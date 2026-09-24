@@ -2165,7 +2165,9 @@ continues. `docs/human/policy-company.toml` denies it, beside
 `unconfined-resolution`, with a comment. A company that uses `tog audit`
 already has machine `[signing]` keys (audit exits 2 without them), and
 that is the one prerequisite. From then on a lock must come through a tog
-door on a machine whose key the gate trusts.
+door on a machine whose key the gate trusts. Which machines sign is the
+team's choice, and both options below use the same verification path
+(see "Decisions").
 
 **Existing locks: `tog attest [<eco>]`.** Every repository adopting that
 policy starts with locks that no door produced. `tog attest` runs a
@@ -2193,8 +2195,8 @@ the join judges.
 `weak-integrity`) are recorded by the tailor from the lock during sync.
 The proxy uses them only for real-time denial and leaves them out of the
 record. Facts only the proxy can know (`unattested-index` for an endpoint
-the resolution consulted, `resolution-build`, `unconfined-resolution`) go
-into the record. As a second safety, `Attribution::claim` now removes
+the resolution consulted, `resolution-build`, `unconfined-resolution`,
+`stale-resolution`) go into the record. As a second safety, `Attribution::claim` now removes
 exact `(kind, subject, detail)` duplicates, which closes the separate
 known gap that the frame had no dedupe at all (see "Known gaps").
 
@@ -2213,6 +2215,7 @@ on the thread that opened the attribution, records after the tool exits.
 | A request to an endpoint outside the permitted set: an intercepted host (uv extra index, `.npmrc` scoped registry, direct-URL dependency) or a refused `CONNECT` | `unattested-index` (existing; the policy text already covers "index-like options") | refuse | intercepted tools (uv, npm, pnpm, cargo): forward and record in the resolution record; mirror tools (Go, Bundler, Hex, NuGet): refuse visibly and record |
 | The resolution required building a source distribution (see below) | `resolution-build` (**new**) | uv runs with `--no-build` only, so the edit fails naming the package that needs a build | record |
 | The door ran without confinement | `unconfined-resolution` (**new**) | refuse before the tool starts | record |
+| Metadata was served from last-good because the upstream was unreachable (offline or transport failure) | `stale-resolution` (**new**; subject = endpoint, detail = number of last-good responses) | the proxy answers 504 for any request it would otherwise serve last-good, so the door fails naming the first such URL | record; the entries are also marked `freshness: last-good` in the portable evidence, which the signature covers |
 | A lock has no attesting resolution record at closure time | `unrecorded-resolution` (**new**) | the sync refuses to publish, and names `tog attest` | record |
 | Lifecycle scripts | none | `--ignore-scripts` and `npm_config_ignore_scripts=true` stay as today; a script that ran anyway would be confined | `install-script-failed` stays a realize-time kind |
 | Integrity mismatch (bytes differ from the claimed digest) | not an exception | always a hard failure: 502 to the tool, door fails, nothing cached | no permissive path |
@@ -2251,11 +2254,14 @@ packages during resolution (Bundler, mix, and MSBuild evaluate the
 project's own files; git dependencies' `mix.exs` is covered by
 `git-dependency`), so the probe is Python's alone.
 
-The three new kinds go into `policy::KINDS`.
+The four new kinds go into `policy::KINDS`.
 `docs/human/policy-company.toml` denies `unconfined-resolution` and
-`unrecorded-resolution`, and it lists `resolution-build` as deliberately
-not denied, with the reason: the build ran confined, and the lock it
-produced is verified at sync like any other lock.
+`unrecorded-resolution`. It lists `resolution-build` and
+`stale-resolution` as deliberately not denied, each with its reason. The
+build ran confined, and the lock it produced is verified at sync like any
+other lock. A stale resolution produces an older lock, not a less honest
+one, since every artifact is still verified. A company that wants neither
+denies the kind. The decisions are recorded under "Decisions".
 
 **Permitted endpoints.** Until WP3 PR 1 lands, the permitted set is
 compiled in and is exactly today's forced public set: `pypi.org`,
@@ -2302,16 +2308,19 @@ to last-good; an integrity failure never does"):
 
 - **Upstream unreachable while online** (DNS, connect, TLS, timeout, HTTP
   5xx): metadata requests are served from the proxy's last-good copy if one
-  exists, with `freshness: last-good` in the portable evidence and one
-  note ("npm: 12 metadata responses served from cache; registry
-  unreachable"). With no copy, the answer is 504 with a body naming the
+  exists. Each such entry is marked `freshness: last-good` in the portable
+  evidence, the door records `stale-resolution` per endpoint (denied:
+  the proxy answers 504 instead of last-good, and the door fails), and
+  one note is printed ("npm: 12 metadata responses served from cache;
+  registry unreachable"). With no copy, the answer is 504 with a body naming the
   URL. Artifacts are served only from the verified cache (below), never
   from anything unverified. A 4xx is passed through, not converted to
   stale.
 - **`--offline`** (WP3's mode; the flag does not exist yet, and until it
   does this mode is exercised by tests): the proxy makes no upstream
-  connection. Metadata comes from last-good, artifacts from the cache, and
-  every miss is 504 plus a ledger `offline-miss`. The door's error names the
+  connection. Metadata comes from last-good (recorded as
+  `stale-resolution`, as above), artifacts from the cache, and every miss
+  is 504 plus a ledger `offline-miss`. The door's error names the
   first miss, which is the thing to fetch online. A project whose lock
   already exists reaches no edit or missing-lock door offline, but two
   planner doors run on ordinary syncs: Go's `mod tidy -diff` and
@@ -2642,6 +2651,8 @@ Kernel unit tests (`src/kernel/resolve/`):
 - `proxy_strips_tool_authorization_and_cookies`
 - `claimed_digest_mismatch_is_a_hard_failure_and_caches_nothing`
 - `transport_failure_serves_last_good_metadata_marked_last_good`
+- `last_good_records_stale_resolution_per_endpoint`
+- `denied_stale_resolution_turns_last_good_into_504`
 - `http_4xx_is_passed_through_not_served_stale`
 - `offline_mode_serves_cache_only_and_names_the_first_miss`
 - `metadata_cache_key_includes_accept`
@@ -2778,7 +2789,9 @@ After it, #61's grep is empty and every door is in one place.
 tunnel authentication, the forward proxy with visible refusal, the
 validating resolver (SSRF pinning), the ledger's two parts, redaction,
 the `resolution-ledger` kind and identity, the metadata cache, the
-artifact-cache integration, redirect rules, and offline mode. Kernel unit
+artifact-cache integration, redirect rules, offline mode, and the
+last-good path with its `freshness` marking and the per-session switch
+that turns last-good into 504 when `stale-resolution` is denied. Kernel unit
 tests against the fixture upstream. No tool uses it yet.
 
 **PR 3: confinement and the transaction.** The staged snapshot and diff,
@@ -2793,8 +2806,12 @@ profile (known gap 1).
 the proxied mode (mirror plus sumdb), including the planner doors that
 run on ordinary syncs (known gap 3, Go half). Add the signed resolution
 record, key loading for the edit verbs, the join in `write_closure_inner`,
-`ClosureRefs` retention, `unrecorded-resolution`,
-`Tailor::resolution_outputs`, `tog attest` with Go's lock check,
+`ClosureRefs` retention, `unrecorded-resolution`, `stale-resolution`,
+`Tailor::resolution_outputs`, `tog attest` with Go's lock check, the
+per-developer key path (a laptop key in the machine `[signing]` set
+attests a record exactly as a CI key does, with
+`developer_key_record_attests_when_trusted` and
+`developer_key_record_is_unrecorded_when_not_trusted`),
 `Attribution::claim` dedupe (known gap 5), and the attestation and audit
 tests. Go goes first because it has no code execution, no TLS, and no
 lock URLs.
@@ -2822,8 +2839,12 @@ which closes the LIMITATIONS row "Restore-time MSBuild evaluation runs
 unsandboxed" (known gap 4). `attest` with `--locked-mode`.
 
 **PR 10: remove `Legacy`.** Delete the mode. The company template denies
-`unconfined-resolution` and `unrecorded-resolution`, and its comment names
-`tog attest` as the migration step. ARCHITECTURE gains a "Resolution
+`unconfined-resolution` and `unrecorded-resolution`, lists
+`resolution-build` and `stale-resolution` as deliberately not denied with
+their reasons, and its comment names `tog attest` as the migration step.
+The README documents both signing setups: `tog attest` in a separate CI
+job, the default, and per-developer keys in the machine `[signing]`
+set. ARCHITECTURE gains a "Resolution
 doors" section with the census as a covered/not-covered table (WP5's
 "state which doors are covered"). LIMITATIONS rows are rewritten: the
 `add`/`remove`/`update` row, "Delegated planning runs unsandboxed", the
@@ -2938,7 +2959,8 @@ where the design above closes each:
 18. *Stale metadata masks a yanked or security release.* Stale serving
     happens only on transport failure and is marked per entry in the
     portable evidence, so it is inside the signed record's digest. The
-    bytes are still verified. See open questions.
+    bytes are still verified. It is also the policy kind
+    `stale-resolution`, so a company can deny it (see "Decisions").
 19. *Buffering large artifacts stalls resolution.* Few artifacts are
     fetched during resolution. See Performance.
 20. *Cross-project poisoning through a shared tool cache.* Fixed: tool
@@ -2969,23 +2991,31 @@ residual channel stated as documented (data encoded in request paths to
 a permitted registry, under "What this does not claim") says why no
 enforceable design exists.
 
-### Open questions for the owner
+### Decisions
 
-- **Stale metadata under company policy.** Should a company be able to
-  deny a resolution that used last-good metadata (a new kind, say
-  `stale-resolution`), or is the marking in the signed portable evidence
-  enough? Recommended: marking only. Artifacts are verified either way,
-  and a stale lock is an older lock, not a less honest one.
-- **Who signs on developer machines.** Under a company policy denying
-  `unrecorded-resolution`, a laptop `tog add` produces an unsigned record
-  that CI will not accept. The options: distribute per-developer keys into
-  the machine `[signing]` set, or have CI run `tog attest` after the
-  developer pushes. Recommended: `tog attest` on CI. It keeps signing
-  keys off laptops. The existing rule "a job that runs untrusted project
-  code must not hold a signing key" still applies to the CI job as a
-  whole: the key stays in the tog process and is never in a sandbox read
-  root, but a CI job that also runs the project's tests should attest in
-  a separate job.
+Owner decisions, 2026-09-23, choosing the flexible option each time:
+
+- **Stale metadata is the policy kind `stale-resolution`.** It is recorded
+  whenever the proxy served last-good metadata (transport failure or
+  `--offline`). It is permitted by default, deniable by any policy, and
+  always marked per entry as `freshness: last-good` in the portable
+  evidence, which the signature covers. A company that must never
+  resolve against old metadata denies the kind: the proxy then answers
+  504 instead of serving last-good, and the door fails naming the URL.
+  Everyone else gets the resilience. Rollout: PR 2 (serving, marking,
+  and the deny switch) and PR 4 (the kind, joined through the record).
+- **Signing: `tog attest` on CI is the documented default, and
+  per-developer keys are also supported.** Both go through the same
+  verification: a record attests when its key is in the machine policy's
+  `[signing] trusted` set. A team either runs `tog attest` in CI, which
+  keeps signing keys off laptops, or distributes per-developer keys into
+  the machine `[signing]` set, so a laptop `tog add` attests directly.
+  The standing rule holds either way: a job that runs untrusted project
+  code must not hold a signing key, so CI attests in a separate job from
+  the one that runs the project's tests. (The key stays in the tog
+  process and is never in a sandbox read root, but the test job runs the
+  project's code outside any sandbox.) Rollout: PR 4 (both paths and
+  their tests) and PR 10 (the README's two setups).
 
 
 ---
