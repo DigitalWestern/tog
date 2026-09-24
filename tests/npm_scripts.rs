@@ -376,9 +376,10 @@ fn permissive_install_script_is_cached_but_rejected_strict() {
     assert!(package_dir.is_dir());
     assert!(package_dir.join("package.json").is_file());
     assert!(!package_dir.join("partial.txt").exists());
+    let project = tog::kernel::fsroot::ProjectRoot::open(&dir).unwrap();
     node::project_node_env(
         activity,
-        &dir,
+        &project,
         &env,
         platform,
         &plan,

@@ -15,6 +15,7 @@ pub mod tailor;
 use crate::kernel::activity::StoreActivity;
 use crate::kernel::digest::Algo;
 use crate::kernel::fetch::{download_verified_held, hash_file, Digest};
+use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::platform::Platform;
 use crate::kernel::sandbox::{force_env, BuildSpec};
 use crate::kernel::store::Store;
@@ -705,22 +706,41 @@ fn validate_plan(plan: &RubyPlan) -> io::Result<()> {
     Ok(())
 }
 
+/// The project's Gemfile.lock text, read through the held descriptor so a
+/// project directory renamed or replaced mid-sync cannot substitute another
+/// project's lock. Absent reads as NotFound, as the path read reported it.
+fn read_gemfile_lock(project: &ProjectRoot) -> io::Result<String> {
+    project
+        .read_input_string(Path::new("Gemfile.lock"))?
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!(
+                    "{}: not found",
+                    project.path().join("Gemfile.lock").display()
+                ),
+            )
+        })
+}
+
 /// Plan the gem closure: Bundler-delegated lock parsing + platform
 /// selection, tog-pinned hashes (lock CHECKSUMS section when present,
 /// rubygems.org v2 API otherwise). Never cached: every sync re-derives the
-/// plan from the lock.
+/// plan from the lock. The project is read through the held descriptor;
+/// its path is only the store Ruby's working directory and arguments.
 pub fn plan_ruby(
     store: &Store,
     activity: &StoreActivity,
-    project_dir: &Path,
+    project: &ProjectRoot,
     ruby_obj: &Path,
     selected: &Selected,
 ) -> io::Result<(RubyPlan, String)> {
-    if !project_dir.join("Gemfile").is_file() {
+    let project_dir = project.path();
+    if !project.is_input_file(Path::new("Gemfile")) {
         return Err(err("Gemfile not found"));
     }
     let lock_path = project_dir.join("Gemfile.lock");
-    if !lock_path.is_file() {
+    if !project.is_input_file(Path::new("Gemfile.lock")) {
         ui::note("no Gemfile.lock; resolving with the store bundler...");
         let scratch = store.stage_with_activity(activity)?;
         let out = run_ruby(
@@ -738,7 +758,8 @@ pub fn plan_ruby(
             )));
         }
     }
-    let lock = fs::read_to_string(&lock_path)?;
+    // A lock `bundle lock` just generated is read back through the root too.
+    let lock = read_gemfile_lock(project)?;
     // No plan cache: an editable cache with a predictable key is forgeable
     // authority. Planning re-derives from the lock every sync; the store's
     // object cache still makes realizes instant.
@@ -864,7 +885,7 @@ pub fn plan_ruby(
     validate_plan(&plan)?;
     // Snapshot guard: the lock this plan derives from is the lock whose
     // digest provenance will record (Go precedent).
-    let now = fs::read_to_string(&lock_path)?;
+    let now = read_gemfile_lock(project)?;
     if now != lock {
         return Err(err("Gemfile.lock changed while planning; re-run 'tog'"));
     }
@@ -1030,9 +1051,12 @@ pub fn realize_gems(
 }
 
 /// Project provenance (closure envelope); enforcement is env, set at run.
+/// The closure writer still takes the project path: it publishes through
+/// the descriptor the sync's toolchain guard holds and refuses a renamed
+/// project before publication.
 pub fn project_ruby_env(
     activity: &StoreActivity,
-    project_dir: &Path,
+    project: &ProjectRoot,
     ruby_obj: &Path,
     gems_obj: &Path,
     plan: &RubyPlan,
@@ -1048,7 +1072,7 @@ pub fn project_ruby_env(
     refs.object_path(&store, activity, &ruby_obj)?;
     refs.object_path(&store, activity, &gems_obj)?;
     crate::comforter::write_closure(
-        project_dir,
+        project,
         "ruby",
         closure_body(&ruby_obj, &gems_obj, plan, lock_sha256, selected)?,
         &store,
@@ -1563,7 +1587,7 @@ mod tests {
         fs::create_dir_all(&project).unwrap();
         project_ruby_env(
             activity,
-            &project,
+            &ProjectRoot::open(&project).unwrap(),
             &store.object_path(&ruby_id),
             &store.object_path(&gems_id),
             &linux_test_plan(),
@@ -1588,6 +1612,30 @@ mod tests {
         let reimported = crate::kernel::store::reimport_root_for_test(&store, &project).unwrap();
         assert_eq!(reimported.objects, record.objects);
         assert_eq!(reimported.projections, record.projections);
+    }
+
+    /// A project renamed mid-sync with another project put at its old path:
+    /// detection and the lock reader keep reading the directory the sync
+    /// opened, never the replacement.
+    #[test]
+    fn a_held_root_keeps_reading_the_original_project_after_a_rename() {
+        use crate::tailors::Tailor as _;
+        let temp = TempDir::new();
+        let project = temp.0.join("project");
+        fs::create_dir_all(&project).unwrap();
+        fs::write(project.join("Gemfile"), "source \"https://rubygems.org\"\n").unwrap();
+        fs::write(project.join("Gemfile.lock"), "ORIGINAL\n").unwrap();
+        let root = ProjectRoot::open(&project).unwrap();
+
+        fs::rename(&project, temp.0.join("moved")).unwrap();
+        fs::create_dir_all(&project).unwrap();
+        fs::write(project.join("Gemfile.lock"), "REPLACEMENT\n").unwrap();
+
+        assert!(tailor::Ruby.detect(&root).unwrap());
+        assert_eq!(read_gemfile_lock(&root).unwrap(), "ORIGINAL\n");
+        let fresh = ProjectRoot::open(&project).unwrap();
+        assert!(!tailor::Ruby.detect(&fresh).unwrap());
+        assert_eq!(read_gemfile_lock(&fresh).unwrap(), "REPLACEMENT\n");
     }
 
     #[test]

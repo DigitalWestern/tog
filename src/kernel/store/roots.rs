@@ -3,6 +3,7 @@
 //! registry file operations.
 
 use super::*;
+use crate::kernel::fsroot::{Entry, ProjectRoot};
 use crate::kernel::ui;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,7 +59,18 @@ impl Store {
     /// Callers acquire the store activity lease first, then this transaction
     /// lock, then publish/cache locks.
     pub(crate) fn project_lock(&self, project_dir: &Path) -> io::Result<fs::File> {
-        let project_dir = project_dir.canonicalize()?;
+        self.project_lock_canonical(&project_dir.canonicalize()?)
+    }
+
+    /// `project_lock` for a project held open as a `ProjectRoot`: keyed on
+    /// the canonical path the root was opened at, never resolved again, so
+    /// every step of one sync takes the same lock and records the same key
+    /// even if the pathname has changed meanwhile.
+    pub(crate) fn project_lock_in(&self, project: &ProjectRoot) -> io::Result<fs::File> {
+        self.project_lock_canonical(project.path())
+    }
+
+    fn project_lock_canonical(&self, project_dir: &Path) -> io::Result<fs::File> {
         let locks = self.root.join("root-locks");
         ensure_directory_tree(&self.root, Path::new("root-locks"))?;
         let key = root_key(&project_dir);
@@ -160,26 +172,30 @@ impl Store {
         })
     }
 
+    /// Publish a producer's root parts for the project it holds open. The
+    /// record is keyed on the canonical path the root was opened at, taken
+    /// as it is rather than resolved again, and the project's existing
+    /// closures are imported through the held descriptor.
     pub(crate) fn register_root_parts_with_project_lock(
         &self,
         activity: &StoreActivity,
-        project_dir: &Path,
+        project: &ProjectRoot,
         objects: BTreeSet<String>,
         projections: BTreeSet<ProjectionRef>,
         _project: &fs::File,
     ) -> io::Result<RootEntry> {
         self.require_activity(activity, "root publication")?;
-        let project_dir = project_dir.canonicalize()?;
-        self.register_root_parts_locked(&project_dir, objects, projections)
+        self.register_root_parts_locked(project, objects, projections)
     }
 
     pub(super) fn register_root_parts_locked(
         &self,
-        project_dir: &Path,
+        project: &ProjectRoot,
         objects: BTreeSet<String>,
         projections: BTreeSet<ProjectionRef>,
     ) -> io::Result<RootEntry> {
-        let key = root_key(&project_dir);
+        let project_dir = project.path();
+        let key = root_key(project_dir);
         let previous = self.read_root_entry_strict(&key)?;
         let mut record = previous
             .as_ref()
@@ -195,11 +211,10 @@ impl Store {
             .as_ref()
             .and_then(|entry| entry.record.as_ref())
             .is_none()
-            && project_dir.join(".tog/closures").is_dir()
         {
             import_existing_project_closures(
                 self,
-                &project_dir,
+                project,
                 &mut record,
                 ImportMode::DropUnresolvable,
             )?;
@@ -309,12 +324,12 @@ impl Store {
     /// `register_root_record` directly.
     pub(crate) fn register_root_with_closure(
         &self,
-        project_dir: &Path,
+        project: &ProjectRoot,
         ecosystem: &str,
         body: &serde_json::Value,
     ) -> io::Result<RootEntry> {
-        let project_dir = project_dir.canonicalize()?;
-        let _project = self.project_lock(&project_dir)?;
+        let project_dir = project.path().to_path_buf();
+        let _project = self.project_lock_in(project)?;
         let key = root_key(&project_dir);
         let previous = self.read_root_entry_strict(&key)?;
         let had_root2 = previous
@@ -337,7 +352,7 @@ impl Store {
             // producer just wrote is held to the strict rule.
             import_existing_project_closures(
                 self,
-                &project_dir,
+                project,
                 &mut record,
                 ImportMode::DropUnresolvable,
             )?;
@@ -760,6 +775,13 @@ impl Store {
         // capability stays available for direct record registration.
         let project_dir = project_dir.canonicalize()?;
         record_pathname(&project_dir).map(|_| ())
+    }
+
+    /// `check_registrable` for a project held open: the canonical path the
+    /// root was opened at is the one a record would hold, so it is checked
+    /// as it is, not resolved again.
+    pub fn check_registrable_in(project: &ProjectRoot) -> io::Result<()> {
+        record_pathname(project.path()).map(|_| ())
     }
 
     /// Read one root record without failing. A record that cannot be
@@ -1227,25 +1249,38 @@ pub(crate) enum ImportMode {
     DropUnresolvable,
 }
 
+/// Import the closures a project already has, read through the held
+/// project with the strict no-follow walk: a symlinked `.tog`,
+/// `.tog/closures`, or closure file is refused rather than read through, so
+/// a swapped entry cannot make this record protect another project's
+/// objects. An absent closures directory imports nothing; a subdirectory
+/// in it is skipped, as the pathname importer skipped it.
 pub(super) fn import_existing_project_closures(
     store: &Store,
-    project: &Path,
+    project: &ProjectRoot,
     record: &mut RootRecord,
     mode: ImportMode,
 ) -> io::Result<()> {
-    let closures = project.join(".tog/closures");
-    let mut files: Vec<PathBuf> = fs::read_dir(&closures)?
-        .map(|entry| entry.map(|entry| entry.path()))
-        .collect::<io::Result<Vec<_>>>()?;
-    files.sort();
-    for path in files {
-        if !path.is_file() || path.extension().and_then(|s| s.to_str()) != Some("json") {
+    let closures = Path::new(".tog/closures");
+    let Some(names) = project.read_dir(closures)? else {
+        return Ok(());
+    };
+    for name in names {
+        let relative = closures.join(&name);
+        if relative.extension().and_then(|s| s.to_str()) != Some("json") {
             continue;
         }
-        let value: serde_json::Value = serde_json::from_reader(fs::File::open(&path)?)
+        if project.entry(&relative)? == Entry::Directory {
+            continue;
+        }
+        let path = project.path().join(&relative);
+        let Some(bytes) = project.read_file(&relative)? else {
+            continue;
+        };
+        let value: serde_json::Value = serde_json::from_slice(&bytes)
             .map_err(|error| invalid_root_import(&path, error.to_string()))?;
         let body = validate_closure_envelope(&value, &path)?;
-        import_closure_refs(store, project, body, record, mode)?;
+        import_closure_refs(store, project.path(), body, record, mode)?;
     }
     Ok(())
 }

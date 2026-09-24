@@ -7,6 +7,7 @@ use crate::kernel::context::Context;
 use crate::kernel::cyclonedx::{
     component, list, purl_encode, push_hash, required, toolchain_component, version_of,
 };
+use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::objmeta::KindAdapter;
 use crate::kernel::platform::Platform;
 use crate::kernel::sandbox;
@@ -26,25 +27,30 @@ impl Tailor for Ruby {
         "ruby"
     }
 
-    fn detect(&self, dir: &Path) -> io::Result<bool> {
-        Ok(dir.join("Gemfile").is_file())
+    fn detect(&self, project: &ProjectRoot) -> io::Result<bool> {
+        Ok(project.is_input_file(Path::new("Gemfile")))
     }
 
-    fn preflight(&self, platform: Platform, _dir: &Path) -> io::Result<()> {
+    fn preflight(&self, platform: Platform, _project: &ProjectRoot) -> io::Result<()> {
         ruby::preflight_platform(platform)
     }
 
-    fn plan(&self, ctx: &Context, dir: &Path, toolchain: &Selected) -> io::Result<Option<String>> {
+    fn plan(
+        &self,
+        ctx: &Context,
+        project: &ProjectRoot,
+        toolchain: &Selected,
+    ) -> io::Result<Option<String>> {
         let activity = &ctx.activity;
         let ruby_obj = ruby::realize_runtime(&ctx.store, activity, ctx.platform, toolchain)?;
-        let (plan, _) = ruby::plan_ruby(&ctx.store, &ctx.activity, dir, &ruby_obj, toolchain)?;
+        let (plan, _) = ruby::plan_ruby(&ctx.store, activity, project, &ruby_obj, toolchain)?;
         Ok(Some(serde_json::to_string_pretty(&plan)?))
     }
 
     fn sync(
         &self,
         ctx: &Context,
-        dir: &Path,
+        project: &ProjectRoot,
         request: &SyncRequest,
         attribution: &mut crate::kernel::policy::Attribution,
     ) -> io::Result<bool> {
@@ -53,11 +59,11 @@ impl Tailor for Ruby {
         let platform = ctx.platform;
         let store = &ctx.store;
         let ruby_obj = ruby::realize_runtime(store, activity, platform, toolchain)?;
-        let (plan, lock_sha256) = ruby::plan_ruby(store, &ctx.activity, dir, &ruby_obj, toolchain)?;
-        let gems = ruby::realize_gems(store, &ctx.activity, platform, &plan, &ruby_obj, toolchain)?;
+        let (plan, lock_sha256) = ruby::plan_ruby(store, activity, project, &ruby_obj, toolchain)?;
+        let gems = ruby::realize_gems(store, activity, platform, &plan, &ruby_obj, toolchain)?;
         ruby::project_ruby_env(
             activity,
-            dir,
+            project,
             &ruby_obj,
             &gems,
             &plan,

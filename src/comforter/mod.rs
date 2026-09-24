@@ -13,19 +13,15 @@ use crate::kernel::activity::StoreActivity;
 use crate::kernel::fsroot::{Entry, ProjectRoot};
 use crate::kernel::platform::Platform;
 use crate::kernel::signing::SigningKey;
-use crate::kernel::store::{fsync_directory, rename_at, ProjectionBase, ProjectionRef, Store};
+use crate::kernel::store::{ProjectionBase, ProjectionRef, Store};
 use crate::kernel::ui;
 use std::collections::BTreeSet;
-use std::ffi::CString;
 use std::fs::{self, OpenOptions};
 use std::io;
-use std::os::fd::{AsRawFd, FromRawFd, RawFd};
+use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-
-static SYMLINK_SWAP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// The closure-signing key for this invocation: `Some(None)` once preflight
 /// found no `TOG_SIGNING_KEY`, `Some(Some(key))` once it loaded one,
@@ -208,7 +204,7 @@ impl ClosureRefs {
 /// stays tailor-owned. Written atomically. Store ownership and exact
 /// references are mandatory for production publication.
 pub fn write_closure(
-    project_dir: &Path,
+    project: &ProjectRoot,
     ecosystem: &str,
     body: serde_json::Value,
     store: &Store,
@@ -218,7 +214,7 @@ pub fn write_closure(
 ) -> io::Result<()> {
     store.require_activity(activity, "closure publication")?;
     write_closure_inner(
-        project_dir,
+        project,
         ecosystem,
         body,
         store,
@@ -234,7 +230,7 @@ pub fn write_closure(
 /// used by producers that move a user directory or replace a visible link
 /// before writing the envelope.
 pub(crate) fn write_closure_with_project_lock(
-    project_dir: &Path,
+    project: &ProjectRoot,
     ecosystem: &str,
     body: serde_json::Value,
     store: &Store,
@@ -245,7 +241,7 @@ pub(crate) fn write_closure_with_project_lock(
 ) -> io::Result<()> {
     store.require_activity(activity, "closure publication")?;
     write_closure_inner(
-        project_dir,
+        project,
         ecosystem,
         body,
         store,
@@ -258,7 +254,7 @@ pub(crate) fn write_closure_with_project_lock(
 
 /// Alias for `write_closure`.
 pub fn write_closure_with_refs(
-    project_dir: &Path,
+    project: &ProjectRoot,
     ecosystem: &str,
     body: serde_json::Value,
     store: &Store,
@@ -266,15 +262,7 @@ pub fn write_closure_with_refs(
     refs: ClosureRefs,
     attribution: &mut crate::kernel::policy::Attribution,
 ) -> io::Result<()> {
-    write_closure(
-        project_dir,
-        ecosystem,
-        body,
-        store,
-        activity,
-        refs,
-        attribution,
-    )
+    write_closure(project, ecosystem, body, store, activity, refs, attribution)
 }
 
 /// Persist the producer's complete root union before a project projection or
@@ -282,7 +270,7 @@ pub fn write_closure_with_refs(
 /// `write_closure` repeats the union after the visible closure is written so
 /// a crash can only leave extra protection.
 pub(crate) fn persist_root_for_refs_with_project_lock(
-    project_dir: &Path,
+    project: &ProjectRoot,
     store: &Store,
     activity: &crate::kernel::activity::StoreActivity,
     refs: &ClosureRefs,
@@ -293,11 +281,27 @@ pub(crate) fn persist_root_for_refs_with_project_lock(
     // that moved during planning is caught here, before a user directory
     // is moved or a visible link replaced, and again by the closure writer.
     toolchain::recheck_before_publication()?;
+    project.check_still_named()?;
+    // Registration imports the closures the project already has. A `.tog`
+    // that is a symlink, or anything but a real directory, is refused here,
+    // before the import could be pointed at another directory's closures.
+    match project.entry(Path::new(".tog"))? {
+        Entry::Absent | Entry::Directory => {}
+        _ => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "{} is not a real directory; remove it and run 'tog' again",
+                    project.path().join(".tog").display()
+                ),
+            ))
+        }
+    }
     let (objects, projections) = refs.clone().into_record_parts();
     store
         .register_root_parts_with_project_lock(
             activity,
-            project_dir,
+            project,
             objects,
             projections,
             project_lock,
@@ -321,7 +325,7 @@ pub(crate) fn write_closure_legacy(
     };
     let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
     write_closure_inner(
-        project_dir,
+        &ProjectRoot::open(project_dir)?,
         ecosystem,
         body,
         &store,
@@ -333,7 +337,7 @@ pub(crate) fn write_closure_legacy(
 }
 
 fn write_closure_inner(
-    project_dir: &Path,
+    project: &ProjectRoot,
     ecosystem: &str,
     mut body: serde_json::Value,
     store: &Store,
@@ -353,15 +357,21 @@ fn write_closure_inner(
             "closure body must be a JSON object",
         ));
     }
-    let project_dir = project_dir.canonicalize()?;
+    // The GC root is recorded under the project's path, so the path must
+    // still name the directory the closure is published through. The path
+    // is the canonical one the root was opened at, used as it is from here
+    // on: the lock, the record key and the registrability check never
+    // resolve it again.
+    project.check_still_named()?;
+    let project_dir = project.path().to_path_buf();
     // Writing closures for a project that cannot be registered would leave
     // provenance behind for a project no root record can protect.
-    Store::check_registrable(&project_dir)?;
+    Store::check_registrable_in(project)?;
     // Keep the per-project transaction lock through both durable root
     // publication and the visible closure rename. A second producer cannot
     // observe a root from one generation paired with a closure from another.
     let owned_project_lock = if explicit_refs.is_some() && supplied_project_lock.is_none() {
-        Some(store.project_lock(&project_dir)?)
+        Some(store.project_lock_in(project)?)
     } else {
         None
     };
@@ -372,7 +382,6 @@ fn write_closure_inner(
     // O_NOFOLLOW from that descriptor, so a `.tog` or `.tog/closures`
     // swapped for a symlink is refused instead of carrying provenance
     // outside the project (same class as the cargo-home/bin escape).
-    let project = ProjectRoot::open(&project_dir)?;
     let closure_path = Path::new(".tog/closures").join(format!("{ecosystem}.json"));
     // Create the directory before the root record is registered: root
     // registration imports whatever closures the project already has, and a
@@ -432,14 +441,14 @@ fn write_closure_inner(
                 .expect("strict closure publication owns a project lock");
             store.register_root_parts_with_project_lock(
                 activity,
-                &project_dir,
+                project,
                 objects,
                 projections,
                 project_lock,
             )?;
             true
         }
-        None => match store.register_root_with_closure(&project_dir, ecosystem, &body) {
+        None => match store.register_root_with_closure(project, ecosystem, &body) {
             Ok(_) => true,
             Err(error) if error.kind() == io::ErrorKind::InvalidData => false,
             Err(error) => return Err(error),
@@ -460,6 +469,10 @@ fn write_closure_inner(
         key.sign(&mut envelope)?;
     }
     project.write_file(&closure_path, &serde_json::to_vec_pretty(&envelope)?)?;
+    // The root was registered under the path while the closure was being
+    // renamed into the held directory: prove the path still names it, so a
+    // swap in that window fails the sync instead of passing silently.
+    project.check_still_named()?;
     if !durable_root {
         store.register_root_with_activity(activity, &project_dir)?;
     }
@@ -467,158 +480,18 @@ fn write_closure_inner(
     Ok(())
 }
 
-fn open_directory(path: &Path, label: &str) -> io::Result<fs::File> {
-    let path = CString::new(path.as_os_str().as_bytes()).map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("{label} contains a NUL byte; refusing to open it"),
-        )
-    })?;
-    // SAFETY: path is a valid NUL-terminated path and the returned fd is
-    // immediately wrapped in a File that owns it.
-    let fd = unsafe {
-        libc::open(
-            path.as_ptr(),
-            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-        )
-    };
-    if fd < 0 {
-        let error = io::Error::last_os_error();
-        return Err(io::Error::new(
-            error.kind(),
-            format!("open {label}: {error}"),
-        ));
-    }
-    // SAFETY: fd was returned by open above and is now owned by File.
-    Ok(unsafe { fs::File::from_raw_fd(fd) })
-}
-
-/// Atomically install a managed symlink using an already-open parent
-/// directory. Existing symlinks may be replaced; a real file or directory is
-/// never silently overwritten. This is used for visible project projections
-/// after their durable root record has been published.
-pub(crate) fn replace_project_symlink(path: &Path, target: &Path, label: &str) -> io::Result<()> {
-    let invalid = |message: String| io::Error::new(io::ErrorKind::InvalidData, message);
-    let parent = path
-        .parent()
-        .ok_or_else(|| invalid(format!("{label} has no parent")))?;
-    ensure_real_directory_chain(parent, label)?;
-    let parent_fd = open_directory(parent, label)?;
-    let destination = path
-        .file_name()
-        .ok_or_else(|| invalid(format!("{label} has no destination name")))?;
-    match crate::kernel::store::stat_at(parent_fd.as_raw_fd(), destination.as_bytes()) {
-        Ok(stat) => {
-            if (stat.st_mode & libc::S_IFMT) != libc::S_IFLNK {
-                return Err(invalid(format!(
-                    "{label} {} is a real file or directory; refusing to overwrite it",
-                    path.display()
-                )));
-            }
-        }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error),
-    }
-    let counter = SYMLINK_SWAP_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let temporary = format!(
-        ".{}.tog-swap.{}.{}.{}",
-        destination.to_string_lossy(),
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos(),
-        counter
-    );
-    let target = CString::new(target.as_os_str().as_bytes()).map_err(|_| {
-        invalid(format!(
-            "{label} target contains a NUL byte; refusing to publish"
-        ))
-    })?;
-    let temporary_c = CString::new(temporary.as_bytes())
-        .map_err(|_| invalid(format!("{label} temporary name contains a NUL byte")))?;
-    // SAFETY: parent_fd is an open directory and both names are valid
-    // NUL-terminated strings owned by this function.
-    if unsafe { libc::symlinkat(target.as_ptr(), parent_fd.as_raw_fd(), temporary_c.as_ptr()) } != 0
-    {
-        return Err(io::Error::last_os_error());
-    }
-    let result = rename_at(
-        parent_fd.as_raw_fd(),
-        temporary.as_bytes(),
-        destination.as_bytes(),
-    )
-    .map_err(|error| io::Error::new(error.kind(), format!("publish {label}: {error}")))
-    .and_then(|()| {
-        fsync_directory(parent_fd.as_raw_fd())
-            .map_err(|error| io::Error::new(error.kind(), format!("sync {label} parent: {error}")))
-    });
-    if result.is_err() {
-        unlink_at(parent_fd.as_raw_fd(), &temporary);
-    }
-    result
-}
-
-/// Create missing parent directories without following a pre-existing
-/// symlink in the path. The final open_directory call still rechecks the
-/// resulting parent with O_NOFOLLOW.
-fn ensure_real_directory_chain(path: &Path, label: &str) -> io::Result<()> {
-    let mut current = path.to_path_buf();
-    let mut missing = Vec::new();
-    loop {
-        match fs::symlink_metadata(&current) {
-            Ok(metadata) => {
-                if metadata.file_type().is_symlink() || !metadata.is_dir() {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!(
-                            "{label} parent {} is not a real directory",
-                            current.display()
-                        ),
-                    ));
-                }
-                break;
-            }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                let name = current.file_name().ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        format!("{label} parent has no directory name"),
-                    )
-                })?;
-                missing.push(name.to_os_string());
-                current.pop();
-            }
-            Err(error) => return Err(error),
-        }
-    }
-    for name in missing.into_iter().rev() {
-        current.push(name);
-        match fs::create_dir(&current) {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-            Err(error) => return Err(error),
-        }
-        let metadata = fs::symlink_metadata(&current)?;
-        if metadata.file_type().is_symlink() || !metadata.is_dir() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "{label} parent {} is not a real directory",
-                    current.display()
-                ),
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn unlink_at(parent_fd: RawFd, name: &str) {
-    let Ok(name) = CString::new(name) else {
-        return;
-    };
-    // SAFETY: parent_fd is an open directory and name is a relative name.
-    let _ = unsafe { libc::unlinkat(parent_fd, name.as_ptr(), 0) };
+/// Atomically install a managed symlink (`.venv`, `node_modules`) in the
+/// project, through the held project descriptor: an existing symlink is
+/// replaced, and a real file or directory is never silently overwritten.
+/// Used for visible project projections after their durable root record has
+/// been published.
+pub(crate) fn replace_project_symlink(
+    project: &ProjectRoot,
+    relative: &Path,
+    target: &Path,
+    label: &str,
+) -> io::Result<()> {
+    project.replace_symlink(relative, target, label)
 }
 
 #[cfg(test)]
@@ -799,76 +672,17 @@ pub fn closure_object(
     Ok(path)
 }
 
-/// If `path` is a real directory (a pre-tog install), move it out of the
-/// project into `<tog-home>/backups/` so no tool (tsc, vitest, eslint)
-/// ever crawls it again. tog-home is derived from the env object's store
-/// (`<store>/objects/<id>` -> store parent), so tests with temp stores back
-/// up into the temp dir, never the real one. Returns the backup location.
-pub fn backup_real_dir(path: &Path, env_obj: &Path) -> io::Result<Option<PathBuf>> {
-    match fs::symlink_metadata(path) {
-        Ok(md) if !md.file_type().is_symlink() && md.is_dir() => {}
-        _ => return Ok(None),
-    }
-    let home = env_obj
-        .parent() // objects/
-        .and_then(|p| p.parent()) // store root
-        .and_then(|p| p.parent()) // tog home
-        .ok_or_else(|| io::Error::other("cannot locate tog home for backup"))?;
-    let backups = home.join("backups");
-    fs::create_dir_all(&backups)?;
-    let project = path
-        .parent()
-        .and_then(|p| p.file_name())
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "project".into());
-    let dirname = path
-        .file_name()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "dir".into());
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    let dest = backups.join(format!("{project}-{dirname}-{secs}"));
-    fs::rename(path, &dest).map_err(|e| {
-        io::Error::new(
-            e.kind(),
-            format!(
-                "could not move existing {} aside to {}: {e}",
-                path.display(),
-                dest.display()
-            ),
-        )
-    })?;
-    ui::warning(
-        &format!("moved existing {} to {}", path.display(), dest.display()),
-        &ui::shell_line(&["rm", "-rf", &dest.display().to_string()]),
-    );
-    Ok(Some(dest))
-}
-
-/// Store-owned backup variant used by new projections: it moves the
-/// directory into `<store>/backups`, which a root record can protect, rather
-/// than the `<tog-home>/backups` of the legacy helper above.
-pub fn backup_real_dir_for_store(path: &Path, store: &Store) -> io::Result<Option<PathBuf>> {
-    let Some(destination) = reserve_backup_real_dir_for_store(path, store)? else {
-        return Ok(None);
-    };
-    move_reserved_backup(path, &destination)?;
-    Ok(Some(destination))
-}
-
 /// Reserve a store-owned backup destination without moving the user's
 /// directory. Producers use this before publishing a root/2 record; the
 /// reservation itself is safe over-retention if a later projection step
 /// fails.
 pub fn reserve_backup_real_dir_for_store(
-    path: &Path,
+    project: &ProjectRoot,
+    relative: &Path,
     store: &Store,
 ) -> io::Result<Option<PathBuf>> {
-    match fs::symlink_metadata(path) {
-        Ok(md) if !md.file_type().is_symlink() && md.is_dir() => {}
-        _ => return Ok(None),
+    if project.entry(relative)? != Entry::Directory {
+        return Ok(None);
     }
     let backups = store.root.join("backups");
     store.ensure_namespace(Path::new("backups"))?;
@@ -893,10 +707,15 @@ pub fn reserve_backup_real_dir_for_store(
     Ok(Some(dest))
 }
 
-/// Move a previously reserved real directory into the store-owned backup
-/// namespace. The destination is checked lexically before the rename and is
-/// never followed as a symlink.
-pub fn move_reserved_backup(path: &Path, destination: &Path) -> io::Result<()> {
+/// Move a previously reserved real directory out of the project, through
+/// the held project descriptor, into the store-owned backup namespace. The
+/// destination is checked lexically before the rename and is never followed
+/// as a symlink; the source must still be a real directory.
+pub fn move_reserved_backup(
+    project: &ProjectRoot,
+    relative: &Path,
+    destination: &Path,
+) -> io::Result<()> {
     let backups = destination.parent().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -921,52 +740,14 @@ pub fn move_reserved_backup(path: &Path, destination: &Path) -> io::Result<()> {
             ),
         ));
     }
-
-    let source_parent = path.parent().ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "backup source has no parent directory",
-        )
-    })?;
-    let source_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "backup source name is not valid UTF-8",
-            )
-        })?;
     let destination_name = destination.file_name().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
             "reserved backup has no destination name",
         )
     })?;
-    let source_stat = fs::symlink_metadata(path)?;
-    if source_stat.file_type().is_symlink() || !source_stat.is_dir() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("backup source {} is not a real directory", path.display()),
-        ));
-    }
-    let source_dir = open_real_directory(source_parent, "backup source parent")?;
+    let path = project.path().join(relative);
     let backups_dir = open_real_directory(backups, "store backups")?;
-    let source_entry =
-        crate::kernel::store::stat_at(source_dir.as_raw_fd(), source_name.as_bytes())?;
-    // libc's stat field widths are per-platform (st_dev is i32 on Darwin,
-    // u64 on Linux); widen to u64 to match MetadataExt.
-    if source_entry.st_dev as u64 != source_stat.dev()
-        || source_entry.st_ino as u64 != source_stat.ino()
-    {
-        return Err(io::Error::new(
-            io::ErrorKind::Interrupted,
-            format!(
-                "backup source {} changed during publication",
-                path.display()
-            ),
-        ));
-    }
     match crate::kernel::store::stat_at(backups_dir.as_raw_fd(), destination_name.as_bytes()) {
         Ok(_) => {
             return Err(io::Error::new(
@@ -980,23 +761,23 @@ pub fn move_reserved_backup(path: &Path, destination: &Path) -> io::Result<()> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(error) => return Err(error),
     }
-    rename_entry_at(
-        source_dir.as_raw_fd(),
-        source_name.as_bytes(),
-        backups_dir.as_raw_fd(),
-        destination_name.as_bytes(),
-    )
-    .map_err(|e| {
-        io::Error::new(
-            e.kind(),
-            format!(
-                "could not move existing {} aside to {}: {e}",
-                path.display(),
-                destination.display()
-            ),
-        )
-    })?;
-    source_dir.sync_all()?;
+    project
+        .move_dir_out(relative, &backups_dir, destination_name.as_bytes())
+        .map_err(|e| {
+            io::Error::new(
+                e.kind(),
+                format!(
+                    "could not move existing {} aside to {}: {e}",
+                    path.display(),
+                    destination.display()
+                ),
+            )
+        })?;
+    if let Some(parent) = relative.parent().filter(|p| !p.as_os_str().is_empty()) {
+        project.sync_dir(parent)?;
+    } else {
+        project.sync_dir(Path::new("."))?;
+    }
     backups_dir.sync_all()?;
     // The one advisory for a real directory found where tog projects a
     // symlink, said after the move so it is true when it is read. The
@@ -1035,26 +816,6 @@ fn open_real_directory(path: &Path, label: &str) -> io::Result<fs::File> {
         .open(path)
 }
 
-fn rename_entry_at(
-    old_dir_fd: RawFd,
-    old_name: &[u8],
-    new_dir_fd: RawFd,
-    new_name: &[u8],
-) -> io::Result<()> {
-    let old_name = CString::new(old_name)
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "source name contains NUL"))?;
-    let new_name = CString::new(new_name).map_err(|_| {
-        io::Error::new(io::ErrorKind::InvalidInput, "destination name contains NUL")
-    })?;
-    // SAFETY: both descriptors are open directories and both names are
-    // NUL-terminated relative entry names.
-    if unsafe { libc::renameat(old_dir_fd, old_name.as_ptr(), new_dir_fd, new_name.as_ptr()) } != 0
-    {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(())
-}
-
 /// Recover the store from an explicit realized object path.  This is a
 /// narrow path-shape check for producer APIs, not the old recursive JSON
 /// provenance guess used by legacy x cleanup.
@@ -1081,30 +842,46 @@ pub struct InputRecord {
 }
 
 /// Hash the given files (absolute or project-relative); missing ones are
-/// skipped so callers can list every candidate input.
-pub fn input_records(project_dir: &Path, candidates: &[PathBuf]) -> io::Result<Vec<InputRecord>> {
+/// skipped so callers can list every candidate input. A file inside the
+/// project is read through the held project descriptor, so the hash is of
+/// the directory being synced; one outside it (an include beside the
+/// project) is read by its path.
+pub fn input_records(
+    project: &ProjectRoot,
+    candidates: &[PathBuf],
+) -> io::Result<Vec<InputRecord>> {
     use sha2::{Digest, Sha256};
     let mut records: Vec<InputRecord> = Vec::new();
     for candidate in candidates {
-        let absolute = if candidate.is_absolute() {
-            candidate.clone()
-        } else {
-            project_dir.join(candidate)
+        let (relative, bytes) = match project.relative(candidate) {
+            Some(relative) => (relative.to_path_buf(), None),
+            None if candidate.is_relative() => (candidate.clone(), None),
+            None => {
+                if !candidate.is_file() {
+                    continue;
+                }
+                (candidate.clone(), Some(fs::read(candidate)?))
+            }
         };
-        if !absolute.is_file() {
+        let key = relative.to_string_lossy().into_owned();
+        if records.iter().any(|record| record.path == key) {
             continue;
         }
-        let relative = absolute
-            .strip_prefix(project_dir)
-            .unwrap_or(&absolute)
-            .to_string_lossy()
-            .into_owned();
-        if records.iter().any(|record| record.path == relative) {
-            continue;
-        }
+        let bytes = match bytes {
+            Some(bytes) => bytes,
+            None => {
+                if !project.is_input_file(&relative) {
+                    continue;
+                }
+                match project.read_input(&relative)? {
+                    Some(bytes) => bytes,
+                    None => continue,
+                }
+            }
+        };
         records.push(InputRecord {
-            sha256: hex::encode(Sha256::digest(fs::read(&absolute)?)),
-            path: relative,
+            sha256: hex::encode(Sha256::digest(bytes)),
+            path: key,
         });
     }
     Ok(records)
@@ -1156,7 +933,7 @@ mod closure_platform_tests {
             .activity(crate::kernel::activity::ActivityMode::Exclusive)
             .unwrap();
         let error = super::write_closure(
-            &project,
+            &crate::kernel::fsroot::ProjectRoot::open(&project).unwrap(),
             "python",
             serde_json::json!({}),
             &store,
@@ -1260,7 +1037,7 @@ mod closure_platform_tests {
         let mut refs = super::ClosureRefs::new();
         refs.object_id(&store, &activity, &id).unwrap();
         super::write_closure(
-            &project,
+            &crate::kernel::fsroot::ProjectRoot::open(&project).unwrap(),
             "python",
             closure_test_body(&store),
             &store,
@@ -1403,7 +1180,7 @@ mod closure_platform_tests {
         let mut refs = ClosureRefs::new();
         refs.object_id(&store, &activity, &id).unwrap();
         let result = super::write_closure(
-            &project,
+            &crate::kernel::fsroot::ProjectRoot::open(&project).unwrap(),
             "python",
             closure_test_body(&store),
             &store,
@@ -1467,7 +1244,7 @@ mod closure_platform_tests {
         refs.object_id(&store, &activity, &new_python).unwrap();
         let project_lock = store.project_lock(&project).unwrap();
         let error = persist_root_for_refs_with_project_lock(
-            &project,
+            &crate::kernel::fsroot::ProjectRoot::open(&project).unwrap(),
             &store,
             &activity,
             &refs,
@@ -1480,8 +1257,14 @@ mod closure_platform_tests {
 
         // The durable half of a Python resync, before its projection switch:
         // the old Python and Node references are imported with the new one.
-        persist_root_for_refs_with_project_lock(&project, &store, &activity, &refs, &project_lock)
-            .unwrap();
+        persist_root_for_refs_with_project_lock(
+            &crate::kernel::fsroot::ProjectRoot::open(&project).unwrap(),
+            &store,
+            &activity,
+            &refs,
+            &project_lock,
+        )
+        .unwrap();
         let everything = BTreeSet::from([old_python.clone(), node.clone(), new_python.clone()]);
         let roots = store.roots().unwrap();
         assert_eq!(roots.len(), 1);
@@ -1497,7 +1280,7 @@ mod closure_platform_tests {
         // The visible switch keeps the union.
         let mut attribution = crate::kernel::policy::Attribution::open("python").unwrap();
         super::write_closure_with_project_lock(
-            &project,
+            &crate::kernel::fsroot::ProjectRoot::open(&project).unwrap(),
             "python",
             serde_json::json!({"env_object": store.object_path(&new_python)}),
             &store,
@@ -1514,6 +1297,76 @@ mod closure_platform_tests {
         assert_eq!(roots[0].record.as_ref().unwrap().objects, everything);
         let _ = crate::kernel::store::remove_tree(&store.root);
         let _ = fs::remove_dir_all(&project);
+    }
+
+    /// Root registration imports the closures the project already has
+    /// through the held descriptor. A symlinked `.tog` is refused before the
+    /// import could read another directory's closures, and a project swapped
+    /// for another after it was opened is refused before anything is
+    /// imported from either.
+    #[test]
+    fn root_publication_imports_closures_only_through_the_held_project() {
+        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _attribution_lock = crate::kernel::policy::attribution_test_lock();
+        let store = test_store("held-import");
+        let project = unique_project("held-import");
+        let outside = unique_project("held-import-outside");
+        let foreign = complete_object(&store, "foreign-env");
+        let own = complete_object(&store, "own-env");
+        envelope(
+            &outside,
+            "node",
+            serde_json::json!({"env_object": store.object_path(&foreign)}),
+        );
+        let activity = store
+            .activity(crate::kernel::activity::ActivityMode::Exclusive)
+            .unwrap();
+        let mut refs = ClosureRefs::new();
+        refs.object_id(&store, &activity, &own).unwrap();
+
+        // A `.tog` that is a symlink to another project's state.
+        std::os::unix::fs::symlink(outside.join(".tog"), project.join(".tog")).unwrap();
+        let root = crate::kernel::fsroot::ProjectRoot::open(&project).unwrap();
+        let project_lock = store.project_lock_in(&root).unwrap();
+        let error =
+            persist_root_for_refs_with_project_lock(&root, &store, &activity, &refs, &project_lock)
+                .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{error}");
+        assert!(store.roots().unwrap().is_empty());
+        fs::remove_file(project.join(".tog")).unwrap();
+
+        // The project renamed away and another put at its path, carrying
+        // closures that name a foreign object.
+        let moved = project.with_extension("moved");
+        fs::rename(&project, &moved).unwrap();
+        fs::rename(&outside, &project).unwrap();
+        let error =
+            persist_root_for_refs_with_project_lock(&root, &store, &activity, &refs, &project_lock)
+                .unwrap_err();
+        assert!(
+            error.to_string().contains("moved or replaced during sync"),
+            "{error}"
+        );
+        assert!(store.roots().unwrap().is_empty());
+
+        // Put back, the held project's own (empty) closures are imported and
+        // nothing from the other directory is.
+        fs::rename(&project, &outside).unwrap();
+        fs::rename(&moved, &project).unwrap();
+        persist_root_for_refs_with_project_lock(&root, &store, &activity, &refs, &project_lock)
+            .unwrap();
+        let roots = store.roots().unwrap();
+        assert_eq!(roots.len(), 1);
+        assert_eq!(roots[0].path, root.path());
+        let record = roots[0].record.as_ref().expect("root/2 record");
+        assert_eq!(record.objects, BTreeSet::from([own.clone()]));
+        drop(project_lock);
+        drop(activity);
+        let _ = crate::kernel::store::remove_tree(&store.root);
+        let _ = fs::remove_dir_all(&project);
+        let _ = fs::remove_dir_all(&outside);
     }
 
     #[test]
@@ -1543,7 +1396,7 @@ mod closure_platform_tests {
             .activity(crate::kernel::activity::ActivityMode::Exclusive)
             .unwrap();
         let error = super::write_closure(
-            &project,
+            &crate::kernel::fsroot::ProjectRoot::open(&project).unwrap(),
             "python",
             serde_json::json!(["not an object"]),
             &store,

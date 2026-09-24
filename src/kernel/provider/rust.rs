@@ -30,7 +30,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 pub use super::rust_extras::{
-    project_extras, realize_toolchain, toolchain_file_extras_within, toolchain_object_id, Extras,
+    project_extras, project_extras_in, realize_toolchain, toolchain_file_extras_within,
+    toolchain_object_id, Extras,
 };
 
 /// The shipped Rust catalog: every stable release from 1.70.0 on, with its

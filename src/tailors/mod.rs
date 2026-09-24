@@ -17,6 +17,7 @@ pub mod ruby;
 
 use crate::comforter::status::State;
 use crate::kernel::context::Context;
+use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::objmeta::KindAdapter;
 use crate::kernel::platform::Platform;
 use crate::kernel::toolchain::{Catalog, LegacyEvidence, Selected};
@@ -138,6 +139,14 @@ fn unsupported(id: &str, verb: &str) -> io::Error {
 /// Every method takes the project directory explicitly: a tailor never reads
 /// the current directory itself, so the same tailor can serve `sync` in
 /// `dir` and `build` in a workspace root above it.
+///
+/// The methods a sync calls (`detect` through `sync`) take the project as a
+/// held directory descriptor (`ProjectRoot`), not a path: the command opens
+/// it once, and every project read and write goes through it, so a project
+/// directory renamed or replaced mid-sync cannot hand a tailor another
+/// project's manifests. `project.path()` is for messages, for recording,
+/// and for a child process's working directory; a tailor never reads the
+/// project through it.
 pub trait Tailor: Sync {
     /// The ecosystem name: closure file stem, `ls` vocabulary, plan JSON.
     fn id(&self) -> &'static str;
@@ -156,9 +165,9 @@ pub trait Tailor: Sync {
         name == self.id()
     }
 
-    /// Are this ecosystem's inputs present in `dir` itself? The one test
-    /// `sync`, `plan`, `status`, `deps`, and `fmt` all use.
-    fn detect(&self, dir: &Path) -> io::Result<bool>;
+    /// Are this ecosystem's inputs present in the project directory itself?
+    /// The one test `sync`, `plan`, `status`, `deps`, and `fmt` all use.
+    fn detect(&self, project: &ProjectRoot) -> io::Result<bool>;
 
     /// Before any store-touching work, for every detected ecosystem
     /// whatever the command is about: are the declarative toolchain inputs
@@ -166,7 +175,7 @@ pub trait Tailor: Sync {
     /// every machine and every command, including a build of another
     /// ecosystem, rather than being read as no request. Most ecosystems'
     /// inputs are checked by the lock's own readers and need nothing here.
-    fn check_inputs(&self, _dir: &Path) -> io::Result<()> {
+    fn check_inputs(&self, _project: &ProjectRoot) -> io::Result<()> {
         Ok(())
     }
 
@@ -174,7 +183,7 @@ pub trait Tailor: Sync {
     /// realize: can this host run this ecosystem, and does this tog pin a
     /// toolchain for it here? Runs after `check_inputs`, so it may assume
     /// well-formed inputs.
-    fn preflight(&self, platform: Platform, dir: &Path) -> io::Result<()>;
+    fn preflight(&self, platform: Platform, project: &ProjectRoot) -> io::Result<()>;
 
     /// Host-side preparation that must precede planning for every
     /// ecosystem (missing-lock generation). Runs for detected ecosystems
@@ -182,7 +191,7 @@ pub trait Tailor: Sync {
     fn prepare(
         &self,
         _ctx: &Context,
-        _dir: &Path,
+        _project: &ProjectRoot,
         _toolchain: &Selected,
         _attribution: &mut crate::kernel::policy::Attribution,
     ) -> io::Result<()> {
@@ -193,14 +202,19 @@ pub trait Tailor: Sync {
     /// realizing anything. `None` when, after `prepare`, there is nothing of
     /// this ecosystem to plan (the text is produced here, not a `Value`, so
     /// each plan's key order stays exactly what its producer serializes).
-    fn plan(&self, ctx: &Context, dir: &Path, toolchain: &Selected) -> io::Result<Option<String>>;
+    fn plan(
+        &self,
+        ctx: &Context,
+        project: &ProjectRoot,
+        toolchain: &Selected,
+    ) -> io::Result<Option<String>>;
 
     /// A sync: plan, realize, project, and narrate with
     /// `ui::synced`. Returns whether anything was synced.
     fn sync(
         &self,
         ctx: &Context,
-        dir: &Path,
+        project: &ProjectRoot,
         request: &SyncRequest,
         attribution: &mut crate::kernel::policy::Attribution,
     ) -> io::Result<bool>;
@@ -598,9 +612,28 @@ pub fn install_kinds() {
 
 /// The tailors whose inputs are present in `dir`, in registry order.
 pub fn detected(dir: &Path) -> io::Result<Vec<&'static dyn Tailor>> {
+    // A directory that is not there, or not a directory, has nothing to
+    // detect. One tog may not read is an error naming the path: an empty
+    // detection would report "no project here" for a project that exists.
+    let project = match ProjectRoot::open(dir) {
+        Ok(project) => project,
+        Err(error)
+            if error.kind() == io::ErrorKind::NotFound
+                || error.kind() == io::ErrorKind::InvalidData =>
+        {
+            return Ok(Vec::new())
+        }
+        Err(error) => return Err(error),
+    };
+    detected_in(&project)
+}
+
+/// `detected` for a project the caller already holds: sync detects through
+/// the descriptor it reads everything else through.
+pub fn detected_in(project: &ProjectRoot) -> io::Result<Vec<&'static dyn Tailor>> {
     let mut found = Vec::new();
     for tailor in registry() {
-        if tailor.detect(dir)? {
+        if tailor.detect(project)? {
             found.push(*tailor);
         }
     }
@@ -615,6 +648,33 @@ mod tests {
 
     const DARWIN: Platform = Platform::Aarch64AppleDarwin;
     const LINUX: Platform = Platform::X86_64UnknownLinuxGnu;
+
+    #[test]
+    fn detection_reports_an_unreadable_project_instead_of_finding_nothing() {
+        use std::os::unix::fs::PermissionsExt as _;
+        // SAFETY: geteuid has no preconditions.
+        if unsafe { libc::geteuid() } == 0 {
+            return; // root reads through any mode
+        }
+        let temp = crate::kernel::testutil::TempDir::new();
+        let parent = temp.0.join("locked");
+        let project = parent.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join("go.mod"), "module example.com/m\n").unwrap();
+        assert!(detected(&temp.0.join("absent")).unwrap().is_empty());
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let result = detected(&project);
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let error = match result {
+            Ok(found) => panic!("an unreadable project detected {} tailors", found.len()),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied, "{error}");
+        assert!(
+            error.to_string().contains(&project.display().to_string()),
+            "{error}"
+        );
+    }
 
     #[test]
     fn every_tailor_ships_a_complete_catalog_under_the_shipped_source_policy() {

@@ -17,7 +17,7 @@ use crate::kernel::dirhash;
 use crate::kernel::fetch::{
     cache_insert, cache_verified_held, download_verified_digest_held, Digest,
 };
-use crate::kernel::fsroot::ProjectRoot;
+use crate::kernel::fsroot::{Entry, ProjectRoot};
 use crate::kernel::platform::{no_pin, Platform};
 use crate::kernel::sandbox::BuildSpec;
 use crate::kernel::store::Store;
@@ -489,24 +489,25 @@ fn run_go(
 /// not use. go's own rule (`go` as a minimum, the lowest toolchain that
 /// satisfies it) is deliberately not applied anywhere: with more than one
 /// pin it would answer with an older release than selection does.
-pub fn project_go_version(platform: Platform, project_dir: &Path) -> io::Result<String> {
-    project_go_version_from(toolchain_catalog()?, platform, project_dir)
+///
+/// The project is read through the caller's held descriptor.
+pub fn project_go_version(platform: Platform, project: &ProjectRoot) -> io::Result<String> {
+    project_go_version_from(toolchain_catalog()?, platform, project)
 }
 
 fn project_go_version_from(
     catalog: Catalog,
     platform: Platform,
-    project_dir: &Path,
+    project: &ProjectRoot,
 ) -> io::Result<String> {
     use crate::comforter::toolchain::{self as project_toolchain, EcosystemInput, Mode};
-    let root = ProjectRoot::open(project_dir)?;
     let resolved = project_toolchain::resolve(
-        &root,
+        project,
         platform,
         vec![EcosystemInput {
             lock_ecosystem: "go".into(),
             catalog,
-            legacy: project_toolchain::legacy_evidence_in(project_dir, &tailor::Go)?,
+            legacy: project_toolchain::legacy_evidence_in(project, &tailor::Go)?,
             external: None,
             helper_pins: Default::default(),
             legacy_helper_pins: Default::default(),
@@ -558,12 +559,20 @@ struct DownloadEntry {
 }
 
 /// Reject go.work anywhere up the tree (v0: single-module projects only).
-pub fn reject_workspaces(project_dir: &Path) -> io::Result<()> {
+/// The project's own go.work is read through the held descriptor; the
+/// directories above it are outside the project and checked by path.
+pub fn reject_workspaces(project: &ProjectRoot) -> io::Result<()> {
     if std::env::var_os("GOWORK").map_or(false, |v| !v.is_empty() && v != "off") {
         return Err(err("GOWORK is set; Go workspaces are not supported yet"));
     }
+    let project_dir = project.path();
     for dir in project_dir.ancestors() {
-        if dir.join("go.work").is_file() {
+        let found = if dir == project_dir {
+            project.is_input_file(Path::new("go.work"))
+        } else {
+            dir.join("go.work").is_file()
+        };
+        if found {
             return Err(err(format!(
                 "{}/go.work found; Go workspaces are not supported yet — \
                  run from a single-module project",
@@ -712,11 +721,12 @@ fn cached_plan(project: &ProjectRoot, input_hash: &str) -> io::Result<Option<GoP
 /// nonzero when go.mod/go.sum need changes). Needs the source tree, so
 /// it runs in the real project — but never writes. Its module cache is a
 /// persistent planner scratch (resolver-trust only; never feeds objects).
-/// Returns the final, possibly tidied, manifest pair.
+/// Returns the final, possibly tidied, manifest pair, read back through the
+/// held descriptor; go itself runs in `project.path()`.
 fn tidy_gate(
     activity: &StoreActivity,
     go_obj: &Path,
-    project_dir: &Path,
+    project: &ProjectRoot,
     gate_cache: &Path,
     scratch: &Path,
     gomod: String,
@@ -725,7 +735,7 @@ fn tidy_gate(
     let out = run_go(
         activity,
         go_obj,
-        project_dir,
+        project.path(),
         gate_cache,
         false,
         &["mod", "tidy", "-diff"],
@@ -739,7 +749,7 @@ fn tidy_gate(
     let out = run_go(
         activity,
         go_obj,
-        project_dir,
+        project.path(),
         gate_cache,
         false,
         &["mod", "tidy"],
@@ -751,10 +761,24 @@ fn tidy_gate(
             String::from_utf8_lossy(&out.stderr).trim()
         )));
     }
-    Ok((
-        fs::read_to_string(project_dir.join("go.mod"))?,
-        fs::read_to_string(project_dir.join("go.sum")).unwrap_or_default(),
-    ))
+    Ok((read_gomod(project)?, read_gosum(project)))
+}
+
+/// go.mod through the held descriptor. Absent is the NotFound a path read
+/// reported.
+fn read_gomod(project: &ProjectRoot) -> io::Result<String> {
+    project
+        .read_input_string(Path::new("go.mod"))?
+        .ok_or_else(|| io::Error::from_raw_os_error(libc::ENOENT))
+}
+
+/// go.sum through the held descriptor; absent or unreadable is empty.
+fn read_gosum(project: &ProjectRoot) -> String {
+    project
+        .read_input_string(Path::new("go.sum"))
+        .ok()
+        .flatten()
+        .unwrap_or_default()
 }
 
 /// Run the closure download in a DISPOSABLE copy of the manifest (go mod
@@ -924,23 +948,24 @@ fn verified_module(
 /// directive for it: the lock decides the toolchain, and the tidy gate below
 /// is free to rewrite those directives without moving the plan to a
 /// different compiler than the one it is being planned with.
+///
+/// The project is read through the held descriptor `project`.
 pub fn plan_go(
     store: &Store,
     activity: &StoreActivity,
-    project_dir: &Path,
+    project: &ProjectRoot,
     go_obj: &Path,
     go_version: &str,
 ) -> io::Result<GoPlan> {
-    reject_workspaces(project_dir)?;
-    let project = ProjectRoot::open(project_dir)?;
-    let gomod = fs::read_to_string(project_dir.join("go.mod"))
-        .map_err(|e| io::Error::new(e.kind(), format!("go.mod: {e}")))?;
-    let gosum = fs::read_to_string(project_dir.join("go.sum")).unwrap_or_default();
+    reject_workspaces(project)?;
+    let gomod =
+        read_gomod(project).map_err(|e| io::Error::new(e.kind(), format!("go.mod: {e}")))?;
+    let gosum = read_gosum(project);
     reject_local_replaces(&gomod)?;
 
-    let src_digest = source_digest(project_dir)?;
+    let src_digest = source_digest(project)?;
     let input_hash = plan_cache_key(go_version, &gomod, &gosum, &src_digest);
-    if let Some(plan) = cached_plan(&project, &input_hash)? {
+    if let Some(plan) = cached_plan(project, &input_hash)? {
         return Ok(plan);
     }
 
@@ -950,7 +975,7 @@ pub fn plan_go(
     let (gomod, gosum) = tidy_gate(
         activity,
         go_obj,
-        project_dir,
+        project,
         &gate_cache,
         &scratch,
         gomod,
@@ -959,7 +984,7 @@ pub fn plan_go(
     reject_local_replaces(&gomod)?;
     // Cache under the FINAL (possibly tidied) inputs so the next sync hits.
     let module = module_path(&gomod)?;
-    let input_hash = plan_cache_key(go_version, &gomod, &gosum, &source_digest(project_dir)?);
+    let input_hash = plan_cache_key(go_version, &gomod, &gosum, &source_digest(project)?);
 
     let work = scratch.join("plan");
     let out = download_closure(activity, go_obj, &work, &gate_cache, &gomod, &gosum)?;
@@ -976,8 +1001,8 @@ pub fn plan_go(
     validate_plan(&plan)?;
     // Snapshot guard: the manifest must not have changed under us between
     // the gate and now, or the cache key would lie about the plan's inputs.
-    let now_mod = fs::read_to_string(project_dir.join("go.mod")).unwrap_or_default();
-    let now_sum = fs::read_to_string(project_dir.join("go.sum")).unwrap_or_default();
+    let now_mod = read_gomod(project).unwrap_or_default();
+    let now_sum = read_gosum(project);
     if now_mod != gomod || now_sum != gosum {
         return Err(err("go.mod/go.sum changed while planning; re-run 'tog'"));
     }
@@ -993,34 +1018,48 @@ pub fn plan_go(
 
 /// Digest of the project's .go sources (the tidy gate's third input).
 /// Sorted (relpath, sha256) pairs; names starting with `.` or `_` (so
-/// `.tog` too) are skipped.
-fn source_digest(project_dir: &Path) -> io::Result<String> {
+/// `.tog` too) are skipped. The walk runs through the held descriptor, each
+/// subdirectory held as its own root and opened with the strict no-follow
+/// walk; a symlink is neither followed nor hashed, and one swapped in after
+/// the entry was classified is refused rather than walked into.
+fn source_digest(project: &ProjectRoot) -> io::Result<String> {
     let mut files: Vec<(String, String)> = Vec::new();
-    fn walk(root: &Path, dir: &Path, files: &mut Vec<(String, String)>) -> io::Result<()> {
-        for entry in fs::read_dir(dir)? {
-            let entry = entry?;
-            let path = entry.path();
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            if name.starts_with('.') || name.starts_with('_') {
+    fn walk(dir: &ProjectRoot, rel: &Path, files: &mut Vec<(String, String)>) -> io::Result<()> {
+        let names = dir
+            .read_input_dir(Path::new("."))?
+            .ok_or_else(|| err(format!("source walk: {} vanished", dir.path().display())))?;
+        for name in names {
+            let lossy = name.to_string_lossy();
+            if lossy.starts_with('.') || lossy.starts_with('_') {
                 continue;
             }
-            let md = fs::symlink_metadata(&path)?;
-            if md.is_dir() {
-                walk(root, &path, files)?;
-            } else if md.is_file() && name.ends_with(".go") {
-                let rel = path
-                    .strip_prefix(root)
-                    .map_err(|e| err(format!("source walk: {e}")))?
-                    .to_string_lossy()
-                    .into_owned();
-                let content = fs::read(&path)?;
-                files.push((rel, hex::encode(Sha256::digest(&content))));
+            let child = Path::new(&name);
+            match dir.entry(child)? {
+                Entry::Directory => {
+                    let sub = dir.subdir(child)?.ok_or_else(|| {
+                        err(format!(
+                            "source walk: {} vanished",
+                            dir.path().join(child).display()
+                        ))
+                    })?;
+                    walk(&sub, &rel.join(child), files)?;
+                }
+                Entry::Regular if lossy.ends_with(".go") => {
+                    let content = dir.read_file(child)?.ok_or_else(|| {
+                        err(format!(
+                            "source walk: {} vanished",
+                            dir.path().join(child).display()
+                        ))
+                    })?;
+                    let rel = rel.join(child).to_string_lossy().into_owned();
+                    files.push((rel, hex::encode(Sha256::digest(&content))));
+                }
+                _ => {}
             }
         }
         Ok(())
     }
-    walk(project_dir, project_dir, &mut files)?;
+    walk(project, Path::new(""), &mut files)?;
     files.sort();
     let mut hasher = Sha256::new();
     for (rel, hash) in &files {
@@ -1227,7 +1266,7 @@ pub fn realize_modcache(
 /// this Go object came from is readable without re-deriving it from go.mod.
 pub fn project_go_env(
     activity: &StoreActivity,
-    project_dir: &Path,
+    project: &ProjectRoot,
     go_obj: &Path,
     modcache_obj: &Path,
     plan: &GoPlan,
@@ -1268,7 +1307,7 @@ pub fn project_go_env(
             body.insert(key.clone(), value.clone());
         }
     }
-    crate::comforter::write_closure(project_dir, "go", body, &store, activity, refs, attribution)
+    crate::comforter::write_closure(project, "go", body, &store, activity, refs, attribution)
 }
 
 /// Sandboxed `go build`: network denied, project READ-ONLY — outputs are
@@ -1677,7 +1716,7 @@ mod tests {
         };
         project_go_env(
             activity,
-            &project,
+            &crate::kernel::fsroot::ProjectRoot::open(&project).unwrap(),
             &store.object_path(&go_id),
             &store.object_path(&modcache_id),
             &plan,
@@ -1756,7 +1795,7 @@ mod tests {
         };
         project_go_env(
             activity,
-            &project,
+            &crate::kernel::fsroot::ProjectRoot::open(&project).unwrap(),
             &store.object_path(&go_id),
             &store.object_path(&modcache_id),
             &plan,
@@ -1910,7 +1949,7 @@ mod tests {
                 let temp = TempDir::new();
                 let dir = gomod_project(&temp, gomod);
                 assert_eq!(
-                    project_go_version(platform, &dir).unwrap(),
+                    project_go_version(platform, &ProjectRoot::open(&dir).unwrap()).unwrap(),
                     "1.27.0",
                     "{gomod:?}"
                 );
@@ -1924,7 +1963,10 @@ mod tests {
             ] {
                 let temp = TempDir::new();
                 let dir = gomod_project(&temp, gomod);
-                assert!(project_go_version(platform, &dir).is_err(), "{gomod:?}");
+                assert!(
+                    project_go_version(platform, &ProjectRoot::open(&dir).unwrap()).is_err(),
+                    "{gomod:?}"
+                );
             }
         }
     }
@@ -1953,9 +1995,12 @@ mod tests {
         let rows = input::discover(&ProjectRoot::open(&dir).unwrap(), "go").unwrap();
         let selected = select_for(&catalog, "go", &rows).unwrap();
         assert_eq!(selected.component("go").unwrap().version, "1.27.0");
-        let answer =
-            project_go_version_from(catalog.clone(), Platform::X86_64UnknownLinuxGnu, &dir)
-                .unwrap();
+        let answer = project_go_version_from(
+            catalog.clone(),
+            Platform::X86_64UnknownLinuxGnu,
+            &ProjectRoot::open(&dir).unwrap(),
+        )
+        .unwrap();
         assert_eq!(answer, "1.27.0");
         assert!(
             !dir.join(crate::kernel::toolchain::lock::LOCK_PATH).exists(),
@@ -1983,8 +2028,12 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            project_go_version_from(two_pin_catalog(), Platform::X86_64UnknownLinuxGnu, &dir)
-                .unwrap(),
+            project_go_version_from(
+                two_pin_catalog(),
+                Platform::X86_64UnknownLinuxGnu,
+                &ProjectRoot::open(&dir).unwrap()
+            )
+            .unwrap(),
             "1.26.0"
         );
     }
@@ -2003,7 +2052,12 @@ mod tests {
         lock.set_ecosystem("go", &older, &rows).unwrap();
         fs::write(dir.join(LOCK_PATH), lock.canonical_bytes()).unwrap();
         assert_eq!(
-            project_go_version_from(catalog, Platform::X86_64UnknownLinuxGnu, &dir).unwrap(),
+            project_go_version_from(
+                catalog,
+                Platform::X86_64UnknownLinuxGnu,
+                &ProjectRoot::open(&dir).unwrap()
+            )
+            .unwrap(),
             "1.26.0"
         );
     }
@@ -2315,7 +2369,7 @@ mod tests {
             format!(
                 "go-planner/2\x00{}\x00{gomod}\x00{gosum}\x00{}",
                 "1.27.0",
-                source_digest(project).unwrap()
+                source_digest(&ProjectRoot::open(project).unwrap()).unwrap()
             )
             .as_bytes(),
         ))
@@ -2342,7 +2396,7 @@ mod tests {
         let got = plan_go(
             &store,
             &activity,
-            &project,
+            &ProjectRoot::open(&project).unwrap(),
             Path::new("/nonexistent/go"),
             "1.27.0",
         )
@@ -2375,7 +2429,12 @@ mod tests {
         let gomod = fs::read_to_string(project.join("go.mod")).unwrap();
         write_plan_cache(
             &project,
-            &plan_cache_key("1.27.0", &gomod, &gosum, &source_digest(&project).unwrap()),
+            &plan_cache_key(
+                "1.27.0",
+                &gomod,
+                &gosum,
+                &source_digest(&ProjectRoot::open(&project).unwrap()).unwrap(),
+            ),
             &plan,
         );
         // A store root that does not exist and a go binary that does not
@@ -2386,7 +2445,7 @@ mod tests {
         let got = plan_go(
             &store,
             &activity,
-            &project,
+            &ProjectRoot::open(&project).unwrap(),
             Path::new("/nonexistent/go"),
             "1.27.0",
         )
@@ -2399,7 +2458,7 @@ mod tests {
         assert!(plan_go(
             &store,
             &activity,
-            &project,
+            &ProjectRoot::open(&project).unwrap(),
             Path::new("/nonexistent/go"),
             "1.28.0"
         )
@@ -2450,7 +2509,7 @@ mod tests {
         let e = plan_go(
             &store,
             &activity,
-            &project,
+            &ProjectRoot::open(&project).unwrap(),
             Path::new("/nonexistent/go"),
             "1.27.0",
         )
@@ -2480,7 +2539,7 @@ mod tests {
         let e = plan_go(
             &store,
             &activity,
-            &project,
+            &ProjectRoot::open(&project).unwrap(),
             Path::new("/nonexistent/go"),
             "1.27.0",
         )
@@ -2523,10 +2582,64 @@ mod tests {
         assert!(plan_go(
             &store,
             &activity,
-            &project,
+            &ProjectRoot::open(&project).unwrap(),
             Path::new("/nonexistent/go"),
             "1.27.0",
         )
         .is_err());
+    }
+
+    /// A project renamed away mid-sync and replaced by another at the same
+    /// path is still read through the descriptor held for the original:
+    /// detection, go.mod, the source digest, and the plan cache all come
+    /// from the original directory, never the replacement.
+    #[test]
+    fn a_held_root_keeps_reading_the_original_project_after_a_swap() {
+        use crate::tailors::Tailor;
+        // The plan borrows the caller's lease; a cache hit never reaches the
+        // store, so a lease on a scratch store stands in for it.
+        let (_lease_store, activity) = crate::kernel::testutil::detached_lease();
+        let temp = TempDir::new();
+        let project = temp.0.join("proj");
+        let (gomod, gosum, plan) = plan_fixture(&project);
+        write_plan_cache(
+            &project,
+            &expected_input_hash(&project, &gomod, &gosum),
+            &plan,
+        );
+        let root = ProjectRoot::open(&project).unwrap();
+        let digest = source_digest(&root).unwrap();
+
+        fs::rename(&project, temp.0.join("moved")).unwrap();
+        fs::create_dir_all(&project).unwrap();
+        fs::write(
+            project.join("go.mod"),
+            "module example.com/evil\n\ngo 1.27.0\n",
+        )
+        .unwrap();
+        fs::write(project.join("evil.go"), "package main\n").unwrap();
+
+        assert!(tailor::Go.detect(&root).unwrap());
+        assert_eq!(read_gomod(&root).unwrap(), gomod);
+        assert_eq!(read_gosum(&root), gosum);
+        assert_eq!(source_digest(&root).unwrap(), digest);
+        // The original's cache is served; the replacement has none, so a
+        // read of the replacement would have missed and reached the store.
+        let store = Store {
+            root: temp.0.join("absent-store"),
+        };
+        let got = plan_go(
+            &store,
+            &activity,
+            &root,
+            Path::new("/nonexistent/go"),
+            "1.27.0",
+        )
+        .unwrap();
+        assert_eq!(got.module, "example.com/m");
+        assert!(
+            !store.root.exists(),
+            "the swap made the plan miss its cache"
+        );
     }
 }

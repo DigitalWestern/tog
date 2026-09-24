@@ -11,6 +11,7 @@ use crate::comforter::{
 };
 use crate::kernel::activity::StoreActivity;
 use crate::kernel::fetch::download_verified_held;
+use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::platform::Platform;
 use crate::kernel::store::Store;
 use crate::kernel::toolchain::Selected;
@@ -544,7 +545,7 @@ fn python_closure_body(
 /// the closure records so a later run resolves the same bytes.
 pub fn project_env_with_inputs(
     activity: &StoreActivity,
-    project_dir: &Path,
+    project: &ProjectRoot,
     env_obj: &Path,
     plan: &Plan,
     selection: &pyselect::PythonSelection,
@@ -555,7 +556,7 @@ pub fn project_env_with_inputs(
 ) -> io::Result<()> {
     project_env_inner(
         activity,
-        project_dir,
+        project,
         env_obj,
         plan,
         Some(selection),
@@ -572,7 +573,7 @@ pub fn project_env_with_inputs(
 /// `tog x` uses this: it has a selection but no recorded input files.
 pub fn project_env_with_selection(
     activity: &StoreActivity,
-    project_dir: &Path,
+    project: &ProjectRoot,
     env_obj: &Path,
     plan: &Plan,
     selection: &pyselect::PythonSelection,
@@ -580,7 +581,7 @@ pub fn project_env_with_selection(
 ) -> io::Result<()> {
     project_env_inner(
         activity,
-        project_dir,
+        project,
         env_obj,
         plan,
         Some(selection),
@@ -593,7 +594,7 @@ pub fn project_env_with_selection(
 
 pub(super) fn project_env_inner(
     activity: &StoreActivity,
-    project_dir: &Path,
+    project: &ProjectRoot,
     env_obj: &Path,
     plan: &Plan,
     selection: Option<&pyselect::PythonSelection>,
@@ -604,13 +605,15 @@ pub(super) fn project_env_inner(
     helpers: &serde_json::Value,
     attribution: &mut crate::kernel::policy::Attribution,
 ) -> io::Result<()> {
-    let venv = project_dir.join(".venv");
+    // `.venv` is moved aside, replaced and published through the held
+    // project descriptor, never through the project's path.
+    let venv = Path::new(".venv");
     let store = store_from_object_path(env_obj)
         .ok_or_else(|| io::Error::other("environment object is not in a Tog store"))?;
     let env_obj = env_obj.canonicalize()?;
-    let project_lock = store.project_lock(project_dir)?;
+    let project_lock = store.project_lock_in(project)?;
     let native_reference = crate::kernel::provider::nativelibs::env_reference(&env_obj)?;
-    let backup = reserve_backup_real_dir_for_store(&venv, &store)?;
+    let backup = reserve_backup_real_dir_for_store(project, venv, &store)?;
     let mut refs = ClosureRefs::new();
     refs.object_path(&store, activity, &env_obj)?;
     // The interpreter is referenced directly, not only through the
@@ -640,14 +643,14 @@ pub(super) fn project_env_inner(
     }
     // Durable protection precedes both the user-data move and the visible
     // .venv switch. A failed later step therefore over-retains safely.
-    persist_root_for_refs_with_project_lock(project_dir, &store, activity, &refs, &project_lock)?;
+    persist_root_for_refs_with_project_lock(project, &store, activity, &refs, &project_lock)?;
     if let Some(backup) = backup.as_ref() {
-        move_reserved_backup(&venv, backup)?;
+        move_reserved_backup(project, venv, backup)?;
     }
     // replace_project_symlink makes and renames its own temporary link; an
     // extra one here would be left behind in the user's project on every
     // sync.
-    replace_project_symlink(&venv, &env_obj, ".venv")?;
+    replace_project_symlink(project, venv, &env_obj, ".venv")?;
 
     let body = python_closure_body(
         &env_obj,
@@ -659,7 +662,7 @@ pub(super) fn project_env_inner(
         runtime_record,
     );
     write_closure_with_project_lock(
-        project_dir,
+        project,
         "python",
         body,
         &store,
@@ -788,7 +791,7 @@ mod tests {
         let runtime = store.object_path(&runtime_id);
         project_env_inner(
             activity,
-            &project,
+            &ProjectRoot::open(&project).unwrap(),
             &store.object_path(&env_id),
             &plan,
             None,

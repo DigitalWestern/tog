@@ -6,6 +6,7 @@ use crate::kernel::context::Context;
 use crate::kernel::cyclonedx::{
     component, list, purl_encode, push_hash, required, toolchain_component, version_of,
 };
+use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::objmeta::KindAdapter;
 use crate::kernel::platform::Platform;
 use crate::kernel::toolchain::{Catalog, LegacyEvidence, Selected};
@@ -24,8 +25,8 @@ impl Tailor for Python {
         "python"
     }
 
-    fn detect(&self, dir: &Path) -> io::Result<bool> {
-        inputs::has_python_input(dir)
+    fn detect(&self, project: &ProjectRoot) -> io::Result<bool> {
+        inputs::has_python_input(project)
     }
 
     /// `tog x` resolves from the public registry and projects into its own
@@ -67,8 +68,8 @@ impl Tailor for Python {
     /// A `.python-version`, `requires-python`, or Poetry `python` that does
     /// not parse refuses here, on every command, before any lock is read
     /// or written from it.
-    fn check_inputs(&self, dir: &Path) -> io::Result<()> {
-        pyselect::check_project_inputs(dir)
+    fn check_inputs(&self, project: &ProjectRoot) -> io::Result<()> {
+        pyselect::check_project_inputs(project)
     }
 
     /// Host support and a pinned interpreter for the request this project
@@ -77,22 +78,27 @@ impl Tailor for Python {
     /// unpinnable request is refused in Python's own words (which patch
     /// releases exist, and what to put in `.python-version`) rather than in
     /// the catalog's.
-    fn preflight(&self, platform: Platform, dir: &Path) -> io::Result<()> {
+    fn preflight(&self, platform: Platform, project: &ProjectRoot) -> io::Result<()> {
         let selection =
-            pyselect::select_python_with_inputs(platform, &manifest::python_inputs(dir)?)?;
+            pyselect::select_python_with_inputs(platform, &manifest::python_inputs(project)?)?;
         python::preflight(platform, selection.pin.version)
     }
 
-    fn plan(&self, ctx: &Context, dir: &Path, selected: &Selected) -> io::Result<Option<String>> {
+    fn plan(
+        &self,
+        ctx: &Context,
+        project: &ProjectRoot,
+        selected: &Selected,
+    ) -> io::Result<Option<String>> {
         let (plan, _selection, _inputs) =
-            inputs::read_plan(ctx.platform, dir, &ctx.store, &ctx.activity, selected)?;
+            inputs::read_plan(ctx.platform, project, &ctx.store, &ctx.activity, selected)?;
         Ok(Some(serde_json::to_string_pretty(&plan)?))
     }
 
     fn sync(
         &self,
         ctx: &Context,
-        dir: &Path,
+        project: &ProjectRoot,
         request: &SyncRequest,
         attribution: &mut crate::kernel::policy::Attribution,
     ) -> io::Result<bool> {
@@ -103,7 +109,7 @@ impl Tailor for Python {
         // project's toolchain selection names, not the pin table.
         let selected = request.toolchain;
         let (plan, selection, inputs) =
-            inputs::read_plan(platform, dir, store, &ctx.activity, selected)?;
+            inputs::read_plan(platform, project, store, &ctx.activity, selected)?;
         let runtime = python::realize_runtime(store, activity, platform, selected)?;
         // An sdist with a Rust extension builds on the Rust this project's
         // lock names when the project has one, not on the shipped pin.
@@ -116,9 +122,11 @@ impl Tailor for Python {
             selected,
             helpers.get("rust"),
         )?;
+        // The `.venv` projection and the closure are published through the
+        // held project descriptor.
         super::env::project_env_with_inputs(
             activity,
-            dir,
+            project,
             &env,
             &plan,
             &selection,

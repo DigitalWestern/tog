@@ -265,7 +265,7 @@ snapshots:
     let plan = tog::tailors::node::lock_import::plan_pnpm(
         Platform::X86_64UnknownLinuxGnu,
         &lock,
-        &dir,
+        &tog::kernel::fsroot::ProjectRoot::open(&dir).unwrap(),
         node_version(),
     )
     .unwrap();
@@ -319,7 +319,7 @@ fn plan_local(
     let plan = tog::tailors::node::lock_import::plan_pnpm(
         Platform::X86_64UnknownLinuxGnu,
         lock,
-        &dir,
+        &tog::kernel::fsroot::ProjectRoot::open(&dir).unwrap(),
         node_version(),
     );
     let _ = fs::remove_dir_all(dir);
@@ -563,7 +563,7 @@ snapshots:
         tog::tailors::node::lock_import::plan_pnpm(
             Platform::X86_64UnknownLinuxGnu,
             lock,
-            &dir,
+            &tog::kernel::fsroot::ProjectRoot::open(&dir).unwrap(),
             node_version(),
         )
     };
@@ -624,7 +624,7 @@ snapshots:
         tog::tailors::node::lock_import::plan_pnpm(
             Platform::X86_64UnknownLinuxGnu,
             lock,
-            &dir,
+            &tog::kernel::fsroot::ProjectRoot::open(&dir).unwrap(),
             node_version(),
         )
     };
@@ -720,7 +720,7 @@ fn pnpm_bare_name_and_range_patches_apply_where_pnpm_applied_them() {
         tog::tailors::node::lock_import::plan_pnpm(
             Platform::X86_64UnknownLinuxGnu,
             lock,
-            &dir,
+            &tog::kernel::fsroot::ProjectRoot::open(&dir).unwrap(),
             node_version(),
         )
     };

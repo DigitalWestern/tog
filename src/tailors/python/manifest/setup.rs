@@ -217,26 +217,51 @@ pub(super) fn parse_requires_python_metadata(text: &str) -> Option<String> {
     })
 }
 
-pub(super) fn setup_tree_hash(dir: &Path) -> io::Result<String> {
+/// Hash the setup.py tree, walked and read through the held project
+/// descriptor. Paths are project-relative, as they always were.
+pub(super) fn setup_tree_hash(project: &ProjectRoot) -> io::Result<String> {
     let mut paths = BTreeSet::new();
-    collect_setup_files(dir, &mut paths)?;
+    collect_setup_files(project, Path::new(""), &mut paths)?;
     let mut hasher = Sha256::new();
-    for path in paths {
-        let relative = path.strip_prefix(dir).unwrap_or(&path);
+    for relative in paths {
+        let path = project.path().join(&relative);
         hasher.update(relative.to_string_lossy().as_bytes());
         hasher.update([0]);
-        hasher.update(fs::read(&path).map_err(|e| unreadable(&path, e))?);
+        let bytes = project
+            .read_input(&relative)
+            .and_then(|bytes| bytes.ok_or_else(|| io::Error::from_raw_os_error(libc::ENOENT)))
+            .map_err(|e| unreadable(&path, e))?;
+        hasher.update(bytes);
         hasher.update([0]);
     }
     Ok(hex::encode(hasher.finalize()))
 }
 
-pub(super) fn collect_setup_files(path: &Path, files: &mut BTreeSet<PathBuf>) -> io::Result<()> {
-    let mut entries = fs::read_dir(path)?.collect::<Result<Vec<_>, _>>()?;
-    entries.sort_by_key(|entry| entry.file_name());
-    for entry in entries {
-        let child = entry.path();
-        let name = entry.file_name().to_string_lossy().into_owned();
+/// Collect the project-relative files under `relative` (empty for the
+/// root). A directory is descended only when it is a real one, not a
+/// symlink, as `symlink_metadata` decided before.
+pub(super) fn collect_setup_files(
+    project: &ProjectRoot,
+    relative: &Path,
+    files: &mut BTreeSet<PathBuf>,
+) -> io::Result<()> {
+    let listed = if relative.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        relative
+    };
+    let names = project.read_input_dir(listed)?.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            format!(
+                "{}: no such directory",
+                project.path().join(relative).display()
+            ),
+        )
+    })?;
+    for name in names {
+        let child = relative.join(&name);
+        let name = name.to_string_lossy().into_owned();
         if matches!(
             name.as_str(),
             ".git" | ".tog" | "__pycache__" | ".venv" | "node_modules"
@@ -245,9 +270,8 @@ pub(super) fn collect_setup_files(path: &Path, files: &mut BTreeSet<PathBuf>) ->
         {
             continue;
         }
-        let metadata = fs::symlink_metadata(&child)?;
-        if metadata.file_type().is_dir() {
-            collect_setup_files(&child, files)?;
+        if project.entry(&child)? == crate::kernel::fsroot::Entry::Directory {
+            collect_setup_files(project, &child, files)?;
         } else {
             files.insert(child);
         }

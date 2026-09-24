@@ -3,7 +3,7 @@
 //! registry.
 
 use crate::comforter::toolchain::{self as project_toolchain, Mode, ProjectToolchain};
-use crate::commands::shared::{ecosystem_inputs, no_inputs, projected_root};
+use crate::commands::shared::{ecosystem_inputs_in, no_inputs, projected_root};
 use crate::kernel::context::{self, Context};
 use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::platform::Platform;
@@ -11,7 +11,6 @@ use crate::kernel::policy;
 use crate::kernel::store;
 use crate::tailors::{self, SyncRequest, Tailor};
 use std::io;
-use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 /// Which detected tailors a sync is about: every one (the bare `tog`,
@@ -52,9 +51,14 @@ impl Scope<'_> {
 /// unresolvable toolchain must refuse without creating a store tree, taking
 /// a lease, or running maintenance. Nothing is written yet either; `commit`
 /// publishes a created lock once the store lease is held.
+///
+/// `project` is the directory the whole sync reads and writes through,
+/// opened once by the caller: detection, the input check, host preflight,
+/// the toolchain inputs, and the pre-lock closures all read the directory
+/// it holds, never whatever the project's path names by then.
 pub fn preflight_sync(
     platform: Platform,
-    dir: &Path,
+    project: &ProjectRoot,
     mode: Mode,
     scope: Scope<'_>,
 ) -> io::Result<(Vec<&'static dyn Tailor>, ProjectToolchain)> {
@@ -62,15 +66,15 @@ pub fn preflight_sync(
     // path can be recorded before realizing or projecting anything: a
     // finished sync that could not register would leave a projected
     // environment nothing protects, and the next sweep would collect it.
-    store::Store::check_registrable(dir)?;
-    let present = tailors::detected(dir)?;
+    store::Store::check_registrable_in(project)?;
+    let present = tailors::detected_in(project)?;
     // No project is the answer before any lock is: `tog --frozen` in the
     // wrong directory must say there is no manifest here, not that
     // tog-toolchain.toml is missing.
     if present.is_empty() {
         return Err(no_inputs());
     }
-    let toolchain = preflight_detected(platform, dir, &present, mode, scope)?;
+    let toolchain = preflight_detected(platform, project, &present, mode, scope)?;
     Ok((present, toolchain))
 }
 
@@ -79,7 +83,7 @@ pub fn preflight_sync(
 /// covers.
 fn preflight_detected(
     platform: Platform,
-    dir: &Path,
+    project: &ProjectRoot,
     present: &[&dyn Tailor],
     mode: Mode,
     scope: Scope<'_>,
@@ -88,16 +92,15 @@ fn preflight_detected(
     // descriptor, so a tampered input or lock fails closed here. Only
     // detected ecosystems are consulted, so a stray symlink for an ecosystem
     // the project does not use cannot stop its sync.
-    let root = ProjectRoot::open(dir)?;
-    check_inputs(dir, present)?;
+    check_inputs(project, present)?;
     // Host support next: an ecosystem that cannot run here at all says so
     // in its own words, before selection reports the same project as
     // unsatisfiable in the catalog's words.
     for tailor in present.iter().filter(|tailor| scope.covers(**tailor)) {
-        tailor.preflight(platform, dir)?;
+        tailor.preflight(platform, project)?;
     }
-    let inputs = ecosystem_inputs(dir, present)?;
-    project_toolchain::resolve(&root, platform, inputs, mode, policy::strict())
+    let inputs = ecosystem_inputs_in(project, present)?;
+    project_toolchain::resolve(project, platform, inputs, mode, policy::strict())
 }
 
 /// The bare `tog` from the command line: load policy and preflight every
@@ -124,35 +127,21 @@ pub(crate) fn run_in_mode(
     stop_after_lock: bool,
 ) -> io::Result<()> {
     let dir = context::project_dir();
-    let checked = directory_identity(&dir)?;
-    let (present, mut toolchain) = preflight(platform, &dir, strict, mode.clone(), Scope::All)?;
+    // The one descriptor this whole sync reads and writes the project
+    // through, from preflight to the last closure.
+    let project = ProjectRoot::open(&dir)?;
+    let (present, mut toolchain) = preflight(platform, &project, strict, mode.clone(), Scope::All)?;
     // Opening the store can wait on another process's lease. If the
     // directory was renamed or replaced meanwhile, the pathname no longer
-    // names the project preflight checked: refuse rather than sync it. This
-    // closes the wait this ordering added, not every pathname race: the
-    // sync itself reads the project by path, as it always has.
+    // names the project preflight checked: refuse now rather than at
+    // publication, before any work is done for it.
     let ctx = Context::open(platform, true)?;
-    let moved = |detail: String| {
-        io::Error::other(format!(
-            "{}: {detail} while waiting for the store; run 'tog' again",
-            dir.display()
-        ))
-    };
-    match directory_identity(&dir) {
-        Ok(now) if now == checked => {}
-        Ok(_) => return Err(moved("the project directory was moved or replaced".into())),
-        Err(error) => {
-            return Err(moved(format!(
-                "the project directory became unreadable ({error})"
-            )))
-        }
-    }
+    project.check_still_named()?;
     if stop_after_lock {
         if present.is_empty() {
             return Err(no_inputs());
         }
-        let root = ProjectRoot::open(&dir)?;
-        let _input_lock = project_toolchain::commit(&root, &mut toolchain, &mode)?;
+        let _input_lock = project_toolchain::commit(&project, &mut toolchain, &mode)?;
         crate::kernel::ui::note(
             "--no-sync: read the tog-toolchain.toml diff, then run 'tog' to sync it",
         );
@@ -165,18 +154,20 @@ pub(crate) fn run_in_mode(
     // realized.
     if matches!(mode, Mode::Update { only: Some(_) }) {
         {
-            let root = ProjectRoot::open(&dir)?;
-            let _published = project_toolchain::commit(&root, &mut toolchain, &mode)?;
+            let _published = project_toolchain::commit(&project, &mut toolchain, &mode)?;
         }
-        let (present, mut toolchain) = preflight_sync(platform, &dir, Mode::Writable, Scope::All)?;
-        return sync_preflighted(&ctx, &dir, &present, &mut toolchain, fresh, &Mode::Writable);
+        let (present, mut toolchain) =
+            preflight_sync(platform, &project, Mode::Writable, Scope::All)?;
+        return sync_preflighted(
+            &ctx,
+            &project,
+            &present,
+            &mut toolchain,
+            fresh,
+            &Mode::Writable,
+        );
     }
-    sync_preflighted(&ctx, &dir, &present, &mut toolchain, fresh, &mode)
-}
-
-fn directory_identity(dir: &Path) -> io::Result<(u64, u64)> {
-    let metadata = std::fs::metadata(dir)?;
-    Ok((metadata.dev(), metadata.ino()))
+    sync_preflighted(&ctx, &project, &present, &mut toolchain, fresh, &mode)
 }
 
 /// Sync with a context the caller already opened (`add`/`remove`/`update`
@@ -189,8 +180,10 @@ pub fn run(ctx: &Context, fresh: bool, strict: bool) -> io::Result<()> {
 /// found by walking up, which is not always the process cwd.
 fn run_in(ctx: &Context, dir: &Path, fresh: bool, strict: bool, frozen: bool) -> io::Result<()> {
     let mode = if frozen { Mode::Frozen } else { Mode::Writable };
-    let (present, mut toolchain) = preflight(ctx.platform, dir, strict, mode.clone(), Scope::All)?;
-    sync_preflighted(ctx, dir, &present, &mut toolchain, fresh, &mode)
+    let project = ProjectRoot::open(dir)?;
+    let (present, mut toolchain) =
+        preflight(ctx.platform, &project, strict, mode.clone(), Scope::All)?;
+    sync_preflighted(ctx, &project, &present, &mut toolchain, fresh, &mode)
 }
 
 /// Sync first when the environment for `cwd` is not the one its inputs
@@ -272,21 +265,21 @@ pub(crate) fn ensure_current_for(
 /// nothing is selected into a file, nothing is host-preflighted, and a
 /// directory with nothing detected is left to the caller.
 fn check_whole_project(platform: Platform, dir: &Path) -> io::Result<()> {
-    let present = tailors::detected(dir)?;
+    let root = ProjectRoot::open(dir)?;
+    let present = tailors::detected_in(&root)?;
     if present.is_empty() {
         return Ok(());
     }
-    let root = ProjectRoot::open(dir)?;
-    check_inputs(dir, &present)?;
-    let inputs = ecosystem_inputs(dir, &present)?;
+    check_inputs(&root, &present)?;
+    let inputs = ecosystem_inputs_in(&root, &present)?;
     project_toolchain::resolve(&root, platform, inputs, Mode::ReadOnly, false).map(|_| ())
 }
 
 /// Every detected ecosystem's toolchain inputs, checked whatever the
 /// command's scope.
-fn check_inputs(dir: &Path, present: &[&dyn Tailor]) -> io::Result<()> {
+fn check_inputs(project: &ProjectRoot, present: &[&dyn Tailor]) -> io::Result<()> {
     for tailor in present {
-        tailor.check_inputs(dir)?;
+        tailor.check_inputs(project)?;
     }
     Ok(())
 }
@@ -306,9 +299,10 @@ fn run_in_only(
 ) -> io::Result<()> {
     let mode = if frozen { Mode::Frozen } else { Mode::Writable };
     let scope = Scope::Only(only);
-    let (present, mut toolchain) = preflight(ctx.platform, dir, strict, mode.clone(), scope)?;
+    let project = ProjectRoot::open(dir)?;
+    let (present, mut toolchain) = preflight(ctx.platform, &project, strict, mode.clone(), scope)?;
     let scoped = scope_to(&present, scope);
-    sync_preflighted(ctx, dir, &scoped, &mut toolchain, false, &mode)
+    sync_preflighted(ctx, &project, &scoped, &mut toolchain, false, &mode)
 }
 
 /// The tailors one sync realizes: every detected one, or the named one.
@@ -358,21 +352,26 @@ fn stale_reason(row: &crate::commands::inspect::EcosystemStatus) -> String {
 
 fn preflight(
     platform: Platform,
-    dir: &Path,
+    project: &ProjectRoot,
     strict: bool,
     mode: Mode,
     scope: Scope<'_>,
 ) -> io::Result<(Vec<&'static dyn Tailor>, ProjectToolchain)> {
-    policy::init(dir, strict)?;
+    policy::init_in(project, strict)?;
     // A configured signing key that cannot be loaded fails here, before the
     // store is opened or any closure is written.
     crate::comforter::init_signing()?;
-    preflight_sync(platform, dir, mode, scope)
+    preflight_sync(platform, project, mode, scope)
 }
 
+/// Run the preflighted tailors through `project`, the descriptor preflight
+/// read through. Each tailor reads and writes the project through it; its
+/// path is checked to still name it before every tailor starts (its child
+/// processes run in the project by path) and again by the closure writer
+/// before anything is published.
 pub(crate) fn sync_preflighted(
     ctx: &Context,
-    dir: &Path,
+    project: &ProjectRoot,
     present: &[&'static dyn Tailor],
     toolchain: &mut ProjectToolchain,
     fresh: bool,
@@ -386,11 +385,11 @@ pub(crate) fn sync_preflighted(
     // The toolchain-input lock is taken after the store lease and before any
     // tailor runs, and held for the whole sync, so `update --toolchain`
     // cannot install a new lock while this sync plans from the old one.
-    let root = ProjectRoot::open(dir)?;
-    let _input_lock = project_toolchain::commit(&root, toolchain, mode)?;
+    let _input_lock = project_toolchain::commit(project, toolchain, mode)?;
     let frozen = *mode == Mode::Frozen;
     let mut any = false;
     for tailor in present {
+        project.check_still_named()?;
         let selected = toolchain.get(tailor.lock_ecosystem())?;
         let mut attribution = policy::Attribution::open(tailor.id())?;
         // `prepare` is missing-lock generation: it runs the ecosystem's own
@@ -399,7 +398,7 @@ pub(crate) fn sync_preflighted(
         // all; a project with no dependency lock fails inside the tailor,
         // which is the one place that knows which file is missing.
         if !frozen {
-            tailor.prepare(ctx, dir, selected, &mut attribution)?;
+            tailor.prepare(ctx, project, selected, &mut attribution)?;
         }
         let request = SyncRequest {
             fresh,
@@ -407,7 +406,7 @@ pub(crate) fn sync_preflighted(
             toolchain: selected,
             selections: &toolchain.entries,
         };
-        let changed = tailor.sync(ctx, dir, &request, &mut attribution)?;
+        let changed = tailor.sync(ctx, project, &request, &mut attribution)?;
         attribution.finish(changed)?;
         if changed {
             any = true;
@@ -416,7 +415,7 @@ pub(crate) fn sync_preflighted(
     if !any {
         return Err(no_inputs());
     }
-    print_exception_summary(dir)?;
+    print_exception_summary(project)?;
     print_habits_notice(&ctx.store);
     print_signing_notice(&ctx.store);
     Ok(())
@@ -551,25 +550,35 @@ fn first_signing_notice(store: &store::Store) -> bool {
         .is_ok()
 }
 
-fn print_exception_summary(project_dir: &Path) -> io::Result<()> {
-    let dir = project_dir.join(".tog/closures");
+/// The exceptions recorded across the project's closures, read through the
+/// held project with the strict no-follow walk: closures are tog's own
+/// state, so a symlinked `.tog` or closure file counts nothing rather than
+/// being read through. The summary is advisory, so an unreadable or
+/// malformed closure is skipped.
+fn exception_count(project: &ProjectRoot) -> usize {
+    let dir = Path::new(".tog/closures");
     let mut total = 0;
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            if !entry.file_name().to_string_lossy().ends_with(".json") {
+    if let Ok(Some(names)) = project.read_dir(dir) {
+        for name in names {
+            if !name.to_string_lossy().ends_with(".json") {
                 continue;
             }
-            let text = match std::fs::read_to_string(entry.path()) {
-                Ok(text) => text,
-                Err(_) => continue,
+            let bytes = match project.read_file(&dir.join(&name)) {
+                Ok(Some(bytes)) => bytes,
+                _ => continue,
             };
-            let value: serde_json::Value = match serde_json::from_str(&text) {
+            let value: serde_json::Value = match serde_json::from_slice(&bytes) {
                 Ok(value) => value,
                 Err(_) => continue,
             };
             total += value["body"]["exceptions"].as_array().map_or(0, Vec::len);
         }
     }
+    total
+}
+
+fn print_exception_summary(project: &ProjectRoot) -> io::Result<()> {
+    let total = exception_count(project);
     match exception_summary(total, policy::signing_configured()) {
         Some((message, Some(next))) => crate::kernel::ui::warning_next(&message, next),
         Some((message, None)) => crate::kernel::ui::note(&message),
@@ -776,6 +785,52 @@ mod tests {
         assert!(line.contains("[signing]"), "{line}");
     }
 
+    /// Closures are tog's own state: sync's toolchain seeding and its
+    /// exception summary read them through the held project with the strict
+    /// no-follow walk, so a symlinked `.tog` or closure file is refused (or,
+    /// for the advisory summary, counts nothing) instead of being read
+    /// through to another directory.
+    #[test]
+    fn closures_are_read_without_following_a_symlink() {
+        let temp = TempDir::new();
+        let project = temp.0.join("project");
+        let outside = temp.0.join("outside");
+        std::fs::create_dir_all(project.join(".tog/closures")).unwrap();
+        std::fs::create_dir_all(outside.join("closures")).unwrap();
+        let closure = serde_json::json!({
+            "schema": "closure/1",
+            "ecosystem": "python",
+            "body": {"exceptions": [{"kind": "a"}, {"kind": "b"}]},
+        })
+        .to_string();
+        std::fs::write(project.join(".tog/closures/python.json"), &closure).unwrap();
+        std::fs::write(outside.join("closures/python.json"), &closure).unwrap();
+        let root = ProjectRoot::open(&project).unwrap();
+        assert_eq!(
+            crate::commands::inspect::closures_in(&root).unwrap().len(),
+            1
+        );
+        assert_eq!(exception_count(&root), 2);
+
+        // A symlinked closure file.
+        std::fs::remove_file(project.join(".tog/closures/python.json")).unwrap();
+        std::os::unix::fs::symlink(
+            outside.join("closures/python.json"),
+            project.join(".tog/closures/python.json"),
+        )
+        .unwrap();
+        let error = crate::commands::inspect::closures_in(&root).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{error}");
+        assert_eq!(exception_count(&root), 0);
+
+        // A symlinked `.tog`.
+        std::fs::remove_dir_all(project.join(".tog")).unwrap();
+        std::os::unix::fs::symlink(&outside, project.join(".tog")).unwrap();
+        let error = crate::commands::inspect::closures_in(&root).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{error}");
+        assert_eq!(exception_count(&root), 0);
+    }
+
     /// Sync ends by registering the project as a GC root, so a path no
     /// record can hold is refused before an environment is realized or
     /// projected. Refusing at the end instead would leave the project synced,
@@ -787,7 +842,7 @@ mod tests {
         std::fs::create_dir_all(&project).unwrap();
         let Err(error) = preflight_sync(
             Platform::host().unwrap(),
-            &project,
+            &ProjectRoot::open(&project).unwrap(),
             Mode::Writable,
             Scope::All,
         ) else {
@@ -821,8 +876,13 @@ mod tests {
         .unwrap();
         std::fs::write(project.join(".python-version"), "3.12.14\n").unwrap();
         let platform = Platform::host().unwrap();
-        let (present, mut toolchain) =
-            preflight_sync(platform, &project, Mode::Writable, Scope::All).unwrap();
+        let (present, mut toolchain) = preflight_sync(
+            platform,
+            &ProjectRoot::open(&project).unwrap(),
+            Mode::Writable,
+            Scope::All,
+        )
+        .unwrap();
         assert!(present.iter().any(|tailor| tailor.id() == "python"));
         assert!(!project.join("tog-toolchain.toml").exists());
         let selected = toolchain.get("python").unwrap();
@@ -843,7 +903,13 @@ mod tests {
         );
         drop(guard);
 
-        let (_, again) = preflight_sync(platform, &project, Mode::Writable, Scope::All).unwrap();
+        let (_, again) = preflight_sync(
+            platform,
+            &ProjectRoot::open(&project).unwrap(),
+            Mode::Writable,
+            Scope::All,
+        )
+        .unwrap();
         let honored = again.get("python").unwrap();
         assert_eq!(honored.source, Source::Lock);
         assert_eq!(honored.bundle_id(), chosen);
@@ -876,7 +942,7 @@ mod tests {
         std::os::unix::fs::symlink(&victim, project.join(".python-version")).unwrap();
         let Err(error) = preflight_sync(
             Platform::host().unwrap(),
-            &project,
+            &ProjectRoot::open(&project).unwrap(),
             Mode::Writable,
             Scope::All,
         ) else {
@@ -890,7 +956,7 @@ mod tests {
         std::os::unix::fs::symlink(&victim, project.join(".ruby-version")).unwrap();
         preflight_sync(
             Platform::host().unwrap(),
-            &project,
+            &ProjectRoot::open(&project).unwrap(),
             Mode::Writable,
             Scope::All,
         )
@@ -1024,31 +1090,31 @@ mod tests {
         fn id(&self) -> &'static str {
             "python"
         }
-        fn detect(&self, dir: &Path) -> io::Result<bool> {
-            Self::real().detect(dir)
+        fn detect(&self, project: &ProjectRoot) -> io::Result<bool> {
+            Self::real().detect(project)
         }
-        fn check_inputs(&self, dir: &Path) -> io::Result<()> {
-            Self::real().check_inputs(dir)
+        fn check_inputs(&self, project: &ProjectRoot) -> io::Result<()> {
+            Self::real().check_inputs(project)
         }
-        fn preflight(&self, _platform: Platform, _dir: &Path) -> io::Result<()> {
+        fn preflight(&self, _platform: Platform, _project: &ProjectRoot) -> io::Result<()> {
             Err(io::Error::other("CPython: no build for this host"))
         }
         fn plan(
             &self,
             ctx: &Context,
-            dir: &Path,
+            project: &ProjectRoot,
             toolchain: &crate::kernel::toolchain::Selected,
         ) -> io::Result<Option<String>> {
-            Self::real().plan(ctx, dir, toolchain)
+            Self::real().plan(ctx, project, toolchain)
         }
         fn sync(
             &self,
             ctx: &Context,
-            dir: &Path,
+            project: &ProjectRoot,
             request: &SyncRequest,
             attribution: &mut policy::Attribution,
         ) -> io::Result<bool> {
-            Self::real().sync(ctx, dir, request, attribution)
+            Self::real().sync(ctx, project, request, attribution)
         }
         fn listing(&self, ecosystem: &str, body: &serde_json::Value) -> tailors::ClosureListing {
             Self::real().listing(ecosystem, body)
@@ -1107,8 +1173,13 @@ mod tests {
         std::fs::write(project.join("pyproject.toml"), pyproject).unwrap();
         std::fs::write(project.join(".python-version"), "3.12\n").unwrap();
         let platform = Platform::host().unwrap();
-        let (_, mut toolchain) =
-            preflight_sync(platform, &project, Mode::Writable, Scope::All).unwrap();
+        let (_, mut toolchain) = preflight_sync(
+            platform,
+            &ProjectRoot::open(&project).unwrap(),
+            Mode::Writable,
+            Scope::All,
+        )
+        .unwrap();
         let root = ProjectRoot::open(&project).unwrap();
         drop(project_toolchain::commit(&root, &mut toolchain, &Mode::Writable).unwrap());
         let lock = std::fs::read(project.join("tog-toolchain.toml")).unwrap();
@@ -1159,8 +1230,14 @@ mod tests {
         let platform = Platform::host().unwrap();
         let present: [&dyn Tailor; 2] = [&HostlessPython, tailors::by_id("cargo").unwrap()];
 
-        let error = preflight_detected(platform, &project, &present, Mode::Writable, Scope::All)
-            .unwrap_err();
+        let error = preflight_detected(
+            platform,
+            &ProjectRoot::open(&project).unwrap(),
+            &present,
+            Mode::Writable,
+            Scope::All,
+        )
+        .unwrap_err();
         assert!(
             error.to_string().contains("no build for this host"),
             "{error}"
@@ -1168,7 +1245,7 @@ mod tests {
 
         let toolchain = preflight_detected(
             platform,
-            &project,
+            &ProjectRoot::open(&project).unwrap(),
             &present,
             Mode::Writable,
             Scope::Only("cargo"),
@@ -1184,7 +1261,7 @@ mod tests {
         .unwrap();
         let error = preflight_detected(
             platform,
-            &project,
+            &ProjectRoot::open(&project).unwrap(),
             &present,
             Mode::Writable,
             Scope::Only("cargo"),
@@ -1243,5 +1320,261 @@ mod tests {
         );
         let next = policy::Attribution::open("node").unwrap();
         drop(next);
+    }
+
+    /// The Python tailor whose `sync` has a same-user process rename the
+    /// project away and put another project at its path mid-sync, then
+    /// publishes the way every producer does: the production closure writer,
+    /// through the held root, with a complete object reference, so the only
+    /// thing that can stop the publication is a still-named check.
+    struct SwappedMidSync {
+        moved: PathBuf,
+    }
+
+    /// A complete store object for a closure to reference, made under the
+    /// command's own lease.
+    fn complete_object(ctx: &Context, name: &str) -> io::Result<String> {
+        use std::os::unix::fs::PermissionsExt as _;
+        crate::kernel::objmeta::register_test_kinds();
+        let identity = crate::kernel::types::Identity {
+            kind: "test".into(),
+            name: name.into(),
+            version: "1".into(),
+            inputs: Default::default(),
+        };
+        let id = identity.object_id();
+        let staged = ctx.store.stage_with_activity(&ctx.activity)?;
+        std::fs::write(staged.join("payload"), name)?;
+        ctx.store.commit_with_activity_and_deps(
+            &ctx.activity,
+            &identity,
+            &staged,
+            &[],
+            &crate::kernel::store::ObjectDeps::new(),
+        )?;
+        let object = ctx.store.object_path(&id);
+        let mut perms = std::fs::metadata(&object)?.permissions();
+        perms.set_mode(perms.mode() & !0o222);
+        std::fs::set_permissions(&object, perms)?;
+        Ok(id)
+    }
+
+    impl Tailor for SwappedMidSync {
+        fn id(&self) -> &'static str {
+            "python"
+        }
+        fn detect(&self, project: &ProjectRoot) -> io::Result<bool> {
+            HostlessPython::real().detect(project)
+        }
+        fn preflight(&self, _platform: Platform, _project: &ProjectRoot) -> io::Result<()> {
+            Ok(())
+        }
+        fn plan(
+            &self,
+            _ctx: &Context,
+            _project: &ProjectRoot,
+            _toolchain: &crate::kernel::toolchain::Selected,
+        ) -> io::Result<Option<String>> {
+            Ok(None)
+        }
+        fn sync(
+            &self,
+            ctx: &Context,
+            project: &ProjectRoot,
+            _request: &SyncRequest,
+            attribution: &mut policy::Attribution,
+        ) -> io::Result<bool> {
+            let manifest = Path::new("pyproject.toml");
+            let before = project.read_input(manifest)?.unwrap();
+            let id = complete_object(ctx, "swapped-mid-sync")?;
+            let mut refs = crate::comforter::ClosureRefs::new();
+            refs.object_id(&ctx.store, &ctx.activity, &id)?;
+            let path = project.path().to_path_buf();
+            std::fs::rename(&path, &self.moved)?;
+            std::fs::create_dir_all(&path)?;
+            std::fs::write(
+                path.join("pyproject.toml"),
+                "[project]\nname = \"impostor\"\nversion = \"6.6.6\"\n",
+            )?;
+            std::fs::write(path.join(".python-version"), "3.12.14\n")?;
+            // The held descriptor still reads the project preflight checked.
+            assert_eq!(project.read_input(manifest)?.unwrap(), before);
+            crate::comforter::write_closure(
+                project,
+                "python",
+                serde_json::json!({}),
+                &ctx.store,
+                &ctx.activity,
+                refs,
+                attribution,
+            )?;
+            Ok(true)
+        }
+        fn listing(&self, ecosystem: &str, body: &serde_json::Value) -> tailors::ClosureListing {
+            HostlessPython::real().listing(ecosystem, body)
+        }
+        fn closure_state(
+            &self,
+            platform: Platform,
+            dir: &Path,
+            ecosystem: &str,
+            body: &serde_json::Value,
+        ) -> io::Result<crate::comforter::status::State> {
+            HostlessPython::real().closure_state(platform, dir, ecosystem, body)
+        }
+        fn sbom_components(
+            &self,
+            ecosystem: &str,
+            body: &serde_json::Value,
+            out: &mut Vec<serde_json::Value>,
+        ) -> io::Result<()> {
+            HostlessPython::real().sbom_components(ecosystem, body, out)
+        }
+        fn toolchain_catalog(&self) -> io::Result<crate::kernel::toolchain::Catalog> {
+            HostlessPython::real().toolchain_catalog()
+        }
+        fn legacy_toolchain_evidence(
+            &self,
+            ecosystem: &str,
+            platform: Option<Platform>,
+            body: &serde_json::Value,
+            store: Option<&crate::kernel::store::Store>,
+        ) -> crate::kernel::toolchain::LegacyEvidence {
+            HostlessPython::real().legacy_toolchain_evidence(ecosystem, platform, body, store)
+        }
+    }
+
+    /// #55: a project directory renamed away and replaced by another project
+    /// at the same path mid-sync is refused before anything is published, in
+    /// either directory. The tailor kept reading the original through the
+    /// held descriptor the whole time.
+    #[test]
+    fn a_project_swapped_mid_sync_is_refused_before_publication() {
+        // Same lock order as `failed_tailor_sync_clears_its_unpublished_exceptions`.
+        let _env_lock = policy::test_env_lock();
+        let temp = TempDir::new();
+        let home = temp.0.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let _policy_env = PolicyEnv::enter(&home);
+        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _store_lock = store::STORE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _attribution = policy::attribution_test_lock();
+        let project = temp.0.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(
+            project.join("pyproject.toml"),
+            "[project]\nname = \"fixture\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        std::fs::write(project.join(".python-version"), "3.12.14\n").unwrap();
+        let _store_env = StoreEnv::enter(&temp.0.join("store"));
+        let platform = Platform::host().unwrap();
+        let ctx = Context::open_in(platform, &project, false).unwrap();
+        let root = ProjectRoot::open(&project).unwrap();
+        let moved = temp.0.join("moved");
+        let swapped = SwappedMidSync {
+            moved: moved.clone(),
+        };
+        let present: [&'static dyn Tailor; 1] = [Box::leak(Box::new(swapped))];
+        let mut toolchain =
+            preflight_detected(platform, &root, &present, Mode::Writable, Scope::All).unwrap();
+
+        let error = sync_preflighted(
+            &ctx,
+            &root,
+            &present,
+            &mut toolchain,
+            false,
+            &Mode::Writable,
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("moved or replaced during sync"),
+            "{error}"
+        );
+        assert!(!project.join(".tog/closures/python.json").exists());
+        assert!(!moved.join(".tog/closures/python.json").exists());
+        assert!(
+            ctx.store.roots().unwrap().is_empty(),
+            "a refused publication registered a root"
+        );
+        assert!(
+            policy::pending().is_empty(),
+            "a refused publication left an exception queued"
+        );
+    }
+
+    /// The same swap with no toolchain guard installed (a tailor driven
+    /// outside `sync_preflighted`, as `commit` never ran): the guard's own
+    /// still-named check cannot catch it, so the closure writer's check is
+    /// what refuses, before a root is registered or a closure written in
+    /// either directory.
+    #[test]
+    fn a_swapped_project_is_refused_by_the_closure_writer_without_a_guard() {
+        // Same lock order as `failed_tailor_sync_clears_its_unpublished_exceptions`.
+        let _env_lock = policy::test_env_lock();
+        let temp = TempDir::new();
+        let home = temp.0.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let _policy_env = PolicyEnv::enter(&home);
+        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _store_lock = store::STORE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _attribution = policy::attribution_test_lock();
+        assert!(
+            !project_toolchain::guard_installed_for_test(),
+            "a toolchain guard from another command is still installed"
+        );
+        let project = temp.0.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(
+            project.join("pyproject.toml"),
+            "[project]\nname = \"fixture\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        std::fs::write(project.join(".python-version"), "3.12.14\n").unwrap();
+        let _store_env = StoreEnv::enter(&temp.0.join("store"));
+        let platform = Platform::host().unwrap();
+        let ctx = Context::open_in(platform, &project, false).unwrap();
+        let root = ProjectRoot::open(&project).unwrap();
+        let moved = temp.0.join("moved");
+        let swapped: &'static SwappedMidSync = Box::leak(Box::new(SwappedMidSync {
+            moved: moved.clone(),
+        }));
+        // Resolve a toolchain for the request without `commit`, which is
+        // what would install the guard.
+        let present: [&'static dyn Tailor; 1] = [swapped];
+        let toolchain =
+            preflight_detected(platform, &root, &present, Mode::Writable, Scope::All).unwrap();
+        assert!(!project_toolchain::guard_installed_for_test());
+        let selections = std::collections::BTreeMap::new();
+        let request = SyncRequest {
+            fresh: false,
+            frozen: false,
+            toolchain: toolchain.get("python").unwrap(),
+            selections: &selections,
+        };
+        let mut attribution = policy::Attribution::open("python").unwrap();
+        let error = swapped
+            .sync(&ctx, &root, &request, &mut attribution)
+            .unwrap_err();
+        drop(attribution);
+        assert!(
+            error.to_string().contains("moved or replaced during sync"),
+            "{error}"
+        );
+        assert!(!project.join(".tog/closures/python.json").exists());
+        assert!(!moved.join(".tog/closures/python.json").exists());
+        assert!(
+            ctx.store.roots().unwrap().is_empty(),
+            "a refused publication registered a root"
+        );
     }
 }

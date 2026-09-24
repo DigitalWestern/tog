@@ -1,6 +1,7 @@
 //! From a Go project to its inputs: toolchain selection from go.mod, the
 //! `GoPlan`, and the go.sum digest.
 
+use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::platform::Platform;
 use crate::kernel::store;
 use crate::kernel::toolchain::Selected;
@@ -18,18 +19,23 @@ pub struct GoInputs {
 /// decides which Go this call realizes and plans with. go.mod's `go` and
 /// `toolchain` directives were read by toolchain-input discovery and
 /// answered by selection; reading them again here could only disagree with
-/// the lock this run is honoring.
+/// the lock this run is honoring. The project is read through the held
+/// descriptor `project`.
 pub fn load_go_inputs(
     platform: Platform,
-    dir: &Path,
+    project: &ProjectRoot,
     store: &store::Store,
     activity: &crate::kernel::activity::StoreActivity,
     toolchain: &Selected,
 ) -> io::Result<GoInputs> {
     let go_version = toolchain.version("go")?;
     let go_obj = go::realize_runtime(store, activity, platform, toolchain)?;
-    let plan = go::plan_go(store, activity, dir, &go_obj, go_version)?;
-    let gosum = std::fs::read_to_string(dir.join("go.sum")).unwrap_or_default();
+    let plan = go::plan_go(store, activity, project, &go_obj, go_version)?;
+    let gosum = project
+        .read_input_string(Path::new("go.sum"))
+        .ok()
+        .flatten()
+        .unwrap_or_default();
     use sha2::{Digest, Sha256};
     Ok(GoInputs {
         go_obj,

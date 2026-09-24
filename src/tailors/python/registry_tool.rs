@@ -147,7 +147,14 @@ impl RegistryTool for PythonTool {
         let text = fs::read_to_string(&output)?;
         let plan = pypi::plan_python(platform, &text, pin.version)?;
         let env = env::realize_env_for(store, activity, platform, &plan, toolchain)?;
-        env::project_env_with_selection(activity, root, &env, &plan, &selection, attribution)?;
+        env::project_env_with_selection(
+            activity,
+            &crate::kernel::fsroot::ProjectRoot::open(root)?,
+            &env,
+            &plan,
+            &selection,
+            attribution,
+        )?;
         ui::synced(&format!("x {package}"), &env);
         Ok(())
     }

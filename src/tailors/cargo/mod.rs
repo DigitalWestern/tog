@@ -8,6 +8,7 @@ pub mod rustfmt;
 pub mod tailor;
 
 use crate::kernel::activity::StoreActivity;
+use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::platform::Platform;
 use crate::kernel::store::Store;
 use crate::kernel::toolchain::{LegacyEvidence, Selected};
@@ -23,8 +24,8 @@ pub(crate) use crate::kernel::provider::crates::{
     plan_git_sources, project_git_sources, tog_config_text_for,
 };
 pub use crate::kernel::provider::rust::{
-    preflight_platform, project_extras, resolve_toolchain, resolve_toolchain_quiet,
-    runtime_object_id, rust_object_id, toolchain_catalog, Extras,
+    preflight_platform, project_extras, project_extras_in, resolve_toolchain,
+    resolve_toolchain_quiet, runtime_object_id, rust_object_id, toolchain_catalog, Extras,
 };
 
 /// Realize the base Rust toolchain `selected` names; see
@@ -294,7 +295,7 @@ pub(crate) fn merge_record(body: &mut serde_json::Value, record: serde_json::Val
 /// Rust object came from is readable without re-deriving it from the plan.
 pub fn project_cargo_env(
     activity: &StoreActivity,
-    project_dir: &Path,
+    project: &ProjectRoot,
     rust_obj: &Path,
     vendor_obj: &Path,
     plan: &CargoPlan,
@@ -302,28 +303,25 @@ pub fn project_cargo_env(
     toolchain: &Selected,
     attribution: &mut crate::kernel::policy::Attribution,
 ) -> io::Result<()> {
-    let project_dir = project_dir.canonicalize()?;
+    let project_dir = project.path().to_path_buf();
     // The workspace root is what gets registered, and projecting a cargo-home
     // into a root no record can name leaves wrappers pointing at objects the
     // next sweep is free to remove.
-    Store::check_registrable(&project_dir)?;
+    Store::check_registrable_in(project)?;
     let rust_obj = rust_obj.canonicalize()?;
     let vendor_obj = vendor_obj.canonicalize()?;
     let store = crate::comforter::store_from_object_path(&rust_obj)
         .ok_or_else(|| err("Rust object is not in a Tog store"))?;
-    let meta_dir = project_dir.join(".tog");
-    fs::create_dir_all(&meta_dir)?;
-    let cargo_home = project_child_dir(&project_dir, ".tog/cargo-home")?;
-    // bin gets its own containment check: a symlinked bin would carry the
-    // wrapper write outside the project.
-    let bin_dir = project_child_dir(&project_dir, ".tog/cargo-home/bin")?;
+    // Every component is created and walked from the held descriptor with
+    // O_NOFOLLOW: a symlinked `.tog`, cargo-home or bin is refused rather
+    // than carrying the wrapper write outside the project.
+    project.create_dir_all(Path::new(".tog/cargo-home/bin"))?;
+    let cargo_home = project_dir.join(".tog/cargo-home");
     let config = cargo_home.join("tog-config.toml");
-    let wrapper = bin_dir.join("cargo");
 
-    write_atomic(
-        &config,
+    project.write_file(
+        Path::new(".tog/cargo-home/tog-config.toml"),
         tog_config_text_for(&vendor_obj, &plan_git_sources(plan))?.as_bytes(),
-        None,
     )?;
 
     let cargo_bin = rust_obj.join("bin/cargo");
@@ -342,7 +340,11 @@ pub fn project_cargo_env(
         shell_double_quote(&cargo_bin),
         shell_double_quote(&config),
     );
-    write_atomic(&wrapper, wrapper_text.as_bytes(), Some(0o755))?;
+    project.write_file_mode(
+        Path::new(".tog/cargo-home/bin/cargo"),
+        wrapper_text.as_bytes(),
+        0o755,
+    )?;
 
     let object_ref = |path: &Path| -> io::Result<serde_json::Value> {
         let id = path
@@ -396,15 +398,7 @@ pub fn project_cargo_env(
     // reference is what keeps it alive across a GC.
     refs.object_path(&store, activity, &rust_obj)?;
     refs.object_path(&store, activity, &vendor_obj)?;
-    crate::comforter::write_closure(
-        &project_dir,
-        "cargo",
-        body,
-        &store,
-        activity,
-        refs,
-        attribution,
-    )
+    crate::comforter::write_closure(project, "cargo", body, &store, activity, refs, attribution)
 }
 
 /// Build a Cargo project in the network-denied sandbox.
@@ -537,37 +531,6 @@ fn unique_dir(parent: &Path, prefix: &str) -> io::Result<PathBuf> {
         "could not create a {prefix} scratch directory under {}: every candidate name was taken",
         parent.display()
     )))
-}
-
-fn write_atomic(path: &Path, bytes: &[u8], mode: Option<u32>) -> io::Result<()> {
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    static SEQ: AtomicU64 = AtomicU64::new(0);
-    let parent = path
-        .parent()
-        .ok_or_else(|| err(format!("path has no parent: {}", path.display())))?;
-    fs::create_dir_all(parent)?;
-    let tmp = parent.join(format!(
-        ".{}.tmp.{}.{}",
-        path.file_name().unwrap().to_string_lossy(),
-        std::process::id(),
-        SEQ.fetch_add(1, Ordering::Relaxed),
-    ));
-    let result = (|| {
-        fs::write(&tmp, bytes)?;
-        if let Some(mode) = mode {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                fs::set_permissions(&tmp, fs::Permissions::from_mode(mode))?;
-            }
-        }
-        fs::rename(&tmp, path)
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&tmp);
-    }
-    result
 }
 
 fn shell_double_quote(path: &Path) -> String {
@@ -1586,7 +1549,7 @@ checksum = "{hash_b}"
         let activity = &lease.1;
         let error = project_cargo_env(
             activity,
-            &root,
+            &ProjectRoot::open(&root).unwrap(),
             &temp.path().join("absent-rust"),
             &temp.path().join("absent-vendor"),
             &plan,
@@ -1625,7 +1588,7 @@ checksum = "{hash_b}"
         let activity = &lease.1;
         project_cargo_env(
             activity,
-            &project,
+            &ProjectRoot::open(&project).unwrap(),
             &rust,
             &vendor,
             &plan,
@@ -1710,7 +1673,7 @@ checksum = "{hash_b}"
         let activity = &lease.1;
         let result = project_cargo_env(
             activity,
-            &project,
+            &ProjectRoot::open(&project).unwrap(),
             &rust,
             &vendor,
             &plan,
@@ -1771,7 +1734,7 @@ checksum = "{hash_b}"
         };
         project_cargo_env(
             activity,
-            &project,
+            &ProjectRoot::open(&project).unwrap(),
             &store.object_path(&rust_id),
             &store.object_path(&vendor_id),
             &plan,

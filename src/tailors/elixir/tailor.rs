@@ -8,6 +8,7 @@ use crate::kernel::cyclonedx::{
     component, list, purl_encode, push_hash, push_property, required, toolchain_component,
     version_of,
 };
+use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::objmeta::KindAdapter;
 use crate::kernel::platform::Platform;
 use crate::kernel::sandbox;
@@ -27,25 +28,30 @@ impl Tailor for Elixir {
         "elixir"
     }
 
-    fn detect(&self, dir: &Path) -> io::Result<bool> {
-        Ok(dir.join("mix.exs").is_file())
+    fn detect(&self, project: &ProjectRoot) -> io::Result<bool> {
+        Ok(project.is_input_file(Path::new("mix.exs")))
     }
 
-    fn preflight(&self, platform: Platform, _dir: &Path) -> io::Result<()> {
+    fn preflight(&self, platform: Platform, _project: &ProjectRoot) -> io::Result<()> {
         elixir::preflight_platform(platform)
     }
 
-    fn plan(&self, ctx: &Context, dir: &Path, toolchain: &Selected) -> io::Result<Option<String>> {
+    fn plan(
+        &self,
+        ctx: &Context,
+        project: &ProjectRoot,
+        toolchain: &Selected,
+    ) -> io::Result<Option<String>> {
         let activity = &ctx.activity;
         let beam = elixir::realize_runtime(&ctx.store, activity, ctx.platform, toolchain)?;
-        let (plan, _) = elixir::plan_elixir(&ctx.store, &ctx.activity, dir, &beam, toolchain)?;
+        let (plan, _) = elixir::plan_elixir(&ctx.store, activity, project, &beam, toolchain)?;
         Ok(Some(serde_json::to_string_pretty(&plan)?))
     }
 
     fn sync(
         &self,
         ctx: &Context,
-        dir: &Path,
+        project: &ProjectRoot,
         request: &SyncRequest,
         attribution: &mut crate::kernel::policy::Attribution,
     ) -> io::Result<bool> {
@@ -56,12 +62,14 @@ impl Tailor for Elixir {
         let platform = ctx.platform;
         let store = &ctx.store;
         let beam = elixir::realize_runtime(store, activity, platform, toolchain)?;
-        let (plan, lock_sha256) = elixir::plan_elixir(store, &ctx.activity, dir, &beam, toolchain)?;
+        let (plan, lock_sha256) = elixir::plan_elixir(store, activity, project, &beam, toolchain)?;
         let deps = elixir::realize_deps(store, activity, platform, &plan, &beam, toolchain)?;
+        // Projection writes only the store forest and the closure, which is
+        // published through the descriptor this sync holds.
         let projection = elixir::project_elixir_env(
             activity,
             platform,
-            dir,
+            project,
             &beam,
             &deps,
             &plan,
@@ -101,17 +109,17 @@ impl Tailor for Elixir {
         toolchain: &Selected,
         attribution: &mut crate::kernel::policy::Attribution,
     ) -> io::Result<()> {
+        let project = ProjectRoot::open(root)?;
         let activity = &ctx.activity;
         let platform = ctx.platform;
         let store = &ctx.store;
         let beam = elixir::realize_runtime(store, activity, platform, toolchain)?;
-        let (plan, lock_sha256) =
-            elixir::plan_elixir(store, &ctx.activity, root, &beam, toolchain)?;
+        let (plan, lock_sha256) = elixir::plan_elixir(store, activity, &project, &beam, toolchain)?;
         let deps = elixir::realize_deps(store, activity, platform, &plan, &beam, toolchain)?;
         let projection = elixir::project_elixir_env(
             activity,
             platform,
-            root,
+            &project,
             &beam,
             &deps,
             &plan,

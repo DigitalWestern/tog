@@ -228,9 +228,10 @@ impl RegistryTool for NodeTool {
             toolchain,
             &gyp_python,
         )?;
+        let project = crate::kernel::fsroot::ProjectRoot::open(root)?;
         node::project_node_env(
             activity,
-            root,
+            &project,
             &env,
             platform,
             &plan,

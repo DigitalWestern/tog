@@ -104,7 +104,7 @@ pub(super) fn identity_key_for_snapshot(key: &str) -> String {
         .unwrap_or_else(|| key.to_string())
 }
 
-pub(super) fn patch_path(project_dir: &Path, raw: &str) -> io::Result<PathBuf> {
+pub(super) fn patch_path(project: &ProjectRoot, raw: &str) -> io::Result<PathBuf> {
     let path = Path::new(raw);
     if raw.is_empty()
         || raw.starts_with('/')
@@ -120,9 +120,14 @@ pub(super) fn patch_path(project_dir: &Path, raw: &str) -> io::Result<PathBuf> {
             "pnpm patch path {raw:?} must be a project-relative file"
         )));
     }
-    let root = project_dir.canonicalize()?;
-    let path = project_dir.join(path).canonicalize()?;
-    if !path.starts_with(&root) || !path.is_file() {
+    // The canonical path is what the plan records (realization re-reads and
+    // re-verifies it). Containment is checked on that pathname; whether it
+    // is a file is asked of the held descriptor.
+    let path = project.path().join(path).canonicalize()?;
+    if !project
+        .relative(&path)
+        .is_some_and(|relative| project.is_input_file(relative))
+    {
         return Err(err(format!(
             "pnpm patch path {raw:?} is outside the project or is not a file"
         )));
@@ -130,13 +135,30 @@ pub(super) fn patch_path(project_dir: &Path, raw: &str) -> io::Result<PathBuf> {
     Ok(path)
 }
 
+/// The bytes of a patch `patch_path` accepted, read through the held
+/// project descriptor rather than by its recorded pathname.
+pub(super) fn read_patch(project: &ProjectRoot, path: &Path) -> io::Result<Vec<u8>> {
+    let relative = project.relative(path).ok_or_else(|| {
+        err(format!(
+            "pnpm patch {} is outside the project",
+            path.display()
+        ))
+    })?;
+    project.read_input(relative)?.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("{}: not found", path.display()),
+        )
+    })
+}
+
 pub(super) fn verify_patch_hash(
     package: &str,
     path: &Path,
+    bytes: &[u8],
     declared: &str,
 ) -> io::Result<Option<String>> {
-    let bytes = fs::read(path)?;
-    let matched = check_patch_hash(declared, &bytes).map_err(|actual| {
+    let matched = check_patch_hash(declared, bytes).map_err(|actual| {
         err(format!(
             "pnpm patch {package} hash mismatch for {} (expected {declared}, got {actual})",
             path.display()
@@ -144,7 +166,7 @@ pub(super) fn verify_patch_hash(
     })?;
     Ok(match matched {
         PatchMatch::Raw => None,
-        PatchMatch::Normalized => Some(hex::encode(Sha256::digest(&bytes))),
+        PatchMatch::Normalized => Some(hex::encode(Sha256::digest(bytes))),
     })
 }
 
@@ -416,7 +438,7 @@ pub(super) fn patch_key_selector(key: &str) -> io::Result<(String, PatchSelector
 
 pub(super) fn pnpm_patches(
     root: &BTreeMap<String, YamlValue>,
-    project_dir: &Path,
+    project: &ProjectRoot,
     record: &mut impl FnMut(&str, &str, &str) -> io::Result<()>,
 ) -> io::Result<Vec<PnpmPatchRule>> {
     let Some(value) = root.get("patchedDependencies") else {
@@ -431,7 +453,7 @@ pub(super) fn pnpm_patches(
         let (raw_path, hash) = if let Some(hash) = yaml_str(Some(value)) {
             let escaped = format!("patches/{}.patch", package.replace('/', "__"));
             let conventional = format!("patches/{package}.patch");
-            let raw_path = if project_dir.join(&escaped).is_file() {
+            let raw_path = if project.is_input_file(Path::new(&escaped)) {
                 escaped
             } else {
                 conventional
@@ -445,8 +467,9 @@ pub(super) fn pnpm_patches(
                 .ok_or_else(|| err(format!("pnpm patch {package} has no string patch hash")))?;
             (raw_path.to_string(), hash)
         };
-        let path = patch_path(project_dir, &raw_path)?;
-        let content_sha256 = verify_patch_hash(package, &path, hash)?;
+        let path = patch_path(project, &raw_path)?;
+        let bytes = read_patch(project, &path)?;
+        let content_sha256 = verify_patch_hash(package, &path, &bytes, hash)?;
         let (name, selector) = patch_key_selector(package)?;
         let subject = match &selector {
             PatchSelector::Exact(version) => format!("{name}@{version}"),
@@ -466,7 +489,7 @@ pub(super) fn pnpm_patches(
             key: package.clone(),
             name,
             selector,
-            raw_sha256: hex::encode(Sha256::digest(fs::read(&path)?)),
+            raw_sha256: hex::encode(Sha256::digest(&bytes)),
             patch: NpmPatch {
                 path: path.to_string_lossy().into_owned(),
                 hash: hash.to_string(),
@@ -727,7 +750,7 @@ pub(super) fn dep_version_key(
 }
 
 pub(super) fn workspace_target(
-    project_dir: &Path,
+    project: &ProjectRoot,
     importer: &str,
     raw: &str,
 ) -> io::Result<String> {
@@ -773,12 +796,12 @@ pub(super) fn workspace_target(
     } else {
         relative.join("/")
     };
-    let root = project_dir
-        .canonicalize()
-        .unwrap_or_else(|_| project_dir.to_path_buf());
-    let target_path = root.join(&target);
-    if target_path.exists() {
-        let canonical = target_path.canonicalize()?;
+    // Whether the target exists is asked of the held descriptor; where a
+    // symlink in it leads is still resolved on the pathname (ProjectRoot
+    // has no canonicalize).
+    let root = project.path();
+    if input_exists(project, &target) {
+        let canonical = root.join(&target).canonicalize()?;
         if !canonical.starts_with(&root) {
             return Err(err(format!(
                 "workspace link target {raw:?} is outside the project"
@@ -793,7 +816,7 @@ pub(super) fn target_for_ref(
     reference: &str,
     importer: &str,
     snapshots: &BTreeMap<String, Node>,
-    project_dir: &Path,
+    project: &ProjectRoot,
 ) -> Target {
     let reference = reference.trim();
     let local_reference = reference
@@ -811,13 +834,13 @@ pub(super) fn target_for_ref(
         // importer-relative. Prefer the existing project-root target for the
         // former and retain the importer-relative fallback for older locks.
         let target = if local_reference.starts_with("file:") {
-            workspace_target(project_dir, ".", raw)
+            workspace_target(project, ".", raw)
                 .ok()
-                .filter(|target| project_dir.join(target).exists())
+                .filter(|target| input_exists(project, target))
                 .map(Ok)
-                .unwrap_or_else(|| workspace_target(project_dir, importer, raw))
+                .unwrap_or_else(|| workspace_target(project, importer, raw))
         } else {
-            workspace_target(project_dir, importer, raw)
+            workspace_target(project, importer, raw)
         };
         return match target {
             Ok(target) => Target::Link(target),
@@ -853,7 +876,7 @@ pub(super) fn importer_dependencies(
     importer: &BTreeMap<String, YamlValue>,
     importer_name: &str,
     snapshots: &BTreeMap<String, Node>,
-    project_dir: &Path,
+    project: &ProjectRoot,
     catalogs: &BTreeMap<String, BTreeMap<String, String>>,
     local_snapshots: &BTreeMap<String, Vec<Dependency>>,
     local_link_deps: &mut BTreeMap<String, Vec<Dependency>>,
@@ -892,7 +915,7 @@ pub(super) fn importer_dependencies(
                     "importer {importer_name} dependency {name}: missing version"
                 ))
             })?;
-            let target = target_for_ref(name, version, importer_name, snapshots, project_dir);
+            let target = target_for_ref(name, version, importer_name, snapshots, project);
             if let Target::Link(target_path) = &target {
                 if let Some(dependencies) = local_snapshots.get(
                     &normalize_pnpm_snapshot_key(&format!("{name}@{version}")).unwrap_or_default(),
@@ -946,7 +969,7 @@ pub(super) fn snapshot_dependencies(
     snapshot: &BTreeMap<String, YamlValue>,
     snapshot_key: &str,
     lookup: &BTreeMap<String, Node>,
-    project_dir: &Path,
+    project: &ProjectRoot,
 ) -> io::Result<Vec<Dependency>> {
     let mut deps = BTreeMap::<String, Dependency>::new();
     for (field, optional) in [("dependencies", false), ("optionalDependencies", true)] {
@@ -958,7 +981,7 @@ pub(super) fn snapshot_dependencies(
                     name.clone(),
                     Dependency {
                         name: name.clone(),
-                        target: target_for_ref(name, reference, ".", lookup, project_dir),
+                        target: target_for_ref(name, reference, ".", lookup, project),
                         optional,
                     },
                 );
@@ -976,7 +999,7 @@ pub(super) fn is_local_snapshot(snapshot_key: &str) -> bool {
 
 pub(super) fn local_snapshot_target(
     snapshot_key: &str,
-    project_dir: &Path,
+    project: &ProjectRoot,
 ) -> io::Result<Option<String>> {
     let Some((_, version)) = normalize_pnpm_identity(snapshot_key) else {
         return Ok(None);
@@ -987,13 +1010,13 @@ pub(super) fn local_snapshot_target(
     else {
         return Ok(None);
     };
-    workspace_target(project_dir, ".", raw).map(Some)
+    workspace_target(project, ".", raw).map(Some)
 }
 
 pub(super) fn pnpm_nodes(
     packages: &BTreeMap<String, YamlValue>,
     snapshots_value: Option<&YamlValue>,
-    project_dir: &Path,
+    project: &ProjectRoot,
 ) -> io::Result<(BTreeMap<String, Node>, BTreeMap<String, Vec<Dependency>>)> {
     // Keep one metadata record per canonical package key. These records are
     // tarball facts only; they are never graph nodes until a snapshot selects
@@ -1126,7 +1149,7 @@ pub(super) fn pnpm_nodes(
         .map(|(snapshot_key, snapshot)| {
             Ok((
                 snapshot_key.clone(),
-                snapshot_dependencies(snapshot, snapshot_key, &snapshot_metadata, project_dir)?,
+                snapshot_dependencies(snapshot, snapshot_key, &snapshot_metadata, project)?,
             ))
         })
         .collect::<io::Result<BTreeMap<_, _>>>()?;
@@ -1145,8 +1168,7 @@ pub(super) fn pnpm_nodes(
                 "pnpm snapshot {snapshot_key} has no matching packages metadata"
             )));
         };
-        node.deps =
-            snapshot_dependencies(&snapshot, &snapshot_key, &snapshot_metadata, project_dir)?;
+        node.deps = snapshot_dependencies(&snapshot, &snapshot_key, &snapshot_metadata, project)?;
         nodes.insert(snapshot_key, node);
     }
     Ok((nodes, local_snapshots))
@@ -1183,19 +1205,19 @@ pub(super) fn pnpm_legacy_root(root: &BTreeMap<String, YamlValue>) -> BTreeMap<S
 pub fn plan_pnpm(
     platform: Platform,
     lock_yaml: &str,
-    project_dir: &Path,
+    project: &ProjectRoot,
     node_version: &str,
 ) -> io::Result<NpmPlan> {
     let mut record = |kind: &str, subject: &str, detail: &str| {
         crate::kernel::policy::record(kind, subject, detail)
     };
-    plan_pnpm_with_recorder(platform, lock_yaml, project_dir, node_version, &mut record)
+    plan_pnpm_with_recorder(platform, lock_yaml, project, node_version, &mut record)
 }
 
 fn plan_pnpm_with_recorder(
     platform: Platform,
     lock_yaml: &str,
-    project_dir: &Path,
+    project: &ProjectRoot,
     node_version: &str,
     record: &mut impl FnMut(&str, &str, &str) -> io::Result<()>,
 ) -> io::Result<NpmPlan> {
@@ -1221,8 +1243,8 @@ fn plan_pnpm_with_recorder(
         None => &empty_packages,
     };
     let snapshots = root.get("snapshots");
-    let patches = pnpm_patches(root, project_dir, record)?;
-    let (mut nodes, local_snapshots) = pnpm_nodes(packages, snapshots, project_dir)?;
+    let patches = pnpm_patches(root, project, record)?;
+    let (mut nodes, local_snapshots) = pnpm_nodes(packages, snapshots, project)?;
     attach_pnpm_patches(&mut nodes, &patches)?;
     let catalogs = pnpm_catalogs(root)?;
     let importers = importer_map(root)?;
@@ -1232,7 +1254,7 @@ fn plan_pnpm_with_recorder(
         .unwrap_or_else(|| pnpm_legacy_root(root));
     let mut local_link_deps = BTreeMap::new();
     for (snapshot_key, dependencies) in &local_snapshots {
-        if let Some(target) = local_snapshot_target(snapshot_key, project_dir)? {
+        if let Some(target) = local_snapshot_target(snapshot_key, project)? {
             local_link_deps
                 .entry(target)
                 .or_insert_with(|| dependencies.clone());
@@ -1242,7 +1264,7 @@ fn plan_pnpm_with_recorder(
         &root_importer,
         ".",
         &nodes,
-        project_dir,
+        project,
         &catalogs,
         &local_snapshots,
         &mut local_link_deps,
@@ -1267,7 +1289,7 @@ fn plan_pnpm_with_recorder(
             &importer,
             &importer_name,
             &nodes,
-            project_dir,
+            project,
             &catalogs,
             &local_snapshots,
             &mut local_link_deps,
@@ -1302,14 +1324,14 @@ fn plan_pnpm_with_recorder(
 pub(super) fn plan_pnpm_with_policy(
     platform: Platform,
     lock_yaml: &str,
-    project_dir: &Path,
+    project: &ProjectRoot,
     node_version: &str,
     policy: &crate::kernel::policy::Policy,
 ) -> io::Result<NpmPlan> {
     let mut record = |kind: &str, subject: &str, detail: &str| {
         crate::kernel::policy::record_with(policy, kind, subject, detail)
     };
-    plan_pnpm_with_recorder(platform, lock_yaml, project_dir, node_version, &mut record)
+    plan_pnpm_with_recorder(platform, lock_yaml, project, node_version, &mut record)
 }
 
 #[cfg(test)]
@@ -1605,11 +1627,17 @@ mod patch_hash_tests {
         fs::write(&raw_path, PATCH).unwrap();
 
         assert_eq!(
-            verify_patch_hash("normalized", &normalized_path, &normalized_digest).unwrap(),
+            verify_patch_hash(
+                "normalized",
+                &normalized_path,
+                &fs::read(&normalized_path).unwrap(),
+                &normalized_digest
+            )
+            .unwrap(),
             Some(hex::encode(Sha256::digest(normalized_bytes)))
         );
         assert_eq!(
-            verify_patch_hash("raw", &raw_path, PATCH_HEX).unwrap(),
+            verify_patch_hash("raw", &raw_path, &fs::read(&raw_path).unwrap(), PATCH_HEX).unwrap(),
             None
         );
         let _ = fs::remove_dir_all(root);
@@ -1635,12 +1663,22 @@ mod patch_hash_tests {
         fs::write(&first_path, first).unwrap();
         fs::write(&second_path, second).unwrap();
 
-        let first_content = verify_patch_hash("first", &first_path, &declared)
-            .unwrap()
-            .unwrap();
-        let second_content = verify_patch_hash("second", &second_path, &declared)
-            .unwrap()
-            .unwrap();
+        let first_content = verify_patch_hash(
+            "first",
+            &first_path,
+            &fs::read(&first_path).unwrap(),
+            &declared,
+        )
+        .unwrap()
+        .unwrap();
+        let second_content = verify_patch_hash(
+            "second",
+            &second_path,
+            &fs::read(&second_path).unwrap(),
+            &declared,
+        )
+        .unwrap()
+        .unwrap();
         assert_ne!(first_content, second_content);
         let _ = fs::remove_dir_all(root);
     }

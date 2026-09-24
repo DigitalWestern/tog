@@ -46,8 +46,8 @@ pub fn planner_input_hash(
     ))
 }
 
-pub fn has_python_input(dir: &Path) -> io::Result<bool> {
-    manifest::has_manifest(dir)
+pub fn has_python_input(project: &ProjectRoot) -> io::Result<bool> {
+    manifest::has_manifest(project)
 }
 
 /// The Python plan, the interpreter selection it was made with, and the
@@ -59,11 +59,13 @@ pub type PythonPlan = (
 );
 
 /// Candidate input files for the status record: the manifest that won, the
-/// interpreter request, and every lock tog reads or writes.
+/// interpreter request, and every lock tog reads or writes, hashed through
+/// the held project descriptor by `comforter::input_records`.
 pub fn python_input_records(
-    dir: &Path,
+    project: &ProjectRoot,
     manifest: &manifest::Manifest,
 ) -> io::Result<Vec<comforter::InputRecord>> {
+    let dir = project.path();
     let mut candidates: Vec<PathBuf> = Vec::new();
     match &manifest.source_path {
         Some(path) => candidates.push(path.clone()),
@@ -81,7 +83,7 @@ pub fn python_input_records(
     ] {
         candidates.push(dir.join(extra));
     }
-    comforter::input_records(dir, &candidates)
+    comforter::input_records(project, &candidates)
 }
 
 /// Plan from project inputs, returning the interpreter selection that was
@@ -91,26 +93,27 @@ pub fn python_input_records(
 ///
 /// Planning hits PyPI, so successful plans are cached in `.tog/plan.json`
 /// keyed by a hash of the inputs; an unchanged lock replans offline.
+///
+/// The project is read, and `.tog` written, through the held descriptor;
+/// its path only names files to uv and to the messages.
 pub fn read_plan(
     platform: Platform,
-    dir: &Path,
+    project: &ProjectRoot,
     store: &store::Store,
     activity: &StoreActivity,
     selected: &Selected,
 ) -> io::Result<PythonPlan> {
-    let project = ProjectRoot::open(dir)?;
+    let dir = project.path();
     // The interpreter is decided: it is the one this project's toolchain
     // selection names. Planning reads the manifest with it and checks it
     // against every declared constraint; nothing here reselects, so a
     // `setup.py` probe cannot move the version out from under the lock.
     let version = selected.version("cpython")?;
-    let mut manifest = manifest::discover(platform, dir, version)?;
+    let mut manifest = manifest::discover(platform, project, version)?;
     let mut selection = pyselect::locked(platform, version, &manifest.python)?;
     if manifest.requires_setup() {
         let dynamic_dependencies = manifest.dynamic_dependencies;
-        if let Err(error) =
-            manifest.prepare_setup(platform, dir, &project, store, activity, selected)
-        {
+        if let Err(error) = manifest.prepare_setup(platform, project, store, activity, selected) {
             // Every ordinary failure in here is already `InvalidData`
             // (`unreadable` in the manifest layer hardcodes it, and it
             // wraps the sandboxed egg_info probe), so the kind cannot
@@ -121,7 +124,7 @@ pub fn read_plan(
             if !dynamic_dependencies {
                 return Err(error);
             }
-            let Some(mut fallback) = manifest::dynamic_requirements_fallback(dir)? else {
+            let Some(mut fallback) = manifest::dynamic_requirements_fallback(project)? else {
                 return Err(error);
             };
             // The probe's error carries the sandbox log's last lines after
@@ -171,7 +174,7 @@ pub fn read_plan(
     // A found manifest may intentionally declare no dependencies. Keep the
     // interpreter-only plan on the normal realization/projection path, but do
     // not ask uv to compile an empty setup.cfg or requirements file.
-    let inputs = python_input_records(dir, &manifest)?;
+    let inputs = python_input_records(project, &manifest)?;
     if manifest.is_empty() {
         return Ok((
             types::Plan {
@@ -241,8 +244,7 @@ pub fn read_plan(
                 ));
                 let text = locked_requirements(
                     platform,
-                    dir,
-                    &project,
+                    project,
                     store,
                     activity,
                     &input,
@@ -267,8 +269,7 @@ pub fn read_plan(
     } else {
         locked_requirements(
             platform,
-            dir,
-            &project,
+            project,
             store,
             activity,
             &input,
@@ -286,7 +287,7 @@ pub fn read_plan(
         pypi::Glibc(0, 0)
     };
     // The lock may have just been (re)written above: hash it now.
-    let inputs = python_input_records(dir, &manifest)?;
+    let inputs = python_input_records(project, &manifest)?;
     let input_hash = planner_input_hash(platform, version, &text, glibc);
     // A symlinked or non-regular cache is a refusal; an unreadable regular
     // file is a miss that the write below replaces.
@@ -381,10 +382,11 @@ pub fn is_fully_pinned(text: &str) -> bool {
 
 /// Resolve ranged requirements to a hash-pinned lock via uv, cached in
 /// requirements.lock.txt and regenerated when the source input changes.
+/// uv runs in the project by path; the lock it writes is read back through
+/// the held descriptor.
 #[allow(clippy::too_many_arguments)]
 pub fn locked_requirements(
     platform: Platform,
-    dir: &Path,
     project: &ProjectRoot,
     store: &store::Store,
     activity: &StoreActivity,
@@ -393,25 +395,27 @@ pub fn locked_requirements(
     selected: &Selected,
     compile_path: Option<&Path>,
 ) -> io::Result<String> {
+    let dir = project.path();
     let pyver = selected.version("cpython")?;
-    let lock_path = dir.join("requirements.lock.txt");
-    let stamp_path = dir.join(LOCK_STAMP);
+    let lock_path = Path::new("requirements.lock.txt");
     let source_hash = if compile_path.is_some_and(|path| {
         !path
             .components()
             .any(|component| component.as_os_str() == ".tog")
     }) {
         let path = compile_path.expect("checked above");
-        let tree_hash = manifest::requirements_tree_hash(path)?;
+        let tree_hash = manifest::requirements_tree_hash(project, path)?;
         lock_source_hash(pyver, &format!("{source}\0{tree_hash}"))
     } else {
         lock_source_hash(pyver, source)
     };
-    if let (Ok(stamp), Ok(lock)) = (
-        std::fs::read_to_string(&stamp_path),
-        std::fs::read_to_string(&lock_path),
+    // The stamp is tog's own state (strict no-follow read); the lock is a
+    // project input. Anything unreadable is a miss, as before.
+    if let (Ok(Some(stamp)), Ok(Some(lock))) = (
+        project.read_file(Path::new(LOCK_STAMP)),
+        project.read_input_string(lock_path),
     ) {
-        if cached_lock_matches(&stamp, &lock, &source_hash) {
+        if cached_lock_matches(&String::from_utf8_lossy(&stamp), &lock, &source_hash) {
             return Ok(lock);
         }
     }
@@ -451,7 +455,12 @@ pub fn locked_requirements(
     // rather than followed. `requirements.lock.txt` beside it is uv's own
     // write by pathname.
     project.write_file(Path::new(LOCK_STAMP), source_hash.as_bytes())?;
-    std::fs::read_to_string(&lock_path)
+    project.read_input_string(lock_path)?.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("{}: uv wrote no lock", dir.join(lock_path).display()),
+        )
+    })
 }
 
 pub fn cached_lock_matches(stamp: &str, lock: &str, source_hash: &str) -> bool {
@@ -567,9 +576,10 @@ mod tests {
         let store = store::Store {
             root: temp.0.join("absent-store"),
         };
+        let root = ProjectRoot::open(&project).unwrap();
         let e = read_plan(
             Platform::host().unwrap(),
-            &project,
+            &root,
             &store,
             &crate::kernel::testutil::detached_lease().1,
             &selected(),
@@ -639,9 +649,10 @@ mod tests {
         std::os::unix::fs::symlink(&outside, project_dir.join(".tog")).unwrap();
         let store = store_with_stub_uv(&temp.0.join("store"));
 
+        let project = ProjectRoot::open(&project_dir).unwrap();
         let error = read_plan(
             Platform::host().unwrap(),
-            &project_dir,
+            &project,
             &store,
             &test_activity(&store),
             &selected(),
@@ -716,7 +727,7 @@ mod tests {
 
         let (planned, selection, inputs) = read_plan(
             platform,
-            &project_dir,
+            &project,
             &store,
             &crate::kernel::testutil::detached_lease().1,
             &selected(),
@@ -752,9 +763,10 @@ mod tests {
             root: temp.0.join("absent-store"),
         };
 
+        let project = ProjectRoot::open(&project_dir).unwrap();
         let error = read_plan(
             Platform::host().unwrap(),
-            &project_dir,
+            &project,
             &store,
             &crate::kernel::testutil::detached_lease().1,
             &selected(),

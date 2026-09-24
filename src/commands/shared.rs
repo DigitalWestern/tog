@@ -55,7 +55,22 @@ pub(crate) fn ecosystem_inputs(
     dir: &Path,
     present: &[&dyn Tailor],
 ) -> io::Result<Vec<EcosystemInput>> {
-    let closures = inspect::closures(dir)?;
+    inputs_from_closures(inspect::closures(dir)?, present)
+}
+
+/// `ecosystem_inputs` for a project the caller holds: the pre-lock closures
+/// are read through its descriptor, as sync reads everything else.
+pub(crate) fn ecosystem_inputs_in(
+    project: &ProjectRoot,
+    present: &[&dyn Tailor],
+) -> io::Result<Vec<EcosystemInput>> {
+    inputs_from_closures(inspect::closures_in(project)?, present)
+}
+
+fn inputs_from_closures(
+    closures: Vec<inspect::ClosureFile>,
+    present: &[&dyn Tailor],
+) -> io::Result<Vec<EcosystemInput>> {
     // Only a present tailor's own pre-lock closure looks anything up, and
     // then read-only: the store is located, never created or leased.
     let store = if present.iter().any(|tailor| {

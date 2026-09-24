@@ -7,6 +7,7 @@ use crate::kernel::context::Context;
 use crate::kernel::cyclonedx::{
     component, list, purl_encode, push_property, required, toolchain_component, version_of,
 };
+use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::objmeta::KindAdapter;
 use crate::kernel::platform::Platform;
 use crate::kernel::sandbox;
@@ -26,28 +27,34 @@ impl Tailor for Dotnet {
         "dotnet"
     }
 
-    fn detect(&self, dir: &Path) -> io::Result<bool> {
-        Ok(dir.is_dir() && dotnet::has_marker(dir)?)
+    fn detect(&self, project: &ProjectRoot) -> io::Result<bool> {
+        // A held root is a directory by construction.
+        dotnet::has_marker(project)
     }
 
-    fn preflight(&self, platform: Platform, _dir: &Path) -> io::Result<()> {
+    fn preflight(&self, platform: Platform, _project: &ProjectRoot) -> io::Result<()> {
         dotnet::preflight_platform(platform)
     }
 
-    fn plan(&self, ctx: &Context, dir: &Path, toolchain: &Selected) -> io::Result<Option<String>> {
+    fn plan(
+        &self,
+        ctx: &Context,
+        project: &ProjectRoot,
+        toolchain: &Selected,
+    ) -> io::Result<Option<String>> {
         let activity = &ctx.activity;
         // Preflight before SDK realization: a broken layout should fail
         // loudly here, not after a toolchain download.
-        dotnet::preflight(dir, toolchain.version("dotnet-sdk")?)?;
+        dotnet::preflight(project, toolchain.version("dotnet-sdk")?)?;
         let sdk = dotnet::realize_runtime(&ctx.store, activity, ctx.platform, toolchain)?;
-        let (plan, _) = dotnet::plan_dotnet(&ctx.store, &ctx.activity, dir, &sdk, toolchain)?;
+        let (plan, _) = dotnet::plan_dotnet(&ctx.store, activity, project, &sdk, toolchain)?;
         Ok(Some(serde_json::to_string_pretty(&plan)?))
     }
 
     fn sync(
         &self,
         ctx: &Context,
-        dir: &Path,
+        project: &ProjectRoot,
         request: &SyncRequest,
         attribution: &mut crate::kernel::policy::Attribution,
     ) -> io::Result<bool> {
@@ -55,14 +62,15 @@ impl Tailor for Dotnet {
         let toolchain = request.toolchain;
         let platform = ctx.platform;
         let store = &ctx.store;
-        dotnet::preflight(dir, toolchain.version("dotnet-sdk")?)?;
+        dotnet::preflight(project, toolchain.version("dotnet-sdk")?)?;
         let sdk = dotnet::realize_runtime(store, activity, platform, toolchain)?;
-        let (plan, lock_sha256) = dotnet::plan_dotnet(store, &ctx.activity, dir, &sdk, toolchain)?;
+        let (plan, lock_sha256) = dotnet::plan_dotnet(store, activity, project, &sdk, toolchain)?;
         let packages =
-            dotnet::realize_packages(store, activity, platform, &plan, &sdk, dir, toolchain)?;
+            dotnet::realize_packages(store, activity, platform, &plan, &sdk, project, toolchain)?;
+        // The closure is published through the descriptor this sync holds.
         dotnet::project_dotnet_env(
             activity,
-            dir,
+            project,
             &sdk,
             &packages,
             &plan,
@@ -79,7 +87,7 @@ impl Tailor for Dotnet {
     }
 
     fn build_present(&self, cwd: &Path) -> io::Result<bool> {
-        dotnet::has_marker(cwd)
+        dotnet::has_marker(&ProjectRoot::open(cwd)?)
     }
 
     fn build_root(&self, cwd: &Path) -> io::Result<PathBuf> {
@@ -98,13 +106,14 @@ impl Tailor for Dotnet {
         let activity = &ctx.activity;
         let platform = ctx.platform;
         let store = &ctx.store;
+        let project = ProjectRoot::open(cwd)?;
         let sdk = dotnet::realize_runtime(store, activity, platform, toolchain)?;
-        let (plan, lock_sha256) = dotnet::plan_dotnet(store, &ctx.activity, cwd, &sdk, toolchain)?;
+        let (plan, lock_sha256) = dotnet::plan_dotnet(store, activity, &project, &sdk, toolchain)?;
         let packages =
-            dotnet::realize_packages(store, activity, platform, &plan, &sdk, cwd, toolchain)?;
+            dotnet::realize_packages(store, activity, platform, &plan, &sdk, &project, toolchain)?;
         dotnet::project_dotnet_env(
             activity,
-            cwd,
+            &project,
             &sdk,
             &packages,
             &plan,
@@ -113,13 +122,7 @@ impl Tailor for Dotnet {
             attribution,
         )?;
         dotnet::build_sandboxed(
-            platform,
-            &ctx.activity,
-            cwd,
-            &sdk,
-            &packages,
-            args,
-            toolchain,
+            platform, activity, &project, &sdk, &packages, args, toolchain,
         )
     }
 
