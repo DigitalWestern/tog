@@ -2661,7 +2661,7 @@ mod tests {
         refs.object_id(&store, &activity, &named).unwrap();
         refs.object_id(&store, &activity, &unnamed).unwrap();
         crate::comforter::write_closure(
-            &project,
+            &crate::kernel::fsroot::ProjectRoot::open(&project).unwrap(),
             "python",
             serde_json::json!({"ok": true}),
             &store,
@@ -2903,7 +2903,7 @@ mod tests {
             let mut refs = crate::comforter::ClosureRefs::new();
             refs.object_id(&store, &activity, &id).unwrap();
             crate::comforter::write_closure(
-                &project,
+                &crate::kernel::fsroot::ProjectRoot::open(&project).unwrap(),
                 ecosystem,
                 serde_json::json!({"env_object": store.object_path(&id)}),
                 &store,

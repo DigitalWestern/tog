@@ -5,6 +5,7 @@
 //! is pure once project files have been collected: selection never consults
 //! the host Python or a package index.
 
+use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::platform::Platform;
 use crate::kernel::provider::cpython::default_version;
 use crate::tailors::python::{canonical_release_len, pythons, PinnedPython};
@@ -238,8 +239,8 @@ pub fn locked(
 /// pin: `.python-version` and every stated constraint must be well-formed
 /// on any host. Selection against this host's pins is
 /// `select_python_with_inputs`.
-pub fn check_project_inputs(dir: &Path) -> io::Result<()> {
-    let inputs = collect_project_inputs(dir)?;
+pub fn check_project_inputs(project: &ProjectRoot) -> io::Result<()> {
+    let inputs = collect_project_inputs(project)?;
     for constraint in &inputs.constraints {
         crate::tailors::python::pep440::SpecifierSet::parse(&constraint.text, &constraint.source)?;
     }
@@ -586,20 +587,17 @@ pub fn parse_python_version_file(text: &str, source: &str) -> io::Result<Explici
 
 /// Collect all interpreter constraints that already exist in a project.
 /// Dependency parsing happens in the manifest modules; this function only
-/// reads metadata needed to choose the CPython pin.
-pub fn collect_project_inputs(dir: &Path) -> io::Result<PythonInputs> {
+/// reads metadata needed to choose the CPython pin. The project is read
+/// through the held descriptor.
+pub fn collect_project_inputs(project: &ProjectRoot) -> io::Result<PythonInputs> {
+    let dir = project.path();
     let mut inputs = PythonInputs::default();
-    let version_path = dir.join(".python-version");
-    if version_path.is_file() {
-        let text = std::fs::read_to_string(&version_path)
-            .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", version_path.display())))?;
+    if let Some(text) = read_project_input(project, ".python-version")? {
         inputs.explicit = Some(parse_python_version_file(&text, ".python-version")?);
     }
 
     let pyproject_path = dir.join("pyproject.toml");
-    if pyproject_path.is_file() {
-        let text = std::fs::read_to_string(&pyproject_path)
-            .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", pyproject_path.display())))?;
+    if let Some(text) = read_project_input(project, "pyproject.toml")? {
         let value: toml::Value = toml::from_str(&text).map_err(|e| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -664,10 +662,7 @@ pub fn collect_project_inputs(dir: &Path) -> io::Result<PythonInputs> {
         }
     }
 
-    let setup_cfg = dir.join("setup.cfg");
-    if setup_cfg.is_file() {
-        let text = std::fs::read_to_string(&setup_cfg)
-            .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", setup_cfg.display())))?;
+    if let Some(text) = read_project_input(project, "setup.cfg")? {
         if let Some(value) = parse_setup_cfg(&text).python_requires {
             inputs
                 .constraints
@@ -675,10 +670,7 @@ pub fn collect_project_inputs(dir: &Path) -> io::Result<PythonInputs> {
         }
     }
 
-    let setup_py = dir.join("setup.py");
-    if setup_py.is_file() {
-        let text = std::fs::read_to_string(&setup_py)
-            .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", setup_py.display())))?;
+    if let Some(text) = read_project_input(project, "setup.py")? {
         // A static text scan. setup.py may compute python_requires
         // dynamically, which this cannot see; a sandboxed egg_info dump
         // would.
@@ -689,6 +681,28 @@ pub fn collect_project_inputs(dir: &Path) -> io::Result<PythonInputs> {
         }
     }
     Ok(inputs)
+}
+
+/// The text of a project input when it is a regular file (`None` when it is
+/// absent or is not a file, as `is_file` skipped it), read through the held
+/// descriptor. Errors name the file as the pathname read did.
+fn read_project_input(project: &ProjectRoot, name: &str) -> io::Result<Option<String>> {
+    if !project.is_input_file(Path::new(name)) {
+        return Ok(None);
+    }
+    let path = project.path().join(name);
+    let bytes = project
+        .read_input(Path::new(name))
+        .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", path.display())))?;
+    let Some(bytes) = bytes else {
+        return Ok(None);
+    };
+    String::from_utf8(bytes).map(Some).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{}: stream did not contain valid UTF-8", path.display()),
+        )
+    })
 }
 
 /// Parse the setup.cfg sections used by manifest discovery.
@@ -1179,7 +1193,7 @@ mod tests {
             "[tool.poetry.dependencies]\npython = { version = \"^3.9\", python = \">=3.9\" }\n",
         )
         .unwrap();
-        let inputs = collect_project_inputs(&temp).unwrap();
+        let inputs = collect_project_inputs(&ProjectRoot::open(&temp).unwrap()).unwrap();
         assert_eq!(inputs.constraints.len(), 1);
         assert_eq!(inputs.constraints[0].text, "^3.9");
         let _ = std::fs::remove_dir_all(temp);

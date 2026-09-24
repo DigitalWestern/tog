@@ -3,12 +3,19 @@
 
 use super::*;
 
-pub(super) fn requirements_manifest(_dir: &Path, path: &Path, input: &str) -> io::Result<Manifest> {
-    let source = read_text(path)?;
-    validate_requirement_includes(path, false, &mut Vec::new(), &mut BTreeSet::new())?;
+/// The requirements file and every include are read through the held
+/// project descriptor (`read_project_file`).
+pub(super) fn requirements_manifest(
+    project: &ProjectRoot,
+    path: &Path,
+    input: &str,
+) -> io::Result<Manifest> {
+    let source = read_text(project, path)?;
+    validate_requirement_includes(project, path, false, &mut Vec::new(), &mut BTreeSet::new())?;
     let mut requirements = Vec::new();
     let mut constraints = Vec::new();
     collect_requirement_lines(
+        project,
         path,
         &mut Vec::new(),
         &mut BTreeSet::new(),
@@ -33,6 +40,7 @@ pub(super) fn requirements_manifest(_dir: &Path, path: &Path, input: &str) -> io
     let requirements = filtered;
     let mut index_options = Vec::new();
     collect_index_options(
+        project,
         path,
         &mut Vec::new(),
         &mut BTreeSet::new(),
@@ -65,11 +73,12 @@ pub(super) fn requirements_manifest(_dir: &Path, path: &Path, input: &str) -> io
 }
 
 pub(super) fn requirements_directory_candidate(
-    dir: &Path,
+    project: &ProjectRoot,
     cfg: &TogPythonConfig,
 ) -> io::Result<Option<PathBuf>> {
+    let dir = project.path();
     let requirements = dir.join("requirements");
-    if !requirements.is_dir() {
+    if !is_project_dir(project, &requirements) {
         return Ok(None);
     }
     if let Some(explicit) = &cfg.requirements {
@@ -78,7 +87,7 @@ pub(super) fn requirements_directory_candidate(
         } else {
             dir.join(explicit)
         };
-        if path.is_file() {
+        if is_project_file(project, &path) {
             return Ok(Some(path));
         }
         return Err(unreadable(
@@ -88,13 +97,13 @@ pub(super) fn requirements_directory_candidate(
     }
     for hardware in ["cpu.txt", "cuda.txt", "rocm.txt", "xpu.txt"] {
         let path = requirements.join(hardware);
-        if path.is_file() {
+        if is_project_file(project, &path) {
             return Ok(Some(path));
         }
     }
     for name in ["common.txt", "base.txt", "requirements.in"] {
         let path = requirements.join(name);
-        if path.is_file() {
+        if is_project_file(project, &path) {
             return Ok(Some(path));
         }
     }
@@ -102,6 +111,7 @@ pub(super) fn requirements_directory_candidate(
 }
 
 pub(super) fn validate_requirement_includes(
+    project: &ProjectRoot,
     path: &Path,
     constraints_only: bool,
     stack: &mut Vec<(PathBuf, bool)>,
@@ -126,17 +136,18 @@ pub(super) fn validate_requirement_includes(
         return Ok(());
     }
     stack.push(key);
-    let text = read_text(&path)?;
+    let text = read_text(project, &path)?;
     for line in pypi::logical_requirement_lines(&text) {
         if let Some(include) = parse_include_directive(&line) {
             let target = include.target.ok_or_else(|| {
                 unreadable(&path, "requirements include is missing its file argument")
             })?;
             let child = path.parent().unwrap_or(Path::new(".")).join(target.trim());
-            if !child.is_file() {
+            if !is_project_file(project, &child) {
                 return Err(unreadable(&child, "included requirements file is missing"));
             }
             validate_requirement_includes(
+                project,
                 &child,
                 constraints_only || include.constraint,
                 stack,
@@ -151,25 +162,34 @@ pub(super) fn validate_requirement_includes(
 /// Hash a requirements file together with every file reached through its
 /// `-r`/`-c` include closure.  uv follows those includes itself when the
 /// source is handed to it, so the cache key must cover the same files rather
-/// than only the bytes of the top-level file.
-pub fn requirements_tree_hash(path: &Path) -> io::Result<String> {
+/// than only the bytes of the top-level file. Each file is read through the
+/// held project descriptor.
+pub fn requirements_tree_hash(project: &ProjectRoot, path: &Path) -> io::Result<String> {
     let top = path.canonicalize().map_err(|e| unreadable(path, e))?;
     let root = top.parent().unwrap_or(Path::new("."));
     let mut visited = BTreeSet::new();
     let mut files = BTreeSet::new();
-    collect_requirement_files(&top, false, &mut Vec::new(), &mut visited, &mut files)?;
+    collect_requirement_files(
+        project,
+        &top,
+        false,
+        &mut Vec::new(),
+        &mut visited,
+        &mut files,
+    )?;
     let mut hasher = Sha256::new();
     for file in files {
         let relative = file.strip_prefix(root).unwrap_or(&file);
         hasher.update(relative.to_string_lossy().as_bytes());
         hasher.update([0]);
-        hasher.update(fs::read(&file).map_err(|e| unreadable(&file, e))?);
+        hasher.update(read_project_file(project, &file).map_err(|e| unreadable(&file, e))?);
         hasher.update([0]);
     }
     Ok(hex::encode(hasher.finalize()))
 }
 
 pub(super) fn collect_requirement_files(
+    project: &ProjectRoot,
     path: &Path,
     constraints_only: bool,
     stack: &mut Vec<(PathBuf, bool)>,
@@ -186,13 +206,14 @@ pub(super) fn collect_requirement_files(
     }
     files.insert(path.clone());
     stack.push(key);
-    for line in pypi::logical_requirement_lines(&read_text(&path)?) {
+    for line in pypi::logical_requirement_lines(&read_text(project, &path)?) {
         if let Some(include) = parse_include_directive(&line) {
             let Some(target) = include.target else {
                 continue;
             };
             let child = path.parent().unwrap_or(Path::new(".")).join(target.trim());
             collect_requirement_files(
+                project,
                 &child,
                 constraints_only || include.constraint,
                 stack,
@@ -206,6 +227,7 @@ pub(super) fn collect_requirement_files(
 }
 
 pub(super) fn collect_requirement_lines(
+    project: &ProjectRoot,
     path: &Path,
     stack: &mut Vec<(PathBuf, bool)>,
     seen: &mut BTreeSet<(PathBuf, bool)>,
@@ -222,7 +244,7 @@ pub(super) fn collect_requirement_lines(
         return Ok(());
     }
     stack.push(key);
-    for line in pypi::logical_requirement_lines(&read_text(&path)?) {
+    for line in pypi::logical_requirement_lines(&read_text(project, &path)?) {
         if let Some(include) = parse_include_directive(&line) {
             let target = include.target.ok_or_else(|| {
                 unreadable(&path, "requirements include is missing its file argument")
@@ -230,6 +252,7 @@ pub(super) fn collect_requirement_lines(
             let is_constraint = include.constraint;
             let child = path.parent().unwrap_or(Path::new(".")).join(target);
             collect_requirement_lines(
+                project,
                 &child,
                 stack,
                 seen,
@@ -297,6 +320,7 @@ pub(super) fn parse_include_directive(line: &str) -> Option<IncludeDirective> {
 }
 
 pub(super) fn collect_index_options(
+    project: &ProjectRoot,
     path: &Path,
     stack: &mut Vec<PathBuf>,
     seen: &mut BTreeSet<PathBuf>,
@@ -310,14 +334,14 @@ pub(super) fn collect_index_options(
         return Ok(());
     }
     stack.push(path.clone());
-    for line in pypi::logical_requirement_lines(&read_text(&path)?) {
+    for line in pypi::logical_requirement_lines(&read_text(project, &path)?) {
         output.extend(pypi::unattested_index_options(&line));
         if let Some(include) = parse_include_directive(&line) {
             let Some(target) = include.target else {
                 continue;
             };
             let child = path.parent().unwrap_or(Path::new(".")).join(target.trim());
-            collect_index_options(&child, stack, seen, output)?;
+            collect_index_options(project, &child, stack, seen, output)?;
         }
     }
     stack.pop();

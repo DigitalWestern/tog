@@ -1,6 +1,8 @@
 //! From a Node project to its inputs: missing-lock generation through the
 //! store npm and the lockfile-to-`NpmPlan` importers.
 
+use crate::comforter::InputRecord;
+use crate::kernel::fsroot::{Entry, ProjectRoot};
 use crate::kernel::platform::Platform;
 use crate::kernel::store;
 use crate::kernel::supervise;
@@ -14,24 +16,26 @@ use std::path::Path;
 /// A package.json with no lockfile tog can import (package-lock.json,
 /// pnpm-lock.yaml, yarn.lock): delegate lock generation to npm, mirroring
 /// the uv flow for Python. Resolution is the ecosystem's job; realization
-/// is tog's.
+/// is tog's. The project is read through the held descriptor; npm itself
+/// runs in `project.path()`.
 pub fn ensure_npm_lock(
     platform: Platform,
-    dir: &Path,
+    project: &ProjectRoot,
     store: &store::Store,
     activity: &crate::kernel::activity::StoreActivity,
     selected: &Selected,
 ) -> io::Result<()> {
-    if !dir.join("package.json").exists()
-        || dir.join("package-lock.json").exists()
-        || dir.join("pnpm-lock.yaml").exists()
-        || dir.join("yarn.lock").exists()
+    if !input_exists(project, "package.json")
+        || input_exists(project, "package-lock.json")
+        || input_exists(project, "pnpm-lock.yaml")
+        || input_exists(project, "yarn.lock")
     {
         return Ok(());
     }
+    let dir = project.path();
     let bun_lock = ["bun.lock", "bun.lockb"]
         .into_iter()
-        .find(|other| dir.join(other).exists());
+        .find(|other| input_exists(project, other));
     if let Some(other) = bun_lock {
         ui::note(&format!(
             "{other} found but no package-lock.json; generating one with npm \
@@ -82,36 +86,65 @@ pub fn ensure_npm_lock(
     Ok(())
 }
 
+/// The plan from whichever lock the project has, read through the held
+/// descriptor (a lock npm just generated is read back the same way).
 pub fn load_npm_plan(
     platform: Platform,
-    dir: &Path,
+    project: &ProjectRoot,
     selected: &Selected,
 ) -> io::Result<Option<node::NpmPlan>> {
     let node_version = selected.version("node")?;
-    if dir.join("package-lock.json").is_file() {
+    if project.is_input_file(Path::new("package-lock.json")) {
         return Ok(Some(node::plan_npm_with(
             platform,
-            &std::fs::read_to_string(dir.join("package-lock.json"))?,
+            &read_input(project, "package-lock.json")?,
             node_version,
         )?));
     }
-    if dir.join("pnpm-lock.yaml").is_file() {
+    if project.is_input_file(Path::new("pnpm-lock.yaml")) {
         return Ok(Some(lock_import::plan_pnpm(
             platform,
-            &std::fs::read_to_string(dir.join("pnpm-lock.yaml"))?,
-            dir,
+            &read_input(project, "pnpm-lock.yaml")?,
+            project,
             node_version,
         )?));
     }
-    if dir.join("yarn.lock").is_file() {
-        let package = std::fs::read_to_string(dir.join("package.json"))?;
+    if project.is_input_file(Path::new("yarn.lock")) {
+        let package = read_input(project, "package.json")?;
         return Ok(Some(lock_import::plan_yarn(
             platform,
-            &std::fs::read_to_string(dir.join("yarn.lock"))?,
+            &read_input(project, "yarn.lock")?,
             &package,
-            dir,
+            project,
             node_version,
         )?));
     }
     Ok(None)
+}
+
+/// `Path::exists` for a project input, resolved from the held descriptor.
+pub(crate) fn input_exists(project: &ProjectRoot, relative: impl AsRef<Path>) -> bool {
+    !matches!(
+        project.input_entry(relative.as_ref()),
+        Ok(Entry::Absent) | Err(_)
+    )
+}
+
+/// `fs::read_to_string` of a project input through the held descriptor: an
+/// absent file is a `NotFound` error naming its project path.
+pub(crate) fn read_input(project: &ProjectRoot, relative: impl AsRef<Path>) -> io::Result<String> {
+    let relative = relative.as_ref();
+    project.read_input_string(relative)?.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("{}: not found", project.path().join(relative).display()),
+        )
+    })
+}
+
+/// The input records a Node closure keeps: project-relative names hashed
+/// through the held project descriptor.
+pub(crate) fn input_records(project: &ProjectRoot, names: &[&str]) -> io::Result<Vec<InputRecord>> {
+    let names: Vec<std::path::PathBuf> = names.iter().map(std::path::PathBuf::from).collect();
+    crate::comforter::input_records(project, &names)
 }

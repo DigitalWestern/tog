@@ -3,6 +3,7 @@
 //! `CargoPlan`.
 
 use crate::kernel::activity::StoreActivity;
+use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::platform::Platform;
 use crate::kernel::store;
 use crate::kernel::supervise;
@@ -16,8 +17,9 @@ use std::path::{Path, PathBuf};
 /// invocation dir is itself a Cargo package (workspace members included).
 /// Without this gate, running tog in any project nested under an
 /// unrelated Cargo workspace would silently project into that parent tree.
-pub fn is_cargo_here(dir: &Path) -> bool {
-    dir.join("Cargo.toml").is_file() || dir.join("Cargo.lock").is_file()
+/// The project is read through the held descriptor.
+pub fn is_cargo_here(project: &ProjectRoot) -> bool {
+    project.is_input_file(Path::new("Cargo.toml")) || project.is_input_file(Path::new("Cargo.lock"))
 }
 
 pub struct CargoInputs {
@@ -66,19 +68,25 @@ pub fn locate_cargo_root(
 /// `toolchain` is the project's selection, and it decides which Rust this
 /// call realizes. `lock_root` is the directory the selection was resolved
 /// in: the components and cross targets its toolchain file asks for are
-/// read there, through the rows the toolchain lock records, and assembled
-/// onto that Rust. One the pinned release does not publish is an error
-/// before any project write.
+/// read there, through the rows the toolchain lock records and the
+/// descriptor it is held by, and assembled onto that Rust. One the pinned
+/// release does not publish is an error before any project write.
+///
+/// `project` is where Cargo runs (sync passes the same root for both). It
+/// is read through its held descriptor: Cargo runs in `project.path()`, but
+/// the lock it names is read back from the directory `project` holds (or,
+/// for a workspace rooted above it, from that root).
 pub fn load_cargo_inputs(
     platform: Platform,
-    lock_root: &Path,
-    cwd: &Path,
+    lock_root: &ProjectRoot,
+    project: &ProjectRoot,
     store: &store::Store,
     activity: &StoreActivity,
     toolchain: &Selected,
 ) -> io::Result<CargoInputs> {
     let rust_version = toolchain.version("rustc")?;
-    let extras = cargo::project_extras(lock_root)?;
+    let cwd = project.path();
+    let extras = cargo::project_extras_in(lock_root)?;
     let rust_obj = cargo::realize_toolchain(store, activity, platform, toolchain, &extras)?;
     let root = locate_cargo_root(&rust_obj, cwd, activity)?;
     // Cargo is the one tailor whose registered root is not the directory
@@ -88,10 +96,20 @@ pub fn load_cargo_inputs(
     // a vendor object or a cargo-home lands in a workspace that cannot be
     // registered and so cannot be protected.
     store::Store::check_registrable(&root)?;
-    if !root.join("Cargo.lock").is_file() {
-        ensure_cargo_lock(&root, &rust_obj, activity)?;
-    }
-    let lock = std::fs::read_to_string(root.join("Cargo.lock"))?;
+    let workspace = workspace_root(project, &root)?;
+    let lock = read_cargo_lock(&workspace)?;
+    let lock = match lock {
+        Some(lock) => lock,
+        None => {
+            ensure_cargo_lock(&root, &rust_obj, activity)?;
+            read_cargo_lock(&workspace)?.ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("{} was not generated", root.join("Cargo.lock").display()),
+                )
+            })?
+        }
+    };
     let plan = cargo::plan_cargo(&lock, rust_version)?;
     Ok(CargoInputs {
         root,
@@ -99,6 +117,32 @@ pub fn load_cargo_inputs(
         plan,
         lock_digest: cargo::lock_digest(&lock),
     })
+}
+
+/// The workspace root Cargo located, held as a root. At or under the
+/// project it is reached from the project's held descriptor. A workspace
+/// rooted above the project lies outside that descriptor, so it is opened
+/// from the path Cargo reported.
+/// The workspace root Cargo reported, held as a descriptor: the project
+/// itself or a directory inside it resolved from the project's descriptor,
+/// and only a root above the project opened by its path.
+pub(crate) fn workspace_root(project: &ProjectRoot, root: &Path) -> io::Result<ProjectRoot> {
+    match project.relative(root) {
+        Some(relative) if relative.as_os_str().is_empty() => project.try_clone(),
+        Some(relative) => project.input_subdir(relative)?.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("workspace root {} is not a directory", root.display()),
+            )
+        }),
+        None => ProjectRoot::open(root),
+    }
+}
+
+/// The workspace's Cargo.lock, read through the held descriptor; `None`
+/// when there is none yet.
+fn read_cargo_lock(workspace: &ProjectRoot) -> io::Result<Option<String>> {
+    workspace.read_input_string(Path::new("Cargo.lock"))
 }
 
 pub fn ensure_cargo_lock(root: &Path, rust_obj: &Path, activity: &StoreActivity) -> io::Result<()> {
@@ -143,9 +187,34 @@ mod tests {
         std::fs::create_dir_all(&nested).unwrap();
         std::fs::write(temp.0.join("outer/Cargo.toml"), "[package]\nname=\"o\"\n").unwrap();
         // sync/plan only join in where the invocation dir itself is a package
-        assert!(is_cargo_here(&temp.0.join("outer")));
-        assert!(!is_cargo_here(&nested));
+        let open = |dir: &Path| ProjectRoot::open(dir).unwrap();
+        assert!(is_cargo_here(&open(&temp.0.join("outer"))));
+        assert!(!is_cargo_here(&open(&nested)));
         std::fs::write(nested.join("Cargo.lock"), "version = 4\n").unwrap();
-        assert!(is_cargo_here(&nested));
+        assert!(is_cargo_here(&open(&nested)));
+    }
+
+    #[test]
+    fn a_held_project_keeps_reading_its_own_lock_after_a_rename() {
+        let temp = TempDir::new();
+        let dir = temp.0.join("project");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("Cargo.lock"), "# original\nversion = 4\n").unwrap();
+        let project = ProjectRoot::open(&dir).unwrap();
+        // Another directory takes the path mid-sync, first with no Cargo
+        // files at all, then with a lock of its own.
+        std::fs::rename(&dir, temp.0.join("moved")).unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(is_cargo_here(&project));
+        let workspace = workspace_root(&project, project.path()).unwrap();
+        assert_eq!(
+            read_cargo_lock(&workspace).unwrap().as_deref(),
+            Some("# original\nversion = 4\n")
+        );
+        std::fs::write(dir.join("Cargo.lock"), "# replacement\nversion = 4\n").unwrap();
+        assert_eq!(
+            read_cargo_lock(&workspace).unwrap().as_deref(),
+            Some("# original\nversion = 4\n")
+        );
     }
 }

@@ -1,9 +1,18 @@
-//! Descriptor-relative project writes (kernel layer). A `ProjectRoot` holds
+//! Descriptor-relative project access (kernel layer). A `ProjectRoot` holds
 //! a project directory open as a descriptor, reached from `/` one component
 //! at a time with openat(O_NOFOLLOW), and every project-relative file it
-//! reads or publishes is walked the same way from that descriptor. No
-//! component of a project-relative path is ever followed through a symlink,
-//! so a symlinked `.tog` cannot redirect a cache write outside the project.
+//! reads or publishes is resolved from that descriptor, never from the
+//! project's pathname: a project directory renamed or replaced while a
+//! command runs cannot substitute another project's files.
+//!
+//! Two read disciplines share the descriptor. tog's own state (`.tog`,
+//! closures, caches) and the toolchain inputs are walked one component at a
+//! time with O_NOFOLLOW (`read_file`, `write_file`, `entry`): no component is
+//! ever followed through a symlink, so a symlinked `.tog` cannot redirect a
+//! cache write outside the project. Inputs the user authors (manifests,
+//! dependency locks) are read with `read_input`, which resolves from the
+//! descriptor but follows a symlink the project itself contains, as a
+//! pathname read inside the project always has.
 //!
 //! What `write_file` guarantees: the file is created with O_EXCL under a
 //! random temporary name in the held parent, written, fsynced, and renamed
@@ -18,14 +27,14 @@
 //! mode. Temporary cleanup after a failure is best-effort.
 
 use crate::kernel::store::{
-    fd_stat, fsync_directory, mkdir_at, open_file_at, rename_at, same_inode, stat_at,
-    unlink_if_same,
+    fd_stat, fsync_directory, mkdir_at, open_file_at, read_dir_names_at, remove_tree_entry_at,
+    rename_at, same_inode, stat_at, stat_at_following, unlink_if_same,
 };
 use std::ffi::{CString, OsStr};
 use std::fs;
 use std::io::{self, Read as _, Write as _};
 use std::os::fd::{AsRawFd, FromRawFd, RawFd};
-use std::os::unix::ffi::OsStrExt;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 
 const DIRECTORY_FLAGS: libc::c_int =
@@ -163,6 +172,230 @@ impl ProjectRoot {
         self.publish(relative, bytes, &mut random_temp_name)
     }
 
+    /// `write_file` with an explicit permission mode (an executable shim),
+    /// set on the temporary before it is renamed into place, so the file is
+    /// never visible with the wrong mode.
+    pub fn write_file_mode(
+        &self,
+        relative: &Path,
+        bytes: &[u8],
+        mode: libc::mode_t,
+    ) -> io::Result<()> {
+        self.publish_mode(relative, bytes, Some(mode), &mut random_temp_name)
+    }
+
+    /// Point a project-relative symlink (a `.venv` or `node_modules`
+    /// projection) at `target`, atomically: a new link is made under a
+    /// random temporary name in the held parent and renamed over the
+    /// destination, then the parent is fsynced. Missing parents are created
+    /// with the no-follow walk. An existing symlink is replaced; a real file
+    /// or directory at the destination is user state and is refused, never
+    /// overwritten. `label` names the projection in messages.
+    pub fn replace_symlink(&self, relative: &Path, target: &Path, label: &str) -> io::Result<()> {
+        let (parents, name) = split_relative(relative)?;
+        let mut display = self.path.clone();
+        let held = self.open_creating(&parents, &mut display)?;
+        display.push(name);
+        let parent_fd = held
+            .as_ref()
+            .map_or(self.dir.as_raw_fd(), AsRawFd::as_raw_fd);
+        match stat_at(parent_fd, name.as_bytes()) {
+            Ok(stat) if stat.st_mode & libc::S_IFMT == libc::S_IFLNK => {}
+            Ok(_) => {
+                return Err(refusal(format!(
+                    "{label} {} is a real file or directory; refusing to overwrite it",
+                    display.display()
+                )))
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        let target = CString::new(target.as_os_str().as_bytes()).map_err(|_| {
+            refusal(format!(
+                "{label} target contains a NUL byte; refusing to publish"
+            ))
+        })?;
+        let mut made = None;
+        for _ in 0..TEMP_ATTEMPTS {
+            let candidate = random_temp_name(name.as_bytes(), 0)?;
+            let temp = CString::new(candidate.clone()).expect("hex names hold no NUL");
+            // SAFETY: parent_fd is an open directory and both strings are
+            // valid NUL-terminated strings that outlive the call.
+            if unsafe { libc::symlinkat(target.as_ptr(), parent_fd, temp.as_ptr()) } == 0 {
+                made = Some(candidate);
+                break;
+            }
+            let error = io::Error::last_os_error();
+            if error.kind() != io::ErrorKind::AlreadyExists {
+                return Err(io::Error::new(
+                    error.kind(),
+                    format!("create temporary link for {label}: {error}"),
+                ));
+            }
+        }
+        let temp = made.ok_or_else(|| {
+            refusal(format!(
+                "every temporary name for {label} {} is occupied; remove stale .tog-tmp \
+                 entries and retry",
+                display.display()
+            ))
+        })?;
+        let result = rename_at(parent_fd, &temp, name.as_bytes())
+            .map_err(|error| io::Error::new(error.kind(), format!("publish {label}: {error}")))
+            .and_then(|()| {
+                fsync_directory(parent_fd).map_err(|error| {
+                    io::Error::new(error.kind(), format!("sync {label} parent: {error}"))
+                })
+            });
+        if result.is_err() {
+            if let Ok(stat) = stat_at(parent_fd, &temp) {
+                let _ = unlink_if_same(parent_fd, &temp, &stat, 0);
+            }
+        }
+        result
+    }
+
+    /// The target of a project-relative symlink, read without following
+    /// it. `None` when the name is absent or is not a symlink.
+    pub fn read_link(&self, relative: &Path) -> io::Result<Option<PathBuf>> {
+        let mut display = self.path.clone();
+        let Some((held, name)) = self.open_parent(relative, "inspect", &mut display)? else {
+            return Ok(None);
+        };
+        let parent_fd = held
+            .as_ref()
+            .map_or(self.dir.as_raw_fd(), AsRawFd::as_raw_fd);
+        let name = CString::new(name.as_bytes())
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "name contains NUL"))?;
+        let mut buffer = vec![0u8; libc::PATH_MAX as usize + 1];
+        // SAFETY: parent_fd is open, name is NUL-terminated, and the buffer
+        // is writable for its whole length.
+        let length = unsafe {
+            libc::readlinkat(
+                parent_fd,
+                name.as_ptr(),
+                buffer.as_mut_ptr().cast(),
+                buffer.len(),
+            )
+        };
+        if length < 0 {
+            let error = io::Error::last_os_error();
+            return match error.raw_os_error() {
+                Some(libc::ENOENT) | Some(libc::EINVAL) => Ok(None),
+                _ => Err(io::Error::new(
+                    error.kind(),
+                    format!("read link {}: {error}", display.display()),
+                )),
+            };
+        }
+        buffer.truncate(length as usize);
+        Ok(Some(PathBuf::from(std::ffi::OsString::from_vec(buffer))))
+    }
+
+    /// Remove a project-relative symlink tog placed (a stale workspace
+    /// link). `Ok(())` when it is already absent. Anything that is not a
+    /// symlink is refused, so a user's real file or directory that took the
+    /// name is never removed.
+    pub fn remove_symlink(&self, relative: &Path) -> io::Result<()> {
+        let mut display = self.path.clone();
+        let Some((held, name)) = self.open_parent(relative, "remove", &mut display)? else {
+            return Ok(());
+        };
+        let parent_fd = held
+            .as_ref()
+            .map_or(self.dir.as_raw_fd(), AsRawFd::as_raw_fd);
+        let stat = match stat_at(parent_fd, name.as_bytes()) {
+            Ok(stat) => stat,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        if stat.st_mode & libc::S_IFMT != libc::S_IFLNK {
+            return Err(refusal(format!(
+                "{} is not a symlink; refusing to remove it",
+                display.display()
+            )));
+        }
+        unlink_if_same(parent_fd, name.as_bytes(), &stat, 0).map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!("remove {}: {error}", display.display()),
+            )
+        })?;
+        Ok(())
+    }
+
+    /// Remove a project-relative directory tree tog owns (`.tog/cargo-home`
+    /// on `--fresh`) without following a symlink anywhere: a symlink at the
+    /// name is unlinked, never followed, and nothing outside the tree is
+    /// touched. `Ok(())` when it is already absent.
+    pub fn remove_dir_all(&self, relative: &Path) -> io::Result<()> {
+        let mut display = self.path.clone();
+        let Some((held, name)) = self.open_parent(relative, "remove", &mut display)? else {
+            return Ok(());
+        };
+        let parent_fd = held
+            .as_ref()
+            .map_or(self.dir.as_raw_fd(), AsRawFd::as_raw_fd);
+        remove_tree_entry_at(parent_fd, name.as_bytes()).map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!("remove {}: {error}", display.display()),
+            )
+        })
+    }
+
+    /// fsync a project directory (`.` for the root) reached with the
+    /// no-follow walk, so an entry just renamed out of it is durable.
+    pub fn sync_dir(&self, relative: &Path) -> io::Result<()> {
+        if relative == Path::new(".") {
+            return fsync_directory(self.dir.as_raw_fd());
+        }
+        let mut display = self.path.clone();
+        let Some((held, name)) = self.open_parent(relative, "sync", &mut display)? else {
+            return Ok(());
+        };
+        let parent_fd = held
+            .as_ref()
+            .map_or(self.dir.as_raw_fd(), AsRawFd::as_raw_fd);
+        let dir = open_directory_at(parent_fd, name.as_bytes(), &display, "sync")?;
+        fsync_directory(dir.as_raw_fd())
+    }
+
+    /// Move a real project directory (a pre-tog `.venv` or `node_modules`)
+    /// out of the project into `destination_dir` under `destination_name`,
+    /// with one `renameat` from the held parent. Refuses unless the name is
+    /// a real directory now; a symlink is never followed or moved.
+    pub fn move_dir_out(
+        &self,
+        relative: &Path,
+        destination_dir: &fs::File,
+        destination_name: &[u8],
+    ) -> io::Result<()> {
+        let mut display = self.path.clone();
+        let Some((held, name)) = self.open_parent(relative, "move", &mut display)? else {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("{} is gone", display.display()),
+            ));
+        };
+        let parent_fd = held
+            .as_ref()
+            .map_or(self.dir.as_raw_fd(), AsRawFd::as_raw_fd);
+        let stat = stat_at(parent_fd, name.as_bytes())?;
+        if stat.st_mode & libc::S_IFMT != libc::S_IFDIR {
+            return Err(refusal(format!(
+                "{} is not a real directory; refusing to move it",
+                display.display()
+            )));
+        }
+        rename_between(
+            parent_fd,
+            name.as_bytes(),
+            destination_dir.as_raw_fd(),
+            destination_name,
+        )
+    }
+
     /// Open a project-relative file to hold an advisory lock on, creating
     /// it and any missing parent directory. The name is opened
     /// descriptor-relative with `O_NOFOLLOW`, so a symlink planted at it
@@ -288,6 +521,200 @@ impl ProjectRoot {
         Ok(())
     }
 
+    /// A second descriptor for the same held directory, for a holder that
+    /// outlives the borrow it was handed (the toolchain-input guard).
+    pub fn try_clone(&self) -> io::Result<Self> {
+        Ok(Self {
+            dir: self.dir.try_clone()?,
+            path: self.path.clone(),
+        })
+    }
+
+    /// Does the canonical path still name the directory this descriptor
+    /// holds? Every read and write here goes through the descriptor, so a
+    /// renamed or replaced project cannot redirect them; but the path is
+    /// what the store records as a GC root and what a child process is
+    /// started in, so a sync refuses to finish once the two disagree. The
+    /// path is walked from `/` with O_NOFOLLOW, as `open` walks it.
+    pub fn check_still_named(&self) -> io::Result<()> {
+        let held = fd_stat(self.dir.as_raw_fd())?;
+        let moved = |detail: String| {
+            io::Error::other(format!(
+                "{}: {detail}; run 'tog' again",
+                self.path.display()
+            ))
+        };
+        let now = match Self::open(&self.path) {
+            Ok(now) => now,
+            Err(error) => {
+                return Err(moved(format!(
+                    "the project directory was moved or became unreadable during sync ({error})"
+                )))
+            }
+        };
+        if !same_inode(&fd_stat(now.dir.as_raw_fd())?, &held) {
+            return Err(moved(
+                "the project directory was moved or replaced during sync".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// The bytes of a project input the user authors (a manifest, a
+    /// dependency lock, a version file), or `None` when it is absent.
+    ///
+    /// Resolved from the held descriptor, so a project directory renamed or
+    /// replaced mid-command cannot substitute another project's files. A
+    /// symlink the project itself contains is followed, as a pathname read
+    /// inside the project would follow it: that is the user's own layout,
+    /// not a race. The strict no-follow walk (`read_file`) stays for tog's
+    /// own state under `.tog` and for toolchain inputs. `relative` may climb
+    /// with `..` (a requirements include beside the project); it may not be
+    /// absolute, since an absolute path would ignore the descriptor.
+    pub fn read_input(&self, relative: &Path) -> io::Result<Option<Vec<u8>>> {
+        let Some(mut file) = self.open_input(relative)? else {
+            return Ok(None);
+        };
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes).map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!("read {}: {error}", self.path.join(relative).display()),
+            )
+        })?;
+        Ok(Some(bytes))
+    }
+
+    /// `read_input` as UTF-8 text. Invalid UTF-8 is `InvalidData`, as
+    /// `fs::read_to_string` reports it.
+    pub fn read_input_string(&self, relative: &Path) -> io::Result<Option<String>> {
+        match self.read_input(relative)? {
+            None => Ok(None),
+            Some(bytes) => String::from_utf8(bytes).map(Some).map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("{} is not valid UTF-8", self.path.join(relative).display()),
+                )
+            }),
+        }
+    }
+
+    /// What a project input names, resolved from the held descriptor and
+    /// following symlinks the way `Path::is_file` does: a dangling symlink
+    /// or a missing parent is `Entry::Absent`, and `Entry::Symlink` is
+    /// never returned.
+    pub fn input_entry(&self, relative: &Path) -> io::Result<Entry> {
+        let name = input_name(relative)?;
+        match stat_at_following(self.dir.as_raw_fd(), &name) {
+            Ok(stat) => Ok(match stat.st_mode & libc::S_IFMT {
+                libc::S_IFREG => Entry::Regular,
+                libc::S_IFDIR => Entry::Directory,
+                _ => Entry::Other,
+            }),
+            Err(error)
+                if error.kind() == io::ErrorKind::NotFound
+                    || error.raw_os_error() == Some(libc::ENOTDIR)
+                    || error.raw_os_error() == Some(libc::ELOOP) =>
+            {
+                Ok(Entry::Absent)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// `input_entry(relative) == Entry::Regular`, with an unreadable
+    /// parent read as absent, as `Path::is_file` reads it.
+    pub fn is_input_file(&self, relative: &Path) -> bool {
+        matches!(self.input_entry(relative), Ok(Entry::Regular))
+    }
+
+    /// `input_entry(relative) == Entry::Directory`, as `Path::is_dir`.
+    pub fn is_input_dir(&self, relative: &Path) -> bool {
+        matches!(self.input_entry(relative), Ok(Entry::Directory))
+    }
+
+    /// The names in a project directory (`.` for the root itself), sorted,
+    /// or `None` when it is absent. Resolved like `read_input`.
+    pub fn read_input_dir(&self, relative: &Path) -> io::Result<Option<Vec<std::ffi::OsString>>> {
+        let Some(dir) = self.input_subdir(relative)? else {
+            return Ok(None);
+        };
+        let mut names = read_dir_names_at(dir.dir.as_raw_fd())?;
+        names.sort();
+        Ok(Some(names))
+    }
+
+    /// A project subdirectory held as its own root (a workspace member),
+    /// resolved like `read_input`; `None` when it is absent or not a
+    /// directory. Its `path` is this root's path joined with `relative`.
+    pub fn input_subdir(&self, relative: &Path) -> io::Result<Option<ProjectRoot>> {
+        let name = input_name(relative)?;
+        match open_file_at(
+            self.dir.as_raw_fd(),
+            &name,
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+            0,
+        ) {
+            Ok(dir) => Ok(Some(ProjectRoot {
+                dir,
+                path: if relative == Path::new(".") {
+                    self.path.clone()
+                } else {
+                    self.path.join(relative)
+                },
+            })),
+            Err(error)
+                if error.kind() == io::ErrorKind::NotFound
+                    || error.raw_os_error() == Some(libc::ENOTDIR) =>
+            {
+                Ok(None)
+            }
+            Err(error) => Err(io::Error::new(
+                error.kind(),
+                format!("open {}: {error}", self.path.join(relative).display()),
+            )),
+        }
+    }
+
+    /// `path` relative to this root, when it lies under the root's
+    /// canonical path: how a caller holding an absolute path it built from
+    /// `path()` turns it back into a descriptor-relative one.
+    pub fn relative<'a>(&self, path: &'a Path) -> Option<&'a Path> {
+        path.strip_prefix(&self.path).ok()
+    }
+
+    fn open_input(&self, relative: &Path) -> io::Result<Option<fs::File>> {
+        let name = input_name(relative)?;
+        let display = self.path.join(relative);
+        let file = match open_file_at(
+            self.dir.as_raw_fd(),
+            &name,
+            libc::O_RDONLY | libc::O_NONBLOCK | libc::O_CLOEXEC,
+            0,
+        ) {
+            Ok(file) => file,
+            Err(error)
+                if error.kind() == io::ErrorKind::NotFound
+                    || error.raw_os_error() == Some(libc::ENOTDIR) =>
+            {
+                return Ok(None)
+            }
+            Err(error) => {
+                return Err(io::Error::new(
+                    error.kind(),
+                    format!("read {}: {error}", display.display()),
+                ))
+            }
+        };
+        if !file.metadata()?.file_type().is_file() {
+            return Err(refusal(format!(
+                "{} is not a regular file; refusing to read it",
+                display.display()
+            )));
+        }
+        Ok(Some(file))
+    }
+
     /// Walk to the parent directory of a project-relative path, creating
     /// nothing. Returns the held parent descriptor (`None` when the project
     /// root itself is the parent) together with the final name, and pushes
@@ -348,6 +775,16 @@ impl ProjectRoot {
         &self,
         relative: &Path,
         bytes: &[u8],
+        temp_name: &mut dyn FnMut(&[u8], usize) -> io::Result<Vec<u8>>,
+    ) -> io::Result<()> {
+        self.publish_mode(relative, bytes, None, temp_name)
+    }
+
+    fn publish_mode(
+        &self,
+        relative: &Path,
+        bytes: &[u8],
+        mode: Option<libc::mode_t>,
         temp_name: &mut dyn FnMut(&[u8], usize) -> io::Result<Vec<u8>>,
     ) -> io::Result<()> {
         let (parents, name) = split_relative(relative)?;
@@ -429,6 +866,12 @@ impl ProjectRoot {
         // `file` stays open through the identity checks below so the inode
         // it names cannot be recycled under them.
         let result = (|| {
+            if let Some(mode) = mode {
+                // SAFETY: the descriptor is owned by `file` for this call.
+                if unsafe { libc::fchmod(file.as_raw_fd(), mode) } != 0 {
+                    return Err(io::Error::last_os_error());
+                }
+            }
             file.write_all(bytes)?;
             file.sync_all()?;
             let current = stat_at(parent_fd, &temp)?;
@@ -493,6 +936,44 @@ fn split_relative(relative: &Path) -> io::Result<(Vec<&OsStr>, &OsStr)> {
         .pop()
         .expect("a non-empty path has a last component");
     Ok((components, name))
+}
+
+/// A project-input name for `openat` from the held descriptor: not empty,
+/// not absolute, no NUL. Unlike `split_relative` it may climb or repeat a
+/// separator, since it is resolved by the kernel the way a pathname
+/// relative to the project would be.
+fn input_name(relative: &Path) -> io::Result<Vec<u8>> {
+    let bytes = relative.as_os_str().as_bytes();
+    let invalid = |reason: &str| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("project-relative path {relative:?} {reason}"),
+        )
+    };
+    if bytes.is_empty() {
+        return Err(invalid("is empty"));
+    }
+    if bytes.contains(&0) {
+        return Err(invalid("contains a NUL byte"));
+    }
+    if bytes[0] == b'/' {
+        return Err(invalid("is absolute"));
+    }
+    Ok(bytes.to_vec())
+}
+
+/// `renameat` between two held directories.
+fn rename_between(from: RawFd, old: &[u8], to: RawFd, new: &[u8]) -> io::Result<()> {
+    let old = CString::new(old)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "name contains NUL"))?;
+    let new = CString::new(new)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "name contains NUL"))?;
+    // SAFETY: both descriptors are open directories and both names are
+    // NUL-terminated relative names that outlive the call.
+    if unsafe { libc::renameat(from, old.as_ptr(), to, new.as_ptr()) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 fn open_directory_at(
@@ -1149,5 +1630,174 @@ mod tests {
         assert_eq!(root.path(), dir.canonicalize().unwrap());
         root.write_file(Path::new(".tog/plan.json"), b"x").unwrap();
         assert_eq!(fs::read(dir.join(".tog/plan.json")).unwrap(), b"x");
+    }
+
+    #[test]
+    fn inputs_read_the_held_directory_after_it_is_renamed_and_replaced() {
+        let temp = TempDir::new();
+        let dir = project(&temp);
+        fs::create_dir_all(dir.join("member")).unwrap();
+        fs::write(dir.join("package.json"), b"original").unwrap();
+        fs::write(dir.join("member/package.json"), b"member").unwrap();
+        let root = ProjectRoot::open(&dir).unwrap();
+        root.check_still_named().unwrap();
+
+        let moved = temp.0.join("moved");
+        fs::rename(&dir, &moved).unwrap();
+        fs::create_dir_all(dir.join("member")).unwrap();
+        fs::write(dir.join("package.json"), b"impostor").unwrap();
+        fs::write(dir.join("extra.json"), b"impostor").unwrap();
+
+        let error = root.check_still_named().unwrap_err();
+        assert!(
+            error.to_string().contains("moved or replaced during sync"),
+            "{error}"
+        );
+        assert_eq!(
+            root.read_input(Path::new("package.json")).unwrap().unwrap(),
+            b"original"
+        );
+        assert!(!root.is_input_file(Path::new("extra.json")));
+        assert!(root.is_input_dir(Path::new("member")));
+        let names = root.read_input_dir(Path::new(".")).unwrap().unwrap();
+        assert_eq!(names, vec!["member", "package.json"]);
+        let member = root.input_subdir(Path::new("member")).unwrap().unwrap();
+        assert_eq!(
+            member
+                .read_input(Path::new("package.json"))
+                .unwrap()
+                .unwrap(),
+            b"member"
+        );
+        let clone = root.try_clone().unwrap();
+        assert_eq!(
+            clone
+                .read_input_string(Path::new("package.json"))
+                .unwrap()
+                .as_deref(),
+            Some("original")
+        );
+
+        // A removed path is refused too, and so is a restored one only when
+        // it is not the held directory.
+        fs::remove_dir_all(&dir).unwrap();
+        assert!(root.check_still_named().is_err());
+        fs::rename(&moved, &dir).unwrap();
+        root.check_still_named().unwrap();
+    }
+
+    #[test]
+    fn inputs_follow_a_symlink_inside_the_project_and_refuse_odd_names() {
+        let temp = TempDir::new();
+        let dir = project(&temp);
+        let shared = temp.0.join("shared.lock");
+        fs::write(&shared, b"shared").unwrap();
+        symlink(&shared, dir.join("package-lock.json")).unwrap();
+        symlink(temp.0.join("missing"), dir.join("dangling.json")).unwrap();
+        fs::create_dir_all(dir.join("dir")).unwrap();
+        let root = ProjectRoot::open(&dir).unwrap();
+
+        // A symlink the project contains is the user's layout: followed, as
+        // a pathname read would follow it.
+        assert_eq!(
+            root.read_input(Path::new("package-lock.json"))
+                .unwrap()
+                .unwrap(),
+            b"shared"
+        );
+        assert!(root.is_input_file(Path::new("package-lock.json")));
+        assert_eq!(
+            root.input_entry(Path::new("dangling.json")).unwrap(),
+            Entry::Absent
+        );
+        assert!(root
+            .read_input(Path::new("dangling.json"))
+            .unwrap()
+            .is_none());
+        assert!(root.read_input(Path::new("absent/x")).unwrap().is_none());
+        let error = root.read_input(Path::new("dir")).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        let error = root.read_input(Path::new("/etc/hostname")).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        fs::write(dir.join("bad.txt"), [0xff, 0xfe]).unwrap();
+        let error = root.read_input_string(Path::new("bad.txt")).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+    #[test]
+    fn projection_writes_go_through_the_held_directory() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let temp = TempDir::new();
+        let dir = project(&temp);
+        let env = temp.0.join("env");
+        let other = temp.0.join("other-env");
+        fs::create_dir_all(&env).unwrap();
+        fs::create_dir_all(&other).unwrap();
+        fs::create_dir_all(dir.join(".venv/lib")).unwrap();
+        let root = ProjectRoot::open(&dir).unwrap();
+
+        // A real directory is user state: refused, then moved out whole.
+        let error = root
+            .replace_symlink(Path::new(".venv"), &env, ".venv")
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("real file or directory"),
+            "{error}"
+        );
+        let backups = temp.0.join("backups");
+        fs::create_dir_all(&backups).unwrap();
+        let backups_dir = fs::File::open(&backups).unwrap();
+        root.move_dir_out(Path::new(".venv"), &backups_dir, b"saved")
+            .unwrap();
+        assert!(backups.join("saved/lib").is_dir());
+        root.sync_dir(Path::new(".")).unwrap();
+
+        // Links are made and replaced atomically, read back, and removed.
+        root.replace_symlink(Path::new(".venv"), &env, ".venv")
+            .unwrap();
+        root.replace_symlink(Path::new(".venv"), &other, ".venv")
+            .unwrap();
+        assert_eq!(fs::read_link(dir.join(".venv")).unwrap(), other);
+        assert_eq!(root.read_link(Path::new(".venv")).unwrap(), Some(other));
+        assert_eq!(root.read_link(Path::new("absent")).unwrap(), None);
+        fs::write(dir.join("file"), b"x").unwrap();
+        assert_eq!(root.read_link(Path::new("file")).unwrap(), None);
+        assert!(root.remove_symlink(Path::new("file")).is_err());
+        root.remove_symlink(Path::new(".venv")).unwrap();
+        root.remove_symlink(Path::new(".venv")).unwrap();
+        assert!(dir.join(".venv").symlink_metadata().is_err());
+        assert!(!entries(&dir)
+            .iter()
+            .any(|name| name.starts_with(".tog-tmp")));
+
+        // A tree tog owns is removed without following a symlink inside it.
+        let outside = temp.0.join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("keep"), b"x").unwrap();
+        root.write_file_mode(
+            Path::new(".tog/cargo-home/bin/cargo"),
+            b"#!/bin/sh\n",
+            0o755,
+        )
+        .unwrap();
+        let mode = fs::metadata(dir.join(".tog/cargo-home/bin/cargo"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o755);
+        symlink(&outside, dir.join(".tog/cargo-home/escape")).unwrap();
+        root.remove_dir_all(Path::new(".tog/cargo-home")).unwrap();
+        assert!(!dir.join(".tog/cargo-home").exists());
+        assert!(outside.join("keep").is_file());
+        root.remove_dir_all(Path::new(".tog/cargo-home")).unwrap();
+
+        // Once the project is renamed away, every write lands in the held
+        // directory, never at the old path.
+        let moved = temp.0.join("moved");
+        fs::rename(&dir, &moved).unwrap();
+        fs::create_dir_all(&dir).unwrap();
+        root.replace_symlink(Path::new("node_modules"), &env, "node_modules")
+            .unwrap();
+        assert!(moved.join("node_modules").symlink_metadata().is_ok());
+        assert!(dir.join("node_modules").symlink_metadata().is_err());
     }
 }

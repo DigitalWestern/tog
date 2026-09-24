@@ -55,12 +55,18 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   a wait status. An inherited ignored SIGCHLD (`SIG_IGN` or `SA_NOCLDWAIT`) is overridden while
   a child is supervised, so its exit status is not auto-reaped away; the child still execs with
   the inherited `SIG_IGN`.
-- **A sync addresses the project by pathname.** It checks the project directory's
-  identity before and after waiting for the store lease and refuses if it changed, but a
-  same-user process that renames the directory and puts another project at the same path
-  *during* the sync can make tog sync the replacement under the original's policy and
-  detected ecosystems. Every command that reads the project behaves this way; closing it
-  needs descriptor-relative project access in every tailor. Silent.
+- **The tools a sync runs find the project by pathname.** A sync holds the project
+  directory open from its first read to its last write: detection, policy, manifests, locks,
+  closures, `.venv`/`node_modules` links and `.tog` all go through that one descriptor, and it
+  refuses once the project's path stops naming it (after the store wait, before each
+  ecosystem, before anything is published). The ecosystem tools it starts (uv, npm, cargo,
+  go, mix, bundle, dotnet, a `setup.py` probe) still run in the project by path, so a
+  same-user process that renames the directory away, puts another project at its path, and
+  puts the original back while one of them runs can make that tool read or write the
+  replacement. Loud when the tool's output is read back (a lock it wrote is missing from the
+  held directory); silent otherwise. Files above the project (a Cargo workspace root, a
+  parent `go.work`, .NET `Directory.*` files, a parent `.tog/policy.toml`) and commands that
+  do not sync (`status`, `doctor`, `run`'s environment) read by path.
 - **CLI exit status is 0 / 1 / 2** (success / command failed / usage error); `run`, `x` and
   `fmt` pass the program's status through. A tool argument that is spelled like one of tog's
   own options needs `--` first: `-h`/`--help` for all four, and for `fmt` and `x` also the

@@ -55,18 +55,24 @@ cached in `.tog/plan.json` (`.tog/go-plan.json` for Go) keyed by input hash,
 so unchanged locks never touch the network again. The plan cache is
 machine-local and is not committed; the closure JSON is.
 
-Six writes under `.tog/` go through `kernel::fsroot::ProjectRoot`, which
-walks every component from a held project descriptor with `O_NOFOLLOW`, so a
-`.tog` swapped for a symlink is refused rather than followed: the closure
-JSON (`.tog/closures/<ecosystem>.json`), the plan cache (`.tog/plan.json`),
-the Python manifest snapshots (`.tog/manifest-requirements.txt`,
-`.tog/manifest-constraints.txt`), the lock stamp (`.tog/lock-source.hash`,
-also removed through the descriptor by `tog update`), and the setup.py
-metadata cache (`.tog/egg-info.json`). The rest of `.tog/` is still written
-by pathname: `uv pip compile` writes `requirements.lock.txt` itself, and the
-cargo tailor creates `.tog/cargo-home/` with `tog-config.toml` and a `cargo`
-shim behind its own canonicalized containment check. Closing those is
-"Descriptor-relative project access in sync" in `FOLLOW-UPS.md`.
+A sync opens the project once as a `kernel::fsroot::ProjectRoot`, a held
+directory descriptor, and hands it to every `Tailor` method it calls
+(`detect`, `check_inputs`, `preflight`, `prepare`, `plan`, `sync`). Every
+project read and write goes through it, never through the project's path, so
+a project renamed or replaced mid-sync cannot substitute another project's
+files. Manifests and dependency locks the user authors are read with
+`read_input`, which resolves from the descriptor but follows a symlink the
+project contains. tog's own state is walked one component at a time with
+`O_NOFOLLOW`, so a `.tog`, `.venv` parent or `cargo-home` swapped for a
+symlink is refused rather than followed: closures, the plan and setup.py
+caches, the Python manifest snapshots and lock stamp, `.tog/cargo-home`
+(`tog-config.toml` and the 0755 `cargo` shim), the `.venv` and
+`node_modules` links (`replace_symlink`), and a real `.venv` or
+`node_modules` moved into a store backup (`move_dir_out`). The toolchain
+guard keeps a duplicate of the descriptor, and the closure writer checks
+that the path still names it before a GC root is recorded under that path.
+Ecosystem tools the tailors run still start in the project by path; that
+window is in `docs/human/LIMITATIONS.md`.
 
 ## Vocabulary
 

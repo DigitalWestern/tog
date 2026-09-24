@@ -2,6 +2,7 @@
 //! node_modules forest, workspace links, bin links, and the closure record.
 
 use super::*;
+use crate::kernel::fsroot::ProjectRoot;
 
 pub(super) fn workspace_set(plan: &NpmPlan) -> Vec<String> {
     if !plan.workspaces.is_empty() {
@@ -21,12 +22,13 @@ pub(super) fn workspace_set(plan: &NpmPlan) -> Vec<String> {
     workspaces.into_keys().collect()
 }
 
-pub(super) fn previous_workspace_set(project_dir: &Path) -> Vec<String> {
-    let path = project_dir.join(".tog/closures/node.json");
-    let Ok(text) = fs::read_to_string(path) else {
+/// The workspaces the previous closure recorded, read from tog's own state
+/// through the held project descriptor.
+pub(super) fn previous_workspace_set(project: &ProjectRoot) -> Vec<String> {
+    let Ok(Some(bytes)) = project.read_file(Path::new(".tog/closures/node.json")) else {
         return Vec::new();
     };
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
         return Vec::new();
     };
     value["body"]["workspaces"]
@@ -106,6 +108,7 @@ pub(super) fn managed_projection_symlink(path: &Path, project_dir: &Path, home: 
     managed_projection_symlink_for_store(path, project_dir, home, None)
 }
 
+#[cfg(test)]
 pub(super) fn managed_projection_symlink_for_store(
     path: &Path,
     project_dir: &Path,
@@ -121,6 +124,32 @@ pub(super) fn managed_projection_symlink_for_store(
     let Ok(target) = fs::read_link(path) else {
         return false;
     };
+    managed_target(path, target, project_dir, home, store_root)
+}
+
+/// `managed_projection_symlink_for_store` for a project-relative link read
+/// through the held project descriptor, so the link judged is the one in
+/// the directory being synced.
+fn managed_projection_link(
+    project: &ProjectRoot,
+    relative: &Path,
+    home: &Path,
+    store_root: Option<&Path>,
+) -> bool {
+    let Ok(Some(target)) = project.read_link(relative) else {
+        return false;
+    };
+    let path = project.path().join(relative);
+    managed_target(&path, target, project.path(), home, store_root)
+}
+
+fn managed_target(
+    path: &Path,
+    target: PathBuf,
+    project_dir: &Path,
+    home: &Path,
+    store_root: Option<&Path>,
+) -> bool {
     let target = if target.is_absolute() {
         target
     } else {
@@ -170,8 +199,13 @@ pub(super) fn relative_path(from: &Path, to: &Path) -> io::Result<PathBuf> {
     Ok(result)
 }
 
-pub(super) fn replace_with_symlink(path: &Path, target: &Path, label: &str) -> io::Result<()> {
-    crate::comforter::replace_project_symlink(path, target, label)
+pub(super) fn replace_with_symlink(
+    project: &ProjectRoot,
+    relative: &Path,
+    target: &Path,
+    label: &str,
+) -> io::Result<()> {
+    crate::comforter::replace_project_symlink(project, relative, target, label)
 }
 
 /// Project the env into the project as a "forest": the root and every
@@ -188,7 +222,7 @@ pub(super) fn replace_with_symlink(path: &Path, target: &Path, label: &str) -> i
 /// records them as unattested.
 pub fn project_node_env(
     activity: &StoreActivity,
-    project_dir: &Path,
+    project: &ProjectRoot,
     env_obj: &Path,
     platform: Platform,
     plan: &NpmPlan,
@@ -198,7 +232,7 @@ pub fn project_node_env(
 ) -> io::Result<()> {
     project_node_env_recorded(
         activity,
-        project_dir,
+        project,
         env_obj,
         platform,
         plan,
@@ -274,7 +308,7 @@ fn projection_project_lock(
 /// Returns (backup paths, pending moves) — nothing is moved yet.
 #[allow(clippy::type_complexity)]
 fn reserve_projection_backups(
-    project_dir: &Path,
+    project: &ProjectRoot,
     nm: &Path,
     store: &Store,
     home: &Path,
@@ -287,15 +321,10 @@ fn reserve_projection_backups(
         if workspaces.contains(workspace) || !safe_workspace_path(workspace) {
             continue;
         }
-        let workspace_nm = project_dir.join(workspace).join("node_modules");
-        if !managed_projection_symlink_for_store(
-            &workspace_nm,
-            project_dir,
-            home,
-            Some(&store.root),
-        ) {
+        let workspace_nm = Path::new(workspace).join("node_modules");
+        if !managed_projection_link(project, &workspace_nm, home, Some(&store.root)) {
             if let Some(backup) =
-                crate::comforter::reserve_backup_real_dir_for_store(&workspace_nm, store)?
+                crate::comforter::reserve_backup_real_dir_for_store(project, &workspace_nm, store)?
             {
                 pending_backups.push((workspace_nm, backup.clone()));
                 backup_paths.push(backup);
@@ -305,14 +334,14 @@ fn reserve_projection_backups(
     // A real (npm-made) node_modules is moved aside automatically so
     // pointing tog at an existing project is one command. Workspace
     // importers get the same treatment in their source directories.
-    if let Some(backup) = crate::comforter::reserve_backup_real_dir_for_store(nm, store)? {
+    if let Some(backup) = crate::comforter::reserve_backup_real_dir_for_store(project, nm, store)? {
         pending_backups.push((nm.to_path_buf(), backup.clone()));
         backup_paths.push(backup);
     }
     for workspace in workspaces {
-        let workspace_nm = project_dir.join(workspace).join("node_modules");
+        let workspace_nm = Path::new(workspace).join("node_modules");
         if let Some(backup) =
-            crate::comforter::reserve_backup_real_dir_for_store(&workspace_nm, store)?
+            crate::comforter::reserve_backup_real_dir_for_store(project, &workspace_nm, store)?
         {
             pending_backups.push((workspace_nm, backup.clone()));
             backup_paths.push(backup);
@@ -339,7 +368,7 @@ struct ForestPaths {
 /// checkers, and the forest links into store packages whose own test files
 /// must never be picked up.
 fn forest_paths(
-    project_dir: &Path,
+    project: &ProjectRoot,
     env_obj: &Path,
     store: &Store,
     plan: &NpmPlan,
@@ -362,9 +391,9 @@ fn forest_paths(
         .as_bytes(),
     ))[..32]
         .to_string();
-    let project_key = &hex::encode(Sha256::digest(
-        project_dir.canonicalize()?.as_os_str().as_bytes(),
-    ))[..32];
+    // The held root's path is already canonical: keying on it rather than
+    // re-canonicalizing the pathname keeps a renamed project on its own key.
+    let project_key = &hex::encode(Sha256::digest(project.path().as_os_str().as_bytes()))[..32];
     let nm_root = store.root.join("forests").join(project_key);
     let proj_dir = nm_root.join(&proj_id);
     let forest = proj_dir.join("node_modules");
@@ -379,7 +408,7 @@ fn forest_paths(
 /// Managed projections of workspaces that have left the lockfile: only
 /// symlinks proven to target tog-owned roots are removed automatically.
 fn remove_stale_workspace_links(
-    project_dir: &Path,
+    project: &ProjectRoot,
     store: &Store,
     home: &Path,
     previous_workspaces: &[String],
@@ -389,10 +418,9 @@ fn remove_stale_workspace_links(
         if workspaces.contains(workspace) || !safe_workspace_path(workspace) {
             continue;
         }
-        let workspace_nm = project_dir.join(workspace).join("node_modules");
-        if managed_projection_symlink_for_store(&workspace_nm, project_dir, home, Some(&store.root))
-        {
-            fs::remove_file(workspace_nm)?;
+        let workspace_nm = Path::new(workspace).join("node_modules");
+        if managed_projection_link(project, &workspace_nm, home, Some(&store.root)) {
+            project.remove_symlink(&workspace_nm)?;
         }
     }
     Ok(())
@@ -527,19 +555,26 @@ fn link_workspace_sources(
 /// tog-owned paths are ours from earlier projections: remove them (test
 /// runners crawl through them otherwise). Anything else is only warned
 /// about — never delete what we didn't create.
-fn remove_sync_duplicate_links(project_dir: &Path, store: &Store, home: &Path) {
-    let Ok(entries) = fs::read_dir(project_dir) else {
+///
+/// The project is listed, and each link read and removed, through the held
+/// descriptor.
+fn remove_sync_duplicate_links(project: &ProjectRoot, store: &Store, home: &Path) {
+    let project_dir = project.path();
+    let Ok(Some(entries)) = project.read_input_dir(Path::new(".")) else {
         return;
     };
-    for e in entries.flatten() {
-        let name = e.file_name().to_string_lossy().into_owned();
+    for file_name in entries {
+        let name = file_name.to_string_lossy().into_owned();
         if !name.starts_with("node_modules ") {
             continue;
         }
-        let p = e.path();
+        let p = project_dir.join(&file_name);
         // Only targets under tog-owned roots count as ours — never
         // delete a user's own symlink on a loose match.
-        let is_ours = fs::read_link(&p)
+        let is_ours = project
+            .read_link(Path::new(&file_name))
+            .ok()
+            .flatten()
             .map(|t| {
                 t.starts_with(home.join("forests"))
                     || t.starts_with(store.root.join("forests"))
@@ -548,7 +583,7 @@ fn remove_sync_duplicate_links(project_dir: &Path, store: &Store, home: &Path) {
             })
             .unwrap_or(false);
         if is_ours {
-            let _ = fs::remove_file(&p);
+            let _ = project.remove_symlink(Path::new(&file_name));
             crate::kernel::ui::note(&format!("removed stale sync-duplicate symlink {name:?}"));
         } else {
             crate::kernel::ui::warning(
@@ -607,10 +642,15 @@ fn node_closure_body(
 
 /// `project_node_env` plus the input files recorded for `tog status`
 /// (package.json and the lockfile the plan came from).
+///
+/// The project is read through the held descriptor (the previous closure,
+/// the directory listing, `.tog`). The projection symlinks, backups, and
+/// closure publication still go by `project.path()`: they need a symlink
+/// replace and a directory move ProjectRoot does not offer.
 #[allow(clippy::too_many_arguments)]
 pub fn project_node_env_recorded(
     activity: &StoreActivity,
-    project_dir: &Path,
+    project: &ProjectRoot,
     env_obj: &Path,
     platform: Platform,
     plan: &NpmPlan,
@@ -633,9 +673,10 @@ pub fn project_node_env_recorded(
             "mutable package projection is unattested",
         )?;
     }
-    let nm = project_dir.join("node_modules");
+    let project_dir = project.path();
+    let nm = Path::new("node_modules");
     let workspaces = workspace_set(plan);
-    let previous_workspaces = previous_workspace_set(project_dir);
+    let previous_workspaces = previous_workspace_set(project);
     // Resolve every old and new workspace parent before any policy, backup,
     // removal, or projection mutation. A lexical `packages/lib` can be an
     // external symlink after the previous closure was written.
@@ -658,16 +699,10 @@ pub fn project_node_env_recorded(
         .root
         .parent()
         .ok_or_else(|| err("cannot locate tog home for legacy forests"))?;
-    let (backup_paths, pending_backups) = reserve_projection_backups(
-        project_dir,
-        &nm,
-        &store,
-        home,
-        &previous_workspaces,
-        &workspaces,
-    )?;
+    let (backup_paths, pending_backups) =
+        reserve_projection_backups(project, nm, &store, home, &previous_workspaces, &workspaces)?;
 
-    let paths = forest_paths(project_dir, &env_obj, &store, plan, mutable, &workspaces)?;
+    let paths = forest_paths(project, &env_obj, &store, plan, mutable, &workspaces)?;
     let ForestPaths {
         proj_dir, forest, ..
     } = &paths;
@@ -703,7 +738,7 @@ pub fn project_node_env_recorded(
             .as_ref()
             .expect("strict Node publication owns a project lock");
         crate::comforter::persist_root_for_refs_with_project_lock(
-            project_dir,
+            project,
             &store,
             activity,
             &refs,
@@ -715,9 +750,9 @@ pub fn project_node_env_recorded(
         // symlink: either a project tog has never synced, or one where an
         // `npm install` overwrote the projection. `move_reserved_backup`
         // says so once the move has happened, with where the packages went.
-        crate::comforter::move_reserved_backup(&source, &backup)?;
+        crate::comforter::move_reserved_backup(project, &source, &backup)?;
     }
-    remove_stale_workspace_links(project_dir, &store, home, &previous_workspaces, &workspaces)?;
+    remove_stale_workspace_links(project, &store, home, &previous_workspaces, &workspaces)?;
     build_project_forest(
         activity,
         platform,
@@ -732,21 +767,24 @@ pub fn project_node_env_recorded(
     // be running from one, and pruning would break it mid-session. They are
     // cheap symlink trees; explicit `tog gc` with liveness checks is the
     // collection path.
-    remove_sync_duplicate_links(project_dir, &store, home);
+    remove_sync_duplicate_links(project, &store, home);
 
-    replace_with_symlink(&nm, forest, "node_modules")?;
+    replace_with_symlink(project, nm, forest, "node_modules")?;
     for workspace in &workspaces {
-        let workspace_dir = project_dir.join(workspace);
-        let workspace_nm = workspace_dir.join("node_modules");
+        let workspace_nm = Path::new(workspace).join("node_modules");
         let workspace_forest = proj_dir
             .join("workspaces")
             .join(encode_workspace_path(workspace))
             .join("node_modules");
-        replace_with_symlink(&workspace_nm, &workspace_forest, "workspace-node_modules")?;
+        replace_with_symlink(
+            project,
+            &workspace_nm,
+            &workspace_forest,
+            "workspace-node_modules",
+        )?;
     }
 
-    let meta_dir = project_dir.join(".tog");
-    fs::create_dir_all(&meta_dir)?;
+    project.create_dir_all(Path::new(".tog"))?;
     let mut body = node_closure_body(
         &env_obj,
         &native_reference,
@@ -770,7 +808,7 @@ pub fn project_node_env_recorded(
         .as_ref()
         .expect("strict Node publication owns a project lock");
     crate::comforter::write_closure_with_project_lock(
-        project_dir,
+        project,
         "node",
         body,
         &store,

@@ -299,40 +299,48 @@ pub(super) fn workspace_glob_matches(pattern: &str, path: &str) -> bool {
     matches(&patterns, &paths)
 }
 
+/// Every directory under `directory` (project-relative, `.` for the root)
+/// holding a package.json. The project is walked through the held
+/// descriptor; a symlinked directory is not descended into, as
+/// `DirEntry::file_type` never followed one.
 pub(super) fn collect_workspace_manifests(
-    root: &Path,
+    project: &ProjectRoot,
     directory: &Path,
     result: &mut Vec<String>,
 ) -> io::Result<()> {
-    let entries = fs::read_dir(directory)?;
-    for entry in entries {
-        let entry = entry?;
-        let name = entry.file_name().to_string_lossy().into_owned();
+    let Some(entries) = project.read_input_dir(directory)? else {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("{}: not found", project.path().join(directory).display()),
+        ));
+    };
+    for file_name in entries {
+        let name = file_name.to_string_lossy().into_owned();
         if name == "node_modules" || name == ".git" || name == ".tog" {
             continue;
         }
-        let path = entry.path();
-        if !entry.file_type()?.is_dir() {
+        let path = if directory == Path::new(".") {
+            PathBuf::from(&file_name)
+        } else {
+            directory.join(&file_name)
+        };
+        if project.entry(&path)? != Entry::Directory {
             continue;
         }
-        if path.join("package.json").is_file() {
-            let relative = path
-                .strip_prefix(root)
-                .map_err(|_| err("workspace manifest escaped project root"))?
-                .to_string_lossy()
-                .replace('\\', "/");
+        if project.is_input_file(&path.join("package.json")) {
+            let relative = path.to_string_lossy().replace('\\', "/");
             if !relative.is_empty() {
                 result.push(relative);
             }
         }
-        collect_workspace_manifests(root, &path, result)?;
+        collect_workspace_manifests(project, &path, result)?;
     }
     Ok(())
 }
 
 pub(super) fn yarn_workspace_manifests(
     package: &JsonValue,
-    project_dir: &Path,
+    project: &ProjectRoot,
 ) -> io::Result<Vec<YarnWorkspace>> {
     let Some(value) = package.get("workspaces") else {
         return Ok(Vec::new());
@@ -372,7 +380,7 @@ pub(super) fn yarn_workspace_manifests(
     }
 
     let mut candidates = Vec::new();
-    collect_workspace_manifests(project_dir, project_dir, &mut candidates)?;
+    collect_workspace_manifests(project, Path::new("."), &mut candidates)?;
     candidates.sort();
     candidates.dedup();
     let mut selected = BTreeSet::new();
@@ -401,9 +409,11 @@ pub(super) fn yarn_workspace_manifests(
     }
     let mut workspaces = Vec::new();
     for path in selected {
-        let manifest_path = project_dir.join(&path).join("package.json");
-        let text = fs::read_to_string(&manifest_path)
-            .map_err(|error| err(format!("Yarn workspace {path}: read package.json: {error}")))?;
+        let text = crate::tailors::node::inputs::read_input(
+            project,
+            Path::new(&path).join("package.json"),
+        )
+        .map_err(|error| err(format!("Yarn workspace {path}: read package.json: {error}")))?;
         let package: JsonValue = serde_json::from_str(&text)
             .map_err(|error| err(format!("Yarn workspace {path}: package.json: {error}")))?;
         let name = package["name"].as_str().ok_or_else(|| {
@@ -567,7 +577,7 @@ pub fn plan_yarn(
     platform: Platform,
     lock: &str,
     package_json: &str,
-    project_dir: &Path,
+    project: &ProjectRoot,
     node_version: &str,
 ) -> io::Result<NpmPlan> {
     let entries = parse_yarn_entries(lock)?;
@@ -668,7 +678,7 @@ pub fn plan_yarn(
         }
     }
 
-    let workspaces = yarn_workspace_manifests(&package, project_dir)?;
+    let workspaces = yarn_workspace_manifests(&package, project)?;
     let mut root_deps: Vec<RootDependency> =
         yarn_package_dependencies(&package, &selector_to_node, &workspaces, None)?
             .into_iter()

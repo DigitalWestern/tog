@@ -15,6 +15,7 @@ pub mod tailor;
 
 use crate::kernel::activity::StoreActivity;
 use crate::kernel::fetch::{download_verified_digest_held, download_verified_held, Digest};
+use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::platform::Platform;
 use crate::kernel::sandbox::{force_env, BuildSpec};
 use crate::kernel::store::Store;
@@ -1398,21 +1399,36 @@ fn validate_plan(plan: &ElixirPlan) -> io::Result<()> {
     Ok(())
 }
 
+/// The project's mix.lock text, read through the held descriptor so a
+/// project directory swapped mid-sync cannot hand in another lock.
+fn read_mix_lock(project: &ProjectRoot) -> io::Result<String> {
+    project
+        .read_input_string(Path::new("mix.lock"))?
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("{} not found", project.path().join("mix.lock").display()),
+            )
+        })
+}
+
 /// Plan: AST-parse mix.lock under the pinned toolchain (lock-only, no
 /// eval); missing lock delegates `mix deps.get` (planner scratch, network).
+/// The project is read through the held descriptor; mix itself still runs
+/// in `project.path()`.
 pub fn plan_elixir(
     store: &Store,
     activity: &StoreActivity,
-    project_dir: &Path,
+    project: &ProjectRoot,
     beam_obj: &Path,
     selected: &Selected,
 ) -> io::Result<(ElixirPlan, String)> {
-    if !project_dir.join("mix.exs").is_file() {
+    if !project.is_input_file(Path::new("mix.exs")) {
         return Err(err("mix.exs not found"));
     }
-    let lock_path = project_dir.join("mix.lock");
+    let project_dir = project.path();
     let scratch = store.stage_with_activity(activity)?;
-    if !lock_path.is_file() {
+    if !project.is_input_file(Path::new("mix.lock")) {
         ui::note("no mix.lock; resolving with the store mix (network, unsandboxed)...");
         let out = run_mix(
             activity,
@@ -1453,9 +1469,13 @@ pub fn plan_elixir(
             )));
         }
     }
-    let lock = fs::read_to_string(&lock_path)?;
+    let lock = read_mix_lock(project)?;
     let helper = scratch.join("helper.exs");
     fs::write(&helper, HELPER)?;
+    // The helper parses a copy of the bytes read through the held
+    // descriptor, so what it parses is exactly what is hashed below.
+    let lock_copy = scratch.join("mix.lock");
+    fs::write(&lock_copy, &lock)?;
     let out = run_mix(
         activity,
         beam_obj,
@@ -1468,7 +1488,7 @@ pub fn plan_elixir(
                 .to_str()
                 .ok_or_else(|| err("helper path not UTF-8"))?,
             "lock",
-            lock_path.to_str().ok_or_else(|| err("path not UTF-8"))?,
+            lock_copy.to_str().ok_or_else(|| err("path not UTF-8"))?,
         ],
     )?;
     let _ = crate::kernel::store::remove_tree(&scratch);
@@ -1494,7 +1514,7 @@ pub fn plan_elixir(
         deps,
     };
     validate_plan(&plan)?;
-    let now = fs::read_to_string(&lock_path)?;
+    let now = read_mix_lock(project)?;
     if now != lock {
         return Err(err("mix.lock changed while planning; re-run 'tog'"));
     }
@@ -1715,7 +1735,7 @@ pub fn expected_projection(
 pub fn project_elixir_env(
     activity: &StoreActivity,
     platform: Platform,
-    project_dir: &Path,
+    project: &ProjectRoot,
     beam_obj: &Path,
     deps_obj: &Path,
     plan: &ElixirPlan,
@@ -1729,6 +1749,7 @@ pub fn project_elixir_env(
     let deps_obj = deps_obj.canonicalize()?;
     let store = crate::comforter::store_from_object_path(&beam_obj)
         .ok_or_else(|| err("BEAM object is not in a Tog store"))?;
+    let project_dir = project.path();
     let proj_dir = expected_projection(&store, project_dir, &deps_obj)?;
     let project_lock = store.project_lock(project_dir)?;
     store.ensure_namespace(Path::new("forests"))?;
@@ -1738,7 +1759,7 @@ pub fn project_elixir_env(
     refs.forest(&store, activity, &proj_dir)?;
     // Protect the dependency projection before cloning or publishing it.
     crate::comforter::persist_root_for_refs_with_project_lock(
-        project_dir,
+        project,
         &store,
         activity,
         &refs,
@@ -1760,7 +1781,7 @@ pub fn project_elixir_env(
         fs::rename(&tmp, &proj_dir)?;
     }
     crate::comforter::write_closure_with_project_lock(
-        project_dir,
+        project,
         "elixir",
         closure_body(
             &beam_obj,
@@ -2860,7 +2881,7 @@ exit 0
         let forest = project_elixir_env(
             activity,
             Platform::host().unwrap(),
-            &project,
+            &crate::kernel::fsroot::ProjectRoot::open(&project).unwrap(),
             &store.object_path(&beam_id),
             &store.object_path(&deps_id),
             &plan,
@@ -2895,5 +2916,29 @@ exit 0
         let reimported = crate::kernel::store::reimport_root_for_test(&store, &project).unwrap();
         assert_eq!(reimported.objects, record.objects);
         assert_eq!(reimported.projections, record.projections);
+    }
+
+    /// A project renamed mid-sync with another project put at its path:
+    /// the held root keeps reading the original mix.exs and mix.lock.
+    #[test]
+    fn held_root_reads_the_original_project_after_a_swap() {
+        use crate::tailors::Tailor as _;
+        let temp = TempDir::new("held-root");
+        let project = temp.0.join("app");
+        fs::create_dir_all(&project).unwrap();
+        fs::write(project.join("mix.exs"), "defmodule App.MixProject do end\n").unwrap();
+        fs::write(project.join("mix.lock"), "%{\"original\" => {}}\n").unwrap();
+        let root = ProjectRoot::open(&project).unwrap();
+
+        fs::rename(&project, temp.0.join("app-moved")).unwrap();
+        fs::create_dir_all(&project).unwrap();
+        fs::write(project.join("mix.lock"), "%{\"replacement\" => {}}\n").unwrap();
+
+        assert_eq!(read_mix_lock(&root).unwrap(), "%{\"original\" => {}}\n");
+        // The replacement has no mix.exs; the held original still does.
+        assert!(tailor::Elixir.detect(&root).unwrap());
+        assert!(!tailor::Elixir
+            .detect(&ProjectRoot::open(&project).unwrap())
+            .unwrap());
     }
 }

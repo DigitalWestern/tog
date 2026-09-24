@@ -69,17 +69,6 @@ by position.
   workaround is `SUPERVISION_TEST_LOCK` plus `--test-threads=1` for
   `--ignored` targets. Design: `docs/agent/DESIGNS.md` §5 "Per-operation
   signal sessions" (#57); implementation follows its review.
-- **Descriptor-relative project access in sync.** Every command reads the
-  project by pathname, so a same-user process that swaps the project
-  directory mid-sync can make tog sync the replacement
-  (`docs/human/LIMITATIONS.md`). Raised by review on 2026-09-16 and declined
-  there as pre-existing. Closing it means every tailor reads through a held
-  directory descriptor. Builds on `src/kernel/fsroot.rs`. The toolchain
-  lock has the same shape: `sync` preflight opens a `ProjectRoot`, drops it,
-  and `commit` and the publication recheck reopen the pathname
-  (`src/comforter/toolchain.rs`), so the guard proves the inputs of whatever
-  directory the path names at recheck time. Carry one held root from
-  preflight through publication when the rest of sync does (#132, with #55).
 - **The resolution proxy (#68).** Delegated tools (`add`/`remove`/`update`,
   missing-lock generation, `tog x`) run unsandboxed with network today.
   Design: `docs/agent/DESIGNS.md` §6 (#196). PR 0, the measured evidence,

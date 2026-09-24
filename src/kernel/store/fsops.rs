@@ -224,6 +224,21 @@ pub(crate) fn read_link_at(dirfd: RawFd, name: &[u8]) -> io::Result<PathBuf> {
     }
 }
 
+/// `stat_at` that follows a symlink at the last component, the way a
+/// pathname `metadata` call does, but resolved from `dirfd`.
+pub(crate) fn stat_at_following(dirfd: RawFd, name: &[u8]) -> io::Result<libc::stat> {
+    let name = CString::new(name)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "directory entry contains NUL"))?;
+    // SAFETY: stat is initialized by fstatat before it is read, and name is a
+    // NUL-terminated path that lives through the call.
+    let mut stat = unsafe { std::mem::zeroed() };
+    // SAFETY: dirfd is borrowed for the duration of this call.
+    if unsafe { libc::fstatat(dirfd, name.as_ptr(), &mut stat, 0) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(stat)
+}
+
 pub(crate) fn same_inode(left: &libc::stat, right: &libc::stat) -> bool {
     left.st_dev == right.st_dev && left.st_ino == right.st_ino
 }

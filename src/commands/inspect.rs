@@ -68,31 +68,63 @@ pub fn closures(dir: &Path) -> io::Result<Vec<ClosureFile>> {
     for entry in entries {
         let entry = entry?;
         let name = entry.file_name().to_string_lossy().into_owned();
-        let Some(stem) = name.strip_suffix(".json") else {
-            continue;
-        };
-        if stem.starts_with('.') {
+        if closure_stem(&name).is_none() {
             continue;
         }
         let bytes = fs::read(entry.path())?;
-        let value: Value = serde_json::from_slice(&bytes).map_err(|error| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("{:?}: {error}; run 'tog'", entry.path().to_string_lossy()),
-            )
-        })?;
-        out.push(ClosureFile {
-            ecosystem: value["ecosystem"].as_str().unwrap_or(stem).to_string(),
-            platform: value["platform"].as_str().map(str::to_string),
-            projected_at: value["projected_at"].as_u64(),
-            body: value["body"].clone(),
-            envelope: value,
-            path: entry.path(),
-            record_sha256: hex::encode(Sha256::digest(&bytes)),
-        });
+        out.push(closure_file(&name, entry.path(), &bytes)?);
     }
     out.sort_by_key(|closure| rank(&closure.ecosystem));
     Ok(out)
+}
+
+/// `closures`, read through a project the caller holds: sync seeds its
+/// toolchain from the closures of the directory it holds, not whatever the
+/// path names by then.
+pub fn closures_in(project: &ProjectRoot) -> io::Result<Vec<ClosureFile>> {
+    let mut out = Vec::new();
+    let closures = Path::new(".tog/closures");
+    let Some(names) = project.read_input_dir(closures)? else {
+        return Ok(out);
+    };
+    for name in names {
+        let name = name.to_string_lossy().into_owned();
+        if closure_stem(&name).is_none() {
+            continue;
+        }
+        let relative = closures.join(&name);
+        let Some(bytes) = project.read_input(&relative)? else {
+            continue;
+        };
+        out.push(closure_file(&name, project.path().join(&relative), &bytes)?);
+    }
+    out.sort_by_key(|closure| rank(&closure.ecosystem));
+    Ok(out)
+}
+
+/// The ecosystem stem of a closure file name: `<stem>.json`, not hidden.
+fn closure_stem(name: &str) -> Option<&str> {
+    name.strip_suffix(".json")
+        .filter(|stem| !stem.starts_with('.'))
+}
+
+fn closure_file(name: &str, path: PathBuf, bytes: &[u8]) -> io::Result<ClosureFile> {
+    let stem = closure_stem(name).expect("caller filtered closure names");
+    let value: Value = serde_json::from_slice(bytes).map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{:?}: {error}; run 'tog'", path.to_string_lossy()),
+        )
+    })?;
+    Ok(ClosureFile {
+        ecosystem: value["ecosystem"].as_str().unwrap_or(stem).to_string(),
+        platform: value["platform"].as_str().map(str::to_string),
+        projected_at: value["projected_at"].as_u64(),
+        body: value["body"].clone(),
+        envelope: value,
+        path,
+        record_sha256: hex::encode(Sha256::digest(bytes)),
+    })
 }
 
 fn rank(ecosystem: &str) -> usize {

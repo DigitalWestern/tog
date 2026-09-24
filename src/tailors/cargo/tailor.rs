@@ -8,9 +8,9 @@ use crate::kernel::context::Context;
 use crate::kernel::cyclonedx::{
     component, list, purl_encode, push_hash, required, toolchain_component, version_of,
 };
+use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::objmeta::KindAdapter;
 use crate::kernel::platform::Platform;
-use crate::kernel::store;
 use crate::kernel::toolchain::{Catalog, LegacyEvidence, Selected};
 use crate::kernel::ui;
 use crate::tailors::cargo::{self as cargo, inputs, rustfmt};
@@ -47,19 +47,24 @@ impl Tailor for Cargo {
         name == "cargo" || name == "rustfmt"
     }
 
-    fn detect(&self, dir: &Path) -> io::Result<bool> {
-        Ok(inputs::is_cargo_here(dir))
+    fn detect(&self, project: &ProjectRoot) -> io::Result<bool> {
+        Ok(inputs::is_cargo_here(project))
     }
 
-    fn preflight(&self, platform: Platform, _dir: &Path) -> io::Result<()> {
+    fn preflight(&self, platform: Platform, _project: &ProjectRoot) -> io::Result<()> {
         cargo::preflight_platform(platform)
     }
 
-    fn plan(&self, ctx: &Context, dir: &Path, toolchain: &Selected) -> io::Result<Option<String>> {
+    fn plan(
+        &self,
+        ctx: &Context,
+        project: &ProjectRoot,
+        toolchain: &Selected,
+    ) -> io::Result<Option<String>> {
         let inputs = inputs::load_cargo_inputs(
             ctx.platform,
-            dir,
-            dir,
+            project,
+            project,
             &ctx.store,
             &ctx.activity,
             toolchain,
@@ -70,7 +75,7 @@ impl Tailor for Cargo {
     fn sync(
         &self,
         ctx: &Context,
-        dir: &Path,
+        project: &ProjectRoot,
         request: &SyncRequest,
         attribution: &mut crate::kernel::policy::Attribution,
     ) -> io::Result<bool> {
@@ -79,19 +84,25 @@ impl Tailor for Cargo {
         let fresh = request.fresh;
 
         let store = &ctx.store;
-        let inputs =
-            inputs::load_cargo_inputs(ctx.platform, dir, dir, store, &ctx.activity, toolchain)?;
+        let inputs = inputs::load_cargo_inputs(
+            ctx.platform,
+            project,
+            project,
+            store,
+            &ctx.activity,
+            toolchain,
+        )?;
         let rust_obj = &inputs.rust_obj;
         let vendor_obj = cargo::realize_vendor(store, activity, &inputs.plan)?;
+        // The workspace root the closure and cargo-home belong to: the held
+        // project, or a directory resolved from it.
+        let workspace = inputs::workspace_root(project, &inputs.root)?;
         if fresh {
-            let cargo_home = inputs.root.join(".tog/cargo-home");
-            if std::fs::symlink_metadata(&cargo_home).is_ok() {
-                store::remove_tree(&cargo_home)?;
-            }
+            workspace.remove_dir_all(Path::new(".tog/cargo-home"))?;
         }
         cargo::project_cargo_env(
             activity,
-            &inputs.root,
+            &workspace,
             rust_obj,
             &vendor_obj,
             &inputs.plan,
@@ -108,7 +119,9 @@ impl Tailor for Cargo {
     }
 
     fn build_present(&self, cwd: &Path) -> io::Result<bool> {
-        Ok(cwd.ancestors().any(inputs::is_cargo_here))
+        Ok(cwd
+            .ancestors()
+            .any(|dir| ProjectRoot::open(dir).is_ok_and(|project| inputs::is_cargo_here(&project))))
     }
 
     fn build_root(&self, cwd: &Path) -> io::Result<PathBuf> {
@@ -135,12 +148,21 @@ impl Tailor for Cargo {
     ) -> io::Result<()> {
         let activity = &ctx.activity;
         let store = &ctx.store;
-        let inputs =
-            inputs::load_cargo_inputs(ctx.platform, root, cwd, store, &ctx.activity, toolchain)?;
+        let lock_root = ProjectRoot::open(root)?;
+        let project = ProjectRoot::open(cwd)?;
+        let inputs = inputs::load_cargo_inputs(
+            ctx.platform,
+            &lock_root,
+            &project,
+            store,
+            &ctx.activity,
+            toolchain,
+        )?;
         let vendor_obj = cargo::realize_vendor(store, activity, &inputs.plan)?;
+        let workspace = inputs::workspace_root(&project, &inputs.root)?;
         cargo::project_cargo_env(
             activity,
-            &inputs.root,
+            &workspace,
             &inputs.rust_obj,
             &vendor_obj,
             &inputs.plan,
@@ -397,7 +419,7 @@ impl Tailor for Cargo {
             comforter::toolchain::closure_record(toolchain, &rust_object),
         );
         comforter::write_closure(
-            &workspace_root,
+            &ProjectRoot::open(&workspace_root)?,
             "rustfmt",
             body,
             store,

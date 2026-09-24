@@ -162,8 +162,13 @@ const MINIMAL_PROFILE: &str = "minimal";
 /// lock's own rows; the publication recheck refuses the write if the file
 /// moves after this read.
 pub fn project_extras(project_dir: &Path) -> io::Result<Extras> {
-    let root = ProjectRoot::open(project_dir)?;
-    Ok(Extras::from_rows(&input::discover(&root, "rust")?))
+    project_extras_in(&ProjectRoot::open(project_dir)?)
+}
+
+/// `project_extras` for a project the caller holds (sync): the toolchain
+/// file is read through the held descriptor, never by reopening its path.
+pub fn project_extras_in(project: &ProjectRoot) -> io::Result<Extras> {
+    Ok(Extras::from_rows(&input::discover(project, "rust")?))
 }
 
 /// What an unpacked sdist's own toolchain file inside `root` asks for.

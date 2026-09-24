@@ -2,6 +2,7 @@
 //! project policy chain, the exception kinds a sync may wave through, and
 //! the collision checks the store consults at commit time.
 
+use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::signing::{self, KeySet};
 use crate::kernel::store::Store;
 use crate::kernel::ui;
@@ -260,7 +261,20 @@ fn merge_file(
             ))
         }
     };
-    let other = parse_file(path, &text)?;
+    merge_text(policy, sources, path, &text, origin)?;
+    Ok(true)
+}
+
+/// `merge_file` for text already read (the project's own policy, read
+/// through the held project descriptor).
+fn merge_text(
+    policy: &mut Policy,
+    sources: &mut Vec<PolicySource>,
+    path: &Path,
+    text: &str,
+    origin: SourceOrigin,
+) -> io::Result<()> {
+    let other = parse_file(path, text)?;
     // Attribute before merging: after the union nothing says which file
     // asked for a denial, and a refusal has to name the file to fix.
     if other.strict && policy.strict_source.is_none() {
@@ -276,7 +290,7 @@ fn merge_file(
     // Only a file that existed and was merged is a source; the optional
     // files that were not there contributed nothing to attribute.
     sources.push(PolicySource::from_file(origin, path, &other));
-    Ok(true)
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -421,6 +435,18 @@ pub fn load_with_sources(
     project_dir: &Path,
     cli_strict: bool,
 ) -> io::Result<(Policy, Vec<PolicySource>)> {
+    load_with_sources_from(project_dir, None, cli_strict)
+}
+
+/// `load_with_sources` with the project directory itself read through a
+/// descriptor the caller holds: its own `.tog/policy.toml` is the one of
+/// the directory being synced, whatever its path names by then. Ancestor
+/// and machine policies are outside the project and still read by path.
+fn load_with_sources_from(
+    project_dir: &Path,
+    project: Option<&ProjectRoot>,
+    cli_strict: bool,
+) -> io::Result<(Policy, Vec<PolicySource>)> {
     let mut policy = Policy::default();
     let mut sources = Vec::new();
     let machine_path = if let Some(path) = std::env::var_os("TOG_POLICY") {
@@ -455,6 +481,19 @@ pub fn load_with_sources(
             .as_ref()
             .is_some_and(|machine| path_identity(&path).as_ref() == Some(machine))
         {
+            continue;
+        }
+        if let Some(project) = project.filter(|project| project.path() == dir) {
+            let own = Path::new(".tog/policy.toml");
+            if let Some(text) = project.read_input_string(own)? {
+                merge_text(
+                    &mut policy,
+                    &mut sources,
+                    &path,
+                    &text,
+                    SourceOrigin::Project,
+                )?;
+            }
             continue;
         }
         merge_file(
@@ -508,6 +547,15 @@ pub fn load_with_sources(
 pub fn init(project_dir: &Path, cli_strict: bool) -> io::Result<()> {
     if POLICY.get().is_none() {
         let _ = POLICY.set(load(project_dir, cli_strict)?);
+    }
+    Ok(())
+}
+
+/// `init` for a project held open as a descriptor (sync): the project's own
+/// policy is read through it.
+pub fn init_in(project: &ProjectRoot, cli_strict: bool) -> io::Result<()> {
+    if POLICY.get().is_none() {
+        let _ = POLICY.set(load_with_sources_from(project.path(), Some(project), cli_strict)?.0);
     }
     Ok(())
 }

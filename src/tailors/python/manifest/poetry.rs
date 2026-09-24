@@ -5,12 +5,13 @@ use super::*;
 
 pub(super) fn poetry_manifest(
     platform: Platform,
-    dir: &Path,
+    project: &ProjectRoot,
     value: &toml::Value,
     _source: &str,
     cfg: &TogPythonConfig,
     python_version: &str,
 ) -> io::Result<Manifest> {
+    let dir = project.path();
     let poetry = value
         .get("tool")
         .and_then(toml::Value::as_table)
@@ -97,8 +98,8 @@ pub(super) fn poetry_manifest(
         )?;
     }
     let lock_path = dir.join("poetry.lock");
-    let (requirements, locked) = if lock_path.is_file() {
-        let lock_text = read_text(&lock_path)?;
+    let (requirements, locked) = if is_project_file(project, &lock_path) {
+        let lock_text = read_text(project, &lock_path)?;
         let lock = parse_toml(&lock_path, &lock_text)?;
         check_poetry_content_hash(value, &lock)?;
         let locked = poetry_lock_requirements(platform, value, &lock, cfg, python_version)
@@ -109,7 +110,7 @@ pub(super) fn poetry_manifest(
     } else {
         (requirements, false)
     };
-    let provenance = if lock_path.is_file() && locked {
+    let provenance = if is_project_file(project, &lock_path) && locked {
         "pyproject.toml [tool.poetry] (+ poetry.lock)"
     } else {
         "pyproject.toml [tool.poetry]"

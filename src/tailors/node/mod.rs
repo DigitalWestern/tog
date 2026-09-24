@@ -2158,7 +2158,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            previous_workspace_set(&dir),
+            previous_workspace_set(&crate::kernel::fsroot::ProjectRoot::open(&dir).unwrap()),
             vec![
                 "packages/lib".to_string(),
                 "tools/node_modules-shim".to_string()
@@ -2282,7 +2282,7 @@ mod tests {
         let activity = &lease.1;
         project_node_env_recorded(
             activity,
-            &project,
+            &crate::kernel::fsroot::ProjectRoot::open(&project).unwrap(),
             &env,
             Platform::host().unwrap(),
             &plan,
@@ -2392,7 +2392,7 @@ mod tests {
         let activity = &lease.1;
         project_node_env_recorded(
             activity,
-            &project,
+            &crate::kernel::fsroot::ProjectRoot::open(&project).unwrap(),
             &env,
             Platform::host().unwrap(),
             &plan,
@@ -2518,7 +2518,7 @@ mod tests {
         let runtime = store.object_path(&runtime_id);
         project_node_env_recorded(
             activity,
-            &project,
+            &crate::kernel::fsroot::ProjectRoot::open(&project).unwrap(),
             &store.object_path(&env_id),
             Platform::host().unwrap(),
             &plan,
@@ -2628,7 +2628,7 @@ mod tests {
         let activity = &lease.1;
         project_node_env(
             activity,
-            &project,
+            &crate::kernel::fsroot::ProjectRoot::open(&project).unwrap(),
             &env,
             Platform::host().unwrap(),
             &first,
@@ -2658,7 +2658,7 @@ mod tests {
         let activity = &lease.1;
         project_node_env(
             activity,
-            &project,
+            &crate::kernel::fsroot::ProjectRoot::open(&project).unwrap(),
             &env,
             Platform::host().unwrap(),
             &second,

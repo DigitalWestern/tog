@@ -247,16 +247,20 @@ pub fn needs_seeding(envelope: &serde_json::Value) -> bool {
     envelope["body"].get("toolchain").is_none()
 }
 
-/// [`legacy_evidence`] for the closure `tailor` wrote under `dir`, if any:
+/// [`legacy_evidence`] for the closure `tailor` wrote in `project`, if any:
 /// what a read-only answer (`tog doctor`, `tog status`) passes `resolve`
 /// so it seeds exactly as the next sync would. This lookup itself only
-/// reads the store; the command around it may already hold it open.
-pub fn legacy_evidence_in(dir: &Path, tailor: &dyn Tailor) -> io::Result<Option<LegacyEvidence>> {
-    let path = dir.join(format!(".tog/closures/{}.json", tailor.id()));
-    let bytes = match std::fs::read(&path) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error),
+/// reads the store; the command around it may already hold it open. The
+/// closure is tog's own state, read through the held project with the
+/// strict no-follow walk.
+pub fn legacy_evidence_in(
+    project: &ProjectRoot,
+    tailor: &dyn Tailor,
+) -> io::Result<Option<LegacyEvidence>> {
+    let relative = PathBuf::from(format!(".tog/closures/{}.json", tailor.id()));
+    let path = project.path().join(&relative);
+    let Some(bytes) = project.read_file(&relative)? else {
+        return Ok(None);
     };
     let envelope: serde_json::Value = serde_json::from_slice(&bytes)
         .map_err(|error| invalid(format!("{}: {error}; run 'tog'", path.display())))?;
@@ -696,7 +700,10 @@ pub fn resolve(
 /// before any project write, that the lock and the inputs are still the
 /// ones this command resolved from.
 struct GuardState {
-    root: PathBuf,
+    /// A duplicate of the descriptor the command resolved through: the
+    /// recheck reads the directory it held, never whatever the project's
+    /// path names by publication time.
+    root: ProjectRoot,
     lock_bytes: Option<Vec<u8>>,
     inputs: Vec<(String, Vec<InputRow>)>,
 }
@@ -767,7 +774,7 @@ pub fn commit(
     *INPUT_GUARD
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(GuardState {
-        root: root.path().to_path_buf(),
+        root: root.try_clone()?,
         lock_bytes: toolchain.lock_bytes.clone(),
         inputs: toolchain.inputs.clone(),
     });
@@ -821,8 +828,14 @@ fn conflict(existing: &[u8], toolchain: &ProjectToolchain) -> io::Error {
 }
 
 /// Prove the lock and the source inputs are still the ones this command
-/// resolved from. Called at the top of the one closure writer, so every
+/// resolved from, and that the project's path still names the directory it
+/// resolved them in. Called at the top of the one closure writer, so every
 /// project write is covered without each producer remembering to ask.
+///
+/// Everything is read through the descriptor the command held since
+/// preflight, so a project renamed away and replaced by another at the same
+/// path is refused here rather than rechecked in the replacement. Nothing
+/// to prove when no sync guard is installed (a command outside sync).
 pub fn recheck_before_publication() -> io::Result<()> {
     let guard = INPUT_GUARD
         .lock()
@@ -830,14 +843,15 @@ pub fn recheck_before_publication() -> io::Result<()> {
     let Some(state) = guard.as_ref() else {
         return Ok(());
     };
-    let root = ProjectRoot::open(&state.root)?;
-    if ToolchainLock::read_bytes_via(&root)? != state.lock_bytes {
+    let root = &state.root;
+    root.check_still_named()?;
+    if ToolchainLock::read_bytes_via(root)? != state.lock_bytes {
         return Err(invalid(
             "tog-toolchain.toml changed during sync (update --toolchain race)",
         ));
     }
     for (ecosystem, recorded) in &state.inputs {
-        let current = input::discover(&root, ecosystem)?;
+        let current = input::discover(root, ecosystem)?;
         for row in recorded {
             let now = current
                 .iter()
@@ -1273,7 +1287,9 @@ mod tests {
 
         std::env::set_var("TOG_STORE", &store.root);
         let before = tree(&store.root);
-        let evidence = legacy_evidence_in(&dir, go).unwrap().unwrap();
+        let evidence = legacy_evidence_in(&ProjectRoot::open(&dir).unwrap(), go)
+            .unwrap()
+            .unwrap();
         assert_eq!(tree(&store.root), before);
         assert!(evidence.unproved.is_empty(), "{:?}", evidence.unproved);
         assert!(
@@ -1300,7 +1316,9 @@ mod tests {
             serde_json::to_vec(&serde_json::json!({"identity": forged})).unwrap(),
         )
         .unwrap();
-        let evidence = legacy_evidence_in(&dir, go).unwrap().unwrap();
+        let evidence = legacy_evidence_in(&ProjectRoot::open(&dir).unwrap(), go)
+            .unwrap()
+            .unwrap();
         assert!(evidence.artifacts.is_empty());
         assert!(
             evidence.contradicted[0].contains("has unusable store metadata"),
@@ -1311,7 +1329,9 @@ mod tests {
         // No store yet: nothing proved, and nothing created.
         let missing = temp.0.join("no-store");
         std::env::set_var("TOG_STORE", &missing);
-        let evidence = legacy_evidence_in(&dir, go).unwrap().unwrap();
+        let evidence = legacy_evidence_in(&ProjectRoot::open(&dir).unwrap(), go)
+            .unwrap()
+            .unwrap();
         assert!(evidence.artifacts.is_empty());
         assert!(
             evidence.unproved[0].contains("there is no store"),
@@ -1633,6 +1653,50 @@ mod tests {
         // Dropping the guard puts the process back to having no snapshot.
         drop(guard);
         recheck_before_publication().unwrap();
+    }
+
+    /// #132: the guard holds the descriptor preflight resolved through. A
+    /// project renamed away between preflight and publication, with another
+    /// project installed at its path, is refused rather than rechecked in
+    /// the replacement, and the guard never reads the replacement.
+    #[test]
+    fn the_guard_refuses_a_project_renamed_and_replaced_before_publication() {
+        let _serialized = serialized();
+        let temp = TempDir::new();
+        let dir = project(&temp);
+        let root = ProjectRoot::open(&dir).unwrap();
+        let mut created = resolve_python(&root, &dir, Mode::Writable).unwrap();
+        let guard = commit(&root, &mut created, &Mode::Writable).unwrap();
+        drop(root);
+        recheck_before_publication().unwrap();
+
+        // Rename the checked project away and put a byte-identical copy at
+        // its path: identical lock and inputs, a different directory. A
+        // recheck that reopened the path would read the copy and pass.
+        let moved = temp.0.join("moved");
+        std::fs::rename(&dir, &moved).unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in ["pyproject.toml", ".python-version", LOCK_PATH] {
+            std::fs::copy(moved.join(name), dir.join(name)).unwrap();
+        }
+        let error = recheck_before_publication().unwrap_err().to_string();
+        assert!(error.contains("moved or replaced during sync"), "{error}");
+
+        // The guard reads the directory it held, wherever it now is: an
+        // input edited in the moved original is caught once it is back.
+        std::fs::write(moved.join(".python-version"), "3.13.15\n").unwrap();
+
+        // Putting the original back is the only way to publish again.
+        std::fs::remove_dir_all(&dir).unwrap();
+        std::fs::rename(&moved, &dir).unwrap();
+        let error = recheck_before_publication().unwrap_err().to_string();
+        assert!(
+            error.contains("project toolchain inputs changed during sync"),
+            "{error}"
+        );
+        std::fs::write(dir.join(".python-version"), "3.12.14\n").unwrap();
+        recheck_before_publication().unwrap();
+        drop(guard);
     }
 
     #[test]

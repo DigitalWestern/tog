@@ -6,11 +6,14 @@
 //! to the npm tailor's literal node_modules paths before realization.
 
 use crate::kernel::fetch::Digest;
+use crate::kernel::fsroot::{Entry, ProjectRoot};
 use crate::kernel::platform::Platform;
+use crate::tailors::node::inputs::input_exists;
 use crate::tailors::node::{NpmLink, NpmPackage, NpmPatch, NpmPlan};
 use serde_json::Value as JsonValue;
 use sha2::{Digest as Sha2Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+#[cfg(test)]
 use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
@@ -849,6 +852,11 @@ mod tests {
             .version
     }
 
+    /// A fixture project held the way sync holds it.
+    pub(super) fn held(dir: &std::path::Path) -> crate::kernel::fsroot::ProjectRoot {
+        crate::kernel::fsroot::ProjectRoot::open(dir).unwrap()
+    }
+
     #[test]
     fn a_quote_inside_a_plain_key_does_not_open_a_quoted_scalar() {
         let lock = "lockfileVersion: '9.0'\n\nimporters:\n\n  .: {}\n\n  packages/it's: {}\n  packages/plain: {}\n";
@@ -972,7 +980,13 @@ snapshots:
   mac-only@1.0.0: {{}}
 "#
         );
-        let plan = plan_pnpm(Platform::X86_64UnknownLinuxGnu, &lock, &dir, node_version()).unwrap();
+        let plan = plan_pnpm(
+            Platform::X86_64UnknownLinuxGnu,
+            &lock,
+            &held(&dir),
+            node_version(),
+        )
+        .unwrap();
         assert_eq!(plan.lock_source, "pnpm-lock.yaml");
         assert!(plan.links.iter().any(|link| link.target == "packages/lib"));
         assert!(plan.packages.iter().any(|package| package.name == "is-odd"));
@@ -1037,7 +1051,13 @@ snapshots:
   mac-only@1.0.0: {{}}
 "#
         );
-        let plan = plan_pnpm(Platform::X86_64UnknownLinuxGnu, &lock, &dir, node_version()).unwrap();
+        let plan = plan_pnpm(
+            Platform::X86_64UnknownLinuxGnu,
+            &lock,
+            &held(&dir),
+            node_version(),
+        )
+        .unwrap();
         let placed: Vec<(&str, &str, &str)> = plan
             .packages
             .iter()
@@ -1089,7 +1109,13 @@ packages:
     resolution: {{integrity: {SRI}}}
 "#
         );
-        let plan = plan_pnpm(Platform::X86_64UnknownLinuxGnu, &lock, &dir, node_version()).unwrap();
+        let plan = plan_pnpm(
+            Platform::X86_64UnknownLinuxGnu,
+            &lock,
+            &held(&dir),
+            node_version(),
+        )
+        .unwrap();
         assert!(plan
             .packages
             .iter()
@@ -1134,7 +1160,13 @@ importers:
   .: {{}}
 "#
         );
-        let plan = plan_pnpm(Platform::X86_64UnknownLinuxGnu, &lock, &dir, node_version()).unwrap();
+        let plan = plan_pnpm(
+            Platform::X86_64UnknownLinuxGnu,
+            &lock,
+            &held(&dir),
+            node_version(),
+        )
+        .unwrap();
         assert!(plan.packages.is_empty(), "{:?}", plan.packages);
         assert!(plan.links.is_empty(), "{:?}", plan.links);
         let _ = fs::remove_dir_all(dir);
@@ -1165,7 +1197,13 @@ snapshots:
   foo@1.0.0: {{}}
 "#
         );
-        let plan = plan_pnpm(Platform::X86_64UnknownLinuxGnu, &lock, &dir, node_version()).unwrap();
+        let plan = plan_pnpm(
+            Platform::X86_64UnknownLinuxGnu,
+            &lock,
+            &held(&dir),
+            node_version(),
+        )
+        .unwrap();
         assert_eq!(
             plan.packages[0]
                 .patch
@@ -1174,8 +1212,13 @@ snapshots:
             Some(hash.as_str())
         );
         fs::write(&patch_path, b"changed patch").unwrap();
-        let error =
-            plan_pnpm(Platform::X86_64UnknownLinuxGnu, &lock, &dir, node_version()).unwrap_err();
+        let error = plan_pnpm(
+            Platform::X86_64UnknownLinuxGnu,
+            &lock,
+            &held(&dir),
+            node_version(),
+        )
+        .unwrap_err();
         assert!(error.to_string().contains("patch foo@1.0.0 hash mismatch"));
         let _ = fs::remove_dir_all(dir);
     }
@@ -1212,7 +1255,13 @@ snapshots:
   foo@1.0.0: {{}}
 "#
         );
-        let plan = plan_pnpm(Platform::X86_64UnknownLinuxGnu, &lock, &dir, node_version()).unwrap();
+        let plan = plan_pnpm(
+            Platform::X86_64UnknownLinuxGnu,
+            &lock,
+            &held(&dir),
+            node_version(),
+        )
+        .unwrap();
         assert_eq!(
             plan.packages[0]
                 .patch
@@ -1237,8 +1286,13 @@ snapshots:
             "pnpm 9 md5 patch hash accepted and verified, but is cryptographically weak; the environment id binds the patch by sha256"
         );
         fs::write(&patch_path, b"changed patch").unwrap();
-        let error =
-            plan_pnpm(Platform::X86_64UnknownLinuxGnu, &lock, &dir, node_version()).unwrap_err();
+        let error = plan_pnpm(
+            Platform::X86_64UnknownLinuxGnu,
+            &lock,
+            &held(&dir),
+            node_version(),
+        )
+        .unwrap_err();
         // The computed value is reported in the declared encoding.
         assert!(
             error
@@ -1288,7 +1342,7 @@ snapshots:
         let md5_error = super::pnpm::plan_pnpm_with_policy(
             Platform::X86_64UnknownLinuxGnu,
             &lock("kpncbvlbnwqxywzzahw2g7pnwq"),
-            &dir,
+            &held(&dir),
             node_version(),
             &deny_weak_integrity,
         )
@@ -1300,7 +1354,7 @@ snapshots:
         let sha256_plan = super::pnpm::plan_pnpm_with_policy(
             Platform::X86_64UnknownLinuxGnu,
             &lock("2692094a267de7e28825147fd6cb2ebde098a4e68c25dfa3976ac806f4a1a784"),
-            &dir,
+            &held(&dir),
             node_version(),
             &deny_weak_integrity,
         )
@@ -1340,7 +1394,13 @@ snapshots:
   b@1.0.0: {{}}
 "#
         );
-        let plan = plan_pnpm(Platform::X86_64UnknownLinuxGnu, &lock, &dir, node_version()).unwrap();
+        let plan = plan_pnpm(
+            Platform::X86_64UnknownLinuxGnu,
+            &lock,
+            &held(&dir),
+            node_version(),
+        )
+        .unwrap();
         assert!(plan.links.iter().any(|link| link.target == "vendor/a"));
         assert!(plan
             .packages
@@ -1391,7 +1451,13 @@ snapshots:
   child-b@1.0.0: {{}}
 "#
         );
-        let plan = plan_pnpm(Platform::X86_64UnknownLinuxGnu, &lock, &dir, node_version()).unwrap();
+        let plan = plan_pnpm(
+            Platform::X86_64UnknownLinuxGnu,
+            &lock,
+            &held(&dir),
+            node_version(),
+        )
+        .unwrap();
         assert!(plan.packages.iter().any(|package| {
             package.path == "node_modules/plugin" && package.version == "1.0.0"
         }));
@@ -1450,7 +1516,13 @@ snapshots:
       c: 1.0.0
 "#
         );
-        let plan = plan_pnpm(Platform::X86_64UnknownLinuxGnu, &lock, &dir, node_version()).unwrap();
+        let plan = plan_pnpm(
+            Platform::X86_64UnknownLinuxGnu,
+            &lock,
+            &held(&dir),
+            node_version(),
+        )
+        .unwrap();
         assert!(plan.packages.iter().any(|package| {
             package.path == "node_modules/b/node_modules/d/node_modules/c"
                 && package.version == "1.0.0"
@@ -1482,7 +1554,7 @@ snapshots: {}
         let error = plan_pnpm(
             Platform::X86_64UnknownLinuxGnu,
             required,
-            &dir,
+            &held(&dir),
             node_version(),
         )
         .unwrap_err();
@@ -1494,7 +1566,7 @@ snapshots: {}
         let plan = plan_pnpm(
             Platform::X86_64UnknownLinuxGnu,
             &optional,
-            &dir,
+            &held(&dir),
             node_version(),
         )
         .unwrap();
@@ -1536,7 +1608,13 @@ snapshots:
   c@2.0.0: {{}}
 "#
         );
-        let plan = plan_pnpm(Platform::X86_64UnknownLinuxGnu, &lock, &dir, node_version()).unwrap();
+        let plan = plan_pnpm(
+            Platform::X86_64UnknownLinuxGnu,
+            &lock,
+            &held(&dir),
+            node_version(),
+        )
+        .unwrap();
         let paths: Vec<_> = plan
             .packages
             .iter()
@@ -1580,7 +1658,13 @@ snapshots:
   shared@2.0.0: {{}}
 "#
         );
-        let plan = plan_pnpm(Platform::X86_64UnknownLinuxGnu, &lock, &dir, node_version()).unwrap();
+        let plan = plan_pnpm(
+            Platform::X86_64UnknownLinuxGnu,
+            &lock,
+            &held(&dir),
+            node_version(),
+        )
+        .unwrap();
         assert!(plan
             .packages
             .iter()
@@ -1622,7 +1706,13 @@ snapshots:
   c@2.0.0: {{}}
 "#
         );
-        let plan = plan_pnpm(Platform::X86_64UnknownLinuxGnu, &lock, &dir, node_version()).unwrap();
+        let plan = plan_pnpm(
+            Platform::X86_64UnknownLinuxGnu,
+            &lock,
+            &held(&dir),
+            node_version(),
+        )
+        .unwrap();
         assert!(plan
             .packages
             .iter()
@@ -1654,7 +1744,7 @@ is-number@^6.0.0:
             Platform::X86_64UnknownLinuxGnu,
             lock,
             package_json,
-            &dir,
+            &held(&dir),
             node_version(),
         )
         .unwrap();
@@ -1668,7 +1758,7 @@ is-number@^6.0.0:
             Platform::X86_64UnknownLinuxGnu,
             berry,
             package_json,
-            &dir,
+            &held(&dir),
             node_version(),
         )
         .unwrap_err();
@@ -1737,7 +1827,7 @@ snapshots:
         let error = super::pnpm::plan_pnpm_with_policy(
             Platform::X86_64UnknownLinuxGnu,
             lock,
-            &dir,
+            &held(&dir),
             node_version(),
             &crate::kernel::policy::Policy::default(),
         )
@@ -1773,7 +1863,7 @@ dep@1.0.0:
             Platform::X86_64UnknownLinuxGnu,
             &lock,
             &package,
-            &dir,
+            &held(&dir),
             node_version(),
         )
         .unwrap();
@@ -1810,7 +1900,7 @@ dep@1.0.0:
             Platform::X86_64UnknownLinuxGnu,
             "# yarn lockfile v1\n",
             &package,
-            &dir,
+            &held(&dir),
             node_version(),
         )
         .unwrap();
@@ -1866,8 +1956,13 @@ snapshots:
   linux-only@1.0.0: {{}}
 "#
         );
-        let error =
-            plan_pnpm(Platform::Aarch64AppleDarwin, &lock, &dir, node_version()).unwrap_err();
+        let error = plan_pnpm(
+            Platform::Aarch64AppleDarwin,
+            &lock,
+            &held(&dir),
+            node_version(),
+        )
+        .unwrap_err();
         let text = error.to_string();
         assert!(text.contains("linux-only@1.0.0"));
         assert!(text.contains("aarch64-apple-darwin"));
@@ -1877,7 +1972,7 @@ snapshots:
 
 #[cfg(test)]
 mod git_import_tests {
-    use super::tests::node_version;
+    use super::tests::{held, node_version};
 
     const SRI: &str =
         "sha512-m3HSJL1i83hdltRq0+o9czGb+8KJDKra4t/3JRXMui/CET1IEDrHK6nHYbdEaGL/uhPMbuF3AGkGxXTVpn3ETw==";
@@ -1946,7 +2041,7 @@ mod git_import_tests {
         let plan = super::plan_pnpm(
             crate::kernel::platform::Platform::X86_64UnknownLinuxGnu,
             &lock,
-            &project,
+            &held(&project),
             node_version(),
         )
         .unwrap();
@@ -1972,7 +2067,7 @@ plugin@1.0.0:
             crate::kernel::platform::Platform::X86_64UnknownLinuxGnu,
             &lock,
             r#"{"dependencies":{"plugin":"1.0.0"}}"#,
-            &project,
+            &held(&project),
             node_version(),
         )
         .unwrap();
@@ -2003,7 +2098,7 @@ plugin@1.0.0:
             crate::kernel::platform::Platform::X86_64UnknownLinuxGnu,
             &lock,
             &format!(r#"{{"dependencies":{{"rt-client":"{url}"}}}}"#),
-            &project,
+            &held(&project),
             node_version(),
         )
         .unwrap();
@@ -2039,7 +2134,7 @@ plugin@1.0.0:
                 crate::kernel::platform::Platform::X86_64UnknownLinuxGnu,
                 &lock,
                 r#"{"dependencies":{"plugin":"1.0.0"}}"#,
-                &dir,
+                &held(&dir),
                 node_version(),
             );
             let _ = crate::kernel::store::remove_tree(&dir);
@@ -2058,7 +2153,7 @@ plugin@1.0.0:
                 crate::kernel::platform::Platform::X86_64UnknownLinuxGnu,
                 &lock,
                 r#"{"dependencies":{"plugin":"1.0.0"}}"#,
-                &dir,
+                &held(&dir),
                 node_version(),
             );
             let _ = crate::kernel::store::remove_tree(&dir);
@@ -2107,7 +2202,7 @@ plugin@1.0.0:
         let result = super::plan_pnpm(
             crate::kernel::platform::Platform::X86_64UnknownLinuxGnu,
             &lock,
-            &project,
+            &held(&project),
             node_version(),
         );
         let _ = crate::kernel::store::remove_tree(&project);

@@ -9,12 +9,12 @@ pub(super) struct TogPythonConfig {
     pub(super) extras: BTreeSet<String>,
 }
 
-pub(super) fn config(dir: &Path) -> io::Result<TogPythonConfig> {
-    let path = dir.join("tog.toml");
-    if !path.is_file() {
+pub(super) fn config(project: &ProjectRoot) -> io::Result<TogPythonConfig> {
+    let path = project.path().join("tog.toml");
+    if !is_project_file(project, &path) {
         return Ok(TogPythonConfig::default());
     }
-    let value = parse_toml(&path, &read_text(&path)?)?;
+    let value = parse_toml(&path, &read_text(project, &path)?)?;
     let Some(python) = value.get("python").and_then(toml::Value::as_table) else {
         return Ok(TogPythonConfig::default());
     };
@@ -71,83 +71,94 @@ pub(super) fn project_dependencies_are_dynamic(value: &toml::Value) -> bool {
 
 /// Read only enough metadata to decide whether Python is present. Parsing is
 /// intentional: a found but broken manifest is reported as unreadable, not as
-/// a misleading "nothing to sync here".
-pub fn has_manifest(dir: &Path) -> io::Result<bool> {
-    if dir.join("requirements.lock.txt").is_file() || dir.join("requirements.txt").is_file() {
+/// a misleading "nothing to sync here". The project is read through the
+/// held descriptor.
+pub fn has_manifest(project: &ProjectRoot) -> io::Result<bool> {
+    let dir = project.path();
+    let is_file = |name: &str| is_project_file(project, &dir.join(name));
+    if is_file("requirements.lock.txt") || is_file("requirements.txt") {
         return Ok(true);
     }
     let pyproject = dir.join("pyproject.toml");
-    if pyproject.is_file() {
-        let value = parse_toml(&pyproject, &read_text(&pyproject)?)?;
+    if is_file("pyproject.toml") {
+        let value = parse_toml(&pyproject, &read_text(project, &pyproject)?)?;
         let (project, poetry, groups) = pyproject_sections(&value);
         if project || poetry || groups {
             return Ok(true);
         }
     }
-    if dir.join("setup.cfg").is_file() || dir.join("setup.py").is_file() {
+    if is_file("setup.cfg") || is_file("setup.py") {
         return Ok(true);
     }
-    Ok(requirements_directory_candidate(dir, &config(dir)?)?.is_some())
+    Ok(requirements_directory_candidate(project, &config(project)?)?.is_some())
 }
 
 /// Interpreter-input collection lives in `pyselect`. Keep the manifest
 /// boundary's error class around it so preflight and planning report the same
 /// diagnosis.
-pub fn python_inputs(dir: &Path) -> io::Result<PythonInputs> {
-    pyselect::collect_project_inputs(dir).map_err(|e| unreadable(&dir.join("pyproject.toml"), e))
+pub fn python_inputs(project: &ProjectRoot) -> io::Result<PythonInputs> {
+    pyselect::collect_project_inputs(project)
+        .map_err(|e| unreadable(&project.path().join("pyproject.toml"), e))
 }
 
 /// Discover the project's manifest. `python_version` is the interpreter the
 /// project's toolchain selection names: marker evaluation (Poetry's
 /// environment markers, a `uv.lock` entry's `python_version`) is a function
 /// of the interpreter that will run, so discovery is handed the locked one
-/// rather than choosing its own.
-pub fn discover(platform: Platform, dir: &Path, python_version: &str) -> io::Result<Manifest> {
-    let cfg = config(dir)?;
-    let collected_python = python_inputs(dir)?;
-    let dynamic_dependencies = if dir.join("pyproject.toml").is_file() {
+/// rather than choosing its own. The project is read through the held
+/// descriptor.
+pub fn discover(
+    platform: Platform,
+    project: &ProjectRoot,
+    python_version: &str,
+) -> io::Result<Manifest> {
+    let dir = project.path();
+    let is_file = |name: &str| is_project_file(project, &dir.join(name));
+    let cfg = config(project)?;
+    let collected_python = python_inputs(project)?;
+    let dynamic_dependencies = if is_file("pyproject.toml") {
         let path = dir.join("pyproject.toml");
-        project_dependencies_are_dynamic(&parse_toml(&path, &read_text(&path)?)?)
+        project_dependencies_are_dynamic(&parse_toml(&path, &read_text(project, &path)?)?)
     } else {
         false
     };
-    let mut manifest = if dir.join("requirements.txt").is_file() {
-        requirements_manifest(dir, &dir.join("requirements.txt"), "requirements.txt")?
-    } else if dir.join("pyproject.toml").is_file() {
+    let mut manifest = if is_file("requirements.txt") {
+        requirements_manifest(project, &dir.join("requirements.txt"), "requirements.txt")?
+    } else if is_file("pyproject.toml") {
         let path = dir.join("pyproject.toml");
-        let text = read_text(&path)?;
+        let text = read_text(project, &path)?;
         let value = parse_toml(&path, &text)?;
-        let (project, poetry, groups) = pyproject_sections(&value);
+        let (has_project, poetry, groups) = pyproject_sections(&value);
         // PEP 621 is the public metadata format and takes precedence when a
         // project also carries a legacy Poetry table.
-        if project && project_dependencies_are_dynamic(&value) {
+        if has_project && project_dependencies_are_dynamic(&value) {
             // PEP 621's dynamic declaration is a promise that another build
             // input supplies the dependencies. An empty [project] table here
             // is not evidence of an empty environment. Let setup.py and the
             // requirements-directory convention provide that source.
-            dynamic_dependencies_manifest(dir, &cfg)?
-        } else if project {
-            project_manifest(dir, &value, &text, &cfg)?
+            dynamic_dependencies_manifest(project, &cfg)?
+        } else if has_project {
+            project_manifest(project, &value, &text, &cfg)?
         } else if poetry {
-            poetry_manifest(platform, dir, &value, &text, &cfg, python_version)?
+            poetry_manifest(platform, project, &value, &text, &cfg, python_version)?
         } else if groups {
-            project_manifest(dir, &value, &text, &cfg)?
+            project_manifest(project, &value, &text, &cfg)?
         } else {
-            setup_or_requirements_manifest(dir, &cfg)?
+            setup_or_requirements_manifest(project, &cfg)?
         }
-    } else if dir.join("setup.cfg").is_file()
-        || dir.join("setup.py").is_file()
-        || requirements_directory_candidate(dir, &cfg)?.is_some()
+    } else if is_file("setup.cfg")
+        || is_file("setup.py")
+        || requirements_directory_candidate(project, &cfg)?.is_some()
     {
-        setup_or_requirements_manifest(dir, &cfg)?
-    } else if dir.join("requirements.lock.txt").is_file() {
+        setup_or_requirements_manifest(project, &cfg)?
+    } else if is_file("requirements.lock.txt") {
         // With no discoverable source, a lock is an explicitly supplied
         // requirements file. The generated-lock cache path is only reached
         // after a live source has been discovered above.
         let lock = dir.join("requirements.lock.txt");
-        requirements_manifest(dir, &lock, "requirements.lock.txt")?
+        requirements_manifest(project, &lock, "requirements.lock.txt")?
     } else {
-        setup_or_requirements_manifest(dir, &cfg)?
+        setup_or_requirements_manifest(project, &cfg)?
     };
 
     manifest.python = collected_python;
@@ -173,12 +184,12 @@ pub fn discover(platform: Platform, dir: &Path, python_version: &str) -> io::Res
 }
 
 pub(super) fn dynamic_dependencies_manifest(
-    dir: &Path,
+    project: &ProjectRoot,
     cfg: &TogPythonConfig,
 ) -> io::Result<Manifest> {
-    match setup_or_requirements_manifest(dir, cfg) {
+    match setup_or_requirements_manifest(project, cfg) {
         Err(error) if error.kind() == io::ErrorKind::NotFound => Err(unreadable(
-            &dir.join("pyproject.toml"),
+            &project.path().join("pyproject.toml"),
             "[project].dynamic includes dependencies but no setup.py or requirements directory was found",
         )),
         result => result,
@@ -189,9 +200,10 @@ pub(super) fn dynamic_dependencies_manifest(
 /// requirements tree is still a useful, explicit dependency source. This is
 /// the recovery path used by projects such as vllm whose setup.py imports a
 /// package that is itself not installed during egg_info.
-pub fn dynamic_requirements_fallback(dir: &Path) -> io::Result<Option<Manifest>> {
-    let cfg = config(dir)?;
-    let Some(path) = requirements_directory_candidate(dir, &cfg)? else {
+pub fn dynamic_requirements_fallback(project: &ProjectRoot) -> io::Result<Option<Manifest>> {
+    let dir = project.path();
+    let cfg = config(project)?;
+    let Some(path) = requirements_directory_candidate(project, &cfg)? else {
         return Ok(None);
     };
     let relative = path
@@ -199,17 +211,18 @@ pub fn dynamic_requirements_fallback(dir: &Path) -> io::Result<Option<Manifest>>
         .unwrap_or(&path)
         .to_string_lossy()
         .into_owned();
-    requirements_manifest(dir, &path, &relative).map(Some)
+    requirements_manifest(project, &path, &relative).map(Some)
 }
 
 pub(super) fn setup_or_requirements_manifest(
-    dir: &Path,
+    project: &ProjectRoot,
     cfg: &TogPythonConfig,
 ) -> io::Result<Manifest> {
+    let dir = project.path();
     let setup_cfg_path = dir.join("setup.cfg");
     let setup_py_path = dir.join("setup.py");
-    if setup_cfg_path.is_file() {
-        let text = read_text(&setup_cfg_path)?;
+    if is_project_file(project, &setup_cfg_path) {
+        let text = read_text(project, &setup_cfg_path)?;
         let parsed = pyselect::parse_setup_cfg(&text);
         let mut requirements = parsed.install_requires.clone();
         for (extra, values) in &parsed.extras_require {
@@ -225,10 +238,10 @@ pub(super) fn setup_or_requirements_manifest(
                 }
             }
         }
-        let setup_py_safe = if !setup_py_path.is_file() {
+        let setup_py_safe = if !is_project_file(project, &setup_py_path) {
             true
         } else {
-            let setup_py = read_text(&setup_py_path)?;
+            let setup_py = read_text(project, &setup_py_path)?;
             // A declarative install_requires list is authoritative. An empty
             // list is not: setup.py may provide the real dependencies, and a
             // call through an alias (for example `s(...)`) must be probed.
@@ -254,7 +267,7 @@ pub(super) fn setup_or_requirements_manifest(
             });
         }
     }
-    if setup_py_path.is_file() {
+    if is_project_file(project, &setup_py_path) {
         return Ok(Manifest {
             input: "setup.py".into(),
             requirements: Vec::new(),
@@ -272,7 +285,7 @@ pub(super) fn setup_or_requirements_manifest(
             dynamic_dependencies: false,
         });
     }
-    let Some(path) = requirements_directory_candidate(dir, cfg)? else {
+    let Some(path) = requirements_directory_candidate(project, cfg)? else {
         return Err(no_manifest());
     };
     let relative = path
@@ -280,15 +293,16 @@ pub(super) fn setup_or_requirements_manifest(
         .unwrap_or(&path)
         .to_string_lossy()
         .into_owned();
-    requirements_manifest(dir, &path, &relative)
+    requirements_manifest(project, &path, &relative)
 }
 
 pub(super) fn project_manifest(
-    dir: &Path,
+    root: &ProjectRoot,
     value: &toml::Value,
     source: &str,
     cfg: &TogPythonConfig,
 ) -> io::Result<Manifest> {
+    let dir = root.path();
     let mut requirements = Vec::new();
     let project = value
         .get("project")
@@ -367,9 +381,9 @@ pub(super) fn project_manifest(
         )?;
     }
     record_uv_sources(value)?;
-    let uv_lock = if dir.join("uv.lock").is_file() {
+    let uv_lock = if is_project_file(root, &dir.join("uv.lock")) {
         let path = dir.join("uv.lock");
-        Some(parse_uv_lock(&read_text(&path)?)?)
+        Some(parse_uv_lock(&read_text(root, &path)?)?)
     } else {
         None
     };

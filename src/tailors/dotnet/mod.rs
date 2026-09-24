@@ -15,6 +15,7 @@ pub mod tailor;
 
 use crate::kernel::activity::StoreActivity;
 use crate::kernel::fetch::{cache_insert, download_verified_digest_held, Digest};
+use crate::kernel::fsroot::{Entry, ProjectRoot};
 use crate::kernel::platform::Platform;
 use crate::kernel::sandbox::{force_env, BuildSpec};
 use crate::kernel::store::Store;
@@ -337,12 +338,13 @@ fn extract_sdk_archive_for(
 /// global.json gate: it must name the SELECTED SDK exactly, with
 /// rollForward disabled and no redirection. Comparing against the shipped
 /// constant would let a catalog refresh start failing locked projects.
-pub fn check_global_json(project_dir: &Path, sdk_version: &str) -> io::Result<()> {
-    let path = project_dir.join("global.json");
-    if !regular_file_if_present(&path, "global.json")? {
+/// The project is read through the held descriptor.
+pub fn check_global_json(project: &ProjectRoot, sdk_version: &str) -> io::Result<()> {
+    let rel = Path::new("global.json");
+    if !regular_file_if_present(project, rel, "global.json")? {
         return Ok(());
     }
-    let text = fs::read_to_string(&path)?;
+    let text = read_input_text(project, rel)?;
     let v: serde_json::Value =
         serde_json::from_str(&text).map_err(|e| err(format!("global.json: {e}")))?;
     reject_global_redirects(&v, "global.json")?;
@@ -389,20 +391,34 @@ fn reject_global_redirects(value: &serde_json::Value, path: &str) -> io::Result<
     Ok(())
 }
 
-fn regular_file_if_present(path: &Path, label: &str) -> io::Result<bool> {
-    match fs::symlink_metadata(path) {
-        Ok(md) if md.file_type().is_symlink() => Err(err(format!(
+/// A project-relative name inspected from the held descriptor without
+/// following a symlink (what `symlink_metadata` on its path did).
+fn regular_file_if_present(project: &ProjectRoot, rel: &Path, label: &str) -> io::Result<bool> {
+    let path = project.path().join(rel);
+    match project.entry(rel)? {
+        Entry::Symlink => Err(err(format!(
             "{label} must be a regular file, not a symlink: {}",
             path.display()
         ))),
-        Ok(md) if !md.is_file() => Err(err(format!(
+        Entry::Directory | Entry::Other => Err(err(format!(
             "{label} must be a regular file: {}",
             path.display()
         ))),
-        Ok(_) => Ok(true),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
-        Err(e) => Err(e),
+        Entry::Regular => Ok(true),
+        Entry::Absent => Ok(false),
     }
+}
+
+/// A project input's text, read through the held descriptor. A file that
+/// vanished after its entry was checked reads as NotFound, as
+/// `fs::read_to_string` reported it.
+fn read_input_text(project: &ProjectRoot, rel: &Path) -> io::Result<String> {
+    project.read_input_string(rel)?.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("{} not found", project.path().join(rel).display()),
+        )
+    })
 }
 
 const ENV_REMOVE_PREFIXES: &[&str] = &["DOTNET_", "NUGET_", "MSBUILD", "MSBuild", "Msbuild"];
@@ -599,12 +615,25 @@ fn validate_plan(plan: &DotnetPlan, sdk_version: &str) -> io::Result<()> {
     Ok(())
 }
 
+/// The names in the project root, listed through the held descriptor. A
+/// root that went away reads as NotFound, as `fs::read_dir` reported it.
+fn root_names(project: &ProjectRoot) -> io::Result<Vec<std::ffi::OsString>> {
+    project.read_input_dir(Path::new("."))?.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("{} not found", project.path().display()),
+        )
+    })
+}
+
 /// Locate the single .csproj (v0 boundary: one SDK-style project, no sln).
-pub fn find_project(dir: &Path) -> io::Result<PathBuf> {
+/// Returns its project-relative name; the root is listed through the held
+/// descriptor.
+pub fn find_project(project: &ProjectRoot) -> io::Result<PathBuf> {
     let mut found = Vec::new();
-    for entry in fs::read_dir(dir)? {
-        let path = entry?.path();
-        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    for name in root_names(project)? {
+        let path = PathBuf::from(name);
+        let name = path.to_str().unwrap_or("");
         if name.ends_with(".sln") || name.ends_with(".slnx") {
             return Err(err(
                 "solution files are not supported yet; sync a single project",
@@ -625,20 +654,28 @@ pub fn find_project(dir: &Path) -> io::Result<PathBuf> {
 
 /// Directory-read failures propagate: guessing "no dotnet here" would hide
 /// them, and guessing "dotnet present" would trigger SDK realization first.
-pub fn has_marker(dir: &Path) -> io::Result<bool> {
-    for entry in fs::read_dir(dir)? {
-        let name = entry?.file_name();
+/// The project is read through the held descriptor.
+pub fn has_marker(project: &ProjectRoot) -> io::Result<bool> {
+    for name in root_names(project)? {
         let name = name.to_string_lossy();
         if name.ends_with(".csproj") || name.ends_with(".sln") || name.ends_with(".slnx") {
             return Ok(true);
         }
     }
-    Ok(fs::symlink_metadata(dir.join("packages.lock.json")).is_ok()
-        || fs::symlink_metadata(dir.join(".tog/closures/dotnet.json")).is_ok())
+    let present = |rel: &str| {
+        matches!(
+            project.entry(Path::new(rel)),
+            Ok(Entry::Regular | Entry::Directory | Entry::Symlink | Entry::Other)
+        )
+    };
+    Ok(present(LOCK_FILE) || present(".tog/closures/dotnet.json"))
 }
 
-fn validate_csproj(path: &Path) -> io::Result<()> {
-    let text = fs::read_to_string(path)?;
+/// Validate a project-relative csproj, read through the held descriptor.
+fn validate_csproj(project: &ProjectRoot, rel: &Path) -> io::Result<()> {
+    let text = read_input_text(project, rel)?;
+    let path = project.path().join(rel);
+    let path = path.as_path();
     let lower = text.to_ascii_lowercase();
     let mut document = text.strip_prefix('\u{feff}').unwrap_or(&text).trim_start();
     if document.starts_with("<?xml")
@@ -746,8 +783,8 @@ fn validate_csproj(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
-fn validate_lock_shape(path: &Path) -> io::Result<()> {
-    let text = fs::read_to_string(path)?;
+fn validate_lock_shape(project: &ProjectRoot, rel: &Path) -> io::Result<()> {
+    let text = read_input_text(project, rel)?;
     let v: serde_json::Value =
         serde_json::from_str(&text).map_err(|e| err(format!("packages.lock.json: {e}")))?;
     if v["version"] != 1 {
@@ -790,25 +827,25 @@ fn validate_lock_shape(path: &Path) -> io::Result<()> {
 
 /// Central v0 trust-boundary validation. The tuple is the canonical project
 /// file and its lock path (the latter may not exist until delegated planning).
-pub fn preflight(project_dir: &Path, sdk_version: &str) -> io::Result<(PathBuf, PathBuf)> {
-    let project_dir = project_dir.canonicalize()?;
-    if !project_dir.is_dir() {
-        return Err(err(format!(
-            "dotnet project root is not a directory: {}",
-            project_dir.display()
-        )));
-    }
-    let csproj = find_project(&project_dir)?;
-    if !regular_file_if_present(&csproj, "csproj")? {
+///
+/// Project files are read through the held descriptor (a held root is a
+/// directory by construction); the returned paths are for messages and
+/// child-process arguments. Ancestors lie outside the project and are
+/// still inspected by path.
+pub fn preflight(project: &ProjectRoot, sdk_version: &str) -> io::Result<(PathBuf, PathBuf)> {
+    let project_dir = project.path();
+    let csproj_rel = find_project(project)?;
+    let csproj = project_dir.join(&csproj_rel);
+    if !regular_file_if_present(project, &csproj_rel, "csproj")? {
         return Err(err(format!("csproj is missing: {}", csproj.display())));
     }
-    validate_csproj(&csproj)?;
+    validate_csproj(project, &csproj_rel)?;
 
-    let lock_path = project_dir.join("packages.lock.json");
-    regular_file_if_present(&lock_path, "packages.lock.json")?;
-    let global_path = project_dir.join("global.json");
-    regular_file_if_present(&global_path, "global.json")?;
-    check_global_json(&project_dir, sdk_version)?;
+    let lock_rel = Path::new(LOCK_FILE);
+    let lock_path = project_dir.join(lock_rel);
+    regular_file_if_present(project, lock_rel, "packages.lock.json")?;
+    regular_file_if_present(project, Path::new("global.json"), "global.json")?;
+    check_global_json(project, sdk_version)?;
 
     for (depth, ancestor) in project_dir.ancestors().enumerate() {
         for name in [
@@ -816,49 +853,75 @@ pub fn preflight(project_dir: &Path, sdk_version: &str) -> io::Result<(PathBuf, 
             "Directory.Build.rsp",
             "packages.config",
         ] {
-            match fs::symlink_metadata(ancestor.join(name)) {
-                Ok(_) => {
+            // The project itself through the descriptor, its ancestors
+            // (outside the project) by path.
+            let present = if depth == 0 {
+                project
+                    .entry(Path::new(name))
+                    .map(|entry| entry != Entry::Absent)
+            } else {
+                path_present(&ancestor.join(name))
+            };
+            match present {
+                Ok(true) => {
                     return Err(err(format!(
                         "{name} is not supported in the project or an SDK ancestor: {}",
                         ancestor.join(name).display()
                     )))
                 }
-                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                Ok(false) => {}
                 Err(e) => return Err(e),
             }
         }
         if depth > 0 {
-            match fs::symlink_metadata(ancestor.join("global.json")) {
-                Ok(_) => {
+            match path_present(&ancestor.join("global.json")) {
+                Ok(true) => {
                     return Err(err(format!(
                         "ancestor global.json is not supported; SDK discovery would see {}",
                         ancestor.join("global.json").display()
                     )))
                 }
-                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                Ok(false) => {}
                 Err(e) => return Err(e),
             }
         }
     }
-    if lock_path.is_file() {
-        validate_lock_shape(&lock_path)?;
+    if project.is_input_file(lock_rel) {
+        validate_lock_shape(project, lock_rel)?;
     }
     Ok((csproj, lock_path))
+}
+
+const LOCK_FILE: &str = "packages.lock.json";
+
+/// Does a path outside the project name anything (`symlink_metadata`)?
+fn path_present(path: &Path) -> io::Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e),
+    }
 }
 
 /// Plan from packages.lock.json (v1 only; tog makes the opt-in lock
 /// mandatory). Missing lock delegates a store-SDK restore --use-lock-file
 /// (named resolver mutation, isolated caches).
+///
+/// The project is read through the held descriptor. The restore child runs
+/// in its path, and the lock it generates is read back through the
+/// descriptor.
 pub fn plan_dotnet(
     store: &Store,
     activity: &StoreActivity,
-    project_dir: &Path,
+    project: &ProjectRoot,
     sdk_obj: &Path,
     selected: &Selected,
 ) -> io::Result<(DotnetPlan, String)> {
+    let project_dir = project.path();
+    let lock_rel = Path::new(LOCK_FILE);
     let sdk_version = selected.version("dotnet-sdk")?.to_string();
-    let (mut csproj, mut lock_path) = preflight(project_dir, &sdk_version)?;
-    if !lock_path.is_file() {
+    let (mut csproj, _) = preflight(project, &sdk_version)?;
+    if !project.is_input_file(lock_rel) {
         ui::note("no packages.lock.json; resolving with the store SDK...");
         let scratch = store.stage_with_activity(activity)?;
         let config = scratch.join("nuget.config");
@@ -886,9 +949,9 @@ pub fn plan_dotnet(
                 String::from_utf8_lossy(&out.stderr).trim()
             )));
         }
-        (csproj, lock_path) = preflight(project_dir, &sdk_version)?;
+        (csproj, _) = preflight(project, &sdk_version)?;
     }
-    let lock = fs::read_to_string(&lock_path)?;
+    let lock = read_input_text(project, lock_rel)?;
     let v: serde_json::Value =
         serde_json::from_str(&lock).map_err(|e| err(format!("packages.lock.json: {e}")))?;
     if v["version"] != 1 {
@@ -957,7 +1020,7 @@ pub fn plan_dotnet(
         packages: packages.into_values().collect(),
     };
     validate_plan(&plan, &sdk_version)?;
-    let now = fs::read_to_string(&lock_path)?;
+    let now = read_input_text(project, lock_rel)?;
     if now != lock {
         return Err(err(
             "packages.lock.json changed while planning; re-run 'tog'",
@@ -1082,13 +1145,13 @@ pub fn realize_packages(
     platform: Platform,
     plan: &DotnetPlan,
     sdk_obj: &Path,
-    project_dir: &Path,
+    project: &ProjectRoot,
     selected: &Selected,
 ) -> io::Result<PathBuf> {
     crate::tailors::install_kinds();
     crate::kernel::platform::require_host(platform, ".NET packages")?;
     let spec = sdk_spec(platform, selected)?;
-    let _ = preflight(project_dir, &spec.version)?;
+    let _ = preflight(project, &spec.version)?;
     validate_plan(plan, &spec.version)?;
     let sdk_obj = sdk_obj.canonicalize()?;
     // Fetch every nupkg (nuget.org flatcontainer only in v0). No upfront
@@ -1228,7 +1291,7 @@ pub fn realize_packages(
 
 pub fn project_dotnet_env(
     activity: &StoreActivity,
-    project_dir: &Path,
+    project: &ProjectRoot,
     sdk_obj: &Path,
     packages_obj: &Path,
     plan: &DotnetPlan,
@@ -1244,7 +1307,7 @@ pub fn project_dotnet_env(
     refs.object_path(&store, activity, &sdk_obj)?;
     refs.object_path(&store, activity, &packages_obj)?;
     crate::comforter::write_closure(
-        project_dir,
+        project,
         "dotnet",
         closure_body(&sdk_obj, &packages_obj, plan, lock_sha256, selected)?,
         &store,
@@ -1557,7 +1620,7 @@ fn publish_output(
 pub fn build_sandboxed(
     platform: Platform,
     activity: &StoreActivity,
-    project_dir: &Path,
+    project: &ProjectRoot,
     sdk_obj: &Path,
     packages_obj: &Path,
     args: &[String],
@@ -1565,8 +1628,8 @@ pub fn build_sandboxed(
 ) -> io::Result<()> {
     validate_build_args(args)?;
     let sdk_spec = sdk_spec(platform, selected)?;
-    let (csproj, _) = preflight(project_dir, &sdk_spec.version)?;
-    let project_dir = project_dir.canonicalize()?;
+    let (csproj, _) = preflight(project, &sdk_spec.version)?;
+    let project_dir = project.path().to_path_buf();
     let sdk_obj = sdk_obj.canonicalize()?;
     let packages_obj = packages_obj.canonicalize()?;
     let store = Store::open()?;
@@ -1862,8 +1925,8 @@ mod tests {
             "{\"sdk\":{\"version\":\"9.0.100\",\"rollForward\":\"disable\"}}",
         )
         .unwrap();
-        check_global_json(&temp, "9.0.100").unwrap();
-        let error = check_global_json(&temp, SDK_VERSION)
+        check_global_json(&ProjectRoot::open(&temp).unwrap(), "9.0.100").unwrap();
+        let error = check_global_json(&ProjectRoot::open(&temp).unwrap(), SDK_VERSION)
             .unwrap_err()
             .to_string();
         assert!(error.contains("requires SDK 9.0.100"), "{error}");
@@ -1961,7 +2024,7 @@ mod tests {
         };
         project_dotnet_env(
             activity,
-            &project,
+            &crate::kernel::fsroot::ProjectRoot::open(&project).unwrap(),
             &store.object_path(&sdk_id),
             &store.object_path(&packages_id),
             &plan,
@@ -2196,31 +2259,31 @@ mod tests {
                 .as_nanos()
         ));
         std::fs::create_dir_all(&temp).unwrap();
-        assert!(check_global_json(&temp, SDK_VERSION).is_ok()); // absent
+        assert!(check_global_json(&ProjectRoot::open(&temp).unwrap(), SDK_VERSION).is_ok()); // absent
         std::fs::write(
             temp.join("global.json"),
             format!("{{\"sdk\":{{\"version\":\"{SDK_VERSION}\",\"rollForward\":\"disable\"}}}}"),
         )
         .unwrap();
-        assert!(check_global_json(&temp, SDK_VERSION).is_ok());
+        assert!(check_global_json(&ProjectRoot::open(&temp).unwrap(), SDK_VERSION).is_ok());
         std::fs::write(
             temp.join("global.json"),
             "{\"sdk\":{\"version\":\"8.0.100\",\"rollForward\":\"disable\"}}",
         )
         .unwrap();
-        assert!(check_global_json(&temp, SDK_VERSION).is_err());
+        assert!(check_global_json(&ProjectRoot::open(&temp).unwrap(), SDK_VERSION).is_err());
         std::fs::write(
             temp.join("global.json"),
             format!("{{\"sdk\":{{\"version\":\"{SDK_VERSION}\"}}}}"),
         )
         .unwrap();
-        assert!(check_global_json(&temp, SDK_VERSION).is_err()); // rollForward missing
+        assert!(check_global_json(&ProjectRoot::open(&temp).unwrap(), SDK_VERSION).is_err()); // rollForward missing
         std::fs::write(
             temp.join("global.json"),
             "{\"msbuild-sdks\":{\"X\":\"1.0\"}}",
         )
         .unwrap();
-        assert!(check_global_json(&temp, SDK_VERSION).is_err());
+        assert!(check_global_json(&ProjectRoot::open(&temp).unwrap(), SDK_VERSION).is_err());
         let _ = std::fs::remove_dir_all(&temp);
     }
 
@@ -2269,17 +2332,29 @@ mod tests {
 
         let minimal = base.join("minimal.csproj");
         fs::write(&minimal, minimal_csproj()).unwrap();
-        assert!(validate_csproj(&minimal).is_ok());
+        assert!(validate_csproj(
+            &ProjectRoot::open(&base).unwrap(),
+            Path::new("minimal.csproj")
+        )
+        .is_ok());
         let sdk_element = base.join("sdk-element.csproj");
         fs::write(
             &sdk_element,
             "<Project Sdk=\"Microsoft.NET.Sdk\"><Sdk Name=\"X\" /></Project>",
         )
         .unwrap();
-        assert!(validate_csproj(&sdk_element).is_err());
+        assert!(validate_csproj(
+            &ProjectRoot::open(&base).unwrap(),
+            Path::new("sdk-element.csproj")
+        )
+        .is_err());
         let garbage = base.join("garbage.csproj");
         fs::write(&garbage, "not XML").unwrap();
-        assert!(validate_csproj(&garbage).is_err());
+        assert!(validate_csproj(
+            &ProjectRoot::open(&base).unwrap(),
+            Path::new("garbage.csproj")
+        )
+        .is_err());
 
         let symlinked = base.join("symlinked");
         fs::create_dir(&symlinked).unwrap();
@@ -2289,7 +2364,7 @@ mod tests {
             symlinked.join("project.csproj"),
         )
         .unwrap();
-        assert!(preflight(&symlinked, SDK_VERSION).is_err());
+        assert!(preflight(&ProjectRoot::open(&symlinked).unwrap(), SDK_VERSION).is_err());
 
         let project_lock = base.join("project-lock");
         fs::create_dir(&project_lock).unwrap();
@@ -2299,7 +2374,7 @@ mod tests {
             r#"{"version":1,"dependencies":{"net9.0":{"Other":{"type":"Project","resolved":"1.0.0","contentHash":"A"}}}}"#,
         )
         .unwrap();
-        let error = preflight(&project_lock, SDK_VERSION)
+        let error = preflight(&ProjectRoot::open(&project_lock).unwrap(), SDK_VERSION)
             .unwrap_err()
             .to_string();
         assert!(error.contains("Project lock entries"), "{error}");
@@ -2312,9 +2387,12 @@ mod tests {
             r#"{"version":1,"dependencies":{"net9.0":{"Other":{"type":"CentralTransitive","resolved":"1.0.0","contentHash":"A"}}}}"#,
         )
         .unwrap();
-        let error = preflight(&central_transitive, SDK_VERSION)
-            .unwrap_err()
-            .to_string();
+        let error = preflight(
+            &ProjectRoot::open(&central_transitive).unwrap(),
+            SDK_VERSION,
+        )
+        .unwrap_err()
+        .to_string();
         assert!(error.contains("Other"), "{error}");
         assert!(error.contains("CentralTransitive"), "{error}");
 
@@ -2325,13 +2403,13 @@ mod tests {
             "<Project Sdk=\"Microsoft.NET.Sdk\"><Import Project=\"evil.targets\" /></Project>",
         )
         .unwrap();
-        assert!(preflight(&import, SDK_VERSION).is_err());
+        assert!(preflight(&ProjectRoot::open(&import).unwrap(), SDK_VERSION).is_err());
 
         let bad_global = base.join("bad-global");
         fs::create_dir(&bad_global).unwrap();
         fs::write(bad_global.join("project.csproj"), minimal_csproj()).unwrap();
         fs::write(bad_global.join("global.json"), "{}").unwrap();
-        assert!(preflight(&bad_global, SDK_VERSION).is_err());
+        assert!(preflight(&ProjectRoot::open(&bad_global).unwrap(), SDK_VERSION).is_err());
 
         let ancestor = base.join("ancestor");
         fs::create_dir(&ancestor).unwrap();
@@ -2339,15 +2417,17 @@ mod tests {
         let child = ancestor.join("child");
         fs::create_dir(&child).unwrap();
         fs::write(child.join("project.csproj"), minimal_csproj()).unwrap();
-        let error = preflight(&child, SDK_VERSION).unwrap_err().to_string();
+        let error = preflight(&ProjectRoot::open(&child).unwrap(), SDK_VERSION)
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("ancestor global.json"), "{error}");
 
         let solution_only = base.join("solution-only");
         fs::create_dir(&solution_only).unwrap();
         fs::write(solution_only.join("x.sln"), "solution").unwrap();
-        assert!(has_marker(&solution_only).unwrap());
+        assert!(has_marker(&ProjectRoot::open(&solution_only).unwrap()).unwrap());
         // An unreadable/missing dir propagates instead of guessing.
-        assert!(has_marker(&base.join("missing")).is_err());
+        assert!(ProjectRoot::open(&base.join("missing")).is_err());
 
         let bypass = base.join("bypass");
         fs::create_dir(&bypass).unwrap();
@@ -2357,10 +2437,63 @@ mod tests {
             "<Project Sdk=\"Microsoft.NET.Sdk\"><Sdk\rName=\"X\"/></Project>",
         )
         .unwrap();
-        assert!(validate_csproj(&cr_sdk).is_err());
+        assert!(
+            validate_csproj(&ProjectRoot::open(&bypass).unwrap(), Path::new("cr.csproj")).is_err()
+        );
         let projector = bypass.join("projector.csproj");
         fs::write(&projector, "<Projector/>").unwrap();
-        assert!(validate_csproj(&projector).is_err());
+        assert!(validate_csproj(
+            &ProjectRoot::open(&bypass).unwrap(),
+            Path::new("projector.csproj")
+        )
+        .is_err());
+
+        let _ = crate::kernel::store::remove_tree(&base);
+    }
+
+    /// A project read through a held root keeps reading the original
+    /// directory after it is renamed and another project takes its path.
+    #[test]
+    fn preflight_reads_the_held_project_after_a_rename() {
+        let base = std::env::temp_dir().join(format!(
+            "tog-dn-held-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let project = base.join("project");
+        fs::create_dir_all(&project).unwrap();
+        fs::write(project.join("original.csproj"), minimal_csproj()).unwrap();
+        fs::write(
+            project.join("packages.lock.json"),
+            r#"{"version":1,"dependencies":{"net9.0":{}}}"#,
+        )
+        .unwrap();
+        let root = ProjectRoot::open(&project).unwrap();
+
+        fs::rename(&project, base.join("moved")).unwrap();
+        fs::create_dir(&project).unwrap();
+        fs::write(
+            project.join("replacement.csproj"),
+            "<Project Sdk=\"Microsoft.NET.Sdk\"><Import Project=\"evil.targets\" /></Project>",
+        )
+        .unwrap();
+        fs::write(
+            project.join("packages.lock.json"),
+            r#"{"version":1,"dependencies":{"net9.0":{"Other":{"type":"Project","resolved":"1.0.0","contentHash":"A"}}}}"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            find_project(&root).unwrap(),
+            PathBuf::from("original.csproj")
+        );
+        let (csproj, _) = preflight(&root, SDK_VERSION).unwrap();
+        assert_eq!(csproj, root.path().join("original.csproj"));
+        // The replacement at the old path is what a path read would see.
+        assert!(preflight(&ProjectRoot::open(&project).unwrap(), SDK_VERSION).is_err());
 
         let _ = crate::kernel::store::remove_tree(&base);
     }

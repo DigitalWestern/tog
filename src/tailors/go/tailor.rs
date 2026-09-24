@@ -8,6 +8,7 @@ use crate::kernel::cyclonedx::{
     component, list, purl_encode, purl_encode_path, push_hash, push_property, required,
     toolchain_component, version_of,
 };
+use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::objmeta::KindAdapter;
 use crate::kernel::platform::Platform;
 use crate::kernel::toolchain::{Catalog, LegacyEvidence, Selected};
@@ -27,24 +28,29 @@ impl Tailor for Go {
         "go"
     }
 
-    fn detect(&self, dir: &Path) -> io::Result<bool> {
-        Ok(dir.join("go.mod").is_file())
+    fn detect(&self, project: &ProjectRoot) -> io::Result<bool> {
+        Ok(project.is_input_file(Path::new("go.mod")))
     }
 
-    fn preflight(&self, platform: Platform, _dir: &Path) -> io::Result<()> {
+    fn preflight(&self, platform: Platform, _project: &ProjectRoot) -> io::Result<()> {
         go::preflight_platform(platform)
     }
 
-    fn plan(&self, ctx: &Context, dir: &Path, toolchain: &Selected) -> io::Result<Option<String>> {
+    fn plan(
+        &self,
+        ctx: &Context,
+        project: &ProjectRoot,
+        toolchain: &Selected,
+    ) -> io::Result<Option<String>> {
         let inputs =
-            inputs::load_go_inputs(ctx.platform, dir, &ctx.store, &ctx.activity, toolchain)?;
+            inputs::load_go_inputs(ctx.platform, project, &ctx.store, &ctx.activity, toolchain)?;
         Ok(Some(serde_json::to_string_pretty(&inputs.plan)?))
     }
 
     fn sync(
         &self,
         ctx: &Context,
-        dir: &Path,
+        project: &ProjectRoot,
         request: &SyncRequest,
         attribution: &mut crate::kernel::policy::Attribution,
     ) -> io::Result<bool> {
@@ -52,7 +58,7 @@ impl Tailor for Go {
         let toolchain = request.toolchain;
         let platform = ctx.platform;
         let store = &ctx.store;
-        let inputs = inputs::load_go_inputs(platform, dir, store, &ctx.activity, toolchain)?;
+        let inputs = inputs::load_go_inputs(platform, project, store, &ctx.activity, toolchain)?;
         let modcache = go::realize_modcache(
             store,
             &ctx.activity,
@@ -61,9 +67,10 @@ impl Tailor for Go {
             &inputs.plan,
             &inputs.go_obj,
         )?;
+        // The closure is published through the descriptor this sync holds.
         go::project_go_env(
             activity,
-            dir,
+            project,
             &inputs.go_obj,
             &modcache,
             &inputs.plan,
@@ -105,7 +112,8 @@ impl Tailor for Go {
         let activity = &ctx.activity;
         let platform = ctx.platform;
         let store = &ctx.store;
-        let inputs = inputs::load_go_inputs(platform, root, store, &ctx.activity, toolchain)?;
+        let project = ProjectRoot::open(root)?;
+        let inputs = inputs::load_go_inputs(platform, &project, store, &ctx.activity, toolchain)?;
         let modcache = go::realize_modcache(
             store,
             &ctx.activity,
@@ -116,7 +124,7 @@ impl Tailor for Go {
         )?;
         go::project_go_env(
             activity,
-            root,
+            &project,
             &inputs.go_obj,
             &modcache,
             &inputs.plan,
@@ -205,7 +213,7 @@ impl Tailor for Go {
     fn doctor(&self, platform: Platform, dir: &Path) -> Vec<DoctorCheck> {
         let mut checks = Vec::new();
         if dir.join("go.mod").is_file() {
-            match go::project_go_version(platform, dir) {
+            match ProjectRoot::open(dir).and_then(|root| go::project_go_version(platform, &root)) {
                 Ok(version) => checks.push(DoctorCheck {
                     name: "go-toolchain",
                     ok: true,
@@ -269,7 +277,9 @@ fn go_status(platform: Platform, dir: &Path, body: &Value) -> io::Result<State> 
     let recorded_version = string(&body["plan"]["go_version"]);
     if !recorded_version.is_empty() {
         match fs::metadata(dir.join("go.mod")) {
-            Ok(_) => match go::project_go_version(platform, dir) {
+            Ok(_) => match ProjectRoot::open(dir)
+                .and_then(|root| go::project_go_version(platform, &root))
+            {
                 Ok(selected) if selected == recorded_version => {}
                 Ok(_) => changed.push("go.mod".to_string()),
                 Err(_) => changed.push("go.mod (Go toolchain selection unavailable)".to_string()),

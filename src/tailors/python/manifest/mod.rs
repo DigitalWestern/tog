@@ -135,20 +135,22 @@ impl Manifest {
     /// Complete a setup.py manifest after the caller has selected the first
     /// compatible interpreter.  The metadata cache is content-addressed by
     /// the manifest tree, not by its current working directory.
+    /// The project is read through the held descriptor: the tree hash
+    /// that keys the cache walks `project`, not its pathname.
     pub fn prepare_setup(
         &mut self,
         platform: Platform,
-        dir: &Path,
         project: &ProjectRoot,
         store: &Store,
         activity: &StoreActivity,
         selected: &crate::kernel::toolchain::Selected,
     ) -> io::Result<()> {
+        let dir = project.path();
         let python_version = selected.version("cpython")?;
         if !self.setup || self.setup_cfg {
             return Ok(());
         }
-        let tree_hash = setup_tree_hash(dir)?;
+        let tree_hash = setup_tree_hash(project)?;
         // Read through the held descriptor, and treat a refusal as an error
         // rather than a miss. A cache hit decides the requirements this plan
         // is built from, and `setup_cache_matches` gates only on the tree
@@ -194,7 +196,10 @@ impl Manifest {
             quote(&egg_base),
             quote(&log)
         );
-        let project_root = dir.canonicalize().map_err(|e| unreadable(dir, e))?;
+        // The sandboxed probe is a child process: it runs in the project by
+        // its canonical path, which the sync loop checks still names the
+        // held directory.
+        let project_root = dir.to_path_buf();
         let spec = BuildSpec {
             argv: vec!["/bin/sh".into(), "-c".into(), command],
             cwd: project_root.clone(),
@@ -268,8 +273,48 @@ fn unreadable(path: &Path, error: impl std::fmt::Display) -> io::Error {
     )
 }
 
-fn read_text(path: &Path) -> io::Result<String> {
-    fs::read_to_string(path).map_err(|e| unreadable(path, e))
+/// The bytes of a project file, read through the held descriptor when
+/// `path` lies under the project root, so a project directory renamed or
+/// replaced mid-command cannot substitute another project's manifest. A
+/// path outside the project (an absolute `tog.toml` requirements path, an
+/// include that climbs out, a symlink pointing out) is read by pathname.
+pub(crate) fn read_project_file(project: &ProjectRoot, path: &Path) -> io::Result<Vec<u8>> {
+    match project.relative(path) {
+        Some(relative) if !relative.as_os_str().is_empty() => project
+            .read_input(relative)?
+            .ok_or_else(|| io::Error::from_raw_os_error(libc::ENOENT)),
+        _ => fs::read(path),
+    }
+}
+
+/// `path.is_file()`, resolved like `read_project_file`.
+pub(crate) fn is_project_file(project: &ProjectRoot, path: &Path) -> bool {
+    match project.relative(path) {
+        Some(relative) if !relative.as_os_str().is_empty() => project.is_input_file(relative),
+        _ => path.is_file(),
+    }
+}
+
+/// `path.is_dir()`, resolved like `read_project_file`.
+fn is_project_dir(project: &ProjectRoot, path: &Path) -> bool {
+    match project.relative(path) {
+        Some(relative) if !relative.as_os_str().is_empty() => project.is_input_dir(relative),
+        Some(_) => true,
+        None => path.is_dir(),
+    }
+}
+
+fn read_text(project: &ProjectRoot, path: &Path) -> io::Result<String> {
+    let bytes = read_project_file(project, path).map_err(|e| unreadable(path, e))?;
+    String::from_utf8(bytes).map_err(|_| {
+        unreadable(
+            path,
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "stream did not contain valid UTF-8",
+            ),
+        )
+    })
 }
 
 fn parse_toml(path: &Path, text: &str) -> io::Result<toml::Value> {
@@ -402,7 +447,7 @@ mod tests {
         // them computable by whoever plants the symlink. Only the descriptor
         // walk stands between it and the plan.
         let planted = SetupCache {
-            tree_hash: setup_tree_hash(&dir).unwrap(),
+            tree_hash: setup_tree_hash(&ProjectRoot::open(&dir).unwrap()).unwrap(),
             requirements: vec!["attacker-controlled==1.0".to_string()],
             requires_python: None,
             python_version: python_version.to_string(),
@@ -416,9 +461,9 @@ mod tests {
         .unwrap();
         std::os::unix::fs::symlink(&outside, dir.join(".tog")).unwrap();
 
-        let mut manifest = discover(platform, &dir, python_version).unwrap();
-        assert!(manifest.requires_setup(), "fixture is not a setup.py tree");
         let project = ProjectRoot::open(&dir).unwrap();
+        let mut manifest = discover(platform, &project, python_version).unwrap();
+        assert!(manifest.requires_setup(), "fixture is not a setup.py tree");
         let store = Store {
             root: root.join("absent-store"),
         };
@@ -427,7 +472,6 @@ mod tests {
         let error = manifest
             .prepare_setup(
                 platform,
-                &dir,
                 &project,
                 &store,
                 activity,
@@ -448,6 +492,38 @@ mod tests {
             manifest.requirements
         );
         assert!(!store.root.exists(), "a refused cache touched the store");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A project renamed mid-sync, with another project put at its old
+    /// path, is still read from the held descriptor: discovery sees the
+    /// original manifest, its include, and its interpreter request.
+    #[test]
+    fn discovery_through_a_held_root_survives_the_directory_being_replaced() {
+        let root = temp_project("held-root");
+        let dir = root.join("project");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("requirements.txt"), "-r base.txt\n").unwrap();
+        fs::write(dir.join("base.txt"), "six==1.17.0\n").unwrap();
+        fs::write(dir.join(".python-version"), "3.12\n").unwrap();
+        let project = ProjectRoot::open(&dir).unwrap();
+
+        fs::rename(&dir, root.join("moved")).unwrap();
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("requirements.txt"), "-r base.txt\n").unwrap();
+        fs::write(dir.join("base.txt"), "attacker==6.6.6\n").unwrap();
+        fs::write(dir.join(".python-version"), "3.11\n").unwrap();
+
+        let manifest = discover(
+            Platform::X86_64UnknownLinuxGnu,
+            &project,
+            crate::tailors::python::pyselect::DEFAULT_VERSION,
+        )
+        .unwrap();
+        assert_eq!(manifest.requirements, ["six==1.17.0"]);
+        let inputs = python_inputs(&project).unwrap();
+        assert_eq!(inputs.explicit.unwrap().raw, "3.12");
 
         let _ = fs::remove_dir_all(&root);
     }
@@ -879,7 +955,7 @@ files = []
         fs::write(dir.join("constraints.txt"), "six<2\n").unwrap();
         let manifest = discover(
             Platform::X86_64UnknownLinuxGnu,
-            &dir,
+            &ProjectRoot::open(&dir).unwrap(),
             crate::tailors::python::pyselect::DEFAULT_VERSION,
         )
         .unwrap();
@@ -945,17 +1021,21 @@ files = []
         fs::create_dir_all(dir.join("requirements")).unwrap();
         fs::write(dir.join("requirements/cpu.txt"), "six==1.0\n").unwrap();
         fs::write(dir.join("requirements/cuda.txt"), "numpy==1.0\n").unwrap();
-        let default = requirements_directory_candidate(&dir, &TogPythonConfig::default())
-            .unwrap()
-            .unwrap();
+        let default = requirements_directory_candidate(
+            &ProjectRoot::open(&dir).unwrap(),
+            &TogPythonConfig::default(),
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(default.file_name().unwrap(), "cpu.txt");
         let override_cfg = TogPythonConfig {
             requirements: Some("requirements/cuda.txt".into()),
             extras: BTreeSet::new(),
         };
-        let selected = requirements_directory_candidate(&dir, &override_cfg)
-            .unwrap()
-            .unwrap();
+        let selected =
+            requirements_directory_candidate(&ProjectRoot::open(&dir).unwrap(), &override_cfg)
+                .unwrap()
+                .unwrap();
         assert_eq!(selected.file_name().unwrap(), "cuda.txt");
         let _ = fs::remove_dir_all(dir);
     }
@@ -973,7 +1053,7 @@ files = []
         .unwrap();
         let manifest = discover(
             Platform::X86_64UnknownLinuxGnu,
-            &dir,
+            &ProjectRoot::open(&dir).unwrap(),
             crate::tailors::python::pyselect::DEFAULT_VERSION,
         )
         .unwrap();
@@ -1034,7 +1114,7 @@ files = []
             }
             let got = discover(
                 Platform::X86_64UnknownLinuxGnu,
-                &dir,
+                &ProjectRoot::open(&dir).unwrap(),
                 crate::tailors::python::pyselect::DEFAULT_VERSION,
             )
             .unwrap();
@@ -1058,7 +1138,7 @@ files = []
 
         let manifest = discover(
             Platform::X86_64UnknownLinuxGnu,
-            &dir,
+            &ProjectRoot::open(&dir).unwrap(),
             crate::tailors::python::pyselect::DEFAULT_VERSION,
         )
         .unwrap();
@@ -1080,7 +1160,7 @@ files = []
 
         let manifest = discover(
             Platform::X86_64UnknownLinuxGnu,
-            &dir,
+            &ProjectRoot::open(&dir).unwrap(),
             crate::tailors::python::pyselect::DEFAULT_VERSION,
         )
         .unwrap();
@@ -1100,7 +1180,7 @@ files = []
         .unwrap();
         let error = discover(
             Platform::X86_64UnknownLinuxGnu,
-            &dir,
+            &ProjectRoot::open(&dir).unwrap(),
             crate::tailors::python::pyselect::DEFAULT_VERSION,
         )
         .unwrap_err();
@@ -1732,9 +1812,9 @@ files = [{ file = "old.whl", hash = "sha256:dddddddddddddddddddddddddddddddddddd
         let child = dir.join("requirements/common.txt");
         fs::write(&top, "-r common.txt\n").unwrap();
         fs::write(&child, "six==1.0\n").unwrap();
-        let old = requirements_tree_hash(&top).unwrap();
+        let old = requirements_tree_hash(&ProjectRoot::open(&dir).unwrap(), &top).unwrap();
         fs::write(&child, "six==2.0\n").unwrap();
-        let new = requirements_tree_hash(&top).unwrap();
+        let new = requirements_tree_hash(&ProjectRoot::open(&dir).unwrap(), &top).unwrap();
         assert_ne!(old, new);
         let _ = fs::remove_dir_all(dir);
     }
@@ -1754,15 +1834,18 @@ files = [{ file = "old.whl", hash = "sha256:dddddddddddddddddddddddddddddddddddd
         fs::write(dir.join("constraints.txt"), "six<2\n").unwrap();
         let manifest = discover(
             Platform::X86_64UnknownLinuxGnu,
-            &dir,
+            &ProjectRoot::open(&dir).unwrap(),
             crate::tailors::python::pyselect::DEFAULT_VERSION,
         )
         .unwrap();
         assert_eq!(manifest.normalized_requirements_text(), "six\nidna\n");
         assert_eq!(manifest.constraints_text(), "six<2\n");
-        let old = requirements_tree_hash(&top).unwrap();
+        let old = requirements_tree_hash(&ProjectRoot::open(&dir).unwrap(), &top).unwrap();
         fs::write(dir.join("constraints.txt"), "six<3\n").unwrap();
-        assert_ne!(old, requirements_tree_hash(&top).unwrap());
+        assert_ne!(
+            old,
+            requirements_tree_hash(&ProjectRoot::open(&dir).unwrap(), &top).unwrap()
+        );
         let _ = fs::remove_dir_all(dir);
     }
 
@@ -1773,7 +1856,7 @@ files = [{ file = "old.whl", hash = "sha256:dddddddddddddddddddddddddddddddddddd
         fs::write(dir.join("deps.txt"), "six\n").unwrap();
         let manifest = discover(
             Platform::X86_64UnknownLinuxGnu,
-            &dir,
+            &ProjectRoot::open(&dir).unwrap(),
             crate::tailors::python::pyselect::DEFAULT_VERSION,
         )
         .unwrap();
@@ -1819,13 +1902,16 @@ files = [{ file = "old.whl", hash = "sha256:dddddddddddddddddddddddddddddddddddd
         fs::write(dir.join("requirements.lock.txt"), "stale\n").unwrap();
         fs::create_dir_all(dir.join(".tog")).unwrap();
         fs::write(dir.join(".tog/egg-info.json"), "cache\n").unwrap();
-        let old = setup_tree_hash(&dir).unwrap();
+        let old = setup_tree_hash(&ProjectRoot::open(&dir).unwrap()).unwrap();
         fs::write(dir.join("deps.py"), "requirements = ['idna']\n").unwrap();
-        let changed = setup_tree_hash(&dir).unwrap();
+        let changed = setup_tree_hash(&ProjectRoot::open(&dir).unwrap()).unwrap();
         assert_ne!(old, changed);
         fs::write(dir.join("requirements.lock.txt"), "different\n").unwrap();
         fs::write(dir.join(".tog/egg-info.json"), "different\n").unwrap();
-        assert_eq!(changed, setup_tree_hash(&dir).unwrap());
+        assert_eq!(
+            changed,
+            setup_tree_hash(&ProjectRoot::open(&dir).unwrap()).unwrap()
+        );
         let _ = fs::remove_dir_all(dir);
     }
 
@@ -1840,7 +1926,7 @@ files = [{ file = "old.whl", hash = "sha256:dddddddddddddddddddddddddddddddddddd
         .unwrap();
         let manifest = discover(
             Platform::X86_64UnknownLinuxGnu,
-            &dir,
+            &ProjectRoot::open(&dir).unwrap(),
             crate::tailors::python::pyselect::DEFAULT_VERSION,
         )
         .unwrap();
@@ -1862,7 +1948,7 @@ files = [{ file = "old.whl", hash = "sha256:dddddddddddddddddddddddddddddddddddd
         .unwrap();
         let manifest = discover(
             Platform::X86_64UnknownLinuxGnu,
-            &dir,
+            &ProjectRoot::open(&dir).unwrap(),
             crate::tailors::python::pyselect::DEFAULT_VERSION,
         )
         .unwrap();
@@ -1879,7 +1965,7 @@ files = [{ file = "old.whl", hash = "sha256:dddddddddddddddddddddddddddddddddddd
         fs::write(dir.join("other.txt"), "-r requirements.txt\n").unwrap();
         let error = discover(
             Platform::X86_64UnknownLinuxGnu,
-            &dir,
+            &ProjectRoot::open(&dir).unwrap(),
             crate::tailors::python::pyselect::DEFAULT_VERSION,
         )
         .unwrap_err();
@@ -1894,7 +1980,7 @@ files = [{ file = "old.whl", hash = "sha256:dddddddddddddddddddddddddddddddddddd
         let dir = temp_project("none");
         let error = discover(
             Platform::X86_64UnknownLinuxGnu,
-            &dir,
+            &ProjectRoot::open(&dir).unwrap(),
             crate::tailors::python::pyselect::DEFAULT_VERSION,
         )
         .unwrap_err();
