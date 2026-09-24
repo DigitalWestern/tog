@@ -193,13 +193,9 @@ impl Tailor for Cargo {
         cargo::toolchain_catalog()
     }
 
-    fn external_toolchain(
-        &self,
-        platform: Platform,
-        project: &Path,
-        rows: &[crate::kernel::toolchain::input::InputRow],
-    ) -> io::Result<Option<crate::kernel::toolchain::Bundle>> {
-        crate::kernel::provider::rust_path::select(platform, project, rows)
+    /// `[toolchain] path` in rust-toolchain.toml names a local tree.
+    fn external_toolchain(&self) -> Option<crate::comforter::toolchain::ExternalToolchain> {
+        Some(crate::kernel::provider::rust_path::select)
     }
 
     fn legacy_toolchain_evidence(

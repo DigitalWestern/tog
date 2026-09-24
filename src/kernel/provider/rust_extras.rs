@@ -127,7 +127,10 @@ impl Extras {
     }
 
     /// The part of the request the base object does not already answer:
-    /// the base's own components by name and the host's own target.
+    /// the base's own components by name, the host's own target, and the
+    /// `minimal` profile, which is exactly the base (rustc, cargo and the
+    /// host std on every platform tog supports). What is left empty needs
+    /// no channel manifest, so it is never fetched.
     fn beyond_base(&self, platform: Platform) -> Extras {
         Extras {
             components: self
@@ -142,10 +145,16 @@ impl Extras {
                 .filter(|triple| triple.as_str() != platform.triple())
                 .cloned()
                 .collect(),
-            profile: self.profile.clone(),
+            profile: self
+                .profile
+                .clone()
+                .filter(|profile| profile != MINIMAL_PROFILE),
         }
     }
 }
+
+/// The profile that installs only the base toolchain.
+const MINIMAL_PROFILE: &str = "minimal";
 
 /// What the project at `project_dir` asks for, read through the same
 /// discovery the toolchain lock records and is checked against. A run that
@@ -928,7 +937,14 @@ mod tests {
                 .collect()
         };
         for platform in Platform::ALL {
-            // minimal is the base: rust-mingw exists only for Windows.
+            // minimal is the base: rust-mingw exists only for Windows. It
+            // is dropped before planning, so no manifest is read for it.
+            assert!(with_profile("minimal", &[])
+                .beyond_base(*platform)
+                .is_empty());
+            assert!(!with_profile("default", &[])
+                .beyond_base(*platform)
+                .is_empty());
             let minimal = plan_for(*platform, &with_profile("minimal", &[])).unwrap();
             assert!(minimal.extensions.is_empty());
             assert_eq!(

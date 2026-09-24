@@ -381,6 +381,18 @@ fn refresh(ecosystem: &str) -> &'static str {
     }
 }
 
+/// The command that rewrites a closure recording a retired kind: the one
+/// that wrote it. The retired table says why each kind is out of date, and
+/// the closure's writer is what drops it, so a `rustfmt` record names
+/// `tog fmt` and every ecosystem's closure names `tog sync`.
+fn rerecord(ecosystem: &str) -> &'static str {
+    if ecosystem == "rustfmt" {
+        "tog fmt"
+    } else {
+        "tog sync"
+    }
+}
+
 /// The `status` state of a record, as the gate reads it: only `Synced` is
 /// current; every other state fails.
 fn freshness_from_state(state: State) -> Freshness {
@@ -507,7 +519,8 @@ pub fn evaluate(
         if let Some((why, kind)) = retired {
             if !matches!(freshness, Freshness::Stale(_)) {
                 freshness = Freshness::Outdated(format!(
-                    "{why} (it records the retired {kind} exception); run 'tog sync' under a trusted key, then commit"
+                    "{why} (it records the retired {kind} exception); run '{}' under a trusted key, then commit",
+                    rerecord(&closure.ecosystem)
                 ));
             }
         }
@@ -2077,6 +2090,20 @@ mod tests {
         extra["inputs"]["note"] = json!("hand-added");
         let verdicts = judge(dir, &permissive(), &write(extra));
         assert!(matches!(verdicts[0].freshness, Freshness::Stale(_)));
+
+        // A retired kind in a rustfmt record: `tog fmt` rewrites it, not a sync.
+        let mut retired = body.clone();
+        retired["exceptions"] = json!([exception("toolchain-component-unavailable", "rustfmt")]);
+        let verdicts = judge(dir, &permissive(), &write(retired));
+        assert!(
+            matches!(
+                verdicts[0].freshness,
+                Freshness::Outdated(ref why) if why.contains(
+                    "retired toolchain-component-unavailable exception); run 'tog fmt' under a trusted key"
+                )
+            ),
+            "{verdicts:?}"
+        );
 
         // Made by another rustfmt version: stale, naming both objects.
         let current = body["rustfmt_object"]["id"].as_str().unwrap().to_string();

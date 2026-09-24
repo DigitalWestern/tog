@@ -195,7 +195,9 @@ impl ChannelManifest {
     /// The packages profile `name` installs on `host`, in the profile's
     /// order: its members the aggregate `rust` package lists for `host`
     /// (as a component or an extension, built for `host` or for every
-    /// target). A member off that list is not part of this host's toolchain
+    /// target). A member is read through `renames` first, as a component
+    /// name is, so a profile spelling `clippy` means the `clippy-preview`
+    /// package the aggregate lists. A member off that list is not part of this host's toolchain
     /// and is left out, as rustup leaves it out. A member on it that the
     /// release did not build is not left out: every returned package must
     /// then resolve through [`ChannelManifest::component`], which refuses
@@ -227,7 +229,7 @@ impl ChannelManifest {
             .collect();
         Ok(members
             .iter()
-            .map(String::as_str)
+            .map(|member| self.package_name(member))
             .filter(|package| on_host.contains(package))
             .collect())
     }
@@ -433,6 +435,17 @@ mod tests {
             assert!(!complete.contains(&"rust-mingw"), "{complete:?}");
             assert!(manifest.component("miri-preview", host).is_err());
         }
+        // A member spelled by its rename is the package it renames to.
+        let renamed = FIXTURE.replace(
+            "default = [\"rustc\", \"cargo\", \"rust-std\", \"rust-mingw\", \"rust-docs\", \"rustfmt-preview\", \"clippy-preview\"]",
+            "default = [\"rustc\", \"cargo\", \"rust-std\", \"rust-docs\", \"clippy\"]",
+        );
+        assert_ne!(renamed, FIXTURE);
+        let renamed = ChannelManifest::parse("1.96.1", &renamed).unwrap();
+        assert_eq!(
+            renamed.profile_members("default", LINUX).unwrap(),
+            ["rustc", "cargo", "rust-std", "rust-docs", "clippy-preview"]
+        );
         let error = manifest.profile_members("bespoke", LINUX).unwrap_err();
         assert!(
             error.to_string().contains("profile named bespoke"),

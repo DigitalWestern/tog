@@ -128,6 +128,14 @@ const ALLOWED: &[(&str, &str, &str)] = &[
         "commands::deps::validate_spec",
         "argv validation",
     ),
+    // Legacy seeding asks a tailor what its pre-lock closure proves; the
+    // command layer passes that tailor in, and the trait is the only thing
+    // named. Resolution itself never looks a tailor up.
+    (
+        "comforter/toolchain.rs",
+        "tailors::Tailor",
+        "legacy seeding",
+    ),
 ];
 
 fn allowed(relative: &str, path: &[String]) -> bool {
@@ -155,7 +163,7 @@ fn layers_point_one_way() {
                     target.as_str(),
                     "tailors" | "comforter" | "commands" | "cli"
                 ),
-                "comforter" => matches!(target.as_str(), "commands" | "cli"),
+                "comforter" => matches!(target.as_str(), "tailors" | "commands" | "cli"),
                 "tailors" => {
                     matches!(target.as_str(), "commands" | "cli")
                         || (target == "tailors"

@@ -240,6 +240,7 @@ pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
 pub(crate) fn path_selection_for_test(platform: Platform) -> Selected {
     use crate::kernel::toolchain::{ArtifactRow, Bundle, Component, Source};
     Selected {
+        helpers: Default::default(),
         ecosystem: "rust".into(),
         bundle: Bundle {
             release: crate::kernel::provider::rust_path::PATH_RELEASE.into(),
@@ -906,6 +907,57 @@ checksum = "{hash_b}"
         assert!(resolve_toolchain_within(platform, &sdist).is_err());
     }
 
+    /// A Python lock's pinned sdist Rust stands in for the catalog default
+    /// wherever the sdist's own file leaves the choice open: no file, no
+    /// channel, or `stable`. A channel the sdist names still decides.
+    #[test]
+    fn an_sdist_without_a_channel_takes_the_locked_default() {
+        use crate::kernel::provider::rust::resolve_toolchain_within_or;
+        let _exception_guard = exception_guard();
+        let _attribution = crate::kernel::policy::Attribution::open("python").unwrap();
+        let platform = Platform::X86_64UnknownLinuxGnu;
+        let temp = TempDir::new("tog-sdist-default");
+        let sdist = temp.path().join("source");
+        fs::create_dir_all(&sdist).unwrap();
+        let pinned = Some("1.90.0");
+        assert_ne!(default_version(), "1.90.0");
+        assert_eq!(
+            resolve_toolchain_within_or(platform, &sdist, pinned).unwrap(),
+            "1.90.0"
+        );
+        assert_eq!(
+            resolve_toolchain_within_or(platform, &sdist, None).unwrap(),
+            default_version()
+        );
+        for file in [
+            "stable\n",
+            "[toolchain]\nchannel = \"stable\"\n",
+            "[toolchain]\ncomponents = [\"rust-src\"]\n",
+        ] {
+            let name = if file.starts_with('[') {
+                "rust-toolchain.toml"
+            } else {
+                "rust-toolchain"
+            };
+            fs::write(sdist.join(name), file).unwrap();
+            assert_eq!(
+                resolve_toolchain_within_or(platform, &sdist, pinned).unwrap(),
+                "1.90.0",
+                "{file}"
+            );
+            fs::remove_file(sdist.join(name)).unwrap();
+        }
+        fs::write(sdist.join("rust-toolchain"), "1.95\n").unwrap();
+        assert!(resolve_toolchain_within_or(platform, &sdist, pinned)
+            .unwrap()
+            .starts_with("1.95."));
+        fs::remove_file(sdist.join("rust-toolchain")).unwrap();
+        // A pin this tog does not ship is refused by name.
+        let error = resolve_toolchain_within_or(platform, &sdist, Some("1.2.3")).unwrap_err();
+        assert!(error.to_string().contains("pins Rust 1.2.3"), "{error}");
+        crate::kernel::policy::clear();
+    }
+
     #[test]
     fn resolves_toolchain_files_and_pins() {
         let _exception_guard = exception_guard();
@@ -1030,6 +1082,7 @@ checksum = "{hash_b}"
         let platform = Platform::host().unwrap();
 
         let foreign = Selected {
+            helpers: Default::default(),
             ecosystem: "python".into(),
             bundle: fixtures::bundle("cpython-3.13.15", "cpython", "3.13.15", Platform::ALL),
             lock_sha256: None,
@@ -1054,6 +1107,7 @@ checksum = "{hash_b}"
             );
         }
         let unknown = Selected {
+            helpers: Default::default(),
             ecosystem: "rust".into(),
             bundle,
             lock_sha256: None,
@@ -1067,6 +1121,7 @@ checksum = "{hash_b}"
 
         // A row with no artifact for this platform is refused by name too.
         let one_platform = Selected {
+            helpers: Default::default(),
             ecosystem: "rust".into(),
             bundle: fixtures::bundle("rust-1.96.1", "rustc", "1.96.1", &[]),
             lock_sha256: None,

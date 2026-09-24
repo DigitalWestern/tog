@@ -140,19 +140,15 @@ fn current_inputs(recorded: &Value) -> Value {
 
 /// The fields of a `rustfmt` closure that say which rustfmt made it, as
 /// this binary would write them for a run in `root.join(resolved_from)` now.
-/// Computed from the pins alone: no store, no network, no policy record.
+/// Computed from the lock and the pins alone: no store, no network, no
+/// policy record.
 pub fn pinned_record(platform: Platform, root: &Path, resolved_from: &str) -> io::Result<Value> {
-    // A local toolchain has no pin: the lock's row is its identity, and its
-    // own tree is the formatter.
-    if let Some(selected) = locked_path_selection(root)? {
-        let rust_object = rust_path::identity(platform, &selected)?.object_id();
-        return Ok(json!({
-            "rust_version": selected.version("rustc")?,
-            "rust_object": { "id": rust_object },
-            "rustfmt_object": { "id": rust_object },
-            "inputs": record_inputs(&rust_object, resolved_from),
-        }));
+    // `tog fmt` formats with the lock's Rust selection, so the record it
+    // writes is judged against that selection, whatever release it pins.
+    if let Some(selected) = locked_selection(root)? {
+        return record_for(platform, &selected, resolved_from);
     }
+    // No lock: the toolchain file, or the catalog default without one.
     let version = cargo::resolve_toolchain_quiet(platform, &root.join(resolved_from))?;
     let rust_object = cargo::rust_object_id(platform, version)?;
     let rustfmt_object = rustfmt_identity(platform, version, Path::new(&rust_object))?.object_id();
@@ -164,10 +160,37 @@ pub fn pinned_record(platform: Platform, root: &Path, resolved_from: &str) -> io
     }))
 }
 
-/// The committed lock's Rust selection at `root`, when it is a local tree.
-/// A lock that cannot be read is not one: `status` reports it on its own
-/// row, and this record is then judged against the pins as before.
-fn locked_path_selection(root: &Path) -> io::Result<Option<Selected>> {
+/// The record a `tog fmt` run under `selected` writes. A local toolchain
+/// has no pin: the lock's row is its identity, and its own tree is the
+/// formatter. A catalog release pairs its base Rust object with its own
+/// rustfmt row.
+fn record_for(platform: Platform, selected: &Selected, resolved_from: &str) -> io::Result<Value> {
+    let rust_object = cargo::runtime_object_id(platform, selected)?;
+    let rustfmt_object = if rust_path::is_path(selected) {
+        rust_object.clone()
+    } else {
+        let row = rustfmt_row(platform, selected)?;
+        identity_from(
+            platform,
+            &row.version,
+            row.digest.hex(),
+            Path::new(&rust_object),
+        )?
+        .object_id()
+    };
+    Ok(json!({
+        "rust_version": selected.version("rustc")?,
+        "rust_object": { "id": rust_object },
+        "rustfmt_object": { "id": rustfmt_object },
+        "inputs": record_inputs(&rustfmt_object, resolved_from),
+    }))
+}
+
+/// The committed lock's Rust selection at `root`. A lock that cannot be
+/// read, or that names no Rust, is not one: `status` reports a broken lock
+/// on its own row, and this record is then judged against the toolchain
+/// file as before.
+fn locked_selection(root: &Path) -> io::Result<Option<Selected>> {
     use crate::kernel::toolchain::lock::ToolchainLock;
     let Ok(Some(lock)) = crate::kernel::fsroot::ProjectRoot::open(root)
         .and_then(|project| ToolchainLock::read_via(&project))
@@ -178,12 +201,13 @@ fn locked_path_selection(root: &Path) -> io::Result<Option<Selected>> {
         return Ok(None);
     };
     let selected = Selected {
+        helpers: Default::default(),
         ecosystem: "rust".into(),
         bundle: section.bundle()?,
         lock_sha256: None,
         source: crate::kernel::toolchain::Source::Lock,
     };
-    Ok(rust_path::is_path(&selected).then_some(selected))
+    Ok(Some(selected))
 }
 
 /// Whether a `rustfmt` closure in `dir` was made by the rustfmt this binary
@@ -741,6 +765,67 @@ mod tests {
         assert_eq!(record["rustfmt_object"]["id"], import.as_str());
         assert_eq!(record["rust_version"], "1.96.1");
         assert_eq!(record["inputs"]["rustfmt_object"], import.as_str());
+    }
+
+    /// A lock pinned to a release other than the catalog default: the
+    /// record `status` and `audit` expect is the one `tog fmt` writes under
+    /// that lock, so it stays fresh. The expected ids are built from the
+    /// shipped release of that version, not through the lock.
+    #[test]
+    fn a_lock_pinned_to_a_non_default_release_is_the_expected_record() {
+        use crate::kernel::toolchain::input::InputRow;
+        use crate::kernel::toolchain::lock::{ToolchainLock, LOCK_PATH};
+        let temp = crate::kernel::testutil::TempDir::new();
+        let root = temp.0.as_path();
+        let platform = Platform::X86_64UnknownLinuxGnu;
+        let default = crate::kernel::toolchain::shipped(&cargo::toolchain_catalog().unwrap())
+            .unwrap()
+            .version("rustc")
+            .unwrap()
+            .to_string();
+        let pinned = "1.90.0";
+        assert_ne!(
+            pinned, default,
+            "the fixture release must not be the default"
+        );
+        let selected = shipped_selection(pinned).unwrap();
+        let mut lock = ToolchainLock::new("0.1.0");
+        let rows = [InputRow {
+            path: PathBuf::from("rust-toolchain.toml"),
+            field: "toolchain.channel".into(),
+            value: Some(pinned.into()),
+            absent: false,
+            sha256: Some("0".repeat(64)),
+        }];
+        lock.set_ecosystem("rust", &selected.bundle, &rows).unwrap();
+        fs::write(root.join(LOCK_PATH), lock.canonical_bytes()).unwrap();
+
+        let record = pinned_record(platform, root, "").unwrap();
+        let rust_id = cargo::rust_object_id(platform, pinned).unwrap();
+        let rustfmt_id = object_id_for(platform, pinned, &rust_id).unwrap();
+        assert!(rust_id.ends_with(&format!("-rust-{pinned}")), "{rust_id}");
+        assert!(
+            rustfmt_id.ends_with(&format!("-rustfmt-{pinned}")),
+            "{rustfmt_id}"
+        );
+        assert_eq!(record["rust_version"], pinned);
+        assert_eq!(record["rust_object"]["id"], rust_id.as_str());
+        assert_eq!(record["rustfmt_object"]["id"], rustfmt_id.as_str());
+        assert_eq!(record["inputs"], record_inputs(&rustfmt_id, ""));
+        assert!(matches!(
+            closure_state(platform, root, &record).unwrap(),
+            State::Synced
+        ));
+
+        // Without the lock, the same directory expects the default release,
+        // so the pinned record reads as changed rather than silently fresh.
+        fs::remove_file(root.join(LOCK_PATH)).unwrap();
+        let unlocked = pinned_record(platform, root, "").unwrap();
+        assert_eq!(unlocked["rust_version"], default.as_str());
+        assert!(matches!(
+            closure_state(platform, root, &record).unwrap(),
+            State::Changed(_)
+        ));
     }
 
     #[test]

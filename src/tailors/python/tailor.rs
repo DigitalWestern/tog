@@ -37,6 +37,29 @@ impl Tailor for Python {
         &["rust"]
     }
 
+    /// An sdist with no toolchain file of its own (or one naming no
+    /// channel, or `stable`) builds on the Rust the Python section pins: the
+    /// catalog's default when the section is written. The wheel ids of a
+    /// locked project then stay put when a newer tog ships a newer default.
+    fn helper_pins(&self) -> io::Result<std::collections::BTreeMap<String, String>> {
+        let rust = crate::kernel::toolchain::shipped(
+            &crate::kernel::provider::rust::toolchain_catalog()?,
+        )?;
+        Ok(std::collections::BTreeMap::from([(
+            "rust".to_string(),
+            rust.version("rustc")?.to_string(),
+        )]))
+    }
+
+    /// Before sections pinned it, that default was Rust
+    /// [`LEGACY_SDIST_RUST`](super::build::LEGACY_SDIST_RUST).
+    fn legacy_helper_pins(&self) -> std::collections::BTreeMap<String, String> {
+        std::collections::BTreeMap::from([(
+            "rust".to_string(),
+            super::build::LEGACY_SDIST_RUST.to_string(),
+        )])
+    }
+
     fn registry_tool(&self) -> io::Result<&'static dyn RegistryTool> {
         Ok(&python::registry_tool::PythonTool)
     }

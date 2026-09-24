@@ -457,6 +457,7 @@ pub(crate) fn plan_sdist_identity_input(
                 activity,
                 platform,
                 rust,
+                sdist_rust_default(selected),
                 &pkg.sha256,
                 &source,
                 &info,
@@ -577,6 +578,11 @@ fn generate_cargo_lock(
     })
 }
 
+/// The Rust an sdist with no toolchain file of its own built with before a
+/// project's lock pinned one: the newest release tog shipped then. A Python
+/// section with no `helpers.rust` pin keeps it, so its wheels keep their ids.
+pub(crate) const LEGACY_SDIST_RUST: &str = "1.96.1";
+
 struct RustPlanInputs {
     /// The Rust this build compiles with: the project's locked selection, or
     /// the shipped release the sdist's toolchain file resolves to.
@@ -591,12 +597,20 @@ struct RustPlanInputs {
     generated_lock: bool,
 }
 
+/// The Rust an sdist with no channel of its own builds on under the Python
+/// selection `selected`: its lock's pin, or `None` (the catalog's default)
+/// when no lock is involved.
+fn sdist_rust_default(selected: &Selected) -> Option<&str> {
+    selected.helpers.get("rust").map(String::as_str)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn rust_plan_inputs(
     store: &Store,
     activity: &crate::kernel::activity::StoreActivity,
     platform: Platform,
     project_rust: Option<&Selected>,
+    sdist_default: Option<&str>,
     sdist_sha256: &str,
     source: &Path,
     info: &ArchiveInfo,
@@ -614,8 +628,14 @@ fn rust_plan_inputs(
         // project; the sdist's channel is not read, because the lock already
         // answered it.
         Some(selected) => selected.clone(),
+        // Otherwise the sdist's own channel, and failing one the Rust the
+        // Python section pins for sdists (`sdist_default`).
         None => crate::kernel::provider::rust::shipped_selection(
-            crate::kernel::provider::rust::resolve_toolchain_within(platform, source)?,
+            crate::kernel::provider::rust::resolve_toolchain_within_or(
+                platform,
+                source,
+                sdist_default,
+            )?,
         )?,
     };
     // What the sdist's own toolchain file asks for beyond the compiler is
@@ -994,6 +1014,7 @@ pub(crate) fn build_sdist_wheel_at_depth(
             activity,
             platform,
             rust,
+            sdist_rust_default(selected),
             &pkg.sha256,
             source,
             &info,
@@ -1357,6 +1378,37 @@ mod tests {
         assert_eq!(unlocked.inputs["schema"], "sdist-build/4");
         assert_eq!(unlocked.inputs["rust"], rust_id(&shipped_rust));
         assert_eq!(plan(Some(&shipped_rust)).inputs, unlocked.inputs);
+
+        // Under a Python lock that locks no Rust, an sdist with no channel
+        // of its own builds on the Rust the Python section pins. A section
+        // from before the pin keeps 1.96.1, the Rust its wheels were built
+        // with, so their ids do not move with the catalog's default.
+        let pinned = |version: &str| {
+            let mut locked_python = python.clone();
+            locked_python
+                .helpers
+                .insert("rust".into(), version.to_string());
+            super::plan_sdist_identity_input(
+                &store,
+                activity,
+                platform,
+                &pkg,
+                &locked_python,
+                None,
+                None,
+            )
+            .expect("Rust sdist identity plan")
+            .identity
+        };
+        let legacy = pinned(super::LEGACY_SDIST_RUST);
+        assert_eq!(
+            legacy.inputs["rust"],
+            crate::kernel::provider::rust::rust_object_id(platform, "1.96.1").unwrap()
+        );
+        assert!(legacy.inputs["rust"].ends_with("-rust-1.96.1"));
+        assert_ne!(legacy.object_id(), unlocked.object_id());
+        let today = pinned(shipped_rust.version("rustc").unwrap());
+        assert_eq!(today.inputs, unlocked.inputs);
 
         // A lock whose rustc row names other bytes than today's pin.
         let mut locked = shipped_rust.clone();

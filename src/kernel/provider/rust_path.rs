@@ -23,7 +23,7 @@ use crate::kernel::digest::Digest;
 use crate::kernel::platform::Platform;
 use crate::kernel::policy::{self, Exception, EXTERNAL_TOOLCHAIN};
 use crate::kernel::sandbox::Sandbox;
-use crate::kernel::store::{ObjectDeps, Store};
+use crate::kernel::store::{self, ObjectDeps, Store};
 use crate::kernel::toolchain::input::{InputRow, RUST_TOOLCHAIN_PATH};
 use crate::kernel::toolchain::{
     is_path_url, qualified, ArtifactRow, ArtifactSpec, Bundle, Component, Selected, Version,
@@ -32,9 +32,12 @@ use crate::kernel::toolchain::{
 use crate::kernel::types::Identity;
 use sha2::{Digest as _, Sha256};
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::fs;
-use std::io::{self, Read};
-use std::os::unix::fs::PermissionsExt;
+use std::io::{self, Read, Write};
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::io::AsRawFd;
 use std::path::{Component as PathPart, Path, PathBuf};
 
 /// The layout recipe of an imported local tree: copied as it is, checked
@@ -183,71 +186,241 @@ fn probe(tree: &Path, platform: Platform) -> io::Result<Probe> {
     })
 }
 
-/// A symlink target inside the tree: relative, and never above the root
-/// once resolved against the link's own directory. Anything else would
-/// make the imported object depend on a path outside itself.
-fn contained_link(relative: &Path, target: &Path) -> bool {
+/// The most symlinks one link's resolution may pass through, as the
+/// kernel's own limit (`MAXSYMLINKS`) bounds a path lookup. A loop is refused.
+const MAX_LINK_HOPS: u32 = 40;
+
+/// Whether the symlink at `link` (relative to `root`) with target text
+/// `target` resolves inside the tree. The target is resolved one component
+/// at a time against the tree as it is on disk, following every symlink it
+/// passes through (each of which must be relative and resolve inside too),
+/// and refused the moment a `..` would climb above the root. Text alone is
+/// not enough: `d/s -> ..` is inside, but `e -> d/s/../secret` then leaves.
+/// A component that does not exist ends the lookups: nothing below it can
+/// be a link, and the rest is resolved as written. Anything else would make
+/// the imported object depend on a path outside itself.
+fn contained_link(root: &Path, link: &Path, target: &Path) -> bool {
+    let mut at: Vec<OsString> = link
+        .parent()
+        .map(|parent| {
+            parent
+                .components()
+                .filter_map(|part| match part {
+                    PathPart::Normal(name) => Some(name.to_os_string()),
+                    _ => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut hops = 0;
+    resolves_within(root, &mut at, target, &mut hops)
+}
+
+fn resolves_within(root: &Path, at: &mut Vec<OsString>, target: &Path, hops: &mut u32) -> bool {
     if target.is_absolute() {
         return false;
     }
-    let mut depth: i64 = relative.components().count() as i64 - 1;
+    let mut missing = false;
     for part in target.components() {
         match part {
-            PathPart::Normal(_) => depth += 1,
+            PathPart::CurDir => {}
             PathPart::ParentDir => {
-                depth -= 1;
-                if depth < 0 {
+                if at.pop().is_none() {
                     return false;
                 }
             }
-            PathPart::CurDir => {}
+            PathPart::Normal(name) => {
+                at.push(name.to_os_string());
+                if missing {
+                    continue;
+                }
+                let here = at
+                    .iter()
+                    .fold(root.to_path_buf(), |path, name| path.join(name));
+                match fs::symlink_metadata(&here) {
+                    Ok(metadata) if metadata.file_type().is_symlink() => {
+                        *hops += 1;
+                        if *hops > MAX_LINK_HOPS {
+                            return false;
+                        }
+                        let Ok(next) = fs::read_link(&here) else {
+                            return false;
+                        };
+                        at.pop();
+                        if !resolves_within(root, at, &next, hops) {
+                            return false;
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(_) => missing = true,
+                }
+            }
             _ => return false,
         }
     }
     true
 }
 
+fn file_kind(stat: &libc::stat) -> libc::mode_t {
+    stat.st_mode & libc::S_IFMT
+}
+
+/// What identifies one version of a file without reading it: device,
+/// inode, size, and modification and change times to the nanosecond. A
+/// write changes the change time, so a file with the same key holds the
+/// same bytes it held when its sha256 was taken.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct FileKey([i64; 7]);
+
+impl FileKey {
+    fn of(stat: &libc::stat) -> FileKey {
+        FileKey([
+            stat.st_dev as i64,
+            stat.st_ino as i64,
+            stat.st_size as i64,
+            stat.st_mtime as i64,
+            stat.st_mtime_nsec as i64,
+            stat.st_ctime as i64,
+            stat.st_ctime_nsec as i64,
+        ])
+    }
+
+    fn changed_at(&self) -> i64 {
+        self.0[5]
+    }
+}
+
+/// A regular file the walk met, not yet opened.
+struct FileAt<'a> {
+    dir: &'a fs::File,
+    name: &'a [u8],
+    stat: libc::stat,
+}
+
+impl FileAt<'_> {
+    fn executable(&self) -> bool {
+        u32::from(self.stat.st_mode) & 0o111 != 0
+    }
+
+    /// Open the file the walk saw, relative to its held directory and never
+    /// through a symlink, and check the descriptor is still that regular
+    /// file. Everything read from it (its bytes, its hash, its copy) is then
+    /// that one file, whatever happens to the name meanwhile.
+    fn open(&self, root: &Path, path: &Path) -> io::Result<(fs::File, libc::stat)> {
+        let file = store::open_file_at(
+            self.dir.as_raw_fd(),
+            self.name,
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK,
+            0,
+        )
+        .map_err(|error| at_entry(root, path, error))?;
+        let opened = store::fd_stat(file.as_raw_fd())?;
+        if file_kind(&opened) != libc::S_IFREG || !store::same_inode(&opened, &self.stat) {
+            return Err(invalid(format!(
+                "the Rust toolchain at {}: {} changed while tog read it; run tog again",
+                root.display(),
+                path.display()
+            )));
+        }
+        Ok((file, opened))
+    }
+}
+
 /// One entry of a tree walk, in a canonical order.
-enum Entry {
+enum Entry<'a> {
     Dir,
-    File { executable: bool },
+    File(FileAt<'a>),
     Link(PathBuf),
 }
 
-/// Walk `root` in byte order of names, calling `visit` with each entry's
-/// path relative to `root`. Symlinks are not followed. A special file
-/// (socket, device, fifo) or a symlink that leaves the tree is refused.
-fn walk(
+fn at_entry(root: &Path, path: &Path, error: io::Error) -> io::Error {
+    io::Error::new(
+        error.kind(),
+        format!(
+            "the Rust toolchain at {}: {}: {error}",
+            root.display(),
+            path.display()
+        ),
+    )
+}
+
+/// The tree's root directory, opened without following a symlink at it.
+fn open_root(root: &Path) -> io::Result<fs::File> {
+    fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(root)
+        .map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!("the Rust toolchain at {}: {error}", root.display()),
+            )
+        })
+}
+
+/// Walk the tree at `root` in byte order of names, calling `visit` with
+/// each entry's path relative to `root`. Every directory is read through a
+/// descriptor opened with O_NOFOLLOW and checked against the entry the walk
+/// saw, so a directory swapped for a symlink mid-walk is refused rather
+/// than followed. A special file (socket, device, fifo) or a symlink that
+/// resolves outside the tree is refused.
+fn walk(root: &Path, visit: &mut dyn FnMut(&Path, Entry<'_>) -> io::Result<()>) -> io::Result<()> {
+    walk_dir(root, &open_root(root)?, Path::new(""), visit)
+}
+
+fn walk_dir(
     root: &Path,
+    dir: &fs::File,
     relative: &Path,
-    visit: &mut dyn FnMut(&Path, &Entry) -> io::Result<()>,
+    visit: &mut dyn FnMut(&Path, Entry<'_>) -> io::Result<()>,
 ) -> io::Result<()> {
-    let mut names: Vec<_> = fs::read_dir(root.join(relative))?
-        .map(|entry| entry.map(|entry| entry.file_name()))
-        .collect::<io::Result<_>>()?;
-    names.sort_by(|a, b| a.as_encoded_bytes().cmp(b.as_encoded_bytes()));
+    let dirfd = dir.as_raw_fd();
+    let mut names =
+        store::read_dir_names_at(dirfd).map_err(|error| at_entry(root, relative, error))?;
+    names.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
     for name in names {
         let path = relative.join(&name);
-        let full = root.join(&path);
-        let metadata = fs::symlink_metadata(&full)?;
-        let kind = metadata.file_type();
-        if kind.is_symlink() {
-            let target = fs::read_link(&full)?;
-            if !contained_link(&path, &target) {
+        let bytes = name.as_bytes();
+        let stat = store::stat_at(dirfd, bytes).map_err(|error| at_entry(root, &path, error))?;
+        let kind = file_kind(&stat);
+        if kind == libc::S_IFLNK {
+            let target =
+                store::read_link_at(dirfd, bytes).map_err(|error| at_entry(root, &path, error))?;
+            if !contained_link(root, &path, &target) {
                 return Err(invalid(format!(
-                    "the Rust toolchain at {}: {} links to {}, outside the toolchain; tog imports only a self-contained tree",
+                    "the Rust toolchain at {}: {} links to {}, which resolves outside the toolchain; tog imports only a self-contained tree",
                     root.display(),
                     path.display(),
                     target.display()
                 )));
             }
-            visit(&path, &Entry::Link(target))?;
-        } else if kind.is_dir() {
-            visit(&path, &Entry::Dir)?;
-            walk(root, &path, visit)?;
-        } else if kind.is_file() {
-            let executable = metadata.permissions().mode() & 0o111 != 0;
-            visit(&path, &Entry::File { executable })?;
+            visit(&path, Entry::Link(target))?;
+        } else if kind == libc::S_IFDIR {
+            let child = store::open_file_at(
+                dirfd,
+                bytes,
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                0,
+            )
+            .map_err(|error| at_entry(root, &path, error))?;
+            if !store::same_inode(&store::fd_stat(child.as_raw_fd())?, &stat) {
+                return Err(invalid(format!(
+                    "the Rust toolchain at {}: {} changed while tog read it; run tog again",
+                    root.display(),
+                    path.display()
+                )));
+            }
+            visit(&path, Entry::Dir)?;
+            walk_dir(root, &child, &path, visit)?;
+        } else if kind == libc::S_IFREG {
+            visit(
+                &path,
+                Entry::File(FileAt {
+                    dir,
+                    name: bytes,
+                    stat,
+                }),
+            )?;
         } else {
             return Err(invalid(format!(
                 "the Rust toolchain at {}: {} is not a file, directory or symlink",
@@ -259,8 +432,16 @@ fn walk(
     Ok(())
 }
 
-fn file_sha256(path: &Path) -> io::Result<String> {
-    let mut file = fs::File::open(path)?;
+/// The cheap pass: every link resolved and every entry's kind checked,
+/// no file opened. It runs before anything is hashed, so a tree tog will
+/// refuse is refused before a whole toolchain is read.
+fn check_tree(root: &Path) -> io::Result<()> {
+    walk(root, &mut |_, _| Ok(()))
+}
+
+/// Read `file` to its end, hashing it and, when `copy` is given, writing
+/// the same bytes there.
+fn read_sha256(file: &mut fs::File, mut copy: Option<&mut fs::File>) -> io::Result<String> {
     let mut hasher = Sha256::new();
     let mut buffer = vec![0u8; 1 << 16];
     loop {
@@ -269,57 +450,235 @@ fn file_sha256(path: &Path) -> io::Result<String> {
             break;
         }
         hasher.update(&buffer[..read]);
+        if let Some(copy) = copy.as_deref_mut() {
+            copy.write_all(&buffer[..read])?;
+        }
     }
     Ok(hex::encode(hasher.finalize()))
 }
 
-/// The content hash of the tree at `root`: sha256 over one length-prefixed
-/// record per entry, in walk order, naming its relative path and kind, a
-/// file's executable bit and content sha256, and a link's target. Two trees
-/// hash alike exactly when they hold the same names, bytes, links and
-/// executable bits. Owners, times and other mode bits are not content.
-pub fn tree_digest(root: &Path) -> io::Result<Digest> {
-    let mut hasher = Sha256::new();
-    let mut record = |fields: &[&[u8]]| {
+/// The records a tree hash is taken over: one length-prefixed record per
+/// entry, in walk order, naming its relative path and kind, a file's
+/// executable bit and content sha256, and a link's target.
+struct TreeHasher(Sha256);
+
+impl TreeHasher {
+    fn new() -> TreeHasher {
+        let mut hasher = TreeHasher(Sha256::new());
+        hasher.record(&[b"rust-path-tree", b"1"]);
+        hasher
+    }
+
+    fn record(&mut self, fields: &[&[u8]]) {
         for field in fields {
-            hasher.update(field.len().to_string().as_bytes());
-            hasher.update(b":");
-            hasher.update(field);
+            self.0.update(field.len().to_string().as_bytes());
+            self.0.update(b":");
+            self.0.update(field);
         }
-    };
-    record(&[b"rust-path-tree", b"1"]);
-    walk(root, Path::new(""), &mut |path, entry| {
-        let name = path.as_os_str().as_encoded_bytes();
+    }
+
+    fn entry(&mut self, path: &Path, entry: &Entry<'_>, sha256: Option<&str>) {
+        let name = path.as_os_str().as_bytes();
         match entry {
-            Entry::Dir => record(&[b"dir", name]),
-            Entry::File { executable } => {
-                let sha = file_sha256(&root.join(path))?;
-                let mode: &[u8] = if *executable { b"x" } else { b"-" };
-                record(&[b"file", name, mode, sha.as_bytes()]);
+            Entry::Dir => self.record(&[b"dir", name]),
+            Entry::File(file) => {
+                let mode: &[u8] = if file.executable() { b"x" } else { b"-" };
+                self.record(&[b"file", name, mode, sha256.unwrap_or_default().as_bytes()]);
             }
-            Entry::Link(target) => record(&[b"link", name, target.as_os_str().as_encoded_bytes()]),
+            Entry::Link(target) => self.record(&[b"link", name, target.as_os_str().as_bytes()]),
         }
+    }
+
+    fn finish(self) -> io::Result<Digest> {
+        Digest::sha256(&hex::encode(self.0.finalize()))
+    }
+}
+
+/// The content hash of the tree at `root`. Two trees hash alike exactly
+/// when they hold the same names, bytes, links and executable bits.
+/// Owners, times and other mode bits are not content.
+pub fn tree_digest(root: &Path) -> io::Result<Digest> {
+    tree_digest_cached(root, None)
+}
+
+/// [`tree_digest`], reading a file's sha256 from the cache at `cache`
+/// instead of the file when the file's [`FileKey`] is the one the cache
+/// recorded, and writing back what it learned. The tree walk, the link
+/// checks and the hash over the records run in full every time: only
+/// unchanged file bytes are not read again.
+fn tree_digest_cached(root: &Path, cache: Option<&Path>) -> io::Result<Digest> {
+    // A file changed in the same clock tick as its hash could keep its key
+    // with other bytes, so only files quiet for a while are remembered.
+    let quiet_before = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |now| now.as_secs() as i64 - CACHE_QUIET_SECONDS);
+    tree_digest_quiet(root, cache, quiet_before)
+}
+
+/// [`tree_digest_cached`], remembering only files whose change time (in
+/// seconds) is before `quiet_before`.
+fn tree_digest_quiet(root: &Path, cache: Option<&Path>, quiet_before: i64) -> io::Result<Digest> {
+    check_tree(root)?;
+    let known = cache.map(load_cache).unwrap_or_default();
+    let mut learned = BTreeMap::new();
+    let mut hasher = TreeHasher::new();
+    walk(root, &mut |path, entry| {
+        let Entry::File(file) = &entry else {
+            hasher.entry(path, &entry, None);
+            return Ok(());
+        };
+        let seen = FileKey::of(&file.stat);
+        let name = path.to_str().map(str::to_string);
+        let (sha256, key) = match name.as_ref().and_then(|name| known.get(name)) {
+            Some(cached) if cached.key == seen => (cached.sha256.clone(), seen),
+            _ => {
+                let (mut opened, stat) = file.open(root, path)?;
+                let sha256 = read_sha256(&mut opened, None)?;
+                let key = FileKey::of(&stat);
+                if FileKey::of(&store::fd_stat(opened.as_raw_fd())?) != key {
+                    return Err(invalid(format!(
+                        "the Rust toolchain at {}: {} changed while tog read it; run tog again",
+                        root.display(),
+                        path.display()
+                    )));
+                }
+                (sha256, key)
+            }
+        };
+        if let Some(name) = name {
+            if key.changed_at() < quiet_before {
+                learned.insert(
+                    name,
+                    CachedFile {
+                        key,
+                        sha256: sha256.clone(),
+                    },
+                );
+            }
+        }
+        hasher.entry(path, &entry, Some(&sha256));
         Ok(())
     })?;
-    Digest::sha256(&hex::encode(hasher.finalize()))
+    if let Some(cache) = cache {
+        if learned != known {
+            save_cache(cache, &learned);
+        }
+    }
+    hasher.finish()
 }
 
 /// Copy the tree at `from` into the existing empty directory `to`: files
 /// with their bytes and executable bit, directories, and (contained)
-/// symlinks as links.
-fn copy_tree(from: &Path, to: &Path) -> io::Result<()> {
-    walk(from, Path::new(""), &mut |path, entry| {
+/// symlinks as links. Each file is read once, from the descriptor the walk
+/// checked, and hashed as it is copied, so the digest returned is the hash
+/// of exactly what was written.
+fn copy_tree(from: &Path, to: &Path) -> io::Result<Digest> {
+    let mut hasher = TreeHasher::new();
+    walk(from, &mut |path, entry| {
         let dest = to.join(path);
-        match entry {
-            Entry::Dir => fs::create_dir(&dest),
-            Entry::File { executable } => {
-                fs::copy(from.join(path), &dest)?;
-                let mode = if *executable { 0o755 } else { 0o644 };
-                fs::set_permissions(&dest, fs::Permissions::from_mode(mode))
+        let sha256 = match &entry {
+            Entry::Dir => {
+                fs::create_dir(&dest)?;
+                None
             }
-            Entry::Link(target) => std::os::unix::fs::symlink(target, &dest),
-        }
-    })
+            Entry::Link(target) => {
+                std::os::unix::fs::symlink(target, &dest)?;
+                None
+            }
+            Entry::File(file) => {
+                let (mut source, _) = file.open(from, path)?;
+                let mut copy = fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+                    .open(&dest)?;
+                let sha256 = read_sha256(&mut source, Some(&mut copy))?;
+                let mode = if file.executable() { 0o755 } else { 0o644 };
+                copy.set_permissions(fs::Permissions::from_mode(mode))?;
+                Some(sha256)
+            }
+        };
+        hasher.entry(path, &entry, sha256.as_deref());
+        Ok(())
+    })?;
+    hasher.finish()
+}
+
+/// The store cache namespace of tree hashes, one file per tree path. It is
+/// only ever a shortcut: a missing or unreadable entry means files are read.
+const TREE_CACHE: &str = "rust-path-tree";
+
+/// The schema of one [`TREE_CACHE`] entry.
+const CACHE_SCHEMA: &str = "rust-path-tree-cache/1";
+
+/// How long a file must have been unchanged for its hash to be remembered.
+const CACHE_QUIET_SECONDS: i64 = 2;
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct CachedFile {
+    key: FileKey,
+    sha256: String,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct CacheFile {
+    schema: String,
+    files: BTreeMap<String, CachedFile>,
+}
+
+/// Where the hashes of the tree at `tree` are cached in `store`.
+fn cache_path(store: &Store, tree: &Path) -> PathBuf {
+    store.cache_path(
+        TREE_CACHE,
+        &hex::encode(Sha256::digest(tree.as_os_str().as_bytes())),
+    )
+}
+
+/// The cache of the active store, when there is one: what `select` reads
+/// and writes. The store is only located, never created.
+fn store_cache(tree: &Path) -> Option<PathBuf> {
+    Store::existing()
+        .ok()
+        .flatten()
+        .map(|store| cache_path(&store, tree))
+}
+
+fn load_cache(path: &Path) -> BTreeMap<String, CachedFile> {
+    fs::read(path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<CacheFile>(&bytes).ok())
+        .filter(|cache| cache.schema == CACHE_SCHEMA)
+        .map(|cache| cache.files)
+        .unwrap_or_default()
+}
+
+/// Replace the cache at `path` with `files`, through a temporary file and
+/// a rename so a reader never sees half of one. A cache that cannot be
+/// written costs only a re-read next time, so failures are dropped.
+fn save_cache(path: &Path, files: &BTreeMap<String, CachedFile>) {
+    let Some(parent) = path.parent() else {
+        return;
+    };
+    let body = CacheFile {
+        schema: CACHE_SCHEMA.to_string(),
+        files: files.clone(),
+    };
+    let Ok(bytes) = serde_json::to_vec(&body) else {
+        return;
+    };
+    let temporary = parent.join(format!(
+        ".tmp-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_nanos())
+    ));
+    let written = fs::create_dir_all(parent)
+        .and_then(|()| fs::write(&temporary, &bytes))
+        .and_then(|()| fs::rename(&temporary, path));
+    if written.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
 }
 
 /// The directory a `toolchain.path` value names: as written when absolute,
@@ -352,8 +711,19 @@ fn tree_of(project: &Path, value: &str) -> io::Result<PathBuf> {
 
 /// The bundle a lock records for the local tree the discovered `rows`
 /// name, or `None` when they name none. The tree is probed and hashed now:
-/// this is the moment the lock's identity for it is taken.
+/// this is the moment the lock's identity for it is taken. File hashes are
+/// shared with the active store's cache, so the realization that follows
+/// does not read the tree's files again.
 pub fn select(platform: Platform, project: &Path, rows: &[InputRow]) -> io::Result<Option<Bundle>> {
+    select_with(platform, project, rows, store_cache)
+}
+
+fn select_with(
+    platform: Platform,
+    project: &Path,
+    rows: &[InputRow],
+    cache: fn(&Path) -> Option<PathBuf>,
+) -> io::Result<Option<Bundle>> {
     let Some(value) = rows
         .iter()
         .find(|row| row.field == RUST_TOOLCHAIN_PATH.1)
@@ -362,8 +732,9 @@ pub fn select(platform: Platform, project: &Path, rows: &[InputRow]) -> io::Resu
         return Ok(None);
     };
     let tree = tree_of(project, value)?;
+    check_tree(&tree)?;
     let probe = probe(&tree, platform)?;
-    let digest = tree_digest(&tree)?;
+    let digest = tree_digest_cached(&tree, cache(&tree).as_deref())?;
     let url = tree
         .to_str()
         .map(|path| format!("{PATH_URL_SCHEME}{path}"))
@@ -440,8 +811,16 @@ pub fn identity(platform: Platform, selected: &Selected) -> io::Result<Identity>
 }
 
 /// Refuse a tree that is no longer the one `row` locked: another build, or
-/// other content. This is what makes a path toolchain fail closed.
-fn verify(platform: Platform, tree: &Path, row: &ArtifactSpec) -> io::Result<()> {
+/// other content. This is what makes a path toolchain fail closed. The
+/// hash reads unchanged files' sums from `cache`; a mismatch is confirmed
+/// by reading every file before it is reported, so a stale cache can never
+/// be the reason a tree is refused.
+fn verify(
+    platform: Platform,
+    tree: &Path,
+    row: &ArtifactSpec,
+    cache: Option<&Path>,
+) -> io::Result<()> {
     let changed = |what: String| {
         invalid(format!(
             "the Rust toolchain at {} changed since tog-toolchain.toml locked it ({what}); \
@@ -449,6 +828,7 @@ fn verify(platform: Platform, tree: &Path, row: &ArtifactSpec) -> io::Result<()>
             tree.display()
         ))
     };
+    check_tree(tree)?;
     let probe = probe(tree, platform)?;
     if probe.build != row.build || probe.version != row.version {
         return Err(changed(format!(
@@ -456,7 +836,13 @@ fn verify(platform: Platform, tree: &Path, row: &ArtifactSpec) -> io::Result<()>
             row.build, probe.build
         )));
     }
-    let digest = tree_digest(tree)?;
+    let mut digest = tree_digest_cached(tree, cache)?;
+    if let (true, Some(cache)) = (digest != row.digest, cache) {
+        // Drop the sums that disagreed and read every file: the cache is
+        // rebuilt from what the tree holds now.
+        let _ = fs::remove_file(cache);
+        digest = tree_digest_cached(tree, Some(cache))?;
+    }
     if digest != row.digest {
         return Err(changed(format!(
             "locked content {}, now {}",
@@ -492,7 +878,7 @@ pub fn realize(
 ) -> io::Result<PathBuf> {
     crate::kernel::platform::require_host(platform, "Rust toolchain")?;
     let (row, tree) = locked_row(platform, selected)?;
-    verify(platform, &tree, &row)?;
+    verify(platform, &tree, &row, Some(&cache_path(store, &tree)))?;
     let identity = identity(platform, selected)?;
     let id = identity.object_id();
     if store.has_with_activity(activity, &id)? {
@@ -504,10 +890,12 @@ pub fn realize(
     let exception = exception(&tree, &row);
     policy::record(&exception.kind, &exception.subject, &exception.detail)?;
     let staged = store.stage_with_activity(activity)?;
-    let imported = copy_tree(&tree, &staged).and_then(|()| {
+    let imported = copy_tree(&tree, &staged).and_then(|copied| {
         // The copy is what is committed, so it is what must hash to the
         // lock: a tree edited between the check and the copy is refused.
-        let copied = tree_digest(&staged)?;
+        // The digest is of the bytes as they were written, and the copy's
+        // links are checked again against the copy's own layout.
+        check_tree(&staged)?;
         if copied != row.digest {
             return Err(invalid(format!(
                 "the Rust toolchain at {} changed while it was imported (locked content {}, copied {}); run tog again",
@@ -630,8 +1018,161 @@ mod tests {
             error.to_string().contains("outside the toolchain"),
             "{error}"
         );
-        assert!(!contained_link(Path::new("bin/x"), Path::new("../../etc")));
-        assert!(contained_link(Path::new("bin/x"), Path::new("../lib/y")));
+        assert!(!contained_link(
+            &b,
+            Path::new("bin/x"),
+            Path::new("../../etc")
+        ));
+        assert!(contained_link(
+            &b,
+            Path::new("bin/x"),
+            Path::new("../lib/y")
+        ));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn no_cache(_: &Path) -> Option<PathBuf> {
+        None
+    }
+
+    /// Links are resolved against the tree on disk, through the links they
+    /// pass: text that stays inside can still lead out.
+    #[test]
+    fn a_link_that_leaves_through_another_link_is_refused() {
+        let dir = temp("chained");
+        let tree = dir.join("tree");
+        fake_toolchain(&tree, host(), "1.96.1");
+        fs::write(dir.join("secret"), b"outside").unwrap();
+        fs::create_dir(tree.join("d")).unwrap();
+        // d/s is the root itself: inside.
+        std::os::unix::fs::symlink("..", tree.join("d/s")).unwrap();
+        assert!(tree_digest(&tree).is_ok());
+        // A link through d/s to the root's own files stays inside.
+        std::os::unix::fs::symlink("d/s/bin/rustc", tree.join("inside")).unwrap();
+        assert!(tree_digest(&tree).is_ok());
+        // `d/s/../secret` never climbs above the root as text, but d/s is
+        // the root, so its `..` is the root's parent.
+        std::os::unix::fs::symlink("d/s/../secret", tree.join("e")).unwrap();
+        assert!(contained_link(&tree, Path::new("d/s"), Path::new("..")));
+        assert!(!contained_link(
+            &tree,
+            Path::new("e"),
+            Path::new("d/s/../secret")
+        ));
+        let error = tree_digest(&tree).unwrap_err();
+        assert!(
+            error.to_string().contains("e links to d/s/../secret"),
+            "{error}"
+        );
+        assert!(
+            error.to_string().contains("outside the toolchain"),
+            "{error}"
+        );
+        fs::create_dir(dir.join("copy")).unwrap();
+        let error = copy_tree(&tree, &dir.join("copy")).unwrap_err();
+        assert!(
+            error.to_string().contains("outside the toolchain"),
+            "{error}"
+        );
+        fs::remove_file(tree.join("e")).unwrap();
+        // A loop resolves nowhere, and an absolute hop inside a chain leaves.
+        std::os::unix::fs::symlink("loop-b", tree.join("loop-a")).unwrap();
+        std::os::unix::fs::symlink("loop-a", tree.join("loop-b")).unwrap();
+        assert!(tree_digest(&tree).is_err());
+        fs::remove_file(tree.join("loop-a")).unwrap();
+        fs::remove_file(tree.join("loop-b")).unwrap();
+        std::os::unix::fs::symlink(&dir, tree.join("d/abs")).unwrap();
+        assert!(!contained_link(
+            &tree,
+            Path::new("f"),
+            Path::new("d/abs/secret")
+        ));
+        fs::remove_file(tree.join("d/abs")).unwrap();
+        // A dangling link inside the tree stays inside.
+        std::os::unix::fs::symlink("not-yet/../bin", tree.join("dangling")).unwrap();
+        assert!(tree_digest(&tree).is_ok());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A file is read through the descriptor the walk checked: a name
+    /// swapped for a symlink between the walk seeing it and reading it is
+    /// refused, not followed.
+    #[test]
+    fn a_file_swapped_for_a_link_mid_walk_is_refused() {
+        let dir = temp("swap");
+        let tree = dir.join("tree");
+        fake_toolchain(&tree, host(), "1.96.1");
+        fs::write(dir.join("secret"), b"outside").unwrap();
+        let mut refused = Vec::new();
+        walk(&tree, &mut |path, entry| {
+            if let Entry::File(file) = entry {
+                if path == Path::new("bin/cargo") {
+                    fs::remove_file(tree.join(path))?;
+                    std::os::unix::fs::symlink(dir.join("secret"), tree.join(path))?;
+                    refused.push(file.open(&tree, path).is_err());
+                }
+            }
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(refused, [true]);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// An unchanged file's sum comes from the cache; a changed one is read,
+    /// and verification never refuses a tree on a cached sum alone.
+    #[test]
+    fn unchanged_files_are_hashed_from_the_cache() {
+        let dir = temp("cache");
+        let tree = dir.join("tree");
+        fake_toolchain(&tree, host(), "1.96.1");
+        let cache = dir.join("cache.json");
+        let full = tree_digest(&tree).unwrap();
+        // Every file is quiet enough to remember in this test.
+        assert_eq!(
+            tree_digest_quiet(&tree, Some(&cache), i64::MAX).unwrap(),
+            full
+        );
+        let std = format!("lib/rustlib/{}/lib/libstd.rlib", host().triple());
+        let mut files = load_cache(&cache);
+        assert!(files.contains_key(&std), "{files:?}");
+        assert!(files.contains_key("bin/rustc"), "{files:?}");
+        // A cached sum is used without reading the file: a wrong one shows.
+        files.get_mut(&std).unwrap().sha256 = "0".repeat(64);
+        save_cache(&cache, &files);
+        assert_ne!(
+            tree_digest_quiet(&tree, Some(&cache), i64::MAX).unwrap(),
+            full
+        );
+        // The verification of the locked tree reads past the wrong sum.
+        let bundle = select_with(host(), &dir, &[path_row("tree")], no_cache)
+            .unwrap()
+            .unwrap();
+        let row = Selected {
+            ecosystem: "rust".into(),
+            bundle,
+            lock_sha256: None,
+            source: crate::kernel::toolchain::Source::Lock,
+            helpers: BTreeMap::new(),
+        }
+        .artifact(host(), "rustc")
+        .unwrap();
+        files.get_mut(&std).unwrap().sha256 = "0".repeat(64);
+        save_cache(&cache, &files);
+        verify(host(), &tree.canonicalize().unwrap(), &row, Some(&cache)).unwrap();
+        // ...and drops the wrong sum rather than keep re-reading past it.
+        assert!(load_cache(&cache)
+            .get(&std)
+            .is_none_or(|cached| cached.sha256 != "0".repeat(64)));
+        // A changed file has another key, so it is read again.
+        fs::write(tree.join(&std), b"STD").unwrap();
+        let changed = tree_digest_quiet(&tree, Some(&cache), i64::MAX).unwrap();
+        assert_eq!(changed, tree_digest(&tree).unwrap());
+        assert_ne!(changed, full);
+        // A file changed within the quiet window is not remembered.
+        let _ = fs::remove_file(&cache);
+        tree_digest_cached(&tree, Some(&cache)).unwrap();
+        assert!(!load_cache(&cache).contains_key(&std));
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -641,9 +1182,9 @@ mod tests {
         let tree = dir.join("custom-rust");
         fake_toolchain(&tree, host(), "1.97.0-nightly");
         // No path row: the catalog answers.
-        assert_eq!(select(host(), &dir, &[]).unwrap(), None);
+        assert_eq!(select_with(host(), &dir, &[], no_cache).unwrap(), None);
         // Relative to the project, as rustup reads it.
-        let bundle = select(host(), &dir, &[path_row("custom-rust")])
+        let bundle = select_with(host(), &dir, &[path_row("custom-rust")], no_cache)
             .unwrap()
             .unwrap();
         assert_eq!(bundle.release, PATH_RELEASE);
@@ -663,12 +1204,12 @@ mod tests {
             "rustc 1.97.0-nightly (0123abcde 2026-06-26); cargo 1.97.0-nightly (4567fedcb 2026-06-26)"
         );
         // The same tree named absolutely is the same bundle.
-        let absolute = select(host(), &dir, &[path_row(tree.to_str().unwrap())])
+        let absolute = select_with(host(), &dir, &[path_row(tree.to_str().unwrap())], no_cache)
             .unwrap()
             .unwrap();
         assert_eq!(absolute, bundle);
         // A missing tree, or one built for another host, is refused.
-        let error = select(host(), &dir, &[path_row("nowhere")]).unwrap_err();
+        let error = select_with(host(), &dir, &[path_row("nowhere")], no_cache).unwrap_err();
         assert!(
             error.to_string().contains("toolchain.path nowhere"),
             "{error}"
@@ -680,7 +1221,7 @@ mod tests {
             Platform::X86_64UnknownLinuxGnu
         };
         fake_toolchain(&foreign, other, "1.96.1");
-        let error = select(host(), &dir, &[path_row("foreign")]).unwrap_err();
+        let error = select_with(host(), &dir, &[path_row("foreign")], no_cache).unwrap_err();
         assert!(error.to_string().contains("not this host"), "{error}");
         let _ = fs::remove_dir_all(&dir);
     }

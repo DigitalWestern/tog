@@ -124,6 +124,13 @@ pub struct EcoLock {
     components: Vec<String>,
     #[serde(default)]
     component: BTreeMap<String, ComponentLock>,
+    /// The release pinned for each helper this ecosystem builds with, by
+    /// helper lock ecosystem (`rust = "1.98.1"` in a Python section: the
+    /// Rust its sdists compile with when the project locks no Rust). A
+    /// section written before helpers were pinned has none, and its reader
+    /// supplies the release that section's builds already used.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    helpers: BTreeMap<String, String>,
     #[serde(default)]
     inputs: Vec<InputToml>,
     #[serde(default)]
@@ -200,6 +207,16 @@ impl ToolchainLock {
             }
             if entry.platforms.is_empty() {
                 return Err(bad("no platforms".into()));
+            }
+            for (helper, release) in &entry.helpers {
+                if !is_bare_key(helper) || helper == eco {
+                    return Err(bad(format!(
+                        "helper name {helper:?} is not another ecosystem"
+                    )));
+                }
+                if release.is_empty() {
+                    return Err(bad(format!("helper {helper} has an empty release")));
+                }
             }
             let names: std::collections::BTreeSet<&str> =
                 entry.components.iter().map(String::as_str).collect();
@@ -396,6 +413,12 @@ impl ToolchainLock {
                 out.push_str(&quoted(name));
             }
             out.push_str("]\n");
+            if !entry.helpers.is_empty() {
+                out.push_str(&format!("[toolchain.{eco}.helpers]\n"));
+                for (helper, release) in &entry.helpers {
+                    out.push_str(&format!("{helper} = {}\n", quoted(release)));
+                }
+            }
             for name in &entry.components {
                 let table = &entry.component[name.as_str()];
                 out.push_str(&format!("[toolchain.{eco}.component.{name}]\n"));
@@ -546,10 +569,27 @@ impl ToolchainLock {
                 revision: bundle.revision.map(u64::from),
                 components,
                 component,
+                helpers: BTreeMap::new(),
                 inputs: rows,
                 platforms,
             },
         );
+        self.validate()
+    }
+
+    /// Pin the helper releases of `ecosystem`'s section (see
+    /// [`EcoLock::helpers`]), replacing any it had, then validate the whole
+    /// lock. The section must already be set.
+    pub fn set_helpers(
+        &mut self,
+        ecosystem: &str,
+        helpers: &BTreeMap<String, String>,
+    ) -> io::Result<()> {
+        let entry =
+            self.inner.toolchain.get_mut(ecosystem).ok_or_else(|| {
+                invalid(format!("tog-toolchain.toml has no [{ecosystem}] section"))
+            })?;
+        entry.helpers = helpers.clone();
         self.validate()
     }
 
@@ -580,6 +620,12 @@ impl EcoLock {
     /// The primary component(s), in comparison order.
     pub fn primary(&self) -> &[String] {
         &self.primary
+    }
+
+    /// The helper releases this section pins, by helper lock ecosystem.
+    /// Empty for a section written before helpers were pinned.
+    pub fn helpers(&self) -> &BTreeMap<String, String> {
+        &self.helpers
     }
 
     /// The kernel [`Bundle`] this section records: the locked rows, not a
@@ -1158,6 +1204,49 @@ digest = "sha256:855d581f8a4eb1a8117e3426de25fe02770592febcfb31369aee1ffbfee9e8e
                 .to_string();
             assert!(error.contains(words), "{from} -> {to}: {error}");
         }
+    }
+
+    /// A section's helper pins are a table of their own, written only when
+    /// there are some: a lock without them keeps the bytes it always had.
+    #[test]
+    fn helper_pins_round_trip_and_are_absent_when_empty() {
+        let mut lock = ToolchainLock::new("0.1.0");
+        lock.set_ecosystem("node", &node_bundle(), &node_inputs())
+            .unwrap();
+        let plain = lock.canonical_bytes();
+        assert!(!String::from_utf8(plain.clone())
+            .unwrap()
+            .contains("helpers"));
+        assert!(lock.ecosystem("node").unwrap().helpers().is_empty());
+        let pins = BTreeMap::from([("python".to_string(), "3.12.14".to_string())]);
+        lock.set_helpers("node", &pins).unwrap();
+        let text = String::from_utf8(lock.canonical_bytes()).unwrap();
+        assert!(
+            text.contains("]\n[toolchain.node.helpers]\npython = \"3.12.14\"\n"),
+            "{text}"
+        );
+        let again = ToolchainLock::parse(text.as_bytes()).unwrap();
+        assert_eq!(again.canonical_bytes(), text.as_bytes());
+        assert_eq!(again.ecosystem("node").unwrap().helpers(), &pins);
+        // Emptying them restores the original bytes.
+        lock.set_helpers("node", &BTreeMap::new()).unwrap();
+        assert_eq!(lock.canonical_bytes(), plain);
+        // A helper is another ecosystem, with a release.
+        for (from, to, words) in [
+            ("python = \"3.12.14\"", "python = \"\"", "empty release"),
+            (
+                "python = \"3.12.14\"",
+                "node = \"1\"",
+                "not another ecosystem",
+            ),
+        ] {
+            let edited = text.replacen(from, to, 1);
+            let error = ToolchainLock::parse(edited.as_bytes())
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(words), "{from} -> {to}: {error}");
+        }
+        assert!(lock.set_helpers("python", &pins).is_err());
     }
 
     #[test]

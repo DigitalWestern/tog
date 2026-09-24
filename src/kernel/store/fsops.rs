@@ -193,6 +193,37 @@ pub(crate) fn stat_at(dirfd: RawFd, name: &[u8]) -> io::Result<libc::stat> {
     Ok(stat)
 }
 
+/// The target text of the symlink `name` under `dirfd`, read without
+/// following it and without resolving any other pathname.
+pub(crate) fn read_link_at(dirfd: RawFd, name: &[u8]) -> io::Result<PathBuf> {
+    let name = CString::new(name)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "directory entry contains NUL"))?;
+    let mut buffer = vec![0u8; 256];
+    loop {
+        // SAFETY: dirfd is borrowed for the duration of the call, name is a
+        // NUL-terminated entry name, and buffer is writable for its length.
+        let read = unsafe {
+            libc::readlinkat(
+                dirfd,
+                name.as_ptr(),
+                buffer.as_mut_ptr().cast(),
+                buffer.len(),
+            )
+        };
+        if read < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // A target that fills the buffer may have been cut short: retry
+        // with more room until it fits.
+        let read = read as usize;
+        if read < buffer.len() {
+            buffer.truncate(read);
+            return Ok(PathBuf::from(OsString::from_vec(buffer)));
+        }
+        buffer.resize(buffer.len() * 2, 0);
+    }
+}
+
 pub(crate) fn same_inode(left: &libc::stat, right: &libc::stat) -> bool {
     left.st_dev == right.st_dev && left.st_ino == right.st_ino
 }

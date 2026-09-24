@@ -1113,9 +1113,6 @@ pub fn input_records(project_dir: &Path, candidates: &[PathBuf]) -> io::Result<V
 #[cfg(test)]
 mod closure_platform_tests {
     use super::*;
-    use crate::kernel::types::LockedPackage;
-    use crate::kernel::types::{ArtifactKind, Plan};
-    use sha2::Digest as _;
     use std::os::unix::fs::symlink;
     use std::os::unix::fs::PermissionsExt as _;
 
@@ -1131,100 +1128,6 @@ mod closure_platform_tests {
         Store {
             root: root.canonicalize().unwrap(),
         }
-    }
-
-    fn local_sdist(store: &Store, name: &str, requires: &str) -> LockedPackage {
-        let source = store.root.join(format!("{name}-source"));
-        let root = source.join(format!("{name}-1.0"));
-        fs::create_dir_all(&root).unwrap();
-        fs::write(
-            root.join("pyproject.toml"),
-            format!("[build-system]\nrequires = [{requires}]\nbuild-backend = \"setuptools.build_meta\"\n"),
-        )
-        .unwrap();
-        let archive = store.root.join(format!("{name}-1.0.tar.gz"));
-        let status = std::process::Command::new("/usr/bin/tar")
-            .args(["-czf"])
-            .arg(&archive)
-            .args(["-C"])
-            .arg(&source)
-            .arg(format!("{name}-1.0"))
-            .status()
-            .unwrap();
-        assert!(status.success());
-        let bytes = fs::read(&archive).unwrap();
-        let sha256 = hex::encode(sha2::Sha256::digest(bytes));
-        let _ = fs::remove_dir_all(source);
-        LockedPackage {
-            name: name.into(),
-            version: "1.0".into(),
-            filename: format!("{name}-1.0.tar.gz"),
-            url: format!("file://{}", archive.display()),
-            sha256,
-            kind: ArtifactKind::Sdist,
-            git: None,
-        }
-    }
-
-    fn local_native_sdist(store: &Store, name: &str) -> LockedPackage {
-        let source = store.root.join(format!("{name}-native-source"));
-        let root = source.join(format!("{name}-1.0"));
-        fs::create_dir_all(&root).unwrap();
-        fs::write(
-            root.join("pyproject.toml"),
-            "[build-system]\nrequires = [\"setuptools>=40.8\"]\nbuild-backend = \"setuptools.build_meta\"\n",
-        )
-        .unwrap();
-        fs::write(root.join("binding.gyp"), "{}").unwrap();
-        let archive = store.root.join(format!("{name}-1.0.tar.gz"));
-        let status = std::process::Command::new("/usr/bin/tar")
-            .args(["-czf"])
-            .arg(&archive)
-            .args(["-C"])
-            .arg(&source)
-            .arg(format!("{name}-1.0"))
-            .status()
-            .unwrap();
-        assert!(status.success());
-        let sha256 = hex::encode(sha2::Sha256::digest(fs::read(&archive).unwrap()));
-        let _ = fs::remove_dir_all(source);
-        LockedPackage {
-            name: name.into(),
-            version: "1.0".into(),
-            filename: format!("{name}-1.0.tar.gz"),
-            url: format!("file://{}", archive.display()),
-            sha256,
-            kind: ArtifactKind::Sdist,
-            git: None,
-        }
-    }
-
-    fn cached_build_plan(store: &Store, requirement: &str, sha256: &str) -> String {
-        let platform = Platform::host().unwrap();
-        let requires = vec![requirement.to_string()];
-        let key = crate::tailors::python::build_requires::lock_cache_key(
-            platform, "3.12.14", &requires, None,
-        );
-        let lock = store.cache_path("build-lock", &key);
-        let plan_path = store.cache_path("build-plan", &key);
-        fs::create_dir_all(lock.parent().unwrap()).unwrap();
-        fs::create_dir_all(plan_path.parent().unwrap()).unwrap();
-        fs::write(lock, "# cached test lock\n").unwrap();
-        let plan = Plan {
-            ecosystem: "python".into(),
-            python_version: "3.12.14".into(),
-            packages: vec![LockedPackage {
-                name: "setuptools".into(),
-                version: "84.0.0".into(),
-                filename: "setuptools.whl".into(),
-                url: String::new(),
-                sha256: sha256.into(),
-                kind: ArtifactKind::Wheel,
-                git: None,
-            }],
-        };
-        fs::write(&plan_path, serde_json::to_vec(&plan).unwrap()).unwrap();
-        key
     }
 
     fn write_closure(dir: &Path, platform: Option<&str>) {

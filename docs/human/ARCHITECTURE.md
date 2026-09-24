@@ -222,14 +222,26 @@ place of a catalog release: a row marked `source = "path"` whose URL is
 the tree's `file://` path, whose build is the first lines of its
 `bin/rustc -vV` and `bin/cargo -V`, and whose digest is a sha256 over the
 tree's names, bytes, executable bits and (contained) symlink targets. The
-selection comes from the tailor (`Tailor::external_toolchain`), because
-only it knows what a path means; the lock writer and reader stay generic
-and check that the marker and the `file://` URL go together. Every
-realization re-probes and re-hashes the tree first and refuses one that is
-no longer the locked tree, naming `tog update --toolchain rust`. The tree
-is then imported as a `rust` object (`rust-path/1`: a verified copy keyed by
-the tree hash and build, with no store dependencies), so builds, closures
-and GC treat it like any other toolchain. Each use records the
+reader comes from the tailor (`Tailor::external_toolchain`), because only
+it knows what a path means; the command layer hands it to resolution on
+`EcosystemInput::external`, so `comforter` never looks a tailor up, and the
+lock writer and reader stay generic and check that the marker and the
+`file://` URL go together. The tree is walked through descriptors: every
+directory and file is opened with O_NOFOLLOW relative to its held parent
+and checked against the entry the walk saw, a file's bytes are hashed (and,
+on import, copied) from that one descriptor, and every symlink is resolved
+component by component against the tree on disk, through any links it
+passes, and refused if it would leave. A first pass checks the links
+before any file is read. Every realization re-probes and re-hashes the
+tree and refuses one that is no longer the locked tree, naming
+`tog update --toolchain rust`; the per-file sums are cached in the store
+(`cache/rust-path-tree/`, keyed by the tree's path) under each file's
+device, inode, size and modification and change times, so an unchanged
+file is not read again, and a mismatch is confirmed by a full read before
+it refuses. The tree is then imported as a `rust` object (`rust-path/1`: a
+copy whose hash, taken of the bytes as written, must be the locked one,
+keyed by the tree hash and build, with no store dependencies), so builds,
+closures and GC treat it like any other toolchain. Each use records the
 `external-toolchain` exception (a toolchain from no pinned release),
 which a policy can deny; the company template does. rustup refuses a path
 beside a channel, components, targets or a profile, and so does the lock's
@@ -319,7 +331,13 @@ sdists compile with `rust`. `tailors::helper_selections` decides each one
 the same way for `sync`, `status` and `tog x`: the project's own selection
 when the project has that ecosystem, the tailor's `default_helper`
 otherwise (the shipped 3.12 for node-gyp; none for Rust, where each sdist's
-toolchain file picks). A closure records the decision as
+toolchain file picks). What an sdist with no channel of its own falls back
+to is pinned in the Python lock section instead (`Tailor::helper_pins`,
+written as `[toolchain.python.helpers] rust = "<version>"` when the section
+is written, the catalog's default at that moment), so a newer tog with a
+newer default does not change a locked project's wheel ids. A section from
+before the pin, and one seeded from a pre-lock closure, keep the Rust those
+builds used (`Tailor::legacy_helper_pins`: 1.96.1). A closure records the decision as
 `toolchain.helpers.<ecosystem>`, the bundle id or `null`, and `status` holds
 a synced closure to it: re-locking the helper ecosystem, or removing its
 manifest so the default applies, is `changed` naming "the <helper>
@@ -462,7 +480,8 @@ project also locks Python, the shipped 3.12 otherwise. Its object id is the
 `gyp_python` input of `node-env/5`, so a different interpreter is a different
 environment. Likewise a Python sdist with a Rust extension compiles with the
 project's locked Rust when the lock has a `rust` section, and with the shipped
-Rust its toolchain file resolves to otherwise; `sdist-build/4` already commits
+Rust its toolchain file resolves to otherwise (the Python section's pinned Rust
+when the file names no channel); `sdist-build/4` already commits
 to that Rust object id through its `rust` input. Both helpers come from
 `kernel/provider/`. This is a cooperative network-denial build sandbox, not
 hostile-code containment. Packages that download binaries at install time

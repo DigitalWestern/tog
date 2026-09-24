@@ -140,6 +140,25 @@ fn default_pin(platform: Platform) -> io::Result<&'static str> {
         .ok_or_else(|| err("rust catalog: the default release has no rustc"))
 }
 
+/// The version a file with no channel (or none at all, or `stable`)
+/// resolves to: `default` when the caller has one (the Rust a Python
+/// project's lock pins for its sdists), the catalog's default otherwise.
+fn fallback_pin(platform: Platform, default: Option<&str>) -> io::Result<&'static str> {
+    let Some(version) = default else {
+        return default_pin(platform);
+    };
+    rust_pins(platform)?
+        .into_iter()
+        .find(|pin| *pin == version)
+        .ok_or_else(|| {
+            err(format!(
+                "tog-toolchain.toml pins Rust {version} for building sdists, which this tog \
+                 does not ship for {}; run `tog update --toolchain python`",
+                platform.triple()
+            ))
+        })
+}
+
 /// One base-toolchain row of the [`RUST_VERSION`] release, as the tests
 /// that pin its digests and ids read it.
 #[cfg(test)]
@@ -366,6 +385,7 @@ pub fn shipped_selection(version: &str) -> io::Result<Selected> {
         .ok_or_else(|| err(format!("internal: no shipped Rust release for {version}")))?
         .clone();
     Ok(Selected {
+        helpers: Default::default(),
         ecosystem: catalog.ecosystem().to_string(),
         bundle,
         lock_sha256: None,
@@ -444,42 +464,73 @@ pub(super) fn validate_rust_layout(staged: &Path, platform: Platform) -> io::Res
 
 /// Resolve the nearest rustup-style toolchain file to the pinned version.
 ///
-/// This is the pre-lock answer, and the only callers left are the ones that
-/// have no project selection to honor, such as `tog deps`, which reports on
-/// a project it never syncs. The Python sdist build of a project whose lock
-/// names no Rust uses [`resolve_toolchain_within`] instead: its tree is a
-/// store scratch directory that is nobody's tog project.
+/// This is the pre-lock answer, kept for the tests that pin how a file maps
+/// onto the catalog. No command resolves a project this way: a project's
+/// Rust is its lock's selection, `tog status` and `tog audit` ask through
+/// [`resolve_toolchain_quiet`] only when there is no lock, and the Python
+/// sdist build of a project whose lock names no Rust uses
+/// [`resolve_toolchain_within_or`]: its tree is a store scratch directory
+/// that is nobody's tog project.
 /// Every entry point that is handed a [`Selected`] takes the version from it
 /// instead (`toolchain.version("rustc")`), so the lock decides the toolchain.
 /// What the file asks for beyond the channel is read from the lock's rows
 /// ([`project_extras`]) or, for an sdist, [`toolchain_file_extras_within`].
 pub fn resolve_toolchain(platform: Platform, project_dir: &Path) -> io::Result<&'static str> {
-    resolve_toolchain_with(platform, nearest_toolchain_file(project_dir, None), true)
+    resolve_toolchain_with(
+        platform,
+        nearest_toolchain_file(project_dir, None),
+        true,
+        None,
+    )
 }
 
 /// `resolve_toolchain` for an unpacked sdist: only a toolchain file inside
 /// `root` is read. A file above it belongs to whoever owns the store's
 /// parent directories (`$HOME`, a repository the store sits in) and must
 /// not reach a build whose identity names only the sdist. With none, the
-/// newest pin, whatever lies above the store.
+/// catalog's default, whatever lies above the store.
 pub fn resolve_toolchain_within(platform: Platform, root: &Path) -> io::Result<&'static str> {
-    resolve_toolchain_with(platform, nearest_toolchain_file(root, Some(root)), true)
+    resolve_toolchain_within_or(platform, root, None)
+}
+
+/// [`resolve_toolchain_within`] with the default a project locked: an
+/// sdist whose own file names a channel gets that channel, and one with no
+/// file, no channel, or `stable` gets `default` (the Rust the Python
+/// section of `tog-toolchain.toml` pins for sdists) rather than whatever
+/// this tog's catalog calls its default today. `None` is the catalog's.
+pub fn resolve_toolchain_within_or(
+    platform: Platform,
+    root: &Path,
+    default: Option<&str>,
+) -> io::Result<&'static str> {
+    resolve_toolchain_with(
+        platform,
+        nearest_toolchain_file(root, Some(root)),
+        true,
+        default,
+    )
 }
 
 /// The version `resolve_toolchain` would choose, without its narration, so
 /// a read-only caller (`tog status`, `tog audit`) can ask.
 pub fn resolve_toolchain_quiet(platform: Platform, project_dir: &Path) -> io::Result<&'static str> {
-    resolve_toolchain_with(platform, nearest_toolchain_file(project_dir, None), false)
+    resolve_toolchain_with(
+        platform,
+        nearest_toolchain_file(project_dir, None),
+        false,
+        None,
+    )
 }
 
 fn resolve_toolchain_with(
     platform: Platform,
     found: Option<(PathBuf, bool)>,
     effects: bool,
+    default: Option<&str>,
 ) -> io::Result<&'static str> {
     let _ = rust_pins(platform)?;
     let Some((path, legacy)) = found else {
-        return default_pin(platform);
+        return fallback_pin(platform, default);
     };
     let bytes = read_toolchain_file(&path)?;
     let located =
@@ -506,9 +557,9 @@ fn resolve_toolchain_with(
     // A table with no channel (only components, targets or a profile) means
     // rustup's default toolchain: here, the catalog's explicit default.
     let Some(channel) = channel else {
-        return default_pin(platform);
+        return fallback_pin(platform, default);
     };
-    resolve_channel(platform, &path, channel.trim(), effects)
+    resolve_channel(platform, &path, channel.trim(), effects, default)
 }
 
 /// The components and cross targets the nearest toolchain file inside
@@ -571,9 +622,10 @@ fn resolve_channel(
     path: &Path,
     channel: &str,
     effects: bool,
+    default: Option<&str>,
 ) -> io::Result<&'static str> {
     if channel == "stable" {
-        let pin = default_pin(platform)?;
+        let pin = fallback_pin(platform, default)?;
         if effects {
             ui::note(&format!(
                 "{} resolves stable to pinned Rust {pin}",

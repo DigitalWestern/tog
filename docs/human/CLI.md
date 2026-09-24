@@ -237,6 +237,14 @@ refuses and names `tog update --toolchain rust`), and each use records the
 `external-toolchain` exception. A path beside a channel, components,
 targets or a profile is refused, as rustup refuses it.
 
+A Python section also pins the Rust that sdists with a Rust extension
+build on when neither the project (no `rust` section) nor the sdist (no
+channel of its own, or `stable`) names one: `[toolchain.python.helpers]
+rust = "<version>"`, the catalog's default when the section was written.
+A section from before that pin keeps Rust 1.96.1, so an existing lock's
+wheels do not change; `tog update --toolchain python` pins today's
+default.
+
 `--frozen` validates the committed lock instead of creating one and refuses
 a missing or stale one.
 
@@ -561,7 +569,8 @@ line names the key and the scopes that exclude it), `outdated` (no
 signature, or a record from before inputs, platform, or the exception
 record were written; run `tog` once under a trusted key, then
 commit. A record carrying an exception kind tog has retired is outdated
-too, with the reason and `run 'tog sync'`: a closure recording
+too, with the reason and the command that rewrites it (`run 'tog fmt'`
+for a `rustfmt` record, `run 'tog sync'` for the others): a closure recording
 `toolchain-component-unavailable` says `closure predates component
 provisioning`), `stale` (the same inputs-changed / projection-missing /
 other-platform checks `status` makes, made per closure file from that

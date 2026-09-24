@@ -310,19 +310,28 @@ pub trait Tailor: Sync {
     /// the pin tables, so no object identity changes.
     fn toolchain_catalog(&self) -> io::Result<Catalog>;
 
-    /// The toolchain the project's discovered `rows` name when it is not a
-    /// catalog release at all: a directory on this machine
-    /// (`kernel::toolchain::PATH_SOURCE`), which the lock then records in
-    /// place of a catalog selection. `project` is the canonical project
-    /// directory the rows are relative to. `None` means the catalog
-    /// answers, as it does for every ecosystem that names no such thing.
-    fn external_toolchain(
-        &self,
-        _platform: Platform,
-        _project: &Path,
-        _rows: &[crate::kernel::toolchain::input::InputRow],
-    ) -> io::Result<Option<crate::kernel::toolchain::Bundle>> {
-        Ok(None)
+    /// The reader of a toolchain that is not a catalog release at all: a
+    /// directory on this machine (`kernel::toolchain::PATH_SOURCE`), which
+    /// the lock then records in place of a catalog selection. The command
+    /// layer hands it to resolution on `EcosystemInput::external`. `None`
+    /// means the catalog always answers, as it does for every ecosystem
+    /// that has no such thing.
+    fn external_toolchain(&self) -> Option<crate::comforter::toolchain::ExternalToolchain> {
+        None
+    }
+
+    /// The helper releases a lock section written now pins, by helper lock
+    /// ecosystem (see [`Tailor::helpers`]): what a build that needs a
+    /// helper the project does not lock uses by default, fixed when the
+    /// section is written so a later catalog does not move it.
+    fn helper_pins(&self) -> io::Result<BTreeMap<String, String>> {
+        Ok(BTreeMap::new())
+    }
+
+    /// The helper releases this ecosystem's builds used before lock
+    /// sections pinned them: what a section with no pin keeps.
+    fn legacy_helper_pins(&self) -> BTreeMap<String, String> {
+        BTreeMap::new()
     }
 
     /// What a closure of this ecosystem written before the toolchain lock
@@ -1263,6 +1272,7 @@ mod tests {
             let catalog =
                 Catalog::new(shipped.ecosystem(), vec![first.clone(), second.clone()]).unwrap();
             let selected = |bundle: &crate::kernel::toolchain::Bundle| Selected {
+                helpers: Default::default(),
                 ecosystem: tailor.lock_ecosystem().to_string(),
                 bundle: bundle.clone(),
                 lock_sha256: None,
@@ -1439,6 +1449,7 @@ mod tests {
             let catalog = tailor.toolchain_catalog().unwrap();
             let bundle = catalog.select(&Request::newest()).unwrap().clone();
             let selected = Selected {
+                helpers: Default::default(),
                 ecosystem: tailor.lock_ecosystem().to_string(),
                 bundle: bundle.clone(),
                 lock_sha256: None,
@@ -1488,6 +1499,7 @@ mod tests {
         let catalog = go.toolchain_catalog().unwrap();
         let bundle = catalog.select(&Request::newest()).unwrap().clone();
         let selected = Selected {
+            helpers: Default::default(),
             ecosystem: "go".into(),
             bundle: bundle.clone(),
             lock_sha256: None,

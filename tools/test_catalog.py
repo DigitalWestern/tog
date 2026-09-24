@@ -10,6 +10,7 @@ path runs for real.
 import hashlib
 import io
 import json
+import lzma
 import os
 import subprocess
 import sys
@@ -454,6 +455,33 @@ class Rust(Base):
         shipped["artifacts"][0]["digest"] = "sha256:" + "f" * 64
         with self.assertRaisesRegex(catalog.Failure, "no longer matches upstream"):
             self.generate([shipped])
+
+    def test_the_real_manifest_verifies_under_the_real_key_and_yields_the_shipped_rows(self):
+        """The checked-in Rust key, and the real 1.96.1 channel manifest and
+        its detached signature (tools/keys/, the manifest xz-compressed):
+        gpgv accepts them, and the reader turns them into exactly the
+        rust-1.96.1 release rust.catalog.toml ships."""
+        catalog.RUST_KEY, catalog.RUST_FINGERPRINT = self.rust_saved[0], self.rust_saved[1]
+        repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        keys = os.path.join(repo, "tools/keys")
+        with lzma.open(os.path.join(keys, "channel-rust-1.96.1.toml.xz")) as f:
+            manifest = f.read()
+        with open(os.path.join(keys, "channel-rust-1.96.1.toml.asc"), "rb") as f:
+            signature = f.read()
+        catalog.rust_verify("1.96.1", manifest, signature, catalog.rust_keyring())
+        url = f"{self.DIST}/channel-rust-1.96.1.toml"
+        self.net.bodies[url] = manifest
+        self.net.bodies[url + ".asc"] = signature
+        rel, why = catalog.rust_release("1.96.1", catalog.rust_keyring())
+        self.assertIsNone(why)
+        catalog.REPO = repo
+        shipped = next(r for r in catalog.read_document("cargo")["release"]
+                       if r["key"] == "rust-1.96.1")
+        self.assertEqual(rel["components"], shipped["components"])
+        key = lambda a: (a["platform"], a["component"])
+        self.assertEqual(sorted(rel["artifacts"], key=key), sorted(shipped["artifacts"], key=key))
+        manifest_row = next(a for a in rel["artifacts"] if a["component"] == "channel-manifest")
+        self.assertEqual(manifest_row["digest"], "sha256:" + sha256(manifest))
 
     def test_the_real_key_refuses_the_trimmed_fixture_under_the_real_signature(self):
         """The checked-in Rust key and 1.96.1 signature: the trimmed test
