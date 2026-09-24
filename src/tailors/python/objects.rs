@@ -534,7 +534,7 @@ fn cpython_for_sdist(record: &Record, index: &MetaIndex) -> Result<String, Strin
 /// `sdist-build/2`: the historical non-isolated build. Its build environment
 /// was never a separate object, so the toolchain wheels it installed are
 /// named directly by the `toolchain` fingerprint — a comma-joined list of
-/// their sha256s (`build::build_toolchain_fingerprint`).
+/// their sha256s (the toolchain fingerprint in `build::derivation_fingerprint`).
 fn sdist_build_v2(record: &Record, index: &MetaIndex) -> Result<ObjectDeps, String> {
     let mut deps = ObjectDeps::new();
     let cpython = cpython_for_sdist(record, index)?;

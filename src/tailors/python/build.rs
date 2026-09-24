@@ -1098,7 +1098,7 @@ pub(crate) fn build_sdist_wheel_at_depth(
 }
 
 /// Everything that must hold before the build touches the network: the
-/// recursion cap, the host check, and a pinned CPython for this platform.
+/// recursion cap and the host check.
 fn admit_sdist_build(platform: Platform, pkg: &LockedPackage, depth: usize) -> io::Result<()> {
     if depth > 3 {
         return Err(io::Error::new(

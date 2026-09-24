@@ -343,7 +343,7 @@ where
     Ok(())
 }
 
-/// Every non-comment logical line (after backslash continuations) carries a
+/// Most non-comment logical lines (after backslash continuations) carry a
 /// --hash= option. That is the shape `uv pip compile --generate-hashes`
 /// emits and the only shape the planner accepts directly.
 pub fn is_fully_pinned(text: &str) -> bool {

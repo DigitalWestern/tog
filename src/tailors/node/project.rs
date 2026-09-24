@@ -363,7 +363,7 @@ struct ForestPaths {
 
 /// Projection id: env object + mutable declarations + layout schema.
 ///
-/// Forests live OUTSIDE the project (under the tog home, keyed by project
+/// Forests live OUTSIDE the project (under the store root, keyed by project
 /// path): anything inside the project gets crawled by test runners and type
 /// checkers, and the forest links into store packages whose own test files
 /// must never be picked up.

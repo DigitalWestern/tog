@@ -182,7 +182,7 @@ impl Tailor for Node {
             config = node::parse_tog_config(&pkg)?;
         }
         let runtime = node::realize_runtime(store, activity, platform, selected)?;
-        // node-gyp runs on the Python this project's lock names when it has
+        // node-gyp runs on the helper Python selection when the project has
         // one; a Node-only project gets the shipped default.
         let helpers = request.helpers(self)?;
         let gyp_python = match helpers.get("python") {

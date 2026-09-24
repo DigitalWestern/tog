@@ -29,8 +29,6 @@ impl Tailor for Python {
         inputs::has_python_input(project)
     }
 
-    /// `tog x` resolves from the public registry and projects into its own
-    /// cache directory (`registry_tool.rs`).
     /// An sdist with a Rust extension compiles with a Rust. With no locked
     /// Rust there is no single default: each sdist's own toolchain file
     /// picks among the shipped pins.

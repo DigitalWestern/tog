@@ -3,8 +3,9 @@
 //! another tailor or on a command.
 //!
 //! `Tailor` is the one blueprint every ecosystem implements and
-//! `registry()` is the only list of ecosystems in the crate. A command
-//! iterates the registry; it never names an ecosystem. Adding an ecosystem
+//! `registry()` lists the ecosystems in the crate. Most commands
+//! iterate the registry; some commands name an ecosystem directly
+//! (for example `by_id`). Adding an ecosystem
 //! is a folder plus one line in `REGISTRY` (docs/human/ADDING-A-TAILOR.md).
 
 pub mod cargo;
@@ -44,8 +45,8 @@ pub struct ClosureListing {
 }
 
 /// What a sync asks of one tailor: the flags that change how it works
-/// and the toolchain it must use. `frozen` never reaches a tailor that is
-/// allowed to write project inputs; the caller skips `prepare` entirely.
+/// and the toolchain it must use. With `frozen` the caller skips `prepare`
+/// and each tailor validates the committed lock instead of writing inputs.
 pub struct SyncRequest<'a> {
     pub fresh: bool,
     pub frozen: bool,
@@ -185,9 +186,8 @@ pub trait Tailor: Sync {
     /// well-formed inputs.
     fn preflight(&self, platform: Platform, project: &ProjectRoot) -> io::Result<()>;
 
-    /// Host-side preparation that must precede planning for every
-    /// ecosystem (missing-lock generation). Runs for detected ecosystems
-    /// only, before any of them plans.
+    /// Host-side preparation that must precede planning for one ecosystem.
+    /// Runs for detected ecosystems only, before that ecosystem plans.
     fn prepare(
         &self,
         _ctx: &Context,

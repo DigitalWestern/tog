@@ -1,5 +1,5 @@
 //! Manifest discovery (python tailor): which files a project has, which
-//! manifest shape wins, and the `[tool.tog]` configuration that steers it.
+//! manifest shape wins, and the `tog.toml` `[python]` configuration that steers it.
 
 use super::*;
 

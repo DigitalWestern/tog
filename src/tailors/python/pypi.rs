@@ -1,6 +1,6 @@
 //! The PyPI tailor: parses a hash-pinned requirements.txt and locks each
 //! requirement to one exact PyPI artifact (wheel preferred, sdist
-//! fallback), cutting the pattern (Plan) the kernel realizes.
+//! fallback), cutting the plan (Plan) the kernel realizes.
 
 use crate::kernel::activity::StoreActivity;
 use crate::kernel::platform::Platform;
@@ -620,7 +620,7 @@ fn score(filename: &str, python_tag: &str, platform: Platform, glibc: Glibc) -> 
     best
 }
 
-/// Pick the best compatible file, preferring the specified ordering key.
+/// Pick the best compatible file, preferring the fixed score order.
 pub fn select_file<'a>(
     files: &'a [FileCandidate],
     python_tag: &str,

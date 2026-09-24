@@ -190,8 +190,8 @@ fn run_in(ctx: &Context, dir: &Path, fresh: bool, strict: bool, frozen: bool) ->
 /// describe, and return the root whose projection the caller should read.
 ///
 /// `tog run`, `tog env` and a delegated `tog fmt` script all want the
-/// environment the project's inputs describe. Refusing with "run `tog
-/// sync` first" made the user type the one thing tog already knew to do.
+/// environment the project's inputs describe. Auto-syncing does that work
+/// instead of refusing and making the user type the sync themselves.
 /// The check is the one `tog status` prints: offline, reading the closure
 /// records and hashing the inputs they name, and it is what decides, so
 /// `status` and this never disagree about staleness. A directory with no

@@ -67,9 +67,7 @@ pub struct ExplicitPython {
 
 #[derive(Clone, Debug)]
 pub struct PythonSelection {
-    /// The pinned build this project runs. On a project path it is the row
-    /// for the version the toolchain selection names, not a choice this
-    /// module made.
+    /// The pinned build this project runs.
     pub pin: &'static PinnedPython,
     pub constraint: Option<String>,
     pub constraint_source: Option<String>,

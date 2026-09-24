@@ -6,10 +6,7 @@
 //! new higher-precedence file flips a row from absent to present instead of
 //! changing nothing the lock knows about.
 //!
-//! This module owns parsing, strict validation, and canonical writing. The
-//! lock is dormant: nothing here writes or requires it. Creation and
-//! enforcement arrive with activation; this PR only reads inputs and proves
-//! the file round-trips byte-identically.
+//! This module owns parsing, strict validation, and canonical writing.
 
 use super::input::InputRow;
 use super::{is_path_url, qualified, ArtifactRow, Bundle, Component, PATH_SOURCE};
