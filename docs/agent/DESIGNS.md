@@ -1625,9 +1625,19 @@ When this section is fully built:
 8. The lock the tool writes is **byte-identical** to what the same tool
    writes when it talks to the registry directly. The proxy is invisible in
    every file the user commits, apart from the resolution record itself.
-9. When confinement is unavailable on a host, the door either refuses or
-   runs unconfined and records `unconfined-resolution`, by policy. It never
-   runs unconfined silently.
+9. **No resolver runs without isolation when it matters.** A tool that
+   evaluates project or third-party code never runs without filesystem
+   isolation: when the native sandbox is unavailable it runs under a
+   container backend or a dedicated resolver user, and where neither
+   exists the command fails naming the missing capability. **No resolver
+   runs without isolation while a signing key is configured.** The only
+   unisolated runs left are non-code-evaluating tools on a keyless
+   machine, and they record `unconfined-resolution`, which policy can
+   deny. See "Isolation tiers".
+10. **Nothing that outlives the tool is trusted.** The whole tool process
+   tree is stopped before validation, and the outputs are validated,
+   signed, and published from an immutable copy in the store, never from
+   the stage a straggler could still write.
 
 **What this does not claim.** It is cooperative hermeticity plus
 provenance, the same claim the build sandbox makes
@@ -1818,11 +1828,11 @@ complete a handshake with anything but the proxy. `NODE_EXTRA_CA_CERTS`
 **adds** to Node's built-in roots, so any other Node code (a pnpm internal
 request, a script that ran anyway) can still make a directly trusted TLS
 connection. Under confinement this does not matter, because the network
-reaches only the proxy. In the unconfined fallback it does: **unconfined
-Node is treated as capable of direct trusted TLS**, and so is every other
-unconfined tool, since the fallback exists only when no fence exists. That
-is why `unconfined-resolution` is a kind and not a detail. The recording
-guarantee applies only to confined runs.
+reaches only the proxy. Without a network fence (the `isolated` and
+`none` tiers below) it does: **Node without a fence is treated as capable
+of direct trusted TLS**, and so is every other unfenced tool. That is why
+unfenced runs record `unconfined-resolution` and why the recording
+guarantee applies only to the `confined` tier.
 
 **ALPN.** The interception server offers only `http/1.1`. Tools that
 prefer HTTP/2 (cargo's sparse index, uv) fall back to parallel HTTP/1.1
@@ -1890,11 +1900,12 @@ Because the real project was never mounted writable, "fails" means that
 nothing happened to it. No restore step is needed for the tool's writes,
 and a newly created `.git` never reaches the real tree.
 
-**Publication** happens only after the diff, the output checks, and the
-ledger commit have all passed (see "The transaction"). Before publishing,
-the door checks that each real output still has the digest it had when
-the snapshot was taken. If the user edited `package.json` during the run,
-the door fails instead of overwriting their change.
+**Publication** happens only after the tree is stopped, the diff and the
+output checks have passed on the immutable output copy, and the ledger
+has committed (see "The transaction"). Each target is swapped in
+atomically and the displaced bytes are compared with the pre-run digest.
+If the user edited `package.json` during the run, the swap is reversed
+and their edit is kept.
 
 **Cost.** Cloning is near-instant on APFS, btrfs, and XFS. On ext4 the
 copy is proportional to the source tree minus the excluded outputs,
@@ -1938,13 +1949,8 @@ wholesale, so the door profile appends `(deny mach-lookup (global-name
 after the blanket allow (SBPL: the last matching rule wins†). Other local
 processes can reach the TCP port during the run, which is why every
 tunnel and every mirror request must carry the session token. Seatbelt
-applies to every descendant. The process-tree quiescence gap (a daemon
-surviving the tool's exit, Backlog "Sol review 3 leftovers") remains on
-macOS, and the rules keep children in tog's process group (§5, guarantee
-4). With the snapshot this no longer threatens the project: a straggler
-can write only the stage, which the door has already diffed and which
-`tog gc` sweeps. The door deletes the stage after publication. A
-straggler that keeps writing into a deleted directory affects nothing.
+applies to every descendant. Stragglers are handled by "Quiescence and
+the immutable output copy" below.
 
 #### Unix sockets: no connection to any host socket
 
@@ -1988,19 +1994,124 @@ in the tool's row before merging.
 profile allows only the proxy's TCP port. So a host socket is unreachable
 whether or not it exists at scan time. The same two tests run there.
 
-#### No confinement available
+#### Quiescence and the immutable output copy
 
-On Linux without unprivileged user namespaces, with `bwrap` missing, or
-without `sandbox-exec`, the door runs the tool **unconfined but still
-staged**: it runs on the snapshot, with the same diff, output checks, and
-transaction, and is wired to the proxy. The snapshot and diff need no
-kernel feature, so the project stays protected. What is lost is the
-fence: the tool can reach the network directly (Node even with trusted
-TLS; see "What the CA file does and does not prevent"), so the ledger
-records only cooperative traffic. The door records `unconfined-resolution`
-before starting. A policy that denies that kind (the company template
-does) refuses the door before the tool starts, and the message names the
-missing engine. Contract 9.
+A process the tool started can outlive it (a daemon, a double fork) and
+keep writing the stage while tog diffs, hashes, signs, and publishes.
+Two measures close that window, on both platforms:
+
+1. **Stop the whole tree before validation.**
+   - *Linux:* the tool runs in bwrap's PID namespace. When the tool
+     exits, the relay sends `SIGKILL` to every other process in the
+     namespace (it enumerates `/proc` inside the namespace) and exits.
+     bwrap's init then exits, which kills anything left, and the door
+     waits for bwrap to be reaped. No process of the tree survives, and
+     none can escape a PID namespace. The container backend gets the same
+     result by removing the container.
+   - *macOS:* there is no PID namespace, and children stay in tog's
+     process group (§5, guarantee 4), so the door cannot kill a group it
+     shares. It freezes and kills the tree instead. After the tool exits,
+     or on timeout, it walks the descendants of the tool's pid with
+     `proc_listchildpids` and sends each `SIGSTOP`. It repeats the walk
+     until two walks in a row find no new pid, then sends `SIGKILL` to the
+     frozen set. It also kills every same-uid process whose
+     `proc_pidinfo` parent chain leads to a pid first seen in the tree
+     (this catches processes reparented to `launchd`, because the door
+     keeps the set of pids it has observed). A `setsid` double fork that
+     escapes between two walks is the one case the walk can miss, and
+     the next measure makes it harmless. Such a process also stays inside
+     Seatbelt: it can write only the stage and reach only the proxy port,
+     which closes when the session ends.
+2. **Validate and publish from an immutable copy.** Once the tree is
+   stopped, the door copies each declared output from the stage into a
+   store stage owned by tog. The copy lies outside every path the
+   sandbox profile allows the tool to write, and the door makes it
+   read-only and holds its descriptors open. The diff classifies paths in
+   the stage, but every check on output **contents** (the token, address,
+   and stage-path scans, the digests), the signature, and publication read
+   only this copy. Whatever a missed straggler writes to the stage
+   afterward is never read.
+
+The named test `descendant_writes_during_publication_do_not_reach_the_project`
+runs a fixture tool whose `setsid`, double-forked child rewrites a
+declared output in a loop for ten seconds after the tool exits. It
+asserts that the published bytes equal the immutable copy, that the
+record's `outputs` digests match the published files, and, on Linux,
+that the child was killed. It runs on both platforms.
+
+#### Isolation tiers: what runs when the native sandbox is unavailable
+
+Every door runs in the strongest tier the host offers. A tool's
+**class** decides which tiers it may use:
+
+- **Code-evaluating** tools run project or third-party code: Bundler
+  (Gemfile), mix (`mix.exs`), `dotnet restore` (MSBuild), uv whenever
+  builds are allowed (the probe's rerun and every `x` or edit run that
+  may build), and the no-route helpers that evaluate project files.
+- **Non-code-evaluating** tools run only themselves: npm and pnpm with
+  scripts off, cargo, go, git, and uv's `--no-build` probe.
+
+The tiers, strongest first:
+
+1. **`confined`** means network fenced to the proxy plus filesystem
+   isolation. It comes from either of two engines:
+   - the **native sandbox**: bwrap on Linux, Seatbelt on macOS;
+   - the **container backend** (Linux): when bwrap cannot create a user
+     namespace (`kernel.unprivileged_userns_clone=0`, or the AppArmor
+     `restrict_unprivileged_userns` policy) but a container engine
+     (`podman` or `docker`) is reachable. The relay runs as the
+     container's entrypoint. The container has `--network none`, the
+     snapshot and the tool's store objects bind-mounted at their real
+     paths, the proxy socket bind-mounted, a read-only root from a
+     minimal tog-built image (the store's system-runtime subset, pinned
+     by digest), the same seccomp filter, and `--pids-limit`. Removing
+     the container kills the tree. Everything else (snapshot, diff,
+     transaction) is identical.
+2. **`isolated`** means filesystem isolation without a network fence. It
+   comes from a **dedicated resolver user**: an OS account
+   (`tog-resolver`) that an administrator creates once, together with a
+   sudoers rule allowing the developer to run only
+   `tog __resolution-relay` as that user (`tog doctor --resolver-user`
+   prints the exact commands for Linux and macOS). The door copies the
+   snapshot and the tool's store objects into a shared stage the resolver
+   user owns. The relay runs as that user, so ordinary Unix permissions
+   keep it away from the developer's home, the real project, the store,
+   and the signing key file (0600). Before using the tier, the door
+   checks that the lock root and every ancestor are not writable by the
+   resolver user, and that the signing key file is not readable by it,
+   and refuses if either check fails. The network is not fenced, so the
+   run records `unconfined-resolution` (the ledger saw only cooperative
+   traffic). The key is still safe: it lives in a file and in the
+   developer's tog process, and neither is reachable across the uid
+   boundary. On macOS, `sandbox-exec` ships with every release, so this
+   tier is reached only if it has been removed or disabled.
+3. **`none`**: same user, no fence. The door still runs the tool on the
+   snapshot and still uses the transaction. This tier exists only for
+   non-code-evaluating tools on a machine with **no signing key
+   configured**. It records `unconfined-resolution`.
+
+The rule, as a table:
+
+| Tool class | Signing key configured | Allowed tiers | When none of the allowed tiers is available |
+|---|---|---|---|
+| code-evaluating | either | `confined`, `isolated` | the command fails |
+| non-code-evaluating | yes | `confined`, `isolated` | the command fails |
+| non-code-evaluating | no | `confined`, `isolated`, `none` | cannot happen (`none` is always available) |
+
+The failure message names the tool, why it needs isolation, and each
+missing capability with its fix. For example: "tog add runs Bundler,
+which evaluates the Gemfile, so it needs isolation. bubblewrap cannot
+create a user namespace here (AppArmor restrict_unprivileged_userns=1),
+no container engine is reachable (podman/docker not found), and no
+resolver user is configured (see `tog doctor --resolver-user`). Enable
+one of them." A sync that needs a missing-lock door fails the same way.
+
+`unconfined-resolution` keeps its meaning, "the ledger may be missing
+traffic because the network was not fenced", and it is recorded for the
+`isolated` and `none` tiers. The record's `isolation` field states the
+tier (`confined`, `isolated`, or `none`). The tier is a semantic fact;
+which engine provided it is a diagnostic. The company template denies
+`unconfined-resolution`, so under it only `confined` runs pass.
 
 ### The ledger: identity, contents, and redaction
 
@@ -2017,39 +2128,68 @@ portable semantic part and a run-local diagnostic part:
   retried.
 - **Diagnostics** hold what varies by machine or run: cache disposition
   (hit, miss, revalidated), arrival order, retry and duplicate counts,
-  byte counts, the confinement engine, the platform, tool store object
+  byte counts, the isolation engine, the platform, tool store object
   ids, the proxy port, refusal details, and on Linux the exec log below.
-  Diagnostics never reach a committed file.
+  Diagnostics never reach a committed file, and they are never part of the
+  ledger's identity.
 
 The canonical bytes of each part use the same canonicalization as
 `kernel/signing.rs` (keys in byte order, compact).
 
-**Store identity.** The ledger is a store object of the new kernel-owned
-kind `resolution-ledger`, with an `Identity` like every other object:
-kind `resolution-ledger`, name = ecosystem, version = `1`, inputs =
-`{portable: sha256(portable bytes), diagnostics: sha256(diagnostic bytes),
-door: <kind>}`. Its object directory holds `portable.json` and
-`diagnostics.json`. It gets a `KindAdapter` row in the kernel's
-object-kind table with live and migration grammars, as every kind must
-have or GC refuses to certify it (§ARCHITECTURE "GC root safety").
+**Store identity: portable bytes only.** The ledger is a store object of
+the new kernel-owned kind `resolution-ledger`, with an `Identity` like
+every other object: kind `resolution-ledger`, name = ecosystem, version =
+`1`, inputs = `{portable: sha256(portable bytes)}`. Its object directory
+holds only `portable.json`. The ecosystem and the door kind are inside
+the portable bytes, so the identity covers them. The identity is a pure
+function of the portable evidence, so **two machines holding the same
+portable ledger compute the same object id**. It gets a `KindAdapter` row
+in the kernel's object-kind table with live and migration grammars, as
+every kind must have or GC refuses to certify it (§ARCHITECTURE "GC root
+safety").
 
-**Retention.** The door registers the ledger's **full object id** in the
-project's root record as soon as the object is committed, so GC keeps it
-from the moment it exists, including across `--no-sync`. When the
-resolution record joins a closure, the closure writer adds the ledger id
-to that closure's `ClosureRefs`, the same way it retains every other
-object the closure names. Planner and `x` doors, which write no record,
-add their ledger ids to the `ClosureRefs` of the closure their sync (or
-`x` root) publishes.
+**Diagnostics are a sidecar.** The run-local part is a second object of
+kind `resolution-diagnostics`, identity inputs
+`{ledger: <ledger object id>, diagnostics: sha256(diagnostic bytes)}`,
+holding `diagnostics.json`. Nothing portable names it. The ledger does
+not reference it, and it is found through the index
+`<store>/resolve/diag/<ledger id>`. It has its own `KindAdapter` row, is
+rooted alongside its ledger on the machine that produced it, and never
+leaves that machine.
 
-**Portable versus local evidence.** The committed resolution record
-carries the ledger's full object id and the sha256 of its portable part,
-under a signature (see "Attestation"). `tog audit` stays store-independent
-and does not read the ledger: what it judges is the signed record's
-facts. The full ledger is **local evidence**. On the machine that ran the
-door, `tog ls` and a future `tog why` can show every fetch, and anyone
-holding the object can verify it against the signed portable digest. It
-is not joined portable evidence, and the design does not claim that it is.
+**Retention.** The door registers the ledger id (and the sidecar id) in
+the project's root record as soon as the objects are committed, so GC
+keeps them from the moment they exist, including across `--no-sync`.
+When a resolution record joins a closure, the closure writer adds the
+ledger id to that closure's `ClosureRefs` **only if the object exists in
+the active store**, because `ClosureRefs` validates presence and must not
+fail on a machine that never had it. On a fresh CI machine the join
+succeeds with no ledger retained. Planner and `x` doors, which write no
+record, add their ledger ids (always local) to the `ClosureRefs` of the
+closure their sync (or `x` root) publishes.
+
+**Portable versus local evidence.** The signed record carries the ledger's
+object id and the sha256 of its portable bytes. Both are portable
+values, fixed by the portable evidence and identical on every machine.
+Verifying the record needs neither the object nor the store. `tog audit`
+stays store-independent and judges the signed record's facts. The full
+ledger is evidence you can move between machines but do not need to:
+
+- `tog attest --ledger-export <ecosystem> <file>` writes the portable
+  bytes of the ledger named by the project's current record. It fails if
+  the object is not in the local store.
+- `tog attest --ledger-import <file>` reads portable bytes, recomputes
+  their sha256 and object id, and accepts them only if they equal the
+  `portable_sha256` and ledger id of an attesting record in the project.
+  It then commits the object and roots it, and the next closure write
+  retains it through `ClosureRefs`. A CI job that wants the developer's
+  ledger imports the file the developer exported (for example as a CI
+  artifact).
+- **Reconstruction by re-running** cannot give the same bytes (registry
+  metadata changes over time), so it is not offered as a way to recover a
+  ledger. `tog attest` on CI produces a **new** record and ledger for the
+  same lock instead, which is the supported way for CI to hold its own
+  evidence.
 
 **Redaction, before anything is serialized.** Entries and the command
 field pass through one redactor:
@@ -2090,35 +2230,39 @@ dtrace, so the policy-relevant build fact must not depend on it. See
 ### Attestation: the signed resolution record
 
 **The record** (`.tog/resolution/<ecosystem>.json`) is the portable,
-committed receipt of one door that produced project outputs. It is a
-signed envelope over a body:
+committed receipt of one door that produced project outputs. It uses the
+**same envelope form as a signed closure**. The signature covers the
+canonical bytes of the whole record minus its top-level `signature`
+field, and `kernel/signing.rs` (`Signer::sign` and the closure verifier)
+produces and checks it unchanged:
 
 ```json
-{"body":{"schema":"resolution/1","ecosystem":"node","door":"edit",
-  "tool":{"name":"npm","version":"10.9.2"},
-  "command":["add","lodash@^4"],
-  "outputs":{"package-lock.json":"<sha256>","package.json":"<sha256>"},
-  "ledger":{"object":"<full object id>","portable_sha256":"<hex>",
-            "endpoints":["registry.npmjs.org"],"entries":412,"refused":0},
-  "confined":true,
-  "exceptions":[{"kind":"unattested-index","subject":"npm.example.com","detail":"..."}]},
- "signature":{"key":"ed25519:<64 hex>","sig":"<hex>"}}
+{"schema":"resolution/1","ecosystem":"node","door":"edit",
+ "tool":{"name":"npm","version":"10.9.2"},
+ "command":["add","lodash@^4"],
+ "outputs":{"package-lock.json":"<sha256>","package.json":"<sha256>"},
+ "ledger":{"object":"<ledger object id>","portable_sha256":"<64 hex>",
+           "endpoints":["registry.npmjs.org"],"entries":412,"refused":0},
+ "isolation":"confined",
+ "exceptions":[{"kind":"unattested-index","subject":"npm.example.com","detail":"..."}],
+ "signature":{"alg":"ed25519","key":"<64 hex>","sig":"<128 hex>"}}
 ```
 
-The body has no timestamps, port, token, platform, confinement engine, or
-store object ids other than the ledger's. `confined` is a boolean
-semantic fact; which engine confined the run is a diagnostic. The
-signature is Ed25519 over the canonical bytes of `body`, made with
-`TOG_SIGNING_KEY` through `kernel/signing.rs`, the same key and code that
-sign closures. The door loads the key at preflight, as `sync` and `fmt`
-do, and that loading extends to `add`, `remove`, `update`, `x`, and the
-new `tog attest`. With no key configured, the door writes the envelope
-with `"signature": null`. That record is honest but unattested.
+`signature.key` is **bare** 64-character lowercase hex, exactly as
+`Signer::sign` writes it today (the `ed25519:` prefix belongs only to the
+key-file and policy syntax). The record has no timestamps, port, token,
+platform, isolation engine, or store object ids other than the ledger's,
+and the ledger id is itself portable (see "Store identity"). The key is
+`TOG_SIGNING_KEY`, the same key that signs closures. The door loads it at
+preflight, as `sync` and `fmt` do, and that loading extends to `add`,
+`remove`, `update`, `x`, and the new `tog attest`. With no key
+configured, the record has no `signature` field (the unsigned closure
+convention). Such a record is honest but unattested.
 
 **What the signature binds.** It binds, in one signed object: the outputs'
-digests (the lock and manifest hash), the ledger's full object id and
-portable digest, the tool, the command, whether the run was confined, and
-every ledger-only exception. Changing any of them breaks the signature.
+digests (the lock and manifest hash), the ledger's object id and
+portable digest, the tool, the command, the isolation tier, and every
+ledger-only exception. Changing any of them breaks the signature.
 
 **The join.** It happens in one ecosystem-neutral place,
 `comforter::write_closure_inner`, before it claims the attribution. For
@@ -2130,21 +2274,36 @@ to the closure's project directory):
 2. The record **attests** when every check passes: the signature verifies,
    the key is in the machine policy's `[signing] trusted` set (the same
    set audit trusts; project and `--policy` files can only intersect it),
-   the body parses as `resolution/1`, and every `outputs` digest matches
+   the record parses as `resolution/1`, and every `outputs` digest matches
    the file on disk.
-3. If it attests: the closure body gains `"resolution": <envelope>`, the
-   record's `exceptions` are recorded into the attribution on the
-   writer's thread, and the ledger id joins `ClosureRefs`.
-4. If it does not attest (missing, unsigned, bad signature, untrusted
+3. **Every exception kind in an attesting record is validated** against
+   `policy::KINDS` (through `canonical_kind`) before anything is recorded.
+   An unknown kind is a **hard failure under every policy, permissive
+   included**: "the resolution record names exception kind `<kind>`,
+   which this tog does not know; upgrade tog to judge it". This matters
+   because `policy::record_with` itself accepts free-string kinds. Without
+   the check, an older tog would publish a closure from a newer signed
+   record and silently drop a finding it cannot judge. The same check
+   applies to `isolation` values and to the record schema version.
+4. If it attests and every kind is known: the closure body gains
+   `"resolution": <envelope>`, and the record's `exceptions` are recorded
+   into the attribution on the writer's thread. The ledger id joins
+   `ClosureRefs` only if the object exists in the active store.
+5. If it does not attest (missing, unsigned, bad signature, untrusted
    key, malformed, or stale digests): its contents are **ignored
    entirely**, and the join records **`unrecorded-resolution`** with the
    reason (`missing`, `unsigned`, `untrusted-key`, `bad-signature`,
-   `stale-outputs`). A stale record is deleted. An unsigned or untrusted
-   record is kept, since a machine that does trust its key can still
-   attest it.
-5. Recording goes through `policy::record_with`, so a denied kind, whether
+   `malformed`, `stale-outputs`). The record file is **left untouched** in
+   every case: the join never deletes or rewrites a receipt. A stale
+   receipt stays as forensic evidence of what was last resolved, and it
+   is replaced only by the publication step of a later **successful**
+   resolution transaction (an edit, a missing-lock door, or `tog
+   attest`). An unsigned or untrusted record likewise stays, since a
+   machine that trusts its key can still attest it.
+6. Recording goes through `policy::record_with`, so a denied kind, whether
    an attested exception or `unrecorded-resolution` itself, refuses
-   publication and the sync fails.
+   publication and the sync fails. Because the join writes nothing to the
+   project, a refusal leaves the checkout exactly as it was.
 
 This is what makes the record enforceable rather than informational:
 
@@ -2214,7 +2373,7 @@ on the thread that opened the attribution, records after the tool exits.
 | An artifact whose registry claim is SHA-1 or MD5 only (npm `shasum` without `integrity`, a PyPI `md5` fragment), or has no claim where the protocol provides one | `weak-integrity` (existing) | refuse | ledger only |
 | A request to an endpoint outside the permitted set: an intercepted host (uv extra index, `.npmrc` scoped registry, direct-URL dependency) or a refused `CONNECT` | `unattested-index` (existing; the policy text already covers "index-like options") | refuse | intercepted tools (uv, npm, pnpm, cargo): forward and record in the resolution record; mirror tools (Go, Bundler, Hex, NuGet): refuse visibly and record |
 | The resolution required building a source distribution (see below) | `resolution-build` (**new**) | uv runs with `--no-build` only, so the edit fails naming the package that needs a build | record |
-| The door ran without confinement | `unconfined-resolution` (**new**) | refuse before the tool starts | record |
+| The door ran without a network fence (`isolated` or `none` tier; see "Isolation tiers") | `unconfined-resolution` (**new**) | refuse before the tool starts | record |
 | Metadata was served from last-good because the upstream was unreachable (offline or transport failure) | `stale-resolution` (**new**; subject = endpoint, detail = number of last-good responses) | the proxy answers 504 for any request it would otherwise serve last-good, so the door fails naming the first such URL | record; the entries are also marked `freshness: last-good` in the portable evidence, which the signature covers |
 | A lock has no attesting resolution record at closure time | `unrecorded-resolution` (**new**) | the sync refuses to publish, and names `tog attest` | record |
 | Lifecycle scripts | none | `--ignore-scripts` and `npm_config_ignore_scripts=true` stay as today; a script that ran anyway would be confined | `install-script-failed` stays a realize-time kind |
@@ -2286,10 +2445,27 @@ route, or by `CONNECT` for interception. For each upstream connection the
 proxy:
 
 1. resolves the hostname **once**,
-2. validates **every** returned address, and refuses the connection if
-   any is loopback, private (RFC 1918, ULA), link-local (including
-   `169.254.169.254`), multicast, unspecified, or an IPv4-mapped form of
-   those,
+2. validates **every** returned address and refuses the connection if
+   any address is not globally routable. "Globally routable" is decided by
+   a table compiled from the IANA IPv4 and IPv6 Special-Purpose Address
+   Registries, pinned by registry date in the source. Every entry whose
+   "Globally Reachable" column is not `True` is refused. For IPv6, only
+   `2000::/3` global unicast is eligible at all. Addresses that embed an
+   IPv4 address (IPv4-mapped `::ffff:0:0/96`, IPv4-compatible `::/96`,
+   NAT64 `64:ff9b::/96` and `64:ff9b:1::/48`, 6to4 `2002::/16`, Teredo
+   `2001::/32`) are refused outright rather than unpacked. That refuses,
+   for IPv4, `0.0.0.0/8`, `10.0.0.0/8`, `100.64.0.0/10` (CGNAT),
+   `127.0.0.0/8`, `169.254.0.0/16`, `172.16.0.0/12`, `192.0.0.0/24`,
+   `192.0.2.0/24`, `192.31.196.0/24`, `192.52.193.0/24`,
+   `192.88.99.0/24`, `192.168.0.0/16`, `192.175.48.0/24`,
+   `198.18.0.0/15`, `198.51.100.0/24`, `203.0.113.0/24`,
+   `224.0.0.0/4`, `240.0.0.0/4`, and `255.255.255.255/32`, and for IPv6,
+   `::/128`, `::1/128`, `100::/64`, `2001::/23`, `2001:db8::/32`,
+   `3fff::/20`, `5f00::/16`, `fc00::/7`, `fe80::/10`, `ff00::/8`, and
+   the embedding forms above. A registry host that genuinely lives in a
+   non-global range (a company mirror on `10.x`) is a WP5 permitted
+   endpoint with an explicit address allowance in machine policy, never
+   a default,
 3. connects to one of **those validated `SocketAddr`s**, through a `ureq`
    `Resolver` that returns exactly the validated list, so the client
    performs no lookup of its own,
@@ -2524,59 +2700,98 @@ Contract 1 needs enforcement, not review alone:
 
 `ResolutionDoor::run` is all-or-nothing for the project. In order:
 
-1. **Preflight.** Load the policy snapshot and signing key. Refuse
-   `unconfined-resolution` now if it is denied and confinement is missing.
-   Record the real outputs' pre-run digests.
-2. **Snapshot** the lock root and extra roots (socket-free), with the
+1. **Preflight.** Load the policy snapshot and signing key. Choose the
+   isolation tier. Refuse now if the tool's class and the key forbid
+   every available tier, or if `unconfined-resolution` is denied and only
+   an unfenced tier is available. First, **recover** any leftover
+   publication journal for this project (see "Recovery").
+2. **Hold the originals.** Open the lock root through `ProjectRoot` and
+   keep the directory descriptor for the whole run. For each declared
+   output that exists, open it `O_NOFOLLOW` through that descriptor, copy
+   its bytes into an immutable store stage (the **original copy**), and
+   record their sha256 as the pre-run digest.
+3. **Snapshot** the lock root and extra roots (socket-free), with the
    baseline manifest. Scan store and system roots for sockets.
-3. **Run** the tool (probe first for uv), confined, through the proxy.
-4. **Check.** The tool succeeded. No request was refused by policy. The
-   diff holds only declared outputs and declared scratch. No output
-   contains the session token, the proxy address, or (macOS) the stage
-   path. The real outputs still have their pre-run digests.
-5. **Commit the ledger** object (store commit: staged directory plus
-   rename, as for every object) and register its id in the project's
-   root record.
-6. **Stage the publication.** Write each output and the record envelope
-   (signed if a key is loaded) as temporary files beside their targets
-   through `ProjectRoot`, and fsync them.
-7. **Publish.** Copy each current real output into the stage as a
-   backup, then rename the temporaries over the targets, outputs first
-   and the record last.
-8. **On any failure in steps 1–7:** nothing reaches the project before
-   step 7. In step 7, every already-renamed target is restored from its
-   backup by rename (a target that did not exist before is removed). The
-   temporaries are removed. The ledger object, if committed, stays in
-   the store as an unrooted object: its root-record entry is removed and
-   `tog gc` sweeps it. The door returns the first error.
+4. **Run** the tool (probe first for uv) in its tier, through the proxy.
+   Then **stop the whole tree** (see "Quiescence").
+5. **Copy and check.** Copy the declared outputs into the immutable output
+   copy. Check that the tool succeeded, that no request was refused by
+   policy, that the diff holds only declared outputs and declared
+   scratch, and that no output copy contains the session token, the proxy
+   address, or (macOS) the stage path.
+6. **Commit the ledger** and its diagnostics sidecar (store commits:
+   staged directory plus rename, as for every object), and register them
+   in the project's root record. Build the record from the output copy's
+   digests and sign it.
+7. **Journal.** Write `.tog/resolution/.journal-<ecosystem>.json` through
+   the held descriptor, with `fsync` of the file and the directory. It
+   lists, per target (each output, then the record), the target name,
+   the temporary name, the original copy's store path and pre-run digest
+   (or "absent"), the new digest, and a state (`pending`). The journal's
+   presence means "publication may be incomplete". Every tog command that
+   writes this project (sync, `add`/`remove`/`update`, `attest`) runs
+   recovery before anything else when it finds one. The journal's
+   root-record entry keeps the original copies alive until recovery or
+   commit.
+8. **Publish, one target at a time: swap, then compare.** Write the new
+   bytes from the output copy to a temporary name beside the target and
+   `fsync` it. Then **atomically exchange** the temporary and the target
+   (`renameat2(RENAME_EXCHANGE)` on Linux, `renameatx_np(RENAME_SWAP)` on
+   macOS, both through the held directory descriptor). The file now at
+   the temporary name is exactly what the target was an instant before
+   the swap. Hash it. If it differs from the pre-run digest (the user,
+   or anything else, changed the file after step 2), **exchange back**,
+   which restores their bytes exactly, and fail. No edit can be read into
+   a backup and then overwritten, because the compare runs on the
+   displaced bytes after an atomic swap. A target that did not exist is
+   created with `renameat2(RENAME_NOREPLACE)` (`renameatx_np(RENAME_EXCL)`
+   on macOS), which fails if something appeared in the meantime. After
+   each target, mark it `swapped` in the journal and `fsync`. The record
+   is the last target, so a receipt is replaced only here, inside a
+   successful transaction.
+9. **Commit point.** When the record has been swapped, mark the journal
+   `committed`, `fsync`, delete the displaced temporaries, and delete the
+   journal. The resolution is now published.
+10. **On any failure before step 8**, nothing has touched the project:
+    remove the temporaries and unroot the ledger and sidecar for `tog gc`.
+    **On failure during step 8**, undo every `swapped` target in reverse
+    order, by exchanging the displaced original back (or removing a
+    created file), then delete the journal. The project is byte-for-byte
+    as it was.
 
-A failed ledger commit or record write therefore never leaves a new lock
-behind. A crash between two renames in step 7 can leave a mixed state,
-which the next sync sees as a record whose `outputs` digests do not
-match: `unrecorded-resolution` with reason `stale-outputs`, never a
-silently accepted lock. The staged backups stay in a `stage-` directory
-until `tog gc`, so the user can recover them.
+**Recovery** (at the start of any writing command, after a crash): a
+`committed` journal only needs its temporaries and itself deleted. Any
+other journal is rolled back target by target. A target whose current
+digest is the journal's new digest is restored from its original copy
+(or removed if it was absent). A target at its pre-run digest is left
+alone. A target at a third digest was edited after the crash, so it is
+left alone and reported. Then the journal is deleted. A crash therefore
+never leaves a new lock that the next sync accepts silently: after
+recovery the project is back at its originals, and the receipt that was
+there before (if any) still describes them.
 
 ### Failure modes and fail-closed rules
 
 | Failure | Behavior |
 |---|---|
 | Proxy cannot start (bind, CA generation) | door fails before the tool starts; no direct-network fallback |
-| Confinement unavailable | `unconfined-resolution`: refuse if denied, else run staged and wired but unconfined, and record |
+| Native sandbox unavailable | next tier per "Isolation tiers"; code-evaluating tools, and every tool while a signing key is configured, fail naming each missing capability when neither the container backend nor the resolver user is available |
+| A descendant outlives the tool | the tree is stopped before validation; contents are read only from the immutable output copy |
 | Socket found in a mounted root at preflight | door refuses, naming the path |
 | Request matches no route and is not interceptable | 403 with a tog body, ledger `refused`; the door fails if the refusal was a policy denial, even when the tool exits 0 (npm tolerates failed optional fetches) |
 | `CONNECT` or mirror request without the session token | 407/403, ledger entry; never forwarded |
 | Upstream bytes do not match the claimed digest | 502 to the tool, nothing cached, the door fails with both digests named; no stale fallback |
 | Redirect to a non-permitted origin | refused; credentials never follow a redirect to another origin |
-| Any resolved upstream address is loopback, private, or link-local | refused (SSRF rule) |
+| Any resolved upstream address is not globally routable (IANA special-purpose registries) | refused (SSRF rule) |
 | Transport failure | last-good metadata marked `last-good`; otherwise 504 |
 | Relay or proxy thread dies | the tool sees connection refused and fails; the door reports the proxy error first |
 | Tool exits non-zero | nothing published; the tool's stderr is shown after any proxy refusal, which is usually the real cause |
 | Undeclared change in the snapshot (source files, `.github/`, a new `.git`, `.git/hooks/*`, `.tog/*`) | nothing published; the paths are named |
 | An output contains the session token, the proxy address, or the stage path | nothing published |
-| A real output changed during the run | nothing published; the user's edit is kept |
-| Ledger commit, record write, or any publication rename fails | the transaction rolls back (step 8); the project is unchanged |
-| tog is killed mid-run | before step 7 the project is unchanged; during step 7 the next sync reports `stale-outputs` and the backups remain in the stage until `tog gc` |
+| A real output changed during the run, at any moment up to its swap | the post-swap compare sees it, the swap is reversed, and nothing stays published; the user's edit is kept byte-for-byte |
+| Ledger commit, sidecar commit, record signing, or any swap fails | the transaction rolls back (step 10); the project is unchanged |
+| tog is killed mid-run | before step 8 the project is unchanged; after that, the next writing command recovers from the journal |
+| Record names an unknown exception kind, isolation value, or schema | hard failure at the join under every policy |
 
 ### Performance and caching
 
@@ -2640,7 +2855,16 @@ Kernel unit tests (`src/kernel/resolve/`):
 - `connect_tunnel_is_authenticated_once_and_bound_to_its_session`
 - `inner_requests_of_an_authenticated_tunnel_need_no_token`
 - `proxy_routes_only_to_permitted_endpoints`
-- `proxy_refuses_loopback_private_and_link_local_upstreams`
+- `proxy_refuses_every_iana_special_purpose_range`: table-driven, one
+  named case per IPv4 and IPv6 registry row listed in the SSRF rule
+  (`refuses_100_64_0_0_10_cgnat`, `refuses_198_18_0_0_15_benchmarking`,
+  `refuses_fc00_7_ula`, ...), each with an address at the start, middle,
+  and end of the range, plus the embedding forms
+- `proxy_accepts_a_global_address_next_to_each_refused_range` (the
+  adjacent addresses just outside each range pass, so the table is not
+  over-broad)
+- `iana_special_purpose_table_matches_the_pinned_registry` (parses the
+  checked-in registry CSVs and compares them with the compiled table)
 - `proxy_connects_only_to_the_validated_address` (a rebinding test
   resolver answers public first and loopback on every later call; the
   connection must reach the public listener, and the resolver must be
@@ -2666,6 +2890,12 @@ Ledger and redaction (`src/kernel/resolve/ledger.rs`):
 - `portable_ledger_is_independent_of_arrival_order_and_duplicates`
 - `portable_ledger_excludes_cache_state_and_platform`
 - `resolution_ledger_identity_golden` (the `Identity` bytes and object id)
+- `ledger_identity_depends_only_on_portable_bytes` (two runs with the same
+  portable evidence and different diagnostics give one ledger id)
+- `diagnostics_sidecar_is_a_separate_object_never_named_by_the_record`
+- `join_retains_ledger_only_when_present_locally` (a fresh store joins a
+  developer's record without failing `ClosureRefs`)
+- `ledger_export_import_round_trips_and_rejects_mismatched_bytes`
 - `resolution_ledger_kind_is_registered_for_gc`
 - `ledger_is_rooted_from_commit_and_retained_through_closure_refs`
 - `redaction_removes_userinfo_secret_queries_and_credential_operands`
@@ -2680,15 +2910,35 @@ Snapshot, sockets, and transaction (`src/kernel/resolve/door.rs`):
 - `new_git_directory_publishes_nothing_and_never_reaches_the_project`
 - `git_hook_change_publishes_nothing`
 - `declared_scratch_is_discarded`
-- `concurrent_user_edit_of_an_output_fails_the_door`
+- `descendant_writes_during_publication_do_not_reach_the_project` (both
+  platforms; see "Quiescence")
+- `linux_tree_is_killed_before_validation`
+- `macos_tree_is_frozen_and_killed_before_validation` (including a child
+  reparented to `launchd`)
+- `user_edit_before_swap_is_restored_by_reverse_exchange` (a test hook
+  edits the target between step 2 and its swap)
+- `user_edit_after_hold_is_never_copied_into_a_backup`
+- `created_target_that_appeared_meanwhile_fails_noreplace`
 - `ledger_commit_failure_restores_every_output` (fault injection)
-- `record_write_failure_restores_every_output` (fault injection)
-- `crash_between_renames_yields_stale_outputs_not_acceptance`
+- `sidecar_commit_failure_restores_every_output` (fault injection)
+- `swap_failure_mid_publication_rolls_back_every_swapped_target`
+- `crash_at_every_journal_state_recovers_to_the_originals` (kills the
+  door after each `fsync` point and runs recovery)
+- `committed_journal_recovery_only_cleans_up`
+- `recovery_leaves_a_target_edited_after_the_crash_and_reports_it`
 - `denied_kind_fails_the_door_even_when_the_tool_exits_zero`
 - `ledger_only_exceptions_are_recorded_on_the_owner_thread`
 - `output_containing_the_token_fails`
 - `unconfined_resolution_is_refused_when_denied_and_recorded_otherwise`
-- `unconfined_door_still_runs_on_the_snapshot`
+- `code_evaluating_tool_never_runs_in_tier_none`
+- `no_resolver_runs_in_tier_none_while_a_signing_key_is_configured`
+- `container_backend_is_used_when_user_namespaces_are_unavailable`
+- `resolver_user_tier_refuses_when_the_project_is_writable_by_it`
+- `resolver_user_tier_refuses_when_the_key_is_readable_by_it`
+- `resolver_user_tier_cannot_read_the_signing_key` (e2e, `--ignored`,
+  needs the account)
+- `missing_isolation_message_names_every_missing_capability`
+- `tier_none_still_runs_on_the_snapshot`
 - `every_resolver_invocation_goes_through_the_door` (tripwire table vs census)
 - `local_supervise_refuses_resolver_programs`
 
@@ -2719,7 +2969,12 @@ Attestation, join, and audit (`tests/cli.rs` and `src/comforter/`):
   `unconfined-resolution` from the body)
 - `record_signed_by_untrusted_key_yields_unrecorded_resolution`
 - `unsigned_record_yields_unrecorded_resolution_and_is_kept`
-- `stale_record_yields_unrecorded_resolution_and_is_deleted`
+- `stale_record_yields_unrecorded_resolution_and_is_left_untouched`
+- `denied_unrecorded_resolution_leaves_the_checkout_unchanged`
+- `stale_receipt_is_replaced_only_by_a_successful_transaction`
+- `join_hard_fails_an_unknown_exception_kind_under_permissive_policy`
+- `join_hard_fails_an_unknown_isolation_value_or_schema`
+- `record_signature_key_is_bare_hex_and_verifies_with_kernel_signing`
 - `unattested_record_exceptions_are_ignored`
 - `company_policy_denies_unrecorded_resolution_under_frozen_sync`
 - `tog_attest_signs_an_unchanged_lock_and_refuses_a_changed_one`
@@ -2787,26 +3042,45 @@ After it, #61's grep is empty and every door is in one place.
 
 **PR 2: proxy core.** The HTTP subset, routes and `RegistryProtocol`,
 tunnel authentication, the forward proxy with visible refusal, the
-validating resolver (SSRF pinning), the ledger's two parts, redaction,
-the `resolution-ledger` kind and identity, the metadata cache, the
+validating resolver (SSRF pinning) with the IANA special-purpose table
+and its per-range tests, the portable ledger and the diagnostics
+sidecar, redaction, the `resolution-ledger` and `resolution-diagnostics`
+kinds and identities (portable bytes only for the ledger), the metadata
+cache, the
 artifact-cache integration, redirect rules, offline mode, and the
 last-good path with its `freshness` marking and the per-session switch
 that turns last-good into 504 when `stale-resolution` is denied. Kernel unit
 tests against the fixture upstream. No tool uses it yet.
 
 **PR 3: confinement and the transaction.** The staged snapshot and diff,
-the transaction and its rollback, the `Proxy` network mode for both
-sandbox engines, the `__resolution-relay` subcommand, the AF_UNIX
-seccomp filter and exec log, the all-roots socket scan, the
-`unconfined-resolution` kind, and the sandbox tests. On the Mac: the
-Seatbelt rules, the DNS deny, and the same deny added to the **build**
-profile (known gap 1).
+tree quiescence on both platforms, the immutable output copy, the
+transaction (held originals, swap-then-compare publication, the journal,
+and recovery), the `Proxy` network mode for both sandbox engines, the
+`__resolution-relay` subcommand, the AF_UNIX seccomp filter and exec log,
+the all-roots socket scan, the tool classes and the tier rule (native
+sandbox and tier `none`, with the signing-key and code-evaluating
+refusals and their messages), the `unconfined-resolution` kind, and the
+sandbox, quiescence, and transaction tests. On the Mac: the Seatbelt
+rules, the DNS deny, and the same deny added to the **build** profile
+(known gap 1).
+
+**PR 3b: the other isolation backends.** The Linux container backend
+(podman/docker, the pinned minimal image, `--network none`, the same
+relay and seccomp filter) and the dedicated resolver user on Linux and
+macOS (`tog doctor --resolver-user`, the sudoers rule, the shared stage,
+and the permission preflight). Until it lands, a host without the native
+sandbox fails with the missing-capability message, which is the
+fail-closed outcome.
 
 **PR 4: Go end to end, attestation, and the join.** Switch the Go rows to
 the proxied mode (mirror plus sumdb), including the planner doors that
 run on ordinary syncs (known gap 3, Go half). Add the signed resolution
-record, key loading for the edit verbs, the join in `write_closure_inner`,
-`ClosureRefs` retention, `unrecorded-resolution`, `stale-resolution`,
+record in the closure envelope format (bare-hex key), key loading for the
+edit verbs, the join in `write_closure_inner` (kind, isolation, and
+schema validation with hard failure on unknowns; stale receipts left
+untouched), `ClosureRefs` retention only for locally present ledgers,
+`tog attest --ledger-export` and `--ledger-import`,
+`unrecorded-resolution`, `stale-resolution`,
 `Tailor::resolution_outputs`, `tog attest` with Go's lock check, the
 per-developer key path (a laptop key in the machine `[signing]` set
 attests a record exactly as a CI key does, with
@@ -2894,8 +3168,8 @@ where the design above closes each:
 1. *"Scrub the user's environment" misses variables nobody listed*
    (`CARGO_REGISTRIES_*`, `UV_*` added in a newer uv, `NODE_OPTIONS`
    `--require`). Fixed: the door's environment starts empty (contract 2).
-   Under confinement a leaked setting can only fail to connect. The
-   unconfined fallback is denied by the company template.
+   Under confinement a leaked setting can only fail to connect. Unfenced
+   tiers are denied by the company template.
 2. *Project config files re-point the tool* (`.npmrc registry=`,
    `[tool.uv] index-url`, `.cargo/config.toml` `[source]`,
    `.bundle/config`). Under confinement they can only make resolution
@@ -2965,8 +3239,8 @@ where the design above closes each:
     fetched during resolution. See Performance.
 20. *Cross-project poisoning through a shared tool cache.* Fixed: tool
     caches are per run.
-21. *A lingering macOS descendant writes after tog's checks.* It can only
-    write the stage, which is already diffed and then deleted.
+21. *A lingering descendant writes after tog's checks.* Superseded by item
+    27: the tree is stopped first, and only the immutable copy is read.
 22. *#61 lands before the proxy and bakes in an unconfined signature.*
     Fixed by ordering: PR 1 puts the door type in the signature from day
     one, in `Legacy` mode, so no later PR changes the trait.
@@ -2977,6 +3251,43 @@ where the design above closes each:
     reach the proxy.* They are stripped and never forwarded. Redaction
     keeps them out of the ledger, and private registries use WP5
     credential references held by tog.
+25. *The unconfined fallback runs a hostile Gemfile, `mix.exs`, or MSBuild
+    project as the user.* It could edit the real repository outside the
+    transaction, read `~/.tog` signing keys, and forge a clean receipt.
+    Fixed: code-evaluating tools never run without filesystem isolation
+    (container backend or resolver user as fallbacks, otherwise a failure
+    naming what is missing), and no resolver runs without isolation while
+    a signing key is configured (review 2.1).
+26. *A developer's record names a ledger that CI does not have*, and
+    `ClosureRefs` would reject the missing object. Fixed: verifying the
+    record never needs the object, the ledger is retained only when
+    present locally, and `--ledger-export`/`--ledger-import` move it when
+    wanted (review 2.2).
+27. *macOS descendants race validation and publication.* Fixed: the tree
+    is stopped before validation, and every content check, the
+    signature, and publication read an immutable copy (review 2.3).
+28. *The ledger id hashed the diagnostics*, so the "portable" record
+    changed between machines. Fixed: the identity covers only portable
+    bytes, and diagnostics are a separate sidecar object (review 2.4).
+29. *A user edit between the recheck and the backup was silently
+    overwritten.* Fixed: originals are copied through a held descriptor
+    before the run, each target is atomically exchanged and the displaced
+    bytes are compared (a mismatch is swapped back), and a journal makes
+    a crash recoverable (review 2.5).
+30. *The SSRF list missed non-global ranges* such as CGNAT
+    `100.64.0.0/10` and benchmarking `198.18.0.0/15`. Fixed: everything
+    the IANA special-purpose registries do not mark globally reachable
+    is refused, with a test per range (review 2.6).
+31. *An older tog silently accepts unknown kinds from a newer signed
+    record*, because `record_with` takes free strings. Fixed: the join
+    validates every kind against `policy::KINDS` and fails hard on
+    unknowns (review 2.7).
+32. *The join deleted stale receipts*, destroying evidence and mutating
+    the checkout during validation. Fixed: the join never writes. Receipts
+    are replaced only by a successful transaction (review 2.8).
+33. *The record's `signature.key` example used the prefixed policy
+    syntax.* Fixed: bare hex, the envelope `kernel/signing.rs` already
+    writes and verifies (review 2.9).
 
 ### Review round 1
 
@@ -2990,6 +3301,23 @@ proxy-authentication wiring. Every one is fixed above (self-check items
 residual channel stated as documented (data encoded in request paths to
 a permitted registry, under "What this does not claim") says why no
 enforceable design exists.
+
+### Review round 2
+
+Codex (Sol), 2026-09-23, verdict "changes needed", nine findings. The
+blockers were the unconfined fallback reaching the real project and the
+signing key, developer ledgers missing on CI, and macOS stragglers racing
+publication. The majors were a machine-dependent ledger id, an
+edit-overwrite gap between recheck and backup, incomplete SSRF ranges,
+unknown kinds accepted at the join, and stale receipts deleted by the
+join. The minor was the key format in the record example. All nine are
+fixed above (self-check items 25–33), with the coordinator's choices:
+isolation tiers instead of an unconfined fallback, the portable-only
+ledger identity with an optional local object and export/import,
+quiescence plus an immutable output copy, a diagnostics sidecar, held
+originals with swap-then-compare and a journal, the full IANA tables,
+hard failure on unknown kinds, receipts replaced only by successful
+transactions, and bare hex.
 
 ### Decisions
 
