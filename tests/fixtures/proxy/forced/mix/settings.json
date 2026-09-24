@@ -1,0 +1,7 @@
+{
+  "tool": "mix",
+  "config_file": "(none)",
+  "note": "See npm/settings.json for the placeholder rules. mix.exs is project code mix evaluates by design; the marker runs in the forced run too, and isolation is the control.",
+  "settings": [],
+  "by_design": ["mix-exs-eval"]
+}

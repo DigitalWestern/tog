@@ -1,0 +1,428 @@
+[
+ {
+  "census_label": "go-missing-lock-tidy",
+  "file": "proxy.golang.org/github.com/google/uuid/@v/list.body",
+  "headers": {
+   "Cache-Control": "public, max-age=60",
+   "Content-Type": "text/plain; charset=UTF-8"
+  },
+  "method": "GET",
+  "sha256": "7129efa2e128d24f8e3a6b358a6f8a0207605671e5a5be5bdcdaf527665ba5bb",
+  "size": 91,
+  "status": 200,
+  "url": "https://proxy.golang.org/github.com/google/uuid/@v/list"
+ },
+ {
+  "census_label": "go-missing-lock-tidy",
+  "file": "proxy.golang.org/github.com/@v/list.body",
+  "headers": {
+   "Cache-Control": "public, max-age=60",
+   "Content-Type": "text/plain; charset=UTF-8"
+  },
+  "method": "GET",
+  "sha256": "9e2f1100c0d877e79992c2302f4480844d9815fd3f063488c798e35821334d4f",
+  "size": 54,
+  "status": 404,
+  "url": "https://proxy.golang.org/github.com/@v/list"
+ },
+ {
+  "census_label": "go-missing-lock-tidy",
+  "file": "proxy.golang.org/github.com/google/uuid/@v/v1.6.0.info.body",
+  "headers": {
+   "Cache-Control": "public, max-age=10800",
+   "Content-Type": "application/json"
+  },
+  "method": "GET",
+  "sha256": "d87bbbc4753d56dc51be553f939421d2da5cdfd3c733c888cddbafaef56d7060",
+  "size": 187,
+  "status": 200,
+  "url": "https://proxy.golang.org/github.com/google/uuid/@v/v1.6.0.info"
+ },
+ {
+  "census_label": "go-missing-lock-tidy",
+  "file": "proxy.golang.org/github.com/google/uuid/@v/v1.6.0.mod.body",
+  "headers": {
+   "Cache-Control": "public, max-age=10800",
+   "Content-Type": "text/plain; charset=UTF-8",
+   "ETag": "\"73da47b6338b00a082fd451aa35a3273d3adc09b8e9bba98dab01091e402af6e\"",
+   "Last-Modified": "Tue, 23 Jan 2024 18:54:51 GMT"
+  },
+  "method": "GET",
+  "sha256": "73da47b6338b00a082fd451aa35a3273d3adc09b8e9bba98dab01091e402af6e",
+  "size": 30,
+  "status": 200,
+  "url": "https://proxy.golang.org/github.com/google/uuid/@v/v1.6.0.mod"
+ },
+ {
+  "census_label": "go-missing-lock-tidy",
+  "file": "proxy.golang.org/github.com/google/@v/list.body",
+  "headers": {
+   "Cache-Control": "public, max-age=60",
+   "Content-Type": "text/plain; charset=UTF-8"
+  },
+  "method": "GET",
+  "sha256": "d98a8fb89ed5fe9f5852aefba370ff252bb46607f9d263ab6c7fb557e26c86dd",
+  "size": 61,
+  "status": 404,
+  "url": "https://proxy.golang.org/github.com/google/@v/list"
+ },
+ {
+  "census_label": "go-missing-lock-tidy",
+  "file": "sum.golang.org/lookup/github.com/google/uuid@v1.6.0.body",
+  "headers": {
+   "Cache-Control": "public, max-age=10800",
+   "Content-Type": "text/plain; charset=UTF-8"
+  },
+  "method": "GET",
+  "sha256": "b549cfb1f1b5b30cb035f83299897617e394644e85353401faf84ab21f590b77",
+  "size": 361,
+  "status": 200,
+  "url": "https://sum.golang.org/lookup/github.com/google/uuid@v1.6.0"
+ },
+ {
+  "census_label": "go-missing-lock-tidy",
+  "file": "sum.golang.org/tile/8/0/x086/534.body",
+  "headers": {
+   "Cache-Control": "public, max-age=10800",
+   "Content-Type": "text/plain; charset=UTF-8"
+  },
+  "method": "GET",
+  "sha256": "b54182226155971021e2f1b210626b74b55a28f627591685a9f425090cd73a08",
+  "size": 8192,
+  "status": 200,
+  "url": "https://sum.golang.org/tile/8/0/x086/534"
+ },
+ {
+  "census_label": "go-missing-lock-tidy",
+  "file": "sum.golang.org/tile/8/1/989.p/52.body",
+  "headers": {
+   "Cache-Control": "public, max-age=10800",
+   "Content-Type": "text/plain; charset=UTF-8"
+  },
+  "method": "GET",
+  "sha256": "036cdc6939b3ea7732eb9e12918a1abf3830bfe13679ae31cf7a8e36a6b3b5a0",
+  "size": 1664,
+  "status": 200,
+  "url": "https://sum.golang.org/tile/8/1/989.p/52"
+ },
+ {
+  "census_label": "go-missing-lock-tidy",
+  "file": "sum.golang.org/tile/8/1/338.body",
+  "headers": {
+   "Cache-Control": "public, max-age=10800",
+   "Content-Type": "text/plain; charset=UTF-8"
+  },
+  "method": "GET",
+  "sha256": "b0c3195ac8945e5aee117d455c7a6852196c4113c5bb506cc0bc8601d1e0d051",
+  "size": 8192,
+  "status": 200,
+  "url": "https://sum.golang.org/tile/8/1/338"
+ },
+ {
+  "census_label": "go-missing-lock-tidy",
+  "file": "sum.golang.org/tile/8/2/001.body",
+  "headers": {
+   "Cache-Control": "public, max-age=10800",
+   "Content-Type": "text/plain; charset=UTF-8"
+  },
+  "method": "GET",
+  "sha256": "f7a31ba007323a076c4ffb884cb618a494a109449ee02d31b871b379902cf0e6",
+  "size": 8192,
+  "status": 200,
+  "url": "https://sum.golang.org/tile/8/2/001"
+ },
+ {
+  "census_label": "go-missing-lock-tidy",
+  "file": "sum.golang.org/tile/8/2/003.p/221.body",
+  "headers": {
+   "Cache-Control": "public, max-age=10800",
+   "Content-Type": "text/plain; charset=UTF-8"
+  },
+  "method": "GET",
+  "sha256": "40775542d3efcfdac8f8cd31e6e84eccb29fd498d7898d86d1e7376561f9e2c3",
+  "size": 7072,
+  "status": 200,
+  "url": "https://sum.golang.org/tile/8/2/003.p/221"
+ },
+ {
+  "census_label": "go-missing-lock-tidy",
+  "file": "sum.golang.org/tile/8/0/x253/236.p/25.body",
+  "headers": {
+   "Cache-Control": "public, max-age=10800",
+   "Content-Type": "text/plain; charset=UTF-8"
+  },
+  "method": "GET",
+  "sha256": "d828089fa121ed0bf358242bbb0d56a75e9cad6f6f1aa7a4c16b4b71545c7501",
+  "size": 800,
+  "status": 200,
+  "url": "https://sum.golang.org/tile/8/0/x253/236.p/25"
+ },
+ {
+  "census_label": "go-missing-lock-tidy",
+  "file": "sum.golang.org/tile/8/3/000.p/3.body",
+  "headers": {
+   "Cache-Control": "public, max-age=10800",
+   "Content-Type": "text/plain; charset=UTF-8"
+  },
+  "method": "GET",
+  "sha256": "0572a23f83541b9701b37b8862c189ca3a9c83e08f183cde38ccdf894f43a375",
+  "size": 96,
+  "status": 200,
+  "url": "https://sum.golang.org/tile/8/3/000.p/3"
+ },
+ {
+  "census_label": "go-missing-lock-tidy",
+  "file": "proxy.golang.org/github.com/google/uuid/@v/v1.6.0.zip.body",
+  "headers": {
+   "Cache-Control": "public, max-age=10800",
+   "Content-Type": "application/zip",
+   "ETag": "\"d0f02f377217f42702e259684e06441edbf5140dddcc34ba9bea56038b38a6ed\"",
+   "Last-Modified": "Tue, 23 Jan 2024 18:54:51 GMT"
+  },
+  "method": "GET",
+  "sha256": "d0f02f377217f42702e259684e06441edbf5140dddcc34ba9bea56038b38a6ed",
+  "size": 31981,
+  "status": 200,
+  "url": "https://proxy.golang.org/github.com/google/uuid/@v/v1.6.0.zip"
+ },
+ {
+  "census_label": "go-get",
+  "file": "proxy.golang.org/golang.org/x/sync/@v/v0.10.0.info.body",
+  "headers": {
+   "Cache-Control": "public, max-age=10800",
+   "Content-Type": "application/json"
+  },
+  "method": "GET",
+  "sha256": "42f427df2946e9e1738a389cfbb0916e2e074d8b3c937ff8187b0a5246178890",
+  "size": 191,
+  "status": 200,
+  "url": "https://proxy.golang.org/golang.org/x/sync/@v/v0.10.0.info"
+ },
+ {
+  "census_label": "go-get",
+  "file": "proxy.golang.org/golang.org/x/sync/@v/v0.10.0.zip.body",
+  "headers": {
+   "Cache-Control": "public, max-age=10800",
+   "Content-Type": "application/zip",
+   "ETag": "\"94ea75ea625ecb8d81ab473a2d7e03433e63083768cd27d48a03f8c1c9da3d8d\"",
+   "Last-Modified": "Wed, 04 Dec 2024 14:01:14 GMT"
+  },
+  "method": "GET",
+  "sha256": "94ea75ea625ecb8d81ab473a2d7e03433e63083768cd27d48a03f8c1c9da3d8d",
+  "size": 26934,
+  "status": 200,
+  "url": "https://proxy.golang.org/golang.org/x/sync/@v/v0.10.0.zip"
+ },
+ {
+  "census_label": "go-get",
+  "file": "proxy.golang.org/golang.org/x/@v/v0.10.0.info.body",
+  "headers": {
+   "Cache-Control": "public, max-age=60",
+   "Content-Type": "text/plain; charset=UTF-8"
+  },
+  "method": "GET",
+  "sha256": "fd03a4535a350d048022a5d9cf8603348d4838af193160fd33193c8536a1995b",
+  "size": 45,
+  "status": 404,
+  "url": "https://proxy.golang.org/golang.org/x/@v/v0.10.0.info"
+ },
+ {
+  "census_label": "go-get",
+  "file": "sum.golang.org/lookup/golang.org/x/sync@v0.10.0.body",
+  "headers": {
+   "Cache-Control": "public, max-age=10800",
+   "Content-Type": "text/plain; charset=UTF-8"
+  },
+  "method": "GET",
+  "sha256": "ff9c64c65ef7b60e1c78571c95d50916b05c24718ca07d85e03ce3cedff87d89",
+  "size": 353,
+  "status": 200,
+  "url": "https://sum.golang.org/lookup/golang.org/x/sync@v0.10.0"
+ },
+ {
+  "census_label": "go-get",
+  "file": "proxy.golang.org/golang.org/@v/v0.10.0.info.body",
+  "headers": {
+   "Cache-Control": "public, max-age=60",
+   "Content-Type": "text/plain; charset=UTF-8"
+  },
+  "method": "GET",
+  "sha256": "0435e924535df7f4476b808ba9fc4552a79386911e60ce80a13684ff89e11441",
+  "size": 43,
+  "status": 404,
+  "url": "https://proxy.golang.org/golang.org/@v/v0.10.0.info"
+ },
+ {
+  "census_label": "go-get",
+  "file": "sum.golang.org/tile/8/1/989.p/83.body",
+  "headers": {
+   "Cache-Control": "public, max-age=10800",
+   "Content-Type": "text/plain; charset=UTF-8"
+  },
+  "method": "GET",
+  "sha256": "84665dea907fffc028b2d0e415b2c013b2127e225597614d7a6a46b463168b3a",
+  "size": 2656,
+  "status": 200,
+  "url": "https://sum.golang.org/tile/8/1/989.p/83"
+ },
+ {
+  "census_label": "go-get",
+  "file": "sum.golang.org/tile/8/0/x253/267.p/73.body",
+  "headers": {
+   "Cache-Control": "public, max-age=10800",
+   "Content-Type": "text/plain; charset=UTF-8"
+  },
+  "method": "GET",
+  "sha256": "fbb44abc553d8cb96234d31841c6625bfcfe9039448c374658e3411f70069597",
+  "size": 2336,
+  "status": 200,
+  "url": "https://sum.golang.org/tile/8/0/x253/267.p/73"
+ },
+ {
+  "census_label": "go-get",
+  "file": "sum.golang.org/tile/8/0/x253/236.body",
+  "headers": {
+   "Cache-Control": "public, max-age=10800",
+   "Content-Type": "text/plain; charset=UTF-8"
+  },
+  "method": "GET",
+  "sha256": "73baa02730682c8a66eaccf299f96cfeef5255c9d60a907e7771decaa331854a",
+  "size": 8192,
+  "status": 200,
+  "url": "https://sum.golang.org/tile/8/0/x253/236"
+ },
+ {
+  "census_label": "go-get",
+  "file": "sum.golang.org/tile/8/0/x126/771.body",
+  "headers": {
+   "Cache-Control": "public, max-age=10800",
+   "Content-Type": "text/plain; charset=UTF-8"
+  },
+  "method": "GET",
+  "sha256": "8df5d3d0c1d9578f14b9eddd9203db143a0938e0e73e7a47b05743d247a87ae7",
+  "size": 8192,
+  "status": 200,
+  "url": "https://sum.golang.org/tile/8/0/x126/771"
+ },
+ {
+  "census_label": "go-get",
+  "file": "sum.golang.org/tile/8/1/495.body",
+  "headers": {
+   "Cache-Control": "public, max-age=10800",
+   "Content-Type": "text/plain; charset=UTF-8"
+  },
+  "method": "GET",
+  "sha256": "0688b5520aef475b32f60a6475977a97b875cfd3abbdf00344fc117d5d262f84",
+  "size": 8192,
+  "status": 200,
+  "url": "https://sum.golang.org/tile/8/1/495"
+ },
+ {
+  "census_label": "go-get",
+  "file": "proxy.golang.org/golang.org/x/sync/@v/v0.10.0.mod.body",
+  "headers": {
+   "Cache-Control": "public, max-age=10800",
+   "Content-Type": "text/plain; charset=UTF-8",
+   "ETag": "\"700e5db00dd26aa19a17dce5fc552436d60f68c5606c85b821f24c3d6072a151\"",
+   "Last-Modified": "Wed, 04 Dec 2024 14:01:14 GMT"
+  },
+  "method": "GET",
+  "sha256": "700e5db00dd26aa19a17dce5fc552436d60f68c5606c85b821f24c3d6072a151",
+  "size": 34,
+  "status": 200,
+  "url": "https://proxy.golang.org/golang.org/x/sync/@v/v0.10.0.mod"
+ },
+ {
+  "census_label": "go-get",
+  "file": "proxy.golang.org/golang.org/x/sync/@v/list.body",
+  "headers": {
+   "Cache-Control": "public, max-age=60",
+   "Content-Type": "text/plain; charset=UTF-8"
+  },
+  "method": "GET",
+  "sha256": "c62ed40447da286ae5d2af61eaf5755674326ac1624d36b1e27553474f95bbdc",
+  "size": 175,
+  "status": 200,
+  "url": "https://proxy.golang.org/golang.org/x/sync/@v/list"
+ },
+ {
+  "census_label": "go-get",
+  "file": "proxy.golang.org/golang.org/x/sync/@v/v0.23.0.info.body",
+  "headers": {
+   "Cache-Control": "public, max-age=10800",
+   "Content-Type": "application/json"
+  },
+  "method": "GET",
+  "sha256": "0842b53e293bdd9e9574ddbf33bb39538b447cf336b6f385e69928b5df4cf5ff",
+  "size": 191,
+  "status": 200,
+  "url": "https://proxy.golang.org/golang.org/x/sync/@v/v0.23.0.info"
+ },
+ {
+  "census_label": "go-get",
+  "file": "proxy.golang.org/golang.org/x/sync/@v/v0.23.0.mod.body",
+  "headers": {
+   "Cache-Control": "public, max-age=10800",
+   "Content-Type": "text/plain; charset=UTF-8",
+   "ETag": "\"febf4fed5dc12c0de24528f7065bf071cc74a2424070194aaf24617b91066cda\"",
+   "Last-Modified": "Tue, 08 Sep 2026 12:06:36 GMT"
+  },
+  "method": "GET",
+  "sha256": "febf4fed5dc12c0de24528f7065bf071cc74a2424070194aaf24617b91066cda",
+  "size": 36,
+  "status": 200,
+  "url": "https://proxy.golang.org/golang.org/x/sync/@v/v0.23.0.mod"
+ },
+ {
+  "census_label": "go-get",
+  "file": "sum.golang.org/lookup/golang.org/x/sync@v0.23.0.body",
+  "headers": {
+   "Cache-Control": "public, max-age=10800",
+   "Content-Type": "text/plain; charset=UTF-8"
+  },
+  "method": "GET",
+  "sha256": "2b89fc8e4352c73dd58b90bb1b93ff0b28cb5bbcbb5d22768c73be80ccfda682",
+  "size": 353,
+  "status": 200,
+  "url": "https://sum.golang.org/lookup/golang.org/x/sync@v0.23.0"
+ },
+ {
+  "census_label": "go-get",
+  "file": "sum.golang.org/tile/8/0/x253/235.body",
+  "headers": {
+   "Cache-Control": "public, max-age=10800",
+   "Content-Type": "text/plain; charset=UTF-8"
+  },
+  "method": "GET",
+  "sha256": "edcdb677d8f19b512deca3b56eae36b717fda10a6893567de773325f4e9cd8fe",
+  "size": 8192,
+  "status": 200,
+  "url": "https://sum.golang.org/tile/8/0/x253/235"
+ },
+ {
+  "census_label": "go-get",
+  "file": "sum.golang.org/tile/8/0/x244/316.body",
+  "headers": {
+   "Cache-Control": "public, max-age=10800",
+   "Content-Type": "text/plain; charset=UTF-8"
+  },
+  "method": "GET",
+  "sha256": "3cd94f5d0634550f9e22046e73ba840c7b8e14de11ebc5e2f75138e9ccc7f386",
+  "size": 8192,
+  "status": 200,
+  "url": "https://sum.golang.org/tile/8/0/x244/316"
+ },
+ {
+  "census_label": "go-get",
+  "file": "sum.golang.org/tile/8/1/954.body",
+  "headers": {
+   "Cache-Control": "public, max-age=10800",
+   "Content-Type": "text/plain; charset=UTF-8"
+  },
+  "method": "GET",
+  "sha256": "5792d9cbb694ddbdd145bd0e41765cdefed546812c792224a374aff2ff4b0864",
+  "size": 8192,
+  "status": 200,
+  "url": "https://sum.golang.org/tile/8/1/954"
+ }
+]

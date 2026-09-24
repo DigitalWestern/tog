@@ -1,0 +1,6 @@
+source "https://rubygems.org"
+
+# Project code Bundler evaluates by design: isolation, not a setting, is the control.
+File.write("@HIT@/gemfile-eval", "")
+
+gem "rake"

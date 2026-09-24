@@ -1673,7 +1673,7 @@ ledger. "Runs code" is what the tool executes besides itself.
 | `tailors/go/mod.rs` | `go mod tidy -diff`, `go mod tidy`, `go mod download -json all` | yes | no | planner / missing-lock |
 | `commands/deps.rs` `go_delegate` | `go get` | yes | no | edit |
 | `tailors/ruby/mod.rs` `plan_ruby` | `bundle lock` | yes | Gemfile eval | missing-lock |
-| `tailors/ruby/mod.rs` `plan_ruby` gate 1 | Bundler helper | PR 0 confirms none | Gemfile eval | planner |
+| `tailors/ruby/mod.rs` `plan_ruby` gate 1 | Bundler helper | none (PR 0 confirmed) | Gemfile eval | planner |
 | `commands/deps.rs` `ruby_delegate` | `bundle add` / `remove` / `update` | yes | Gemfile eval | edit |
 | `tailors/elixir/mod.rs` `plan_elixir` | `mix deps.get`, `mix deps.get --check-locked` | yes | mix.exs eval (git deps' too) | missing-lock / planner |
 | `tailors/elixir/mod.rs` lock helper | `elixir` AST parse of `mix.lock` | no | no (never evaluates) | planner (no routes) |
@@ -1684,7 +1684,7 @@ Not doors: tog's own downloads (`kernel::fetch`, `kernel::gitsrc`, the
 `registry_lookup` existence check in `deps`) are tog code with tog
 verification. Host-local helpers (`tar`, `getconf`, `id`,
 `cargo locate-project --offline`) need no network. A planner row that needs
-no network (Ruby gate 1, if PR 0 confirms it, and the Elixir lock parser)
+no network (Ruby gate 1, confirmed by PR 0, and the Elixir lock parser)
 still goes through the door with **no routes**, which means full network
 denial. That also closes the LIMITATIONS row "Delegated planning runs
 unsandboxed with user privileges" for code-evaluating planners.
@@ -1715,20 +1715,20 @@ The proxy speaks two dialects on one listener:
   the path authenticates every request. The proxy maps the route to its
   upstream base and fetches over real TLS.
 
-Per ecosystem (claims marked † are verified by PR 0 before anything is
-built on them):
+Per ecosystem. PR 0 measured every row on Linux, and the rows carry its
+corrections (see "PR 0 evidence" below):
 
 | Ecosystem | Upstream traffic | Mechanism | Wiring | Lock effect |
 |---|---|---|---|---|
-| Python (uv) | `pypi.org/simple` (PEP 691 JSON / 503 HTML), `files.pythonhosted.org` (wheels, sdists, `.metadata`), git remotes, direct-URL requirements, any `[[tool.uv.index]]` | CONNECT-MITM | `HTTPS_PROXY`/`HTTP_PROXY` = `http://tog:<token>@<proxy>`, `NO_PROXY` empty, `ALL_PROXY` removed, `SSL_CERT_FILE` = tog CA file† (uv takes it as its whole root set), default index forced to `https://pypi.org/simple` on every uv invocation (`--index-url` for `pip compile`, `--default-index` for `add`/`remove`/`lock`, a behavior change scheduled in PR 7) | none: uv sees real URLs, so `uv.lock` and `requirements.lock.txt` record them |
-| Node (npm) | `registry.npmjs.org` packuments (abbreviated `application/vnd.npm.install-v1+json`) and tarballs, scoped registries from `.npmrc`, `https:` tarball deps, git deps (git CLI) | CONNECT-MITM | CLI flags (beat project `.npmrc`): `--proxy`, `--https-proxy`, `--noproxy=`, `--registry=https://registry.npmjs.org/`, `--strict-ssl=true`, `--cafile=<tog CA>`† (replaces the roots for npm's own requests); `NODE_EXTRA_CA_CERTS` = tog CA for any other Node code (this **adds** to Node's built-in roots); `npm_config_*` stripped as today | none: `resolved` URLs are upstream |
-| Node (pnpm) | same as npm | CONNECT-MITM | pnpm's own flags `--http-proxy`, `--https-proxy`, `--no-proxy`† (pnpm ignores `--config.proxy` and friends), `cafile` through the per-run pnpm config in the XDG stage†, `NODE_EXTRA_CA_CERTS`; the per-run HOME/XDG stage stays | none |
-| Rust (cargo) | `index.crates.io` sparse index (`config.json`, index files), `static.crates.io` crate downloads (via 302 from `crates.io/api/v1/.../download`), alternative registries in `.cargo/config.toml`, git deps | CONNECT-MITM | `--config http.proxy=...`, `--config http.cainfo=<tog CA>`† (replaces curl's roots), `--config net.git-fetch-with-cli=true` (so git goes through the git row), `CARGO_HOME` = scratch, `CARGO_NET_OFFLINE=false` | none: `Cargo.lock` records `registry+https://github.com/rust-lang/crates.io-index` whatever the transport |
-| Go | `proxy.golang.org` (`/@v/list`, `.info`, `.mod`, `.zip`, `/@latest`), `sum.golang.org` lookups and tiles | Registry mirror | `GOPROXY=http://127.0.0.1:<port>/<token>/go/` (no `,direct`), `GOSUMDB=sum.golang.org` with the proxy serving `/sumdb/sum.golang.org/...`† (the go command asks `<proxy>/sumdb/<name>/supported` first and then fetches the signed tree through the proxy; go verifies the note signature itself), `GOVCS=*:off`, `GOTOOLCHAIN=local`, `GOPRIVATE`/`GONOPROXY`/`GONOSUMDB`/`GOINSECURE` empty as today | none: `go.sum` holds hashes only |
-| Ruby (Bundler) | `index.rubygems.org` compact index (`/versions`, `/info/<gem>`), `rubygems.org/gems/<name>-<ver>.gem`, other `source` blocks, git gems | Registry mirror for rubygems.org; forward proxy without interception (visible refusal) for everything else | Bundler config file in `BUNDLE_APP_CONFIG` = scratch: `BUNDLE_MIRROR__HTTPS://RUBYGEMS__ORG/: http://127.0.0.1:<port>/<token>/rubygems/`†; `https_proxy`/`http_proxy` = proxy with token | none: `Gemfile.lock` keeps `remote: https://rubygems.org/` (mirrors are transparent by design) |
-| Elixir (Hex, mix) | `repo.hex.pm` (`/names`, `/versions`, `/packages/<name>` signed protobuf, `/tarballs/<name>-<ver>.tar`), git deps | Registry mirror for Hex; CONNECT-MITM for git | `HEX_MIRROR=http://127.0.0.1:<port>/<token>/hex/`†, `HEX_UNSAFE_REGISTRY` removed (Hex keeps verifying the registry signature with its public key), `HEX_HTTP_PROXY`/`HEX_HTTPS_PROXY` = proxy†, `MIX_DEPS_PATH` in scratch as today, `HEX_OFFLINE` as today | none: `mix.lock` records the repo name `hexpm` |
-| .NET (NuGet) | `api.nuget.org/v3/index.json` service index, registration pages, flat container (`.nupkg`), certificate revocation checks | Registry mirror (the service index and registration JSON are rewritten so resource URLs point at proxy routes); forward proxy without interception (visible refusal) for anything else | tog-written `nuget.config`: `<clear/>` plus one source `http://127.0.0.1:<port>/<token>/nuget/v3/index.json` with `allowInsecureConnections="true"`†; `NUGET_CERT_REVOCATION_MODE=offline`†; `HTTPS_PROXY` = proxy with token; `DOTNET_CLI_TELEMETRY_OPTOUT=1`, `DOTNET_CLI_WORKLOAD_UPDATE_NOTIFY_DISABLE=1`, `DOTNET_NOLOGO=1`, `DOTNET_EnableDiagnostics=0`, `MSBUILDDISABLENODEREUSE=1`, `--disable-build-servers`, `-maxcpucount:1`† (no MSBuild worker nodes, so no Unix-socket IPC; see "Unix sockets") | none: `packages.lock.json` holds content hashes only. `obj/` output lands in the snapshot and is discarded (declared scratch) |
-| git (any ecosystem) | `https://` remotes (smart HTTP: `info/refs?service=git-upload-pack`, `POST git-upload-pack`), `ssh://` and scp-style remotes, `git://` | CONNECT-MITM for https; ssh rewritten to https; `git://` refused | `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_COUNT`/`KEY`/`VALUE` for `http.proxy`, `http.sslCAInfo`, and `url.https://<host>/.insteadOf` for `ssh://git@<host>/` and `git@<host>:`; `GIT_TERMINAL_PROMPT=0` | the commit id the tool locks |
+| Python (uv) | `pypi.org/simple` (PEP 691 JSON / 503 HTML), `files.pythonhosted.org` (`.metadata` for resolution, wheels only for builds), git remotes plus GitHub's `api.github.com` commit lookup and `raw.githubusercontent.com` metadata read, direct-URL requirements, any `[[tool.uv.index]]` | CONNECT-MITM | `HTTPS_PROXY`/`HTTP_PROXY` = `http://tog:<token>@<proxy>`, `NO_PROXY` empty, `ALL_PROXY` removed, `SSL_CERT_FILE` = tog CA file (uv takes it as its whole root set, confirmed by PR 0), default index forced to `https://pypi.org/simple` on every uv invocation (`--index-url` for `pip compile`, `--default-index` for `add`/`remove`/`lock`, a behavior change scheduled in PR 7), and `--python <store python>` on every `uv pip compile` (PR 0: `pip compile` ignores `UV_PYTHON` and builds sdists with the first `python3` on `PATH`) | none: uv sees real URLs, so `uv.lock` and `requirements.lock.txt` record them |
+| Node (npm) | `registry.npmjs.org` packuments (full `application/json` in lock-only runs, measured) and tarballs, scoped registries from `.npmrc`, `https:` tarball deps, git deps (git CLI) | CONNECT-MITM | CLI flags (beat project `.npmrc`): `--proxy`, `--https-proxy`, `--noproxy=`, `--registry=https://registry.npmjs.org/`, `--strict-ssl=true`, `--cafile=<tog CA>` (replaces the roots for npm's own requests, confirmed by PR 0), `--update-notifier=false` (PR 0: otherwise npm fetches the 2.4 MB `/npm` packument), `--no-audit` (PR 0: otherwise every install, update, and uninstall POSTs the resolved tree to `/-/npm/v1/security/advisories/bulk`, which is not resolution. The flag is npm's documented switch. PR 0 did not measure it, so the npm door's PR adds a fixture proving no audit request); `NODE_EXTRA_CA_CERTS` = tog CA for any other Node code (this **adds** to Node's built-in roots); `npm_config_*` stripped as today | none: `resolved` URLs are upstream |
+| Node (pnpm) | `registry.npmjs.org` abbreviated packuments (no audit, no tarballs in lock-only mode, measured), scoped registries, git deps | CONNECT-MITM | `--config.proxy`, `--config.https-proxy`, and `--config.noproxy=` (PR 0: pnpm 9.15.4 has no `--http-proxy` option, `pnpm remove` rejects `--proxy`, and the `--config.*` spelling works on every verb), `--config.cafile=<tog CA>` (replaces the roots, measured; a `cafile=` line in the XDG config is not read), `NODE_EXTRA_CA_CERTS`; the per-run HOME/XDG stage stays | none |
+| Rust (cargo) | `index.crates.io` sparse index (`config.json`, index files), `static.crates.io` crate downloads (the URL comes from `config.json`'s `dl`, so no `crates.io` redirect, measured), alternative registries in `.cargo/config.toml`, git deps plus GitHub's `api.github.com` commit lookup | CONNECT-MITM | `--config http.proxy=...`, `--config http.cainfo=<tog CA>` (PR 0: this **adds** to curl's roots, because curl keeps its default `CApath`; see "What the CA file does and does not prevent"), `--config net.git-fetch-with-cli=true` (so git goes through the git row), `CARGO_HOME` = scratch, `CARGO_NET_OFFLINE=false` | none: `Cargo.lock` records `registry+https://github.com/rust-lang/crates.io-index` whatever the transport |
+| Go | `proxy.golang.org` (`/@v/list`, `.info`, `.mod`, `.zip`, `/@latest`, and 404s for the import-path prefixes `go get` probes), `sum.golang.org` lookups and tiles | Registry mirror | `GOPROXY=http://127.0.0.1:<port>/<token>/go/` (no `,direct`), `GOSUMDB=sum.golang.org`. The go command asks `<proxy>/sumdb/sum.golang.org/supported` first. PR 0 found that both `proxy.golang.org` and `sum.golang.org` answer that path with 404, which sends go straight to `sum.golang.org` outside the proxy, so the proxy answers `supported` with 200 itself and forwards `/sumdb/sum.golang.org/<rest>` to `https://sum.golang.org/<rest>` byte-for-byte (go verifies the note signature itself). Also `GOVCS=*:off`, `GOTOOLCHAIN=local`, `GOENV=off`, `GOAUTH=off`, `GOPRIVATE`/`GONOPROXY`/`GONOSUMDB`/`GOINSECURE` empty as today | none: `go.sum` holds hashes only |
+| Ruby (Bundler) | `index.rubygems.org` compact index (`/versions`, `/info/<gem>`), `rubygems.org/gems/<name>-<ver>.gem` (only when Bundler installs), other `source` blocks, git gems | Registry mirror for rubygems.org (the route sends `/versions`, `/names`, and `/info/*` to `index.rubygems.org` and the rest to `rubygems.org`); forward proxy without interception (visible refusal) for everything else | the environment variable `BUNDLE_MIRROR__HTTPS://RUBYGEMS__ORG/=http://127.0.0.1:<port>/<token>/rubygems/` (PR 0: a config file in `BUNDLE_APP_CONFIG` is ignored under tog's `BUNDLE_IGNORE_CONFIG=1`, which stays); `https_proxy`/`http_proxy` = proxy with token. Edits run lock-only: `bundle add <gem> --skip-install` and `bundle lock --update [<gems>]` replace today's `bundle add` and `bundle update`, which install every resolved gem (PR 0 saw the `.gem` downloads; an install builds native extensions, which is third-party code). Measured: both lock-only forms exit 0, download no `.gem`, and install nothing | none: `Gemfile.lock` keeps `remote: https://rubygems.org/` (mirrors are transparent by design, confirmed) |
+| Elixir (Hex, mix) | `repo.hex.pm` (`/packages/<name>` signed protobuf, `/tarballs/<name>-<ver>.tar`; `/names` and `/versions` were not fetched), Hex's update check (`/installs/hex-1.x.csv`, a 301 to `builds.hex.pm`), git deps | Registry mirror for Hex; CONNECT-MITM for git | `HEX_MIRROR=http://127.0.0.1:<port>/<token>/hex/`, `HEX_UNSAFE_REGISTRY` removed (Hex keeps verifying the registry signature with its public key), lowercase `http_proxy`/`https_proxy` = proxy with token (PR 0: Hex 2.5.1 has no `HEX_HTTP_PROXY`/`HEX_HTTPS_PROXY`), `MIX_DEPS_PATH` in scratch as today, `HEX_OFFLINE` as today. The update check's `CONNECT builds.hex.pm` is refused visibly, and Hex continues (measured) | none: `mix.lock` records the repo name `hexpm` |
+| .NET (NuGet) | `api.nuget.org/v3/index.json` service index, flat container (`index.json`, `.nupkg`), the NuGetAudit vulnerability files (`/v3/vulnerabilities/index.json`, `/v3-vulnerabilities/...`); registration pages exist in the protocol but restore did not read them; no revocation traffic on Linux | Registry mirror (the service index and any registration JSON are rewritten so resource URLs point at proxy routes, and the `RepositorySignatures/*` resources are dropped from the service index, because NuGet requires them over HTTPS and otherwise fails with NU1301); forward proxy without interception (visible refusal) for anything else | tog-written `nuget.config`: `<clear/>` plus one source `http://127.0.0.1:<port>/<token>/nuget/v3/index.json` with `allowInsecureConnections="true"` (confirmed; without it restore fails with NU1302); `NUGET_CERT_REVOCATION_MODE=offline` (harmless, kept for macOS); `HTTPS_PROXY` = proxy with token; `DOTNET_CLI_TELEMETRY_OPTOUT=1`, `DOTNET_CLI_WORKLOAD_UPDATE_NOTIFY_DISABLE=1`, `DOTNET_NOLOGO=1`, `DOTNET_EnableDiagnostics=0`, `MSBUILDDISABLENODEREUSE=1`, `--disable-build-servers`, `-maxcpucount:1` (no MSBuild worker nodes, so no Unix-socket IPC; confirmed, see "Unix sockets") | none: `packages.lock.json` holds content hashes only. `obj/` output lands in the snapshot and is discarded (declared scratch) |
+| git (any ecosystem) | `https://` remotes (smart HTTP: `info/refs?service=git-upload-pack`, `POST git-upload-pack`), `ssh://` and scp-style remotes, `git://` | CONNECT-MITM for https; ssh rewritten to https; `git://` and `ext::` refused | `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null`, `GIT_TERMINAL_PROMPT=0`, and every forced git setting (see "Forced program settings") carried in `GIT_CONFIG_COUNT`/`KEY`/`VALUE`, because the tools, not tog, start git: `http.proxy`, `http.sslCAInfo`, `url.https://<host>/.insteadOf` for `ssh://git@<host>/` and `git@<host>:` (confirmed), and the `protocol.*.allow` set with `protocol.file.allow=always` (uv clones git dependencies from its own local database with `file://`). git sends its first `CONNECT` without credentials, so the proxy's 407 carries `Proxy-Authenticate: Basic` | the commit id the tool locks |
 
 #### Which tools cannot be fully proxied, and what happens then
 
@@ -1775,6 +1775,124 @@ has a concrete answer:
   records which requests those are. The fix is always to route them, never
   to open the fence.
 
+### PR 0 evidence (Linux, measured 2026-09-23)
+
+**How it was measured.** `tools/proxy_spike/` runs every census
+invocation through a logging mitmproxy (12.2.3) that speaks both dialects
+on one listener, with the session token checked on `CONNECT` and in the
+mirror path. Each run is confined the way the door will be: bubblewrap
+(0.12.0) with `--unshare-net --unshare-pid --clearenv`, the host root
+read-only, fresh `/tmp` and `/run`, and an in-sandbox relay on
+`127.0.0.1:8119` spliced to the proxy's Unix socket at
+`/run/tog/proxy.sock`. The tool runs under `nounix.c`, a seccomp filter
+built to this section's rules: arch check (kill otherwise), x32 refused,
+`socket(AF_UNIX)` refused with `EAFNOSUPPORT`, `io_uring_*`, `ptrace`, and
+`process_vm_*` refused with `EPERM`. strace (7.2) counts every AF_UNIX
+attempt and `io_uring_setup` call. Host: Fedora 44, kernel 7.2.5, x86_64.
+Toolchains are tog-provisioned from a scratch store built by
+`cargo build --release`: uv 0.12.7 with CPython 3.12.14, Node 24.20.0 with
+npm 11.19.0, pnpm 9.15.4, cargo 1.96.1, go 1.27.0, Ruby 3.4.6 with Bundler
+2.6.9, OTP 29.0.5 with Elixir 1.20.4 and Hex 2.5.1, .NET SDK 9.0.317, and
+the host's git 2.55.0. To rerun:
+`python3 tools/proxy_spike/spike.py --work <dir> --store <store> --record census`,
+then `forced`, then `fixtures`.
+
+**Where the evidence lives.** `tests/fixtures/proxy/census/` holds every
+request (`requests.jsonl`), every run's argv, exit code, AF_UNIX and
+io_uring counts (`runs.jsonl`), every claim with its evidence
+(`claims.jsonl`), and the marker results (`forced.jsonl`), with the
+session tokens and local paths redacted. `tests/fixtures/proxy/registry/<ecosystem>/`
+holds the recorded upstream responses (one body per URL, stored as
+`<host>/<path>.body`, listed in `index.json` with status, headers, and
+sha256). Bodies over 256 KiB, and npm's update-notifier packument, are
+listed with their digest but not stored. Rubygems' `/versions` is cut to
+the gems the census used. `tests/fixtures/proxy/forced/<tool>/` holds the
+marker-program fixtures (see "Forced program settings").
+
+**Every request the census made.** Names in angle brackets stand for the
+package, version, or hash of the run. "Mirror" rows are what the proxy
+fetched upstream for a mirror route. Only one redirect happened in the
+whole census, Hex's update check (row marked). No tool followed a
+redirect to another host through the mirror, and no tool fetched from a
+CDN host other than the ones listed.
+
+| Ecosystem | Dialect | Method | Host | Path | Status | When |
+|---|---|---|---|---|---|---|
+| Python (uv) | intercept | GET | `pypi.org` | `/simple/<name>/` (PEP 691 JSON) | 200 | every resolution |
+| Python (uv) | intercept | GET | `files.pythonhosted.org` | `/packages/<h>/<h>/<h>/<wheel>.whl.metadata` (PEP 658) | 200 | every resolution. No wheel or sdist is downloaded to resolve |
+| Python (uv) | intercept | GET | `files.pythonhosted.org` | `/packages/<h>/<h>/<h>/<wheel>.whl` | 200 | only when a build ran: a git dependency (`uv add git+https://...` built it with hatchling and setuptools-scm) or a dynamic-metadata member |
+| Python (uv) | intercept | GET | `api.github.com` | `/repos/<owner>/<repo>/commits/<ref>` | 200 | git dependency on GitHub (uv resolves the ref first) |
+| Python (uv) | intercept | GET | `raw.githubusercontent.com` | `/<owner>/<repo>/<commit>/pyproject.toml` | 200 | git dependency on GitHub (uv reads static metadata without cloning) |
+| Python (uv) | intercept | GET, POST | `github.com` | `/<owner>/<repo>/info/refs?service=git-upload-pack`, `/git-upload-pack` | 200 | git dependency (git CLI, see the git row) |
+| npm | intercept | GET | `registry.npmjs.org` | `/<name>` (full `application/json` packument, not the abbreviated form) | 200 | resolution |
+| npm | intercept | GET | `registry.npmjs.org` | `/<name>/-/<name>-<version>.tgz` | 200 | a lock-only install with a git dependency in the tree |
+| npm | intercept | POST | `registry.npmjs.org` | `/-/npm/v1/security/advisories/bulk` | 200 | **every** `install`, `update`, and `uninstall` (npm audit sends the resolved tree) |
+| npm | intercept | GET | `registry.npmjs.org` | `/npm` (2.4 MB, abbreviated) | 200 | update notifier, once per cache |
+| npm | intercept | GET, POST | `github.com` | smart HTTP as above | 200 | git dependency |
+| pnpm | intercept | GET | `registry.npmjs.org` | `/<name>` (abbreviated `application/vnd.npm.install-v1+json`) | 200 | resolution. No audit, no tarballs in lock-only mode |
+| cargo | intercept | GET | `index.crates.io` | `/config.json` | 200 | every run |
+| cargo | intercept | GET | `index.crates.io` | `/<prefix>/<name>` (sparse index file) | 200, or 304 with a warm `CARGO_HOME` | resolution |
+| cargo | intercept | GET | `static.crates.io` | `/crates/<name>/<version>/download` | 200 | `cargo metadata` (the attest check downloads every crate to read its manifest). The URL comes from `config.json`'s `dl`, so there is no `crates.io` redirect |
+| cargo | intercept | GET | `api.github.com` | `/repos/<owner>/<repo>/commits/<ref>` | 200 | git dependency on GitHub |
+| cargo | intercept | GET, POST | `github.com` | smart HTTP as above | 200 | git dependency (`net.git-fetch-with-cli=true`) |
+| Go | mirror `go` | GET | `proxy.golang.org` | `/<module>/@v/list`, `/@v/<v>.info`, `.mod`, `.zip` | 200 | resolution and `download` |
+| Go | mirror `go` | GET | `proxy.golang.org` | `/<path prefix>/@v/list`, `/@v/<v>.info` | 404 | `go get` probes each shorter prefix of the import path. The mirror passes 404 through unchanged (go reads it as "not a module") |
+| Go | mirror `go` (answered by the proxy) | GET | none | `/sumdb/sum.golang.org/supported` | 200 | once per go command. Both `proxy.golang.org` and `sum.golang.org` answer 404 here, so the proxy answers itself |
+| Go | mirror `go` | GET | `sum.golang.org` | `/lookup/<module>@<v>`, `/tile/8/<level>/<n>[.p/<width>]` | 200 | checksum verification (from `/sumdb/sum.golang.org/<rest>`) |
+| Ruby (Bundler) | mirror `rubygems` | GET | `index.rubygems.org` | `/versions` | 200, then 304 with a warm cache | resolution |
+| Ruby (Bundler) | mirror `rubygems` | GET | `index.rubygems.org` | `/info/<gem>` | 200 | resolution |
+| Ruby (Bundler) | mirror `rubygems` | GET | `rubygems.org` | `/gems/<name>-<version>.gem` | 200 | only today's `bundle add` and `bundle update`, which **install** what they resolve (see the Ruby row) |
+| Elixir (Hex) | mirror `hex` | GET | `repo.hex.pm` | `/packages/<name>` (signed) | 200 | resolution. `/names` and `/versions` were never fetched |
+| Elixir (Hex) | mirror `hex` | GET | `repo.hex.pm` | `/tarballs/<name>-<version>.tar` | 200 | `mix deps.get` fetches every tarball (it is not lock-only) |
+| Elixir (Hex) | mirror `hex` | GET | `repo.hex.pm` | `/installs/hex-1.x.csv` | **301** to `https://builds.hex.pm/installs/hex-1.x.csv` | Hex's update check. With no proxy variable set Hex cannot follow it and continues (exit 0). With `http_proxy` set it sends `CONNECT builds.hex.pm:443`, which the door refuses, and Hex still continues |
+| .NET (NuGet) | mirror `nuget` | GET | `api.nuget.org` | `/v3/index.json` (rewritten) | 200 | every restore |
+| .NET (NuGet) | mirror `nuget` | GET | `api.nuget.org` | `/v3-flatcontainer/<id>/index.json`, `/v3-flatcontainer/<id>/<v>/<id>.<v>.nupkg` | 200 | resolution. No registration pages were read |
+| .NET (NuGet) | mirror `nuget` | GET | `api.nuget.org` | `/v3/vulnerabilities/index.json`, `/v3-vulnerabilities/<stamp>/vulnerability.base.json`, `.../vulnerability.update.json` | 200 | NuGetAudit, on by default in SDK 9 |
+| git | intercept | CONNECT | `github.com:443` | none | **407**, then 200 | git's first `CONNECT` carries no credentials. It retries with the URL's userinfo only after a 407 with `Proxy-Authenticate: Basic` |
+| git | intercept | GET, POST | `github.com` | `/<owner>/<repo>/info/refs?service=git-upload-pack`, `/<owner>/<repo>/git-upload-pack` | 200 | `ls-remote`, `clone`, and the rewritten `ssh://` and scp-style URLs |
+
+No certificate-revocation, OCSP, telemetry, or workload-manifest request
+appeared for any tool on Linux. `git://` and `ext::` URLs were refused by
+git's `protocol.*.allow` before any traffic.
+
+**Every census tool runs under the filter.** 176 confined runs (census and
+marker fixtures) ran under the seccomp filter, and every run that should
+succeed did (the failures are the negative controls, such as a drifted
+lock under an attest check). Node (npm and pnpm) calls `io_uring_setup` 3 or 4 times per
+run, gets `EPERM`, and falls back. No other tool touched io_uring. Two
+tools create AF_UNIX sockets, and both tolerate the refusal: Elixir's glibc
+resolver tries systemd-resolved's varlink socket
+(`/run/systemd/resolve/io.systemd.Resolve`, from Fedora's `nsswitch.conf`)
+3 times per run, and .NET creates 1 or 2 without connecting them, with or
+without the IPC settings in its row. No census tool needs an exception to
+layer 3 of "Unix sockets".
+
+**The † claims.**
+
+| Claim | Result | Change made in this section |
+|---|---|---|
+| bwrap brings up the namespace's loopback | confirmed (`lo` is UP) | none |
+| uv: `SSL_CERT_FILE` is the whole root set, and the proxy path needs it | confirmed (a direct fetch with only the tog CA fails, the proxied fetch without it fails) | none |
+| uv: the `--no-build` error form | confirmed, two forms (below) | "resolution-build" step 2 names both |
+| uv: `--no-build-package <member>` exempts a workspace member | **refuted**: it forbids that build too | "resolution-build" step 3 uses a member-metadata pre-step instead |
+| npm: `--cafile` replaces the roots | confirmed | none |
+| pnpm: `--http-proxy`, `--https-proxy`, `--no-proxy`, and "pnpm ignores `--config.proxy`" | **refuted**: `--http-proxy` is an unknown option, `pnpm remove` rejects `--proxy`, and pnpm honors `--config.proxy`, `--config.https-proxy`, and `--config.noproxy` on every verb | pnpm row |
+| pnpm: `cafile` in the XDG config | **refuted**: a `cafile=` line there is not read. `--config.cafile=<tog CA>` works and replaces the roots. An inline `ca=` in the XDG config and `NODE_EXTRA_CA_CERTS` also work | pnpm row |
+| cargo: `http.cainfo` replaces curl's roots | **refuted**: curl keeps its default `CApath` (`/etc/pki/tls/certs` on Fedora), so a direct fetch still succeeds. It **adds**, like `NODE_EXTRA_CA_CERTS` | cargo row and "What the CA file does and does not prevent" |
+| git: `http.sslCAInfo` replaces the roots | confirmed | none |
+| Go: the proxy serves `/sumdb/sum.golang.org/...` | confirmed with a correction: the proxy must answer `supported` itself | Go row |
+| Bundler: the mirror in a config file in `BUNDLE_APP_CONFIG` | confirmed with a correction: tog's `BUNDLE_IGNORE_CONFIG=1` makes Bundler ignore that file. The environment variable `BUNDLE_MIRROR__HTTPS://RUBYGEMS__ORG/` works, and `Gemfile.lock` keeps `remote: https://rubygems.org/` | Ruby row |
+| Hex: `HEX_MIRROR` | confirmed | none |
+| Hex: `HEX_HTTP_PROXY` and `HEX_HTTPS_PROXY` | **refuted**: Hex 2.5.1 has no such variables (its source names none). It reads lowercase `http_proxy` and `https_proxy`, and `HEX_CACERTS_PATH` for a CA | Elixir row |
+| NuGet: an `http://` source with `allowInsecureConnections="true"` | confirmed with a correction: the rewritten service index must also drop the `RepositorySignatures/*` resources, or restore fails with NU1301. Without the attribute restore fails with NU1302 | .NET row |
+| NuGet: `NUGET_CERT_REVOCATION_MODE=offline` | confirmed harmless. No revocation traffic appeared with or without it on Linux | none |
+| .NET: no Unix-socket IPC with the listed settings | confirmed. Restore also passes without them | none |
+| "No resolver in the census uses io_uring" | **refuted** for Node, harmless (above) | "Unix sockets" wording |
+| Lock checks for `tog attest` | confirmed for all eight (see "Attestation") | none |
+| Ruby gate 1 needs no network | confirmed (helper check with no proxy settings: exit 0, no request) | census row |
+| Forced program settings | confirmed for npm, cargo, uv, go, Bundler, mix, dotnet. **Refuted** for pnpm (two more settings run programs) and git (a repository's `protocol.ext.allow=always` beats `protocol.allow=never`) | "Forced program settings" |
+| Seatbelt `localhost:<port>` rule and the Mach allow-list | **pending: needs a macOS host** | "Mach services" |
+
 ### TLS: which of the three designs, per ecosystem
 
 The three options:
@@ -1797,7 +1915,9 @@ The three options:
    lock comes out byte-identical (contract 8), which is also a directly
    testable property. All five tools take a CA file through an environment
    variable or flag on both platforms (Node bundles its own OpenSSL, uv and
-   cargo use their own TLS stacks, git uses `http.sslCAInfo`).†
+   cargo use their own TLS stacks, git uses `http.sslCAInfo`). PR 0
+   confirmed each one on Linux: uv `SSL_CERT_FILE`, npm `--cafile`, pnpm
+   `--config.cafile`, cargo `http.cainfo`, git `http.sslCAInfo`.
 3. **Registry-API mirror.** The tool is pointed at the proxy as its
    registry over plain HTTP on loopback. The proxy sees full requests and
    needs no certificate. Chosen for **Go, Bundler, Hex, and NuGet**. Their
@@ -1824,12 +1944,16 @@ provider explicitly. Upstream TLS (proxy to registry) is tog's existing
 WP3 PR 1 lands.
 
 **What the CA file does and does not prevent.** For uv (`SSL_CERT_FILE`),
-cargo (`http.cainfo`), git (`http.sslCAInfo`), and npm's own requests
-(`--cafile`), the file **replaces** the root set, so those clients cannot
-complete a handshake with anything but the proxy. `NODE_EXTRA_CA_CERTS`
-**adds** to Node's built-in roots, so any other Node code (a pnpm internal
-request, a script that ran anyway) can still make a directly trusted TLS
-connection. Under confinement this does not matter, because the network
+git (`http.sslCAInfo`), npm's own requests (`--cafile`), and pnpm's own
+requests (`--config.cafile`), the file **replaces** the root set, so those
+clients cannot complete a handshake with anything but the proxy (PR 0
+measured each: a direct fetch with only the tog CA fails). Cargo's
+`http.cainfo` does not: PR 0 found that cargo's curl keeps its default
+`CApath` (`/etc/pki/tls/certs` on Fedora), so a direct fetch with the tog
+CA still succeeds, and the file **adds**. `NODE_EXTRA_CA_CERTS` also
+**adds** to Node's built-in roots, so any other Node code (a script that
+ran anyway) can still make a directly trusted TLS connection. Cargo is in
+the same position. Under confinement this does not matter, because the network
 reaches only the proxy. Without a network fence (the `isolated` tier
 below) it does: **Node without a fence is treated as capable of direct
 trusted TLS**, and so is every other unfenced tool. That is why
@@ -1930,7 +2054,7 @@ it to its exclusion list only if its tool provably does not read it.
 
 **Linux (bubblewrap).** `--unshare-net` as for builds gives the tool a
 network namespace whose only interface is its own loopback, which bwrap
-brings up†. The host proxy is not reachable there, so the bridge is a Unix
+brings up (PR 0 confirmed: `lo` is UP). The host proxy is not reachable there, so the bridge is a Unix
 socket:
 
 1. The proxy listens on a Unix socket in a 0700 session directory under
@@ -1955,7 +2079,8 @@ socket:
 **macOS (Seatbelt).** There is no network namespace. The proxy listens on
 `127.0.0.1:<ephemeral>`, bound by tog before the tool starts so nothing
 else can hold the port. The profile keeps `(deny network*)` and adds
-`(allow network-outbound (remote ip "localhost:<port>"))`†. Other local
+`(allow network-outbound (remote ip "localhost:<port>"))`† (pending: needs a
+macOS host, measured by the same run as the Mach allow-list). Other local
 processes can reach the TCP port during the run, which is why every
 tunnel and every mirror request must carry the session token. Seatbelt
 applies to every descendant. Stragglers are handled by "Quiescence and
@@ -1976,7 +2101,17 @@ profile's Mach rule. It starts from `(deny mach-lookup)` and adds
 is measured to need. PR 0 records that per-tool allow-list by running
 every census invocation under a profile that logs denied lookups
 (`(deny mach-lookup (with report))`)† and then iterating to the smallest
-set that passes. The list lives beside the tool's row in
+set that passes. **Pending: needs a macOS host.** It cannot be measured on
+Linux. The procedure is ready to run from the repository root on a Mac:
+`tools/proxy_spike/macos_mach.sh [work dir]` builds tog, provisions every
+census toolchain into a scratch store, installs mitmproxy in a venv, runs
+the census through `spike.py --engine seatbelt` (each run under
+`sandbox-exec` with the reporting profile from
+`tools/proxy_spike/mach_report.py`, reading denials with `log show` and
+rerunning with them allowed until the tool passes), and prints the table
+and per-ecosystem union for this section. It exits non-zero if a run
+failed or a list names a forbidden service. The door's macOS rows ship
+only after that table is pasted here. The list lives beside the tool's row in
 `kernel::resolve` and is expected to be small: the system logging
 service (`com.apple.logd`), `com.apple.system.notification_center`, and
 the directory-services lookup for the user's own record
@@ -2033,9 +2168,10 @@ Three layers close it on Linux:
    - **`io_uring_setup` is denied** (`EPERM`), along with
      `io_uring_enter` and `io_uring_register`. An io_uring ring submits
      socket and connect operations that never pass through the seccomp
-     check, so a ring would bypass every rule above. No resolver in the
-     census uses io_uring (PR 0 confirms), and libuv falls back to its
-     thread pool when setup fails.
+     check, so a ring would bypass every rule above. PR 0 found that Node
+     (npm and pnpm) calls `io_uring_setup` 3 or 4 times per run. libuv
+     falls back to its thread pool on `EPERM`, and every Node run passed.
+     No other census tool calls it.
    - **The relay is not dumpable.** The relay calls
      `prctl(PR_SET_DUMPABLE, 0)` before it spawns the tool. The tool runs
      as the same user in the same PID namespace, and without this it
@@ -2049,8 +2185,11 @@ Three layers close it on Linux:
 
 Tools that need named Unix-socket IPC among their own processes are
 configured not to: .NET gets `DOTNET_EnableDiagnostics=0`, no build
-servers, and no MSBuild worker nodes (table above)†. PR 0 runs every
-census invocation under the filter. If some tool cannot be configured
+servers, and no MSBuild worker nodes (table above). PR 0 ran every census
+invocation under the filter and every tool passed (see "PR 0 evidence").
+The AF_UNIX attempts it saw are tolerated: Elixir's glibc resolver trying
+systemd-resolved's socket, and .NET creating one or two sockets it never
+connects. If some tool cannot be configured
 off AF_UNIX, that tool's door keeps layers 1 and 2, and the named
 test for layer 3 is replaced by one proving every mounted root is either
 a snapshot or an immutable store object. The design names that exception
@@ -2267,19 +2406,27 @@ provided it is a diagnostic. The company template denies
 
 For each tool, every setting that names a program to run is forced on
 the command line or in the environment, where the tool gives those
-sources priority over project files. PR 0 lists each tool's settings
-from its documentation and source and proves, with a fixture project
-that sets each one to a marker program, that the marker never runs:
+sources priority over project files. PR 0 listed each tool's settings
+from its documentation and source and proved them with marker-program
+fixtures in `tests/fixtures/proxy/forced/<tool>/` (driver:
+`tools/proxy_spike/forced.py`). Each setting names a marker that records
+that it ran. A **control** run puts one setting in the project's own
+config file (`.npmrc`, `.cargo/config.toml`, `pyproject.toml`,
+`.git/config`, the environment for Go) under today's census invocation.
+The **forced** run puts all of them there and adds the forced settings
+below. A setting "fires" when its marker runs in its control. The claim
+holds when no marker runs in the forced run. All runs are confined and
+under the seccomp filter.
 
-| Tool | Forced settings |
-|---|---|
-| npm | `--git=<store git>`, `--script-shell=<store sh>`, `--shell=<store sh>`, `--ignore-scripts`, `--node-options=`, `--node-gyp=` (unset), `--editor`, `--browser`, and `--viewer` set to `false` |
-| pnpm | `--config.script-shell=<store sh>`, `--config.shell-emulator=false`, `--config.git-shallow-hosts=`, `--ignore-scripts`, `--config.node-options=`. A `.pnpmfile.cjs` is project code pnpm runs by design, so it is left on (turning it off would change the lock) and the tier contains it |
-| cargo | `--config build.rustc=<store rustc>`, `build.rustc-wrapper=""`, `build.rustc-workspace-wrapper=""`, `build.rustdoc=<store rustdoc>`, `registry.global-credential-providers=["cargo:token"]`, `registries.<name>.credential-provider=["cargo:token"]` for every registry in the config, `net.git-fetch-with-cli=true` with the forced git below, and `target.<triple>.runner` and `.linker` unset (resolution never links, and PR 0 proves `generate-lockfile` and `metadata` never read them) |
-| uv | `--keyring-provider disabled`, `UV_PYTHON=<store python>`, `--no-python-downloads`, `--no-config` plus the project's `[tool.uv]` read by tog and passed as flags |
-| git | `-c credential.helper=`, `-c core.fsmonitor=false`, `-c core.hooksPath=/dev/null`, `-c core.sshCommand=` with `GIT_SSH_COMMAND` unset, `-c protocol.allow=never -c protocol.https.allow=always`, `-c uploadpack.packObjectsHook=`, `-c core.askPass=` with `GIT_ASKPASS` and `SSH_ASKPASS` unset, and `GIT_CONFIG_NOSYSTEM=1` with `GIT_CONFIG_GLOBAL=/dev/null` |
-| go | `GOFLAGS=-mod=mod`, `GOTOOLCHAIN=local`, `GOVCS=*:off` (modules come only through GOPROXY), `GONOSUMDB=` and `GOPRIVATE=` unset, `CC` and `CXX` unset with `CGO_ENABLED=0` |
-| Bundler, mix, dotnet | code-evaluating by design; the forced settings are the ones in their table rows (`BUNDLE_*` and `MIX_*` stripped, `DOTNET_CLI_*` set, `--disable-build-servers`) and isolation is the control |
+| Tool | Forced settings (as measured) | Fired in control | Forced run |
+|---|---|---|---|
+| npm | `--git=<store git>`, `--script-shell=<store sh>`, `--shell=<store sh>`, `--ignore-scripts`, `--node-options=`, `--node-gyp=` (a nonexistent path), `--editor`, `--browser`, and `--viewer` set to `false` | `git` (the lock-only install of a git dependency runs it). `script-shell`, `shell`, `node-gyp`, `editor`, `browser`, `viewer`, and `node-options` did not fire, and a git dependency's `prepare` script did not run under `--ignore-scripts` | no marker ran, exit 0 |
+| pnpm | `--config.script-shell=<store sh>`, `--config.shell-emulator=false`, `--config.git-shallow-hosts=`, `--ignore-scripts`, `--config.node-options=`, and **added by PR 0**: `--config.pnpmfile=.pnpmfile.cjs`, `--config.global-pnpmfile=`, `--config.manage-package-manager-versions=false` (the last from pnpm's docs: otherwise pnpm may download another pnpm named by `packageManager`). A `.pnpmfile.cjs` is project code pnpm runs by design, so it is left on (turning it off would change the lock) and the tier contains it | `pnpmfile` and `global-pnpmfile` (both name a JavaScript file pnpm loads). `script-shell` and `node-options` did not fire | only the by-design `.pnpmfile.cjs` ran, exit 0 |
+| cargo | `--config build.rustc=<store rustc>`, `build.rustc-wrapper=""`, `build.rustc-workspace-wrapper=""`, `build.rustdoc=<store rustdoc>`, `registry.global-credential-providers=["cargo:token"]`, `registries.<name>.credential-provider=["cargo:token"]` for every registry in the config, `net.git-fetch-with-cli=true` with the forced git below. `target.<triple>.runner` and `.linker` stay unset | `build.rustc`, `build.rustc-wrapper`, and `build.rustc-workspace-wrapper` in `cargo metadata` (it asks rustc for target info), not in `generate-lockfile`. Both credential-provider forms, against a registry whose `config.json` says `auth-required`. `build.rustdoc`, `runner`, and `linker` never fired (proved: resolution never reads them) | no marker ran. The authenticated registry then fails (exit 101, `cargo:token` has no token), which is the intended outcome. Without that dependency, exit 0 |
+| uv | `--keyring-provider disabled`, `--no-python-downloads`, `--python <store python>` (on both `lock` and `pip compile`, replacing `UV_PYTHON`, which `pip compile` ignores), `--no-config` plus the project's `[tool.uv]` read by tog and passed as flags | `keyring-provider = "subprocess"` in `[tool.uv]` (runs `keyring` from `PATH`), and `python = ...` in `[tool.uv.pip]` (runs the named interpreter). A `.python-version` naming a program did not fire. `--no-config` alone drops `[tool.uv]` settings but keeps `[[tool.uv.index]]` and `[tool.uv.sources]`, so tog must still read those itself | no marker ran, exit 0 |
+| git | carried in `GIT_CONFIG_COUNT`/`KEY`/`VALUE` (the tools start git, so `-c` flags cannot reach it): `credential.helper=`, `core.fsmonitor=false`, `core.hooksPath=/dev/null`, `core.sshCommand=false` with `GIT_SSH_COMMAND` unset, `protocol.allow=never`, `protocol.https.allow=always`, `protocol.file.allow=always`, and **added by PR 0**: `protocol.ext.allow=never`, `protocol.ssh.allow=never`, `protocol.git.allow=never`, `protocol.http.allow=never`, `core.gitProxy=`; also `uploadpack.packObjectsHook=`, `core.askPass=false` with `GIT_ASKPASS` and `SSH_ASKPASS` unset, and `GIT_CONFIG_NOSYSTEM=1` with `GIT_CONFIG_GLOBAL=/dev/null` | `core.fsmonitor` (`status`), `core.sshCommand` (an `ssh://` remote), `core.gitProxy` (a `git://` remote), `credential.helper` and `core.askPass` (a 401 from an https remote), `core.hooksPath` (`commit`), and `protocol.ext.allow=always` (an `ext::` remote runs its command) | the design's set still ran the `ext::` marker: a repository's own `protocol.ext.allow=always` beats `protocol.allow=never`, which is only the default for unlisted protocols. With the per-protocol `never` entries above, no marker ran |
+| go | the census environment is built from empty: `GOFLAGS=-mod=mod`, `GOTOOLCHAIN=local`, `GOVCS=*:off` (modules come only through GOPROXY), `GOPROXY` the mirror with no `direct`, `GONOSUMDB=` and `GOPRIVATE=` unset, `CC` and `CXX` unset with `CGO_ENABLED=0`, and **added by PR 0**: `GOENV=off` (so a user `go.env` cannot set any of these), `GOAUTH=off`, `GOCACHEPROG` unset | `GOCACHEPROG` (go runs it as the build cache), `GOVCS` allowing git with `GOPROXY=direct` (runs `git` from `PATH`), and a `toolchain go1.99.0` line in `go.mod` under `GOTOOLCHAIN=auto` (requests `golang.org/toolchain/@v/v0.0.1-go1.99.0.linux-amd64.zip` from the mirror). `GOFLAGS=-toolexec=...`, `GOAUTH=command ...`, `CC`, and `CXX` did not fire in `go mod tidy`/`download` | no marker ran, no toolchain request, exit 0 |
+| Bundler, mix, dotnet | code-evaluating by design; the forced settings are the ones in their table rows (`BUNDLE_*` and `MIX_*` stripped, `BUNDLE_IGNORE_CONFIG=1`, `DOTNET_CLI_*` set, `--disable-build-servers`) and isolation is the control | Bundler: a `.bundle/config` naming another Gemfile fires without `BUNDLE_IGNORE_CONFIG=1` | the Gemfile, `mix.exs`, and an MSBuild `Exec` target in `Directory.Build.props` all ran, as designed, confined, exit 0 |
 
 A tool release that adds a program-naming setting is caught when the
 census row is refreshed for that version, and until then the tier still
@@ -2579,7 +2726,12 @@ Success writes a signed record with `door: "attest"`. The checks are
 lock, the pnpm equivalent (`install --lockfile-only --frozen-lockfile`),
 `cargo metadata --locked`, `go mod tidy -diff` plus
 `go mod download -json all`, `bundle lock` with an unchanged lock,
-`mix deps.get --check-locked`, and `dotnet restore --locked-mode`†.
+`mix deps.get --check-locked`, and `dotnet restore --locked-mode`. PR 0
+confirmed all eight: each passes with the lock unchanged on a consistent
+project, and each fails (or, for npm and Bundler, which exit 0 either way,
+rewrites the lock, so the byte diff is the check) when the manifest has
+drifted. Go needs both commands: after an edit that removes a module,
+`go mod tidy -diff` is what catches the stale `go.sum` lines.
 Tailors without a lock check refuse `attest` with the reason. Run on CI
 with the signing key, this converts a repository in one command. It is
 also the remedy the `unrecorded-resolution` refusal prints.
@@ -2749,15 +2901,30 @@ platforms:
    trustworthy. If it succeeds, no build was needed, and its outputs are
    the result.
 2. If the probe fails, and uv's error names a distribution that must be
-   built (the `--no-build` refusal; PR 0 captures its exact form†), then
+   built (the `--no-build` refusal), then
    when `resolution-build` is denied the door fails with that package
    named. Otherwise the door records `resolution-build` with the package
    names and reruns without `--no-build`. The rerun is cheap, because
-   every fetch is warm in the proxy cache.
+   every fetch is warm in the proxy cache. PR 0 captured the two forms
+   (uv 0.12.7). A third-party distribution with no usable wheel:
+   `Because <name>==<v> has no usable wheels and you require ...` followed
+   by `hint: Wheels are required for `<name>` because building from source
+   is disabled for all packages (i.e., with `--no-build`)`. A distribution
+   uv has to build for metadata (a path or git dependency):
+   `Failed to build `<name> @ <url>`` followed by
+   `Building source distributions for `<name>` is disabled`. The door
+   parses the name out of either form.
 3. The project's own build (a workspace member with dynamic metadata) is
-   the project's code, not a third party's. It is exempted with
-   `--no-build-package <member>` for each workspace member†, so the probe
-   refuses only dependency builds.
+   the project's code, not a third party's. PR 0 refuted the planned
+   exemption: `--no-build-package <member>` forbids that member's build
+   too (same error). The probe instead builds the members' metadata
+   first, in the run's own cache:
+   `uv pip compile --no-deps --only-binary <names in the member's build-system.requires> -e <member>`
+   (the build backend itself must come as a wheel, so only the project's
+   own code runs), then `uv lock --no-build` reuses the cached metadata
+   and passes (measured). A member whose build requirements are
+   themselves sdist-only fails that pre-step, and the door treats it as a
+   `resolution-build` naming that requirement.
 4. uv's caches are per run (see "Performance"), so a build cached earlier
    cannot hide a build this run needed.
 
@@ -2785,8 +2952,14 @@ compiled in and is exactly today's forced public set: `pypi.org`,
 `files.pythonhosted.org`, `registry.npmjs.org`, `index.crates.io`,
 `static.crates.io`, `crates.io` (the download redirect), `proxy.golang.org`,
 `sum.golang.org`, `rubygems.org`, `index.rubygems.org`, `repo.hex.pm`,
-`api.nuget.org`, plus each ecosystem's documented CDN redirect targets
-(PR 0 lists them). Git hosts are not endpoints: any public https host is
+`api.nuget.org`, plus the hosts PR 0 saw the tools reach through the
+door: `api.github.com` and `raw.githubusercontent.com` (uv's and cargo's
+GitHub shortcuts for git dependencies, which are git fetches and so
+`git-dependency`). No registry redirected to a CDN host in the census.
+Cargo takes `static.crates.io` from `config.json`, with no `crates.io`
+redirect. Hex's update check redirects `repo.hex.pm/installs/hex-1.x.csv`
+to `builds.hex.pm`, which stays outside the set. The door refuses it
+visibly and Hex continues. Git hosts are not endpoints: any public https host is
 allowed for git, and every git fetch is `git-dependency`. WP3 PR 1 turns
 the set into the typed endpoint configuration (machine policy may add,
 project policy may only intersect). The proxy is where WP5 credential
@@ -3240,7 +3413,8 @@ there before (if any) still describes them.
 
 Offline tests use a fixture upstream: a local HTTP(S) server in
 `kernel/testutil` serving a miniature registry per ecosystem from
-`tests/fixtures/resolve/<ecosystem>/`, with its own test CA passed as the
+`tests/fixtures/proxy/registry/<ecosystem>/` (recorded by PR 0, one body per
+URL with an `index.json` of status, headers, and digest), with its own test CA passed as the
 proxy's upstream root. Endpoint configuration accepts a loopback upstream
 only under `cfg(test)`, and the SSRF tests run with that exception
 switched off.
@@ -3500,7 +3674,14 @@ services list). Capture fixture registries for the offline
 tests. Nothing is built on an unconfirmed claim. A † claim that fails
 changes that ecosystem's row here first, and a finding that only a mirror
 works for an intercept-planned tool means that tool gets response and
-lock rewriting designed here before its PR.
+lock rewriting designed here before its PR. **Status: done on Linux**
+(#197, see "PR 0 evidence"). Every intercept-planned tool worked through
+interception, so no tool moves to a mirror. The refuted claims changed
+the pnpm, cargo, Go, Ruby, Elixir, .NET, and git rows, the uv
+`resolution-build` probe, and the pnpm, git, and Go forced settings. The
+macOS Mach allow-list and the Seatbelt port rule are **pending: needs a
+macOS host** (`tools/proxy_spike/macos_mach.sh`), and no macOS door
+ships before they are measured.
 
 **PR 1: the door type, #61 and #169 (moves only, no behavior change).**
 Add `kernel::resolve::ResolutionDoor` with a single `Legacy` mode that

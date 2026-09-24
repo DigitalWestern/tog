@@ -1,0 +1,92 @@
+[
+ {
+  "census_label": "dotnet-unix-probe",
+  "file": "api.nuget.org/v3/index.json.body",
+  "headers": {
+   "Cache-Control": "max-age=0, no-cache, no-store",
+   "Content-Type": "application/json",
+   "ETag": "0x8DD2F82FA585D1E",
+   "Last-Modified": "Wed, 08 Jan 2025 01:22:54 GMT"
+  },
+  "method": "GET",
+  "sha256": "cea4d74624be767e0569c891597c0e6f5329f19f6c9b7fcf8b8c9e9f4933a4bb",
+  "size": 9272,
+  "status": 200,
+  "url": "https://api.nuget.org/v3/index.json"
+ },
+ {
+  "census_label": "dotnet-unix-probe",
+  "file": "api.nuget.org/v3-flatcontainer/humanizer.core/index.json.body",
+  "headers": {
+   "Cache-Control": "max-age=0, no-cache",
+   "Content-Type": "application/json",
+   "ETag": "0x8DE96974D6805CB",
+   "Last-Modified": "Fri, 10 Apr 2026 00:22:51 GMT"
+  },
+  "method": "GET",
+  "sha256": "3298002207c0b165d122a575ad4c6ab56e219781d630e4085ccea3df5f3a3b5d",
+  "size": 537,
+  "status": 200,
+  "url": "https://api.nuget.org/v3-flatcontainer/humanizer.core/index.json"
+ },
+ {
+  "census_label": "dotnet-unix-probe",
+  "headers": {
+   "Cache-Control": "max-age=86400",
+   "Content-Type": "application/octet-stream",
+   "ETag": "0x8D9E33A55B1E55C",
+   "Last-Modified": "Sat, 29 Jan 2022 15:16:33 GMT"
+  },
+  "method": "GET",
+  "omitted": "larger than 262144 bytes",
+  "sha256": "117be88dd74fbbef492a0386f4d4908144df5aad51a4e630eda7710cf28327aa",
+  "size": 538179,
+  "status": 200,
+  "url": "https://api.nuget.org/v3-flatcontainer/humanizer.core/2.14.1/humanizer.core.2.14.1.nupkg"
+ },
+ {
+  "census_label": "dotnet-unix-probe",
+  "file": "api.nuget.org/v3/vulnerabilities/index.json.body",
+  "headers": {
+   "Cache-Control": "max-age=0, no-cache, no-store",
+   "Content-Type": "application/json",
+   "ETag": "0x8DF19CB86388BD8",
+   "Last-Modified": "Wed, 23 Sep 2026 23:36:43 GMT"
+  },
+  "method": "GET",
+  "sha256": "5f77bfe5df3be255e21176a2e68b530f4ca3cffeff6e6865d1081b841a285c6f",
+  "size": 505,
+  "status": 200,
+  "url": "https://api.nuget.org/v3/vulnerabilities/index.json"
+ },
+ {
+  "census_label": "dotnet-unix-probe",
+  "headers": {
+   "Cache-Control": "max-age=0, no-cache, no-store",
+   "Content-Type": "application/json",
+   "ETag": "0x8DF1934A3E98B9E",
+   "Last-Modified": "Wed, 23 Sep 2026 05:36:38 GMT"
+  },
+  "method": "GET",
+  "omitted": "larger than 262144 bytes",
+  "sha256": "d55c0eabcb6379d05376ea9bcc778e5a98089bbc5f74b041928d44fde8d7f8ae",
+  "size": 664885,
+  "status": 200,
+  "url": "https://api.nuget.org/v3-vulnerabilities/2026.09.23.05.36.38/vulnerability.base.json"
+ },
+ {
+  "census_label": "dotnet-unix-probe",
+  "file": "api.nuget.org/v3-vulnerabilities/2026.09.23.05.36.38/2026.09.23.23.36.42/vulnerability.update.json.body",
+  "headers": {
+   "Cache-Control": "max-age=0, no-cache, no-store",
+   "Content-Type": "application/json",
+   "ETag": "0x8DF19CB86361B3B",
+   "Last-Modified": "Wed, 23 Sep 2026 23:36:43 GMT"
+  },
+  "method": "GET",
+  "sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+  "size": 2,
+  "status": 200,
+  "url": "https://api.nuget.org/v3-vulnerabilities/2026.09.23.05.36.38/2026.09.23.23.36.42/vulnerability.update.json"
+ }
+]

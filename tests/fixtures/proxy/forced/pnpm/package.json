@@ -1,0 +1,8 @@
+{
+  "name": "forced-pnpm",
+  "version": "1.0.0",
+  "packageManager": "pnpm@9.15.4",
+  "dependencies": {
+    "prepdep": "git+file://@SCENARIO@/prepdep.repo#main"
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "name": "prepdep",
+  "version": "1.0.0",
+  "scripts": {
+    "prepare": "node -e \"require('fs').writeFileSync('@HIT@/prepare-script', '')\""
+  }
+}

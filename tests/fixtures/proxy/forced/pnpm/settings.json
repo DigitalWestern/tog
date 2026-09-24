@@ -1,0 +1,24 @@
+{
+  "tool": "pnpm",
+  "config_file": ".npmrc",
+  "note": "See npm/settings.json for the placeholder rules. .pnpmfile.cjs is project code pnpm runs by design and is measured separately (by-design row).",
+  "settings": [
+    {"name": "script-shell", "line": "script-shell=@M:script-shell@"},
+    {"name": "node-options", "line": "node-options=--require=@J:node-options@"},
+    {"name": "pnpmfile", "line": "pnpmfile=@J:pnpmfile@"},
+    {"name": "global-pnpmfile", "line": "global-pnpmfile=@J:global-pnpmfile@"}
+  ],
+  "by_design": [
+    {"name": "dot-pnpmfile", "file": ".pnpmfile.cjs", "content": "require('fs').writeFileSync('@HIT@/dot-pnpmfile', '');\nmodule.exports = {};\n"}
+  ],
+  "forced_flags": [
+    "--config.script-shell=/bin/sh",
+    "--config.shell-emulator=false",
+    "--ignore-scripts",
+    "--config.node-options=",
+    "--config.pnpmfile=.pnpmfile.cjs",
+    "--config.global-pnpmfile=",
+    "--config.manage-package-manager-versions=false",
+    "--config.git-shallow-hosts="
+  ]
+}
