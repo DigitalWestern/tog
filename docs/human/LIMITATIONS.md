@@ -56,17 +56,21 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   a child is supervised, so its exit status is not auto-reaped away; the child still execs with
   the inherited `SIG_IGN`.
 - **The tools a sync runs find the project by pathname.** A sync holds the project
-  directory open from its first read to its last write: detection, policy, manifests, locks,
-  closures, `.venv`/`node_modules` links and `.tog` all go through that one descriptor, and it
-  refuses once the project's path stops naming it (after the store wait, before each
-  ecosystem, before anything is published). The ecosystem tools it starts (uv, npm, cargo,
-  go, mix, bundle, dotnet, a `setup.py` probe) still run in the project by path, so a
-  same-user process that renames the directory away, puts another project at its path, and
-  puts the original back while one of them runs can make that tool read or write the
-  replacement. Loud when the tool's output is read back (a lock it wrote is missing from the
-  held directory); silent otherwise. Files above the project (a Cargo workspace root, a
-  parent `go.work`, .NET `Directory.*` files, a parent `.tog/policy.toml`) and commands that
-  do not sync (`status`, `doctor`, `run`'s environment) read by path.
+  directory open from its first read to its last write: detection, the project's own
+  `.tog/policy.toml`, manifests, locks, closures (including the ones root registration
+  imports), `.venv`/`node_modules` links and `.tog` all go through that one descriptor. The GC
+  root and the per-project lock are keyed on the canonical path the project was opened at,
+  never resolved again, and the sync refuses once that path stops naming the held directory
+  (after the store wait, before each ecosystem, before a root is registered, and after the
+  closure is renamed into place). Three things still go by path. The ecosystem tools a sync
+  starts (uv, npm, cargo, go, mix, bundle, dotnet, a `setup.py` probe) run in the project by
+  path, so a same-user process that renames the directory away, puts another project at its
+  path, and puts the original back while one of them runs can make that tool read or write
+  the replacement. Loud when the tool's output is read back (a lock it wrote is missing from
+  the held directory); silent otherwise. Files above the project (a Cargo workspace root, a
+  parent `go.work`, .NET `Directory.*` files, a parent `.tog/policy.toml`, the machine
+  policy) are read by path. Commands that do not sync (`status`, `doctor`, `run`'s
+  environment, `gc --register`) open the project by path.
 - **CLI exit status is 0 / 1 / 2** (success / command failed / usage error); `run`, `x` and
   `fmt` pass the program's status through. A tool argument that is spelled like one of tog's
   own options needs `--` first: `-h`/`--help` for all four, and for `fmt` and `x` also the

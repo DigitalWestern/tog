@@ -119,10 +119,6 @@ pub fn load_cargo_inputs(
     })
 }
 
-/// The workspace root Cargo located, held as a root. At or under the
-/// project it is reached from the project's held descriptor. A workspace
-/// rooted above the project lies outside that descriptor, so it is opened
-/// from the path Cargo reported.
 /// The workspace root Cargo reported, held as a descriptor: the project
 /// itself or a directory inside it resolved from the project's descriptor,
 /// and only a root above the project opened by its path.

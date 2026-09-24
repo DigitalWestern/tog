@@ -1407,7 +1407,7 @@ fn read_mix_lock(project: &ProjectRoot) -> io::Result<String> {
         .ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::NotFound,
-                format!("{} not found", project.path().join("mix.lock").display()),
+                format!("{}: not found", project.path().join("mix.lock").display()),
             )
         })
 }
@@ -1751,7 +1751,7 @@ pub fn project_elixir_env(
         .ok_or_else(|| err("BEAM object is not in a Tog store"))?;
     let project_dir = project.path();
     let proj_dir = expected_projection(&store, project_dir, &deps_obj)?;
-    let project_lock = store.project_lock(project_dir)?;
+    let project_lock = store.project_lock_in(project)?;
     store.ensure_namespace(Path::new("forests"))?;
     let mut refs = crate::comforter::ClosureRefs::new();
     refs.object_path(&store, activity, &beam_obj)?;

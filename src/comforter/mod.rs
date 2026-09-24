@@ -282,11 +282,26 @@ pub(crate) fn persist_root_for_refs_with_project_lock(
     // is moved or a visible link replaced, and again by the closure writer.
     toolchain::recheck_before_publication()?;
     project.check_still_named()?;
+    // Registration imports the closures the project already has. A `.tog`
+    // that is a symlink, or anything but a real directory, is refused here,
+    // before the import could be pointed at another directory's closures.
+    match project.entry(Path::new(".tog"))? {
+        Entry::Absent | Entry::Directory => {}
+        _ => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "{} is not a real directory; remove it and run 'tog' again",
+                    project.path().join(".tog").display()
+                ),
+            ))
+        }
+    }
     let (objects, projections) = refs.clone().into_record_parts();
     store
         .register_root_parts_with_project_lock(
             activity,
-            project.path(),
+            project,
             objects,
             projections,
             project_lock,
@@ -343,17 +358,20 @@ fn write_closure_inner(
         ));
     }
     // The GC root is recorded under the project's path, so the path must
-    // still name the directory the closure is published through.
+    // still name the directory the closure is published through. The path
+    // is the canonical one the root was opened at, used as it is from here
+    // on: the lock, the record key and the registrability check never
+    // resolve it again.
     project.check_still_named()?;
     let project_dir = project.path().to_path_buf();
     // Writing closures for a project that cannot be registered would leave
     // provenance behind for a project no root record can protect.
-    Store::check_registrable(&project_dir)?;
+    Store::check_registrable_in(project)?;
     // Keep the per-project transaction lock through both durable root
     // publication and the visible closure rename. A second producer cannot
     // observe a root from one generation paired with a closure from another.
     let owned_project_lock = if explicit_refs.is_some() && supplied_project_lock.is_none() {
-        Some(store.project_lock(&project_dir)?)
+        Some(store.project_lock_in(project)?)
     } else {
         None
     };
@@ -423,14 +441,14 @@ fn write_closure_inner(
                 .expect("strict closure publication owns a project lock");
             store.register_root_parts_with_project_lock(
                 activity,
-                &project_dir,
+                project,
                 objects,
                 projections,
                 project_lock,
             )?;
             true
         }
-        None => match store.register_root_with_closure(&project_dir, ecosystem, &body) {
+        None => match store.register_root_with_closure(project, ecosystem, &body) {
             Ok(_) => true,
             Err(error) if error.kind() == io::ErrorKind::InvalidData => false,
             Err(error) => return Err(error),
@@ -451,6 +469,10 @@ fn write_closure_inner(
         key.sign(&mut envelope)?;
     }
     project.write_file(&closure_path, &serde_json::to_vec_pretty(&envelope)?)?;
+    // The root was registered under the path while the closure was being
+    // renamed into the held directory: prove the path still names it, so a
+    // swap in that window fails the sync instead of passing silently.
+    project.check_still_named()?;
     if !durable_root {
         store.register_root_with_activity(activity, &project_dir)?;
     }
@@ -1275,6 +1297,76 @@ mod closure_platform_tests {
         assert_eq!(roots[0].record.as_ref().unwrap().objects, everything);
         let _ = crate::kernel::store::remove_tree(&store.root);
         let _ = fs::remove_dir_all(&project);
+    }
+
+    /// Root registration imports the closures the project already has
+    /// through the held descriptor. A symlinked `.tog` is refused before the
+    /// import could read another directory's closures, and a project swapped
+    /// for another after it was opened is refused before anything is
+    /// imported from either.
+    #[test]
+    fn root_publication_imports_closures_only_through_the_held_project() {
+        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _attribution_lock = crate::kernel::policy::attribution_test_lock();
+        let store = test_store("held-import");
+        let project = unique_project("held-import");
+        let outside = unique_project("held-import-outside");
+        let foreign = complete_object(&store, "foreign-env");
+        let own = complete_object(&store, "own-env");
+        envelope(
+            &outside,
+            "node",
+            serde_json::json!({"env_object": store.object_path(&foreign)}),
+        );
+        let activity = store
+            .activity(crate::kernel::activity::ActivityMode::Exclusive)
+            .unwrap();
+        let mut refs = ClosureRefs::new();
+        refs.object_id(&store, &activity, &own).unwrap();
+
+        // A `.tog` that is a symlink to another project's state.
+        std::os::unix::fs::symlink(outside.join(".tog"), project.join(".tog")).unwrap();
+        let root = crate::kernel::fsroot::ProjectRoot::open(&project).unwrap();
+        let project_lock = store.project_lock_in(&root).unwrap();
+        let error =
+            persist_root_for_refs_with_project_lock(&root, &store, &activity, &refs, &project_lock)
+                .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{error}");
+        assert!(store.roots().unwrap().is_empty());
+        fs::remove_file(project.join(".tog")).unwrap();
+
+        // The project renamed away and another put at its path, carrying
+        // closures that name a foreign object.
+        let moved = project.with_extension("moved");
+        fs::rename(&project, &moved).unwrap();
+        fs::rename(&outside, &project).unwrap();
+        let error =
+            persist_root_for_refs_with_project_lock(&root, &store, &activity, &refs, &project_lock)
+                .unwrap_err();
+        assert!(
+            error.to_string().contains("moved or replaced during sync"),
+            "{error}"
+        );
+        assert!(store.roots().unwrap().is_empty());
+
+        // Put back, the held project's own (empty) closures are imported and
+        // nothing from the other directory is.
+        fs::rename(&project, &outside).unwrap();
+        fs::rename(&moved, &project).unwrap();
+        persist_root_for_refs_with_project_lock(&root, &store, &activity, &refs, &project_lock)
+            .unwrap();
+        let roots = store.roots().unwrap();
+        assert_eq!(roots.len(), 1);
+        assert_eq!(roots[0].path, root.path());
+        let record = roots[0].record.as_ref().expect("root/2 record");
+        assert_eq!(record.objects, BTreeSet::from([own.clone()]));
+        drop(project_lock);
+        drop(activity);
+        let _ = crate::kernel::store::remove_tree(&store.root);
+        let _ = fs::remove_dir_all(&project);
+        let _ = fs::remove_dir_all(&outside);
     }
 
     #[test]

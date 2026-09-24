@@ -484,8 +484,17 @@ fn load_with_sources_from(
             continue;
         }
         if let Some(project) = project.filter(|project| project.path() == dir) {
+            // The project's own policy is tog state under `.tog`: read with
+            // the strict no-follow walk, so a symlinked `.tog` or policy
+            // file is refused rather than read through.
             let own = Path::new(".tog/policy.toml");
-            if let Some(text) = project.read_input_string(own)? {
+            if let Some(bytes) = project.read_file(own)? {
+                let text = String::from_utf8(bytes).map_err(|_| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("{} is not valid UTF-8", path.display()),
+                    )
+                })?;
                 merge_text(
                     &mut policy,
                     &mut sources,
@@ -1321,6 +1330,39 @@ deny = ["git-dependency"]"#,
             assert_eq!(serialized, format!("\"{}\"", origin.as_str()));
             assert_eq!(origin.as_str(), origin.as_str().to_lowercase());
         }
+    }
+
+    #[test]
+    fn the_held_projects_own_policy_is_read_without_following_a_symlink() {
+        let temp = crate::kernel::testutil::TempDir::new();
+        let home = temp.0.join("home");
+        let project = temp.0.join("project");
+        let outside = temp.0.join("outside");
+        fs::create_dir_all(&home).unwrap();
+        fs::create_dir_all(project.join(".tog")).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("policy.toml"), "strict = true\n").unwrap();
+        let _env = test_env_lock();
+        let _home = EnvVarGuard::set("HOME", home.as_os_str());
+        let _policy = EnvVarGuard::remove("TOG_POLICY");
+        let root = ProjectRoot::open(&project).unwrap();
+        fs::write(project.join(".tog/policy.toml"), "strict = true\n").unwrap();
+        let (policy, _) = load_with_sources_from(root.path(), Some(&root), false).unwrap();
+        assert!(policy.strict);
+
+        // A symlinked policy file, and a symlinked `.tog`, are refused.
+        fs::remove_file(project.join(".tog/policy.toml")).unwrap();
+        std::os::unix::fs::symlink(
+            outside.join("policy.toml"),
+            project.join(".tog/policy.toml"),
+        )
+        .unwrap();
+        let error = load_with_sources_from(root.path(), Some(&root), false).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{error}");
+        fs::remove_dir_all(project.join(".tog")).unwrap();
+        std::os::unix::fs::symlink(&outside, project.join(".tog")).unwrap();
+        let error = load_with_sources_from(root.path(), Some(&root), false).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{error}");
     }
 
     #[test]

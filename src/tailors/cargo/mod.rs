@@ -307,7 +307,7 @@ pub fn project_cargo_env(
     // The workspace root is what gets registered, and projecting a cargo-home
     // into a root no record can name leaves wrappers pointing at objects the
     // next sweep is free to remove.
-    Store::check_registrable(&project_dir)?;
+    Store::check_registrable_in(project)?;
     let rust_obj = rust_obj.canonicalize()?;
     let vendor_obj = vendor_obj.canonicalize()?;
     let store = crate::comforter::store_from_object_path(&rust_obj)

@@ -66,7 +66,7 @@ pub fn preflight_sync(
     // path can be recorded before realizing or projecting anything: a
     // finished sync that could not register would leave a projected
     // environment nothing protects, and the next sweep would collect it.
-    store::Store::check_registrable(project.path())?;
+    store::Store::check_registrable_in(project)?;
     let present = tailors::detected_in(project)?;
     // No project is the answer before any lock is: `tog --frozen` in the
     // wrong directory must say there is no manifest here, not that
@@ -550,25 +550,35 @@ fn first_signing_notice(store: &store::Store) -> bool {
         .is_ok()
 }
 
-fn print_exception_summary(project: &ProjectRoot) -> io::Result<()> {
+/// The exceptions recorded across the project's closures, read through the
+/// held project with the strict no-follow walk: closures are tog's own
+/// state, so a symlinked `.tog` or closure file counts nothing rather than
+/// being read through. The summary is advisory, so an unreadable or
+/// malformed closure is skipped.
+fn exception_count(project: &ProjectRoot) -> usize {
     let dir = Path::new(".tog/closures");
     let mut total = 0;
-    if let Ok(Some(names)) = project.read_input_dir(dir) {
+    if let Ok(Some(names)) = project.read_dir(dir) {
         for name in names {
             if !name.to_string_lossy().ends_with(".json") {
                 continue;
             }
-            let text = match project.read_input_string(&dir.join(&name)) {
-                Ok(Some(text)) => text,
+            let bytes = match project.read_file(&dir.join(&name)) {
+                Ok(Some(bytes)) => bytes,
                 _ => continue,
             };
-            let value: serde_json::Value = match serde_json::from_str(&text) {
+            let value: serde_json::Value = match serde_json::from_slice(&bytes) {
                 Ok(value) => value,
                 Err(_) => continue,
             };
             total += value["body"]["exceptions"].as_array().map_or(0, Vec::len);
         }
     }
+    total
+}
+
+fn print_exception_summary(project: &ProjectRoot) -> io::Result<()> {
+    let total = exception_count(project);
     match exception_summary(total, policy::signing_configured()) {
         Some((message, Some(next))) => crate::kernel::ui::warning_next(&message, next),
         Some((message, None)) => crate::kernel::ui::note(&message),
@@ -773,6 +783,52 @@ mod tests {
         let (line, next) = exception_summary(3, false).unwrap();
         assert_eq!(next, None);
         assert!(line.contains("[signing]"), "{line}");
+    }
+
+    /// Closures are tog's own state: sync's toolchain seeding and its
+    /// exception summary read them through the held project with the strict
+    /// no-follow walk, so a symlinked `.tog` or closure file is refused (or,
+    /// for the advisory summary, counts nothing) instead of being read
+    /// through to another directory.
+    #[test]
+    fn closures_are_read_without_following_a_symlink() {
+        let temp = TempDir::new();
+        let project = temp.0.join("project");
+        let outside = temp.0.join("outside");
+        std::fs::create_dir_all(project.join(".tog/closures")).unwrap();
+        std::fs::create_dir_all(outside.join("closures")).unwrap();
+        let closure = serde_json::json!({
+            "schema": "closure/1",
+            "ecosystem": "python",
+            "body": {"exceptions": [{"kind": "a"}, {"kind": "b"}]},
+        })
+        .to_string();
+        std::fs::write(project.join(".tog/closures/python.json"), &closure).unwrap();
+        std::fs::write(outside.join("closures/python.json"), &closure).unwrap();
+        let root = ProjectRoot::open(&project).unwrap();
+        assert_eq!(
+            crate::commands::inspect::closures_in(&root).unwrap().len(),
+            1
+        );
+        assert_eq!(exception_count(&root), 2);
+
+        // A symlinked closure file.
+        std::fs::remove_file(project.join(".tog/closures/python.json")).unwrap();
+        std::os::unix::fs::symlink(
+            outside.join("closures/python.json"),
+            project.join(".tog/closures/python.json"),
+        )
+        .unwrap();
+        let error = crate::commands::inspect::closures_in(&root).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{error}");
+        assert_eq!(exception_count(&root), 0);
+
+        // A symlinked `.tog`.
+        std::fs::remove_dir_all(project.join(".tog")).unwrap();
+        std::os::unix::fs::symlink(&outside, project.join(".tog")).unwrap();
+        let error = crate::commands::inspect::closures_in(&root).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{error}");
+        assert_eq!(exception_count(&root), 0);
     }
 
     /// Sync ends by registering the project as a GC root, so a path no
@@ -1268,9 +1324,39 @@ mod tests {
 
     /// The Python tailor whose `sync` has a same-user process rename the
     /// project away and put another project at its path mid-sync, then
-    /// tries to publish the way every producer does.
+    /// publishes the way every producer does: the production closure writer,
+    /// through the held root, with a complete object reference, so the only
+    /// thing that can stop the publication is a still-named check.
     struct SwappedMidSync {
         moved: PathBuf,
+    }
+
+    /// A complete store object for a closure to reference, made under the
+    /// command's own lease.
+    fn complete_object(ctx: &Context, name: &str) -> io::Result<String> {
+        use std::os::unix::fs::PermissionsExt as _;
+        crate::kernel::objmeta::register_test_kinds();
+        let identity = crate::kernel::types::Identity {
+            kind: "test".into(),
+            name: name.into(),
+            version: "1".into(),
+            inputs: Default::default(),
+        };
+        let id = identity.object_id();
+        let staged = ctx.store.stage_with_activity(&ctx.activity)?;
+        std::fs::write(staged.join("payload"), name)?;
+        ctx.store.commit_with_activity_and_deps(
+            &ctx.activity,
+            &identity,
+            &staged,
+            &[],
+            &crate::kernel::store::ObjectDeps::new(),
+        )?;
+        let object = ctx.store.object_path(&id);
+        let mut perms = std::fs::metadata(&object)?.permissions();
+        perms.set_mode(perms.mode() & !0o222);
+        std::fs::set_permissions(&object, perms)?;
+        Ok(id)
     }
 
     impl Tailor for SwappedMidSync {
@@ -1293,13 +1379,16 @@ mod tests {
         }
         fn sync(
             &self,
-            _ctx: &Context,
+            ctx: &Context,
             project: &ProjectRoot,
             _request: &SyncRequest,
             attribution: &mut policy::Attribution,
         ) -> io::Result<bool> {
             let manifest = Path::new("pyproject.toml");
             let before = project.read_input(manifest)?.unwrap();
+            let id = complete_object(ctx, "swapped-mid-sync")?;
+            let mut refs = crate::comforter::ClosureRefs::new();
+            refs.object_id(&ctx.store, &ctx.activity, &id)?;
             let path = project.path().to_path_buf();
             std::fs::rename(&path, &self.moved)?;
             std::fs::create_dir_all(&path)?;
@@ -1310,10 +1399,13 @@ mod tests {
             std::fs::write(path.join(".python-version"), "3.12.14\n")?;
             // The held descriptor still reads the project preflight checked.
             assert_eq!(project.read_input(manifest)?.unwrap(), before);
-            crate::comforter::write_closure_legacy(
-                project.path(),
+            crate::comforter::write_closure(
+                project,
                 "python",
                 serde_json::json!({}),
+                &ctx.store,
+                &ctx.activity,
+                refs,
                 attribution,
             )?;
             Ok(true)
@@ -1407,8 +1499,82 @@ mod tests {
         assert!(!project.join(".tog/closures/python.json").exists());
         assert!(!moved.join(".tog/closures/python.json").exists());
         assert!(
+            ctx.store.roots().unwrap().is_empty(),
+            "a refused publication registered a root"
+        );
+        assert!(
             policy::pending().is_empty(),
             "a refused publication left an exception queued"
+        );
+    }
+
+    /// The same swap with no toolchain guard installed (a tailor driven
+    /// outside `sync_preflighted`, as `commit` never ran): the guard's own
+    /// still-named check cannot catch it, so the closure writer's check is
+    /// what refuses, before a root is registered or a closure written in
+    /// either directory.
+    #[test]
+    fn a_swapped_project_is_refused_by_the_closure_writer_without_a_guard() {
+        // Same lock order as `failed_tailor_sync_clears_its_unpublished_exceptions`.
+        let _env_lock = policy::test_env_lock();
+        let temp = TempDir::new();
+        let home = temp.0.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let _policy_env = PolicyEnv::enter(&home);
+        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _store_lock = store::STORE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _attribution = policy::attribution_test_lock();
+        assert!(
+            !project_toolchain::guard_installed_for_test(),
+            "a toolchain guard from another command is still installed"
+        );
+        let project = temp.0.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(
+            project.join("pyproject.toml"),
+            "[project]\nname = \"fixture\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        std::fs::write(project.join(".python-version"), "3.12.14\n").unwrap();
+        let _store_env = StoreEnv::enter(&temp.0.join("store"));
+        let platform = Platform::host().unwrap();
+        let ctx = Context::open_in(platform, &project, false).unwrap();
+        let root = ProjectRoot::open(&project).unwrap();
+        let moved = temp.0.join("moved");
+        let swapped: &'static SwappedMidSync = Box::leak(Box::new(SwappedMidSync {
+            moved: moved.clone(),
+        }));
+        // Resolve a toolchain for the request without `commit`, which is
+        // what would install the guard.
+        let present: [&'static dyn Tailor; 1] = [swapped];
+        let toolchain =
+            preflight_detected(platform, &root, &present, Mode::Writable, Scope::All).unwrap();
+        assert!(!project_toolchain::guard_installed_for_test());
+        let selections = std::collections::BTreeMap::new();
+        let request = SyncRequest {
+            fresh: false,
+            frozen: false,
+            toolchain: toolchain.get("python").unwrap(),
+            selections: &selections,
+        };
+        let mut attribution = policy::Attribution::open("python").unwrap();
+        let error = swapped
+            .sync(&ctx, &root, &request, &mut attribution)
+            .unwrap_err();
+        drop(attribution);
+        assert!(
+            error.to_string().contains("moved or replaced during sync"),
+            "{error}"
+        );
+        assert!(!project.join(".tog/closures/python.json").exists());
+        assert!(!moved.join(".tog/closures/python.json").exists());
+        assert!(
+            ctx.store.roots().unwrap().is_empty(),
+            "a refused publication registered a root"
         );
     }
 }

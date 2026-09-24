@@ -952,6 +952,7 @@ mod tests {
         let project = temp.0.join("project");
         fs::create_dir_all(&project).unwrap();
         let project = project.canonicalize().unwrap();
+        let held = crate::kernel::fsroot::ProjectRoot::open(&project).unwrap();
         let first = format!("{}-first", "a".repeat(40));
         let second = format!("{}-second", "b".repeat(40));
         let forest = |name: &str| {
@@ -960,14 +961,14 @@ mod tests {
 
         store
             .register_root_parts_locked(
-                &project,
+                &held,
                 BTreeSet::from([first.clone()]),
                 BTreeSet::from([forest("one")]),
             )
             .unwrap();
         let record = store
             .register_root_parts_locked(
-                &project,
+                &held,
                 BTreeSet::from([second.clone()]),
                 BTreeSet::from([forest("two")]),
             )

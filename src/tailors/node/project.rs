@@ -270,7 +270,7 @@ fn native_reference_id(reference: &Option<serde_json::Value>) -> io::Result<Opti
 /// independently blocking even within one process).
 fn projection_project_lock(
     store: &Store,
-    project_dir: &Path,
+    project: &ProjectRoot,
     strict_refs: bool,
 ) -> io::Result<Option<fs::File>> {
     if !strict_refs {
@@ -284,14 +284,14 @@ fn projection_project_lock(
     #[cfg(test)]
     {
         if strict_refs {
-            Ok(Some(store.project_lock(project_dir)?))
+            Ok(Some(store.project_lock_in(project)?))
         } else {
             Ok(None)
         }
     }
     #[cfg(not(test))]
     {
-        Ok(Some(store.project_lock(project_dir)?))
+        Ok(Some(store.project_lock_in(project)?))
     }
 }
 
@@ -642,11 +642,6 @@ fn node_closure_body(
 
 /// `project_node_env` plus the input files recorded for `tog status`
 /// (package.json and the lockfile the plan came from).
-///
-/// The project is read through the held descriptor (the previous closure,
-/// the directory listing, `.tog`). The projection symlinks, backups, and
-/// closure publication still go by `project.path()`: they need a symlink
-/// replace and a directory move ProjectRoot does not offer.
 #[allow(clippy::too_many_arguments)]
 pub fn project_node_env_recorded(
     activity: &StoreActivity,
@@ -694,7 +689,7 @@ pub fn project_node_env_recorded(
         .map(crate::kernel::store::is_object_id)
         .unwrap_or(true);
     let strict_refs = valid_env && valid_native;
-    let project_lock = projection_project_lock(&store, project_dir, strict_refs)?;
+    let project_lock = projection_project_lock(&store, project, strict_refs)?;
     let home = store
         .root
         .parent()

@@ -416,7 +416,7 @@ fn read_input_text(project: &ProjectRoot, rel: &Path) -> io::Result<String> {
     project.read_input_string(rel)?.ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::NotFound,
-            format!("{} not found", project.path().join(rel).display()),
+            format!("{}: not found", project.path().join(rel).display()),
         )
     })
 }
@@ -621,7 +621,7 @@ fn root_names(project: &ProjectRoot) -> io::Result<Vec<std::ffi::OsString>> {
     project.read_input_dir(Path::new("."))?.ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::NotFound,
-            format!("{} not found", project.path().display()),
+            format!("{}: not found", project.path().display()),
         )
     })
 }

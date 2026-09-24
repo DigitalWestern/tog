@@ -64,15 +64,26 @@ files. Manifests and dependency locks the user authors are read with
 `read_input`, which resolves from the descriptor but follows a symlink the
 project contains. tog's own state is walked one component at a time with
 `O_NOFOLLOW`, so a `.tog`, `.venv` parent or `cargo-home` swapped for a
-symlink is refused rather than followed: closures, the plan and setup.py
-caches, the Python manifest snapshots and lock stamp, `.tog/cargo-home`
-(`tog-config.toml` and the 0755 `cargo` shim), the `.venv` and
-`node_modules` links (`replace_symlink`), and a real `.venv` or
-`node_modules` moved into a store backup (`move_dir_out`). The toolchain
-guard keeps a duplicate of the descriptor, and the closure writer checks
-that the path still names it before a GC root is recorded under that path.
-Ecosystem tools the tailors run still start in the project by path; that
-window is in `docs/human/LIMITATIONS.md`.
+symlink is refused rather than followed: closures (read for toolchain
+seeding, the exception summary and root registration, and written),
+`.tog/policy.toml`, the plan and setup.py caches, the Python manifest
+snapshots and lock stamp, `.tog/cargo-home` (`tog-config.toml` and the 0755
+`cargo` shim), the `.venv` and `node_modules` links (`replace_symlink`,
+which publishes a new link with an exclusive rename so a real entry that
+appears meanwhile is refused, not replaced), and a real `.venv` or
+`node_modules` moved into a store backup (`move_dir_out`). Tree walks (the
+Go source digest) open each subdirectory with the same no-follow rule
+(`subdir`). The toolchain guard keeps a duplicate of the descriptor. The
+GC root is recorded under the canonical path the project was opened at,
+used as it is and never resolved again: the per-project lock is keyed on
+it, root registration imports the project's existing closures through the
+descriptor and refuses a symlinked `.tog`, and `check_still_named` walks
+that recorded path from `/` with `O_NOFOLLOW` and compares it with the held
+directory before each tailor, before a root is registered, and again after
+the closure is renamed into place. What still goes by path: the ecosystem
+tools the tailors run start in the project by path, files above the project
+are read by path, and commands that do not sync open the project by path.
+Those windows are in `docs/human/LIMITATIONS.md`.
 
 ## Vocabulary
 

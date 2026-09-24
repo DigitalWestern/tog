@@ -80,11 +80,13 @@ pub fn closures(dir: &Path) -> io::Result<Vec<ClosureFile>> {
 
 /// `closures`, read through a project the caller holds: sync seeds its
 /// toolchain from the closures of the directory it holds, not whatever the
-/// path names by then.
+/// path names by then. Closures are tog's own state, so they are read with
+/// the strict no-follow walk: a symlinked `.tog`, `.tog/closures`, or
+/// closure file is refused rather than read through.
 pub fn closures_in(project: &ProjectRoot) -> io::Result<Vec<ClosureFile>> {
     let mut out = Vec::new();
     let closures = Path::new(".tog/closures");
-    let Some(names) = project.read_input_dir(closures)? else {
+    let Some(names) = project.read_dir(closures)? else {
         return Ok(out);
     };
     for name in names {
@@ -93,7 +95,7 @@ pub fn closures_in(project: &ProjectRoot) -> io::Result<Vec<ClosureFile>> {
             continue;
         }
         let relative = closures.join(&name);
-        let Some(bytes) = project.read_input(&relative)? else {
+        let Some(bytes) = project.read_file(&relative)? else {
             continue;
         };
         out.push(closure_file(&name, project.path().join(&relative), &bytes)?);

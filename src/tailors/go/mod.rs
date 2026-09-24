@@ -1019,8 +1019,9 @@ pub fn plan_go(
 /// Digest of the project's .go sources (the tidy gate's third input).
 /// Sorted (relpath, sha256) pairs; names starting with `.` or `_` (so
 /// `.tog` too) are skipped. The walk runs through the held descriptor, each
-/// subdirectory held as its own root; a symlink is neither followed nor
-/// hashed, as the path walk's `symlink_metadata` did.
+/// subdirectory held as its own root and opened with the strict no-follow
+/// walk; a symlink is neither followed nor hashed, and one swapped in after
+/// the entry was classified is refused rather than walked into.
 fn source_digest(project: &ProjectRoot) -> io::Result<String> {
     let mut files: Vec<(String, String)> = Vec::new();
     fn walk(dir: &ProjectRoot, rel: &Path, files: &mut Vec<(String, String)>) -> io::Result<()> {
@@ -1035,7 +1036,7 @@ fn source_digest(project: &ProjectRoot) -> io::Result<String> {
             let child = Path::new(&name);
             match dir.entry(child)? {
                 Entry::Directory => {
-                    let sub = dir.input_subdir(child)?.ok_or_else(|| {
+                    let sub = dir.subdir(child)?.ok_or_else(|| {
                         err(format!(
                             "source walk: {} vanished",
                             dir.path().join(child).display()
@@ -1044,7 +1045,7 @@ fn source_digest(project: &ProjectRoot) -> io::Result<String> {
                     walk(&sub, &rel.join(child), files)?;
                 }
                 Entry::Regular if lossy.ends_with(".go") => {
-                    let content = dir.read_input(child)?.ok_or_else(|| {
+                    let content = dir.read_file(child)?.ok_or_else(|| {
                         err(format!(
                             "source walk: {} vanished",
                             dir.path().join(child).display()

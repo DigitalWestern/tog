@@ -911,6 +911,15 @@ pub fn runtime_object(
     super::closure_object(store, activity, closure_body, "runtime_object", probe)
 }
 
+/// Whether a sync's toolchain-input guard is installed in this process.
+#[cfg(test)]
+pub(crate) fn guard_installed_for_test() -> bool {
+    INPUT_GUARD
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .is_some()
+}
+
 /// An `{id, path}` closure reference to `id` in `store`, as closure writers
 /// record one.
 #[cfg(test)]

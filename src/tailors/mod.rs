@@ -613,13 +613,13 @@ pub fn install_kinds() {
 /// The tailors whose inputs are present in `dir`, in registry order.
 pub fn detected(dir: &Path) -> io::Result<Vec<&'static dyn Tailor>> {
     // A directory that is not there, or not a directory, has nothing to
-    // detect, as the `is_file` probes this replaced always answered.
+    // detect. One tog may not read is an error naming the path: an empty
+    // detection would report "no project here" for a project that exists.
     let project = match ProjectRoot::open(dir) {
         Ok(project) => project,
         Err(error)
             if error.kind() == io::ErrorKind::NotFound
-                || error.kind() == io::ErrorKind::InvalidData
-                || error.kind() == io::ErrorKind::PermissionDenied =>
+                || error.kind() == io::ErrorKind::InvalidData =>
         {
             return Ok(Vec::new())
         }
@@ -648,6 +648,33 @@ mod tests {
 
     const DARWIN: Platform = Platform::Aarch64AppleDarwin;
     const LINUX: Platform = Platform::X86_64UnknownLinuxGnu;
+
+    #[test]
+    fn detection_reports_an_unreadable_project_instead_of_finding_nothing() {
+        use std::os::unix::fs::PermissionsExt as _;
+        // SAFETY: geteuid has no preconditions.
+        if unsafe { libc::geteuid() } == 0 {
+            return; // root reads through any mode
+        }
+        let temp = crate::kernel::testutil::TempDir::new();
+        let parent = temp.0.join("locked");
+        let project = parent.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join("go.mod"), "module example.com/m\n").unwrap();
+        assert!(detected(&temp.0.join("absent")).unwrap().is_empty());
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let result = detected(&project);
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let error = match result {
+            Ok(found) => panic!("an unreadable project detected {} tailors", found.len()),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied, "{error}");
+        assert!(
+            error.to_string().contains(&project.display().to_string()),
+            "{error}"
+        );
+    }
 
     #[test]
     fn every_tailor_ships_a_complete_catalog_under_the_shipped_source_policy() {
