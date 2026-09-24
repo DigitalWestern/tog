@@ -1558,7 +1558,9 @@ Decided 2026-09-23 (owner, #68 option 1): the delegated-tool doors get a
 tog-owned registry proxy. No refusal behavior changes until the
 implementation PRs below land. This section is the design; #61 (the
 `Tailor::edit_manifest` trait method) and #169 (moving the Corepack/pnpm
-delegate path into the Node tailor) are built from it.
+delegate path into the Node tailor) are built from it. Revised after Codex
+review round 1 (ten findings, all addressed in the design below; the
+review is summarized in "Review round 1").
 
 ### In plain words
 
@@ -1571,75 +1573,82 @@ while they work (Bundler evaluates the Gemfile, uv may build a package to
 read its metadata, `dotnet restore` evaluates MSBuild). `tog audit` cannot
 see any of it.
 
-The fix has two halves, and both are needed:
+The fix has three parts, and all three are needed:
 
-1. **A fence.** The tool runs in the same kind of sandbox tog already uses
-   for builds, except that instead of "no network" it gets exactly one
-   network destination: a small web server inside the tog process (the
-   proxy). Anything else it tries to reach fails.
+1. **A fence.** The tool runs in a sandbox, on a private copy of the
+   project, and its only network destination is a small web server inside
+   the tog process (the proxy). Anything else it tries to reach fails, and
+   nothing it writes reaches the real project until tog has checked it.
 2. **A gatekeeper with a notebook.** The proxy fetches what the tool asks
    for from the real registry, checks it against policy, checks its
    integrity where the registry published a digest, keeps a copy in tog's
-   cache, and writes one line per fetch into a ledger. The ledger's summary
-   and any exceptions it found travel into the closure file, which is what
-   `tog audit` reads.
-
-The fence without the notebook stops leaks but proves nothing. The notebook
-without the fence records only the traffic that chose to be recorded.
+   cache, and writes one line per fetch into a ledger.
+3. **A signed receipt.** When the run passes, tog publishes the new
+   manifest and lock together with a small record of what happened,
+   signed with the same key that signs closures. The next sync copies the
+   receipt into the closure, so `tog audit` sees it. A lock without a
+   valid receipt is itself a finding a company can deny.
 
 ### The contract
 
 When this section is fully built:
 
 1. Every child process tog starts that resolves dependencies with network
-   access (the census below) starts through one kernel type, the
-   **resolution door**. No other code path can start one; a tripwire
-   refuses it at run time (see "Every door goes through the door").
-2. The door runs the tool **confined**: network reaches only the proxy;
-   filesystem writes reach only the lock root (minus `.git` and `.tog`) and
-   a per-run scratch directory; reads reach the lock root, declared extra
-   roots, the store, and the system runtime; the environment is built from
-   empty, not scrubbed from the user's.
-3. The proxy forwards only to **permitted endpoints**, never to loopback,
-   private, or link-local addresses, and never forwards a credential the
-   tool sent.
-4. Every request the proxy answers or refuses is one **ledger entry**: URL,
-   method, class (index, metadata, artifact, git, sumdb, connect), status,
-   sha256 and size of the bytes served, the registry's claimed digest when
-   one exists, whether the claim was verified, cache disposition, and the
-   refusal reason if refused.
+   access, or evaluates project code to resolve (the census below), starts
+   through one kernel type, the **resolution door**. No other code path can
+   start one: a runtime tripwire and a clippy rule refuse it (see "Every
+   door goes through the door").
+2. The door runs the tool **confined**, on a **socket-free staged snapshot**
+   of the lock root. Network reaches only the proxy. The real project is
+   read-only to the tool. Nothing the tool writes reaches the project
+   except the spec's declared outputs, and only after every check has
+   passed. The environment is built from empty, not scrubbed from the
+   user's.
+3. The proxy forwards only to **permitted endpoints**. It connects only to
+   the exact address it validated (never loopback, private, or link-local)
+   and never forwards a credential the tool sent.
+4. Every request the proxy answers or refuses becomes a **ledger entry**
+   with credentials redacted. The ledger is a store object with its own
+   identity and kind contract, kept alive by the closure that joins it.
 5. Policy is applied **per request, in real time**, with the same
    `policy::Policy` the rest of the run uses. A denied kind is a refused
    request, and a refused request fails the door even when the tool exits
    0.
-6. Exceptions the proxy sees reach the closure and therefore `tog audit`
-   through the existing exception machinery. Audit gains no new mechanism,
-   only two new kinds.
-7. The lock the tool writes is **byte-identical** to what the same tool
+6. **One transaction.** The door publishes its outputs, the ledger object,
+   and the signed resolution record together or not at all. If any step
+   fails, the project is left byte-for-byte as it was.
+7. **Only attested records enforce.** A resolution record reaches the
+   closure only when its signature verifies against the machine policy's
+   trusted keys and it matches the files on disk. A lock without such a
+   record gets `unrecorded-resolution`, which policy can deny. Deleting,
+   replacing, or editing a record therefore cannot remove a finding.
+8. The lock the tool writes is **byte-identical** to what the same tool
    writes when it talks to the registry directly. The proxy is invisible in
-   every file the user commits.
-8. When confinement is unavailable on a host, the door either refuses or
+   every file the user commits, apart from the resolution record itself.
+9. When confinement is unavailable on a host, the door either refuses or
    runs unconfined and records `unconfined-resolution`, by policy. It never
    runs unconfined silently.
 
-**What this does not claim.** It governs tog's doors. A lock produced
-outside tog (the developer ran `npm install` themselves) is judged by its
-contents at sync, as today; the proxy cannot vouch for a resolution it did
-not see. It is cooperative hermeticity plus provenance, the same claim the
-build sandbox makes (`docs/human/LIMITATIONS.md`, "Tog's security claim is
-provenance"): sandboxed code can still encode data in request paths sent
-to a permitted registry. That residual channel is documented, not closed.
+**What this does not claim.** It is cooperative hermeticity plus
+provenance, the same claim the build sandbox makes
+(`docs/human/LIMITATIONS.md`, "Tog's security claim is provenance").
+Sandboxed code can still encode data in the request paths it sends to a
+permitted registry. No enforceable design closes that channel while the
+tool is allowed to name packages (a package name is attacker-chosen
+text), so it is documented. The proxy bounds it: the channel is
+only the permitted endpoints, and every such request is in the ledger.
 
 ### The doors (census, 2026-09-23)
 
 Every place tog runs an ecosystem tool that resolves with the network or
 evaluates project code today. "Kind" is the door kind recorded in the
-ledger. Code execution is what the tool runs besides itself.
+ledger. "Runs code" is what the tool executes besides itself.
 
 | Site | Tool invocation | Network | Runs code | Kind |
 |---|---|---|---|---|
 | `tailors/python/inputs.rs` (requirements lock) | `uv pip compile --generate-hashes` | yes | sdist builds for metadata | missing-lock |
 | `tailors/python/pypi.rs` (build requirements) | `uv pip compile --no-build` | yes | no | planner |
+| `tailors/python/build.rs` `generate_cargo_lock` | `cargo generate-lockfile --manifest-path` for an sdist's Rust extension that ships no `Cargo.lock` (cached by sdist sha256 and Rust id) | yes | no | missing-lock (dependency) |
 | `commands/deps.rs` `python_uv` | `uv add` / `remove` / `lock` | yes | sdist and project builds | edit |
 | `commands/deps.rs` `uv_compile` | `uv pip compile` (requirements.in edits) | yes | sdist builds | edit |
 | `tailors/python/registry_tool.rs` | `uv pip compile` for `tog x` | yes | sdist builds | x |
@@ -1655,46 +1664,58 @@ ledger. Code execution is what the tool runs besides itself.
 | `tailors/ruby/mod.rs` `plan_ruby` gate 1 | Bundler helper | PR 0 confirms none | Gemfile eval | planner |
 | `commands/deps.rs` `ruby_delegate` | `bundle add` / `remove` / `update` | yes | Gemfile eval | edit |
 | `tailors/elixir/mod.rs` `plan_elixir` | `mix deps.get`, `mix deps.get --check-locked` | yes | mix.exs eval (git deps' too) | missing-lock / planner |
+| `tailors/elixir/mod.rs` lock helper | `elixir` AST parse of `mix.lock` | no | no (never evaluates) | planner (no routes) |
 | `commands/deps.rs` `elixir_delegate` | `mix deps.update` | yes | mix.exs eval | edit |
 | `tailors/dotnet/mod.rs` `plan_dotnet` | `dotnet restore --use-lock-file` | yes | MSBuild eval | missing-lock |
 
 Not doors: tog's own downloads (`kernel::fetch`, `kernel::gitsrc`, the
 `registry_lookup` existence check in `deps`) are tog code with tog
-verification; host-local helpers (`tar`, `getconf`, `id`,
+verification. Host-local helpers (`tar`, `getconf`, `id`,
 `cargo locate-project --offline`) need no network. A planner row that needs
-no network (Ruby gate 1, if PR 0 confirms it) still goes through the door
-with **no routes**, which is full network denial. That also closes the
-LIMITATIONS row "Delegated planning runs unsandboxed with user privileges"
-for code-evaluating planners.
+no network (Ruby gate 1, if PR 0 confirms it, and the Elixir lock parser)
+still goes through the door with **no routes**, which means full network
+denial. That also closes the LIMITATIONS row "Delegated planning runs
+unsandboxed with user privileges" for code-evaluating planners.
+
+The sdist `cargo generate-lockfile` row differs from the others: its lock
+root is the extracted sdist source in a store stage, not a project, and
+its output is the cached generated `Cargo.lock`. It writes a ledger and
+no resolution record (there is no project to commit one to). The ledger
+object id is retained through the `ClosureRefs` of the Python closure
+whose sync ran it, like the other planner doors.
 
 ### Per-ecosystem traffic and how each tool is pointed at the proxy
 
 The proxy speaks two dialects on one listener:
 
 - **Forward proxy with TLS interception** ("CONNECT-MITM"). The tool is
-  told to use an HTTP proxy (`HTTPS_PROXY` or the tool's own flag). For an
-  `https://` URL it sends `CONNECT host:443`. The proxy answers the CONNECT,
-  terminates TLS with a leaf certificate for `host` signed by a per-process
-  tog CA, reads the plain HTTP request inside, and fetches it upstream
-  itself over real TLS. The tool trusts the tog CA through an environment
-  variable naming a file that holds **only** that CA.
+  told to use an HTTP proxy. For an `https://` URL it sends
+  `CONNECT host:443` carrying `Proxy-Authorization` with the session token.
+  The proxy checks the token **once per tunnel**, binds the tunnel to that
+  session, answers `200`, terminates TLS with a leaf certificate for
+  `host` signed by a per-process tog CA, reads the plain HTTP requests
+  inside, and fetches each one upstream itself over real TLS. Requests
+  inside an authenticated tunnel carry no token and need none (standard
+  clients never add proxy credentials to inner requests). A `CONNECT`
+  without a valid token gets `407` and a ledger entry.
 - **Registry mirror** (plain HTTP). The tool's registry base URL is set to
-  a proxy route (`http://127.0.0.1:<port>/<token>/<route>/`). The proxy
-  maps the route to its upstream base and fetches over real TLS.
+  a proxy route (`http://127.0.0.1:<port>/<token>/<route>/`). The token in
+  the path authenticates every request. The proxy maps the route to its
+  upstream base and fetches over real TLS.
 
 Per ecosystem (claims marked † are verified by PR 0 before anything is
 built on them):
 
 | Ecosystem | Upstream traffic | Mechanism | Wiring | Lock effect |
 |---|---|---|---|---|
-| Python (uv) | `pypi.org/simple` (PEP 691 JSON / 503 HTML), `files.pythonhosted.org` (wheels, sdists, `.metadata`), git remotes, direct-URL requirements, any `[[tool.uv.index]]` | CONNECT-MITM | `HTTPS_PROXY`/`HTTP_PROXY` = proxy with token credentials, `NO_PROXY` empty, `ALL_PROXY` removed, `SSL_CERT_FILE` = tog CA file† (uv reads it for rustls roots), `--index-url https://pypi.org/simple` kept where it is passed today | none: uv sees real URLs, so `uv.lock` and `requirements.lock.txt` record them |
-| Node (npm) | `registry.npmjs.org` packuments (abbreviated `application/vnd.npm.install-v1+json`) and tarballs, scoped registries from `.npmrc`, `https:` tarball deps, git deps (git CLI) | CONNECT-MITM | CLI flags (beat project `.npmrc`): `--proxy`, `--https-proxy`, `--noproxy=`, `--registry=https://registry.npmjs.org/`, `--strict-ssl=true`; `NODE_EXTRA_CA_CERTS` = tog CA†; `npm_config_*` stripped as today | none: `resolved` URLs are upstream |
-| Node (pnpm) | same as npm | CONNECT-MITM | pnpm settings via env and flags (`--config.proxy`, `--config.https-proxy`, `--config.noproxy`)†, `NODE_EXTRA_CA_CERTS`; the per-run HOME/XDG stage stays | none |
-| Rust (cargo) | `index.crates.io` sparse index (`config.json`, index files), `static.crates.io` crate downloads (via 302 from `crates.io/api/v1/.../download`), alternative registries in `.cargo/config.toml`, git deps | CONNECT-MITM | `--config http.proxy=...`, `--config http.cainfo=<tog CA>`†, `--config net.git-fetch-with-cli=true` (so git goes through the git row), `CARGO_HOME` = scratch, `CARGO_NET_OFFLINE=false` | none: `Cargo.lock` records `registry+https://github.com/rust-lang/crates.io-index` whatever the transport |
+| Python (uv) | `pypi.org/simple` (PEP 691 JSON / 503 HTML), `files.pythonhosted.org` (wheels, sdists, `.metadata`), git remotes, direct-URL requirements, any `[[tool.uv.index]]` | CONNECT-MITM | `HTTPS_PROXY`/`HTTP_PROXY` = `http://tog:<token>@<proxy>`, `NO_PROXY` empty, `ALL_PROXY` removed, `SSL_CERT_FILE` = tog CA file† (uv takes it as its whole root set), default index forced to `https://pypi.org/simple` on every uv invocation (`--index-url` for `pip compile`, `--default-index` for `add`/`remove`/`lock`, a behavior change scheduled in PR 7) | none: uv sees real URLs, so `uv.lock` and `requirements.lock.txt` record them |
+| Node (npm) | `registry.npmjs.org` packuments (abbreviated `application/vnd.npm.install-v1+json`) and tarballs, scoped registries from `.npmrc`, `https:` tarball deps, git deps (git CLI) | CONNECT-MITM | CLI flags (beat project `.npmrc`): `--proxy`, `--https-proxy`, `--noproxy=`, `--registry=https://registry.npmjs.org/`, `--strict-ssl=true`, `--cafile=<tog CA>`† (replaces the roots for npm's own requests); `NODE_EXTRA_CA_CERTS` = tog CA for any other Node code (this **adds** to Node's built-in roots); `npm_config_*` stripped as today | none: `resolved` URLs are upstream |
+| Node (pnpm) | same as npm | CONNECT-MITM | pnpm's own flags `--http-proxy`, `--https-proxy`, `--no-proxy`† (pnpm ignores `--config.proxy` and friends), `cafile` through the per-run pnpm config in the XDG stage†, `NODE_EXTRA_CA_CERTS`; the per-run HOME/XDG stage stays | none |
+| Rust (cargo) | `index.crates.io` sparse index (`config.json`, index files), `static.crates.io` crate downloads (via 302 from `crates.io/api/v1/.../download`), alternative registries in `.cargo/config.toml`, git deps | CONNECT-MITM | `--config http.proxy=...`, `--config http.cainfo=<tog CA>`† (replaces curl's roots), `--config net.git-fetch-with-cli=true` (so git goes through the git row), `CARGO_HOME` = scratch, `CARGO_NET_OFFLINE=false` | none: `Cargo.lock` records `registry+https://github.com/rust-lang/crates.io-index` whatever the transport |
 | Go | `proxy.golang.org` (`/@v/list`, `.info`, `.mod`, `.zip`, `/@latest`), `sum.golang.org` lookups and tiles | Registry mirror | `GOPROXY=http://127.0.0.1:<port>/<token>/go/` (no `,direct`), `GOSUMDB=sum.golang.org` with the proxy serving `/sumdb/sum.golang.org/...`† (the go command asks `<proxy>/sumdb/<name>/supported` first and then fetches the signed tree through the proxy; go verifies the note signature itself), `GOVCS=*:off`, `GOTOOLCHAIN=local`, `GOPRIVATE`/`GONOPROXY`/`GONOSUMDB`/`GOINSECURE` empty as today | none: `go.sum` holds hashes only |
-| Ruby (Bundler) | `index.rubygems.org` compact index (`/versions`, `/info/<gem>`), `rubygems.org/gems/<name>-<ver>.gem`, other `source` blocks, git gems | Registry mirror for rubygems.org, forward proxy (no interception) for everything else | Bundler config file in `BUNDLE_APP_CONFIG` = scratch: `BUNDLE_MIRROR__HTTPS://RUBYGEMS__ORG/: http://127.0.0.1:<port>/<token>/rubygems/`†; `https_proxy`/`http_proxy` = proxy | none: `Gemfile.lock` keeps `remote: https://rubygems.org/` (mirrors are transparent by design) |
-| Elixir (Hex, mix) | `repo.hex.pm` (`/names`, `/versions`, `/packages/<name>` signed protobuf, `/tarballs/<name>-<ver>.tar`), git deps | Registry mirror for Hex, CONNECT-MITM for git | `HEX_MIRROR=http://127.0.0.1:<port>/<token>/hex/`†, `HEX_UNSAFE_REGISTRY` removed (Hex keeps verifying the registry signature with its public key), `HEX_HTTP_PROXY`/`HEX_HTTPS_PROXY` = proxy†, `HEX_OFFLINE` as today | none: `mix.lock` records the repo name `hexpm` |
-| .NET (NuGet) | `api.nuget.org/v3/index.json` service index, registration pages, flat container (`.nupkg`), certificate revocation checks | Registry mirror (the service index and registration JSON are rewritten so resource URLs point at proxy routes), forward proxy without interception for anything else | tog-written `nuget.config`: `<clear/>` plus one source `http://127.0.0.1:<port>/<token>/nuget/v3/index.json` with `allowInsecureConnections="true"`†; `NUGET_CERT_REVOCATION_MODE=offline`†; `HTTPS_PROXY` = proxy; `DOTNET_CLI_TELEMETRY_OPTOUT=1`, `DOTNET_CLI_WORKLOAD_UPDATE_NOTIFY_DISABLE=1`, `DOTNET_NOLOGO=1` | none: `packages.lock.json` holds content hashes only; `obj/project.assets.json` may name the proxy source (build scratch, rewritten by the next restore; `tog build` restores fresh) |
+| Ruby (Bundler) | `index.rubygems.org` compact index (`/versions`, `/info/<gem>`), `rubygems.org/gems/<name>-<ver>.gem`, other `source` blocks, git gems | Registry mirror for rubygems.org; forward proxy without interception (visible refusal) for everything else | Bundler config file in `BUNDLE_APP_CONFIG` = scratch: `BUNDLE_MIRROR__HTTPS://RUBYGEMS__ORG/: http://127.0.0.1:<port>/<token>/rubygems/`†; `https_proxy`/`http_proxy` = proxy with token | none: `Gemfile.lock` keeps `remote: https://rubygems.org/` (mirrors are transparent by design) |
+| Elixir (Hex, mix) | `repo.hex.pm` (`/names`, `/versions`, `/packages/<name>` signed protobuf, `/tarballs/<name>-<ver>.tar`), git deps | Registry mirror for Hex; CONNECT-MITM for git | `HEX_MIRROR=http://127.0.0.1:<port>/<token>/hex/`†, `HEX_UNSAFE_REGISTRY` removed (Hex keeps verifying the registry signature with its public key), `HEX_HTTP_PROXY`/`HEX_HTTPS_PROXY` = proxy†, `MIX_DEPS_PATH` in scratch as today, `HEX_OFFLINE` as today | none: `mix.lock` records the repo name `hexpm` |
+| .NET (NuGet) | `api.nuget.org/v3/index.json` service index, registration pages, flat container (`.nupkg`), certificate revocation checks | Registry mirror (the service index and registration JSON are rewritten so resource URLs point at proxy routes); forward proxy without interception (visible refusal) for anything else | tog-written `nuget.config`: `<clear/>` plus one source `http://127.0.0.1:<port>/<token>/nuget/v3/index.json` with `allowInsecureConnections="true"`†; `NUGET_CERT_REVOCATION_MODE=offline`†; `HTTPS_PROXY` = proxy with token; `DOTNET_CLI_TELEMETRY_OPTOUT=1`, `DOTNET_CLI_WORKLOAD_UPDATE_NOTIFY_DISABLE=1`, `DOTNET_NOLOGO=1`, `DOTNET_EnableDiagnostics=0`, `MSBUILDDISABLENODEREUSE=1`, `--disable-build-servers`, `-maxcpucount:1`† (no MSBuild worker nodes, so no Unix-socket IPC; see "Unix sockets") | none: `packages.lock.json` holds content hashes only. `obj/` output lands in the snapshot and is discarded (declared scratch) |
 | git (any ecosystem) | `https://` remotes (smart HTTP: `info/refs?service=git-upload-pack`, `POST git-upload-pack`), `ssh://` and scp-style remotes, `git://` | CONNECT-MITM for https; ssh rewritten to https; `git://` refused | `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_COUNT`/`KEY`/`VALUE` for `http.proxy`, `http.sslCAInfo`, and `url.https://<host>/.insteadOf` for `ssh://git@<host>/` and `git@<host>:`; `GIT_TERMINAL_PROMPT=0` | the commit id the tool locks |
 
 #### Which tools cannot be fully proxied, and what happens then
@@ -1703,16 +1724,16 @@ built on them):
 has a concrete answer:
 
 - **Go and .NET on macOS cannot be taught a private CA.** Go on darwin
-  verifies through the platform verifier and ignores `SSL_CERT_FILE`; .NET
-  on macOS uses the Keychain. tog will not modify the user's Keychain.
+  verifies through the platform verifier and ignores `SSL_CERT_FILE`, and
+  .NET on macOS uses the Keychain. tog will not modify the user's Keychain.
   Answer: both use the registry-mirror dialect, which needs no TLS between
   tool and proxy, on both platforms (one mechanism per ecosystem, not per
-  platform). Their only registry traffic is the mirror. Any other traffic
-  (a .NET workload advertising-manifest check, telemetry) goes to the
-  proxy as a `CONNECT`, because `HTTPS_PROXY` is set. The proxy refuses it
-  with a ledger entry naming the host instead of letting it hang on a
-  denied socket. If the tool fails because of that refusal, tog's error
-  names the host and the reason.
+  platform). Their only registry traffic goes through the mirror. Any
+  other traffic (a .NET workload advertising-manifest check, telemetry)
+  goes to the proxy as a `CONNECT`, because `HTTPS_PROXY` is set. The proxy
+  refuses it with a ledger entry naming the host instead of letting it
+  hang on a denied socket. If the tool fails because of that refusal,
+  tog's error names the host and the reason.
 - **Ruby sources other than rubygems.org.** Sync already fails closed on
   them (LIMITATIONS, Ruby). The proxy agrees: Bundler reaches them through
   `CONNECT`, the proxy refuses without interception and records
@@ -1721,7 +1742,7 @@ has a concrete answer:
   permitted Ruby source becomes a second mirror route and needs no new
   mechanism.
 - **Hex beyond `repo.hex.pm`** (private organizations at
-  `repo.hex.pm/repos/<org>`, other repos): the same `CONNECT` visible
+  `repo.hex.pm/repos/<org>`, other repos): the same visible `CONNECT`
   refusal until WP5 adds credentials. Hex organization access is a
   credentialed route, not a TLS problem.
 - **`git://` remotes** (unencrypted, unauthenticated, port 9418): refused
@@ -1730,10 +1751,10 @@ has a concrete answer:
 - **SSH git remotes with private keys.** The sandbox has no `~/.ssh` and no
   agent socket, on purpose. The `insteadOf` rewrite serves public
   repositories over https. A private repository needs a WP5 credential
-  reference that the proxy attaches upstream; until then the fetch fails
+  reference that the proxy attaches upstream. Until then the fetch fails
   with the host named. The tool never holds the credential.
 - **Direct-URL dependencies** (npm `https:` tarball specs, PEP 508
-  `name @ https://...`): fully proxied for npm and uv by interception,
+  `name @ https://...`): fully proxied for npm and uv by interception, and
   recorded as `unattested-index` when the host is not a permitted
   endpoint (see policy mapping). Cargo, Go, Bundler, Hex, and NuGet have no
   arbitrary-URL dependency form.
@@ -1751,8 +1772,8 @@ The three options:
    but cannot record a URL, a digest, or a package. Rejected as the
    recording mechanism: it cannot answer "what did the tool fetch". Kept
    as the **refusal detector** for traffic an ecosystem should not produce
-   (row ".NET", "Ruby" above): the tool announces the host, and the proxy
-   says no with a reason.
+   (rows ".NET" and "Ruby" above): the tool announces the host, and the
+   proxy says no with a reason.
 2. **Local HTTPS with a tog-generated CA (interception).** The proxy sees
    full requests. The tool must trust the CA. Chosen for **uv, npm, pnpm,
    cargo, and git**. Their locks record upstream URLs (`resolved` in
@@ -1761,7 +1782,7 @@ The three options:
    registry responses on the way in and lock files on the way out: two
    format-specific transforms on security-relevant files, each a place for
    a mistake. With interception the tool talks to the real URLs and the
-   lock comes out byte-identical (contract 7), which is also a directly
+   lock comes out byte-identical (contract 8), which is also a directly
    testable property. All five tools take a CA file through an environment
    variable or flag on both platforms (Node bundles its own OpenSSL, uv and
    cargo use their own TLS stacks, git uses `http.sslCAInfo`).†
@@ -1783,25 +1804,105 @@ P-256 through `ring`, which tog already links). The private key never
 leaves memory. The certificate is written 0600 into the session
 directory and bound read-only into the sandbox. Leaf certificates are
 minted per SNI host on demand and cached in memory for the process. The
-system and user trust stores are never touched. Each tool's CA variable
-names a file holding **only** the tog CA, so the confined tool cannot
-complete a TLS handshake with anything but the proxy, even in the
-unconfined fallback. New dependencies: `rcgen` (certificate building,
-`ring` backend) and the server half of `rustls`, which `ureq` already
-pulls in at 0.23. The proxy PR pins rustls's `ring` provider explicitly.
-Upstream TLS (proxy to registry) is tog's existing `ureq`/rustls client
-with webpki roots, plus WP3's company roots when WP3 PR 1 lands.
+system and user trust stores are never touched. New dependencies: `rcgen`
+(certificate building, `ring` backend) and the server half of `rustls`,
+which `ureq` already pulls in at 0.23. The proxy PR pins rustls's `ring`
+provider explicitly. Upstream TLS (proxy to registry) is tog's existing
+`ureq`/rustls client with webpki roots, plus WP3's company roots when
+WP3 PR 1 lands.
+
+**What the CA file does and does not prevent.** For uv (`SSL_CERT_FILE`),
+cargo (`http.cainfo`), git (`http.sslCAInfo`), and npm's own requests
+(`--cafile`), the file **replaces** the root set, so those clients cannot
+complete a handshake with anything but the proxy. `NODE_EXTRA_CA_CERTS`
+**adds** to Node's built-in roots, so any other Node code (a pnpm internal
+request, a script that ran anyway) can still make a directly trusted TLS
+connection. Under confinement this does not matter, because the network
+reaches only the proxy. In the unconfined fallback it does: **unconfined
+Node is treated as capable of direct trusted TLS**, and so is every other
+unconfined tool, since the fallback exists only when no fence exists. That
+is why `unconfined-resolution` is a kind and not a detail. The recording
+guarantee applies only to confined runs.
 
 **ALPN.** The interception server offers only `http/1.1`. Tools that
 prefer HTTP/2 (cargo's sparse index, uv) fall back to parallel HTTP/1.1
 connections. The cost is in "Performance".
 
-### Confinement: network limited to the proxy
+### Confinement
 
 The door is a third sandbox mode beside "no network" builds: network =
 `Proxy`. It uses the same `kernel::sandbox` engines and their existing
-rules (canonical roots, the host-socket scan of writable roots,
-`--clearenv`).
+rules (canonical roots, `--clearenv`), and adds four things: a staged
+snapshot, the proxy bridge, Unix-socket denial, and output checking.
+
+#### The staged snapshot (the real project is never writable)
+
+Before the tool starts, the door builds a **snapshot** of every tree the
+tool reads from the project side, in a 0700 store stage with an
+unguessable name:
+
+- the lock root (the project, or the workspace root for Cargo and pnpm),
+  and
+- each declared extra read root that is not a store object (an
+  out-of-root Cargo `path =` dependency, an npm `file:` target, a uv path
+  source), placed at the same path relative to the lock root.
+
+The snapshot copies only regular files, directories, and symlinks. Unix
+sockets, FIFOs, and device nodes are omitted, so the snapshot is
+**socket-free by construction**. Files are cloned rather than copied where
+the filesystem allows it (`clonefile` on APFS, `FICLONE` reflink on
+btrfs and XFS), otherwise copied. Each tailor names the heavy build outputs
+that are not resolution inputs, and those are left out (`target/`,
+`_build/`, `bin/` and `obj/` for .NET, `.venv`, `node_modules`; the last
+two are symlinks into the store anyway). `.git` **is** included, because
+dynamic-version build backends (setuptools-scm) read it. It is included
+as a copy, so a change to it is a diff like any other. While building the
+snapshot, the door records a **baseline manifest**: path, type, size,
+inode, and ctime for every entry.
+
+The tool runs on the snapshot:
+
+- **Linux:** bwrap binds each snapshot tree **at the real path** (`--bind
+  <stage>/root <lock_root>`, and likewise for each extra root), so every
+  absolute and relative path the tool sees is the real one, and the real
+  project is not mounted at all.
+- **macOS:** Seatbelt cannot remap paths, so the tool runs at the stage
+  path. Relative paths still resolve, because extra roots sit at the same
+  relative position. The output checks (below) fail the door if a
+  declared output contains the stage path, which is how an absolute-path
+  leak into a lock would show up. Seatbelt denies writes everywhere except
+  the stage and scratch, and denies reads of the real project.
+
+After the tool exits, the **diff** is computed from the baseline: an entry
+added, removed, changed in type, or whose ctime is newer than the
+baseline's (ctime cannot be set from user space, unlike mtime) has
+changed. Each changed path is classified by the spec:
+
+- a **declared output** (`package.json`, `package-lock.json`, ...): kept
+  for publication,
+- **declared scratch** (per tool: .NET `obj/`, uv's `.venv` if created):
+  discarded,
+- anything else, **including a new `.git`, a changed `.git/hooks/*`, or any
+  file under `.tog`**: the door fails, names the paths, and publishes
+  nothing.
+
+Because the real project was never mounted writable, "fails" means that
+nothing happened to it. No restore step is needed for the tool's writes,
+and a newly created `.git` never reaches the real tree.
+
+**Publication** happens only after the diff, the output checks, and the
+ledger commit have all passed (see "The transaction"). Before publishing,
+the door checks that each real output still has the digest it had when
+the snapshot was taken. If the user edited `package.json` during the run,
+the door fails instead of overwriting their change.
+
+**Cost.** Cloning is near-instant on APFS, btrfs, and XFS. On ext4 the
+copy is proportional to the source tree minus the excluded outputs,
+typically well under a second for application repositories. The budget in
+"Performance" covers it, and a tailor that finds a heavy input tree adds
+it to its exclusion list only if its tool provably does not read it.
+
+#### The proxy bridge
 
 **Linux (bubblewrap).** `--unshare-net` as for builds gives the tool a
 network namespace whose only interface is its own loopback, which bwrap
@@ -1811,18 +1912,18 @@ socket:
 1. The proxy listens on a Unix socket in a 0700 session directory under
    `$XDG_RUNTIME_DIR` (else the temp dir). The path is kept short, under
    the 108-byte `sun_path` limit.
-2. bwrap binds that one socket file at `/run/tog/proxy.sock` (read-only;
-   `connect(2)` needs no write access on a read-only mount for a socket
-   inode†, else a single-file `--bind`), and binds the running tog
-   executable (`/proc/self/exe`, resolved before the sandbox starts)
-   read-only at `/run/tog/tog`.
-3. The sandbox's first process is `tog __resolution-relay /run/tog/proxy.sock
-   127.0.0.1:8119 -- <tool argv>`, a hidden subcommand. It listens on the
-   fixed port inside the private namespace, splices each accepted
-   connection to the Unix socket, spawns the tool, and exits with the
-   tool's status. The fixed port keeps every proxy URL identical from run
-   to run. `--die-with-parent` and the PID namespace end every descendant
-   when the relay exits, so nothing outlives the door on Linux.
+2. bwrap binds that one socket file at `/run/tog/proxy.sock`, and binds
+   the running tog executable (`/proc/self/exe`, resolved before the
+   sandbox starts) read-only at `/run/tog/tog`.
+3. The sandbox's first process is `tog __resolution-relay
+   /run/tog/proxy.sock 127.0.0.1:8119 -- <tool argv>`, a hidden
+   subcommand. It listens on the fixed port inside the private namespace,
+   connects the Unix socket once per accepted TCP connection and splices
+   the two, spawns the tool (with the seccomp filter below installed in
+   the child before `exec`), and exits with the tool's status. The fixed
+   port keeps every proxy URL identical from run to run.
+   `--die-with-parent` and the PID namespace end every descendant when the
+   relay exits, so nothing outlives the door on Linux.
 4. No DNS exists in the namespace (`/etc/resolv.conf` is not bound, and no
    resolver is reachable). The tool never needs one because every proxy
    URL uses a literal IP.
@@ -1830,126 +1931,272 @@ socket:
 **macOS (Seatbelt).** There is no network namespace. The proxy listens on
 `127.0.0.1:<ephemeral>`, bound by tog before the tool starts so nothing
 else can hold the port. The profile keeps `(deny network*)` and adds
-`(allow network-outbound (remote ip "localhost:<port>"))`†. It also closes
-the DNS side channel the current profile leaves open, because the build
-profile allows `mach-lookup` wholesale: the door profile appends
-`(deny mach-lookup (global-name "com.apple.dnssd.service")
-(global-name "com.apple.mDNSResponder"))` after the blanket allow (SBPL:
-the last matching rule wins†). The TCP port is reachable by other local
-processes during the run, so every request must carry the per-session
-token (Proxy-Authorization basic credentials for the forward proxy, a
-path prefix for mirror routes); requests without it get 407/403 and a
-ledger entry. Seatbelt applies to every descendant. The process-tree
-quiescence gap (a daemon surviving the tool's exit, Backlog "Sol review 3
-leftovers") remains on macOS, and the rules keep children in tog's
-process group (§5, guarantee 4). Such a straggler stays inside Seatbelt,
-so it can write only the lock root. Anything it writes after tog has read
-the outputs changes the lock digest, and the next sync drops the
-resolution record (see "Recording").
+`(allow network-outbound (remote ip "localhost:<port>"))`†. It also
+closes the DNS side channel: the build profile allows `mach-lookup`
+wholesale, so the door profile appends `(deny mach-lookup (global-name
+"com.apple.dnssd.service") (global-name "com.apple.mDNSResponder"))`
+after the blanket allow (SBPL: the last matching rule wins†). Other local
+processes can reach the TCP port during the run, which is why every
+tunnel and every mirror request must carry the session token. Seatbelt
+applies to every descendant. The process-tree quiescence gap (a daemon
+surviving the tool's exit, Backlog "Sol review 3 leftovers") remains on
+macOS, and the rules keep children in tog's process group (§5, guarantee
+4). With the snapshot this no longer threatens the project: a straggler
+can write only the stage, which the door has already diffed and which
+`tog gc` sweeps. The door deletes the stage after publication. A
+straggler that keeps writing into a deleted directory affects nothing.
 
-**Filesystem, both engines.** Writable: the lock root, the per-run
-scratch (HOME, TMPDIR, the tool's caches), and nothing else. Read-only on
-top of the writable lock root: `.git` and `.tog` (bwrap `--ro-bind` over
-the bind when they exist, Seatbelt `deny file-write*` subpaths). A
-hostile build that plants `.git/hooks/pre-commit` would get code
-execution outside any sandbox at the user's next commit, so this matters.
-When `.git` or `.tog` does not exist, bwrap cannot pre-mount it. The door
-then checks after the run that neither appeared and fails closed if one
-did. Readable: the lock root, the tool's store objects, the store paths
-the tailor declares, and extra roots the tailor declares (an out-of-root
-`path =` Cargo dependency, an npm `file:` target outside the root, a uv
-path source). A missed root shows up as a permission error naming the
-path, which is fail-closed.
+#### Unix sockets: no connection to any host socket
 
-**No confinement available** (Linux without unprivileged user
-namespaces, `bwrap` missing, `sandbox-exec` missing): the door runs the
-tool unconfined, but still wired to the proxy with the tog-only CA file,
-so cooperative traffic is still recorded. It records
-`unconfined-resolution` before starting. A policy that denies that kind
-(the company template will) refuses the door before the tool starts, and
-the message says which engine is missing. Contract 8.
+A Unix socket is a network door the network namespace does not close. A
+resolver that can `connect(2)` to a host socket (a Docker socket, an SSH
+agent, a D-Bus session bus) bypasses both the namespace and the ledger.
+Three layers close it on Linux:
 
-### Recording: the ledger, the resolution record, and the join
+1. **Socket-free snapshot.** Every project-side tree is the snapshot
+   above. No host project tree is mounted.
+2. **Every other mounted root is scanned and refused.** Store objects, tool
+   objects, and the system roots bound by `system_root_args` are scanned
+   before mounting, and a socket anywhere in them refuses the door, naming
+   the path. (Today's sandbox scans writable roots only; see
+   `src/kernel/sandbox.rs` module docs. The door scans every root.) Store
+   object scans are cached per object id in the object's metadata, since
+   objects are immutable. `/run/tog` holds only tog's own socket, and
+   `/tmp` and `/dev` are fresh.
+3. **A seccomp filter denies creating Unix sockets.** The relay installs
+   a filter in the tool's process before `exec`, inherited by every
+   descendant: `socket(AF_UNIX, ...)` fails with `EAFNOSUPPORT`.
+   `socketpair(2)` stays allowed, because libuv (Node) and Python's
+   asyncio use it for child-process pipes, and a socketpair cannot reach
+   a named socket. This layer covers a socket that appears in a mounted
+   root **after** the scan: it cannot be connected to, because nothing in
+   the tree can create the socket to connect with. The relay is outside
+   the filter (it installs it in the child), so the proxy bridge keeps
+   working.
 
-**The ledger** (`resolution-ledger/1`) is one per door run. The proxy
-appends entries as it serves. At the end the door serializes it
-canonically (keys in byte order, compact, the same canonicalization as
-`kernel/signing.rs`; entries sorted by `(class, url, method)` so parallel
-fetch order does not change the bytes) and commits it as a store object
-whose identity is the sha256 of those bytes. Header fields:
+Tools that need named Unix-socket IPC among their own processes are
+configured not to: .NET gets `DOTNET_EnableDiagnostics=0`, no build
+servers, and no MSBuild worker nodes (table above)†. PR 0 runs every
+census invocation under the filter. If some tool cannot be configured
+off AF_UNIX, that tool's door keeps layers 1 and 2, and the named
+test for layer 3 is replaced by one proving every mounted root is either
+a snapshot or an immutable store object. The design names that exception
+in the tool's row before merging.
 
-- `door`: `edit` | `missing-lock` | `planner` | `x`
-- `ecosystem`, `tool` (name, version, store object id)
-- `command`: the tog verb and its operands (`["add", "lodash@^4"]`) and the
-  tool argv with the proxy token redacted
-- `lock_root` relative to the project, `outputs` (declared output files)
-  with their sha256 after the run
-- `confinement`: `bwrap` | `seatbelt` | `none`
-- `policy`: the effective `strict` and `deny` set the proxy judged with
+**macOS.** Seatbelt's `(deny network*)` covers Unix-socket connections
+(`network-outbound` with a `remote unix-socket` filter), and the door
+profile allows only the proxy's TCP port. So a host socket is unreachable
+whether or not it exists at scan time. The same two tests run there.
 
-Entries: `{class, method, url, status, sha256, bytes, claimed, verified,
-cache, redirects, decision, reason}`. `url` is always the upstream URL:
-for mirror routes the proxy writes the URL it fetched, not the route path.
-Header values (cookies, `Authorization`) are never recorded.
+#### No confinement available
 
-**The resolution record** (`.tog/resolution/<ecosystem>.json`, written
-through `ProjectRoot` like every other `.tog` write) is the part that
-travels. It is written by the door when the tool succeeded and the outputs
-passed the checks:
+On Linux without unprivileged user namespaces, with `bwrap` missing, or
+without `sandbox-exec`, the door runs the tool **unconfined but still
+staged**: it runs on the snapshot, with the same diff, output checks, and
+transaction, and is wired to the proxy. The snapshot and diff need no
+kernel feature, so the project stays protected. What is lost is the
+fence: the tool can reach the network directly (Node even with trusted
+TLS; see "What the CA file does and does not prevent"), so the ledger
+records only cooperative traffic. The door records `unconfined-resolution`
+before starting. A policy that denies that kind (the company template
+does) refuses the door before the tool starts, and the message names the
+missing engine. Contract 9.
+
+### The ledger: identity, contents, and redaction
+
+**Two parts, one object.** A door run produces one ledger. It has a
+portable semantic part and a run-local diagnostic part:
+
+- **Portable evidence** is what the fetches were, independent of the
+  machine and of cache state. It is a **set** of entries, each
+  `{class, method, url, status, sha256, claimed, verified, freshness}`
+  (`freshness` is `live` or `last-good`; see "Offline behavior").
+  Duplicates are removed by exact equality, and the set is sorted by each
+  entry's complete canonical bytes. The same fetches therefore produce the
+  same bytes whatever order they arrived in and however often they were
+  retried.
+- **Diagnostics** hold what varies by machine or run: cache disposition
+  (hit, miss, revalidated), arrival order, retry and duplicate counts,
+  byte counts, the confinement engine, the platform, tool store object
+  ids, the proxy port, refusal details, and on Linux the exec log below.
+  Diagnostics never reach a committed file.
+
+The canonical bytes of each part use the same canonicalization as
+`kernel/signing.rs` (keys in byte order, compact).
+
+**Store identity.** The ledger is a store object of the new kernel-owned
+kind `resolution-ledger`, with an `Identity` like every other object:
+kind `resolution-ledger`, name = ecosystem, version = `1`, inputs =
+`{portable: sha256(portable bytes), diagnostics: sha256(diagnostic bytes),
+door: <kind>}`. Its object directory holds `portable.json` and
+`diagnostics.json`. It gets a `KindAdapter` row in the kernel's
+object-kind table with live and migration grammars, as every kind must
+have or GC refuses to certify it (§ARCHITECTURE "GC root safety").
+
+**Retention.** The door registers the ledger's **full object id** in the
+project's root record as soon as the object is committed, so GC keeps it
+from the moment it exists, including across `--no-sync`. When the
+resolution record joins a closure, the closure writer adds the ledger id
+to that closure's `ClosureRefs`, the same way it retains every other
+object the closure names. Planner and `x` doors, which write no record,
+add their ledger ids to the `ClosureRefs` of the closure their sync (or
+`x` root) publishes.
+
+**Portable versus local evidence.** The committed resolution record
+carries the ledger's full object id and the sha256 of its portable part,
+under a signature (see "Attestation"). `tog audit` stays store-independent
+and does not read the ledger: what it judges is the signed record's
+facts. The full ledger is **local evidence**. On the machine that ran the
+door, `tog ls` and a future `tog why` can show every fetch, and anyone
+holding the object can verify it against the signed portable digest. It
+is not joined portable evidence, and the design does not claim that it is.
+
+**Redaction, before anything is serialized.** Entries and the command
+field pass through one redactor:
+
+- URL userinfo is removed (`https://user:tok@host/` becomes
+  `https://host/`).
+- Query strings: each `RegistryProtocol` declares the query keys that
+  identify content (for example none for npm tarballs, `format` for some
+  index APIs). Every other key keeps its name and gets the value
+  `REDACTED`. This covers presigned-URL signatures (`X-Amz-*`,
+  `X-Goog-*`, Azure SAS `sig`/`se`/`sp`, `token`, `key`) without needing
+  to list them. Intercepted hosts without a protocol get all values
+  redacted.
+- Redirect chains are redacted hop by hop the same way.
+- Command operands: the tog verb's operands and the tool argv are
+  scanned. URL-shaped operands are redacted as above. Values of
+  credential-bearing flags (`--password`, `--token`, `--auth`, `-u`/
+  `--user` with a colon, `--_authToken`, npm `//host/:_authToken=`, and
+  every `--config` whose key contains `token`, `auth`, `password`, or
+  `credential`) become `REDACTED`. The session token and proxy address are
+  removed. The environment is never recorded.
+- Headers are never recorded.
+
+A redaction test feeds each form through the redactor, and a golden
+ledger test fails if a known secret shape survives.
+
+**The Linux exec log.** On Linux the relay's seccomp filter also returns
+`SECCOMP_RET_USER_NOTIF` for `execve`/`execveat`. The relay (outside the
+filter) receives each notification, reads the program path from the
+notifying process, appends `{pid, parent, path}` to the diagnostics, and
+lets the call continue. This makes the kernel, not the tool, report every
+program the tool tree executed. It is diagnostics, and it cross-checks the
+build probe (below). macOS has no equivalent without Endpoint Security
+entitlements (Apple-granted; not available to tog) or disabling SIP for
+dtrace, so the policy-relevant build fact must not depend on it. See
+`resolution-build`.
+
+### Attestation: the signed resolution record
+
+**The record** (`.tog/resolution/<ecosystem>.json`) is the portable,
+committed receipt of one door that produced project outputs. It is a
+signed envelope over a body:
 
 ```json
-{"schema":"resolution/1","ecosystem":"node","door":"edit",
- "tool":{"name":"npm","version":"10.9.2","object":"<id>"},
- "command":["add","lodash@^4"],
- "outputs":{"package-lock.json":"<sha256>","package.json":"<sha256>"},
- "ledger":{"sha256":"<hex>","entries":412,"artifacts":3,
-           "endpoints":["registry.npmjs.org"],"refused":0,"stale":0},
- "confinement":"bwrap",
- "exceptions":[{"kind":"unattested-index","subject":"npm.example.com","detail":"..."}]}
+{"body":{"schema":"resolution/1","ecosystem":"node","door":"edit",
+  "tool":{"name":"npm","version":"10.9.2"},
+  "command":["add","lodash@^4"],
+  "outputs":{"package-lock.json":"<sha256>","package.json":"<sha256>"},
+  "ledger":{"object":"<full object id>","portable_sha256":"<hex>",
+            "endpoints":["registry.npmjs.org"],"entries":412,"refused":0},
+  "confined":true,
+  "exceptions":[{"kind":"unattested-index","subject":"npm.example.com","detail":"..."}]},
+ "signature":{"key":"ed25519:<64 hex>","sig":"<hex>"}}
 ```
 
-It carries no timestamps, token, or port, so the same resolution on two
-machines writes the same bytes. It is committed. The README's `.gitignore`
-stanza gains `!**/.tog/resolution/` in the PR that introduces the file.
+The body has no timestamps, port, token, platform, confinement engine, or
+store object ids other than the ledger's. `confined` is a boolean
+semantic fact; which engine confined the run is a diagnostic. The
+signature is Ed25519 over the canonical bytes of `body`, made with
+`TOG_SIGNING_KEY` through `kernel/signing.rs`, the same key and code that
+sign closures. The door loads the key at preflight, as `sync` and `fmt`
+do, and that loading extends to `add`, `remove`, `update`, `x`, and the
+new `tog attest`. With no key configured, the door writes the envelope
+with `"signature": null`. That record is honest but unattested.
+
+**What the signature binds.** It binds, in one signed object: the outputs'
+digests (the lock and manifest hash), the ledger's full object id and
+portable digest, the tool, the command, whether the run was confined, and
+every ledger-only exception. Changing any of them breaks the signature.
 
 **The join.** It happens in one ecosystem-neutral place,
-`comforter::write_closure_inner`, before it claims the attribution: it
-reads `.tog/resolution/<ecosystem>.json` from the closure's project
-directory (the lock root, which is also the sync root for Cargo
-workspaces and pnpm workspaces). If every `outputs` digest matches the
-files on disk, the closure body gains `"resolution": <the record>`, and
-the record's `exceptions` are re-recorded into the attribution on the
-writer's thread (the owner), skipping any `(kind, subject)` the frame
-already holds. A denied kind makes that record fail, so the closure is
-not published and the sync fails: this is how a CI sync under company
-policy stops a lock that a laptop resolved unconfined. The closure is signed
-over its whole body, so the signature covers the resolution summary. If
-any digest differs (the lock was edited by hand, or regenerated outside
-tog), the record describes a lock that no longer exists: it is deleted,
-and the closure has no `resolution` field. That is the honest state
-"this lock was not resolved through tog's door". It is not an exception,
-because a lock made outside tog is judged by its contents, like any lock
-today. The closure field is additive; closure identity is not an object
-identity, so no golden moves. PR 4 adds a test that no closure reader
-uses `deny_unknown_fields` on the body.
+`comforter::write_closure_inner`, before it claims the attribution. For
+an ecosystem whose tailor declares a resolvable lock
+(`Tailor::resolution_outputs`, the files a door would produce, relative
+to the closure's project directory):
 
-**Where exceptions come from, with no double counting.** Facts the proxy
-sees split in two:
+1. Read `.tog/resolution/<ecosystem>.json` through `ProjectRoot`.
+2. The record **attests** when every check passes: the signature verifies,
+   the key is in the machine policy's `[signing] trusted` set (the same
+   set audit trusts; project and `--policy` files can only intersect it),
+   the body parses as `resolution/1`, and every `outputs` digest matches
+   the file on disk.
+3. If it attests: the closure body gains `"resolution": <envelope>`, the
+   record's `exceptions` are recorded into the attribution on the
+   writer's thread, and the ledger id joins `ClosureRefs`.
+4. If it does not attest (missing, unsigned, bad signature, untrusted
+   key, malformed, or stale digests): its contents are **ignored
+   entirely**, and the join records **`unrecorded-resolution`** with the
+   reason (`missing`, `unsigned`, `untrusted-key`, `bad-signature`,
+   `stale-outputs`). A stale record is deleted. An unsigned or untrusted
+   record is kept, since a machine that does trust its key can still
+   attest it.
+5. Recording goes through `policy::record_with`, so a denied kind, whether
+   an attested exception or `unrecorded-resolution` itself, refuses
+   publication and the sync fails.
 
-- **Re-derivable from the lock** (`git-dependency`, `weak-integrity`): the
-  tailor already records these from the lock during sync. The proxy uses
-  them only for real-time denial (a denied kind refuses the request and
-  fails the door early, before a lock is written). It does not put them
-  in the record, so the closure never carries the same finding twice.
-- **Only the proxy can know** (`unattested-index` for an endpoint the
-  resolution consulted, `resolution-build`, `unconfined-resolution`):
-  these go into the record's `exceptions` and reach the closure through
-  the join.
+This is what makes the record enforceable rather than informational:
 
-`tog audit` needs no change beyond knowing the two new kinds. Audit
-already fails on a kind it does not know ("no recorded exception is
-denied or unknown"), so an older binary judging a newer closure fails
-closed.
+- **Deleting** a record gives `unrecorded-resolution`.
+- **Replacing** it with a clean one needs a trusted key.
+- **Editing** it (removing `unconfined-resolution`) breaks the signature,
+  which again gives `unrecorded-resolution`.
+- **Replaying** an older signed record for the same output bytes is
+  harmless: it genuinely describes a resolution that produced exactly
+  those bytes.
+
+Exceptions in a record affect policy only when the record attests.
+
+**Where provenance is required.** `unrecorded-resolution` is an ordinary
+policy kind. Permissive policy records it (so `tog status` and the
+exception summary show that a lock came from outside a tog door) and
+continues. `docs/human/policy-company.toml` denies it, beside
+`unconfined-resolution`, with a comment. A company that uses `tog audit`
+already has machine `[signing]` keys (audit exits 2 without them), and
+that is the one prerequisite. From then on a lock must come through a tog
+door on a machine whose key the gate trusts.
+
+**Existing locks: `tog attest [<eco>]`.** Every repository adopting that
+policy starts with locks that no door produced. `tog attest` runs a
+**verification door** (door kind `attest`) per ecosystem: the tool's own
+lock-consistency check, confined through the proxy. Its declared outputs
+are the lock and manifest, and success requires that the diff leaves
+them **byte-unchanged**. The check fetches metadata and proves the
+committed lock is what the tool accepts from permitted endpoints.
+Success writes a signed record with `door: "attest"`. The checks are
+`uv lock --locked`, `npm install --package-lock-only` with an unchanged
+lock, the pnpm equivalent (`install --lockfile-only --frozen-lockfile`),
+`cargo metadata --locked`, `go mod tidy -diff` plus
+`go mod download -json all`, `bundle lock` with an unchanged lock,
+`mix deps.get --check-locked`, and `dotnet restore --locked-mode`†.
+Tailors without a lock check refuse `attest` with the reason. Run on CI
+with the signing key, this converts a repository in one command. It is
+also the remedy the `unrecorded-resolution` refusal prints.
+
+**Resolution doors without a project** (planner, `x`, the sdist Cargo
+lock) write no record, so the join never looks for one. Planner doors run
+inside a sync whose lock already exists: that lock's own record is what
+the join judges.
+
+**Double counting.** Facts the lock itself shows (`git-dependency`,
+`weak-integrity`) are recorded by the tailor from the lock during sync.
+The proxy uses them only for real-time denial and leaves them out of the
+record. Facts only the proxy can know (`unattested-index` for an endpoint
+the resolution consulted, `resolution-build`, `unconfined-resolution`) go
+into the record. As a second safety, `Attribution::claim` now removes
+exact `(kind, subject, detail)` duplicates, which closes the separate
+known gap that the frame had no dedupe at all (see "Known gaps").
 
 **Threading.** `policy::record_with` refuses a record from a thread that
 does not own the frame. The proxy runs on its own threads, so it never
@@ -1959,20 +2206,56 @@ on the thread that opened the attribution, records after the tool exits.
 
 ### Policy checks: how proxy facts map to exception kinds
 
-| What the proxy sees | Kind | Real-time action when denied | Otherwise |
+| What the door or proxy establishes | Kind | Real-time action when denied | Otherwise |
 |---|---|---|---|
 | Any git fetch (smart HTTP through interception, or a refused `git://`) | `git-dependency` (existing) | refuse the request with the policy refusal text | ledger only (sync re-derives from the lock) |
-| An artifact whose registry claim is SHA-1 or MD5 only (npm `shasum` without `integrity`, a PyPI `md5` fragment), or has no claim at all where the protocol provides one | `weak-integrity` (existing) | refuse | ledger only |
-| A request to an endpoint outside the permitted set: an intercepted host (uv extra index, `.npmrc` scoped registry, direct-URL dependency) or a refused `CONNECT` | `unattested-index` (existing; the policy text already covers "index-like options") | refuse | intercepted tools (uv, npm, pnpm, cargo): forward and put it in the resolution record; mirror tools (Go, Bundler, Hex, NuGet): refuse visibly and put it in the record |
-| uv fetched an sdist or a source tree it must build for metadata: a third party's build backend ran during resolution, confined | `resolution-build` (**new**) | before starting, pass `--no-build` to uv so it refuses to build (tool-native, deterministic); the proxy refuses sdist fetches as a backstop | record |
+| An artifact whose registry claim is SHA-1 or MD5 only (npm `shasum` without `integrity`, a PyPI `md5` fragment), or has no claim where the protocol provides one | `weak-integrity` (existing) | refuse | ledger only |
+| A request to an endpoint outside the permitted set: an intercepted host (uv extra index, `.npmrc` scoped registry, direct-URL dependency) or a refused `CONNECT` | `unattested-index` (existing; the policy text already covers "index-like options") | refuse | intercepted tools (uv, npm, pnpm, cargo): forward and record in the resolution record; mirror tools (Go, Bundler, Hex, NuGet): refuse visibly and record |
+| The resolution required building a source distribution (see below) | `resolution-build` (**new**) | uv runs with `--no-build` only, so the edit fails naming the package that needs a build | record |
 | The door ran without confinement | `unconfined-resolution` (**new**) | refuse before the tool starts | record |
+| A lock has no attesting resolution record at closure time | `unrecorded-resolution` (**new**) | the sync refuses to publish, and names `tog attest` | record |
 | Lifecycle scripts | none | `--ignore-scripts` and `npm_config_ignore_scripts=true` stay as today; a script that ran anyway would be confined | `install-script-failed` stays a realize-time kind |
 | Integrity mismatch (bytes differ from the claimed digest) | not an exception | always a hard failure: 502 to the tool, door fails, nothing cached | no permissive path |
 
-The two new kinds go into `policy::KINDS`. `docs/human/policy-company.toml`
-adds `unconfined-resolution` to `deny`. `resolution-build` stays
-permitted in the template, with a comment explaining why: the build was
-confined, and the resulting lock is verified at sync like any other lock.
+**`resolution-build`, established by a probe instead of by guessing.** The
+proxy cannot see whether uv executed a build backend: fetching an sdist
+does not prove a build, and a build can happen without a fetch in that
+run. On Linux the exec log can see it, but macOS offers no equivalent
+tog can use. So the fact is established by construction on both
+platforms:
+
+1. Every uv door first runs with `--no-build` (the **probe**). With no
+   build allowed, no third-party code runs, so the probe's outcome is
+   trustworthy. If it succeeds, no build was needed, and its outputs are
+   the result.
+2. If the probe fails, and uv's error names a distribution that must be
+   built (the `--no-build` refusal; PR 0 captures its exact form†), then
+   when `resolution-build` is denied the door fails with that package
+   named. Otherwise the door records `resolution-build` with the package
+   names and reruns without `--no-build`. The rerun is cheap, because
+   every fetch is warm in the proxy cache.
+3. The project's own build (a workspace member with dynamic metadata) is
+   the project's code, not a third party's. It is exempted with
+   `--no-build-package <member>` for each workspace member†, so the probe
+   refuses only dependency builds.
+4. uv's caches are per run (see "Performance"), so a build cached earlier
+   cannot hide a build this run needed.
+
+The kind therefore means exactly "resolution could not complete without
+building a third-party source distribution, and the build was allowed".
+On Linux the rerun's exec log is compared with the probe, and a build
+recorded without any interpreter exec from a uv build environment (or the
+reverse) is written to diagnostics for investigation. That is a
+cross-check, not the source of the fact. No other ecosystem builds
+packages during resolution (Bundler, mix, and MSBuild evaluate the
+project's own files; git dependencies' `mix.exs` is covered by
+`git-dependency`), so the probe is Python's alone.
+
+The three new kinds go into `policy::KINDS`.
+`docs/human/policy-company.toml` denies `unconfined-resolution` and
+`unrecorded-resolution`, and it lists `resolution-build` as deliberately
+not denied, with the reason: the build ran confined, and the lock it
+produced is verified at sync like any other lock.
 
 **Permitted endpoints.** Until WP3 PR 1 lands, the permitted set is
 compiled in and is exactly today's forced public set: `pypi.org`,
@@ -1980,24 +2263,37 @@ compiled in and is exactly today's forced public set: `pypi.org`,
 `static.crates.io`, `crates.io` (the download redirect), `proxy.golang.org`,
 `sum.golang.org`, `rubygems.org`, `index.rubygems.org`, `repo.hex.pm`,
 `api.nuget.org`, plus each ecosystem's documented CDN redirect targets
-(PR 0 lists them). Git hosts are not endpoints: any https host is allowed
-for git and every git fetch is `git-dependency`. WP3 PR 1 turns the set
-into the typed endpoint configuration (machine policy may add, project
-policy may only intersect). The proxy is where WP5 credential references
-are used: attached upstream per endpoint, never forwarded across a
-redirect to another origin, never visible to the tool. The proxy strips
-`Authorization`, `Proxy-Authorization` (after checking the token), and
-`Cookie` from every tool request.
+(PR 0 lists them). Git hosts are not endpoints: any public https host is
+allowed for git, and every git fetch is `git-dependency`. WP3 PR 1 turns
+the set into the typed endpoint configuration (machine policy may add,
+project policy may only intersect). The proxy is where WP5 credential
+references are used: attached upstream per endpoint, never forwarded
+across a redirect to another origin, never visible to the tool. The
+proxy strips `Authorization`, `Proxy-Authorization` (after checking the
+token), and `Cookie` from every tool request.
 
-**SSRF.** Sandboxed code can send the proxy any request. Routes accept
-only paths that parse in their protocol's grammar (no `..`, no
-percent-encoded `/`, no absolute-form URLs inside a route). The upstream
-host is fixed by the route, or by `CONNECT` for interception. Every
-upstream address is resolved by the proxy and refused if it is loopback,
-private (RFC 1918, ULA), link-local (including `169.254.169.254`),
-multicast, or unspecified. The check runs after resolution, so DNS
-rebinding cannot defeat it. Redirects are rechecked hop by hop against the
-permitted set, as WP3 requires.
+**SSRF: resolve once, validate, connect to exactly that address.**
+Sandboxed code can send the proxy any request. Routes accept only paths
+that parse in their protocol's grammar (no `..`, no percent-encoded `/`,
+no absolute-form URLs inside a route). The upstream host is fixed by the
+route, or by `CONNECT` for interception. For each upstream connection the
+proxy:
+
+1. resolves the hostname **once**,
+2. validates **every** returned address, and refuses the connection if
+   any is loopback, private (RFC 1918, ULA), link-local (including
+   `169.254.169.254`), multicast, unspecified, or an IPv4-mapped form of
+   those,
+3. connects to one of **those validated `SocketAddr`s**, through a `ureq`
+   `Resolver` that returns exactly the validated list, so the client
+   performs no lookup of its own,
+4. keeps the original hostname for TLS SNI, certificate verification, and
+   the `Host` header.
+
+A second lookup that could answer differently never happens, so DNS
+rebinding has nothing to race. Redirects repeat all four steps for each
+hop, and each hop is also checked against the permitted set, as WP3
+requires.
 
 ### Offline behavior
 
@@ -2006,11 +2302,12 @@ to last-good; an integrity failure never does"):
 
 - **Upstream unreachable while online** (DNS, connect, TLS, timeout, HTTP
   5xx): metadata requests are served from the proxy's last-good copy if one
-  exists, marked `stale` in the ledger and summarized in one note ("npm:
-  12 metadata responses served from cache; registry unreachable"). With no
-  copy, the answer is 504 with a body naming the URL. Artifacts are served
-  only from the verified cache (below), never from anything unverified. A
-  4xx is passed through, not converted to stale.
+  exists, with `freshness: last-good` in the portable evidence and one
+  note ("npm: 12 metadata responses served from cache; registry
+  unreachable"). With no copy, the answer is 504 with a body naming the
+  URL. Artifacts are served only from the verified cache (below), never
+  from anything unverified. A 4xx is passed through, not converted to
+  stale.
 - **`--offline`** (WP3's mode; the flag does not exist yet, and until it
   does this mode is exercised by tests): the proxy makes no upstream
   connection. Metadata comes from last-good, artifacts from the cache, and
@@ -2025,7 +2322,9 @@ to last-good; an integrity failure never does"):
   once on this machine, and fail naming the first miss otherwise.
 
 `--frozen` is unchanged: sync never calls `prepare`, so no missing-lock
-door runs, and dependency edits are not frozen operations.
+door runs, and dependency edits are not frozen operations. The join still
+runs under `--frozen`, so a frozen CI sync enforces
+`unrecorded-resolution`.
 
 ### Missing-lock generation through the door
 
@@ -2035,47 +2334,52 @@ ecosystem when not frozen. With the door:
 1. `run_in` opens the ecosystem's `Attribution` as today and passes it
    into a `ResolutionDoor` for `prepare`.
 2. The tailor decides a lock is missing and builds a `DelegateSpec` (tool,
-   args, outputs = the lock file, routes, read roots).
-3. The door runs it confined through the proxy, checks outputs (below),
-   writes the ledger object and the resolution record, and records
-   ledger-only exceptions into the same attribution. For a missing-lock
-   door the attribution is already the ecosystem's own scope, so no
-   hand-off is needed.
+   args, outputs = the lock file, routes, extra read roots).
+3. The door snapshots, runs the tool confined through the proxy, diffs,
+   and commits the transaction: ledger object, signed record, lock
+   published. It records ledger-only exceptions into the same
+   attribution. For a missing-lock door that attribution is already the
+   ecosystem's own scope, so no hand-off is needed.
 4. The tailor plans from the new lock exactly as today: every artifact is
    fetched and verified by tog at realize time.
-5. The closure writer joins the record, whose output digests match because
-   the lock was just written.
+5. The closure writer joins the record. It attests, because the outputs
+   were just published and signed (when a key is configured).
 
 Planner doors inside `Tailor::sync` (Go's `mod tidy -diff` and
 `mod download -json all`, mix `deps.get --check-locked`) open a door from
-the same attribution. They write a ledger but no resolution record (they
-did not produce the lock). A refusal still fails the sync. Go's closure
-download keeps its "re-verify every artifact" rule. The proxy's cache and
-tog's `cache/sha256` are the same store, so the second copy costs
-nothing.
+the same attribution. They declare no project outputs: a Go planner
+whose `go mod tidy` would change `go.mod` is the missing-lock door, not a
+planner. They write a ledger, retained through `ClosureRefs`, and no
+record. A refusal still fails the sync. Go's closure download keeps its
+"re-verify every artifact" rule. The proxy's cache and tog's
+`cache/sha256` are the same store, so the second copy costs nothing.
 
 ### `Tailor::edit_manifest` and the door API (#61, #169)
 
 The kernel owns the door (`src/kernel/resolve/`: proxy server, CA,
-routes, ledger, cache, the relay subcommand's body). Tailors own protocol
-knowledge through a kernel trait. Commands own nothing ecosystem-specific.
+routes, ledger, redaction, snapshot and diff, the transaction, the relay
+subcommand's body). Tailors own protocol knowledge through a kernel trait.
+Commands own nothing ecosystem-specific.
 
 ```rust
 // src/kernel/resolve/mod.rs
-pub enum DoorKind { Edit, MissingLock, Planner, X }
+pub enum DoorKind { Edit, MissingLock, Planner, X, Attest }
 
 /// The only way to run a dependency tool that may use the network or
 /// evaluate project code. Borrowing the attribution ties every fact the
 /// run produces to the scope that will publish (or discard) it.
 pub struct ResolutionDoor<'a> { /* store, activity, platform, kind,
-                                    attribution: &'a mut Attribution, policy */ }
+                                    attribution: &'a mut Attribution, policy,
+                                    signing key */ }
 
 impl<'a> ResolutionDoor<'a> {
     pub fn open(store: &'a Store, activity: &'a StoreActivity, platform: Platform,
                 kind: DoorKind, attribution: &'a mut Attribution) -> io::Result<Self>;
-    /// Run one tool invocation confined to the proxy. Fails when the tool
-    /// fails, when any request was refused by policy, or when an output
-    /// check fails; on failure the declared outputs are restored.
+    /// Run one tool invocation on a staged snapshot, confined to the
+    /// proxy, and publish its declared outputs, ledger, and signed record
+    /// as one transaction. Fails, leaving the project unchanged, when the
+    /// tool fails, when any request was refused by policy, when the diff
+    /// holds an undeclared change, or when any publication step fails.
     pub fn run(&mut self, spec: DelegateSpec<'_>) -> io::Result<DelegateReport>;
     pub fn attribution(&mut self) -> &mut Attribution;
 }
@@ -2085,12 +2389,16 @@ pub struct DelegateSpec<'s> {
     pub tool: ToolId,                     // name, version, store object id
     pub program: PathBuf,
     pub args: Vec<OsString>,
-    pub lock_root: &'s Path,              // cwd and the one writable project root
-    pub outputs: Vec<PathBuf>,            // relative to lock_root; backed up, checked, digested
-    pub read: Vec<PathBuf>,               // store objects and declared extra roots
+    pub lock_root: &'s Path,              // snapshotted; cwd inside the sandbox
+    pub outputs: Vec<PathBuf>,            // relative to lock_root; the only files published
+    pub scratch_outputs: Vec<Glob>,       // relative to lock_root; allowed to change, discarded
+    pub exclude: Vec<Glob>,               // not snapshotted (heavy build outputs)
+    pub extra_roots: Vec<PathBuf>,        // project-side read roots, snapshotted
+    pub store_reads: Vec<PathBuf>,        // store objects, scanned for sockets, read-only
     pub env: Vec<(String, String)>,       // tog-forced values; the environment starts empty
     pub routes: Vec<Route>,               // mirror routes: (&'static dyn RegistryProtocol, Endpoint)
     pub intercept: Intercept,             // Intercept::{Tls, RefuseVisibly}
+    pub probe: Option<Probe>,             // uv's --no-build probe and its rerun args
     pub wire: &'s dyn Fn(&ProxyAddress) -> io::Result<Wiring>, // proxy URL/CA path -> args, env, config files
 }
 
@@ -2100,13 +2408,15 @@ pub trait RegistryProtocol: Sync {
     fn upstream(&self, endpoint: &Endpoint, path: &str) -> io::Result<Url>; // grammar-checked
     fn classify(&self, url: &Url) -> RequestClass;            // index | metadata | artifact | sumdb
     fn claims(&self, url: &Url, body: &[u8]) -> Vec<(Url, Claim)>; // digests this metadata promises
+    fn content_query_keys(&self) -> &'static [&'static str] { &[] } // kept by redaction
     fn rewrite(&self, _url: &Url, body: Vec<u8>, _base: &ProxyAddress) -> io::Result<Vec<u8>> { Ok(body) }
 }
 ```
 
 Interception needs no `RegistryProtocol` to forward. Registering one for a
-host still gives classification and claims, so npm packuments feed the
-tarball `integrity` claims and PyPI JSON feeds the wheel `sha256` claims.
+host still gives classification, claims, and redaction keys, so npm
+packuments feed the tarball `integrity` claims and PyPI JSON feeds the
+wheel `sha256` claims.
 
 The trait method #61 asked for:
 
@@ -2127,9 +2437,10 @@ pub struct EditOutcome {
 
 /// `tog add` / `remove` / `update` for this ecosystem: edit the manifest
 /// and lock with the ecosystem's pinned tool. The tool runs only through
-/// `door`: network limited to tog's resolution proxy, writes limited to
-/// the lock root, every fetch in the ledger. A tailor that cannot make an
-/// edit refuses with the exact command to run; the default refuses.
+/// `door`: on a staged snapshot, network limited to tog's resolution
+/// proxy, outputs published with a signed resolution record. A tailor
+/// that cannot make an edit refuses with the exact command to run; the
+/// default refuses.
 fn edit_manifest(
     &self,
     ctx: &Context,
@@ -2138,6 +2449,17 @@ fn edit_manifest(
 ) -> io::Result<EditOutcome> {
     Err(unsupported(self.id(), "add, remove, and update"))
 }
+
+/// `tog attest`: run this ecosystem's lock-consistency check through
+/// `door`. The default refuses.
+fn attest_lock(&self, ctx: &Context, dir: &Path, toolchain: &Selected,
+               door: &mut ResolutionDoor<'_>) -> io::Result<()> {
+    Err(unsupported(self.id(), "attest"))
+}
+
+/// The project files a door of this ecosystem produces, relative to the
+/// closure's project directory. The join checks them against the record.
+fn resolution_outputs(&self, _dir: &Path) -> io::Result<Vec<PathBuf>> { Ok(Vec::new()) }
 ```
 
 `Tailor::prepare` changes the same way: its `attribution` parameter
@@ -2156,13 +2478,13 @@ through the registry, the report lines, and the follow-up sync.
 the URLs live with their ecosystems.
 
 The refusals (.NET, Elixir add/remove, Yarn, Poetry/PDM) move into each
-tailor's `edit_manifest` unchanged. `.NET` keeps refusing edits: MSBuild
+tailor's `edit_manifest` unchanged. .NET keeps refusing edits: MSBuild
 evaluation is now confined, but `dotnet add package` restores and edits
 the project file, and that decision is not part of this design.
 
 ### Every door goes through the door
 
-Rule 1 of the contract needs enforcement, not review alone:
+Contract 1 needs enforcement, not review alone:
 
 - **Runtime tripwire.** `kernel::supervise` gains `local_status` and
   `local_output` for host-local helpers. Their contract is "this child
@@ -2170,59 +2492,98 @@ Rule 1 of the contract needs enforcement, not review alone:
   `RESOLVERS` (`uv`, `npm`, `npx`, `pnpm`, `cargo`, `go`, `bundle`, `gem`,
   `ruby`, `mix`, `elixir`, `erl`, `dotnet`, `git`) unless the argv matches
   a row of a small reviewed table of offline forms
-  (`cargo locate-project ... --offline`, `go` with `GOPROXY=off`, `tar`
+  (`cargo locate-project ... --offline`, `go` with `GOPROXY=off`; `tar`
   never matches). Helpers that evaluate project files without needing the
   network (the Ruby gate-1 helper, the Elixir `mix.lock` parser) go
-  through a door with no routes, which is full network denial. The door
-  calls the unrestricted primitive, and so do `sandbox` builds. Every
-  other supervise caller moves to `local_*`.
+  through a door with no routes, which means full network denial. The
+  door calls the unrestricted primitive, and so do `sandbox` builds.
+  Every other supervise caller moves to `local_*`. That includes
+  `tailors/python/build.rs`: its sdist `cargo generate-lockfile` becomes a
+  door in PR 1 (`Legacy`) and a proxied door in PR 5. It is not an
+  offline-form exemption.
 - **Compile-time.** `clippy.toml` adds `tog::kernel::supervise::status` and
   `tog::kernel::supervise::output` to `disallowed-methods`, allowed only in
   `kernel::resolve`, `kernel::sandbox`, and `kernel::supervise` itself,
   each with its reason. That is three kernel sites, not an allow-list row
   per tailor.
-- **Named test.** `every_resolver_invocation_goes_through_the_door` runs the
-  tripwire table against the argv of every census row and fails if a
-  census tool can start through `local_*`.
+- **Named test.** `every_resolver_invocation_goes_through_the_door` runs
+  the tripwire table against the argv of every census row (including the
+  sdist Cargo lock) and fails if a census tool can start through
+  `local_*`.
+
+### The transaction
+
+`ResolutionDoor::run` is all-or-nothing for the project. In order:
+
+1. **Preflight.** Load the policy snapshot and signing key. Refuse
+   `unconfined-resolution` now if it is denied and confinement is missing.
+   Record the real outputs' pre-run digests.
+2. **Snapshot** the lock root and extra roots (socket-free), with the
+   baseline manifest. Scan store and system roots for sockets.
+3. **Run** the tool (probe first for uv), confined, through the proxy.
+4. **Check.** The tool succeeded. No request was refused by policy. The
+   diff holds only declared outputs and declared scratch. No output
+   contains the session token, the proxy address, or (macOS) the stage
+   path. The real outputs still have their pre-run digests.
+5. **Commit the ledger** object (store commit: staged directory plus
+   rename, as for every object) and register its id in the project's
+   root record.
+6. **Stage the publication.** Write each output and the record envelope
+   (signed if a key is loaded) as temporary files beside their targets
+   through `ProjectRoot`, and fsync them.
+7. **Publish.** Copy each current real output into the stage as a
+   backup, then rename the temporaries over the targets, outputs first
+   and the record last.
+8. **On any failure in steps 1–7:** nothing reaches the project before
+   step 7. In step 7, every already-renamed target is restored from its
+   backup by rename (a target that did not exist before is removed). The
+   temporaries are removed. The ledger object, if committed, stays in
+   the store as an unrooted object: its root-record entry is removed and
+   `tog gc` sweeps it. The door returns the first error.
+
+A failed ledger commit or record write therefore never leaves a new lock
+behind. A crash between two renames in step 7 can leave a mixed state,
+which the next sync sees as a record whose `outputs` digests do not
+match: `unrecorded-resolution` with reason `stale-outputs`, never a
+silently accepted lock. The staged backups stay in a `stage-` directory
+until `tog gc`, so the user can recover them.
 
 ### Failure modes and fail-closed rules
 
 | Failure | Behavior |
 |---|---|
 | Proxy cannot start (bind, CA generation) | door fails before the tool starts; no direct-network fallback |
-| Confinement unavailable | `unconfined-resolution`: refuse if denied, else run wired-but-unconfined and record |
+| Confinement unavailable | `unconfined-resolution`: refuse if denied, else run staged and wired but unconfined, and record |
+| Socket found in a mounted root at preflight | door refuses, naming the path |
 | Request matches no route and is not interceptable | 403 with a tog body, ledger `refused`; the door fails if the refusal was a policy denial, even when the tool exits 0 (npm tolerates failed optional fetches) |
-| Missing or wrong session token | 407/403, ledger entry; never forwarded |
+| `CONNECT` or mirror request without the session token | 407/403, ledger entry; never forwarded |
 | Upstream bytes do not match the claimed digest | 502 to the tool, nothing cached, the door fails with both digests named; no stale fallback |
 | Redirect to a non-permitted origin | refused; credentials never follow a redirect to another origin |
-| Upstream address is loopback, private, or link-local | refused (SSRF rule) |
-| Transport failure | last-good metadata marked `stale`; otherwise 504 |
+| Any resolved upstream address is loopback, private, or link-local | refused (SSRF rule) |
+| Transport failure | last-good metadata marked `last-good`; otherwise 504 |
 | Relay or proxy thread dies | the tool sees connection refused and fails; the door reports the proxy error first |
-| Tool exits non-zero | outputs restored from the pre-run backup; the tool's stderr is shown after any proxy refusal, which is usually the real cause |
-| An output contains the session token or the proxy address | the door fails and restores the outputs. Byte search for the token (128 random bits) and for `127.0.0.1:<port>`; belt and braces on contract 7 |
-| `.git` or `.tog` appeared during the run (Linux, absent before) | door fails; tog does not delete it (the user decides) and names it |
-| Ledger or resolution-record write fails | door fails; the outputs are kept, since the tool succeeded, but the error says the resolution is unrecorded and the next sync will not join it |
-| tog is killed mid-run | backups stay in a `stage-` directory that `tog gc` sweeps; outputs may be half-written, as today |
-
-Backups: before `run`, the door copies each declared output that exists
-into its stage. On failure it restores them through `ProjectRoot` with an
-atomic rename, and it removes outputs that did not exist before.
+| Tool exits non-zero | nothing published; the tool's stderr is shown after any proxy refusal, which is usually the real cause |
+| Undeclared change in the snapshot (source files, `.github/`, a new `.git`, `.git/hooks/*`, `.tog/*`) | nothing published; the paths are named |
+| An output contains the session token, the proxy address, or the stage path | nothing published |
+| A real output changed during the run | nothing published; the user's edit is kept |
+| Ledger commit, record write, or any publication rename fails | the transaction rolls back (step 8); the project is unchanged |
+| tog is killed mid-run | before step 7 the project is unchanged; during step 7 the next sync reports `stale-outputs` and the backups remain in the stage until `tog gc` |
 
 ### Performance and caching
 
 - **One proxy per tog process**, started lazily on the first door
-  (`OnceLock` in `kernel::resolve`). Startup cost: bind, P-256 keygen and
+  (`OnceLock` in `kernel::resolve`). Startup cost: bind, P-256 keygen, and
   a self-signed CA, well under 10 ms. Sessions are per door run, each with
   its own token and ledger, so concurrent doors in one process stay
   separate.
-- **Threads, not async.** tog has no async runtime and this does not add
-  one. Each accepted connection gets a thread from a bounded pool (64);
-  connections beyond that wait in the accept backlog rather than being
+- **Threads, not async.** tog has no async runtime, and this does not add
+  one. Each accepted connection gets a thread from a bounded pool (64).
+  Connections beyond that wait in the accept backlog rather than being
   refused, because uv opens up to 50 concurrent downloads by default.
-  Upstream uses one shared `ureq` agent with per-host keep-alive. HTTP/1.1
-  only, in a strict hand-written subset in `kernel/resolve/http.rs`:
-  request line and headers up to 64 KiB, `Content-Length` or chunked but
-  never both, no obs-fold, no pipelining.
+  Upstream uses one shared `ureq` agent with per-host keep-alive and the
+  validating resolver. HTTP/1.1 only, in a strict hand-written subset in
+  `kernel/resolve/http.rs`: request line and headers up to 64 KiB,
+  `Content-Length` or chunked but never both, no obs-fold, no pipelining.
 - **Artifact cache = the existing `cache/sha256`.** When a request has a
   claimed digest (npm `integrity`, PyPI `sha256`, crates `cksum`,
   rubygems compact-index `checksum`, Hex outer checksum), the proxy
@@ -2234,24 +2595,27 @@ atomic rename, and it removes outputs that did not exist before.
   downloading), so buffering costs little.
 - **Metadata cache** (`<store>/resolve/meta/`, keyed by
   `sha256(method, url, normalized Accept)`, because npm's abbreviated and
-  full packuments share a URL): each stored with its ETag or Last-Modified
-  and sha256. Online, every metadata request revalidates with a
-  conditional GET, which is a 304 when nothing changed. It is a cache
-  under the store's GC rules (age-based sweep); losing it costs only
-  refetches.
+  full packuments share a URL): each response is stored with its ETag or
+  Last-Modified and its sha256. Online, every metadata request
+  revalidates with a conditional GET, which is a 304 when nothing changed.
+  It is a cache under the store's GC rules (age-based sweep). Losing it
+  costs only refetches.
 - **No persistent tool caches in the sandbox.** Each run's uv, npm, pnpm,
   cargo, and Bundler caches live in the run's scratch. A writable cache
   shared across projects is a poisoning path (uv caches wheels it built
-  from sdists, and a hostile build could plant one), and the proxy cache
-  is tog-verified and makes cold tool caches cheap anyway. Go's
-  `planner` module cache stays persistent as today: no third-party code
-  runs in Go resolution, and tog re-verifies every module it keeps.
-- **Budget.** A warm `tog add` through the proxy within 1.2x of today's
-  wall time, cold within 1.5x, measured in PR 4 onward on the hit-rate
-  projects and reported in each PR. HTTP/1.1 fallback is the likely
-  cost for cargo's sparse index. If a PR misses the budget, the fix goes
-  in the proxy (connection count, cache hits), never in widening the
-  fence.
+  from sdists, and a hostile build could plant one), and it would let a
+  cached build hide from the `resolution-build` probe. The proxy cache is
+  tog-verified and makes cold tool caches cheap. Go's planner module cache
+  stays persistent as today: no third-party code runs in Go resolution,
+  and tog re-verifies every module it keeps.
+- **Snapshot cost:** see "The staged snapshot".
+- **Budget.** A warm `tog add` through the door within 1.2x of today's
+  wall time, and a cold one within 1.5x, measured from PR 4 onward on the
+  hit-rate projects and reported in each PR. HTTP/1.1 fallback is the
+  likely cost for cargo's sparse index, and the snapshot copy on ext4 for
+  large repositories. If a PR misses the budget, the fix goes into the
+  proxy or the snapshot (connection count, cache hits, exclusions of
+  provably unread trees), never into widening the fence.
 
 ### Test plan
 
@@ -2259,152 +2623,258 @@ Offline tests use a fixture upstream: a local HTTP(S) server in
 `kernel/testutil` serving a miniature registry per ecosystem from
 `tests/fixtures/resolve/<ecosystem>/`, with its own test CA passed as the
 proxy's upstream root. Endpoint configuration accepts a loopback upstream
-only under `cfg(test)`.
+only under `cfg(test)`, and the SSRF tests run with that exception
+switched off.
 
 Kernel unit tests (`src/kernel/resolve/`):
 - `proxy_refuses_requests_without_the_session_token`
+- `connect_tunnel_is_authenticated_once_and_bound_to_its_session`
+- `inner_requests_of_an_authenticated_tunnel_need_no_token`
 - `proxy_routes_only_to_permitted_endpoints`
 - `proxy_refuses_loopback_private_and_link_local_upstreams`
+- `proxy_connects_only_to_the_validated_address` (a rebinding test
+  resolver answers public first and loopback on every later call; the
+  connection must reach the public listener, and the resolver must be
+  called once)
+- `proxy_refuses_when_any_resolved_address_is_private`
+- `proxy_keeps_the_hostname_for_sni_and_host`
 - `proxy_rechecks_every_redirect_hop_and_drops_credentials_across_origins`
 - `proxy_strips_tool_authorization_and_cookies`
 - `claimed_digest_mismatch_is_a_hard_failure_and_caches_nothing`
-- `transport_failure_serves_last_good_metadata_marked_stale`
+- `transport_failure_serves_last_good_metadata_marked_last_good`
 - `http_4xx_is_passed_through_not_served_stale`
 - `offline_mode_serves_cache_only_and_names_the_first_miss`
 - `metadata_cache_key_includes_accept`
-- `ledger_canonical_bytes_are_stable` (golden)
-- `ledger_order_is_independent_of_fetch_order`
 - `http_parser_rejects_ambiguous_framing` (CL+TE, obs-fold, oversize headers)
 - `interception_mints_leaf_for_sni_host_signed_by_session_ca`
 - `connect_without_interception_is_a_visible_refusal`
 - `git_scheme_is_refused_as_git_dependency`
 
-Door tests (`src/kernel/resolve/door.rs`):
+Ledger and redaction (`src/kernel/resolve/ledger.rs`):
+- `portable_ledger_bytes_are_stable` (golden)
+- `portable_ledger_is_independent_of_arrival_order_and_duplicates`
+- `portable_ledger_excludes_cache_state_and_platform`
+- `resolution_ledger_identity_golden` (the `Identity` bytes and object id)
+- `resolution_ledger_kind_is_registered_for_gc`
+- `ledger_is_rooted_from_commit_and_retained_through_closure_refs`
+- `redaction_removes_userinfo_secret_queries_and_credential_operands`
+- `no_known_secret_shape_survives_in_a_ledger` (golden over a corpus of
+  presigned URLs, `_authToken` settings, and `-u user:pass`)
+
+Snapshot, sockets, and transaction (`src/kernel/resolve/door.rs`):
+- `snapshot_omits_sockets_fifos_and_devices`
+- `door_refuses_a_socket_in_a_store_read_root`
+- `undeclared_change_publishes_nothing` (a fixture tool edits
+  `src/main.rs` and `.github/workflows/x.yml` and exits 0)
+- `new_git_directory_publishes_nothing_and_never_reaches_the_project`
+- `git_hook_change_publishes_nothing`
+- `declared_scratch_is_discarded`
+- `concurrent_user_edit_of_an_output_fails_the_door`
+- `ledger_commit_failure_restores_every_output` (fault injection)
+- `record_write_failure_restores_every_output` (fault injection)
+- `crash_between_renames_yields_stale_outputs_not_acceptance`
 - `denied_kind_fails_the_door_even_when_the_tool_exits_zero`
 - `ledger_only_exceptions_are_recorded_on_the_owner_thread`
-- `failed_tool_restores_declared_outputs`
-- `output_containing_the_token_fails_and_restores`
-- `resolution_record_has_no_timestamps_token_or_port`
+- `output_containing_the_token_fails`
 - `unconfined_resolution_is_refused_when_denied_and_recorded_otherwise`
+- `unconfined_door_still_runs_on_the_snapshot`
 - `every_resolver_invocation_goes_through_the_door` (tripwire table vs census)
 - `local_supervise_refuses_resolver_programs`
 
 Sandbox tests (`tests/sandbox_deny.rs`, extended, not a new file, per §4):
-- `linux_door_reaches_only_the_proxy` (curl to a host-side listener fails,
-  to the relay succeeds)
+- `linux_door_reaches_only_the_proxy` (curl to a host-side listener
+  fails, to the relay succeeds)
 - `linux_door_has_no_dns`
-- `linux_door_cannot_write_git_or_tog`
+- `linux_door_does_not_mount_the_real_project`
 - `linux_door_descendants_die_with_the_relay`
+- `linux_door_cannot_connect_to_a_socket_in_a_read_root` (a listening
+  socket planted in a declared store read root with the preflight scan
+  bypassed by a test hook: connect fails through seccomp)
+- `linux_door_cannot_connect_to_a_socket_created_after_preflight` (the
+  host creates a listening socket in a mounted root after the scan: the
+  tool's `socket(AF_UNIX)` fails with `EAFNOSUPPORT`)
+- `linux_door_socketpair_still_works` (Node spawns a child with pipes)
+- `linux_door_exec_log_records_every_exec`
 - `macos_door_reaches_only_the_proxy_port`
 - `macos_door_cannot_resolve_names` (the mDNSResponder deny)
-- `macos_door_cannot_write_git_or_tog`
+- `macos_door_cannot_connect_to_a_host_unix_socket` (both the read-root
+  and after-preflight cases)
+- `macos_door_cannot_read_or_write_the_real_project`
 
-Join and audit (`tests/cli.rs` and `src/comforter/`):
-- `resolution_record_joins_closure_when_outputs_match`
-- `stale_resolution_record_is_dropped_not_joined`
+Attestation, join, and audit (`tests/cli.rs` and `src/comforter/`):
+- `signed_record_joins_closure_when_outputs_match`
+- `deleted_record_yields_unrecorded_resolution`
+- `edited_record_yields_unrecorded_resolution` (removing
+  `unconfined-resolution` from the body)
+- `record_signed_by_untrusted_key_yields_unrecorded_resolution`
+- `unsigned_record_yields_unrecorded_resolution_and_is_kept`
+- `stale_record_yields_unrecorded_resolution_and_is_deleted`
+- `unattested_record_exceptions_are_ignored`
+- `company_policy_denies_unrecorded_resolution_under_frozen_sync`
+- `tog_attest_signs_an_unchanged_lock_and_refuses_a_changed_one`
 - `joined_exceptions_are_not_duplicated_by_sync`
+- `attribution_claim_removes_exact_duplicates`
 - `audit_denies_unconfined_resolution_under_company_policy`
 - `audit_fails_closed_on_an_unknown_resolution_kind`
 - `closure_readers_accept_the_resolution_field`
+- `record_body_has_no_timestamps_port_platform_or_engine`
 
 Per ecosystem, offline against fixtures (one per migration PR):
 - `go_get_through_mirror_uses_proxied_sumdb`
 - `cargo_add_through_interception_keeps_crates_io_source_in_lock`
+- `sdist_cargo_lock_generation_goes_through_the_door`
 - `npm_add_through_interception_lock_matches_direct_run` (byte-identical
   lock versus the same npm run against the fixture directly)
-- `pnpm_add_through_interception_lock_matches_direct_run`
+- `pnpm_add_through_interception_lock_matches_direct_run` (and asserts
+  the `--http-proxy`/`--https-proxy`/`--no-proxy` flags took effect)
 - `uv_add_through_interception_lock_matches_direct_run`
-- `uv_resolution_build_is_recorded_and_no_build_when_denied`
+- `uv_add_forces_the_public_default_index`
+- `uv_probe_without_build_records_nothing`
+- `uv_probe_needing_a_build_records_resolution_build_and_reruns`
+- `uv_probe_needing_a_build_fails_when_denied`
+- `uv_project_self_build_is_not_resolution_build`
 - `bundle_add_through_mirror_keeps_rubygems_remote`
 - `bundle_other_source_is_refused_as_unattested_index`
 - `mix_deps_update_through_hex_mirror_keeps_signature_check`
 - `dotnet_missing_lock_restore_through_nuget_mirror`
+- `dotnet_restore_runs_without_unix_sockets`
 - `git_dependency_through_interception_records_commit`
 - `npm_url_dependency_is_intercepted_and_recorded`
 
 Network (`--ignored`, run on Linux and the Mac): the ten existing
 `deps_e2e` round trips, unchanged in expectations, now running through the
-door, plus one live missing-lock generation per ecosystem.
+door, plus one live missing-lock generation and one `tog attest` per
+ecosystem.
 
 ### Implementation plan (PRs, in order)
 
 **PR 0: evidence spike (docs and fixtures only).** For each tool, run the
 census invocations through a logging interception proxy and record every
 request (host, path, method, redirect chain) in a table in this section.
-Confirm each † claim. Capture fixture registries for the offline tests.
-Nothing is built on an unconfirmed claim. A † claim that fails changes
-that ecosystem's row here first, and a finding that only a mirror works
-for an intercept-planned tool means that tool gets response and lock
-rewriting designed here before its PR.
+Confirm each † claim: the pnpm proxy flags, npm `--cafile`, uv's
+`SSL_CERT_FILE`, `--no-build` error form and `--no-build-package`, every
+tool's lock check for `tog attest`, and every census tool running under
+the AF_UNIX seccomp filter. Capture fixture registries for the offline
+tests. Nothing is built on an unconfirmed claim. A † claim that fails
+changes that ecosystem's row here first, and a finding that only a mirror
+works for an intercept-planned tool means that tool gets response and
+lock rewriting designed here before its PR.
 
 **PR 1: the door type, #61 and #169 (moves only, no behavior change).**
 Add `kernel::resolve::ResolutionDoor` with a single `Legacy` mode that
 runs exactly today's command, unsandboxed and inheriting the environment,
-and records nothing new. Route every census row through `door.run`. Add
-`Tailor::edit_manifest`, move each delegate from `commands/deps.rs` into
-its tailor, move `realize_node_tool` and `verify_corepack_hash` into
-`src/tailors/node/`, change `prepare` and `RegistryTool::realize` to take
-the door, and add `Tailor::registry_exists`. Add the `local_*` supervise
-split, the tripwire, and the clippy entries. This is layering rule 7
-("moves are not rewrites"): every golden and every test output stays
-identical. After it, #61's grep is empty and every door is in one place.
+with no snapshot, and records nothing new. Route every census row through
+`door.run`, including `tailors/python/build.rs`'s sdist
+`cargo generate-lockfile`. Add `Tailor::edit_manifest`, move each
+delegate from `commands/deps.rs` into its tailor, move `realize_node_tool`
+and `verify_corepack_hash` into `src/tailors/node/`, change `prepare` and
+`RegistryTool::realize` to take the door, and add
+`Tailor::registry_exists`. Add the `local_*` supervise split, the
+tripwire, and the clippy entries. This follows layering rule 7 ("moves
+are not rewrites"): every golden and every test output stays identical.
+After it, #61's grep is empty and every door is in one place.
 
 **PR 2: proxy core.** The HTTP subset, routes and `RegistryProtocol`,
-the forward proxy with visible refusal, the ledger, the metadata cache,
-the artifact-cache integration, SSRF and redirect rules, the token, and
-offline mode. Kernel unit tests against the fixture upstream. No tool
-uses it yet.
+tunnel authentication, the forward proxy with visible refusal, the
+validating resolver (SSRF pinning), the ledger's two parts, redaction,
+the `resolution-ledger` kind and identity, the metadata cache, the
+artifact-cache integration, redirect rules, and offline mode. Kernel unit
+tests against the fixture upstream. No tool uses it yet.
 
-**PR 3: confinement.** The `Proxy` network mode for both sandbox engines,
-the `__resolution-relay` subcommand, the `.git`/`.tog` protection, the
+**PR 3: confinement and the transaction.** The staged snapshot and diff,
+the transaction and its rollback, the `Proxy` network mode for both
+sandbox engines, the `__resolution-relay` subcommand, the AF_UNIX
+seccomp filter and exec log, the all-roots socket scan, the
 `unconfined-resolution` kind, and the sandbox tests. On the Mac: the
-Seatbelt rules and the DNS deny.
+Seatbelt rules, the DNS deny, and the same deny added to the **build**
+profile (known gap 1).
 
-**PR 4: Go end to end, and the join.** Switch the Go rows to `Proxied`
-mode (mirror plus sumdb). Add the resolution record, the closure join,
-the resolution summary in the closure, and the join and audit tests.
-Go goes first because it has no code execution, no TLS, and no lock
-URLs.
+**PR 4: Go end to end, attestation, and the join.** Switch the Go rows to
+the proxied mode (mirror plus sumdb), including the planner doors that
+run on ordinary syncs (known gap 3, Go half). Add the signed resolution
+record, key loading for the edit verbs, the join in `write_closure_inner`,
+`ClosureRefs` retention, `unrecorded-resolution`,
+`Tailor::resolution_outputs`, `tog attest` with Go's lock check,
+`Attribution::claim` dedupe (known gap 5), and the attestation and audit
+tests. Go goes first because it has no code execution, no TLS, and no
+lock URLs.
 
 **PR 5: interception.** The session CA, leaf minting, TLS termination
 (`rcgen` and rustls server, `ring` provider pinned), and the git row.
-Switch cargo (interception plus git).
+Switch cargo (interception plus git) and the sdist
+`cargo generate-lockfile` in `tailors/python/build.rs`. Cargo `attest`.
 
-**PR 6: Node.** npm and pnpm (edit, missing lock, `x`), with the
-byte-identical-lock tests.
+**PR 6: Node.** npm and pnpm (edit, missing lock, `x`, `attest`), with the
+byte-identical-lock tests and the corrected pnpm flags.
 
-**PR 7: Python.** uv (edit, missing lock, build requirements, `x`), the
-`resolution-build` kind, and `--no-build` under denial.
+**PR 7: Python.** uv (edit, missing lock, build requirements, `x`,
+`attest`), the default index forced on every uv invocation (known gap 2),
+the `--no-build` probe, and `resolution-build`.
 
 **PR 8: Ruby and Elixir.** Bundler mirror and Hex mirror, the visible
-refusals, and the Ruby gate-1 planner behind a no-route door.
+refusals, the Ruby gate-1 helper and Elixir lock parser behind no-route
+doors, and mix `deps.get --check-locked` on ordinary syncs through the
+proxy (known gap 3, Elixir half). `attest` for both.
 
-**PR 9: .NET.** The `nuget.config` mirror with service-index rewriting.
-Missing-lock restore confined, which closes the LIMITATIONS row
-"Restore-time MSBuild evaluation runs unsandboxed".
+**PR 9: .NET.** The `nuget.config` mirror with service-index rewriting,
+the no-Unix-socket restore settings, and missing-lock restore confined,
+which closes the LIMITATIONS row "Restore-time MSBuild evaluation runs
+unsandboxed" (known gap 4). `attest` with `--locked-mode`.
 
 **PR 10: remove `Legacy`.** Delete the mode. The company template denies
-`unconfined-resolution`. ARCHITECTURE gains a "Resolution doors" section
-with the census as a covered/not-covered table (WP5's "state which doors
-are covered"). LIMITATIONS rows are rewritten: the `add`/`remove`/`update`
-row, "Delegated planning runs unsandboxed", the audit paragraph's "does
-not cover the doors" sentence, and the .NET restore row. CLI.md documents
-the new notes and errors. FOLLOW-UPS "Delegated-tool doors" is deleted
-and #68 closed.
+`unconfined-resolution` and `unrecorded-resolution`, and its comment names
+`tog attest` as the migration step. ARCHITECTURE gains a "Resolution
+doors" section with the census as a covered/not-covered table (WP5's
+"state which doors are covered"). LIMITATIONS rows are rewritten: the
+`add`/`remove`/`update` row, "Delegated planning runs unsandboxed", the
+audit paragraph's "does not cover the doors" sentence, and the .NET
+restore row. CLI.md documents `tog attest`, the new notes, and the new
+errors. The README `.gitignore` stanza gains `!**/.tog/resolution/`.
+FOLLOW-UPS "Delegated-tool doors" is deleted and #68 closed.
 
 Each PR from 3 on runs its ecosystem's `--ignored` tests on the Mac
 before merge, and PR 3 also runs `tests/sandbox_deny.rs` there.
 
+### Known gaps found while designing
+
+Found in today's code while writing this section. None is fixed by the
+design commit itself; each has a slot above.
+
+1. **Seatbelt DNS leak in the build sandbox.** The build profile allows
+   `mach-lookup` wholesale, so sandboxed builds can resolve names, and
+   send data out, through mDNSResponder (`src/kernel/sandbox.rs`,
+   `Sandbox::profile`). Slot: PR 3, which adds the mDNSResponder deny to
+   the build profile as well as the door profile, with
+   `macos_build_cannot_resolve_names` in `tests/sandbox_deny.rs`.
+2. **`uv add` / `remove` / `lock` do not force the index.** Only
+   `pip compile` passes `--index-url https://pypi.org/simple`, so
+   `[[tool.uv.index]]` entries in `pyproject.toml` are contacted directly
+   during edits (`src/commands/deps.rs`, `uv_command`/`python_uv`). Slot:
+   PR 7 (`--default-index` on every uv invocation, extra indexes
+   through interception as `unattested-index`).
+3. **Go and mix reach the network on ordinary syncs**, not only when a
+   lock is missing: Go's `mod tidy -diff` and `mod download -json all` on
+   a plan-cache miss, and mix `deps.get --check-locked` on every sync
+   (`src/tailors/go/mod.rs`, `src/tailors/elixir/mod.rs`). Slot: PR 4
+   (Go) and PR 8 (Elixir), as planner doors.
+4. **`dotnet restore` runs the project's MSBuild on the host** during
+   missing-lock generation (`src/tailors/dotnet/mod.rs`, `plan_dotnet`).
+   Slot: PR 9.
+5. **Exception frames have no dedupe.** `policy::record_with` pushes every
+   record, so the same `(kind, subject, detail)` can appear twice in a
+   closure (`src/kernel/policy.rs`). Slot: PR 4 (`Attribution::claim`
+   removes exact duplicates, `attribution_claim_removes_exact_duplicates`).
+
 ### Adversarial self-check
 
-Holes found in the first draft, and where the design above closes each:
+Holes found in the drafts (round 0 by the author, round 1 by review), and
+where the design above closes each:
 
 1. *"Scrub the user's environment" misses variables nobody listed*
    (`CARGO_REGISTRIES_*`, `UV_*` added in a newer uv, `NODE_OPTIONS`
    `--require`). Fixed: the door's environment starts empty (contract 2).
-   Under confinement a leaked setting can only fail to connect. Under the
-   unconfined fallback it could open a side door, which is why the company
-   template denies that kind.
+   Under confinement a leaked setting can only fail to connect. The
+   unconfined fallback is denied by the company template.
 2. *Project config files re-point the tool* (`.npmrc registry=`,
    `[tool.uv] index-url`, `.cargo/config.toml` `[source]`,
    `.bundle/config`). Under confinement they can only make resolution
@@ -2414,65 +2884,108 @@ Holes found in the first draft, and where the design above closes each:
    sandbox.
 3. *A mirror leaks `127.0.0.1:<port>` into committed locks.* Fixed by
    choosing interception for every tool whose lock records URLs, plus the
-   token and address scan of outputs (contract 7).
+   token, address, and stage-path scan of outputs (contract 8).
 4. *Sandboxed code uses the proxy as an SSRF pivot* to cloud metadata or
-   localhost services. Fixed by the post-resolution address check.
+   localhost services, including by DNS rebinding between the check and
+   the connection. Fixed by resolving once, validating every address,
+   and connecting only to a validated `SocketAddr` (review 4).
 5. *Another local user or process on macOS uses the proxy* (and, after
-   WP5, its credentials). Fixed by the per-session token on every request.
+   WP5, its credentials). Fixed by the session token: once per `CONNECT`
+   tunnel, and in the path for mirror routes (review 10).
 6. *Double-counted exceptions* between the proxy and sync's lock-derived
-   records. Fixed by the ledger-only split.
-7. *The proxy thread records into an attribution it does not own*, which
-   `policy::record_with` would refuse at run time. Fixed: the proxy only
-   calls `policy::denied`, and the owner thread records.
+   records. Fixed by the ledger-only split plus claim-time dedupe.
+7. *The proxy thread records into an attribution it does not own.* Fixed:
+   the proxy only calls `policy::denied`; the owner thread records.
 8. *A tool treats a refused optional fetch as success*, so a policy denial
    is silently swallowed. Fixed: any policy refusal fails the door
    regardless of exit status.
-9. *A hostile resolution-time build plants git hooks* for later
-   unsandboxed execution. Fixed by read-only `.git` and `.tog`, plus the
-   appeared-during-run check on Linux.
-10. *DNS as an exfiltration channel.* Linux has no resolver in the
-    namespace. On macOS, the blanket `mach-lookup` allow would permit it;
-    fixed by the mDNSResponder deny and its named test.
-11. *The committed resolution record is forgeable*, since it is a project
-    file. It only ever adds exceptions or describes a lock whose digest
-    must match. A forged record can at worst make a closure claim a
-    resolution happened. Audit makes no admission decision on that claim;
-    it judges only the exceptions, and forging can only add those. Stated
-    in "What this does not claim".
-12. *Stale metadata masks a yanked or security release.* Stale serving
-    happens only on transport failure, is recorded per entry, and is
-    announced. The bytes are still verified. A company that wants
-    "no stale resolution" is an open question below, not silently
-    permitted.
-13. *Buffering large artifacts stalls resolution.* Few artifacts are
-    fetched during resolution; see Performance.
-14. *Cross-project poisoning through a shared tool cache.* Fixed: tool
+9. *Resolution-time code rewrites project files*: sources, `Makefile`,
+   `.github/workflows/publish.yml`, `.git/hooks`, a new `.git`. Fixed:
+   the tool runs on a snapshot, the real project is never writable, and
+   only declared outputs are published after the diff passes (review 2).
+10. *A host Unix socket bypasses the network namespace*, whether planted
+    in a read root or created after preflight. Fixed by the socket-free
+    snapshot, the all-roots scan, and the AF_UNIX seccomp filter on
+    Linux, and by Seatbelt's network deny on macOS (review 3).
+11. *The committed record is unauthenticated*, so deleting it, replacing
+    it, or editing out `unconfined-resolution` would pass a company gate.
+    Fixed: records are signed with the closure key, only attesting
+    records reach the closure, and anything else is
+    `unrecorded-resolution`, which the company template denies (review 1).
+    The first draft's claim that forgery "can only add exceptions" was
+    wrong and is gone.
+12. *A failed ledger or record write leaves an accepted lock.* Fixed: the
+    transaction publishes nothing unless the ledger commits and the
+    record is staged, and it rolls back on any rename failure (review 5).
+13. *A census row was missing*: the sdist `cargo generate-lockfile` in
+    `tailors/python/build.rs`. Added, routed in PR 1 and proxied in PR 5
+    (review 6).
+14. *The ledger was a hash, not a store object*, so GC could sweep it,
+    and it could persist presigned URLs or tokens. Fixed: the
+    `resolution-ledger` identity and kind, retention from commit, and the
+    redactor (review 7).
+15. *The "canonical" ledger was not stable*: duplicate order, cache state,
+    and machine fields in the committed record. Fixed: portable evidence
+    versus diagnostics, set semantics sorted by full entry bytes, and a
+    record body without engine, platform, or tool object ids (review 8).
+16. *`resolution-build` was inferred from an sdist fetch*, which over- and
+    under-reports. Fixed: the `--no-build` probe establishes it by
+    construction on both platforms, with per-run caches and the Linux
+    exec log as a cross-check (review 9).
+17. *Wrong pnpm flags, a per-request token inside tunnels, and "the tog CA
+    alone prevents direct TLS" for Node.* Fixed in the wiring table and
+    in "What the CA file does and does not prevent" (review 10).
+18. *Stale metadata masks a yanked or security release.* Stale serving
+    happens only on transport failure and is marked per entry in the
+    portable evidence, so it is inside the signed record's digest. The
+    bytes are still verified. See open questions.
+19. *Buffering large artifacts stalls resolution.* Few artifacts are
+    fetched during resolution. See Performance.
+20. *Cross-project poisoning through a shared tool cache.* Fixed: tool
     caches are per run.
-15. *A lingering macOS descendant rewrites the lock after tog's checks.*
-    It stays inside Seatbelt. A later change breaks the record's output
-    digests, so the join drops it. The quiescence gap stays a Backlog item
-    and is not claimed closed.
-16. *#61 lands before the proxy and bakes in an unconfined signature.*
-    Fixed by ordering: PR 1 introduces the door type in the signature from
-    day one, in `Legacy` mode, so no later PR changes the trait.
-17. *`--no-sync` edits never join.* The record persists in `.tog/resolution/`
-    and joins at the next sync if the outputs are unchanged.
-18. *Credentials in the project `.npmrc` (`//registry.npmjs.org/:_authToken`)
-    reach the proxy.* They are stripped and never forwarded or recorded.
-    Private registries use WP5 credential references held by tog.
+21. *A lingering macOS descendant writes after tog's checks.* It can only
+    write the stage, which is already diffed and then deleted.
+22. *#61 lands before the proxy and bakes in an unconfined signature.*
+    Fixed by ordering: PR 1 puts the door type in the signature from day
+    one, in `Legacy` mode, so no later PR changes the trait.
+23. *`--no-sync` edits never join.* The signed record persists in
+    `.tog/resolution/`, and the ledger is rooted from commit, so the next
+    sync joins it if the outputs are unchanged.
+24. *Credentials in the project `.npmrc` (`//registry.npmjs.org/:_authToken`)
+    reach the proxy.* They are stripped and never forwarded. Redaction
+    keeps them out of the ledger, and private registries use WP5
+    credential references held by tog.
+
+### Review round 1
+
+Codex (Sol), 2026-09-23, verdict "changes needed", ten findings: an
+unauthenticated record (blocker), writable project root (blocker), host
+Unix sockets (blocker), DNS-rebinding SSRF, non-transactional ledger and
+record writes, a missing census row, no ledger identity or redaction, an
+unstable canonical form, an unobservable build fact, and wrong pnpm and
+proxy-authentication wiring. Every one is fixed above (self-check items
+4, 5, and 9–17). None was downgraded to a documented limitation. The one
+residual channel stated as documented (data encoded in request paths to
+a permitted registry, under "What this does not claim") says why no
+enforceable design exists.
 
 ### Open questions for the owner
 
 - **Stale metadata under company policy.** Should a company be able to
-  deny a resolution that used stale metadata (a new kind, say
-  `stale-resolution`), or is the ledger note enough? Recommended: the note
-  only. Artifacts are verified either way, and a stale lock is an older
-  lock, not a less honest one.
-- **An admission rule on the resolution record.** A future
-  `tog audit` knob could require every lock to carry a joined resolution
-  record, which would refuse locks made outside tog. That is #68's option
-  2 by another route and changes the agent story. Recommended: not now.
-  Revisit after PR 10, with real closures to look at.
+  deny a resolution that used last-good metadata (a new kind, say
+  `stale-resolution`), or is the marking in the signed portable evidence
+  enough? Recommended: marking only. Artifacts are verified either way,
+  and a stale lock is an older lock, not a less honest one.
+- **Who signs on developer machines.** Under a company policy denying
+  `unrecorded-resolution`, a laptop `tog add` produces an unsigned record
+  that CI will not accept. The options: distribute per-developer keys into
+  the machine `[signing]` set, or have CI run `tog attest` after the
+  developer pushes. Recommended: `tog attest` on CI. It keeps signing
+  keys off laptops. The existing rule "a job that runs untrusted project
+  code must not hold a signing key" still applies to the CI job as a
+  whole: the key stays in the tog process and is never in a sandbox read
+  root, but a CI job that also runs the project's tests should attest in
+  a separate job.
 
 
 ---
