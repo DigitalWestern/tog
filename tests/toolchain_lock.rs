@@ -8,7 +8,8 @@
 //! whole point of most of them), use a manifest whose planner fails in
 //! the project directory, which happens after the lock has been published
 //! and before any network call, or name a local toolchain directory
-//! (`[toolchain] path`), which is imported, not fetched.
+//! (`[toolchain] path`), which is imported, not fetched. The `#[ignore]`d
+//! end-to-end cases are the exception: they sync for real.
 
 // Tests spawn fixtures and take leases freely (see clippy.toml).
 #![allow(clippy::disallowed_methods)]
@@ -269,6 +270,95 @@ fn no_pin_creation_end_to_end() {
     // And status agrees with both of them.
     let status = fixture.tog(&["status"]);
     assert_eq!(status.status.code(), Some(0), "{}", text(&status.stdout));
+}
+
+/// The fastuuid 0.14.0 sdist: a pyo3/maturin Rust extension with a
+/// Cargo.lock and no toolchain file of its own. Pinning only the sdist's
+/// hash is the `--no-binary` of a hash-pinned requirements file: the wheels
+/// PyPI also serves do not match, so tog must build this archive.
+const RUST_SDIST_REQUIREMENTS: &str = "fastuuid==0.14.0 \\\n    \
+    --hash=sha256:178947fc2f995b38497a74172adee64fdeb8b7ec18f2a5934d037641ba265d26\n";
+
+/// The `sdist-build` object the store holds for `name`: its identity's
+/// `rust` input, the id of the Rust object the wheel was compiled with.
+fn sdist_build_rust(store: &Path, name: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    for entry in std::fs::read_dir(store.join("meta")).unwrap() {
+        let bytes = std::fs::read(entry.unwrap().path()).unwrap();
+        let meta: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let identity = &meta["identity"];
+        if identity["inputs"]["schema"]
+            .as_str()
+            .is_some_and(|schema| schema.starts_with("sdist-build/"))
+            && identity["name"] == name
+        {
+            found.push(identity["inputs"]["rust"].as_str().unwrap().to_string());
+        }
+    }
+    found.sort();
+    found
+}
+
+/// A Python project syncs a Rust-extension sdist from source through tog.
+/// The lock pins the Rust that sdist compiles with, the wheel is built with
+/// exactly that Rust object, and a lock written before the pin existed
+/// builds it with Rust 1.96.1 instead, as those locks always did. Needs
+/// the network (PyPI, static.rust-lang.org) and bubblewrap, so it is off by
+/// default: `cargo test --test toolchain_lock -- --ignored rust_sdist`.
+#[test]
+#[ignore]
+fn a_rust_sdist_builds_with_the_rust_the_python_section_pins() {
+    if !cfg!(target_os = "linux") {
+        eprintln!("toolchain_lock: skipped on non-Linux host");
+        return;
+    }
+    let platform = Platform::host().unwrap();
+    let default =
+        tog::kernel::toolchain::shipped(&tog::kernel::provider::rust::toolchain_catalog().unwrap())
+            .unwrap()
+            .version("rustc")
+            .unwrap()
+            .to_string();
+    let fixture = Fixture::new("rust-sdist");
+    fixture.write("requirements.txt", RUST_SDIST_REQUIREMENTS);
+    fixture.write(".python-version", "3.12.14\n");
+
+    let out = fixture.tog(&["sync"]);
+    let stderr = text(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{stderr}");
+    let lock = String::from_utf8(fixture.lock_bytes().unwrap()).unwrap();
+    let pin = format!("[toolchain.python.helpers]\nrust = \"{default}\"\n");
+    assert!(lock.contains(&pin), "{lock}");
+    assert!(!lock.contains("[toolchain.rust]"), "{lock}");
+    // The wheel was compiled with the pinned release's Rust object.
+    let pinned_rust = tog::kernel::provider::rust::rust_object_id(platform, &default).unwrap();
+    assert_eq!(
+        sdist_build_rust(&fixture.store(), "fastuuid"),
+        [pinned_rust.clone()]
+    );
+    assert!(fixture.store().join("objects").join(&pinned_rust).is_dir());
+    let run = fixture.tog(&[
+        "run",
+        "python",
+        "-c",
+        "import fastuuid; print(len(str(fastuuid.uuid4())))",
+    ]);
+    assert_eq!(run.status.code(), Some(0), "{}", text(&run.stderr));
+    assert_eq!(text(&run.stdout).trim(), "36");
+
+    // The same lock as a tog from before the pin wrote it: the sdist builds
+    // on 1.96.1, the Rust those locks' wheels were built with.
+    std::fs::write(fixture.dir().join(LOCK_PATH), lock.replace(&pin, "")).unwrap();
+    let out = fixture.tog(&["sync"]);
+    let stderr = text(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{stderr}");
+    assert!(!String::from_utf8(fixture.lock_bytes().unwrap())
+        .unwrap()
+        .contains("helpers"));
+    let legacy_rust = tog::kernel::provider::rust::rust_object_id(platform, "1.96.1").unwrap();
+    let mut both = vec![pinned_rust, legacy_rust];
+    both.sort();
+    assert_eq!(sdist_build_rust(&fixture.store(), "fastuuid"), both);
 }
 
 /// A lock is honored, not re-derived: a second sync reads the committed
