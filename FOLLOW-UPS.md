@@ -78,6 +78,50 @@ by position.
   #207, #208 (PR 10, remove `Legacy`). Found by PR 0 and slotted into those:
   #210 (uv ignores `UV_PYTHON`), #211 (`bundle add` installs), #212 (npm
   notifier and audit requests).
+- **Quality review of 2026-09-24 (#264).** A whole-codebase review after
+  the 09-20 to 09-24 run. #264 holds the work order and the overall verdict.
+  Each line is one issue and one PR, in order:
+  - #233 tests: one shared test harness; temp dirs leak read-only store trees and tests read the real ~/.tog/policy.toml.
+  - #223 frozen: cargo, go, ruby, elixir and dotnet still write dependency locks under --frozen.
+  - #225 cli: --frozen and --strict are accepted and ignored on verbs that don't use them; tog --frozen plan writes a lock.
+  - #224 policy: the first policy::init wins, so --strict is dropped by build, fmt and x.
+  - #227 node: pnpm and yarn locks are never checked against package.json.
+  - #228 pnpm importer: underscore peer-suffix trimming, a lenient YAML reader, and two multi-document rules.
+  - #229 node: yarn1 importer has its own semver that disagrees with node-semver.
+  - #230 node: tog run npm --prefix . install bypasses the install refusal.
+  - #231 run: elixir and dotnet get a predictable, shared /tmp home directory.
+  - #232 go: a cached plan skips the go.sum check a fresh plan enforces; unreadable go.sum is treated as empty.
+  - #226 supervise: Ctrl-C during a sandboxed child is recorded as a script failure and the sync continues.
+  - #260 ruby and elixir: an unchanged project can't re-sync offline.
+  - #263 dotnet: csproj checks use substring matches and duplicate the lock parser.
+  - #234 ci: nothing runs the 65 ignored e2e tests, acceptance.sh or tests/install.sh.
+  - #235 ci: pin the toolchain and actions, scope release permissions, test before release, deny clippy warnings.
+  - #262 docs: the planning docs contradict each other, and README's install line can't work.
+  - #236 archive: npm, hex, sdist and most toolchain archives are unpacked by raw tar, not kernel::archive.
+  - #238 http: pypi, rubygems, dotnet and deps call ureq directly, bypassing kernel::fetch.
+  - #239 toolchain: SourcePolicy is documented as enforced on every fetch but never runs.
+  - #241 store: object commit never fsyncs; a power loss can leave an empty completion record.
+  - #242 gc: crashed download temp files in tmp/ are never removed.
+  - #240 store: a CacheLease holds gc.lock exclusively, so separate tog processes download one at a time.
+  - #244 supervise: waits forever for stderr EOF if the child leaves a background process.
+  - #247 dead code: about 90 unused items hidden by pub mod, plus a CI check to keep it at zero.
+  - #245 kernel: consolidate duplicated primitives (base64, SRI, metadata parser, forest key, file hash, temp names).
+  - #246 tailors: shared closure_state, checked_artifact, object_ref and merge_record helpers; cargo status misses GC'd objects.
+  - #248 sandbox and gitsrc: collapse the _with_activity twin of every entry point.
+  - #259 legacy: drop pre-release legacy toolchain seeding and x legacy roots now.
+  - #249 x.rs: reuse kernel fsops, one lock, one name validator, and split the file.
+  - #250 python manifest: four requirements include walkers; uv.lock silently drops edges; pypi host check is a substring.
+  - #261 perf: every sync parses every metadata record before starting.
+  - #251 commands: one project-discovery function; tog <script> and tog run <script> disagree.
+  - #252 commands: sbom, ls and store path create the store; sbom refuses closures from another platform.
+  - #253 cli: usage mistakes exit 1 after opening the store instead of exit 2.
+  - #254 commands: small fixes: deps changes cwd, stale help pointers, three manifest lists, inspect.rs belongs in comforter.
+  - #256 design: the Tailor trait has 35+ methods, a dozen used by one ecosystem, and its docs have drifted.
+  - #255 design: the kernel knows every ecosystem by name, and tog run is hard-wired to Node.
+  - #257 design: move process-global state (policy, signing key, input guard, kinds) into Context.
+  - #258 design: an error type that separates refusals, staleness, network and bugs.
+  - #243 sandbox: the macOS Seatbelt profile doesn't canonicalize paths, reads all of /opt, and CI never runs it.
+  - #237 archive: symlink containment compares names case-sensitively.
 - **Smaller open issues from the 2026-09-23/24 run.** One line each; the
   issue has the options and the pick.
   - #174 npm: git-tracked `node_modules` in workspace members moved into backups.
