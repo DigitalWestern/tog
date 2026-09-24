@@ -1625,15 +1625,17 @@ When this section is fully built:
 8. The lock the tool writes is **byte-identical** to what the same tool
    writes when it talks to the registry directly. The proxy is invisible in
    every file the user commits, apart from the resolution record itself.
-9. **No resolver runs without isolation when it matters.** A tool that
-   evaluates project or third-party code never runs without filesystem
-   isolation: when the native sandbox is unavailable it runs under a
-   container or VM backend or (Linux) a per-run ephemeral identity, and
-   where none exists the command fails naming the missing capability. **No resolver
-   runs without isolation while a signing key is configured.** The only
-   unisolated runs left are non-code-evaluating tools on a keyless
-   machine, and they record `unconfined-resolution`, which policy can
-   deny. See "Isolation tiers".
+9. **No resolver ever runs without isolation.** Every delegated tool runs
+   in the `confined` or `isolated` tier: the native sandbox, a container
+   or VM backend, or (Linux) a per-run ephemeral identity. Where none
+   exists the command fails naming the missing capability. There is no
+   unisolated tier, because even a "resolve-only" tool can be made to run
+   a project-chosen program (npm's `git` and `script-shell` settings,
+   cargo's `build.rustc-wrapper` and credential providers), so no tool
+   class is safe to run as the developer. The door also forces every
+   program-naming setting of each tool to a fixed value (see "Forced
+   program settings"). Runs without a network fence record
+   `unconfined-resolution`, which policy can deny. See "Isolation tiers".
 10. **Nothing that outlives the tool is trusted.** The whole tool process
    tree is stopped before validation, and the outputs are validated,
    signed, and published from an immutable copy in the store, never from
@@ -1828,9 +1830,9 @@ complete a handshake with anything but the proxy. `NODE_EXTRA_CA_CERTS`
 **adds** to Node's built-in roots, so any other Node code (a pnpm internal
 request, a script that ran anyway) can still make a directly trusted TLS
 connection. Under confinement this does not matter, because the network
-reaches only the proxy. Without a network fence (the `isolated` and
-`none` tiers below) it does: **Node without a fence is treated as capable
-of direct trusted TLS**, and so is every other unfenced tool. That is why
+reaches only the proxy. Without a network fence (the `isolated` tier
+below) it does: **Node without a fence is treated as capable of direct
+trusted TLS**, and so is every other unfenced tool. That is why
 unfenced runs record `unconfined-resolution` and why the recording
 guarantee applies only to the `confined` tier.
 
@@ -1867,8 +1869,11 @@ that are not resolution inputs, and those are left out (`target/`,
 two are symlinks into the store anyway). `.git` **is** included, because
 dynamic-version build backends (setuptools-scm) read it. It is included
 as a copy, so a change to it is a diff like any other. While building the
-snapshot, the door records a **baseline manifest**: path, type, size,
-inode, and ctime for every entry.
+snapshot, the door records a **baseline manifest**: path, type, mode,
+and, for a regular file, the SHA-256 of its contents (for a symlink, its
+target string) for every entry. The digests are computed from the bytes
+the door itself wrote into the stage, so building the manifest costs one
+extra read of data already in the page cache.
 
 The tool runs on the snapshot:
 
@@ -1883,13 +1888,21 @@ The tool runs on the snapshot:
   leak into a lock would show up. Seatbelt denies writes everywhere except
   the stage and scratch, and denies reads of the real project.
 
-After the tool exits, the **diff** is computed from the baseline: an entry
-added, removed, changed in type, or whose ctime is newer than the
-baseline's (ctime cannot be set from user space, unlike mtime) has
-changed. Each changed path is classified by the spec:
+After the tool exits and the tree is stopped, the **diff** is computed
+from the baseline by content: an entry added, removed, changed in type
+or mode, whose symlink target changed, or whose contents hash to a
+different digest has changed. Timestamps are never consulted. (A ctime
+or mtime rule misses a same-second rewrite on a filesystem with coarse
+timestamps and flags a no-op rewrite as a change. A digest has neither
+problem.) The walk never follows a symlink, and it opens each file with
+the same no-symlink rule as the output copy below. Each changed path is
+classified by the spec:
 
 - a **declared output** (`package.json`, `package-lock.json`, ...): kept
-  for publication,
+  for publication, but only if it is a **regular file**. A declared output
+  that is now a symlink, a directory, a FIFO, or any other type fails the
+  door, naming the path. So does any declared output whose parent
+  directory inside the stage became a symlink,
 - **declared scratch** (per tool: .NET `obj/`, uv's `.venv` if created):
   discarded,
 - anything else, **including a new `.git`, a changed `.git/hooks/*`, or any
@@ -1942,15 +1955,42 @@ socket:
 **macOS (Seatbelt).** There is no network namespace. The proxy listens on
 `127.0.0.1:<ephemeral>`, bound by tog before the tool starts so nothing
 else can hold the port. The profile keeps `(deny network*)` and adds
-`(allow network-outbound (remote ip "localhost:<port>"))`†. It also
-closes the DNS side channel: the build profile allows `mach-lookup`
-wholesale, so the door profile appends `(deny mach-lookup (global-name
-"com.apple.dnssd.service") (global-name "com.apple.mDNSResponder"))`
-after the blanket allow (SBPL: the last matching rule wins†). Other local
+`(allow network-outbound (remote ip "localhost:<port>"))`†. Other local
 processes can reach the TCP port during the run, which is why every
 tunnel and every mirror request must carry the session token. Seatbelt
 applies to every descendant. Stragglers are handled by "Quiescence and
 the immutable output copy" below.
+
+**Mach services are denied by default.** A Mach service is a system
+daemon a process talks to by name through `mach-lookup` instead of a
+socket, and many of them do work on the caller's behalf **outside** the
+sandbox. The build profile allows `mach-lookup` wholesale, which is an
+escape for the door: `/usr/bin/open` reaches LaunchServices and can start
+any app or open any URL in the user's browser, `nsurlsessiond` performs
+downloads and uploads for the caller, `securityd` and the Keychain
+services hand out credentials, and `mDNSResponder` resolves (and so
+sends) names. Blocking a few names after a blanket allow leaves every
+other service open. So the door profile does not start from the build
+profile's Mach rule. It starts from `(deny mach-lookup)` and adds
+`(allow mach-lookup (global-name ...))` only for the services each tool
+is measured to need. PR 0 records that per-tool allow-list by running
+every census invocation under a profile that logs denied lookups
+(`(deny mach-lookup (with report))`)† and then iterating to the smallest
+set that passes. The list lives beside the tool's row in
+`kernel::resolve` and is expected to be small: the system logging
+service (`com.apple.logd`), `com.apple.system.notification_center`, and
+the directory-services lookup for the user's own record
+(`com.apple.system.opendirectoryd.libinfo`), which libc needs for
+`getpwuid`. PR 0 fails any tool whose measured list includes a service
+that acts for the caller outside the sandbox (LaunchServices
+`com.apple.coreservices.*` and `com.apple.lsd.*`, `com.apple.nsurlsessiond`,
+`com.apple.securityd` and `com.apple.SecurityServer`, the Keychain
+services, `com.apple.dnssd.service`, `com.apple.mDNSResponder`, the
+pasteboard, and the Apple Events services). Such a tool's row has to be
+configured off that service before the door ships for it. The named
+tests `macos_door_cannot_open_urls_or_apps` and
+`macos_door_cannot_reach_nsurlsessiond` run a fixture inside the door
+that tries each, and `macos_door_cannot_resolve_names` covers DNS.
 
 #### Unix sockets: no connection to any host socket
 
@@ -1979,6 +2019,33 @@ Three layers close it on Linux:
    the tree can create the socket to connect with. The relay is outside
    the filter (it installs it in the child), so the proxy bridge keeps
    working.
+
+   Three details keep the filter from being sidestepped:
+   - **The architecture is checked first.** The filter's first
+     instruction loads `seccomp_data.arch` and kills the process
+     (`SECCOMP_RET_KILL_PROCESS`) unless it equals the build's native
+     `AUDIT_ARCH_*` value. Otherwise a process could switch to another
+     syscall table (32-bit `int 0x80` on x86-64, where the `socket`
+     number differs and `socketcall(2)` multiplexes it) and create the
+     socket under a number the filter does not match. On x86-64 the
+     filter also refuses syscall numbers with the x32 bit
+     (`__X32_SYSCALL_BIT`) set.
+   - **`io_uring_setup` is denied** (`EPERM`), along with
+     `io_uring_enter` and `io_uring_register`. An io_uring ring submits
+     socket and connect operations that never pass through the seccomp
+     check, so a ring would bypass every rule above. No resolver in the
+     census uses io_uring (PR 0 confirms), and libuv falls back to its
+     thread pool when setup fails.
+   - **The relay is not dumpable.** The relay calls
+     `prctl(PR_SET_DUMPABLE, 0)` before it spawns the tool. The tool runs
+     as the same user in the same PID namespace, and without this it
+     could `ptrace` the relay or open `/proc/<relay>/mem` and make the
+     unfiltered relay create sockets for it. A non-dumpable process
+     cannot be traced or have its memory opened by an unprivileged
+     process of the same user. The exec log's user-notification listener
+     lives in the relay too, so this also protects the log. The filter
+     additionally denies `ptrace`, `process_vm_readv`, and
+     `process_vm_writev` to the tool tree.
 
 Tools that need named Unix-socket IPC among their own processes are
 configured not to: .NET gets `DOTNET_EnableDiagnostics=0`, no build
@@ -2020,11 +2087,27 @@ Two measures close that window, on both platforms:
      keeps the set of pids it has observed). A `setsid` double fork that
      escapes between two walks is the one case the walk can miss, and
      the next measure makes it harmless. Such a process also stays inside
-     Seatbelt: it can write only the stage and reach only the proxy port,
-     which closes when the session ends.
+     Seatbelt: it can write only the stage, reach only the proxy port
+     (which closes when the session ends), and look up only the Mach
+     services on the tool's measured allow-list, none of which acts for
+     it outside the sandbox.
 2. **Validate and publish from an immutable copy.** Once the tree is
    stopped, the door copies each declared output from the stage into a
-   store stage owned by tog. The copy lies outside every path the
+   store stage owned by tog. It opens each output relative to a held
+   descriptor for the stage directory, never by a path string: on Linux
+   with `openat2(stage_fd, rel, O_RDONLY|O_NOFOLLOW, RESOLVE_BENEATH |
+   RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS)`, and on macOS by walking
+   one component at a time with `openat(dirfd, component,
+   O_NOFOLLOW|O_DIRECTORY)` and opening the last with `O_NOFOLLOW`. Then
+   `fstat` on the open descriptor must report a regular file, else the
+   door fails naming the path. So a tool that replaced
+   `package-lock.json` (or a parent directory) with a symlink to
+   `~/.ssh/id_ed25519` or to a file in another project gets a failed door,
+   not a signed copy of that file. The named tests
+   `declared_output_symlink_fails_the_door`,
+   `declared_output_parent_dir_symlink_fails_the_door`, and
+   `declared_output_replaced_by_fifo_fails_the_door` cover the three
+   cases on both platforms. The copy lies outside every path the
    sandbox profile allows the tool to write, and the door makes it
    read-only and holds its descriptors open. The diff classifies paths in
    the stage, but every check on output **contents** (the token, address,
@@ -2041,15 +2124,19 @@ that the child was killed. It runs on both platforms.
 
 #### Isolation tiers: what runs when the native sandbox is unavailable
 
-Every door runs in the strongest tier the host offers. A tool's
-**class** decides which tiers it may use:
-
-- **Code-evaluating** tools run project or third-party code: Bundler
-  (Gemfile), mix (`mix.exs`), `dotnet restore` (MSBuild), uv whenever
-  builds are allowed (the probe's rerun and every `x` or edit run that
-  may build), and the no-route helpers that evaluate project files.
-- **Non-code-evaluating** tools run only themselves: npm and pnpm with
-  scripts off, cargo, go, git, and uv's `--no-build` probe.
+Every door runs in the strongest tier the host offers, and there are
+only two tiers. Every delegated tool is treated as able to run
+project-chosen code. For Bundler (Gemfile), mix (`mix.exs`),
+`dotnet restore` (MSBuild), uv whenever builds are allowed, and the
+no-route helpers that evaluate project files, that is their job. For the
+rest it is a configuration away: npm runs whatever program `.npmrc`'s
+`git=` or `script-shell=` names, cargo runs `build.rustc-wrapper` and any
+credential provider `.cargo/config.toml` names, git runs `core.fsmonitor`
+and `core.sshCommand`. The door forces these settings (below), but the
+list of such settings is only as complete as each tool's documentation,
+so isolation is the backstop and no tool runs without it. (Earlier drafts
+had a third tier, `none`, for "resolve-only" tools on keyless machines.
+It is removed.)
 
 The tiers, strongest first:
 
@@ -2113,9 +2200,24 @@ The tiers, strongest first:
       `populated 0`, with a bounded timeout. Timing out fails the door,
       and the UID stays allocated and the stage untouched until an
       operator runs `tog-isolate --reap`. **The door never validates
-      while the cgroup is populated.** Only then does the helper change
-      the stage's ownership to the developer, and the door proceeds to
-      the immutable output copy.
+      while the cgroup is populated.** Only then does the helper hand the
+      stage to the developer, and the door proceeds to the immutable
+      output copy. The hand-over runs as root over a tree the run's UID
+      controlled, so it never follows a link: the helper walks the stage
+      from a held directory descriptor with `openat2(RESOLVE_BENEATH |
+      RESOLVE_NO_SYMLINKS | RESOLVE_NO_XDEV)`, changes each entry with
+      `fchownat(dirfd, name, uid, gid, AT_SYMLINK_NOFOLLOW)` (so a symlink
+      itself changes owner, never its target), descends only into entries
+      whose `fstatat(AT_SYMLINK_NOFOLLOW)` reports a real directory, and
+      refuses a hard-linked regular file (`st_nlink > 1`), which could
+      otherwise hand the developer ownership of a file linked in from
+      elsewhere on the same filesystem. (The helper also requires
+      `fs.protected_hardlinks=1`, the default on current distributions,
+      so the run's UID cannot link a file it does not own in the first
+      place. The `st_nlink` refusal holds even where that is off.) The named
+      tests `isolate_handover_does_not_follow_symlinks` (a stage symlink
+      to a root-owned file keeps that file's owner) and
+      `isolate_handover_refuses_hardlinks` cover it.
    6. **Release**: remove the stage and the cgroup leaf, and release the
       UID lock.
 
@@ -2132,18 +2234,19 @@ The tiers, strongest first:
    depends on the `aarch64-unknown-linux-gnu` platform rows, which tog
    does not ship yet. Until they exist, a Mac without usable Seatbelt
    fails with the missing-capability message.
-3. **`none`**: same user, no fence. The door still runs the tool on the
-   snapshot and still uses the transaction. This tier exists only for
-   non-code-evaluating tools on a machine with **no signing key
-   configured**. It records `unconfined-resolution`.
 
-The rule, as a table:
-
-| Tool class | Signing key configured | Allowed tiers | When none of the allowed tiers is available |
-|---|---|---|---|
-| code-evaluating | either | `confined`, `isolated` (Linux) | the command fails |
-| non-code-evaluating | yes | `confined`, `isolated` (Linux) | the command fails |
-| non-code-evaluating | no | `confined`, `isolated` (Linux), `none` | cannot happen (`none` is always available) |
+The rule: every tool, on every machine, with or without a signing key,
+runs `confined` or `isolated` (Linux), and fails when neither is
+available. Nothing depends on whether a key is configured, so there is
+no key-presence check to get wrong. (The earlier `none` rule hinged on
+"no signing key configured", which a check of `TOG_SIGNING_KEY` alone
+would misread: a key file can exist with the variable unset in this
+shell and set in the next.) The key is protected by the tiers instead:
+the door profile denies reads of the path `TOG_SIGNING_KEY` names, and
+of the default path `tog keygen` suggests, on both platforms, and the
+`isolated` tier puts it across a UID boundary. `tog keygen` refuses a
+path under the sandbox's system read roots (`/usr`, `/etc`, `/opt`,
+`/private/etc`, `/Library`, `/System`), which every tier can read.
 
 The failure message names the tool, why it needs isolation, and each
 missing capability with its fix. For example: "tog add runs Bundler,
@@ -2155,10 +2258,32 @@ one of them." A sync that needs a missing-lock door fails the same way.
 
 `unconfined-resolution` keeps its meaning, "the ledger may be missing
 traffic because the network was not fenced", and it is recorded for the
-`isolated` and `none` tiers. The record's `isolation` field states the
-tier (`confined`, `isolated`, or `none`). The tier is a semantic fact;
-which engine provided it is a diagnostic. The company template denies
+`isolated` tier. The record's `isolation` field states the tier
+(`confined` or `isolated`). The tier is a semantic fact. Which engine
+provided it is a diagnostic. The company template denies
 `unconfined-resolution`, so under it only `confined` runs pass.
+
+#### Forced program settings
+
+For each tool, every setting that names a program to run is forced on
+the command line or in the environment, where the tool gives those
+sources priority over project files. PR 0 lists each tool's settings
+from its documentation and source and proves, with a fixture project
+that sets each one to a marker program, that the marker never runs:
+
+| Tool | Forced settings |
+|---|---|
+| npm | `--git=<store git>`, `--script-shell=<store sh>`, `--shell=<store sh>`, `--ignore-scripts`, `--node-options=`, `--node-gyp=` (unset), `--editor`, `--browser`, and `--viewer` set to `false` |
+| pnpm | `--config.script-shell=<store sh>`, `--config.shell-emulator=false`, `--config.git-shallow-hosts=`, `--ignore-scripts`, `--config.node-options=`. A `.pnpmfile.cjs` is project code pnpm runs by design, so it is left on (turning it off would change the lock) and the tier contains it |
+| cargo | `--config build.rustc=<store rustc>`, `build.rustc-wrapper=""`, `build.rustc-workspace-wrapper=""`, `build.rustdoc=<store rustdoc>`, `registry.global-credential-providers=["cargo:token"]`, `registries.<name>.credential-provider=["cargo:token"]` for every registry in the config, `net.git-fetch-with-cli=true` with the forced git below, and `target.<triple>.runner` and `.linker` unset (resolution never links, and PR 0 proves `generate-lockfile` and `metadata` never read them) |
+| uv | `--keyring-provider disabled`, `UV_PYTHON=<store python>`, `--no-python-downloads`, `--no-config` plus the project's `[tool.uv]` read by tog and passed as flags |
+| git | `-c credential.helper=`, `-c core.fsmonitor=false`, `-c core.hooksPath=/dev/null`, `-c core.sshCommand=` with `GIT_SSH_COMMAND` unset, `-c protocol.allow=never -c protocol.https.allow=always`, `-c uploadpack.packObjectsHook=`, `-c core.askPass=` with `GIT_ASKPASS` and `SSH_ASKPASS` unset, and `GIT_CONFIG_NOSYSTEM=1` with `GIT_CONFIG_GLOBAL=/dev/null` |
+| go | `GOFLAGS=-mod=mod`, `GOTOOLCHAIN=local`, `GOVCS=*:off` (modules come only through GOPROXY), `GONOSUMDB=` and `GOPRIVATE=` unset, `CC` and `CXX` unset with `CGO_ENABLED=0` |
+| Bundler, mix, dotnet | code-evaluating by design; the forced settings are the ones in their table rows (`BUNDLE_*` and `MIX_*` stripped, `DOTNET_CLI_*` set, `--disable-build-servers`) and isolation is the control |
+
+A tool release that adds a program-naming setting is caught when the
+census row is refreshed for that version, and until then the tier still
+contains it.
 
 ### The ledger: identity, contents, and redaction
 
@@ -2290,6 +2415,7 @@ produces and checks it unchanged:
  "tool":{"name":"npm","version":"10.9.2"},
  "command":["add","lodash@^4"],
  "outputs":{"package-lock.json":"<sha256>","package.json":"<sha256>"},
+ "inputs":{".npmrc":"<sha256>","packages/web/package.json":"<sha256>"},
  "ledger":{"object":"<ledger object id>","portable_sha256":"<64 hex>",
            "endpoints":["registry.npmjs.org"],"entries":412,"refused":0},
  "isolation":"confined",
@@ -2304,14 +2430,35 @@ platform, isolation engine, or store object ids other than the ledger's,
 and the ledger id is itself portable (see "Store identity"). The key is
 `TOG_SIGNING_KEY`, the same key that signs closures. The door loads it at
 preflight, as `sync` and `fmt` do, and that loading extends to `add`,
-`remove`, `update`, `x`, and the new `tog attest`. With no key
-configured, the record has no `signature` field (the unsigned closure
-convention). Such a record is honest but unattested.
+`remove`, `update`, `x`, and the new `tog attest`. When `TOG_SIGNING_KEY`
+is unset in the running process, the record has no `signature` field (the
+unsigned closure convention). Such a record is honest but unattested.
+This is the only thing that depends on whether a key is present, and it
+fails safe: a key file that exists on disk while the variable is unset
+produces an unsigned record, which the join treats as unrecorded.
+
+`outputs` holds the digest of every file the door published. `inputs`
+holds the digest of every **resolution input** the tool read but did not
+write, as the tailor names them (`Tailor::resolution_inputs`, below): the
+other workspace members' manifests, `.npmrc`, `pnpm-workspace.yaml`,
+`uv.toml` and `[tool.uv]`-bearing `pyproject.toml` files,
+`.cargo/config.toml`, `go.work`, `Directory.Packages.props`,
+`NuGet.config`, and so on. Paths in both maps are relative to the
+closure's project directory. Input digests come from the baseline
+manifest, so they describe exactly the bytes the tool was given. If the
+user edits an input during the run, the record still describes the
+snapshot, and the next join reports `stale-inputs`, which is the truth.
 
 **What the signature binds.** It binds, in one signed object: the outputs'
-digests (the lock and manifest hash), the ledger's object id and
+digests (every lock and manifest the door wrote), the inputs' digests
+(every manifest and tool config it read), the ledger's object id and
 portable digest, the tool, the command, the isolation tier, and every
 ledger-only exception. Changing any of them breaks the signature.
+Because the record names the project's own manifests by content, a
+record signed for one project cannot attest another project that
+happens to have the same lock bytes, and a manifest edited after the
+resolution (a dependency added by hand without relocking) no longer
+matches.
 
 **The join.** It happens in one ecosystem-neutral place,
 `comforter::write_closure_inner`, before it claims the attribution. For
@@ -2319,8 +2466,16 @@ an ecosystem whose tailor declares a resolvable lock
 (`Tailor::resolution_outputs`, the files a door would produce, relative
 to the closure's project directory):
 
-1. Read `.tog/resolution/<ecosystem>.json` through `ProjectRoot` as raw
-   bytes, and parse it only as a generic JSON object.
+1. Collect the **candidate records**: `.tog/resolution/<ecosystem>.json`
+   read through `ProjectRoot`, plus every file passed with
+   `--resolution-record <file>` (the CI artifact flow below) whose
+   top-level `ecosystem` string names this ecosystem. Each is read as raw
+   bytes and parsed only as a generic JSON object. Steps 2 and 3 run on
+   each candidate. The first candidate that attests is joined (supplied
+   files first, in command-line order, then the committed one). If none
+   attests, the reason recorded in step 5 is the committed record's (or
+   `missing`), with each supplied file's reason appended to the detail.
+   A hard failure in step 3 from any candidate fails the sync.
 2. **Authenticate the raw envelope first**, before interpreting any field
    but `signature`. Compute the canonical bytes of the object minus its
    top-level `signature` (the closure rule in `kernel/signing.rs`), verify
@@ -2337,8 +2492,10 @@ to the closure's project directory):
      tog supports, or with any `n` it does not implement, is a **hard
      failure under every policy**: "the resolution record uses schema
      `resolution/2`, which this tog cannot read; upgrade tog".
-   - an `isolation` string outside `confined`, `isolated`, `none` is the
-     same hard failure ("... isolation tier `<value>` ...").
+   - an `isolation` string outside `confined` and `isolated` is the
+     same hard failure ("... isolation tier `<value>` ..."). No tog ever
+     signed `none` (the tier never shipped), so no compatibility case
+     exists for it.
    - an exception `kind` not in `policy::KINDS` (through `canonical_kind`)
      is the same hard failure ("... exception kind `<kind>` ..."). This
      matters because `policy::record_with` itself accepts free-string
@@ -2349,18 +2506,33 @@ to the closure's project directory):
    so no enum parser can turn a newer value into "malformed". Only after
    they pass is the object parsed as `resolution/1`. A signed record with a
    supported schema that still fails to parse (a missing field, a wrong
-   type) is `malformed` and goes to step 5. Then every `outputs` digest is
-   compared with the file on disk, and a mismatch is `stale-outputs`
-   (step 5). A record that passes all of this **attests**.
+   type) is `malformed` and goes to step 5. So is a record whose
+   `outputs` map is **empty**, or which names a path outside the
+   tailor's `resolution_outputs(dir)` and `resolution_inputs(dir)`
+   lists, or a path that is absolute or contains `..`. Then the join
+   checks **coverage and freshness** against the files on disk:
+   - every file `resolution_outputs(dir)` names that **exists** must
+     appear in `outputs`. A lock the record does not cover is
+     `incomplete` (step 5). Without this rule, a signed record for
+     `package.json` alone would vouch for a `package-lock.json` that no
+     door produced.
+   - every file `resolution_inputs(dir)` names that exists must appear
+     in `outputs` or `inputs`, else `incomplete`. A file the record names
+     that no longer exists is `stale-outputs` or `stale-inputs`.
+   - every digest in `outputs` must match the file on disk (else
+     `stale-outputs`), and every digest in `inputs` likewise (else
+     `stale-inputs`).
+
+   A record that passes all of this **attests**.
 4. If it attests and every kind is known: the closure body gains
    `"resolution": <envelope>`, and the record's `exceptions` are recorded
    into the attribution on the writer's thread. The ledger id joins
    `ClosureRefs` only if the object exists in the active store.
-5. If it does not attest (missing, unauthenticated, malformed, or stale
-   digests): its contents are **ignored
+5. If it does not attest (missing, unauthenticated, malformed,
+   incomplete, or stale digests): its contents are **ignored
    entirely**, and the join records **`unrecorded-resolution`** with the
    reason (`missing`, `unsigned`, `untrusted-key`, `bad-signature`,
-   `malformed`, `stale-outputs`). The record file is **left untouched** in
+   `malformed`, `incomplete`, `stale-outputs`, `stale-inputs`). The record file is **left untouched** in
    every case: the join never deletes or rewrites a receipt. A stale
    receipt stays as forensic evidence of what was last resolved, and it
    is replaced only by the publication step of a later **successful**
@@ -2412,6 +2584,125 @@ Tailors without a lock check refuse `attest` with the reason. Run on CI
 with the signing key, this converts a repository in one command. It is
 also the remedy the `unrecorded-resolution` refusal prints.
 
+**`--strict` (and `TOG_STRICT=1`, and `strict = true`).** Strict mode
+denies every exception kind (`policy::StrictSource`), so from PR 4, the
+PR that introduces the join, onward strict has these outcomes:
+
+- **Every lock needs an attesting record.** A sync under strict with a
+  lock that has none refuses publication with `unrecorded-resolution`,
+  and the refusal carries this remedy in place of the generic
+  "rerun without --strict": "`tog --strict` requires every lock to carry
+  a signed resolution record. `<lock>` has none (`<reason>`). To create
+  one: run `tog keygen <path>`, set `TOG_SIGNING_KEY=<path>`, add the
+  printed public key to the `[signing] trusted` list in your machine
+  policy (`TOG_POLICY`, else `~/.tog/policy.toml`), then run `tog attest
+  <ecosystem>`. Or rerun without --strict." The reason is the join's
+  (`missing`, `unsigned`, `untrusted-key`, `stale-inputs`, and so on),
+  so a developer whose record is merely stale is told to run
+  `tog attest` and not to make a new key.
+- **Last-good metadata is refused.** `stale-resolution` is denied, so the
+  proxy answers 504 where it would have served last-good, and the door
+  fails with: "`tog --strict` refuses stale metadata: `<url>` could not
+  be fetched (`<transport error or --offline>`) and the last-good copy
+  from the cache was not used. Retry when `<host>` is reachable, or rerun
+  without --strict." It names the first such URL and the reason the
+  upstream fetch failed.
+- **Only the `confined` tier passes.** `unconfined-resolution` is denied,
+  so an `isolated`-tier run is refused before the tool starts, naming the
+  missing network namespace.
+
+The named tests are
+`strict_sync_refuses_unrecorded_lock_with_keygen_and_attest_remedy`,
+`strict_sync_with_stale_record_says_attest_not_keygen`,
+`strict_last_good_fetch_fails_naming_the_url_and_reason`, and
+`strict_refuses_the_isolated_tier_before_the_tool_starts`. PR 4 updates
+`docs/human/CLI.md`'s `--strict` and `TOG_STRICT` entries to say that
+strict requires a signed resolution record for every lock and names the
+remedy.
+
+**Signing on CI: the record artifact.** The default setup (see
+"Decisions") keeps the signing key in one CI job that runs no project
+code, and passes that job's records to the gate as a build artifact, so
+nothing is committed by a bot:
+
+- `tog attest [<eco>] --record-out <path>` runs the verification doors
+  as above but writes each signed record to `<path>` (a file when one
+  ecosystem is named, else a directory holding `<eco>.json` per
+  ecosystem) instead of `.tog/resolution/`. The project checkout is left
+  unchanged.
+- `tog sync --frozen --resolution-record <path>` (repeatable; a file or
+  a directory of records) adds those records to the join's candidates
+  (step 1 above). They are verified exactly like a committed record: the
+  signature against the machine policy's trusted keys, then coverage and
+  digests against the checkout. A supplied record is only ever evidence.
+  It is never written into the project.
+
+A worked GitHub Actions example. The public half of the attest key is in
+the repository variable `TOG_ATTEST_PUBKEY`, and the gate writes its
+machine policy from that variable, never from the checkout, because
+project policy files can only narrow trust:
+
+```yaml
+jobs:
+  attest:                      # holds the key, runs no project code
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: curl -fsSL https://raw.githubusercontent.com/DigitalWestern/tog/main/install.sh | sh
+      - run: |
+          umask 077
+          printf '%s\n' "$TOG_ATTEST_KEY" > "$RUNNER_TEMP/attest.key"
+          TOG_SIGNING_KEY="$RUNNER_TEMP/attest.key" tog attest --record-out resolution/
+        env:
+          TOG_ATTEST_KEY: ${{ secrets.TOG_ATTEST_KEY }}
+      - uses: actions/upload-artifact@v4
+        with: { name: resolution-records, path: resolution/ }
+
+  gate:                        # no key, verifies the records
+    needs: attest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: curl -fsSL https://raw.githubusercontent.com/DigitalWestern/tog/main/install.sh | sh
+      - uses: actions/download-artifact@v4
+        with: { name: resolution-records, path: resolution/ }
+      - run: |
+          printf '[signing]\ntrusted = ["%s"]\n' "$TOG_ATTEST_PUBKEY" > "$RUNNER_TEMP/policy.toml"
+          export TOG_POLICY="$RUNNER_TEMP/policy.toml"
+          tog --strict sync --frozen --resolution-record resolution/
+          tog audit
+        env:
+          TOG_ATTEST_PUBKEY: ${{ vars.TOG_ATTEST_PUBKEY }}
+
+  test:                        # runs project code, holds no key
+    needs: gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: curl -fsSL https://raw.githubusercontent.com/DigitalWestern/tog/main/install.sh | sh
+      - run: tog sync --frozen && tog run test
+```
+
+The `attest` job runs only confined tools (every door is `confined` or
+`isolated`), so no project code runs outside a sandbox in the job that
+holds the key. The `test` job, which does run project code unsandboxed,
+never sees the key. GitHub withholds secrets from pull requests opened
+from forks, so a fork's `attest` job fails and its gate reports
+`unrecorded-resolution`. That is the fail-closed result: the lock is
+attested when a maintainer's run of the same commit signs it. The gate
+should be a required check whose workflow file is protected by branch
+rules, as with any CI gate. PR 10 puts this example in the README.
+
+**The bot-commit alternative.** A team that prefers committed records
+runs `tog attest` without `--record-out` in the same key-holding job and
+commits `.tog/resolution/` back to the branch (a bot commit). The gate
+is then `tog --strict sync --frozen` with no extra flag. Both flows go
+through the same join, the same trust check, and the same named tests:
+`ci_record_artifact_attests_through_resolution_record_flag`,
+`supplied_record_for_another_project_is_incomplete_or_stale`,
+`supplied_record_is_never_written_into_the_project`, and
+`committed_record_from_bot_flow_attests_without_flag`.
+
 **Resolution doors without a project** (planner, `x`, the sdist Cargo
 lock) write no record, so the join never looks for one. Planner doors run
 inside a sync whose lock already exists: that lock's own record is what
@@ -2440,7 +2731,7 @@ on the thread that opened the attribution, records after the tool exits.
 | An artifact whose registry claim is SHA-1 or MD5 only (npm `shasum` without `integrity`, a PyPI `md5` fragment), or has no claim where the protocol provides one | `weak-integrity` (existing) | refuse | ledger only |
 | A request to an endpoint outside the permitted set: an intercepted host (uv extra index, `.npmrc` scoped registry, direct-URL dependency) or a refused `CONNECT` | `unattested-index` (existing; the policy text already covers "index-like options") | refuse | intercepted tools (uv, npm, pnpm, cargo): forward and record in the resolution record; mirror tools (Go, Bundler, Hex, NuGet): refuse visibly and record |
 | The resolution required building a source distribution (see below) | `resolution-build` (**new**) | uv runs with `--no-build` only, so the edit fails naming the package that needs a build | record |
-| The door ran without a network fence (`isolated` or `none` tier; see "Isolation tiers") | `unconfined-resolution` (**new**) | refuse before the tool starts | record |
+| The door ran without a network fence (the `isolated` tier; see "Isolation tiers") | `unconfined-resolution` (**new**) | refuse before the tool starts | record |
 | Metadata was served from last-good because the upstream was unreachable (offline or transport failure) | `stale-resolution` (**new**; subject = endpoint, detail = number of last-good responses) | the proxy answers 504 for any request it would otherwise serve last-good, so the door fails naming the first such URL | record; the entries are also marked `freshness: last-good` in the portable evidence, which the signature covers |
 | A lock has no attesting resolution record at closure time | `unrecorded-resolution` (**new**) | the sync refuses to publish, and names `tog attest` | record |
 | Lifecycle scripts | none | `--ignore-scripts` and `npm_config_ignore_scripts=true` stay as today; a script that ran anyway would be confined | `install-script-failed` stays a realize-time kind |
@@ -2710,8 +3001,16 @@ fn attest_lock(&self, ctx: &Context, dir: &Path, toolchain: &Selected,
 }
 
 /// The project files a door of this ecosystem produces, relative to the
-/// closure's project directory. The join checks them against the record.
+/// closure's project directory. The join requires the record's `outputs`
+/// to cover every one of them that exists.
 fn resolution_outputs(&self, _dir: &Path) -> io::Result<Vec<PathBuf>> { Ok(Vec::new()) }
+
+/// The project files the tool reads to resolve but never writes (other
+/// workspace members' manifests, tool config such as `.npmrc` or
+/// `.cargo/config.toml`), relative to the closure's project directory.
+/// The door records their digests in `inputs`, and the join requires
+/// every one that exists to be covered and unchanged.
+fn resolution_inputs(&self, _dir: &Path) -> io::Result<Vec<PathBuf>> { Ok(Vec::new()) }
 ```
 
 `Tailor::prepare` changes the same way: its `attribution` parameter
@@ -2738,8 +3037,10 @@ the project file, and that decision is not part of this design.
 
 Contract 1 needs enforcement, not review alone:
 
-- **Runtime tripwire.** `kernel::supervise` gains `local_status` and
-  `local_output` for host-local helpers. Their contract is "this child
+- **Runtime tripwire.** `kernel::supervise` gains `local_status`,
+  `local_status_with_stderr`, and `local_output` for host-local helpers,
+  one for each of today's three spawn primitives (`status`,
+  `status_with_stderr`, and `output`, `src/kernel/supervise.rs`). Their contract is "this child
   needs no network". They refuse to spawn a program whose file name is in
   `RESOLVERS` (`uv`, `npm`, `npx`, `pnpm`, `cargo`, `go`, `bundle`, `gem`,
   `ruby`, `mix`, `elixir`, `erl`, `dotnet`, `git`) unless the argv matches
@@ -2753,11 +3054,16 @@ Contract 1 needs enforcement, not review alone:
   `tailors/python/build.rs`: its sdist `cargo generate-lockfile` becomes a
   door in PR 1 (`Legacy`) and a proxied door in PR 5. It is not an
   offline-form exemption.
-- **Compile-time.** `clippy.toml` adds `tog::kernel::supervise::status` and
+- **Compile-time.** `clippy.toml` adds `tog::kernel::supervise::status`,
+  `tog::kernel::supervise::status_with_stderr`, and
   `tog::kernel::supervise::output` to `disallowed-methods`, allowed only in
   `kernel::resolve`, `kernel::sandbox`, and `kernel::supervise` itself,
   each with its reason. That is three kernel sites, not an allow-list row
-  per tailor.
+  per tailor. Any spawn primitive added to `supervise` later joins the
+  list in the same PR, and the named test
+  `every_public_supervise_spawn_is_fenced` fails if a `pub fn` in
+  `kernel::supervise` that takes a `Command` is neither a `local_*`
+  function nor on the `disallowed-methods` list.
 - **Named test.** `every_resolver_invocation_goes_through_the_door` runs
   the tripwire table against the argv of every census row (including the
   sdist Cargo lock) and fails if a census tool can start through
@@ -2768,9 +3074,9 @@ Contract 1 needs enforcement, not review alone:
 `ResolutionDoor::run` is all-or-nothing for the project. In order:
 
 1. **Preflight.** Load the policy snapshot and signing key. Choose the
-   isolation tier. Refuse now if the tool's class and the key forbid
-   every available tier, or if `unconfined-resolution` is denied and only
-   an unfenced tier is available. First, **recover** any leftover
+   isolation tier. Refuse now if neither `confined` nor `isolated` is
+   available, or if `unconfined-resolution` is denied and only
+   `isolated` is. First, **recover** any leftover
    publication journal for this project (see "Recovery").
 2. **Hold the originals.** Open the lock root through `ProjectRoot` and
    keep the directory descriptor for the whole run. The **held target
@@ -2853,7 +3159,10 @@ there before (if any) still describes them.
 | Failure | Behavior |
 |---|---|
 | Proxy cannot start (bind, CA generation) | door fails before the tool starts; no direct-network fallback |
-| Native sandbox unavailable | next tier per "Isolation tiers"; code-evaluating tools, and every tool while a signing key is configured, fail naming each missing capability when neither the container/VM backend nor (Linux) the isolation helper is available |
+| Native sandbox unavailable | next tier per "Isolation tiers"; every tool fails naming each missing capability when neither the container/VM backend nor (Linux) the isolation helper is available. There is no unisolated tier |
+| A declared output is not a regular file, or a path to it crosses a symlink | nothing published; the path and its type are named |
+| The seccomp filter sees a foreign syscall arch | the process is killed; the door fails with the tool's signal |
+| A Mach lookup outside the tool's allow-list (macOS) | Seatbelt denies it; the tool usually fails, and the denial is in the sandbox log the door prints |
 | A descendant outlives the tool | the tree is stopped before validation; contents are read only from the immutable output copy |
 | Socket found in a mounted root at preflight | door refuses, naming the path |
 | Request matches no route and is not interceptable | 403 with a tog body, ledger `refused`; the door fails if the refusal was a policy denial, even when the tool exits 0 (npm tolerates failed optional fetches) |
@@ -2870,6 +3179,7 @@ there before (if any) still describes them.
 | Ledger commit, sidecar commit, record signing, or any swap fails | the transaction rolls back (step 10); the project is unchanged |
 | tog is killed mid-run | before step 8 the project is unchanged; after that, the next writing command recovers from the journal |
 | Record names an unknown exception kind, isolation value, or schema | hard failure at the join under every policy |
+| Record does not cover an existing lock or manifest, or has empty `outputs` | `unrecorded-resolution` (`incomplete` or `malformed`) |
 
 ### Performance and caching
 
@@ -2910,7 +3220,14 @@ there before (if any) still describes them.
   tog-verified and makes cold tool caches cheap. Go's planner module cache
   stays persistent as today: no third-party code runs in Go resolution,
   and tog re-verifies every module it keeps.
-- **Snapshot cost:** see "The staged snapshot".
+- **Snapshot cost:** see "The staged snapshot". The content-digest
+  diff hashes the snapshot twice (the baseline while copying, and the
+  post-run walk). SHA-256 runs at roughly 1 to 2 GB/s per core on
+  current hardware, and an application tree without the excluded build
+  outputs is usually tens of megabytes, so both passes together stay in
+  the tens of milliseconds. The post-run walk hashes every file and never
+  skips one by timestamp, since a skip would bring back the timestamp
+  problem. The budget below includes it.
 - **Budget.** A warm `tog add` through the door within 1.2x of today's
   wall time, and a cold one within 1.5x, measured from PR 4 onward on the
   hit-rate projects and reported in each PR. HTTP/1.1 fallback is the
@@ -3016,8 +3333,26 @@ Snapshot, sockets, and transaction (`src/kernel/resolve/door.rs`):
 - `ledger_only_exceptions_are_recorded_on_the_owner_thread`
 - `output_containing_the_token_fails`
 - `unconfined_resolution_is_refused_when_denied_and_recorded_otherwise`
-- `code_evaluating_tool_never_runs_in_tier_none`
-- `no_resolver_runs_in_tier_none_while_a_signing_key_is_configured`
+- `no_tool_runs_unisolated_when_no_tier_is_available` (every census
+  tool, with and without `TOG_SIGNING_KEY` set, and with a key file on
+  disk but the variable unset: the command fails naming the missing
+  capability)
+- `npm_forced_settings_never_run_the_project_git_or_script_shell` (a
+  fixture `.npmrc` sets `git=` and `script-shell=` to a marker program)
+- `cargo_forced_settings_never_run_project_wrappers_or_credential_providers`
+  (a fixture `.cargo/config.toml` sets `build.rustc-wrapper`,
+  `build.rustc`, and a `credential-provider` to a marker program)
+- `forced_program_settings_hold_for_every_census_tool` (table-driven
+  over the "Forced program settings" rows)
+- `door_profile_denies_reading_the_signing_key`
+- `keygen_refuses_a_path_under_a_system_read_root`
+- `declared_output_symlink_fails_the_door`
+- `declared_output_parent_dir_symlink_fails_the_door`
+- `declared_output_replaced_by_fifo_fails_the_door`
+- `diff_detects_same_second_rewrite_by_content` (a fixture tool rewrites
+  an undeclared file with different bytes of the same size and restores
+  its mtime)
+- `diff_ignores_a_byte_identical_rewrite_of_an_undeclared_file`
 - `container_backend_is_used_when_user_namespaces_are_unavailable`
 - `isolate_helper_allocates_distinct_uids_to_concurrent_sessions`
 - `isolate_helper_never_reuses_a_uid_with_a_live_process`
@@ -3033,12 +3368,16 @@ Snapshot, sockets, and transaction (`src/kernel/resolve/door.rs`):
 - `isolate_tmp_is_private_and_wiped` (a file left in `/tmp` by one run is
   absent in the next run that gets the same UID)
 - `isolate_helper_fences_network_when_it_can_and_records_confined`
+- `isolate_handover_does_not_follow_symlinks` (a stage symlink to a
+  root-owned file keeps that file's owner)
+- `isolate_handover_refuses_hardlinks`
 - `macos_has_no_isolated_tier` (with Seatbelt disabled by a test hook
   and no VM backend, the door fails with the missing-capability message)
 - `missing_isolation_message_names_every_missing_capability`
-- `tier_none_still_runs_on_the_snapshot`
 - `every_resolver_invocation_goes_through_the_door` (tripwire table vs census)
-- `local_supervise_refuses_resolver_programs`
+- `local_supervise_refuses_resolver_programs` (all three `local_*`
+  functions)
+- `every_public_supervise_spawn_is_fenced`
 
 Sandbox tests (`tests/sandbox_deny.rs`, extended, not a new file, per §4):
 - `linux_door_reaches_only_the_proxy` (curl to a host-side listener
@@ -3054,8 +3393,21 @@ Sandbox tests (`tests/sandbox_deny.rs`, extended, not a new file, per §4):
   tool's `socket(AF_UNIX)` fails with `EAFNOSUPPORT`)
 - `linux_door_socketpair_still_works` (Node spawns a child with pipes)
 - `linux_door_exec_log_records_every_exec`
+- `linux_door_filter_kills_a_foreign_syscall_arch` (an `int 0x80`
+  `socketcall` from the 32-bit table, and an x32-bit syscall number)
+- `linux_door_denies_io_uring_setup`
+- `linux_door_tool_cannot_ptrace_or_read_the_relay` (`ptrace` attach and
+  `/proc/<relay>/mem` both fail)
 - `macos_door_reaches_only_the_proxy_port`
-- `macos_door_cannot_resolve_names` (the mDNSResponder deny)
+- `macos_door_cannot_resolve_names` (mDNSResponder is not on any
+  allow-list)
+- `macos_door_cannot_open_urls_or_apps` (`/usr/bin/open` of a URL and of
+  an app both fail, and LaunchServices lookups are denied)
+- `macos_door_cannot_reach_nsurlsessiond` (an `NSURLSession` background
+  download fails)
+- `macos_door_mach_allow_list_matches_pr0_measurement` (the compiled
+  per-tool list equals the checked-in measurement, and contains no
+  service from the forbidden list)
 - `macos_door_cannot_connect_to_a_host_unix_socket` (both the read-root
   and after-preflight cases)
 - `macos_door_cannot_read_or_write_the_real_project`
@@ -3086,6 +3438,23 @@ Attestation, join, and audit (`tests/cli.rs` and `src/comforter/`):
 - `audit_fails_closed_on_an_unknown_resolution_kind`
 - `closure_readers_accept_the_resolution_field`
 - `record_body_has_no_timestamps_port_platform_or_engine`
+- `record_not_covering_the_lock_is_unrecorded` (a signed record whose
+  `outputs` name `package.json` but not the existing
+  `package-lock.json`: `unrecorded-resolution`, reason `incomplete`)
+- `record_with_empty_outputs_is_malformed`
+- `record_naming_a_path_outside_the_tailor_lists_is_malformed`
+- `record_for_another_project_with_the_same_lock_is_unrecorded` (same
+  lock bytes, different manifest: `stale-outputs` or `stale-inputs`)
+- `edited_workspace_member_manifest_is_stale_inputs`
+- `strict_sync_refuses_unrecorded_lock_with_keygen_and_attest_remedy`
+- `strict_sync_with_stale_record_says_attest_not_keygen`
+- `strict_last_good_fetch_fails_naming_the_url_and_reason`
+- `strict_refuses_the_isolated_tier_before_the_tool_starts`
+- `ci_record_artifact_attests_through_resolution_record_flag`
+- `supplied_record_for_another_project_is_incomplete_or_stale`
+- `supplied_record_is_never_written_into_the_project`
+- `committed_record_from_bot_flow_attests_without_flag`
+- `attest_record_out_leaves_the_checkout_unchanged`
 
 Per ecosystem, offline against fixtures (one per migration PR):
 - `go_get_through_mirror_uses_proxied_sumdb`
@@ -3121,8 +3490,13 @@ census invocations through a logging interception proxy and record every
 request (host, path, method, redirect chain) in a table in this section.
 Confirm each † claim: the pnpm proxy flags, npm `--cafile`, uv's
 `SSL_CERT_FILE`, `--no-build` error form and `--no-build-package`, every
-tool's lock check for `tog attest`, and every census tool running under
-the AF_UNIX seccomp filter. Capture fixture registries for the offline
+tool's lock check for `tog attest`, every census tool running under
+the AF_UNIX seccomp filter (with `io_uring_setup` denied), each tool's
+**program-naming settings** (the "Forced program settings" table, from
+the tool's documentation and source, each proven with a marker-program
+fixture), and each tool's **macOS Mach allow-list** (measured under a
+reporting `(deny mach-lookup)` profile, checked against the forbidden
+services list). Capture fixture registries for the offline
 tests. Nothing is built on an unconfirmed claim. A † claim that fails
 changes that ecosystem's row here first, and a finding that only a mirror
 works for an intercept-planned tool means that tool gets response and
@@ -3159,12 +3533,18 @@ tree quiescence on both platforms, the immutable output copy, the
 transaction (held originals, swap-then-compare publication, the journal,
 and recovery), the `Proxy` network mode for both sandbox engines, the
 `__resolution-relay` subcommand, the AF_UNIX seccomp filter and exec log,
-the all-roots socket scan, the tool classes and the tier rule (native
-sandbox and tier `none`, with the signing-key and code-evaluating
-refusals and their messages), the `unconfined-resolution` kind, and the
-sandbox, quiescence, and transaction tests. On the Mac: the Seatbelt
-rules, the DNS deny, and the same deny added to the **build** profile
-(known gap 1).
+the seccomp arch check and `io_uring` and `ptrace` denials, the relay's
+`PR_SET_DUMPABLE=0`, the all-roots socket scan, the content-digest diff,
+the regular-file rule for declared outputs (`openat2` with
+`RESOLVE_BENEATH|RESOLVE_NO_SYMLINKS` on Linux, per-component
+`O_NOFOLLOW` on macOS), the forced program settings for every tool row,
+the tier rule (native sandbox only in this PR; no unisolated tier, so a
+host without it fails with the missing-capability message until PR 3b),
+the signing-key read deny and the `tog keygen` path check, the
+`unconfined-resolution` kind, and the sandbox, quiescence, and
+transaction tests. On the Mac: the Seatbelt rules, the deny-by-default
+Mach profile with the per-tool allow-lists from PR 0, and the same
+deny-by-default Mach rule for the **build** profile (known gap 1).
 
 **PR 3b: the other isolation backends.** The Linux container backend
 (podman/docker, the pinned minimal image, `--network none`, the same
@@ -3186,7 +3566,15 @@ schema validation with hard failure on unknowns; stale receipts left
 untouched), `ClosureRefs` retention only for locally present ledgers,
 `tog attest --ledger-export` and `--ledger-import`,
 `unrecorded-resolution`, `stale-resolution`,
-`Tailor::resolution_outputs`, `tog attest` with Go's lock check, the
+`Tailor::resolution_outputs` and `Tailor::resolution_inputs` with the
+join's coverage rule (every existing output covered, empty `outputs`
+malformed, `inputs` digests checked), `tog attest` with Go's lock check,
+`tog attest --record-out` and `tog sync --resolution-record` (the CI
+artifact flow) beside the committed-record bot flow, both with their
+named tests, the `--strict` outcomes (the `unrecorded-resolution` remedy
+text naming `tog keygen` and `tog attest`, and the precise last-good
+refusal) with their tests, the `docs/human/CLI.md` update for
+`--strict`, `TOG_STRICT`, `--record-out`, and `--resolution-record`, the
 per-developer key path (a laptop key in the machine `[signing]` set
 attests a record exactly as a CI key does, with
 `developer_key_record_attests_when_trusted` and
@@ -3223,7 +3611,11 @@ unsandboxed" (known gap 4). `attest` with `--locked-mode`.
 their reasons, and its comment names `tog attest` as the migration step.
 The README documents both signing setups: `tog attest` in a separate CI
 job, the default, and per-developer keys in the machine `[signing]`
-set. ARCHITECTURE gains a "Resolution
+set. The CI setup is the worked GitHub Actions example from
+"Attestation" (an `attest` job that holds the key and uploads
+`--record-out` records as an artifact, a keyless `gate` job running
+`tog --strict sync --frozen --resolution-record`, and a separate `test`
+job), with the bot-commit flow as the documented alternative. ARCHITECTURE gains a "Resolution
 doors" section with the census as a covered/not-covered table (WP5's
 "state which doors are covered"). LIMITATIONS rows are rewritten: the
 `add`/`remove`/`update` row, "Delegated planning runs unsandboxed", the
@@ -3240,12 +3632,16 @@ before merge, and PR 3 also runs `tests/sandbox_deny.rs` there.
 Found in today's code while writing this section. None is fixed by the
 design commit itself; each has a slot above.
 
-1. **Seatbelt DNS leak in the build sandbox.** The build profile allows
-   `mach-lookup` wholesale, so sandboxed builds can resolve names, and
-   send data out, through mDNSResponder (`src/kernel/sandbox.rs`,
-   `Sandbox::profile`). Slot: PR 3, which adds the mDNSResponder deny to
-   the build profile as well as the door profile, with
-   `macos_build_cannot_resolve_names` in `tests/sandbox_deny.rs`.
+1. **Seatbelt Mach escapes in the build sandbox.** The build profile
+   allows `mach-lookup` wholesale, so sandboxed builds can resolve names
+   and send data out through mDNSResponder, open URLs and apps through
+   LaunchServices, and download through `nsurlsessiond`
+   (`src/kernel/sandbox.rs`, `Sandbox::profile`). Slot: PR 3, which moves
+   the build profile to `(deny mach-lookup)` plus an allow-list measured
+   the same way as the door's, over every build fixture in the test
+   suite, with the same forbidden-services check, and adds
+   `macos_build_cannot_resolve_names` and
+   `macos_build_cannot_open_urls_or_apps` to `tests/sandbox_deny.rs`.
 2. **`uv add` / `remove` / `lock` do not force the index.** Only
    `pip compile` passes `--index-url https://pypi.org/simple`, so
    `[[tool.uv.index]]` entries in `pyproject.toml` are contacted directly
@@ -3278,8 +3674,9 @@ where the design above closes each:
 2. *Project config files re-point the tool* (`.npmrc registry=`,
    `[tool.uv] index-url`, `.cargo/config.toml` `[source]`,
    `.bundle/config`). Under confinement they can only make resolution
-   fail, never reach another host. The forced flags exist for correct
-   routing, not for security. Parent-directory configs outside the project
+   fail, never reach another host. The forced routing flags exist for
+   correct routing. The forced **program** settings are a security
+   control (item 40). Parent-directory configs outside the project
    (cargo walks up to `~/.cargo/config.toml`) are not readable in the
    sandbox.
 3. *A mirror leaks `127.0.0.1:<port>` into committed locks.* Fixed by
@@ -3306,7 +3703,13 @@ where the design above closes each:
 10. *A host Unix socket bypasses the network namespace*, whether planted
     in a read root or created after preflight. Fixed by the socket-free
     snapshot, the all-roots scan, and the AF_UNIX seccomp filter on
-    Linux, and by Seatbelt's network deny on macOS (review 3).
+    Linux (with the arch check and the `io_uring` deny, item 45), and on
+    macOS by Seatbelt's network deny. The first draft of this item said
+    macOS was closed by the network deny alone. That was wrong while the
+    profile allowed every `mach-lookup`: a Mach service is a socket-like
+    door the network rule does not cover, and several of them act for the
+    caller outside the sandbox. It holds now because the door profile
+    denies `mach-lookup` by default (item 38) (review 3, review 4.1).
 11. *The committed record is unauthenticated*, so deleting it, replacing
     it, or editing out `unconfined-resolution` would pass a company gate.
     Fixed: records are signed with the closure key, only attesting
@@ -3361,8 +3764,8 @@ where the design above closes each:
     transaction, read `~/.tog` signing keys, and forge a clean receipt.
     Fixed: code-evaluating tools never run without filesystem isolation
     (container/VM backend or, on Linux, the per-run isolation helper as
-    fallbacks, otherwise a failure naming what is missing), and no
-    resolver runs without isolation while a signing key is configured
+    fallbacks, otherwise a failure naming what is missing). Since round
+    4, no resolver of any class runs without isolation (item 40)
     (review 2.1).
 26. *A developer's record names a ledger that CI does not have*, and
     `ClosureRefs` would reject the missing object. Fixed: verifying the
@@ -3412,6 +3815,62 @@ where the design above closes each:
 37. *"Two parts, one object" contradicted the sidecar.* Fixed wording:
     two related objects, and diagnostics never enter portable or
     project-committed data (review 3.4).
+38. *The macOS door allowed every Mach service*, so a tool could open a
+    URL or an app through LaunchServices (`/usr/bin/open`), download or
+    upload through `nsurlsessiond`, or ask `securityd` for credentials,
+    all outside Seatbelt. Fixed: the door profile starts from `(deny
+    mach-lookup)` and allows only each tool's measured list, PR 0 fails a
+    list that includes a service that acts for the caller, and the build
+    profile gets the same rule (known gap 1). Tests
+    `macos_door_cannot_open_urls_or_apps` and
+    `macos_door_cannot_reach_nsurlsessiond` (review 4.1).
+39. *A declared output replaced by a symlink* (to `~/.ssh/id_ed25519`, or
+    to another project's lock) would be copied, signed, and published.
+    Fixed: declared outputs must be regular files, opened with `openat2`
+    and `RESOLVE_BENEATH|RESOLVE_NO_SYMLINKS` from the held stage
+    descriptor (per-component `O_NOFOLLOW` on macOS), and the isolation
+    helper's hand-over uses `fchownat(AT_SYMLINK_NOFOLLOW)`, never
+    descends a symlink, and refuses hard links (review 4.2).
+40. *Tier `none` trusted "resolve-only" tools*, but npm (`git=`,
+    `script-shell=`) and cargo (`build.rustc-wrapper`, credential
+    providers) run programs a project config names. Fixed: the tier is
+    removed, every tool runs `confined` or `isolated`, and every
+    program-naming setting of each tool is forced, listed and proven in
+    PR 0. With nothing conditioned on key presence, the "is a key
+    configured" check that could misread an existing key file is gone
+    (review 4.3).
+41. *A signed record could cover part of a project*, for example
+    `package.json` without the lock, or be copied to another project with
+    the same lock bytes. Fixed: the join requires `outputs` to cover every
+    existing file in `resolution_outputs`, treats empty `outputs` as
+    malformed, and binds the project's manifests and tool configs through
+    the signed `inputs` digests. Test
+    `record_not_covering_the_lock_is_unrecorded` (review 4.4).
+42. *`--strict` became unusable without saying why*, since it denies
+    `unrecorded-resolution` and `stale-resolution` from PR 4 on. Fixed:
+    the refusal names the remedy (`tog keygen`, `TOG_SIGNING_KEY`, the
+    trusted list, `tog attest`), a stale record is told to re-attest, the
+    last-good refusal names the URL and why the fetch failed, and CLI.md
+    says so in PR 4 (review 4.5).
+43. *The CI flow required a bot commit.* Fixed: `tog attest --record-out`
+    writes records to a CI artifact and `tog sync --resolution-record`
+    feeds them to the same join. The bot-commit flow stays as an
+    alternative through the same verification. A worked GitHub Actions
+    example is in "Attestation" and goes to the README in PR 10
+    (review 4.6).
+44. *`supervise::status_with_stderr` was outside the fence.* Fixed: it is
+    on the `disallowed-methods` list with a `local_*` twin, and
+    `every_public_supervise_spawn_is_fenced` catches the next one
+    (review 4.7).
+45. *The seccomp filter could be sidestepped* by a foreign syscall table
+    (`int 0x80` `socketcall` on x86-64, x32 numbers), by an io_uring
+    ring, or by tracing the unfiltered relay. Fixed: the filter checks
+    `seccomp_data.arch` first and kills on mismatch, denies the io_uring
+    and `ptrace`-family calls, and the relay sets `PR_SET_DUMPABLE=0`
+    (review 4.8).
+46. *The diff trusted ctime*, which misses a same-size rewrite within one
+    timestamp tick on coarse filesystems. Fixed: the baseline records
+    content digests and the diff compares by content (review 4.9).
 
 ### Review round 1
 
@@ -3452,6 +3911,22 @@ Fixed as self-check items 34–37, with the coordinator's choices: per-run
 ephemeral identities with cgroup v2 containment on Linux, no isolated
 tier on macOS (container/VM backend only), the receipt held and swapped
 like an output, and authentication before version checks.
+
+### Review round 4
+
+Claude (Opus), 2026-09-23, standing in while Codex was out of quota,
+nine findings: the macOS door allowed every Mach service (blocker),
+symlinked declared outputs, tier `none` running tools that can be told
+to run project programs, records that did not have to cover the lock or
+name the project, the unstated `--strict` outcome, a CI flow that needed
+a bot commit, `status_with_stderr` outside the fence, three seccomp
+gaps, and a ctime diff. All nine are fixed above (self-check items
+38–46), with the coordinator's choices: deny `mach-lookup` by default
+with measured per-tool allow-lists, regular-file outputs opened without
+following symlinks, tier `none` removed and program settings forced, a
+coverage rule plus signed manifest digests, the strict remedy text in
+PR 4, the record-artifact CI flow with the bot commit as an alternative,
+the fence extended, the filter hardened, and a content-digest diff.
 
 ### Decisions
 
