@@ -511,7 +511,8 @@ fn run_ruby_with_env(
 /// Helper executed BY the pinned Ruby: parses the lock with Bundler's own
 /// classes, validates the Gemfile/ruby directive, selects the local
 /// platform's closure, and emits it dependency-first as JSON.
-/// Second mode reads a downloaded .gem's spec for post-download checks.
+/// Extra modes install gems, check manifests, and read a downloaded .gem's
+/// spec for post-download checks.
 const HELPER: &str = r##"
 require "json"
 mode = ARGV.shift

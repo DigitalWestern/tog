@@ -244,8 +244,7 @@ pub(super) fn native_libs_identity_id(
 /// content root holds `node_modules/` plus one
 /// `workspaces/<encoded importer>/node_modules` per workspace importer.
 /// Realize the tree for a caller that holds no selection: the shipped
-/// Node release. `x` outside a project and tests use this; a project sync
-/// uses `realize_node_env_for`.
+/// Node release.
 pub fn realize_node_env(
     store: &Store,
     activity: &StoreActivity,
@@ -265,8 +264,8 @@ pub fn realize_node_env(
 }
 
 /// Realize the tree with the Node the project's selection names, running
-/// node-gyp on `gyp_python`: the Python the project's lock names when it
-/// has one, [`shipped_gyp_python`](crate::tailors::node::shipped_gyp_python)
+/// node-gyp on `gyp_python`: the helper toolchain selection when the
+/// project has one, [`shipped_gyp_python`](crate::tailors::node::shipped_gyp_python)
 /// otherwise. Its object id is an input of the `node-env/5` identity.
 pub fn realize_node_env_for(
     store: &Store,
@@ -295,13 +294,13 @@ pub(crate) fn provisioned_version<'a>(name: &str, version: &'a str) -> Option<&'
 /// The schema the producer writes. `node-env/5` is `/4` plus `gyp_python`.
 pub(crate) const NODE_ENV_SCHEMA: &str = "node-env/5";
 
-/// The two spellings of the `node-env/4` native decision. The producer
+/// The two spellings of the `node-env/5` native decision. The producer
 /// writes one of them on every commit, so a dropped `native_libs` key is a
 /// contract violation rather than a different legitimate environment.
 pub(crate) const NATIVE_LIBS_MOUNTED: &str = "native-libs";
 pub(crate) const NATIVE_NONE: &str = "none";
 
-/// The `node-env/4` digest over the package set and the declared artifacts:
+/// The `node-env/5` digest over the package set and the declared artifacts:
 /// every `pkg:` and `artifact:` entry, key and value NUL-terminated so no
 /// pair can be re-spelled as another, in the order a `BTreeMap` yields them.
 /// It is written unconditionally — the empty lockfile gets the digest of
@@ -312,7 +311,7 @@ pub(crate) const NATIVE_NONE: &str = "none";
 /// artifact list; the identity contract in `objects.rs` digests the `pkg:`
 /// and `artifact:` inputs the finished identity actually carries. A producer
 /// that writes one fewer input than its plan names makes the two disagree,
-/// which is the drift `node-env/4` exists to catch. Digesting the input map
+/// which is the drift `node-env/5` exists to catch. Digesting the input map
 /// on both sides would move the digest along with the drift and catch
 /// nothing.
 fn plan_digest_of(entries: &BTreeMap<String, String>) -> String {
@@ -388,7 +387,7 @@ pub(super) fn node_env_identity(
     )
 }
 
-/// The exact producer drift `node-env/4` exists to catch: the plan names
+/// The exact producer drift `node-env/5` exists to catch: the plan names
 /// `skip_entry` (a `pkg:` or `artifact:` key), the input loops never write
 /// it, and the plan digest is still taken over the whole plan. Only tests
 /// build this.
@@ -1080,7 +1079,6 @@ pub(super) fn realize_node_env_with_node_object(
     gyp_python: &crate::kernel::toolchain::Selected,
 ) -> io::Result<PathBuf> {
     crate::tailors::install_kinds();
-    // Pure: the interpreter is realized only if a package runs a script.
     let gyp_python_id =
         crate::kernel::provider::cpython::cpython_object_id(gyp_python, platform)
             .map_err(|e| io::Error::new(e.kind(), format!("python for node-gyp: {e}")))?;

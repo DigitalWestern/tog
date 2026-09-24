@@ -717,9 +717,10 @@ fn cached_plan(project: &ProjectRoot, input_hash: &str) -> io::Result<Option<GoP
     Ok(None)
 }
 
-/// Consistency gate: tidy -diff is non-mutating (prints a diff, exit
-/// nonzero when go.mod/go.sum need changes). Needs the source tree, so
-/// it runs in the real project — but never writes. Its module cache is a
+/// Consistency gate: the tidy -diff first pass is non-mutating (prints a
+/// diff, exit nonzero when go.mod/go.sum need changes). Needs the source
+/// tree, so it runs in the real project. On diff failure it resolves with
+/// the store `go mod tidy`. Its module cache is a
 /// persistent planner scratch (resolver-trust only; never feeds objects).
 /// Returns the final, possibly tidied, manifest pair, read back through the
 /// held descriptor; go itself runs in `project.path()`.

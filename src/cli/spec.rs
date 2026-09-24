@@ -525,7 +525,7 @@ lock' gate.",
         description: "\
 Name and version of every package in each synced closure, with the
 toolchain each runs on; -v adds the artifact and store object. Read from
-.tog/closures/*.json, no store access. Ecosystems: python, node,
+.tog/closures/*.json. Ecosystems: python, node,
 cargo, go, ruby, elixir, dotnet; plus rustfmt, the toolchain-only closure
 'tog fmt' writes.",
         examples: &[
@@ -753,7 +753,7 @@ ENVIRONMENT:
   TOG_STORE           store root (default ~/.tog/store)
   TOG_STRICT=1        refuse every policy exception, like 'tog --strict'
   TOG_POLICY          policy file used instead of ~/.tog/policy.toml
-  TOG_SIGNING_KEY     key file; every command that writes a closure signs it
+  TOG_SIGNING_KEY     key file; closure-writing commands (build, add, remove, update, sync, fmt) sign it
   NO_COLOR            plain output, like --no-color
 ";
 

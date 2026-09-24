@@ -43,7 +43,7 @@ pub enum Mode {
     Writable,
     /// `--frozen`: validate the committed lock and never create one.
     Frozen,
-    /// Read-only consumers (`plan`, `build`, `fmt`): honor a lock, fall
+    /// Read-only consumers: honor a lock, fall
     /// back to selection, write nothing.
     ReadOnly,
     /// `tog update --toolchain [<ecosystem>]`: re-select and replace.

@@ -30,7 +30,8 @@ use std::path::{Path, PathBuf};
 /// Cache hit if the identical env already exists.
 /// Realize the environment for a caller that holds no selection: the
 /// shipped catalog release for the plan's interpreter. `x` outside a
-/// project and tests use this; a project sync uses `realize_env_for`.
+/// project and tests use this; a project sync uses `realize_env_with`
+/// (reached directly, or through `realize_env_for`).
 pub fn realize_env(
     store: &Store,
     activity: &StoreActivity,

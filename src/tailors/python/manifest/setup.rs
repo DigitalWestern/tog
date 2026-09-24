@@ -239,7 +239,7 @@ pub(super) fn setup_tree_hash(project: &ProjectRoot) -> io::Result<String> {
 
 /// Collect the project-relative files under `relative` (empty for the
 /// root). A directory is descended only when it is a real one, not a
-/// symlink, as `symlink_metadata` decided before.
+/// symlink.
 pub(super) fn collect_setup_files(
     project: &ProjectRoot,
     relative: &Path,

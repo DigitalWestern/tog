@@ -320,7 +320,7 @@ pub fn runtime_object_id(platform: Platform, selected: &Selected) -> io::Result<
 }
 
 /// The Node object identity, from the row the selection names. It is
-/// byte-identical to the one the pin table produced: the row carries the
+/// byte-identical to the one the catalog row produced: the row carries the
 /// same version and the same artifact digest.
 fn node_identity_of(spec: &ArtifactSpec, platform: Platform) -> Identity {
     Identity {

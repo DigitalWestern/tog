@@ -428,8 +428,7 @@ pub fn load(project_dir: &Path, cli_strict: bool) -> io::Result<Policy> {
 
 /// `load`, plus every policy that contributed, in merge order. One loading
 /// algorithm serves both: `load` is this with the provenance discarded.
-/// Callers that pass `cli_strict=true` (currently the sync command for its
-/// strict switch) can produce a `flag` source; audit passes `false` and adds
+/// Callers that pass `cli_strict=true` can produce a `flag` source; audit passes `false` and adds
 /// its separately parsed policy file as a source.
 pub fn load_with_sources(
     project_dir: &Path,

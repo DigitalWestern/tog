@@ -301,8 +301,7 @@ pub(super) fn workspace_glob_matches(pattern: &str, path: &str) -> bool {
 
 /// Every directory under `directory` (project-relative, `.` for the root)
 /// holding a package.json. The project is walked through the held
-/// descriptor; a symlinked directory is not descended into, as
-/// `DirEntry::file_type` never followed one.
+/// descriptor; a symlinked directory is not descended into.
 pub(super) fn collect_workspace_manifests(
     project: &ProjectRoot,
     directory: &Path,

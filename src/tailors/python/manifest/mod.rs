@@ -132,8 +132,7 @@ impl Manifest {
         self.setup && !self.setup_cfg
     }
 
-    /// Complete a setup.py manifest after the caller has selected the first
-    /// compatible interpreter.  The metadata cache is content-addressed by
+    /// Complete a setup.py manifest. The metadata cache is content-addressed by
     /// the manifest tree, not by its current working directory.
     /// The project is read through the held descriptor: the tree hash
     /// that keys the cache walks `project`, not its pathname.

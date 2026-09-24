@@ -122,7 +122,7 @@ pub fn resolve(pending: Pending) -> io::Result<cli::Command> {
     }
 }
 
-/// One line per verb: every arm is a single call into the verb's file.
+/// Dispatch one parsed command to the verb's file.
 pub fn dispatch(command: cli::Command) -> io::Result<i32> {
     use cli::Command::*;
     crate::tailors::install_kinds();

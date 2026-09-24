@@ -97,7 +97,7 @@ impl Record {
 
     /// The kind/schema pair used for adapter dispatch and for diagnostics.
     /// Kinds whose producer never wrote a `schema` input dispatch on the
-    /// kind alone; they are listed explicitly in `adapt` so a record that
+    /// kind alone; they are listed explicitly in `adapter_for`/`adapt_inner` so a record that
     /// unexpectedly carries one is refused instead of silently sharing a
     /// path with a different schema.
     pub fn describe(&self) -> String {
@@ -475,7 +475,7 @@ pub(crate) fn parse_digest(algo: &str, hex: &str) -> Result<Digest, String> {
 // `store::validate_cached_dependency_evidence` turns every later cache hit on
 // a divergent record into a hard error.
 //
-// The coverage matrix in ARCHITECTURE.md lists every row implemented here.
+// The coverage matrix in docs/human/ARCHITECTURE.md lists every row implemented here.
 // ---------------------------------------------------------------------------
 
 /// The adapter version stamped into `evidence: "adapted:<kind>@<version>"`.
