@@ -1,6 +1,6 @@
 # STATUS — where tog is, and what is next
 
-Updated 2026-09-22.
+Updated 2026-09-24.
 
 ## What tog is
 
@@ -15,8 +15,8 @@ Cargo, Go, Ruby, Elixir, .NET.
 | Area | State |
 |---|---|
 | Seven ecosystems, Linux x86_64 | Shipped, acceptance-tested |
-| macOS arm64 | Last run 2026-09-10, and it has not run since: eleven days and every PR below are Linux-verified only. The toolchain lock adds the two-machine lock diff to what that run has to cover. That run was green (`cargo test`, `gc --ignored` 3/3, sandboxed self-build), but the gate now also has to cover the Darwin identity goldens the schema successors added, which must stay byte-identical. It is deliberately the last item in FOLLOW-UPS.md |
-| Python + npm on real projects | Proven (Next.js, vite, prisma, native addons, FastAPI). Latest hit rate: Python 26/30, npm 20/30 (`docs/agent/HITRATE.md`) |
+| macOS arm64 | Last run 2026-09-10, and it has not run since: every PR after that is Linux-verified only. The toolchain lock adds the two-machine lock diff to what that run has to cover. That run was green (`cargo test`, `gc --ignored` 3/3, sandboxed self-build), but the gate now also has to cover the Darwin identity goldens the schema successors added, which must stay byte-identical. It is deliberately the last item in FOLLOW-UPS.md |
+| Python + npm on real projects | Proven (Next.js, vite, prisma, native addons, FastAPI). Latest hit rate (2026-09-23): Python 26/30, npm 28/30; 27 and 29 with #213's Rust catalog (`docs/agent/HITRATE.md`) |
 | Other ecosystems | Fixture-proven only (`tests/`) |
 | Store GC (root protection, object metadata, fail-closed sweep) | Shipped and independently reviewed on Linux |
 | Module layout | Refactor finished 2026-09-12: one folder per layer, the `Tailor` trait and registry, layering enforced by `tests/architecture.rs` (rules in `docs/human/ARCHITECTURE.md`) |
@@ -24,6 +24,9 @@ Cargo, Go, Ruby, Elixir, .NET.
 | `tog sync` preflight | Refused syncs no longer touch the store (2026-09-16, PR #40) |
 | Toolchain lock (WP2) | Shipped on Linux 2026-09-21. A committed `tog-toolchain.toml` names the exact toolchain per ecosystem: the first writable sync writes it, every later sync honors it, a source that disagrees stops the sync, `tog --frozen` validates without writing, `tog update --toolchain [<eco>]` is the one writer that replaces it, `tog status` reports the verdict, and `tog x` keys its cache on the selected bundle. Described in `docs/human/ARCHITECTURE.md` "Toolchain lock"; the reasoning stays in `docs/agent/DESIGNS.md` §1. **Not yet run on two machines** — see below |
 | Release catalog and trust (WP3), company layer (WP5) | Designed, not built (`docs/agent/DESIGNS.md` §2, §4) |
+| Toolchain catalogs (2026-09-24) | Every ecosystem's releases are generated, verified data files (`catalog.toml`, `tools/catalog.py --check`), append-only, with an explicit default (#195). Rust ships 43 releases, 1.70.0 to 1.98.1; `rust-toolchain.toml` targets, components, profile and `path` are lock rows, and tog provisions every component from the signed channel manifest (#213) |
+| Resolution proxy (#68) | Designed and reviewed over four rounds (`docs/agent/DESIGNS.md` §6, #196); PR 0 evidence shipped (#209). Implementation is #198 to #208, in order. Until PR 10, delegated tools (`add`/`remove`/`update`, missing-lock generation) run unsandboxed with network |
+| Linux sandbox on Ubuntu 24.04 | AppArmor-restricted user namespaces are detected; `doctor` agrees with bwrap and CI runs a 24.04 job (#173, #194) |
 | User-experience review (2026-09-19) | Shipped on Linux: the CLI contract, help layout and `--json` promise (#122, #123); daily-use and error text — download progress, pip/npm guidance, the signing notice, distro `doctor` hints, error context (#125); docs and installer — a getting-started walkthrough, `install.sh --uninstall`, the `.tog/` commit rule (#128, this PR). `tog env` with the direnv recipe and an editor guide, plain-words help summaries, advisories routed through `tog: warning:`, and the once-per-store note on how a read-only environment is used (#108, #112, #106, #103). 2026-09-22: a bare `tog` syncs then shows the help, help screens open with START HERE and carry EXAMPLES. Still open from #106: lifting the sandbox stderr tail out of the Python tailor; from #103: `npm install` run directly is refused, not prevented |
 | Commands sync on their own (2026-09-21) | `tog run`, `tog env` and `tog <script>` make the offline check `tog status` makes and sync first when the project is not synced or its inputs changed, one line on stderr saying why; a directory with no manifest says so instead of naming `tog sync`. The automatic store-maintenance warning is three `tog: warning:` lines at most (record, summary, once-per-store), the migration's own accounting stays with `tog gc --migrate-metadata`. 2026-09-22: every `tog: warning:` line is followed by a `tog:     fix:` line naming the command that resolves it; advisories with nothing to do became progress lines |
 | No sync verb (2026-09-22, #143) | The cargo model: a bare `tog` is the setup step, and `--frozen`, `--fresh` and `--strict` go on it (no help screen after them, and no project is a failure). `sync`, `install` and `i` still work as hidden aliases but are not listed, completed or suggested; `tog help setup` and `tog help inputs` replace `tog help sync`. `tog build` syncs first when the ecosystem it builds is stale, as `run` does; `x` does not, because it runs in its own environment. Every "run 'tog sync'" message says `tog` |
@@ -38,6 +41,9 @@ detail behind each item:
 1. The two-machine toolchain-lock diff: sync one project on Linux and on an
    arm64 Mac, and prove the lock file and `tog status` are identical. It is
    the last thing between WP2 and done, and it is part of the macOS gate.
+2. The resolution proxy, PR 1 onward (#198).
+3. The macOS gate (#66, #136), which now also covers the per-operation
+   signal sessions implementation (#57) and PR 0's Mach allow-list.
 
 ## How work happens here
 
