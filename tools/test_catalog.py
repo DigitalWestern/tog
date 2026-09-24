@@ -10,7 +10,9 @@ path runs for real.
 import hashlib
 import io
 import json
+import lzma
 import os
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -309,6 +311,189 @@ class Ruby(Base):
         self.assertIn('default = "ruby-3.4.6"', written)
         self.assertLess(written.index('key = "ruby-3.4.6"'), written.index('key = "ruby-3.4.6_1"'))
         self.assertIn("revision = 2\n", written)
+
+
+class Rust(Base):
+    """The Rust reader against a fake static.rust-lang.org. The manifests
+    are signed for real, by a throwaway key standing in for the Rust release
+    key, so gpgv runs on every path."""
+
+    DIST = "https://static.rust-lang.org/dist"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.gnupg = tempfile.TemporaryDirectory()
+        home = cls.gnupg.name
+        os.chmod(home, 0o700)
+        cls.gpg = ["gpg", "--homedir", home, "--batch", "--quiet", "--pinentry-mode", "loopback",
+                   "--passphrase", ""]
+        subprocess.run(cls.gpg + ["--quick-gen-key", "Test Rust Key <rust@example.invalid>",
+                                  "ed25519", "sign", "never"], check=True, capture_output=True)
+        listing = subprocess.run(cls.gpg + ["--with-colons", "--list-keys"], check=True,
+                                 capture_output=True, text=True).stdout
+        cls.fingerprint = next(line.split(":")[9] for line in listing.splitlines()
+                               if line.startswith("fpr:"))
+        cls.key = os.path.join(home, "test-key.asc")
+        with open(cls.key, "wb") as f:
+            f.write(subprocess.run(cls.gpg + ["--armor", "--export"], check=True,
+                                   capture_output=True).stdout)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.gnupg.cleanup()
+
+    def setUp(self):
+        super().setUp()
+        self.rust_saved = (catalog.RUST_KEY, catalog.RUST_FINGERPRINT, catalog.RUST_OLDEST)
+        catalog.RUST_KEY = self.key
+        catalog.RUST_FINGERPRINT = self.fingerprint
+        catalog.RUST_OLDEST = (1, 70, 0)
+
+    def tearDown(self):
+        catalog.RUST_KEY, catalog.RUST_FINGERPRINT, catalog.RUST_OLDEST = self.rust_saved
+        super().tearDown()
+
+    def sign(self, body):
+        path = os.path.join(self.scratch.name, "to-sign")
+        with open(path, "wb") as f:
+            f.write(body)
+        return subprocess.run(self.gpg + ["--armor", "--detach-sign", "--output", "-", path],
+                              check=True, capture_output=True).stdout
+
+    @staticmethod
+    def archive_sha(name):
+        return sha256(name.encode())
+
+    def manifest(self, version, missing=()):
+        lines = ['manifest-version = "2"', 'date = "2026-01-01"']
+        for package, name in (("rustc", "rustc"), ("rust-std", "rust-std"), ("cargo", "cargo"),
+                              ("rustfmt-preview", "rustfmt")):
+            lines += [f"[pkg.{package}]", f'version = "{version} (0123abc 2026-01-01)"']
+            for platform in (DARWIN, LINUX):
+                if (name, platform) in missing:
+                    continue
+                archive = f"{name}-{version}-{platform}.tar.xz"
+                lines += [f"[pkg.{package}.target.{platform}]", "available = true",
+                          f'xz_url = "{self.DIST}/2026-01-01/{archive}"',
+                          f'xz_hash = "{self.archive_sha(archive)}"']
+        lines += ["[renames.rustfmt]", 'to = "rustfmt-preview"']
+        return ("\n".join(lines) + "\n").encode()
+
+    def publish(self, version, missing=(), signed=None, stable=False):
+        body = self.manifest(version, missing)
+        url = f"{self.DIST}/channel-rust-{version}.toml"
+        self.net.bodies[url] = body
+        self.net.bodies[url + ".asc"] = self.sign(signed if signed is not None else body)
+        self.net.bodies[url + ".sha256"] = f"{sha256(body)}  channel-rust-{version}.toml\n"
+        for name in ("rustc", "rust-std", "cargo", "rustfmt"):
+            for platform in (DARWIN, LINUX):
+                archive = f"{name}-{version}-{platform}.tar.xz"
+                self.net.bodies[f"{self.DIST}/{archive}.sha256"] = f"{self.archive_sha(archive)}  {archive}\n"
+        if stable:
+            self.net.bodies[f"{self.DIST}/channel-rust-stable.toml"] = body
+        return body
+
+    def generate(self, existing):
+        report = catalog.Report("cargo")
+        return catalog.generate_cargo(existing, report), report
+
+    def test_every_stable_release_from_the_oldest_is_signed_verified_and_pinned(self):
+        self.publish("1.70.0")
+        self.publish("1.71.0")
+        body = self.publish("1.71.1", stable=True)
+        out, report = self.generate([])
+        self.assertEqual(sorted(out), ["rust-1.70.0", "rust-1.71.0", "rust-1.71.1"])
+        rel = out["rust-1.71.1"]
+        self.assertEqual([c["name"] for c in rel["components"]],
+                         ["rustc", "rust-std", "cargo", "rustfmt", "channel-manifest"])
+        self.assertEqual(len(rel["artifacts"]), 10)
+        rows = {(a["platform"], a["component"]): a for a in rel["artifacts"]}
+        rustc = rows[(LINUX, "rustc")]
+        # The undated URL, the digest the signed manifest names.
+        self.assertEqual(rustc["url"], f"{self.DIST}/rustc-1.71.1-{LINUX}.tar.xz")
+        self.assertEqual(rustc["digest"], "sha256:" + self.archive_sha(f"rustc-1.71.1-{LINUX}.tar.xz"))
+        self.assertEqual(rows[(DARWIN, "rustfmt")]["recipe"], "rustfmt/1")
+        manifest = rows[(DARWIN, "channel-manifest")]
+        self.assertEqual(manifest["url"], f"{self.DIST}/channel-rust-1.71.1.toml")
+        self.assertEqual(manifest["digest"], "sha256:" + sha256(body))
+        self.assertEqual(manifest["recipe"], "rust-channel-manifest/1")
+        self.assertEqual(report.skipped, [])
+        # The render is the canonical document, newest first.
+        text = catalog.render("cargo", "rust-1.71.1", list(out.values()))
+        self.assertIn('default = "rust-1.71.1"', text)
+        self.assertLess(text.index('key = "rust-1.71.1"'), text.index('key = "rust-1.70.0"'))
+
+    def test_a_manifest_the_signature_does_not_cover_is_refused(self):
+        self.publish("1.70.0", signed=b"other bytes\n", stable=True)
+        with self.assertRaisesRegex(catalog.Failure, "does not verify"):
+            self.generate([])
+
+    def test_a_signature_by_a_key_other_than_rusts_is_refused(self):
+        self.publish("1.70.0", stable=True)
+        catalog.RUST_FINGERPRINT = "0" * 40
+        with self.assertRaisesRegex(catalog.Failure, "not the Rust release key"):
+            self.generate([])
+
+    def test_a_release_missing_an_archive_is_skipped_with_the_reason(self):
+        self.publish("1.70.0", missing={("rustfmt", DARWIN)})
+        self.publish("1.71.0", stable=True)
+        out, report = self.generate([])
+        self.assertEqual(list(out), ["rust-1.71.0"])
+        self.assertEqual(len(report.skipped), 1)
+        self.assertIn(f"rustfmt-preview .tar.xz for {DARWIN}", report.skipped[0][1])
+
+    def test_a_published_sha256_that_disagrees_is_an_error(self):
+        self.publish("1.70.0", stable=True)
+        self.net.bodies[f"{self.DIST}/cargo-1.70.0-{LINUX}.tar.xz.sha256"] = "0" * 64 + "  x\n"
+        with self.assertRaisesRegex(catalog.Failure, r"\.sha256"):
+            self.generate([])
+
+    def test_a_shipped_row_upstream_no_longer_signs_is_an_error(self):
+        self.publish("1.70.0", stable=True)
+        first, _ = self.generate([])
+        shipped = json.loads(json.dumps(first["rust-1.70.0"]))
+        shipped["artifacts"][0]["digest"] = "sha256:" + "f" * 64
+        with self.assertRaisesRegex(catalog.Failure, "no longer matches upstream"):
+            self.generate([shipped])
+
+    def test_the_real_manifest_verifies_under_the_real_key_and_yields_the_shipped_rows(self):
+        """The checked-in Rust key, and the real 1.96.1 channel manifest and
+        its detached signature (tools/keys/, the manifest xz-compressed):
+        gpgv accepts them, and the reader turns them into exactly the
+        rust-1.96.1 release rust.catalog.toml ships."""
+        catalog.RUST_KEY, catalog.RUST_FINGERPRINT = self.rust_saved[0], self.rust_saved[1]
+        repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        keys = os.path.join(repo, "tools/keys")
+        with lzma.open(os.path.join(keys, "channel-rust-1.96.1.toml.xz")) as f:
+            manifest = f.read()
+        with open(os.path.join(keys, "channel-rust-1.96.1.toml.asc"), "rb") as f:
+            signature = f.read()
+        catalog.rust_verify("1.96.1", manifest, signature, catalog.rust_keyring())
+        url = f"{self.DIST}/channel-rust-1.96.1.toml"
+        self.net.bodies[url] = manifest
+        self.net.bodies[url + ".asc"] = signature
+        rel, why = catalog.rust_release("1.96.1", catalog.rust_keyring())
+        self.assertIsNone(why)
+        catalog.REPO = repo
+        shipped = next(r for r in catalog.read_document("cargo")["release"]
+                       if r["key"] == "rust-1.96.1")
+        self.assertEqual(rel["components"], shipped["components"])
+        key = lambda a: (a["platform"], a["component"])
+        self.assertEqual(sorted(rel["artifacts"], key=key), sorted(shipped["artifacts"], key=key))
+        manifest_row = next(a for a in rel["artifacts"] if a["component"] == "channel-manifest")
+        self.assertEqual(manifest_row["digest"], "sha256:" + sha256(manifest))
+
+    def test_the_real_key_refuses_the_trimmed_fixture_under_the_real_signature(self):
+        """The checked-in Rust key and 1.96.1 signature: the trimmed test
+        fixture is not the bytes Rust signed."""
+        catalog.RUST_KEY, catalog.RUST_FINGERPRINT = self.rust_saved[0], self.rust_saved[1]
+        repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with open(os.path.join(repo, "tools/keys/channel-rust-1.96.1.toml.asc"), "rb") as f:
+            signature = f.read()
+        with open(os.path.join(repo, "src/kernel/provider/rust_channel_fixture.toml"), "rb") as f:
+            fixture = f.read()
+        with self.assertRaisesRegex(catalog.Failure, "does not verify"):
+            catalog.rust_verify("1.96.1", fixture, signature, catalog.rust_keyring())
 
 
 if __name__ == "__main__":

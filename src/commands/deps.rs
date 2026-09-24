@@ -1850,10 +1850,10 @@ fn cargo_delegate(
     _attribution: &mut policy::Attribution,
 ) -> io::Result<Vec<String>> {
     validate_delegate_specs(texts)?;
-    // The toolchain file still contributes its component requests (the
-    // `toolchain-component-unavailable` exception); the version is the
-    // project's selection.
-    cargo::toolchain_file_components(platform, project)?;
+    // `cargo add` and `cargo remove` need only cargo, so the edit runs on
+    // the base toolchain of the project's selection. The components and
+    // targets the toolchain file asks for are provisioned by the sync that
+    // follows.
     let rust_obj = cargo::realize_runtime(
         store,
         activity,
@@ -2117,10 +2117,8 @@ pub fn run(ctx: &Context, request: Request, no_sync: bool, strict: bool) -> io::
 
 /// Open the dependency edit's attribution scope before the edit can record.
 ///
-/// `edit` records exceptions of its own, outside any ecosystem's closure: a
-/// `rust-toolchain.toml` naming `clippy` makes `cargo_delegate`'s
-/// `cargo::toolchain_file_components` record `toolchain-component-unavailable`, and
-/// on a warm store every `ensure_*_for` replays cached-object exceptions
+/// `edit` records exceptions of its own, outside any ecosystem's closure: on
+/// a warm store every `ensure_*_for` replays cached-object exceptions
 /// through `policy::check_cached`. Those belong to the edit, not to whichever
 /// ecosystem `sync` happens to realize first. `discard` clears them before
 /// sync; `Drop` covers errors, panics, and `--no-sync`. Enforcement already

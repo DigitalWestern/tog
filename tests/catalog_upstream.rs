@@ -103,6 +103,11 @@ impl Upstream {
             let source = format!("{url}.sha256");
             return (side_file("sha256", self.text(&source)), source);
         }
+        if url.starts_with("https://static.rust-lang.org/dist/") {
+            // Every Rust archive and channel manifest has its .sha256 beside it.
+            let source = format!("{url}.sha256");
+            return (side_file("sha256", self.text(&source)), source);
+        }
         if url.contains("/elixir-lang/elixir/releases/download/") {
             let source = format!("{url}.sha256sum");
             return (side_file("sha256", self.text(&source)), source);
@@ -245,4 +250,10 @@ fn elixir_rows_match_upstream() {
 #[ignore = "network: fetches the .NET release metadata"]
 fn dotnet_rows_match_upstream() {
     verify("dotnet");
+}
+
+#[test]
+#[ignore = "network: fetches static.rust-lang.org's .sha256 files"]
+fn cargo_rows_match_upstream() {
+    verify("cargo");
 }

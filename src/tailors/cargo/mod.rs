@@ -23,12 +23,11 @@ pub(crate) use crate::kernel::provider::crates::{
     plan_git_sources, project_git_sources, tog_config_text_for,
 };
 pub use crate::kernel::provider::rust::{
-    preflight_platform, resolve_toolchain, resolve_toolchain_choice, resolve_toolchain_quiet,
-    runtime_object_id, rust_object_id, toolchain_catalog, toolchain_file_components,
-    ToolchainChoice,
+    preflight_platform, project_extras, resolve_toolchain, resolve_toolchain_quiet,
+    runtime_object_id, rust_object_id, toolchain_catalog, Extras,
 };
 
-/// Realize the Rust toolchain `selected` names; see
+/// Realize the base Rust toolchain `selected` names; see
 /// `kernel::provider::rust::realize_runtime`.
 pub fn realize_runtime(
     store: &Store,
@@ -38,6 +37,20 @@ pub fn realize_runtime(
 ) -> io::Result<PathBuf> {
     crate::tailors::install_kinds();
     crate::kernel::provider::rust::realize_runtime(store, activity, platform, selected)
+}
+
+/// Realize the Rust toolchain `selected` names with the components and
+/// cross targets `extras` asks for; see
+/// `kernel::provider::rust_extras::realize_toolchain`.
+pub fn realize_toolchain(
+    store: &Store,
+    activity: &StoreActivity,
+    platform: Platform,
+    selected: &Selected,
+    extras: &Extras,
+) -> io::Result<PathBuf> {
+    crate::tailors::install_kinds();
+    crate::kernel::provider::rust::realize_toolchain(store, activity, platform, selected, extras)
 }
 
 /// Realize the registry closure as a Cargo directory source; see
@@ -187,13 +200,69 @@ pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
     })
     .expect("multi-crate Cargo vendor identity")
     .1;
-    vec![
+    // An assembled toolchain and its component objects, planned from the
+    // checked-in channel manifest fixture.
+    let assembled = {
+        use crate::kernel::provider::rust_extras::fixtures;
+        fixtures::plan_for(
+            platform,
+            &fixtures::extras(
+                &["clippy", "rustfmt", "rust-src"],
+                &["wasm32-unknown-unknown"],
+            ),
+        )
+        .expect("assembled Rust toolchain plan")
+    };
+    let mut cases = vec![
         rust,
         rustfmt,
         vendor_empty,
         vendor_registry,
         vendor_registry_many,
-    ]
+    ];
+    cases.extend(
+        assembled
+            .extensions
+            .iter()
+            .map(|extension| extension.identity.clone()),
+    );
+    cases.push(assembled.identity);
+    // A local toolchain tree, imported from the row a lock records for it.
+    cases.push(
+        crate::kernel::provider::rust_path::identity(platform, &path_selection_for_test(platform))
+            .expect("local Rust toolchain identity"),
+    );
+    cases
+}
+
+/// A locked local-toolchain selection, as `tog-toolchain.toml` records one.
+#[cfg(test)]
+pub(crate) fn path_selection_for_test(platform: Platform) -> Selected {
+    use crate::kernel::toolchain::{ArtifactRow, Bundle, Component, Source};
+    Selected {
+        helpers: Default::default(),
+        ecosystem: "rust".into(),
+        bundle: Bundle {
+            release: crate::kernel::provider::rust_path::PATH_RELEASE.into(),
+            revision: None,
+            primary: vec!["rustc".into()],
+            components: vec![
+                Component::new("rustc", "1.96.1"),
+                Component::embedded("cargo", "1.96.1", "rustc"),
+            ],
+            artifacts: vec![ArtifactRow::new(
+                platform,
+                "rustc",
+                "path",
+                "rustc 1.96.1 (31fca3adb 2026-06-26); cargo 1.96.1 (356927216 2026-06-26)",
+                crate::kernel::provider::rust_path::PATH_RECIPE,
+                "file:///custom/rust",
+                crate::kernel::digest::Digest::sha256(&"e".repeat(64)).unwrap(),
+            )],
+        },
+        lock_sha256: None,
+        source: Source::Lock,
+    }
 }
 
 /// A later `--config` outranks ours; letting one through would let a hostile
@@ -556,7 +625,17 @@ mod tests {
     /// The shipped Rust selection: what a run with no lock to honor is
     /// handed, and the only thing these tests need a `Selected` for.
     fn selection() -> Selected {
-        crate::kernel::toolchain::shipped(&toolchain_catalog().unwrap()).unwrap()
+        crate::kernel::provider::rust::shipped_selection(RUST_VERSION).unwrap()
+    }
+
+    /// The Rust a project with no toolchain file, or one naming `stable`,
+    /// gets: the shipped catalog's explicit default.
+    fn default_version() -> String {
+        crate::kernel::toolchain::shipped(&toolchain_catalog().unwrap())
+            .unwrap()
+            .version("rustc")
+            .unwrap()
+            .to_string()
     }
 
     #[test]
@@ -789,11 +868,11 @@ checksum = "{hash_b}"
     /// scratch directory sits under `$HOME` or wherever `TOG_STORE` points, so
     /// a file above the sdist is someone else's: a `~/rust-toolchain` naming
     /// nightly must not fail every Rust sdist build, and its components must
-    /// not be recorded against one.
+    /// not be provisioned for one.
     #[test]
     fn an_sdist_ignores_toolchain_files_above_its_root() {
         use crate::kernel::provider::rust::{
-            resolve_toolchain_within, toolchain_file_components_within,
+            resolve_toolchain_within, toolchain_file_extras_within,
         };
         let _exception_guard = exception_guard();
         let _attribution = crate::kernel::policy::Attribution::open("python").unwrap();
@@ -809,24 +888,74 @@ checksum = "{hash_b}"
         .unwrap();
 
         // The project search climbs to the stray files.
-        let climbed =
-            crate::kernel::provider::rust::resolve_toolchain_quiet(platform, &sdist).unwrap();
-        assert_eq!(climbed.unavailable, vec!["miri".to_string()]);
+        assert_eq!(
+            crate::kernel::provider::rust::resolve_toolchain_quiet(platform, &sdist).unwrap(),
+            RUST_VERSION
+        );
         assert!(resolve_toolchain(platform, temp.path()).is_err());
         crate::kernel::policy::clear();
 
         assert_eq!(
             resolve_toolchain_within(platform, &sdist).unwrap(),
-            RUST_VERSION
+            default_version()
         );
-        assert!(toolchain_file_components_within(platform, &sdist)
-            .unwrap()
-            .is_empty());
+        assert!(toolchain_file_extras_within(&sdist).unwrap().is_empty());
         assert!(crate::kernel::policy::pending().is_empty());
 
         // The sdist's own file is still read.
         fs::write(sdist.join("rust-toolchain"), "nightly-2026-01-01\n").unwrap();
         assert!(resolve_toolchain_within(platform, &sdist).is_err());
+    }
+
+    /// A Python lock's pinned sdist Rust stands in for the catalog default
+    /// wherever the sdist's own file leaves the choice open: no file, no
+    /// channel, or `stable`. A channel the sdist names still decides.
+    #[test]
+    fn an_sdist_without_a_channel_takes_the_locked_default() {
+        use crate::kernel::provider::rust::resolve_toolchain_within_or;
+        let _exception_guard = exception_guard();
+        let _attribution = crate::kernel::policy::Attribution::open("python").unwrap();
+        let platform = Platform::X86_64UnknownLinuxGnu;
+        let temp = TempDir::new("tog-sdist-default");
+        let sdist = temp.path().join("source");
+        fs::create_dir_all(&sdist).unwrap();
+        let pinned = Some("1.90.0");
+        assert_ne!(default_version(), "1.90.0");
+        assert_eq!(
+            resolve_toolchain_within_or(platform, &sdist, pinned).unwrap(),
+            "1.90.0"
+        );
+        assert_eq!(
+            resolve_toolchain_within_or(platform, &sdist, None).unwrap(),
+            default_version()
+        );
+        for file in [
+            "stable\n",
+            "[toolchain]\nchannel = \"stable\"\n",
+            "[toolchain]\ncomponents = [\"rust-src\"]\n",
+        ] {
+            let name = if file.starts_with('[') {
+                "rust-toolchain.toml"
+            } else {
+                "rust-toolchain"
+            };
+            fs::write(sdist.join(name), file).unwrap();
+            assert_eq!(
+                resolve_toolchain_within_or(platform, &sdist, pinned).unwrap(),
+                "1.90.0",
+                "{file}"
+            );
+            fs::remove_file(sdist.join(name)).unwrap();
+        }
+        fs::write(sdist.join("rust-toolchain"), "1.95\n").unwrap();
+        assert!(resolve_toolchain_within_or(platform, &sdist, pinned)
+            .unwrap()
+            .starts_with("1.95."));
+        fs::remove_file(sdist.join("rust-toolchain")).unwrap();
+        // A pin this tog does not ship is refused by name.
+        let error = resolve_toolchain_within_or(platform, &sdist, Some("1.2.3")).unwrap_err();
+        assert!(error.to_string().contains("pins Rust 1.2.3"), "{error}");
+        crate::kernel::policy::clear();
     }
 
     #[test]
@@ -843,6 +972,34 @@ checksum = "{hash_b}"
             resolve_toolchain(Platform::Aarch64AppleDarwin, &project).unwrap(),
             "1.96.1"
         );
+
+        // A table with components and no channel is rustup's default
+        // toolchain: the catalog's explicit default.
+        fs::remove_file(root.join("rust-toolchain")).unwrap();
+        fs::write(
+            root.join("rust-toolchain.toml"),
+            "[toolchain]\ncomponents = [\"clippy\"]\n",
+        )
+        .unwrap();
+        assert_eq!(
+            resolve_toolchain(Platform::Aarch64AppleDarwin, &project).unwrap(),
+            default_version()
+        );
+        // A local toolchain has no pin: only a project lock records one.
+        fs::write(
+            root.join("rust-toolchain.toml"),
+            "[toolchain]\npath = \"/custom/rust\"\n",
+        )
+        .unwrap();
+        let error = resolve_toolchain(Platform::Aarch64AppleDarwin, &project).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("names the local toolchain /custom/rust"),
+            "{error}"
+        );
+        fs::remove_file(root.join("rust-toolchain.toml")).unwrap();
+        fs::write(root.join("rust-toolchain"), "1.96\n").unwrap();
 
         fs::remove_file(root.join("rust-toolchain")).unwrap();
         fs::write(
@@ -870,7 +1027,7 @@ checksum = "{hash_b}"
         fs::write(root.join("rust-toolchain"), "stable\n").unwrap();
         assert_eq!(
             resolve_toolchain(Platform::Aarch64AppleDarwin, &project).unwrap(),
-            "1.96.1"
+            default_version()
         );
 
         fs::write(root.join("rust-toolchain"), "nightly-2026-01-01\n").unwrap();
@@ -879,12 +1036,17 @@ checksum = "{hash_b}"
             .to_string();
         assert!(error.contains("1.96.1"));
 
+        // The lists do not move the version; they are provisioned from the
+        // lock's rows, not refused here.
         fs::write(
             root.join("rust-toolchain"),
             "[toolchain]\nchannel = \"1.96.1\"\ntargets = [\"wasm32-unknown-unknown\"]\n",
         )
         .unwrap();
-        assert!(resolve_toolchain(Platform::Aarch64AppleDarwin, &project).is_err());
+        assert_eq!(
+            resolve_toolchain(Platform::Aarch64AppleDarwin, &project).unwrap(),
+            "1.96.1"
+        );
         fs::write(
             root.join("rust-toolchain"),
             "[toolchain]\nchannel = \"1.96.1\"\ncomponents = [\"clippy\"]\n",
@@ -899,7 +1061,7 @@ checksum = "{hash_b}"
         fs::remove_file(root.join("rust-toolchain.toml")).unwrap();
         assert_eq!(
             resolve_toolchain(Platform::Aarch64AppleDarwin, &project).unwrap(),
-            "1.96.1"
+            default_version()
         );
         let _ = crate::kernel::policy::drain();
     }
@@ -920,6 +1082,7 @@ checksum = "{hash_b}"
         let platform = Platform::host().unwrap();
 
         let foreign = Selected {
+            helpers: Default::default(),
             ecosystem: "python".into(),
             bundle: fixtures::bundle("cpython-3.13.15", "cpython", "3.13.15", Platform::ALL),
             lock_sha256: None,
@@ -944,6 +1107,7 @@ checksum = "{hash_b}"
             );
         }
         let unknown = Selected {
+            helpers: Default::default(),
             ecosystem: "rust".into(),
             bundle,
             lock_sha256: None,
@@ -957,6 +1121,7 @@ checksum = "{hash_b}"
 
         // A row with no artifact for this platform is refused by name too.
         let one_platform = Selected {
+            helpers: Default::default(),
             ecosystem: "rust".into(),
             bundle: fixtures::bundle("rust-1.96.1", "rustc", "1.96.1", &[]),
             lock_sha256: None,
@@ -1024,96 +1189,63 @@ checksum = "{hash_b}"
         let temp = TempDir::new("tog-cargo-lockless");
         let project = temp.path().join("project");
         fs::create_dir_all(&project).unwrap();
-        let shipped = selection();
         for platform in Platform::ALL {
             assert_eq!(
                 resolve_toolchain(*platform, &project).unwrap(),
-                shipped.version("rustc").unwrap(),
+                default_version(),
                 "{}",
                 platform.triple()
             );
         }
     }
 
-    /// Once a lock decides the version, the toolchain file is read for one
-    /// thing only: the components it asks for that tog does not provide. The
-    /// channel is selection's business, so a channel this binary could never
-    /// resolve on its own is no longer this path's error — the run that got
-    /// here was already handed a selection that answered it.
+    /// An sdist's toolchain file contributes the components and targets it
+    /// asks for, read with the lock's own readers: sorted, deduplicated, and
+    /// with nothing recorded as an exception. The channel is selection's
+    /// business, so a channel this binary could never resolve on its own is
+    /// not this path's error.
     #[test]
-    fn a_toolchain_file_contributes_components_not_a_version() {
+    fn an_sdist_toolchain_file_contributes_extras_not_a_version() {
+        use crate::kernel::provider::rust::toolchain_file_extras_within;
         let _exception_guard = exception_guard();
         let _attribution = crate::kernel::policy::Attribution::open("cargo").unwrap();
-        let platform = Platform::X86_64UnknownLinuxGnu;
-        let temp = TempDir::new("tog-cargo-file-components");
-        let project = temp.path().join("project/child");
-        fs::create_dir_all(&project).unwrap();
-        let root = project.parent().unwrap();
+        let temp = TempDir::new("tog-cargo-file-extras");
+        let root = temp.path().join("source");
+        fs::create_dir_all(&root).unwrap();
 
         // No file at all, and a bare channel line: nothing to contribute.
-        assert!(toolchain_file_components(platform, &project)
-            .unwrap()
-            .is_empty());
+        assert!(toolchain_file_extras_within(&root).unwrap().is_empty());
         fs::write(root.join("rust-toolchain"), "1.96.1\n").unwrap();
-        assert!(toolchain_file_components(platform, &project)
-            .unwrap()
-            .is_empty());
+        assert!(toolchain_file_extras_within(&root).unwrap().is_empty());
+
+        fs::write(
+            root.join("rust-toolchain"),
+            "[toolchain]\nchannel = \"nightly-2026-01-01\"\n\
+             components = [\"rustc\", \"clippy\", \"cargo\", \"clippy\"]\n\
+             targets = [\"wasm32-unknown-unknown\"]\n",
+        )
+        .unwrap();
+        let extras = toolchain_file_extras_within(&root).unwrap();
+        assert_eq!(extras.components, ["cargo", "clippy", "rustc"]);
+        assert_eq!(extras.targets, ["wasm32-unknown-unknown"]);
         assert!(crate::kernel::policy::pending().is_empty());
 
-        // The components tog provides are not unavailable; the rest are,
-        // in file order, and they are the run's exception.
+        // A malformed list is refused with the file's path.
         fs::write(
             root.join("rust-toolchain"),
-            "[toolchain]\nchannel = \"1.96.1\"\ncomponents = [\"rustc\", \"clippy\", \"cargo\", \"miri\"]\n",
+            "[toolchain]\nchannel = \"1.96.1\"\ncomponents = \"clippy\"\n",
         )
         .unwrap();
-        assert_eq!(
-            toolchain_file_components(platform, &project).unwrap(),
-            ["clippy", "miri"]
-        );
-        let recorded = crate::kernel::policy::drain();
-        let exception = recorded
-            .iter()
-            .find(|exception| {
-                exception.kind == crate::kernel::policy::TOOLCHAIN_COMPONENT_UNAVAILABLE
-            })
-            .expect("unavailable components are an exception");
+        let error = toolchain_file_extras_within(&root).unwrap_err().to_string();
         assert!(
-            exception.subject.ends_with("rust-toolchain"),
-            "{exception:?}"
+            error.contains("toolchain.components must be an array"),
+            "{error}"
         );
-        assert!(exception.detail.contains("clippy, miri"), "{exception:?}");
-
-        // A channel no pin table could answer still yields its components:
-        // the version came from the lock, and this path never re-decides it.
-        fs::write(
-            root.join("rust-toolchain"),
-            "[toolchain]\nchannel = \"nightly-2026-01-01\"\ncomponents = [\"clippy\"]\n",
-        )
-        .unwrap();
-        assert!(resolve_toolchain(platform, &project).is_err());
-        assert_eq!(
-            toolchain_file_components(platform, &project).unwrap(),
-            ["clippy"]
-        );
-        let _ = crate::kernel::policy::drain();
-
-        // A target that is not this host is still refused: tog realizes one
-        // platform's toolchain and cannot honor a cross-compilation request.
-        fs::write(
-            root.join("rust-toolchain"),
-            "[toolchain]\nchannel = \"1.96.1\"\ntargets = [\"wasm32-unknown-unknown\"]\n",
-        )
-        .unwrap();
-        let error = toolchain_file_components(platform, &project)
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("wasm32-unknown-unknown"), "{error}");
-        let _ = crate::kernel::policy::drain();
+        assert!(error.contains(&root.display().to_string()), "{error}");
     }
 
     #[test]
-    fn resolves_linux_toolchain_files_targets_and_policy() {
+    fn resolves_linux_toolchain_files_and_ignores_their_lists() {
         let _exception_guard = exception_guard();
         let _attribution = crate::kernel::policy::Attribution::open("cargo").unwrap();
         let temp = TempDir::new("tog-cargo-linux-toolchain");
@@ -1123,85 +1255,63 @@ checksum = "{hash_b}"
 
         assert_eq!(
             resolve_toolchain(Platform::X86_64UnknownLinuxGnu, &project).unwrap(),
-            "1.96.1"
+            default_version()
         );
-        for channel in ["stable", "1.96", "1.96.1"] {
+        fs::write(root.join("rust-toolchain"), "stable\n").unwrap();
+        assert_eq!(
+            resolve_toolchain(Platform::X86_64UnknownLinuxGnu, &project).unwrap(),
+            default_version()
+        );
+        // Every shipped release is reachable, a minor line by its newest
+        // patch.
+        for (channel, version) in [
+            ("1.96", "1.96.1"),
+            ("1.96.1", "1.96.1"),
+            ("1.96.0", "1.96.0"),
+            ("1.95.0", "1.95.0"),
+            ("1.70", "1.70.0"),
+        ] {
             fs::write(root.join("rust-toolchain"), format!("{channel}\n")).unwrap();
             assert_eq!(
                 resolve_toolchain(Platform::X86_64UnknownLinuxGnu, &project).unwrap(),
-                "1.96.1"
+                version
             );
         }
+        fs::write(root.join("rust-toolchain"), "1.69.0\n").unwrap();
+        assert!(resolve_toolchain(Platform::X86_64UnknownLinuxGnu, &project).is_err());
 
         fs::write(root.join("rust-toolchain"), "beta\n").unwrap();
         assert!(resolve_toolchain(Platform::X86_64UnknownLinuxGnu, &project).is_err());
         fs::write(root.join("rust-toolchain"), "nightly-2026-01-01\n").unwrap();
         assert!(resolve_toolchain(Platform::X86_64UnknownLinuxGnu, &project).is_err());
 
-        fs::write(
-            root.join("rust-toolchain"),
-            "[toolchain]\nchannel = \"1.96.1\"\ntargets = [\"x86_64-unknown-linux-gnu\"]\n",
-        )
-        .unwrap();
-        assert_eq!(
-            resolve_toolchain(Platform::X86_64UnknownLinuxGnu, &project).unwrap(),
-            "1.96.1"
-        );
-        for target in ["aarch64-apple-darwin", "wasm32-unknown-unknown"] {
+        // Targets and components never change the version and are never an
+        // exception: a sync provisions them or refuses one by name.
+        for list in [
+            "targets = [\"x86_64-unknown-linux-gnu\"]",
+            "targets = [\"aarch64-apple-darwin\", \"wasm32-unknown-unknown\"]",
+            "components = [\"clippy\", \"rustfmt\"]",
+        ] {
             fs::write(
                 root.join("rust-toolchain"),
-                format!("[toolchain]\nchannel = \"1.96.1\"\ntargets = [\"{target}\"]\n"),
+                format!("[toolchain]\nchannel = \"1.96.1\"\n{list}\n"),
             )
             .unwrap();
-            assert!(resolve_toolchain(Platform::X86_64UnknownLinuxGnu, &project).is_err());
+            assert_eq!(
+                resolve_toolchain(Platform::X86_64UnknownLinuxGnu, &project).unwrap(),
+                "1.96.1",
+                "{list}"
+            );
         }
+        assert!(crate::kernel::policy::pending().is_empty());
 
-        fs::write(
-            root.join("rust-toolchain"),
-            "[toolchain]\nchannel = \"1.96.1\"\ncomponents = [\"clippy\"]\n",
-        )
-        .unwrap();
-        assert_eq!(
-            resolve_toolchain(Platform::X86_64UnknownLinuxGnu, &project).unwrap(),
-            "1.96.1"
-        );
-        assert!(crate::kernel::policy::pending()
-            .iter()
-            .any(|exception| exception.kind
-                == crate::kernel::policy::TOOLCHAIN_COMPONENT_UNAVAILABLE));
-        let _ = crate::kernel::policy::drain();
-
-        fs::write(
-            root.join("rust-toolchain"),
-            "[toolchain]\nchannel = \"1.96.1\"\ntargets = [\"aarch64-apple-darwin\"]\n",
-        )
-        .unwrap();
-        assert!(resolve_toolchain(Platform::X86_64UnknownLinuxGnu, &project).is_err());
-    }
-
-    #[test]
-    fn rustfmt_toolchain_component_is_recorded_as_unavailable_under_permissive_policy() {
-        let _exception_guard = exception_guard();
-        let _attribution = crate::kernel::policy::Attribution::open("cargo").unwrap();
-        let temp = TempDir::new("tog-cargo-rustfmt-policy");
-        let project = temp.path().join("project");
-        fs::create_dir_all(&project).unwrap();
-        fs::write(
-            project.join("rust-toolchain.toml"),
-            "[toolchain]\nchannel = \"1.96.1\"\ncomponents = [\"rustfmt\"]\n",
-        )
-        .unwrap();
-
-        assert_eq!(
-            resolve_toolchain(Platform::X86_64UnknownLinuxGnu, &project).unwrap(),
-            "1.96.1"
-        );
-        assert!(crate::kernel::policy::pending().iter().any(|exception| {
-            exception.kind == crate::kernel::policy::TOOLCHAIN_COMPONENT_UNAVAILABLE
-                && exception.subject.ends_with("rust-toolchain.toml")
-                && exception.detail.contains("rustfmt")
-        }));
-        let _ = crate::kernel::policy::drain();
+        // A file that is not the TOML its name promises is refused.
+        fs::remove_file(root.join("rust-toolchain")).unwrap();
+        fs::write(root.join("rust-toolchain.toml"), "[toolchain\n").unwrap();
+        let error = resolve_toolchain(Platform::X86_64UnknownLinuxGnu, &project)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("rust-toolchain.toml"), "{error}");
     }
 
     fn make_component_archives(

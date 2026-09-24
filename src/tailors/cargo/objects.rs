@@ -32,6 +32,63 @@ pub static KINDS: &[KindAdapter] = &[
         adapt: rust_toolchain,
     },
     KindAdapter {
+        kind: "rust",
+        schema: Some("rust-toolchain/2"),
+        superseded_by: None,
+        live_required: &[
+            "schema",
+            "platform",
+            "base",
+            "channel_manifest_sha256",
+            "extensions",
+        ],
+        live_optional: &["ext:"],
+        legacy_only: &[],
+        live_contract: Some(rust_assembled_contract),
+        grammar: Grammar {
+            required: &[
+                "schema",
+                "platform",
+                "base",
+                "channel_manifest_sha256",
+                "extensions",
+            ],
+            optional: &[],
+            groups: &[("ext:", None)],
+        },
+        adapt: rust_assembled,
+    },
+    KindAdapter {
+        kind: "rust",
+        schema: Some("rust-path/1"),
+        superseded_by: None,
+        live_required: &["schema", "platform", "tree_sha256", "build"],
+        live_optional: &[],
+        legacy_only: &[],
+        live_contract: None,
+        grammar: Grammar {
+            required: &["schema", "platform", "tree_sha256", "build"],
+            optional: &[],
+            groups: &[],
+        },
+        adapt: rust_path,
+    },
+    KindAdapter {
+        kind: "rust-component",
+        schema: Some("rust-component/1"),
+        superseded_by: None,
+        live_required: &["schema", "platform", "target", "archive_sha256"],
+        live_optional: &[],
+        legacy_only: &[],
+        live_contract: None,
+        grammar: Grammar {
+            required: &["schema", "platform", "target", "archive_sha256"],
+            optional: &[],
+            groups: &[],
+        },
+        adapt: rust_component,
+    },
+    KindAdapter {
         kind: "rustfmt",
         schema: Some("rustfmt/1"),
         superseded_by: None,
@@ -142,6 +199,75 @@ fn rust_toolchain(record: &Record, _index: &MetaIndex) -> Result<ObjectDeps, Str
     for key in ["cargo_sha256", "rust_std_sha256", "rustc_sha256"] {
         add_digest(&mut deps, Algo::Sha256, input(record, key)?, key)?;
     }
+    Ok(deps)
+}
+
+/// `rust-toolchain/2`: an assembled toolchain names at least one extension
+/// (an assembly of the base alone would be the base under a second id), and
+/// its `extensions` count is the number of `ext:` keys, so a dropped key
+/// cannot hash to a smaller request's id.
+fn rust_assembled_contract(identity: &Identity) -> Result<(), String> {
+    let keys = identity
+        .inputs
+        .keys()
+        .filter(|key| key.starts_with("ext:"))
+        .count();
+    let declared = identity
+        .inputs
+        .get("extensions")
+        .ok_or_else(|| "Rust extension count relation: no extensions input".to_string())?;
+    let declared = declared.parse::<usize>().map_err(|_| {
+        format!("Rust extension count relation: extensions {declared:?} is not a count")
+    })?;
+    if declared != keys {
+        return Err(format!(
+            "Rust extension count relation: extensions {declared} does not match {keys} ext: inputs"
+        ));
+    }
+    if keys == 0 {
+        return Err(
+            "Rust extension count relation: an assembled toolchain names no extension".into(),
+        );
+    }
+    Ok(())
+}
+
+/// `rust-toolchain/2`: the merge copied the base object and every component
+/// object, all named by the identity, after reading the pinned channel
+/// manifest, which stays in the cache so the id can be recomputed offline.
+fn rust_assembled(record: &Record, index: &MetaIndex) -> Result<ObjectDeps, String> {
+    let mut deps = ObjectDeps::new();
+    add_object(&mut deps, input(record, "base")?, index, "base")?;
+    for (key, value) in &record.identity.inputs {
+        if key.starts_with("ext:") {
+            add_object(&mut deps, value, index, key)?;
+        }
+    }
+    add_digest(
+        &mut deps,
+        Algo::Sha256,
+        input(record, "channel_manifest_sha256")?,
+        "channel_manifest_sha256",
+    )?;
+    Ok(deps)
+}
+
+/// `rust-path/1`: a local toolchain tree copied in as it is. The tree's
+/// content hash names bytes that never pass through the download cache and
+/// no other object, so the import depends on nothing in the store.
+fn rust_path(_record: &Record, _index: &MetaIndex) -> Result<ObjectDeps, String> {
+    Ok(ObjectDeps::new())
+}
+
+/// `rust-component/1`: one archive, named by its sha256.
+fn rust_component(record: &Record, _index: &MetaIndex) -> Result<ObjectDeps, String> {
+    let mut deps = ObjectDeps::new();
+    add_digest(
+        &mut deps,
+        Algo::Sha256,
+        input(record, "archive_sha256")?,
+        "archive_sha256",
+    )?;
     Ok(deps)
 }
 

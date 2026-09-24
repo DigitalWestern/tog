@@ -16,3 +16,6 @@ pub mod cpython;
 pub mod crates;
 pub mod nativelibs;
 pub mod rust;
+pub mod rust_channel;
+pub mod rust_extras;
+pub mod rust_path;

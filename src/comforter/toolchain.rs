@@ -19,7 +19,7 @@ use crate::kernel::store::{self, Store};
 use crate::kernel::toolchain::input::{self, InputRow};
 use crate::kernel::toolchain::lock::{self, ToolchainLock};
 use crate::kernel::toolchain::{
-    seed, select_for, Catalog, LegacyEvidence, ProvedArtifact, Selected, Source,
+    seed, select_for, Bundle, Catalog, LegacyEvidence, ProvedArtifact, Selected, Source,
 };
 use crate::kernel::types::Identity;
 use crate::kernel::ui;
@@ -50,7 +50,15 @@ pub enum Mode {
     Update { only: Option<String> },
 }
 
-/// One ecosystem `resolve` should answer for.
+/// Where a toolchain that is not a catalog release comes from: given the
+/// host, the canonical project directory and the rows discovery found, the
+/// bundle a new or updated lock records in place of a catalog selection, or
+/// `None` when the rows name no such toolchain. Probing and hashing happen
+/// only when a lock section is being written.
+pub type ExternalToolchain = fn(Platform, &Path, &[InputRow]) -> io::Result<Option<Bundle>>;
+
+/// One ecosystem `resolve` should answer for. The command layer fills it
+/// from the ecosystem's tailor, so resolution never looks a tailor up.
 #[derive(Debug)]
 pub struct EcosystemInput {
     /// The `[toolchain.<name>]` section key, which is also the name
@@ -61,6 +69,58 @@ pub struct EcosystemInput {
     /// What a closure written before the lock existed proves, when there is
     /// one.
     pub legacy: Option<LegacyEvidence>,
+    /// The local-toolchain reader of this ecosystem, when it has one
+    /// (`toolchain.path` for Rust). It is consulted before the catalog.
+    pub external: Option<ExternalToolchain>,
+    /// The helper lock ecosystems this ecosystem builds with
+    /// (`Tailor::helpers`): the only names its section may pin.
+    pub declared_helpers: Vec<String>,
+    /// The helper releases a section written now pins (`rust` for a Python
+    /// project's sdists), by helper lock ecosystem.
+    pub helper_pins: BTreeMap<String, String>,
+    /// The helper releases this ecosystem's builds used before sections
+    /// pinned them: what a section with no pin, or a selection seeded from a
+    /// pre-lock closure, gets, so neither moves when the catalog does.
+    pub legacy_helper_pins: BTreeMap<String, String>,
+}
+
+impl EcosystemInput {
+    /// A committed section's helper pins, refused when one names a helper
+    /// this ecosystem does not build with: nothing would read it, so the
+    /// line is an edit or another tog's, and honoring the rest silently
+    /// would hide that.
+    fn pinned_helpers(&self, section: &lock::EcoLock) -> io::Result<BTreeMap<String, String>> {
+        let ecosystem = self.lock_ecosystem.as_str();
+        for helper in section.helpers().keys() {
+            if !self.declared_helpers.contains(helper) {
+                let builds_with = if self.declared_helpers.is_empty() {
+                    format!("{ecosystem} builds with no helper toolchain")
+                } else {
+                    format!(
+                        "{ecosystem} builds with only {}",
+                        self.declared_helpers.join(", ")
+                    )
+                };
+                return Err(invalid(format!(
+                    "tog-toolchain.toml [toolchain.{ecosystem}.helpers] pins {helper:?}, \
+                     which is not a helper toolchain ({builds_with}); \
+                     run `tog update --toolchain {ecosystem}` to rewrite the section"
+                )));
+            }
+        }
+        Ok(section.helpers().clone())
+    }
+
+    /// The helper pins a section written now records: the legacy ones when
+    /// the selection was seeded from a pre-lock closure (that closure's
+    /// builds used them), today's otherwise.
+    fn pins_to_write(&self, seeded: bool) -> &BTreeMap<String, String> {
+        if seeded {
+            &self.legacy_helper_pins
+        } else {
+            &self.helper_pins
+        }
+    }
 }
 
 /// The project's resolved toolchains and everything publication needs.
@@ -104,14 +164,39 @@ fn rows_of<'a>(discovered: &'a [(String, Vec<InputRow>)], ecosystem: &str) -> &'
         .map_or(&[][..], |(_, rows)| rows.as_slice())
 }
 
+/// The bundle a new or updated lock records for `ecosystem`: the local
+/// toolchain the rows name, when the entry has a reader for one
+/// ([`EcosystemInput::external`]) and it finds one; otherwise the pre-lock
+/// closure's seed when there is one, and the catalog's selection for the
+/// rows when not.
+fn choose(
+    root: &ProjectRoot,
+    platform: Platform,
+    entry: &EcosystemInput,
+    rows: &[InputRow],
+    seed_from_legacy: bool,
+) -> io::Result<(Bundle, bool)> {
+    let ecosystem = entry.lock_ecosystem.as_str();
+    if let Some(external) = entry.external {
+        if let Some(bundle) = external(platform, root.path(), rows)? {
+            return Ok((bundle, false));
+        }
+    }
+    match (&entry.legacy, seed_from_legacy) {
+        (Some(evidence), true) => Ok((seed(&entry.catalog, evidence)?.clone(), true)),
+        _ => Ok((select_for(&entry.catalog, ecosystem, rows)?.clone(), false)),
+    }
+}
+
 /// One selection read from a committed section, checked against the host.
 fn from_section(
-    ecosystem: &str,
+    entry: &EcosystemInput,
     section: &lock::EcoLock,
     platform: Platform,
     lock_sha256: Option<String>,
     source: Source,
 ) -> io::Result<Selected> {
+    let ecosystem = entry.lock_ecosystem.as_str();
     let bundle = section.bundle()?;
     if !bundle.complete_for(platform) {
         return Err(invalid(format!(
@@ -122,6 +207,7 @@ fn from_section(
         )));
     }
     Ok(Selected {
+        helpers: entry.pinned_helpers(section)?,
         ecosystem: ecosystem.to_string(),
         bundle,
         lock_sha256,
@@ -471,16 +557,18 @@ pub fn resolve(
                 if let Some(section) = committed.as_ref().and_then(|l| l.ecosystem(ecosystem)) {
                     entries.insert(
                         ecosystem.to_string(),
-                        from_section(ecosystem, section, platform, None, Source::Lock)?,
+                        from_section(entry, section, platform, None, Source::Lock)?,
                     );
                 }
                 continue;
             }
-            let bundle = select_for(&entry.catalog, ecosystem, rows)?.clone();
+            let (bundle, _) = choose(root, platform, entry, rows, false)?;
             next.set_ecosystem(ecosystem, &bundle, rows)?;
+            next.set_helpers(ecosystem, entry.pins_to_write(false))?;
             entries.insert(
                 ecosystem.to_string(),
                 Selected {
+                    helpers: entry.pins_to_write(false).clone(),
                     ecosystem: ecosystem.to_string(),
                     bundle,
                     lock_sha256: None,
@@ -516,7 +604,7 @@ pub fn resolve(
             entries.insert(
                 ecosystem.to_string(),
                 from_section(
-                    ecosystem,
+                    entry,
                     section,
                     platform,
                     committed_sha.clone(),
@@ -542,16 +630,21 @@ pub fn resolve(
                 for entry in &inputs {
                     let ecosystem = entry.lock_ecosystem.as_str();
                     let rows = rows_of(&discovered, ecosystem);
-                    let (bundle, source) = match &entry.legacy {
-                        Some(evidence) => (seed(&entry.catalog, evidence)?.clone(), Source::Seeded),
-                        None => (
-                            select_for(&entry.catalog, ecosystem, rows)?.clone(),
-                            Source::Shipped,
-                        ),
+                    let (bundle, seeded) = choose(root, platform, entry, rows, true)?;
+                    let source = if seeded {
+                        Source::Seeded
+                    } else {
+                        Source::Shipped
                     };
                     entries.insert(
                         ecosystem.to_string(),
+                        // No section is written, so none is pinned: the
+                        // builds supply what such a section would pin (the
+                        // catalog's default, or the release a seeded
+                        // closure's builds used), and the id stays the
+                        // bundle's own, as it always was here.
                         Selected {
+                            helpers: BTreeMap::new(),
                             ecosystem: ecosystem.to_string(),
                             bundle,
                             lock_sha256: None,
@@ -565,14 +658,13 @@ pub fn resolve(
                 for entry in &inputs {
                     let ecosystem = entry.lock_ecosystem.as_str();
                     let rows = rows_of(&discovered, ecosystem);
-                    let bundle = match &entry.legacy {
-                        Some(evidence) => seed(&entry.catalog, evidence)?.clone(),
-                        None => select_for(&entry.catalog, ecosystem, rows)?.clone(),
-                    };
+                    let (bundle, seeded) = choose(root, platform, entry, rows, true)?;
                     next.set_ecosystem(ecosystem, &bundle, rows)?;
+                    next.set_helpers(ecosystem, entry.pins_to_write(seeded))?;
                     entries.insert(
                         ecosystem.to_string(),
                         Selected {
+                            helpers: entry.pins_to_write(seeded).clone(),
                             ecosystem: ecosystem.to_string(),
                             bundle,
                             lock_sha256: None,
@@ -707,6 +799,7 @@ fn conflict(existing: &[u8], toolchain: &ProjectToolchain) -> io::Error {
             .and_then(|section| section.bundle().ok())
             .map(|bundle| {
                 Selected {
+                    helpers: Default::default(),
                     ecosystem: ecosystem.clone(),
                     bundle,
                     lock_sha256: None,
@@ -948,6 +1041,132 @@ mod tests {
         assert_eq!(fresh.get("python").unwrap().source, Source::Lock);
     }
 
+    fn resolve_rust(root: &ProjectRoot, dir: &Path, mode: Mode) -> io::Result<ProjectToolchain> {
+        resolve(
+            root,
+            Platform::host().unwrap(),
+            inputs_for(dir, &["cargo"]),
+            mode,
+            false,
+        )
+    }
+
+    /// `targets` and `components` are lock rows: editing either stales the
+    /// lock, an update records it, and an equivalent spelling (reordered,
+    /// duplicated) is the same row. A file that asks for neither gives the
+    /// lock it always gave, and a malformed file is refused, never read as
+    /// one that asks for nothing.
+    #[test]
+    fn rust_targets_and_components_are_lock_rows() {
+        let _serialized = serialized();
+        let temp = TempDir::new();
+        let dir = temp.0.join("crate");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        let toolchain = |extra: &str| {
+            std::fs::write(
+                dir.join("rust-toolchain.toml"),
+                format!("[toolchain]\nchannel = \"1.96.1\"\n{extra}"),
+            )
+            .unwrap();
+        };
+        let root = ProjectRoot::open(&dir).unwrap();
+        toolchain("");
+        let mut created = resolve_rust(&root, &dir, Mode::Writable).unwrap();
+        drop(commit(&root, &mut created, &Mode::Writable).unwrap());
+        let plain = std::fs::read_to_string(dir.join(LOCK_PATH)).unwrap();
+        // Exactly the two channel rows a lock always recorded for Rust.
+        assert_eq!(plain.matches("[[toolchain.rust.inputs]]").count(), 2);
+        assert!(!plain.contains("toolchain.components"), "{plain}");
+        assert!(!plain.contains("toolchain.targets"), "{plain}");
+
+        toolchain("components = [\"rustfmt\", \"clippy\"]\n");
+        let error = resolve_rust(&root, &dir, Mode::Writable)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("is stale for rust"), "{error}");
+        assert!(
+            error.contains(
+                "rust-toolchain.toml toolchain.components: recorded absent, now clippy,rustfmt"
+            ),
+            "{error}"
+        );
+        let mode = Mode::Update {
+            only: Some("rust".into()),
+        };
+        let mut updated = resolve_rust(&root, &dir, mode.clone()).unwrap();
+        drop(commit(&root, &mut updated, &mode).unwrap());
+        let listed = std::fs::read_to_string(dir.join(LOCK_PATH)).unwrap();
+        assert!(
+            listed.contains("field = \"toolchain.components\"\nvalue = \"clippy,rustfmt\"\n"),
+            "{listed}"
+        );
+
+        // Reordering, duplicating, or reformatting the list is no edit.
+        toolchain("components = [\n  \"clippy\",\n  \"rustfmt\",\n  \"clippy\",\n]\n");
+        let honored = resolve_rust(&root, &dir, Mode::Writable).unwrap();
+        assert_eq!(honored.get("rust").unwrap().source, Source::Lock);
+
+        // A target is a row of its own; dropping the components is stale too.
+        toolchain(
+            "components = [\"clippy\", \"rustfmt\"]\ntargets = [\"wasm32-unknown-unknown\"]\n",
+        );
+        let error = resolve_rust(&root, &dir, Mode::Frozen)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("toolchain.targets: recorded absent, now wasm32-unknown-unknown"),
+            "{error}"
+        );
+        // A profile is a row too.
+        toolchain("components = [\"clippy\", \"rustfmt\"]\nprofile = \"default\"\n");
+        let error = resolve_rust(&root, &dir, Mode::Writable)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("toolchain.profile: recorded absent, now default"),
+            "{error}"
+        );
+        toolchain("");
+        let error = resolve_rust(&root, &dir, Mode::Writable)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("toolchain.components: recorded clippy,rustfmt, now absent"),
+            "{error}"
+        );
+
+        // A malformed file is refused on every path, update included.
+        for (bad, words) in [
+            (
+                "components = \"clippy\"\n",
+                "rust-toolchain.toml: toolchain.components must be an array",
+            ),
+            (
+                "profile = \"everything\"\n",
+                "rust-toolchain.toml: toolchain.profile must be one of minimal, default, complete",
+            ),
+        ] {
+            std::fs::write(
+                dir.join("rust-toolchain.toml"),
+                format!("[toolchain]\n{bad}"),
+            )
+            .unwrap();
+            for mode in [Mode::Writable, Mode::ReadOnly, mode.clone()] {
+                let error = resolve_rust(&root, &dir, mode).unwrap_err().to_string();
+                assert!(error.contains(words), "{error}");
+            }
+        }
+        assert_eq!(
+            std::fs::read_to_string(dir.join(LOCK_PATH)).unwrap(),
+            listed
+        );
+    }
+
     #[test]
     fn frozen_refuses_a_missing_lock_and_so_does_strict() {
         let _serialized = serialized();
@@ -1131,6 +1350,10 @@ mod tests {
                 lock_ecosystem: "python".into(),
                 catalog: tailor("python").toolchain_catalog().unwrap(),
                 legacy: None,
+                external: None,
+                helper_pins: BTreeMap::new(),
+                legacy_helper_pins: BTreeMap::new(),
+                declared_helpers: Vec::new(),
             }],
             Mode::Writable,
             false,
@@ -1150,6 +1373,12 @@ mod tests {
             seeded.get("python").unwrap().version("cpython").unwrap(),
             "3.11.16"
         );
+        // The pre-lock closure's sdists built on the Rust tog shipped then,
+        // and the seeded section pins that one.
+        assert_eq!(
+            seeded.get("python").unwrap().helpers["rust"],
+            crate::tailors::python::build::LEGACY_SDIST_RUST
+        );
         drop(commit(&root, &mut seeded, &Mode::Writable).unwrap());
         let text = std::fs::read_to_string(dir.join(LOCK_PATH)).unwrap();
         assert!(text.contains("version = \"3.11.16\""), "{text}");
@@ -1158,6 +1387,90 @@ mod tests {
         std::fs::remove_file(dir.join(LOCK_PATH)).unwrap();
         let read_only = resolve_python(&root, &dir, Mode::ReadOnly).unwrap();
         assert_eq!(read_only.get("python").unwrap().source, Source::Seeded);
+    }
+
+    /// A Python section pins the Rust its sdists build on when it is
+    /// written, and a section written before pins keeps the Rust those
+    /// builds used, so neither moves when the catalog's default does.
+    #[test]
+    fn the_python_section_pins_the_rust_its_sdists_build_on() {
+        let _serialized = serialized();
+        let temp = TempDir::new();
+        let dir = project(&temp);
+        let root = ProjectRoot::open(&dir).unwrap();
+        let default = crate::kernel::toolchain::shipped(
+            &crate::kernel::provider::rust::toolchain_catalog().unwrap(),
+        )
+        .unwrap()
+        .version("rustc")
+        .unwrap()
+        .to_string();
+        let legacy = crate::tailors::python::build::LEGACY_SDIST_RUST;
+        assert_ne!(default, legacy);
+        let mut created = resolve_python(&root, &dir, Mode::Writable).unwrap();
+        assert_eq!(created.get("python").unwrap().helpers["rust"], default);
+        drop(commit(&root, &mut created, &Mode::Writable).unwrap());
+        let text = std::fs::read_to_string(dir.join(LOCK_PATH)).unwrap();
+        let pin = format!("[toolchain.python.helpers]\nrust = \"{default}\"\n");
+        assert!(text.contains(&pin), "{text}");
+        for mode in [Mode::ReadOnly, Mode::Frozen, Mode::Writable] {
+            let honored = resolve_python(&root, &dir, mode).unwrap();
+            let python = honored.get("python").unwrap();
+            assert_eq!(python.source, Source::Lock);
+            assert_eq!(python.helpers["rust"], default);
+        }
+        // The lock as a tog before pins wrote it: no pin, and the bundle's
+        // own id.
+        let mut old = ToolchainLock::parse(text.as_bytes()).unwrap();
+        old.set_helpers("python", &BTreeMap::new()).unwrap();
+        let old = old.canonical_bytes();
+        assert_eq!(
+            String::from_utf8(old.clone()).unwrap(),
+            text.replace(&pin, "").replace(
+                created.get("python").unwrap().bundle_id().as_str(),
+                created.get("python").unwrap().bundle.bundle_id().as_str(),
+            )
+        );
+        std::fs::write(dir.join(LOCK_PATH), &old).unwrap();
+        for mode in [Mode::ReadOnly, Mode::Frozen, Mode::Writable] {
+            let honored = resolve_python(&root, &dir, mode).unwrap();
+            let python = honored.get("python").unwrap();
+            // It pins nothing, so its id is the bundle's own, as before
+            // pins; the sdist builds supply the legacy release.
+            assert!(python.helpers.is_empty());
+            assert_eq!(python.bundle_id(), python.bundle.bundle_id());
+            assert!(honored.pending.is_none(), "an old lock was rewritten");
+        }
+        // An update pins today's default.
+        let updated = resolve_python(&root, &dir, Mode::Update { only: None }).unwrap();
+        assert_eq!(updated.get("python").unwrap().helpers["rust"], default);
+        let written = updated.pending.as_ref().unwrap().canonical_bytes();
+        assert!(String::from_utf8(written).unwrap().contains(&pin));
+
+        // A pin for a helper Python does not build with is refused by
+        // every read, even under a consistent id; an update rewrites it.
+        let mut odd = ToolchainLock::parse(text.as_bytes()).unwrap();
+        odd.set_helpers(
+            "python",
+            &BTreeMap::from([("node".to_string(), "24.20.0".to_string())]),
+        )
+        .unwrap();
+        std::fs::write(dir.join(LOCK_PATH), odd.canonical_bytes()).unwrap();
+        for mode in [Mode::ReadOnly, Mode::Frozen, Mode::Writable] {
+            let error = resolve_python(&root, &dir, mode).unwrap_err().to_string();
+            assert!(
+                error.contains(
+                    "[toolchain.python.helpers] pins \"node\", which is not a helper \
+                     toolchain (python builds with only rust)"
+                ),
+                "{error}"
+            );
+        }
+        let repaired = resolve_python(&root, &dir, Mode::Update { only: None }).unwrap();
+        assert_eq!(
+            repaired.get("python").unwrap().helpers,
+            BTreeMap::from([("rust".to_string(), default.clone())])
+        );
     }
 
     #[test]

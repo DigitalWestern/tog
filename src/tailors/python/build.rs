@@ -457,6 +457,7 @@ pub(crate) fn plan_sdist_identity_input(
                 activity,
                 platform,
                 rust,
+                sdist_rust_default(selected),
                 &pkg.sha256,
                 &source,
                 &info,
@@ -577,15 +578,37 @@ fn generate_cargo_lock(
     })
 }
 
+/// The Rust an sdist with no toolchain file of its own built with before a
+/// project's lock pinned one: the newest release tog shipped then. A Python
+/// section with no `helpers.rust` pin keeps it, so its wheels keep their ids.
+pub(crate) const LEGACY_SDIST_RUST: &str = "1.96.1";
+
 struct RustPlanInputs {
     /// The Rust this build compiles with: the project's locked selection, or
     /// the shipped release the sdist's toolchain file resolves to.
     rust: Selected,
+    /// The components and cross targets the sdist's own toolchain file asks
+    /// for, assembled onto that Rust.
+    extras: crate::kernel::provider::rust::Extras,
     rust_version: String,
     rust_id: String,
     vendor_id: String,
     lock_text: String,
     generated_lock: bool,
+}
+
+/// The Rust an sdist with no channel of its own builds on under the Python
+/// selection `selected`: its section's pin; [`LEGACY_SDIST_RUST`] for a
+/// section written before pins, or a selection seeded from a closure
+/// written before the lock (those builds used it); `None` (the catalog's
+/// default, which is what a section written now pins) otherwise.
+fn sdist_rust_default(selected: &Selected) -> Option<&str> {
+    use crate::kernel::toolchain::Source;
+    match selected.helpers.get("rust") {
+        Some(pin) => Some(pin),
+        None if matches!(selected.source, Source::Lock | Source::Seeded) => Some(LEGACY_SDIST_RUST),
+        None => None,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -594,6 +617,7 @@ fn rust_plan_inputs(
     activity: &crate::kernel::activity::StoreActivity,
     platform: Platform,
     project_rust: Option<&Selected>,
+    sdist_default: Option<&str>,
     sdist_sha256: &str,
     source: &Path,
     info: &ArchiveInfo,
@@ -608,19 +632,27 @@ fn rust_plan_inputs(
     let manifest = source.join(manifest_rel);
     let rust = match project_rust {
         // The project's lock decides the compiler, as it does for a cargo
-        // project. The sdist's toolchain file still refuses a foreign target
-        // and records the components tog does not provide; its channel is
-        // not read, because the lock already answered it.
-        Some(selected) => {
-            crate::kernel::provider::rust::toolchain_file_components_within(platform, source)?;
-            selected.clone()
-        }
+        // project; the sdist's channel is not read, because the lock already
+        // answered it.
+        Some(selected) => selected.clone(),
+        // Otherwise the sdist's own channel, and failing one the Rust the
+        // Python section pins for sdists (`sdist_default`).
         None => crate::kernel::provider::rust::shipped_selection(
-            crate::kernel::provider::rust::resolve_toolchain_within(platform, source)?,
+            crate::kernel::provider::rust::resolve_toolchain_within_or(
+                platform,
+                source,
+                sdist_default,
+            )?,
         )?,
     };
+    // What the sdist's own toolchain file asks for beyond the compiler is
+    // provisioned like a project's: a component or target the pinned release
+    // does not publish refuses the build.
+    let extras = crate::kernel::provider::rust::toolchain_file_extras_within(source)?;
     let rust_version = rust.version("rustc")?.to_string();
-    let rust_id = crate::kernel::provider::rust::runtime_object_id(platform, &rust)?;
+    let rust_id = crate::kernel::provider::rust::toolchain_object_id(
+        store, activity, platform, &rust, &extras,
+    )?;
     let generated_path =
         store.cache_path("cargo-lock", &cargo_lock_cache_key(sdist_sha256, &rust_id));
     let (lock_text, generated_lock) = if let Some(path) = cargo_lock_for(source, &manifest) {
@@ -647,8 +679,9 @@ fn rust_plan_inputs(
     } else {
         // This is the one cold path that must invoke Cargo. Persist the lock
         // before any later wheel-cache lookup so warm rebuilds stay offline.
-        let rust_obj =
-            crate::kernel::provider::rust::realize_runtime(store, activity, platform, &rust)?;
+        let rust_obj = crate::kernel::provider::rust::realize_toolchain(
+            store, activity, platform, &rust, &extras,
+        )?;
         let plan_home = work.join("cargo-plan-home");
         let lock = generate_cargo_lock(activity, &rust_obj, &manifest, source, &plan_home)?;
         let text = fs::read_to_string(lock)?;
@@ -660,6 +693,7 @@ fn rust_plan_inputs(
     let vendor_id = crate::kernel::provider::crates::vendor_object_id(&cargo_plan)?;
     Ok(RustPlanInputs {
         rust,
+        extras,
         rust_version,
         rust_id,
         vendor_id,
@@ -682,8 +716,13 @@ fn prepare_rust(
             "Rust build trigger found, but the sdist has no Cargo.toml",
         )
     })?;
-    let rust_obj =
-        crate::kernel::provider::rust::realize_runtime(store, activity, platform, &inputs.rust)?;
+    let rust_obj = crate::kernel::provider::rust::realize_toolchain(
+        store,
+        activity,
+        platform,
+        &inputs.rust,
+        &inputs.extras,
+    )?;
     let cargo_plan =
         crate::kernel::provider::crates::plan_cargo(&inputs.lock_text, &inputs.rust_version)?;
     let vendor_obj = crate::kernel::provider::crates::realize_vendor(store, activity, &cargo_plan)?;
@@ -982,6 +1021,7 @@ pub(crate) fn build_sdist_wheel_at_depth(
             activity,
             platform,
             rust,
+            sdist_rust_default(selected),
             &pkg.sha256,
             source,
             &info,
@@ -1160,6 +1200,7 @@ pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
     let rust_inputs = RustPlanInputs {
         rust: crate::kernel::provider::rust::shipped_selection("1.96.1")
             .expect("shipped Rust release"),
+        extras: Default::default(),
         rust_version: "1.96.1".into(),
         rust_id: "rust-object".into(),
         vendor_id: "vendor-object".into(),
@@ -1334,14 +1375,72 @@ mod tests {
             crate::kernel::provider::rust::runtime_object_id(platform, selected).unwrap()
         };
 
-        let shipped_rust = crate::kernel::provider::rust::shipped_selection(
-            crate::kernel::provider::rust::RUST_VERSION,
+        // With no lock and no toolchain file, the sdist builds with the
+        // shipped default.
+        let shipped_rust = crate::kernel::toolchain::shipped(
+            &crate::kernel::provider::rust::toolchain_catalog().unwrap(),
         )
         .unwrap();
         let unlocked = plan(None);
         assert_eq!(unlocked.inputs["schema"], "sdist-build/4");
         assert_eq!(unlocked.inputs["rust"], rust_id(&shipped_rust));
         assert_eq!(plan(Some(&shipped_rust)).inputs, unlocked.inputs);
+
+        // Under a Python lock that locks no Rust, an sdist with no channel
+        // of its own builds on the Rust the Python section pins. A section
+        // from before the pin keeps 1.96.1, the Rust its wheels were built
+        // with, so their ids do not move with the catalog's default.
+        let pinned = |version: &str| {
+            let mut locked_python = python.clone();
+            locked_python
+                .helpers
+                .insert("rust".into(), version.to_string());
+            super::plan_sdist_identity_input(
+                &store,
+                activity,
+                platform,
+                &pkg,
+                &locked_python,
+                None,
+                None,
+            )
+            .expect("Rust sdist identity plan")
+            .identity
+        };
+        let legacy = pinned(super::LEGACY_SDIST_RUST);
+        assert_eq!(
+            legacy.inputs["rust"],
+            crate::kernel::provider::rust::rust_object_id(platform, "1.96.1").unwrap()
+        );
+        assert!(legacy.inputs["rust"].ends_with("-rust-1.96.1"));
+        assert_ne!(legacy.object_id(), unlocked.object_id());
+
+        // A lock written before pins pins nothing, and the wheel it builds
+        // keeps the id the tog before pins gave it, byte for byte. The
+        // literal is what main (df5650e) computes for this fixture, where
+        // every sdist built on 1.96.1, with the one store-dependent input
+        // (the build environment's id covers the store root) fixed.
+        let mut pinless = python.clone();
+        pinless.source = crate::kernel::toolchain::Source::Lock;
+        assert!(pinless.helpers.is_empty());
+        let pinless = super::plan_sdist_identity_input(
+            &store, activity, platform, &pkg, &pinless, None, None,
+        )
+        .expect("Rust sdist identity plan")
+        .identity;
+        assert_eq!(pinless.object_id(), legacy.object_id());
+        if platform == crate::kernel::platform::Platform::X86_64UnknownLinuxGnu {
+            let mut fixed = pinless.clone();
+            fixed
+                .inputs
+                .insert("build_env".into(), "store-independent".into());
+            assert_eq!(
+                fixed.object_id(),
+                "5582557b082e53e3a8d47b1ec286cc51867bd86c-locked-rust-1.0"
+            );
+        }
+        let today = pinned(shipped_rust.version("rustc").unwrap());
+        assert_eq!(today.inputs, unlocked.inputs);
 
         // A lock whose rustc row names other bytes than today's pin.
         let mut locked = shipped_rust.clone();

@@ -128,13 +128,24 @@ const ALLOWED: &[(&str, &str, &str)] = &[
         "commands::deps::validate_spec",
         "argv validation",
     ),
+    // Legacy seeding asks a tailor what its pre-lock closure proves; the
+    // command layer passes that tailor in, and the trait is the only thing
+    // named. Resolution itself never looks a tailor up.
+    (
+        "comforter/toolchain.rs",
+        "tailors::Tailor",
+        "legacy seeding",
+    ),
 ];
 
+/// Whether `path`, named in `relative`, is one of the listed exceptions.
+/// The match is exact: `tailors::Tailor` allows the trait and nothing that
+/// merely starts with its name (`tailors::TailorRegistry`, `tailors::Tailor::x`).
 fn allowed(relative: &str, path: &[String]) -> bool {
     let joined = path.join("::");
     ALLOWED
         .iter()
-        .any(|(file, prefix, _)| relative == *file && joined.starts_with(prefix))
+        .any(|(file, exact, _)| relative == *file && joined == *exact)
 }
 
 #[test]
@@ -155,7 +166,7 @@ fn layers_point_one_way() {
                     target.as_str(),
                     "tailors" | "comforter" | "commands" | "cli"
                 ),
-                "comforter" => matches!(target.as_str(), "commands" | "cli"),
+                "comforter" => matches!(target.as_str(), "tailors" | "commands" | "cli"),
                 "tailors" => {
                     matches!(target.as_str(), "commands" | "cli")
                         || (target == "tailors"

@@ -196,6 +196,7 @@ pub fn shipped_selection(version: &str) -> io::Result<Selected> {
         },
     );
     Ok(Selected {
+        helpers: Default::default(),
         ecosystem: "python".into(),
         bundle: catalog.select(&request)?.clone(),
         lock_sha256: None,

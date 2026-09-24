@@ -220,7 +220,30 @@ declarative toolchain source that disagrees with what the lock recorded —
 `tog update --toolchain`. So does a lock with no section for an ecosystem
 the project just gained: that is stale, not absent. Comparison is by the
 re-derived value, never by the file's digest alone, so a `tog add` that
-rewrites a multi-purpose manifest leaves the lock fresh.
+rewrites a multi-purpose manifest leaves the lock fresh. The `targets`,
+`components` and `profile` of `rust-toolchain(.toml)` are rows too (list
+order and duplicates do not count), and a toolchain file that does not
+parse is always stale. A sync provisions them from the release's pinned
+channel manifest, and refuses by name a component or target the release
+does not publish for this host. A profile installs what rustup's does, and
+fails naming every member this host's toolchain lists that the release did
+not build; with none, the toolchain is rustc, cargo and the host's
+standard library. A table with no channel gets the catalog's default
+release, and the lock records it. `path = "<dir>"` names a local toolchain
+directory instead: the lock records its `rustc -vV` and `cargo -V` lines
+and a hash of the whole tree on a row marked `source = "path"`, each sync
+imports it after checking the tree still hashes the same (a changed tree
+refuses and names `tog update --toolchain rust`), and each use records the
+`external-toolchain` exception. A path beside a channel, components,
+targets or a profile is refused, as rustup refuses it.
+
+A Python section also pins the Rust that sdists with a Rust extension
+build on when neither the project (no `rust` section) nor the sdist (no
+channel of its own, or `stable`) names one: `[toolchain.python.helpers]
+rust = "<version>"`, the catalog's default when the section was written.
+A section from before that pin keeps Rust 1.96.1, so an existing lock's
+wheels do not change; `tog update --toolchain python` pins today's
+default.
 
 `--frozen` validates the committed lock instead of creating one and refuses
 a missing or stale one.
@@ -545,7 +568,11 @@ algorithm; find out who changed it, then regenerate under a trusted key),
 line names the key and the scopes that exclude it), `outdated` (no
 signature, or a record from before inputs, platform, or the exception
 record were written; run `tog` once under a trusted key, then
-commit), `stale` (the same inputs-changed / projection-missing /
+commit. A record carrying an exception kind tog has retired is outdated
+too, with the reason and the command that rewrites it (`run 'tog fmt'`
+for a `rustfmt` record, `run 'tog sync'` for the others): a closure recording
+`toolchain-component-unavailable` says `closure predates component
+provisioning`), `stale` (the same inputs-changed / projection-missing /
 other-platform checks `status` makes, made per closure file from that
 file's own record), `denied` (each denied exception's kind, subject, and
 detail), `unknown` (an exception kind this binary cannot judge), or `clean`
@@ -555,10 +582,14 @@ exception is judged, and the line says `(not evaluated)` rather than
 claiming anything about its contents. A detected ecosystem with no
 `.tog/closures/<ecosystem>.json` is listed as `missing` and fails the
 report; the optional `rustfmt` record is not a substitute for `cargo.json`.
-Only `clean` with nothing missing passes. The `rustfmt` closure
-`tog fmt` writes projects nothing, so its inputs are the rustfmt object
-it ran, the directory the toolchain file was looked up from, and the
-components that file asked for that tog does not provide. It is `stale`
+Only `clean` with nothing missing passes. The `rustfmt` closure is
+written at the Cargo workspace root, and `tog fmt` takes its toolchain
+from the lock there, the lock `status` and `audit` judge it by, so running
+it from a member directory writes the same record as running it at the
+root. It projects nothing, so its inputs are the rustfmt object
+it ran and the directory the toolchain file was looked up from (a record
+from an older tog may also carry `unavailable_components`: empty is still
+current, a non-empty list is `stale`). It is `stale`
 when any of those, or the Rust object and version beside them, is not what
 this binary would record for the same run now (including a toolchain with
 no pinned rustfmt), and `outdated` when it predates recording inputs;

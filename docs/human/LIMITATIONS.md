@@ -12,9 +12,9 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
 
 ## Kernel-wide
 
-- **`tog fmt` is Rust-only**; other ecosystems fail clearly (pinned rustfmt 1.96.1, no
-  `Cargo.lock`; `status` ignores the rustfmt closure; a sync rustfmt request still records
-  `toolchain-component-unavailable` while `fmt` realizes it on demand).
+- **`tog fmt` is Rust-only**; other ecosystems fail clearly (the locked Rust release's
+  rustfmt, or a local toolchain's own, no
+  `Cargo.lock`; `status` ignores the rustfmt closure).
 - **`tog audit` judges signed records only.** A pass proves that every closure file in
   the working tree carries a valid signature from a key the machine policy trusts, that
   every detected ecosystem has its primary closure, that each record is current for the
@@ -199,9 +199,35 @@ Selection covers every patch of each maintained CPython minor that python-build-
 
 - **Pinned Git dependencies work for standalone crates**; workspace-inherited manifests and
   escaping symlinks fail closed, and workspace metadata is not rewritten into vendor
-  manifests. **Fail-closed rows**: alternative registries; beta/nightly/custom toolchains and
-  non-arm64 targets. Loud.
-- **Extra rust-toolchain components** are permissive with `toolchain-component-unavailable`.
+  manifests. **Fail-closed rows**: alternative registries; beta/nightly channels. Loud.
+  Cross `targets` get their standard library from the release's signed channel manifest,
+  but tog provides no linker or C sysroot for them, so a crate that links for another
+  platform still needs one on the machine. A custom toolchain works as a local directory
+  (`path =` in rust-toolchain.toml), below.
+- **A local toolchain (`[toolchain] path`) is trusted by content, not by origin.** The lock
+  records its `rustc -vV`/`cargo -V` lines and a hash of the whole tree, so it proves the
+  tree did not change, not who built it; every use records `external-toolchain`, which the
+  company template denies. Locking runs the tree's own `bin/rustc` and `bin/cargo` for their
+  versions (in the build sandbox, so it needs bubblewrap on Linux). The tree is re-hashed on every sync, build and
+  fmt: the walk and link checks run in full, but a file whose device, inode, size and times
+  are unchanged is not read again (its sum is cached in the store), so only the first
+  hash of a full toolchain costs seconds. That key is the file's device, inode, size,
+  mtime and ctime (seconds and nanoseconds), so a write that leaves all of them as they
+  were (an NFS mount with coarse or cached attributes, or a write through a shared `mmap`
+  that never updates the times) is not seen until the import's copy, hashed from the
+  bytes, disagrees. That refusal re-reads the whole tree and rewrites the cache. Locking
+  (`tog update --toolchain rust`) always reads every file. The lock row names
+  an absolute path on one machine and one host platform, so a checkout elsewhere needs
+  `tog update --toolchain rust`. As in rustup, a path cannot be combined with a channel,
+  components, targets or a profile. A symlink in the tree is resolved against the tree
+  itself, through any links it passes, and a tree with one that leads outside is refused.
+- **No `profile` in rust-toolchain means rustc, cargo and the host std** (rustup's
+  `minimal`), not rustup's configured default; ask for `profile = "default"` to get
+  clippy, rustfmt and the docs. **No channel means the catalog's default release**
+  (rustup's would be its configured default toolchain).
+- **`profile = "complete"` fails on releases that did not build all of it** (1.96.1 lists
+  `miri` and `rustc-codegen-cranelift` for Linux and macOS and marks both unavailable), as
+  rustup's does; name the components instead.
   **`tog build` covers `build` only** — no sandboxed test/clippy/doc; those run via
   `tog run cargo ...` offline but unsandboxed. target/ is unmanaged scratch (no shared
   build cache). **`cargo install` through the wrapper is unmanaged** (lands in

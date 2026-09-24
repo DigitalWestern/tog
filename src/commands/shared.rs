@@ -47,9 +47,10 @@ pub(crate) fn projected_env(
 }
 
 /// What toolchain resolution needs to know about each detected ecosystem:
-/// its shipped catalog, and what a closure written before the lock existed
+/// its shipped catalog, what a closure written before the lock existed
 /// proves (`comforter::toolchain::legacy_evidence`), checked against the
-/// active store's objects.
+/// active store's objects, its local-toolchain reader, and the helper
+/// releases its lock section pins.
 pub(crate) fn ecosystem_inputs(
     dir: &Path,
     present: &[&dyn Tailor],
@@ -79,6 +80,10 @@ pub(crate) fn ecosystem_inputs(
             lock_ecosystem: tailor.lock_ecosystem().to_string(),
             catalog: tailor.toolchain_catalog()?,
             legacy,
+            external: tailor.external_toolchain(),
+            helper_pins: tailor.helper_pins()?,
+            legacy_helper_pins: tailor.legacy_helper_pins(),
+            declared_helpers: tailor.helpers().iter().map(|h| h.to_string()).collect(),
         });
     }
     Ok(out)

@@ -1,0 +1,953 @@
+# The shipped cargo toolchain catalog. Generated and verified by
+# `python3 tools/catalog.py cargo`: regenerate it, do not edit it by hand.
+# Rows are append-only; `default` is what a project with no pin gets.
+schema = 1
+ecosystem = "cargo"
+primary = ["rustc"]
+default = "rust-1.98.1"
+
+[[release]]
+key = "rust-1.98.1"
+components = [
+  { name = "rustc", version = "1.98.1" },
+  { name = "rust-std", version = "1.98.1" },
+  { name = "cargo", version = "1.98.1" },
+  { name = "rustfmt", version = "1.98.1" },
+  { name = "channel-manifest", version = "1.98.1" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "rustc", provider = "static.rust-lang.org", build = "1.98.1", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rustc-1.98.1-aarch64-apple-darwin.tar.xz", digest = "sha256:738e3f60114b20550fcf4f8a57c9cea0544239f214709f45594ff3fde327f577" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rustc", provider = "static.rust-lang.org", build = "1.98.1", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rustc-1.98.1-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:e974f036b28565f37c0f3bd92ddefa809bee16c04f9dcf07b9ed96e05aaaf7c4" },
+  { platform = "aarch64-apple-darwin", component = "rust-std", provider = "static.rust-lang.org", build = "1.98.1", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rust-std-1.98.1-aarch64-apple-darwin.tar.xz", digest = "sha256:2de831ef563ce772519a4d18ba2659f0f7428d497ef66dad24b5a35e8f8cd177" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rust-std", provider = "static.rust-lang.org", build = "1.98.1", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rust-std-1.98.1-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:fa3ff450172a16c026944030230c5069947af93c728d9179971d44e5e0cfb561" },
+  { platform = "aarch64-apple-darwin", component = "cargo", provider = "static.rust-lang.org", build = "1.98.1", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/cargo-1.98.1-aarch64-apple-darwin.tar.xz", digest = "sha256:de51d4fade4f31ad8ec405261cc96bedc000d905f98980027610d6e288dbe21b" },
+  { platform = "x86_64-unknown-linux-gnu", component = "cargo", provider = "static.rust-lang.org", build = "1.98.1", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/cargo-1.98.1-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:ea1de9f9e23107d97ee2b41a72c552f34064a593da503789218387aee59f3ba4" },
+  { platform = "aarch64-apple-darwin", component = "rustfmt", provider = "static.rust-lang.org", build = "1.98.1", recipe = "rustfmt/1", url = "https://static.rust-lang.org/dist/rustfmt-1.98.1-aarch64-apple-darwin.tar.xz", digest = "sha256:86aa28e2f23edb0045a85288c3f69998dd30294fd2d3f1480efa9485cf137bfd" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rustfmt", provider = "static.rust-lang.org", build = "1.98.1", recipe = "rustfmt/1", url = "https://static.rust-lang.org/dist/rustfmt-1.98.1-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:b29a1addcbf2aa8f5785075605700e63cbe131b08c8334b50c09cfca8bbc51dc" },
+  { platform = "aarch64-apple-darwin", component = "channel-manifest", provider = "static.rust-lang.org", build = "1.98.1", recipe = "rust-channel-manifest/1", url = "https://static.rust-lang.org/dist/channel-rust-1.98.1.toml", digest = "sha256:a7c8774a5fd8441c997d94c029776cbc5eb111e9d72ab5d256fa69866644347e" },
+  { platform = "x86_64-unknown-linux-gnu", component = "channel-manifest", provider = "static.rust-lang.org", build = "1.98.1", recipe = "rust-channel-manifest/1", url = "https://static.rust-lang.org/dist/channel-rust-1.98.1.toml", digest = "sha256:a7c8774a5fd8441c997d94c029776cbc5eb111e9d72ab5d256fa69866644347e" },
+]
+
+[[release]]
+key = "rust-1.98.0"
+components = [
+  { name = "rustc", version = "1.98.0" },
+  { name = "rust-std", version = "1.98.0" },
+  { name = "cargo", version = "1.98.0" },
+  { name = "rustfmt", version = "1.98.0" },
+  { name = "channel-manifest", version = "1.98.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "rustc", provider = "static.rust-lang.org", build = "1.98.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rustc-1.98.0-aarch64-apple-darwin.tar.xz", digest = "sha256:287edbc2e285b9c23ef7b085413b90cb8539909eda9c4b49f2a55ec0b52819d4" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rustc", provider = "static.rust-lang.org", build = "1.98.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rustc-1.98.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:0e37cb339f447fc44d6d781073bacacebfdc5612f2600e4c7e84c266f5f3aced" },
+  { platform = "aarch64-apple-darwin", component = "rust-std", provider = "static.rust-lang.org", build = "1.98.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rust-std-1.98.0-aarch64-apple-darwin.tar.xz", digest = "sha256:48c05269ed36fb5f0a8438065156891fe59fcb868d90cfed9b7209540d54b2ce" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rust-std", provider = "static.rust-lang.org", build = "1.98.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rust-std-1.98.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:f5022e6c95a5ad23cca2513dc8281200f585fa188de6370aa37b128a43f876a3" },
+  { platform = "aarch64-apple-darwin", component = "cargo", provider = "static.rust-lang.org", build = "1.98.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/cargo-1.98.0-aarch64-apple-darwin.tar.xz", digest = "sha256:2c2a8bbf3cba4353c0ca2cf1ba8280603f3ca82ceebb538fee4a1a987147f743" },
+  { platform = "x86_64-unknown-linux-gnu", component = "cargo", provider = "static.rust-lang.org", build = "1.98.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/cargo-1.98.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:2f512d170d3dd23e16ababcda32ee2e6d5172d861a7af1f504e0b1e270cafab9" },
+  { platform = "aarch64-apple-darwin", component = "rustfmt", provider = "static.rust-lang.org", build = "1.98.0", recipe = "rustfmt/1", url = "https://static.rust-lang.org/dist/rustfmt-1.98.0-aarch64-apple-darwin.tar.xz", digest = "sha256:cec1b153c2331a94a6c8344ac54887917d89a0eef935d9e827bb553713b2f9fa" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rustfmt", provider = "static.rust-lang.org", build = "1.98.0", recipe = "rustfmt/1", url = "https://static.rust-lang.org/dist/rustfmt-1.98.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:8922a03e68265a74a8040590e28b173fb5d9d49655bb6eacfd880fbd3bef0dc3" },
+  { platform = "aarch64-apple-darwin", component = "channel-manifest", provider = "static.rust-lang.org", build = "1.98.0", recipe = "rust-channel-manifest/1", url = "https://static.rust-lang.org/dist/channel-rust-1.98.0.toml", digest = "sha256:3f7d139b73bbbd0004ef6e58b430831c68cdad2b1f64ee2eb35d54c09199489a" },
+  { platform = "x86_64-unknown-linux-gnu", component = "channel-manifest", provider = "static.rust-lang.org", build = "1.98.0", recipe = "rust-channel-manifest/1", url = "https://static.rust-lang.org/dist/channel-rust-1.98.0.toml", digest = "sha256:3f7d139b73bbbd0004ef6e58b430831c68cdad2b1f64ee2eb35d54c09199489a" },
+]
+
+[[release]]
+key = "rust-1.97.1"
+components = [
+  { name = "rustc", version = "1.97.1" },
+  { name = "rust-std", version = "1.97.1" },
+  { name = "cargo", version = "1.97.1" },
+  { name = "rustfmt", version = "1.97.1" },
+  { name = "channel-manifest", version = "1.97.1" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "rustc", provider = "static.rust-lang.org", build = "1.97.1", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rustc-1.97.1-aarch64-apple-darwin.tar.xz", digest = "sha256:6076cad38ccabaa24325f26a74080a363a2633a9cd34c473a8977255d8a593cb" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rustc", provider = "static.rust-lang.org", build = "1.97.1", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rustc-1.97.1-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:9819d0a32d56bd339585319c80260e332779f5541fd66838ab7e016d6c814819" },
+  { platform = "aarch64-apple-darwin", component = "rust-std", provider = "static.rust-lang.org", build = "1.97.1", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rust-std-1.97.1-aarch64-apple-darwin.tar.xz", digest = "sha256:a4895f5c6995e83cab8687e46b14324592398049def71ce75ca308c981cf200d" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rust-std", provider = "static.rust-lang.org", build = "1.97.1", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rust-std-1.97.1-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:1c1e704ae80126b7de34f72ea2825f7fd01736dec20732faed47374b95282fba" },
+  { platform = "aarch64-apple-darwin", component = "cargo", provider = "static.rust-lang.org", build = "1.97.1", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/cargo-1.97.1-aarch64-apple-darwin.tar.xz", digest = "sha256:2d84a74e9558192a7de674aca6aa3ab7464bed2df97e0377156ddb7e09a0fd7a" },
+  { platform = "x86_64-unknown-linux-gnu", component = "cargo", provider = "static.rust-lang.org", build = "1.97.1", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/cargo-1.97.1-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:e1be5f5ff7f7f80ca506fb65770b759edbdc6d303781ed71c5de8ec8a8394779" },
+  { platform = "aarch64-apple-darwin", component = "rustfmt", provider = "static.rust-lang.org", build = "1.97.1", recipe = "rustfmt/1", url = "https://static.rust-lang.org/dist/rustfmt-1.97.1-aarch64-apple-darwin.tar.xz", digest = "sha256:358bbba5d0c7c37116ec15f67cfd3ac4da5d3c319cddb49389c26d3a0c65747a" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rustfmt", provider = "static.rust-lang.org", build = "1.97.1", recipe = "rustfmt/1", url = "https://static.rust-lang.org/dist/rustfmt-1.97.1-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:907fe97d6afbde1eca1b34c992c76e1406d422e2e6f137813d382acec7eb4d14" },
+  { platform = "aarch64-apple-darwin", component = "channel-manifest", provider = "static.rust-lang.org", build = "1.97.1", recipe = "rust-channel-manifest/1", url = "https://static.rust-lang.org/dist/channel-rust-1.97.1.toml", digest = "sha256:03569b1886ceb5c05276b50c8431ab111de944cd6140fe1fa7d821dd8e0f29cf" },
+  { platform = "x86_64-unknown-linux-gnu", component = "channel-manifest", provider = "static.rust-lang.org", build = "1.97.1", recipe = "rust-channel-manifest/1", url = "https://static.rust-lang.org/dist/channel-rust-1.97.1.toml", digest = "sha256:03569b1886ceb5c05276b50c8431ab111de944cd6140fe1fa7d821dd8e0f29cf" },
+]
+
+[[release]]
+key = "rust-1.97.0"
+components = [
+  { name = "rustc", version = "1.97.0" },
+  { name = "rust-std", version = "1.97.0" },
+  { name = "cargo", version = "1.97.0" },
+  { name = "rustfmt", version = "1.97.0" },
+  { name = "channel-manifest", version = "1.97.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "rustc", provider = "static.rust-lang.org", build = "1.97.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rustc-1.97.0-aarch64-apple-darwin.tar.xz", digest = "sha256:53e339f16382bb348566f648d01775797e038fdd6bfc6ddd8859c5a0eac09f68" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rustc", provider = "static.rust-lang.org", build = "1.97.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rustc-1.97.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:0a8787303c88b018af61b5c53a0c7024d516d175e623eeab35a35eab11dbcad0" },
+  { platform = "aarch64-apple-darwin", component = "rust-std", provider = "static.rust-lang.org", build = "1.97.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rust-std-1.97.0-aarch64-apple-darwin.tar.xz", digest = "sha256:df26b872f1bbcc5cd700eacb76231d6ba97aeda76ccd44f5b7de3db3757a38ee" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rust-std", provider = "static.rust-lang.org", build = "1.97.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rust-std-1.97.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:0c43618128a7a6b96b0b04c04cf7b28dd52fb0991a74c9615fbd1a684ff88712" },
+  { platform = "aarch64-apple-darwin", component = "cargo", provider = "static.rust-lang.org", build = "1.97.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/cargo-1.97.0-aarch64-apple-darwin.tar.xz", digest = "sha256:ca46bbef082ff751c06807b29872b59c05296c3acd4da1a98fac6367bb8bb2c5" },
+  { platform = "x86_64-unknown-linux-gnu", component = "cargo", provider = "static.rust-lang.org", build = "1.97.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/cargo-1.97.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:5c5bc94af02797b699bb7d4e85b356192eab9fb50376053a1e6edf509fcf7129" },
+  { platform = "aarch64-apple-darwin", component = "rustfmt", provider = "static.rust-lang.org", build = "1.97.0", recipe = "rustfmt/1", url = "https://static.rust-lang.org/dist/rustfmt-1.97.0-aarch64-apple-darwin.tar.xz", digest = "sha256:dccc375bf71383817a4e419f54dce701202e54cfedb37c96492b4d30ec1a439e" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rustfmt", provider = "static.rust-lang.org", build = "1.97.0", recipe = "rustfmt/1", url = "https://static.rust-lang.org/dist/rustfmt-1.97.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:0aaaebebf628af9151d99388db9074fa47c5e8b4b218c56119ef71f0084051f9" },
+  { platform = "aarch64-apple-darwin", component = "channel-manifest", provider = "static.rust-lang.org", build = "1.97.0", recipe = "rust-channel-manifest/1", url = "https://static.rust-lang.org/dist/channel-rust-1.97.0.toml", digest = "sha256:3804d2666f7c12ce64205baa69b6be52f910b45b158091013264beb7aa1de7f5" },
+  { platform = "x86_64-unknown-linux-gnu", component = "channel-manifest", provider = "static.rust-lang.org", build = "1.97.0", recipe = "rust-channel-manifest/1", url = "https://static.rust-lang.org/dist/channel-rust-1.97.0.toml", digest = "sha256:3804d2666f7c12ce64205baa69b6be52f910b45b158091013264beb7aa1de7f5" },
+]
+
+[[release]]
+key = "rust-1.96.1"
+components = [
+  { name = "rustc", version = "1.96.1" },
+  { name = "rust-std", version = "1.96.1" },
+  { name = "cargo", version = "1.96.1" },
+  { name = "rustfmt", version = "1.96.1" },
+  { name = "channel-manifest", version = "1.96.1" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "rustc", provider = "static.rust-lang.org", build = "1.96.1", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rustc-1.96.1-aarch64-apple-darwin.tar.xz", digest = "sha256:9b548f0665f85f3c7fd45165611e3dea79f048c69d163be193986310d204fc2c" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rustc", provider = "static.rust-lang.org", build = "1.96.1", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rustc-1.96.1-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:3545a0efad2355ecb0a3b9ac02efee96e27f1f9d24b7ce2fc3f279b2efb0d923" },
+  { platform = "aarch64-apple-darwin", component = "rust-std", provider = "static.rust-lang.org", build = "1.96.1", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rust-std-1.96.1-aarch64-apple-darwin.tar.xz", digest = "sha256:0d433a74c303febc915f8fa1091ef166445706461d0c96984ecb7303aa8208f5" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rust-std", provider = "static.rust-lang.org", build = "1.96.1", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rust-std-1.96.1-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:1bf4fde5048cca33e6ea00c7471281ed96d792f6923141e3db45072743a1afae" },
+  { platform = "aarch64-apple-darwin", component = "cargo", provider = "static.rust-lang.org", build = "1.96.1", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/cargo-1.96.1-aarch64-apple-darwin.tar.xz", digest = "sha256:2f43d75e9ad3febae5022c6f295cf93b74131cfdb1293a83e291f878ea9585a0" },
+  { platform = "x86_64-unknown-linux-gnu", component = "cargo", provider = "static.rust-lang.org", build = "1.96.1", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/cargo-1.96.1-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:ecc53a3c49fab5ab8c9301b3bbc8fb1dff9be6c65287add3f57a0fe8fddfea9e" },
+  { platform = "aarch64-apple-darwin", component = "rustfmt", provider = "static.rust-lang.org", build = "1.96.1", recipe = "rustfmt/1", url = "https://static.rust-lang.org/dist/rustfmt-1.96.1-aarch64-apple-darwin.tar.xz", digest = "sha256:ed0cc9d72c04e7c3c4b7a82ab7f1ce5e33132017d062d8f9be6adf6472e8f165" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rustfmt", provider = "static.rust-lang.org", build = "1.96.1", recipe = "rustfmt/1", url = "https://static.rust-lang.org/dist/rustfmt-1.96.1-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:dcee5627f709f387cdca416a1d2ae9e6c2581cd117cdb4fd097c56c196384662" },
+  { platform = "aarch64-apple-darwin", component = "channel-manifest", provider = "static.rust-lang.org", build = "1.96.1", recipe = "rust-channel-manifest/1", url = "https://static.rust-lang.org/dist/channel-rust-1.96.1.toml", digest = "sha256:87eb76c53073e72b766083bed5530820694253b832a762d8385bda5759f03975" },
+  { platform = "x86_64-unknown-linux-gnu", component = "channel-manifest", provider = "static.rust-lang.org", build = "1.96.1", recipe = "rust-channel-manifest/1", url = "https://static.rust-lang.org/dist/channel-rust-1.96.1.toml", digest = "sha256:87eb76c53073e72b766083bed5530820694253b832a762d8385bda5759f03975" },
+]
+
+[[release]]
+key = "rust-1.96.0"
+components = [
+  { name = "rustc", version = "1.96.0" },
+  { name = "rust-std", version = "1.96.0" },
+  { name = "cargo", version = "1.96.0" },
+  { name = "rustfmt", version = "1.96.0" },
+  { name = "channel-manifest", version = "1.96.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "rustc", provider = "static.rust-lang.org", build = "1.96.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rustc-1.96.0-aarch64-apple-darwin.tar.xz", digest = "sha256:1bb7b0bad1d2a42fc4173ede6dd460de2774fc1858a8369329d3e081e4e3426c" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rustc", provider = "static.rust-lang.org", build = "1.96.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rustc-1.96.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:7d7fa1d0cfb0fab71a956bb78f41107202c17f30ab56c45288e869a37fd9633d" },
+  { platform = "aarch64-apple-darwin", component = "rust-std", provider = "static.rust-lang.org", build = "1.96.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rust-std-1.96.0-aarch64-apple-darwin.tar.xz", digest = "sha256:439c4f71060b913e00db3a2e01340b2da0aa49978b843e36871f3250267c63f8" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rust-std", provider = "static.rust-lang.org", build = "1.96.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rust-std-1.96.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:c09c7c646248f14f473f5f7a029af15ee57c3a9f9bc93dfa72d9621938586b82" },
+  { platform = "aarch64-apple-darwin", component = "cargo", provider = "static.rust-lang.org", build = "1.96.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/cargo-1.96.0-aarch64-apple-darwin.tar.xz", digest = "sha256:c042858192b7b6d66fe59b3bbbbd0f6e3cac6e8a478dc4cc091cde9eddea3c8b" },
+  { platform = "x86_64-unknown-linux-gnu", component = "cargo", provider = "static.rust-lang.org", build = "1.96.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/cargo-1.96.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:dee75c3c8f9f600ad75bc0c93249e767d3047845a4dd668327ce43ab039ba266" },
+  { platform = "aarch64-apple-darwin", component = "rustfmt", provider = "static.rust-lang.org", build = "1.96.0", recipe = "rustfmt/1", url = "https://static.rust-lang.org/dist/rustfmt-1.96.0-aarch64-apple-darwin.tar.xz", digest = "sha256:54812707d3e5d5af99070b524d27c10b204d23e81ef397c80b3a9bf2ddc1d1d7" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rustfmt", provider = "static.rust-lang.org", build = "1.96.0", recipe = "rustfmt/1", url = "https://static.rust-lang.org/dist/rustfmt-1.96.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:9754ab68f1b8871f8a714548f66d8d44e91f6d904505882945b27e6e3eeb08e2" },
+  { platform = "aarch64-apple-darwin", component = "channel-manifest", provider = "static.rust-lang.org", build = "1.96.0", recipe = "rust-channel-manifest/1", url = "https://static.rust-lang.org/dist/channel-rust-1.96.0.toml", digest = "sha256:9af50610e1d82699f78a40b985c9277ae1a2c5a0bec86ae430cfe58832038285" },
+  { platform = "x86_64-unknown-linux-gnu", component = "channel-manifest", provider = "static.rust-lang.org", build = "1.96.0", recipe = "rust-channel-manifest/1", url = "https://static.rust-lang.org/dist/channel-rust-1.96.0.toml", digest = "sha256:9af50610e1d82699f78a40b985c9277ae1a2c5a0bec86ae430cfe58832038285" },
+]
+
+[[release]]
+key = "rust-1.95.0"
+components = [
+  { name = "rustc", version = "1.95.0" },
+  { name = "rust-std", version = "1.95.0" },
+  { name = "cargo", version = "1.95.0" },
+  { name = "rustfmt", version = "1.95.0" },
+  { name = "channel-manifest", version = "1.95.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "rustc", provider = "static.rust-lang.org", build = "1.95.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rustc-1.95.0-aarch64-apple-darwin.tar.xz", digest = "sha256:149e85a285b6eba58eb6c8bdf7deb1b93763890598e62cb635a712e3a8454f04" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rustc", provider = "static.rust-lang.org", build = "1.95.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rustc-1.95.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:8426a3d170a5879f5682f5fbdd024a1779b3951e7baba685af2d6dc32a6dfc15" },
+  { platform = "aarch64-apple-darwin", component = "rust-std", provider = "static.rust-lang.org", build = "1.95.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rust-std-1.95.0-aarch64-apple-darwin.tar.xz", digest = "sha256:9b30089b0f767cb91b2190ffec55a9beeb2a21a1405d8da0f664d7e09d08e6d8" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rust-std", provider = "static.rust-lang.org", build = "1.95.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rust-std-1.95.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:047ea7098803d3500fa1072e9cee5392697e21525559e4458128a2bf874aa382" },
+  { platform = "aarch64-apple-darwin", component = "cargo", provider = "static.rust-lang.org", build = "1.95.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/cargo-1.95.0-aarch64-apple-darwin.tar.xz", digest = "sha256:6c2ffed8e1ac9cf4dc9e80f282a869a6b237a153e7c55cca039d33de29d80aaf" },
+  { platform = "x86_64-unknown-linux-gnu", component = "cargo", provider = "static.rust-lang.org", build = "1.95.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/cargo-1.95.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:e74edd2cf7d0f1f1383b4f00eb90c843750bc489e2ccf7214e6476678a907425" },
+  { platform = "aarch64-apple-darwin", component = "rustfmt", provider = "static.rust-lang.org", build = "1.95.0", recipe = "rustfmt/1", url = "https://static.rust-lang.org/dist/rustfmt-1.95.0-aarch64-apple-darwin.tar.xz", digest = "sha256:c54af79adfdc790d27fc56e24407e370c80be5a89ad537eef9fbd45d3c3e28e8" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rustfmt", provider = "static.rust-lang.org", build = "1.95.0", recipe = "rustfmt/1", url = "https://static.rust-lang.org/dist/rustfmt-1.95.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:f1b2a7301513ffdd95ebf22ebbdd932e4d17fc806f748d93924740d0297b1396" },
+  { platform = "aarch64-apple-darwin", component = "channel-manifest", provider = "static.rust-lang.org", build = "1.95.0", recipe = "rust-channel-manifest/1", url = "https://static.rust-lang.org/dist/channel-rust-1.95.0.toml", digest = "sha256:821ff14e4c4a1cbe1e8915f35aff0a3fbbdf8d293ad48ab8f31e3b0440c581f9" },
+  { platform = "x86_64-unknown-linux-gnu", component = "channel-manifest", provider = "static.rust-lang.org", build = "1.95.0", recipe = "rust-channel-manifest/1", url = "https://static.rust-lang.org/dist/channel-rust-1.95.0.toml", digest = "sha256:821ff14e4c4a1cbe1e8915f35aff0a3fbbdf8d293ad48ab8f31e3b0440c581f9" },
+]
+
+[[release]]
+key = "rust-1.94.1"
+components = [
+  { name = "rustc", version = "1.94.1" },
+  { name = "rust-std", version = "1.94.1" },
+  { name = "cargo", version = "1.94.1" },
+  { name = "rustfmt", version = "1.94.1" },
+  { name = "channel-manifest", version = "1.94.1" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "rustc", provider = "static.rust-lang.org", build = "1.94.1", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rustc-1.94.1-aarch64-apple-darwin.tar.xz", digest = "sha256:3ae26df6f8c83a13e4190469d124de49970432b6f4517a0762d9bfffdff5b89b" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rustc", provider = "static.rust-lang.org", build = "1.94.1", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rustc-1.94.1-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:0a6b16ca476461c6238f48efcb74a7aa08a3983e61adf587f208ba48504d87e1" },
+  { platform = "aarch64-apple-darwin", component = "rust-std", provider = "static.rust-lang.org", build = "1.94.1", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rust-std-1.94.1-aarch64-apple-darwin.tar.xz", digest = "sha256:36574c7d66ea7978224aa4b672b61e6fd9bef55083b1d0caea06201e6dcfa3e1" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rust-std", provider = "static.rust-lang.org", build = "1.94.1", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rust-std-1.94.1-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:74109ee2c19098f1d7122087dd338a8f643203b3ce678c9d58169db733e17a03" },
+  { platform = "aarch64-apple-darwin", component = "cargo", provider = "static.rust-lang.org", build = "1.94.1", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/cargo-1.94.1-aarch64-apple-darwin.tar.xz", digest = "sha256:57f4e445695decbdff1e10abdebd6af2b129b9baac531e691862a2861b222d87" },
+  { platform = "x86_64-unknown-linux-gnu", component = "cargo", provider = "static.rust-lang.org", build = "1.94.1", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/cargo-1.94.1-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:03595624775204f80ff3a67986f69c8918e4cd311877ced635108888013a1e39" },
+  { platform = "aarch64-apple-darwin", component = "rustfmt", provider = "static.rust-lang.org", build = "1.94.1", recipe = "rustfmt/1", url = "https://static.rust-lang.org/dist/rustfmt-1.94.1-aarch64-apple-darwin.tar.xz", digest = "sha256:41f004a12cb8fb0aa8c6e479cc8735e1303a2f8a57b887c5f9de7fd22afa9173" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rustfmt", provider = "static.rust-lang.org", build = "1.94.1", recipe = "rustfmt/1", url = "https://static.rust-lang.org/dist/rustfmt-1.94.1-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:eaff8c808a1b82261e235002fc86ad217cba194525364cfd8d3a4de21c179d0f" },
+  { platform = "aarch64-apple-darwin", component = "channel-manifest", provider = "static.rust-lang.org", build = "1.94.1", recipe = "rust-channel-manifest/1", url = "https://static.rust-lang.org/dist/channel-rust-1.94.1.toml", digest = "sha256:cc2f04dfc883549d683c8cc2a9393f523a3dfbd931f5d5eaef00303cca64a60d" },
+  { platform = "x86_64-unknown-linux-gnu", component = "channel-manifest", provider = "static.rust-lang.org", build = "1.94.1", recipe = "rust-channel-manifest/1", url = "https://static.rust-lang.org/dist/channel-rust-1.94.1.toml", digest = "sha256:cc2f04dfc883549d683c8cc2a9393f523a3dfbd931f5d5eaef00303cca64a60d" },
+]
+
+[[release]]
+key = "rust-1.94.0"
+components = [
+  { name = "rustc", version = "1.94.0" },
+  { name = "rust-std", version = "1.94.0" },
+  { name = "cargo", version = "1.94.0" },
+  { name = "rustfmt", version = "1.94.0" },
+  { name = "channel-manifest", version = "1.94.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "rustc", provider = "static.rust-lang.org", build = "1.94.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rustc-1.94.0-aarch64-apple-darwin.tar.xz", digest = "sha256:6ba00a4f486af11826335cd7fe405592d959f50afb9489176fc1463cbe75dbf2" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rustc", provider = "static.rust-lang.org", build = "1.94.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rustc-1.94.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:31a0d3ac9383dfdeb4fce86eeed5ade3230131c635264c0eab7252dbf235f28e" },
+  { platform = "aarch64-apple-darwin", component = "rust-std", provider = "static.rust-lang.org", build = "1.94.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rust-std-1.94.0-aarch64-apple-darwin.tar.xz", digest = "sha256:d3293668128b0a7838ef2544ae341eadd4437460ca22098af723349885a10ba2" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rust-std", provider = "static.rust-lang.org", build = "1.94.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rust-std-1.94.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:dd33653107c36e040082050d9e547e64dac5b456ba74069430d838c00c189a05" },
+  { platform = "aarch64-apple-darwin", component = "cargo", provider = "static.rust-lang.org", build = "1.94.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/cargo-1.94.0-aarch64-apple-darwin.tar.xz", digest = "sha256:7497ab873993cf38b806548c85bf818ffd71d1c3cf77b5bb4c3d3f1769588a08" },
+  { platform = "x86_64-unknown-linux-gnu", component = "cargo", provider = "static.rust-lang.org", build = "1.94.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/cargo-1.94.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:8e17624f3de39e079845bfb25ed15a042f4b50ceca78e37c56c4b9b15949b9f7" },
+  { platform = "aarch64-apple-darwin", component = "rustfmt", provider = "static.rust-lang.org", build = "1.94.0", recipe = "rustfmt/1", url = "https://static.rust-lang.org/dist/rustfmt-1.94.0-aarch64-apple-darwin.tar.xz", digest = "sha256:0eb716d201dc0d6d24ef8207d3ef27611d9d15d2212e3b27aa11e97286ed02ac" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rustfmt", provider = "static.rust-lang.org", build = "1.94.0", recipe = "rustfmt/1", url = "https://static.rust-lang.org/dist/rustfmt-1.94.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:903e768f7626f78ed2d6cb82c1820b93bd339afec8575102e847fd3a379d33e5" },
+  { platform = "aarch64-apple-darwin", component = "channel-manifest", provider = "static.rust-lang.org", build = "1.94.0", recipe = "rust-channel-manifest/1", url = "https://static.rust-lang.org/dist/channel-rust-1.94.0.toml", digest = "sha256:aaa177def36e01d539bee6bde95295230b9ce378f81057845db8d0ebe97898ee" },
+  { platform = "x86_64-unknown-linux-gnu", component = "channel-manifest", provider = "static.rust-lang.org", build = "1.94.0", recipe = "rust-channel-manifest/1", url = "https://static.rust-lang.org/dist/channel-rust-1.94.0.toml", digest = "sha256:aaa177def36e01d539bee6bde95295230b9ce378f81057845db8d0ebe97898ee" },
+]
+
+[[release]]
+key = "rust-1.93.1"
+components = [
+  { name = "rustc", version = "1.93.1" },
+  { name = "rust-std", version = "1.93.1" },
+  { name = "cargo", version = "1.93.1" },
+  { name = "rustfmt", version = "1.93.1" },
+  { name = "channel-manifest", version = "1.93.1" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "rustc", provider = "static.rust-lang.org", build = "1.93.1", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rustc-1.93.1-aarch64-apple-darwin.tar.xz", digest = "sha256:d103a0ee04c121b30cf061c7ad1456daaebd7ff0a7ea5fdb64acf92d86cb25fd" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rustc", provider = "static.rust-lang.org", build = "1.93.1", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rustc-1.93.1-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:b9db2636f5a101c4cdaf46a26f8a0c8e4b5767ecdb02ae9c7ccc3ead577732bc" },
+  { platform = "aarch64-apple-darwin", component = "rust-std", provider = "static.rust-lang.org", build = "1.93.1", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rust-std-1.93.1-aarch64-apple-darwin.tar.xz", digest = "sha256:dd278e6eb993ddffb190442ca11ed1e118c1edaf04114910e3c8c652f6423f65" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rust-std", provider = "static.rust-lang.org", build = "1.93.1", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rust-std-1.93.1-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:82c4e41268f1741e4eb68796aeb6ca5042406ae858dd56144155c4ef8d87d8b6" },
+  { platform = "aarch64-apple-darwin", component = "cargo", provider = "static.rust-lang.org", build = "1.93.1", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/cargo-1.93.1-aarch64-apple-darwin.tar.xz", digest = "sha256:ecd50b093656061366c5af1184af10d883f21bddb482a9c2142fe860c0f671b2" },
+  { platform = "x86_64-unknown-linux-gnu", component = "cargo", provider = "static.rust-lang.org", build = "1.93.1", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/cargo-1.93.1-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:dbf12e8fd2a245a6bdd9f6c8df267cb2c25b0c56866ee91d8321337df0a00ddb" },
+  { platform = "aarch64-apple-darwin", component = "rustfmt", provider = "static.rust-lang.org", build = "1.93.1", recipe = "rustfmt/1", url = "https://static.rust-lang.org/dist/rustfmt-1.93.1-aarch64-apple-darwin.tar.xz", digest = "sha256:66c7b9cbbe54526729545866591e829f81c920feceba11c5b6670800ef8fd1e4" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rustfmt", provider = "static.rust-lang.org", build = "1.93.1", recipe = "rustfmt/1", url = "https://static.rust-lang.org/dist/rustfmt-1.93.1-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:2ad6fa7ad2b5e42e1ca39299039ea0110b8cb2a45847553e4cbab82181a351e0" },
+  { platform = "aarch64-apple-darwin", component = "channel-manifest", provider = "static.rust-lang.org", build = "1.93.1", recipe = "rust-channel-manifest/1", url = "https://static.rust-lang.org/dist/channel-rust-1.93.1.toml", digest = "sha256:4812a3c610bacc74eed12c89c312e540722dccccd867bd55096402da13b3a516" },
+  { platform = "x86_64-unknown-linux-gnu", component = "channel-manifest", provider = "static.rust-lang.org", build = "1.93.1", recipe = "rust-channel-manifest/1", url = "https://static.rust-lang.org/dist/channel-rust-1.93.1.toml", digest = "sha256:4812a3c610bacc74eed12c89c312e540722dccccd867bd55096402da13b3a516" },
+]
+
+[[release]]
+key = "rust-1.93.0"
+components = [
+  { name = "rustc", version = "1.93.0" },
+  { name = "rust-std", version = "1.93.0" },
+  { name = "cargo", version = "1.93.0" },
+  { name = "rustfmt", version = "1.93.0" },
+  { name = "channel-manifest", version = "1.93.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "rustc", provider = "static.rust-lang.org", build = "1.93.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rustc-1.93.0-aarch64-apple-darwin.tar.xz", digest = "sha256:092be03c02b44c405dab1232541c84f32b2d9e8295747568c3d531dd137221dc" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rustc", provider = "static.rust-lang.org", build = "1.93.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rustc-1.93.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:00c6e6740ea6a795e33568cd7514855d58408a1180cd820284a7bbf7c46af715" },
+  { platform = "aarch64-apple-darwin", component = "rust-std", provider = "static.rust-lang.org", build = "1.93.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rust-std-1.93.0-aarch64-apple-darwin.tar.xz", digest = "sha256:8603c63715349636ed85b4fe716c4e827a727918c840e54aff5b243cedadf19b" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rust-std", provider = "static.rust-lang.org", build = "1.93.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rust-std-1.93.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:a849a418d0f27e69573e41763c395e924a0b98c16fcdc55599c1c79c27c1c777" },
+  { platform = "aarch64-apple-darwin", component = "cargo", provider = "static.rust-lang.org", build = "1.93.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/cargo-1.93.0-aarch64-apple-darwin.tar.xz", digest = "sha256:6443909350322ad07f09bb5edfd9ff29268e6fe88c7d78bfba7a5e254248dc25" },
+  { platform = "x86_64-unknown-linux-gnu", component = "cargo", provider = "static.rust-lang.org", build = "1.93.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/cargo-1.93.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:c23de3ae709ff33eed5e4ae59d1f9bcd75fa4dbaa9fb92f7b06bfb534b8db880" },
+  { platform = "aarch64-apple-darwin", component = "rustfmt", provider = "static.rust-lang.org", build = "1.93.0", recipe = "rustfmt/1", url = "https://static.rust-lang.org/dist/rustfmt-1.93.0-aarch64-apple-darwin.tar.xz", digest = "sha256:0dd1faedf0768ef362f4aae4424b34e8266f2b9cf5e76ea4fcaf780220b363a0" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rustfmt", provider = "static.rust-lang.org", build = "1.93.0", recipe = "rustfmt/1", url = "https://static.rust-lang.org/dist/rustfmt-1.93.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:7f81f6c17d11a7fda5b4e1b111942fb3b23d30dcec767e13e340ebfb762a5e33" },
+  { platform = "aarch64-apple-darwin", component = "channel-manifest", provider = "static.rust-lang.org", build = "1.93.0", recipe = "rust-channel-manifest/1", url = "https://static.rust-lang.org/dist/channel-rust-1.93.0.toml", digest = "sha256:beb6ba4e41c84e9c11c80e6804a007497d0c8ba0810cd403fabc8f4a9c45b1f8" },
+  { platform = "x86_64-unknown-linux-gnu", component = "channel-manifest", provider = "static.rust-lang.org", build = "1.93.0", recipe = "rust-channel-manifest/1", url = "https://static.rust-lang.org/dist/channel-rust-1.93.0.toml", digest = "sha256:beb6ba4e41c84e9c11c80e6804a007497d0c8ba0810cd403fabc8f4a9c45b1f8" },
+]
+
+[[release]]
+key = "rust-1.92.0"
+components = [
+  { name = "rustc", version = "1.92.0" },
+  { name = "rust-std", version = "1.92.0" },
+  { name = "cargo", version = "1.92.0" },
+  { name = "rustfmt", version = "1.92.0" },
+  { name = "channel-manifest", version = "1.92.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "rustc", provider = "static.rust-lang.org", build = "1.92.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rustc-1.92.0-aarch64-apple-darwin.tar.xz", digest = "sha256:15dee753c9217dff4cf45d734b29dc13ce6017d8a55fe34eed75022b39a63ff0" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rustc", provider = "static.rust-lang.org", build = "1.92.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rustc-1.92.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:78b2dd9c6b1fcd2621fa81c611cf5e2d6950690775038b585c64f364422886e0" },
+  { platform = "aarch64-apple-darwin", component = "rust-std", provider = "static.rust-lang.org", build = "1.92.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rust-std-1.92.0-aarch64-apple-darwin.tar.xz", digest = "sha256:ea619984fcb8e24b05dbd568d599b8e10d904435ab458dfba6469e03e0fd69aa" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rust-std", provider = "static.rust-lang.org", build = "1.92.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rust-std-1.92.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:5f106805ed86ebf8df287039e53a45cf974391ef4d088c2760776b05b8e48b5d" },
+  { platform = "aarch64-apple-darwin", component = "cargo", provider = "static.rust-lang.org", build = "1.92.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/cargo-1.92.0-aarch64-apple-darwin.tar.xz", digest = "sha256:bce6e7def37240c5a63115828017a9fc0ebcb31e64115382f5943b62b71aa34a" },
+  { platform = "x86_64-unknown-linux-gnu", component = "cargo", provider = "static.rust-lang.org", build = "1.92.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/cargo-1.92.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:e5e12be2c7126a7036c8adf573078a28b92611f5767cc9bd0a6f7c83081df103" },
+  { platform = "aarch64-apple-darwin", component = "rustfmt", provider = "static.rust-lang.org", build = "1.92.0", recipe = "rustfmt/1", url = "https://static.rust-lang.org/dist/rustfmt-1.92.0-aarch64-apple-darwin.tar.xz", digest = "sha256:5d8ea865a7999dc9141603be8a9352745bf8440da051eb1c43f0fcaaf6845441" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rustfmt", provider = "static.rust-lang.org", build = "1.92.0", recipe = "rustfmt/1", url = "https://static.rust-lang.org/dist/rustfmt-1.92.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:38951ee55f21e9170236fc98c8ba373ae4338d863087c6b0a5fa8c4e797d52c4" },
+  { platform = "aarch64-apple-darwin", component = "channel-manifest", provider = "static.rust-lang.org", build = "1.92.0", recipe = "rust-channel-manifest/1", url = "https://static.rust-lang.org/dist/channel-rust-1.92.0.toml", digest = "sha256:b2a49624353173ecdacf59c158c00929300606e1963f6e4609fb483a508402d0" },
+  { platform = "x86_64-unknown-linux-gnu", component = "channel-manifest", provider = "static.rust-lang.org", build = "1.92.0", recipe = "rust-channel-manifest/1", url = "https://static.rust-lang.org/dist/channel-rust-1.92.0.toml", digest = "sha256:b2a49624353173ecdacf59c158c00929300606e1963f6e4609fb483a508402d0" },
+]
+
+[[release]]
+key = "rust-1.91.1"
+components = [
+  { name = "rustc", version = "1.91.1" },
+  { name = "rust-std", version = "1.91.1" },
+  { name = "cargo", version = "1.91.1" },
+  { name = "rustfmt", version = "1.91.1" },
+  { name = "channel-manifest", version = "1.91.1" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "rustc", provider = "static.rust-lang.org", build = "1.91.1", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rustc-1.91.1-aarch64-apple-darwin.tar.xz", digest = "sha256:327c9017195b4ad0465ab6b1f1036377415cc6dc3612301af6ed9e3414ff53c8" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rustc", provider = "static.rust-lang.org", build = "1.91.1", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rustc-1.91.1-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:4b4c596fc5268435c310a79c2e231a5a3567572c930ac0740ef9e147e83baf4e" },
+  { platform = "aarch64-apple-darwin", component = "rust-std", provider = "static.rust-lang.org", build = "1.91.1", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rust-std-1.91.1-aarch64-apple-darwin.tar.xz", digest = "sha256:edf0e5053da34759bdbc1abc47dab7d9882c8b4c68b5fdbeb103b6a5a0d23a58" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rust-std", provider = "static.rust-lang.org", build = "1.91.1", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rust-std-1.91.1-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:2023ed689529516d7bd5533738ca6d205b2561f8d51947dabeeb39dd51a024c9" },
+  { platform = "aarch64-apple-darwin", component = "cargo", provider = "static.rust-lang.org", build = "1.91.1", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/cargo-1.91.1-aarch64-apple-darwin.tar.xz", digest = "sha256:f6162fbbe0a514efcbd488cf78524fe5bfbc000b197922a8ff2b7f8440fa235a" },
+  { platform = "x86_64-unknown-linux-gnu", component = "cargo", provider = "static.rust-lang.org", build = "1.91.1", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/cargo-1.91.1-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:8d17d5a4734e684228adee4ea4a75da94eb7f71993804adf29f344709e65fe09" },
+  { platform = "aarch64-apple-darwin", component = "rustfmt", provider = "static.rust-lang.org", build = "1.91.1", recipe = "rustfmt/1", url = "https://static.rust-lang.org/dist/rustfmt-1.91.1-aarch64-apple-darwin.tar.xz", digest = "sha256:858396bf1f1ebfb16026e4b06572950180e3e4a63a70425b3f76663e67dba1b5" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rustfmt", provider = "static.rust-lang.org", build = "1.91.1", recipe = "rustfmt/1", url = "https://static.rust-lang.org/dist/rustfmt-1.91.1-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:4e1848cb39796f6927e9fc3bd2720299fb81349f4480cd68a5c3cf1b61649b53" },
+  { platform = "aarch64-apple-darwin", component = "channel-manifest", provider = "static.rust-lang.org", build = "1.91.1", recipe = "rust-channel-manifest/1", url = "https://static.rust-lang.org/dist/channel-rust-1.91.1.toml", digest = "sha256:483bb8b271168ee654e3be4f111beefa23b9d0c8b7f4a563a8278978dbe982e5" },
+  { platform = "x86_64-unknown-linux-gnu", component = "channel-manifest", provider = "static.rust-lang.org", build = "1.91.1", recipe = "rust-channel-manifest/1", url = "https://static.rust-lang.org/dist/channel-rust-1.91.1.toml", digest = "sha256:483bb8b271168ee654e3be4f111beefa23b9d0c8b7f4a563a8278978dbe982e5" },
+]
+
+[[release]]
+key = "rust-1.91.0"
+components = [
+  { name = "rustc", version = "1.91.0" },
+  { name = "rust-std", version = "1.91.0" },
+  { name = "cargo", version = "1.91.0" },
+  { name = "rustfmt", version = "1.91.0" },
+  { name = "channel-manifest", version = "1.91.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "rustc", provider = "static.rust-lang.org", build = "1.91.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rustc-1.91.0-aarch64-apple-darwin.tar.xz", digest = "sha256:a68e3ada151e6eee10374529161d35dc26e8a185bddb14eabe6133f37144e02f" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rustc", provider = "static.rust-lang.org", build = "1.91.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rustc-1.91.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:a7169e8cb6174af2f45717703370363d8de82ce55f6ccba185893045b9370874" },
+  { platform = "aarch64-apple-darwin", component = "rust-std", provider = "static.rust-lang.org", build = "1.91.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rust-std-1.91.0-aarch64-apple-darwin.tar.xz", digest = "sha256:d2e1cbce8dda7a9f16df1393d003f6eb145b3b152a883a8791db326ebc03b549" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rust-std", provider = "static.rust-lang.org", build = "1.91.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rust-std-1.91.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:89e6520b16c12b43526440298d2da0dcb70747c5cc2d0b8e47d39b5da9aeef49" },
+  { platform = "aarch64-apple-darwin", component = "cargo", provider = "static.rust-lang.org", build = "1.91.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/cargo-1.91.0-aarch64-apple-darwin.tar.xz", digest = "sha256:2f50ee5fe07c2a8df9f67726aad0fd30d343ba52485f76d57c4d0ca1113b2343" },
+  { platform = "x86_64-unknown-linux-gnu", component = "cargo", provider = "static.rust-lang.org", build = "1.91.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/cargo-1.91.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:7103c03fb8abe85b23307005a9dfe4f01c826a89945d84b96fa2d03fd4d2d138" },
+  { platform = "aarch64-apple-darwin", component = "rustfmt", provider = "static.rust-lang.org", build = "1.91.0", recipe = "rustfmt/1", url = "https://static.rust-lang.org/dist/rustfmt-1.91.0-aarch64-apple-darwin.tar.xz", digest = "sha256:560c35084d8bcd70a05b0b63aaa7152c7d6afd0ce11cbf6d039f84f06c1fd9a4" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rustfmt", provider = "static.rust-lang.org", build = "1.91.0", recipe = "rustfmt/1", url = "https://static.rust-lang.org/dist/rustfmt-1.91.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:7e3ff426d5e46e969e9955f0acce292bd5ef0ff46b34b23c33bc4adffab774f5" },
+  { platform = "aarch64-apple-darwin", component = "channel-manifest", provider = "static.rust-lang.org", build = "1.91.0", recipe = "rust-channel-manifest/1", url = "https://static.rust-lang.org/dist/channel-rust-1.91.0.toml", digest = "sha256:d9e59cdf15532aa839c0a4871b0b755e833f914042eb2dcc59f2a0ef8667f9f6" },
+  { platform = "x86_64-unknown-linux-gnu", component = "channel-manifest", provider = "static.rust-lang.org", build = "1.91.0", recipe = "rust-channel-manifest/1", url = "https://static.rust-lang.org/dist/channel-rust-1.91.0.toml", digest = "sha256:d9e59cdf15532aa839c0a4871b0b755e833f914042eb2dcc59f2a0ef8667f9f6" },
+]
+
+[[release]]
+key = "rust-1.90.0"
+components = [
+  { name = "rustc", version = "1.90.0" },
+  { name = "rust-std", version = "1.90.0" },
+  { name = "cargo", version = "1.90.0" },
+  { name = "rustfmt", version = "1.90.0" },
+  { name = "channel-manifest", version = "1.90.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "rustc", provider = "static.rust-lang.org", build = "1.90.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rustc-1.90.0-aarch64-apple-darwin.tar.xz", digest = "sha256:89551c0ba1cc6d0312aebc4a6cafe4497223217ea8e87c81f6afbe127dfaeeb6" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rustc", provider = "static.rust-lang.org", build = "1.90.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rustc-1.90.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:48c2a42de9e92fcae8c24568f5fe40d5734696a6f80e83cc6d46eef1a78f13c9" },
+  { platform = "aarch64-apple-darwin", component = "rust-std", provider = "static.rust-lang.org", build = "1.90.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rust-std-1.90.0-aarch64-apple-darwin.tar.xz", digest = "sha256:c36777aec17d617f85f94b7cb87bdd4270eeca30ef38c6f686809d163c881609" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rust-std", provider = "static.rust-lang.org", build = "1.90.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rust-std-1.90.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:663f4ab7945b392d5e5294dec1b050a66820a20e86f084ec37eeb0f2f7ff5569" },
+  { platform = "aarch64-apple-darwin", component = "cargo", provider = "static.rust-lang.org", build = "1.90.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/cargo-1.90.0-aarch64-apple-darwin.tar.xz", digest = "sha256:17a4410a27bf7dad4765f3809265c225f25f8b009da3d4b76cd0927acdae04b5" },
+  { platform = "x86_64-unknown-linux-gnu", component = "cargo", provider = "static.rust-lang.org", build = "1.90.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/cargo-1.90.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:9853db03d68578a30972e2755c89c66aec035fec641cf8f3a7117c81eec2578d" },
+  { platform = "aarch64-apple-darwin", component = "rustfmt", provider = "static.rust-lang.org", build = "1.90.0", recipe = "rustfmt/1", url = "https://static.rust-lang.org/dist/rustfmt-1.90.0-aarch64-apple-darwin.tar.xz", digest = "sha256:ab2c6bdac9d3742de4a52c42aea132709b4f0bf66d4f14479f27b18543c255be" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rustfmt", provider = "static.rust-lang.org", build = "1.90.0", recipe = "rustfmt/1", url = "https://static.rust-lang.org/dist/rustfmt-1.90.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:7f4d38b9d782e55832bf17969ef35477703c60781545bb098eb127cc8172d1c6" },
+  { platform = "aarch64-apple-darwin", component = "channel-manifest", provider = "static.rust-lang.org", build = "1.90.0", recipe = "rust-channel-manifest/1", url = "https://static.rust-lang.org/dist/channel-rust-1.90.0.toml", digest = "sha256:489c19f20d331765ab2835661eb546de90f6446a107a8db83045e7371e45cae2" },
+  { platform = "x86_64-unknown-linux-gnu", component = "channel-manifest", provider = "static.rust-lang.org", build = "1.90.0", recipe = "rust-channel-manifest/1", url = "https://static.rust-lang.org/dist/channel-rust-1.90.0.toml", digest = "sha256:489c19f20d331765ab2835661eb546de90f6446a107a8db83045e7371e45cae2" },
+]
+
+[[release]]
+key = "rust-1.89.0"
+components = [
+  { name = "rustc", version = "1.89.0" },
+  { name = "rust-std", version = "1.89.0" },
+  { name = "cargo", version = "1.89.0" },
+  { name = "rustfmt", version = "1.89.0" },
+  { name = "channel-manifest", version = "1.89.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "rustc", provider = "static.rust-lang.org", build = "1.89.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rustc-1.89.0-aarch64-apple-darwin.tar.xz", digest = "sha256:6d2cf6164bef00ff3d2c37ca0a0658ffb7c9c3178882a72d78e35abeba888860" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rustc", provider = "static.rust-lang.org", build = "1.89.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rustc-1.89.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:b42c254e1349df86bd40bc28fdf386172a1a46f2eeabe3c7a08a75cf1fb60e27" },
+  { platform = "aarch64-apple-darwin", component = "rust-std", provider = "static.rust-lang.org", build = "1.89.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rust-std-1.89.0-aarch64-apple-darwin.tar.xz", digest = "sha256:1f729f8ba21725618ab894f14cc38f01470f1d15ea76a81fac2da63291bed75c" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rust-std", provider = "static.rust-lang.org", build = "1.89.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rust-std-1.89.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:2719470dcd78b3f97d78b978c8f85a1a58d84ff11b62558294621c01bca34d49" },
+  { platform = "aarch64-apple-darwin", component = "cargo", provider = "static.rust-lang.org", build = "1.89.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/cargo-1.89.0-aarch64-apple-darwin.tar.xz", digest = "sha256:545517d16ac76789aa6ce801cbc3eeecc9acaf43f3ccb63148c3577f2bb4b8d3" },
+  { platform = "x86_64-unknown-linux-gnu", component = "cargo", provider = "static.rust-lang.org", build = "1.89.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/cargo-1.89.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:99fc10be2aeedf2c23a484f217bfa76458494495a0eee33e280d3616bb08282d" },
+  { platform = "aarch64-apple-darwin", component = "rustfmt", provider = "static.rust-lang.org", build = "1.89.0", recipe = "rustfmt/1", url = "https://static.rust-lang.org/dist/rustfmt-1.89.0-aarch64-apple-darwin.tar.xz", digest = "sha256:5dc30672157eb0cac3d4ddc7c5ecd0bdf8afd24bef6eafd4c348087dc5f7c2a0" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rustfmt", provider = "static.rust-lang.org", build = "1.89.0", recipe = "rustfmt/1", url = "https://static.rust-lang.org/dist/rustfmt-1.89.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:540eb7adf43e37b22936f981c630b10c63915f64f3c227d981a8b592ece33430" },
+  { platform = "aarch64-apple-darwin", component = "channel-manifest", provider = "static.rust-lang.org", build = "1.89.0", recipe = "rust-channel-manifest/1", url = "https://static.rust-lang.org/dist/channel-rust-1.89.0.toml", digest = "sha256:fbd1662e100e7b305908ece23b441cb7534eadfa6336c5f173ff08d1cec174a1" },
+  { platform = "x86_64-unknown-linux-gnu", component = "channel-manifest", provider = "static.rust-lang.org", build = "1.89.0", recipe = "rust-channel-manifest/1", url = "https://static.rust-lang.org/dist/channel-rust-1.89.0.toml", digest = "sha256:fbd1662e100e7b305908ece23b441cb7534eadfa6336c5f173ff08d1cec174a1" },
+]
+
+[[release]]
+key = "rust-1.88.0"
+components = [
+  { name = "rustc", version = "1.88.0" },
+  { name = "rust-std", version = "1.88.0" },
+  { name = "cargo", version = "1.88.0" },
+  { name = "rustfmt", version = "1.88.0" },
+  { name = "channel-manifest", version = "1.88.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "rustc", provider = "static.rust-lang.org", build = "1.88.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rustc-1.88.0-aarch64-apple-darwin.tar.xz", digest = "sha256:249f4cacd3fac1f718af19373c73e9d3b9a595965972d8b1f3947c578110f520" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rustc", provider = "static.rust-lang.org", build = "1.88.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rustc-1.88.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:b049fd57fce274d10013e2cf0e05f215f68f6580865abc52178f66ae9bf43fd8" },
+  { platform = "aarch64-apple-darwin", component = "rust-std", provider = "static.rust-lang.org", build = "1.88.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rust-std-1.88.0-aarch64-apple-darwin.tar.xz", digest = "sha256:532be07511af557cb67f33bfc77044a787363ab281b963752542bc837ce90e96" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rust-std", provider = "static.rust-lang.org", build = "1.88.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rust-std-1.88.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:36d7eacf46bd5199cb433e49a9ed9c9b380d82f8a0ebc05e89b43b51c070c955" },
+  { platform = "aarch64-apple-darwin", component = "cargo", provider = "static.rust-lang.org", build = "1.88.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/cargo-1.88.0-aarch64-apple-darwin.tar.xz", digest = "sha256:71c08c8fab9b7a9cd13b6119886d50ce48efa8261d08e1fd328ed3ee1c84e2e0" },
+  { platform = "x86_64-unknown-linux-gnu", component = "cargo", provider = "static.rust-lang.org", build = "1.88.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/cargo-1.88.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:856962610ee821648cee32e3d6abac667af7bb7ea6ec6f3d184cc31e66044f6b" },
+  { platform = "aarch64-apple-darwin", component = "rustfmt", provider = "static.rust-lang.org", build = "1.88.0", recipe = "rustfmt/1", url = "https://static.rust-lang.org/dist/rustfmt-1.88.0-aarch64-apple-darwin.tar.xz", digest = "sha256:bc904434ecdd6587ef8eea351e626216c84e59d7ecc95c9e4416084e4dd82e86" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rustfmt", provider = "static.rust-lang.org", build = "1.88.0", recipe = "rustfmt/1", url = "https://static.rust-lang.org/dist/rustfmt-1.88.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:55f4c150a865cae19cfa5f5f2b5eec84ed98dc3a1c1c406d4323c63d896c3f1d" },
+  { platform = "aarch64-apple-darwin", component = "channel-manifest", provider = "static.rust-lang.org", build = "1.88.0", recipe = "rust-channel-manifest/1", url = "https://static.rust-lang.org/dist/channel-rust-1.88.0.toml", digest = "sha256:431b7c5c0b9a511d8e31d29b378bbc74124e8521f14beb92d3a5a5f7e7e55449" },
+  { platform = "x86_64-unknown-linux-gnu", component = "channel-manifest", provider = "static.rust-lang.org", build = "1.88.0", recipe = "rust-channel-manifest/1", url = "https://static.rust-lang.org/dist/channel-rust-1.88.0.toml", digest = "sha256:431b7c5c0b9a511d8e31d29b378bbc74124e8521f14beb92d3a5a5f7e7e55449" },
+]
+
+[[release]]
+key = "rust-1.87.0"
+components = [
+  { name = "rustc", version = "1.87.0" },
+  { name = "rust-std", version = "1.87.0" },
+  { name = "cargo", version = "1.87.0" },
+  { name = "rustfmt", version = "1.87.0" },
+  { name = "channel-manifest", version = "1.87.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "rustc", provider = "static.rust-lang.org", build = "1.87.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rustc-1.87.0-aarch64-apple-darwin.tar.xz", digest = "sha256:175800bc89cccd8f8ee2f3a4d07bdf98c163030fd5d3dc6d5b23cf4dd0a2a4c3" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rustc", provider = "static.rust-lang.org", build = "1.87.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rustc-1.87.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:e8395c5c5756253b76107055e093ffbc4431af7b30aeebe72ce2684b9cb53973" },
+  { platform = "aarch64-apple-darwin", component = "rust-std", provider = "static.rust-lang.org", build = "1.87.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rust-std-1.87.0-aarch64-apple-darwin.tar.xz", digest = "sha256:6547322b317f18b73695724ff60a7860457df1a646b4a79f89a70a13d0747375" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rust-std", provider = "static.rust-lang.org", build = "1.87.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rust-std-1.87.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:1b57253bd32b8b292c965b3a2d992a266763158494cab8555584c09360b90f77" },
+  { platform = "aarch64-apple-darwin", component = "cargo", provider = "static.rust-lang.org", build = "1.87.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/cargo-1.87.0-aarch64-apple-darwin.tar.xz", digest = "sha256:f8d6f554e5ed081de5c3fd23cf2f30f4012013e95fb7a5458a50d8215651fb88" },
+  { platform = "x86_64-unknown-linux-gnu", component = "cargo", provider = "static.rust-lang.org", build = "1.87.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/cargo-1.87.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:469d5dc479835adadd728bc3587f8abf1941b3dd71f9865abd3e0783ae662555" },
+  { platform = "aarch64-apple-darwin", component = "rustfmt", provider = "static.rust-lang.org", build = "1.87.0", recipe = "rustfmt/1", url = "https://static.rust-lang.org/dist/rustfmt-1.87.0-aarch64-apple-darwin.tar.xz", digest = "sha256:f1b09961e482eba3139d175031c955c8ab8be43a7bd63ffc3ffcdd0ba47f5e89" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rustfmt", provider = "static.rust-lang.org", build = "1.87.0", recipe = "rustfmt/1", url = "https://static.rust-lang.org/dist/rustfmt-1.87.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:1dd7661b85ec270884ccb37805fc55c3c9dcfc61727d9bf98bd62cceb0f331fa" },
+  { platform = "aarch64-apple-darwin", component = "channel-manifest", provider = "static.rust-lang.org", build = "1.87.0", recipe = "rust-channel-manifest/1", url = "https://static.rust-lang.org/dist/channel-rust-1.87.0.toml", digest = "sha256:2949b5ea91e3f9c45e75ff2fc6cfc7776616c693ab599ed43abc2120b7522415" },
+  { platform = "x86_64-unknown-linux-gnu", component = "channel-manifest", provider = "static.rust-lang.org", build = "1.87.0", recipe = "rust-channel-manifest/1", url = "https://static.rust-lang.org/dist/channel-rust-1.87.0.toml", digest = "sha256:2949b5ea91e3f9c45e75ff2fc6cfc7776616c693ab599ed43abc2120b7522415" },
+]
+
+[[release]]
+key = "rust-1.86.0"
+components = [
+  { name = "rustc", version = "1.86.0" },
+  { name = "rust-std", version = "1.86.0" },
+  { name = "cargo", version = "1.86.0" },
+  { name = "rustfmt", version = "1.86.0" },
+  { name = "channel-manifest", version = "1.86.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "rustc", provider = "static.rust-lang.org", build = "1.86.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rustc-1.86.0-aarch64-apple-darwin.tar.xz", digest = "sha256:23b8f52102249a47ab5bc859d54c9a3cb588a3259ba3f00f557d50edeca4fde9" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rustc", provider = "static.rust-lang.org", build = "1.86.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rustc-1.86.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:4438b809ce4a083af31ed17aeeedcc8fc60ccffc0625bef1926620751b6989d7" },
+  { platform = "aarch64-apple-darwin", component = "rust-std", provider = "static.rust-lang.org", build = "1.86.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rust-std-1.86.0-aarch64-apple-darwin.tar.xz", digest = "sha256:0fb121fb3b8fa9027d79ff598500a7e5cd086ddbc3557482ed3fdda00832c61b" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rust-std", provider = "static.rust-lang.org", build = "1.86.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rust-std-1.86.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:67be7184ea388d8ce0feaf7fdea46f1775cfc2970930264343b3089898501d37" },
+  { platform = "aarch64-apple-darwin", component = "cargo", provider = "static.rust-lang.org", build = "1.86.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/cargo-1.86.0-aarch64-apple-darwin.tar.xz", digest = "sha256:3cb13873d48c3e1e4cc684d42c245226a11fba52af6b047c3346ed654e7a05c0" },
+  { platform = "x86_64-unknown-linux-gnu", component = "cargo", provider = "static.rust-lang.org", build = "1.86.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/cargo-1.86.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:c5c1590f7e9246ad9f4f97cfe26ffa92707b52a769726596a9ef81565ebd908b" },
+  { platform = "aarch64-apple-darwin", component = "rustfmt", provider = "static.rust-lang.org", build = "1.86.0", recipe = "rustfmt/1", url = "https://static.rust-lang.org/dist/rustfmt-1.86.0-aarch64-apple-darwin.tar.xz", digest = "sha256:45e2d3543ea1abc2aa5dad894452c848bf2c75df83c8b175c418166baee09d37" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rustfmt", provider = "static.rust-lang.org", build = "1.86.0", recipe = "rustfmt/1", url = "https://static.rust-lang.org/dist/rustfmt-1.86.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:caf1947b060d7b1ca62e33a0cae4b33b9d4151643e0494f4ffc65c119d97abb6" },
+  { platform = "aarch64-apple-darwin", component = "channel-manifest", provider = "static.rust-lang.org", build = "1.86.0", recipe = "rust-channel-manifest/1", url = "https://static.rust-lang.org/dist/channel-rust-1.86.0.toml", digest = "sha256:5ffe190473b7896d1f39e9d0ddfa04bec72000f25897669bb296814e10ceba42" },
+  { platform = "x86_64-unknown-linux-gnu", component = "channel-manifest", provider = "static.rust-lang.org", build = "1.86.0", recipe = "rust-channel-manifest/1", url = "https://static.rust-lang.org/dist/channel-rust-1.86.0.toml", digest = "sha256:5ffe190473b7896d1f39e9d0ddfa04bec72000f25897669bb296814e10ceba42" },
+]
+
+[[release]]
+key = "rust-1.85.1"
+components = [
+  { name = "rustc", version = "1.85.1" },
+  { name = "rust-std", version = "1.85.1" },
+  { name = "cargo", version = "1.85.1" },
+  { name = "rustfmt", version = "1.85.1" },
+  { name = "channel-manifest", version = "1.85.1" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "rustc", provider = "static.rust-lang.org", build = "1.85.1", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rustc-1.85.1-aarch64-apple-darwin.tar.xz", digest = "sha256:93a6fd55cf1a88bb50e133c5bdb629197b80ad0ccab128ce3a84902992786b4c" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rustc", provider = "static.rust-lang.org", build = "1.85.1", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rustc-1.85.1-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:92a5c532b9e87912190128704e0d65825912e3b08a6ee9203c4068d6d1df62c4" },
+  { platform = "aarch64-apple-darwin", component = "rust-std", provider = "static.rust-lang.org", build = "1.85.1", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rust-std-1.85.1-aarch64-apple-darwin.tar.xz", digest = "sha256:a066d9b033f5fc74283ca86e38da8178c201e86b17113e184383904573734a67" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rust-std", provider = "static.rust-lang.org", build = "1.85.1", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rust-std-1.85.1-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:0aaeffba85359503f874315cd08e0ae8490275d14b41470d36d4fa57fd085916" },
+  { platform = "aarch64-apple-darwin", component = "cargo", provider = "static.rust-lang.org", build = "1.85.1", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/cargo-1.85.1-aarch64-apple-darwin.tar.xz", digest = "sha256:21edfaa6d97dd5eca08c50d2520d1a821e917be98d3515cbf00ddafd9001b634" },
+  { platform = "x86_64-unknown-linux-gnu", component = "cargo", provider = "static.rust-lang.org", build = "1.85.1", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/cargo-1.85.1-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:7373132c13e394755d15f01bda4374af59b4daef01b12a83cb3df3f3be38e289" },
+  { platform = "aarch64-apple-darwin", component = "rustfmt", provider = "static.rust-lang.org", build = "1.85.1", recipe = "rustfmt/1", url = "https://static.rust-lang.org/dist/rustfmt-1.85.1-aarch64-apple-darwin.tar.xz", digest = "sha256:90adc209908355ee7e315b98c84f16e6773c8664291b0981a4ff80992bc0fb66" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rustfmt", provider = "static.rust-lang.org", build = "1.85.1", recipe = "rustfmt/1", url = "https://static.rust-lang.org/dist/rustfmt-1.85.1-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:6e6e7d094a2d756dc223d3246fc8978a75195b289d5860f99f9c492c2fd409fa" },
+  { platform = "aarch64-apple-darwin", component = "channel-manifest", provider = "static.rust-lang.org", build = "1.85.1", recipe = "rust-channel-manifest/1", url = "https://static.rust-lang.org/dist/channel-rust-1.85.1.toml", digest = "sha256:1e7dae690cd12e27405a97e64704917489a27c650201bf47780a936055d67909" },
+  { platform = "x86_64-unknown-linux-gnu", component = "channel-manifest", provider = "static.rust-lang.org", build = "1.85.1", recipe = "rust-channel-manifest/1", url = "https://static.rust-lang.org/dist/channel-rust-1.85.1.toml", digest = "sha256:1e7dae690cd12e27405a97e64704917489a27c650201bf47780a936055d67909" },
+]
+
+[[release]]
+key = "rust-1.85.0"
+components = [
+  { name = "rustc", version = "1.85.0" },
+  { name = "rust-std", version = "1.85.0" },
+  { name = "cargo", version = "1.85.0" },
+  { name = "rustfmt", version = "1.85.0" },
+  { name = "channel-manifest", version = "1.85.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "rustc", provider = "static.rust-lang.org", build = "1.85.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rustc-1.85.0-aarch64-apple-darwin.tar.xz", digest = "sha256:2a03e227b57a49d80b43473b6fa2d56ad661ece0d8ffd81f639cd31600d3823e" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rustc", provider = "static.rust-lang.org", build = "1.85.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rustc-1.85.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:7436f13797475082cd87aa65547449e01659d6a810b4cd5f8aedc48bb9f89dfb" },
+  { platform = "aarch64-apple-darwin", component = "rust-std", provider = "static.rust-lang.org", build = "1.85.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rust-std-1.85.0-aarch64-apple-darwin.tar.xz", digest = "sha256:7da1367209de00e3fb315c0e76658e3605ee2559892d29851a3159ae7ea1ddc5" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rust-std", provider = "static.rust-lang.org", build = "1.85.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rust-std-1.85.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:285e105d25ebdf501341238d4c0594ecdda50ec9078f45095f793a736b1f1ac2" },
+  { platform = "aarch64-apple-darwin", component = "cargo", provider = "static.rust-lang.org", build = "1.85.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/cargo-1.85.0-aarch64-apple-darwin.tar.xz", digest = "sha256:d67766fb2e62214b3ee3faf01dcddddcb48e8d0483c2bb3475a16cb96210afed" },
+  { platform = "x86_64-unknown-linux-gnu", component = "cargo", provider = "static.rust-lang.org", build = "1.85.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/cargo-1.85.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:0aff33b57b0e0b102d762a2b53042846c1ca346cff4b7bd96b5c03c9e8e51d81" },
+  { platform = "aarch64-apple-darwin", component = "rustfmt", provider = "static.rust-lang.org", build = "1.85.0", recipe = "rustfmt/1", url = "https://static.rust-lang.org/dist/rustfmt-1.85.0-aarch64-apple-darwin.tar.xz", digest = "sha256:f394a5f7e640239ebed3ec5f7d9c6d65d0472be42fb428adae344c869dcb81cd" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rustfmt", provider = "static.rust-lang.org", build = "1.85.0", recipe = "rustfmt/1", url = "https://static.rust-lang.org/dist/rustfmt-1.85.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:99e3bc5f77720bac977a84444428b9162b242031d2cf6949bdb66ead0d3bc5f5" },
+  { platform = "aarch64-apple-darwin", component = "channel-manifest", provider = "static.rust-lang.org", build = "1.85.0", recipe = "rust-channel-manifest/1", url = "https://static.rust-lang.org/dist/channel-rust-1.85.0.toml", digest = "sha256:009e8b5ff43f12bf644b5e5b9fd89f96453072062a450c623882f64e85405da5" },
+  { platform = "x86_64-unknown-linux-gnu", component = "channel-manifest", provider = "static.rust-lang.org", build = "1.85.0", recipe = "rust-channel-manifest/1", url = "https://static.rust-lang.org/dist/channel-rust-1.85.0.toml", digest = "sha256:009e8b5ff43f12bf644b5e5b9fd89f96453072062a450c623882f64e85405da5" },
+]
+
+[[release]]
+key = "rust-1.84.1"
+components = [
+  { name = "rustc", version = "1.84.1" },
+  { name = "rust-std", version = "1.84.1" },
+  { name = "cargo", version = "1.84.1" },
+  { name = "rustfmt", version = "1.84.1" },
+  { name = "channel-manifest", version = "1.84.1" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "rustc", provider = "static.rust-lang.org", build = "1.84.1", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rustc-1.84.1-aarch64-apple-darwin.tar.xz", digest = "sha256:08923de98c4ee89c816844a0e37e8be40a6cf81ed29c7a734f137d2ecc044730" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rustc", provider = "static.rust-lang.org", build = "1.84.1", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rustc-1.84.1-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:ae9e4c996707a7152443639bd09de49afdcc37830ff8561872e718b0600a4fcf" },
+  { platform = "aarch64-apple-darwin", component = "rust-std", provider = "static.rust-lang.org", build = "1.84.1", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rust-std-1.84.1-aarch64-apple-darwin.tar.xz", digest = "sha256:f5ce8aa9a64e9e5429e552fd058d1046871b15b2fc248b4992a649d8a8eaf239" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rust-std", provider = "static.rust-lang.org", build = "1.84.1", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rust-std-1.84.1-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:553727eeee81f1b1e7f3c7b7fd023abfb62fe5aff7fe0b1c81d3b5b92ab8a474" },
+  { platform = "aarch64-apple-darwin", component = "cargo", provider = "static.rust-lang.org", build = "1.84.1", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/cargo-1.84.1-aarch64-apple-darwin.tar.xz", digest = "sha256:61b459defb45a51d6c52cb1f5dbe915a9b99ca4c4bf291e4e33798ceb0ff5b90" },
+  { platform = "x86_64-unknown-linux-gnu", component = "cargo", provider = "static.rust-lang.org", build = "1.84.1", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/cargo-1.84.1-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:792214e185297d8a3fa65949f9f3001ddd7cc06e1e8afd2a042f7ca5a8af727b" },
+  { platform = "aarch64-apple-darwin", component = "rustfmt", provider = "static.rust-lang.org", build = "1.84.1", recipe = "rustfmt/1", url = "https://static.rust-lang.org/dist/rustfmt-1.84.1-aarch64-apple-darwin.tar.xz", digest = "sha256:cc37bd535e68b9a29cd27373c72f543fd7d61314905b13505380ee10a1ea425c" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rustfmt", provider = "static.rust-lang.org", build = "1.84.1", recipe = "rustfmt/1", url = "https://static.rust-lang.org/dist/rustfmt-1.84.1-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:36c786de30ceb50cf0680bfe559742a7a1fbe7d0d67da27d96f5cb8ed7612e75" },
+  { platform = "aarch64-apple-darwin", component = "channel-manifest", provider = "static.rust-lang.org", build = "1.84.1", recipe = "rust-channel-manifest/1", url = "https://static.rust-lang.org/dist/channel-rust-1.84.1.toml", digest = "sha256:bcc973d331ddba85edae5bb42a3d63129ef5b58157cb2980096f0be23cebccd0" },
+  { platform = "x86_64-unknown-linux-gnu", component = "channel-manifest", provider = "static.rust-lang.org", build = "1.84.1", recipe = "rust-channel-manifest/1", url = "https://static.rust-lang.org/dist/channel-rust-1.84.1.toml", digest = "sha256:bcc973d331ddba85edae5bb42a3d63129ef5b58157cb2980096f0be23cebccd0" },
+]
+
+[[release]]
+key = "rust-1.84.0"
+components = [
+  { name = "rustc", version = "1.84.0" },
+  { name = "rust-std", version = "1.84.0" },
+  { name = "cargo", version = "1.84.0" },
+  { name = "rustfmt", version = "1.84.0" },
+  { name = "channel-manifest", version = "1.84.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "rustc", provider = "static.rust-lang.org", build = "1.84.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rustc-1.84.0-aarch64-apple-darwin.tar.xz", digest = "sha256:7e2a1594c1e174f28b84adab25e96699feb8d0455dabe8dac1b2850945b400b1" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rustc", provider = "static.rust-lang.org", build = "1.84.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rustc-1.84.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:a1737d86f80b31a6d48a6726726275dc068ecb930c9635b13aa59999486de837" },
+  { platform = "aarch64-apple-darwin", component = "rust-std", provider = "static.rust-lang.org", build = "1.84.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rust-std-1.84.0-aarch64-apple-darwin.tar.xz", digest = "sha256:c3ec73225e0f0228e4a8a9c650195b3f9e63f839954e65509d47ea58316f8f5d" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rust-std", provider = "static.rust-lang.org", build = "1.84.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rust-std-1.84.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:770237080b9310d126350c3bd70820bd91064c2e96c29ab5f2e002b31b5bd067" },
+  { platform = "aarch64-apple-darwin", component = "cargo", provider = "static.rust-lang.org", build = "1.84.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/cargo-1.84.0-aarch64-apple-darwin.tar.xz", digest = "sha256:0dc1cf2510c692f0d2ac254bf8474b3f96a719eeb5062b16dceb30361c0d235e" },
+  { platform = "x86_64-unknown-linux-gnu", component = "cargo", provider = "static.rust-lang.org", build = "1.84.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/cargo-1.84.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:6c2371488db92a09cd50a1b4045c022f3cf2c643285b3b21105ab5f9b64fd6b6" },
+  { platform = "aarch64-apple-darwin", component = "rustfmt", provider = "static.rust-lang.org", build = "1.84.0", recipe = "rustfmt/1", url = "https://static.rust-lang.org/dist/rustfmt-1.84.0-aarch64-apple-darwin.tar.xz", digest = "sha256:4d5b2a16c6fbffa139f0e8748a97169da4434e62cca54762638a18bd59b51676" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rustfmt", provider = "static.rust-lang.org", build = "1.84.0", recipe = "rustfmt/1", url = "https://static.rust-lang.org/dist/rustfmt-1.84.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:16a40ea563e99b75485968606be2b1d5cd7643b804d4646d373817221a0c09c4" },
+  { platform = "aarch64-apple-darwin", component = "channel-manifest", provider = "static.rust-lang.org", build = "1.84.0", recipe = "rust-channel-manifest/1", url = "https://static.rust-lang.org/dist/channel-rust-1.84.0.toml", digest = "sha256:94c2c0ba9c6783815df45d680f0f20c7ea80d11b85ee8bbbc61354f3082cd0f5" },
+  { platform = "x86_64-unknown-linux-gnu", component = "channel-manifest", provider = "static.rust-lang.org", build = "1.84.0", recipe = "rust-channel-manifest/1", url = "https://static.rust-lang.org/dist/channel-rust-1.84.0.toml", digest = "sha256:94c2c0ba9c6783815df45d680f0f20c7ea80d11b85ee8bbbc61354f3082cd0f5" },
+]
+
+[[release]]
+key = "rust-1.83.0"
+components = [
+  { name = "rustc", version = "1.83.0" },
+  { name = "rust-std", version = "1.83.0" },
+  { name = "cargo", version = "1.83.0" },
+  { name = "rustfmt", version = "1.83.0" },
+  { name = "channel-manifest", version = "1.83.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "rustc", provider = "static.rust-lang.org", build = "1.83.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rustc-1.83.0-aarch64-apple-darwin.tar.xz", digest = "sha256:7a55f65f1ab39f538c31f006e20350362251609af02d2156fc78823419aa2b10" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rustc", provider = "static.rust-lang.org", build = "1.83.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rustc-1.83.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:6ec40e0405c8cbed3b786a97d374c144b012fc831b7c22b535f8ecb524f495ad" },
+  { platform = "aarch64-apple-darwin", component = "rust-std", provider = "static.rust-lang.org", build = "1.83.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rust-std-1.83.0-aarch64-apple-darwin.tar.xz", digest = "sha256:635230a14210e87b82c6f7f0597349c5cb9e5ee3a260c9b049b4b078af72eae1" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rust-std", provider = "static.rust-lang.org", build = "1.83.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rust-std-1.83.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:c88fe6cb22f9d2721f26430b6bdd291e562da759e8629e2b4c7eb2c7cad705f2" },
+  { platform = "aarch64-apple-darwin", component = "cargo", provider = "static.rust-lang.org", build = "1.83.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/cargo-1.83.0-aarch64-apple-darwin.tar.xz", digest = "sha256:42a797429e7f7ac6e6c87c29845fe5face5b694a49b5026c63aed58726181536" },
+  { platform = "x86_64-unknown-linux-gnu", component = "cargo", provider = "static.rust-lang.org", build = "1.83.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/cargo-1.83.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:de834a4062d9cd200f8e0cdca894c0b98afe26f1396d80765df828880a39b98c" },
+  { platform = "aarch64-apple-darwin", component = "rustfmt", provider = "static.rust-lang.org", build = "1.83.0", recipe = "rustfmt/1", url = "https://static.rust-lang.org/dist/rustfmt-1.83.0-aarch64-apple-darwin.tar.xz", digest = "sha256:307aefc186efd090dc1eb0d55b4c15e4eddd81e91c845fe1e6e1f8e0251e23e6" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rustfmt", provider = "static.rust-lang.org", build = "1.83.0", recipe = "rustfmt/1", url = "https://static.rust-lang.org/dist/rustfmt-1.83.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:43f799a353d367a78387d49c0c6eaa1082813b88338ddd9f741c2fc1858bb9a2" },
+  { platform = "aarch64-apple-darwin", component = "channel-manifest", provider = "static.rust-lang.org", build = "1.83.0", recipe = "rust-channel-manifest/1", url = "https://static.rust-lang.org/dist/channel-rust-1.83.0.toml", digest = "sha256:b3544fb72bc3189697fc18ac2d3fa27d57ee8434f59d9919d4d70af2c6f010b3" },
+  { platform = "x86_64-unknown-linux-gnu", component = "channel-manifest", provider = "static.rust-lang.org", build = "1.83.0", recipe = "rust-channel-manifest/1", url = "https://static.rust-lang.org/dist/channel-rust-1.83.0.toml", digest = "sha256:b3544fb72bc3189697fc18ac2d3fa27d57ee8434f59d9919d4d70af2c6f010b3" },
+]
+
+[[release]]
+key = "rust-1.82.0"
+components = [
+  { name = "rustc", version = "1.82.0" },
+  { name = "rust-std", version = "1.82.0" },
+  { name = "cargo", version = "1.82.0" },
+  { name = "rustfmt", version = "1.82.0" },
+  { name = "channel-manifest", version = "1.82.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "rustc", provider = "static.rust-lang.org", build = "1.82.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rustc-1.82.0-aarch64-apple-darwin.tar.xz", digest = "sha256:ca9b9cab552c86ac7a28d8fb757c95a363bb5d6413b854b19472950eab2a9fa4" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rustc", provider = "static.rust-lang.org", build = "1.82.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rustc-1.82.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:90b61494f5ccfd4d1ca9a5ce4a0af49a253ca435c701d9c44e3e44b5faf70cb8" },
+  { platform = "aarch64-apple-darwin", component = "rust-std", provider = "static.rust-lang.org", build = "1.82.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rust-std-1.82.0-aarch64-apple-darwin.tar.xz", digest = "sha256:8b0786c55e02f3adc5df030861b6b60bc336326b9e372f6b1bf3040257621a90" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rust-std", provider = "static.rust-lang.org", build = "1.82.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rust-std-1.82.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:2eca3d36f7928f877c334909f35fe202fbcecce109ccf3b439284c2cb7849594" },
+  { platform = "aarch64-apple-darwin", component = "cargo", provider = "static.rust-lang.org", build = "1.82.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/cargo-1.82.0-aarch64-apple-darwin.tar.xz", digest = "sha256:66b9acc4629a21896ebd96076016263461567b8faf4eb0b76d0a72614790f29a" },
+  { platform = "x86_64-unknown-linux-gnu", component = "cargo", provider = "static.rust-lang.org", build = "1.82.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/cargo-1.82.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:97aeae783874a932c4500f4d36473297945edf6294d63871784217d608718e70" },
+  { platform = "aarch64-apple-darwin", component = "rustfmt", provider = "static.rust-lang.org", build = "1.82.0", recipe = "rustfmt/1", url = "https://static.rust-lang.org/dist/rustfmt-1.82.0-aarch64-apple-darwin.tar.xz", digest = "sha256:91b7bf726ecb8497b91411c81fcc4b9bb73af7a8a24e79e4292eed4bb29be0be" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rustfmt", provider = "static.rust-lang.org", build = "1.82.0", recipe = "rustfmt/1", url = "https://static.rust-lang.org/dist/rustfmt-1.82.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:9beb3ed2b9775927e1e65a82990b58dcdbfad73f8bc89d7a040ba4cdc587a824" },
+  { platform = "aarch64-apple-darwin", component = "channel-manifest", provider = "static.rust-lang.org", build = "1.82.0", recipe = "rust-channel-manifest/1", url = "https://static.rust-lang.org/dist/channel-rust-1.82.0.toml", digest = "sha256:c8cb926f97903cefdb1eff8171ffd44bc2d531b7ff1bfd0c49f88fc018623e99" },
+  { platform = "x86_64-unknown-linux-gnu", component = "channel-manifest", provider = "static.rust-lang.org", build = "1.82.0", recipe = "rust-channel-manifest/1", url = "https://static.rust-lang.org/dist/channel-rust-1.82.0.toml", digest = "sha256:c8cb926f97903cefdb1eff8171ffd44bc2d531b7ff1bfd0c49f88fc018623e99" },
+]
+
+[[release]]
+key = "rust-1.81.0"
+components = [
+  { name = "rustc", version = "1.81.0" },
+  { name = "rust-std", version = "1.81.0" },
+  { name = "cargo", version = "1.81.0" },
+  { name = "rustfmt", version = "1.81.0" },
+  { name = "channel-manifest", version = "1.81.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "rustc", provider = "static.rust-lang.org", build = "1.81.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rustc-1.81.0-aarch64-apple-darwin.tar.xz", digest = "sha256:bed00f549a08030b232ad811728e3a5d7239e2e53b667df9cfb11eabf87f2cf3" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rustc", provider = "static.rust-lang.org", build = "1.81.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rustc-1.81.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:988a4e4cdecebe4f4a0c52ec4ade5a5bfc58d6958969f5b1e8aac033bda2613e" },
+  { platform = "aarch64-apple-darwin", component = "rust-std", provider = "static.rust-lang.org", build = "1.81.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rust-std-1.81.0-aarch64-apple-darwin.tar.xz", digest = "sha256:2dba5210a79617a9240570c1f7fcc24912a2c96689a3159324727e5a516c6326" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rust-std", provider = "static.rust-lang.org", build = "1.81.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rust-std-1.81.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:6ddf80f254e8eea9956308ba89fd68e1ac7885853df9239b07bbc9f047b7562f" },
+  { platform = "aarch64-apple-darwin", component = "cargo", provider = "static.rust-lang.org", build = "1.81.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/cargo-1.81.0-aarch64-apple-darwin.tar.xz", digest = "sha256:cc826e6592016db7a5750a97051b71b48aca2d79f146daf08e953d56000ae43d" },
+  { platform = "x86_64-unknown-linux-gnu", component = "cargo", provider = "static.rust-lang.org", build = "1.81.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/cargo-1.81.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:c50ee4b1ae8695461930e36d5465dddb7c7a0e0f0aa6cbd60de120b17c38b841" },
+  { platform = "aarch64-apple-darwin", component = "rustfmt", provider = "static.rust-lang.org", build = "1.81.0", recipe = "rustfmt/1", url = "https://static.rust-lang.org/dist/rustfmt-1.81.0-aarch64-apple-darwin.tar.xz", digest = "sha256:2effbe2cb246e739ec935d627cb84b38a2e39e1812d03304a3f1fa71b56c3f2a" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rustfmt", provider = "static.rust-lang.org", build = "1.81.0", recipe = "rustfmt/1", url = "https://static.rust-lang.org/dist/rustfmt-1.81.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:bc0b254ea4aa387c317af6f00c980819373d32440c4dc0417395b65400f5222f" },
+  { platform = "aarch64-apple-darwin", component = "channel-manifest", provider = "static.rust-lang.org", build = "1.81.0", recipe = "rust-channel-manifest/1", url = "https://static.rust-lang.org/dist/channel-rust-1.81.0.toml", digest = "sha256:5596679723faf7e63772bacb1d0c898abaa51eb4ed193b328929d907c8c4bd5a" },
+  { platform = "x86_64-unknown-linux-gnu", component = "channel-manifest", provider = "static.rust-lang.org", build = "1.81.0", recipe = "rust-channel-manifest/1", url = "https://static.rust-lang.org/dist/channel-rust-1.81.0.toml", digest = "sha256:5596679723faf7e63772bacb1d0c898abaa51eb4ed193b328929d907c8c4bd5a" },
+]
+
+[[release]]
+key = "rust-1.80.1"
+components = [
+  { name = "rustc", version = "1.80.1" },
+  { name = "rust-std", version = "1.80.1" },
+  { name = "cargo", version = "1.80.1" },
+  { name = "rustfmt", version = "1.80.1" },
+  { name = "channel-manifest", version = "1.80.1" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "rustc", provider = "static.rust-lang.org", build = "1.80.1", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rustc-1.80.1-aarch64-apple-darwin.tar.xz", digest = "sha256:b22ac69b19de26fed67634379ae72cbc8fcc2ad1b1d97c4fbcb747264e69f13c" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rustc", provider = "static.rust-lang.org", build = "1.80.1", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rustc-1.80.1-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:0367f069b49560af5c61810530d4721ad13eecfcb48952e67a2c32be903d5043" },
+  { platform = "aarch64-apple-darwin", component = "rust-std", provider = "static.rust-lang.org", build = "1.80.1", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rust-std-1.80.1-aarch64-apple-darwin.tar.xz", digest = "sha256:b64f95fd458f3fbb6bf006da87762b9cf2f7ed6dae6e33a272851e8162f0b64f" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rust-std", provider = "static.rust-lang.org", build = "1.80.1", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rust-std-1.80.1-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:b793405538d8b6ec1632779efa8835b07b8987db2008c5c9c809bc4b17dcb121" },
+  { platform = "aarch64-apple-darwin", component = "cargo", provider = "static.rust-lang.org", build = "1.80.1", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/cargo-1.80.1-aarch64-apple-darwin.tar.xz", digest = "sha256:81e5940945d4e5ab698aa9e2a8a6655295963decbdd5cb9cae8a04acf0472d39" },
+  { platform = "x86_64-unknown-linux-gnu", component = "cargo", provider = "static.rust-lang.org", build = "1.80.1", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/cargo-1.80.1-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:da9340b3249f08656cd4fe10e47aa292c7cd79903870a5863064731a00b5b27e" },
+  { platform = "aarch64-apple-darwin", component = "rustfmt", provider = "static.rust-lang.org", build = "1.80.1", recipe = "rustfmt/1", url = "https://static.rust-lang.org/dist/rustfmt-1.80.1-aarch64-apple-darwin.tar.xz", digest = "sha256:6d6b9e127fe26a6858341c509ab77cb08d6042728b1a366a6d589aa293e2ef5a" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rustfmt", provider = "static.rust-lang.org", build = "1.80.1", recipe = "rustfmt/1", url = "https://static.rust-lang.org/dist/rustfmt-1.80.1-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:14b602641dc33e0deb0df1d40eebed03bbd370b97e08f40405a904880987d747" },
+  { platform = "aarch64-apple-darwin", component = "channel-manifest", provider = "static.rust-lang.org", build = "1.80.1", recipe = "rust-channel-manifest/1", url = "https://static.rust-lang.org/dist/channel-rust-1.80.1.toml", digest = "sha256:de354821fe573e7514d4245a4f20223b45c755b265d76312c777ae7135c28ed1" },
+  { platform = "x86_64-unknown-linux-gnu", component = "channel-manifest", provider = "static.rust-lang.org", build = "1.80.1", recipe = "rust-channel-manifest/1", url = "https://static.rust-lang.org/dist/channel-rust-1.80.1.toml", digest = "sha256:de354821fe573e7514d4245a4f20223b45c755b265d76312c777ae7135c28ed1" },
+]
+
+[[release]]
+key = "rust-1.80.0"
+components = [
+  { name = "rustc", version = "1.80.0" },
+  { name = "rust-std", version = "1.80.0" },
+  { name = "cargo", version = "1.80.0" },
+  { name = "rustfmt", version = "1.80.0" },
+  { name = "channel-manifest", version = "1.80.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "rustc", provider = "static.rust-lang.org", build = "1.80.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rustc-1.80.0-aarch64-apple-darwin.tar.xz", digest = "sha256:367d9cf73cc4f4b719c843b81a241f5c68a41f798b781026606703d166265a87" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rustc", provider = "static.rust-lang.org", build = "1.80.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rustc-1.80.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:ef1692e3d67236868d32ef26f96f47792b1c3a3f9747bbe05c63742464307c4f" },
+  { platform = "aarch64-apple-darwin", component = "rust-std", provider = "static.rust-lang.org", build = "1.80.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rust-std-1.80.0-aarch64-apple-darwin.tar.xz", digest = "sha256:d2f124d495ed92715ebcb21ba6677b304472098427f21795aacdbd4b24f04808" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rust-std", provider = "static.rust-lang.org", build = "1.80.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rust-std-1.80.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:c722cba93c9627e04a6a5ecc749cde9dda39f15e4d02fb6ae8d0b27e02e6488a" },
+  { platform = "aarch64-apple-darwin", component = "cargo", provider = "static.rust-lang.org", build = "1.80.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/cargo-1.80.0-aarch64-apple-darwin.tar.xz", digest = "sha256:517950591429dbc2bca8efb9f94e1a9dda9f1d16392f7885e3f81ddd31525659" },
+  { platform = "x86_64-unknown-linux-gnu", component = "cargo", provider = "static.rust-lang.org", build = "1.80.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/cargo-1.80.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:5602ba863f5276cfaa7ed3a8dd94d187fbd0319a1b4bbb9284e77fb6b7168a41" },
+  { platform = "aarch64-apple-darwin", component = "rustfmt", provider = "static.rust-lang.org", build = "1.80.0", recipe = "rustfmt/1", url = "https://static.rust-lang.org/dist/rustfmt-1.80.0-aarch64-apple-darwin.tar.xz", digest = "sha256:c30dc9cfed4681e11d9018c4f69f22e45c0a847141e56a408037bb76bb1961dd" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rustfmt", provider = "static.rust-lang.org", build = "1.80.0", recipe = "rustfmt/1", url = "https://static.rust-lang.org/dist/rustfmt-1.80.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:ea3c45978965a4f74819dcb4883379358ec7753ad55a62890d1c8cd76395d871" },
+  { platform = "aarch64-apple-darwin", component = "channel-manifest", provider = "static.rust-lang.org", build = "1.80.0", recipe = "rust-channel-manifest/1", url = "https://static.rust-lang.org/dist/channel-rust-1.80.0.toml", digest = "sha256:e9e37f18ace35528c48463bd16158e6e4445684d497febaa3127509dbf25701e" },
+  { platform = "x86_64-unknown-linux-gnu", component = "channel-manifest", provider = "static.rust-lang.org", build = "1.80.0", recipe = "rust-channel-manifest/1", url = "https://static.rust-lang.org/dist/channel-rust-1.80.0.toml", digest = "sha256:e9e37f18ace35528c48463bd16158e6e4445684d497febaa3127509dbf25701e" },
+]
+
+[[release]]
+key = "rust-1.79.0"
+components = [
+  { name = "rustc", version = "1.79.0" },
+  { name = "rust-std", version = "1.79.0" },
+  { name = "cargo", version = "1.79.0" },
+  { name = "rustfmt", version = "1.79.0" },
+  { name = "channel-manifest", version = "1.79.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "rustc", provider = "static.rust-lang.org", build = "1.79.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rustc-1.79.0-aarch64-apple-darwin.tar.xz", digest = "sha256:0d7890d57a879fdde1866049beb5d47319d9d7acc1968ec0b92d719917c137b3" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rustc", provider = "static.rust-lang.org", build = "1.79.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rustc-1.79.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:a04cf42022d0a5faf01c31082bfb1dde9c38409f0ca6da90a3e40faa03e797ae" },
+  { platform = "aarch64-apple-darwin", component = "rust-std", provider = "static.rust-lang.org", build = "1.79.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rust-std-1.79.0-aarch64-apple-darwin.tar.xz", digest = "sha256:89f16f3a6e8705c314c2f59186e0f8695ba43a58805c8450825888371fceaa25" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rust-std", provider = "static.rust-lang.org", build = "1.79.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rust-std-1.79.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:2c914483c0882d44af2e50a181cbd2c953d672d50b31aa669ee2346cade1f108" },
+  { platform = "aarch64-apple-darwin", component = "cargo", provider = "static.rust-lang.org", build = "1.79.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/cargo-1.79.0-aarch64-apple-darwin.tar.xz", digest = "sha256:2cc674f17c18b0c01e0e5a8e5caedc26b0f499d2cc10605cf1a838e2cad9ef7d" },
+  { platform = "x86_64-unknown-linux-gnu", component = "cargo", provider = "static.rust-lang.org", build = "1.79.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/cargo-1.79.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:07fcadd27b645ad58ff4dae5ef166fd730311bbae8f25f6640fe1bfd2a1f3c3c" },
+  { platform = "aarch64-apple-darwin", component = "rustfmt", provider = "static.rust-lang.org", build = "1.79.0", recipe = "rustfmt/1", url = "https://static.rust-lang.org/dist/rustfmt-1.79.0-aarch64-apple-darwin.tar.xz", digest = "sha256:30c39ab593a6f51b392da2ea75935eb488a20658289d62325854d08e3555f956" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rustfmt", provider = "static.rust-lang.org", build = "1.79.0", recipe = "rustfmt/1", url = "https://static.rust-lang.org/dist/rustfmt-1.79.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:4404d5e2881194a09d68888c45c21405e452b35418e04190caae1af108ea76df" },
+  { platform = "aarch64-apple-darwin", component = "channel-manifest", provider = "static.rust-lang.org", build = "1.79.0", recipe = "rust-channel-manifest/1", url = "https://static.rust-lang.org/dist/channel-rust-1.79.0.toml", digest = "sha256:3608b3efa60fe074d8ef9186747d8ff803c4fc3108c7647f0e7f81c303b2cd95" },
+  { platform = "x86_64-unknown-linux-gnu", component = "channel-manifest", provider = "static.rust-lang.org", build = "1.79.0", recipe = "rust-channel-manifest/1", url = "https://static.rust-lang.org/dist/channel-rust-1.79.0.toml", digest = "sha256:3608b3efa60fe074d8ef9186747d8ff803c4fc3108c7647f0e7f81c303b2cd95" },
+]
+
+[[release]]
+key = "rust-1.78.0"
+components = [
+  { name = "rustc", version = "1.78.0" },
+  { name = "rust-std", version = "1.78.0" },
+  { name = "cargo", version = "1.78.0" },
+  { name = "rustfmt", version = "1.78.0" },
+  { name = "channel-manifest", version = "1.78.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "rustc", provider = "static.rust-lang.org", build = "1.78.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rustc-1.78.0-aarch64-apple-darwin.tar.xz", digest = "sha256:7f6e7e0800711aded0a35349bd2e1efcb1eaf8c2f080693a69f252195290c888" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rustc", provider = "static.rust-lang.org", build = "1.78.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rustc-1.78.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:3994971e5923716d54e4b574ce238f04c4e20cda03990670f7cc3f87d36e5499" },
+  { platform = "aarch64-apple-darwin", component = "rust-std", provider = "static.rust-lang.org", build = "1.78.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rust-std-1.78.0-aarch64-apple-darwin.tar.xz", digest = "sha256:4ab399e983e6f4b21687010842774e5b7c679641360b0b85ac9b27a426bec4c1" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rust-std", provider = "static.rust-lang.org", build = "1.78.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rust-std-1.78.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:95aece42a336f237c5bac5c5d9aca051b7f0bd3e6a64fb3c5828e6d0d3af2e8c" },
+  { platform = "aarch64-apple-darwin", component = "cargo", provider = "static.rust-lang.org", build = "1.78.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/cargo-1.78.0-aarch64-apple-darwin.tar.xz", digest = "sha256:76b9a39eea441b31c6b26cc58ebff7095a64bc60788254c2525e752a1149688d" },
+  { platform = "x86_64-unknown-linux-gnu", component = "cargo", provider = "static.rust-lang.org", build = "1.78.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/cargo-1.78.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:f8aacf7a101eb10dc000b8bf26de90a9d0ce678d02ccf70430ed20dd31ecec6b" },
+  { platform = "aarch64-apple-darwin", component = "rustfmt", provider = "static.rust-lang.org", build = "1.78.0", recipe = "rustfmt/1", url = "https://static.rust-lang.org/dist/rustfmt-1.78.0-aarch64-apple-darwin.tar.xz", digest = "sha256:cf87e321ffa214765bcdd7173101f8e8ee6c2a6c42e072e5b5308da687b98b26" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rustfmt", provider = "static.rust-lang.org", build = "1.78.0", recipe = "rustfmt/1", url = "https://static.rust-lang.org/dist/rustfmt-1.78.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:c9b9a240602b568eafa04905b7f731eccd7079d701b72dc9f23d8c7395ef9a92" },
+  { platform = "aarch64-apple-darwin", component = "channel-manifest", provider = "static.rust-lang.org", build = "1.78.0", recipe = "rust-channel-manifest/1", url = "https://static.rust-lang.org/dist/channel-rust-1.78.0.toml", digest = "sha256:a29520b3a7245100b20f1701f56cb9d69aa177430f1875156f044a28f1a2c195" },
+  { platform = "x86_64-unknown-linux-gnu", component = "channel-manifest", provider = "static.rust-lang.org", build = "1.78.0", recipe = "rust-channel-manifest/1", url = "https://static.rust-lang.org/dist/channel-rust-1.78.0.toml", digest = "sha256:a29520b3a7245100b20f1701f56cb9d69aa177430f1875156f044a28f1a2c195" },
+]
+
+[[release]]
+key = "rust-1.77.2"
+components = [
+  { name = "rustc", version = "1.77.2" },
+  { name = "rust-std", version = "1.77.2" },
+  { name = "cargo", version = "1.77.2" },
+  { name = "rustfmt", version = "1.77.2" },
+  { name = "channel-manifest", version = "1.77.2" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "rustc", provider = "static.rust-lang.org", build = "1.77.2", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rustc-1.77.2-aarch64-apple-darwin.tar.xz", digest = "sha256:eb530841527f601da0c2354182a740d67c9fa1345011c73907ba66a497300bdb" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rustc", provider = "static.rust-lang.org", build = "1.77.2", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rustc-1.77.2-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:7fa3779e7693825728e99639c9b34b9475bfc0dc4a31f730d1f2fbb6764e183c" },
+  { platform = "aarch64-apple-darwin", component = "rust-std", provider = "static.rust-lang.org", build = "1.77.2", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rust-std-1.77.2-aarch64-apple-darwin.tar.xz", digest = "sha256:2251b669682bb1e4290c488d58574ba1eb332c1558a185aa2e9a5711aeb69648" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rust-std", provider = "static.rust-lang.org", build = "1.77.2", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rust-std-1.77.2-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:23119121fae4b7163b9c2ff5cbaad03d08f80d55da011a025d6b17d27489df7f" },
+  { platform = "aarch64-apple-darwin", component = "cargo", provider = "static.rust-lang.org", build = "1.77.2", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/cargo-1.77.2-aarch64-apple-darwin.tar.xz", digest = "sha256:e20eb22ffb465a2de9c1f775992a17a096119025a04f901e8dc62e356c29aea2" },
+  { platform = "x86_64-unknown-linux-gnu", component = "cargo", provider = "static.rust-lang.org", build = "1.77.2", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/cargo-1.77.2-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:b57b050ee48123e05021aff43f84da4b10d1d777dd350dd54fbc14448cd3d2d8" },
+  { platform = "aarch64-apple-darwin", component = "rustfmt", provider = "static.rust-lang.org", build = "1.77.2", recipe = "rustfmt/1", url = "https://static.rust-lang.org/dist/rustfmt-1.77.2-aarch64-apple-darwin.tar.xz", digest = "sha256:679e9dd24decac45c9ac2a78079bac66640bb75176f1b7f3f058d60604403761" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rustfmt", provider = "static.rust-lang.org", build = "1.77.2", recipe = "rustfmt/1", url = "https://static.rust-lang.org/dist/rustfmt-1.77.2-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:254658a9aa29464fcfd81d1e10ec1ba762f24407b59d977776745147ce6d2b66" },
+  { platform = "aarch64-apple-darwin", component = "channel-manifest", provider = "static.rust-lang.org", build = "1.77.2", recipe = "rust-channel-manifest/1", url = "https://static.rust-lang.org/dist/channel-rust-1.77.2.toml", digest = "sha256:ed07e41edcba852ae034cd1fb29c9c62445c07cd9e12a61ae02a0027da80ded5" },
+  { platform = "x86_64-unknown-linux-gnu", component = "channel-manifest", provider = "static.rust-lang.org", build = "1.77.2", recipe = "rust-channel-manifest/1", url = "https://static.rust-lang.org/dist/channel-rust-1.77.2.toml", digest = "sha256:ed07e41edcba852ae034cd1fb29c9c62445c07cd9e12a61ae02a0027da80ded5" },
+]
+
+[[release]]
+key = "rust-1.77.1"
+components = [
+  { name = "rustc", version = "1.77.1" },
+  { name = "rust-std", version = "1.77.1" },
+  { name = "cargo", version = "1.77.1" },
+  { name = "rustfmt", version = "1.77.1" },
+  { name = "channel-manifest", version = "1.77.1" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "rustc", provider = "static.rust-lang.org", build = "1.77.1", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rustc-1.77.1-aarch64-apple-darwin.tar.xz", digest = "sha256:8da1814eb8358236e88ceb155e32f0f34bbe71cb19cd9700c7eb40e675738d77" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rustc", provider = "static.rust-lang.org", build = "1.77.1", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rustc-1.77.1-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:c9caaf8c214f6683281fa55e76a4d345004aa2933daca469952b3bead8cc5ca9" },
+  { platform = "aarch64-apple-darwin", component = "rust-std", provider = "static.rust-lang.org", build = "1.77.1", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rust-std-1.77.1-aarch64-apple-darwin.tar.xz", digest = "sha256:3b5b71e40d934de25dcb553b9df28289d38640e6fa2654b42410f4cc8d9bed2a" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rust-std", provider = "static.rust-lang.org", build = "1.77.1", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rust-std-1.77.1-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:317e604909360d1bb92f7558aaa5ce449312630d8226767ae9df99bf5bef4fd1" },
+  { platform = "aarch64-apple-darwin", component = "cargo", provider = "static.rust-lang.org", build = "1.77.1", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/cargo-1.77.1-aarch64-apple-darwin.tar.xz", digest = "sha256:c0249b6c247953cbe3b01e276988b6ca600aeba4e91332cd2ddaa0b7eee4dfb7" },
+  { platform = "x86_64-unknown-linux-gnu", component = "cargo", provider = "static.rust-lang.org", build = "1.77.1", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/cargo-1.77.1-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:87713287303cbb44d89d839ade3de7fe679fcadfe4688a9c6829c276a7946e79" },
+  { platform = "aarch64-apple-darwin", component = "rustfmt", provider = "static.rust-lang.org", build = "1.77.1", recipe = "rustfmt/1", url = "https://static.rust-lang.org/dist/rustfmt-1.77.1-aarch64-apple-darwin.tar.xz", digest = "sha256:4228e171a6a2d0b296039ac0cf94d39dd4d51917386d94792857503196e6e522" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rustfmt", provider = "static.rust-lang.org", build = "1.77.1", recipe = "rustfmt/1", url = "https://static.rust-lang.org/dist/rustfmt-1.77.1-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:8d9aec0f6613839a772fa7323659d6bd13cebea4839a479a4ab1622e5380afc6" },
+  { platform = "aarch64-apple-darwin", component = "channel-manifest", provider = "static.rust-lang.org", build = "1.77.1", recipe = "rust-channel-manifest/1", url = "https://static.rust-lang.org/dist/channel-rust-1.77.1.toml", digest = "sha256:dd2b7ff7f50aa3fea5cf629fab65669731f2b9f76e00ba6220a69a297e0fab48" },
+  { platform = "x86_64-unknown-linux-gnu", component = "channel-manifest", provider = "static.rust-lang.org", build = "1.77.1", recipe = "rust-channel-manifest/1", url = "https://static.rust-lang.org/dist/channel-rust-1.77.1.toml", digest = "sha256:dd2b7ff7f50aa3fea5cf629fab65669731f2b9f76e00ba6220a69a297e0fab48" },
+]
+
+[[release]]
+key = "rust-1.77.0"
+components = [
+  { name = "rustc", version = "1.77.0" },
+  { name = "rust-std", version = "1.77.0" },
+  { name = "cargo", version = "1.77.0" },
+  { name = "rustfmt", version = "1.77.0" },
+  { name = "channel-manifest", version = "1.77.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "rustc", provider = "static.rust-lang.org", build = "1.77.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rustc-1.77.0-aarch64-apple-darwin.tar.xz", digest = "sha256:84f74f2aaf4d4df20a18bc027a875d655ff209931f247db03c07a33413029032" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rustc", provider = "static.rust-lang.org", build = "1.77.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rustc-1.77.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:89397dddb99733bad987e9fdc9d985a150af2e39c81766099e584d93991f5752" },
+  { platform = "aarch64-apple-darwin", component = "rust-std", provider = "static.rust-lang.org", build = "1.77.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rust-std-1.77.0-aarch64-apple-darwin.tar.xz", digest = "sha256:447821e59fbf401f4fbcd182d65207dc4660fddcd73b9dd1cbe32d9ad6d233dc" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rust-std", provider = "static.rust-lang.org", build = "1.77.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rust-std-1.77.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:e5fec840744c3ff63611f6801de80f5ec8e099fa8225bf46d064810a9545e9b5" },
+  { platform = "aarch64-apple-darwin", component = "cargo", provider = "static.rust-lang.org", build = "1.77.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/cargo-1.77.0-aarch64-apple-darwin.tar.xz", digest = "sha256:30f0b45863da00856d29ff851a25dcaa73cc5a5e9ca2aa9e16529ab13777ba66" },
+  { platform = "x86_64-unknown-linux-gnu", component = "cargo", provider = "static.rust-lang.org", build = "1.77.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/cargo-1.77.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:0af971f126e0307d4e4d974f0e9c33fd1c2923274b14a0861823b5a019e8faf5" },
+  { platform = "aarch64-apple-darwin", component = "rustfmt", provider = "static.rust-lang.org", build = "1.77.0", recipe = "rustfmt/1", url = "https://static.rust-lang.org/dist/rustfmt-1.77.0-aarch64-apple-darwin.tar.xz", digest = "sha256:c20723822cf414bc1fb60e317fbbb5651ad9cee577abf30335643785e34aea7a" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rustfmt", provider = "static.rust-lang.org", build = "1.77.0", recipe = "rustfmt/1", url = "https://static.rust-lang.org/dist/rustfmt-1.77.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:c438f9b32f46a5984000336b06da3a050359024650e8cb5fa08b800010b0f499" },
+  { platform = "aarch64-apple-darwin", component = "channel-manifest", provider = "static.rust-lang.org", build = "1.77.0", recipe = "rust-channel-manifest/1", url = "https://static.rust-lang.org/dist/channel-rust-1.77.0.toml", digest = "sha256:faccaa01dda45fc2956bcfd4da0cf76e52104d3b1862ddd4eb7c4159a18e49cf" },
+  { platform = "x86_64-unknown-linux-gnu", component = "channel-manifest", provider = "static.rust-lang.org", build = "1.77.0", recipe = "rust-channel-manifest/1", url = "https://static.rust-lang.org/dist/channel-rust-1.77.0.toml", digest = "sha256:faccaa01dda45fc2956bcfd4da0cf76e52104d3b1862ddd4eb7c4159a18e49cf" },
+]
+
+[[release]]
+key = "rust-1.76.0"
+components = [
+  { name = "rustc", version = "1.76.0" },
+  { name = "rust-std", version = "1.76.0" },
+  { name = "cargo", version = "1.76.0" },
+  { name = "rustfmt", version = "1.76.0" },
+  { name = "channel-manifest", version = "1.76.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "rustc", provider = "static.rust-lang.org", build = "1.76.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rustc-1.76.0-aarch64-apple-darwin.tar.xz", digest = "sha256:03d315b0bbd1137c50486163b30d1bbba4c5e77fa6dba3a905fc3114c36575e9" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rustc", provider = "static.rust-lang.org", build = "1.76.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rustc-1.76.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:9fadfcf71bc6a0ddfd026b9624163faf1c5689dd4a1f7cc1f857167ade4aa6eb" },
+  { platform = "aarch64-apple-darwin", component = "rust-std", provider = "static.rust-lang.org", build = "1.76.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rust-std-1.76.0-aarch64-apple-darwin.tar.xz", digest = "sha256:7005bce1370712e6ad29165b3ba3e39b582a46a831bc28f7350650e058d8243b" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rust-std", provider = "static.rust-lang.org", build = "1.76.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rust-std-1.76.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:e41150b52d923a3bbe166c4ecc5719f56576274b0d034d764768aee279ae2063" },
+  { platform = "aarch64-apple-darwin", component = "cargo", provider = "static.rust-lang.org", build = "1.76.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/cargo-1.76.0-aarch64-apple-darwin.tar.xz", digest = "sha256:c963d3bf8f07077b0c87922e53ebb8999c601848def13d6f60a7a102dfa2a8a5" },
+  { platform = "x86_64-unknown-linux-gnu", component = "cargo", provider = "static.rust-lang.org", build = "1.76.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/cargo-1.76.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:30ec0ad9fca443ec12c544f9ce448dacdde411a45b9042961938b650e918ccfb" },
+  { platform = "aarch64-apple-darwin", component = "rustfmt", provider = "static.rust-lang.org", build = "1.76.0", recipe = "rustfmt/1", url = "https://static.rust-lang.org/dist/rustfmt-1.76.0-aarch64-apple-darwin.tar.xz", digest = "sha256:49be204b368286ce0f0001676a6dff964814166dcf93859c3038e19cc683b24c" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rustfmt", provider = "static.rust-lang.org", build = "1.76.0", recipe = "rustfmt/1", url = "https://static.rust-lang.org/dist/rustfmt-1.76.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:92a324bf679fa47a46e05360c88a49a91b9861e26c3e213c49a237609444e8eb" },
+  { platform = "aarch64-apple-darwin", component = "channel-manifest", provider = "static.rust-lang.org", build = "1.76.0", recipe = "rust-channel-manifest/1", url = "https://static.rust-lang.org/dist/channel-rust-1.76.0.toml", digest = "sha256:7b89a56897a1581ca66312468276ee08e6d596a3254128a567c1658c6f733c76" },
+  { platform = "x86_64-unknown-linux-gnu", component = "channel-manifest", provider = "static.rust-lang.org", build = "1.76.0", recipe = "rust-channel-manifest/1", url = "https://static.rust-lang.org/dist/channel-rust-1.76.0.toml", digest = "sha256:7b89a56897a1581ca66312468276ee08e6d596a3254128a567c1658c6f733c76" },
+]
+
+[[release]]
+key = "rust-1.75.0"
+components = [
+  { name = "rustc", version = "1.75.0" },
+  { name = "rust-std", version = "1.75.0" },
+  { name = "cargo", version = "1.75.0" },
+  { name = "rustfmt", version = "1.75.0" },
+  { name = "channel-manifest", version = "1.75.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "rustc", provider = "static.rust-lang.org", build = "1.75.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rustc-1.75.0-aarch64-apple-darwin.tar.xz", digest = "sha256:c16ba325a1c491d9963b0095cbae85e1a7d51e1bcf10426891e297a190ddb236" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rustc", provider = "static.rust-lang.org", build = "1.75.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rustc-1.75.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:2824ba4045acdddfa436da4f0bb72807b64a089aa2e7c9a66ca1a3a571114ce7" },
+  { platform = "aarch64-apple-darwin", component = "rust-std", provider = "static.rust-lang.org", build = "1.75.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rust-std-1.75.0-aarch64-apple-darwin.tar.xz", digest = "sha256:25e9849c4bd0032599e31a1358c7d175cfded3807593f6f1b5d9742db4941355" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rust-std", provider = "static.rust-lang.org", build = "1.75.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rust-std-1.75.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:136b132199f7bbda2aa0bbff6d1e6ae7d5fca2994a2f2a432a5e99de224b6314" },
+  { platform = "aarch64-apple-darwin", component = "cargo", provider = "static.rust-lang.org", build = "1.75.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/cargo-1.75.0-aarch64-apple-darwin.tar.xz", digest = "sha256:86320d22c192b7a531daed941bbc11d8c7d01b6490cb4b85e7aa7ff92b5baf65" },
+  { platform = "x86_64-unknown-linux-gnu", component = "cargo", provider = "static.rust-lang.org", build = "1.75.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/cargo-1.75.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:6ac164e7da969a1d524f747f22792e9aa08bc7446f058314445a4f3c1d31a6bd" },
+  { platform = "aarch64-apple-darwin", component = "rustfmt", provider = "static.rust-lang.org", build = "1.75.0", recipe = "rustfmt/1", url = "https://static.rust-lang.org/dist/rustfmt-1.75.0-aarch64-apple-darwin.tar.xz", digest = "sha256:27627c5606145a3a6cf2d12a75e8f3ee4b8be08dc5485d7c5a0e7c7c6245bfb9" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rustfmt", provider = "static.rust-lang.org", build = "1.75.0", recipe = "rustfmt/1", url = "https://static.rust-lang.org/dist/rustfmt-1.75.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:1799f103dfaa19b8cf4781500773c709c627c00d203aecd1b56d75d8e624e4d5" },
+  { platform = "aarch64-apple-darwin", component = "channel-manifest", provider = "static.rust-lang.org", build = "1.75.0", recipe = "rust-channel-manifest/1", url = "https://static.rust-lang.org/dist/channel-rust-1.75.0.toml", digest = "sha256:49746d02e3b822a34e42afa72dbaec0c56d593edda540f0d369499b0a9551fff" },
+  { platform = "x86_64-unknown-linux-gnu", component = "channel-manifest", provider = "static.rust-lang.org", build = "1.75.0", recipe = "rust-channel-manifest/1", url = "https://static.rust-lang.org/dist/channel-rust-1.75.0.toml", digest = "sha256:49746d02e3b822a34e42afa72dbaec0c56d593edda540f0d369499b0a9551fff" },
+]
+
+[[release]]
+key = "rust-1.74.1"
+components = [
+  { name = "rustc", version = "1.74.1" },
+  { name = "rust-std", version = "1.74.1" },
+  { name = "cargo", version = "1.74.1" },
+  { name = "rustfmt", version = "1.74.1" },
+  { name = "channel-manifest", version = "1.74.1" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "rustc", provider = "static.rust-lang.org", build = "1.74.1", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rustc-1.74.1-aarch64-apple-darwin.tar.xz", digest = "sha256:ae757835889580fd46404d475f258865f961ef5cedd6ee1e773f255d20052106" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rustc", provider = "static.rust-lang.org", build = "1.74.1", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rustc-1.74.1-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:b30e2d1b6b139874caa3fc81fbc3098e88cf01b98e891ce591d12ad4f0299437" },
+  { platform = "aarch64-apple-darwin", component = "rust-std", provider = "static.rust-lang.org", build = "1.74.1", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rust-std-1.74.1-aarch64-apple-darwin.tar.xz", digest = "sha256:9aec44d92ea792d24700416a18f8cff6dbb5e5c0bbe75ef40a8fc561fdbe9857" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rust-std", provider = "static.rust-lang.org", build = "1.74.1", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rust-std-1.74.1-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:df435e3254c03ccbfc9e733ae33b399f5f99bd488974bc07d8b1db91a12ee95b" },
+  { platform = "aarch64-apple-darwin", component = "cargo", provider = "static.rust-lang.org", build = "1.74.1", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/cargo-1.74.1-aarch64-apple-darwin.tar.xz", digest = "sha256:2a94dc69baeb4038b173bd5f604e1b82d82a8e49cf9558822087018ea62b1b44" },
+  { platform = "x86_64-unknown-linux-gnu", component = "cargo", provider = "static.rust-lang.org", build = "1.74.1", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/cargo-1.74.1-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:3ea1159af625c281a9d4486efbeb51e1a24ccba58a39db230af38fa331a95f34" },
+  { platform = "aarch64-apple-darwin", component = "rustfmt", provider = "static.rust-lang.org", build = "1.74.1", recipe = "rustfmt/1", url = "https://static.rust-lang.org/dist/rustfmt-1.74.1-aarch64-apple-darwin.tar.xz", digest = "sha256:92f47a4bd8bd475ce23dfa7279545fffd090bfb37e68d2e1ad21f4d53c6a1b16" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rustfmt", provider = "static.rust-lang.org", build = "1.74.1", recipe = "rustfmt/1", url = "https://static.rust-lang.org/dist/rustfmt-1.74.1-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:92a80452f63c4ec63dd6c4f4fd4910b2c45e94e59f2a26a36d3644e6c8e5a36d" },
+  { platform = "aarch64-apple-darwin", component = "channel-manifest", provider = "static.rust-lang.org", build = "1.74.1", recipe = "rust-channel-manifest/1", url = "https://static.rust-lang.org/dist/channel-rust-1.74.1.toml", digest = "sha256:3e3beea2ec13b187cd296e558b961eef2fa52fb4ac5860710ad04e3a6db3d787" },
+  { platform = "x86_64-unknown-linux-gnu", component = "channel-manifest", provider = "static.rust-lang.org", build = "1.74.1", recipe = "rust-channel-manifest/1", url = "https://static.rust-lang.org/dist/channel-rust-1.74.1.toml", digest = "sha256:3e3beea2ec13b187cd296e558b961eef2fa52fb4ac5860710ad04e3a6db3d787" },
+]
+
+[[release]]
+key = "rust-1.74.0"
+components = [
+  { name = "rustc", version = "1.74.0" },
+  { name = "rust-std", version = "1.74.0" },
+  { name = "cargo", version = "1.74.0" },
+  { name = "rustfmt", version = "1.74.0" },
+  { name = "channel-manifest", version = "1.74.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "rustc", provider = "static.rust-lang.org", build = "1.74.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rustc-1.74.0-aarch64-apple-darwin.tar.xz", digest = "sha256:488a87560a0b162b408e56738751d48e9667e34c43050ec590714f2b6665166c" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rustc", provider = "static.rust-lang.org", build = "1.74.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rustc-1.74.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:7d464be2ae0d6ce69f056d1ea9a8ce2b3b1d537418caea216fdd303903972181" },
+  { platform = "aarch64-apple-darwin", component = "rust-std", provider = "static.rust-lang.org", build = "1.74.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rust-std-1.74.0-aarch64-apple-darwin.tar.xz", digest = "sha256:7c8e78df45a915a770bb38096042dbeb8154557bf56f8bd565354991ea0a64fb" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rust-std", provider = "static.rust-lang.org", build = "1.74.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rust-std-1.74.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:548413213012e2f62b08ed8a913a51210ae7402619027224580176031f2789ea" },
+  { platform = "aarch64-apple-darwin", component = "cargo", provider = "static.rust-lang.org", build = "1.74.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/cargo-1.74.0-aarch64-apple-darwin.tar.xz", digest = "sha256:5c14e9b3a458d728d89e02f4e024b710d5b0eb8c45249066fe666d2094fbf233" },
+  { platform = "x86_64-unknown-linux-gnu", component = "cargo", provider = "static.rust-lang.org", build = "1.74.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/cargo-1.74.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:f219386d4569c40b660518e99267afff428c13bf980bda7a614c8d4038d013f6" },
+  { platform = "aarch64-apple-darwin", component = "rustfmt", provider = "static.rust-lang.org", build = "1.74.0", recipe = "rustfmt/1", url = "https://static.rust-lang.org/dist/rustfmt-1.74.0-aarch64-apple-darwin.tar.xz", digest = "sha256:7932eb3595824580d52ef7ab84aa9ec89e7ec35862acc952d62aeb86f85e75cb" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rustfmt", provider = "static.rust-lang.org", build = "1.74.0", recipe = "rustfmt/1", url = "https://static.rust-lang.org/dist/rustfmt-1.74.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:0ebf9b8d2edaa7ae40fbfc091d0c75098f53c9f613fa562dfe94dfdb8046a840" },
+  { platform = "aarch64-apple-darwin", component = "channel-manifest", provider = "static.rust-lang.org", build = "1.74.0", recipe = "rust-channel-manifest/1", url = "https://static.rust-lang.org/dist/channel-rust-1.74.0.toml", digest = "sha256:536c9fb9e1688491e389feda9e6241e6f65ba4fec6e9b2021f866c8edb9f4685" },
+  { platform = "x86_64-unknown-linux-gnu", component = "channel-manifest", provider = "static.rust-lang.org", build = "1.74.0", recipe = "rust-channel-manifest/1", url = "https://static.rust-lang.org/dist/channel-rust-1.74.0.toml", digest = "sha256:536c9fb9e1688491e389feda9e6241e6f65ba4fec6e9b2021f866c8edb9f4685" },
+]
+
+[[release]]
+key = "rust-1.73.0"
+components = [
+  { name = "rustc", version = "1.73.0" },
+  { name = "rust-std", version = "1.73.0" },
+  { name = "cargo", version = "1.73.0" },
+  { name = "rustfmt", version = "1.73.0" },
+  { name = "channel-manifest", version = "1.73.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "rustc", provider = "static.rust-lang.org", build = "1.73.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rustc-1.73.0-aarch64-apple-darwin.tar.xz", digest = "sha256:a0cb60d97d18064a816fc4e1d55faef51aec807606fc467b99451355584e5763" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rustc", provider = "static.rust-lang.org", build = "1.73.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rustc-1.73.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:14f383eb4d6e65ce01cc99f2c5cf5a78744239f29704f72fe84f11095af779f5" },
+  { platform = "aarch64-apple-darwin", component = "rust-std", provider = "static.rust-lang.org", build = "1.73.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rust-std-1.73.0-aarch64-apple-darwin.tar.xz", digest = "sha256:25818c9b2ca878076892504bfc9504a24f638be3de23691a548dc094f08c0172" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rust-std", provider = "static.rust-lang.org", build = "1.73.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rust-std-1.73.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:96efb163a57b400152c357be0ea3a0dd902b56cc0df662b9ac951403c7c7b15b" },
+  { platform = "aarch64-apple-darwin", component = "cargo", provider = "static.rust-lang.org", build = "1.73.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/cargo-1.73.0-aarch64-apple-darwin.tar.xz", digest = "sha256:caa855d28ade0ecb70567d886048d392b3b90f15a7751f9733d4c189ce67bb71" },
+  { platform = "x86_64-unknown-linux-gnu", component = "cargo", provider = "static.rust-lang.org", build = "1.73.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/cargo-1.73.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:7c3ce5738d570eaea97dd3d213ea73c8beda4f0c61e7486f95e497b7b10c4e2d" },
+  { platform = "aarch64-apple-darwin", component = "rustfmt", provider = "static.rust-lang.org", build = "1.73.0", recipe = "rustfmt/1", url = "https://static.rust-lang.org/dist/rustfmt-1.73.0-aarch64-apple-darwin.tar.xz", digest = "sha256:445644e5b86e751e37a59b2a447d288ac74c11647829f3bd226328a5d1f96f04" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rustfmt", provider = "static.rust-lang.org", build = "1.73.0", recipe = "rustfmt/1", url = "https://static.rust-lang.org/dist/rustfmt-1.73.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:aa84061bc53fd3fc0d2b90c8b405ef58328171e0baa9e688f27160e9adbbaf3e" },
+  { platform = "aarch64-apple-darwin", component = "channel-manifest", provider = "static.rust-lang.org", build = "1.73.0", recipe = "rust-channel-manifest/1", url = "https://static.rust-lang.org/dist/channel-rust-1.73.0.toml", digest = "sha256:acb3fcf9f4f19cf1e847de9926209aff9027b353a88c8ecc2ec992a91da2a7ca" },
+  { platform = "x86_64-unknown-linux-gnu", component = "channel-manifest", provider = "static.rust-lang.org", build = "1.73.0", recipe = "rust-channel-manifest/1", url = "https://static.rust-lang.org/dist/channel-rust-1.73.0.toml", digest = "sha256:acb3fcf9f4f19cf1e847de9926209aff9027b353a88c8ecc2ec992a91da2a7ca" },
+]
+
+[[release]]
+key = "rust-1.72.1"
+components = [
+  { name = "rustc", version = "1.72.1" },
+  { name = "rust-std", version = "1.72.1" },
+  { name = "cargo", version = "1.72.1" },
+  { name = "rustfmt", version = "1.72.1" },
+  { name = "channel-manifest", version = "1.72.1" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "rustc", provider = "static.rust-lang.org", build = "1.72.1", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rustc-1.72.1-aarch64-apple-darwin.tar.xz", digest = "sha256:a260a78182c5712b483e0bd2fd5b87748703e05a0cdeae9d57dab655eb945465" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rustc", provider = "static.rust-lang.org", build = "1.72.1", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rustc-1.72.1-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:df30342d3cc16c9688b6121301397489f2f07c2c8cbd074c74857cc70e61281b" },
+  { platform = "aarch64-apple-darwin", component = "rust-std", provider = "static.rust-lang.org", build = "1.72.1", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rust-std-1.72.1-aarch64-apple-darwin.tar.xz", digest = "sha256:f0a9020530229527ce69d2d4c0b7ca7e71bdb39df135ca658bb8555458a40d86" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rust-std", provider = "static.rust-lang.org", build = "1.72.1", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rust-std-1.72.1-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:35d7f3099c801fc0899453318a538ec55b9a4641279943479912d7784236338b" },
+  { platform = "aarch64-apple-darwin", component = "cargo", provider = "static.rust-lang.org", build = "1.72.1", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/cargo-1.72.1-aarch64-apple-darwin.tar.xz", digest = "sha256:9ddf3aa3fb56a8a6f92c4ba5025c3538cb14729631d963d174804e9d0c2403de" },
+  { platform = "x86_64-unknown-linux-gnu", component = "cargo", provider = "static.rust-lang.org", build = "1.72.1", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/cargo-1.72.1-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:64eb3dbc8aa1c2ee2e5f12cb4fd0a714219ffec9f503f7bbaac4c92d68017ad7" },
+  { platform = "aarch64-apple-darwin", component = "rustfmt", provider = "static.rust-lang.org", build = "1.72.1", recipe = "rustfmt/1", url = "https://static.rust-lang.org/dist/rustfmt-1.72.1-aarch64-apple-darwin.tar.xz", digest = "sha256:d2b2c17ab83b0a7acc9dfdd3f3a9040aae4e8f8c679786b1962e69fd13992fb1" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rustfmt", provider = "static.rust-lang.org", build = "1.72.1", recipe = "rustfmt/1", url = "https://static.rust-lang.org/dist/rustfmt-1.72.1-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:5e798c0b44985c99c703fdc751e670774604ba88c60d22fdf75d214a8ae9ac39" },
+  { platform = "aarch64-apple-darwin", component = "channel-manifest", provider = "static.rust-lang.org", build = "1.72.1", recipe = "rust-channel-manifest/1", url = "https://static.rust-lang.org/dist/channel-rust-1.72.1.toml", digest = "sha256:77113b9660855a5ab49e5ff029c998be93fdcea41b062b40420675cf1f4ea229" },
+  { platform = "x86_64-unknown-linux-gnu", component = "channel-manifest", provider = "static.rust-lang.org", build = "1.72.1", recipe = "rust-channel-manifest/1", url = "https://static.rust-lang.org/dist/channel-rust-1.72.1.toml", digest = "sha256:77113b9660855a5ab49e5ff029c998be93fdcea41b062b40420675cf1f4ea229" },
+]
+
+[[release]]
+key = "rust-1.72.0"
+components = [
+  { name = "rustc", version = "1.72.0" },
+  { name = "rust-std", version = "1.72.0" },
+  { name = "cargo", version = "1.72.0" },
+  { name = "rustfmt", version = "1.72.0" },
+  { name = "channel-manifest", version = "1.72.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "rustc", provider = "static.rust-lang.org", build = "1.72.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rustc-1.72.0-aarch64-apple-darwin.tar.xz", digest = "sha256:173a97b6f1285c2dcbb703aafe77c6aad81cfdcad0ee5f48d5c8d1e65eb21dba" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rustc", provider = "static.rust-lang.org", build = "1.72.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rustc-1.72.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:5b5d7854a0d73368f15146c1aa47e4dbccf12762c93282f410a09a605929ce09" },
+  { platform = "aarch64-apple-darwin", component = "rust-std", provider = "static.rust-lang.org", build = "1.72.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rust-std-1.72.0-aarch64-apple-darwin.tar.xz", digest = "sha256:dc62c28fb00b210d9cbb30c00024dfc966230aec65991bcf6e888051fc351e86" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rust-std", provider = "static.rust-lang.org", build = "1.72.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rust-std-1.72.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:36f27513a6e4381f15b0cd14097c885af537f990cb6193cec3337c429367bf23" },
+  { platform = "aarch64-apple-darwin", component = "cargo", provider = "static.rust-lang.org", build = "1.72.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/cargo-1.72.0-aarch64-apple-darwin.tar.xz", digest = "sha256:3716f783710422b0f234da5f8924f077b040edc24dc5677f98e6e93f968011e5" },
+  { platform = "x86_64-unknown-linux-gnu", component = "cargo", provider = "static.rust-lang.org", build = "1.72.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/cargo-1.72.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:4a401dfe7b3056dc0d42acbcd380b2b90f936577706ca74ef5327af0f5abd0a0" },
+  { platform = "aarch64-apple-darwin", component = "rustfmt", provider = "static.rust-lang.org", build = "1.72.0", recipe = "rustfmt/1", url = "https://static.rust-lang.org/dist/rustfmt-1.72.0-aarch64-apple-darwin.tar.xz", digest = "sha256:6798ec395e8520e0f97e45652b1b0212c2bf7ab2e2596830a5e0e6a4bf4e2fc6" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rustfmt", provider = "static.rust-lang.org", build = "1.72.0", recipe = "rustfmt/1", url = "https://static.rust-lang.org/dist/rustfmt-1.72.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:4d2fdc509753a915bc6ae5d73d3655410143ab53af3d634f6bafa279cf801bf6" },
+  { platform = "aarch64-apple-darwin", component = "channel-manifest", provider = "static.rust-lang.org", build = "1.72.0", recipe = "rust-channel-manifest/1", url = "https://static.rust-lang.org/dist/channel-rust-1.72.0.toml", digest = "sha256:43d520cf3bf12e2e31f5a5942539feff91177a40bdf0e0d15354f0854b3d4676" },
+  { platform = "x86_64-unknown-linux-gnu", component = "channel-manifest", provider = "static.rust-lang.org", build = "1.72.0", recipe = "rust-channel-manifest/1", url = "https://static.rust-lang.org/dist/channel-rust-1.72.0.toml", digest = "sha256:43d520cf3bf12e2e31f5a5942539feff91177a40bdf0e0d15354f0854b3d4676" },
+]
+
+[[release]]
+key = "rust-1.71.1"
+components = [
+  { name = "rustc", version = "1.71.1" },
+  { name = "rust-std", version = "1.71.1" },
+  { name = "cargo", version = "1.71.1" },
+  { name = "rustfmt", version = "1.71.1" },
+  { name = "channel-manifest", version = "1.71.1" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "rustc", provider = "static.rust-lang.org", build = "1.71.1", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rustc-1.71.1-aarch64-apple-darwin.tar.xz", digest = "sha256:d7271d2fb81ab361355ceb97eb04e27e06283bcdecbef94f3d3d1ffcb9d71e4a" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rustc", provider = "static.rust-lang.org", build = "1.71.1", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rustc-1.71.1-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:9a8a12b6c2a6f67d75ead0f343f891b78672c59387d1be28b46f3161ec2b251d" },
+  { platform = "aarch64-apple-darwin", component = "rust-std", provider = "static.rust-lang.org", build = "1.71.1", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rust-std-1.71.1-aarch64-apple-darwin.tar.xz", digest = "sha256:c440ba48558c05e27ab2ced4dff790100f4d4204890c6abcc821368fad2a56c6" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rust-std", provider = "static.rust-lang.org", build = "1.71.1", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rust-std-1.71.1-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:31f392df564850d78be80adc625b06a3964a49ef5c519075b930f2042a422264" },
+  { platform = "aarch64-apple-darwin", component = "cargo", provider = "static.rust-lang.org", build = "1.71.1", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/cargo-1.71.1-aarch64-apple-darwin.tar.xz", digest = "sha256:a9e76a461f90894b6413608695d113fa83a98525ca900452192141db2c63b576" },
+  { platform = "x86_64-unknown-linux-gnu", component = "cargo", provider = "static.rust-lang.org", build = "1.71.1", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/cargo-1.71.1-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:55760c2f20356fe5cb2a4aa105e20693a573048f1dbc9daa41a0983fc0930b15" },
+  { platform = "aarch64-apple-darwin", component = "rustfmt", provider = "static.rust-lang.org", build = "1.71.1", recipe = "rustfmt/1", url = "https://static.rust-lang.org/dist/rustfmt-1.71.1-aarch64-apple-darwin.tar.xz", digest = "sha256:f8faadf03e72a5741fef2777be0f891037ac780a45b1ef5a13dc2839b7826224" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rustfmt", provider = "static.rust-lang.org", build = "1.71.1", recipe = "rustfmt/1", url = "https://static.rust-lang.org/dist/rustfmt-1.71.1-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:2b0b301b06d4d8cf4bfadb2d260356b7b487b7f69dc4623e60648e19061554a6" },
+  { platform = "aarch64-apple-darwin", component = "channel-manifest", provider = "static.rust-lang.org", build = "1.71.1", recipe = "rust-channel-manifest/1", url = "https://static.rust-lang.org/dist/channel-rust-1.71.1.toml", digest = "sha256:474174462b1bafbe3183d98463277279bc7fcf45aee87234fca5b0ad5df4bd9a" },
+  { platform = "x86_64-unknown-linux-gnu", component = "channel-manifest", provider = "static.rust-lang.org", build = "1.71.1", recipe = "rust-channel-manifest/1", url = "https://static.rust-lang.org/dist/channel-rust-1.71.1.toml", digest = "sha256:474174462b1bafbe3183d98463277279bc7fcf45aee87234fca5b0ad5df4bd9a" },
+]
+
+[[release]]
+key = "rust-1.71.0"
+components = [
+  { name = "rustc", version = "1.71.0" },
+  { name = "rust-std", version = "1.71.0" },
+  { name = "cargo", version = "1.71.0" },
+  { name = "rustfmt", version = "1.71.0" },
+  { name = "channel-manifest", version = "1.71.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "rustc", provider = "static.rust-lang.org", build = "1.71.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rustc-1.71.0-aarch64-apple-darwin.tar.xz", digest = "sha256:bee065a5635ec4206b4faa25fdd6390a58a82f6c7351b2c5c9bc05077a1ec250" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rustc", provider = "static.rust-lang.org", build = "1.71.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rustc-1.71.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:c293d906769671d1cd18e945671bbd14e0b8a41df5075c47f33e6086fc8a1558" },
+  { platform = "aarch64-apple-darwin", component = "rust-std", provider = "static.rust-lang.org", build = "1.71.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rust-std-1.71.0-aarch64-apple-darwin.tar.xz", digest = "sha256:2fd0b7d71c215dafeff5b3bd7c5b9a15a404902459c03653f072fe44efa5d5bd" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rust-std", provider = "static.rust-lang.org", build = "1.71.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rust-std-1.71.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:98ae6530c3a41167e9d93d11ea078be98a02f6d809a06d0d51af3ce0f73150d7" },
+  { platform = "aarch64-apple-darwin", component = "cargo", provider = "static.rust-lang.org", build = "1.71.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/cargo-1.71.0-aarch64-apple-darwin.tar.xz", digest = "sha256:7637bc54d15cec656d7abb32417316546c7a784eded8677753b5dad7f05b5b09" },
+  { platform = "x86_64-unknown-linux-gnu", component = "cargo", provider = "static.rust-lang.org", build = "1.71.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/cargo-1.71.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:fe6fb520f59966300ee661d18b37c36cb3e614877c4c01dfedf987b8a9c577e9" },
+  { platform = "aarch64-apple-darwin", component = "rustfmt", provider = "static.rust-lang.org", build = "1.71.0", recipe = "rustfmt/1", url = "https://static.rust-lang.org/dist/rustfmt-1.71.0-aarch64-apple-darwin.tar.xz", digest = "sha256:b27586318672a28e588909b1a6f3442358549a6a108492420d09881684ffe7a9" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rustfmt", provider = "static.rust-lang.org", build = "1.71.0", recipe = "rustfmt/1", url = "https://static.rust-lang.org/dist/rustfmt-1.71.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:1d400f3944ac356a4638d1fbb49834e81ff10429b2a97be845519701b5bdeb36" },
+  { platform = "aarch64-apple-darwin", component = "channel-manifest", provider = "static.rust-lang.org", build = "1.71.0", recipe = "rust-channel-manifest/1", url = "https://static.rust-lang.org/dist/channel-rust-1.71.0.toml", digest = "sha256:92cd273041865caac79dfbf8164bbebe143b831efaaeebfa223e1f29947797bf" },
+  { platform = "x86_64-unknown-linux-gnu", component = "channel-manifest", provider = "static.rust-lang.org", build = "1.71.0", recipe = "rust-channel-manifest/1", url = "https://static.rust-lang.org/dist/channel-rust-1.71.0.toml", digest = "sha256:92cd273041865caac79dfbf8164bbebe143b831efaaeebfa223e1f29947797bf" },
+]
+
+[[release]]
+key = "rust-1.70.0"
+components = [
+  { name = "rustc", version = "1.70.0" },
+  { name = "rust-std", version = "1.70.0" },
+  { name = "cargo", version = "1.70.0" },
+  { name = "rustfmt", version = "1.70.0" },
+  { name = "channel-manifest", version = "1.70.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "rustc", provider = "static.rust-lang.org", build = "1.70.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rustc-1.70.0-aarch64-apple-darwin.tar.xz", digest = "sha256:cc5f1242e3aa8fe9af7245542d5e1a0edaad7cd4289db31836021ab60bbf91f4" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rustc", provider = "static.rust-lang.org", build = "1.70.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rustc-1.70.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:7d891d3e9bc4f1151545c83cbe3bc6af9ed234388c45ca2e19641262f48615e2" },
+  { platform = "aarch64-apple-darwin", component = "rust-std", provider = "static.rust-lang.org", build = "1.70.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rust-std-1.70.0-aarch64-apple-darwin.tar.xz", digest = "sha256:cea769733d661c25199ac200b3ec522e4e935c610fd8c3a55f24360f1b8ec616" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rust-std", provider = "static.rust-lang.org", build = "1.70.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/rust-std-1.70.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:0c0129717da1e27ccf2c56da950d2fe56973f71beec9e80ae6904b282d2f0ee9" },
+  { platform = "aarch64-apple-darwin", component = "cargo", provider = "static.rust-lang.org", build = "1.70.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/cargo-1.70.0-aarch64-apple-darwin.tar.xz", digest = "sha256:faa0c57eab1846f4220e0833a167b845799bfc2d43aee819db7e9f5fe7d5a031" },
+  { platform = "x86_64-unknown-linux-gnu", component = "cargo", provider = "static.rust-lang.org", build = "1.70.0", recipe = "rust-toolchain/1", url = "https://static.rust-lang.org/dist/cargo-1.70.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:650e7a890a52869cd14e2305652bff775aec7fc2cf47fc62cf4a89ff07242333" },
+  { platform = "aarch64-apple-darwin", component = "rustfmt", provider = "static.rust-lang.org", build = "1.70.0", recipe = "rustfmt/1", url = "https://static.rust-lang.org/dist/rustfmt-1.70.0-aarch64-apple-darwin.tar.xz", digest = "sha256:f956814dbf47c665376bf7ae23e50fc0dc772dc4f7e7040d5ab340d3b48ba803" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rustfmt", provider = "static.rust-lang.org", build = "1.70.0", recipe = "rustfmt/1", url = "https://static.rust-lang.org/dist/rustfmt-1.70.0-x86_64-unknown-linux-gnu.tar.xz", digest = "sha256:c3a6de7adcc4c6f50c087d5ec2c01204852fb35d95609475e90ca2d60160ddbb" },
+  { platform = "aarch64-apple-darwin", component = "channel-manifest", provider = "static.rust-lang.org", build = "1.70.0", recipe = "rust-channel-manifest/1", url = "https://static.rust-lang.org/dist/channel-rust-1.70.0.toml", digest = "sha256:81d62a9e0d32f621d8cd83c07640bf91adc3467cb72dafd2e46f004a3d00cb27" },
+  { platform = "x86_64-unknown-linux-gnu", component = "channel-manifest", provider = "static.rust-lang.org", build = "1.70.0", recipe = "rust-channel-manifest/1", url = "https://static.rust-lang.org/dist/channel-rust-1.70.0.toml", digest = "sha256:81d62a9e0d32f621d8cd83c07640bf91adc3467cb72dafd2e46f004a3d00cb27" },
+]

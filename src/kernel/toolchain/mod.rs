@@ -31,6 +31,21 @@ use sha2::{Digest as _, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 
+/// The source a lock row names for a toolchain that is a directory on this
+/// machine (`[toolchain] path` in a rustup toolchain file) rather than a
+/// catalog download. Its row's URL is [`PATH_URL_SCHEME`] and its digest is
+/// the content hash of the tree.
+pub const PATH_SOURCE: &str = "path";
+
+/// The URL scheme of a [`PATH_SOURCE`] row. No catalog row uses it: catalog
+/// rows are downloads.
+pub const PATH_URL_SCHEME: &str = "file://";
+
+/// Whether an artifact `url` names a local tree, not a download.
+pub fn is_path_url(url: &str) -> bool {
+    url.starts_with(PATH_URL_SCHEME)
+}
+
 /// The canonical `<algorithm>:<hex>` spelling a catalog row, a bundle id and
 /// a lock row share, so the row names the algorithm the verifier must use.
 pub fn qualified(digest: &Digest) -> String {
@@ -219,6 +234,28 @@ impl Bundle {
             "sha256:{}",
             hex::encode(Sha256::digest(self.canonical_bytes()))
         )
+    }
+
+    /// The id a lock section records for this bundle with the helper
+    /// releases it pins (`rust = "1.98.1"` in a Python section): the
+    /// bundle's own id when it pins none, which is every section written
+    /// before pins existed, so those ids are unchanged. With pins, the hash
+    /// runs over the bundle's canonical bytes followed by one `helper`
+    /// record per pin, in name order, so a pin edited by hand is refused
+    /// like an edited row, and a closure built under other pins is stale.
+    pub fn section_id(&self, helpers: &BTreeMap<String, String>) -> String {
+        if helpers.is_empty() {
+            return self.bundle_id();
+        }
+        let mut bytes = self.canonical_bytes();
+        for (helper, release) in helpers {
+            for field in ["helper", helper.as_str(), release.as_str()] {
+                bytes.extend_from_slice(field.len().to_string().as_bytes());
+                bytes.push(b':');
+                bytes.extend_from_slice(field.as_bytes());
+            }
+        }
+        format!("sha256:{}", hex::encode(Sha256::digest(bytes)))
     }
 
     /// Structural checks a single bundle can do alone.
@@ -610,6 +647,19 @@ mod tests {
             text.contains("8:artifact20:aarch64-apple-darwin4:node"),
             "{text}"
         );
+    }
+
+    /// No pins add nothing; each pin, and each release, is its own id.
+    #[test]
+    fn a_section_id_is_the_bundle_id_until_it_pins_a_helper() {
+        let a = bundle("r1", "cpython", "3.12.0", Platform::ALL);
+        assert_eq!(a.section_id(&BTreeMap::new()), a.bundle_id());
+        let pin = |release: &str| BTreeMap::from([("rust".to_string(), release.to_string())]);
+        let pinned = a.section_id(&pin("1.98.1"));
+        assert_ne!(pinned, a.bundle_id());
+        assert_ne!(pinned, a.section_id(&pin("1.96.1")));
+        assert_eq!(pinned, a.section_id(&pin("1.98.1")));
+        assert!(pinned.starts_with("sha256:"));
     }
 
     #[test]

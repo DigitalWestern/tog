@@ -1,39 +1,167 @@
-//! The pinned Rust toolchain (kernel provider layer): the rustc, rust-std,
-//! cargo and rustfmt pin tables, the shipped Rust catalog they form,
-//! realization of the toolchain a selection names, and the rustup-style
-//! toolchain-file reading that maps a channel onto the pins.
+//! The pinned Rust toolchain (kernel provider layer): the shipped Rust
+//! catalog (`rust.catalog.toml`: every stable release's rustc, rust-std,
+//! cargo and rustfmt archives and its channel manifest), realization of the base
+//! toolchain a selection names, and the rustup-style toolchain-file reading
+//! that maps a channel onto the pins. Optional components and cross targets
+//! a toolchain file asks for are assembled on top of that base in
+//! [`super::rust_extras`].
 //!
 //! The cargo tailor builds projects with it and the Python tailor builds
 //! sdists with Rust extensions with it, so it lives below both. Callers
 //! install the object-kind rows (`tailors::install_kinds`) before they
 //! realize, as every realization entry point does.
 //!
-//! The pin rows and identity constructors are `pub` so the owning
-//! tailor keeps its identity goldens and object-kind rows beside it.
+//! The identity constructors are `pub` so the owning tailor keeps its
+//! identity goldens and object-kind rows beside it.
 
 use crate::kernel::activity::StoreActivity;
-use crate::kernel::fetch::{download_verified_digest_held, Digest};
+use crate::kernel::fetch::download_verified_digest_held;
 use crate::kernel::platform::{no_pin, Platform};
 use crate::kernel::store::Store;
-use crate::kernel::toolchain::{
-    ArtifactRow, ArtifactSpec, Bundle, Catalog, Component as BundleComponent, Selected,
-};
+use crate::kernel::toolchain::document::Shipped;
+use crate::kernel::toolchain::input;
+use crate::kernel::toolchain::{ArtifactSpec, Catalog, Selected};
 use crate::kernel::types::Identity;
 use crate::kernel::ui;
-use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+pub use super::rust_extras::{
+    project_extras, realize_toolchain, toolchain_file_extras_within, toolchain_object_id, Extras,
+};
+
+/// The shipped Rust catalog: every stable release from 1.70.0 on, with its
+/// rustc, rust-std, cargo and rustfmt archives and its channel manifest,
+/// and the release a project with no Rust pin gets. Generated and verified
+/// by `tools/catalog.py cargo`, which checks each manifest's signature
+/// against the Rust release key before it writes a row.
+static CATALOG: Shipped = Shipped::new(include_str!("rust.catalog.toml"));
+
+/// The release the checked-in channel manifest fixture trims and the
+/// identity goldens pin. Any shipped release realizes the same way.
 pub const RUST_VERSION: &str = "1.96.1";
+
+/// The catalog component that pins a release's official channel manifest,
+/// `channel-rust-<version>.toml`, by the sha256 of its bytes. Every optional
+/// component and cross target is provisioned from that file's rows
+/// (`rust_channel`), so pinning it pins them all. tog checks the sha256 only;
+/// the generator verified the manifest's signature before writing the row.
+pub const CHANNEL_MANIFEST: &str = "channel-manifest";
+
+/// The recipe of a channel manifest row: a file read, never laid out.
+pub const CHANNEL_MANIFEST_RECIPE: &str = "rust-channel-manifest/1";
+
+/// The pinned channel manifest of the release `selected` names. A lock
+/// written before the manifest was a catalog row has none of its own; the
+/// shipped release of the same version answers then, and the manifest is
+/// still held to every row of the lock before anything is read from it.
+pub fn channel_manifest(platform: Platform, selected: &Selected) -> io::Result<ArtifactSpec> {
+    let row = match selected.artifact(platform, CHANNEL_MANIFEST) {
+        Ok(row) => row,
+        Err(_) => {
+            let version = selected.version("rustc")?;
+            shipped_selection(version)
+                .and_then(|shipped| shipped.artifact(platform, CHANNEL_MANIFEST))
+                .map_err(|_| {
+                    err(format!(
+                        "this tog pins no channel manifest for Rust {version}, so it cannot \
+                         provision the components, targets or profile rust-toolchain.toml asks \
+                         for; upgrade tog"
+                    ))
+                })?
+        }
+    };
+    if row.recipe != CHANNEL_MANIFEST_RECIPE || row.digest.algo() != "sha256" {
+        return Err(err(format!(
+            "cargo: the channel manifest row ({} {}) is not one this tog reads; upgrade tog",
+            row.recipe,
+            row.digest.algo()
+        )));
+    }
+    Ok(row)
+}
 
 /// The extraction/layout recipe this binary knows for a Rust toolchain: the
 /// catalog emits it, the object identity commits to it, and a locked row
 /// naming anything else is refused rather than guessed at.
 pub const RUST_RECIPE: &str = "rust-toolchain/1";
 
+/// The layout recipe this binary knows for the rustfmt component. The
+/// catalog emits it and the object identity commits to it; a locked row
+/// naming another one is refused rather than laid out by guess.
+pub const RUSTFMT_RECIPE: &str = "rustfmt/1";
+
+/// The shipped Rust catalog: one release bundle per stable release, and the
+/// release a project with no Rust pin gets.
+pub fn toolchain_catalog() -> io::Result<Catalog> {
+    CATALOG.catalog()
+}
+
+pub fn preflight_platform(platform: Platform) -> io::Result<()> {
+    crate::kernel::platform::require_host(platform, "Rust toolchain")?;
+    rust_pins(platform).map(|_| ())
+}
+
+/// Every shipped Rust version with a complete base toolchain on `platform`.
+fn rust_pins(platform: Platform) -> io::Result<Vec<&'static str>> {
+    let mut pins = Vec::new();
+    for bundle in &CATALOG.document()?.bundles {
+        let complete = RUNTIME_COMPONENTS
+            .iter()
+            .all(|name| bundle.artifact(platform, name).is_some());
+        if let (true, Some(rustc)) = (complete, bundle.component("rustc")) {
+            pins.push(rustc.version.as_str());
+        }
+    }
+    if pins.is_empty() {
+        return Err(no_pin("rust toolchain", platform));
+    }
+    pins.sort_unstable_by_key(|pin| version_key(pin));
+    pins.dedup();
+    Ok(pins)
+}
+
+/// The Rust version a project with no toolchain file, or one naming
+/// `stable`, gets: the catalog's explicit default.
+fn default_pin(platform: Platform) -> io::Result<&'static str> {
+    let bundle = CATALOG.default_bundle()?;
+    if !RUNTIME_COMPONENTS
+        .iter()
+        .all(|name| bundle.artifact(platform, name).is_some())
+    {
+        return Err(no_pin("rust toolchain", platform));
+    }
+    bundle
+        .component("rustc")
+        .map(|rustc| rustc.version.as_str())
+        .ok_or_else(|| err("rust catalog: the default release has no rustc"))
+}
+
+/// The version a file with no channel (or none at all, or `stable`)
+/// resolves to: `default` when the caller has one (the Rust a Python
+/// project's lock pins for its sdists), the catalog's default otherwise.
+fn fallback_pin(platform: Platform, default: Option<&str>) -> io::Result<&'static str> {
+    let Some(version) = default else {
+        return default_pin(platform);
+    };
+    rust_pins(platform)?
+        .into_iter()
+        .find(|pin| *pin == version)
+        .ok_or_else(|| {
+            err(format!(
+                "tog-toolchain.toml pins Rust {version} for building sdists, which this tog \
+                 does not ship for {}; run `tog update --toolchain python`",
+                platform.triple()
+            ))
+        })
+}
+
+/// One base-toolchain row of the [`RUST_VERSION`] release, as the tests
+/// that pin its digests and ids read it.
+#[cfg(test)]
 pub struct RustComponent {
     pub platform: Platform,
     pub component: &'static str,
@@ -42,178 +170,55 @@ pub struct RustComponent {
     pub sha256: &'static str,
 }
 
-const RUST_COMPONENTS: &[RustComponent] = &[
-    RustComponent {
-        platform: Platform::Aarch64AppleDarwin,
-        component: "rustc",
-        version: RUST_VERSION,
-        url: "https://static.rust-lang.org/dist/rustc-1.96.1-aarch64-apple-darwin.tar.xz",
-        sha256: "9b548f0665f85f3c7fd45165611e3dea79f048c69d163be193986310d204fc2c",
-    },
-    RustComponent {
-        platform: Platform::Aarch64AppleDarwin,
-        component: "rust-std",
-        version: RUST_VERSION,
-        url: "https://static.rust-lang.org/dist/rust-std-1.96.1-aarch64-apple-darwin.tar.xz",
-        sha256: "0d433a74c303febc915f8fa1091ef166445706461d0c96984ecb7303aa8208f5",
-    },
-    RustComponent {
-        platform: Platform::Aarch64AppleDarwin,
-        component: "cargo",
-        version: RUST_VERSION,
-        url: "https://static.rust-lang.org/dist/cargo-1.96.1-aarch64-apple-darwin.tar.xz",
-        sha256: "2f43d75e9ad3febae5022c6f295cf93b74131cfdb1293a83e291f878ea9585a0",
-    },
-    RustComponent {
-        platform: Platform::X86_64UnknownLinuxGnu,
-        component: "rustc",
-        version: RUST_VERSION,
-        url: "https://static.rust-lang.org/dist/rustc-1.96.1-x86_64-unknown-linux-gnu.tar.xz",
-        sha256: "3545a0efad2355ecb0a3b9ac02efee96e27f1f9d24b7ce2fc3f279b2efb0d923",
-    },
-    RustComponent {
-        platform: Platform::X86_64UnknownLinuxGnu,
-        component: "rust-std",
-        version: RUST_VERSION,
-        url: "https://static.rust-lang.org/dist/rust-std-1.96.1-x86_64-unknown-linux-gnu.tar.xz",
-        sha256: "1bf4fde5048cca33e6ea00c7471281ed96d792f6923141e3db45072743a1afae",
-    },
-    RustComponent {
-        platform: Platform::X86_64UnknownLinuxGnu,
-        component: "cargo",
-        version: RUST_VERSION,
-        url: "https://static.rust-lang.org/dist/cargo-1.96.1-x86_64-unknown-linux-gnu.tar.xz",
-        sha256: "ecc53a3c49fab5ab8c9301b3bbc8fb1dff9be6c65287add3f57a0fe8fddfea9e",
-    },
-];
-
+/// The [`RUST_VERSION`] release's rustc, rust-std and cargo rows on
+/// `platform`, in extraction order, read from the shipped document.
+#[cfg(test)]
 pub fn rust_components(platform: Platform) -> io::Result<Vec<&'static RustComponent>> {
-    let components: Vec<_> = RUST_COMPONENTS
-        .iter()
-        .filter(|component| component.platform == platform)
-        .collect();
-    let complete = components.len() == 3
-        && ["rustc", "rust-std", "cargo"]
+    static ROWS: std::sync::OnceLock<Vec<RustComponent>> = std::sync::OnceLock::new();
+    let rows = ROWS.get_or_init(|| {
+        let document = CATALOG.document().expect("the shipped Rust catalog parses");
+        let bundle = document
+            .bundles
             .iter()
-            .all(|name| components.iter().filter(|c| c.component == *name).count() == 1);
-    if !complete {
+            .find(|bundle| bundle.release == format!("rust-{RUST_VERSION}"))
+            .expect("the fixture release is shipped");
+        let mut rows = Vec::new();
+        for name in RUNTIME_COMPONENTS {
+            for row in bundle.artifacts.iter().filter(|row| row.component == name) {
+                rows.push(RustComponent {
+                    platform: row.platform,
+                    component: name,
+                    version: RUST_VERSION,
+                    url: row.url.as_str(),
+                    sha256: row.digest.hex(),
+                });
+            }
+        }
+        rows
+    });
+    let components: Vec<_> = rows.iter().filter(|c| c.platform == platform).collect();
+    if components.len() != RUNTIME_COMPONENTS.len() {
         return Err(no_pin("rust toolchain", platform));
     }
     Ok(components)
 }
 
-/// The shipped Rust catalog: one release bundle per pinned Rust version,
-/// with rustc, rust-std and cargo under the toolchain recipe and rustfmt (the
-/// `tog fmt` component of the same version) under its own.
-pub fn toolchain_catalog() -> io::Result<Catalog> {
-    // Catalog order is pin-table order: the newest-appended row wins a tie.
-    let mut versions: Vec<&str> = Vec::new();
-    for version in RUST_COMPONENTS.iter().map(|c| c.version) {
-        if !versions.contains(&version) {
-            versions.push(version);
-        }
-    }
-    let mut bundles = Vec::new();
-    for version in versions {
-        let mut components = Vec::new();
-        let mut artifacts = Vec::new();
-        for row in RUST_COMPONENTS.iter().filter(|c| c.version == version) {
-            if !components
-                .iter()
-                .any(|c: &BundleComponent| c.name == row.component)
-            {
-                components.push(BundleComponent::new(row.component, version));
-            }
-            artifacts.push(ArtifactRow::new(
-                row.platform,
-                row.component,
-                "static.rust-lang.org",
-                version,
-                RUST_RECIPE,
-                row.url,
-                Digest::sha256(row.sha256)?,
-            ));
-        }
-        if RUSTFMT_VERSION == version {
-            components.push(BundleComponent::new("rustfmt", version));
-            for row in RUSTFMT_COMPONENTS {
-                artifacts.push(ArtifactRow::new(
-                    row.platform,
-                    "rustfmt",
-                    "static.rust-lang.org",
-                    version,
-                    "rustfmt/1",
-                    row.url,
-                    Digest::sha256(row.sha256)?,
-                ));
-            }
-        }
-        bundles.push(Bundle {
-            release: format!("rust-{version}"),
-            revision: None,
-            primary: vec!["rustc".into()],
-            components,
-            artifacts,
-        });
-    }
-    Catalog::new("cargo", bundles)
-}
-
-pub const RUSTFMT_VERSION: &str = "1.96.1";
-
-/// The layout recipe this binary knows for the rustfmt component. The
-/// catalog emits it and the object identity commits to it; a locked row
-/// naming another one is refused rather than laid out by guess.
-pub const RUSTFMT_RECIPE: &str = "rustfmt/1";
-
-pub struct RustfmtComponent {
-    pub platform: Platform,
-    pub url: &'static str,
-    pub sha256: &'static str,
-}
-
-pub const RUSTFMT_COMPONENTS: &[RustfmtComponent] = &[
-    RustfmtComponent {
-        platform: Platform::Aarch64AppleDarwin,
-        url: "https://static.rust-lang.org/dist/rustfmt-1.96.1-aarch64-apple-darwin.tar.xz",
-        sha256: "ed0cc9d72c04e7c3c4b7a82ab7f1ce5e33132017d062d8f9be6adf6472e8f165",
-    },
-    RustfmtComponent {
-        platform: Platform::X86_64UnknownLinuxGnu,
-        url: "https://static.rust-lang.org/dist/rustfmt-1.96.1-x86_64-unknown-linux-gnu.tar.xz",
-        sha256: "dcee5627f709f387cdca416a1d2ae9e6c2581cd117cdb4fd097c56c196384662",
-    },
-];
-
-pub fn preflight_platform(platform: Platform) -> io::Result<()> {
-    crate::kernel::platform::require_host(platform, "Rust toolchain")?;
-    rust_components(platform).map(|_| ())
-}
-
-fn rust_pins(platform: Platform) -> io::Result<Vec<&'static str>> {
-    let mut pins: Vec<_> = rust_components(platform)?
-        .into_iter()
-        .map(|component| component.version)
-        .collect();
-    pins.sort_unstable();
-    pins.dedup();
-    Ok(pins)
-}
-
-fn rust_component<'a>(components: &'a [&'static RustComponent], name: &str) -> &'a RustComponent {
-    components
-        .iter()
-        .find(|component| component.component == name)
-        .expect("validated Rust component set")
-}
-
+/// The base object identity of [`rust_components`] rows.
+#[cfg(test)]
 pub fn rust_identity(platform: Platform, components: &[&'static RustComponent]) -> Identity {
+    let sha = |name: &str| {
+        components
+            .iter()
+            .find(|component| component.component == name)
+            .expect("validated Rust component set")
+            .sha256
+    };
     runtime_identity(
         platform,
         RUST_VERSION,
-        rust_component(components, "rustc").sha256,
-        rust_component(components, "rust-std").sha256,
-        rust_component(components, "cargo").sha256,
+        sha("rustc"),
+        sha("rust-std"),
+        sha("cargo"),
     )
 }
 
@@ -288,7 +293,11 @@ fn row_of<'a>(rows: &'a [ArtifactSpec], component: &str) -> &'a ArtifactSpec {
 }
 
 /// The identity of the Rust object `selected` names, without realizing it.
+/// A local tree's is read from its locked row.
 pub fn runtime_object_id(platform: Platform, selected: &Selected) -> io::Result<String> {
+    if super::rust_path::is_path(selected) {
+        return Ok(super::rust_path::identity(platform, selected)?.object_id());
+    }
     let rows = runtime_rows(platform, selected)?;
     Ok(identity_of(platform, &rows).object_id())
 }
@@ -303,16 +312,12 @@ pub fn identity_of(platform: Platform, rows: &[ArtifactSpec]) -> Identity {
     )
 }
 
+/// The id of the base Rust object the shipped release of `version` names.
 pub fn rust_object_id(platform: Platform, version: &str) -> io::Result<String> {
-    if version != RUST_VERSION {
-        return Err(err(format!(
-            "internal: resolved Rust {version} but only {RUST_VERSION} is realizable"
-        )));
-    }
-    Ok(rust_identity(platform, &rust_components(platform)?).object_id())
+    runtime_object_id(platform, &shipped_selection(version)?)
 }
 
-fn err(msg: impl Into<String>) -> io::Error {
+pub(super) fn err(msg: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, msg.into())
 }
 
@@ -327,6 +332,9 @@ pub fn realize_runtime(
     selected: &Selected,
 ) -> io::Result<PathBuf> {
     crate::kernel::platform::require_host(platform, "Rust toolchain")?;
+    if super::rust_path::is_path(selected) {
+        return super::rust_path::realize(store, activity, platform, selected);
+    }
     let rows = runtime_rows(platform, selected)?;
     let identity = identity_of(platform, &rows);
     let id = identity.object_id();
@@ -363,13 +371,8 @@ pub fn realize_runtime(
 
 /// The shipped catalog's release for one exact Rust version, as a selection.
 /// This is what a caller outside any project gets: there is no lock to
-/// honor, so the compiled pin table is both the catalog and the answer.
+/// honor, so the shipped catalog is both the catalog and the answer.
 pub fn shipped_selection(version: &str) -> io::Result<Selected> {
-    if version != RUST_VERSION {
-        return Err(err(format!(
-            "internal: resolved Rust {version} but only {RUST_VERSION} is realizable"
-        )));
-    }
     let catalog = toolchain_catalog()?;
     let bundle = catalog
         .bundles()
@@ -382,6 +385,7 @@ pub fn shipped_selection(version: &str) -> io::Result<Selected> {
         .ok_or_else(|| err(format!("internal: no shipped Rust release for {version}")))?
         .clone();
     Ok(Selected {
+        helpers: Default::default(),
         ecosystem: catalog.ecosystem().to_string(),
         bundle,
         lock_sha256: None,
@@ -444,7 +448,7 @@ pub fn extract_rust_components(
     validate_rust_layout(staged, platform)
 }
 
-fn validate_rust_layout(staged: &Path, platform: Platform) -> io::Result<()> {
+pub(super) fn validate_rust_layout(staged: &Path, platform: Platform) -> io::Result<()> {
     if !staged.join("bin/rustc").is_file()
         || !staged.join("bin/cargo").is_file()
         || !staged
@@ -458,139 +462,135 @@ fn validate_rust_layout(staged: &Path, platform: Platform) -> io::Result<()> {
     Ok(())
 }
 
-#[derive(Debug, Deserialize)]
-struct ToolchainDocument {
-    toolchain: Option<ToolchainSpec>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ToolchainSpec {
-    channel: Option<String>,
-    components: Option<Vec<String>>,
-    targets: Option<Vec<String>>,
-}
-
 /// Resolve the nearest rustup-style toolchain file to the pinned version.
 ///
-/// This is the pre-lock answer, and the only callers left are the ones that
-/// have no project selection to honor, such as `tog deps`, which reports on
-/// a project it never syncs. The Python sdist build of a project whose lock
-/// names no Rust uses [`resolve_toolchain_within`] instead: its tree is a
-/// store scratch directory that is nobody's tog project.
+/// This is the pre-lock answer, kept for the tests that pin how a file maps
+/// onto the catalog. No command resolves a project this way: a project's
+/// Rust is its lock's selection, `tog status` and `tog audit` ask through
+/// [`resolve_toolchain_quiet`] only when there is no lock, and the Python
+/// sdist build of a project whose lock names no Rust uses
+/// [`resolve_toolchain_within_or`]: its tree is a store scratch directory
+/// that is nobody's tog project.
 /// Every entry point that is handed a [`Selected`] takes the version from it
-/// instead (`toolchain.version("rustc")`), so the lock decides the toolchain
-/// and the file only contributes the components below.
+/// instead (`toolchain.version("rustc")`), so the lock decides the toolchain.
+/// What the file asks for beyond the channel is read from the lock's rows
+/// ([`project_extras`]) or, for an sdist, [`toolchain_file_extras_within`].
 pub fn resolve_toolchain(platform: Platform, project_dir: &Path) -> io::Result<&'static str> {
-    resolve_toolchain_choice(platform, project_dir).map(|choice| choice.version)
-}
-
-/// What the nearest rustup-style toolchain file still says once a
-/// [`Selected`] has decided the version: which targets it demands, which is
-/// refused when it is not this host, and which components it asks for that
-/// tog does not provide, recorded as the run's
-/// `toolchain-component-unavailable` exception. Returns those components so
-/// a caller that records them in a closure (`tog fmt`) writes the same list
-/// the exception names.
-///
-/// The channel is deliberately not read here. Selection already lowered it
-/// to a request and refused an unsupported one by name
-/// (`kernel::toolchain::resolve`), so reading it a second time could only
-/// disagree with the lock this run is honoring.
-pub fn toolchain_file_components(
-    platform: Platform,
-    project_dir: &Path,
-) -> io::Result<Vec<String>> {
-    components_of(platform, nearest_toolchain_file(project_dir, None))
-}
-
-/// `toolchain_file_components` for a tree that is not a project: an
-/// unpacked sdist in store scratch. Only a file inside `root` counts. A
-/// file above it belongs to whoever owns the store's parent directories
-/// (`$HOME`, a repository the store sits in) and must not reach a build
-/// whose identity names only the sdist.
-pub fn toolchain_file_components_within(
-    platform: Platform,
-    root: &Path,
-) -> io::Result<Vec<String>> {
-    components_of(platform, nearest_toolchain_file(root, Some(root)))
-}
-
-fn components_of(platform: Platform, found: Option<(PathBuf, bool)>) -> io::Result<Vec<String>> {
-    let Some((path, legacy)) = found else {
-        return Ok(Vec::new());
-    };
-    match read_toolchain_file(&path, legacy)? {
-        // A bare channel line states a version and nothing else.
-        FileSpec::Bare(_) => Ok(Vec::new()),
-        FileSpec::Table(spec) => unavailable_components(platform, &path, &spec, true),
-    }
-}
-
-/// What the nearest toolchain file asks for, as far as tog answers it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ToolchainChoice {
-    /// The pinned Rust version the file resolves to.
-    pub version: &'static str,
-    /// Requested components tog does not provide, in file order.
-    pub unavailable: Vec<String>,
-}
-
-/// `resolve_toolchain`, keeping the unavailable components it recorded as a
-/// `toolchain-component-unavailable` exception.
-pub fn resolve_toolchain_choice(
-    platform: Platform,
-    project_dir: &Path,
-) -> io::Result<ToolchainChoice> {
-    resolve_toolchain_with(platform, nearest_toolchain_file(project_dir, None), true)
+    resolve_toolchain_with(
+        platform,
+        nearest_toolchain_file(project_dir, None),
+        true,
+        None,
+    )
 }
 
 /// `resolve_toolchain` for an unpacked sdist: only a toolchain file inside
-/// `root` is read, for the reason `toolchain_file_components_within` gives.
-/// With none, the newest pin, whatever lies above the store.
+/// `root` is read. A file above it belongs to whoever owns the store's
+/// parent directories (`$HOME`, a repository the store sits in) and must
+/// not reach a build whose identity names only the sdist. With none, the
+/// catalog's default, whatever lies above the store.
 pub fn resolve_toolchain_within(platform: Platform, root: &Path) -> io::Result<&'static str> {
-    resolve_toolchain_with(platform, nearest_toolchain_file(root, Some(root)), true)
-        .map(|choice| choice.version)
+    resolve_toolchain_within_or(platform, root, None)
 }
 
-/// The choice `resolve_toolchain_choice` would make, without its effects: no
-/// exception is recorded and nothing is printed, so a read-only caller
-/// outside any attribution can ask.
-pub fn resolve_toolchain_quiet(
+/// [`resolve_toolchain_within`] with the default a project locked: an
+/// sdist whose own file names a channel gets that channel, and one with no
+/// file, no channel, or `stable` gets `default` (the Rust the Python
+/// section of `tog-toolchain.toml` pins for sdists) rather than whatever
+/// this tog's catalog calls its default today. `None` is the catalog's.
+pub fn resolve_toolchain_within_or(
     platform: Platform,
-    project_dir: &Path,
-) -> io::Result<ToolchainChoice> {
-    resolve_toolchain_with(platform, nearest_toolchain_file(project_dir, None), false)
+    root: &Path,
+    default: Option<&str>,
+) -> io::Result<&'static str> {
+    resolve_toolchain_with(
+        platform,
+        nearest_toolchain_file(root, Some(root)),
+        true,
+        default,
+    )
+}
+
+/// The version `resolve_toolchain` would choose, without its narration, so
+/// a read-only caller (`tog status`, `tog audit`) can ask.
+pub fn resolve_toolchain_quiet(platform: Platform, project_dir: &Path) -> io::Result<&'static str> {
+    resolve_toolchain_with(
+        platform,
+        nearest_toolchain_file(project_dir, None),
+        false,
+        None,
+    )
 }
 
 fn resolve_toolchain_with(
     platform: Platform,
     found: Option<(PathBuf, bool)>,
     effects: bool,
-) -> io::Result<ToolchainChoice> {
+    default: Option<&str>,
+) -> io::Result<&'static str> {
     let _ = rust_pins(platform)?;
     let Some((path, legacy)) = found else {
-        return Ok(ToolchainChoice {
-            version: newest_pin(platform)?,
-            unavailable: Vec::new(),
-        });
+        return fallback_pin(platform, default);
     };
-    match read_toolchain_file(&path, legacy)? {
-        FileSpec::Bare(channel) => Ok(ToolchainChoice {
-            version: resolve_channel(platform, &path, channel.trim(), effects)?,
-            unavailable: Vec::new(),
-        }),
-        FileSpec::Table(spec) => {
-            let unavailable = unavailable_components(platform, &path, &spec, effects)?;
-            let channel = spec
-                .channel
-                .as_deref()
-                .ok_or_else(|| err(format!("{}: [toolchain] has no channel", path.display())))?;
-            Ok(ToolchainChoice {
-                version: resolve_channel(platform, &path, channel.trim(), effects)?,
-                unavailable,
-            })
+    let bytes = read_toolchain_file(&path)?;
+    let located =
+        |error: io::Error| io::Error::new(error.kind(), format!("{}: {error}", path.display()));
+    // A local toolchain has no pin to resolve to: only a project lock
+    // records one (its content hash), and this resolver has no lock.
+    if let Some(table) = input::rust_toolchain_table(&bytes, legacy).map_err(located)? {
+        if let Some(tree) = input::toolchain_path(&table, legacy).map_err(located)? {
+            return Err(err(format!(
+                "{}: names the local toolchain {tree}, which a project sync locks in \
+                 tog-toolchain.toml; there is no pinned Rust to resolve it to here",
+                path.display()
+            )));
         }
     }
+    // The channel is read by the same reader the toolchain lock records it
+    // with, so a file this refuses is one the lock refuses too.
+    let channel = if legacy {
+        input::read_rust_toolchain_legacy(&bytes)
+    } else {
+        input::read_rust_toolchain(&bytes)
+    }
+    .map_err(located)?;
+    // A table with no channel (only components, targets or a profile) means
+    // rustup's default toolchain: here, the catalog's explicit default.
+    let Some(channel) = channel else {
+        return fallback_pin(platform, default);
+    };
+    resolve_channel(platform, &path, channel.trim(), effects, default)
+}
+
+/// The components and cross targets the nearest toolchain file inside
+/// `root` asks for: an unpacked sdist's own request, read with the same
+/// readers and normalization the toolchain lock uses. A bare channel line
+/// asks for none.
+pub(super) fn file_extras_within(root: &Path) -> io::Result<Extras> {
+    let Some((path, legacy)) = nearest_toolchain_file(root, Some(root)) else {
+        return Ok(Extras::default());
+    };
+    let bytes = read_toolchain_file(&path)?;
+    let located =
+        |error: io::Error| io::Error::new(error.kind(), format!("{}: {error}", path.display()));
+    let Some(table) = input::rust_toolchain_table(&bytes, legacy).map_err(located)? else {
+        return Ok(Extras::default());
+    };
+    let list = |key: &str| -> io::Result<Vec<String>> {
+        Ok(input::toolchain_list(&table, key, legacy)
+            .map_err(located)?
+            .map(|value| input::split_list(&value))
+            .unwrap_or_default())
+    };
+    Ok(Extras {
+        components: list("components")?,
+        targets: list("targets")?,
+        profile: input::toolchain_profile(&table, legacy).map_err(located)?,
+    })
+}
+
+fn read_toolchain_file(path: &Path) -> io::Result<Vec<u8>> {
+    fs::read(path).map_err(|e| io::Error::new(e.kind(), format!("read {}: {e}", path.display())))
 }
 
 /// The nearest rustup-style toolchain file at or above `project_dir`, and
@@ -617,78 +617,15 @@ fn nearest_toolchain_file(project_dir: &Path, ceiling: Option<&Path>) -> Option<
     }
 }
 
-/// What a toolchain file holds: the legacy bare channel line, or the
-/// `[toolchain]` table both spellings accept.
-enum FileSpec {
-    Bare(String),
-    Table(ToolchainSpec),
-}
-
-fn read_toolchain_file(path: &Path, legacy: bool) -> io::Result<FileSpec> {
-    let text = fs::read_to_string(path)
-        .map_err(|e| io::Error::new(e.kind(), format!("read {}: {e}", path.display())))?;
-    if legacy {
-        if let Ok(document) = toml::from_str::<ToolchainDocument>(&text) {
-            if let Some(spec) = document.toolchain {
-                return Ok(FileSpec::Table(spec));
-            }
-        }
-        return Ok(FileSpec::Bare(text.trim().to_string()));
-    }
-    let document = toml::from_str::<ToolchainDocument>(&text)
-        .map_err(|e| err(format!("parse {}: {e}", path.display())))?;
-    document
-        .toolchain
-        .map(FileSpec::Table)
-        .ok_or_else(|| err(format!("{} has no [toolchain] table", path.display())))
-}
-
-/// The components a `[toolchain]` table asks for that tog does not provide,
-/// after refusing a target that is not this host. With `effects`, the list
-/// is also recorded as the run's `toolchain-component-unavailable`
-/// exception, which is what makes it visible to `tog audit`.
-fn unavailable_components(
-    platform: Platform,
-    path: &Path,
-    spec: &ToolchainSpec,
-    effects: bool,
-) -> io::Result<Vec<String>> {
-    if let Some(targets) = &spec.targets {
-        for target in targets {
-            if target != platform.triple() {
-                return Err(err(format!(
-                    "{}: target {target:?} is unsupported; only {} is pinned",
-                    path.display(),
-                    platform.triple()
-                )));
-            }
-        }
-    }
-    let unavailable: Vec<String> = spec
-        .components
-        .clone()
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|component| !matches!(component.as_str(), "rustc" | "cargo" | "rust-std"))
-        .collect();
-    if effects && !unavailable.is_empty() {
-        crate::kernel::policy::record(
-            crate::kernel::policy::TOOLCHAIN_COMPONENT_UNAVAILABLE,
-            &path.display().to_string(),
-            &format!("components unavailable: {}", unavailable.join(", ")),
-        )?;
-    }
-    Ok(unavailable)
-}
-
 fn resolve_channel(
     platform: Platform,
     path: &Path,
     channel: &str,
     effects: bool,
+    default: Option<&str>,
 ) -> io::Result<&'static str> {
     if channel == "stable" {
-        let pin = newest_pin(platform)?;
+        let pin = fallback_pin(platform, default)?;
         if effects {
             ui::note(&format!(
                 "{} resolves stable to pinned Rust {pin}",
@@ -721,12 +658,4 @@ fn version_key(version: &str) -> Vec<u64> {
         .split('.')
         .map(|part| part.parse::<u64>().unwrap_or(0))
         .collect()
-}
-
-fn newest_pin(platform: Platform) -> io::Result<&'static str> {
-    rust_pins(platform)?
-        .iter()
-        .copied()
-        .max_by_key(|pin| version_key(pin))
-        .ok_or_else(|| no_pin("rust toolchain", platform))
 }

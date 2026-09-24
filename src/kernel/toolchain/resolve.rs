@@ -380,6 +380,32 @@ pub fn request_for(ecosystem: &str, rows: &[InputRow]) -> io::Result<Request> {
                     )));
                 }
             }
+            // The lists are not part of the version request, but both files
+            // are read and recorded, so two that ask for different components
+            // or targets, or name different local trees, are the same
+            // conflict as two channels. A local tree states no version: the
+            // tailor's external selection answers for it.
+            let present = |path: &str| {
+                rows.iter()
+                    .any(|row| row.path.as_os_str() == path && row.sha256.is_some())
+            };
+            if present("rust-toolchain") && present("rust-toolchain.toml") {
+                for (key, field) in super::input::RUST_TOOLCHAIN_REQUESTS
+                    .into_iter()
+                    .chain([super::input::RUST_TOOLCHAIN_PATH])
+                {
+                    let a = value(rows, "rust-toolchain", field);
+                    let b = value(rows, "rust-toolchain.toml", field);
+                    if a != b {
+                        return Err(invalid(format!(
+                            "rust-toolchain asks for {key} {} and rust-toolchain.toml asks for {}; \
+                             make them agree, then {UPDATE_HINT}",
+                            a.unwrap_or("none"),
+                            b.unwrap_or("none")
+                        )));
+                    }
+                }
+            }
             if let Some(channel) = legacy.or(modern) {
                 if channel != "stable" {
                     let version = Version::parse(channel).map_err(|_| {
@@ -1078,6 +1104,41 @@ mod tests {
             row("rust-toolchain.toml", "toolchain.channel", Some("1.96.1")),
         ];
         assert_eq!(request("rust", &agreeing), "rustc ==1.96.1");
+        // Two present files must ask for the same lists too; one file alone
+        // asks for what it lists.
+        let lists = |legacy: Option<&str>, modern: Option<&str>| {
+            let mut rows = agreeing.clone();
+            if let Some(value) = legacy {
+                rows.push(row("rust-toolchain", "toolchain.components", Some(value)));
+            }
+            if let Some(value) = modern {
+                rows.push(row(
+                    "rust-toolchain.toml",
+                    "toolchain.components",
+                    Some(value),
+                ));
+            }
+            rows
+        };
+        assert_eq!(
+            request("rust", &lists(Some("clippy"), Some("clippy"))),
+            "rustc ==1.96.1"
+        );
+        let error = refusal("rust", &lists(None, Some("clippy")));
+        assert!(
+            error.contains(
+                "rust-toolchain asks for components none and rust-toolchain.toml asks for clippy"
+            ),
+            "{error}"
+        );
+        let mut alone = modern("1.96.1");
+        alone.push(row(
+            "rust-toolchain.toml",
+            "toolchain.components",
+            Some("clippy"),
+        ));
+        alone.push(row("rust-toolchain", "toolchain.channel", None));
+        assert_eq!(request("rust", &alone), "rustc ==1.96.1");
     }
 
     #[test]

@@ -360,6 +360,7 @@ fn shipped_selection(platform: Platform, version: &str) -> io::Result<Selected> 
         .ok_or_else(|| err(format!("internal: no shipped Go release for {version}")))?
         .clone();
     Ok(Selected {
+        helpers: Default::default(),
         ecosystem: catalog.ecosystem().to_string(),
         bundle,
         lock_sha256: None,
@@ -506,6 +507,10 @@ fn project_go_version_from(
             lock_ecosystem: "go".into(),
             catalog,
             legacy: project_toolchain::legacy_evidence_in(project_dir, &tailor::Go)?,
+            external: None,
+            helper_pins: Default::default(),
+            legacy_helper_pins: Default::default(),
+            declared_helpers: Default::default(),
         }],
         Mode::ReadOnly,
         false,
@@ -1542,6 +1547,7 @@ mod tests {
         let platform = Platform::host().unwrap();
 
         let foreign = Selected {
+            helpers: Default::default(),
             ecosystem: "node".into(),
             bundle: fixtures::bundle("node-24.20.0", "node", "24.20.0", Platform::ALL),
             lock_sha256: None,
@@ -1554,6 +1560,7 @@ mod tests {
         assert!(error.contains("Go tailor"), "{error}");
 
         let unknown = Selected {
+            helpers: Default::default(),
             ecosystem: "go".into(),
             bundle: fixtures::bundle("go-9.9.9", "go", "9.9.9", Platform::ALL),
             lock_sha256: None,
@@ -1567,6 +1574,7 @@ mod tests {
 
         // A bundle with no row for this platform is refused by name.
         let elsewhere = Selected {
+            helpers: Default::default(),
             ecosystem: "go".into(),
             bundle: fixtures::bundle("go-1.27.0", "go", "1.27.0", &[]),
             lock_sha256: None,

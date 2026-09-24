@@ -2230,6 +2230,7 @@ mod tests {
     fn fixed_selection(ecosystem: &str, primary: &str, version: &str) -> Selected {
         use crate::kernel::toolchain::{Bundle, Component, Source};
         Selected {
+            helpers: Default::default(),
             ecosystem: ecosystem.into(),
             bundle: Bundle {
                 release: format!("{primary}-{version}-r1"),

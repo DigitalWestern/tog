@@ -8,6 +8,7 @@
 use super::{invalid, qualified, Bundle, Catalog, Request};
 use crate::kernel::digest::Digest;
 use crate::kernel::platform::Platform;
+use std::collections::BTreeMap;
 use std::io;
 
 /// Where a selection came from. It decides what may be written, not what is
@@ -37,6 +38,14 @@ pub struct Selected {
     /// involved.
     pub lock_sha256: Option<String>,
     pub source: Source,
+    /// The releases this ecosystem's lock section pins for its helpers, by
+    /// helper lock ecosystem: `rust` for the Rust a Python project's sdists
+    /// build with when the project does not lock Rust itself. Written when
+    /// the section is, so a catalog whose default moves does not move a
+    /// locked project's builds. Exactly the section's pins: empty for a
+    /// section written before pins existed (the ecosystem's builds supply
+    /// the release those sections used) and when no lock is involved.
+    pub helpers: BTreeMap<String, String>,
 }
 
 /// One component's bytes on one platform: everything retrieval needs and
@@ -88,8 +97,11 @@ impl Selected {
             })
     }
 
+    /// The id of this selection's lock section: the bundle's id, covering
+    /// the helper pins when there are some ([`Bundle::section_id`]). It is
+    /// what a closure records and `status` compares with the section.
     pub fn bundle_id(&self) -> String {
-        self.bundle.bundle_id()
+        self.bundle.section_id(&self.helpers)
     }
 
     /// The primary versions joined with `+`: one version for most
@@ -136,6 +148,7 @@ impl Selected {
 pub fn shipped(catalog: &Catalog) -> io::Result<Selected> {
     let bundle = catalog.select(&Request::newest())?;
     Ok(Selected {
+        helpers: Default::default(),
         ecosystem: catalog.ecosystem().to_string(),
         bundle: bundle.clone(),
         lock_sha256: None,
@@ -197,6 +210,7 @@ mod tests {
             .extend(Platform::ALL.iter().map(|p| row(*p, "elixir", 'c')));
         beam.primary = vec!["otp".into(), "elixir".into()];
         let selected = Selected {
+            helpers: Default::default(),
             ecosystem: "elixir".into(),
             bundle: beam,
             lock_sha256: Some("f".repeat(64)),

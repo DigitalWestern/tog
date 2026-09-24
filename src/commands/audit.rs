@@ -43,6 +43,9 @@
 //! - An exception kind this binary does not know (a record written by a
 //!   newer tog, or by hand) is `unknown`, never permitted: no policy
 //!   file can name it, so no policy file can be said to have allowed it.
+//!   A kind tog retired (`policy::retired_kind`) is known, and old: the
+//!   record predates the change that retired it, so the closure is
+//!   `outdated` with that reason and the fix, a fresh sync.
 
 use crate::cli;
 use crate::commands::inspect::{self, ClosureFile, State};
@@ -378,6 +381,18 @@ fn refresh(ecosystem: &str) -> &'static str {
     }
 }
 
+/// The command that rewrites a closure recording a retired kind: the one
+/// that wrote it. The retired table says why each kind is out of date, and
+/// the closure's writer is what drops it, so a `rustfmt` record names
+/// `tog fmt` and every ecosystem's closure names `tog sync`.
+fn rerecord(ecosystem: &str) -> &'static str {
+    if ecosystem == "rustfmt" {
+        "tog fmt"
+    } else {
+        "tog sync"
+    }
+}
+
 /// The `status` state of a record, as the gate reads it: only `Synced` is
 /// current; every other state fails.
 fn freshness_from_state(state: State) -> Freshness {
@@ -471,6 +486,7 @@ pub fn evaluate(
         let mut denied = Vec::new();
         let mut unknown = Vec::new();
         let mut permitted = BTreeMap::new();
+        let mut retired = None;
         match recorded_exceptions(closure)? {
             Some(exceptions) => {
                 for mut exception in exceptions {
@@ -478,7 +494,9 @@ pub fn evaluate(
                     // on the hyphen is judged, counted, and printed under
                     // the one spelling this binary uses.
                     exception.kind = policy::canonical_kind(&exception.kind).to_string();
-                    if !policy::KINDS.contains(&exception.kind.as_str()) {
+                    if let Some(why) = policy::retired_kind(&exception.kind) {
+                        retired.get_or_insert((why, exception.kind));
+                    } else if !policy::KINDS.contains(&exception.kind.as_str()) {
                         unknown.push(exception);
                     } else if policy::denied(policy, &exception.kind) {
                         denied.push(exception);
@@ -494,6 +512,16 @@ pub fn evaluate(
                         refresh(&closure.ecosystem)
                     ));
                 }
+            }
+        }
+        // A retired kind is not judged against the policy: the record is
+        // older than what retired it, and a fresh sync replaces it.
+        if let Some((why, kind)) = retired {
+            if !matches!(freshness, Freshness::Stale(_)) {
+                freshness = Freshness::Outdated(format!(
+                    "{why} (it records the retired {kind} exception); run '{}' under a trusted key, then commit",
+                    rerecord(&closure.ecosystem)
+                ));
             }
         }
         verdicts.push(Verdict {
@@ -1530,6 +1558,57 @@ mod tests {
     }
 
     #[test]
+    fn a_retired_kind_is_an_outdated_closure_not_an_unknown_one() {
+        let temp = python_project("retired");
+        let closures = [with_exceptions(
+            &temp.0,
+            &[
+                exception("toolchain-component-unavailable", "clippy"),
+                exception(SKIPPED_OPTIONAL, "dev"),
+            ],
+        )];
+        for policy in [permissive(), deny(policy::KINDS)] {
+            let verdicts = judge(&temp.0, &policy, &closures);
+            let verdict = &verdicts[0];
+            assert!(!verdict.passes(), "{policy:?}");
+            assert!(
+                matches!(
+                    verdict.freshness,
+                    Freshness::Outdated(ref why) if why.starts_with(
+                        "closure predates component provisioning (it records the retired toolchain-component-unavailable exception); run 'tog sync'"
+                    )
+                ),
+                "{verdict:?}"
+            );
+            // Not unknown (it is no newer tog's kind), and not permitted.
+            assert!(verdict.unknown.as_deref().unwrap().is_empty());
+            assert!(!verdict
+                .permitted
+                .as_ref()
+                .unwrap()
+                .contains_key("toolchain-component-unavailable"));
+        }
+        let verdicts = judge(&temp.0, &permissive(), &closures);
+        let record = record(&verdicts[0]);
+        let report = Report {
+            policy: permissive(),
+            sources: Vec::new(),
+            verdicts,
+            missing: Vec::new(),
+        };
+        let text = render(&temp.0, &report, false).unwrap();
+        assert!(text.contains("python  outdated"), "{text}");
+        assert!(text.contains(&record), "{text}");
+        assert!(
+            text.contains("closure predates component provisioning"),
+            "{text}"
+        );
+        assert!(!text.contains("unknown kind"), "{text}");
+        let value: Value = serde_json::from_str(&render(&temp.0, &report, true).unwrap()).unwrap();
+        assert_eq!(value["passed"], false);
+    }
+
+    #[test]
     fn extra_policy_denies_what_the_chain_permits() {
         let temp = python_project("extra");
         let extra = temp.0.join("company.toml");
@@ -1998,16 +2077,12 @@ mod tests {
 
         // Current: passes, and its exceptions are still judged.
         let mut body = rustfmt_body(dir);
-        body["exceptions"] = json!([exception(policy::TOOLCHAIN_COMPONENT_UNAVAILABLE, "clippy")]);
+        body["exceptions"] = json!([exception(policy::UNATTESTED_CARGO_LOCK, "Cargo.lock")]);
         let closures = write(body.clone());
         let verdicts = judge(dir, &permissive(), &closures);
         assert_eq!(verdicts[0].freshness, Freshness::Current, "{verdicts:?}");
         assert!(verdicts[0].passes());
-        let verdicts = judge(
-            dir,
-            &deny(&[policy::TOOLCHAIN_COMPONENT_UNAVAILABLE]),
-            &closures,
-        );
+        let verdicts = judge(dir, &deny(&[policy::UNATTESTED_CARGO_LOCK]), &closures);
         assert!(!verdicts[0].passes());
 
         // Inputs carrying anything this binary would not write: stale.
@@ -2015,6 +2090,20 @@ mod tests {
         extra["inputs"]["note"] = json!("hand-added");
         let verdicts = judge(dir, &permissive(), &write(extra));
         assert!(matches!(verdicts[0].freshness, Freshness::Stale(_)));
+
+        // A retired kind in a rustfmt record: `tog fmt` rewrites it, not a sync.
+        let mut retired = body.clone();
+        retired["exceptions"] = json!([exception("toolchain-component-unavailable", "rustfmt")]);
+        let verdicts = judge(dir, &permissive(), &write(retired));
+        assert!(
+            matches!(
+                verdicts[0].freshness,
+                Freshness::Outdated(ref why) if why.contains(
+                    "retired toolchain-component-unavailable exception); run 'tog fmt' under a trusted key"
+                )
+            ),
+            "{verdicts:?}"
+        );
 
         // Made by another rustfmt version: stale, naming both objects.
         let current = body["rustfmt_object"]["id"].as_str().unwrap().to_string();
@@ -2089,16 +2178,30 @@ mod tests {
         let verdicts = judge(dir, &permissive(), &write(python));
         assert!(matches!(verdicts[0].freshness, Freshness::Stale(_)));
 
-        // Components requested after the run: the version and objects are
-        // unchanged, but a new run would record an exception this record
-        // lacks, so it is stale and the fix names `tog fmt`.
+        // Components requested after the run change nothing a rustfmt run
+        // records: sync provisions them, so the record stays current, and
+        // what `fmt` records reads nothing but the pins.
         fs::write(
             dir.join("rust-toolchain.toml"),
             "[toolchain]\nchannel = \"stable\"\ncomponents = [\"rustfmt\", \"clippy\"]\n",
         )
         .unwrap();
-        let closures = write(body.clone());
-        let verdicts = judge(dir, &permissive(), &closures);
+        let verdicts = judge(dir, &permissive(), &write(body.clone()));
+        assert_eq!(verdicts[0].freshness, Freshness::Current, "{verdicts:?}");
+        assert!(rustfmt_body(dir)["inputs"]
+            .get("unavailable_components")
+            .is_none());
+        // A record from before, which carried the list empty, is what a run
+        // writes now.
+        let mut legacy = body.clone();
+        legacy["inputs"]["unavailable_components"] = json!([]);
+        let verdicts = judge(dir, &permissive(), &write(legacy));
+        assert_eq!(verdicts[0].freshness, Freshness::Current, "{verdicts:?}");
+        // One listing components tog did not ship is not: stale, and the
+        // fix names `tog fmt`.
+        let mut older = body.clone();
+        older["inputs"]["unavailable_components"] = json!(["rustfmt", "clippy"]);
+        let verdicts = judge(dir, &permissive(), &write(older));
         let Freshness::Stale(why) = &verdicts[0].freshness else {
             panic!("{verdicts:?}");
         };
@@ -2112,26 +2215,6 @@ mod tests {
         assert!(render(dir, &report, false)
             .unwrap()
             .contains("run 'tog fmt', then audit again"));
-        // The record a run under that file writes is current, read without
-        // recording anything, and its exception is still judged.
-        let mut listed = rustfmt_body(dir);
-        assert_eq!(
-            listed["inputs"]["unavailable_components"],
-            json!(["rustfmt", "clippy"])
-        );
-        listed["exceptions"] = json!([exception(
-            policy::TOOLCHAIN_COMPONENT_UNAVAILABLE,
-            "rust-toolchain.toml"
-        )]);
-        let closures = write(listed);
-        let verdicts = judge(dir, &permissive(), &closures);
-        assert_eq!(verdicts[0].freshness, Freshness::Current, "{verdicts:?}");
-        let verdicts = judge(
-            dir,
-            &deny(&[policy::TOOLCHAIN_COMPONENT_UNAVAILABLE]),
-            &closures,
-        );
-        assert!(!verdicts[0].passes());
         fs::remove_file(dir.join("rust-toolchain.toml")).unwrap();
 
         // A run from a workspace member resolves the toolchain from there,
@@ -2293,6 +2376,7 @@ mod tests {
             GIT_DEPENDENCY,
             policy::LOCK_DISAGREEMENT,
             policy::ARTIFACT_NOT_PROVISIONED,
+            policy::EXTERNAL_TOOLCHAIN,
         ]
         .iter()
         .map(|kind| kind.to_string())
