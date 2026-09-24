@@ -1,0 +1,102 @@
+[
+ {
+  "census_label": "cargo-missing-lock",
+  "file": "index.crates.io/config.json.body",
+  "headers": {
+   "Content-Type": "application/octet-stream",
+   "ETag": "\"652b69f181634dbf60fc8c3ec9f776e5\"",
+   "Last-Modified": "Tue, 12 Mar 2024 07:31:15 GMT"
+  },
+  "method": "GET",
+  "sha256": "5b943a2c6f7eb743f7308aba07bdbb47d9ae44aafecd832d7f15df186afbafb3",
+  "size": 76,
+  "status": 200,
+  "url": "https://index.crates.io/config.json"
+ },
+ {
+  "census_label": "cargo-missing-lock",
+  "file": "index.crates.io/it/oa/itoa.body",
+  "headers": {
+   "Cache-Control": "public,max-age=600",
+   "Content-Type": "text/plain",
+   "ETag": "\"ea8494d560f1b8174443495b370e272f\"",
+   "Last-Modified": "Fri, 20 Mar 2026 00:12:38 GMT"
+  },
+  "method": "GET",
+  "sha256": "5e275f1d7a32dd49bc850af460efbf99064cd058f4566f5f86a969e2a535eece",
+  "size": 9473,
+  "status": 200,
+  "url": "https://index.crates.io/it/oa/itoa"
+ },
+ {
+  "census_label": "cargo-add",
+  "file": "index.crates.io/3/r/ryu.body",
+  "headers": {
+   "Cache-Control": "public,max-age=600",
+   "Content-Type": "text/plain",
+   "ETag": "\"c4c50076c5bbf5aa19d1f4f25a000223\"",
+   "Last-Modified": "Sun, 08 Feb 2026 20:34:05 GMT"
+  },
+  "method": "GET",
+  "sha256": "2d75021df0545cbef0c4d5565c60b0fe07134c11f6b5b014b9cfd99d112a3ed8",
+  "size": 0,
+  "status": 200,
+  "url": "https://index.crates.io/3/r/ryu"
+ },
+ {
+  "census_label": "cargo-attest",
+  "file": "static.crates.io/crates/itoa/1.0.18/download.body",
+  "headers": {
+   "cache-control": "public,max-age=31536000,immutable",
+   "content-type": "application/gzip",
+   "etag": "\"e46a3fc53950ca8571c6b5dced7f9552\"",
+   "last-modified": "Sun, 28 Jun 2026 17:55:52 GMT"
+  },
+  "method": "GET",
+  "sha256": "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682",
+  "size": 15935,
+  "status": 200,
+  "url": "https://static.crates.io/crates/itoa/1.0.18/download"
+ },
+ {
+  "census_label": "cargo-git-dep",
+  "file": "api.github.com/repos/dtolnay/ryu/commits/1.0.18.body",
+  "headers": {
+   "Cache-Control": "public, max-age=60, s-maxage=60",
+   "Content-Type": "application/vnd.github.3.sha; charset=utf-8",
+   "ETag": "\"12746aa88cc51a6f1fc97f92b8d36d991c2d966e\"",
+   "Last-Modified": "Tue, 07 May 2024 01:51:19 GMT"
+  },
+  "method": "GET",
+  "sha256": "3a7020c5ae17e83d4c2fa6c64db7e3d8cf3fb55b1dc1da56373b40b92b519a2b",
+  "size": 40,
+  "status": 200,
+  "url": "https://api.github.com/repos/dtolnay/ryu/commits/1.0.18"
+ },
+ {
+  "census_label": "cargo-git-dep",
+  "file": "github.com/dtolnay/ryu/info/refs@service%3Dgit-upload-pack.body",
+  "headers": {
+   "Cache-Control": "no-cache, max-age=0, must-revalidate",
+   "Content-Type": "application/x-git-upload-pack-advertisement"
+  },
+  "method": "GET",
+  "sha256": "1983c4b9fa294a8e8d4a577144e887c84c691eccd04ce1d97c3da35ad5346280",
+  "size": 191,
+  "status": 200,
+  "url": "https://github.com/dtolnay/ryu/info/refs?service=git-upload-pack"
+ },
+ {
+  "census_label": "cargo-git-dep",
+  "headers": {
+   "Cache-Control": "no-cache, max-age=0, must-revalidate",
+   "Content-Type": "application/x-git-upload-pack-result"
+  },
+  "method": "POST",
+  "omitted": "larger than 262144 bytes",
+  "sha256": "476ca2216772dcf7e9dc4fcf5f4dbda1d55ca4603919429a0a2ab47a0d857f8d",
+  "size": 577788,
+  "status": 200,
+  "url": "https://github.com/dtolnay/ryu/git-upload-pack"
+ }
+]

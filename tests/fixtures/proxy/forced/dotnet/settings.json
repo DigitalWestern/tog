@@ -1,0 +1,7 @@
+{
+  "tool": "dotnet",
+  "config_file": "Directory.Build.props",
+  "note": "See npm/settings.json for the placeholder rules. MSBuild evaluates Directory.Build.props and runs targets during restore by design; the marker runs in the forced run too, and isolation is the control.",
+  "settings": [],
+  "by_design": ["msbuild-exec"]
+}

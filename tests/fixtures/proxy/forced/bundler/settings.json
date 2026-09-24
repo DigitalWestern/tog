@@ -1,0 +1,10 @@
+{
+  "tool": "bundler",
+  "config_file": ".bundle/config",
+  "note": "See npm/settings.json for the placeholder rules. The Gemfile marker runs by design in both runs. The .bundle/config settings are ignored under tog's BUNDLE_IGNORE_CONFIG=1 (both runs set it, as today).",
+  "settings": [
+    {"name": "bundle-config-gemfile", "line": "BUNDLE_GEMFILE: \"@SCENARIO@/Evil.gemfile\""}
+  ],
+  "extra_files": {"Evil.gemfile": "File.write(\"@HIT@/bundle-config-gemfile\", \"\")\nsource \"https://rubygems.org\"\n"},
+  "by_design": ["gemfile-eval"]
+}

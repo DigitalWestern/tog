@@ -1,0 +1,14 @@
+{
+  "tool": "go",
+  "config_file": "(environment)",
+  "note": "See npm/settings.json for the placeholder rules. Go reads program-naming settings only from the environment and the GOENV file (tog sets GOENV=off), plus go.mod's toolchain line. Each control run adds one variable to the census environment; the forced run is the census environment the door builds from empty. toolchain-line is detected in the proxy log (a golang.org/toolchain download), not by a marker.",
+  "settings": [
+    {"name": "GOFLAGS-toolexec", "env": {"GOFLAGS": "-mod=mod -toolexec=@M:GOFLAGS-toolexec@"}},
+    {"name": "GOAUTH", "env": {"GOAUTH": "command @M:GOAUTH@"}},
+    {"name": "GOCACHEPROG", "env": {"GOCACHEPROG": "@M:GOCACHEPROG@"}},
+    {"name": "CC", "env": {"CC": "@M:CC@", "CGO_ENABLED": "1"}},
+    {"name": "CXX", "env": {"CXX": "@M:CXX@", "CGO_ENABLED": "1"}},
+    {"name": "GOVCS-git", "env": {"GOVCS": "*:all", "GOPROXY": "direct", "GOSUMDB": "off"}, "path_marker": "git"},
+    {"name": "toolchain-line", "env": {"GOTOOLCHAIN": "auto"}, "gomod_append": "\ntoolchain go1.99.0\n", "detect_request": "golang.org/toolchain"}
+  ]
+}

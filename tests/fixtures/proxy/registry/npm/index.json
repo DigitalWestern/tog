@@ -1,0 +1,98 @@
+[
+ {
+  "census_label": "npm-update-notifier",
+  "file": "registry.npmjs.org/is-number.body",
+  "headers": {
+   "Cache-Control": "public, max-age=300",
+   "Content-Type": "application/json",
+   "ETag": "W/\"5cefdbc91d0fe57d1c3110d2a0141612\"",
+   "Last-Modified": "Fri, 26 May 2023 16:12:34 GMT"
+  },
+  "method": "GET",
+  "sha256": "8fdfbca6f95aa058e4e228ec3a4dc76b5b0a9f53354f06681a3effb2fca7ef92",
+  "size": 36183,
+  "status": 200,
+  "url": "https://registry.npmjs.org/is-number"
+ },
+ {
+  "census_label": "npm-update-notifier",
+  "headers": {
+   "Cache-Control": "public, max-age=300",
+   "Content-Type": "application/vnd.npm.install-v1+json",
+   "ETag": "W/\"50f9de77291b566afee3c9a682ceaee1\"",
+   "Last-Modified": "Tue, 22 Sep 2026 21:29:37 GMT"
+  },
+  "method": "GET",
+  "omitted": "npm's update notifier (the door passes --update-notifier=false)",
+  "sha256": "96c5853b3b98b14c2e83223298a339200d0a90e0fe53b045f1860d5da1c0288a",
+  "size": 2456147,
+  "status": 200,
+  "url": "https://registry.npmjs.org/npm"
+ },
+ {
+  "census_label": "npm-update-notifier",
+  "file": "registry.npmjs.org/-/npm/v1/security/advisories/bulk.body",
+  "headers": {},
+  "method": "POST",
+  "sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+  "size": 2,
+  "status": 200,
+  "url": "https://registry.npmjs.org/-/npm/v1/security/advisories/bulk"
+ },
+ {
+  "census_label": "npm-add",
+  "file": "registry.npmjs.org/is-odd.body",
+  "headers": {
+   "Cache-Control": "public, max-age=300",
+   "Content-Type": "application/json",
+   "ETag": "W/\"5b3d535e31ab2abcf97418c6388b7494\"",
+   "Last-Modified": "Tue, 14 Apr 2026 14:26:12 GMT"
+  },
+  "method": "GET",
+  "sha256": "b6d733d29cb921ea30492d808eda615f2a90cd4a487b888434058b4873680e7d",
+  "size": 20171,
+  "status": 200,
+  "url": "https://registry.npmjs.org/is-odd"
+ },
+ {
+  "census_label": "npm-git-url-deps",
+  "file": "github.com/jonschlinkert/is-number.git/info/refs@service%3Dgit-upload-pack.body",
+  "headers": {
+   "Cache-Control": "no-cache, max-age=0, must-revalidate",
+   "Content-Type": "application/x-git-upload-pack-advertisement"
+  },
+  "method": "GET",
+  "sha256": "1983c4b9fa294a8e8d4a577144e887c84c691eccd04ce1d97c3da35ad5346280",
+  "size": 191,
+  "status": 200,
+  "url": "https://github.com/jonschlinkert/is-number.git/info/refs?service=git-upload-pack"
+ },
+ {
+  "census_label": "npm-git-url-deps",
+  "file": "github.com/jonschlinkert/is-number.git/git-upload-pack.body",
+  "headers": {
+   "Cache-Control": "no-cache, max-age=0, must-revalidate",
+   "Content-Type": "application/x-git-upload-pack-result"
+  },
+  "method": "POST",
+  "sha256": "843f6fa42aa2717132f0cd2b340efcc7920d3a37ebdb539837186b94eaf772de",
+  "size": 9800,
+  "status": 200,
+  "url": "https://github.com/jonschlinkert/is-number.git/git-upload-pack"
+ },
+ {
+  "census_label": "npm-git-url-deps",
+  "file": "registry.npmjs.org/is-odd/-/is-odd-3.0.1.tgz.body",
+  "headers": {
+   "Cache-Control": "public, immutable, max-age=31557600",
+   "Content-Type": "application/octet-stream",
+   "ETag": "\"72202ddfef0f4a837b5483dfefaf662d\"",
+   "Last-Modified": "Thu, 31 May 2018 20:16:49 GMT"
+  },
+  "method": "GET",
+  "sha256": "13c23b3f1f3a5c146b8906e23c8e674f8e4a6ff44b77720e1d4bddb7b2caf312",
+  "size": 2774,
+  "status": 200,
+  "url": "https://registry.npmjs.org/is-odd/-/is-odd-3.0.1.tgz"
+ }
+]

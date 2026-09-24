@@ -1,0 +1,19 @@
+[project]
+name = "forced-uv"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = ["iniconfig"]
+
+[[tool.uv.index]]
+name = "authed"
+url = "https://spike@pypi.org/simple"
+explicit = true
+
+[tool.uv.sources]
+iniconfig = { index = "authed" }
+
+[tool.uv]
+@SETTINGS:tool.uv@
+
+[tool.uv.pip]
+@SETTINGS:tool.uv.pip@

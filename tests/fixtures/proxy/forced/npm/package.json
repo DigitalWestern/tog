@@ -1,0 +1,7 @@
+{
+  "name": "forced-npm",
+  "version": "1.0.0",
+  "dependencies": {
+    "prepdep": "git+file://@SCENARIO@/prepdep.repo#main"
+  }
+}

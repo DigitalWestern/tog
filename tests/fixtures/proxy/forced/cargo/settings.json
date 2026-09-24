@@ -1,0 +1,24 @@
+{
+  "tool": "cargo",
+  "config_file": ".cargo/config.toml",
+  "note": "See npm/settings.json for the placeholder rules. @MIRROR@ is the proxy's mirror base; its fakecargo route is a sparse registry whose config.json says auth-required, so cargo asks the credential provider. @RUST@ is the store Rust object.",
+  "base_config": "registries.evil.index = \"sparse+@MIRROR@/fakecargo/\"",
+  "settings": [
+    {"name": "build.rustc", "line": "build.rustc = \"@M:build.rustc@\""},
+    {"name": "build.rustc-wrapper", "line": "build.rustc-wrapper = \"@M:build.rustc-wrapper@\""},
+    {"name": "build.rustc-workspace-wrapper", "line": "build.rustc-workspace-wrapper = \"@M:build.rustc-workspace-wrapper@\""},
+    {"name": "build.rustdoc", "line": "build.rustdoc = \"@M:build.rustdoc@\""},
+    {"name": "target.runner", "line": "target.x86_64-unknown-linux-gnu.runner = \"@M:target.runner@\""},
+    {"name": "target.linker", "line": "target.x86_64-unknown-linux-gnu.linker = \"@M:target.linker@\""},
+    {"name": "registry.global-credential-providers", "line": "registry.global-credential-providers = [\"@M:registry.global-credential-providers@\"]", "manifest_append": "evilcrate = { version = \"1\", registry = \"evil\" }\n"},
+    {"name": "registries.evil.credential-provider", "line": "registries.evil.credential-provider = [\"@M:registries.evil.credential-provider@\"]", "manifest_append": "evilcrate = { version = \"1\", registry = \"evil\" }\n"}
+  ],
+  "forced_flags": [
+    "--config", "build.rustc=\"@RUST@/bin/rustc\"",
+    "--config", "build.rustc-wrapper=\"\"",
+    "--config", "build.rustc-workspace-wrapper=\"\"",
+    "--config", "build.rustdoc=\"@RUST@/bin/rustdoc\"",
+    "--config", "registry.global-credential-providers=[\"cargo:token\"]",
+    "--config", "registries.evil.credential-provider=[\"cargo:token\"]"
+  ]
+}

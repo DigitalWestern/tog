@@ -1,0 +1,9 @@
+<Project>
+  <!-- Project code MSBuild runs during restore by design: a target hooked
+       before restore. (Property functions cannot write files: MSBuild
+       refuses System.IO.File::WriteAllText with MSB4185.) Isolation, not a
+       setting, is the control. -->
+  <Target Name="ForcedBeforeRestore" BeforeTargets="Restore;_GenerateRestoreGraph">
+    <Exec Command="@M:msbuild-exec@" ContinueOnError="true" />
+  </Target>
+</Project>

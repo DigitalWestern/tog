@@ -1,0 +1,11 @@
+{
+  "tool": "uv",
+  "config_file": "pyproject.toml",
+  "note": "See npm/settings.json for the placeholder rules. A setting goes into the [tool.uv] or [tool.uv.pip] table of pyproject.toml, or is a file of its own. path_marker puts a marker with that name first on PATH (the door's PATH never has project directories; the control shows what the setting would run). Both census shapes run: uv lock (edits, UV_PYTHON set as today) and uv pip compile (missing lock, as today in tailors/python/inputs.rs).",
+  "settings": [
+    {"name": "keyring-provider", "section": "tool.uv", "line": "keyring-provider = \"subprocess\"", "path_marker": "keyring"},
+    {"name": "python-version-file", "file": ".python-version", "content": "@M:python-version-file@\n"},
+    {"name": "pip.python", "section": "tool.uv.pip", "line": "python = \"@M:pip.python@\""}
+  ],
+  "forced_flags": ["--keyring-provider", "disabled", "--no-python-downloads", "--no-config", "--python", "@PYTHON@"]
+}

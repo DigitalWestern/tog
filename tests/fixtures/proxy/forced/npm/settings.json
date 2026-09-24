@@ -1,0 +1,26 @@
+{
+  "tool": "npm",
+  "config_file": ".npmrc",
+  "note": "Each setting names a marker program. The control run applies one setting with today's census flags; the forced run applies all of them with the forced flags. @M:x@ is a shell marker, @J:x@ a Node module marker, @SCENARIO@ the project copy, @HIT@ the marker directory.",
+  "settings": [
+    {"name": "git", "line": "git=@M:git@"},
+    {"name": "script-shell", "line": "script-shell=@M:script-shell@"},
+    {"name": "shell", "line": "shell=@M:shell@"},
+    {"name": "node-gyp", "line": "node-gyp=@M:node-gyp@"},
+    {"name": "editor", "line": "editor=@M:editor@"},
+    {"name": "browser", "line": "browser=@M:browser@"},
+    {"name": "viewer", "line": "viewer=@M:viewer@"},
+    {"name": "node-options", "line": "node-options=--require=@J:node-options@"}
+  ],
+  "forced_flags": [
+    "--git=/usr/bin/git",
+    "--script-shell=/bin/sh",
+    "--shell=/bin/sh",
+    "--ignore-scripts",
+    "--node-options=",
+    "--node-gyp=/nonexistent/node-gyp",
+    "--editor=false",
+    "--browser=false",
+    "--viewer=false"
+  ]
+}

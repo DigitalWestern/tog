@@ -1,0 +1,104 @@
+[
+ {
+  "census_label": "elixir-unix-probe",
+  "file": "repo.hex.pm/packages/jason.body",
+  "headers": {
+   "cache-control": "public, max-age=3600",
+   "content-type": "application/octet-stream",
+   "etag": "\"b8eb4fa719c69366ce8ba9aabb06dbc3\"",
+   "last-modified": "Wed, 20 May 2026 14:36:49 GMT"
+  },
+  "method": "GET",
+  "sha256": "aa566c242ad5747605754261faf5dfa901a4c0918e7855b57ed71c2d7834f31c",
+  "size": 2134,
+  "status": 200,
+  "url": "https://repo.hex.pm/packages/jason"
+ },
+ {
+  "census_label": "elixir-unix-probe",
+  "file": "repo.hex.pm/installs/hex-1.x.csv.body",
+  "headers": {
+   "location": "https://builds.hex.pm/installs/hex-1.x.csv"
+  },
+  "method": "GET",
+  "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "size": 0,
+  "status": 301,
+  "url": "https://repo.hex.pm/installs/hex-1.x.csv"
+ },
+ {
+  "census_label": "elixir-unix-probe",
+  "file": "repo.hex.pm/packages/decimal.body",
+  "headers": {
+   "cache-control": "public, max-age=3600",
+   "content-type": "binary/octet-stream",
+   "etag": "\"a2587c56e2fd8d108d40743916fe0d77\"",
+   "last-modified": "Tue, 08 Sep 2026 13:30:01 GMT"
+  },
+  "method": "GET",
+  "sha256": "e15a06336de401091a5144273508cc4364e609c7390df0d5da91c93522cce54c",
+  "size": 3526,
+  "status": 200,
+  "url": "https://repo.hex.pm/packages/decimal"
+ },
+ {
+  "census_label": "elixir-unix-probe",
+  "file": "repo.hex.pm/tarballs/jason-1.4.5.tar.body",
+  "headers": {
+   "cache-control": "public, max-age=604800",
+   "content-type": "application/octet-stream",
+   "etag": "\"e1cb3accde8a36e9c75892abda115fbd-1\"",
+   "last-modified": "Tue, 05 May 2026 14:34:54 GMT"
+  },
+  "method": "GET",
+  "sha256": "b0c823996102bcd0239b3c2444eb00409b72f6a140c1950bc8b457d836b30684",
+  "size": 26112,
+  "status": 200,
+  "url": "https://repo.hex.pm/tarballs/jason-1.4.5.tar"
+ },
+ {
+  "census_label": "elixir-attest-drift",
+  "file": "repo.hex.pm/packages/telemetry.body",
+  "headers": {
+   "cache-control": "public, max-age=3600",
+   "content-type": "application/octet-stream",
+   "etag": "\"4357b98c864558a7191dd11442dd30e6\"",
+   "last-modified": "Wed, 20 May 2026 14:37:20 GMT"
+  },
+  "method": "GET",
+  "sha256": "fe2b6250f416cd49823559af428c41bfbc44970e829358ca5dca653d0e6a87cf",
+  "size": 1611,
+  "status": 200,
+  "url": "https://repo.hex.pm/packages/telemetry"
+ },
+ {
+  "census_label": "elixir-attest-drift",
+  "file": "repo.hex.pm/tarballs/telemetry-1.4.2.tar.body",
+  "headers": {
+   "cache-control": "public, max-age=604800",
+   "content-type": "application/octet-stream",
+   "etag": "\"c414b5a159e578057cff2cba2741d729-1\"",
+   "last-modified": "Mon, 11 May 2026 08:18:00 GMT"
+  },
+  "method": "GET",
+  "sha256": "928f6495066506077862c0d1646609eed891a4326bee3126ba54b60af61febb1",
+  "size": 21504,
+  "status": 200,
+  "url": "https://repo.hex.pm/tarballs/telemetry-1.4.2.tar"
+ },
+ {
+  "census_label": "elixir-proxy-lowercase-vars-with-token",
+  "file": "builds.hex.pm/installs/hex-1.x.csv.body",
+  "headers": {
+   "cache-control": "public, max-age=604800",
+   "content-type": "text/csv",
+   "etag": "\"8b6a7c0d59abf7651880c7955f97e1e4\"",
+   "last-modified": "Thu, 09 Jul 2026 23:22:13 GMT"
+  },
+  "method": "GET",
+  "sha256": "b6a45881e7658fa85b3e051bc697ac65b2549964f807dcadc1266513406ac71b",
+  "size": 64972,
+  "status": 200,
+  "url": "https://builds.hex.pm/installs/hex-1.x.csv"
+ }
+]

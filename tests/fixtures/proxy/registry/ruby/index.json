@@ -1,0 +1,78 @@
+[
+ {
+  "census_label": "ruby-missing-lock",
+  "file": "index.rubygems.org/versions.body",
+  "filtered": "cut to the lines for ['rainbow', 'rake']; sha256 and size are the upstream body's",
+  "headers": {
+   "Cache-Control": "max-age=60, public",
+   "Content-Type": "text/plain; charset=utf-8",
+   "ETag": "\"a23be46b885495e19eb1eae509f5d35d\"",
+   "Last-Modified": "Thu, 24 Sep 2026 03:25:02 GMT"
+  },
+  "method": "GET",
+  "sha256": "a16378ddefc94d1cdbdb7a7d21e8cb59f5618feeb7405b9d479a4277abeb27c5",
+  "size": 23705192,
+  "status": 200,
+  "url": "https://index.rubygems.org/versions"
+ },
+ {
+  "census_label": "ruby-missing-lock",
+  "file": "index.rubygems.org/info/rake.body",
+  "headers": {
+   "Cache-Control": "max-age=60, public",
+   "Content-Type": "text/plain; charset=utf-8",
+   "ETag": "\"f2391254c926152f4e7db3af188e330d\"",
+   "Last-Modified": "Thu, 28 May 2026 23:27:48 GMT"
+  },
+  "method": "GET",
+  "sha256": "b44e2cff6d9cd246ab2fac3fedfc9644ed91d8ed1e4d75a6c02d6e9e1960b5f1",
+  "size": 13171,
+  "status": 200,
+  "url": "https://index.rubygems.org/info/rake"
+ },
+ {
+  "census_label": "ruby-add",
+  "file": "index.rubygems.org/info/rainbow.body",
+  "headers": {
+   "Cache-Control": "max-age=60, public",
+   "Content-Type": "text/plain; charset=utf-8",
+   "ETag": "\"d12461ad8dac4de609ca961b72ade9f1\"",
+   "Last-Modified": "Thu, 28 May 2026 23:28:23 GMT"
+  },
+  "method": "GET",
+  "sha256": "012e481f3e27bd7e16e63cd484f6a75b9a6e01bf15ce7d42d0c2259dc09011c1",
+  "size": 2384,
+  "status": 200,
+  "url": "https://index.rubygems.org/info/rainbow"
+ },
+ {
+  "census_label": "ruby-add",
+  "file": "rubygems.org/gems/rake-13.4.2.gem.body",
+  "headers": {
+   "Cache-Control": "max-age=31536000",
+   "Content-Type": "application/octet-stream",
+   "ETag": "\"cce180fe684211684fbac6b420934ace\"",
+   "Last-Modified": "Thu, 16 Apr 2026 04:47:48 GMT"
+  },
+  "method": "GET",
+  "sha256": "cb825b2bd5f1f8e91ca37bddb4b9aaf345551b4731da62949be002fa89283701",
+  "size": 86528,
+  "status": 200,
+  "url": "https://rubygems.org/gems/rake-13.4.2.gem"
+ },
+ {
+  "census_label": "ruby-add",
+  "file": "rubygems.org/gems/rainbow-3.1.1.gem.body",
+  "headers": {
+   "Cache-Control": "max-age=31536000",
+   "Content-Type": "application/octet-stream",
+   "ETag": "\"acdea414d05a0d360e0fda6c26747156\"",
+   "Last-Modified": "Sat, 29 Mar 2025 00:08:25 GMT"
+  },
+  "method": "GET",
+  "sha256": "039491aa3a89f42efa1d6dec2fc4e62ede96eb6acd95e52f1ad581182b79bc6a",
+  "size": 13824,
+  "status": 200,
+  "url": "https://rubygems.org/gems/rainbow-3.1.1.gem"
+ }
+]

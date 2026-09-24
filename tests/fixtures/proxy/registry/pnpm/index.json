@@ -1,0 +1,32 @@
+[
+ {
+  "census_label": "pnpm-proxy-flags",
+  "file": "registry.npmjs.org/is-number.body",
+  "headers": {
+   "Cache-Control": "public, max-age=300",
+   "Content-Type": "application/vnd.npm.install-v1+json",
+   "ETag": "W/\"47deffbfb71a701056c86b6f4e7acfd8\"",
+   "Last-Modified": "Fri, 26 May 2023 16:12:34 GMT"
+  },
+  "method": "GET",
+  "sha256": "6349bc63a22af726dda304587581b3446abf1abd094e4700bbfa522f0a707300",
+  "size": 9995,
+  "status": 200,
+  "url": "https://registry.npmjs.org/is-number"
+ },
+ {
+  "census_label": "pnpm-add",
+  "file": "registry.npmjs.org/is-odd.body",
+  "headers": {
+   "Cache-Control": "public, max-age=300",
+   "Content-Type": "application/vnd.npm.install-v1+json",
+   "ETag": "W/\"fd4117a66003c707dae5e1c68aba91af\"",
+   "Last-Modified": "Tue, 14 Apr 2026 14:26:12 GMT"
+  },
+  "method": "GET",
+  "sha256": "92a9229f5da327f50324cc71b5d72ce3805ca9518cc16b40823a973366de92f9",
+  "size": 6124,
+  "status": 200,
+  "url": "https://registry.npmjs.org/is-odd"
+ }
+]

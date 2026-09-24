@@ -1,0 +1,26 @@
+{
+  "tool": "git",
+  "config_file": ".git/config",
+  "note": "See npm/settings.json for the placeholder rules. The project is a repository whose own config names each marker. The triggers are git commands a resolver or a build backend runs with the project as its working directory. The forced run carries the git row's settings in GIT_CONFIG_COUNT/KEY/VALUE, because the tools, not tog, start git.",
+  "settings": [
+    {"name": "core.fsmonitor", "key": "core.fsmonitor", "value": "@M:core.fsmonitor@"},
+    {"name": "core.sshCommand", "key": "core.sshCommand", "value": "@M:core.sshCommand@"},
+    {"name": "credential.helper", "key": "credential.helper", "value": "@M:credential.helper@"},
+    {"name": "core.askPass", "key": "core.askPass", "value": "@M:core.askPass@"},
+    {"name": "core.hooksPath", "key": "core.hooksPath", "value": "@HOOKS@"},
+    {"name": "uploadpack.packObjectsHook", "key": "uploadpack.packObjectsHook", "value": "@M:uploadpack.packObjectsHook@"},
+    {"name": "core.gitProxy", "key": "core.gitProxy", "value": "@M:core.gitProxy@"},
+    {"name": "protocol.ext.allow", "key": "protocol.ext.allow", "value": "always"}
+  ],
+  "triggers": [
+    ["status", "--porcelain"],
+    ["ls-files", "--modified"],
+    ["describe", "--tags", "--always", "--dirty"],
+    ["ls-remote", "ssh://git@example.invalid/x.git", "HEAD"],
+    ["ls-remote", "git://example.invalid/x.git", "HEAD"],
+    ["ls-remote", "https://github.com/tog-spike-nonexistent/private-repo.git", "HEAD"],
+    ["ls-remote", "ext::@M:protocol.ext.allow@ %S", "HEAD"],
+    ["commit", "--allow-empty", "-m", "hooks"],
+    ["clone", "--no-local", ".", "@SCENARIO@/.spike/clone"]
+  ]
+}

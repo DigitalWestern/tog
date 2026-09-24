@@ -1,0 +1,28 @@
+[
+ {
+  "census_label": "git-ls-remote",
+  "file": "github.com/dtolnay/itoa/info/refs@service%3Dgit-upload-pack.body",
+  "headers": {
+   "Cache-Control": "no-cache, max-age=0, must-revalidate",
+   "Content-Type": "application/x-git-upload-pack-advertisement"
+  },
+  "method": "GET",
+  "sha256": "1983c4b9fa294a8e8d4a577144e887c84c691eccd04ce1d97c3da35ad5346280",
+  "size": 191,
+  "status": 200,
+  "url": "https://github.com/dtolnay/itoa/info/refs?service=git-upload-pack"
+ },
+ {
+  "census_label": "git-ls-remote",
+  "file": "github.com/dtolnay/itoa/git-upload-pack.body",
+  "headers": {
+   "Cache-Control": "no-cache, max-age=0, must-revalidate",
+   "Content-Type": "application/x-git-upload-pack-result"
+  },
+  "method": "POST",
+  "sha256": "d10ba00549917459ea358e340dbb7b9ad85351732fd7515f69a044bca35f629f",
+  "size": 7274,
+  "status": 200,
+  "url": "https://github.com/dtolnay/itoa/git-upload-pack"
+ }
+]
