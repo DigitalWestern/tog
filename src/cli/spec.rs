@@ -753,7 +753,7 @@ ENVIRONMENT:
   TOG_STORE           store root (default ~/.tog/store)
   TOG_STRICT=1        refuse every policy exception, like 'tog --strict'
   TOG_POLICY          policy file used instead of ~/.tog/policy.toml
-  TOG_SIGNING_KEY     key file; closure-writing commands (build, add, remove, update, sync, fmt) sign it
+  TOG_SIGNING_KEY     key file; build, add, remove, update, sync, fmt sign it
   NO_COLOR            plain output, like --no-color
 ";
 
