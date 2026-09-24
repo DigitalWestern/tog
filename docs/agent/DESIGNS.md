@@ -1628,8 +1628,8 @@ When this section is fully built:
 9. **No resolver runs without isolation when it matters.** A tool that
    evaluates project or third-party code never runs without filesystem
    isolation: when the native sandbox is unavailable it runs under a
-   container backend or a dedicated resolver user, and where neither
-   exists the command fails naming the missing capability. **No resolver
+   container or VM backend or (Linux) a per-run ephemeral identity, and
+   where none exists the command fails naming the missing capability. **No resolver
    runs without isolation while a signing key is configured.** The only
    unisolated runs left are non-code-evaluating tools on a keyless
    machine, and they record `unconfined-resolution`, which policy can
@@ -2054,9 +2054,12 @@ Every door runs in the strongest tier the host offers. A tool's
 The tiers, strongest first:
 
 1. **`confined`** means network fenced to the proxy plus filesystem
-   isolation. It comes from either of two engines:
+   isolation. It comes from the two engines below, or from the Linux
+   isolation helper when it can create a network namespace (see
+   `isolated`):
    - the **native sandbox**: bwrap on Linux, Seatbelt on macOS;
-   - the **container backend** (Linux): when bwrap cannot create a user
+   - the **container backend** (Linux; on macOS the VM backend described
+     under `isolated`): when bwrap cannot create a user
      namespace (`kernel.unprivileged_userns_clone=0`, or the AppArmor
      `restrict_unprivileged_userns` policy) but a container engine
      (`podman` or `docker`) is reachable. The relay runs as the
@@ -2067,24 +2070,68 @@ The tiers, strongest first:
      by digest), the same seccomp filter, and `--pids-limit`. Removing
      the container kills the tree. Everything else (snapshot, diff,
      transaction) is identical.
-2. **`isolated`** means filesystem isolation without a network fence. It
-   comes from a **dedicated resolver user**: an OS account
-   (`tog-resolver`) that an administrator creates once, together with a
-   sudoers rule allowing the developer to run only
-   `tog __resolution-relay` as that user (`tog doctor --resolver-user`
-   prints the exact commands for Linux and macOS). The door copies the
-   snapshot and the tool's store objects into a shared stage the resolver
-   user owns. The relay runs as that user, so ordinary Unix permissions
-   keep it away from the developer's home, the real project, the store,
-   and the signing key file (0600). Before using the tier, the door
-   checks that the lock root and every ancestor are not writable by the
-   resolver user, and that the signing key file is not readable by it,
-   and refuses if either check fails. The network is not fenced, so the
-   run records `unconfined-resolution` (the ledger saw only cooperative
-   traffic). The key is still safe: it lives in a file and in the
-   developer's tog process, and neither is reachable across the uid
-   boundary. On macOS, `sandbox-exec` ships with every release, so this
-   tier is reached only if it has been removed or disabled.
+2. **`isolated`** (Linux only) means filesystem and process isolation
+   under a **per-run ephemeral identity**. There is no shared resolver
+   account. A shared UID would let a surviving or concurrent malicious
+   run reach another run's stage and change the outputs that the
+   developer's tog then signs. The identity comes from
+   **`tog-isolate`**, a small privileged helper (setuid root, or started
+   through one sudoers rule; `tog doctor --isolation` prints the install
+   steps). It does only this, per run:
+   1. **Allocate a UID** from a reserved range configured in
+      `/etc/tog/isolate.toml` (default `2147000000–2147065535`, outside
+      `/etc/subuid` ranges and the system's login range). Allocation is an
+      exclusive lock file per UID under `/run/tog-isolate/`, so two
+      concurrent sessions never share a UID. A UID is never reused while
+      any process with it exists (checked through the cgroup below) or
+      while any file owned by it remains in a place the helper does not
+      wipe. The only writable places are the ones listed in step 3, and
+      the helper wipes all of them.
+   2. **Create a cgroup v2 leaf** for the run under a helper-owned subtree
+      (`/sys/fs/cgroup/tog-isolate/<run id>`, with `pids.max` and
+      `memory.max` set), and start the relay inside it. The run's UID owns
+      neither that cgroup nor any other, so no process of the run can move
+      itself out (moving a process needs write access to the destination
+      `cgroup.procs`).
+   3. **Build a private mount namespace** (root may always do this): `/`
+      recursively read-only, fresh tmpfs on `/tmp`, `/var/tmp`, and
+      `/dev/shm`, the developer's home and the real project not mounted,
+      and one writable **stage**, owned by the run's UID with mode 0700,
+      holding the snapshot and scratch. The tool's store objects are
+      bind-mounted read-only. The helper also creates a **network
+      namespace** with only loopback and bridges the proxy socket through
+      the same relay. When the kernel lets it (it always lets root, unless
+      a container runtime above has forbidden it), the run is fenced, and
+      its tier is recorded as `confined` with engine `isolate-helper` in
+      the diagnostics. Only where the network namespace cannot be created
+      is the run `isolated` and records `unconfined-resolution`.
+   4. **Drop to the UID** (`setgroups([])`, `setresgid`, `setresuid`,
+      `PR_SET_NO_NEW_PRIVS`, and the AF_UNIX and exec seccomp filters)
+      and exec the relay.
+   5. **Quiesce.** After the tool exits: write `1` to the leaf's
+      `cgroup.kill`, then wait until `cgroup.events` reports
+      `populated 0`, with a bounded timeout. Timing out fails the door,
+      and the UID stays allocated and the stage untouched until an
+      operator runs `tog-isolate --reap`. **The door never validates
+      while the cgroup is populated.** Only then does the helper change
+      the stage's ownership to the developer, and the door proceeds to
+      the immutable output copy.
+   6. **Release**: remove the stage and the cgroup leaf, and release the
+      UID lock.
+
+   The signing key (0600, owned by the developer) and the developer's tog
+   process are unreachable across the UID boundary, and nothing of one
+   run is visible to another: each has its own UID, 0700 stage, mount
+   namespace, tmpfs, and cgroup. **macOS has no `isolated` tier.**
+   Seatbelt ships with the OS. If it is unusable, the only fallback is
+   the container/VM backend: a Linux VM through Virtualization.framework
+   (via `podman machine`, `colima`, or Docker Desktop), running the
+   aarch64-linux tool rows with the tool told to resolve for the host
+   platform (`bundle lock --add-platform arm64-darwin`, uv
+   `--python-platform aarch64-apple-darwin`, and so on). That backend
+   depends on the `aarch64-unknown-linux-gnu` platform rows, which tog
+   does not ship yet. Until they exist, a Mac without usable Seatbelt
+   fails with the missing-capability message.
 3. **`none`**: same user, no fence. The door still runs the tool on the
    snapshot and still uses the transaction. This tier exists only for
    non-code-evaluating tools on a machine with **no signing key
@@ -2094,16 +2141,16 @@ The rule, as a table:
 
 | Tool class | Signing key configured | Allowed tiers | When none of the allowed tiers is available |
 |---|---|---|---|
-| code-evaluating | either | `confined`, `isolated` | the command fails |
-| non-code-evaluating | yes | `confined`, `isolated` | the command fails |
-| non-code-evaluating | no | `confined`, `isolated`, `none` | cannot happen (`none` is always available) |
+| code-evaluating | either | `confined`, `isolated` (Linux) | the command fails |
+| non-code-evaluating | yes | `confined`, `isolated` (Linux) | the command fails |
+| non-code-evaluating | no | `confined`, `isolated` (Linux), `none` | cannot happen (`none` is always available) |
 
 The failure message names the tool, why it needs isolation, and each
 missing capability with its fix. For example: "tog add runs Bundler,
 which evaluates the Gemfile, so it needs isolation. bubblewrap cannot
 create a user namespace here (AppArmor restrict_unprivileged_userns=1),
-no container engine is reachable (podman/docker not found), and no
-resolver user is configured (see `tog doctor --resolver-user`). Enable
+no container engine is reachable (podman/docker not found), and the
+isolation helper is not installed (see `tog doctor --isolation`). Enable
 one of them." A sync that needs a missing-lock door fails the same way.
 
 `unconfined-resolution` keeps its meaning, "the ledger may be missing
@@ -2115,8 +2162,9 @@ which engine provided it is a diagnostic. The company template denies
 
 ### The ledger: identity, contents, and redaction
 
-**Two parts, one object.** A door run produces one ledger. It has a
-portable semantic part and a run-local diagnostic part:
+**Two related objects.** A door run produces two store objects: the
+**ledger** (portable evidence) and its **diagnostics sidecar** (run-local
+data). The sidecar names the ledger, and nothing names the sidecar:
 
 - **Portable evidence** is what the fetches were, independent of the
   machine and of cache state. It is a **set** of entries, each
@@ -2130,8 +2178,9 @@ portable semantic part and a run-local diagnostic part:
   (hit, miss, revalidated), arrival order, retry and duplicate counts,
   byte counts, the isolation engine, the platform, tool store object
   ids, the proxy port, refusal details, and on Linux the exec log below.
-  Diagnostics never reach a committed file, and they are never part of the
-  ledger's identity.
+  Diagnostics are stored only in the sidecar object in the local store.
+  They never enter portable data (the ledger, its identity, the signed
+  record, an export) or anything committed to the project.
 
 The canonical bytes of each part use the same canonicalization as
 `kernel/signing.rs` (keys in byte order, compact).
@@ -2148,7 +2197,7 @@ in the kernel's object-kind table with live and migration grammars, as
 every kind must have or GC refuses to certify it (§ARCHITECTURE "GC root
 safety").
 
-**Diagnostics are a sidecar.** The run-local part is a second object of
+**The diagnostics sidecar.** The run-local part is the second object, of
 kind `resolution-diagnostics`, identity inputs
 `{ledger: <ledger object id>, diagnostics: sha256(diagnostic bytes)}`,
 holding `diagnostics.json`. Nothing portable names it. The ledger does
@@ -2270,27 +2319,45 @@ an ecosystem whose tailor declares a resolvable lock
 (`Tailor::resolution_outputs`, the files a door would produce, relative
 to the closure's project directory):
 
-1. Read `.tog/resolution/<ecosystem>.json` through `ProjectRoot`.
-2. The record **attests** when every check passes: the signature verifies,
-   the key is in the machine policy's `[signing] trusted` set (the same
-   set audit trusts; project and `--policy` files can only intersect it),
-   the record parses as `resolution/1`, and every `outputs` digest matches
-   the file on disk.
-3. **Every exception kind in an attesting record is validated** against
-   `policy::KINDS` (through `canonical_kind`) before anything is recorded.
-   An unknown kind is a **hard failure under every policy, permissive
-   included**: "the resolution record names exception kind `<kind>`,
-   which this tog does not know; upgrade tog to judge it". This matters
-   because `policy::record_with` itself accepts free-string kinds. Without
-   the check, an older tog would publish a closure from a newer signed
-   record and silently drop a finding it cannot judge. The same check
-   applies to `isolation` values and to the record schema version.
+1. Read `.tog/resolution/<ecosystem>.json` through `ProjectRoot` as raw
+   bytes, and parse it only as a generic JSON object.
+2. **Authenticate the raw envelope first**, before interpreting any field
+   but `signature`. Compute the canonical bytes of the object minus its
+   top-level `signature` (the closure rule in `kernel/signing.rs`), verify
+   the Ed25519 signature, and check that the key is in the machine
+   policy's `[signing] trusted` set (the same set audit trusts; project
+   and `--policy` files can only intersect it). A record that fails here
+   (no signature, bad signature, untrusted key, not a JSON object) is
+   **unauthenticated**. Its contents are ignored entirely, whatever they
+   say, and it goes to step 5.
+3. **Authenticated records: check versions and vocabularies before
+   anything else.** Read `schema`, `isolation`, and each exception `kind`
+   as plain strings from the authenticated object:
+   - `schema` of the form `resolution/<n>` with `n` greater than this
+     tog supports, or with any `n` it does not implement, is a **hard
+     failure under every policy**: "the resolution record uses schema
+     `resolution/2`, which this tog cannot read; upgrade tog".
+   - an `isolation` string outside `confined`, `isolated`, `none` is the
+     same hard failure ("... isolation tier `<value>` ...").
+   - an exception `kind` not in `policy::KINDS` (through `canonical_kind`)
+     is the same hard failure ("... exception kind `<kind>` ..."). This
+     matters because `policy::record_with` itself accepts free-string
+     kinds. Without the check, an older tog would publish a closure from a
+     newer signed record and silently drop a finding it cannot judge.
+
+   These checks run on strings, before the typed `resolution/1` parser,
+   so no enum parser can turn a newer value into "malformed". Only after
+   they pass is the object parsed as `resolution/1`. A signed record with a
+   supported schema that still fails to parse (a missing field, a wrong
+   type) is `malformed` and goes to step 5. Then every `outputs` digest is
+   compared with the file on disk, and a mismatch is `stale-outputs`
+   (step 5). A record that passes all of this **attests**.
 4. If it attests and every kind is known: the closure body gains
    `"resolution": <envelope>`, and the record's `exceptions` are recorded
    into the attribution on the writer's thread. The ledger id joins
    `ClosureRefs` only if the object exists in the active store.
-5. If it does not attest (missing, unsigned, bad signature, untrusted
-   key, malformed, or stale digests): its contents are **ignored
+5. If it does not attest (missing, unauthenticated, malformed, or stale
+   digests): its contents are **ignored
    entirely**, and the join records **`unrecorded-resolution`** with the
    reason (`missing`, `unsigned`, `untrusted-key`, `bad-signature`,
    `malformed`, `stale-outputs`). The record file is **left untouched** in
@@ -2706,10 +2773,17 @@ Contract 1 needs enforcement, not review alone:
    an unfenced tier is available. First, **recover** any leftover
    publication journal for this project (see "Recovery").
 2. **Hold the originals.** Open the lock root through `ProjectRoot` and
-   keep the directory descriptor for the whole run. For each declared
-   output that exists, open it `O_NOFOLLOW` through that descriptor, copy
-   its bytes into an immutable store stage (the **original copy**), and
-   record their sha256 as the pre-run digest.
+   keep the directory descriptor for the whole run. The **held target
+   set** is every declared output **plus the existing receipt**
+   `.tog/resolution/<ecosystem>.json` (the receipt is never a
+   `DelegateSpec` output, since the tool does not write it, but the
+   transaction replaces it). Open `.tog/resolution/` through the same
+   `ProjectRoot` walk, and keep that directory descriptor too. For each
+   target that exists, open it `O_NOFOLLOW` through its directory
+   descriptor, copy its bytes into an immutable store stage (the
+   **original copy**), and record their sha256 as the pre-run digest. A
+   target that does not exist is recorded as `absent`, which step 8
+   enforces with a no-replace create.
 3. **Snapshot** the lock root and extra roots (socket-free), with the
    baseline manifest. Scan store and system roots for sockets.
 4. **Run** the tool (probe first for uv) in its tier, through the proxy.
@@ -2746,9 +2820,13 @@ Contract 1 needs enforcement, not review alone:
    displaced bytes after an atomic swap. A target that did not exist is
    created with `renameat2(RENAME_NOREPLACE)` (`renameatx_np(RENAME_EXCL)`
    on macOS), which fails if something appeared in the meantime. After
-   each target, mark it `swapped` in the journal and `fsync`. The record
-   is the last target, so a receipt is replaced only here, inside a
-   successful transaction.
+   each target, mark it `swapped` in the journal and `fsync`. The
+   receipt is the last target and gets the same swap-then-compare as
+   every output. A receipt edited or replaced during the run (another
+   `tog attest`, a `git checkout`, a hand edit) is detected, swapped
+   back, and the door fails. A receipt is therefore replaced only here,
+   inside a successful transaction, and only if it is still the one held
+   at step 2.
 9. **Commit point.** When the record has been swapped, mark the journal
    `committed`, `fsync`, delete the displaced temporaries, and delete the
    journal. The resolution is now published.
@@ -2775,7 +2853,7 @@ there before (if any) still describes them.
 | Failure | Behavior |
 |---|---|
 | Proxy cannot start (bind, CA generation) | door fails before the tool starts; no direct-network fallback |
-| Native sandbox unavailable | next tier per "Isolation tiers"; code-evaluating tools, and every tool while a signing key is configured, fail naming each missing capability when neither the container backend nor the resolver user is available |
+| Native sandbox unavailable | next tier per "Isolation tiers"; code-evaluating tools, and every tool while a signing key is configured, fail naming each missing capability when neither the container/VM backend nor (Linux) the isolation helper is available |
 | A descendant outlives the tool | the tree is stopped before validation; contents are read only from the immutable output copy |
 | Socket found in a mounted root at preflight | door refuses, naming the path |
 | Request matches no route and is not interceptable | 403 with a tog body, ledger `refused`; the door fails if the refusal was a policy denial, even when the tool exits 0 (npm tolerates failed optional fetches) |
@@ -2918,6 +2996,14 @@ Snapshot, sockets, and transaction (`src/kernel/resolve/door.rs`):
 - `user_edit_before_swap_is_restored_by_reverse_exchange` (a test hook
   edits the target between step 2 and its swap)
 - `user_edit_after_hold_is_never_copied_into_a_backup`
+- `concurrent_receipt_edit_is_swapped_back_and_fails_the_door` (a test
+  hook rewrites `.tog/resolution/<eco>.json` between step 2 and its
+  swap)
+- `receipt_appearing_during_the_run_fails_noreplace`
+- `crash_during_receipt_swap_recovers_the_original_receipt` (kills the
+  door after the outputs are swapped and while the receipt is swapped,
+  then runs recovery: outputs and receipt are back to their original
+  bytes)
 - `created_target_that_appeared_meanwhile_fails_noreplace`
 - `ledger_commit_failure_restores_every_output` (fault injection)
 - `sidecar_commit_failure_restores_every_output` (fault injection)
@@ -2933,10 +3019,22 @@ Snapshot, sockets, and transaction (`src/kernel/resolve/door.rs`):
 - `code_evaluating_tool_never_runs_in_tier_none`
 - `no_resolver_runs_in_tier_none_while_a_signing_key_is_configured`
 - `container_backend_is_used_when_user_namespaces_are_unavailable`
-- `resolver_user_tier_refuses_when_the_project_is_writable_by_it`
-- `resolver_user_tier_refuses_when_the_key_is_readable_by_it`
-- `resolver_user_tier_cannot_read_the_signing_key` (e2e, `--ignored`,
-  needs the account)
+- `isolate_helper_allocates_distinct_uids_to_concurrent_sessions`
+- `isolate_helper_never_reuses_a_uid_with_a_live_process`
+- `isolate_survivor_is_killed_by_cgroup_kill_before_validation` (a
+  double-forked, `setsid` child that ignores `SIGTERM`; validation must
+  not start until `populated 0`)
+- `isolate_populated_timeout_fails_and_keeps_the_uid_allocated`
+- `isolate_run_cannot_leave_its_cgroup`
+- `isolate_concurrent_session_cannot_read_or_write_another_stage` (two
+  runs in parallel; each tries to open, list, and write the other's stage
+  and `/tmp`)
+- `isolate_run_cannot_read_the_signing_key_or_the_real_project`
+- `isolate_tmp_is_private_and_wiped` (a file left in `/tmp` by one run is
+  absent in the next run that gets the same UID)
+- `isolate_helper_fences_network_when_it_can_and_records_confined`
+- `macos_has_no_isolated_tier` (with Seatbelt disabled by a test hook
+  and no VM backend, the door fails with the missing-capability message)
 - `missing_isolation_message_names_every_missing_capability`
 - `tier_none_still_runs_on_the_snapshot`
 - `every_resolver_invocation_goes_through_the_door` (tripwire table vs census)
@@ -2973,7 +3071,11 @@ Attestation, join, and audit (`tests/cli.rs` and `src/comforter/`):
 - `denied_unrecorded_resolution_leaves_the_checkout_unchanged`
 - `stale_receipt_is_replaced_only_by_a_successful_transaction`
 - `join_hard_fails_an_unknown_exception_kind_under_permissive_policy`
-- `join_hard_fails_an_unknown_isolation_value_or_schema`
+- `join_hard_fails_an_unsupported_schema_in_an_authenticated_record`
+  (a validly signed `resolution/2`)
+- `join_hard_fails_an_unknown_isolation_value_in_an_authenticated_record`
+- `unauthenticated_record_with_an_unknown_schema_is_unrecorded_not_fatal`
+- `signed_supported_record_missing_a_field_is_malformed_not_fatal`
 - `record_signature_key_is_bare_hex_and_verifies_with_kernel_signing`
 - `unattested_record_exceptions_are_ignored`
 - `company_policy_denies_unrecorded_resolution_under_frozen_sync`
@@ -3066,9 +3168,12 @@ rules, the DNS deny, and the same deny added to the **build** profile
 
 **PR 3b: the other isolation backends.** The Linux container backend
 (podman/docker, the pinned minimal image, `--network none`, the same
-relay and seccomp filter) and the dedicated resolver user on Linux and
-macOS (`tog doctor --resolver-user`, the sudoers rule, the shared stage,
-and the permission preflight). Until it lands, a host without the native
+relay and seccomp filter) and the Linux `tog-isolate` helper (per-run UID
+allocation, cgroup v2 leaf with `cgroup.kill` and the `populated 0`
+gate, private mount and network namespaces, 0700 per-run stages, release
+and `--reap`, `tog doctor --isolation`), with the survivor and
+concurrent-session tests. The macOS VM backend follows the
+`aarch64-unknown-linux-gnu` platform rows and is not in this PR. Until it lands, a host without the native
 sandbox fails with the missing-capability message, which is the
 fail-closed outcome.
 
@@ -3255,9 +3360,10 @@ where the design above closes each:
     project as the user.* It could edit the real repository outside the
     transaction, read `~/.tog` signing keys, and forge a clean receipt.
     Fixed: code-evaluating tools never run without filesystem isolation
-    (container backend or resolver user as fallbacks, otherwise a failure
-    naming what is missing), and no resolver runs without isolation while
-    a signing key is configured (review 2.1).
+    (container/VM backend or, on Linux, the per-run isolation helper as
+    fallbacks, otherwise a failure naming what is missing), and no
+    resolver runs without isolation while a signing key is configured
+    (review 2.1).
 26. *A developer's record names a ledger that CI does not have*, and
     `ClosureRefs` would reject the missing object. Fixed: verifying the
     record never needs the object, the ledger is retained only when
@@ -3289,6 +3395,24 @@ where the design above closes each:
     syntax.* Fixed: bare hex, the envelope `kernel/signing.rs` already
     writes and verifies (review 2.9).
 
+34. *A shared resolver UID lets one run tamper with another*, and a
+    survivor outlives quiescence, so the developer's tog signs outputs a
+    different run changed. Fixed: per-run ephemeral UIDs from a reserved
+    range, 0700 per-run stages, private mount namespaces, and a cgroup v2
+    leaf killed and checked for `populated 0` before validation. macOS has
+    no such tier (review 3.1).
+35. *The receipt was replaced without being held*, so a concurrent edit or
+    a crash mid-swap could lose its exact bytes. Fixed: the receipt is in
+    the held target set, with swap-then-compare and journal recovery like
+    every output (review 3.2).
+36. *An unsupported schema in a signed record fell through to
+    `malformed`*, which permissive policy accepts. Fixed: the raw envelope
+    is authenticated first, and schema, isolation, and kinds are checked
+    as strings before typed parsing (review 3.3).
+37. *"Two parts, one object" contradicted the sidecar.* Fixed wording:
+    two related objects, and diagnostics never enter portable or
+    project-committed data (review 3.4).
+
 ### Review round 1
 
 Codex (Sol), 2026-09-23, verdict "changes needed", ten findings: an
@@ -3318,6 +3442,16 @@ quiescence plus an immutable output copy, a diagnostics sidecar, held
 originals with swap-then-compare and a journal, the full IANA tables,
 hard failure on unknown kinds, receipts replaced only by successful
 transactions, and bare hex.
+
+### Review round 3
+
+Codex (Sol), 2026-09-23, verdict "changes needed", four findings: the
+shared resolver UID (blocker), the receipt missing from the held target
+set, a schema check that could not be reached, and the ledger wording.
+Fixed as self-check items 34–37, with the coordinator's choices: per-run
+ephemeral identities with cgroup v2 containment on Linux, no isolated
+tier on macOS (container/VM backend only), the receipt held and swapped
+like an output, and authentication before version checks.
 
 ### Decisions
 
