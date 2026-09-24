@@ -511,6 +511,12 @@ impl Store {
     }
 }
 
+/// What commit does to a staged tree, for tests outside the store.
+#[cfg(test)]
+pub(crate) fn make_read_only_for_test(path: &Path) -> io::Result<()> {
+    make_read_only(path)
+}
+
 /// Recursively remove write permission (files and dirs). Symlinks untouched.
 pub(super) fn make_read_only(path: &Path) -> io::Result<()> {
     use std::os::unix::fs::PermissionsExt;

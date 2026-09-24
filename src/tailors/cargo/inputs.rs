@@ -63,21 +63,23 @@ pub fn locate_cargo_root(
         .ok_or_else(|| io::Error::other("cargo locate-project returned no manifest path"))
 }
 
-/// `toolchain` is the project's selection, and it is the only thing that
-/// decides which Rust this call realizes. The toolchain file is still read,
-/// but only for the components it asks for that tog does not provide: that
-/// list is this run's `toolchain-component-unavailable` exception, and it is
-/// recorded before anything is downloaded.
+/// `toolchain` is the project's selection, and it decides which Rust this
+/// call realizes. `lock_root` is the directory the selection was resolved
+/// in: the components and cross targets its toolchain file asks for are
+/// read there, through the rows the toolchain lock records, and assembled
+/// onto that Rust. One the pinned release does not publish is an error
+/// before any project write.
 pub fn load_cargo_inputs(
     platform: Platform,
+    lock_root: &Path,
     cwd: &Path,
     store: &store::Store,
     activity: &StoreActivity,
     toolchain: &Selected,
 ) -> io::Result<CargoInputs> {
     let rust_version = toolchain.version("rustc")?;
-    cargo::toolchain_file_components(platform, cwd)?;
-    let rust_obj = cargo::realize_runtime(store, activity, platform, toolchain)?;
+    let extras = cargo::project_extras(lock_root)?;
+    let rust_obj = cargo::realize_toolchain(store, activity, platform, toolchain, &extras)?;
     let root = locate_cargo_root(&rust_obj, cwd, activity)?;
     // Cargo is the one tailor whose registered root is not the directory
     // sync was run in: a member of a workspace sends its closure and its

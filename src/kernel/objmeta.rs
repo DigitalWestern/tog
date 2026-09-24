@@ -1164,6 +1164,83 @@ mod tests {
         }
     }
 
+    // -- rust-toolchain/2 and rust-component/1 ------------------------------
+
+    /// An assembled toolchain depends on the base object and every component
+    /// object its identity names, and on the pinned channel manifest.
+    #[test]
+    fn adapter_rust_rust_toolchain_2_recovers_the_expected_dependencies() {
+        let (base, clippy, wasm) = (
+            oid('a', "rust-1.96.1"),
+            oid('b', "clippy-preview-1.96.1"),
+            oid('c', "rust-std-1.96.1"),
+        );
+        let manifest = sha256('d');
+        let identity = ident(
+            "rust",
+            "rust",
+            "1.96.1",
+            &[
+                ("schema", "rust-toolchain/2"),
+                ("platform", "x86_64-unknown-linux-gnu"),
+                ("base", &base),
+                ("channel_manifest_sha256", &manifest),
+                ("extensions", "2"),
+                ("ext:clippy-preview@x86_64-unknown-linux-gnu", &clippy),
+                ("ext:rust-std@wasm32-unknown-unknown", &wasm),
+            ],
+        );
+        let (objects, cache) = proven(
+            identity.clone(),
+            vec![stub(&base), stub(&clippy), stub(&wasm)],
+        );
+        let mut expected = vec![base.clone(), clippy.clone(), wasm.clone()];
+        expected.sort();
+        assert_eq!(objects, expected);
+        assert_eq!(cache, vec![format!("sha256:{manifest}")]);
+        // A component the store no longer holds cannot be certified.
+        let reason = unresolved(identity, vec![stub(&base), stub(&clippy)]);
+        assert!(
+            reason.contains("ext:rust-std@wasm32-unknown-unknown"),
+            "{reason}"
+        );
+    }
+
+    #[test]
+    fn adapter_rust_component_rust_component_1_recovers_the_expected_dependencies() {
+        let archive = sha256('e');
+        let (objects, cache) = proven(
+            ident(
+                "rust-component",
+                "clippy-preview",
+                "1.96.1",
+                &[
+                    ("schema", "rust-component/1"),
+                    ("platform", "x86_64-unknown-linux-gnu"),
+                    ("target", "x86_64-unknown-linux-gnu"),
+                    ("archive_sha256", &archive),
+                ],
+            ),
+            vec![],
+        );
+        assert!(objects.is_empty());
+        assert_eq!(cache, vec![format!("sha256:{archive}")]);
+    }
+
+    /// The count relation: an assembled toolchain names at least one
+    /// extension, and exactly as many as it declares.
+    #[test]
+    fn rust_toolchain_2_extension_count_is_checked() {
+        let linux = live_identity_cases(Platform::X86_64UnknownLinuxGnu);
+        let assembled = case_with_input(&linux, "rust", Some("rust-toolchain/2"), "extensions");
+        assert_count_breaks(&assembled, "ext:", "Rust extension count relation");
+        let mut none = assembled.clone();
+        none.inputs.retain(|key, _| !key.starts_with("ext:"));
+        none.inputs.insert("extensions".into(), "0".into());
+        let reason = check_identity_grammar(&none).unwrap_err();
+        assert!(reason.contains("names no extension"), "{reason}");
+    }
+
     // -- Row 6: cargo-vendor/1 ---------------------------------------------
 
     #[test]

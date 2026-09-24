@@ -92,12 +92,6 @@ by position.
   did for `x`. It is its own design review: deps edits user manifests.
   The signature, carrying the resolution door, is in `docs/agent/DESIGNS.md`
   §6 (PR 1 there), which also moves the Corepack/pnpm path (#169).
-- **Rust targets and components are outside the lock.** Only the channel is
-  a lock row; `targets` and `components` are enforced per run from
-  `rust-toolchain.toml`, a component tog does not ship is a permissive
-  exception rather than a refusal, and a source that fails to parse gets the
-  same row as one with the field absent. Decide in or out, and make a parse
-  failure always stale (#134).
 - **GC loose ends from #162.** Three small `src/kernel/store/roots.rs`
   fixes: a case-mismatched `gc --dry-run --forget` key previews fewer
   deletions on macOS (#163); the root/2 importer calls a path inside this

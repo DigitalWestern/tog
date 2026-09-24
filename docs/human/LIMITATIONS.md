@@ -13,8 +13,7 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
 ## Kernel-wide
 
 - **`tog fmt` is Rust-only**; other ecosystems fail clearly (pinned rustfmt 1.96.1, no
-  `Cargo.lock`; `status` ignores the rustfmt closure; a sync rustfmt request still records
-  `toolchain-component-unavailable` while `fmt` realizes it on demand).
+  `Cargo.lock`; `status` ignores the rustfmt closure).
 - **`tog audit` judges signed records only.** A pass proves that every closure file in
   the working tree carries a valid signature from a key the machine policy trusts, that
   every detected ecosystem has its primary closure, that each record is current for the
@@ -201,7 +200,9 @@ Selection covers every patch of each maintained CPython minor that python-build-
   escaping symlinks fail closed, and workspace metadata is not rewritten into vendor
   manifests. **Fail-closed rows**: alternative registries; beta/nightly/custom toolchains and
   non-arm64 targets. Loud.
-- **Extra rust-toolchain components** are permissive with `toolchain-component-unavailable`.
+- **No `profile` in rust-toolchain means rustc, cargo and the host std** (rustup's
+  `minimal`), not rustup's configured default; ask for `profile = "default"` to get
+  clippy, rustfmt and the docs.
   **`tog build` covers `build` only** — no sandboxed test/clippy/doc; those run via
   `tog run cargo ...` offline but unsandboxed. target/ is unmanaged scratch (no shared
   build cache). **`cargo install` through the wrapper is unmanaged** (lands in

@@ -491,9 +491,12 @@ fn pnpm_add_update_remove_roundtrip() {
     assert_status_synced(&bin, project, &store, &temp);
 }
 
+/// A pnpm edit beside a Cargo project: the Cargo sync's exception (a git
+/// dependency) is published on the Cargo closure and on no Node closure,
+/// the project's or `tog x`'s.
 #[test]
 #[ignore]
-fn mixed_cargo_pnpm_edit_keeps_toolchain_exception_with_cargo() {
+fn mixed_cargo_pnpm_edit_keeps_cargo_exception_with_cargo() {
     let temp = TempDir::new("mixed-cargo-pnpm");
     let project = &temp.0;
     let store = project.join("store");
@@ -510,11 +513,8 @@ fn mixed_cargo_pnpm_edit_keeps_toolchain_exception_with_cargo() {
     .unwrap();
     std::fs::create_dir_all(project.join("src")).unwrap();
     std::fs::write(project.join("src/main.rs"), "fn main() {}\n").unwrap();
-    std::fs::write(
-        project.join("rust-toolchain.toml"),
-        "[toolchain]\nchannel = \"1.96.1\"\ncomponents = [\"clippy\"]\n",
-    )
-    .unwrap();
+    let fixtures = TempDir::new("mixed-cargo-pnpm-git");
+    add_git_dependency(&fixtures.0, project);
     set_package_manager(project, "pnpm@9.12.3");
     let bin = binary();
 
@@ -535,23 +535,14 @@ fn mixed_cargo_pnpm_edit_keeps_toolchain_exception_with_cargo() {
         1,
         "cargo exceptions: {cargo_exceptions:?}"
     );
-    assert_eq!(
-        cargo_exceptions[0]["kind"],
-        "toolchain-component-unavailable"
-    );
-    assert!(
-        cargo_exceptions[0]["subject"]
-            .as_str()
-            .is_some_and(|subject| subject.ends_with("rust-toolchain.toml")),
-        "unexpected Cargo exception: {:?}",
-        cargo_exceptions[0]
-    );
+    assert_eq!(cargo_exceptions[0]["kind"], "git-dependency");
+    assert_eq!(cargo_exceptions[0]["subject"], "gitdep@1.0.0");
 
     let pnpm_exceptions = closure_exceptions(&project.join(".tog/closures/node.json"));
     assert!(
         pnpm_exceptions
             .iter()
-            .all(|exception| exception["kind"] != "toolchain-component-unavailable"),
+            .all(|exception| exception["kind"] != "git-dependency"),
         "pnpm closure inherited Cargo's exception: {pnpm_exceptions:?}"
     );
 
@@ -562,9 +553,86 @@ fn mixed_cargo_pnpm_edit_keeps_toolchain_exception_with_cargo() {
     assert!(
         x_exceptions
             .iter()
-            .all(|exception| exception["kind"] != "toolchain-component-unavailable"),
+            .all(|exception| exception["kind"] != "git-dependency"),
         "Node x closure inherited Cargo's exception: {x_exceptions:?}"
     );
+}
+
+/// A local git repository holding one library crate, and the Cargo project
+/// at `project` made to depend on it at its commit. A git dependency is a
+/// `git-dependency` exception the Cargo sync records, which is what the
+/// attribution tests trace.
+fn add_git_dependency(root: &Path, project: &Path) -> String {
+    let repo = root.join("gitdep-repo");
+    std::fs::create_dir_all(repo.join("src")).unwrap();
+    let git = |args: &[&str]| {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap().trim().to_string()
+    };
+    git(&["init", "-q", "-b", "main"]);
+    git(&["config", "user.email", "t@example.invalid"]);
+    git(&["config", "user.name", "t"]);
+    std::fs::write(
+        repo.join("Cargo.toml"),
+        "[package]\nname = \"gitdep\"\nversion = \"1.0.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(repo.join("src/lib.rs"), "pub fn value() -> u32 { 7 }\n").unwrap();
+    git(&["add", "-A"]);
+    git(&["commit", "-qm", "one"]);
+    let commit = git(&["rev-parse", "HEAD"]);
+    let url = format!("file://{}", repo.display());
+
+    let manifest = std::fs::read_to_string(project.join("Cargo.toml")).unwrap();
+    let manifest = if manifest.contains("[dependencies]\n") {
+        manifest.replace(
+            "[dependencies]\n",
+            &format!("[dependencies]\ngitdep = {{ git = \"{url}\", rev = \"{commit}\" }}\n"),
+        )
+    } else {
+        format!("{manifest}\n[dependencies]\ngitdep = {{ git = \"{url}\", rev = \"{commit}\" }}\n")
+    };
+    std::fs::write(project.join("Cargo.toml"), manifest).unwrap();
+    let lock = std::fs::read_to_string(project.join("Cargo.lock")).unwrap();
+    let package = |name: &str| format!("[[package]]\nname = \"{name}\"\n");
+    let root_name = manifest_name(project);
+    let mut lock = lock;
+    let root_entry = package(&root_name);
+    let at = lock.find(&root_entry).unwrap() + root_entry.len();
+    let rest = &lock[at..];
+    let version_end = rest.find('\n').unwrap() + 1;
+    let insert = at + version_end;
+    if lock[insert..].starts_with("dependencies = [\n") {
+        let list = insert + "dependencies = [\n".len();
+        lock.insert_str(list, " \"gitdep\",\n");
+    } else {
+        lock.insert_str(insert, "dependencies = [\n \"gitdep\",\n]\n");
+    }
+    lock.push_str(&format!(
+        "\n[[package]]\nname = \"gitdep\"\nversion = \"1.0.0\"\nsource = \"git+{url}?rev={commit}#{commit}\"\n"
+    ));
+    std::fs::write(project.join("Cargo.lock"), lock).unwrap();
+    url
+}
+
+fn manifest_name(project: &Path) -> String {
+    let manifest = std::fs::read_to_string(project.join("Cargo.toml")).unwrap();
+    let line = manifest
+        .lines()
+        .find(|line| line.starts_with("name = "))
+        .unwrap();
+    line.trim_start_matches("name = ")
+        .trim_matches('"')
+        .to_string()
 }
 
 /// Every entry under `dir`, with its content digest (or symlink target), so

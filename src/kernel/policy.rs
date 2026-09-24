@@ -25,8 +25,6 @@ pub const INSTALL_SCRIPT_FAILED: &str = "install-script-failed";
 pub const WEAK_INTEGRITY: &str = "weak-integrity";
 /// A mutable projection was created without attesting its runtime contents.
 pub const UNATTESTED_MUTABLE_STATE: &str = "unattested-mutable-state";
-/// A requested toolchain component is not available in the pinned toolchain.
-pub const TOOLCHAIN_COMPONENT_UNAVAILABLE: &str = "toolchain-component-unavailable";
 /// A future git dependency was accepted without registry provenance.
 pub const GIT_DEPENDENCY: &str = "git-dependency";
 /// An optional dependency/group was not requested by the user.
@@ -52,7 +50,6 @@ pub const KINDS: &[&str] = &[
     INSTALL_SCRIPT_FAILED,
     WEAK_INTEGRITY,
     UNATTESTED_MUTABLE_STATE,
-    TOOLCHAIN_COMPONENT_UNAVAILABLE,
     GIT_DEPENDENCY,
     SKIPPED_OPTIONAL,
     UNATTESTED_INDEX,
@@ -77,6 +74,14 @@ const LEGACY_KIND_SPELLINGS: &[(&str, &str)] = &[
     ("artifact_provisioned", ARTIFACT_PROVISIONED),
     ("built_from_source", BUILT_FROM_SOURCE),
 ];
+
+/// Kinds nothing records any more. A deny list may still name one: denying
+/// what cannot occur is satisfied by every record, so the entry is dropped
+/// rather than refused, and a policy file written for an older tog keeps
+/// loading. `toolchain-component-unavailable` was a requested Rust component
+/// tog did not ship; tog now provisions every component the pinned release
+/// publishes and refuses the rest.
+const RETIRED_KINDS: &[&str] = &["toolchain-component-unavailable"];
 
 /// The one spelling of `kind` this binary judges, denies, and prints. An
 /// unknown kind is returned unchanged: a record from a newer tog must stay
@@ -199,6 +204,7 @@ pub fn parse_file(path: &Path, text: &str) -> io::Result<Policy> {
         .deny
         .iter()
         .map(|kind| canonical_kind(kind).to_string())
+        .filter(|kind| !RETIRED_KINDS.contains(&kind.as_str()))
         .collect();
     let unknown: Vec<&str> = policy
         .deny
@@ -1197,6 +1203,21 @@ deny = ["git-dependency"]"#,
             "{message}"
         );
         assert!(message.contains("set 'strict = false' there"), "{message}");
+    }
+
+    /// A retired kind is no kind any more: nothing records it, and a deny
+    /// list written for an older tog still loads, without the entry.
+    #[test]
+    fn a_retired_kind_is_dropped_from_a_deny_list_not_refused() {
+        for kind in RETIRED_KINDS {
+            assert!(!KINDS.contains(kind), "{kind} is both live and retired");
+        }
+        let parsed = parse_file(
+            Path::new("/co/policy.toml"),
+            "deny = [\"toolchain-component-unavailable\", \"weak-integrity\"]\n",
+        )
+        .unwrap();
+        assert_eq!(parsed.deny, BTreeSet::from([WEAK_INTEGRITY.to_string()]));
     }
 
     /// One separator in the names, and the older spelling still judged the

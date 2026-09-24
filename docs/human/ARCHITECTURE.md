@@ -175,6 +175,39 @@ later runs unsandboxed). Honest gap: `tog run cargo build` is
 offline-configured but not sandboxed; use `tog build`. `tog fmt`
 realizes a separate pinned `rustfmt` object linked against the Rust object.
 
+`targets`, `components` and `profile` in `rust-toolchain(.toml)` are lock
+rows (`toolchain.targets`, `toolchain.components`, `toolchain.profile`):
+lists sorted and deduplicated, each written only when present, so a lock
+for a project without them is unchanged. A file that does not parse is an
+error and a stale lock, never the "absent" row. Sync provisions what the
+rows ask for from the official channel manifest
+`channel-rust-<version>.toml`, pinned by sha256 in `provider/rust.rs` and
+kept in the store's content-addressed cache under that sha256, so a
+release seen once plans offline (`provider/rust_channel.rs` reads it,
+following its `renames`). The pin is produced by
+`tools/rust_channel_pin.py`, which verifies the manifest's signature with
+`gpgv` against the Rust release key in `tools/keys/` first; tog checks the
+sha256 only. A named component or target the manifest does not publish for
+the host, or marks `available = false`, is a hard error naming it. A
+profile expands to the manifest's `profiles` list, keeping what the host
+has, as rustup does. Each extension is its own `rust-component/1` object
+(one archive, keyed by its sha256), and the toolchain a build sees is an
+assembled `rust` object (`rust-toolchain/2`): a copy of the base object
+with the components merged in, keyed by the base id, the manifest digest,
+and every component object id (`provider/rust_extras.rs`). It must be one
+real tree because rustc and clippy-driver find their sysroot from their own
+canonical path. Its files are hard links to the base and component objects'
+files (a copy, reflinked where the filesystem can, only when a link
+cannot be made), and store removal never changes a file's mode, so a
+shared inode stays read-only. The base `rust` object (`rust-toolchain/1`) keeps its id, and a
+project asking for nothing beyond it uses it directly. GC reaches the base,
+the components and the manifest through the assembled object's
+dependencies. The profile never enters an identity: it is expanded first,
+so `profile = "default"` and its components by name are one object.
+rustfmt as a component is the bundle's own `rustfmt` row, the
+same archive `tog fmt` realizes, and every bundle row is checked against the
+manifest, so there is one pin.
+
 **go** (`tailors/go/`, `kernel/dirhash.rs`). go.sum is an authentication ledger, not
 a lock graph, so the closure is computed by the store Go toolchain itself
 (`go mod tidy -diff`, then `go mod download -json all`), and tog

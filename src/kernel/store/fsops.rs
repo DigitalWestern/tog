@@ -372,21 +372,23 @@ pub(crate) fn remove_tree_at(dirfd: RawFd) -> io::Result<()> {
     Ok(())
 }
 
-/// Remove a possibly read-only staged tree (restore write bits first).
+/// Remove a possibly read-only staged tree (restore write bits on its
+/// directories first). Unlinking a file needs a writable directory, never a
+/// writable file, so file modes are left alone: an object's file may be a
+/// hard link shared with another object (an assembled Rust toolchain links
+/// its base), and removing one name must not change the other.
 pub fn remove_tree(path: &Path) -> io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     fn unlock(p: &Path) -> io::Result<()> {
         let md = fs::symlink_metadata(p)?;
-        if md.file_type().is_symlink() {
+        if !md.is_dir() {
             return Ok(());
         }
         let mut perms = md.permissions();
         perms.set_mode(perms.mode() | 0o200);
         let _ = fs::set_permissions(p, perms);
-        if md.is_dir() {
-            for entry in fs::read_dir(p)? {
-                unlock(&entry?.path())?;
-            }
+        for entry in fs::read_dir(p)? {
+            unlock(&entry?.path())?;
         }
         Ok(())
     }

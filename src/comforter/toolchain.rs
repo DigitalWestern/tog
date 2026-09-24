@@ -948,6 +948,132 @@ mod tests {
         assert_eq!(fresh.get("python").unwrap().source, Source::Lock);
     }
 
+    fn resolve_rust(root: &ProjectRoot, dir: &Path, mode: Mode) -> io::Result<ProjectToolchain> {
+        resolve(
+            root,
+            Platform::host().unwrap(),
+            inputs_for(dir, &["cargo"]),
+            mode,
+            false,
+        )
+    }
+
+    /// `targets` and `components` are lock rows: editing either stales the
+    /// lock, an update records it, and an equivalent spelling (reordered,
+    /// duplicated) is the same row. A file that asks for neither gives the
+    /// lock it always gave, and a malformed file is refused, never read as
+    /// one that asks for nothing.
+    #[test]
+    fn rust_targets_and_components_are_lock_rows() {
+        let _serialized = serialized();
+        let temp = TempDir::new();
+        let dir = temp.0.join("crate");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        let toolchain = |extra: &str| {
+            std::fs::write(
+                dir.join("rust-toolchain.toml"),
+                format!("[toolchain]\nchannel = \"1.96.1\"\n{extra}"),
+            )
+            .unwrap();
+        };
+        let root = ProjectRoot::open(&dir).unwrap();
+        toolchain("");
+        let mut created = resolve_rust(&root, &dir, Mode::Writable).unwrap();
+        drop(commit(&root, &mut created, &Mode::Writable).unwrap());
+        let plain = std::fs::read_to_string(dir.join(LOCK_PATH)).unwrap();
+        // Exactly the two channel rows a lock always recorded for Rust.
+        assert_eq!(plain.matches("[[toolchain.rust.inputs]]").count(), 2);
+        assert!(!plain.contains("toolchain.components"), "{plain}");
+        assert!(!plain.contains("toolchain.targets"), "{plain}");
+
+        toolchain("components = [\"rustfmt\", \"clippy\"]\n");
+        let error = resolve_rust(&root, &dir, Mode::Writable)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("is stale for rust"), "{error}");
+        assert!(
+            error.contains(
+                "rust-toolchain.toml toolchain.components: recorded absent, now clippy,rustfmt"
+            ),
+            "{error}"
+        );
+        let mode = Mode::Update {
+            only: Some("rust".into()),
+        };
+        let mut updated = resolve_rust(&root, &dir, mode.clone()).unwrap();
+        drop(commit(&root, &mut updated, &mode).unwrap());
+        let listed = std::fs::read_to_string(dir.join(LOCK_PATH)).unwrap();
+        assert!(
+            listed.contains("field = \"toolchain.components\"\nvalue = \"clippy,rustfmt\"\n"),
+            "{listed}"
+        );
+
+        // Reordering, duplicating, or reformatting the list is no edit.
+        toolchain("components = [\n  \"clippy\",\n  \"rustfmt\",\n  \"clippy\",\n]\n");
+        let honored = resolve_rust(&root, &dir, Mode::Writable).unwrap();
+        assert_eq!(honored.get("rust").unwrap().source, Source::Lock);
+
+        // A target is a row of its own; dropping the components is stale too.
+        toolchain(
+            "components = [\"clippy\", \"rustfmt\"]\ntargets = [\"wasm32-unknown-unknown\"]\n",
+        );
+        let error = resolve_rust(&root, &dir, Mode::Frozen)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("toolchain.targets: recorded absent, now wasm32-unknown-unknown"),
+            "{error}"
+        );
+        // A profile is a row too.
+        toolchain("components = [\"clippy\", \"rustfmt\"]\nprofile = \"default\"\n");
+        let error = resolve_rust(&root, &dir, Mode::Writable)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("toolchain.profile: recorded absent, now default"),
+            "{error}"
+        );
+        toolchain("");
+        let error = resolve_rust(&root, &dir, Mode::Writable)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("toolchain.components: recorded clippy,rustfmt, now absent"),
+            "{error}"
+        );
+
+        // A malformed file is refused on every path, update included.
+        for (bad, words) in [
+            (
+                "components = \"clippy\"\n",
+                "rust-toolchain.toml: toolchain.components must be an array",
+            ),
+            (
+                "profile = \"everything\"\n",
+                "rust-toolchain.toml: toolchain.profile must be one of minimal, default, complete",
+            ),
+        ] {
+            std::fs::write(
+                dir.join("rust-toolchain.toml"),
+                format!("[toolchain]\n{bad}"),
+            )
+            .unwrap();
+            for mode in [Mode::Writable, Mode::ReadOnly, mode.clone()] {
+                let error = resolve_rust(&root, &dir, mode).unwrap_err().to_string();
+                assert!(error.contains(words), "{error}");
+            }
+        }
+        assert_eq!(
+            std::fs::read_to_string(dir.join(LOCK_PATH)).unwrap(),
+            listed
+        );
+    }
+
     #[test]
     fn frozen_refuses_a_missing_lock_and_so_does_strict() {
         let _serialized = serialized();

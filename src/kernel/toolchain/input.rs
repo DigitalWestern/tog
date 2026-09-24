@@ -209,28 +209,221 @@ fn global_json_sdk_field(bytes: &[u8], field: &str) -> Option<String> {
     value.get("sdk")?.get(field)?.as_str().map(str::to_string)
 }
 
+/// The `[toolchain]` table of a rustup toolchain file, as a TOML table.
+pub type ToolchainTable = toml::map::Map<String, toml::Value>;
+
+/// The file name a toolchain-file error names.
+fn toolchain_file_name(legacy: bool) -> &'static str {
+    if legacy {
+        "rust-toolchain"
+    } else {
+        "rust-toolchain.toml"
+    }
+}
+
+/// The `[toolchain]` table of a rustup toolchain file, or `None` for a
+/// legacy `rust-toolchain` that is a bare channel line. A file that cannot
+/// be read as the format its name promises is refused here, in the
+/// parser's words, rather than recorded as a file without the field: a lock
+/// must never read a malformed toolchain file as one that asks for nothing.
+///
+/// `rust-toolchain.toml` must be UTF-8 TOML with a `[toolchain]` table, as
+/// rustup requires. The legacy `rust-toolchain` is that TOML document when
+/// it parses as one with a `toolchain` key, and a bare channel line
+/// otherwise.
+pub fn rust_toolchain_table(bytes: &[u8], legacy: bool) -> io::Result<Option<ToolchainTable>> {
+    let name = toolchain_file_name(legacy);
+    let bad = |what: String| io::Error::new(io::ErrorKind::InvalidData, format!("{name}: {what}"));
+    let text = std::str::from_utf8(bytes).map_err(|_| bad("is not UTF-8".into()))?;
+    let document = match toml::from_str::<toml::Value>(text) {
+        Ok(document) => document,
+        Err(_) if legacy => return Ok(None),
+        Err(error) => return Err(bad(error.to_string().trim().to_string())),
+    };
+    match document.get("toolchain") {
+        Some(toml::Value::Table(table)) => Ok(Some(table.clone())),
+        Some(_) => Err(bad("[toolchain] must be a table".into())),
+        None if legacy => Ok(None),
+        None => Err(bad("has no [toolchain] table".into())),
+    }
+}
+
+/// `[toolchain] channel`, which must be a string when it is present.
+pub fn toolchain_channel(table: &ToolchainTable, legacy: bool) -> io::Result<Option<String>> {
+    match table.get("channel") {
+        None => Ok(None),
+        Some(toml::Value::String(text)) => Ok(Some(text.clone())),
+        Some(_) => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "{}: toolchain.channel must be a string",
+                toolchain_file_name(legacy)
+            ),
+        )),
+    }
+}
+
 /// `rust-toolchain.toml`: `[toolchain] channel = "1.96.1"`.
-pub fn read_rust_toolchain(bytes: &[u8]) -> Option<String> {
-    toml_document(bytes)?
-        .get("toolchain")?
-        .get("channel")?
-        .as_str()
-        .map(str::to_string)
+pub fn read_rust_toolchain(bytes: &[u8]) -> io::Result<Option<String>> {
+    match rust_toolchain_table(bytes, false)? {
+        Some(table) => toolchain_channel(&table, false),
+        None => Ok(None),
+    }
 }
 
 /// Legacy `rust-toolchain`: a bare channel on the first line, or the same
 /// TOML document rustup accepts at that name. A document with a
 /// `[toolchain]` table is read as TOML only, so a table without a channel
 /// yields no value instead of the literal header line.
-pub fn read_rust_toolchain_legacy(bytes: &[u8]) -> Option<String> {
-    match toml_document(bytes) {
-        Some(document) if document.get("toolchain").is_some() => document
-            .get("toolchain")?
-            .get("channel")?
-            .as_str()
-            .map(str::to_string),
-        _ => first_line(bytes),
+pub fn read_rust_toolchain_legacy(bytes: &[u8]) -> io::Result<Option<String>> {
+    match rust_toolchain_table(bytes, true)? {
+        Some(table) => toolchain_channel(&table, true),
+        None => Ok(first_line(bytes)),
     }
+}
+
+/// The list fields of a `[toolchain]` table the lock records, each with the
+/// input field it is recorded under.
+pub const RUST_TOOLCHAIN_LISTS: [(&str, &str); 2] = [
+    ("components", "toolchain.components"),
+    ("targets", "toolchain.targets"),
+];
+
+/// `[toolchain] profile`, and the input field it is recorded under.
+pub const RUST_TOOLCHAIN_PROFILE: (&str, &str) = ("profile", "toolchain.profile");
+
+/// The profiles rustup defines. Anything else is refused, as rustup refuses
+/// it, rather than recorded.
+pub const RUST_PROFILES: [&str; 3] = ["minimal", "default", "complete"];
+
+/// Every `[toolchain]` field besides the channel that the lock records.
+pub const RUST_TOOLCHAIN_REQUESTS: [(&str, &str); 3] = [
+    RUST_TOOLCHAIN_LISTS[0],
+    RUST_TOOLCHAIN_LISTS[1],
+    RUST_TOOLCHAIN_PROFILE,
+];
+
+/// `[toolchain] profile`: one of [`RUST_PROFILES`] when present.
+pub fn toolchain_profile(table: &ToolchainTable, legacy: bool) -> io::Result<Option<String>> {
+    match table.get(RUST_TOOLCHAIN_PROFILE.0) {
+        None => Ok(None),
+        Some(toml::Value::String(name)) if RUST_PROFILES.contains(&name.as_str()) => {
+            Ok(Some(name.clone()))
+        }
+        Some(other) => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "{}: toolchain.profile must be one of {}, not {other}",
+                toolchain_file_name(legacy),
+                RUST_PROFILES.join(", ")
+            ),
+        )),
+    }
+}
+
+/// The separator inside a recorded list value. No name can contain it:
+/// [`toolchain_list`] refuses every name outside `[A-Za-z0-9._-]`.
+pub const LIST_SEPARATOR: char = ',';
+
+/// `[toolchain] components` or `targets` as the one canonical value the lock
+/// records: the names sorted, deduplicated and joined with
+/// [`LIST_SEPARATOR`], so two files asking for the same set give the same
+/// bytes. An absent or empty list asks for nothing and has no value. A value
+/// that is not an array of plain names is refused.
+pub fn toolchain_list(
+    table: &ToolchainTable,
+    key: &str,
+    legacy: bool,
+) -> io::Result<Option<String>> {
+    let bad = |what: String| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{}: toolchain.{key} {what}", toolchain_file_name(legacy)),
+        )
+    };
+    let Some(value) = table.get(key) else {
+        return Ok(None);
+    };
+    let toml::Value::Array(items) = value else {
+        return Err(bad("must be an array of strings".into()));
+    };
+    let mut names = std::collections::BTreeSet::new();
+    for item in items {
+        let toml::Value::String(name) = item else {
+            return Err(bad("must be an array of strings".into()));
+        };
+        let plain = !name.is_empty()
+            && name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'));
+        if !plain {
+            return Err(bad(format!(
+                "names {name:?}, which is not a component or target name"
+            )));
+        }
+        names.insert(name.as_str());
+    }
+    if names.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(
+        names
+            .into_iter()
+            .collect::<Vec<_>>()
+            .join(&LIST_SEPARATOR.to_string()),
+    ))
+}
+
+/// A recorded list value back to its names, in recorded (sorted) order.
+pub fn split_list(value: &str) -> Vec<String> {
+    value
+        .split(LIST_SEPARATOR)
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// The Rust rows: each toolchain file's channel, then the lists and the
+/// profile it asks for. A channel row is always written, as every other
+/// ecosystem's rows are. A list or profile row is written only when the file
+/// names one, so a lock minted before they were recorded stays
+/// byte-identical for a project that asks for none, and one appearing or
+/// disappearing is a row only one side has, which staleness calls stale.
+fn rust_rows(root: &ProjectRoot) -> io::Result<Vec<InputRow>> {
+    let mut rows = Vec::new();
+    for (path, legacy) in [("rust-toolchain", true), ("rust-toolchain.toml", false)] {
+        let field = "toolchain.channel";
+        let Some(bytes) = root.read_file(Path::new(path))? else {
+            rows.push(InputRow::missing(path, field));
+            continue;
+        };
+        let table = rust_toolchain_table(&bytes, legacy)?;
+        let channel = match &table {
+            Some(table) => toolchain_channel(table, legacy)?,
+            None => first_line(&bytes),
+        };
+        rows.push(match channel {
+            Some(value) => InputRow::present(path, field, value, &bytes),
+            None => InputRow::present_without_value(path, field, &bytes),
+        });
+        let Some(table) = table else {
+            continue;
+        };
+        for (key, field) in RUST_TOOLCHAIN_LISTS {
+            if let Some(value) = toolchain_list(&table, key, legacy)? {
+                rows.push(InputRow::present(path, field, value, &bytes));
+            }
+        }
+        if let Some(value) = toolchain_profile(&table, legacy)? {
+            rows.push(InputRow::present(
+                path,
+                RUST_TOOLCHAIN_PROFILE.1,
+                value,
+                &bytes,
+            ));
+        }
+    }
+    Ok(rows)
 }
 
 /// `go.mod`: the `go 1.22.0` directive, the module's minimum.
@@ -345,20 +538,7 @@ pub fn discover(root: &ProjectRoot, ecosystem: &str) -> io::Result<Vec<InputRow>
             row_for(root, "go.mod", "go", read_go_mod)?,
             row_for(root, "go.mod", "toolchain", read_go_mod_toolchain)?,
         ],
-        "rust" => vec![
-            row_for(
-                root,
-                "rust-toolchain",
-                "toolchain.channel",
-                read_rust_toolchain_legacy,
-            )?,
-            row_for(
-                root,
-                "rust-toolchain.toml",
-                "toolchain.channel",
-                read_rust_toolchain,
-            )?,
-        ],
+        "rust" => rust_rows(root)?,
         "elixir" => vec![
             row_for(root, ".tool-versions", "erlang", |bytes| {
                 read_tool_versions(bytes, "erlang")
@@ -551,21 +731,157 @@ mod tests {
 
     #[test]
     fn rust_toolchain_readers_find_channel() {
+        let modern = |bytes: &[u8]| read_rust_toolchain(bytes).unwrap();
+        let legacy = |bytes: &[u8]| read_rust_toolchain_legacy(bytes).unwrap();
         let bytes = b"[toolchain]\nchannel = \"1.96.1\"\n";
-        assert_eq!(read_rust_toolchain(bytes), Some("1.96.1".into()));
-        assert_eq!(read_rust_toolchain(b"[toolchain]\n"), None);
-        assert_eq!(read_rust_toolchain(b"not toml ["), None);
-        assert_eq!(read_rust_toolchain_legacy(bytes), Some("1.96.1".into()));
-        assert_eq!(
-            read_rust_toolchain_legacy(b"1.96.1\n"),
-            Some("1.96.1".into())
-        );
-        assert_eq!(read_rust_toolchain_legacy(b""), None);
+        assert_eq!(modern(bytes), Some("1.96.1".into()));
+        assert_eq!(modern(b"[toolchain]\n"), None);
+        assert_eq!(legacy(bytes), Some("1.96.1".into()));
+        assert_eq!(legacy(b"1.96.1\n"), Some("1.96.1".into()));
+        assert_eq!(legacy(b""), None);
         // A TOML document without a channel is not a bare channel line.
+        assert_eq!(legacy(b"[toolchain]\ncomponents = [\"rustfmt\"]\n"), None);
+    }
+
+    /// A toolchain file that is not the format its name promises is refused
+    /// in the parser's words, never read as a file that asks for nothing.
+    #[test]
+    fn a_malformed_rust_toolchain_file_is_refused_not_absent() {
+        for (bytes, words) in [
+            (&b"not toml ["[..], "rust-toolchain.toml:"),
+            (b"[project]\nname = \"x\"\n", "has no [toolchain] table"),
+            (b"toolchain = \"1.96.1\"\n", "[toolchain] must be a table"),
+            (
+                b"[toolchain]\nchannel = 1\n",
+                "toolchain.channel must be a string",
+            ),
+            (b"\xff\xfe", "is not UTF-8"),
+        ] {
+            let error = read_rust_toolchain(bytes).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+            assert!(error.to_string().contains(words), "{error}");
+        }
+        // The legacy name is a bare channel line unless it is TOML with a
+        // `toolchain` key; that document is held to the same rules.
         assert_eq!(
-            read_rust_toolchain_legacy(b"[toolchain]\ncomponents = [\"rustfmt\"]\n"),
+            read_rust_toolchain_legacy(b"not toml [\n").unwrap(),
+            Some("not toml [".into())
+        );
+        let error = read_rust_toolchain_legacy(b"[toolchain]\nchannel = []\n").unwrap_err();
+        assert!(error.to_string().starts_with("rust-toolchain:"), "{error}");
+        assert!(read_rust_toolchain_legacy(b"\xff").is_err());
+    }
+
+    fn list(bytes: &[u8], key: &str) -> io::Result<Option<String>> {
+        let table = rust_toolchain_table(bytes, false).unwrap().unwrap();
+        toolchain_list(&table, key, false)
+    }
+
+    #[test]
+    fn toolchain_lists_are_sorted_deduplicated_and_empty_is_absent() {
+        let bytes = b"[toolchain]\ncomponents = [\"rustfmt\", \"clippy\", \"rustfmt\"]\n\
+                      targets = [\"wasm32-unknown-unknown\"]\n";
+        assert_eq!(
+            list(bytes, "components").unwrap(),
+            Some("clippy,rustfmt".into())
+        );
+        assert_eq!(
+            list(bytes, "targets").unwrap(),
+            Some("wasm32-unknown-unknown".into())
+        );
+        assert_eq!(
+            list(b"[toolchain]\ncomponents = []\n", "components").unwrap(),
             None
         );
+        assert_eq!(list(b"[toolchain]\n", "targets").unwrap(), None);
+        assert_eq!(
+            split_list("clippy,rustfmt"),
+            vec!["clippy".to_string(), "rustfmt".to_string()]
+        );
+        for bad in [
+            &b"[toolchain]\ncomponents = \"clippy\"\n"[..],
+            b"[toolchain]\ncomponents = [1]\n",
+            b"[toolchain]\ncomponents = [\"a,b\"]\n",
+            b"[toolchain]\ncomponents = [\"\"]\n",
+            b"[toolchain]\ncomponents = [\"has space\"]\n",
+        ] {
+            let error = list(bad, "components").unwrap_err();
+            assert!(
+                error.to_string().contains("toolchain.components"),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn rust_discovery_records_lists_only_when_asked_for() {
+        let (temp, root) = project();
+        let dir = temp.0.join("proj");
+        let fields = |root: &ProjectRoot| -> Vec<(String, String, Option<String>)> {
+            discover(root, "rust")
+                .unwrap()
+                .into_iter()
+                .map(|row| (row.path.display().to_string(), row.field, row.value))
+                .collect()
+        };
+        std::fs::write(
+            dir.join("rust-toolchain.toml"),
+            "[toolchain]\nchannel = \"1.96.1\"\n",
+        )
+        .unwrap();
+        // A file with no lists gives exactly the rows it always gave.
+        assert_eq!(
+            fields(&root),
+            vec![
+                ("rust-toolchain".into(), "toolchain.channel".into(), None),
+                (
+                    "rust-toolchain.toml".into(),
+                    "toolchain.channel".into(),
+                    Some("1.96.1".into())
+                ),
+            ]
+        );
+        std::fs::write(
+            dir.join("rust-toolchain.toml"),
+            "[toolchain]\nchannel = \"1.96.1\"\ntargets = [\"wasm32-unknown-unknown\"]\n\
+             components = [\"rustfmt\", \"clippy\"]\n",
+        )
+        .unwrap();
+        let rows = discover(&root, "rust").unwrap();
+        assert_eq!(rows.len(), 4);
+        assert_eq!(rows[2].field, "toolchain.components");
+        assert_eq!(rows[2].value.as_deref(), Some("clippy,rustfmt"));
+        assert_eq!(rows[3].field, "toolchain.targets");
+        assert_eq!(rows[3].value.as_deref(), Some("wasm32-unknown-unknown"));
+        assert!(rows[2..].iter().all(|row| row.sha256 == rows[1].sha256));
+        // A profile is one more row, after the lists.
+        std::fs::write(
+            dir.join("rust-toolchain.toml"),
+            "[toolchain]\nchannel = \"1.96.1\"\nprofile = \"complete\"\n",
+        )
+        .unwrap();
+        let rows = discover(&root, "rust").unwrap();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[2].field, "toolchain.profile");
+        assert_eq!(rows[2].value.as_deref(), Some("complete"));
+        for bad in ["profile = \"full\"", "profile = 1"] {
+            std::fs::write(
+                dir.join("rust-toolchain.toml"),
+                format!("[toolchain]\nchannel = \"1.96.1\"\n{bad}\n"),
+            )
+            .unwrap();
+            let error = discover(&root, "rust").unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("toolchain.profile must be one of"),
+                "{error}"
+            );
+        }
+        // A malformed file stops discovery; it is never recorded as absent.
+        std::fs::write(dir.join("rust-toolchain.toml"), "[toolchain\n").unwrap();
+        let error = discover(&root, "rust").unwrap_err();
+        assert!(error.to_string().contains("rust-toolchain.toml"), "{error}");
     }
 
     #[test]

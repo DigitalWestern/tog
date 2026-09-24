@@ -403,8 +403,19 @@ fn toolchain_lock_state(
             true,
         ));
     };
-    let stale =
-        toolchain_lock::stale_rows(&section.inputs(), &input::discover(&root, lock_ecosystem)?);
+    // A toolchain file that does not parse is never the lock's answer: it is
+    // stale, named, and a sync refuses it the same way.
+    let current = match input::discover(&root, lock_ecosystem) {
+        Ok(current) => current,
+        Err(error) if error.kind() == io::ErrorKind::InvalidData => {
+            return Ok(LockVerdict::changed(
+                vec![format!("{LOCK_PATH} stale: {error}")],
+                true,
+            ));
+        }
+        Err(error) => return Err(error),
+    };
+    let stale = toolchain_lock::stale_rows(&section.inputs(), &current);
     if !stale.is_empty() {
         return Ok(LockVerdict::changed(
             stale
@@ -1501,6 +1512,23 @@ mod tests {
             "{rows:?}"
         );
         fs::write(dir.join(".python-version"), "3.12.14\n").unwrap();
+
+        // A toolchain input that does not parse is stale and named, never
+        // an error that hides the whole status.
+        fs::write(
+            dir.join("pyproject.toml"),
+            "[project]\nrequires-python = 3\n",
+        )
+        .unwrap();
+        let verdict = &status(platform, dir).unwrap()[0].state;
+        let State::Changed(rows) = verdict else {
+            panic!("a malformed toolchain input did not report the lock: {verdict:?}");
+        };
+        assert!(
+            rows[0].starts_with("tog-toolchain.toml stale: pyproject.toml: "),
+            "{rows:?}"
+        );
+        fs::remove_file(dir.join("pyproject.toml")).unwrap();
 
         // A committed lock that describes some other ecosystem, but has no
         // section for this one.

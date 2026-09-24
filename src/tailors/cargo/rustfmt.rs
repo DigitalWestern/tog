@@ -109,30 +109,48 @@ fn rustfmt_row(platform: Platform, selected: &Selected) -> io::Result<ArtifactSp
 /// the pinned component sha256, the platform, and the paired Rust object,
 /// and ends in the version. `resolved_from` is the directory the toolchain
 /// file was looked up from, relative to the workspace root the closure is
-/// written in, and `unavailable_components` is what that file asked for that
-/// tog does not provide (the run's `toolchain-component-unavailable`
-/// exception, when non-empty).
-pub fn record_inputs(rustfmt_object: &str, resolved_from: &str, unavailable: &[String]) -> Value {
+/// written in.
+pub fn record_inputs(rustfmt_object: &str, resolved_from: &str) -> Value {
     json!({
         "rustfmt_object": rustfmt_object,
         "resolved_from": resolved_from,
-        "unavailable_components": unavailable,
     })
+}
+
+/// Records written before sync provisioned every requested component also
+/// carried `unavailable_components`: what the toolchain file asked for that
+/// tog did not ship. Nothing is unavailable any more (a sync provisions a
+/// component or refuses it by name), so an empty list is what a run writes
+/// now by omitting the key, and a non-empty one is a record of a toolchain
+/// this tog would not build: left in place, it compares as changed.
+const LEGACY_UNAVAILABLE: &str = "unavailable_components";
+
+fn current_inputs(recorded: &Value) -> Value {
+    let mut inputs = recorded.clone();
+    if let Some(map) = inputs.as_object_mut() {
+        if map
+            .get(LEGACY_UNAVAILABLE)
+            .and_then(Value::as_array)
+            .is_some_and(Vec::is_empty)
+        {
+            map.remove(LEGACY_UNAVAILABLE);
+        }
+    }
+    inputs
 }
 
 /// The fields of a `rustfmt` closure that say which rustfmt made it, as
 /// this binary would write them for a run in `root.join(resolved_from)` now.
 /// Computed from the pins alone: no store, no network, no policy record.
 pub fn pinned_record(platform: Platform, root: &Path, resolved_from: &str) -> io::Result<Value> {
-    let choice = cargo::resolve_toolchain_quiet(platform, &root.join(resolved_from))?;
-    let rust_object = cargo::rust_object_id(platform, choice.version)?;
-    let rustfmt_object =
-        rustfmt_identity(platform, choice.version, Path::new(&rust_object))?.object_id();
+    let version = cargo::resolve_toolchain_quiet(platform, &root.join(resolved_from))?;
+    let rust_object = cargo::rust_object_id(platform, version)?;
+    let rustfmt_object = rustfmt_identity(platform, version, Path::new(&rust_object))?.object_id();
     Ok(json!({
-        "rust_version": choice.version,
+        "rust_version": version,
         "rust_object": { "id": rust_object },
         "rustfmt_object": { "id": rustfmt_object },
-        "inputs": record_inputs(&rustfmt_object, resolved_from, &choice.unavailable),
+        "inputs": record_inputs(&rustfmt_object, resolved_from),
     }))
 }
 
@@ -148,6 +166,9 @@ pub fn closure_state(platform: Platform, dir: &Path, body: &Value) -> io::Result
                 .into(),
         ));
     }
+    let mut body = body.clone();
+    body["inputs"] = current_inputs(&body["inputs"]);
+    let body = &body;
     let field = |value: &Value, pointer: &str| value.pointer(pointer).cloned().unwrap_or_default();
     // `fmt` records the canonical invocation directory relative to the
     // canonical workspace root, so only that exact spelling of a directory

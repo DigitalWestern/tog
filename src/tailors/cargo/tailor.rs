@@ -56,8 +56,14 @@ impl Tailor for Cargo {
     }
 
     fn plan(&self, ctx: &Context, dir: &Path, toolchain: &Selected) -> io::Result<Option<String>> {
-        let inputs =
-            inputs::load_cargo_inputs(ctx.platform, dir, &ctx.store, &ctx.activity, toolchain)?;
+        let inputs = inputs::load_cargo_inputs(
+            ctx.platform,
+            dir,
+            dir,
+            &ctx.store,
+            &ctx.activity,
+            toolchain,
+        )?;
         Ok(Some(serde_json::to_string_pretty(&inputs.plan)?))
     }
 
@@ -73,7 +79,8 @@ impl Tailor for Cargo {
         let fresh = request.fresh;
 
         let store = &ctx.store;
-        let inputs = inputs::load_cargo_inputs(ctx.platform, dir, store, &ctx.activity, toolchain)?;
+        let inputs =
+            inputs::load_cargo_inputs(ctx.platform, dir, dir, store, &ctx.activity, toolchain)?;
         let rust_obj = &inputs.rust_obj;
         let vendor_obj = cargo::realize_vendor(store, activity, &inputs.plan)?;
         if fresh {
@@ -120,7 +127,7 @@ impl Tailor for Cargo {
     fn build(
         &self,
         ctx: &Context,
-        _root: &Path,
+        root: &Path,
         cwd: &Path,
         args: &[String],
         toolchain: &Selected,
@@ -128,7 +135,8 @@ impl Tailor for Cargo {
     ) -> io::Result<()> {
         let activity = &ctx.activity;
         let store = &ctx.store;
-        let inputs = inputs::load_cargo_inputs(ctx.platform, cwd, store, &ctx.activity, toolchain)?;
+        let inputs =
+            inputs::load_cargo_inputs(ctx.platform, root, cwd, store, &ctx.activity, toolchain)?;
         let vendor_obj = cargo::realize_vendor(store, activity, &inputs.plan)?;
         cargo::project_cargo_env(
             activity,
@@ -329,7 +337,6 @@ impl Tailor for Cargo {
         // The formatter rides in the same release bundle as the compiler, so
         // one selection names both, and both are realized from its rows.
         let rust_version = toolchain.version("rustc")?.to_string();
-        let unavailable = cargo::toolchain_file_components(platform, cwd)?;
         let rust_object = cargo::realize_runtime(store, activity, platform, toolchain)?;
         let rustfmt_object =
             rustfmt::ensure_rustfmt(store, activity, platform, toolchain, &rust_object)?;
@@ -362,7 +369,6 @@ impl Tailor for Cargo {
         let inputs = rustfmt::record_inputs(
             rustfmt_ref["id"].as_str().unwrap_or_default(),
             &resolved_from,
-            &unavailable,
         );
         let mut refs = comforter::ClosureRefs::new();
         refs.object_path(store, activity, &rust_object)?;

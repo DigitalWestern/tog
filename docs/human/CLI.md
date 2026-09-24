@@ -220,7 +220,13 @@ declarative toolchain source that disagrees with what the lock recorded —
 `tog update --toolchain`. So does a lock with no section for an ecosystem
 the project just gained: that is stale, not absent. Comparison is by the
 re-derived value, never by the file's digest alone, so a `tog add` that
-rewrites a multi-purpose manifest leaves the lock fresh.
+rewrites a multi-purpose manifest leaves the lock fresh. The `targets`,
+`components` and `profile` of `rust-toolchain(.toml)` are rows too (list
+order and duplicates do not count), and a toolchain file that does not
+parse is always stale. A sync provisions them from the release's pinned
+channel manifest, and refuses by name a component or target the release
+does not publish for this host. A profile installs what rustup's does; with
+none, the toolchain is rustc, cargo and the host's standard library.
 
 `--frozen` validates the committed lock instead of creating one and refuses
 a missing or stale one.
@@ -557,8 +563,9 @@ claiming anything about its contents. A detected ecosystem with no
 report; the optional `rustfmt` record is not a substitute for `cargo.json`.
 Only `clean` with nothing missing passes. The `rustfmt` closure
 `tog fmt` writes projects nothing, so its inputs are the rustfmt object
-it ran, the directory the toolchain file was looked up from, and the
-components that file asked for that tog does not provide. It is `stale`
+it ran and the directory the toolchain file was looked up from (a record
+from an older tog may also carry `unavailable_components`: empty is still
+current, a non-empty list is `stale`). It is `stale`
 when any of those, or the Rust object and version beside them, is not what
 this binary would record for the same run now (including a toolchain with
 no pinned rustfmt), and `outdated` when it predates recording inputs;

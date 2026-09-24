@@ -1,7 +1,10 @@
 //! The pinned Rust toolchain (kernel provider layer): the rustc, rust-std,
-//! cargo and rustfmt pin tables, the shipped Rust catalog they form,
-//! realization of the toolchain a selection names, and the rustup-style
-//! toolchain-file reading that maps a channel onto the pins.
+//! cargo and rustfmt pin tables and the channel manifest pinned beside
+//! them, the shipped Rust catalog they form, realization of the base
+//! toolchain a selection names, and the rustup-style toolchain-file reading
+//! that maps a channel onto the pins. Optional components and cross targets
+//! a toolchain file asks for are assembled on top of that base in
+//! [`super::rust_extras`].
 //!
 //! The cargo tailor builds projects with it and the Python tailor builds
 //! sdists with Rust extensions with it, so it lives below both. Callers
@@ -15,19 +18,58 @@ use crate::kernel::activity::StoreActivity;
 use crate::kernel::fetch::{download_verified_digest_held, Digest};
 use crate::kernel::platform::{no_pin, Platform};
 use crate::kernel::store::Store;
+use crate::kernel::toolchain::input;
 use crate::kernel::toolchain::{
     ArtifactRow, ArtifactSpec, Bundle, Catalog, Component as BundleComponent, Selected,
 };
 use crate::kernel::types::Identity;
 use crate::kernel::ui;
-use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+pub use super::rust_extras::{
+    project_extras, realize_toolchain, toolchain_file_extras_within, toolchain_object_id, Extras,
+};
+
 pub const RUST_VERSION: &str = "1.96.1";
+
+/// The official channel manifest of one shipped Rust release, pinned by the
+/// sha256 of its bytes: `https://static.rust-lang.org/dist/channel-rust-<version>.toml`.
+/// Every optional component and cross target is provisioned from the rows
+/// of this file (`rust_channel`), so pinning it pins them all.
+///
+/// A row is produced by `tools/rust_channel_pin.py`, which verifies the
+/// manifest's detached signature with `gpgv` against the Rust release key
+/// checked in at `tools/keys/rust-release-signing-key.asc` before printing
+/// the sha256; `--check` re-verifies every row here. tog itself checks the
+/// sha256 only.
+pub struct ChannelManifestPin {
+    pub version: &'static str,
+    pub sha256: &'static str,
+}
+
+pub const CHANNEL_MANIFESTS: &[ChannelManifestPin] = &[ChannelManifestPin {
+    version: "1.96.1",
+    sha256: "87eb76c53073e72b766083bed5530820694253b832a762d8385bda5759f03975",
+}];
+
+/// The pinned manifest digest for Rust `version`. A release this binary
+/// pins no manifest for cannot have extras assembled, and says so.
+pub fn channel_manifest_pin(version: &str) -> io::Result<Digest> {
+    let pin = CHANNEL_MANIFESTS
+        .iter()
+        .find(|pin| pin.version == version)
+        .ok_or_else(|| {
+            err(format!(
+                "this tog pins no channel manifest for Rust {version}, so it cannot provision \
+                 the components or targets rust-toolchain.toml asks for; upgrade tog"
+            ))
+        })?;
+    Digest::sha256(pin.sha256)
+}
 
 /// The extraction/layout recipe this binary knows for a Rust toolchain: the
 /// catalog emits it, the object identity commits to it, and a locked row
@@ -312,7 +354,7 @@ pub fn rust_object_id(platform: Platform, version: &str) -> io::Result<String> {
     Ok(rust_identity(platform, &rust_components(platform)?).object_id())
 }
 
-fn err(msg: impl Into<String>) -> io::Error {
+pub(super) fn err(msg: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, msg.into())
 }
 
@@ -444,7 +486,7 @@ pub fn extract_rust_components(
     validate_rust_layout(staged, platform)
 }
 
-fn validate_rust_layout(staged: &Path, platform: Platform) -> io::Result<()> {
+pub(super) fn validate_rust_layout(staged: &Path, platform: Platform) -> io::Result<()> {
     if !staged.join("bin/rustc").is_file()
         || !staged.join("bin/cargo").is_file()
         || !staged
@@ -458,18 +500,6 @@ fn validate_rust_layout(staged: &Path, platform: Platform) -> io::Result<()> {
     Ok(())
 }
 
-#[derive(Debug, Deserialize)]
-struct ToolchainDocument {
-    toolchain: Option<ToolchainSpec>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ToolchainSpec {
-    channel: Option<String>,
-    components: Option<Vec<String>>,
-    targets: Option<Vec<String>>,
-}
-
 /// Resolve the nearest rustup-style toolchain file to the pinned version.
 ///
 /// This is the pre-lock answer, and the only callers left are the ones that
@@ -478,87 +508,25 @@ struct ToolchainSpec {
 /// names no Rust uses [`resolve_toolchain_within`] instead: its tree is a
 /// store scratch directory that is nobody's tog project.
 /// Every entry point that is handed a [`Selected`] takes the version from it
-/// instead (`toolchain.version("rustc")`), so the lock decides the toolchain
-/// and the file only contributes the components below.
+/// instead (`toolchain.version("rustc")`), so the lock decides the toolchain.
+/// What the file asks for beyond the channel is read from the lock's rows
+/// ([`project_extras`]) or, for an sdist, [`toolchain_file_extras_within`].
 pub fn resolve_toolchain(platform: Platform, project_dir: &Path) -> io::Result<&'static str> {
-    resolve_toolchain_choice(platform, project_dir).map(|choice| choice.version)
-}
-
-/// What the nearest rustup-style toolchain file still says once a
-/// [`Selected`] has decided the version: which targets it demands, which is
-/// refused when it is not this host, and which components it asks for that
-/// tog does not provide, recorded as the run's
-/// `toolchain-component-unavailable` exception. Returns those components so
-/// a caller that records them in a closure (`tog fmt`) writes the same list
-/// the exception names.
-///
-/// The channel is deliberately not read here. Selection already lowered it
-/// to a request and refused an unsupported one by name
-/// (`kernel::toolchain::resolve`), so reading it a second time could only
-/// disagree with the lock this run is honoring.
-pub fn toolchain_file_components(
-    platform: Platform,
-    project_dir: &Path,
-) -> io::Result<Vec<String>> {
-    components_of(platform, nearest_toolchain_file(project_dir, None))
-}
-
-/// `toolchain_file_components` for a tree that is not a project: an
-/// unpacked sdist in store scratch. Only a file inside `root` counts. A
-/// file above it belongs to whoever owns the store's parent directories
-/// (`$HOME`, a repository the store sits in) and must not reach a build
-/// whose identity names only the sdist.
-pub fn toolchain_file_components_within(
-    platform: Platform,
-    root: &Path,
-) -> io::Result<Vec<String>> {
-    components_of(platform, nearest_toolchain_file(root, Some(root)))
-}
-
-fn components_of(platform: Platform, found: Option<(PathBuf, bool)>) -> io::Result<Vec<String>> {
-    let Some((path, legacy)) = found else {
-        return Ok(Vec::new());
-    };
-    match read_toolchain_file(&path, legacy)? {
-        // A bare channel line states a version and nothing else.
-        FileSpec::Bare(_) => Ok(Vec::new()),
-        FileSpec::Table(spec) => unavailable_components(platform, &path, &spec, true),
-    }
-}
-
-/// What the nearest toolchain file asks for, as far as tog answers it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ToolchainChoice {
-    /// The pinned Rust version the file resolves to.
-    pub version: &'static str,
-    /// Requested components tog does not provide, in file order.
-    pub unavailable: Vec<String>,
-}
-
-/// `resolve_toolchain`, keeping the unavailable components it recorded as a
-/// `toolchain-component-unavailable` exception.
-pub fn resolve_toolchain_choice(
-    platform: Platform,
-    project_dir: &Path,
-) -> io::Result<ToolchainChoice> {
     resolve_toolchain_with(platform, nearest_toolchain_file(project_dir, None), true)
 }
 
 /// `resolve_toolchain` for an unpacked sdist: only a toolchain file inside
-/// `root` is read, for the reason `toolchain_file_components_within` gives.
-/// With none, the newest pin, whatever lies above the store.
+/// `root` is read. A file above it belongs to whoever owns the store's
+/// parent directories (`$HOME`, a repository the store sits in) and must
+/// not reach a build whose identity names only the sdist. With none, the
+/// newest pin, whatever lies above the store.
 pub fn resolve_toolchain_within(platform: Platform, root: &Path) -> io::Result<&'static str> {
     resolve_toolchain_with(platform, nearest_toolchain_file(root, Some(root)), true)
-        .map(|choice| choice.version)
 }
 
-/// The choice `resolve_toolchain_choice` would make, without its effects: no
-/// exception is recorded and nothing is printed, so a read-only caller
-/// outside any attribution can ask.
-pub fn resolve_toolchain_quiet(
-    platform: Platform,
-    project_dir: &Path,
-) -> io::Result<ToolchainChoice> {
+/// The version `resolve_toolchain` would choose, without its narration, so
+/// a read-only caller (`tog status`, `tog audit`) can ask.
+pub fn resolve_toolchain_quiet(platform: Platform, project_dir: &Path) -> io::Result<&'static str> {
     resolve_toolchain_with(platform, nearest_toolchain_file(project_dir, None), false)
 }
 
@@ -566,31 +534,53 @@ fn resolve_toolchain_with(
     platform: Platform,
     found: Option<(PathBuf, bool)>,
     effects: bool,
-) -> io::Result<ToolchainChoice> {
+) -> io::Result<&'static str> {
     let _ = rust_pins(platform)?;
     let Some((path, legacy)) = found else {
-        return Ok(ToolchainChoice {
-            version: newest_pin(platform)?,
-            unavailable: Vec::new(),
-        });
+        return newest_pin(platform);
     };
-    match read_toolchain_file(&path, legacy)? {
-        FileSpec::Bare(channel) => Ok(ToolchainChoice {
-            version: resolve_channel(platform, &path, channel.trim(), effects)?,
-            unavailable: Vec::new(),
-        }),
-        FileSpec::Table(spec) => {
-            let unavailable = unavailable_components(platform, &path, &spec, effects)?;
-            let channel = spec
-                .channel
-                .as_deref()
-                .ok_or_else(|| err(format!("{}: [toolchain] has no channel", path.display())))?;
-            Ok(ToolchainChoice {
-                version: resolve_channel(platform, &path, channel.trim(), effects)?,
-                unavailable,
-            })
-        }
+    let bytes = read_toolchain_file(&path)?;
+    // The channel is read by the same reader the toolchain lock records it
+    // with, so a file this refuses is one the lock refuses too.
+    let channel = if legacy {
+        input::read_rust_toolchain_legacy(&bytes)
+    } else {
+        input::read_rust_toolchain(&bytes)
     }
+    .map_err(|error| io::Error::new(error.kind(), format!("{}: {error}", path.display())))?
+    .ok_or_else(|| err(format!("{}: names no channel", path.display())))?;
+    resolve_channel(platform, &path, channel.trim(), effects)
+}
+
+/// The components and cross targets the nearest toolchain file inside
+/// `root` asks for: an unpacked sdist's own request, read with the same
+/// readers and normalization the toolchain lock uses. A bare channel line
+/// asks for none.
+pub(super) fn file_extras_within(root: &Path) -> io::Result<Extras> {
+    let Some((path, legacy)) = nearest_toolchain_file(root, Some(root)) else {
+        return Ok(Extras::default());
+    };
+    let bytes = read_toolchain_file(&path)?;
+    let located =
+        |error: io::Error| io::Error::new(error.kind(), format!("{}: {error}", path.display()));
+    let Some(table) = input::rust_toolchain_table(&bytes, legacy).map_err(located)? else {
+        return Ok(Extras::default());
+    };
+    let list = |key: &str| -> io::Result<Vec<String>> {
+        Ok(input::toolchain_list(&table, key, legacy)
+            .map_err(located)?
+            .map(|value| input::split_list(&value))
+            .unwrap_or_default())
+    };
+    Ok(Extras {
+        components: list("components")?,
+        targets: list("targets")?,
+        profile: input::toolchain_profile(&table, legacy).map_err(located)?,
+    })
+}
+
+fn read_toolchain_file(path: &Path) -> io::Result<Vec<u8>> {
+    fs::read(path).map_err(|e| io::Error::new(e.kind(), format!("read {}: {e}", path.display())))
 }
 
 /// The nearest rustup-style toolchain file at or above `project_dir`, and
@@ -615,70 +605,6 @@ fn nearest_toolchain_file(project_dir: &Path, ceiling: Option<&Path>) -> Option<
             _ => return None,
         }
     }
-}
-
-/// What a toolchain file holds: the legacy bare channel line, or the
-/// `[toolchain]` table both spellings accept.
-enum FileSpec {
-    Bare(String),
-    Table(ToolchainSpec),
-}
-
-fn read_toolchain_file(path: &Path, legacy: bool) -> io::Result<FileSpec> {
-    let text = fs::read_to_string(path)
-        .map_err(|e| io::Error::new(e.kind(), format!("read {}: {e}", path.display())))?;
-    if legacy {
-        if let Ok(document) = toml::from_str::<ToolchainDocument>(&text) {
-            if let Some(spec) = document.toolchain {
-                return Ok(FileSpec::Table(spec));
-            }
-        }
-        return Ok(FileSpec::Bare(text.trim().to_string()));
-    }
-    let document = toml::from_str::<ToolchainDocument>(&text)
-        .map_err(|e| err(format!("parse {}: {e}", path.display())))?;
-    document
-        .toolchain
-        .map(FileSpec::Table)
-        .ok_or_else(|| err(format!("{} has no [toolchain] table", path.display())))
-}
-
-/// The components a `[toolchain]` table asks for that tog does not provide,
-/// after refusing a target that is not this host. With `effects`, the list
-/// is also recorded as the run's `toolchain-component-unavailable`
-/// exception, which is what makes it visible to `tog audit`.
-fn unavailable_components(
-    platform: Platform,
-    path: &Path,
-    spec: &ToolchainSpec,
-    effects: bool,
-) -> io::Result<Vec<String>> {
-    if let Some(targets) = &spec.targets {
-        for target in targets {
-            if target != platform.triple() {
-                return Err(err(format!(
-                    "{}: target {target:?} is unsupported; only {} is pinned",
-                    path.display(),
-                    platform.triple()
-                )));
-            }
-        }
-    }
-    let unavailable: Vec<String> = spec
-        .components
-        .clone()
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|component| !matches!(component.as_str(), "rustc" | "cargo" | "rust-std"))
-        .collect();
-    if effects && !unavailable.is_empty() {
-        crate::kernel::policy::record(
-            crate::kernel::policy::TOOLCHAIN_COMPONENT_UNAVAILABLE,
-            &path.display().to_string(),
-            &format!("components unavailable: {}", unavailable.join(", ")),
-        )?;
-    }
-    Ok(unavailable)
 }
 
 fn resolve_channel(

@@ -1998,16 +1998,12 @@ mod tests {
 
         // Current: passes, and its exceptions are still judged.
         let mut body = rustfmt_body(dir);
-        body["exceptions"] = json!([exception(policy::TOOLCHAIN_COMPONENT_UNAVAILABLE, "clippy")]);
+        body["exceptions"] = json!([exception(policy::UNATTESTED_CARGO_LOCK, "Cargo.lock")]);
         let closures = write(body.clone());
         let verdicts = judge(dir, &permissive(), &closures);
         assert_eq!(verdicts[0].freshness, Freshness::Current, "{verdicts:?}");
         assert!(verdicts[0].passes());
-        let verdicts = judge(
-            dir,
-            &deny(&[policy::TOOLCHAIN_COMPONENT_UNAVAILABLE]),
-            &closures,
-        );
+        let verdicts = judge(dir, &deny(&[policy::UNATTESTED_CARGO_LOCK]), &closures);
         assert!(!verdicts[0].passes());
 
         // Inputs carrying anything this binary would not write: stale.
@@ -2089,16 +2085,30 @@ mod tests {
         let verdicts = judge(dir, &permissive(), &write(python));
         assert!(matches!(verdicts[0].freshness, Freshness::Stale(_)));
 
-        // Components requested after the run: the version and objects are
-        // unchanged, but a new run would record an exception this record
-        // lacks, so it is stale and the fix names `tog fmt`.
+        // Components requested after the run change nothing a rustfmt run
+        // records: sync provisions them, so the record stays current, and
+        // what `fmt` records reads nothing but the pins.
         fs::write(
             dir.join("rust-toolchain.toml"),
             "[toolchain]\nchannel = \"stable\"\ncomponents = [\"rustfmt\", \"clippy\"]\n",
         )
         .unwrap();
-        let closures = write(body.clone());
-        let verdicts = judge(dir, &permissive(), &closures);
+        let verdicts = judge(dir, &permissive(), &write(body.clone()));
+        assert_eq!(verdicts[0].freshness, Freshness::Current, "{verdicts:?}");
+        assert!(rustfmt_body(dir)["inputs"]
+            .get("unavailable_components")
+            .is_none());
+        // A record from before, which carried the list empty, is what a run
+        // writes now.
+        let mut legacy = body.clone();
+        legacy["inputs"]["unavailable_components"] = json!([]);
+        let verdicts = judge(dir, &permissive(), &write(legacy));
+        assert_eq!(verdicts[0].freshness, Freshness::Current, "{verdicts:?}");
+        // One listing components tog did not ship is not: stale, and the
+        // fix names `tog fmt`.
+        let mut older = body.clone();
+        older["inputs"]["unavailable_components"] = json!(["rustfmt", "clippy"]);
+        let verdicts = judge(dir, &permissive(), &write(older));
         let Freshness::Stale(why) = &verdicts[0].freshness else {
             panic!("{verdicts:?}");
         };
@@ -2112,26 +2122,6 @@ mod tests {
         assert!(render(dir, &report, false)
             .unwrap()
             .contains("run 'tog fmt', then audit again"));
-        // The record a run under that file writes is current, read without
-        // recording anything, and its exception is still judged.
-        let mut listed = rustfmt_body(dir);
-        assert_eq!(
-            listed["inputs"]["unavailable_components"],
-            json!(["rustfmt", "clippy"])
-        );
-        listed["exceptions"] = json!([exception(
-            policy::TOOLCHAIN_COMPONENT_UNAVAILABLE,
-            "rust-toolchain.toml"
-        )]);
-        let closures = write(listed);
-        let verdicts = judge(dir, &permissive(), &closures);
-        assert_eq!(verdicts[0].freshness, Freshness::Current, "{verdicts:?}");
-        let verdicts = judge(
-            dir,
-            &deny(&[policy::TOOLCHAIN_COMPONENT_UNAVAILABLE]),
-            &closures,
-        );
-        assert!(!verdicts[0].passes());
         fs::remove_file(dir.join("rust-toolchain.toml")).unwrap();
 
         // A run from a workspace member resolves the toolchain from there,
