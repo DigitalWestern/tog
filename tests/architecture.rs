@@ -138,11 +138,14 @@ const ALLOWED: &[(&str, &str, &str)] = &[
     ),
 ];
 
+/// Whether `path`, named in `relative`, is one of the listed exceptions.
+/// The match is exact: `tailors::Tailor` allows the trait and nothing that
+/// merely starts with its name (`tailors::TailorRegistry`, `tailors::Tailor::x`).
 fn allowed(relative: &str, path: &[String]) -> bool {
     let joined = path.join("::");
     ALLOWED
         .iter()
-        .any(|(file, prefix, _)| relative == *file && joined.starts_with(prefix))
+        .any(|(file, exact, _)| relative == *file && joined == *exact)
 }
 
 #[test]

@@ -598,10 +598,17 @@ struct RustPlanInputs {
 }
 
 /// The Rust an sdist with no channel of its own builds on under the Python
-/// selection `selected`: its lock's pin, or `None` (the catalog's default)
-/// when no lock is involved.
+/// selection `selected`: its section's pin; [`LEGACY_SDIST_RUST`] for a
+/// section written before pins, or a selection seeded from a closure
+/// written before the lock (those builds used it); `None` (the catalog's
+/// default, which is what a section written now pins) otherwise.
 fn sdist_rust_default(selected: &Selected) -> Option<&str> {
-    selected.helpers.get("rust").map(String::as_str)
+    use crate::kernel::toolchain::Source;
+    match selected.helpers.get("rust") {
+        Some(pin) => Some(pin),
+        None if matches!(selected.source, Source::Lock | Source::Seeded) => Some(LEGACY_SDIST_RUST),
+        None => None,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1407,6 +1414,31 @@ mod tests {
         );
         assert!(legacy.inputs["rust"].ends_with("-rust-1.96.1"));
         assert_ne!(legacy.object_id(), unlocked.object_id());
+
+        // A lock written before pins pins nothing, and the wheel it builds
+        // keeps the id the tog before pins gave it, byte for byte. The
+        // literal is what main (df5650e) computes for this fixture, where
+        // every sdist built on 1.96.1, with the one store-dependent input
+        // (the build environment's id covers the store root) fixed.
+        let mut pinless = python.clone();
+        pinless.source = crate::kernel::toolchain::Source::Lock;
+        assert!(pinless.helpers.is_empty());
+        let pinless = super::plan_sdist_identity_input(
+            &store, activity, platform, &pkg, &pinless, None, None,
+        )
+        .expect("Rust sdist identity plan")
+        .identity;
+        assert_eq!(pinless.object_id(), legacy.object_id());
+        if platform == crate::kernel::platform::Platform::X86_64UnknownLinuxGnu {
+            let mut fixed = pinless.clone();
+            fixed
+                .inputs
+                .insert("build_env".into(), "store-independent".into());
+            assert_eq!(
+                fixed.object_id(),
+                "5582557b082e53e3a8d47b1ec286cc51867bd86c-locked-rust-1.0"
+            );
+        }
         let today = pinned(shipped_rust.version("rustc").unwrap());
         assert_eq!(today.inputs, unlocked.inputs);
 

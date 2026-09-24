@@ -367,6 +367,14 @@ pub trait Tailor: Sync {
         Err(unsupported(self.id(), "fmt"))
     }
 
+    /// `tog fmt`: the root of the workspace `cwd` belongs to, found with
+    /// the toolchain `toolchain` names. The formatter's record is written
+    /// there and judged against the lock there, so `tog fmt` takes its
+    /// toolchain from that directory's lock when it has one.
+    fn fmt_root(&self, _ctx: &Context, cwd: &Path, _toolchain: &Selected) -> io::Result<PathBuf> {
+        cwd.canonicalize()
+    }
+
     /// `tog fmt`: realize the formatter, record its closure, and run it
     /// sandboxed over the workspace `cwd` belongs to.
     fn fmt(

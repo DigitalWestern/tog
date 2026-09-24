@@ -348,7 +348,13 @@ fn a_rust_sdist_builds_with_the_rust_the_python_section_pins() {
 
     // The same lock as a tog from before the pin wrote it: the sdist builds
     // on 1.96.1, the Rust those locks' wheels were built with.
-    std::fs::write(fixture.dir().join(LOCK_PATH), lock.replace(&pin, "")).unwrap();
+    // Such a lock has no pin and the bundle's own id.
+    let mut old = ToolchainLock::parse(lock.as_bytes()).unwrap();
+    old.set_helpers("python", &Default::default()).unwrap();
+    assert!(!String::from_utf8(old.canonical_bytes())
+        .unwrap()
+        .contains("helpers"));
+    std::fs::write(fixture.dir().join(LOCK_PATH), old.canonical_bytes()).unwrap();
     let out = fixture.tog(&["sync"]);
     let stderr = text(&out.stderr);
     assert_eq!(out.status.code(), Some(0), "{stderr}");
@@ -890,6 +896,7 @@ fn two_store_replay() {
                 external: None,
                 helper_pins: Default::default(),
                 legacy_helper_pins: Default::default(),
+                declared_helpers: Default::default(),
             }],
             project_toolchain::Mode::ReadOnly,
             false,
@@ -946,6 +953,7 @@ fn linux_lock_bytes_are_platform_independent() {
                 external: None,
                 helper_pins: Default::default(),
                 legacy_helper_pins: Default::default(),
+                declared_helpers: Default::default(),
             }],
             project_toolchain::Mode::Writable,
             false,

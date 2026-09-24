@@ -211,7 +211,12 @@ Selection covers every patch of each maintained CPython minor that python-build-
   versions (in the build sandbox, so it needs bubblewrap on Linux). The tree is re-hashed on every sync, build and
   fmt: the walk and link checks run in full, but a file whose device, inode, size and times
   are unchanged is not read again (its sum is cached in the store), so only the first
-  hash of a full toolchain costs seconds. The lock row names
+  hash of a full toolchain costs seconds. That key is the file's device, inode, size,
+  mtime and ctime (seconds and nanoseconds), so a write that leaves all of them as they
+  were (an NFS mount with coarse or cached attributes, or a write through a shared `mmap`
+  that never updates the times) is not seen until the import's copy, hashed from the
+  bytes, disagrees. That refusal re-reads the whole tree and rewrites the cache. Locking
+  (`tog update --toolchain rust`) always reads every file. The lock row names
   an absolute path on one machine and one host platform, so a checkout elsewhere needs
   `tog update --toolchain rust`. As in rustup, a path cannot be combined with a channel,
   components, targets or a profile. A symlink in the tree is resolved against the tree

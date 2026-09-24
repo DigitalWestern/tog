@@ -309,6 +309,105 @@ fn fmt_is_lockless_cached_sandboxed_and_gc_rooted() {
     assert!(store.join("objects").join(rustfmt_id).is_dir());
 }
 
+/// Run from a workspace member, `tog fmt` formats with the Rust the
+/// workspace root's lock pins, the lock `audit` judges its record against,
+/// so the record it writes at the root is current, not stale. The root pins
+/// a release other than the catalog's default, which is what the member,
+/// having no lock or toolchain file of its own, would otherwise get.
+#[test]
+#[ignore]
+fn fmt_from_a_workspace_member_uses_the_root_lock() {
+    let pinned = "1.96.1";
+    assert_ne!(default_rust(), pinned);
+    let temp = TempDir::new();
+    let root = temp.0.join("workspace");
+    let member = root.join("member");
+    fs::create_dir_all(member.join("src")).unwrap();
+    fs::write(
+        root.join("Cargo.toml"),
+        "[workspace]\nmembers = [\"member\"]\nresolver = \"2\"\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("rust-toolchain.toml"),
+        format!("[toolchain]\nchannel = \"{pinned}\"\n"),
+    )
+    .unwrap();
+    fs::write(
+        member.join("Cargo.toml"),
+        "[package]\nname = \"member\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    fs::write(
+        member.join("src/lib.rs"),
+        "pub fn one() -> u32 {\n    1\n}\n",
+    )
+    .unwrap();
+    let store = temp.0.join("store");
+    let binary = PathBuf::from(env!("CARGO_BIN_EXE_tog"));
+    let key = temp.0.join("signing.key");
+    let public = tog::kernel::signing::generate(&key).unwrap();
+    let home = temp.0.join("home");
+    fs::create_dir_all(home.join(".tog")).unwrap();
+    fs::write(
+        home.join(".tog/policy.toml"),
+        format!("[signing]\ntrusted = [\"{public}\"]\n"),
+    )
+    .unwrap();
+    let signed: &[(&str, &Path)] = &[("TOG_SIGNING_KEY", &key), ("HOME", &home)];
+
+    let locked = tog_env(
+        &binary,
+        &root,
+        &store,
+        &["update", "--toolchain", "rust", "--no-sync"],
+        signed,
+    );
+    assert!(
+        locked.status.success(),
+        "update failed\nstderr:\n{}",
+        String::from_utf8_lossy(&locked.stderr)
+    );
+    let lock = fs::read_to_string(root.join("tog-toolchain.toml")).unwrap();
+    assert!(lock.contains(&format!("version = \"{pinned}\"")), "{lock}");
+
+    let checked = tog_env(&binary, &member, &store, &["fmt", "--check"], signed);
+    assert!(
+        checked.status.success(),
+        "fmt --check from the member failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&checked.stdout),
+        String::from_utf8_lossy(&checked.stderr)
+    );
+    assert!(!member.join("tog-toolchain.toml").exists());
+    assert!(!member.join(".tog/closures/rustfmt.json").exists());
+    let closure: serde_json::Value =
+        serde_json::from_slice(&fs::read(root.join(".tog/closures/rustfmt.json")).unwrap())
+            .unwrap();
+    let rust_id = closure["body"]["rust_object"]["id"].as_str().unwrap();
+    assert!(
+        rust_id.ends_with(&format!("-rust-{pinned}")),
+        "fmt ran on {rust_id}, not the root lock's Rust {pinned}"
+    );
+
+    let audit = tog_env(&binary, &root, &store, &["audit", "--json"], signed);
+    let report: serde_json::Value = serde_json::from_slice(&audit.stdout).unwrap_or_default();
+    let rustfmt = report["closures"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|closure| closure["ecosystem"] == "rustfmt")
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        rustfmt["verdict"] == "clean"
+            && rustfmt["freshness"] == "current"
+            && rustfmt["signature"]["state"] == "trusted",
+        "audit did not judge the member-run record current\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&audit.stdout),
+        String::from_utf8_lossy(&audit.stderr)
+    );
+}
+
 #[test]
 #[ignore]
 fn fmt_script_precedence_runs_script_from_a_project_subdirectory() {

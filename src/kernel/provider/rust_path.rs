@@ -507,19 +507,41 @@ pub fn tree_digest(root: &Path) -> io::Result<Digest> {
 /// checks and the hash over the records run in full every time: only
 /// unchanged file bytes are not read again.
 fn tree_digest_cached(root: &Path, cache: Option<&Path>) -> io::Result<Digest> {
-    // A file changed in the same clock tick as its hash could keep its key
-    // with other bytes, so only files quiet for a while are remembered.
-    let quiet_before = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |now| now.as_secs() as i64 - CACHE_QUIET_SECONDS);
-    tree_digest_quiet(root, cache, quiet_before)
+    tree_digest_quiet(root, cache, true, quiet_before())
 }
 
-/// [`tree_digest_cached`], remembering only files whose change time (in
-/// seconds) is before `quiet_before`.
-fn tree_digest_quiet(root: &Path, cache: Option<&Path>, quiet_before: i64) -> io::Result<Digest> {
+/// [`tree_digest`] reading every file, then replacing the cache at `cache`
+/// with what it read. This is the hash a lock is written from, and the one
+/// that settles any disagreement with a cached hash: it never takes a sum
+/// from the cache, so a stale entry cannot outlive it.
+fn tree_digest_refreshed(root: &Path, cache: Option<&Path>) -> io::Result<Digest> {
+    tree_digest_quiet(root, cache, false, quiet_before())
+}
+
+/// A file changed in the same clock tick as its hash could keep its key
+/// with other bytes, so only files quiet for a while are remembered.
+fn quiet_before() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |now| now.as_secs() as i64 - CACHE_QUIET_SECONDS)
+}
+
+/// The tree hash, reading a file's sum from the cache at `cache` when
+/// `trust` and the file's key matches, and remembering only files whose
+/// change time (in seconds) is before `quiet_before`.
+fn tree_digest_quiet(
+    root: &Path,
+    cache: Option<&Path>,
+    trust: bool,
+    quiet_before: i64,
+) -> io::Result<Digest> {
     check_tree(root)?;
-    let known = cache.map(load_cache).unwrap_or_default();
+    let stored = cache.map(load_cache).unwrap_or_default();
+    let known = if trust {
+        stored.clone()
+    } else {
+        BTreeMap::new()
+    };
     let mut learned = BTreeMap::new();
     let mut hasher = TreeHasher::new();
     walk(root, &mut |path, entry| {
@@ -560,7 +582,7 @@ fn tree_digest_quiet(root: &Path, cache: Option<&Path>, quiet_before: i64) -> io
         Ok(())
     })?;
     if let Some(cache) = cache {
-        if learned != known {
+        if learned != stored {
             save_cache(cache, &learned);
         }
     }
@@ -711,9 +733,9 @@ fn tree_of(project: &Path, value: &str) -> io::Result<PathBuf> {
 
 /// The bundle a lock records for the local tree the discovered `rows`
 /// name, or `None` when they name none. The tree is probed and hashed now:
-/// this is the moment the lock's identity for it is taken. File hashes are
-/// shared with the active store's cache, so the realization that follows
-/// does not read the tree's files again.
+/// this is the moment the lock's identity for it is taken, from every
+/// file's bytes. What it read is written to the active store's cache, so
+/// the realization that follows does not read the tree's files again.
 pub fn select(platform: Platform, project: &Path, rows: &[InputRow]) -> io::Result<Option<Bundle>> {
     select_with(platform, project, rows, store_cache)
 }
@@ -734,7 +756,9 @@ fn select_with(
     let tree = tree_of(project, value)?;
     check_tree(&tree)?;
     let probe = probe(&tree, platform)?;
-    let digest = tree_digest_cached(&tree, cache(&tree).as_deref())?;
+    // The lock's digest is read from the files themselves, never from the
+    // cache; the cache is refreshed on the way, for the realization next.
+    let digest = tree_digest_refreshed(&tree, cache(&tree).as_deref())?;
     let url = tree
         .to_str()
         .map(|path| format!("{PATH_URL_SCHEME}{path}"))
@@ -821,13 +845,7 @@ fn verify(
     row: &ArtifactSpec,
     cache: Option<&Path>,
 ) -> io::Result<()> {
-    let changed = |what: String| {
-        invalid(format!(
-            "the Rust toolchain at {} changed since tog-toolchain.toml locked it ({what}); \
-             run `tog update --toolchain rust` to lock the tree as it is now",
-            tree.display()
-        ))
-    };
+    let changed = |what: String| changed_since_locked(tree, &what);
     check_tree(tree)?;
     let probe = probe(tree, platform)?;
     if probe.build != row.build || probe.version != row.version {
@@ -838,10 +856,9 @@ fn verify(
     }
     let mut digest = tree_digest_cached(tree, cache)?;
     if let (true, Some(cache)) = (digest != row.digest, cache) {
-        // Drop the sums that disagreed and read every file: the cache is
+        // Read every file past the sums that disagreed: the cache is
         // rebuilt from what the tree holds now.
-        let _ = fs::remove_file(cache);
-        digest = tree_digest_cached(tree, Some(cache))?;
+        digest = tree_digest_refreshed(tree, Some(cache))?;
     }
     if digest != row.digest {
         return Err(changed(format!(
@@ -851,6 +868,39 @@ fn verify(
         )));
     }
     Ok(())
+}
+
+fn changed_since_locked(tree: &Path, what: &str) -> io::Error {
+    invalid(format!(
+        "the Rust toolchain at {} changed since tog-toolchain.toml locked it ({what}); \
+         run `tog update --toolchain rust` to lock the tree as it is now",
+        tree.display()
+    ))
+}
+
+/// Why a copy whose bytes do not hash to the lock is refused, decided by
+/// reading the whole tree again (never the cache, which is rewritten from
+/// the read): a tree that no longer matches the lock is reported as
+/// changed, one that does was edited during the copy. Either way no stale
+/// cached sum is left to pass the next verification.
+fn copy_mismatch(tree: &Path, row: &ArtifactSpec, copied: &Digest, cache: &Path) -> io::Error {
+    match tree_digest_refreshed(tree, Some(cache)) {
+        Err(error) => error,
+        Ok(now) if now != row.digest => changed_since_locked(
+            tree,
+            &format!(
+                "locked content {}, now {}",
+                qualified(&row.digest),
+                qualified(&now)
+            ),
+        ),
+        Ok(_) => invalid(format!(
+            "the Rust toolchain at {} changed while it was imported (locked content {}, copied {}); run tog again",
+            tree.display(),
+            qualified(&row.digest),
+            qualified(copied)
+        )),
+    }
 }
 
 /// The exception every use of a local tree records.
@@ -878,7 +928,8 @@ pub fn realize(
 ) -> io::Result<PathBuf> {
     crate::kernel::platform::require_host(platform, "Rust toolchain")?;
     let (row, tree) = locked_row(platform, selected)?;
-    verify(platform, &tree, &row, Some(&cache_path(store, &tree)))?;
+    let cache = cache_path(store, &tree);
+    verify(platform, &tree, &row, Some(&cache))?;
     let identity = identity(platform, selected)?;
     let id = identity.object_id();
     if store.has_with_activity(activity, &id)? {
@@ -897,12 +948,7 @@ pub fn realize(
         // links are checked again against the copy's own layout.
         check_tree(&staged)?;
         if copied != row.digest {
-            return Err(invalid(format!(
-                "the Rust toolchain at {} changed while it was imported (locked content {}, copied {}); run tog again",
-                tree.display(),
-                qualified(&row.digest),
-                qualified(&copied)
-            )));
+            return Err(copy_mismatch(&tree, &row, &copied, &cache));
         }
         super::rust::validate_rust_layout(&staged, platform)
     });
@@ -1130,7 +1176,7 @@ mod tests {
         let full = tree_digest(&tree).unwrap();
         // Every file is quiet enough to remember in this test.
         assert_eq!(
-            tree_digest_quiet(&tree, Some(&cache), i64::MAX).unwrap(),
+            tree_digest_quiet(&tree, Some(&cache), true, i64::MAX).unwrap(),
             full
         );
         let std = format!("lib/rustlib/{}/lib/libstd.rlib", host().triple());
@@ -1141,7 +1187,7 @@ mod tests {
         files.get_mut(&std).unwrap().sha256 = "0".repeat(64);
         save_cache(&cache, &files);
         assert_ne!(
-            tree_digest_quiet(&tree, Some(&cache), i64::MAX).unwrap(),
+            tree_digest_quiet(&tree, Some(&cache), true, i64::MAX).unwrap(),
             full
         );
         // The verification of the locked tree reads past the wrong sum.
@@ -1166,7 +1212,7 @@ mod tests {
             .is_none_or(|cached| cached.sha256 != "0".repeat(64)));
         // A changed file has another key, so it is read again.
         fs::write(tree.join(&std), b"STD").unwrap();
-        let changed = tree_digest_quiet(&tree, Some(&cache), i64::MAX).unwrap();
+        let changed = tree_digest_quiet(&tree, Some(&cache), true, i64::MAX).unwrap();
         assert_eq!(changed, tree_digest(&tree).unwrap());
         assert_ne!(changed, full);
         // A file changed within the quiet window is not remembered.
@@ -1174,6 +1220,98 @@ mod tests {
         tree_digest_cached(&tree, Some(&cache)).unwrap();
         assert!(!load_cache(&cache).contains_key(&std));
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A cached sum that lies about a changed file lets verification pass,
+    /// but the copy's own hash catches it; the refusal then re-reads the
+    /// tree and rewrites the cache, so the next run reports the change
+    /// truthfully instead of repeating the same mismatch, and restoring the
+    /// file imports the tree.
+    #[test]
+    fn realize_recovers_from_a_stale_cached_sum() {
+        let _attribution_lock = crate::kernel::policy::attribution_test_lock();
+        let _attribution = crate::kernel::policy::Attribution::open("cargo").unwrap();
+        let dir = temp("realize-cache");
+        let store_root = dir.join("store");
+        for sub in [
+            "objects",
+            "meta",
+            "cache/sha256",
+            "tmp",
+            "roots",
+            "forests",
+            "backups",
+            "root-locks",
+        ] {
+            fs::create_dir_all(store_root.join(sub)).unwrap();
+        }
+        let store = Store {
+            root: store_root.canonicalize().unwrap(),
+        };
+        let activity = store
+            .activity(crate::kernel::activity::ActivityMode::Exclusive)
+            .unwrap();
+        let tree = dir.join("tree");
+        fake_toolchain(&tree, host(), "1.96.1");
+        let bundle = select_with(host(), &dir, &[path_row("tree")], no_cache)
+            .unwrap()
+            .unwrap();
+        let selected = Selected {
+            ecosystem: "rust".into(),
+            bundle,
+            lock_sha256: None,
+            source: crate::kernel::toolchain::Source::Lock,
+            helpers: BTreeMap::new(),
+        };
+        let tree = tree.canonicalize().unwrap();
+        let cache = cache_path(&store, &tree);
+        let std = format!("lib/rustlib/{}/lib/libstd.rlib", host().triple());
+        let locked_sum = hex::encode(Sha256::digest(b"std"));
+
+        // Change the file, then forge its cache entry: the new key, with
+        // the sum the lock was taken from.
+        fs::write(tree.join(&std), b"STD").unwrap();
+        tree_digest_quiet(&tree, Some(&cache), false, i64::MAX).unwrap();
+        let mut files = load_cache(&cache);
+        files.get_mut(&std).unwrap().sha256 = locked_sum.clone();
+        save_cache(&cache, &files);
+        assert_eq!(
+            tree_digest_quiet(&tree, Some(&cache), true, i64::MAX).unwrap(),
+            selected.artifact(host(), "rustc").unwrap().digest,
+            "the forged entry does not stand in for the locked bytes"
+        );
+
+        let first = realize(&store, &activity, host(), &selected).unwrap_err();
+        assert!(
+            first
+                .to_string()
+                .contains("changed since tog-toolchain.toml locked it"),
+            "{first}"
+        );
+        // The forged sum is gone: the cache holds what the file holds.
+        assert_ne!(
+            load_cache(&cache)
+                .get(&std)
+                .map(|cached| cached.sha256.clone()),
+            Some(locked_sum)
+        );
+        let again = realize(&store, &activity, host(), &selected).unwrap_err();
+        assert!(
+            again
+                .to_string()
+                .contains("changed since tog-toolchain.toml locked it"),
+            "{again}"
+        );
+        // Restoring the bytes the lock names imports the tree.
+        fs::write(tree.join(&std), b"std").unwrap();
+        let imported = realize(&store, &activity, host(), &selected).unwrap();
+        assert_eq!(
+            fs::read(imported.join(&std)).unwrap(),
+            b"std",
+            "the import holds the locked bytes"
+        );
+        drop(activity);
+        let _ = crate::kernel::store::remove_tree(&dir);
     }
 
     #[test]

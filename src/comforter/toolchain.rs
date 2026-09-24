@@ -72,6 +72,9 @@ pub struct EcosystemInput {
     /// The local-toolchain reader of this ecosystem, when it has one
     /// (`toolchain.path` for Rust). It is consulted before the catalog.
     pub external: Option<ExternalToolchain>,
+    /// The helper lock ecosystems this ecosystem builds with
+    /// (`Tailor::helpers`): the only names its section may pin.
+    pub declared_helpers: Vec<String>,
     /// The helper releases a section written now pins (`rust` for a Python
     /// project's sdists), by helper lock ecosystem.
     pub helper_pins: BTreeMap<String, String>,
@@ -82,14 +85,30 @@ pub struct EcosystemInput {
 }
 
 impl EcosystemInput {
-    /// The helper pins a selection gets: a section's own, over the legacy
-    /// ones for any helper it does not pin.
-    fn helpers_for(&self, section: Option<&lock::EcoLock>) -> BTreeMap<String, String> {
-        let mut helpers = self.legacy_helper_pins.clone();
-        if let Some(section) = section {
-            helpers.extend(section.helpers().clone());
+    /// A committed section's helper pins, refused when one names a helper
+    /// this ecosystem does not build with: nothing would read it, so the
+    /// line is an edit or another tog's, and honoring the rest silently
+    /// would hide that.
+    fn pinned_helpers(&self, section: &lock::EcoLock) -> io::Result<BTreeMap<String, String>> {
+        let ecosystem = self.lock_ecosystem.as_str();
+        for helper in section.helpers().keys() {
+            if !self.declared_helpers.contains(helper) {
+                let builds_with = if self.declared_helpers.is_empty() {
+                    format!("{ecosystem} builds with no helper toolchain")
+                } else {
+                    format!(
+                        "{ecosystem} builds with only {}",
+                        self.declared_helpers.join(", ")
+                    )
+                };
+                return Err(invalid(format!(
+                    "tog-toolchain.toml [toolchain.{ecosystem}.helpers] pins {helper:?}, \
+                     which is not a helper toolchain ({builds_with}); \
+                     run `tog update --toolchain {ecosystem}` to rewrite the section"
+                )));
+            }
         }
-        helpers
+        Ok(section.helpers().clone())
     }
 
     /// The helper pins a section written now records: the legacy ones when
@@ -188,7 +207,7 @@ fn from_section(
         )));
     }
     Ok(Selected {
-        helpers: entry.helpers_for(Some(section)),
+        helpers: entry.pinned_helpers(section)?,
         ecosystem: ecosystem.to_string(),
         bundle,
         lock_sha256,
@@ -549,7 +568,7 @@ pub fn resolve(
             entries.insert(
                 ecosystem.to_string(),
                 Selected {
-                    helpers: entry.helpers_for(next.ecosystem(ecosystem)),
+                    helpers: entry.pins_to_write(false).clone(),
                     ecosystem: ecosystem.to_string(),
                     bundle,
                     lock_sha256: None,
@@ -619,8 +638,13 @@ pub fn resolve(
                     };
                     entries.insert(
                         ecosystem.to_string(),
+                        // No section is written, so none is pinned: the
+                        // builds supply what such a section would pin (the
+                        // catalog's default, or the release a seeded
+                        // closure's builds used), and the id stays the
+                        // bundle's own, as it always was here.
                         Selected {
-                            helpers: entry.pins_to_write(seeded).clone(),
+                            helpers: BTreeMap::new(),
                             ecosystem: ecosystem.to_string(),
                             bundle,
                             lock_sha256: None,
@@ -640,7 +664,7 @@ pub fn resolve(
                     entries.insert(
                         ecosystem.to_string(),
                         Selected {
-                            helpers: entry.helpers_for(next.ecosystem(ecosystem)),
+                            helpers: entry.pins_to_write(seeded).clone(),
                             ecosystem: ecosystem.to_string(),
                             bundle,
                             lock_sha256: None,
@@ -1329,6 +1353,7 @@ mod tests {
                 external: None,
                 helper_pins: BTreeMap::new(),
                 legacy_helper_pins: BTreeMap::new(),
+                declared_helpers: Vec::new(),
             }],
             Mode::Writable,
             false,
@@ -1394,11 +1419,26 @@ mod tests {
             assert_eq!(python.source, Source::Lock);
             assert_eq!(python.helpers["rust"], default);
         }
-        // The lock as a tog before pins wrote it: the Rust of that time.
-        std::fs::write(dir.join(LOCK_PATH), text.replace(&pin, "")).unwrap();
+        // The lock as a tog before pins wrote it: no pin, and the bundle's
+        // own id.
+        let mut old = ToolchainLock::parse(text.as_bytes()).unwrap();
+        old.set_helpers("python", &BTreeMap::new()).unwrap();
+        let old = old.canonical_bytes();
+        assert_eq!(
+            String::from_utf8(old.clone()).unwrap(),
+            text.replace(&pin, "").replace(
+                created.get("python").unwrap().bundle_id().as_str(),
+                created.get("python").unwrap().bundle.bundle_id().as_str(),
+            )
+        );
+        std::fs::write(dir.join(LOCK_PATH), &old).unwrap();
         for mode in [Mode::ReadOnly, Mode::Frozen, Mode::Writable] {
             let honored = resolve_python(&root, &dir, mode).unwrap();
-            assert_eq!(honored.get("python").unwrap().helpers["rust"], legacy);
+            let python = honored.get("python").unwrap();
+            // It pins nothing, so its id is the bundle's own, as before
+            // pins; the sdist builds supply the legacy release.
+            assert!(python.helpers.is_empty());
+            assert_eq!(python.bundle_id(), python.bundle.bundle_id());
             assert!(honored.pending.is_none(), "an old lock was rewritten");
         }
         // An update pins today's default.
@@ -1406,6 +1446,31 @@ mod tests {
         assert_eq!(updated.get("python").unwrap().helpers["rust"], default);
         let written = updated.pending.as_ref().unwrap().canonical_bytes();
         assert!(String::from_utf8(written).unwrap().contains(&pin));
+
+        // A pin for a helper Python does not build with is refused by
+        // every read, even under a consistent id; an update rewrites it.
+        let mut odd = ToolchainLock::parse(text.as_bytes()).unwrap();
+        odd.set_helpers(
+            "python",
+            &BTreeMap::from([("node".to_string(), "24.20.0".to_string())]),
+        )
+        .unwrap();
+        std::fs::write(dir.join(LOCK_PATH), odd.canonical_bytes()).unwrap();
+        for mode in [Mode::ReadOnly, Mode::Frozen, Mode::Writable] {
+            let error = resolve_python(&root, &dir, mode).unwrap_err().to_string();
+            assert!(
+                error.contains(
+                    "[toolchain.python.helpers] pins \"node\", which is not a helper \
+                     toolchain (python builds with only rust)"
+                ),
+                "{error}"
+            );
+        }
+        let repaired = resolve_python(&root, &dir, Mode::Update { only: None }).unwrap();
+        assert_eq!(
+            repaired.get("python").unwrap().helpers,
+            BTreeMap::from([("rust".to_string(), default.clone())])
+        );
     }
 
     #[test]

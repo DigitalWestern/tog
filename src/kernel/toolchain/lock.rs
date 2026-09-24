@@ -362,10 +362,10 @@ impl ToolchainLock {
             // by hand under the old id would otherwise pass every reader,
             // and `status` would call a closure built from the real bundle
             // current.
-            let computed = entry.bundle()?.bundle_id();
+            let computed = entry.bundle()?.section_id(&entry.helpers);
             if computed != entry.bundle_id {
                 return Err(bad(format!(
-                    "bundle_id {} does not match its rows ({computed}); the file was edited, \
+                    "bundle_id {} does not match its rows and helper pins ({computed}); the file was edited, \
                      run `tog update --toolchain {eco}`",
                     entry.bundle_id
                 )));
@@ -590,6 +590,7 @@ impl ToolchainLock {
                 invalid(format!("tog-toolchain.toml has no [{ecosystem}] section"))
             })?;
         entry.helpers = helpers.clone();
+        entry.bundle_id = entry.bundle()?.section_id(helpers);
         self.validate()
     }
 
@@ -1228,6 +1229,14 @@ digest = "sha256:855d581f8a4eb1a8117e3426de25fe02770592febcfb31369aee1ffbfee9e8e
         let again = ToolchainLock::parse(text.as_bytes()).unwrap();
         assert_eq!(again.canonical_bytes(), text.as_bytes());
         assert_eq!(again.ecosystem("node").unwrap().helpers(), &pins);
+        // The section's id covers them.
+        let section = again.ecosystem("node").unwrap();
+        assert_eq!(
+            section.bundle_id(),
+            node_bundle().section_id(&pins),
+            "{text}"
+        );
+        assert_ne!(section.bundle_id(), node_bundle().bundle_id());
         // Emptying them restores the original bytes.
         lock.set_helpers("node", &BTreeMap::new()).unwrap();
         assert_eq!(lock.canonical_bytes(), plain);
@@ -1238,6 +1247,11 @@ digest = "sha256:855d581f8a4eb1a8117e3426de25fe02770592febcfb31369aee1ffbfee9e8e
                 "python = \"3.12.14\"",
                 "node = \"1\"",
                 "not another ecosystem",
+            ),
+            (
+                "python = \"3.12.14\"",
+                "python = \"3.12.13\"",
+                "does not match its rows and helper pins",
             ),
         ] {
             let edited = text.replacen(from, to, 1);

@@ -42,7 +42,9 @@ pub struct Selected {
     /// helper lock ecosystem: `rust` for the Rust a Python project's sdists
     /// build with when the project does not lock Rust itself. Written when
     /// the section is, so a catalog whose default moves does not move a
-    /// locked project's builds. Empty when no lock is involved.
+    /// locked project's builds. Exactly the section's pins: empty for a
+    /// section written before pins existed (the ecosystem's builds supply
+    /// the release those sections used) and when no lock is involved.
     pub helpers: BTreeMap<String, String>,
 }
 
@@ -95,8 +97,11 @@ impl Selected {
             })
     }
 
+    /// The id of this selection's lock section: the bundle's id, covering
+    /// the helper pins when there are some ([`Bundle::section_id`]). It is
+    /// what a closure records and `status` compares with the section.
     pub fn bundle_id(&self) -> String {
-        self.bundle.bundle_id()
+        self.bundle.section_id(&self.helpers)
     }
 
     /// The primary versions joined with `+`: one version for most

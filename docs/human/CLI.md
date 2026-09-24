@@ -582,8 +582,11 @@ exception is judged, and the line says `(not evaluated)` rather than
 claiming anything about its contents. A detected ecosystem with no
 `.tog/closures/<ecosystem>.json` is listed as `missing` and fails the
 report; the optional `rustfmt` record is not a substitute for `cargo.json`.
-Only `clean` with nothing missing passes. The `rustfmt` closure
-`tog fmt` writes projects nothing, so its inputs are the rustfmt object
+Only `clean` with nothing missing passes. The `rustfmt` closure is
+written at the Cargo workspace root, and `tog fmt` takes its toolchain
+from the lock there, the lock `status` and `audit` judge it by, so running
+it from a member directory writes the same record as running it at the
+root. It projects nothing, so its inputs are the rustfmt object
 it ran and the directory the toolchain file was looked up from (a record
 from an older tog may also carry `unavailable_components`: empty is still
 current, a non-empty list is `stale`). It is `stale`

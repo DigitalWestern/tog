@@ -325,6 +325,13 @@ impl Tailor for Cargo {
         Ok(())
     }
 
+    /// The Cargo workspace root, as the store Cargo locates it.
+    fn fmt_root(&self, ctx: &Context, cwd: &Path, toolchain: &Selected) -> io::Result<PathBuf> {
+        let rust_object =
+            cargo::realize_runtime(&ctx.store, &ctx.activity, ctx.platform, toolchain)?;
+        inputs::locate_cargo_root(&rust_object, cwd, &ctx.activity)?.canonicalize()
+    }
+
     /// Realize only the Rust toolchain and its paired rustfmt component, then
     /// format the Cargo workspace without resolving dependencies.
     fn fmt(

@@ -238,7 +238,10 @@ tree and refuses one that is no longer the locked tree, naming
 (`cache/rust-path-tree/`, keyed by the tree's path) under each file's
 device, inode, size and modification and change times, so an unchanged
 file is not read again, and a mismatch is confirmed by a full read before
-it refuses. The tree is then imported as a `rust` object (`rust-path/1`: a
+it refuses. The digest a lock is written from is always a full read, never
+the cache, and a copy whose hash disagrees with the lock re-reads the tree
+and rewrites the cache before it reports, so a stale cached sum cannot
+survive into the next run. The tree is then imported as a `rust` object (`rust-path/1`: a
 copy whose hash, taken of the bytes as written, must be the locked one,
 keyed by the tree hash and build, with no store dependencies), so builds,
 closures and GC treat it like any other toolchain. Each use records the
@@ -337,7 +340,14 @@ written as `[toolchain.python.helpers] rust = "<version>"` when the section
 is written, the catalog's default at that moment), so a newer tog with a
 newer default does not change a locked project's wheel ids. A section from
 before the pin, and one seeded from a pre-lock closure, keep the Rust those
-builds used (`Tailor::legacy_helper_pins`: 1.96.1). A closure records the decision as
+builds used (`Tailor::legacy_helper_pins`: 1.96.1). A section may pin only
+the helpers its tailor declares (`Tailor::helpers`); any other name is
+refused on read, naming `tog update --toolchain <ecosystem>`. The section's
+`bundle_id` covers its pins (`Bundle::section_id`: the bundle's canonical
+bytes followed by one `helper` record per pin), so an edited pin is refused
+like an edited row and a closure built under other pins is `changed`; a
+section with no pins keeps the bundle's own id, so every lock from before
+pins reads byte for byte as it did. A closure records the decision as
 `toolchain.helpers.<ecosystem>`, the bundle id or `null`, and `status` holds
 a synced closure to it: re-locking the helper ecosystem, or removing its
 manifest so the default applies, is `changed` naming "the <helper>

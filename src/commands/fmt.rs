@@ -10,10 +10,13 @@ use crate::kernel::context::Context;
 use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::platform::Platform;
 use crate::kernel::policy;
+use crate::kernel::toolchain::lock::LOCK_PATH;
+use crate::kernel::toolchain::Selected;
 use crate::kernel::ui;
 use crate::tailors::node;
 use crate::tailors::{self, Tailor};
 use std::io;
+use std::path::Path;
 
 pub fn run(
     platform: Platform,
@@ -111,17 +114,48 @@ pub fn run(
     let ctx = Context::open(platform, true)?;
     // The formatter rides in the same bundle as the toolchain, so it is
     // chosen by the same committed lock and never by a fresh selection.
-    let held = ProjectRoot::open(&cwd)?;
-    let toolchain = project_toolchain::resolve(
-        &held,
-        platform,
-        ecosystem_inputs(&cwd, &[formatter])?,
-        Mode::ReadOnly,
-        false,
-    )?;
-    let selected = toolchain.get(formatter.lock_ecosystem())?;
+    // The record is written at the workspace root and `status`/`audit`
+    // judge it against the lock there, so that is the lock that decides:
+    // start from the nearest project at or above `cwd` (normally the root
+    // already), find the workspace root with it, and resolve again there
+    // when the root holds a lock of its own that was not the one read.
+    let resolve_at = |dir: &Path| -> io::Result<Selected> {
+        let held = ProjectRoot::open(dir)?;
+        project_toolchain::resolve(
+            &held,
+            platform,
+            ecosystem_inputs(dir, &[formatter])?,
+            Mode::ReadOnly,
+            false,
+        )?
+        .get(formatter.lock_ecosystem())
+        .cloned()
+    };
+    let cwd_real = cwd.canonicalize()?;
+    let start = cwd_real
+        .ancestors()
+        .find(|dir| dir.join(LOCK_PATH).symlink_metadata().is_ok() || dir.join(".tog").is_dir())
+        .unwrap_or(&cwd_real)
+        .to_path_buf();
+    let first = resolve_at(&start)?;
+    // Locating the root realizes `first`, which can record exceptions (a
+    // local toolchain's `external-toolchain`). They are discarded: the
+    // record carries what the run below realizes, which records its own.
+    let locating = policy::Attribution::open("rustfmt")?;
+    let root = formatter.fmt_root(&ctx, &cwd, &first)?;
+    locating.discard();
+    let decides = if root.join(LOCK_PATH).symlink_metadata().is_ok() {
+        root
+    } else {
+        cwd_real
+    };
+    let selected = if decides == start {
+        first
+    } else {
+        resolve_at(&decides)?
+    };
     let mut attribution = policy::Attribution::open("rustfmt")?;
-    let status = formatter.fmt(&ctx, &cwd, check, args, selected, &mut attribution)?;
+    let status = formatter.fmt(&ctx, &cwd, check, args, &selected, &mut attribution)?;
     attribution.finish(true)?;
     if crate::comforter::signing_key().is_none() {
         ui::note("fmt: rustfmt record unsigned; tog audit reports it outdated (set TOG_SIGNING_KEY to sign)");

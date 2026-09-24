@@ -510,6 +510,7 @@ fn project_go_version_from(
             external: None,
             helper_pins: Default::default(),
             legacy_helper_pins: Default::default(),
+            declared_helpers: Default::default(),
         }],
         Mode::ReadOnly,
         false,

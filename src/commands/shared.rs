@@ -83,6 +83,7 @@ pub(crate) fn ecosystem_inputs(
             external: tailor.external_toolchain(),
             helper_pins: tailor.helper_pins()?,
             legacy_helper_pins: tailor.legacy_helper_pins(),
+            declared_helpers: tailor.helpers().iter().map(|h| h.to_string()).collect(),
         });
     }
     Ok(out)
