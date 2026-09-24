@@ -31,7 +31,8 @@ by position.
   missing-lock generation run the ecosystem's own tool unsandboxed with
   network, outside what `tog audit` can see. Decided 2026-09-23: design
   round for a registry proxy (see #68); no refusal behavior changes until
-  the design lands.
+  the design lands. Design: `docs/agent/DESIGNS.md` §6 "The resolution
+  proxy", awaiting independent review; its PR 1 is #61 and #169.
 - **A shared system store at `/opt/tog/store`:** decided 2026-09-23: full
   design round on ownership, permissions, and cross-user GC (see #69).
 - **First outside target.** Cheapest visible artifact: a GitHub Action
@@ -89,6 +90,8 @@ by position.
   tailors directly. A `Tailor::edit_manifest` method with an "unsupported"
   default would make it registry-driven, the way `Tailor::registry_tool`
   did for `x`. It is its own design review: deps edits user manifests.
+  The signature, carrying the resolution door, is in `docs/agent/DESIGNS.md`
+  §6 (PR 1 there), which also moves the Corepack/pnpm path (#169).
 - **Rust targets and components are outside the lock.** Only the channel is
   a lock row; `targets` and `components` are enforced per run from
   `rust-toolchain.toml`, a component tog does not ship is a permissive
