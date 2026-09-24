@@ -27,12 +27,6 @@ by position.
   followed by the full help screen, which can scroll the sync result away.
   Watch daily use; the candidates are a short footer, the full screen only
   when nothing needed syncing, or leaving it.
-- **Delegated-tool doors under company policy.** `add`/`remove`/`update` and
-  missing-lock generation run the ecosystem's own tool unsandboxed with
-  network, outside what `tog audit` can see. Decided 2026-09-23: design
-  round for a registry proxy (see #68); no refusal behavior changes until
-  the design lands. Design: `docs/agent/DESIGNS.md` §6 "The resolution
-  proxy", awaiting independent review; its PR 1 is #61 and #169.
 - **A shared system store at `/opt/tog/store`:** decided 2026-09-23: full
   design round on ownership, permissions, and cross-user GC (see #69).
 - **First outside target.** Cheapest visible artifact: a GitHub Action
@@ -86,12 +80,33 @@ by position.
   (`src/comforter/toolchain.rs`), so the guard proves the inputs of whatever
   directory the path names at recheck time. Carry one held root from
   preflight through publication when the rest of sync does (#132, with #55).
+- **The resolution proxy (#68).** Delegated tools (`add`/`remove`/`update`,
+  missing-lock generation, `tog x`) run unsandboxed with network today.
+  Design: `docs/agent/DESIGNS.md` §6 (#196). PR 0, the measured evidence,
+  shipped in #209; its macOS Mach allow-list waits on one run of
+  `tools/proxy_spike/macos_mach.sh` on a Mac. The rest, in order: #198 (PR 1,
+  the door type), #199, #200, #201 (PR 3b), #202, #203, #204, #205, #206,
+  #207, #208 (PR 10, remove `Legacy`). Found by PR 0 and slotted into those:
+  #210 (uv ignores `UV_PYTHON`), #211 (`bundle add` installs), #212 (npm
+  notifier and audit requests).
+- **Smaller open issues from the 2026-09-23/24 run.** One line each; the
+  issue has the options and the pick.
+  - #174 npm: git-tracked `node_modules` in workspace members moved into backups.
+  - #180 build: first build with no lock still needs a catalog row for every ecosystem.
+  - #183 `status`/`doctor` create and lease the store; add a read-only context mode.
+  - #188 npm: realize `file:` packages as tog-owned trees.
+  - #190 `tog x` py: tools in a Rust-locked project build sdists on shipped Rust.
+  - #191 provider object-kind rows still live in the tailors' `objects.rs`.
+  - #214 npm/pnpm: a required foreign-platform dependency is refused (tailwindcss).
+  - #215 python: sdists that need Rust at build time (stable-diffusion-webui).
+  - #216 python: `uv pip compile` fails for vllm and MetaGPT; classifier label.
 - **`deps` as a `Tailor` method.** `src/commands/deps.rs` still names
   tailors directly. A `Tailor::edit_manifest` method with an "unsupported"
   default would make it registry-driven, the way `Tailor::registry_tool`
   did for `x`. It is its own design review: deps edits user manifests.
   The signature, carrying the resolution door, is in `docs/agent/DESIGNS.md`
-  §6 (PR 1 there), which also moves the Corepack/pnpm path (#169).
+  §6; it ships as resolution proxy PR 1 (#198), which also moves the
+  Corepack/pnpm path (#169).
 - **GC loose ends from #162.** Three small `src/kernel/store/roots.rs`
   fixes: a case-mismatched `gc --dry-run --forget` key previews fewer
   deletions on macOS (#163); the root/2 importer calls a path inside this
@@ -112,10 +127,6 @@ by position.
   (2026-09-15) each failed once in a full parallel run and passed on every
   rerun. The panic messages were not captured. Capture them next time before
   changing anything.
-  `tailors::node::lock_import::tests::pnpm_9_base32_patch_hashes_are_accepted_and_stored_verbatim`
-  (2026-09-20) failed once the same way at `lock_import/mod.rs:1009`, the
-  `policy::pending().len() == 1` assertion, although it holds
-  `exception_guard`; so some other test records an exception without it.
 - **macOS arm64 gate. Last, by the owner's choice.** Run on the Mac:
   `cargo test`, `cargo test --test gc -- --ignored`,
   `cargo test --test cli audit`, and

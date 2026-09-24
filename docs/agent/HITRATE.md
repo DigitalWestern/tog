@@ -26,6 +26,37 @@ full 60-repo run takes about 95 minutes on the Linux box.
 Only Python and npm are measured. Earlier runs (2026-09-02 macOS,
 2026-09-05/06 Linux) are in git history and in their CSVs.
 
+## Linux x86_64 — 2026-09-23 (m6-fedora, tog 4720e12, pinned 60)
+
+Same command and method as 2026-09-11 below. Raw data:
+`tests/fixtures/hitrate-linux-2026-09-23.csv`.
+
+| ecosystem | permissive | company-policy | strict | 2026-09-11 permissive |
+|---|---|---|---|---|
+| python | **26/30** (27/30 after #213) | 24/30 | 8/30 | 26/30 |
+| npm | **28/30** (29/30 after #213) | 15/30 | 14/30 | 20/30 |
+
+npm moved 20 → 28: vite, playwright, mermaid, NextChat and the three
+workspace repos fixed on 09-11 now sync. The npm work merged in between
+(#172 Yarn `#sha1` read as integrity, #182 used-deps and fatal
+provisioning, #192 pnpm links and patches) was not bisected per repo. NextChat's 09-11 cause below is wrong: it was a Yarn
+`#sha1` fragment read as a git commit, not a shallow fetch (#172).
+
+Six misses, three of them one cause: the Rust catalog shipped one release,
+so any project pinning another Rust failed. #213 ships 43 releases
+(1.70.0 to 1.98.1). A re-run of those three repos on main 68c6f03 (CSV not
+kept, three rows): headroom and clash-verge-rev sync; tailwindcss gets past
+Rust and fails on the next known row.
+
+| repo | class | reason | tracked |
+|---|---|---|---|
+| AUTOMATIC1111/stable-diffusion-webui | py_sdist_build_failed | tokenizers 0.13.3 sdist needs Rust at build time | #215 |
+| vllm-project/vllm | unreadable_manifest (misclassified) | `uv pip compile failed` | #216 |
+| FoundationAgents/MetaGPT | py_uv_resolve_failed | `uv pip compile failed` | #216 |
+| headroomlabs-ai/headroom | other | Rust 1.95.0 not in the catalog | **fixed by #213** (re-run ok) |
+| clash-verge-rev/clash-verge-rev | other | Rust 1.98.0 not in the catalog | **fixed by #213** (re-run ok) |
+| tailwindlabs/tailwindcss | other → npm_platform_required | Rust 1.95.0, then a required darwin-only devDependency | Rust fixed by #213; platform row is #214 |
+
 ## Linux x86_64 — 2026-09-11 (m6-fedora, tog fb8b1d6, pinned 60)
 
 Command: `cargo build --release`, then `python3 tests/hitrate.py --repos
