@@ -382,13 +382,18 @@ pub fn request_for(ecosystem: &str, rows: &[InputRow]) -> io::Result<Request> {
             }
             // The lists are not part of the version request, but both files
             // are read and recorded, so two that ask for different components
-            // or targets are the same conflict as two channels.
+            // or targets, or name different local trees, are the same
+            // conflict as two channels. A local tree states no version: the
+            // tailor's external selection answers for it.
             let present = |path: &str| {
                 rows.iter()
                     .any(|row| row.path.as_os_str() == path && row.sha256.is_some())
             };
             if present("rust-toolchain") && present("rust-toolchain.toml") {
-                for (key, field) in super::input::RUST_TOOLCHAIN_REQUESTS {
+                for (key, field) in super::input::RUST_TOOLCHAIN_REQUESTS
+                    .into_iter()
+                    .chain([super::input::RUST_TOOLCHAIN_PATH])
+                {
                     let a = value(rows, "rust-toolchain", field);
                     let b = value(rows, "rust-toolchain.toml", field);
                     if a != b {

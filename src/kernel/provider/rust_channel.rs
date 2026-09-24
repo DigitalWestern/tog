@@ -13,15 +13,23 @@
 //! per component: a name is looked up through `renames` and then `pkg`, and
 //! whatever the release does not publish for the host is refused by name.
 //!
+//! A profile (`minimal`, `default`, `complete`) is a list of package names
+//! for every host at once. What it installs on one host is decided the way
+//! rustup decides it: the aggregate `rust` package lists, per host, the
+//! packages that belong to that host's toolchain (`components`, installed
+//! with it, and `extensions`, installable on it). A profile member on that
+//! list is installed, and must be available. A member off it (`rust-mingw`
+//! off Windows) is not part of this host's toolchain at all.
+//!
 //! This module only parses and looks up. The manifest's own bytes are
-//! pinned by sha256 in the shipped catalog (`rust::CHANNEL_MANIFESTS`) and
-//! verified on download, so every URL and digest read from it is as pinned
-//! as a catalog row.
+//! pinned by sha256 in the shipped catalog (each release's
+//! `channel-manifest` row in `rust.catalog.toml`) and verified on download,
+//! so every URL and digest read from it is as pinned as a catalog row.
 
 use crate::kernel::archive::Compression;
 use crate::kernel::digest::Digest;
 use serde::Deserialize;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 
 /// Where the Rust project publishes release archives and manifests.
@@ -37,6 +45,10 @@ pub const ANY_TARGET: &str = "*";
 
 /// The package that carries one target's standard library.
 pub const STD_PACKAGE: &str = "rust-std";
+
+/// The aggregate package whose per-host rows list what belongs to that
+/// host's toolchain.
+pub const AGGREGATE_PACKAGE: &str = "rust";
 
 #[derive(Debug, Deserialize)]
 struct ManifestToml {
@@ -63,6 +75,21 @@ struct TargetToml {
     hash: Option<String>,
     xz_url: Option<String>,
     xz_hash: Option<String>,
+    /// On the aggregate `rust` package only: the packages installed with
+    /// this host's toolchain.
+    #[serde(default)]
+    components: Vec<MemberToml>,
+    /// On the aggregate `rust` package only: the packages installable on
+    /// this host.
+    #[serde(default)]
+    extensions: Vec<MemberToml>,
+}
+
+/// One entry of the aggregate package's `components` or `extensions`.
+#[derive(Debug, Deserialize)]
+struct MemberToml {
+    pkg: String,
+    target: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -165,29 +192,44 @@ impl ChannelManifest {
         self.archive(package, target, row, &format!("component {spelled}"), host)
     }
 
-    /// The packages profile `name` installs, as the manifest lists them for
-    /// every host at once. A profile the manifest does not define is refused.
-    pub fn profile(&self, name: &str) -> io::Result<&[String]> {
-        self.profiles.get(name).map(Vec::as_slice).ok_or_else(|| {
+    /// The packages profile `name` installs on `host`, in the profile's
+    /// order: its members the aggregate `rust` package lists for `host`
+    /// (as a component or an extension, built for `host` or for every
+    /// target). A member off that list is not part of this host's toolchain
+    /// and is left out, as rustup leaves it out. A member on it that the
+    /// release did not build is not left out: every returned package must
+    /// then resolve through [`ChannelManifest::component`], which refuses
+    /// it. A profile the manifest does not define, or a manifest with no
+    /// `rust` row for `host`, is refused.
+    pub fn profile_members(&self, name: &str, host: &str) -> io::Result<Vec<&str>> {
+        let members = self.profiles.get(name).ok_or_else(|| {
             invalid(format!(
                 "Rust {} does not define a profile named {name}",
                 self.version
             ))
-        })
-    }
-
-    /// Whether `package` is published, and available, for `host` (its own
-    /// row or the `*` row). rustup installs a profile's packages that pass
-    /// this and skips the rest: `rust-mingw` is in every profile and exists
-    /// only for Windows hosts.
-    pub fn publishes(&self, package: &str, host: &str) -> bool {
-        self.packages.get(package).is_some_and(|entry| {
-            entry
-                .target
-                .get(host)
-                .or_else(|| entry.target.get(ANY_TARGET))
-                .is_some_and(|row| row.available)
-        })
+        })?;
+        let row = self
+            .packages
+            .get(AGGREGATE_PACKAGE)
+            .and_then(|entry| entry.target.get(host))
+            .ok_or_else(|| {
+                invalid(format!(
+                    "channel manifest for Rust {}: the {AGGREGATE_PACKAGE} package lists no toolchain for {host}, so profile {name} cannot be expanded there",
+                    self.version
+                ))
+            })?;
+        let on_host: BTreeSet<&str> = row
+            .components
+            .iter()
+            .chain(&row.extensions)
+            .filter(|member| member.target == host || member.target == ANY_TARGET)
+            .map(|member| member.pkg.as_str())
+            .collect();
+        Ok(members
+            .iter()
+            .map(String::as_str)
+            .filter(|package| on_host.contains(package))
+            .collect())
     }
 
     /// The standard library for cross target `triple`.
@@ -360,6 +402,50 @@ mod tests {
             error
                 .to_string()
                 .contains("does not publish a standard library for target riscv99-unknown-none"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn profiles_expand_through_the_hosts_toolchain_list() {
+        let manifest = manifest();
+        for host in [LINUX, DARWIN] {
+            // rust-mingw is in every profile and in no non-Windows
+            // toolchain.
+            assert_eq!(
+                manifest.profile_members("minimal", host).unwrap(),
+                ["rustc", "cargo", "rust-std"]
+            );
+            assert_eq!(
+                manifest.profile_members("default", host).unwrap(),
+                [
+                    "rustc",
+                    "cargo",
+                    "rust-std",
+                    "rust-docs",
+                    "rustfmt-preview",
+                    "clippy-preview"
+                ]
+            );
+            // Unavailable members stay in: the caller refuses them.
+            let complete = manifest.profile_members("complete", host).unwrap();
+            assert!(complete.contains(&"miri-preview"), "{complete:?}");
+            assert!(!complete.contains(&"rust-mingw"), "{complete:?}");
+            assert!(manifest.component("miri-preview", host).is_err());
+        }
+        let error = manifest.profile_members("bespoke", LINUX).unwrap_err();
+        assert!(
+            error.to_string().contains("profile named bespoke"),
+            "{error}"
+        );
+        // A host the aggregate package has no row for cannot expand one.
+        let error = manifest
+            .profile_members("default", "riscv99-unknown-none")
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("lists no toolchain for riscv99-unknown-none"),
             "{error}"
         );
     }

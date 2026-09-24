@@ -5,9 +5,10 @@
 //!
 //! Every case here is offline. Nothing in this file downloads a toolchain:
 //! the fixtures either stop before realization (a refusal, which is the
-//! whole point of most of them) or use a manifest whose planner fails in
+//! whole point of most of them), use a manifest whose planner fails in
 //! the project directory, which happens after the lock has been published
-//! and before any network call.
+//! and before any network call, or name a local toolchain directory
+//! (`[toolchain] path`), which is imported, not fetched.
 
 // Tests spawn fixtures and take leases freely (see clippy.toml).
 #![allow(clippy::disallowed_methods)]
@@ -936,4 +937,221 @@ fn foreign_platform_lock_is_refused() {
     assert_eq!(out.status.code(), Some(1), "{stderr}");
     assert!(stderr.contains("does not match its rows"), "{stderr}");
     assert!(!fixture.store().exists(), "a refusal created the store");
+}
+
+// ---------------------------------------------------------------------------
+// Rust toolchain files beyond a channel
+
+/// A stand-in for a rustup-built toolchain directory: `bin/rustc -vV` and
+/// `bin/cargo -V` print what the real ones print for this host, `cargo
+/// locate-project` answers from its working directory, and the tree has the
+/// layout a Rust object needs. Nothing here compiles. The sync these tests
+/// run needs no compiler, only the toolchain's identity and layout.
+fn fake_rust_tree(tree: &Path, release: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    let host = Platform::host().unwrap().triple();
+    std::fs::create_dir_all(tree.join("bin")).unwrap();
+    std::fs::create_dir_all(tree.join(format!("lib/rustlib/{host}/lib"))).unwrap();
+    let script = |name: &str, body: String| {
+        let path = tree.join("bin").join(name);
+        std::fs::write(&path, format!("#!/bin/sh\n{body}")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    };
+    script(
+        "rustc",
+        format!(
+            "printf 'rustc {release} (0123abcde 2026-06-26)\\nbinary: rustc\\n\
+             commit-hash: 0123abcde\\nhost: {host}\\nrelease: {release}\\n'\n"
+        ),
+    );
+    script(
+        "cargo",
+        format!(
+            "case \"$1\" in\n\
+             -V) printf 'cargo {release} (4567fedcb 2026-06-26)\\n' ;;\n\
+             locate-project) printf '%s/Cargo.toml\\n' \"$(pwd -P)\" ;;\n\
+             *) echo \"fake cargo: $*\" >&2; exit 1 ;;\n\
+             esac\n"
+        ),
+    );
+    std::fs::write(
+        tree.join(format!("lib/rustlib/{host}/lib/libstd.rlib")),
+        b"std",
+    )
+    .unwrap();
+}
+
+const PLAIN_CARGO_TOML: &str = "[package]\nname = \"p\"\nversion = \"0.1.0\"\nedition = \"2021\"\n";
+const PLAIN_CARGO_LOCK: &str = "version = 3\n\n[[package]]\nname = \"p\"\nversion = \"0.1.0\"\n";
+
+/// `[toolchain] path` names a toolchain directory on this machine. The lock
+/// records it by content: a row marked `source = "path"`, with the tree's
+/// URL, both version lines and the tree hash. A sync imports it and records
+/// the `external-toolchain` exception, a policy can deny that, and once the
+/// tree changes every sync refuses it until `tog update --toolchain` locks
+/// the new tree.
+#[test]
+fn a_local_toolchain_is_locked_by_content_and_fails_closed_when_it_changes() {
+    let fixture = Fixture::new("rust-path");
+    let trees = TempDir::new("rust-path-tree");
+    let tree = trees.0.join("custom-rust");
+    fake_rust_tree(&tree, "1.97.0-nightly");
+    let tree = tree.canonicalize().unwrap();
+    fixture.write("Cargo.toml", PLAIN_CARGO_TOML);
+    fixture.write("Cargo.lock", PLAIN_CARGO_LOCK);
+    fixture.write(
+        "rust-toolchain.toml",
+        &format!("[toolchain]\npath = \"{}\"\n", tree.display()),
+    );
+
+    let out = fixture.tog(&["sync"]);
+    let stderr = text(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{stderr}");
+    assert!(stderr.contains("exception external-toolchain"), "{stderr}");
+    let bytes = fixture.lock_bytes().unwrap();
+    let written = String::from_utf8(bytes.clone()).unwrap();
+    assert!(written.contains("release = \"path\""), "{written}");
+    assert!(
+        written.contains("source = \"path\"\nprovider = \"path\"\n"),
+        "{written}"
+    );
+    assert!(
+        written.contains(&format!("url = \"file://{}\"", tree.display())),
+        "{written}"
+    );
+    assert!(
+        written.contains(
+            "build = \"rustc 1.97.0-nightly (0123abcde 2026-06-26); cargo 1.97.0-nightly (4567fedcb 2026-06-26)\""
+        ),
+        "{written}"
+    );
+    assert!(written.contains("field = \"toolchain.path\""), "{written}");
+    let lock = ToolchainLock::parse(&bytes).unwrap();
+    let bundle = lock.ecosystem("rust").unwrap().bundle().unwrap();
+    assert_eq!(bundle.component("rustc").unwrap().version, "1.97.0");
+    let closure = std::fs::read_to_string(fixture.dir().join(".tog/closures/cargo.json")).unwrap();
+    assert!(closure.contains("\"external-toolchain\""), "{closure}");
+    assert!(closure.contains(&tree.display().to_string()), "{closure}");
+
+    // A second sync honors the lock, re-checks the tree, uses the import,
+    // and records the exception again.
+    let out = fixture.tog(&["sync"]);
+    let stderr = text(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{stderr}");
+    assert!(stderr.contains("exception external-toolchain"), "{stderr}");
+    assert_eq!(fixture.lock_bytes().unwrap(), bytes);
+
+    // A policy that denies the kind refuses the sync.
+    fixture.write(".tog/policy.toml", "deny = [\"external-toolchain\"]\n");
+    let out = fixture.tog(&["sync"]);
+    let stderr = text(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    assert!(
+        stderr.contains("carries exception(s): external-toolchain"),
+        "{stderr}"
+    );
+    std::fs::remove_file(fixture.dir().join(".tog/policy.toml")).unwrap();
+
+    // The tree is used as it is, so `tog fmt` needs the tree's own rustfmt.
+    let out = fixture.tog(&["fmt"]);
+    let stderr = text(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    assert!(stderr.contains("has no bin/rustfmt"), "{stderr}");
+
+    // The tree changes (rustfmt is added to it): the lock no longer names
+    // it, and sync fails closed.
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for (name, body) in [
+            ("rustfmt", "exit 0\n"),
+            ("cargo-fmt", "echo \"$@\" > formatted.txt\n"),
+        ] {
+            let path = tree.join("bin").join(name);
+            std::fs::write(&path, format!("#!/bin/sh\n{body}")).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+    let out = fixture.tog(&["sync"]);
+    let stderr = text(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    assert!(
+        stderr.contains("changed since tog-toolchain.toml locked it"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("tog update --toolchain rust"), "{stderr}");
+    assert_eq!(
+        fixture.lock_bytes().unwrap(),
+        bytes,
+        "a refusal rewrote the lock"
+    );
+
+    // Locking the tree as it is now is the way forward.
+    let out = fixture.tog(&["update", "--toolchain", "rust"]);
+    let stderr = text(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{stderr}");
+    assert_ne!(fixture.lock_bytes().unwrap(), bytes);
+    let out = fixture.tog(&["sync"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+
+    // Now the tree's own formatter runs, and the import is the formatter
+    // object the rustfmt record names.
+    let out = fixture.tog(&["fmt", "--check"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(
+        std::fs::read_to_string(fixture.dir().join("formatted.txt")).unwrap(),
+        "--check\n"
+    );
+    let record: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(fixture.dir().join(".tog/closures/rustfmt.json")).unwrap(),
+    )
+    .unwrap();
+    let body = &record["body"];
+    assert_eq!(body["rustfmt_object"]["id"], body["rust_object"]["id"]);
+    assert_eq!(body["rust_version"], "1.97.0");
+    // And status reads the closure as current.
+    let out = fixture.tog(&["status"]);
+    let stdout = text(&out.stdout);
+    assert_eq!(out.status.code(), Some(0), "{stdout}{}", text(&out.stderr));
+    assert!(
+        stdout.contains("cargo  synced      (rust 1.97.0;"),
+        "{stdout}"
+    );
+}
+
+/// A toolchain table with components and no channel means rustup's default
+/// toolchain. tog's is the catalog's explicit default, which the lock
+/// records as the selection, beside the components it will provision.
+#[test]
+fn a_components_only_toolchain_file_locks_the_catalog_default() {
+    let fixture = Fixture::new("rust-components-only");
+    fixture.write("Cargo.toml", PLAIN_CARGO_TOML);
+    fixture.write(
+        "rust-toolchain.toml",
+        "[toolchain]\ncomponents = [\"clippy\", \"rust-src\"]\n",
+    );
+    let out = fixture.tog(&["update", "--toolchain", "--no-sync"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let lock = ToolchainLock::parse(&fixture.lock_bytes().unwrap()).unwrap();
+    let section = lock.ecosystem("rust").unwrap();
+    let catalog = catalog_of("rust");
+    let default = catalog.default_release().unwrap();
+    assert_eq!(section.release(), default.release);
+    assert_eq!(section.bundle_id(), default.bundle_id());
+    let inputs = section.inputs();
+    let row = |field: &str| {
+        inputs
+            .iter()
+            .find(|row| row.path == Path::new("rust-toolchain.toml") && row.field == field)
+            .cloned()
+            .unwrap()
+    };
+    assert_eq!(row("toolchain.channel").value, None);
+    assert!(row("toolchain.channel").sha256.is_some());
+    assert_eq!(
+        row("toolchain.components").value.as_deref(),
+        Some("clippy,rust-src")
+    );
+    // What realization provisions is read back from those rows.
+    let extras = tog::kernel::provider::rust_extras::Extras::from_rows(&inputs);
+    assert_eq!(extras.components, ["clippy", "rust-src"]);
 }

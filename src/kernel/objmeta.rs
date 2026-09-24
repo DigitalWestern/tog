@@ -1227,6 +1227,28 @@ mod tests {
         assert_eq!(cache, vec![format!("sha256:{archive}")]);
     }
 
+    /// A local toolchain tree is copied in whole: its content hash names no
+    /// cache entry and no object, so it depends on nothing.
+    #[test]
+    fn adapter_rust_rust_path_1_recovers_the_expected_dependencies() {
+        let (objects, cache) = proven(
+            ident(
+                "rust",
+                "rust",
+                "1.96.1",
+                &[
+                    ("schema", "rust-path/1"),
+                    ("platform", "x86_64-unknown-linux-gnu"),
+                    ("tree_sha256", &sha256('f')),
+                    ("build", "rustc 1.96.1 (31fca3adb 2026-06-26); cargo 1.96.1"),
+                ],
+            ),
+            vec![],
+        );
+        assert!(objects.is_empty());
+        assert!(cache.is_empty());
+    }
+
     /// The count relation: an assembled toolchain names at least one
     /// extension, and exactly as many as it declares.
     #[test]

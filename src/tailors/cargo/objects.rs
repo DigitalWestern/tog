@@ -59,6 +59,21 @@ pub static KINDS: &[KindAdapter] = &[
         adapt: rust_assembled,
     },
     KindAdapter {
+        kind: "rust",
+        schema: Some("rust-path/1"),
+        superseded_by: None,
+        live_required: &["schema", "platform", "tree_sha256", "build"],
+        live_optional: &[],
+        legacy_only: &[],
+        live_contract: None,
+        grammar: Grammar {
+            required: &["schema", "platform", "tree_sha256", "build"],
+            optional: &[],
+            groups: &[],
+        },
+        adapt: rust_path,
+    },
+    KindAdapter {
         kind: "rust-component",
         schema: Some("rust-component/1"),
         superseded_by: None,
@@ -235,6 +250,13 @@ fn rust_assembled(record: &Record, index: &MetaIndex) -> Result<ObjectDeps, Stri
         "channel_manifest_sha256",
     )?;
     Ok(deps)
+}
+
+/// `rust-path/1`: a local toolchain tree copied in as it is. The tree's
+/// content hash names bytes that never pass through the download cache and
+/// no other object, so the import depends on nothing in the store.
+fn rust_path(_record: &Record, _index: &MetaIndex) -> Result<ObjectDeps, String> {
+    Ok(ObjectDeps::new())
 }
 
 /// `rust-component/1`: one archive, named by its sha256.

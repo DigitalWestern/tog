@@ -12,7 +12,8 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
 
 ## Kernel-wide
 
-- **`tog fmt` is Rust-only**; other ecosystems fail clearly (pinned rustfmt 1.96.1, no
+- **`tog fmt` is Rust-only**; other ecosystems fail clearly (the locked Rust release's
+  rustfmt, or a local toolchain's own, no
   `Cargo.lock`; `status` ignores the rustfmt closure).
 - **`tog audit` judges signed records only.** A pass proves that every closure file in
   the working tree carries a valid signature from a key the machine policy trusts, that
@@ -198,11 +199,25 @@ Selection covers every patch of each maintained CPython minor that python-build-
 
 - **Pinned Git dependencies work for standalone crates**; workspace-inherited manifests and
   escaping symlinks fail closed, and workspace metadata is not rewritten into vendor
-  manifests. **Fail-closed rows**: alternative registries; beta/nightly/custom toolchains and
-  non-arm64 targets. Loud.
+  manifests. **Fail-closed rows**: alternative registries; beta/nightly channels and
+  non-arm64 targets. Loud. A custom toolchain works as a local directory (`path =` in
+  rust-toolchain.toml), below.
+- **A local toolchain (`[toolchain] path`) is trusted by content, not by origin.** The lock
+  records its `rustc -vV`/`cargo -V` lines and a hash of the whole tree, so it proves the
+  tree did not change, not who built it; every use records `external-toolchain`, which the
+  company template denies. Locking runs the tree's own `bin/rustc` and `bin/cargo` for their
+  versions (in the build sandbox, so it needs bubblewrap on Linux). The tree is re-hashed on every sync, build and
+  fmt, which costs a read of the whole toolchain (seconds for a full one). The lock row names
+  an absolute path on one machine and one host platform, so a checkout elsewhere needs
+  `tog update --toolchain rust`. As in rustup, a path cannot be combined with a channel,
+  components, targets or a profile, and a tree with a symlink leaving it is refused.
 - **No `profile` in rust-toolchain means rustc, cargo and the host std** (rustup's
   `minimal`), not rustup's configured default; ask for `profile = "default"` to get
-  clippy, rustfmt and the docs.
+  clippy, rustfmt and the docs. **No channel means the catalog's default release**
+  (rustup's would be its configured default toolchain).
+- **`profile = "complete"` fails on releases that did not build all of it** (1.96.1 lists
+  `miri` and `rustc-codegen-cranelift` for Linux and macOS and marks both unavailable), as
+  rustup's does; name the components instead.
   **`tog build` covers `build` only** — no sandboxed test/clippy/doc; those run via
   `tog run cargo ...` offline but unsandboxed. target/ is unmanaged scratch (no shared
   build cache). **`cargo install` through the wrapper is unmanaged** (lands in

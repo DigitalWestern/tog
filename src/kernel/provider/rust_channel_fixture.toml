@@ -1,8 +1,10 @@
 # A trimmed copy of https://static.rust-lang.org/dist/channel-rust-1.96.1.toml
 # (sha256 87eb76c53073e72b766083bed5530820694253b832a762d8385bda5759f03975,
-# the pin in `rust::CHANNEL_MANIFESTS`). Rows are copied verbatim; only
-# packages and targets the tests read are kept; the aggregate `rust` package
-# and the `artifacts` tables are dropped.
+# the rust-1.96.1 `channel-manifest` row of `rust.catalog.toml`). Rows are
+# copied verbatim. Only the packages and targets the tests read are kept: the
+# aggregate `rust` package keeps its two host rows, with the components and
+# extensions entries a profile can expand to on that host, and the
+# `artifacts` tables are dropped.
 manifest-version = "2"
 date = "2026-06-30"
 
@@ -68,6 +70,186 @@ available = false
 
 [pkg.miri-preview.target.x86_64-unknown-linux-gnu]
 available = false
+
+[pkg.rust]
+version = "1.96.1 (31fca3adb 2026-06-26)"
+git_commit_hash = "31fca3adb283cc9dfd56b49cdee9a96eb9c96ffd"
+
+[pkg.rust.target.aarch64-apple-darwin]
+available = true
+url = "https://static.rust-lang.org/dist/2026-06-30/rust-1.96.1-aarch64-apple-darwin.tar.gz"
+hash = "c080e506af9cba3ca9472c17d989c2d8d5bcfc818eb5e196c77beee982788b50"
+xz_url = "https://static.rust-lang.org/dist/2026-06-30/rust-1.96.1-aarch64-apple-darwin.tar.xz"
+xz_hash = "29bfe4132dd0b39bd488c788bcd29da59694d1981c4ea8f34a61d3b166921db7"
+
+[[pkg.rust.target.aarch64-apple-darwin.components]]
+pkg = "rustc"
+target = "aarch64-apple-darwin"
+
+[[pkg.rust.target.aarch64-apple-darwin.components]]
+pkg = "rust-std"
+target = "aarch64-apple-darwin"
+
+[[pkg.rust.target.aarch64-apple-darwin.components]]
+pkg = "cargo"
+target = "aarch64-apple-darwin"
+
+[[pkg.rust.target.aarch64-apple-darwin.components]]
+pkg = "rust-docs"
+target = "aarch64-apple-darwin"
+
+[[pkg.rust.target.aarch64-apple-darwin.extensions]]
+pkg = "rust-src"
+target = "*"
+
+[[pkg.rust.target.aarch64-apple-darwin.extensions]]
+pkg = "rustc-dev"
+target = "aarch64-apple-darwin"
+
+[[pkg.rust.target.aarch64-apple-darwin.extensions]]
+pkg = "rustc-docs"
+target = "aarch64-apple-darwin"
+
+[[pkg.rust.target.aarch64-apple-darwin.extensions]]
+pkg = "rust-analysis"
+target = "aarch64-apple-darwin"
+
+[[pkg.rust.target.aarch64-apple-darwin.extensions]]
+pkg = "rust-analyzer-preview"
+target = "aarch64-apple-darwin"
+
+[[pkg.rust.target.aarch64-apple-darwin.extensions]]
+pkg = "clippy-preview"
+target = "aarch64-apple-darwin"
+
+[[pkg.rust.target.aarch64-apple-darwin.extensions]]
+pkg = "rustfmt-preview"
+target = "aarch64-apple-darwin"
+
+[[pkg.rust.target.aarch64-apple-darwin.extensions]]
+pkg = "llvm-tools-preview"
+target = "aarch64-apple-darwin"
+
+[[pkg.rust.target.aarch64-apple-darwin.extensions]]
+pkg = "miri-preview"
+target = "aarch64-apple-darwin"
+
+[[pkg.rust.target.aarch64-apple-darwin.extensions]]
+pkg = "rust-docs-json-preview"
+target = "aarch64-apple-darwin"
+
+[[pkg.rust.target.aarch64-apple-darwin.extensions]]
+pkg = "rustc-codegen-cranelift-preview"
+target = "aarch64-apple-darwin"
+
+[[pkg.rust.target.aarch64-apple-darwin.extensions]]
+pkg = "llvm-bitcode-linker-preview"
+target = "aarch64-apple-darwin"
+
+[[pkg.rust.target.aarch64-apple-darwin.extensions]]
+pkg = "rustc-codegen-gcc-preview"
+target = "aarch64-apple-darwin"
+
+[[pkg.rust.target.aarch64-apple-darwin.extensions]]
+pkg = "gcc-x86_64-unknown-linux-gnu-preview"
+target = "aarch64-apple-darwin"
+
+[pkg.rust.target.x86_64-unknown-linux-gnu]
+available = true
+url = "https://static.rust-lang.org/dist/2026-06-30/rust-1.96.1-x86_64-unknown-linux-gnu.tar.gz"
+hash = "b177534946e6e5422d8a75398b39625c08eabad675c08bd3d6565d3ba90c8450"
+xz_url = "https://static.rust-lang.org/dist/2026-06-30/rust-1.96.1-x86_64-unknown-linux-gnu.tar.xz"
+xz_hash = "d29ccb1559a177c4e72291f6e5f629de7fe8885e7521ca47802627544b121e95"
+
+[[pkg.rust.target.x86_64-unknown-linux-gnu.components]]
+pkg = "rustc"
+target = "x86_64-unknown-linux-gnu"
+
+[[pkg.rust.target.x86_64-unknown-linux-gnu.components]]
+pkg = "rust-std"
+target = "x86_64-unknown-linux-gnu"
+
+[[pkg.rust.target.x86_64-unknown-linux-gnu.components]]
+pkg = "cargo"
+target = "x86_64-unknown-linux-gnu"
+
+[[pkg.rust.target.x86_64-unknown-linux-gnu.components]]
+pkg = "rust-docs"
+target = "x86_64-unknown-linux-gnu"
+
+[[pkg.rust.target.x86_64-unknown-linux-gnu.extensions]]
+pkg = "rust-src"
+target = "*"
+
+[[pkg.rust.target.x86_64-unknown-linux-gnu.extensions]]
+pkg = "rustc-dev"
+target = "x86_64-unknown-linux-gnu"
+
+[[pkg.rust.target.x86_64-unknown-linux-gnu.extensions]]
+pkg = "rustc-docs"
+target = "x86_64-unknown-linux-gnu"
+
+[[pkg.rust.target.x86_64-unknown-linux-gnu.extensions]]
+pkg = "rust-analysis"
+target = "x86_64-unknown-linux-gnu"
+
+[[pkg.rust.target.x86_64-unknown-linux-gnu.extensions]]
+pkg = "rust-analyzer-preview"
+target = "x86_64-unknown-linux-gnu"
+
+[[pkg.rust.target.x86_64-unknown-linux-gnu.extensions]]
+pkg = "clippy-preview"
+target = "x86_64-unknown-linux-gnu"
+
+[[pkg.rust.target.x86_64-unknown-linux-gnu.extensions]]
+pkg = "rustfmt-preview"
+target = "x86_64-unknown-linux-gnu"
+
+[[pkg.rust.target.x86_64-unknown-linux-gnu.extensions]]
+pkg = "llvm-tools-preview"
+target = "x86_64-unknown-linux-gnu"
+
+[[pkg.rust.target.x86_64-unknown-linux-gnu.extensions]]
+pkg = "miri-preview"
+target = "x86_64-unknown-linux-gnu"
+
+[[pkg.rust.target.x86_64-unknown-linux-gnu.extensions]]
+pkg = "rust-docs-json-preview"
+target = "x86_64-unknown-linux-gnu"
+
+[[pkg.rust.target.x86_64-unknown-linux-gnu.extensions]]
+pkg = "rustc-codegen-cranelift-preview"
+target = "x86_64-unknown-linux-gnu"
+
+[[pkg.rust.target.x86_64-unknown-linux-gnu.extensions]]
+pkg = "llvm-bitcode-linker-preview"
+target = "x86_64-unknown-linux-gnu"
+
+[[pkg.rust.target.x86_64-unknown-linux-gnu.extensions]]
+pkg = "rustc-codegen-gcc-preview"
+target = "x86_64-unknown-linux-gnu"
+
+[[pkg.rust.target.x86_64-unknown-linux-gnu.extensions]]
+pkg = "gcc-x86_64-unknown-linux-gnu-preview"
+target = "x86_64-unknown-linux-gnu"
+
+[pkg.rust-analysis]
+version = "1.96.1 (31fca3adb 2026-06-26)"
+git_commit_hash = "31fca3adb283cc9dfd56b49cdee9a96eb9c96ffd"
+
+[pkg.rust-analysis.target.aarch64-apple-darwin]
+available = true
+url = "https://static.rust-lang.org/dist/2026-06-30/rust-analysis-1.96.1-aarch64-apple-darwin.tar.gz"
+hash = "eb49dc7a1ce094e61c8c9977a8be4300ac6d809dea1350511d9d56c00d45eb39"
+xz_url = "https://static.rust-lang.org/dist/2026-06-30/rust-analysis-1.96.1-aarch64-apple-darwin.tar.xz"
+xz_hash = "83a0f7eaf08013b8cb1175f126ee0d7ea07a11228aaa630f49c76dec145f18f9"
+
+[pkg.rust-analysis.target.x86_64-unknown-linux-gnu]
+available = true
+url = "https://static.rust-lang.org/dist/2026-06-30/rust-analysis-1.96.1-x86_64-unknown-linux-gnu.tar.gz"
+hash = "2bd54999670c54275ec9024eeb3972eae1f3dc11ee556d365589485b851c5707"
+xz_url = "https://static.rust-lang.org/dist/2026-06-30/rust-analysis-1.96.1-x86_64-unknown-linux-gnu.tar.xz"
+xz_hash = "51fe399e07975f99d75cb1cc5a76e8247e457e6daae4f155caaddfec44e6cb71"
 
 [pkg.rust-analyzer-preview]
 version = "0.0.0"
@@ -176,6 +358,15 @@ url = "https://static.rust-lang.org/dist/2026-06-30/rustc-1.96.1-x86_64-unknown-
 hash = "4979b9ce46281de67d02ea0383400b00f9b83ec7d505b26b3c3646e12d98fee4"
 xz_url = "https://static.rust-lang.org/dist/2026-06-30/rustc-1.96.1-x86_64-unknown-linux-gnu.tar.xz"
 xz_hash = "3545a0efad2355ecb0a3b9ac02efee96e27f1f9d24b7ce2fc3f279b2efb0d923"
+
+[pkg.rustc-codegen-cranelift-preview]
+version = ""
+
+[pkg.rustc-codegen-cranelift-preview.target.aarch64-apple-darwin]
+available = false
+
+[pkg.rustc-codegen-cranelift-preview.target.x86_64-unknown-linux-gnu]
+available = false
 
 [pkg.rustfmt-preview]
 version = "1.9.0"

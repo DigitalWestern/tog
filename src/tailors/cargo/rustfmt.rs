@@ -1,4 +1,9 @@
 //! The pinned Rust formatting component used by `tog fmt`.
+//!
+//! A catalog toolchain's rustfmt is its release's own `rustfmt` row, realized
+//! as a separate object beside the Rust object. A local toolchain
+//! (`toolchain.path`) is used as it is, so its rustfmt is the one in its
+//! tree, and the imported Rust object is also the formatter object.
 
 use crate::comforter::status::State;
 use crate::kernel::activity::StoreActivity;
@@ -16,20 +21,26 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::kernel::provider::rust::{
-    RustfmtComponent, RUSTFMT_COMPONENTS, RUSTFMT_RECIPE, RUSTFMT_VERSION,
-};
+#[cfg(test)]
+use crate::kernel::provider::rust::RUST_VERSION;
+use crate::kernel::provider::rust::{shipped_selection, RUSTFMT_RECIPE};
+use crate::kernel::provider::rust_path;
 
-fn component(platform: Platform) -> io::Result<&'static RustfmtComponent> {
-    RUSTFMT_COMPONENTS
-        .iter()
-        .find(|component| component.platform == platform)
-        .ok_or_else(|| no_pin("rustfmt component", platform))
+/// The shipped release's rustfmt row for Rust `rust_version`: every release
+/// in the catalog carries the rustfmt of the same version.
+fn shipped_row(platform: Platform, rust_version: &str) -> io::Result<ArtifactSpec> {
+    let selected = shipped_selection(rust_version)?;
+    rustfmt_row(platform, &selected).map_err(|_| no_pin("rustfmt component", platform))
 }
 
 pub fn preflight_platform(platform: Platform) -> io::Result<()> {
     crate::kernel::platform::require_host(platform, "rustfmt component")?;
-    component(platform).map(|_| ())
+    let catalog = cargo::toolchain_catalog()?;
+    catalog
+        .default_release()
+        .and_then(|default| default.artifact(platform, "rustfmt"))
+        .map(|_| ())
+        .ok_or_else(|| no_pin("rustfmt component", platform))
 }
 
 fn rustfmt_identity(
@@ -37,20 +48,8 @@ fn rustfmt_identity(
     rust_version: &str,
     rust_object: &Path,
 ) -> io::Result<Identity> {
-    if rust_version != RUSTFMT_VERSION {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!(
-                "internal: resolved Rust {rust_version} but rustfmt {RUSTFMT_VERSION} is the only pinned component"
-            ),
-        ));
-    }
-    identity_from(
-        platform,
-        RUSTFMT_VERSION,
-        component(platform)?.sha256,
-        rust_object,
-    )
+    let row = shipped_row(platform, rust_version)?;
+    identity_from(platform, rust_version, row.digest.hex(), rust_object)
 }
 
 /// The rustfmt object's identity, from the component digest that went into
@@ -143,6 +142,17 @@ fn current_inputs(recorded: &Value) -> Value {
 /// this binary would write them for a run in `root.join(resolved_from)` now.
 /// Computed from the pins alone: no store, no network, no policy record.
 pub fn pinned_record(platform: Platform, root: &Path, resolved_from: &str) -> io::Result<Value> {
+    // A local toolchain has no pin: the lock's row is its identity, and its
+    // own tree is the formatter.
+    if let Some(selected) = locked_path_selection(root)? {
+        let rust_object = rust_path::identity(platform, &selected)?.object_id();
+        return Ok(json!({
+            "rust_version": selected.version("rustc")?,
+            "rust_object": { "id": rust_object },
+            "rustfmt_object": { "id": rust_object },
+            "inputs": record_inputs(&rust_object, resolved_from),
+        }));
+    }
     let version = cargo::resolve_toolchain_quiet(platform, &root.join(resolved_from))?;
     let rust_object = cargo::rust_object_id(platform, version)?;
     let rustfmt_object = rustfmt_identity(platform, version, Path::new(&rust_object))?.object_id();
@@ -152,6 +162,28 @@ pub fn pinned_record(platform: Platform, root: &Path, resolved_from: &str) -> io
         "rustfmt_object": { "id": rustfmt_object },
         "inputs": record_inputs(&rustfmt_object, resolved_from),
     }))
+}
+
+/// The committed lock's Rust selection at `root`, when it is a local tree.
+/// A lock that cannot be read is not one: `status` reports it on its own
+/// row, and this record is then judged against the pins as before.
+fn locked_path_selection(root: &Path) -> io::Result<Option<Selected>> {
+    use crate::kernel::toolchain::lock::ToolchainLock;
+    let Ok(Some(lock)) = crate::kernel::fsroot::ProjectRoot::open(root)
+        .and_then(|project| ToolchainLock::read_via(&project))
+    else {
+        return Ok(None);
+    };
+    let Some(section) = lock.ecosystem("rust") else {
+        return Ok(None);
+    };
+    let selected = Selected {
+        ecosystem: "rust".into(),
+        bundle: section.bundle()?,
+        lock_sha256: None,
+        source: crate::kernel::toolchain::Source::Lock,
+    };
+    Ok(rust_path::is_path(&selected).then_some(selected))
 }
 
 /// Whether a `rustfmt` closure in `dir` was made by the rustfmt this binary
@@ -240,7 +272,7 @@ pub(crate) fn live_identity_for_test(
     platform: Platform,
     rust_object_id: &str,
 ) -> io::Result<Identity> {
-    rustfmt_identity(platform, RUSTFMT_VERSION, Path::new(rust_object_id))
+    rustfmt_identity(platform, RUST_VERSION, Path::new(rust_object_id))
 }
 
 #[cfg(test)]
@@ -253,9 +285,13 @@ fn object_id_for(
         .map(|identity| identity.object_id())
 }
 
+/// The formatter binaries `tog fmt` runs.
+const FORMATTER_BINARIES: [&str; 2] = ["rustfmt", "cargo-fmt"];
+
 /// Ensure the rustfmt and cargo-fmt binaries paired with `rust_object` exist.
 /// The component is a separate immutable object so the existing Rust object
-/// and its identity remain unchanged.
+/// and its identity remain unchanged. A local toolchain brings its own: the
+/// imported tree must hold them, and is itself the formatter object.
 pub fn ensure_rustfmt(
     store: &Store,
     activity: &StoreActivity,
@@ -265,7 +301,6 @@ pub fn ensure_rustfmt(
 ) -> io::Result<PathBuf> {
     crate::tailors::install_kinds();
     crate::kernel::platform::require_host(platform, "rustfmt component")?;
-    let row = rustfmt_row(platform, selected)?;
     let expected_rust_id = cargo::runtime_object_id(platform, selected)?;
     let rust_object = rust_object.canonicalize()?;
     if rust_object != store.object_path(&expected_rust_id).canonicalize()? {
@@ -274,6 +309,23 @@ pub fn ensure_rustfmt(
             "rustfmt was paired with an unexpected Rust object; run `tog` first",
         ));
     }
+    if rust_path::is_path(selected) {
+        for binary in FORMATTER_BINARIES {
+            if !rust_object.join("bin").join(binary).is_file() {
+                let tree = selected.artifact(platform, "rustc")?.url;
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!(
+                        "the local Rust toolchain {tree} has no bin/{binary}; add rustfmt to it \
+                         (for a rustup toolchain, `rustup component add rustfmt`), then run \
+                         `tog update --toolchain rust`"
+                    ),
+                ));
+            }
+        }
+        return Ok(rust_object);
+    }
+    let row = rustfmt_row(platform, selected)?;
     let identity = identity_from(platform, &row.version, row.digest.hex(), &rust_object)?;
     let id = identity.object_id();
     if store.has_with_activity(activity, &id)? {
@@ -556,13 +608,13 @@ mod tests {
     fn legacy_adapter_recovers_the_paired_rust_object_and_component() {
         for platform in Platform::ALL {
             let pin = component(*platform).unwrap();
-            let rust_object = format!("{}-rust-{RUSTFMT_VERSION}", "b".repeat(40));
+            let rust_object = format!("{}-rust-{RUST_VERSION}", "b".repeat(40));
             let identity =
-                rustfmt_identity(*platform, RUSTFMT_VERSION, Path::new(&rust_object)).unwrap();
+                rustfmt_identity(*platform, RUST_VERSION, Path::new(&rust_object)).unwrap();
             let stub = crate::kernel::objmeta::legacy_record(crate::kernel::types::Identity {
                 kind: "rust".into(),
                 name: "rust".into(),
-                version: RUSTFMT_VERSION.into(),
+                version: RUST_VERSION.into(),
                 inputs: std::collections::BTreeMap::new(),
             });
             let mut stub = stub;
@@ -578,7 +630,7 @@ mod tests {
                             .iter()
                             .map(|d| format!("{}:{}", d.algo(), d.hex()))
                             .collect::<Vec<_>>(),
-                        vec![format!("sha256:{}", pin.sha256)]
+                        vec![format!("sha256:{}", pin.digest.hex())]
                     );
                 }
                 crate::kernel::objmeta::Adaptation::Unresolved(reason) => panic!("{reason}"),
@@ -586,6 +638,11 @@ mod tests {
         }
     }
     use super::*;
+
+    /// The shipped rustfmt row of the fixture release.
+    fn component(platform: Platform) -> io::Result<ArtifactSpec> {
+        shipped_row(platform, RUST_VERSION)
+    }
 
     #[test]
     fn pins_are_platform_specific_and_verified() {
@@ -595,7 +652,7 @@ mod tests {
             "https://static.rust-lang.org/dist/rustfmt-1.96.1-aarch64-apple-darwin.tar.xz"
         );
         assert_eq!(
-            darwin.sha256,
+            darwin.digest.hex(),
             "ed0cc9d72c04e7c3c4b7a82ab7f1ce5e33132017d062d8f9be6adf6472e8f165"
         );
         let linux = component(Platform::X86_64UnknownLinuxGnu).unwrap();
@@ -604,7 +661,7 @@ mod tests {
             "https://static.rust-lang.org/dist/rustfmt-1.96.1-x86_64-unknown-linux-gnu.tar.xz"
         );
         assert_eq!(
-            linux.sha256,
+            linux.digest.hex(),
             "dcee5627f709f387cdca416a1d2ae9e6c2581cd117cdb4fd097c56c196384662"
         );
     }
@@ -625,7 +682,7 @@ mod tests {
     fn darwin_identity_unchanged_style_golden() {
         let id = object_id_for(
             Platform::Aarch64AppleDarwin,
-            RUSTFMT_VERSION,
+            RUST_VERSION,
             "b8418440835c4ec1f591381a17ae60ab12d1c727-rust-1.96.1",
         )
         .unwrap();
@@ -654,6 +711,36 @@ mod tests {
             assert!(name.starts_with(prefix), "{name}");
         }
         let _ = crate::kernel::store::remove_tree(&parent);
+    }
+
+    /// Under a lock naming a local toolchain, the record `status` expects
+    /// names the import as both the Rust and the formatter object.
+    #[test]
+    fn a_local_toolchain_record_names_the_import_twice() {
+        use crate::kernel::toolchain::input::InputRow;
+        use crate::kernel::toolchain::lock::{ToolchainLock, LOCK_PATH};
+        let temp = crate::kernel::testutil::TempDir::new();
+        let root = temp.0.as_path();
+        let platform = Platform::X86_64UnknownLinuxGnu;
+        let selected = cargo::path_selection_for_test(platform);
+        let mut lock = ToolchainLock::new("0.1.0");
+        let rows = [InputRow {
+            path: PathBuf::from("rust-toolchain.toml"),
+            field: "toolchain.path".into(),
+            value: Some("/custom/rust".into()),
+            absent: false,
+            sha256: Some("0".repeat(64)),
+        }];
+        lock.set_ecosystem("rust", &selected.bundle, &rows).unwrap();
+        fs::write(root.join(LOCK_PATH), lock.canonical_bytes()).unwrap();
+        let record = pinned_record(platform, root, "").unwrap();
+        let import = rust_path::identity(platform, &selected)
+            .unwrap()
+            .object_id();
+        assert_eq!(record["rust_object"]["id"], import.as_str());
+        assert_eq!(record["rustfmt_object"]["id"], import.as_str());
+        assert_eq!(record["rust_version"], "1.96.1");
+        assert_eq!(record["inputs"]["rustfmt_object"], import.as_str());
     }
 
     #[test]

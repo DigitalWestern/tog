@@ -227,7 +227,41 @@ pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
             .map(|extension| extension.identity.clone()),
     );
     cases.push(assembled.identity);
+    // A local toolchain tree, imported from the row a lock records for it.
+    cases.push(
+        crate::kernel::provider::rust_path::identity(platform, &path_selection_for_test(platform))
+            .expect("local Rust toolchain identity"),
+    );
     cases
+}
+
+/// A locked local-toolchain selection, as `tog-toolchain.toml` records one.
+#[cfg(test)]
+pub(crate) fn path_selection_for_test(platform: Platform) -> Selected {
+    use crate::kernel::toolchain::{ArtifactRow, Bundle, Component, Source};
+    Selected {
+        ecosystem: "rust".into(),
+        bundle: Bundle {
+            release: crate::kernel::provider::rust_path::PATH_RELEASE.into(),
+            revision: None,
+            primary: vec!["rustc".into()],
+            components: vec![
+                Component::new("rustc", "1.96.1"),
+                Component::embedded("cargo", "1.96.1", "rustc"),
+            ],
+            artifacts: vec![ArtifactRow::new(
+                platform,
+                "rustc",
+                "path",
+                "rustc 1.96.1 (31fca3adb 2026-06-26); cargo 1.96.1 (356927216 2026-06-26)",
+                crate::kernel::provider::rust_path::PATH_RECIPE,
+                "file:///custom/rust",
+                crate::kernel::digest::Digest::sha256(&"e".repeat(64)).unwrap(),
+            )],
+        },
+        lock_sha256: None,
+        source: Source::Lock,
+    }
 }
 
 /// A later `--config` outranks ours; letting one through would let a hostile
@@ -590,7 +624,17 @@ mod tests {
     /// The shipped Rust selection: what a run with no lock to honor is
     /// handed, and the only thing these tests need a `Selected` for.
     fn selection() -> Selected {
-        crate::kernel::toolchain::shipped(&toolchain_catalog().unwrap()).unwrap()
+        crate::kernel::provider::rust::shipped_selection(RUST_VERSION).unwrap()
+    }
+
+    /// The Rust a project with no toolchain file, or one naming `stable`,
+    /// gets: the shipped catalog's explicit default.
+    fn default_version() -> String {
+        crate::kernel::toolchain::shipped(&toolchain_catalog().unwrap())
+            .unwrap()
+            .version("rustc")
+            .unwrap()
+            .to_string()
     }
 
     #[test]
@@ -852,7 +896,7 @@ checksum = "{hash_b}"
 
         assert_eq!(
             resolve_toolchain_within(platform, &sdist).unwrap(),
-            RUST_VERSION
+            default_version()
         );
         assert!(toolchain_file_extras_within(&sdist).unwrap().is_empty());
         assert!(crate::kernel::policy::pending().is_empty());
@@ -876,6 +920,34 @@ checksum = "{hash_b}"
             resolve_toolchain(Platform::Aarch64AppleDarwin, &project).unwrap(),
             "1.96.1"
         );
+
+        // A table with components and no channel is rustup's default
+        // toolchain: the catalog's explicit default.
+        fs::remove_file(root.join("rust-toolchain")).unwrap();
+        fs::write(
+            root.join("rust-toolchain.toml"),
+            "[toolchain]\ncomponents = [\"clippy\"]\n",
+        )
+        .unwrap();
+        assert_eq!(
+            resolve_toolchain(Platform::Aarch64AppleDarwin, &project).unwrap(),
+            default_version()
+        );
+        // A local toolchain has no pin: only a project lock records one.
+        fs::write(
+            root.join("rust-toolchain.toml"),
+            "[toolchain]\npath = \"/custom/rust\"\n",
+        )
+        .unwrap();
+        let error = resolve_toolchain(Platform::Aarch64AppleDarwin, &project).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("names the local toolchain /custom/rust"),
+            "{error}"
+        );
+        fs::remove_file(root.join("rust-toolchain.toml")).unwrap();
+        fs::write(root.join("rust-toolchain"), "1.96\n").unwrap();
 
         fs::remove_file(root.join("rust-toolchain")).unwrap();
         fs::write(
@@ -903,7 +975,7 @@ checksum = "{hash_b}"
         fs::write(root.join("rust-toolchain"), "stable\n").unwrap();
         assert_eq!(
             resolve_toolchain(Platform::Aarch64AppleDarwin, &project).unwrap(),
-            "1.96.1"
+            default_version()
         );
 
         fs::write(root.join("rust-toolchain"), "nightly-2026-01-01\n").unwrap();
@@ -937,7 +1009,7 @@ checksum = "{hash_b}"
         fs::remove_file(root.join("rust-toolchain.toml")).unwrap();
         assert_eq!(
             resolve_toolchain(Platform::Aarch64AppleDarwin, &project).unwrap(),
-            "1.96.1"
+            default_version()
         );
         let _ = crate::kernel::policy::drain();
     }
@@ -1062,11 +1134,10 @@ checksum = "{hash_b}"
         let temp = TempDir::new("tog-cargo-lockless");
         let project = temp.path().join("project");
         fs::create_dir_all(&project).unwrap();
-        let shipped = selection();
         for platform in Platform::ALL {
             assert_eq!(
                 resolve_toolchain(*platform, &project).unwrap(),
-                shipped.version("rustc").unwrap(),
+                default_version(),
                 "{}",
                 platform.triple()
             );
@@ -1129,15 +1200,30 @@ checksum = "{hash_b}"
 
         assert_eq!(
             resolve_toolchain(Platform::X86_64UnknownLinuxGnu, &project).unwrap(),
-            "1.96.1"
+            default_version()
         );
-        for channel in ["stable", "1.96", "1.96.1"] {
+        fs::write(root.join("rust-toolchain"), "stable\n").unwrap();
+        assert_eq!(
+            resolve_toolchain(Platform::X86_64UnknownLinuxGnu, &project).unwrap(),
+            default_version()
+        );
+        // Every shipped release is reachable, a minor line by its newest
+        // patch.
+        for (channel, version) in [
+            ("1.96", "1.96.1"),
+            ("1.96.1", "1.96.1"),
+            ("1.96.0", "1.96.0"),
+            ("1.95.0", "1.95.0"),
+            ("1.70", "1.70.0"),
+        ] {
             fs::write(root.join("rust-toolchain"), format!("{channel}\n")).unwrap();
             assert_eq!(
                 resolve_toolchain(Platform::X86_64UnknownLinuxGnu, &project).unwrap(),
-                "1.96.1"
+                version
             );
         }
+        fs::write(root.join("rust-toolchain"), "1.69.0\n").unwrap();
+        assert!(resolve_toolchain(Platform::X86_64UnknownLinuxGnu, &project).is_err());
 
         fs::write(root.join("rust-toolchain"), "beta\n").unwrap();
         assert!(resolve_toolchain(Platform::X86_64UnknownLinuxGnu, &project).is_err());

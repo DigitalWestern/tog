@@ -12,7 +12,7 @@
 //! the file round-trips byte-identically.
 
 use super::input::InputRow;
-use super::{qualified, ArtifactRow, Bundle, Component};
+use super::{is_path_url, qualified, ArtifactRow, Bundle, Component, PATH_SOURCE};
 use crate::kernel::digest::Digest;
 use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::platform::Platform;
@@ -56,6 +56,12 @@ struct InputToml {
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 struct ArtifactLock {
+    /// `"path"` on the row of a toolchain that is a directory on this
+    /// machine, absent on a catalog download. It is written from the row's
+    /// `file://` URL and checked against it on read, so the two cannot
+    /// disagree, and a lock with no path rows has the bytes it always had.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source: Option<String>,
     provider: String,
     build: String,
     recipe: String,
@@ -321,6 +327,18 @@ impl ToolchainLock {
                             "artifact row {triple}/{component} has a bad digest"
                         )));
                     }
+                    let marked = row.source.as_deref() == Some(PATH_SOURCE);
+                    if row.source.is_some() && !marked {
+                        return Err(bad(format!(
+                            "artifact row {triple}/{component} has source {:?}; the only source a row names is {PATH_SOURCE:?}",
+                            row.source.as_deref().unwrap_or_default()
+                        )));
+                    }
+                    if marked != is_path_url(&row.url) {
+                        return Err(bad(format!(
+                            "artifact row {triple}/{component}: source = {PATH_SOURCE:?} goes with a file:// url and only with one"
+                        )));
+                    }
                 }
             }
             // The id is a hash of the rows it stands beside. A row edited
@@ -406,6 +424,9 @@ impl ToolchainLock {
                         "[toolchain.{eco}.platforms.{}.artifacts.{component}]\n",
                         quoted(triple)
                     ));
+                    if let Some(source) = row.source.as_deref() {
+                        out.push_str(&format!("source = {}\n", quoted(source)));
+                    }
                     out.push_str(&format!("provider = {}\n", quoted(&row.provider)));
                     out.push_str(&format!("build = {}\n", quoted(&row.build)));
                     out.push_str(&format!("recipe = {}\n", quoted(&row.recipe)));
@@ -493,6 +514,7 @@ impl ToolchainLock {
                 .insert(
                     row.component.clone(),
                     ArtifactLock {
+                        source: is_path_url(&row.url).then(|| PATH_SOURCE.to_string()),
                         provider: row.provider.clone(),
                         build: row.build.clone(),
                         recipe: row.recipe.clone(),
@@ -1050,7 +1072,7 @@ digest = "sha256:855d581f8a4eb1a8117e3426de25fe02770592febcfb31369aee1ffbfee9e8e
 
     #[test]
     fn a_built_lock_round_trips_back_to_its_bundle() {
-        for bundle in [node_bundle(), beam_bundle()] {
+        for bundle in [node_bundle(), beam_bundle(), path_bundle()] {
             let mut lock = ToolchainLock::new("0.1.0");
             lock.set_ecosystem("eco", &bundle, &node_inputs()).unwrap();
             let again = ToolchainLock::parse(&lock.canonical_bytes()).unwrap();
@@ -1063,6 +1085,78 @@ digest = "sha256:855d581f8a4eb1a8117e3426de25fe02770592febcfb31369aee1ffbfee9e8e
             assert_eq!(section.release(), bundle.release);
             assert_eq!(section.primary(), bundle.primary.as_slice());
             assert_eq!(section.inputs(), node_inputs());
+        }
+    }
+
+    /// A toolchain that is a directory on this machine: one host row whose
+    /// URL is the tree and whose digest is its content hash.
+    fn path_bundle() -> Bundle {
+        Bundle {
+            release: "path".into(),
+            revision: None,
+            primary: vec!["rustc".into()],
+            components: vec![
+                Component::new("rustc", "1.96.1"),
+                Component::embedded("cargo", "1.96.1", "rustc"),
+            ],
+            artifacts: vec![ArtifactRow::new(
+                Platform::X86_64UnknownLinuxGnu,
+                "rustc",
+                "path",
+                "rustc 1.96.1 (31fca3adb 2026-06-26); cargo 1.96.1 (356927216 2026-06-26)",
+                "rust-path/1",
+                "file:///custom/rust",
+                Digest::sha256(&"e".repeat(64)).unwrap(),
+            )],
+        }
+    }
+
+    #[test]
+    fn a_path_row_is_marked_by_its_source_and_round_trips() {
+        let mut lock = ToolchainLock::new("0.1.0");
+        lock.set_ecosystem("rust", &path_bundle(), &node_inputs())
+            .unwrap();
+        let text = String::from_utf8(lock.canonical_bytes()).unwrap();
+        assert!(
+            text.contains(
+                "[toolchain.rust.platforms.\"x86_64-unknown-linux-gnu\".artifacts.rustc]\n\
+                 source = \"path\"\nprovider = \"path\"\n"
+            ),
+            "{text}"
+        );
+        let again = ToolchainLock::parse(text.as_bytes()).unwrap();
+        assert_eq!(again.canonical_bytes(), text.as_bytes());
+        assert_eq!(
+            again.ecosystem("rust").unwrap().bundle().unwrap(),
+            path_bundle()
+        );
+        // A catalog row is never marked, so an existing lock keeps its bytes.
+        let mut catalog = ToolchainLock::new("0.1.0");
+        catalog
+            .set_ecosystem("node", &node_bundle(), &node_inputs())
+            .unwrap();
+        assert!(!String::from_utf8(catalog.canonical_bytes())
+            .unwrap()
+            .contains("source ="));
+        // The marker and the URL cannot disagree, and no other source exists.
+        for (from, to, words) in [
+            ("source = \"path\"\n", "", "goes with a file:// url"),
+            (
+                "url = \"file:///custom/rust\"",
+                "url = \"https://example.org/rust\"",
+                "goes with a file:// url",
+            ),
+            (
+                "source = \"path\"",
+                "source = \"catalog\"",
+                "the only source a row names",
+            ),
+        ] {
+            let edited = text.replacen(from, to, 1);
+            let error = ToolchainLock::parse(edited.as_bytes())
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(words), "{from} -> {to}: {error}");
         }
     }
 

@@ -68,6 +68,16 @@ fn tog_with_tmp(bin: &Path, project: &Path, store: &Path, tmp: &Path, args: &[&s
         .unwrap()
 }
 
+/// The Rust a project with no toolchain file gets: the shipped catalog's
+/// explicit default.
+fn default_rust() -> String {
+    tog::kernel::toolchain::shipped(&tog::kernel::provider::rust::toolchain_catalog().unwrap())
+        .unwrap()
+        .version("rustc")
+        .unwrap()
+        .to_string()
+}
+
 fn assert_ok(output: Output, label: &str) -> String {
     assert!(
         output.status.success(),
@@ -206,7 +216,7 @@ fn cargo_sync_build_and_run_again_offline() {
         "rustc -vV",
     );
     assert!(
-        rustc.contains("1.96.1"),
+        rustc.contains(&format!("release: {}", default_rust())),
         "unexpected rustc version:\n{rustc}"
     );
     assert!(
@@ -345,7 +355,13 @@ fn toolchain_file_components_and_targets_are_provisioned() {
     let store = temp.0.join("store");
     let binary = PathBuf::from(env!("CARGO_BIN_EXE_tog"));
 
-    // The base toolchain first, so the assembled object can be told apart.
+    // The base toolchain of the same release first, so the assembled object
+    // can be told apart from it and shown to link its files.
+    std::fs::write(
+        project.join("rust-toolchain.toml"),
+        "[toolchain]\nchannel = \"1.96.1\"\n",
+    )
+    .unwrap();
     assert_ok(
         tog_with_tmp(&binary, &project, &store, &tmp, &["sync"]),
         "plain sync",
@@ -606,4 +622,105 @@ fn build_syncs_only_the_built_ecosystem_beside_a_failing_one() {
     // The failure is the missing package, not something unrelated.
     assert!(stderr.contains("tog-no-such-package-158"), "{stderr}");
     assert!(!closures.join("python.json").exists());
+}
+
+/// A real toolchain directory named by `[toolchain] path`: the catalog's
+/// Rust, synced once, is copied out of the store to stand in for a local
+/// rustup toolchain. The project then builds and runs with the imported
+/// copy, the closure records `external-toolchain`, and an edit to the
+/// directory makes the next sync refuse until `tog update --toolchain`.
+#[test]
+#[ignore]
+fn a_local_toolchain_directory_builds_the_project() {
+    let temp = TempDir::new();
+    let project = temp.0.join("cargo-hello");
+    copy_tree(
+        &PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/cargo-hello"),
+        &project,
+    );
+    let tmp = temp.0.join("tmp");
+    std::fs::create_dir_all(tmp.join("home")).unwrap();
+    let store = temp.0.join("store");
+    let binary = PathBuf::from(env!("CARGO_BIN_EXE_tog"));
+
+    assert_ok(
+        tog_with_tmp(&binary, &project, &store, &tmp, &["sync"]),
+        "catalog sync",
+    );
+    let (catalog_rust, _) = assert_cargo_closure(&project, &store);
+    let local = temp.0.join("local-rust");
+    let copied = Command::new("/bin/cp")
+        .arg("-R")
+        .arg(&catalog_rust)
+        .arg(&local)
+        .status()
+        .unwrap();
+    assert!(copied.success());
+    let restored = Command::new("/bin/chmod")
+        .args(["-R", "u+w"])
+        .arg(&local)
+        .status()
+        .unwrap();
+    assert!(restored.success());
+    let local = local.canonicalize().unwrap();
+    std::fs::write(
+        project.join("rust-toolchain.toml"),
+        format!("[toolchain]\npath = \"{}\"\n", local.display()),
+    )
+    .unwrap();
+
+    // The toolchain file changed, so the lock is stale until updated.
+    let output = tog_with_tmp(&binary, &project, &store, &tmp, &["sync"]);
+    assert!(!output.status.success(), "a stale lock synced");
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert!(stderr.contains("tog update --toolchain rust"), "{stderr}");
+    let output = tog_with_tmp(
+        &binary,
+        &project,
+        &store,
+        &tmp,
+        &["update", "--toolchain", "rust"],
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert_ok(output, "update to the local toolchain");
+    assert!(stderr.contains("exception external-toolchain"), "{stderr}");
+    let lock = std::fs::read_to_string(project.join("tog-toolchain.toml")).unwrap();
+    assert!(lock.contains("source = \"path\""), "{lock}");
+    assert!(
+        lock.contains(&format!("url = \"file://{}\"", local.display())),
+        "{lock}"
+    );
+
+    let (imported, _) = assert_cargo_closure(&project, &store);
+    assert_ne!(
+        imported, catalog_rust,
+        "the import reused the catalog object"
+    );
+    let closure = std::fs::read_to_string(project.join(".tog/closures/cargo.json")).unwrap();
+    assert!(closure.contains("\"external-toolchain\""), "{closure}");
+    assert_ok(
+        tog_with_tmp(&binary, &project, &store, &tmp, &["build"]),
+        "build",
+    );
+    let output = assert_ok(
+        tog_with_tmp(
+            &binary,
+            &project,
+            &store,
+            &tmp,
+            &["run", "target/debug/cargo-hello"],
+        ),
+        "run",
+    );
+    assert_eq!(output.trim(), "hello 128");
+
+    // Editing the directory breaks the lock's content hash: fail closed.
+    std::fs::write(local.join("lib/rustlib/extra.txt"), b"edited").unwrap();
+    let output = tog_with_tmp(&binary, &project, &store, &tmp, &["sync"]);
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert!(!output.status.success(), "a changed tree synced\n{stderr}");
+    assert!(
+        stderr.contains("changed since tog-toolchain.toml locked it"),
+        "{stderr}"
+    );
 }

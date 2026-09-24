@@ -193,6 +193,15 @@ impl Tailor for Cargo {
         cargo::toolchain_catalog()
     }
 
+    fn external_toolchain(
+        &self,
+        platform: Platform,
+        project: &Path,
+        rows: &[crate::kernel::toolchain::input::InputRow],
+    ) -> io::Result<Option<crate::kernel::toolchain::Bundle>> {
+        crate::kernel::provider::rust_path::select(platform, project, rows)
+    }
+
     fn legacy_toolchain_evidence(
         &self,
         ecosystem: &str,

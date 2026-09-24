@@ -310,6 +310,21 @@ pub trait Tailor: Sync {
     /// the pin tables, so no object identity changes.
     fn toolchain_catalog(&self) -> io::Result<Catalog>;
 
+    /// The toolchain the project's discovered `rows` name when it is not a
+    /// catalog release at all: a directory on this machine
+    /// (`kernel::toolchain::PATH_SOURCE`), which the lock then records in
+    /// place of a catalog selection. `project` is the canonical project
+    /// directory the rows are relative to. `None` means the catalog
+    /// answers, as it does for every ecosystem that names no such thing.
+    fn external_toolchain(
+        &self,
+        _platform: Platform,
+        _project: &Path,
+        _rows: &[crate::kernel::toolchain::input::InputRow],
+    ) -> io::Result<Option<crate::kernel::toolchain::Bundle>> {
+        Ok(None)
+    }
+
     /// What a closure of this ecosystem written before the toolchain lock
     /// proves about its toolchain (`kernel::toolchain::seed`): `platform`
     /// is the closure envelope's platform, `body` the closure body
@@ -686,11 +701,20 @@ mod tests {
             beam.artifact(DARWIN, "hex").unwrap().digest,
             beam.artifact(LINUX, "hex").unwrap().digest
         );
-        // Rust: rustfmt rides in the same bundle under its own recipe.
+        // Rust: rustfmt rides in the same bundle under its own recipe, and
+        // so does the channel manifest extras are provisioned from.
         let cargo = by_id("cargo").unwrap().toolchain_catalog().unwrap();
-        let rust = &cargo.bundles()[0];
-        assert_eq!(rust.components.len(), 4);
+        let rust = cargo.default_release().unwrap();
+        assert_eq!(rust.components.len(), 5);
         assert_eq!(rust.artifact(LINUX, "rustfmt").unwrap().recipe, "rustfmt/1");
+        assert_eq!(
+            rust.artifact(DARWIN, "channel-manifest").unwrap().digest,
+            rust.artifact(LINUX, "channel-manifest").unwrap().digest
+        );
+        assert_eq!(
+            rust.artifact(LINUX, "channel-manifest").unwrap().recipe,
+            "rust-channel-manifest/1"
+        );
         assert_eq!(
             rust.artifact(LINUX, "rustc").unwrap().recipe,
             "rust-toolchain/1"
@@ -713,8 +737,8 @@ mod tests {
         ),
         (
             "cargo",
-            "rust-1.96.1",
-            "sha256:7f8d06960d2ffe5a22fd86070f3d0bd2f912259489d646f4c0c1fb5018dfc1e7",
+            "rust-1.98.1",
+            "sha256:625891abbb7049c43a74a4ef7066e8726e4a9e0df282a663f8eb1be826b1ecea",
         ),
         (
             "go",
@@ -947,10 +971,14 @@ mod tests {
             "node-22.11.0",
             "sha256:c6cac9bb57646ae08a32a6853d523a14a1521de7ac6b9796b825ed2865ae920f",
         ),
+        // The one Rust release the hand-written table shipped. Its bundle
+        // gained the channel manifest row when the catalog became
+        // generated (#134), so its id is the generated one; its base
+        // object id is unchanged (see the cargo identity goldens).
         (
             "cargo",
             "rust-1.96.1",
-            "sha256:7f8d06960d2ffe5a22fd86070f3d0bd2f912259489d646f4c0c1fb5018dfc1e7",
+            "sha256:b4b9a620da8759e882f1b1791d14203f0cbd96c5e51afb3407eb9ab7e75cd9fc",
         ),
         (
             "go",
@@ -996,18 +1024,14 @@ mod tests {
                 .unwrap_or_else(|| panic!("{ecosystem}: {release} is no longer shipped"));
             assert_eq!(&bundle.bundle_id(), id, "{ecosystem}: {release}");
         }
-        // Every ecosystem but Rust (whose catalog #134 regenerates) grew.
+        // Every ecosystem grew.
         for tailor in registry() {
             let before = SHIPPED_BEFORE_GROWTH
                 .iter()
                 .filter(|(ecosystem, _, _)| *ecosystem == tailor.id())
                 .count();
             let now = tailor.toolchain_catalog().unwrap().bundles().len();
-            if tailor.id() == "cargo" {
-                assert_eq!(now, before);
-            } else {
-                assert!(now > before, "{}: {now} releases", tailor.id());
-            }
+            assert!(now > before, "{}: {now} releases", tailor.id());
         }
     }
 
@@ -1022,6 +1046,10 @@ mod tests {
         ("ruby", include_str!("ruby/catalog.toml")),
         ("elixir", include_str!("elixir/catalog.toml")),
         ("dotnet", include_str!("dotnet/catalog.toml")),
+        (
+            "cargo",
+            include_str!("../kernel/provider/rust.catalog.toml"),
+        ),
     ];
 
     /// Each document is in the canonical spelling `tools/catalog.py`

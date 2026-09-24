@@ -42,7 +42,7 @@
 //! manifest and a lock that disagree about any byte refuse to assemble.
 
 use super::rust::{self, err};
-use super::rust_channel::{self, Archive, ChannelManifest, ANY_TARGET, STD_PACKAGE};
+use super::rust_channel::{Archive, ChannelManifest, ANY_TARGET, STD_PACKAGE};
 use crate::kernel::activity::StoreActivity;
 use crate::kernel::archive::{self, Compression};
 use crate::kernel::digest::Digest;
@@ -192,8 +192,31 @@ fn plan(
     selected: &Selected,
     extras: &Extras,
 ) -> io::Result<Plan> {
-    let rows = rust::runtime_rows(platform, selected)?;
     let wanted = extras.beyond_base(platform);
+    if super::rust_path::is_path(selected) {
+        // A local tree is used as it is: nothing is installed into it, as
+        // rustup installs nothing into one. The project's own file cannot
+        // ask (its reader refuses a path beside a list); an sdist's can.
+        if !wanted.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "the project's Rust is a local toolchain (toolchain.path), which is used as it is; \
+                     it cannot also provide components [{}], targets [{}] or profile {}; \
+                     name a channel in rust-toolchain.toml instead",
+                    wanted.components.join(", "),
+                    wanted.targets.join(", "),
+                    wanted.profile.as_deref().unwrap_or("none")
+                ),
+            ));
+        }
+        return Ok(Plan {
+            manifest: None,
+            extensions: Vec::new(),
+            identity: super::rust_path::identity(platform, selected)?,
+        });
+    }
+    let rows = rust::runtime_rows(platform, selected)?;
     if wanted.is_empty() {
         return Ok(Plan {
             manifest: None,
@@ -202,15 +225,9 @@ fn plan(
         });
     }
     let version = selected.version("rustc")?;
-    let pin = rust::channel_manifest_pin(version)?;
-    let manifest = load_manifest(
-        store,
-        activity,
-        version,
-        &rust_channel::manifest_url(version),
-        &pin,
-    )?;
-    plan_with_manifest(platform, selected, &wanted, &manifest, &pin)
+    let row = rust::channel_manifest(platform, selected)?;
+    let manifest = load_manifest(store, activity, version, &row.url, &row.digest)?;
+    plan_with_manifest(platform, selected, &wanted, &manifest, &row.digest)
 }
 
 /// The pinned manifest, from the store's content-addressed cache (keyed by
@@ -261,30 +278,41 @@ pub(crate) fn plan_with_manifest(
         .iter()
         .map(|name| manifest.package_name(name))
         .collect();
-    // Named components are refused when the release lacks them; a profile's
-    // packages are the manifest's own list, installed where published, as
-    // rustup installs them.
-    let mut names: Vec<&str> = wanted.components.iter().map(String::as_str).collect();
-    if let Some(profile) = &wanted.profile {
-        names.extend(
-            manifest
-                .profile(profile)?
-                .iter()
-                .map(String::as_str)
-                .filter(|package| manifest.publishes(package, host)),
-        );
-    }
+    // A named component, and a profile member this host's toolchain lists,
+    // must both resolve: one the release lacks or did not build is a hard
+    // error. A profile's unresolvable members are reported together.
     let mut archives: BTreeMap<(String, String), Archive> = BTreeMap::new();
-    for name in names {
+    let mut resolve = |name: &str| -> io::Result<()> {
         let package = manifest.package_name(name);
         if base_packages.contains(package) {
-            continue;
+            return Ok(());
         }
         let archive = match bundle_component(selected, manifest, package) {
             Some(component) => bundle_archive(platform, selected, component, package)?,
             None => manifest.component(name, host)?,
         };
         archives.insert((archive.package.clone(), archive.target.clone()), archive);
+        Ok(())
+    };
+    for name in &wanted.components {
+        resolve(name)?;
+    }
+    if let Some(profile) = &wanted.profile {
+        let refused: Vec<String> = manifest
+            .profile_members(profile, host)?
+            .into_iter()
+            .filter_map(|package| resolve(package).err())
+            .map(|error| error.to_string())
+            .collect();
+        if !refused.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "profile {profile} cannot be installed on {host}: {}",
+                    refused.join("; ")
+                ),
+            ));
+        }
     }
     for triple in &wanted.targets {
         let archive = manifest.target_std(triple)?;
@@ -320,6 +348,9 @@ fn check_bundle_against_manifest(
     manifest: &ChannelManifest,
 ) -> io::Result<()> {
     for component in &selected.bundle.components {
+        if component.name == rust::CHANNEL_MANIFEST {
+            continue;
+        }
         let Some(row) = selected.bundle.artifact(platform, &component.name) else {
             continue;
         };
@@ -716,11 +747,17 @@ pub(crate) mod fixtures {
 
     /// The checked-in manifest fixture, parsed as the release it trims.
     pub fn manifest() -> ChannelManifest {
-        ChannelManifest::parse(rust::RUST_VERSION, rust_channel::FIXTURE).unwrap()
+        ChannelManifest::parse(
+            rust::RUST_VERSION,
+            crate::kernel::provider::rust_channel::FIXTURE,
+        )
+        .unwrap()
     }
 
     pub fn pin() -> Digest {
-        rust::channel_manifest_pin(rust::RUST_VERSION).unwrap()
+        rust::channel_manifest(Platform::X86_64UnknownLinuxGnu, &shipped())
+            .unwrap()
+            .digest
     }
 
     pub fn shipped() -> Selected {
@@ -810,10 +847,17 @@ mod tests {
             error.to_string().contains("tog update --toolchain rust"),
             "{error}"
         );
-        // Every shipped release has a pinned manifest.
+        // Every shipped release pins its manifest, on every platform.
         for bundle in rust::toolchain_catalog().unwrap().bundles() {
             let version = &bundle.component("rustc").unwrap().version;
-            assert!(rust::channel_manifest_pin(version).is_ok(), "{version}");
+            let selected = rust::shipped_selection(version).unwrap();
+            for platform in Platform::ALL {
+                let row = rust::channel_manifest(*platform, &selected).unwrap();
+                assert_eq!(
+                    row.url,
+                    format!("https://static.rust-lang.org/dist/channel-rust-{version}.toml")
+                );
+            }
         }
     }
 
@@ -907,16 +951,29 @@ mod tests {
                 "ext:rustfmt-preview@x86_64-unknown-linux-gnu",
             ]
         );
-        // complete skips what this release marks unavailable (miri) or does
-        // not publish in the fixture, where a named component would refuse.
-        let complete = plan_for(LINUX, &with_profile("complete", &[])).unwrap();
-        let complete = keys(&complete);
-        assert!(complete.contains(&"ext:rust-analyzer-preview@x86_64-unknown-linux-gnu".into()));
-        assert!(complete.contains(&"ext:llvm-tools-preview@x86_64-unknown-linux-gnu".into()));
-        assert!(
-            !complete.iter().any(|key| key.contains("miri")),
-            "{complete:?}"
-        );
+        // complete names miri and cranelift, which 1.96.1 lists for these
+        // hosts and did not build: a hard error naming both, not a
+        // toolchain quietly missing them.
+        for platform in Platform::ALL {
+            let error = plan_for(*platform, &with_profile("complete", &[])).unwrap_err();
+            let message = error.to_string();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+            assert!(
+                message.starts_with(&format!(
+                    "profile complete cannot be installed on {}",
+                    platform.triple()
+                )),
+                "{message}"
+            );
+            assert!(message.contains("miri-preview"), "{message}");
+            assert!(
+                message.contains("rustc-codegen-cranelift-preview"),
+                "{message}"
+            );
+            assert!(message.contains("marks it unavailable"), "{message}");
+            // Its available members are not what failed.
+            assert!(!message.contains("rust-analyzer"), "{message}");
+        }
         assert!(plan_for(LINUX, &extras(&["miri"], &[])).is_err());
         // A profile the manifest does not define is refused.
         let error = plan_for(LINUX, &with_profile("bespoke", &[])).unwrap_err();
@@ -1026,7 +1083,7 @@ mod tests {
             .activity(crate::kernel::activity::ActivityMode::Shared)
             .unwrap();
         let fixture = temp.0.join("channel-rust.toml");
-        fs::write(&fixture, rust_channel::FIXTURE).unwrap();
+        fs::write(&fixture, crate::kernel::provider::rust_channel::FIXTURE).unwrap();
         let pin = Digest::sha256(
             &crate::kernel::fetch::hash_file(&fixture, crate::kernel::digest::Algo::Sha256)
                 .unwrap(),

@@ -179,18 +179,26 @@ realizes a separate pinned `rustfmt` object linked against the Rust object.
 rows (`toolchain.targets`, `toolchain.components`, `toolchain.profile`):
 lists sorted and deduplicated, each written only when present, so a lock
 for a project without them is unchanged. A file that does not parse is an
-error and a stale lock, never the "absent" row. Sync provisions what the
-rows ask for from the official channel manifest
-`channel-rust-<version>.toml`, pinned by sha256 in `provider/rust.rs` and
-kept in the store's content-addressed cache under that sha256, so a
-release seen once plans offline (`provider/rust_channel.rs` reads it,
-following its `renames`). The pin is produced by
-`tools/rust_channel_pin.py`, which verifies the manifest's signature with
-`gpgv` against the Rust release key in `tools/keys/` first; tog checks the
-sha256 only. A named component or target the manifest does not publish for
-the host, or marks `available = false`, is a hard error naming it. A
-profile expands to the manifest's `profiles` list, keeping what the host
-has, as rustup does. Each extension is its own `rust-component/1` object
+error and a stale lock, never the "absent" row. A table with no channel
+(only components, targets or a profile) means rustup's default toolchain,
+which for tog is the catalog's explicit default: the lock records that
+release and provisions the listed components onto it. Sync provisions what
+the rows ask for from the official channel manifest
+`channel-rust-<version>.toml`, pinned by sha256 as the release's
+`channel-manifest` row in `provider/rust.catalog.toml` and kept in the
+store's content-addressed cache under that sha256, so a release seen once
+plans offline (`provider/rust_channel.rs` reads it, following its
+`renames`). `tools/catalog.py cargo` writes that row after verifying the
+manifest's signature with `gpgv` against the Rust release key in
+`tools/keys/`; tog checks the sha256 only. A named component or target the
+manifest does not publish for the host, or marks `available = false`, is a
+hard error naming it. A profile expands the way rustup expands it: through
+the host's own list, the aggregate `rust` package's `components` and
+`extensions` for that host. A profile member off that list (`rust-mingw`
+off Windows) is not part of this host's toolchain and is left out. A member
+on it that the release did not build is a hard error, and every such member
+is named at once (1.96.1's `complete` names `miri-preview` and
+`rustc-codegen-cranelift-preview`). Each extension is its own `rust-component/1` object
 (one archive, keyed by its sha256), and the toolchain a build sees is an
 assembled `rust` object (`rust-toolchain/2`): a copy of the base object
 with the components merged in, keyed by the base id, the manifest digest,
@@ -207,6 +215,26 @@ so `profile = "default"` and its components by name are one object.
 rustfmt as a component is the bundle's own `rustfmt` row, the
 same archive `tog fmt` realizes, and every bundle row is checked against the
 manifest, so there is one pin.
+
+`[toolchain] path` names a toolchain directory on this machine, which
+rustup runs as it is (`provider/rust_path.rs`). The lock records it in
+place of a catalog release: a row marked `source = "path"` whose URL is
+the tree's `file://` path, whose build is the first lines of its
+`bin/rustc -vV` and `bin/cargo -V`, and whose digest is a sha256 over the
+tree's names, bytes, executable bits and (contained) symlink targets. The
+selection comes from the tailor (`Tailor::external_toolchain`), because
+only it knows what a path means; the lock writer and reader stay generic
+and check that the marker and the `file://` URL go together. Every
+realization re-probes and re-hashes the tree first and refuses one that is
+no longer the locked tree, naming `tog update --toolchain rust`. The tree
+is then imported as a `rust` object (`rust-path/1`: a verified copy keyed by
+the tree hash and build, with no store dependencies), so builds, closures
+and GC treat it like any other toolchain. Each use records the
+`external-toolchain` exception (a toolchain from no pinned release),
+which a policy can deny; the company template does. rustup refuses a path
+beside a channel, components, targets or a profile, and so does the lock's
+reader. `tog fmt` runs the tree's own `rustfmt`, so the import is also the
+formatter object.
 
 **go** (`tailors/go/`, `kernel/dirhash.rs`). go.sum is an authentication ledger, not
 a lock graph, so the closure is computed by the store Go toolchain itself
@@ -311,8 +339,9 @@ is a miss.
 The catalog a lock is minted from
 (`src/kernel/toolchain/`). Each ecosystem's catalog is a checked-in,
 generated data file: `src/tailors/<eco>/catalog.toml`, and
-`src/kernel/provider/cpython.catalog.toml` for CPython and uv (Rust's
-pins are still a table in `rust.rs`). The binary embeds each file and
+`src/kernel/provider/cpython.catalog.toml` for CPython and uv, and
+`src/kernel/provider/rust.catalog.toml` for Rust (providers rather than
+tailor files, because the Python tailor builds with both). The binary embeds each file and
 `toolchain/document.rs` parses it once into release bundles: components,
 and per platform one artifact row with the provider, build, append-only
 recipe id, URL and algorithm-qualified digest (`sha256:…` or `sha512:…`,
@@ -325,7 +354,9 @@ files are written only by `python3 tools/catalog.py [eco ...]`, which reads
 each upstream's release listing (go.dev's JSON, Node's signed
 `SHASUMS256.txt`, python-build-standalone's `SHA256SUMS`, portable-ruby,
 erlef and `tog-toolchains` OTP builds with Hex and rebar3 from
-`builds.hex.pm`, .NET release metadata), verifies every row against a
+`builds.hex.pm`, .NET release metadata, and every stable Rust release from
+1.70.0 in static.rust-lang.org's channel manifests, each signature checked
+with `gpgv` before its rows are read), verifies every row against a
 second published checksum where one exists, and reports each release it
 skips because a supported platform has no build. It is append-only: rows
 already shipped are re-verified against the choices they record and must be
@@ -669,8 +700,11 @@ and build inputs tailors share, so no tailor reaches into another):
     provider/       shared toolchain providers, the pinned things more than one
                     tailor realizes: cpython.rs (CPython + uv from
                     cpython.catalog.toml, realization; node-gyp's
-                    interpreter too), rust.rs (Rust
-                    pins, catalog, toolchain files), crates.rs (Cargo.lock
+                    interpreter too), rust.rs (Rust from
+                    rust.catalog.toml, toolchain files), rust_channel.rs and
+                    rust_extras.rs (components, targets and profiles from
+                    the channel manifest), rust_path.rs (a local toolchain
+                    directory), crates.rs (Cargo.lock
                     vendoring; sdists with Rust extensions too),
                     nativelibs.rs (the Linux native library set), artifacts.rs
                     (install-time artifact policy)

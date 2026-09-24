@@ -1347,8 +1347,10 @@ mod tests {
             crate::kernel::provider::rust::runtime_object_id(platform, selected).unwrap()
         };
 
-        let shipped_rust = crate::kernel::provider::rust::shipped_selection(
-            crate::kernel::provider::rust::RUST_VERSION,
+        // With no lock and no toolchain file, the sdist builds with the
+        // shipped default.
+        let shipped_rust = crate::kernel::toolchain::shipped(
+            &crate::kernel::provider::rust::toolchain_catalog().unwrap(),
         )
         .unwrap();
         let unlocked = plan(None);

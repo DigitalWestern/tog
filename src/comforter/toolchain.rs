@@ -19,7 +19,7 @@ use crate::kernel::store::{self, Store};
 use crate::kernel::toolchain::input::{self, InputRow};
 use crate::kernel::toolchain::lock::{self, ToolchainLock};
 use crate::kernel::toolchain::{
-    seed, select_for, Catalog, LegacyEvidence, ProvedArtifact, Selected, Source,
+    seed, select_for, Bundle, Catalog, LegacyEvidence, ProvedArtifact, Selected, Source,
 };
 use crate::kernel::types::Identity;
 use crate::kernel::ui;
@@ -102,6 +102,32 @@ fn rows_of<'a>(discovered: &'a [(String, Vec<InputRow>)], ecosystem: &str) -> &'
         .iter()
         .find(|(name, _)| name == ecosystem)
         .map_or(&[][..], |(_, rows)| rows.as_slice())
+}
+
+/// The bundle a new or updated lock records for `ecosystem`: the local
+/// toolchain the rows name, when the ecosystem's tailor finds one
+/// ([`Tailor::external_toolchain`]); otherwise the pre-lock closure's seed
+/// when there is one, and the catalog's selection for the rows when not.
+fn choose(
+    root: &ProjectRoot,
+    platform: Platform,
+    entry: &EcosystemInput,
+    rows: &[InputRow],
+    seed_from_legacy: bool,
+) -> io::Result<(Bundle, bool)> {
+    let ecosystem = entry.lock_ecosystem.as_str();
+    if let Some(tailor) = crate::tailors::registry()
+        .iter()
+        .find(|tailor| tailor.lock_ecosystem() == ecosystem)
+    {
+        if let Some(bundle) = tailor.external_toolchain(platform, root.path(), rows)? {
+            return Ok((bundle, false));
+        }
+    }
+    match (&entry.legacy, seed_from_legacy) {
+        (Some(evidence), true) => Ok((seed(&entry.catalog, evidence)?.clone(), true)),
+        _ => Ok((select_for(&entry.catalog, ecosystem, rows)?.clone(), false)),
+    }
 }
 
 /// One selection read from a committed section, checked against the host.
@@ -476,7 +502,7 @@ pub fn resolve(
                 }
                 continue;
             }
-            let bundle = select_for(&entry.catalog, ecosystem, rows)?.clone();
+            let (bundle, _) = choose(root, platform, entry, rows, false)?;
             next.set_ecosystem(ecosystem, &bundle, rows)?;
             entries.insert(
                 ecosystem.to_string(),
@@ -542,12 +568,11 @@ pub fn resolve(
                 for entry in &inputs {
                     let ecosystem = entry.lock_ecosystem.as_str();
                     let rows = rows_of(&discovered, ecosystem);
-                    let (bundle, source) = match &entry.legacy {
-                        Some(evidence) => (seed(&entry.catalog, evidence)?.clone(), Source::Seeded),
-                        None => (
-                            select_for(&entry.catalog, ecosystem, rows)?.clone(),
-                            Source::Shipped,
-                        ),
+                    let (bundle, seeded) = choose(root, platform, entry, rows, true)?;
+                    let source = if seeded {
+                        Source::Seeded
+                    } else {
+                        Source::Shipped
                     };
                     entries.insert(
                         ecosystem.to_string(),
@@ -565,10 +590,7 @@ pub fn resolve(
                 for entry in &inputs {
                     let ecosystem = entry.lock_ecosystem.as_str();
                     let rows = rows_of(&discovered, ecosystem);
-                    let bundle = match &entry.legacy {
-                        Some(evidence) => seed(&entry.catalog, evidence)?.clone(),
-                        None => select_for(&entry.catalog, ecosystem, rows)?.clone(),
-                    };
+                    let (bundle, _) = choose(root, platform, entry, rows, true)?;
                     next.set_ecosystem(ecosystem, &bundle, rows)?;
                     entries.insert(
                         ecosystem.to_string(),

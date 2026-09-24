@@ -1,11 +1,12 @@
-//! Where the Rust channel-manifest pins come from. `tools/rust_channel_pin.py`
+//! Where the Rust channel-manifest pins come from. `tools/catalog.py cargo`
 //! verifies each manifest's detached signature against the Rust release key
-//! checked in at `tools/keys/rust-release-signing-key.asc` before it prints
-//! the sha256 that `CHANNEL_MANIFESTS` pins. These tests hold that key to the
-//! published fingerprint, and the tool to refusing bytes Rust did not sign.
+//! checked in at `tools/keys/rust-release-signing-key.asc` before it writes
+//! the manifest's sha256 as the release's `channel-manifest` row. This test
+//! holds that key, and the fingerprint the generator checks signatures
+//! against, to the key Rust publishes. The generator's own verification is
+//! tested offline in `tools/test_catalog.py`.
 
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::path::PathBuf;
 
 use sha1::{Digest, Sha1};
 
@@ -107,63 +108,10 @@ fn the_checked_in_key_is_the_rust_release_key() {
     let armored =
         std::fs::read_to_string(repo().join("tools/keys/rust-release-signing-key.asc")).unwrap();
     assert_eq!(primary_fingerprint(&armored), RUST_KEY_FINGERPRINT);
-    // The tool checks signatures against the same fingerprint.
-    let tool = std::fs::read_to_string(repo().join("tools/rust_channel_pin.py")).unwrap();
+    // The generator checks signatures against the same fingerprint.
+    let tool = std::fs::read_to_string(repo().join("tools/catalog.py")).unwrap();
     assert!(
-        tool.contains(&format!("FINGERPRINT = \"{RUST_KEY_FINGERPRINT}\"")),
-        "tools/rust_channel_pin.py checks another fingerprint"
+        tool.contains(&format!("RUST_FINGERPRINT = \"{RUST_KEY_FINGERPRINT}\"")),
+        "tools/catalog.py checks another fingerprint"
     );
-}
-
-fn pin_tool(args: &[&str]) -> std::process::Output {
-    Command::new("python3")
-        .arg(repo().join("tools/rust_channel_pin.py"))
-        .args(args)
-        .output()
-        .expect("python3")
-}
-
-/// Offline, with the checked-in signature of the 1.96.1 manifest: the
-/// trimmed test fixture is not the bytes Rust signed, so the tool refuses to
-/// pin it. Needs `gpg` and `gpgv`.
-#[test]
-#[ignore]
-fn the_pin_tool_refuses_a_manifest_rust_did_not_sign() {
-    let signature = repo().join("tools/keys/channel-rust-1.96.1.toml.asc");
-    let fixture = repo().join("src/kernel/provider/rust_channel_fixture.toml");
-    let output = pin_tool(&[
-        "1.96.1",
-        "--manifest",
-        path(&fixture),
-        "--signature",
-        path(&signature),
-    ]);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(!output.status.success(), "{stderr}");
-    assert!(stderr.contains("does not verify"), "{stderr}");
-}
-
-/// Network: every row of `CHANNEL_MANIFESTS` is the sha256 of a manifest
-/// whose signature verifies against the checked-in Rust key.
-#[test]
-#[ignore]
-fn every_pinned_channel_manifest_is_signed_by_rust() {
-    let output = pin_tool(&["--check"]);
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains(&format!(
-            "Rust {}: ",
-            tog::kernel::provider::rust::RUST_VERSION
-        )),
-        "{stdout}"
-    );
-}
-
-fn path(path: &Path) -> &str {
-    path.to_str().unwrap()
 }

@@ -43,6 +43,9 @@
 //! - An exception kind this binary does not know (a record written by a
 //!   newer tog, or by hand) is `unknown`, never permitted: no policy
 //!   file can name it, so no policy file can be said to have allowed it.
+//!   A kind tog retired (`policy::retired_kind`) is known, and old: the
+//!   record predates the change that retired it, so the closure is
+//!   `outdated` with that reason and the fix, a fresh sync.
 
 use crate::cli;
 use crate::commands::inspect::{self, ClosureFile, State};
@@ -471,6 +474,7 @@ pub fn evaluate(
         let mut denied = Vec::new();
         let mut unknown = Vec::new();
         let mut permitted = BTreeMap::new();
+        let mut retired = None;
         match recorded_exceptions(closure)? {
             Some(exceptions) => {
                 for mut exception in exceptions {
@@ -478,7 +482,9 @@ pub fn evaluate(
                     // on the hyphen is judged, counted, and printed under
                     // the one spelling this binary uses.
                     exception.kind = policy::canonical_kind(&exception.kind).to_string();
-                    if !policy::KINDS.contains(&exception.kind.as_str()) {
+                    if let Some(why) = policy::retired_kind(&exception.kind) {
+                        retired.get_or_insert((why, exception.kind));
+                    } else if !policy::KINDS.contains(&exception.kind.as_str()) {
                         unknown.push(exception);
                     } else if policy::denied(policy, &exception.kind) {
                         denied.push(exception);
@@ -494,6 +500,15 @@ pub fn evaluate(
                         refresh(&closure.ecosystem)
                     ));
                 }
+            }
+        }
+        // A retired kind is not judged against the policy: the record is
+        // older than what retired it, and a fresh sync replaces it.
+        if let Some((why, kind)) = retired {
+            if !matches!(freshness, Freshness::Stale(_)) {
+                freshness = Freshness::Outdated(format!(
+                    "{why} (it records the retired {kind} exception); run 'tog sync' under a trusted key, then commit"
+                ));
             }
         }
         verdicts.push(Verdict {
@@ -1530,6 +1545,57 @@ mod tests {
     }
 
     #[test]
+    fn a_retired_kind_is_an_outdated_closure_not_an_unknown_one() {
+        let temp = python_project("retired");
+        let closures = [with_exceptions(
+            &temp.0,
+            &[
+                exception("toolchain-component-unavailable", "clippy"),
+                exception(SKIPPED_OPTIONAL, "dev"),
+            ],
+        )];
+        for policy in [permissive(), deny(policy::KINDS)] {
+            let verdicts = judge(&temp.0, &policy, &closures);
+            let verdict = &verdicts[0];
+            assert!(!verdict.passes(), "{policy:?}");
+            assert!(
+                matches!(
+                    verdict.freshness,
+                    Freshness::Outdated(ref why) if why.starts_with(
+                        "closure predates component provisioning (it records the retired toolchain-component-unavailable exception); run 'tog sync'"
+                    )
+                ),
+                "{verdict:?}"
+            );
+            // Not unknown (it is no newer tog's kind), and not permitted.
+            assert!(verdict.unknown.as_deref().unwrap().is_empty());
+            assert!(!verdict
+                .permitted
+                .as_ref()
+                .unwrap()
+                .contains_key("toolchain-component-unavailable"));
+        }
+        let verdicts = judge(&temp.0, &permissive(), &closures);
+        let record = record(&verdicts[0]);
+        let report = Report {
+            policy: permissive(),
+            sources: Vec::new(),
+            verdicts,
+            missing: Vec::new(),
+        };
+        let text = render(&temp.0, &report, false).unwrap();
+        assert!(text.contains("python  outdated"), "{text}");
+        assert!(text.contains(&record), "{text}");
+        assert!(
+            text.contains("closure predates component provisioning"),
+            "{text}"
+        );
+        assert!(!text.contains("unknown kind"), "{text}");
+        let value: Value = serde_json::from_str(&render(&temp.0, &report, true).unwrap()).unwrap();
+        assert_eq!(value["passed"], false);
+    }
+
+    #[test]
     fn extra_policy_denies_what_the_chain_permits() {
         let temp = python_project("extra");
         let extra = temp.0.join("company.toml");
@@ -2283,6 +2349,7 @@ mod tests {
             GIT_DEPENDENCY,
             policy::LOCK_DISAGREEMENT,
             policy::ARTIFACT_NOT_PROVISIONED,
+            policy::EXTERNAL_TOOLCHAIN,
         ]
         .iter()
         .map(|kind| kind.to_string())

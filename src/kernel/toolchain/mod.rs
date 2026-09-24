@@ -31,6 +31,21 @@ use sha2::{Digest as _, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 
+/// The source a lock row names for a toolchain that is a directory on this
+/// machine (`[toolchain] path` in a rustup toolchain file) rather than a
+/// catalog download. Its row's URL is [`PATH_URL_SCHEME`] and its digest is
+/// the content hash of the tree.
+pub const PATH_SOURCE: &str = "path";
+
+/// The URL scheme of a [`PATH_SOURCE`] row. No catalog row uses it: catalog
+/// rows are downloads.
+pub const PATH_URL_SCHEME: &str = "file://";
+
+/// Whether an artifact `url` names a local tree, not a download.
+pub fn is_path_url(url: &str) -> bool {
+    url.starts_with(PATH_URL_SCHEME)
+}
+
 /// The canonical `<algorithm>:<hex>` spelling a catalog row, a bundle id and
 /// a lock row share, so the row names the algorithm the verifier must use.
 pub fn qualified(digest: &Digest) -> String {

@@ -30,7 +30,8 @@ Usage, from the repository root:
     python3 tools/catalog.py --check go      # verify, write nothing, exit 1 on drift
     python3 tools/catalog.py --set-default go-1.27.1 go
 
-Needs network access, `gpgv` (Node's SHASUMS256.txt signatures) and `tar`.
+Needs network access, `gpgv` (Node's SHASUMS256.txt and Rust's channel
+manifest signatures) and `tar`.
 GitHub API calls use $GH_TOKEN / $GITHUB_TOKEN, or `gh auth token`, when
 available. Release listings and checksum files are fetched fresh on every
 run; only archives, which a versioned URL names immutably, are cached under
@@ -38,6 +39,7 @@ $TMPDIR/tog-catalog-cache (a cached archive is re-hashed on every use).
 Standard library only. Offline tests: `python3 tools/test_catalog.py`.
 """
 import argparse
+import base64
 import concurrent.futures
 import datetime
 import hashlib
@@ -66,6 +68,7 @@ FILES = {
     "ruby": "src/tailors/ruby/catalog.toml",
     "elixir": "src/tailors/elixir/catalog.toml",
     "dotnet": "src/tailors/dotnet/catalog.toml",
+    "cargo": "src/kernel/provider/rust.catalog.toml",
 }
 PRIMARY = {
     "python": ["cpython"],
@@ -74,6 +77,7 @@ PRIMARY = {
     "ruby": ["ruby"],
     "elixir": ["otp", "elixir"],
     "dotnet": ["dotnet-sdk"],
+    "cargo": ["rustc"],
 }
 
 
@@ -1021,6 +1025,169 @@ def generate_dotnet(existing, report):
     if checked < total:
         report.note(f"{total - checked} of {total} rows have no .sha512 beside the archive; "
                     "the release metadata is their only published checksum")
+    return out
+
+
+# --------------------------------------------------------------------------
+# Rust: each stable release's channel manifest (channel-rust-<version>.toml),
+# whose detached signature is checked with gpgv against the Rust release key
+# checked in at tools/keys/rust-release-signing-key.asc. The manifest names
+# every archive by sha256; a release's rows are its rustc, rust-std, cargo
+# and rustfmt archives on each platform, plus the manifest itself (tog
+# provisions optional components and cross targets from it, pinned by that
+# row). Each archive row is cross-checked against the .sha256 file beside
+# it on static.rust-lang.org. Supported releases are every stable release
+# from RUST_OLDEST through the current stable channel.
+
+RUST_DIST = "https://static.rust-lang.org/dist"
+RUST_KEY = os.path.join(REPO, "tools", "keys", "rust-release-signing-key.asc")
+# "Rust Language (Tag and Release Signing Key) <rust-key@rust-lang.org>", as
+# published at https://static.rust-lang.org/rust-key.gpg.ascii.
+RUST_FINGERPRINT = "108F66205EAEB0AAA8DD5E1C85AB96E6FA1BE5FE"
+RUST_OLDEST = (1, 70, 0)
+# (catalog component, manifest package, recipe). A package the manifest
+# renames is looked up under its new name.
+RUST_COMPONENTS = (
+    ("rustc", "rustc", "rust-toolchain/1"),
+    ("rust-std", "rust-std", "rust-toolchain/1"),
+    ("cargo", "cargo", "rust-toolchain/1"),
+    ("rustfmt", "rustfmt", "rustfmt/1"),
+)
+RUST_MANIFEST = "channel-manifest"
+RUST_MANIFEST_RECIPE = "rust-channel-manifest/1"
+
+
+def dearmor(text):
+    """The binary packets of an ASCII-armored OpenPGP block, which is the
+    keyring format gpgv reads."""
+    lines = text.splitlines()
+    start = next(i for i, line in enumerate(lines) if line.startswith("-----BEGIN PGP"))
+    body = []
+    in_headers = True
+    for line in lines[start + 1:]:
+        if in_headers:
+            if not line.strip():
+                in_headers = False
+            continue
+        if line.startswith("=") or line.startswith("-----END"):
+            break
+        body.append(line.strip())
+    return base64.b64decode("".join(body))
+
+
+def rust_keyring():
+    with open(RUST_KEY) as f:
+        return scratch_file("rust-release-key.gpg", dearmor(f.read()))
+
+
+def rust_verify(version, manifest, signature, keyring):
+    """The manifest's signature must verify, and chain to the Rust key."""
+    manifest_path = scratch_file(f"channel-rust-{version}.toml", manifest)
+    signature_path = scratch_file(f"channel-rust-{version}.toml.asc", signature)
+    home = os.path.join(os.path.dirname(keyring), "gnupg-home")
+    os.makedirs(home, mode=0o700, exist_ok=True)
+    result = subprocess.run(
+        ["gpgv", "--homedir", home, "--status-fd", "1", "--keyring", keyring,
+         signature_path, manifest_path],
+        capture_output=True, text=True,
+    )
+    # VALIDSIG <signing-key fpr> ... <primary-key fpr>: the last field is the
+    # primary key the signature chains to.
+    valid = [line.split() for line in result.stdout.splitlines()
+             if line.startswith("[GNUPG:] VALIDSIG ")]
+    if result.returncode != 0 or not valid:
+        raise Failure(f"rust {version}: channel-rust-{version}.toml signature does not verify "
+                      f"against the Rust release key:\n{result.stderr.strip()}")
+    if valid[0][-1] != RUST_FINGERPRINT:
+        raise Failure(f"rust {version}: channel-rust-{version}.toml is signed by {valid[0][-1]}, "
+                      f"not the Rust release key {RUST_FINGERPRINT}")
+
+
+def rust_stable_versions():
+    """Every stable release from RUST_OLDEST through the current stable."""
+    stable = tomllib.loads(fetch_text(f"{RUST_DIST}/channel-rust-stable.toml"))
+    current = version_key(stable["pkg"]["rustc"]["version"].split()[0])
+
+    def patches(minor):
+        out, patch = [], 0
+        while True:
+            version = f"{current[0]}.{minor}.{patch}"
+            if fetch(f"{RUST_DIST}/channel-rust-{version}.toml.sha256", missing_ok=True) is None:
+                return out
+            out.append(version)
+            patch += 1
+
+    minors = range(RUST_OLDEST[1], current[1] + 1)
+    versions = [v for vs in parallel(patches, list(minors)) for v in vs]
+    versions = [v for v in versions if RUST_OLDEST <= version_key(v) <= current]
+    if f"{current[0]}.{current[1]}.{current[2]}" not in versions:
+        raise Failure(f"rust: the stable channel is {current}, but its versioned manifest is missing")
+    return versions
+
+
+def rust_release(version, keyring):
+    """The release for `version`, or (None, why) when a platform lacks one
+    of its archives."""
+    url = f"{RUST_DIST}/channel-rust-{version}.toml"
+    manifest = fetch(url)
+    rust_verify(version, manifest, fetch(url + ".asc"), keyring)
+    doc = tomllib.loads(manifest.decode())
+    if doc.get("manifest-version") != "2":
+        raise Failure(f"rust {version}: manifest-version {doc.get('manifest-version')} is not 2")
+    expect_equal(f"rust {version}: manifest rustc version",
+                 doc["pkg"]["rustc"]["version"].split()[0], version)
+    renames = {name: to["to"] for name, to in doc.get("renames", {}).items()}
+    manifest_digest = "sha256:" + hashlib.sha256(manifest).hexdigest()
+    rows = []
+    for platform in PLATFORMS:
+        for name, package, recipe in RUST_COMPONENTS:
+            package = renames.get(package, package)
+            target = doc["pkg"].get(package, {}).get("target", {}).get(platform)
+            if not target or not target.get("available") or not target.get("xz_url"):
+                return None, f"the manifest publishes no {package} .tar.xz for {platform}"
+            archive = target["xz_url"].rsplit("/", 1)[1]
+            if archive != f"{name}-{version}-{platform}.tar.xz":
+                raise Failure(f"rust {version}: {package} for {platform} is {archive}")
+            # The undated URL: the same bytes (the cross-check proves it),
+            # under the name every release has kept.
+            rows.append(row(platform, name, "static.rust-lang.org", version, recipe,
+                            f"{RUST_DIST}/{archive}", f"sha256:{target['xz_hash']}"))
+        rows.append(row(platform, RUST_MANIFEST, "static.rust-lang.org", version,
+                        RUST_MANIFEST_RECIPE, url, manifest_digest))
+    components = [component(name, version) for name, _, _ in RUST_COMPONENTS]
+    components.append(component(RUST_MANIFEST, version))
+    return release(f"rust-{version}", components, rows), None
+
+
+def rust_cross_check(rel):
+    for a in rel["artifacts"]:
+        text = fetch_text(a["url"] + ".sha256")
+        expect_equal(f"rust {a['url']} .sha256", "sha256:" + text.split()[0], a["digest"])
+
+
+def generate_cargo(existing, report):
+    versions = rust_stable_versions()
+    keyring = rust_keyring()
+    known = {rel["components"][0]["version"] for rel in existing}
+    wanted = sorted(known | set(versions), key=version_key)
+    built = dict(zip(wanted, parallel(lambda v: rust_release(v, keyring), wanted, workers=8)))
+    out = {}
+    for rel in existing:
+        version = rel["components"][0]["version"]
+        fresh, _ = built[version]
+        check_row("cargo", rel["key"], rel, fresh)
+        out[rel["key"]] = rel
+    for version in versions:
+        key = f"rust-{version}"
+        if key in out:
+            continue
+        fresh, why = built[version]
+        if fresh is None:
+            report.skip(key, why)
+            continue
+        out[key] = fresh
+        report.added.append(key)
+    parallel(rust_cross_check, list(out.values()), workers=16)
     return out
 
 

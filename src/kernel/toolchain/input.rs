@@ -303,6 +303,39 @@ pub const RUST_TOOLCHAIN_REQUESTS: [(&str, &str); 3] = [
     RUST_TOOLCHAIN_PROFILE,
 ];
 
+/// `[toolchain] path`, and the input field it is recorded under: a toolchain
+/// that is a directory on this machine, as rustup reads it, instead of a
+/// channel tog provisions.
+pub const RUST_TOOLCHAIN_PATH: (&str, &str) = ("path", "toolchain.path");
+
+/// `[toolchain] path` as written, when present. rustup refuses a path next
+/// to a channel, and next to components, targets or a profile (a local tree
+/// is used as it is, nothing is installed into it); so does this reader,
+/// rather than record a request that means nothing.
+pub fn toolchain_path(table: &ToolchainTable, legacy: bool) -> io::Result<Option<String>> {
+    let name = toolchain_file_name(legacy);
+    let bad = |what: String| io::Error::new(io::ErrorKind::InvalidData, format!("{name}: {what}"));
+    let path = match table.get(RUST_TOOLCHAIN_PATH.0) {
+        None => return Ok(None),
+        Some(toml::Value::String(path)) if !path.is_empty() => path.clone(),
+        Some(_) => return Err(bad("toolchain.path must be a non-empty string".into())),
+    };
+    if table.contains_key("channel") {
+        return Err(bad(format!(
+            "toolchain.path ({path}) and toolchain.channel name two toolchains; keep one (rustup refuses both)"
+        )));
+    }
+    for (key, _) in RUST_TOOLCHAIN_REQUESTS {
+        if table.contains_key(key) {
+            return Err(bad(format!(
+                "toolchain.path ({path}) is used as it is, so toolchain.{key} cannot be installed into it; \
+                 remove toolchain.{key} or name a channel instead (rustup refuses both)"
+            )));
+        }
+    }
+    Ok(Some(path))
+}
+
 /// `[toolchain] profile`: one of [`RUST_PROFILES`] when present.
 pub fn toolchain_profile(table: &ToolchainTable, legacy: bool) -> io::Result<Option<String>> {
     match table.get(RUST_TOOLCHAIN_PROFILE.0) {
@@ -383,12 +416,13 @@ pub fn split_list(value: &str) -> Vec<String> {
         .collect()
 }
 
-/// The Rust rows: each toolchain file's channel, then the lists and the
-/// profile it asks for. A channel row is always written, as every other
-/// ecosystem's rows are. A list or profile row is written only when the file
-/// names one, so a lock minted before they were recorded stays
-/// byte-identical for a project that asks for none, and one appearing or
-/// disappearing is a row only one side has, which staleness calls stale.
+/// The Rust rows: each toolchain file's channel, then the lists, the
+/// profile and the local toolchain path it asks for. A channel row is always
+/// written, as every other ecosystem's rows are. A list, profile or path row
+/// is written only when the file names one, so a lock minted before they
+/// were recorded stays byte-identical for a project that asks for none, and
+/// one appearing or disappearing is a row only one side has, which
+/// staleness calls stale.
 fn rust_rows(root: &ProjectRoot) -> io::Result<Vec<InputRow>> {
     let mut rows = Vec::new();
     for (path, legacy) in [("rust-toolchain", true), ("rust-toolchain.toml", false)] {
@@ -418,6 +452,14 @@ fn rust_rows(root: &ProjectRoot) -> io::Result<Vec<InputRow>> {
             rows.push(InputRow::present(
                 path,
                 RUST_TOOLCHAIN_PROFILE.1,
+                value,
+                &bytes,
+            ));
+        }
+        if let Some(value) = toolchain_path(&table, legacy)? {
+            rows.push(InputRow::present(
+                path,
+                RUST_TOOLCHAIN_PATH.1,
                 value,
                 &bytes,
             ));
@@ -875,6 +917,67 @@ mod tests {
                 error
                     .to_string()
                     .contains("toolchain.profile must be one of"),
+                "{error}"
+            );
+        }
+        // A local toolchain is one row naming the tree as written, beside a
+        // channel row with no value.
+        std::fs::write(
+            dir.join("rust-toolchain.toml"),
+            "[toolchain]\npath = \"/custom/rust\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            fields(&root),
+            vec![
+                ("rust-toolchain".into(), "toolchain.channel".into(), None),
+                (
+                    "rust-toolchain.toml".into(),
+                    "toolchain.channel".into(),
+                    None
+                ),
+                (
+                    "rust-toolchain.toml".into(),
+                    "toolchain.path".into(),
+                    Some("/custom/rust".into())
+                ),
+            ]
+        );
+        // What rustup refuses beside a path is refused, not recorded.
+        for (extra, words) in [
+            ("channel = \"1.96.1\"", "name two toolchains"),
+            (
+                "components = [\"clippy\"]",
+                "toolchain.components cannot be installed",
+            ),
+            (
+                "targets = [\"wasm32-unknown-unknown\"]",
+                "toolchain.targets cannot be installed",
+            ),
+            (
+                "profile = \"minimal\"",
+                "toolchain.profile cannot be installed",
+            ),
+        ] {
+            std::fs::write(
+                dir.join("rust-toolchain.toml"),
+                format!("[toolchain]\npath = \"/custom/rust\"\n{extra}\n"),
+            )
+            .unwrap();
+            let error = discover(&root, "rust").unwrap_err();
+            assert!(error.to_string().contains(words), "{extra}: {error}");
+        }
+        for bad in ["path = \"\"", "path = 1"] {
+            std::fs::write(
+                dir.join("rust-toolchain.toml"),
+                format!("[toolchain]\n{bad}\n"),
+            )
+            .unwrap();
+            let error = discover(&root, "rust").unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("toolchain.path must be a non-empty string"),
                 "{error}"
             );
         }

@@ -85,6 +85,16 @@ fn age(path: &Path) {
     fs::File::open(path).unwrap().set_modified(old).unwrap();
 }
 
+/// The Rust a project with no toolchain file gets: the shipped catalog's
+/// explicit default.
+fn default_rust() -> String {
+    tog::kernel::toolchain::shipped(&tog::kernel::provider::rust::toolchain_catalog().unwrap())
+        .unwrap()
+        .version("rustc")
+        .unwrap()
+        .to_string()
+}
+
 #[test]
 #[ignore]
 fn fmt_is_lockless_cached_sandboxed_and_gc_rooted() {
@@ -206,7 +216,9 @@ fn fmt_is_lockless_cached_sandboxed_and_gc_rooted() {
 
     let listed = tog(&binary, &project, &store, &["ls"]);
     assert!(listed.status.success());
-    assert!(String::from_utf8_lossy(&listed.stdout).contains("rustfmt 1.96.1"));
+    assert!(
+        String::from_utf8_lossy(&listed.stdout).contains(&format!("rustfmt {}", default_rust()))
+    );
     // `ls` prints a rustfmt row, so `ls rustfmt` must be a legal filter.
     let listed_one = tog(&binary, &project, &store, &["ls", "rustfmt"]);
     assert!(

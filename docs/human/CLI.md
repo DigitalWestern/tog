@@ -225,8 +225,17 @@ rewrites a multi-purpose manifest leaves the lock fresh. The `targets`,
 order and duplicates do not count), and a toolchain file that does not
 parse is always stale. A sync provisions them from the release's pinned
 channel manifest, and refuses by name a component or target the release
-does not publish for this host. A profile installs what rustup's does; with
-none, the toolchain is rustc, cargo and the host's standard library.
+does not publish for this host. A profile installs what rustup's does, and
+fails naming every member this host's toolchain lists that the release did
+not build; with none, the toolchain is rustc, cargo and the host's
+standard library. A table with no channel gets the catalog's default
+release, and the lock records it. `path = "<dir>"` names a local toolchain
+directory instead: the lock records its `rustc -vV` and `cargo -V` lines
+and a hash of the whole tree on a row marked `source = "path"`, each sync
+imports it after checking the tree still hashes the same (a changed tree
+refuses and names `tog update --toolchain rust`), and each use records the
+`external-toolchain` exception. A path beside a channel, components,
+targets or a profile is refused, as rustup refuses it.
 
 `--frozen` validates the committed lock instead of creating one and refuses
 a missing or stale one.
@@ -551,7 +560,10 @@ algorithm; find out who changed it, then regenerate under a trusted key),
 line names the key and the scopes that exclude it), `outdated` (no
 signature, or a record from before inputs, platform, or the exception
 record were written; run `tog` once under a trusted key, then
-commit), `stale` (the same inputs-changed / projection-missing /
+commit. A record carrying an exception kind tog has retired is outdated
+too, with the reason and `run 'tog sync'`: a closure recording
+`toolchain-component-unavailable` says `closure predates component
+provisioning`), `stale` (the same inputs-changed / projection-missing /
 other-platform checks `status` makes, made per closure file from that
 file's own record), `denied` (each denied exception's kind, subject, and
 detail), `unknown` (an exception kind this binary cannot judge), or `clean`
