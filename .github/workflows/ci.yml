@@ -1,6 +1,6 @@
 # Every push to main and every pull request: formatting, build, the
 # installer test, and the offline test suite. The heavy network tests
-# (`--ignored`) and tests/acceptance.sh run nightly in heavy.yml; see
+# (`--ignored`) and tests/acceptance.sh run weekly in heavy.yml; see
 # README.md "Test".
 name: ci
 

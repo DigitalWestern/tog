@@ -203,12 +203,12 @@ tog.
 ```sh
 cargo test                                # unit and offline tests; CI runs this and cargo fmt --check
 bash tests/install.sh                     # the installer, offline; CI runs this after cargo build
-cargo test -- --ignored --test-threads=1  # heavy: network, real registries, one store per run under TMPDIR
+cargo test -- --ignored --test-threads=1  # heavy: network, real registries, scratch stores under TMPDIR
 bash tests/acceptance.sh                  # the full end-to-end checklist
 ```
 
 CI (`.github/workflows/ci.yml`) runs the first two on every PR. The last
-two download toolchains and packages, so they run nightly instead, in
+two download toolchains and packages, so they run weekly instead, in
 `.github/workflows/heavy.yml`; start it by hand from the Actions tab.
 
 On Linux the sandbox is bubblewrap (`dnf install bubblewrap`); set
