@@ -2,6 +2,8 @@
 name = "tog"
 version = "0.1.0"
 edition = "2021"
+# Matches rust-toolchain.toml: the one compiler CI tests and releases build with.
+rust-version = "1.98.1"
 description = "One command for every package manager: pinned toolchains, locked graphs, an immutable store"
 repository = "https://github.com/DigitalWestern/tog"
 homepage = "https://github.com/DigitalWestern/tog"
@@ -27,6 +29,16 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 libc = "0.2"
 flate2 = "1"
 liblzma = { version = "0.4", features = ["static"] }
+
+# CI runs `cargo clippy --locked --all-targets -- -D warnings`, so every
+# clippy warning fails the build. These few are allowed project-wide.
+[lints.clippy]
+# Store and sandbox entry points take many explicit inputs on purpose, so
+# each caller names what it passes; a params struct would only hide them.
+too_many_arguments = "allow"
+# Nested generic types (maps of vectors of tuples) read fine at their one
+# use site; a `type` alias per site would add names nobody else uses.
+type_complexity = "allow"
 
 [profile.release]
 strip = true

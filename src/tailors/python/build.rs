@@ -1334,6 +1334,24 @@ fn find_wheel(dir: &Path) -> io::Result<PathBuf> {
     ))
 }
 
+/// Realize the pinned setuptools/pip/wheel environment used by sandboxed
+/// metadata probes such as `setup.py egg_info`.
+pub fn ensure_build_environment(
+    store: &Store,
+    activity: &StoreActivity,
+    platform: Platform,
+    selected: &Selected,
+) -> io::Result<PathBuf> {
+    crate::tailors::install_kinds();
+    super::env::realize_env_for(
+        store,
+        activity,
+        platform,
+        &build_toolchain_plan(selected.version("cpython")?),
+        selected,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     /// A project that locks Rust builds its sdists' Rust extensions on that
@@ -1863,22 +1881,4 @@ mod tests {
         );
         assert!(sdist_build_env(Platform::Aarch64AppleDarwin).is_empty());
     }
-}
-
-/// Realize the pinned setuptools/pip/wheel environment used by sandboxed
-/// metadata probes such as `setup.py egg_info`.
-pub fn ensure_build_environment(
-    store: &Store,
-    activity: &StoreActivity,
-    platform: Platform,
-    selected: &Selected,
-) -> io::Result<PathBuf> {
-    crate::tailors::install_kinds();
-    super::env::realize_env_for(
-        store,
-        activity,
-        platform,
-        &build_toolchain_plan(selected.version("cpython")?),
-        selected,
-    )
 }

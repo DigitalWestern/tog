@@ -339,12 +339,12 @@ pub fn select_python_with_inputs(
             .copied()
             .find(|pin| pin.version == default_version)
             .ok_or_else(|| no_satisfying_pin(platform, "the default CPython", "pins", &pins))?;
-        let pin = if parsed.is_empty() || satisfies(&&default) {
+        let pin = if parsed.is_empty() || satisfies(&default) {
             default
         } else {
             pins.iter()
                 .copied()
-                .filter(|pin| satisfies(&pin))
+                .filter(|pin| satisfies(pin))
                 .max_by(|left, right| {
                     pinned_version(left.version)
                         .expect("pinned version")
@@ -850,9 +850,7 @@ pub fn extract_setup_py_python_requires(text: &str) -> Option<String> {
         {
             pos += 1;
         }
-        let Some(&quote) = text.as_bytes().get(pos) else {
-            return None;
-        };
+        let &quote = text.as_bytes().get(pos)?;
         if quote != b'\'' && quote != b'"' {
             search_from = pos;
             continue;

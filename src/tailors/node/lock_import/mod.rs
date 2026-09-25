@@ -477,10 +477,11 @@ fn place_node_package(
             dependency_path(parent, &dependency.name)
         } else if parent.is_empty() {
             return Err(err(format!(
-                "{}: root dependencies conflict between {} and {}",
+                "{}: root dependencies conflict between {} and {}@{}",
                 dependency.name,
                 occupied_description(existing),
-                format!("{}@{}", node.name, node.version)
+                node.name,
+                node.version
             )));
         } else {
             dependency_path(parent, &dependency.name)
@@ -491,11 +492,12 @@ fn place_node_package(
     if let Some(existing) = occupied.get(&path) {
         if !same_target(existing, &dependency.target, nodes) {
             return Err(err(format!(
-                "{}: two versions conflict at {} ({} and {})",
+                "{}: two versions conflict at {} ({} and {}@{})",
                 dependency.name,
                 path,
                 occupied_description(existing),
-                format!("{}@{}", node.name, node.version)
+                node.name,
+                node.version
             )));
         }
     } else {
@@ -2221,10 +2223,7 @@ plugin@1.0.0:
                 &held(&dir.0),
                 node_version(),
             );
-            let error = result
-                .err()
-                .expect("malformed fragment refused")
-                .to_string();
+            let error = result.expect_err("malformed fragment refused").to_string();
             assert!(error.contains("malformed yarn sha1 fragment"), "{error}");
         }
     }

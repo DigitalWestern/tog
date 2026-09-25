@@ -73,7 +73,7 @@ impl Store {
     fn project_lock_canonical(&self, project_dir: &Path) -> io::Result<fs::File> {
         let locks = self.root.join("root-locks");
         ensure_directory_tree(&self.root, Path::new("root-locks"))?;
-        let key = root_key(&project_dir);
+        let key = root_key(project_dir);
         let path = locks.join(format!("{key}.lock"));
         let file = OpenOptions::new()
             .create(true)
@@ -182,7 +182,7 @@ impl Store {
         project: &ProjectRoot,
         objects: BTreeSet<String>,
         projections: BTreeSet<ProjectionRef>,
-        _project: &fs::File,
+        _project_lock: &fs::File,
     ) -> io::Result<RootEntry> {
         self.require_activity(activity, "root publication")?;
         self.register_root_parts_locked(project, objects, projections)
@@ -395,11 +395,11 @@ impl Store {
             let Some(key) = name.to_str() else {
                 continue;
             };
-            if !is_sha1(&key) {
+            if !is_sha1(key) {
                 continue;
             }
-            let path = roots.join(&key);
-            entries.push(self.read_root_entry_tolerant_at(roots_dir.as_raw_fd(), &key, path));
+            let path = roots.join(key);
+            entries.push(self.read_root_entry_tolerant_at(roots_dir.as_raw_fd(), key, path));
         }
         entries.sort_by(|a, b| (&a.path, &a.key).cmp(&(&b.path, &b.key)));
         Ok(entries)
@@ -488,7 +488,7 @@ impl Store {
                 crash_temps.push(name);
                 continue;
             }
-            if !is_sha1(&key) {
+            if !is_sha1(key) {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     format!(
@@ -1512,7 +1512,7 @@ pub(super) fn base64_encode(bytes: &[u8]) -> String {
 
 pub(super) fn base64_decode(value: &str) -> Option<Vec<u8>> {
     let bytes = value.as_bytes();
-    if bytes.len() % 4 != 0 {
+    if !bytes.len().is_multiple_of(4) {
         return None;
     }
     let decode = |byte: u8| -> Option<u32> {

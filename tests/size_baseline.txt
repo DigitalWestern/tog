@@ -1,0 +1,38 @@
+# Size budget ratchet (tests/architecture.rs::size_budgets_ratchet).
+# Every src/ file over 1,500 non-test lines and every non-test function
+# over 150 lines, with its size today. Entries may only shrink or go away;
+# the test prints this file's new contents whenever it must change.
+#
+#   file <non-test lines> <path>
+#   fn <lines> <path>::<name>[#<nth occurrence in the file>]
+file 1635 src/comforter/mod.rs
+file 2128 src/commands/deps.rs
+file 2215 src/commands/x.rs
+file 1594 src/kernel/store/roots.rs
+file 1855 src/tailors/dotnet/mod.rs
+file 2178 src/tailors/elixir/mod.rs
+file 1534 src/tailors/go/mod.rs
+file 1787 src/tailors/node/lock_import/pnpm.rs
+file 1813 src/tailors/node/realize.rs
+fn 176 src/comforter/toolchain.rs::resolve
+fn 167 src/commands/audit.rs::render
+fn 159 src/commands/deps.rs::edit_requirements
+fn 182 src/commands/deps.rs::node
+fn 174 src/commands/mod.rs::dispatch
+fn 191 src/commands/x.rs::clean
+fn 166 src/kernel/archive.rs::read_entries
+fn 211 src/kernel/gc/migrate.rs::migrate_metadata_locked
+fn 169 src/kernel/gc/plan.rs::plan
+fn 151 src/kernel/gitsrc.rs::ensure_git_source
+fn 170 src/kernel/provider/crates.rs::realize_vendor_inner
+fn 209 src/kernel/toolchain/lock.rs::validate
+fn 163 src/kernel/toolchain/resolve.rs::request_for
+fn 224 src/tailors/node/lock_import/mod.rs::build_plan
+fn 160 src/tailors/node/lock_import/pnpm.rs::pnpm_nodes
+fn 157 src/tailors/node/lock_import/yarn1.rs::plan_yarn
+fn 186 src/tailors/node/mod.rs::live_identity_cases
+fn 170 src/tailors/node/project.rs::project_node_env_recorded
+fn 163 src/tailors/python/build.rs::build_sdist_wheel_at_depth
+fn 157 src/tailors/python/env.rs::realize_env_at_depth
+fn 220 src/tailors/python/inputs.rs::read_plan
+fn 154 src/tailors/ruby/mod.rs::plan_ruby

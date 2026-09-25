@@ -273,6 +273,9 @@ fn file_kind(stat: &libc::stat) -> libc::mode_t {
 struct FileKey([i64; 7]);
 
 impl FileKey {
+    // libc's stat field types differ by target (`st_dev` is an i32 on
+    // macOS); the casts pin the key's width everywhere.
+    #[allow(clippy::unnecessary_cast)]
     fn of(stat: &libc::stat) -> FileKey {
         FileKey([
             stat.st_dev as i64,
@@ -298,6 +301,8 @@ struct FileAt<'a> {
 }
 
 impl FileAt<'_> {
+    // `st_mode` is a u16 on macOS and a u32 on Linux.
+    #[allow(clippy::useless_conversion)]
     fn executable(&self) -> bool {
         u32::from(self.stat.st_mode) & 0o111 != 0
     }

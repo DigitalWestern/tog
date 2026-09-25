@@ -1284,14 +1284,14 @@ pub fn suggest<'a>(word: &str, candidates: impl Iterator<Item = &'a str>) -> Opt
     let mut best: Option<(usize, &str)> = None;
     for candidate in candidates {
         let lower = candidate.to_ascii_lowercase();
-        let distance = if lower == word {
-            0
-        } else if word.len() >= 2 && (lower.starts_with(&word) || word.starts_with(&lower)) {
+        let distance = if lower == word
+            || (word.len() >= 2 && (lower.starts_with(&word) || word.starts_with(&lower)))
+        {
             0
         } else {
             edit_distance(&word, &lower)
         };
-        if distance <= budget && best.map_or(true, |(d, _)| distance < d) {
+        if distance <= budget && best.is_none_or(|(d, _)| distance < d) {
             best = Some((distance, candidate));
         }
     }
@@ -1308,8 +1308,8 @@ fn edit_distance(a: &str, b: &str) -> usize {
     for i in 0..=a.len() {
         d[i * width] = i;
     }
-    for j in 0..=b.len() {
-        d[j] = j;
+    for (j, cell) in d.iter_mut().enumerate().take(width) {
+        *cell = j;
     }
     for i in 1..=a.len() {
         for j in 1..=b.len() {
@@ -2402,7 +2402,7 @@ mod tests {
             command(&[
                 "gc",
                 "--forget",
-                &key,
+                key,
                 "--forget=ABCDEF0123456789ABCDEF0123456789ABCDEF01"
             ]),
             Command::Gc(GcArgs {

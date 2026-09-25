@@ -1089,7 +1089,7 @@ mod tests {
         if !data.is_empty() {
             out.extend_from_slice(data);
             let pad = (512 - data.len() % 512) % 512;
-            out.extend(std::iter::repeat(0u8).take(pad));
+            out.extend(std::iter::repeat_n(0u8, pad));
         }
         out
     }
@@ -1191,7 +1191,7 @@ mod tests {
         for member in members {
             bytes.extend_from_slice(member);
         }
-        bytes.extend(std::iter::repeat(0u8).take(1024));
+        bytes.extend(std::iter::repeat_n(0u8, 1024));
         bytes
     }
 
@@ -1561,7 +1561,7 @@ mod tests {
         // A single zero block is where both tars stop, so the reader stops
         // there too and lists everything before it.
         let mut lone = member.clone();
-        lone.extend(std::iter::repeat(0u8).take(512));
+        lone.extend(std::iter::repeat_n(0u8, 512));
         let entries = list_bytes("lone-zero", &lone).unwrap();
         assert_eq!(names(&entries), vec!["pkg/x"]);
     }
@@ -1763,7 +1763,7 @@ mod tests {
     fn a_target_resolving_through_another_archive_symlink_is_refused() {
         let up = entry(EntryKind::Symlink, "pkg/x/up", Some(".."));
         let out = entry(EntryKind::Symlink, "pkg/x/out", Some("up/../../ESCAPED"));
-        validate(&[up.clone()], 0).unwrap();
+        validate(std::slice::from_ref(&up), 0).unwrap();
         refused(
             &[up.clone(), out.clone()],
             0,

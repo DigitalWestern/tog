@@ -1,0 +1,8 @@
+# The compiler CI tests and the release builds with. rustup reads this file,
+# so a runner (or a contributor) gets exactly this version, and a release
+# cannot come from a compiler CI never ran. Bump it deliberately, together
+# with `rust-version` in Cargo.toml.
+[toolchain]
+channel = "1.98.1"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

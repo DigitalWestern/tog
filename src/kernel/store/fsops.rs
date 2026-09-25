@@ -418,8 +418,8 @@ pub(crate) fn remove_tree_entry_if_same(
     if !same_inode(&current, expected) {
         return Ok(false);
     }
-    if is_symlink(&expected) || !is_directory(&expected) {
-        return unlink_if_same(parentfd, name, &expected, 0);
+    if is_symlink(expected) || !is_directory(expected) {
+        return unlink_if_same(parentfd, name, expected, 0);
     }
 
     let name_c = CString::new(name)
@@ -447,7 +447,7 @@ pub(crate) fn remove_tree_entry_if_same(
     // SAFETY: childfd was returned by openat and ownership moves into File.
     let child = unsafe { fs::File::from_raw_fd(childfd) };
     let actual = fd_stat(child.as_raw_fd())?;
-    if !same_inode(&actual, &expected) {
+    if !same_inode(&actual, expected) {
         return Ok(false);
     }
     let mut mode = actual.st_mode;
@@ -455,7 +455,7 @@ pub(crate) fn remove_tree_entry_if_same(
     // SAFETY: child is owned by this function.
     let _ = unsafe { libc::fchmod(child.as_raw_fd(), mode) };
     remove_tree_at(child.as_raw_fd())?;
-    unlink_if_same(parentfd, name, &expected, libc::AT_REMOVEDIR)
+    unlink_if_same(parentfd, name, expected, libc::AT_REMOVEDIR)
 }
 
 /// Remove the contents of a possibly read-only directory through a borrowed

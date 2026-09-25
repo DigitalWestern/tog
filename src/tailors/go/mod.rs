@@ -567,7 +567,7 @@ struct DownloadEntry {
 /// The project's own go.work is read through the held descriptor; the
 /// directories above it are outside the project and checked by path.
 pub fn reject_workspaces(project: &ProjectRoot) -> io::Result<()> {
-    if std::env::var_os("GOWORK").map_or(false, |v| !v.is_empty() && v != "off") {
+    if std::env::var_os("GOWORK").is_some_and(|v| !v.is_empty() && v != "off") {
         return Err(err("GOWORK is set; Go workspaces are not supported yet"));
     }
     let project_dir = project.path();
@@ -876,8 +876,8 @@ fn closure_from_download(
     let ledger = ledger_lines(gosum);
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
     let mut modules = Vec::new();
-    let mut de = serde_json::Deserializer::from_str(&stdout).into_iter::<DownloadEntry>();
-    while let Some(entry) = de.next() {
+    let de = serde_json::Deserializer::from_str(&stdout).into_iter::<DownloadEntry>();
+    for entry in de {
         let entry = entry.map_err(|e| err(format!("go mod download JSON: {e}")))?;
         if let Some(module) = verified_module(store, activity, entry, &ledger)? {
             modules.push(module);
@@ -1248,13 +1248,13 @@ fn modcache_identity(extractor_version: &str, extractor_sha256: &str, plan: &GoP
             m.info_sha256.clone(),
         );
     }
-    let identity = Identity {
+
+    Identity {
         kind: "go-modcache".into(),
         name: "modcache".into(),
         version: plan.modules.len().to_string(),
         inputs,
-    };
-    identity
+    }
 }
 
 /// Realize the immutable GOMODCACHE object: verified skeleton + extraction

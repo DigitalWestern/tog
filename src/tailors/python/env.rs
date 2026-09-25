@@ -91,9 +91,9 @@ pub(super) fn agreeing(plan: &Plan, selected: &Selected) -> io::Result<()> {
 
 /// Canonical package order and duplicate rejection shared by planning and
 /// realization.
-pub(super) fn canonical_packages<'a>(
-    plan: &'a Plan,
-) -> io::Result<Vec<&'a crate::kernel::types::LockedPackage>> {
+pub(super) fn canonical_packages(
+    plan: &Plan,
+) -> io::Result<Vec<&crate::kernel::types::LockedPackage>> {
     let mut packages: Vec<&crate::kernel::types::LockedPackage> = plan.packages.iter().collect();
     packages.sort_by(|a, b| a.name.cmp(&b.name));
     for w in packages.windows(2) {

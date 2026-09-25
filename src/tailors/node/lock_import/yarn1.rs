@@ -486,9 +486,7 @@ pub fn plan_yarn(
                     .split_once('#')
                     .is_some_and(|(_, fragment)| !fragment.is_empty()));
         let pinned_git = lock_git_source(&entry.resolved, attested);
-        let git_detail = if pinned_git.is_some() {
-            None
-        } else if attested {
+        let git_detail = if pinned_git.is_some() || attested {
             None
         } else {
             crate::tailors::node::git_dependency_detail(&entry.name, &entry.resolved)
