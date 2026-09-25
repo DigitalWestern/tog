@@ -30,7 +30,14 @@ pub fn load_go_inputs(
 ) -> io::Result<GoInputs> {
     let go_version = toolchain.version("go")?;
     let go_obj = go::realize_runtime(store, activity, platform, toolchain)?;
-    let plan = go::plan_go(store, activity, project, &go_obj, go_version)?;
+    let mut plan = go::plan_go(store, activity, project, &go_obj, go_version, true)?;
+    // A cached plan can name artifacts this store never downloaded. When the
+    // module cache object is missing too, plan again, which fetches them;
+    // when the object is present, nothing is fetched, so an offline warm
+    // sync stays offline.
+    if !modcache_realizable(store, activity, platform, toolchain, &plan)? {
+        plan = go::plan_go(store, activity, project, &go_obj, go_version, false)?;
+    }
     // An absent go.sum digests as the empty string; an unreadable one is
     // an error, never a digest of nothing.
     let gosum = go::read_gosum(project)?.unwrap_or_default();
@@ -40,4 +47,28 @@ pub fn load_go_inputs(
         plan,
         gosum_sha256: hex::encode(Sha256::digest(gosum.as_bytes())),
     })
+}
+
+/// Whether this store can realize `plan`'s module cache from what it holds:
+/// the object itself, or every artifact the skeleton copies. A cached plan
+/// names the artifacts its planning run put in that run's store; another
+/// store (a different `TOG_STORE`), or a cache `gc` aged out, lacks them.
+pub(super) fn modcache_realizable(
+    store: &store::Store,
+    activity: &crate::kernel::activity::StoreActivity,
+    platform: Platform,
+    selected: &Selected,
+    plan: &go::GoPlan,
+) -> io::Result<bool> {
+    go::validate_plan(plan)?;
+    let row = go::runtime_row(platform, selected)?;
+    let id = go::modcache_identity(&row.version, row.digest.hex(), plan).object_id();
+    if store.has_with_activity(activity, &id)? {
+        return Ok(true);
+    }
+    Ok(plan.modules.iter().all(|m| {
+        [&m.zip_sha256, &m.modfile_sha256, &m.info_sha256]
+            .iter()
+            .all(|hash| store.cache_path("sha256", hash).is_file())
+    }))
 }

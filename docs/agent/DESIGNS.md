@@ -60,8 +60,10 @@ A lock carries one artifact row per supported platform and is written from
 the releases complete on both, so a lock written on Linux must sync on an
 arm64 Mac without rewriting itself, and the reverse. Tests prove the
 selector never consults the host (an asymmetric catalog gives
-byte-identical locks from either platform value); two real machines have
-not. The run, part of the macOS gate (#66):
+byte-identical locks from either platform value). The two-machine half
+ran by hand on 2026-09-25 and passed (Fedora x86_64 and an arm64 Mac, all
+seven ecosystems, byte-identical lock both ways, identical `tog status`);
+the #136 bullet is what is left. The run, part of the macOS gate (#66):
 
 - Sync the same project on Linux and on the Mac. Diff `tog-toolchain.toml`
   byte for byte, and check that `tog status` says synced on both.

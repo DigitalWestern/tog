@@ -1041,13 +1041,16 @@ fn verified_module(
 /// is free to rewrite those directives without moving the plan to a
 /// different compiler than the one it is being planned with.
 ///
-/// The project is read through the held descriptor `project`.
+/// The project is read through the held descriptor `project`. With
+/// `use_cache` false the plan cache is skipped and the closure downloaded
+/// again, which puts every artifact it names in this store's cache.
 pub fn plan_go(
     store: &Store,
     activity: &StoreActivity,
     project: &ProjectRoot,
     go_obj: &Path,
     go_version: &str,
+    use_cache: bool,
 ) -> io::Result<GoPlan> {
     reject_workspaces(project)?;
     let gomod =
@@ -1057,8 +1060,10 @@ pub fn plan_go(
 
     let src_digest = source_digest(project)?;
     let input_hash = plan_cache_key(go_version, &gomod, &gosum, &src_digest);
-    if let Some(plan) = cached_plan(project, &input_hash, &gosum)? {
-        return Ok(plan);
+    if use_cache {
+        if let Some(plan) = cached_plan(project, &input_hash, &gosum)? {
+            return Ok(plan);
+        }
     }
 
     let gate_cache = gate_cache(store)?;
@@ -2308,6 +2313,65 @@ mod tests {
         assert!(module_path("go 1.27\n").is_err());
     }
 
+    /// A plan the store can realize: its object is there, or every artifact
+    /// is. A missing artifact without the object sends the sync to plan
+    /// again, which is how a plan cached against another store recovers.
+    #[test]
+    fn modcache_realizable_needs_the_object_or_every_artifact() {
+        let scratch = TempDir::named("go-realizable");
+        let temp = scratch.0.clone();
+        let _lock = crate::kernel::store::STORE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("TOG_STORE", temp.join("store"));
+        let store = Store::open().unwrap();
+        let activity = &store
+            .activity(crate::kernel::activity::ActivityMode::Shared)
+            .unwrap();
+        std::env::remove_var("TOG_STORE");
+        let fix = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/go-dirhash");
+        let (zip_hash, zip_cache) =
+            cache_insert(&store, activity, &fix.join("quote-v1.5.2.zip")).unwrap();
+        let (mod_hash, _) = cache_insert(&store, activity, &fix.join("quote-v1.5.2.mod")).unwrap();
+        let info = temp.join("info");
+        std::fs::write(&info, r#"{"Version":"v1.5.2"}"#).unwrap();
+        let (info_hash, _) = cache_insert(&store, activity, &info).unwrap();
+        let plan = GoPlan {
+            go_version: GO_VERSION.into(),
+            module: "m".into(),
+            modules: vec![GoModule {
+                path: "rsc.io/quote".into(),
+                version: "v1.5.2".into(),
+                h1: "h1:w5fcysjrx7yqtD/aO+QwRjYZOKnaM9Uh2b40tElTs3Y=".into(),
+                zip_sha256: zip_hash,
+                modfile_h1: "h1:LzX7hefJvL54yjefDEDHNONDjII0t9xZLPXsUe+TKr0=".into(),
+                modfile_sha256: mod_hash,
+                info_sha256: info_hash,
+            }],
+        };
+        let selected = selection();
+        let platform = Platform::host().unwrap();
+        let realizable =
+            || super::inputs::modcache_realizable(&store, activity, platform, &selected, &plan);
+        assert!(realizable().unwrap());
+
+        std::fs::remove_file(&zip_cache).unwrap();
+        assert!(!realizable().unwrap());
+
+        let row = runtime_row(platform, &selected).unwrap();
+        let identity = modcache_identity(&row.version, row.digest.hex(), &plan);
+        let staged = store.stage().unwrap();
+        store
+            .commit_with_deps(
+                &identity,
+                &staged,
+                &[],
+                &crate::kernel::store::ObjectDeps::new(),
+            )
+            .unwrap();
+        assert!(realizable().unwrap());
+    }
+
     #[test]
     fn modcache_skeleton_layout() {
         let scratch = TempDir::named("go-skel");
@@ -2450,6 +2514,7 @@ mod tests {
             &ProjectRoot::open(&project).unwrap(),
             Path::new("/nonexistent/go"),
             "1.27.0",
+            true,
         )
         .unwrap();
         assert_eq!(got.go_version, "1.27.0");
@@ -2499,6 +2564,7 @@ mod tests {
             &ProjectRoot::open(&project).unwrap(),
             Path::new("/nonexistent/go"),
             "1.27.0",
+            true,
         )
         .unwrap();
         assert_eq!(got.go_version, "1.27.0");
@@ -2511,7 +2577,8 @@ mod tests {
             &activity,
             &ProjectRoot::open(&project).unwrap(),
             Path::new("/nonexistent/go"),
-            "1.28.0"
+            "1.28.0",
+            true,
         )
         .is_err());
     }
@@ -2566,6 +2633,7 @@ mod tests {
             &ProjectRoot::open(&project).unwrap(),
             Path::new("/nonexistent/go"),
             "1.27.0",
+            true,
         )
         .unwrap_err()
         .to_string();
@@ -2661,6 +2729,7 @@ mod tests {
             &ProjectRoot::open(&project).unwrap(),
             Path::new("/nonexistent/go"),
             "1.27.0",
+            true,
         )
         .unwrap_err();
         assert_eq!(e.kind(), io::ErrorKind::PermissionDenied, "{e}");
@@ -2695,6 +2764,7 @@ mod tests {
             &ProjectRoot::open(&project).unwrap(),
             Path::new("/nonexistent/go"),
             "1.27.0",
+            true,
         )
         .unwrap_err()
         .to_string();
@@ -2725,6 +2795,7 @@ mod tests {
             &ProjectRoot::open(&project).unwrap(),
             Path::new("/nonexistent/go"),
             "1.27.0",
+            true,
         )
         .unwrap_err()
         .to_string();
@@ -2768,6 +2839,7 @@ mod tests {
             &ProjectRoot::open(&project).unwrap(),
             Path::new("/nonexistent/go"),
             "1.27.0",
+            true,
         )
         .is_err());
     }
@@ -2817,6 +2889,7 @@ mod tests {
             &root,
             Path::new("/nonexistent/go"),
             "1.27.0",
+            true,
         )
         .unwrap();
         assert_eq!(got.module, "example.com/m");

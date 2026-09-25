@@ -11,7 +11,7 @@ file 2215 src/commands/x.rs
 file 1594 src/kernel/store/roots.rs
 file 1855 src/tailors/dotnet/mod.rs
 file 2178 src/tailors/elixir/mod.rs
-file 1534 src/tailors/go/mod.rs
+file 1539 src/tailors/go/mod.rs
 file 1787 src/tailors/node/lock_import/pnpm.rs
 file 1813 src/tailors/node/realize.rs
 fn 176 src/comforter/toolchain.rs::resolve
