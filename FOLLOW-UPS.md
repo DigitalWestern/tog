@@ -116,7 +116,7 @@ by position.
   - #255 design: the kernel knows every ecosystem by name, and tog run is hard-wired to Node.
   - #257 design: move process-global state (policy, signing key, input guard, kinds) into Context.
   - #258 design: an error type that separates refusals, staleness, network and bugs.
-  - #243 sandbox: the macOS Seatbelt profile doesn't canonicalize paths, reads all of /opt, and CI never runs it.
+  - #243 sandbox: the macOS Seatbelt profile reads all of /opt, its timezone rule is dead, and CI never runs it.
   - #237 archive: symlink containment compares names case-sensitively.
 - **Smaller open issues from the 2026-09-23/24 run.** One line each; the
   issue has the options and the pick.
@@ -135,13 +135,12 @@ by position.
   - #267 tests: non-tog children in npm_scripts and deps_e2e inherit the developer's environment.
   - #272 pnpm freshness: a new workspace member without an importer passes, and overrides match by name only.
   - #277 gc: run homes under `<store>/run-homes` are never reclaimed.
-  - #278 rust_path: the version probe's scratch directory can collide between concurrent probes and is created with `create_dir_all`.
+  - #278 rust_path: the version probe's scratch directory is created with `create_dir_all`.
   - #279 node: run refusal misses npm abbreviations and nested installs, and refuses bare `bun`.
   - #283 dotnet: block `OutDir` and `PublishDir`, and parse the lock once per sync.
   - #285 pnpm lock reader: four edge cases (trailing colon, parentheses in paths, unquoted `@` keys, a third document) not yet confirmed against js-yaml.
   - #287 store records: no gc for `records/`, orphaned `tmp/record-*` temporaries, Elixir check-locked hash blind spots.
   - #289 interrupt: the bwrap preflight misreports Ctrl-C as "bwrap unavailable", and an interrupted sync exits 1 rather than 130.
-  - #293 macOS: six lib tests fail on macos-14 (APFS non-UTF-8 names, SUN_LEN, Seatbelt paths, a Linux-named node test), so no macOS release can ship until fixed.
   - #294 size ratchet: the function heuristic counts `#[cfg(test)]` functions outside `mod tests` as production code.
   - #295 tests: four sandbox tests fail instead of skipping when bubblewrap is missing.
   - #296 ci: add a Dependabot updater for the SHA-pinned actions.
@@ -150,6 +149,9 @@ by position.
   - #300 heavy: the Elixir end-to-end test cannot run on ubuntu-22.04 (OTP needs glibc 2.43).
   - #301 acceptance.sh: steps 9 and 9b re-run two ignored suites the heavy workflow already runs, one multi-threaded.
   - #302 acceptance.sh: step 13 carries its own copy of the closure signing format.
+  - #306 archive: extraction as root lets tar restore xattrs, ACLs and file flags from the archive.
+  - #307 archive: a tarball with macOS AppleDouble (`._name`) members is refused on macOS but extracted on Linux.
+  - #308 tests: python fixture tarballs are packed with raw `/usr/bin/tar`, not `tar_create`.
 - **`deps` as a `Tailor` method (#61).** `src/commands/deps.rs` still names
   tailors directly. A `Tailor::edit_manifest` method with an "unsupported"
   default would make it registry-driven, the way `Tailor::registry_tool`
@@ -180,7 +182,9 @@ by position.
   rerun. The panic messages were not captured. Two `supervise_signals`
   timeouts under a loaded machine (2026-09-25) are captured on #65. Capture
   the rest the same way before changing anything.
-- **macOS arm64 gate (#66). Last, by the owner's choice.** Run on the Mac:
+- **macOS arm64 gate (#66). Last, by the owner's choice.** The suites
+  below passed on the Mac on 2026-09-25 (4a2bffa, after #305); the lock
+  diff, #57 and the Mach allow-list are what is left. Run on the Mac:
   `cargo test`, `cargo test --test gc -- --ignored`,
   `cargo test --test cli audit`, and
   `cargo test --test toolchain_lock -- --ignored`, including the
