@@ -35,6 +35,7 @@ pub use roots::*;
 ///   <root>/meta/<object-id>.json    identity + provenance
 ///   <root>/cache/sha256/<hash>      verified downloaded artifacts
 ///   <root>/tmp/                     staging for atomic renames
+///   <root>/run-homes/<key>/<eco>/   private HOME for `tog run` children
 ///
 /// ponytail: store root defaults to ~/.tog/store (TOG_STORE overrides).
 /// The /opt/tog/store decision only matters once binary-cache sharing
@@ -134,6 +135,7 @@ impl Store {
             "forests",
             "backups",
             "root-locks",
+            "run-homes",
         ] {
             ensure_directory_tree(&root, Path::new(sub))
                 .map_err(|error| open_error(&root.join(sub), from_env, error))?;
@@ -150,6 +152,53 @@ impl Store {
 
     pub fn object_path(&self, id: &str) -> PathBuf {
         self.root.join("objects").join(id)
+    }
+
+    /// The short per-project key under `forests/` and `run-homes/`: hex of
+    /// the first 8 bytes of SHA-256 over the canonical project path. Every
+    /// store path derived from a project goes through here so the
+    /// namespaces agree on which project a key names.
+    pub fn project_key(project_dir: &Path) -> io::Result<String> {
+        use sha2::{Digest, Sha256};
+        let canonical = project_dir.canonicalize()?;
+        Ok(hex::encode(
+            &Sha256::digest(canonical.as_os_str().as_bytes())[..8],
+        ))
+    }
+
+    /// The HOME a `tog run` child of `ecosystem` gets for this project:
+    /// `<root>/run-homes/<project key>/<ecosystem>`, created on demand.
+    ///
+    /// It lives in the store rather than the shared temp root because a
+    /// world-writable parent lets another user create the directory first
+    /// and plant startup files (`.erlang`, `.iex.exs`) that the child runs
+    /// as this user. It is stable per project so `tog env` prints the same
+    /// bytes on every call. Both levels under `run-homes` are private to
+    /// this user: a symlink or a directory someone else owns is refused,
+    /// and one of ours with wider permissions is narrowed to 0700.
+    pub fn run_home(&self, project_dir: &Path, ecosystem: &str) -> io::Result<PathBuf> {
+        let single = matches!(
+            Path::new(ecosystem)
+                .components()
+                .collect::<Vec<_>>()
+                .as_slice(),
+            [std::path::Component::Normal(_)]
+        );
+        if !single || ecosystem.contains('/') {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("run home ecosystem {ecosystem:?} is not one path component"),
+            ));
+        }
+        let key = Self::project_key(project_dir)?;
+        let namespace = Path::new("run-homes");
+        self.ensure_namespace(namespace)?;
+        let mut path = self.root.join(namespace);
+        for level in [key.as_str(), ecosystem] {
+            path.push(level);
+            ensure_private_directory(&path)?;
+        }
+        Ok(path)
     }
 
     /// Acquire operation-level protection for this store. The root is
@@ -1343,5 +1392,128 @@ mod tests {
                 assert!(found[0].record.is_some(), "{found:?}");
             }
         }
+    }
+
+    /// A scratch store and a project directory beside it, for the run
+    /// home tests.
+    fn run_home_fixture(label: &str) -> (TempDir, Store, PathBuf) {
+        let temp = temp_store();
+        let store = Store {
+            root: temp.0.canonicalize().unwrap(),
+        };
+        let project = temp.0.join(label);
+        fs::create_dir_all(&project).unwrap();
+        (temp, store, project)
+    }
+
+    fn mode(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        fs::symlink_metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    /// A fresh run home is `run-homes/<key>/<ecosystem>` with both levels
+    /// private, and asking again returns the same directory.
+    #[test]
+    fn run_home_is_private_and_stable() {
+        let (_temp, store, project) = run_home_fixture("project");
+        let home = store.run_home(&project, "elixir").unwrap();
+        let key = Store::project_key(&project).unwrap();
+        assert_eq!(home, store.root.join("run-homes").join(&key).join("elixir"));
+        assert_eq!(mode(&home), 0o700);
+        assert_eq!(mode(home.parent().unwrap()), 0o700);
+        assert_eq!(store.run_home(&project, "elixir").unwrap(), home);
+    }
+
+    /// The project key is the one the forest paths already use: 16 hex
+    /// characters of SHA-256 over the canonical path, the same for any
+    /// spelling of the project and different between projects.
+    #[test]
+    fn project_key_matches_the_forest_key_and_separates_projects() {
+        use sha2::{Digest, Sha256};
+        let (temp, store, project) = run_home_fixture("one");
+        let other = temp.0.join("two");
+        fs::create_dir_all(&other).unwrap();
+        let canonical = project.canonicalize().unwrap();
+        let expected = hex::encode(&Sha256::digest(canonical.as_os_str().as_bytes())[..8]);
+        assert_eq!(Store::project_key(&project).unwrap(), expected);
+        assert_eq!(
+            Store::project_key(&project.join("../one")).unwrap(),
+            expected
+        );
+        assert_ne!(Store::project_key(&other).unwrap(), expected);
+        assert_ne!(
+            store.run_home(&project, "dotnet").unwrap(),
+            store.run_home(&other, "dotnet").unwrap()
+        );
+    }
+
+    /// A symlink at any level of the run home is refused rather than
+    /// followed: it would hand the child a HOME someone else chose.
+    #[test]
+    fn run_home_refuses_a_symlink_at_every_level() {
+        let (temp, store, project) = run_home_fixture("project");
+        let elsewhere = temp.0.join("elsewhere");
+        fs::create_dir_all(&elsewhere).unwrap();
+        let key = Store::project_key(&project).unwrap();
+        let namespace = store.root.join("run-homes");
+        let levels = [
+            namespace.clone(),
+            namespace.join(&key),
+            namespace.join(&key).join("elixir"),
+        ];
+        for (index, level) in levels.iter().enumerate() {
+            let _ = crate::kernel::store::remove_tree(&namespace);
+            for parent in &levels[..index] {
+                fs::create_dir(parent).unwrap();
+            }
+            std::os::unix::fs::symlink(&elsewhere, level).unwrap();
+            let error = store.run_home(&project, "elixir").unwrap_err();
+            assert!(
+                error.to_string().contains(&level.display().to_string()),
+                "{}: {error}",
+                level.display()
+            );
+            assert_eq!(fs::read_dir(&elsewhere).unwrap().count(), 0);
+        }
+    }
+
+    /// A run home of ours that is readable by others is narrowed to 0700
+    /// instead of refused: the contents are still only ours.
+    #[test]
+    fn run_home_tightens_a_wider_directory_of_ours() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_temp, store, project) = run_home_fixture("project");
+        let key = Store::project_key(&project).unwrap();
+        let home = store.root.join("run-homes").join(&key).join("dotnet");
+        fs::create_dir_all(&home).unwrap();
+        for level in [home.parent().unwrap(), home.as_path()] {
+            fs::set_permissions(level, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        assert_eq!(store.run_home(&project, "dotnet").unwrap(), home);
+        assert_eq!(mode(&home), 0o700);
+        assert_eq!(mode(home.parent().unwrap()), 0o700);
+    }
+
+    /// An ecosystem name that is not a single path component cannot walk
+    /// the run home out of its project's directory.
+    #[test]
+    fn run_home_refuses_an_ecosystem_that_is_not_one_component() {
+        let (_temp, store, project) = run_home_fixture("project");
+        for ecosystem in ["", ".", "..", "../elixir", "a/b", "/abs", "elixir/"] {
+            let error = store.run_home(&project, ecosystem).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "{ecosystem:?}");
+        }
+    }
+
+    /// A file where a run home level belongs is refused by name.
+    #[test]
+    fn run_home_refuses_a_file_in_its_place() {
+        let (_temp, store, project) = run_home_fixture("project");
+        let key = Store::project_key(&project).unwrap();
+        let level = store.root.join("run-homes").join(&key);
+        fs::create_dir_all(level.parent().unwrap()).unwrap();
+        fs::write(&level, b"").unwrap();
+        let error = store.run_home(&project, "elixir").unwrap_err();
+        assert!(error.to_string().contains("not a directory"), "{error}");
     }
 }

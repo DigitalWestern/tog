@@ -217,3 +217,86 @@ pub fn assert_frozen_never_writes_the_lock(project: &Path, home: &Path, lock: &s
         "plan did not regenerate {lock}"
     );
 }
+
+/// The entries directly under the temp root whose names start with
+/// `prefix`, for a before-and-after check that a run left nothing there.
+pub fn temp_entries(prefix: &str) -> std::collections::BTreeSet<String> {
+    std::fs::read_dir(std::env::temp_dir())
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with(prefix))
+        .collect()
+}
+
+/// `tog env` over a synced project prints the same bytes twice, and the
+/// `HOME` it hands the child is the project's private run home inside
+/// `store`: `<store>/run-homes/<project key>/<ecosystem>`, each level a
+/// mode-0700 directory, with nothing named `temp_prefix` left under the
+/// temp root. A home under the shared temp root would let another user
+/// plant startup files the child runs, and a per-process one would change
+/// the printed bytes on every call. Returns the printed `HOME`.
+pub fn assert_private_run_home(
+    project: &Path,
+    home: &Path,
+    store: &Path,
+    ecosystem: &str,
+    temp_prefix: &str,
+) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let before = temp_entries(temp_prefix);
+    let first = assert_ok(
+        tog_at(project, home, store, &["env", "--shell", "bash"]),
+        "tog env",
+    );
+    let second = assert_ok(
+        tog_at(project, home, store, &["env", "--shell", "bash"]),
+        "tog env again",
+    );
+    assert_eq!(
+        first, second,
+        "two runs of `tog env` printed different bytes"
+    );
+    let printed = first
+        .lines()
+        .find_map(|line| line.strip_prefix("export HOME='"))
+        .and_then(|rest| rest.strip_suffix('\''))
+        .unwrap_or_else(|| panic!("`tog env` printed no HOME:\n{first}"));
+    let printed = PathBuf::from(printed);
+    let run_homes = store.canonicalize().unwrap().join("run-homes");
+    let relative = printed.strip_prefix(&run_homes).unwrap_or_else(|_| {
+        panic!(
+            "HOME {} is not under {}",
+            printed.display(),
+            run_homes.display()
+        )
+    });
+    let mut components = relative.components();
+    let key = run_homes.join(components.next().expect("a project key level"));
+    let own = key.join(components.next().expect("an ecosystem level"));
+    assert_eq!(
+        own,
+        key.join(ecosystem),
+        "HOME {} names another ecosystem",
+        printed.display()
+    );
+    for level in [&key, &own] {
+        let stat = std::fs::symlink_metadata(level).unwrap();
+        assert!(stat.is_dir(), "{} is not a directory", level.display());
+        assert_eq!(
+            stat.permissions().mode() & 0o777,
+            0o700,
+            "{} is not private",
+            level.display()
+        );
+    }
+    assert!(
+        printed.is_dir(),
+        "HOME {} does not exist",
+        printed.display()
+    );
+    let left = temp_entries(temp_prefix);
+    let new: Vec<_> = left.difference(&before).collect();
+    assert!(new.is_empty(), "runs left {new:?} under the temp root");
+    printed
+}

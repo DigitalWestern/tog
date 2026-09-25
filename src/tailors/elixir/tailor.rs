@@ -195,8 +195,13 @@ impl Tailor for Elixir {
             }
             prefix.push(beam.join("elixir/bin").to_string_lossy().into_owned());
             prefix.push(beam.join("otp/bin").to_string_lossy().into_owned());
-            let scratch = std::env::temp_dir().join(format!("tog-mix-run-{}", std::process::id()));
-            std::fs::create_dir_all(&scratch)?;
+            // A private per-project home inside the store: a HOME under
+            // the shared temp root lets another user plant `.erlang` or
+            // `.iex.exs` that Erlang and Elixir run at startup as this
+            // user, and a per-process one would make `tog env` print
+            // different bytes on every call.
+            let scratch = ctx.store.run_home(dir, "elixir")?;
+            elixir::prepare_run_home(&scratch)?;
             // The build root belongs to the toolchain this closure was
             // synced with, not to whatever the catalog offers now.
             let fingerprint = closure["beam_fingerprint"].as_str().ok_or_else(|| {

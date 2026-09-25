@@ -8,7 +8,10 @@ use std::path::{Path, PathBuf};
 
 mod common;
 
-use common::{assert_frozen_never_writes_the_lock, assert_ok, fixture, tog, tog_at, TempDir};
+use common::{
+    assert_frozen_never_writes_the_lock, assert_ok, assert_private_run_home, fixture, temp_entries,
+    tog, tog_at, TempDir,
+};
 
 fn copy_dotnet_hello(project: &Path) {
     std::fs::create_dir_all(project).unwrap();
@@ -64,11 +67,21 @@ fn dotnet_sync_sandboxed_build_and_run() {
     let project = temp.0.join("dotnet-hello");
     copy_dotnet_hello(&project);
     let store = temp.0.join("store");
+    let temp_before = temp_entries("tog-dn-run-");
 
     assert_ok(tog(&project, &temp.0, &["sync"]), "sync");
+    let run_home = assert_private_run_home(&project, &temp.0, &store, "dotnet", "tog-dn-run-");
     let version = assert_ok(
         tog(&project, &temp.0, &["run", "dotnet", "--version"]),
         "dotnet --version",
+    );
+    // The run home carries the NuGet migration sentinel the sync path
+    // writes, so a run never takes NuGet's machine-global migration mutex.
+    let scratch = run_home.parent().unwrap();
+    assert!(
+        scratch.join("xdg-data/NuGet/Migrations/1").is_file(),
+        "no NuGet migration sentinel under {}",
+        scratch.display()
     );
     assert!(
         version.lines().any(|line| line.trim() == "9.0.317"),
@@ -132,6 +145,11 @@ fn dotnet_sync_sandboxed_build_and_run() {
     // Without its lock the project is refused under --frozen and left
     // alone; a plan regenerates the lock with the store SDK.
     assert_frozen_never_writes_the_lock(&project, &temp.0, "packages.lock.json");
+    let left: Vec<_> = temp_entries("tog-dn-run-")
+        .difference(&temp_before)
+        .cloned()
+        .collect();
+    assert!(left.is_empty(), "runs left {left:?} under the temp root");
 }
 
 #[test]
