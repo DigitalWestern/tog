@@ -112,9 +112,12 @@ pub fn resolve(pending: Pending) -> io::Result<cli::Command> {
 
 /// Dispatch one parsed command to the verb's file. `sync` holds `--frozen`
 /// and `--strict`; the parser has already refused them for a verb that
-/// never syncs, so every verb that reads them here is one they govern.
+/// never syncs. `--frozen` is handed to the verbs that skip lock writes.
+/// `--strict` is recorded once here, before any verb runs, and every policy
+/// load in the process reads it, so no verb can load a policy without it.
 pub fn dispatch(command: cli::Command, sync: cli::SyncFlags) -> io::Result<i32> {
     use cli::Command::*;
+    crate::kernel::policy::request_strict(sync.strict);
     crate::tailors::install_kinds();
     // Maintenance commands do not need host-platform validation. In
     // particular, GC must remain usable when inspecting a copied store on a
@@ -162,19 +165,12 @@ pub fn dispatch(command: cli::Command, sync: cli::SyncFlags) -> io::Result<i32> 
         ref args,
     } = command
     {
-        return fmt::run(
-            platform,
-            check,
-            ecosystem.as_deref(),
-            args,
-            sync.frozen,
-            sync.strict,
-        );
+        return fmt::run(platform, check, ecosystem.as_deref(), args, sync.frozen);
     }
     // `sync` preflights (policy, pins, root registrability) before opening
     // the store, so a refused request touches nothing.
     if let Sync { fresh } = command {
-        return sync::run_command(platform, fresh, sync.strict, sync.frozen).map(|_| 0);
+        return sync::run_command(platform, fresh, sync.frozen).map(|_| 0);
     }
     // `update --toolchain` refuses a stale or unresolvable project the same
     // way sync does, before the store is opened, and then syncs.
@@ -184,7 +180,7 @@ pub fn dispatch(command: cli::Command, sync: cli::SyncFlags) -> io::Result<i32> 
         ..
     } = command
     {
-        return toolchain::run(platform, update, no_sync, sync.strict).map(|_| 0);
+        return toolchain::run(platform, update, no_sync).map(|_| 0);
     }
     let needs_maintenance = matches!(
         &command,
@@ -212,13 +208,13 @@ pub fn dispatch(command: cli::Command, sync: cli::SyncFlags) -> io::Result<i32> 
     match command {
         // `json` is not read here: plan's output is JSON either way, and
         // the flag only tells `main` which error renderer to use.
-        Plan { .. } => plan::run(&ctx, sync).map(|_| 0),
-        Build { args } => build::run(&ctx, &args, sync.frozen, sync.strict).map(|_| 0),
-        Run { command } => run::run(&ctx, &command, sync.frozen, sync.strict),
+        Plan { .. } => plan::run(&ctx, sync.frozen).map(|_| 0),
+        Build { args } => build::run(&ctx, &args, sync.frozen).map(|_| 0),
+        Run { command } => run::run(&ctx, &command, sync.frozen),
         // Like `run`, `env` needs the store open: a closure's recorded
         // runtime is a store object, and its bin directory is part of the
         // PATH `env` prints.
-        Env { shell } => env::run(&ctx, shell, sync.frozen, sync.strict),
+        Env { shell } => env::run(&ctx, shell, sync.frozen),
         Sbom { output } => sbom::run(output.as_deref()).map(|_| 0),
         Add {
             specs,
@@ -232,7 +228,6 @@ pub fn dispatch(command: cli::Command, sync: cli::SyncFlags) -> io::Result<i32> 
                 dev,
             },
             no_sync,
-            sync.strict,
         )
         .map(|_| 0),
         Remove {
@@ -247,7 +242,6 @@ pub fn dispatch(command: cli::Command, sync: cli::SyncFlags) -> io::Result<i32> 
                 dev,
             },
             no_sync,
-            sync.strict,
         )
         .map(|_| 0),
         Update {
@@ -262,7 +256,6 @@ pub fn dispatch(command: cli::Command, sync: cli::SyncFlags) -> io::Result<i32> 
                 dev: false,
             },
             no_sync,
-            sync.strict,
         )
         .map(|_| 0),
         X {
@@ -278,7 +271,6 @@ pub fn dispatch(command: cli::Command, sync: cli::SyncFlags) -> io::Result<i32> 
                 tool,
                 args,
             },
-            sync.strict,
         ),
         Status { json } => status::run(ctx.platform, json),
         Fmt { .. }

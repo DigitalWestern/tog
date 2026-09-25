@@ -13,20 +13,14 @@ use crate::commands::sync;
 use crate::kernel::platform::Platform;
 use std::io;
 
-pub fn run(
-    platform: Platform,
-    update: &ToolchainUpdate,
-    no_sync: bool,
-    strict: bool,
-) -> io::Result<()> {
-    // `strict` is the global `--strict`; without it the policy chain
-    // decides strictness on its own. Reading `policy::strict()` here would
-    // be worse than wrong: it initializes the policy to the default before
-    // the project's chain has been loaded.
+pub fn run(platform: Platform, update: &ToolchainUpdate, no_sync: bool) -> io::Result<()> {
+    // The dispatcher has already recorded `--strict`, and the sync loads
+    // the policy chain in its preflight. Nothing here reads
+    // `policy::strict()` first: an early read fixes the process policy
+    // before the chain's files are loaded, and it stays that way.
     sync::run_in_mode(
         platform,
         false,
-        strict,
         Mode::Update {
             only: update.ecosystem.clone(),
         },

@@ -544,7 +544,7 @@ mod tests {
     fn strict_policy_rejects_cached_exceptions() {
         if std::env::var_os("TOG_STORE_STRICT_CHILD").is_some() {
             let store = Store::open().unwrap();
-            crate::kernel::policy::init(&store.root, false).unwrap();
+            crate::kernel::policy::init(&store.root).unwrap();
             let error = store
                 .commit_with_deps(&identity(), &staged(&store), &[], &ObjectDeps::new())
                 .unwrap_err();

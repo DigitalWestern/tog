@@ -171,6 +171,18 @@ fn cargo_sync_build_and_run_again_offline() {
         "rustc reported the wrong host:\n{rustc}"
     );
     assert_ok(tog(&project, &temp.0, &["build"]), "build");
+    // On a synced project no sync runs in front of the build, so the only
+    // policy load is build's own: `--strict` must reach it all the same.
+    let strict = tog(&project, &temp.0, &["-v", "--strict", "build"]);
+    let strict_stderr = String::from_utf8_lossy(&strict.stderr).into_owned();
+    assert!(
+        strict.status.success(),
+        "strict build failed: {strict_stderr}"
+    );
+    assert!(
+        strict_stderr.contains("policy: strict (--strict)"),
+        "strict build never loaded a strict policy: {strict_stderr}"
+    );
     let executable = project.join("target/debug/cargo-hello");
     assert!(executable.is_file());
     let output = assert_ok(

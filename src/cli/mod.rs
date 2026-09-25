@@ -241,7 +241,9 @@ pub struct Options {
 /// happens (the bare `tog`, the implicit sync of `run`, `env`, `build`,
 /// `fmt` and a script, the sync after `add`/`remove`/`update`, `plan`'s
 /// lock generation, and the policy `x` judges under). Read once by the
-/// parser from either side of the verb and handed to the dispatcher.
+/// parser from either side of the verb and handed to the dispatcher, which
+/// passes `--frozen` to the verbs and records `--strict` for every policy
+/// load in the process.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct SyncFlags {
     /// `--frozen`: validate the committed `tog-toolchain.toml` instead of

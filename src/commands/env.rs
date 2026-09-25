@@ -17,7 +17,7 @@ type Variable = (String, Option<String>);
 /// Print the environment of the nearest projected root, in `shell` syntax,
 /// on stdout, syncing it first when `run` would. Exit 1 with the same
 /// explanation `run` gives when there is no project here at all.
-pub fn run(ctx: &Context, shell: Option<Shell>, frozen: bool, strict: bool) -> io::Result<i32> {
+pub fn run(ctx: &Context, shell: Option<Shell>, frozen: bool) -> io::Result<i32> {
     let shell = shell.unwrap_or_else(shell_from_environment);
     let cwd = ctx.project_dir();
     // What is printed is the environment the inputs describe, as `run`
@@ -27,7 +27,7 @@ pub fn run(ctx: &Context, shell: Option<Shell>, frozen: bool, strict: bool) -> i
     // output is evaled by a shell, and a package manager's summary in it
     // would be executed.
     let dir = crate::kernel::ui::with_stdout_on_stderr(|| {
-        crate::commands::sync::ensure_current(ctx, &cwd, frozen, strict)
+        crate::commands::sync::ensure_current(ctx, &cwd, frozen)
     })?;
     // Never spawned: the tailors' contribution is read back off it. A
     // program that does not exist is therefore the honest placeholder.

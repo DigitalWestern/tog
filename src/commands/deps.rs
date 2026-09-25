@@ -2080,16 +2080,14 @@ fn dotnet_refuse(
 }
 
 /// `add` / `remove` / `update`: delegate the edit, report it, then the
-/// ordinary sync in the project the edit landed in. `strict` is the global
-/// `--strict`: it governs the edit's own policy checks and that sync.
-pub fn run(ctx: &Context, request: Request, no_sync: bool, strict: bool) -> io::Result<()> {
+/// ordinary sync in the project the edit landed in.
+pub fn run(ctx: &Context, request: Request, no_sync: bool) -> io::Result<()> {
     let cwd = project_dir();
-    // Dependency edits ensure pinned tools before the ordinary sync. Set the
-    // policy first so cached toolchain objects cannot initialize an empty
-    // default policy and let strict/deny settings be bypassed. The policy
-    // is set once per process, so `--strict` must reach it here: the sync
-    // below would find it already set.
-    policy::init(&cwd, strict)?;
+    // Dependency edits ensure pinned tools before the ordinary sync. Load
+    // the policy chain first: a cached toolchain object read before it
+    // would fix the process policy without the policy files, and their
+    // deny entries would not apply to the edit or the sync after it.
+    policy::init(&cwd)?;
     let mut edit_attribution = edit_attribution()?;
     let outcome = edit(
         ctx.platform,
@@ -2112,7 +2110,7 @@ pub fn run(ctx: &Context, request: Request, no_sync: bool, strict: bool) -> io::
     }
     // The edit owns its exceptions. Sync must open a fresh ecosystem scope.
     edit_attribution.discard();
-    sync::run(ctx, false, strict)
+    sync::run(ctx, false)
 }
 
 /// Open the dependency edit's attribution scope before the edit can record.
