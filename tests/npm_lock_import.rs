@@ -832,3 +832,107 @@ fn plan_names_a_package_json_it_cannot_read() {
         }
     }
 }
+
+/// Plans a yarn classic project whose root depends on the workspace member
+/// `lib` (at `version`) with `field: {"lib": spec}`, under an empty lock:
+/// only a link to the member can satisfy the dependency.
+fn plan_yarn_workspace(
+    version: &str,
+    field: &str,
+    spec: &str,
+) -> std::io::Result<tog::tailors::node::NpmPlan> {
+    let temp = TempDir::new("yarn-ws-range");
+    let dir = temp.path();
+    fs::create_dir_all(dir.join("packages/lib")).unwrap();
+    let root = serde_json::json!({
+        "name": "root",
+        "version": "1.0.0",
+        "workspaces": ["packages/*"],
+        field: {"lib": spec},
+    })
+    .to_string();
+    fs::write(dir.join("package.json"), &root).unwrap();
+    fs::write(
+        dir.join("packages/lib/package.json"),
+        serde_json::json!({"name": "lib", "version": version}).to_string(),
+    )
+    .unwrap();
+    tog::tailors::node::lock_import::plan_yarn(
+        Platform::X86_64UnknownLinuxGnu,
+        "# yarn lockfile v1\n",
+        &root,
+        &tog::kernel::fsroot::ProjectRoot::open(dir).unwrap(),
+        node_version(),
+    )
+}
+
+/// Yarn classic links a workspace member whenever its version satisfies the
+/// dependency's range under node-semver, so every range form node-semver
+/// reads (partials, comparators, x-ranges, alternatives) links the member.
+#[test]
+fn yarn_workspace_ranges_match_members_as_node_semver_does() {
+    for (version, spec) in [
+        ("1.5.0", "~1"),
+        ("0.0.7", "^0.0"),
+        ("0.0.0", "^0.0"),
+        ("1.2.3", ">=1.0.0"),
+        ("1.9.0", "1.x"),
+        ("2.4.0", "^1 || ^2"),
+        ("1.0.0", "1.0.0 - 2.0.0"),
+        ("1.2.3", "workspace:>=1.0.0 <2"),
+        ("1.2.3", "workspace:^"),
+        ("1.2.3", "workspace:~"),
+        ("1.2.3", "workspace:*"),
+        ("1.2.3", "*"),
+        ("1.2.3", "latest"),
+        ("2.0.0-beta.1", "*"),
+        ("2.0.0-beta.1", "latest"),
+        ("2.0.0-beta.1", "^2.0.0-beta.0"),
+    ] {
+        for field in ["dependencies", "devDependencies", "optionalDependencies"] {
+            let plan = plan_yarn_workspace(version, field, spec)
+                .unwrap_or_else(|error| panic!("lib@{version} {field} {spec}: {error}"));
+            assert!(
+                plan.links
+                    .iter()
+                    .any(|link| link.path == "node_modules/lib" && link.target == "packages/lib"),
+                "lib@{version} {field} {spec}: {:?}",
+                plan.links
+            );
+        }
+    }
+}
+
+/// A range the member's version does not satisfy is a registry dependency,
+/// which an empty lock does not have; under `workspace:` it is refused as a
+/// mismatch.
+#[test]
+fn yarn_workspace_ranges_that_miss_the_member_do_not_link_it() {
+    for (version, spec) in [
+        ("1.5.0", "~1.4"),
+        ("0.1.0", "^0.0"),
+        ("0.9.0", ">=1.0.0"),
+        ("2.0.0", "1.x"),
+        ("3.0.0", "^1 || ^2"),
+        ("1.3.0-beta.1", "^1.0.0"),
+    ] {
+        let error = plan_yarn_workspace(version, "dependencies", spec)
+            .map(|_| ())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("package.json dependencies disagree with yarn.lock"),
+            "lib@{version} {spec}: {error}"
+        );
+    }
+    let error = plan_yarn_workspace("1.2.3", "dependencies", "workspace:^2")
+        .map(|_| ())
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains(
+            "Yarn workspace dependency lib@workspace:^2 does not match workspace lib@1.2.3"
+        ),
+        "{error}"
+    );
+}

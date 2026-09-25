@@ -435,99 +435,14 @@ pub(super) fn yarn_workspace_manifests(
     Ok(workspaces)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum SemverIdentifier {
-    Numeric(u64),
-    Alpha(String),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct Semver {
-    pub(super) major: u64,
-    pub(super) minor: u64,
-    pub(super) patch: u64,
-    pub(super) prerelease: Vec<SemverIdentifier>,
-}
-
-pub(super) fn parse_semver(value: &str, allow_partial: bool) -> Option<Semver> {
-    let value = value.trim().trim_start_matches('v');
-    let (value, _) = value.split_once('+').unwrap_or((value, ""));
-    let (core, prerelease) = value.split_once('-').unwrap_or((value, ""));
-    let parts = core.split('.').collect::<Vec<_>>();
-    if parts.is_empty() || parts.len() > 3 || (!allow_partial && parts.len() != 3) {
-        return None;
-    }
-    let mut numbers = Vec::new();
-    for part in &parts {
-        if part.is_empty() || (part.len() > 1 && part.starts_with('0')) {
-            return None;
-        }
-        numbers.push(part.parse::<u64>().ok()?);
-    }
-    while numbers.len() < 3 {
-        numbers.push(0);
-    }
-    let prerelease = if prerelease.is_empty() {
-        Vec::new()
-    } else {
-        prerelease
-            .split('.')
-            .map(|part| {
-                if part.is_empty()
-                    || !part
-                        .bytes()
-                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-                    || part.len() > 1
-                        && part.starts_with('0')
-                        && part.bytes().all(|b| b.is_ascii_digit())
-                {
-                    return None;
-                }
-                if part.bytes().all(|byte| byte.is_ascii_digit()) {
-                    Some(SemverIdentifier::Numeric(part.parse().ok()?))
-                } else {
-                    Some(SemverIdentifier::Alpha(part.to_string()))
-                }
-            })
-            .collect::<Option<Vec<_>>>()?
-    };
-    Some(Semver {
-        major: numbers[0],
-        minor: numbers[1],
-        patch: numbers[2],
-        prerelease,
-    })
-}
-
-pub(super) fn semver_cmp(left: &Semver, right: &Semver) -> std::cmp::Ordering {
-    use std::cmp::Ordering;
-    match (left.major, left.minor, left.patch).cmp(&(right.major, right.minor, right.patch)) {
-        Ordering::Equal => {}
-        ordering => return ordering,
-    }
-    match (left.prerelease.is_empty(), right.prerelease.is_empty()) {
-        (true, true) | (false, false) => {}
-        (true, false) => return Ordering::Greater,
-        (false, true) => return Ordering::Less,
-    }
-    for (left, right) in left.prerelease.iter().zip(&right.prerelease) {
-        let ordering = match (left, right) {
-            (SemverIdentifier::Numeric(left), SemverIdentifier::Numeric(right)) => left.cmp(right),
-            (SemverIdentifier::Numeric(_), SemverIdentifier::Alpha(_)) => Ordering::Less,
-            (SemverIdentifier::Alpha(_), SemverIdentifier::Numeric(_)) => Ordering::Greater,
-            (SemverIdentifier::Alpha(left), SemverIdentifier::Alpha(right)) => left.cmp(right),
-        };
-        if ordering != Ordering::Equal {
-            return ordering;
-        }
-    }
-    left.prerelease.len().cmp(&right.prerelease.len())
-}
-
+/// Whether a manifest specifier resolves to the workspace member at
+/// `version`. Yarn classic links the member when node-semver's `satisfies`
+/// admits its version, so the range goes through the kernel's node-semver.
+/// A bare `*` or `latest` names whatever the member is, prereleases
+/// included, and so do the `workspace:` protocol's bare forms.
 pub(super) fn yarn_workspace_spec_matches(specifier: &str, version: &str) -> bool {
     let mut specifier = specifier.trim();
-    let workspace_protocol = specifier.strip_prefix("workspace:");
-    if let Some(protocol) = workspace_protocol {
+    if let Some(protocol) = specifier.strip_prefix("workspace:") {
         specifier = protocol;
         if matches!(specifier, "" | "*" | "^" | "~") {
             return true;
@@ -536,38 +451,7 @@ pub(super) fn yarn_workspace_spec_matches(specifier: &str, version: &str) -> boo
     if matches!(specifier, "*" | "latest") {
         return true;
     }
-    let Some(candidate) = parse_semver(version, false) else {
-        return false;
-    };
-    let (operator, requested) = if let Some(value) = specifier.strip_prefix('^') {
-        ('^', value)
-    } else if let Some(value) = specifier.strip_prefix('~') {
-        ('~', value)
-    } else {
-        ('=', specifier)
-    };
-    let Some(requested) = parse_semver(requested, true) else {
-        return false;
-    };
-    match operator {
-        '=' => semver_cmp(&candidate, &requested) == std::cmp::Ordering::Equal,
-        '~' => {
-            semver_cmp(&candidate, &requested) != std::cmp::Ordering::Less
-                && candidate.major == requested.major
-                && candidate.minor == requested.minor
-        }
-        '^' if requested.major != 0 => {
-            semver_cmp(&candidate, &requested) != std::cmp::Ordering::Less
-                && candidate.major == requested.major
-        }
-        '^' if requested.minor != 0 => {
-            semver_cmp(&candidate, &requested) != std::cmp::Ordering::Less
-                && candidate.major == 0
-                && candidate.minor == requested.minor
-        }
-        '^' => semver_cmp(&candidate, &requested) == std::cmp::Ordering::Equal,
-        _ => false,
-    }
+    crate::kernel::semver::Range::parse(specifier).is_ok_and(|range| range.satisfies_text(version))
 }
 
 /// Parse a Yarn classic v1 lockfile. The package.json is needed because Yarn
