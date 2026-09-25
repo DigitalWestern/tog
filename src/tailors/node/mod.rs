@@ -1929,14 +1929,16 @@ mod tests {
         };
         let digest = Digest::from_sri(TEST_SRI).unwrap();
         write_archive_classification(&store, &digest, false).unwrap();
+        // The Linux identity, whatever the host: the realization below is
+        // for Linux, and a macOS host's identity would never match it.
         let identity = node_env_identity(
             &store,
-            Platform::host().unwrap(),
+            Platform::X86_64UnknownLinuxGnu,
             &node_obj,
             &plan,
             &[],
             None,
-            &test_gyp_python_id(Platform::host().unwrap()),
+            &test_gyp_python_id(Platform::X86_64UnknownLinuxGnu),
         )
         .unwrap();
         let staged = store.stage().unwrap();

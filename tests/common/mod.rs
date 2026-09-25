@@ -10,6 +10,7 @@ use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// A scratch directory under the temp root (`TMPDIR` when set), named
@@ -21,14 +22,18 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub struct TempDir(pub PathBuf);
 
 impl TempDir {
+    /// The clock alone is not unique: macOS's ticks in microseconds, so two
+    /// tests with one label could share a directory without the sequence.
     pub fn new(label: &str) -> Self {
+        static SEQ: AtomicU64 = AtomicU64::new(0);
         let path = std::env::temp_dir().join(format!(
-            "tog-{label}-{}-{}",
+            "tog-{label}-{}-{}-{}",
             std::process::id(),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
-                .as_nanos()
+                .as_nanos(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
         ));
         std::fs::create_dir_all(&path).unwrap();
         // tog records object paths under the store's canonicalized root and
@@ -181,6 +186,18 @@ pub fn assert_ok(output: Output, label: &str) -> String {
 
 pub fn text(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
+}
+
+/// `/usr/bin/tar` for creating fixture archives, without host metadata:
+/// macOS's bsdtar otherwise adds `._` AppleDouble members and binary
+/// provenance xattrs inherited from the process that wrote the files.
+pub fn tar_create() -> Command {
+    let mut command = Command::new("/usr/bin/tar");
+    command.env_remove("TAR_OPTIONS");
+    if cfg!(target_os = "macos") {
+        command.env("COPYFILE_DISABLE", "1").arg("--no-xattrs");
+    }
+    command
 }
 
 /// Copy a fixture tree into scratch space, files and directories only:

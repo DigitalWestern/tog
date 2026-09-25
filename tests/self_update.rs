@@ -17,7 +17,7 @@ use std::process::{Command, Output};
 
 mod common;
 
-use common::{command_for, text, TempDir};
+use common::{command_for, tar_create, text, TempDir};
 
 fn sha256_hex(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
@@ -75,7 +75,7 @@ fn publish(home: &Path, release: &Release<'_>) -> String {
             "README"
         }
     };
-    let status = Command::new("/usr/bin/tar")
+    let status = tar_create()
         .args(["-C"])
         .arg(&stage)
         .arg("-czf")

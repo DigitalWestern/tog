@@ -204,6 +204,33 @@ impl Sandbox<'_> {
         p
     }
 
+    /// The Seatbelt profile a run actually gets. Seatbelt matches rules
+    /// against resolved paths, so a rule for `/var/folders/...` never
+    /// matches a write that lands in `/private/var/folders/...`; every
+    /// path is canonicalized first. The scratch directory is writable, as
+    /// it is under bwrap.
+    fn seatbelt_profile(&self, tmp: &Path) -> io::Result<String> {
+        let read: Vec<PathBuf> = self
+            .read
+            .iter()
+            .map(fs::canonicalize)
+            .collect::<io::Result<_>>()?;
+        let mut write: Vec<PathBuf> = self
+            .write
+            .iter()
+            .map(fs::canonicalize)
+            .collect::<io::Result<_>>()?;
+        let scratch = fs::canonicalize(tmp)?;
+        if !write.iter().any(|path| path == &scratch) {
+            write.push(scratch);
+        }
+        Ok(Sandbox {
+            read: read.iter().map(PathBuf::as_path).collect(),
+            write: write.iter().map(PathBuf::as_path).collect(),
+        }
+        .profile())
+    }
+
     /// Run `cmd` inside the sandbox with a scrubbed environment.
     /// `env_path` becomes PATH; HOME/TMPDIR point into the writable tmp.
     pub fn run(&self, cmd: &[&str], env_path: &str, tmp: &Path) -> io::Result<()> {
@@ -308,7 +335,7 @@ impl Sandbox<'_> {
         cwd: &Path,
         envs: &[(String, String)],
     ) -> io::Result<std::process::ExitStatus> {
-        let profile = self.profile();
+        let profile = self.seatbelt_profile(tmp)?;
         let mut command = Command::new("/usr/bin/sandbox-exec");
         command
             .arg("-p")
@@ -354,7 +381,7 @@ impl Sandbox<'_> {
         envs: &[(String, String)],
         activity: &StoreActivity,
     ) -> io::Result<std::process::ExitStatus> {
-        let profile = self.profile();
+        let profile = self.seatbelt_profile(tmp)?;
         let mut command = Command::new("/usr/bin/sandbox-exec");
         command
             .arg("-p")
@@ -2426,6 +2453,73 @@ mod tests {
             ]),
             "{rendered}"
         );
+    }
+
+    /// Seatbelt matches resolved paths: a rule through a symlink (macOS's
+    /// `/var` -> `/private/var`, where TMPDIR lives) never matches. The
+    /// scratch directory is writable even when no caller lists it.
+    #[test]
+    fn seatbelt_profile_resolves_symlinks_and_grants_the_scratch() {
+        let temp = temp_dir("seatbelt-profile");
+        let real = temp.0.join("real");
+        let (read, scratch) = (real.join("read"), real.join("scratch"));
+        fs::create_dir_all(&read).unwrap();
+        fs::create_dir_all(&scratch).unwrap();
+        std::os::unix::fs::symlink(&real, temp.0.join("link")).unwrap();
+        let linked_read = temp.0.join("link/read");
+        let sandbox = Sandbox {
+            read: vec![&linked_read],
+            write: Vec::new(),
+        };
+        let profile = sandbox
+            .seatbelt_profile(&temp.0.join("link/scratch"))
+            .unwrap();
+        let read = fs::canonicalize(&read).unwrap().display().to_string();
+        let scratch = fs::canonicalize(&scratch).unwrap().display().to_string();
+        assert!(
+            profile.contains(&format!("(allow file-read* (subpath {read:?}))\n")),
+            "{profile}"
+        );
+        assert!(
+            profile.contains(&format!(
+                "(allow file-read* file-write* (subpath {scratch:?}))\n"
+            )),
+            "{profile}"
+        );
+        assert!(!profile.contains("/link/"), "{profile}");
+    }
+
+    /// Under Seatbelt the scratch, reached through a symlink as macOS's
+    /// TMPDIR is, takes writes, and a directory beside it does not.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn seatbelt_writes_the_scratch_through_a_symlink_and_nothing_beside_it() {
+        let temp = temp_dir("seatbelt-writes");
+        let real = temp.0.join("real");
+        let (scratch, beside) = (real.join("scratch"), real.join("beside"));
+        fs::create_dir_all(&scratch).unwrap();
+        fs::create_dir_all(&beside).unwrap();
+        std::os::unix::fs::symlink(&real, temp.0.join("link")).unwrap();
+        let linked = temp.0.join("link/scratch");
+        let sandbox = Sandbox {
+            read: Vec::new(),
+            write: Vec::new(),
+        };
+        let write = |dir: &Path| {
+            let target = dir.join("out").display().to_string();
+            sandbox.run_in_on(
+                Platform::Aarch64AppleDarwin,
+                &["/bin/sh", "-c", "echo x > \"$0\"", &target],
+                "/usr/bin:/bin",
+                &linked,
+                &linked,
+                &[],
+            )
+        };
+        write(&linked).unwrap();
+        assert_eq!(fs::read(scratch.join("out")).unwrap(), b"x\n");
+        assert!(write(&beside).is_err());
+        assert!(!beside.join("out").exists());
     }
 
     #[test]

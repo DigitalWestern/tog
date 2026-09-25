@@ -20,7 +20,7 @@ use tog::tailors::node::{self, NpmPackage, NpmPlan};
 
 mod common;
 
-use common::{tog, TempDir};
+use common::{tar_create, tog, TempDir};
 
 /// Build a one-package tarball whose postinstall runs `script`.
 fn make_pkg_tarball(dir: &std::path::Path, script: &str) -> (PathBuf, String) {
@@ -36,7 +36,7 @@ fn make_pkg_tarball(dir: &std::path::Path, script: &str) -> (PathBuf, String) {
     .unwrap();
     std::fs::write(pkg.join("index.js"), "module.exports = 1;\n").unwrap();
     let tarball = dir.join("fixture-pkg-1.0.0.tgz");
-    let status = Command::new("/usr/bin/tar")
+    let status = tar_create()
         .arg("-czf")
         .arg(&tarball)
         .arg("-C")
@@ -114,7 +114,7 @@ fn make_named_pkg_tarball(dir: &std::path::Path, name: &str, script: &str) -> (P
     .unwrap();
     std::fs::write(pkg.join("index.js"), "module.exports = 1;\n").unwrap();
     let tarball = dir.join(format!("{name}-1.0.0.tgz"));
-    let status = Command::new("/usr/bin/tar")
+    let status = tar_create()
         .arg("-czf")
         .arg(&tarball)
         .arg("-C")
@@ -171,7 +171,7 @@ fn make_fixture_tarball(
         std::fs::write(path, contents).unwrap();
     }
     let tarball = dir.join(format!("{package_name}-1.0.0.tgz"));
-    let status = Command::new("/usr/bin/tar")
+    let status = tar_create()
         .args(["-czf"])
         .arg(&tarball)
         .args(["-C"])
