@@ -128,6 +128,10 @@ by position.
   - #277 gc: run homes under `<store>/run-homes` are never reclaimed.
   - #278 rust_path: the version probe's scratch directory can collide between concurrent probes and is created with `create_dir_all`.
   - #279 node: run refusal misses npm abbreviations and nested installs, and refuses bare `bun`.
+  - #283 dotnet: block `OutDir` and `PublishDir`, and parse the lock once per sync.
+  - #285 pnpm lock reader: four edge cases (trailing colon, parentheses in paths, unquoted `@` keys, a third document) not yet confirmed against js-yaml.
+  - #287 store records: no gc for `records/`, orphaned `tmp/record-*` temporaries, Elixir check-locked hash blind spots.
+  - #289 interrupt: the bwrap preflight misreports Ctrl-C as "bwrap unavailable", and an interrupted sync exits 1 rather than 130.
 - **`deps` as a `Tailor` method.** `src/commands/deps.rs` still names
   tailors directly. A `Tailor::edit_manifest` method with an "unsupported"
   default would make it registry-driven, the way `Tailor::registry_tool`
