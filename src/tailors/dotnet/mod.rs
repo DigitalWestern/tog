@@ -671,13 +671,155 @@ pub fn has_marker(project: &ProjectRoot) -> io::Result<bool> {
     Ok(present(LOCK_FILE) || present(".tog/closures/dotnet.json"))
 }
 
+/// MSBuild elements a csproj may not contain, each because it breaks what
+/// the tailor relies on: the lock is the only package authority, the
+/// project is this one file, and every write lands in scratch.
+const BLOCKED_ELEMENTS: &[(&str, &str)] = &[
+    (
+        "Import",
+        "pulls in targets and props outside the validated project file",
+    ),
+    ("Sdk", "adds an MSBuild SDK other than Microsoft.NET.Sdk"),
+    ("UsingTask", "loads task assemblies outside the SDK"),
+    (
+        "PackageDownload",
+        "downloads packages the lock does not name",
+    ),
+    (
+        "ProjectReference",
+        "builds another project tog has not validated",
+    ),
+    (
+        "RestoreSources",
+        "points restore at feeds other than the projected packages",
+    ),
+    (
+        "RestorePackagesPath",
+        "moves the package folder away from the projected packages",
+    ),
+    (
+        "MSBuildProjectExtensionsPath",
+        "moves restore output away from scratch obj",
+    ),
+    ("BaseIntermediateOutputPath", "moves obj away from scratch"),
+    ("IntermediateOutputPath", "moves obj away from scratch"),
+    ("BaseOutputPath", "moves build output away from scratch"),
+    ("OutputPath", "moves build output away from scratch"),
+];
+
+/// The csproj text with every comment and CDATA section replaced by a
+/// space. Both hold character data, never markup, so what remains is what
+/// MSBuild reads as elements and attributes. An unterminated section is a
+/// refusal: MSBuild would reject the file, and the rest cannot be scanned.
+fn strip_comments_and_cdata(text: &str, path: &Path) -> io::Result<String> {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    loop {
+        let comment = rest.find("<!--");
+        let cdata = rest.find("<![CDATA[");
+        let (at, open, close, what) = match (comment, cdata) {
+            (Some(c), Some(d)) if d < c => (d, "<![CDATA[".len(), "]]>", "CDATA section"),
+            (Some(c), _) => (c, "<!--".len(), "-->", "XML comment"),
+            (None, Some(d)) => (d, "<![CDATA[".len(), "]]>", "CDATA section"),
+            (None, None) => break,
+        };
+        out.push_str(&rest[..at]);
+        out.push(' ');
+        let body = &rest[at + open..];
+        let end = body
+            .find(close)
+            .ok_or_else(|| err(format!("{}: unterminated {what}", path.display())))?;
+        rest = &body[end + close.len()..];
+    }
+    out.push_str(rest);
+    Ok(out)
+}
+
+/// Does `markup` (lowercase, comments stripped) open an element named
+/// `name` (lowercase)? The name must end at whitespace, `>` or `/`, so
+/// `<OutputPath` matches `<OutputPath>`, `<OutputPath Condition=...>` and
+/// `<OutputPath/>` but not `<AppendTargetFrameworkToOutputPath>`.
+fn opens_element(markup: &str, name: &str) -> bool {
+    let tag = format!("<{name}");
+    markup.match_indices(&tag).any(|(at, _)| {
+        markup
+            .as_bytes()
+            .get(at + tag.len())
+            .map(|b| b.is_ascii_whitespace() || matches!(b, b'>' | b'/'))
+            .unwrap_or(false)
+    })
+}
+
+/// The quoted values of every `attribute=` in `markup` (lowercase, comments
+/// stripped), where `attribute` is a whole name. An unquoted value is an
+/// error: well-formed XML always quotes, and the scan must not guess.
+fn attribute_values<'a>(markup: &'a str, attribute: &str, path: &Path) -> io::Result<Vec<&'a str>> {
+    let bytes = markup.as_bytes();
+    let mut values = Vec::new();
+    let mut at = 0;
+    while let Some(found) = markup[at..].find(attribute) {
+        let start = at + found;
+        let before_ok = start == 0 || !is_name_byte(bytes[start - 1]);
+        let mut i = start + attribute.len();
+        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if !before_ok || i >= bytes.len() || bytes[i] != b'=' {
+            at = start + attribute.len();
+            continue;
+        }
+        i += 1;
+        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if i >= bytes.len() || !matches!(bytes[i], b'"' | b'\'') {
+            return Err(err(format!(
+                "{}: {attribute} attribute must be quoted",
+                path.display()
+            )));
+        }
+        let quote = bytes[i];
+        let value_start = i + 1;
+        let end = bytes[value_start..]
+            .iter()
+            .position(|b| *b == quote)
+            .map(|offset| value_start + offset)
+            .ok_or_else(|| {
+                err(format!(
+                    "{}: unterminated {attribute} attribute",
+                    path.display()
+                ))
+            })?;
+        values.push(&markup[value_start..end]);
+        at = end + 1;
+    }
+    Ok(values)
+}
+
+/// Does `b` join the name before an attribute? The boundary keeps `sdk=`
+/// from matching inside `MySdk=`; punctuation such as `-`, `.` and `:`
+/// counts as a boundary so that anything resembling the name is checked.
+fn is_name_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
 /// Validate a project-relative csproj, read through the held descriptor.
+///
+/// Matching is on whole element and attribute names, case-insensitively,
+/// with comments and CDATA removed first; entity references cannot encode
+/// names, so a well-formed file cannot hide one. The scan is an early,
+/// named refusal: the sandbox (network denied, writes confined to scratch)
+/// is what holds the boundary when a build step does something the scan
+/// does not model.
 fn validate_csproj(project: &ProjectRoot, rel: &Path) -> io::Result<()> {
     let text = read_input_text(project, rel)?;
     let path = project.path().join(rel);
     let path = path.as_path();
-    let lower = text.to_ascii_lowercase();
-    let mut document = text.strip_prefix('\u{feff}').unwrap_or(&text).trim_start();
+    let markup = strip_comments_and_cdata(&text, path)?.to_ascii_lowercase();
+    let mut document = markup
+        .strip_prefix('\u{feff}')
+        .unwrap_or(&markup)
+        .trim_start();
     if document.starts_with("<?xml")
         && document
             .as_bytes()
@@ -690,24 +832,12 @@ fn validate_csproj(project: &ProjectRoot, rel: &Path) -> io::Result<()> {
             .ok_or_else(|| err(format!("{}: unterminated XML declaration", path.display())))?;
         document = document[end + 2..].trim_start();
     }
-    loop {
-        if !document.starts_with("<!--") {
-            break;
-        }
-        let end = document
-            .find("-->")
-            .ok_or_else(|| err(format!("{}: unterminated XML comment", path.display())))?;
-        document = document[end + 3..].trim_start();
-    }
     // The root must be exactly <Project (word-bounded: <Projector/> is not).
-    let root_ok = document
-        .get(..8)
-        .map(|prefix| prefix.eq_ignore_ascii_case("<project"))
-        .unwrap_or(false)
+    let root_ok = document.starts_with("<project")
         && document
             .as_bytes()
             .get(8)
-            .map(|b| b.is_ascii_whitespace() || *b == b'>' || *b == b'/')
+            .map(|b| b.is_ascii_whitespace() || matches!(b, b'>' | b'/'))
             .unwrap_or(false);
     if !root_ok {
         return Err(err(format!(
@@ -715,93 +845,83 @@ fn validate_csproj(project: &ProjectRoot, rel: &Path) -> io::Result<()> {
             path.display()
         )));
     }
-    for marker in [
-        "<import",
-        "<sdk ",
-        "<sdk/",
-        "<sdk>",
-        "<sdk\t",
-        "<sdk\n",
-        "<sdk\r",
-        "packagedownload",
-        "projectreference",
-        "usingtask",
-        "restoresources",
-        "restorepackagespath",
-        "msbuildprojectextensionspath",
-        "baseintermediateoutputpath",
-        "outputpath",
-    ] {
-        if lower.contains(marker) {
+    for (name, why) in BLOCKED_ELEMENTS {
+        if opens_element(&markup, &name.to_ascii_lowercase()) {
             return Err(err(format!(
-                "{}: unsupported MSBuild/project feature {marker}",
+                "{}: unsupported MSBuild/project feature <{name}>: it {why}",
                 path.display()
             )));
         }
     }
-    let bytes = lower.as_bytes();
-    let mut at = 0;
-    while let Some(found) = lower[at..].find("sdk") {
-        let start = at + found;
-        let before_ok =
-            start == 0 || !bytes[start - 1].is_ascii_alphanumeric() && bytes[start - 1] != b'_';
-        let mut i = start + 3;
-        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
-            i += 1;
-        }
-        if before_ok && i < bytes.len() && bytes[i] == b'=' {
-            i += 1;
-            while i < bytes.len() && bytes[i].is_ascii_whitespace() {
-                i += 1;
-            }
-            if i >= bytes.len() || !matches!(bytes[i], b'"' | b'\'') {
-                return Err(err(format!(
-                    "{}: SDK attribute must be quoted",
-                    path.display()
-                )));
-            }
-            let quote = bytes[i];
-            let value_start = i + 1;
-            let end = bytes[value_start..]
+    // tog overrides the output and intermediate paths as global properties
+    // on the command line, which a project cannot reassign unless it names
+    // them in TreatAsLocalProperty.
+    if !attribute_values(&markup, "treataslocalproperty", path)?.is_empty() {
+        return Err(err(format!(
+            "{}: unsupported MSBuild/project feature TreatAsLocalProperty: it lets the \
+             project override the paths tog sets on the command line",
+            path.display()
+        )));
+    }
+    // A task's <Output> creates items and properties by name, the same as
+    // the blocked elements would.
+    for attribute in ["itemname", "propertyname"] {
+        for value in attribute_values(&markup, attribute, path)? {
+            let value = value.trim();
+            if let Some((name, why)) = BLOCKED_ELEMENTS
                 .iter()
-                .position(|b| *b == quote)
-                .map(|offset| value_start + offset)
-                .ok_or_else(|| err(format!("{}: unterminated SDK attribute", path.display())))?;
-            if &lower[value_start..end] != "microsoft.net.sdk" {
+                .find(|(name, _)| name.eq_ignore_ascii_case(value))
+            {
                 return Err(err(format!(
-                    "{}: only Microsoft.NET.Sdk is supported",
+                    "{}: unsupported MSBuild/project feature {name} created by a task: it {why}",
                     path.display()
                 )));
             }
-            at = end + 1;
-        } else {
-            at = start + 3;
         }
     }
-    // XML entity references cannot encode element or attribute names, so this
-    // fail-closed name scan cannot be bypassed by a well-formed MSBuild XML file.
+    for value in attribute_values(&markup, "sdk", path)? {
+        if value != "microsoft.net.sdk" {
+            return Err(err(format!(
+                "{}: only Microsoft.NET.Sdk is supported",
+                path.display()
+            )));
+        }
+    }
     Ok(())
 }
 
-fn validate_lock_shape(project: &ProjectRoot, rel: &Path) -> io::Result<()> {
-    let text = read_input_text(project, rel)?;
+/// What a v1 packages.lock.json pins: its targets in lock order and one
+/// package per case-insensitive id and version, sorted by that key.
+struct ParsedLock {
+    targets: Vec<String>,
+    packages: Vec<NugetPackage>,
+}
+
+/// The one reader of packages.lock.json: preflight and planning both call
+/// it, so every refusal of a lock has one text and a lock preflight accepts
+/// is one planning can use.
+fn parse_lock(text: &str) -> io::Result<ParsedLock> {
     let v: serde_json::Value =
-        serde_json::from_str(&text).map_err(|e| err(format!("packages.lock.json: {e}")))?;
+        serde_json::from_str(text).map_err(|e| err(format!("packages.lock.json: {e}")))?;
     if v["version"] != 1 {
         return Err(err(format!(
-            "packages.lock.json version {} unsupported (v1 only in v0; Central Package Management locks are v2+)",
+            "packages.lock.json version {} unsupported (v1 only in v0; \
+             Central Package Management locks are v2+)",
             v["version"]
         )));
     }
-    let targets = v["dependencies"]
+    let deps = v["dependencies"]
         .as_object()
         .ok_or_else(|| err("packages.lock.json has no dependencies"))?;
-    for (target, entries) in targets {
-        for (id, entry) in entries
+    let mut targets = Vec::new();
+    let mut packages: BTreeMap<(String, String), NugetPackage> = BTreeMap::new();
+    for (target, entries) in deps {
+        targets.push(target.clone());
+        let entries = entries
             .as_object()
-            .ok_or_else(|| err(format!("bad lock target {target}")))?
-        {
-            match entry["type"].as_str() {
+            .ok_or_else(|| err(format!("bad lock target {target}")))?;
+        for (id, e) in entries {
+            match e["type"].as_str() {
                 Some("Direct") | Some("Transitive") => {}
                 Some("Project") => {
                     return Err(err(format!(
@@ -816,13 +936,37 @@ fn validate_lock_shape(project: &ProjectRoot, rel: &Path) -> io::Result<()> {
                 None => {
                     return Err(err(format!(
                         "{id}: unsupported lock dependency type {}; expected Direct or Transitive",
-                        entry["type"]
+                        e["type"]
                     )))
                 }
             }
+            let version = e["resolved"]
+                .as_str()
+                .ok_or_else(|| err(format!("{id}: no resolved version")))?;
+            let hash = e["contentHash"]
+                .as_str()
+                .ok_or_else(|| err(format!("{id}: no contentHash")))?;
+            let key = (id.to_ascii_lowercase(), version.to_string());
+            let pkg = NugetPackage {
+                id: id.clone(),
+                version: version.to_string(),
+                content_hash: hash.to_string(),
+            };
+            if let Some(prev) = packages.get(&key) {
+                if prev.content_hash != pkg.content_hash {
+                    return Err(err(format!(
+                        "{id}@{version}: conflicting contentHash across lock targets"
+                    )));
+                }
+            } else {
+                packages.insert(key, pkg);
+            }
         }
     }
-    Ok(())
+    Ok(ParsedLock {
+        targets,
+        packages: packages.into_values().collect(),
+    })
 }
 
 /// Central v0 trust-boundary validation. The tuple is the canonical project
@@ -887,7 +1031,7 @@ pub fn preflight(project: &ProjectRoot, sdk_version: &str) -> io::Result<(PathBu
         }
     }
     if project.is_input_file(lock_rel) {
-        validate_lock_shape(project, lock_rel)?;
+        parse_lock(&read_input_text(project, lock_rel)?)?;
     }
     Ok((csproj, lock_path))
 }
@@ -966,62 +1110,7 @@ pub fn plan_dotnet(project: &ProjectRoot, selected: &Selected) -> io::Result<(Do
     let (csproj, _) = preflight(project, &sdk_version)?;
     require_lock(project)?;
     let lock = read_input_text(project, lock_rel)?;
-    let v: serde_json::Value =
-        serde_json::from_str(&lock).map_err(|e| err(format!("packages.lock.json: {e}")))?;
-    if v["version"] != 1 {
-        return Err(err(format!(
-            "packages.lock.json version {} unsupported (v1 only in v0; \
-             Central Package Management locks are v2+)",
-            v["version"]
-        )));
-    }
-    let deps = v["dependencies"]
-        .as_object()
-        .ok_or_else(|| err("packages.lock.json has no dependencies"))?;
-    let mut targets = Vec::new();
-    let mut packages: BTreeMap<(String, String), NugetPackage> = BTreeMap::new();
-    for (target, entries) in deps {
-        targets.push(target.clone());
-        let entries = entries
-            .as_object()
-            .ok_or_else(|| err(format!("bad lock target {target}")))?;
-        for (id, e) in entries {
-            match e["type"].as_str() {
-                Some("Direct") | Some("Transitive") => {}
-                Some("Project") => {
-                    return Err(err(format!(
-                    "{id}: Project lock entries are not supported; use package dependencies only"
-                )))
-                }
-                other => {
-                    return Err(err(format!(
-                        "{id}: unsupported lock dependency type {other:?} (v0)"
-                    )))
-                }
-            }
-            let version = e["resolved"]
-                .as_str()
-                .ok_or_else(|| err(format!("{id}: no resolved version")))?;
-            let hash = e["contentHash"]
-                .as_str()
-                .ok_or_else(|| err(format!("{id}: no contentHash")))?;
-            let key = (id.to_ascii_lowercase(), version.to_string());
-            let pkg = NugetPackage {
-                id: id.clone(),
-                version: version.to_string(),
-                content_hash: hash.to_string(),
-            };
-            if let Some(prev) = packages.get(&key) {
-                if prev.content_hash != pkg.content_hash {
-                    return Err(err(format!(
-                        "{id}@{version}: conflicting contentHash across lock targets"
-                    )));
-                }
-            } else {
-                packages.insert(key, pkg);
-            }
-        }
-    }
+    let ParsedLock { targets, packages } = parse_lock(&lock)?;
     let plan = DotnetPlan {
         // The SDK this plan was restored under is the selected one.
         sdk_version: sdk_version.clone(),
@@ -1031,7 +1120,7 @@ pub fn plan_dotnet(project: &ProjectRoot, selected: &Selected) -> io::Result<(Do
             .unwrap_or("project")
             .to_string(),
         targets,
-        packages: packages.into_values().collect(),
+        packages,
     };
     validate_plan(&plan, &sdk_version)?;
     let now = read_input_text(project, lock_rel)?;
@@ -2405,6 +2494,145 @@ mod tests {
             Path::new("projector.csproj")
         )
         .is_err());
+    }
+
+    /// Preflight and planning read the lock through one parser, so a lock
+    /// preflight accepts is one planning can use, and each refusal has one
+    /// text.
+    #[test]
+    fn preflight_and_planning_share_one_lock_parser() {
+        let scratch = TempDir::named("dn-lock");
+        let refusal = |name: &str, lock: &str| -> String {
+            let dir = scratch.0.join(name);
+            fs::create_dir(&dir).unwrap();
+            fs::write(dir.join("p.csproj"), minimal_csproj()).unwrap();
+            fs::write(dir.join("packages.lock.json"), lock).unwrap();
+            preflight(&ProjectRoot::open(&dir).unwrap(), SDK_VERSION)
+                .map(|_| String::new())
+                .unwrap_err()
+                .to_string()
+        };
+        let entry = |fields: &str| {
+            format!(
+                r#"{{"version":1,"dependencies":{{"net9.0":{{"Newtonsoft.Json":{{{fields}}}}}}}}}"#
+            )
+        };
+        let error = refusal("v2", r#"{"version":2,"dependencies":{}}"#);
+        assert!(
+            error.contains("packages.lock.json version 2 unsupported (v1 only in v0; Central Package Management locks are v2+)"),
+            "{error}"
+        );
+        let error = refusal(
+            "kind",
+            &entry(r#""type":"Weird","resolved":"1.0.0","contentHash":"A""#),
+        );
+        assert!(
+            error.contains("Newtonsoft.Json: unsupported lock dependency type Weird; expected Direct or Transitive"),
+            "{error}"
+        );
+        let error = refusal("untyped", &entry(r#""resolved":"1.0.0","contentHash":"A""#));
+        assert!(
+            error.contains("Newtonsoft.Json: unsupported lock dependency type null; expected Direct or Transitive"),
+            "{error}"
+        );
+        let error = refusal("unresolved", &entry(r#""type":"Direct","contentHash":"A""#));
+        assert!(
+            error.contains("Newtonsoft.Json: no resolved version"),
+            "{error}"
+        );
+        let error = refusal("unhashed", &entry(r#""type":"Direct","resolved":"1.0.0""#));
+        assert!(error.contains("Newtonsoft.Json: no contentHash"), "{error}");
+        let error = refusal(
+            "conflict",
+            r#"{"version":1,"dependencies":{
+                "net9.0":{"Newtonsoft.Json":{"type":"Direct","resolved":"1.0.0","contentHash":"A"}},
+                "net9.0/linux-x64":{"newtonsoft.json":{"type":"Transitive","resolved":"1.0.0","contentHash":"B"}}}}"#,
+        );
+        assert!(
+            error.contains("newtonsoft.json@1.0.0: conflicting contentHash across lock targets"),
+            "{error}"
+        );
+
+        let lock = parse_lock(
+            r#"{"version":1,"dependencies":{
+                "net9.0":{
+                    "Zeta":{"type":"Direct","resolved":"2.0.0","contentHash":"Z"},
+                    "Alpha":{"type":"Transitive","resolved":"1.0.0","contentHash":"A"}},
+                "net9.0/linux-x64":{
+                    "alpha":{"type":"Transitive","resolved":"1.0.0","contentHash":"A"}}}}"#,
+        )
+        .unwrap();
+        assert_eq!(lock.targets, ["net9.0", "net9.0/linux-x64"]);
+        let packages: Vec<_> = lock
+            .packages
+            .iter()
+            .map(|p| (p.id.as_str(), p.version.as_str(), p.content_hash.as_str()))
+            .collect();
+        assert_eq!(packages, [("Alpha", "1.0.0", "A"), ("Zeta", "2.0.0", "Z")]);
+    }
+
+    /// Validate one csproj body in a fresh project directory.
+    fn csproj_verdict(body: &str) -> io::Result<()> {
+        let scratch = TempDir::named("dn-csproj");
+        fs::write(scratch.0.join("p.csproj"), body).unwrap();
+        validate_csproj(
+            &ProjectRoot::open(&scratch.0).unwrap(),
+            Path::new("p.csproj"),
+        )
+    }
+
+    fn in_project(inner: &str) -> String {
+        format!(
+            "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup>{inner}</PropertyGroup></Project>"
+        )
+    }
+
+    /// Blocked names match whole element names outside comments, so a
+    /// longer property that merely contains one is a valid project.
+    #[test]
+    fn csproj_markers_match_whole_element_names() {
+        for accepted in [
+            in_project(
+                "<AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>",
+            ),
+            in_project(
+                "<AppendRuntimeIdentifierToOutputPath>false</AppendRuntimeIdentifierToOutputPath>",
+            ),
+            in_project("<!-- <OutputPath>bin/elsewhere</OutputPath> -->"),
+            in_project("<!-- an Import, a ProjectReference and a UsingTask -->"),
+            in_project("<Description>$(OutputPath) is where it lands</Description>"),
+            "<!-- lead --><Project Sdk=\"Microsoft.NET.Sdk\"><!-- Sdk=\"Other\" --></Project>"
+                .into(),
+            in_project("<![CDATA[<OutputPath>]]>"),
+        ] {
+            assert!(csproj_verdict(&accepted).is_ok(), "{accepted}");
+        }
+        for refused in [
+            in_project("<OutputPath>bin/elsewhere</OutputPath>"),
+            in_project("<OutputPath Condition=\"'$(Configuration)' == 'Release'\">x</OutputPath>"),
+            in_project("<OutputPath\n>x</OutputPath>"),
+            in_project("<OutputPath/>"),
+            in_project("<outputpath>x</outputpath>"),
+            in_project("<OUTPUTPATH>x</OUTPUTPATH>"),
+            in_project("<BaseOutputPath>x</BaseOutputPath>"),
+            in_project("<IntermediateOutputPath>x</IntermediateOutputPath>"),
+            in_project("<BaseIntermediateOutputPath>x</BaseIntermediateOutputPath>"),
+            in_project("<MSBuildProjectExtensionsPath>x</MSBuildProjectExtensionsPath>"),
+            in_project("<RestoreSources>https://evil</RestoreSources>"),
+            in_project("<RestorePackagesPath>x</RestorePackagesPath>"),
+            "<Project Sdk=\"Microsoft.NET.Sdk\"><ItemGroup><PackageDownload Include=\"X\" Version=\"[1.0.0]\" /></ItemGroup></Project>".into(),
+            "<Project Sdk=\"Microsoft.NET.Sdk\"><ItemGroup><ProjectReference Include=\"../o/o.csproj\" /></ItemGroup></Project>".into(),
+            "<Project Sdk=\"Microsoft.NET.Sdk\"><UsingTask TaskName=\"T\" AssemblyFile=\"t.dll\" /></Project>".into(),
+            "<Project Sdk=\"Microsoft.NET.Sdk\"><import Project=\"evil.targets\" /></Project>".into(),
+            "<Project Sdk=\"Microsoft.NET.Sdk\" TreatAsLocalProperty=\"OutputPath\"></Project>".into(),
+            "<Project Sdk=\"Microsoft.NET.Sdk\"><Target Name=\"T\"><CreateItem Include=\"X\"><Output TaskParameter=\"Include\" ItemName=\"PackageDownload\" /></CreateItem></Target></Project>".into(),
+            "<Project Sdk=\"Microsoft.NET.Sdk\"><Target Name=\"T\"><CreateProperty Value=\"x\"><Output TaskParameter=\"Value\" PropertyName=\"RestoreSources\" /></CreateProperty></Target></Project>".into(),
+            "<Project Sdk=\"Microsoft.NET.Sdk\"><!-- open".into(),
+            "<Project Sdk=\"Microsoft.NET.Sdk\"><![CDATA[ open</Project>".into(),
+            "<Project Sdk=\"Other.Sdk\"></Project>".into(),
+        ] {
+            assert!(csproj_verdict(&refused).is_err(), "{refused}");
+        }
     }
 
     /// A project read through a held root keeps reading the original
