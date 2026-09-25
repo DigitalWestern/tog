@@ -269,6 +269,51 @@ mod tests {
         assert!(refusal(&["yarn", "remove", "is-odd"]).is_some());
     }
 
+    /// A global option before the subcommand does not hide it: its value is
+    /// a bare word too, so taking the first bare word as the subcommand
+    /// would let the install run and replace the projection.
+    #[test]
+    fn a_global_option_does_not_hide_an_npm_family_install() {
+        for (words, invocation) in [
+            (vec!["npm", "--prefix", ".", "install"], "npm install"),
+            (vec!["npm", "--loglevel", "silent", "ci"], "npm ci"),
+            (vec!["npm", "--prefix=.", "i", "is-odd"], "npm i"),
+            (vec!["pnpm", "-C", ".", "add", "x"], "pnpm add"),
+            (vec!["pnpm", "--dir", ".", "install"], "pnpm install"),
+            (vec!["pnpm", "recursive", "install"], "pnpm install"),
+            (vec!["yarn", "--cwd", ".", "add", "x"], "yarn add"),
+            (vec!["yarn", "workspace", "web", "add", "x"], "yarn add"),
+            (vec!["yarn", "--cwd", "."], "yarn"),
+            (vec!["yarn", "--silent"], "yarn"),
+            (vec!["bun", "--cwd", ".", "install"], "bun install"),
+            (vec!["bun", "--cwd", "."], "bun"),
+            (vec!["bun", "--cwd=.", "a", "x"], "bun a"),
+            (
+                vec!["/x/bin/npm", "--prefix", ".", "install"],
+                "npm install",
+            ),
+            // An option's value that spells a subcommand is read as one. That
+            // fails safe: a harmless command is refused, an install never runs.
+            (vec!["npm", "--prefix", "install", "run"], "npm install"),
+        ] {
+            let message = refusal(&words).unwrap_or_else(|| panic!("{words:?} is refused"));
+            assert!(
+                message.starts_with(&format!("'{invocation}' would replace")),
+                "{words:?}: {message}"
+            );
+        }
+        // The advice still follows the subcommand, not the first word.
+        assert!(refusal(&["npm", "--prefix", ".", "ci"])
+            .unwrap()
+            .contains("'tog' sets node_modules up from the lockfile"));
+        assert!(refusal(&["pnpm", "-C", ".", "add", "x"])
+            .unwrap()
+            .contains("edit dependencies through tog"));
+        assert!(refusal(&["yarn", "--cwd", "."])
+            .unwrap()
+            .contains("'tog' sets node_modules up from the lockfile"));
+    }
+
     /// Everything else still runs. A refusal that caught `npm run build`,
     /// `pip list`, or a program merely named after one would be worse than
     /// the raw error it replaces.
@@ -296,6 +341,28 @@ mod tests {
             vec!["npm"],
             vec!["pnpm"],
             vec!["yarn", "why", "is-odd"],
+            // A global option before a verb that leaves node_modules alone.
+            vec!["npm", "--prefix", ".", "run", "build"],
+            vec!["npm", "--prefix", ".", "ls"],
+            vec!["pnpm", "-C", ".", "why", "is-odd"],
+            // Asking yarn or bun about itself is not a bare install.
+            vec!["yarn", "--version"],
+            vec!["yarn", "-v"],
+            vec!["yarn", "--help"],
+            vec!["yarn", "-h"],
+            vec!["bun", "--version"],
+            vec!["bun", "--help"],
+            vec!["bun", "--cwd", ".", "--help"],
+            // A script or a file to run is not a bare install either.
+            vec!["yarn", "build"],
+            vec!["yarn", "--cwd", ".", "build"],
+            vec!["yarn", "workspace", "web", "run", "build"],
+            vec!["bun", "index.ts"],
+            vec!["bun", "--cwd", ".", "./server.ts"],
+            vec!["bun", "-e", "console.log(1)"],
+            vec!["bun", "--eval=console.log(1)"],
+            // `bun upgrade` upgrades bun itself, not node_modules.
+            vec!["bun", "upgrade"],
             // Not these programs at all.
             vec!["pytest"],
             vec!["source", "./scripts/env.sh"],

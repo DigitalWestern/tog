@@ -1028,6 +1028,11 @@ fn pip_activate_and_npm_install_are_refused_with_the_tog_verb() {
             "'tog' sets node_modules up from the lockfile",
         ),
         (&["run", "yarn", "add", "is-odd"], "node_modules"),
+        // A global option's value before the subcommand does not hide it.
+        (
+            &["run", "npm", "--prefix", ".", "install", "is-odd"],
+            "'npm install' would replace the node_modules projection",
+        ),
         // Bare yarn and bare bun install.
         (&["run", "yarn"], "node_modules"),
         (&["run", "bun"], "node_modules"),

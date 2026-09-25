@@ -83,7 +83,6 @@ by position.
   Each line is one issue and one PR, in order:
   - #228 pnpm importer: underscore peer-suffix trimming, a lenient YAML reader, and two multi-document rules.
   - #229 node: yarn1 importer has its own semver that disagrees with node-semver.
-  - #230 node: tog run npm --prefix . install bypasses the install refusal.
   - #231 run: elixir and dotnet get a predictable, shared /tmp home directory.
   - #232 go: a cached plan skips the go.sum check a fresh plan enforces; unreadable go.sum is treated as empty.
   - #226 supervise: Ctrl-C during a sandboxed child is recorded as a script failure and the sync continues.
