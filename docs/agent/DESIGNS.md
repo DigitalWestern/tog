@@ -98,7 +98,12 @@ The design extracts every locked artifact through the pre-materialization
 extractor (`src/kernel/archive.rs`): list and validate every entry first
 (no absolute names, `..`, hard links or special files; symlinks only when
 contained), then extract with `TAR_OPTIONS` (and `UNZIPOPT` for unzip)
-unset. The Go toolchain, the optional Rust components and cross targets
+unset and tar told not to restore extended attributes, ACLs, file flags or
+AppleDouble metadata, since an object's identity covers names, bytes and
+the executable bit only. PAX values are bytes; only `path`, `linkpath` and
+`size` are decoded, as UTF-8, and names are refused when a listing could
+not show them faithfully or when APFS would fold two of them into one. The
+Go toolchain, the optional Rust components and cross targets
 (`src/kernel/provider/rust_extras.rs`) and `tog update --self` use it. The
 other toolchains, and npm, Hex, sdist and crate archives, still call
 `/usr/bin/tar` directly; #236 routes them through it. Extraction must stay
