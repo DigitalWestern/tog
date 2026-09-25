@@ -152,10 +152,13 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   model (sparse members, a global header that renames, unknown type letters, bad checksums),
   and extracts with `TAR_OPTIONS` unset. Three things go through it: the Go toolchain, the
   optional Rust components and cross targets, and the binary `tog update --self` installs.
-  Everything else is extracted by `/usr/bin/tar` directly, relying on its own defences and
-  inheriting the user's `TAR_OPTIONS`: the CPython, uv, Rust, rustfmt, Node, Ruby, .NET,
-  Elixir/OTP and native-library toolchain tarballs, npm registry tarballs, Hex packages,
-  sdists, and crates. A crate is extracted in full before its 1 GiB size cap is checked.
+  The other tarballs are extracted by `/usr/bin/tar` directly, relying on its own defences
+  and inheriting the user's `TAR_OPTIONS`: the CPython, uv, Rust, rustfmt, Node, Ruby, .NET,
+  OTP and native-library toolchains, the `.tar.zst` members inside a `.conda` package, npm
+  registry tarballs, Hex packages, tar sdists, and crates. A crate is extracted in full before
+  its 1 GiB size cap is checked. The Elixir release zip and Hex's own `.ez` archive are
+  unpacked by `/usr/bin/unzip`, inheriting the user's `UNZIP`/`UNZIPOPT`. Wheels, zip sdists
+  and the outer zip of a `.conda` package are read in process with the `zip` crate.
 
 ## Python
 

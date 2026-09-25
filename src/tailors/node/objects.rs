@@ -191,10 +191,11 @@ fn node_env_v4_contract(identity: &Identity) -> Result<(), String> {
 }
 
 /// `node-env/5` adds one unconditional input to the `/4` shape: `gyp_python`,
-/// the object id of the CPython node-gyp runs on. `/4` names that
-/// interpreter nowhere (it is the shipped pin), so under `/4` a pin change
-/// can rebuild a native addon under an unchanged id. Under `/5` it is the
-/// project's locked Python (or the shipped default) and the id commits to it.
+/// the object id of the CPython node-gyp runs on. The legacy `/4` schema,
+/// which no producer writes any more, named that interpreter nowhere: it was
+/// the shipped pin, so a pin change could rebuild a native addon under an
+/// unchanged id. Under `/5` it is the project's locked Python (or the
+/// shipped default) and the id commits to it.
 fn node_env_v5_contract(identity: &Identity) -> Result<(), String> {
     node_env_v4_contract(identity)?;
     let gyp_python = identity

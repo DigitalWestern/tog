@@ -689,6 +689,11 @@ also makes the gate stronger than a file check: the sync itself fails on a
 denied exception, so the policy is enforced while the environment is built
 rather than inspected afterwards.
 
+The install step below uses the one-line installer, which works once
+`v0.1.0` is tagged and the repository is public; until then, build tog
+from source in that step (`cargo install --git
+https://github.com/DigitalWestern/tog --locked`).
+
 ```yaml
 name: tog
 on: [pull_request]

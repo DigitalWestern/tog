@@ -36,8 +36,10 @@ by position.
   running `tog --frozen` under the company policy plus `tog sbom`, which
   should work on GitHub-hosted Ubuntu runners if unprivileged user
   namespaces are allowed there. Parked 2026-09-23 until the Ubuntu sandbox
-  behavior (#87, now closed) is understood or an outside demo is requested
-  (see #70).
+  behavior (#87) was understood. That condition has fired: #87 was fixed by
+  #173 (the sandbox mirrors the host's `/bin` and `/lib` layout, so Ubuntu
+  22.04 can sandbox) and its follow-up #175 is closed. Un-parking #70 is the
+  owner's call.
 - **Key and credential policy for the trust work.** Where trusted publisher
   keys live, who rotates them, and what revocation means (including a
   company's own internal publisher); a test account for private-registry
@@ -156,7 +158,7 @@ by position.
   never published (#165).
 - **`gc --migrate-metadata` as a `fix:` line (#166).** It resolves only a
   transient failure. Recommended: keep `fix:`.
-- **Two PEP 440 version grammars.** `src/kernel/toolchain/select.rs` has
+- **Two PEP 440 version grammars (#297).** `src/kernel/toolchain/select.rs` has
   the small numeric `Version`/specifier subset the toolchain selector needs;
   `src/tailors/python/pep440.rs` has the full grammar. The toolchain lock's
   Python source reader (`src/kernel/toolchain/resolve.rs`) parses

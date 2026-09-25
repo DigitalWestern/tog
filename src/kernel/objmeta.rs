@@ -3226,7 +3226,7 @@ mod tests {
         assert_eq!(check_identity_grammar(one_wheel), Ok(()));
     }
 
-    /// The second drift `python-env/3` closes: an inspected native sdist
+    /// The second drift `python-env/3` detects: an inspected native sdist
     /// that drops its `native_libs` key. Under `/2` every native check was
     /// conditional on that key. The `native` input says what the producer
     /// decided, so its absence is a contradiction rather than a silence.
@@ -3245,7 +3245,7 @@ mod tests {
         assert_eq!(check_identity_grammar(&native), Ok(()));
     }
 
-    /// The first drift `node-env/4` closes: one package dropped from a
+    /// The first drift `node-env/4` detects: one package dropped from a
     /// multi-package plan. Under `/3` another `pkg:` key remained, so every
     /// presence check passed. `plan_digest` covers the whole set.
     #[test]
@@ -3278,7 +3278,7 @@ mod tests {
         assert_eq!(check_identity_grammar(multi_package), Ok(()));
     }
 
-    /// The second drift `node-env/4` closes: a declared `artifact:` key
+    /// The second drift `node-env/4` detects: a declared `artifact:` key
     /// dropped. Under `/3` the artifact group was optional, so nothing
     /// could prove one had been kept. `plan_digest` spans artifacts too.
     #[test]
@@ -3323,7 +3323,7 @@ mod tests {
         }
     }
 
-    /// The third drift `node-env/4` closes: a Linux `native_libs` key
+    /// The third drift `node-env/4` detects: a Linux `native_libs` key
     /// dropped. Under `/3` the native checks were conditional on that key.
     #[test]
     fn node_env_native_libs_dropped_is_detected() {
@@ -3337,7 +3337,7 @@ mod tests {
         assert_eq!(check_identity_grammar(&native), Ok(()));
     }
 
-    /// The first drift `sdist-build/4` closes: both halves of the
+    /// The first drift `sdist-build/4` detects: both halves of the
     /// `rust`/`vendor` pair dropped together. Under `/3` only a one-sided
     /// pair was rejected, so the drifted build looked like a build that
     /// never had a Rust extension at all.
@@ -3354,7 +3354,7 @@ mod tests {
         assert_eq!(check_identity_grammar(&rust), Ok(()));
     }
 
-    /// The second drift `sdist-build/4` closes: both halves of the
+    /// The second drift `sdist-build/4` detects: both halves of the
     /// `native_libs`/`native_linker` pair dropped together.
     #[test]
     fn sdist_build_native_pair_dropped_is_detected() {
@@ -3524,7 +3524,7 @@ mod tests {
         }
     }
 
-    /// The drift `cargo-vendor/2` closes: a one-crate plan that drops its
+    /// The drift `cargo-vendor/2` detects: a one-crate plan that drops its
     /// only `crate:` key. `version` is `max(1, crate_count)`, so under `/1`
     /// the drifted plan hashed to the empty plan's object id. The explicit
     /// `crates` count separates them.
