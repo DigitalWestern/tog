@@ -8,12 +8,9 @@ use std::path::{Path, PathBuf};
 use tog::kernel::platform::Platform;
 use tog::kernel::store::Store;
 
-struct Temp(PathBuf);
-impl Drop for Temp {
-    fn drop(&mut self) {
-        let _ = tog::kernel::store::remove_tree(&self.0);
-    }
-}
+mod common;
+
+use common::TempDir;
 
 fn store_at(root: &Path) -> Store {
     let store_root = root.join("store");
@@ -29,15 +26,7 @@ fn store_at(root: &Path) -> Store {
 #[ignore]
 fn electron_is_provisioned_where_its_installer_looks() {
     let platform = Platform::host().expect("host platform");
-    let root = Temp(std::env::temp_dir().join(format!(
-        "tog-electron-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    )));
-    std::fs::create_dir_all(&root.0).unwrap();
+    let root = TempDir::new("electron");
     let store = store_at(&root.0);
     let activity = &store
         .activity(tog::kernel::activity::ActivityMode::Shared)

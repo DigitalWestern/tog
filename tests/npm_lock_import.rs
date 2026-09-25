@@ -3,68 +3,39 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::Output;
 
 use sha2::{Digest, Sha256};
 use tog::kernel::platform::Platform;
 
-fn copy_tree(source: &Path, destination: &Path) {
-    fs::create_dir_all(destination).unwrap();
-    for entry in fs::read_dir(source).unwrap() {
-        let entry = entry.unwrap();
-        let target = destination.join(entry.file_name());
-        if entry.file_type().unwrap().is_dir() {
-            copy_tree(&entry.path(), &target);
-        } else {
-            fs::copy(entry.path(), target).unwrap();
-        }
-    }
-}
+mod common;
 
-fn run(binary: &Path, project: &Path, store: &Path, args: &[&str], tmp: &Path) -> Output {
-    run_from(binary, project, store, args, tmp)
-}
+use common::{assert_ok, command, copy_tree, warm_store, TempDir};
 
-fn run_from(binary: &Path, current_dir: &Path, store: &Path, args: &[&str], tmp: &Path) -> Output {
-    Command::new(binary)
-        .current_dir(current_dir)
-        .env("TOG_STORE", store)
-        .env("TMPDIR", tmp)
+/// The binary with its `TMPDIR` inside the scratch home, so whatever a
+/// sync stages there is removed with the scratch directory.
+fn run(cwd: &Path, home: &Path, store: &Path, args: &[&str]) -> Output {
+    command(cwd, home, store)
+        .env("TMPDIR", home)
         .args(args)
         .output()
         .unwrap()
-}
-
-fn assert_ok(output: &Output, label: &str) {
-    assert!(
-        output.status.success(),
-        "{label} failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
 }
 
 #[test]
 #[ignore]
 fn pnpm_and_yarn_lockfiles_import_end_to_end() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let scratch = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
-        .join("scratch/tmp");
-    fs::create_dir_all(&scratch).unwrap();
-    let store = scratch.join("nx7-store");
-    let binary = Path::new(env!("CARGO_BIN_EXE_tog"));
+    let temp = TempDir::new("npm-lock-import");
+    let scratch = temp.path();
+    let store = warm_store(&temp);
 
     for fixture in ["proj-pnpm", "proj-pnpm-ws", "proj-yarn1"] {
         let project = scratch.join(format!("nx7-{fixture}"));
-        if project.exists() {
-            fs::remove_dir_all(&project).unwrap();
-        }
         copy_tree(&root.join("tests/fixtures").join(fixture), &project);
 
-        let synced = run(binary, &project, &store, &["sync"], &scratch);
-        assert_ok(&synced, &format!("sync {fixture}"));
+        let synced = run(&project, scratch, &store, &["sync"]);
+        assert_ok(synced, &format!("sync {fixture}"));
         let closure = fs::read_to_string(project.join(".tog/closures/node.json")).unwrap();
         let expected_source = if fixture == "proj-yarn1" {
             "yarn.lock"
@@ -74,8 +45,8 @@ fn pnpm_and_yarn_lockfiles_import_end_to_end() {
         assert!(closure.contains(&format!("\"lock_source\": \"{expected_source}\"")));
 
         let check = run(
-            binary,
             &project,
+            scratch,
             &store,
             &[
                 "run",
@@ -83,14 +54,13 @@ fn pnpm_and_yarn_lockfiles_import_end_to_end() {
                 "-e",
                 "if (!require('is-odd')(3)) process.exit(1)",
             ],
-            &scratch,
         );
-        assert_ok(&check, &format!("is-odd from {fixture}"));
+        assert_ok(check, &format!("is-odd from {fixture}"));
 
         if fixture == "proj-pnpm-ws" {
             let workspace = run(
-                binary,
                 &project,
+                scratch,
                 &store,
                 &[
                     "run",
@@ -98,14 +68,13 @@ fn pnpm_and_yarn_lockfiles_import_end_to_end() {
                     "-e",
                     "if (!require('@fixture/lib')(3)) process.exit(1)",
                 ],
-                &scratch,
             );
-            assert_ok(&workspace, "workspace link");
+            assert_ok(workspace, "workspace link");
 
             let workspace_dir = project.join("packages/lib");
-            let workspace_dep = run_from(
-                binary,
+            let workspace_dep = run(
                 &workspace_dir,
+                scratch,
                 &store,
                 &[
                     "run",
@@ -113,13 +82,12 @@ fn pnpm_and_yarn_lockfiles_import_end_to_end() {
                     "-e",
                     "if (require('is-number/package.json').version !== '7.0.0') process.exit(1)",
                 ],
-                &scratch,
             );
-            assert_ok(&workspace_dep, "workspace-local is-number");
+            assert_ok(workspace_dep, "workspace-local is-number");
 
             let root_dep = run(
-                binary,
                 &project,
+                scratch,
                 &store,
                 &[
                     "run",
@@ -127,9 +95,8 @@ fn pnpm_and_yarn_lockfiles_import_end_to_end() {
                     "-e",
                     "if (require('is-number/package.json').version !== '6.0.0') process.exit(1)",
                 ],
-                &scratch,
             );
-            assert_ok(&root_dep, "root is-number");
+            assert_ok(root_dep, "root is-number");
         }
     }
 }
@@ -142,24 +109,17 @@ fn pnpm_and_yarn_lockfiles_import_end_to_end() {
 #[ignore]
 fn pnpm_local_packages_resolve_their_dependencies_from_their_real_paths() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let scratch = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
-        .join("scratch/tmp");
-    fs::create_dir_all(&scratch).unwrap();
-    let store = scratch.join("nx7-store");
-    let binary = Path::new(env!("CARGO_BIN_EXE_tog"));
+    let temp = TempDir::new("npm-lock-import");
+    let scratch = temp.path();
+    let store = warm_store(&temp);
     let project = scratch.join("nx7-proj-pnpm-local");
-    if project.exists() {
-        fs::remove_dir_all(&project).unwrap();
-    }
     copy_tree(&root.join("tests/fixtures/proj-pnpm-local"), &project);
-    assert_ok(&run(binary, &project, &store, &["sync"], &scratch), "sync");
+    assert_ok(run(&project, scratch, &store, &["sync"]), "sync");
 
     let app = project.join("packages/app");
-    let check = run_from(
-        binary,
+    let check = run(
         &app,
+        scratch,
         &store,
         &[
             "run",
@@ -168,12 +128,11 @@ fn pnpm_local_packages_resolve_their_dependencies_from_their_real_paths() {
             "const same = require('local-same'), cross = require('local-cross'); \
              if (same !== '6.0.0' || cross !== '6.0.0') { console.error(same, cross); process.exit(1) }",
         ],
-        &scratch,
     );
-    assert_ok(&check, "local packages see is-number@6");
+    assert_ok(check, "local packages see is-number@6");
     let root_check = run(
-        binary,
         &project,
+        scratch,
         &store,
         &[
             "run",
@@ -181,9 +140,8 @@ fn pnpm_local_packages_resolve_their_dependencies_from_their_real_paths() {
             "-e",
             "if (require('is-number/package.json').version !== '7.0.0') process.exit(1)",
         ],
-        &scratch,
     );
-    assert_ok(&root_check, "the root keeps is-number@7");
+    assert_ok(root_check, "the root keeps is-number@7");
     for source in ["packages/app/vendor/same", "packages/lib/vendor/cross"] {
         assert!(
             !project.join(source).join("node_modules").exists(),
@@ -194,13 +152,6 @@ fn pnpm_local_packages_resolve_their_dependencies_from_their_real_paths() {
 
 const SRI: &str =
     "sha512-m3HSJL1i83hdltRq0+o9czGb+8KJDKra4t/3JRXMui/CET1IEDrHK6nHYbdEaGL/uhPMbuF3AGkGxXTVpn3ETw==";
-
-fn scratch_project(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("tog-{name}-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).unwrap();
-    dir
-}
 
 fn node_version() -> &'static str {
     tog::tailors::node::node_pin(Platform::X86_64UnknownLinuxGnu)
@@ -218,7 +169,8 @@ fn node_version() -> &'static str {
 /// written beneath a link.
 #[test]
 fn pnpm_links_never_plant_packages_inside_the_linked_source_directory() {
-    let dir = scratch_project("pnpm-link-nesting");
+    let temp = TempDir::new("pnpm-link-nesting");
+    let dir = temp.path();
     for sub in ["license/dep-mit", "license/dep-nested", "ws/vendor/a"] {
         fs::create_dir_all(dir.join(sub)).unwrap();
     }
@@ -304,7 +256,6 @@ snapshots:
         "{:?}",
         plan.packages
     );
-    let _ = fs::remove_dir_all(dir);
 }
 
 fn plan_local(
@@ -312,7 +263,8 @@ fn plan_local(
     dirs: &[&str],
     lock: &str,
 ) -> std::io::Result<tog::tailors::node::NpmPlan> {
-    let dir = scratch_project(name);
+    let temp = TempDir::new(name);
+    let dir = temp.path();
     for sub in dirs {
         fs::create_dir_all(dir.join(sub)).unwrap();
     }
@@ -322,7 +274,6 @@ fn plan_local(
         &tog::kernel::fsroot::ProjectRoot::open(&dir).unwrap(),
         node_version(),
     );
-    let _ = fs::remove_dir_all(dir);
     plan
 }
 
@@ -527,7 +478,8 @@ snapshots:
 /// is refused rather than guessed.
 #[test]
 fn two_every_version_patch_keys_are_settled_by_the_recorded_hash() {
-    let dir = scratch_project("pnpm-every-version-twice");
+    let temp = TempDir::new("pnpm-every-version-twice");
+    let dir = temp.path();
     let bare = write_patch(&dir, "foo.patch", b"diff --git a/bare b/bare\n");
     let star = write_patch(&dir, "foo-star.patch", b"diff --git a/star b/star\n");
     let lock = |recorded: &str| {
@@ -579,7 +531,6 @@ snapshots:
         error.contains("each patch every version of foo with a different patch"),
         "{error}"
     );
-    let _ = fs::remove_dir_all(dir);
 }
 
 /// pnpm's sha256 hash reads patches CRLF-blind, so an LF file and its CRLF
@@ -587,7 +538,8 @@ snapshots:
 /// Two every-version keys like that are one patch only if the bytes agree.
 #[test]
 fn every_version_patch_keys_sharing_a_hash_must_share_their_bytes() {
-    let dir = scratch_project("pnpm-every-version-crlf");
+    let temp = TempDir::new("pnpm-every-version-crlf");
+    let dir = temp.path();
     let hash = write_patch(&dir, "foo.patch", b"diff --git a/x b/x\n");
     write_patch(&dir, "foo-star.patch", b"diff --git a/x b/x\r\n");
     write_patch(&dir, "foo-same.patch", b"diff --git a/x b/x\n");
@@ -641,7 +593,6 @@ snapshots:
             Some(&hash)
         );
     }
-    let _ = fs::remove_dir_all(dir);
 }
 
 fn write_patch(dir: &Path, name: &str, bytes: &[u8]) -> String {
@@ -708,7 +659,8 @@ snapshots:
 
 #[test]
 fn pnpm_bare_name_and_range_patches_apply_where_pnpm_applied_them() {
-    let dir = scratch_project("pnpm-bare-patch");
+    let temp = TempDir::new("pnpm-bare-patch");
+    let dir = temp.path();
     let fastdom = write_patch(
         &dir,
         "fastdom.patch",
@@ -777,5 +729,4 @@ fn pnpm_bare_name_and_range_patches_apply_where_pnpm_applied_them() {
             && error.to_string().contains("selects no patch"),
         "{error}"
     );
-    let _ = fs::remove_dir_all(dir);
 }

@@ -24,26 +24,10 @@ use tog::kernel::platform::Platform;
 use tog::kernel::policy;
 use tog::kernel::store::Store;
 use tog::tailors::node::{self, DeclaredArtifact, NpmPackage, NpmPlan};
-struct Temp(PathBuf);
 
-impl Drop for Temp {
-    fn drop(&mut self) {
-        let _ = tog::kernel::store::remove_tree(&self.0);
-    }
-}
+mod common;
 
-fn temp() -> Temp {
-    let path = std::env::temp_dir().join(format!(
-        "tog-node-env-evidence-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::create_dir_all(&path).unwrap();
-    Temp(path)
-}
+use common::TempDir;
 
 fn store_at(dir: &Path) -> Store {
     let root = dir.join("store");
@@ -265,7 +249,7 @@ fn realize_scriptless_electron(artifacts: &[DeclaredArtifact]) -> (Vec<String>, 
     let _serial = serial();
     let _attribution = policy::Attribution::open("node").expect("test attribution");
     let platform = Platform::host().expect("host platform");
-    let dir = temp();
+    let dir = TempDir::new("node-env-evidence");
     let store = store_at(&dir.0);
     let activity = &store
         .activity(tog::kernel::activity::ActivityMode::Shared)
@@ -360,7 +344,7 @@ fn consumed_artifacts_are_recorded_and_survive_a_sweep() {
     }
     let _serial = serial();
     let _attribution = policy::Attribution::open("node").expect("test attribution");
-    let dir = temp();
+    let dir = TempDir::new("node-env-evidence");
     let store = store_at(&dir.0);
     let lease = store
         .activity(tog::kernel::activity::ActivityMode::Shared)
@@ -472,7 +456,7 @@ fn a_failed_provisioning_publishes_no_environment() {
     let _serial = serial();
     let _attribution = policy::Attribution::open("node").expect("test attribution");
     let platform = Platform::host().expect("host platform");
-    let dir = temp();
+    let dir = TempDir::new("node-env-evidence");
     let store = store_at(&dir.0);
     let activity = &store
         .activity(tog::kernel::activity::ActivityMode::Shared)
@@ -576,7 +560,7 @@ fn a_lifecycle_reference_to_the_gyp_python_survives_a_sweep() {
     }
     let _serial = serial();
     let _attribution = policy::Attribution::open("node").expect("test attribution");
-    let dir = temp();
+    let dir = TempDir::new("node-env-evidence");
     let store = store_at(&dir.0);
     let lease = store
         .activity(tog::kernel::activity::ActivityMode::Shared)

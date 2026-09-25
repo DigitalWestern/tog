@@ -14,42 +14,10 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
-use std::time::{SystemTime, UNIX_EPOCH};
 
-struct TempDir(PathBuf);
+mod common;
 
-impl TempDir {
-    fn new(label: &str) -> Self {
-        let path = std::env::temp_dir().join(format!(
-            "tog-selfupdate-{label}-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir_all(&path).unwrap();
-        fs::create_dir_all(path.join(".tog")).unwrap();
-        Self(path)
-    }
-}
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        // A test that made a directory read-only puts it back so the
-        // fixture can go.
-        if let Ok(meta) = fs::metadata(self.0.join("bin")) {
-            let mut perms = meta.permissions();
-            perms.set_mode(0o755);
-            let _ = fs::set_permissions(self.0.join("bin"), perms);
-        }
-        let _ = fs::remove_dir_all(&self.0);
-    }
-}
-
-fn text(bytes: &[u8]) -> String {
-    String::from_utf8_lossy(bytes).into_owned()
-}
+use common::{command_for, text, TempDir};
 
 fn sha256_hex(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
@@ -163,17 +131,8 @@ fn install_copy(home: &Path) -> PathBuf {
 }
 
 fn run(binary: &Path, home: &Path, manifest: &str, args: &[&str]) -> Output {
-    let mut command = Command::new(binary);
-    command
-        .args(args)
-        .current_dir(home)
-        .env("HOME", home)
-        .env("TOG_STORE", home.join("store"))
-        .env("TOG_RELEASE_MANIFEST", manifest)
-        .env_remove("TOG_POLICY")
-        .env_remove("TOG_STRICT")
-        .env_remove("TOG_SIGNING_KEY")
-        .env("NO_COLOR", "1");
+    let mut command = command_for(binary, home, home, &home.join("store"));
+    command.args(args).env("TOG_RELEASE_MANIFEST", manifest);
     output_of(&mut command)
 }
 
@@ -193,8 +152,8 @@ fn output_of(command: &mut Command) -> Output {
     command.output().expect("spawn tog")
 }
 
-fn version_of(binary: &Path) -> String {
-    text(&output_of(Command::new(binary).arg("--version")).stdout)
+fn version_of(binary: &Path, home: &Path) -> String {
+    text(&output_of(command_for(binary, home, home, &home.join("store")).arg("--version")).stdout)
         .trim()
         .to_string()
 }
@@ -217,9 +176,9 @@ fn running_line() -> String {
 
 #[test]
 fn a_newer_release_replaces_the_binary_in_place() {
-    let home = TempDir::new("newer");
+    let home = TempDir::boundary("selfupdate-newer");
     let binary = install_copy(&home.0);
-    let before = version_of(&binary);
+    let before = version_of(&binary, &home.0);
     assert_eq!(before, running_line());
     let manifest = publish(&home.0, &Release::newer());
 
@@ -234,7 +193,7 @@ fn a_newer_release_replaces_the_binary_in_place() {
         )),
         "{stderr}"
     );
-    assert_eq!(version_of(&binary), "tog 99.0.0 (test)");
+    assert_eq!(version_of(&binary, &home.0), "tog 99.0.0 (test)");
     assert_eq!(
         fs::metadata(&binary).unwrap().permissions().mode() & 0o777,
         0o755
@@ -244,7 +203,7 @@ fn a_newer_release_replaces_the_binary_in_place() {
 
 #[test]
 fn the_same_or_an_older_release_leaves_the_binary_alone() {
-    let home = TempDir::new("current");
+    let home = TempDir::boundary("selfupdate-current");
     let binary = install_copy(&home.0);
     let bytes = fs::read(&binary).unwrap();
     for (tag, word) in [
@@ -286,7 +245,7 @@ fn the_same_or_an_older_release_leaves_the_binary_alone() {
 
 #[test]
 fn a_bad_download_never_touches_the_binary() {
-    let home = TempDir::new("refused");
+    let home = TempDir::boundary("selfupdate-refused");
     let binary = install_copy(&home.0);
     let bytes = fs::read(&binary).unwrap();
     let wrong = "0".repeat(64);
@@ -362,7 +321,7 @@ fn a_bad_download_never_touches_the_binary() {
 
 #[test]
 fn an_unwritable_directory_is_refused_before_anything_is_downloaded() {
-    let home = TempDir::new("readonly");
+    let home = TempDir::boundary("selfupdate-readonly");
     let binary = install_copy(&home.0);
     let bin = binary.parent().unwrap().to_path_buf();
     fs::set_permissions(&bin, fs::Permissions::from_mode(0o555)).unwrap();
@@ -385,13 +344,13 @@ fn an_unwritable_directory_is_refused_before_anything_is_downloaded() {
     );
     assert!(stderr.contains("install.sh"), "{stderr}");
     assert!(!stderr.contains("downloading"), "{stderr}");
-    assert_eq!(version_of(&binary), running_line());
+    assert_eq!(version_of(&binary, &home.0), running_line());
     no_leftovers(&bin);
 }
 
 #[test]
 fn a_symlinked_binary_updates_its_target_and_names_it() {
-    let home = TempDir::new("symlink");
+    let home = TempDir::boundary("selfupdate-symlink");
     let target = install_copy(&home.0);
     let link_dir = home.0.join("link");
     fs::create_dir_all(&link_dir).unwrap();
@@ -411,15 +370,15 @@ fn a_symlinked_binary_updates_its_target_and_names_it() {
         .unwrap()
         .file_type()
         .is_symlink());
-    assert_eq!(version_of(&target), "tog 99.0.0 (test)");
-    assert_eq!(version_of(&link), "tog 99.0.0 (test)");
+    assert_eq!(version_of(&target, &home.0), "tog 99.0.0 (test)");
+    assert_eq!(version_of(&link, &home.0), "tog 99.0.0 (test)");
     no_leftovers(target.parent().unwrap());
     no_leftovers(&link_dir);
 }
 
 #[test]
 fn self_takes_nothing_else_and_needs_no_project_or_store() {
-    let home = TempDir::new("usage");
+    let home = TempDir::boundary("selfupdate-usage");
     let binary = install_copy(&home.0);
     let manifest = publish(&home.0, &Release::newer());
     for args in [
@@ -443,7 +402,7 @@ fn self_takes_nothing_else_and_needs_no_project_or_store() {
 
 #[test]
 fn doctor_reports_the_build_and_whether_a_release_is_newer() {
-    let home = TempDir::new("doctor");
+    let home = TempDir::boundary("selfupdate-doctor");
     let binary = install_copy(&home.0);
     let running = running_line();
 

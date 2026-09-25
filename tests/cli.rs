@@ -9,67 +9,12 @@
 use std::collections::BTreeSet;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
 
-struct TempDir(PathBuf);
+mod common;
 
-impl TempDir {
-    fn new(label: &str) -> Self {
-        let path = std::env::temp_dir().join(format!(
-            "tog-cli-{label}-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&path).unwrap();
-        // Mark the fixture as a project boundary. This temp directory can
-        // itself live below a developer checkout with package manifests;
-        // ancestor discovery must not make these fixtures non-hermetic.
-        std::fs::create_dir_all(path.join(".tog")).unwrap();
-        Self(path)
-    }
-}
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
-/// Run the binary in `cwd` with a throwaway store and home, so nothing here
-/// can read the developer's policy or touch a real store.
-fn tog(cwd: &Path, home: &Path, args: &[&str]) -> Output {
-    tog_env(cwd, home, args, &[])
-}
-
-fn tog_env(cwd: &Path, home: &Path, args: &[&str], env: &[(&str, &str)]) -> Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_tog"));
-    command
-        .args(args)
-        .current_dir(cwd)
-        .env("TOG_STORE", home.join("store"))
-        .env("HOME", home)
-        .env_remove("TOG_POLICY")
-        .env_remove("TOG_STRICT")
-        .env_remove("TOG_SIGNING_KEY")
-        // `doctor` asks GitHub for the latest release; point it at a file
-        // that does not exist so the suite stays offline and the row says
-        // "not checked".
-        .env(
-            "TOG_RELEASE_MANIFEST",
-            format!("file://{}", home.join("no-release.json").display()),
-        )
-        .env("NO_COLOR", "1");
-    for (name, value) in env {
-        command.env(name, value);
-    }
-    command.output().expect("spawn tog")
-}
+use common::{command, text, tog, tog_env, TempDir};
 
 /// The signing key under `home`, generated on first use and trusted by
 /// `home`'s machine policy (`~/.tog/policy.toml`, created with an empty
@@ -87,17 +32,13 @@ fn signing_key(home: &Path) -> tog::kernel::signing::SigningKey {
     tog::kernel::signing::SigningKey::load(&path).unwrap()
 }
 
-fn text(bytes: &[u8]) -> String {
-    String::from_utf8_lossy(bytes).into_owned()
-}
-
 /// With a setup flag the bare `tog` is a sync, so a directory with no
 /// project fails and says so, rather than printing the help (a CI job
 /// pointed at the wrong directory must go red) or naming a missing
 /// tog-toolchain.toml.
 #[test]
 fn setup_flags_outside_a_project_fail_naming_the_missing_manifest() {
-    let home = TempDir::new("flags-noproject");
+    let home = TempDir::boundary("cli-flags-noproject");
     for flag in ["--frozen", "--strict", "--fresh"] {
         let out = tog(&home.0, &home.0, &[flag]);
         assert_eq!(out.status.code(), Some(1), "{flag}");
@@ -116,7 +57,7 @@ fn setup_flags_outside_a_project_fail_naming_the_missing_manifest() {
 /// says why goes to stderr, and the status is 0.
 #[test]
 fn no_arguments_outside_a_project_prints_the_help_and_exits_0() {
-    let home = TempDir::new("noargs");
+    let home = TempDir::boundary("cli-noargs");
     let out = tog(&home.0, &home.0, &[]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     let stdout = text(&out.stdout);
@@ -137,7 +78,7 @@ fn no_arguments_outside_a_project_prints_the_help_and_exits_0() {
 /// stderr that explains it is dropped.
 #[test]
 fn quiet_outside_a_project_keeps_the_help_and_drops_the_note() {
-    let home = TempDir::new("noargs-quiet");
+    let home = TempDir::boundary("cli-noargs-quiet");
     let out = tog(&home.0, &home.0, &["-q"]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     assert!(
@@ -152,8 +93,8 @@ fn quiet_outside_a_project_keeps_the_help_and_drops_the_note() {
 /// said why, and a screen of help under an error buries it.
 #[test]
 fn a_bare_tog_whose_sync_fails_prints_no_help() {
-    let home = TempDir::new("bare-fail-home");
-    let project = TempDir::new("bare-fail-project");
+    let home = TempDir::boundary("cli-bare-fail-home");
+    let project = TempDir::boundary("cli-bare-fail-project");
     std::fs::write(project.0.join("requirements.txt"), "six==1.17.0\n").unwrap();
     // An unreadable signing key refuses before the store is opened: the
     // cheapest offline sync failure the suite has.
@@ -174,7 +115,7 @@ fn a_bare_tog_whose_sync_fails_prints_no_help() {
 
 #[test]
 fn help_goes_to_stdout_and_exits_0() {
-    let home = TempDir::new("help");
+    let home = TempDir::boundary("cli-help");
     for args in [&["--help"][..], &["-h"], &["help"]] {
         let out = tog(&home.0, &home.0, args);
         assert_eq!(out.status.code(), Some(0), "{args:?}");
@@ -229,7 +170,7 @@ fn help_goes_to_stdout_and_exits_0() {
 
 #[test]
 fn version() {
-    let home = TempDir::new("version");
+    let home = TempDir::boundary("cli-version");
     let expected = format!("{}\n", tog::cli::version_line());
     // The crate version, then the build in parentheses: a short commit id
     // and its date from the checkout this binary was built in, or the one
@@ -264,7 +205,7 @@ fn version() {
 
 #[test]
 fn usage_errors_exit_2_with_a_next_step() {
-    let home = TempDir::new("usage");
+    let home = TempDir::boundary("cli-usage");
     let cases: &[(&[&str], &str, &str)] = &[
         (&["snyc"], "unknown command 'snyc'", "tog --help"),
         (&["--fersh"], "unknown option '--fersh'; did you mean '--fresh'?", "tog --help"),
@@ -310,7 +251,7 @@ fn usage_errors_exit_2_with_a_next_step() {
 
 #[test]
 fn fmt_is_named_and_typos_are_usage_errors() {
-    let home = TempDir::new("fmt-cli");
+    let home = TempDir::boundary("cli-fmt-cli");
     let out = tog(&home.0, &home.0, &["fmtt"]);
     assert_eq!(out.status.code(), Some(2));
     assert!(text(&out.stderr).contains("unknown command 'fmtt'; did you mean 'fmt'?"));
@@ -341,8 +282,8 @@ fn fmt_is_named_and_typos_are_usage_errors() {
 /// so `tog ls rustfmt` must be a legal filter rather than a usage error.
 #[test]
 fn ls_accepts_every_ecosystem_name_it_can_print() {
-    let home = TempDir::new("ls-words-home");
-    let project = TempDir::new("ls-words-project");
+    let home = TempDir::boundary("cli-ls-words-home");
+    let project = TempDir::boundary("cli-ls-words-project");
     std::fs::create_dir_all(project.0.join(".tog/closures")).unwrap();
     std::fs::write(
         project.0.join(".tog/closures/rustfmt.json"),
@@ -389,8 +330,8 @@ fn ls_accepts_every_ecosystem_name_it_can_print() {
 /// particular was a usage error that pointed at help documenting `-v`.
 #[test]
 fn global_options_work_after_the_command() {
-    let home = TempDir::new("globals-home");
-    let project = TempDir::new("globals-project");
+    let home = TempDir::boundary("cli-globals-home");
+    let project = TempDir::boundary("cli-globals-project");
     std::fs::create_dir_all(project.0.join(".tog/closures")).unwrap();
     std::fs::write(
         project.0.join(".tog/closures/rustfmt.json"),
@@ -448,7 +389,7 @@ fn global_options_work_after_the_command() {
 
     // -q after the command silences narration the same way it does before,
     // and leaves the one thing quiet must never hide: the error.
-    let empty = TempDir::new("globals-empty");
+    let empty = TempDir::boundary("cli-globals-empty");
     let out = tog(&empty.0, &home.0, &["status", "-q"]);
     assert_eq!(out.status.code(), Some(1));
     let stderr = text(&out.stderr);
@@ -468,8 +409,8 @@ fn global_options_work_after_the_command() {
 /// failure as one JSON object on stderr.
 #[test]
 fn json_commands_report_failure_as_json_on_stderr() {
-    let home = TempDir::new("json-errors-home");
-    let project = TempDir::new("json-errors-project");
+    let home = TempDir::boundary("cli-json-errors-home");
+    let project = TempDir::boundary("cli-json-errors-project");
     for args in [&["status", "--json"][..], &["ls", "--json"]] {
         let out = tog(&project.0, &home.0, args);
         assert_eq!(out.status.code(), Some(1), "{args:?}");
@@ -553,7 +494,7 @@ fn json_commands_report_failure_as_json_on_stderr() {
 /// stderr where `--quiet` can silence them.
 #[test]
 fn gc_narrates_on_stderr_and_quiet_silences_it() {
-    let home = TempDir::new("gc-stream-home");
+    let home = TempDir::boundary("cli-gc-stream-home");
     let store_root = home.0.join("store");
     std::fs::create_dir_all(&store_root).unwrap();
     let canonical_store = store_root.canonicalize().unwrap();
@@ -613,8 +554,8 @@ fn gc_narrates_on_stderr_and_quiet_silences_it() {
 
 #[test]
 fn fmt_reports_ecosystem_and_project_errors_offline() {
-    let home = TempDir::new("fmt-errors");
-    let empty = TempDir::new("fmt-empty");
+    let home = TempDir::boundary("cli-fmt-errors");
+    let empty = TempDir::boundary("cli-fmt-empty");
     let out = tog(&empty.0, &home.0, &["fmt"]);
     assert_eq!(out.status.code(), Some(1));
     assert!(text(&out.stderr).contains("no Rust project"));
@@ -631,8 +572,8 @@ fn fmt_reports_ecosystem_and_project_errors_offline() {
 /// realized Node.
 #[test]
 fn fmt_script_precedence_syncs_instead_of_trying_rustfmt() {
-    let home = TempDir::new("fmt-script-home");
-    let project = TempDir::new("fmt-script-project");
+    let home = TempDir::boundary("cli-fmt-script-home");
+    let project = TempDir::boundary("cli-fmt-script-project");
     std::fs::write(
         project.0.join("package.json"),
         r#"{"name":"p","scripts":{"fmt":"sh -c 'echo script-fmt; exit 7'"}}"#,
@@ -671,8 +612,8 @@ fn fmt_script_precedence_syncs_instead_of_trying_rustfmt() {
 /// could only come from that path.
 #[test]
 fn fmt_eco_selects_the_ecosystem_and_never_delegates_to_the_script() {
-    let home = TempDir::new("fmt-eco-home");
-    let project = TempDir::new("fmt-eco-project");
+    let home = TempDir::boundary("cli-fmt-eco-home");
+    let project = TempDir::boundary("cli-fmt-eco-project");
     std::fs::write(
         project.0.join("package.json"),
         r#"{"name":"p","scripts":{"fmt":"sh -c 'echo script-fmt \"$@\" > script-ran.txt; exit 7' sh"}}"#,
@@ -735,8 +676,8 @@ fn fmt_eco_selects_the_ecosystem_and_never_delegates_to_the_script() {
 
 #[test]
 fn failures_exit_1_and_survive_quiet() {
-    let home = TempDir::new("fail");
-    let project = TempDir::new("empty");
+    let home = TempDir::boundary("cli-fail");
+    let project = TempDir::boundary("cli-empty");
     // An empty directory has no manifest: a real failure, not a usage error.
     let out = tog(&project.0, &home.0, &["plan"]);
     assert_eq!(out.status.code(), Some(1));
@@ -758,8 +699,8 @@ fn failures_exit_1_and_survive_quiet() {
 
 #[test]
 fn directory_option_changes_where_the_command_runs() {
-    let home = TempDir::new("chdir");
-    let project = TempDir::new("chdir-project");
+    let home = TempDir::boundary("cli-chdir");
+    let project = TempDir::boundary("cli-chdir-project");
     // Run from `home`, point at the empty project: the empty project's
     // failure proves the command ran there.
     let out = tog(
@@ -784,8 +725,8 @@ fn directory_option_changes_where_the_command_runs() {
 
 #[test]
 fn run_passes_arguments_through_and_needs_a_project() {
-    let home = TempDir::new("run");
-    let project = TempDir::new("run-project");
+    let home = TempDir::boundary("cli-run");
+    let project = TempDir::boundary("cli-run-project");
     // Flags after the program are the program's: tog does not parse
     // them, so the only error is the missing project. With no manifest
     // there is nothing to sync, and the message says what it looked for
@@ -809,8 +750,8 @@ fn run_passes_arguments_through_and_needs_a_project() {
 /// at selection, before the store is written or anything is fetched.
 #[test]
 fn run_and_env_sync_a_project_before_reading_it() {
-    let home = TempDir::new("autosync");
-    let project = TempDir::new("autosync-project");
+    let home = TempDir::boundary("cli-autosync");
+    let project = TempDir::boundary("cli-autosync-project");
     std::fs::write(
         project.0.join("pyproject.toml"),
         "[project]\nname = \"fixture\"\nversion = \"0.1.0\"\nrequires-python = \"==0.0.1\"\n",
@@ -843,8 +784,8 @@ fn run_and_env_sync_a_project_before_reading_it() {
 /// Python tailor reads, the same fixture `status` is tested against.
 #[test]
 fn env_prints_the_run_environment_as_shell_lines() {
-    let home = TempDir::new("env-home");
-    let project = TempDir::new("env-project");
+    let home = TempDir::boundary("cli-env-home");
+    let project = TempDir::boundary("cli-env-project");
 
     // Outside a project there is nothing to print, and stdout stays
     // empty: a shell evaling this must not get half an environment.
@@ -934,7 +875,7 @@ fn env_prints_the_run_environment_as_shell_lines() {
 
 #[test]
 fn store_path_honors_the_store_variable() {
-    let home = TempDir::new("store");
+    let home = TempDir::boundary("cli-store");
     let out = tog(&home.0, &home.0, &["store", "path"]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     let printed = PathBuf::from(text(&out.stdout).trim());
@@ -948,8 +889,8 @@ fn store_path_honors_the_store_variable() {
 
 #[test]
 fn install_alias_reaches_sync() {
-    let home = TempDir::new("alias");
-    let project = TempDir::new("alias-project");
+    let home = TempDir::boundary("cli-alias");
+    let project = TempDir::boundary("cli-alias-project");
     for args in [&["install"][..], &["i"], &["sync"]] {
         let out = tog(&project.0, &home.0, args);
         assert_eq!(out.status.code(), Some(1), "{args:?}");
@@ -965,8 +906,8 @@ fn install_alias_reaches_sync() {
 /// spelling must name `tog add` rather than reject the word.
 #[test]
 fn installing_a_package_by_name_points_at_add() {
-    let home = TempDir::new("install-pkg");
-    let project = TempDir::new("install-pkg-project");
+    let home = TempDir::boundary("cli-install-pkg");
+    let project = TempDir::boundary("cli-install-pkg-project");
     for verb in ["install", "i", "sync"] {
         let out = tog(&project.0, &home.0, &[verb, "requests"]);
         assert_eq!(out.status.code(), Some(2), "{verb}");
@@ -987,8 +928,8 @@ fn installing_a_package_by_name_points_at_add() {
 /// even looked for, because the explanation is the same everywhere.
 #[test]
 fn pip_activate_and_npm_install_are_refused_with_the_tog_verb() {
-    let home = TempDir::new("immutable");
-    let project = TempDir::new("immutable-project");
+    let home = TempDir::boundary("cli-immutable");
+    let project = TempDir::boundary("cli-immutable-project");
     let cases: &[(&[&str], &str)] = &[
         (&["run", "pip", "install", "flask"], "tog add <package>"),
         (
@@ -1064,17 +1005,13 @@ fn pip_activate_and_npm_install_are_refused_with_the_tog_verb() {
 /// or the process exits 101 having printed nothing at all.
 #[test]
 fn a_panic_is_printed_even_under_quiet() {
-    let home = TempDir::new("panic-quiet");
+    let home = TempDir::boundary("cli-panic-quiet");
     // No HOME and no TOG_STORE: the store's home lookup panics. The only
     // deterministic panic the CLI can be driven into from outside.
-    let mut command = Command::new(env!("CARGO_BIN_EXE_tog"));
-    let out = command
+    let out = command(&home.0, &home.0, &home.0.join("store"))
         .args(["--quiet", "store", "path"])
-        .current_dir(&home.0)
         .env_remove("HOME")
         .env_remove("TOG_STORE")
-        .env_remove("TOG_POLICY")
-        .env("NO_COLOR", "1")
         .output()
         .expect("spawn tog");
     assert_eq!(out.status.code(), Some(101));
@@ -1089,8 +1026,8 @@ fn a_panic_is_printed_even_under_quiet() {
 
 #[test]
 fn unknown_first_word_runs_a_package_json_script_or_errors() {
-    let home = TempDir::new("script");
-    let project = TempDir::new("script-project");
+    let home = TempDir::boundary("cli-script");
+    let project = TempDir::boundary("cli-script-project");
     std::fs::write(
         project.0.join("package.json"),
         r#"{"name": "p", "scripts": {"dev": "echo hi", "build": "echo built"}}"#,
@@ -1142,8 +1079,8 @@ fn unknown_first_word_runs_a_package_json_script_or_errors() {
 /// read as no request and locked as if absent.
 #[test]
 fn build_refuses_an_unrelated_ecosystems_malformed_toolchain_input() {
-    let home = TempDir::new("build-inputs");
-    let project = TempDir::new("build-inputs-project");
+    let home = TempDir::boundary("cli-build-inputs");
+    let project = TempDir::boundary("cli-build-inputs-project");
     std::fs::write(
         project.0.join("Cargo.toml"),
         "[package]\nname = \"p\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
@@ -1182,8 +1119,8 @@ fn build_refuses_an_unrelated_ecosystems_malformed_toolchain_input() {
 /// leaves the committed lock byte for byte as it was.
 #[test]
 fn build_refuses_an_unrelated_stale_lock_section_and_keeps_the_lock() {
-    let home = TempDir::new("build-stale");
-    let project = TempDir::new("build-stale-project");
+    let home = TempDir::boundary("cli-build-stale");
+    let project = TempDir::boundary("cli-build-stale-project");
     std::fs::write(
         project.0.join("Cargo.toml"),
         "[package]\nname = \"p\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
@@ -1219,8 +1156,8 @@ fn build_refuses_an_unrelated_stale_lock_section_and_keeps_the_lock() {
 
 #[test]
 fn inspect_verbs_offline() {
-    let home = TempDir::new("inspect");
-    let project = TempDir::new("inspect-project");
+    let home = TempDir::boundary("cli-inspect");
+    let project = TempDir::boundary("cli-inspect-project");
 
     let out = tog(&project.0, &home.0, &["status"]);
     assert_eq!(out.status.code(), Some(1));
@@ -1282,8 +1219,8 @@ fn inspect_verbs_offline() {
 /// gate that trusts that word would admit any closure old enough.
 #[test]
 fn status_never_calls_an_unchecked_closure_synced() {
-    let home = TempDir::new("unchecked-home");
-    let project = TempDir::new("unchecked-project");
+    let home = TempDir::boundary("cli-unchecked-home");
+    let project = TempDir::boundary("cli-unchecked-project");
     std::fs::write(project.0.join("requirements.txt"), "six==1.17.0\n").unwrap();
     let env = project.0.join("env-object");
     std::fs::create_dir_all(env.join("bin")).unwrap();
@@ -1327,7 +1264,7 @@ fn status_never_calls_an_unchecked_closure_synced() {
 
 #[test]
 fn dependency_verbs_offline_paths() {
-    let home = TempDir::new("deps");
+    let home = TempDir::boundary("cli-deps");
     // This suite may run below a checkout that has its own manifests; use
     // the filesystem root for the intentional no-project case so the
     // ancestor walk cannot discover that unrelated checkout.
@@ -1341,7 +1278,7 @@ fn dependency_verbs_offline_paths() {
 
     // A plain requirements file: tog edits it itself; with --no-sync
     // nothing else runs, so this is fully offline.
-    let project = TempDir::new("deps-req");
+    let project = TempDir::boundary("cli-deps-req");
     std::fs::write(project.0.join("requirements.txt"), "six==1.17.0\n").unwrap();
     let out = tog(
         &project.0,
@@ -1379,7 +1316,7 @@ fn dependency_verbs_offline_paths() {
 
     // Refuse-with-instructions rows and missing tool declarations never touch
     // the network or the store.
-    let setup = TempDir::new("deps-setup");
+    let setup = TempDir::boundary("cli-deps-setup");
     std::fs::write(
         setup.0.join("setup.py"),
         "from setuptools import setup\nsetup()\n",
@@ -1392,7 +1329,7 @@ fn dependency_verbs_offline_paths() {
         "{}",
         text(&out.stderr)
     );
-    let pnpm = TempDir::new("deps-pnpm");
+    let pnpm = TempDir::boundary("cli-deps-pnpm");
     std::fs::write(pnpm.0.join("package.json"), "{}").unwrap();
     std::fs::write(pnpm.0.join("pnpm-lock.yaml"), "lockfileVersion: '9.0'\n").unwrap();
     let out = tog(&pnpm.0, &home.0, &["add", "-D", "react", "left-pad"]);
@@ -1404,7 +1341,7 @@ fn dependency_verbs_offline_paths() {
         "{}",
         text(&out.stderr)
     );
-    let poetry = TempDir::new("deps-poetry");
+    let poetry = TempDir::boundary("cli-deps-poetry");
     std::fs::write(poetry.0.join("pyproject.toml"), "[tool.poetry]\nname='p'\n").unwrap();
     let out = tog(&poetry.0, &home.0, &["update"]);
     assert_eq!(out.status.code(), Some(1));
@@ -1413,7 +1350,7 @@ fn dependency_verbs_offline_paths() {
         "{}",
         text(&out.stderr)
     );
-    let dotnet = TempDir::new("deps-dotnet");
+    let dotnet = TempDir::boundary("cli-deps-dotnet");
     std::fs::write(dotnet.0.join("app.csproj"), "<Project/>").unwrap();
     let out = tog(&dotnet.0, &home.0, &["add", "Newtonsoft.Json"]);
     assert_eq!(out.status.code(), Some(1));
@@ -1434,7 +1371,7 @@ fn dependency_verbs_offline_paths() {
 
 #[test]
 fn x_needs_a_registry_outside_a_project() {
-    let home = TempDir::new("x");
+    let home = TempDir::boundary("cli-x");
     let out = tog(&home.0, &home.0, &["x", "ruff", "--version"]);
     assert_eq!(out.status.code(), Some(1));
     let stderr = text(&out.stderr);
@@ -1450,7 +1387,7 @@ fn x_needs_a_registry_outside_a_project() {
 /// next sweep would refuse it.
 #[test]
 fn command_dispatch_runs_automatic_metadata_maintenance() {
-    let home = TempDir::new("x-maintenance");
+    let home = TempDir::boundary("cli-x-maintenance");
     let store_root = home.0.join("store");
     let identity = tog::kernel::types::Identity {
         kind: "cpython".into(),
@@ -1510,7 +1447,7 @@ fn command_dispatch_runs_automatic_metadata_maintenance() {
 /// warning is now news rather than noise, and `--drop-object` is the exit.
 #[test]
 fn an_unreadable_record_warns_once_and_is_cleared_by_drop_object() {
-    let home = TempDir::new("wedged-record");
+    let home = TempDir::boundary("cli-wedged-record");
     let store_root = home.0.join("store");
 
     // A project root, so the sweep has an initialized registry to work from.
@@ -1610,7 +1547,7 @@ fn an_unreadable_record_warns_once_and_is_cleared_by_drop_object() {
 
 #[test]
 fn x_clean_is_offline_and_strict_about_trailing_arguments() {
-    let home = TempDir::new("x-clean");
+    let home = TempDir::boundary("cli-x-clean");
     let out = tog(&home.0, &home.0, &["x", "--clean"]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     assert!(text(&out.stdout).contains("nothing to clean"));
@@ -1643,8 +1580,8 @@ fn x_clean_follows_a_symlinked_home_chain_the_way_the_runner_does() {
     // another volume. `tog x` follows it when it creates, locks and
     // registers a root, so cleanup has to reach exactly the same
     // environment — otherwise the roots it made could never be removed.
-    let volume = TempDir::new("x-clean-volume-tog");
-    let linked_tog_home = TempDir::new("x-clean-linked-tog");
+    let volume = TempDir::boundary("cli-x-clean-volume-tog");
+    let linked_tog_home = TempDir::boundary("cli-x-clean-linked-tog");
     let root = volume.0.join(".tog/x/py-victim");
     std::fs::create_dir_all(root.join(".tog/closures")).unwrap();
     std::fs::remove_dir_all(linked_tog_home.0.join(".tog")).unwrap();
@@ -1659,8 +1596,8 @@ fn x_clean_follows_a_symlinked_home_chain_the_way_the_runner_does() {
     );
 
     // The same for a symlinked $HOME itself.
-    let real_home = TempDir::new("x-clean-real-home");
-    let links = TempDir::new("x-clean-home-links");
+    let real_home = TempDir::boundary("cli-x-clean-real-home");
+    let links = TempDir::boundary("cli-x-clean-home-links");
     let root = real_home.0.join(".tog/x/py-victim");
     std::fs::create_dir_all(root.join(".tog/closures")).unwrap();
     let home_link = links.0.join("home");
@@ -1679,8 +1616,8 @@ fn x_clean_follows_a_symlinked_home_chain_the_way_the_runner_does() {
 fn x_clean_refuses_a_symlinked_x_directory_or_a_relative_home() {
     // The final `x` component is where both `tog x` and `x --clean`
     // stop following, so neither can be pointed outside the home chain.
-    let outside_x = TempDir::new("x-clean-outside-x");
-    let symlinked_x_home = TempDir::new("x-clean-symlinked-x");
+    let outside_x = TempDir::boundary("cli-x-clean-outside-x");
+    let symlinked_x_home = TempDir::boundary("cli-x-clean-symlinked-x");
     let x_victim = outside_x.0.join("x/py-victim/.tog/closures");
     std::fs::create_dir_all(&x_victim).unwrap();
     std::os::unix::fs::symlink(outside_x.0.join("x"), symlinked_x_home.0.join(".tog/x")).unwrap();
@@ -1693,21 +1630,20 @@ fn x_clean_refuses_a_symlinked_x_directory_or_a_relative_home() {
     );
     assert!(x_victim.is_dir(), "symlink target was removed");
 
-    let relative_home = TempDir::new("x-clean-relative-home");
+    let relative_home = TempDir::boundary("cli-x-clean-relative-home");
     let relative_victim = relative_home
         .0
         .join("relative-home/.tog/x/py-victim/.tog/closures");
     std::fs::create_dir_all(&relative_victim).unwrap();
-    let out = Command::new(env!("CARGO_BIN_EXE_tog"))
-        .current_dir(&relative_home.0)
-        .env("TOG_STORE", relative_home.0.join("store"))
-        .env("HOME", "relative-home")
-        .env_remove("TOG_POLICY")
-        .env_remove("TOG_STRICT")
-        .env("NO_COLOR", "1")
-        .args(["x", "--clean"])
-        .output()
-        .unwrap();
+    let out = command(
+        &relative_home.0,
+        &relative_home.0,
+        &relative_home.0.join("store"),
+    )
+    .env("HOME", "relative-home")
+    .args(["x", "--clean"])
+    .output()
+    .unwrap();
     assert_eq!(out.status.code(), Some(1));
     let stderr = text(&out.stderr);
     assert!(
@@ -1722,8 +1658,8 @@ fn x_clean_refuses_a_symlinked_x_directory_or_a_relative_home() {
 /// caller's `TOG_STORE` is not evidence about someone else's projection.
 #[test]
 fn x_clean_keeps_a_projection_whose_originating_store_is_unrecoverable() {
-    let home = TempDir::new("x-clean-foreign-home");
-    let project = TempDir::new("x-clean-foreign-project");
+    let home = TempDir::boundary("cli-x-clean-foreign-home");
+    let project = TempDir::boundary("cli-x-clean-foreign-project");
     let victim = home.0.join(".tog/x/py-foreign");
     std::fs::create_dir_all(victim.join(".tog/closures")).unwrap();
     // A closure naming an object in a store this invocation knows nothing
@@ -1754,8 +1690,8 @@ fn x_clean_keeps_a_projection_whose_originating_store_is_unrecoverable() {
 /// suite: `HOME` and `TOG_STORE` are per-child temp directories.
 #[test]
 fn x_clean_py_leaves_legacy_npm_root() {
-    let home = TempDir::new("x-clean-legacy-home");
-    let project = TempDir::new("x-clean-legacy-project");
+    let home = TempDir::boundary("cli-x-clean-legacy-home");
+    let project = TempDir::boundary("cli-x-clean-legacy-project");
 
     let npm_root = home.0.join(".tog/x/npm-legacy");
     std::fs::create_dir_all(npm_root.join(".tog/closures")).unwrap();
@@ -1802,7 +1738,7 @@ fn x_clean_py_leaves_legacy_npm_root() {
 
 #[test]
 fn x_clean_that_skips_every_candidate_does_not_claim_nothing_to_clean() {
-    let home = TempDir::new("x-clean-unrecoverable");
+    let home = TempDir::boundary("cli-x-clean-unrecoverable");
     let root = home.0.join(".tog/x/mystery");
     std::fs::create_dir_all(root.join(".tog/closures")).unwrap();
 
@@ -1884,8 +1820,8 @@ fn cached_x_root_with_exception(home: &Path) -> PathBuf {
 
 #[test]
 fn cached_x_rechecks_object_exceptions_under_project_policy() {
-    let home = TempDir::new("x-policy-home");
-    let project = TempDir::new("x-policy-project");
+    let home = TempDir::boundary("cli-x-policy-home");
+    let project = TempDir::boundary("cli-x-policy-project");
     std::fs::write(
         project.0.join(".tog/policy.toml"),
         "deny = [\"file-collision\"]\n",
@@ -1911,8 +1847,8 @@ fn cached_x_rechecks_object_exceptions_under_project_policy() {
 /// exception read as two.
 #[test]
 fn cached_x_narrates_each_object_exception_once() {
-    let home = TempDir::new("x-once-home");
-    let project = TempDir::new("x-once-project");
+    let home = TempDir::boundary("cli-x-once-home");
+    let project = TempDir::boundary("cli-x-once-project");
     cached_x_root_with_exception(&home.0);
 
     let out = tog(
@@ -1935,7 +1871,7 @@ fn cached_x_narrates_each_object_exception_once() {
 /// returns: `add` must stop before realizing anything and name both remedies.
 #[test]
 fn add_under_a_pnpm_workspace_that_does_not_list_the_project_refuses_offline() {
-    let home = TempDir::new("pnpm-unlisted");
+    let home = TempDir::boundary("cli-pnpm-unlisted");
     let workspace = home.0.join("ws");
     let project = workspace.join("packages/added-since-install");
     std::fs::create_dir_all(&project).unwrap();
@@ -2071,7 +2007,7 @@ fn registered_root_keys(home: &Path, cwd: &Path) -> Vec<String> {
 /// must skip that candidate and leave its root record protecting the objects.
 #[test]
 fn busy_x_cleanup_retains_the_root_record() {
-    let home = TempDir::new("x-clean-busy-home");
+    let home = TempDir::boundary("cli-x-clean-busy-home");
     let store_root = home.0.join("store");
     let (root, key) = registered_x_environment(&home.0, &store_root);
 
@@ -2125,7 +2061,7 @@ fn busy_x_cleanup_retains_the_root_record() {
 /// can never be revalidated and the run fails before any removal.
 #[test]
 fn failed_x_cleanup_retains_the_root_record() {
-    let home = TempDir::new("x-clean-failed-home");
+    let home = TempDir::boundary("cli-x-clean-failed-home");
     let store_root = home.0.join("store");
     let (root, key) = registered_x_environment(&home.0, &store_root);
 
@@ -2178,7 +2114,7 @@ fn failed_x_cleanup_retains_the_root_record() {
 #[test]
 fn x_cleanup_revalidates_explicit_or_legacy_origin() {
     for spelling in ["explicit", "legacy"] {
-        let home = TempDir::new(&format!("x-clean-origin-{spelling}"));
+        let home = TempDir::boundary(&format!("cli-x-clean-origin-{spelling}"));
         let store_root = home.0.join("store");
         let (root, key) = registered_x_environment(&home.0, &store_root);
         if spelling == "legacy" {
@@ -2277,10 +2213,10 @@ fn synced_python_closure_with_exception(home: &Path, project: &Path, kind: &str)
 /// whether a denial came from the machine, the repository, or `--policy`.
 #[test]
 fn audit_json_attributes_each_policy_to_its_source_file() {
-    // tog() sets HOME to this temp directory and explicitly removes both
-    // TOG_POLICY and TOG_STRICT from the child.
-    let home = TempDir::new("audit-sources-home");
-    let project = TempDir::new("audit-sources-project");
+    // tog() sets HOME to this temp directory and drops every TOG_*
+    // variable, TOG_POLICY and TOG_STRICT included, from the child.
+    let home = TempDir::boundary("cli-audit-sources-home");
+    let project = TempDir::boundary("cli-audit-sources-project");
     synced_python_closure_with_exception(&home.0, &project.0, "git-dependency");
     // The machine policy `signing_key` wrote: an empty deny list plus the
     // trusted key.
@@ -2403,8 +2339,8 @@ fn audit_json_attributes_each_policy_to_its_source_file() {
 /// is stale, never clean.
 #[test]
 fn audit_is_stale_when_the_toolchain_lock_does_not_describe_the_closure() {
-    let home = TempDir::new("audit-lock-home");
-    let project = TempDir::new("audit-lock-project");
+    let home = TempDir::boundary("cli-audit-lock-home");
+    let project = TempDir::boundary("cli-audit-lock-project");
     let closure = synced_python_closure_with_exception(&home.0, &project.0, "git-dependency");
     let lock_path = project.0.join("tog-toolchain.toml");
     let audit = || {
@@ -2506,8 +2442,8 @@ fn write_rustfmt_closure(
 /// one from before the record carried inputs is outdated.
 #[test]
 fn audit_compares_the_rustfmt_record_to_its_pin() {
-    let home = TempDir::new("audit-rustfmt-home");
-    let project = TempDir::new("audit-rustfmt-project");
+    let home = TempDir::boundary("cli-audit-rustfmt-home");
+    let project = TempDir::boundary("cli-audit-rustfmt-project");
     std::fs::write(project.0.join("Cargo.toml"), "[package]\nname = \"p\"\n").unwrap();
     // A toolchain file naming rustfmt makes `sync` record an exception; the
     // read-only audit must resolve the same pin without recording one.
@@ -2583,8 +2519,8 @@ fn audit_json_handles_non_utf8_project_and_closure_paths() {
     use std::ffi::OsString;
     use std::os::unix::ffi::{OsStrExt, OsStringExt};
 
-    let home = TempDir::new("audit-non-utf8-home");
-    let parent = TempDir::new("audit-non-utf8-parent");
+    let home = TempDir::boundary("cli-audit-non-utf8-home");
+    let parent = TempDir::boundary("cli-audit-non-utf8-parent");
     let project = parent.0.join(OsString::from_vec(vec![
         b'p', b'r', b'o', b'j', b'e', b'c', b't', b'-', 0xff,
     ]));
@@ -2615,8 +2551,8 @@ fn audit_json_handles_non_utf8_project_and_closure_paths() {
 
 #[test]
 fn audit_is_an_offline_admission_gate_over_recorded_exceptions() {
-    let home = TempDir::new("audit-home");
-    let project = TempDir::new("audit-project");
+    let home = TempDir::boundary("cli-audit-home");
+    let project = TempDir::boundary("cli-audit-project");
 
     // No trusted set in the machine policy: the gate is not configured,
     // which is an operator mistake (exit 2), before any record is read.
@@ -2739,7 +2675,7 @@ fn audit_is_an_offline_admission_gate_over_recorded_exceptions() {
         "{}",
         text(&out.stdout)
     );
-    let other_home = TempDir::new("audit-other-home");
+    let other_home = TempDir::boundary("cli-audit-other-home");
     let other = signing_key(&other_home.0);
     let mut resigned: serde_json::Value = serde_json::from_str(&signed).unwrap();
     other.sign(&mut resigned).unwrap();
@@ -2901,7 +2837,7 @@ fn audit_is_an_offline_admission_gate_over_recorded_exceptions() {
 
     // An exception kind this binary does not know is never permitted, under
     // any policy, and cannot be named in one either.
-    let unknown = TempDir::new("audit-unknown");
+    let unknown = TempDir::boundary("cli-audit-unknown");
     synced_python_closure_with_exception(&home.0, &unknown.0, "kind-from-a-newer-tog");
     let out = tog(&unknown.0, &home.0, &["audit"]);
     assert_eq!(out.status.code(), Some(1));
@@ -2927,7 +2863,7 @@ fn audit_is_an_offline_admission_gate_over_recorded_exceptions() {
         .is_empty());
 
     // A closure named for one ecosystem but claiming another is refused.
-    let mismatch = TempDir::new("audit-mismatch");
+    let mismatch = TempDir::boundary("cli-audit-mismatch");
     let path = synced_python_closure_with_exception(&home.0, &mismatch.0, "git-dependency");
     let body = std::fs::read_to_string(&path).unwrap().replacen(
         "\"ecosystem\": \"python\"",
@@ -2965,7 +2901,7 @@ fn audit_is_an_offline_admission_gate_over_recorded_exceptions() {
 
 #[test]
 fn keygen_writes_a_private_key_and_prints_the_policy_table() {
-    let home = TempDir::new("keygen");
+    let home = TempDir::boundary("cli-keygen");
     let path = home.0.join("ci.key");
     let out = tog(&home.0, &home.0, &["keygen", path.to_str().unwrap()]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
@@ -3030,7 +2966,7 @@ fn keygen_writes_a_private_key_and_prints_the_policy_table() {
     assert_eq!(out.status.code(), Some(0));
     assert!(text(&out.stdout).contains("TOG_SIGNING_KEY"));
     // The key signs a record the audit trusts once the table is installed.
-    let project = TempDir::new("keygen-project");
+    let project = TempDir::boundary("cli-keygen-project");
     std::fs::create_dir_all(home.0.join(".tog")).unwrap();
     std::fs::write(home.0.join(".tog/policy.toml"), &stdout).unwrap();
     std::fs::write(project.0.join("Cargo.toml"), "[package]\nname = \"p\"\n").unwrap();
@@ -3069,8 +3005,8 @@ fn keygen_writes_a_private_key_and_prints_the_policy_table() {
 
 #[test]
 fn a_bad_signing_key_fails_every_closure_writer_before_the_store_is_touched() {
-    let home = TempDir::new("badkey-home");
-    let project = TempDir::new("badkey-project");
+    let home = TempDir::boundary("cli-badkey-home");
+    let project = TempDir::boundary("cli-badkey-project");
     std::fs::write(project.0.join("requirements.txt"), "").unwrap();
     std::fs::write(project.0.join("Cargo.toml"), "[package]\nname = \"p\"\n").unwrap();
     let loose = home.0.join("loose.key");

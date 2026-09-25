@@ -15,8 +15,11 @@
 #![allow(clippy::disallowed_methods)]
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::process::Output;
+
+mod common;
+
+use common::{text, tog, tog_at, TempDir};
 
 use tog::comforter::toolchain as project_toolchain;
 use tog::kernel::fsroot::ProjectRoot;
@@ -24,29 +27,6 @@ use tog::kernel::platform::Platform;
 use tog::kernel::toolchain::input::{self, InputRow};
 use tog::kernel::toolchain::lock::{ToolchainLock, LOCK_PATH};
 use tog::kernel::toolchain::{select_for, Catalog, Source};
-
-struct TempDir(PathBuf);
-
-impl TempDir {
-    fn new(label: &str) -> Self {
-        let path = std::env::temp_dir().join(format!(
-            "tog-lock-{label}-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&path).unwrap();
-        Self(path)
-    }
-}
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
 
 /// A project and the throwaway home its store, policy and `x` cache live
 /// in, so nothing here can read the developer's configuration.
@@ -57,14 +37,14 @@ struct Fixture {
 
 impl Fixture {
     fn new(label: &str) -> Self {
-        let fixture = Self {
-            home: TempDir::new(&format!("{label}-home")),
-            project: TempDir::new(&format!("{label}-project")),
-        };
-        // A project boundary, so an ancestor checkout's manifests and
-        // policy cannot reach these fixtures.
-        std::fs::create_dir_all(fixture.home.0.join(".tog")).unwrap();
-        fixture
+        Self {
+            // The home is its own project boundary; the project is not,
+            // because tests here watch for the `.tog` directory a sync
+            // creates, and one run in place (`home` as cwd) must not see a
+            // checkout's manifests above it.
+            home: TempDir::boundary(&format!("lock-{label}-home")),
+            project: TempDir::new(&format!("lock-{label}-project")),
+        }
     }
 
     fn dir(&self) -> &Path {
@@ -88,24 +68,7 @@ impl Fixture {
     }
 
     fn tog(&self, args: &[&str]) -> Output {
-        self.tog_env(args, &[])
-    }
-
-    fn tog_env(&self, args: &[&str], env: &[(&str, &str)]) -> Output {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_tog"));
-        command
-            .args(args)
-            .current_dir(&self.project.0)
-            .env("TOG_STORE", self.store())
-            .env("HOME", &self.home.0)
-            .env_remove("TOG_POLICY")
-            .env_remove("TOG_STRICT")
-            .env_remove("TOG_SIGNING_KEY")
-            .env("NO_COLOR", "1");
-        for (name, value) in env {
-            command.env(name, value);
-        }
-        command.output().expect("spawn tog")
+        tog(&self.project.0, &self.home.0, args)
     }
 
     /// Publish a `tog-toolchain.toml` describing the project exactly as it
@@ -115,10 +78,6 @@ impl Fixture {
         let lock = build_lock(self.dir(), &[ecosystem]);
         std::fs::write(self.project.0.join(LOCK_PATH), lock.canonical_bytes()).unwrap();
     }
-}
-
-fn text(bytes: &[u8]) -> String {
-    String::from_utf8_lossy(bytes).into_owned()
 }
 
 fn catalog_of(ecosystem: &str) -> Catalog {
@@ -915,9 +874,11 @@ fn two_store_replay() {
     fixture.write("pyproject.toml", UNPLANNABLE_PYPROJECT);
     let before = fixture.lock_bytes().unwrap();
     for store in ["store-a", "store-b"] {
-        let out = fixture.tog_env(
+        let out = tog_at(
+            fixture.dir(),
+            &fixture.home.0,
+            &fixture.home.0.join(store),
             &["sync", "--frozen"],
-            &[("TOG_STORE", fixture.home.0.join(store).to_str().unwrap())],
         );
         let stderr = text(&out.stderr);
         assert_eq!(out.status.code(), Some(1), "{stderr}");
@@ -1097,7 +1058,7 @@ const PLAIN_CARGO_LOCK: &str = "version = 3\n\n[[package]]\nname = \"p\"\nversio
 #[test]
 fn a_local_toolchain_is_locked_by_content_and_fails_closed_when_it_changes() {
     let fixture = Fixture::new("rust-path");
-    let trees = TempDir::new("rust-path-tree");
+    let trees = TempDir::new("lock-rust-path-tree");
     let tree = trees.0.join("custom-rust");
     fake_rust_tree(&tree, "1.97.0-nightly");
     let tree = tree.canonicalize().unwrap();

@@ -954,6 +954,7 @@ mod tests {
         GIT_DEPENDENCY, INSTALL_SCRIPT_FAILED, SKIPPED_OPTIONAL, WEAK_INTEGRITY,
     };
     use crate::kernel::signing::SigningKey;
+    use crate::kernel::testutil::TempDir;
     use crate::tailors::cargo::rustfmt;
     use std::collections::BTreeSet;
     use std::fs;
@@ -961,30 +962,6 @@ mod tests {
     use std::os::unix::ffi::OsStringExt;
     use std::path::PathBuf;
     use std::sync::OnceLock;
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    struct TempDir(PathBuf);
-
-    impl TempDir {
-        fn new(label: &str) -> Self {
-            let path = std::env::temp_dir().join(format!(
-                "tog-audit-{label}-{}-{}",
-                std::process::id(),
-                SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
-            ));
-            fs::create_dir_all(&path).unwrap();
-            Self(path)
-        }
-    }
-
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
 
     fn host() -> Platform {
         Platform::host().unwrap()
@@ -1004,7 +981,7 @@ mod tests {
     }
 
     fn generated_key(label: &str) -> SigningKey {
-        let temp = TempDir::new(label);
+        let temp = TempDir::named(label);
         let path = temp.0.join("key");
         signing::generate(&path).unwrap();
         SigningKey::load(&path).unwrap()
@@ -1031,7 +1008,7 @@ mod tests {
 
     impl MachinePolicy {
         fn trusting(label: &str, keys: &[&SigningKey]) -> Self {
-            let dir = TempDir::new(label);
+            let dir = TempDir::named(label);
             let path = dir.0.join("machine.toml");
             let entries: Vec<String> = keys
                 .iter()
@@ -1072,7 +1049,7 @@ mod tests {
     /// written from `python_body` is current until `requirements.txt`
     /// changes.
     fn python_project(label: &str) -> TempDir {
-        let temp = TempDir::new(label);
+        let temp = TempDir::named(label);
         let dir = &temp.0;
         fs::write(dir.join("requirements.txt"), "six==1.17.0\n").unwrap();
         let env = dir.join("env-object");
@@ -1404,7 +1381,7 @@ mod tests {
 
     #[test]
     fn text_policy_source_quotes_grammar_significant_paths() {
-        let temp = TempDir::new("quoted-policy");
+        let temp = TempDir::named("quoted-policy");
         let path = temp.0.join("policy denies git-dependency (strict).toml");
         fs::write(&path, "strict = true\ndeny = [\"git-dependency\"]\n").unwrap();
         let policy = read_policy_file(&path).unwrap();
@@ -2062,7 +2039,7 @@ mod tests {
     /// for the project, and judged on its exceptions like any other record.
     #[test]
     fn rustfmt_record_is_compared_with_its_pin() {
-        let temp = TempDir::new("rustfmt");
+        let temp = TempDir::named("rustfmt");
         let dir = &temp.0;
         fs::write(dir.join("Cargo.toml"), "[package]\nname = \"fmt\"\n").unwrap();
         let write = |body: Value| {
@@ -2241,7 +2218,7 @@ mod tests {
         // The lookup directory must be the exact spelling `fmt` records of a
         // directory inside the workspace: no symlink out, no `..`, no `.`,
         // no trailing separator.
-        let outside = TempDir::new("rustfmt-outside");
+        let outside = TempDir::named("rustfmt-outside");
         std::os::unix::fs::symlink(&outside.0, dir.join("link")).unwrap();
         fs::create_dir_all(dir.join("inner")).unwrap();
         for escape in [
@@ -2348,7 +2325,7 @@ mod tests {
         assert!(!report.passes());
         assert!(!dir.join("store").exists());
         // Nothing synced: a NotFound with a next step.
-        let empty = TempDir::new("empty");
+        let empty = TempDir::named("empty");
         let error = audit(host(), &empty.0, None).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::NotFound);
         assert!(error.to_string().contains("run 'tog' first"));

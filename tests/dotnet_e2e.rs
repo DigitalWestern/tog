@@ -5,53 +5,14 @@
 #![allow(clippy::disallowed_methods)]
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
 
-struct TempDir(PathBuf);
+mod common;
 
-impl TempDir {
-    fn new() -> Self {
-        let path = std::env::temp_dir().join(format!(
-            "tog-dotnet-e2e-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&path).unwrap();
-        Self(path)
-    }
-}
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
-fn tog(bin: &Path, project: &Path, store: &Path, args: &[&str]) -> Output {
-    Command::new(bin)
-        .current_dir(project)
-        .env("TOG_STORE", store)
-        .args(args)
-        .output()
-        .unwrap()
-}
-
-fn assert_ok(output: Output, label: &str) -> String {
-    assert!(
-        output.status.success(),
-        "{label} failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8(output.stdout).unwrap()
-}
+use common::{assert_ok, fixture, tog, tog_at, TempDir};
 
 fn copy_dotnet_hello(project: &Path) {
     std::fs::create_dir_all(project).unwrap();
-    let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/dotnet-hello");
+    let fixtures = fixture("dotnet-hello");
     for f in ["proj.csproj", "packages.lock.json", "Program.cs"] {
         std::fs::copy(fixtures.join(f), project.join(f)).unwrap();
     }
@@ -75,7 +36,7 @@ fn sdk_object(store: &Path) -> PathBuf {
         .expect("committed .NET SDK object")
 }
 
-fn assert_realization_does_not_evaluate_user_project(binary: &Path, temp: &TempDir) {
+fn assert_realization_does_not_evaluate_user_project(temp: &TempDir) {
     let project = temp.0.join("dotnet-tripwire");
     copy_dotnet_hello(&project);
     let csproj = project.join("proj.csproj");
@@ -86,7 +47,10 @@ fn assert_realization_does_not_evaluate_user_project(binary: &Path, temp: &TempD
     );
     std::fs::write(csproj, text).unwrap();
     let store = temp.0.join("tripwire-store");
-    assert_ok(tog(binary, &project, &store, &["sync"]), "tripwire sync");
+    assert_ok(
+        tog_at(&project, &temp.0, &store, &["sync"]),
+        "tripwire sync",
+    );
     assert!(
         !project.join("tripwire.txt").exists(),
         "realization evaluated the user's project"
@@ -96,15 +60,14 @@ fn assert_realization_does_not_evaluate_user_project(binary: &Path, temp: &TempD
 #[test]
 #[ignore]
 fn dotnet_sync_sandboxed_build_and_run() {
-    let temp = TempDir::new();
+    let temp = TempDir::new("dotnet-e2e");
     let project = temp.0.join("dotnet-hello");
     copy_dotnet_hello(&project);
     let store = temp.0.join("store");
-    let binary = PathBuf::from(env!("CARGO_BIN_EXE_tog"));
 
-    assert_ok(tog(&binary, &project, &store, &["sync"]), "sync");
+    assert_ok(tog(&project, &temp.0, &["sync"]), "sync");
     let version = assert_ok(
-        tog(&binary, &project, &store, &["run", "dotnet", "--version"]),
+        tog(&project, &temp.0, &["run", "dotnet", "--version"]),
         "dotnet --version",
     );
     assert!(
@@ -113,7 +76,7 @@ fn dotnet_sync_sandboxed_build_and_run() {
     );
     if cfg!(target_os = "linux") {
         let info = assert_ok(
-            tog(&binary, &project, &store, &["run", "dotnet", "--info"]),
+            tog(&project, &temp.0, &["run", "dotnet", "--info"]),
             "dotnet --info",
         );
         // `dotnet --info` pads with variable whitespace; compare fields.
@@ -131,31 +94,25 @@ fn dotnet_sync_sandboxed_build_and_run() {
             "SDK base path is not under the committed store object: {base_path:?}\n{info}"
         );
     }
-    assert_ok(tog(&binary, &project, &store, &["build"]), "build");
+    assert_ok(tog(&project, &temp.0, &["build"]), "build");
     let dll = published_dll(&project);
     assert!(dll.is_file());
     let out = assert_ok(
-        tog(
-            &binary,
-            &project,
-            &store,
-            &["run", "dotnet", dll.to_str().unwrap()],
-        ),
+        tog(&project, &temp.0, &["run", "dotnet", dll.to_str().unwrap()]),
         "run built app",
     );
     assert!(out.contains("{\"dotnet\":\"ok\"}"), "{out}");
 
     std::fs::remove_dir_all(dll.parent().unwrap()).unwrap();
     assert_ok(
-        tog(&binary, &project, &store, &["build"]),
+        tog(&project, &temp.0, &["build"]),
         "build after published output deletion",
     );
     let rebuilt = published_dll(&project);
     let out = assert_ok(
         tog(
-            &binary,
             &project,
-            &store,
+            &temp.0,
             &["run", "dotnet", rebuilt.to_str().unwrap()],
         ),
         "run rebuilt app",
@@ -163,20 +120,19 @@ fn dotnet_sync_sandboxed_build_and_run() {
     assert!(out.contains("{\"dotnet\":\"ok\"}"), "{out}");
 
     // Build-capable verbs are sandbox-only.
-    let refused = tog(&binary, &project, &store, &["run", "dotnet", "build"]);
+    let refused = tog(&project, &temp.0, &["run", "dotnet", "build"]);
     assert!(!refused.status.success());
     assert!(
         String::from_utf8_lossy(&refused.stderr).contains("tog build dotnet"),
         "build verb must be refused at run"
     );
 
-    assert_realization_does_not_evaluate_user_project(&binary, &temp);
+    assert_realization_does_not_evaluate_user_project(&temp);
 }
 
 #[test]
 #[ignore]
 fn dotnet_realization_does_not_evaluate_user_project() {
-    let temp = TempDir::new();
-    let binary = PathBuf::from(env!("CARGO_BIN_EXE_tog"));
-    assert_realization_does_not_evaluate_user_project(&binary, &temp);
+    let temp = TempDir::new("dotnet-e2e");
+    assert_realization_does_not_evaluate_user_project(&temp);
 }

@@ -12,8 +12,6 @@ use std::collections::BTreeMap;
 use std::fs;
 #[cfg(debug_assertions)]
 use std::panic::{catch_unwind, AssertUnwindSafe};
-#[cfg(debug_assertions)]
-use std::path::PathBuf;
 use std::process::Command;
 use tog::kernel::platform::Platform;
 #[cfg(debug_assertions)]
@@ -21,33 +19,10 @@ use tog::kernel::store::ObjectDeps;
 use tog::kernel::store::Store;
 use tog::kernel::types::*;
 
-#[cfg(debug_assertions)]
-struct TempStore(PathBuf);
+mod common;
 
 #[cfg(debug_assertions)]
-impl TempStore {
-    fn new() -> Self {
-        let base = std::env::temp_dir().join(format!(
-            "tog-kernel-smoke-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        for sub in ["objects", "meta", "cache/sha256", "tmp"] {
-            fs::create_dir_all(base.join(sub)).unwrap();
-        }
-        Self(base)
-    }
-}
-
-#[cfg(debug_assertions)]
-impl Drop for TempStore {
-    fn drop(&mut self) {
-        let _ = tog::kernel::store::remove_tree(&self.0);
-    }
-}
+use common::TempDir;
 
 #[test]
 #[ignore]
@@ -105,9 +80,12 @@ fn tailor_grammar_drift_panics_before_publishing() {
     // explicit installation even though public tailor realization entry
     // points now self-install their rows.
     tog::tailors::install_kinds();
-    let temp = TempStore::new();
+    let temp = TempDir::new("kernel-smoke");
+    for sub in ["objects", "meta", "cache/sha256", "tmp"] {
+        fs::create_dir_all(temp.0.join(sub)).unwrap();
+    }
     let store = Store {
-        root: temp.0.canonicalize().unwrap(),
+        root: temp.0.clone(),
     };
     let activity = &store
         .activity(tog::kernel::activity::ActivityMode::Shared)

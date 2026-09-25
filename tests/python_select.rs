@@ -4,78 +4,13 @@
 // Tests spawn fixtures and take leases freely (see clippy.toml).
 #![allow(clippy::disallowed_methods)]
 
-use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::Output;
+
 use tog::kernel::platform::Platform;
 
-struct TempDir(PathBuf);
+mod common;
 
-impl TempDir {
-    fn new() -> Self {
-        let path = std::env::temp_dir().join(format!(
-            "tog-python-select-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&path).unwrap();
-        Self(path)
-    }
-}
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
-fn copy_tree(src: &Path, dest: &Path) {
-    std::fs::create_dir_all(dest).unwrap();
-    for entry in std::fs::read_dir(src).unwrap() {
-        let entry = entry.unwrap();
-        let from = entry.path();
-        let to = dest.join(entry.file_name());
-        if from.is_dir() {
-            copy_tree(&from, &to);
-        } else {
-            std::fs::copy(from, to).unwrap();
-        }
-    }
-}
-
-fn tog(bin: &Path, project: &Path, store: &Path, args: &[&str]) -> Output {
-    tog_env(bin, project, store, args, &[])
-}
-
-fn tog_env(
-    bin: &Path,
-    project: &Path,
-    store: &Path,
-    args: &[&str],
-    env: &[(&str, &Path)],
-) -> Output {
-    let mut command = Command::new(bin);
-    command
-        .current_dir(project)
-        .env("TOG_STORE", store)
-        .args(args);
-    for (name, value) in env {
-        command.env(name, value);
-    }
-    command.output().unwrap()
-}
-
-fn assert_ok(output: Output, label: &str) -> String {
-    assert!(
-        output.status.success(),
-        "{label} failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8(output.stdout).unwrap()
-}
+use common::{assert_ok, command, copy_tree, fixture, tog, tog_at, warm_store, TempDir};
 
 #[test]
 #[ignore]
@@ -89,16 +24,10 @@ fn pyproject_requires_python_selects_311_and_warm_sync_is_cached() {
         return;
     }
 
-    let temp = TempDir::new();
+    let temp = TempDir::new("python-select");
     let project = temp.0.join("proj-py311");
-    copy_tree(
-        &PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/proj-py311"),
-        &project,
-    );
-    let store = std::env::var_os("TOG_STORE")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| temp.0.join("store"));
-    let binary = PathBuf::from(env!("CARGO_BIN_EXE_tog"));
+    copy_tree(&fixture("proj-py311"), &project);
+    let store = warm_store(&temp);
     // The sync signs its closure with a key made here, and a machine policy
     // in a scratch HOME trusts it: the gate then passes the real record.
     let key = temp.0.join("signing.key");
@@ -110,9 +39,15 @@ fn pyproject_requires_python_selects_311_and_warm_sync_is_cached() {
         format!("[signing]\ntrusted = [\"{public}\"]\n"),
     )
     .unwrap();
-    let signed: &[(&str, &Path)] = &[("TOG_SIGNING_KEY", &key), ("HOME", &home)];
+    let signed = |args: &[&str]| -> Output {
+        command(&project, &home, &store)
+            .env("TOG_SIGNING_KEY", &key)
+            .args(args)
+            .output()
+            .unwrap()
+    };
 
-    let first = tog_env(&binary, &project, &store, &["sync"], signed);
+    let first = signed(&["sync"]);
     let first_stderr = String::from_utf8_lossy(&first.stderr);
     assert!(first.status.success(), "first sync failed: {first_stderr}");
     assert!(
@@ -133,7 +68,7 @@ fn pyproject_requires_python_selects_311_and_warm_sync_is_cached() {
         tog::kernel::signing::verify(&closure),
         tog::kernel::signing::Verification::Valid(public)
     );
-    let audit = tog_env(&binary, &project, &store, &["audit", "--json"], signed);
+    let audit = signed(&["audit", "--json"]);
     let report: serde_json::Value = serde_json::from_slice(&audit.stdout).unwrap_or_default();
     assert!(
         audit.status.success()
@@ -153,19 +88,13 @@ fn pyproject_requires_python_selects_311_and_warm_sync_is_cached() {
         {"kind": "git-dependency", "subject": "left-pad", "detail": "hand-added"}
     ]);
     std::fs::write(&path, serde_json::to_vec_pretty(&edited).unwrap()).unwrap();
-    let audit = tog_env(&binary, &project, &store, &["audit", "--json"], signed);
+    let audit = signed(&["audit", "--json"]);
     let report: serde_json::Value = serde_json::from_slice(&audit.stdout).unwrap_or_default();
     assert_eq!(audit.status.code(), Some(1));
     assert_eq!(report["closures"][0]["verdict"], "bad-signature");
     std::fs::write(&path, serde_json::to_vec_pretty(&closure).unwrap()).unwrap();
     // An unsigned sync says so and its record is outdated.
-    let unsigned = tog_env(
-        &binary,
-        &project,
-        &store,
-        &["sync", "--fresh"],
-        &[("HOME", &home)],
-    );
+    let unsigned = tog_at(&project, &home, &store, &["sync", "--fresh"]);
     assert!(
         unsigned.status.success(),
         "{}",
@@ -176,18 +105,18 @@ fn pyproject_requires_python_selects_311_and_warm_sync_is_cached() {
         "{}",
         String::from_utf8_lossy(&unsigned.stderr)
     );
-    let audit = tog_env(&binary, &project, &store, &["audit", "--json"], signed);
+    let audit = signed(&["audit", "--json"]);
     let report: serde_json::Value = serde_json::from_slice(&audit.stdout).unwrap_or_default();
     assert_eq!(audit.status.code(), Some(1));
     assert_eq!(report["closures"][0]["verdict"], "outdated");
     assert_eq!(report["closures"][0]["signature"]["state"], "unsigned");
-    let resigned = tog_env(&binary, &project, &store, &["sync"], signed);
+    let resigned = signed(&["sync"]);
     assert!(
         resigned.status.success(),
         "{}",
         String::from_utf8_lossy(&resigned.stderr)
     );
-    let audit = tog_env(&binary, &project, &store, &["audit", "--json"], signed);
+    let audit = signed(&["audit", "--json"]);
     let report: serde_json::Value = serde_json::from_slice(&audit.stdout).unwrap_or_default();
     assert!(
         audit.status.success() && report["closures"][0]["verdict"] == "clean",
@@ -203,9 +132,9 @@ fn pyproject_requires_python_selects_311_and_warm_sync_is_cached() {
     );
 
     let run = assert_ok(
-        tog(
-            &binary,
+        tog_at(
             &project,
+            &home,
             &store,
             &[
                 "run",
@@ -225,7 +154,7 @@ fn pyproject_requires_python_selects_311_and_warm_sync_is_cached() {
     let lock_mtime = std::fs::metadata(&lock_path).unwrap().modified().unwrap();
     let stamp_mtime = std::fs::metadata(&stamp_path).unwrap().modified().unwrap();
 
-    let second = tog_env(&binary, &project, &store, &["sync"], signed);
+    let second = signed(&["sync"]);
     assert_ok(second, "warm sync");
     assert_eq!(
         std::fs::metadata(&plan_path).unwrap().modified().unwrap(),
@@ -248,7 +177,7 @@ fn pyproject_requires_python_selects_311_and_warm_sync_is_cached() {
 /// in the default suite and guards the preflight-before-store ordering.
 #[test]
 fn unpinned_patch_request_fails_closed_before_opening_store() {
-    let temp = TempDir::new();
+    let temp = TempDir::new("python-select");
     let project = temp.0.join("proj-unpinned-patch");
     std::fs::create_dir_all(&project).unwrap();
     // 3.11.2 is a real CPython release python-build-standalone never
@@ -256,9 +185,8 @@ fn unpinned_patch_request_fails_closed_before_opening_store() {
     std::fs::write(project.join(".python-version"), "3.11.2\n").unwrap();
     std::fs::write(project.join("requirements.txt"), "").unwrap();
     let store = temp.0.join("store");
-    let binary = PathBuf::from(env!("CARGO_BIN_EXE_tog"));
 
-    let output = tog(&binary, &project, &store, &["sync"]);
+    let output = tog(&project, &temp.0, &["sync"]);
     assert_eq!(
         output.status.code(),
         Some(1),

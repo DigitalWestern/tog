@@ -1,73 +1,21 @@
 //! End-to-end coverage for the Rust `tog fmt` contract.
 //!
-//! Run with a disposable store and a disk-backed TMPDIR:
-//! TOG_STORE=<dir> TMPDIR=<disk-dir> TOG_SANDBOX_TESTS=required
-//! cargo test --target-dir target --test fmt_e2e -- --ignored --nocapture
+//! Each test syncs into its own scratch store; a disk-backed TMPDIR keeps
+//! those off the small /tmp quota:
+//! TMPDIR=<disk-dir> TOG_SANDBOX_TESTS=required
+//! cargo test --test fmt_e2e -- --ignored --nocapture
 
 // Tests spawn fixtures and take leases freely (see clippy.toml).
 #![allow(clippy::disallowed_methods)]
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::Output;
 use std::time::{Duration, SystemTime};
 
-struct TempDir(PathBuf);
+mod common;
 
-impl TempDir {
-    fn new() -> Self {
-        let base = std::env::var_os("TMPDIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(std::env::temp_dir);
-        let path = base.join(format!(
-            "tog-fmt-e2e-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir_all(&path).unwrap();
-        Self(path)
-    }
-}
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        let _ = tog::kernel::store::remove_tree(&self.0);
-    }
-}
-
-fn copy_tree(src: &Path, dest: &Path) {
-    fs::create_dir_all(dest).unwrap();
-    for entry in fs::read_dir(src).unwrap() {
-        let entry = entry.unwrap();
-        let from = entry.path();
-        let to = dest.join(entry.file_name());
-        if from.is_dir() {
-            copy_tree(&from, &to);
-        } else {
-            fs::copy(from, to).unwrap();
-        }
-    }
-}
-
-fn tog(bin: &Path, project: &Path, store: &Path, args: &[&str]) -> Output {
-    tog_at(bin, project, store, args)
-}
-
-fn tog_at(bin: &Path, cwd: &Path, store: &Path, args: &[&str]) -> Output {
-    tog_env(bin, cwd, store, args, &[])
-}
-
-fn tog_env(bin: &Path, cwd: &Path, store: &Path, args: &[&str], env: &[(&str, &Path)]) -> Output {
-    let mut command = Command::new(bin);
-    command.current_dir(cwd).env("TOG_STORE", store).args(args);
-    for (name, value) in env {
-        command.env(name, value);
-    }
-    command.output().unwrap()
-}
+use common::{command, copy_tree, fixture, tog, tog_at, TempDir};
 
 fn object_ids(store: &Path) -> Vec<String> {
     let mut ids = fs::read_dir(store.join("objects"))
@@ -98,15 +46,11 @@ fn default_rust() -> String {
 #[test]
 #[ignore]
 fn fmt_is_lockless_cached_sandboxed_and_gc_rooted() {
-    let temp = TempDir::new();
+    let temp = TempDir::new("fmt-e2e");
     let project = temp.0.join("cargo-hello");
-    copy_tree(
-        &PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/cargo-hello"),
-        &project,
-    );
+    copy_tree(&fixture("cargo-hello"), &project);
     fs::remove_file(project.join("Cargo.lock")).unwrap();
     let store = temp.0.join("store");
-    let binary = PathBuf::from(env!("CARGO_BIN_EXE_tog"));
     // `fmt` signs the rustfmt record like every closure; a scratch HOME's
     // machine policy trusts the key so the gate can judge it.
     let key = temp.0.join("signing.key");
@@ -118,9 +62,15 @@ fn fmt_is_lockless_cached_sandboxed_and_gc_rooted() {
         format!("[signing]\ntrusted = [\"{public}\"]\n"),
     )
     .unwrap();
-    let signed: &[(&str, &Path)] = &[("TOG_SIGNING_KEY", &key), ("HOME", &home)];
+    let signed = |cwd: &Path, args: &[&str]| -> Output {
+        command(cwd, &home, &store)
+            .env("TOG_SIGNING_KEY", &key)
+            .args(args)
+            .output()
+            .unwrap()
+    };
 
-    let first = tog_env(&binary, &project, &store, &["fmt", "--check"], signed);
+    let first = signed(&project, &["fmt", "--check"]);
     assert_eq!(
         first.status.code(),
         Some(1),
@@ -168,7 +118,7 @@ fn fmt_is_lockless_cached_sandboxed_and_gc_rooted() {
     // The record names the pinned rustfmt and is signed by a trusted key,
     // so the gate passes it; the report still fails because the Cargo
     // project was never synced (no cargo.json), which is `missing`.
-    let audit = tog_env(&binary, &project, &store, &["audit", "--json"], signed);
+    let audit = signed(&project, &["audit", "--json"]);
     let report: serde_json::Value = serde_json::from_slice(&audit.stdout).unwrap_or_default();
     assert!(
         audit.status.code() == Some(1)
@@ -191,7 +141,7 @@ fn fmt_is_lockless_cached_sandboxed_and_gc_rooted() {
         "rustfmt metadata does not retain the Rust object reference"
     );
 
-    let formatted = tog(&binary, &project, &store, &["fmt"]);
+    let formatted = tog_at(&project, &home, &store, &["fmt"]);
     assert!(
         formatted.status.success(),
         "format run failed\nstdout:\n{}\nstderr:\n{}",
@@ -205,7 +155,7 @@ fn fmt_is_lockless_cached_sandboxed_and_gc_rooted() {
     assert!(!project.join("Cargo.lock").exists());
 
     let before = object_ids(&store);
-    let warm = tog(&binary, &project, &store, &["fmt", "--check"]);
+    let warm = tog_at(&project, &home, &store, &["fmt", "--check"]);
     assert!(
         warm.status.success(),
         "warm check failed: {:?}",
@@ -214,13 +164,13 @@ fn fmt_is_lockless_cached_sandboxed_and_gc_rooted() {
     assert!(!String::from_utf8_lossy(&warm.stderr).contains("fetching rustfmt"));
     assert_eq!(object_ids(&store), before, "warm fmt created a new object");
 
-    let listed = tog(&binary, &project, &store, &["ls"]);
+    let listed = tog_at(&project, &home, &store, &["ls"]);
     assert!(listed.status.success());
     assert!(
         String::from_utf8_lossy(&listed.stdout).contains(&format!("rustfmt {}", default_rust()))
     );
     // `ls` prints a rustfmt row, so `ls rustfmt` must be a legal filter.
-    let listed_one = tog(&binary, &project, &store, &["ls", "rustfmt"]);
+    let listed_one = tog_at(&project, &home, &store, &["ls", "rustfmt"]);
     assert!(
         listed_one.status.success(),
         "ls rustfmt failed\nstdout:\n{}\nstderr:\n{}",
@@ -231,7 +181,7 @@ fn fmt_is_lockless_cached_sandboxed_and_gc_rooted() {
     // Every closure consumer must survive the package-free fmt closure:
     // `sbom` reads every .tog/closures/*.json and fails the whole
     // document on the first ecosystem it does not know.
-    let sbom = tog(&binary, &project, &store, &["sbom"]);
+    let sbom = tog_at(&project, &home, &store, &["sbom"]);
     assert!(
         sbom.status.success(),
         "sbom failed after fmt\nstdout:\n{}\nstderr:\n{}",
@@ -264,7 +214,7 @@ fn fmt_is_lockless_cached_sandboxed_and_gc_rooted() {
         String::from_utf8_lossy(&sbom.stdout)
     );
 
-    let help = tog(&binary, &project, &store, &["fmt", "--", "--help"]);
+    let help = tog_at(&project, &home, &store, &["fmt", "--", "--help"]);
     assert!(
         help.status.success(),
         "pass-through help failed\nstdout:\n{}\nstderr:\n{}",
@@ -275,7 +225,7 @@ fn fmt_is_lockless_cached_sandboxed_and_gc_rooted() {
     // This is cargo-fmt's own argument parser rejecting a malformed tog
     // pass-through flag. Its status is 2, so status 1 would not prove
     // unchanged propagation from the formatter.
-    let bad_tool_flag = tog(&binary, &project, &store, &["fmt", "--", "--version=bad"]);
+    let bad_tool_flag = tog_at(&project, &home, &store, &["fmt", "--", "--version=bad"]);
     let bad_tool_stderr = String::from_utf8_lossy(&bad_tool_flag.stderr).into_owned();
     assert_eq!(
         bad_tool_flag.status.code(),
@@ -298,7 +248,7 @@ fn fmt_is_lockless_cached_sandboxed_and_gc_rooted() {
     for entry in fs::read_dir(store.join("objects")).unwrap() {
         age(&entry.unwrap().path());
     }
-    let gc = tog(&binary, &project, &store, &["gc", "--keep-days", "0"]);
+    let gc = tog_at(&project, &home, &store, &["gc", "--keep-days", "0"]);
     assert!(
         gc.status.success(),
         "gc failed\nstdout:\n{}\nstderr:\n{}",
@@ -319,7 +269,7 @@ fn fmt_is_lockless_cached_sandboxed_and_gc_rooted() {
 fn fmt_from_a_workspace_member_uses_the_root_lock() {
     let pinned = "1.96.1";
     assert_ne!(default_rust(), pinned);
-    let temp = TempDir::new();
+    let temp = TempDir::new("fmt-e2e");
     let root = temp.0.join("workspace");
     let member = root.join("member");
     fs::create_dir_all(member.join("src")).unwrap();
@@ -344,7 +294,6 @@ fn fmt_from_a_workspace_member_uses_the_root_lock() {
     )
     .unwrap();
     let store = temp.0.join("store");
-    let binary = PathBuf::from(env!("CARGO_BIN_EXE_tog"));
     let key = temp.0.join("signing.key");
     let public = tog::kernel::signing::generate(&key).unwrap();
     let home = temp.0.join("home");
@@ -354,15 +303,15 @@ fn fmt_from_a_workspace_member_uses_the_root_lock() {
         format!("[signing]\ntrusted = [\"{public}\"]\n"),
     )
     .unwrap();
-    let signed: &[(&str, &Path)] = &[("TOG_SIGNING_KEY", &key), ("HOME", &home)];
+    let signed = |cwd: &Path, args: &[&str]| -> Output {
+        command(cwd, &home, &store)
+            .env("TOG_SIGNING_KEY", &key)
+            .args(args)
+            .output()
+            .unwrap()
+    };
 
-    let locked = tog_env(
-        &binary,
-        &root,
-        &store,
-        &["update", "--toolchain", "rust", "--no-sync"],
-        signed,
-    );
+    let locked = signed(&root, &["update", "--toolchain", "rust", "--no-sync"]);
     assert!(
         locked.status.success(),
         "update failed\nstderr:\n{}",
@@ -371,7 +320,7 @@ fn fmt_from_a_workspace_member_uses_the_root_lock() {
     let lock = fs::read_to_string(root.join("tog-toolchain.toml")).unwrap();
     assert!(lock.contains(&format!("version = \"{pinned}\"")), "{lock}");
 
-    let checked = tog_env(&binary, &member, &store, &["fmt", "--check"], signed);
+    let checked = signed(&member, &["fmt", "--check"]);
     assert!(
         checked.status.success(),
         "fmt --check from the member failed\nstdout:\n{}\nstderr:\n{}",
@@ -389,7 +338,7 @@ fn fmt_from_a_workspace_member_uses_the_root_lock() {
         "fmt ran on {rust_id}, not the root lock's Rust {pinned}"
     );
 
-    let audit = tog_env(&binary, &root, &store, &["audit", "--json"], signed);
+    let audit = signed(&root, &["audit", "--json"]);
     let report: serde_json::Value = serde_json::from_slice(&audit.stdout).unwrap_or_default();
     let rustfmt = report["closures"]
         .as_array()
@@ -411,7 +360,7 @@ fn fmt_from_a_workspace_member_uses_the_root_lock() {
 #[test]
 #[ignore]
 fn fmt_script_precedence_runs_script_from_a_project_subdirectory() {
-    let temp = TempDir::new();
+    let temp = TempDir::new("fmt-e2e");
     let project = temp.0.join("fmt-script");
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(
@@ -432,9 +381,7 @@ fn fmt_script_precedence_runs_script_from_a_project_subdirectory() {
     fs::write(project.join("Cargo.lock"), "version = 4\n").unwrap();
     fs::write(project.join("src/main.rs"), "fn main() {}\n").unwrap();
 
-    let store = temp.0.join("store");
-    let binary = PathBuf::from(env!("CARGO_BIN_EXE_tog"));
-    let synced = tog(&binary, &project, &store, &["sync"]);
+    let synced = tog(&project, &temp.0, &["sync"]);
     assert!(
         synced.status.success(),
         "sync failed\nstdout:\n{}\nstderr:\n{}",
@@ -443,12 +390,7 @@ fn fmt_script_precedence_runs_script_from_a_project_subdirectory() {
     );
     assert!(project.join(".tog/closures/node.json").is_file());
 
-    let run = tog_at(
-        &binary,
-        &project.join("src"),
-        &store,
-        &["fmt", "--check", "extra"],
-    );
+    let run = tog(&project.join("src"), &temp.0, &["fmt", "--check", "extra"]);
     assert_eq!(
         run.status.code(),
         Some(7),

@@ -1482,29 +1482,7 @@ mod tests {
         }
     }
     use super::*;
-
-    struct TempDir(PathBuf);
-
-    impl TempDir {
-        fn new() -> Self {
-            let path = std::env::temp_dir().join(format!(
-                "tog-go-test-{}-{}",
-                std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
-            ));
-            fs::create_dir_all(&path).unwrap();
-            Self(path)
-        }
-    }
-
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = crate::kernel::store::remove_tree(&self.0);
-        }
-    }
+    use crate::kernel::testutil::TempDir;
 
     fn tree_snapshot(root: &Path) -> BTreeMap<PathBuf, std::time::SystemTime> {
         fn visit(

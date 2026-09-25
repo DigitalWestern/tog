@@ -75,7 +75,14 @@ pub fn warm_store(temp: &TempDir) -> PathBuf {
 /// suite stays offline. `TOG_SANDBOX_TESTS` passes through: CI sets it to
 /// make a sandbox that cannot start a failure rather than a skip.
 pub fn command(cwd: &Path, home: &Path, store: &Path) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_tog"));
+    command_for(Path::new(env!("CARGO_BIN_EXE_tog")), cwd, home, store)
+}
+
+/// [`command`] for a tog binary at `binary` rather than the one cargo
+/// built: a test of self-update runs a copy it owns, since the update
+/// replaces the file it was started from.
+pub fn command_for(binary: &Path, cwd: &Path, home: &Path, store: &Path) -> Command {
+    let mut command = Command::new(binary);
     for (name, _) in std::env::vars_os() {
         let leaks = name
             .to_str()

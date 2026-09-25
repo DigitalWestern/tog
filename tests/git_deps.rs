@@ -7,7 +7,7 @@
 // Tests spawn fixtures and take leases freely (see clippy.toml).
 #![allow(clippy::disallowed_methods)]
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 use tog::kernel::gitsrc::{ensure_git_source, normalize_url, GitSource};
 use tog::kernel::platform::Platform;
@@ -15,25 +15,9 @@ use tog::kernel::policy;
 use tog::kernel::store::Store;
 use tog::tailors::node::{self, NpmPackage, NpmPlan};
 
-struct Temp(PathBuf);
-impl Drop for Temp {
-    fn drop(&mut self) {
-        let _ = tog::kernel::store::remove_tree(&self.0);
-    }
-}
+mod common;
 
-fn temp(tag: &str) -> Temp {
-    let path = std::env::temp_dir().join(format!(
-        "tog-gitdep-{tag}-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::create_dir_all(&path).unwrap();
-    Temp(path)
-}
+use common::TempDir;
 
 fn git(args: &[&str], cwd: &Path) -> String {
     let out = Command::new("/usr/bin/git")
@@ -89,7 +73,7 @@ fn attribution_guard() -> std::sync::MutexGuard<'static, ()> {
 fn npm_git_dependency_is_realized_from_its_commit() {
     let _attribution_guard = attribution_guard();
     let platform = Platform::host().expect("host platform");
-    let root = temp("npm");
+    let root = TempDir::new("gitdep-npm");
     let (url, commit) = fixture_repo(&root.0);
     let store = store_at(&root.0);
     let activity = &store
@@ -140,7 +124,7 @@ fn npm_git_dependency_is_realized_from_its_commit() {
 #[ignore]
 fn an_unpinned_git_reference_is_refused() {
     let platform = Platform::host().expect("host platform");
-    let root = temp("unpinned");
+    let root = TempDir::new("gitdep-unpinned");
     let (url, _) = fixture_repo(&root.0);
     let lock = format!(
         r#"{{"lockfileVersion":3,"packages":{{"":{{}},"node_modules/git-dep":{{"version":"1.0.0","resolved":"{url}#main"}}}}}}"#
@@ -203,7 +187,7 @@ fn relative_submodule_fixture(root: &Path, transformed: bool) -> (String, String
 
 #[test]
 fn git_relative_submodule_is_pinned_and_raw() {
-    let root = temp("submodule");
+    let root = TempDir::new("gitdep-submodule");
     let (url, commit) = relative_submodule_fixture(&root.0, false);
     let store = store_at(&root.0);
     let activity = &store
@@ -261,7 +245,7 @@ fn python_fixture_repo(root: &Path) -> (String, String) {
 fn python_git_dependency_builds_a_wheel_from_its_commit() {
     let _attribution_guard = attribution_guard();
     let platform = Platform::host().expect("host platform");
-    let root = temp("py");
+    let root = TempDir::new("gitdep-py");
     let (url, commit) = python_fixture_repo(&root.0);
     let store = store_at(&root.0);
     let activity = &store
@@ -326,7 +310,7 @@ fn cargo_fixture_repo(root: &Path) -> (String, String) {
 #[ignore]
 fn cargo_git_dependency_is_vendored_from_its_commit() {
     let _attribution_guard = attribution_guard();
-    let root = temp("cargo");
+    let root = TempDir::new("gitdep-cargo");
     let (url, commit) = cargo_fixture_repo(&root.0);
     let store = store_at(&root.0);
     let activity = &store

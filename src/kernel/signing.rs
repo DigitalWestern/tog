@@ -379,32 +379,9 @@ pub fn verify(envelope: &Value) -> Verification {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::kernel::testutil::TempDir;
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::PermissionsExt;
-    use std::path::PathBuf;
-
-    struct TempDir(PathBuf);
-
-    impl TempDir {
-        fn new(label: &str) -> Self {
-            let path = std::env::temp_dir().join(format!(
-                "tog-signing-{label}-{}-{}",
-                std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
-            ));
-            fs::create_dir_all(&path).unwrap();
-            Self(path)
-        }
-    }
-
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
 
     fn fixed_key() -> SigningKey {
         SigningKey::from_seed(&[7u8; 32]).unwrap()
@@ -435,7 +412,7 @@ mod tests {
 
     #[test]
     fn keygen_load_sign_verify_round_trip() {
-        let temp = TempDir::new("roundtrip");
+        let temp = TempDir::named("roundtrip");
         let path = temp.0.join("key");
         let public = generate(&path).unwrap();
         let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
@@ -736,7 +713,7 @@ mod tests {
 
     #[test]
     fn key_file_loading_refuses_what_it_must() {
-        let temp = TempDir::new("keyfile");
+        let temp = TempDir::named("keyfile");
         let seed = hex::encode([5u8; 32]);
         let good = temp.0.join("good");
         fs::write(&good, format!("ed25519:{seed}\n")).unwrap();
@@ -844,7 +821,7 @@ mod tests {
 
     #[test]
     fn keygen_never_overwrites_a_file_or_follows_a_symlink() {
-        let temp = TempDir::new("keygen");
+        let temp = TempDir::named("keygen");
         let existing = temp.0.join("existing");
         fs::write(&existing, "keep me\n").unwrap();
         let error = generate(&existing).unwrap_err();

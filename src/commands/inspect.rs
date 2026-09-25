@@ -1036,7 +1036,6 @@ pub(crate) fn with_toolchain_lock(dir: &Path, ecosystem: &str, mut body: Value) 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     /// Doctor's realized-toolchain row reads `Tailor::toolchain_kinds`; each
     /// is a kind its own tailor registers, and every ecosystem has one.
@@ -1054,28 +1053,7 @@ mod tests {
         }
     }
 
-    struct TempDir(PathBuf);
-
-    impl TempDir {
-        fn new(label: &str) -> Self {
-            let path = std::env::temp_dir().join(format!(
-                "tog-inspect-{label}-{}-{}",
-                std::process::id(),
-                SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
-            ));
-            fs::create_dir_all(&path).unwrap();
-            Self(path)
-        }
-    }
-
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
+    use crate::kernel::testutil::TempDir;
 
     fn write_closure(dir: &Path, ecosystem: &str, platform: &str, body: Value) {
         let body = with_toolchain_lock(dir, ecosystem, body);
@@ -1097,7 +1075,7 @@ mod tests {
 
     #[test]
     fn detects_every_ecosystem_from_its_inputs() {
-        let temp = TempDir::new("detect");
+        let temp = TempDir::named("detect");
         assert!(detected(&temp.0).unwrap().is_empty());
         fs::write(temp.0.join("requirements.txt"), "six\n").unwrap();
         fs::write(temp.0.join("package.json"), "{}").unwrap();
@@ -1111,7 +1089,7 @@ mod tests {
 
     #[test]
     fn listing_reads_every_closure_shape() {
-        let temp = TempDir::new("ls");
+        let temp = TempDir::named("ls");
         let host = Platform::host().unwrap().triple();
         write_closure(
             &temp.0,
@@ -1183,14 +1161,14 @@ mod tests {
         assert_eq!(value["ecosystems"][0]["packages"][0]["name"], "serde");
         assert_eq!(value["ecosystems"][0]["toolchain"][0]["version"], "1.96.1");
 
-        let empty = TempDir::new("ls-empty");
+        let empty = TempDir::named("ls-empty");
         let error = ls(&empty.0, None, false, false).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::NotFound);
         assert!(error.to_string().contains("run 'tog' first"));
         let error = ls(&temp.0, Some("python"), false, false);
         assert!(error.is_ok());
         let missing = {
-            let solo = TempDir::new("ls-solo");
+            let solo = TempDir::named("ls-solo");
             write_closure(
                 &solo.0,
                 "go",
@@ -1206,7 +1184,7 @@ mod tests {
 
     #[test]
     fn listing_reads_rustfmt_closure_as_a_toolchain() {
-        let temp = TempDir::new("ls-rustfmt");
+        let temp = TempDir::named("ls-rustfmt");
         let host = Platform::host().unwrap().triple();
         write_closure(
             &temp.0,
@@ -1277,7 +1255,7 @@ mod tests {
             ),
         ];
         for (ecosystem, helper, helper_files) in cases {
-            let temp = TempDir::new("status-helpers");
+            let temp = TempDir::named("status-helpers");
             let dir = &temp.0;
             fs::write(dir.join("package.json"), "{}\n").unwrap();
             fs::write(dir.join("requirements.txt"), "six==1.17.0\n").unwrap();
@@ -1335,7 +1313,7 @@ mod tests {
 
     #[test]
     fn status_tracks_inputs_locks_projections_and_platforms() {
-        let temp = TempDir::new("status");
+        let temp = TempDir::named("status");
         let platform = Platform::host().unwrap();
         let host = platform.triple();
         let dir = &temp.0;
@@ -1504,7 +1482,7 @@ mod tests {
     /// otherwise synced, and the one it stays quiet for.
     #[test]
     fn status_reports_the_toolchain_lock_verdicts() {
-        let temp = TempDir::new("status-lock");
+        let temp = TempDir::named("status-lock");
         let platform = Platform::host().unwrap();
         let dir = &temp.0;
         fs::write(dir.join("requirements.txt"), "six==1.17.0\n").unwrap();
@@ -1636,7 +1614,7 @@ mod tests {
 
     #[test]
     fn a_refusing_lock_verdict_outranks_a_changed_closure_input() {
-        let temp = TempDir::new("status-lock-order");
+        let temp = TempDir::named("status-lock-order");
         let platform = Platform::host().unwrap();
         let dir = &temp.0;
         fs::write(dir.join("requirements.txt"), "six==1.17.0\n").unwrap();
@@ -1685,7 +1663,7 @@ mod tests {
 
     #[test]
     fn status_validates_node_forest_and_workspace_links() {
-        let temp = TempDir::new("node-projection");
+        let temp = TempDir::named("node-projection");
         let platform = Platform::host().unwrap();
         let project = &temp.0;
         fs::write(project.join("package.json"), "{}\n").unwrap();
@@ -1799,7 +1777,7 @@ mod tests {
             ),
         ];
         for (ecosystem, marker, first, second, expected) in cases {
-            let temp = TempDir::new(&format!("missing-{ecosystem}"));
+            let temp = TempDir::named(&format!("missing-{ecosystem}"));
             fs::write(temp.0.join(marker), "").unwrap();
             let mut body = json!({"inputs": []});
             body[first] = json!({"path": temp.0.join("missing/first")});
@@ -1821,7 +1799,7 @@ mod tests {
         let _lock = crate::kernel::store::STORE_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let temp = TempDir::new("doctor");
+        let temp = TempDir::named("doctor");
         let store = temp.0.join("store");
         let old_store = std::env::var_os("TOG_STORE");
         std::env::set_var("TOG_STORE", &store);
@@ -1867,7 +1845,7 @@ mod tests {
         let _lock = crate::kernel::store::STORE_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let temp = TempDir::new("doctor-order");
+        let temp = TempDir::named("doctor-order");
         let store = temp.0.join("store");
         fs::write(temp.0.join("go.mod"), "module example.com/m\n\ngo 1.27.0\n").unwrap();
         fs::create_dir_all(temp.0.join(".tog")).unwrap();

@@ -11,55 +11,11 @@
 #![allow(clippy::disallowed_methods)]
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::Command;
 
-struct TempDir(PathBuf);
+mod common;
 
-impl TempDir {
-    fn new() -> Self {
-        let path = std::env::temp_dir().join(format!(
-            "tog-ruby-e2e-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&path).unwrap();
-        Self(path)
-    }
-}
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        // Committed store objects are read-only trees; restore write bits so
-        // the fresh store is actually removed instead of leaking under /tmp.
-        let _ = Command::new("chmod")
-            .args(["-R", "u+w"])
-            .arg(&self.0)
-            .status();
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
-fn tog(bin: &Path, project: &Path, store: &Path, args: &[&str]) -> Output {
-    Command::new(bin)
-        .current_dir(project)
-        .env("TOG_STORE", store)
-        .args(args)
-        .output()
-        .unwrap()
-}
-
-fn assert_ok(output: Output, label: &str) -> String {
-    assert!(
-        output.status.success(),
-        "{label} failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8(output.stdout).unwrap()
-}
+use common::{assert_ok, fixture, tog, TempDir};
 
 /// Linux project: only the SOURCE (`ruby` platform) variant of nokogiri, so
 /// the gate compiles its vendored libxml2/libxslt in the sandbox instead of
@@ -489,20 +445,19 @@ fn assert_stdlib_probe(output: &str, label: &str) {
 #[ignore]
 fn ruby_sync_native_ext_and_run() {
     let linux = cfg!(target_os = "linux");
-    let temp = TempDir::new();
+    let temp = TempDir::new("ruby-e2e");
     let project = temp.0.join("ruby-hello");
     std::fs::create_dir_all(&project).unwrap();
     if linux {
         linux_project_files(&project);
     } else {
-        let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ruby-hello");
+        let fixtures = fixture("ruby-hello");
         for f in ["Gemfile", "Gemfile.lock"] {
             std::fs::copy(fixtures.join(f), project.join(f)).unwrap();
         }
     }
     let store = temp.0.join("store");
     let staging = store.join("tmp");
-    let binary = PathBuf::from(env!("CARGO_BIN_EXE_tog"));
 
     // Hostile .bundle/config must be neutralized (BUNDLE_IGNORE_CONFIG).
     std::fs::create_dir_all(project.join(".bundle")).unwrap();
@@ -516,7 +471,7 @@ fn ruby_sync_native_ext_and_run() {
     if linux {
         // `plan` publishes the Ruby object and prints the gem plan without
         // installing anything, so the toolchain can be gated on its own.
-        let plan = assert_ok(tog(&binary, &project, &store, &["plan"]), "plan");
+        let plan = assert_ok(tog(&project, &temp.0, &["plan"]), "plan");
         let plan: serde_json::Value = serde_json::from_str(plan.trim())
             .unwrap_or_else(|e| panic!("plan output is not JSON ({e}): {plan}"));
         let gems = plan["gems"].as_array().unwrap();
@@ -558,7 +513,7 @@ fn ruby_sync_native_ext_and_run() {
 
     // Sandboxed gem realization: racc's C extension, and on Linux nokogiri's
     // vendored libxml2/libxslt, compile here (network denied).
-    assert_ok(tog(&binary, &project, &store, &["sync"]), "sync");
+    assert_ok(tog(&project, &temp.0, &["sync"]), "sync");
 
     let (ruby_obj, _) = find_object(&store, "ruby").expect("Ruby object published");
     let (gems_obj, gems_meta) = find_object(&store, "ruby-gems").expect("gems object published");
@@ -590,11 +545,7 @@ fn ruby_sync_native_ext_and_run() {
     if let Ok(entries) = std::fs::read_dir(&staging) {
         for entry in entries {
             let path = entry.unwrap().path();
-            let _ = Command::new("chmod")
-                .args(["-R", "u+w"])
-                .arg(&path)
-                .status();
-            let _ = std::fs::remove_dir_all(&path);
+            let _ = tog::kernel::store::remove_tree(&path);
             let _ = std::fs::remove_file(&path);
         }
     }
@@ -607,12 +558,7 @@ fn ruby_sync_native_ext_and_run() {
 
     if linux {
         let stdlib = assert_ok(
-            tog(
-                &binary,
-                &project,
-                &store,
-                &["run", "ruby", "-e", STDLIB_PROBE],
-            ),
+            tog(&project, &temp.0, &["run", "ruby", "-e", STDLIB_PROBE]),
             "committed Ruby stdlib probe",
         );
         assert_stdlib_probe(&stdlib, "Projected-env stdlib probe");
@@ -623,9 +569,8 @@ fn ruby_sync_native_ext_and_run() {
     // the projected env works.
     let out = assert_ok(
         tog(
-            &binary,
             &project,
-            &store,
+            &temp.0,
             &[
                 "run",
                 "ruby",
@@ -640,12 +585,7 @@ fn ruby_sync_native_ext_and_run() {
     // /usr/bin fallback: a symlink binstub that dangles after the commit
     // rename would otherwise let host rake answer and the check still pass.
     let which = assert_ok(
-        tog(
-            &binary,
-            &project,
-            &store,
-            &["run", "sh", "-c", "command -v rake"],
-        ),
+        tog(&project, &temp.0, &["run", "sh", "-c", "command -v rake"]),
         "which rake",
     );
     let which = which.trim().to_string();
@@ -661,21 +601,15 @@ fn ruby_sync_native_ext_and_run() {
     // The wrapper itself must execute (relocatable, not a dangling link).
     // Pass the absolute store path as argv[0]; no shell that could quietly
     // fall back to /usr/bin/rake.
-    let direct = tog(
-        &binary,
-        &project,
-        &store,
-        &["run", which.as_str(), "--version"],
-    );
+    let direct = tog(&project, &temp.0, &["run", which.as_str(), "--version"]);
     let version = assert_ok(direct, "store binstub direct exec");
     assert!(version.contains("13."), "{version}");
 
     if linux {
         let nokogiri = assert_ok(
             tog(
-                &binary,
                 &project,
-                &store,
+                &temp.0,
                 &[
                     "run",
                     "ruby",

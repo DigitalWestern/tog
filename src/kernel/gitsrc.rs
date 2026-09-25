@@ -656,6 +656,7 @@ pub fn ensure_git_source(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::kernel::testutil::TempDir;
 
     #[test]
     fn urls_normalize_to_one_spelling() {
@@ -734,55 +735,29 @@ mod tests {
 
     #[test]
     fn symlinks_must_stay_inside_checkout_even_through_chains() {
-        let root = std::env::temp_dir().join(format!(
-            "tog-gitsrc-links-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir_all(&root).unwrap();
+        let temp = TempDir::named("gitsrc-links");
+        let root = &temp.0;
         fs::write(root.join("safe.txt"), b"safe").unwrap();
         std::os::unix::fs::symlink("safe.txt", root.join("safe-link")).unwrap();
-        validate_symlinks(&root).unwrap();
+        validate_symlinks(root).unwrap();
         std::os::unix::fs::symlink("../outside", root.join("escape")).unwrap();
-        assert!(validate_symlinks(&root).is_err());
+        assert!(validate_symlinks(root).is_err());
         fs::remove_file(root.join("escape")).unwrap();
         std::os::unix::fs::symlink(".", root.join("a")).unwrap();
         std::os::unix::fs::symlink("a/../outside", root.join("escape-via-dot")).unwrap();
-        assert!(validate_symlinks(&root).is_err());
+        assert!(validate_symlinks(root).is_err());
         fs::remove_file(root.join("a")).unwrap();
         fs::remove_file(root.join("escape-via-dot")).unwrap();
         std::os::unix::fs::symlink("chain-end", root.join("chain-start")).unwrap();
         std::os::unix::fs::symlink("../../outside", root.join("chain-end")).unwrap();
-        assert!(validate_symlinks(&root).is_err());
-        let _ = crate::kernel::store::remove_tree(&root);
+        assert!(validate_symlinks(root).is_err());
     }
 }
 
 #[cfg(test)]
 mod realization_tests {
     use super::*;
-
-    struct Temp(PathBuf);
-    impl Drop for Temp {
-        fn drop(&mut self) {
-            let _ = crate::kernel::store::remove_tree(&self.0);
-        }
-    }
-    fn temp(tag: &str) -> Temp {
-        let path = std::env::temp_dir().join(format!(
-            "tog-gitsrc-{tag}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&path).unwrap();
-        Temp(path)
-    }
+    use crate::kernel::testutil::TempDir;
 
     /// A local repository with one commit; `file://` keeps this offline.
     fn fixture_repo(root: &Path) -> (String, String) {
@@ -820,7 +795,7 @@ mod realization_tests {
         let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        let root = temp("realize");
+        let root = TempDir::named("gitsrc-realize");
         let (url, commit) = fixture_repo(&root.0);
         let store = store_at(&root.0);
         let activity = &store
@@ -854,7 +829,7 @@ mod realization_tests {
         let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        let root = temp("wrong");
+        let root = TempDir::named("gitsrc-wrong");
         let (url, _) = fixture_repo(&root.0);
         let store = store_at(&root.0);
         let activity = &store
@@ -909,7 +884,7 @@ mod realization_tests {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         for reference in ["refs/heads/side", "refs/pull/1/head"] {
-            let root = temp("side");
+            let root = TempDir::named("gitsrc-side");
             let (url, _) = fixture_repo(&root.0);
             let commit = off_branch_commit(&url, "side.txt");
             let repo = root.0.join("repo");
@@ -939,7 +914,7 @@ mod realization_tests {
         }
         let _reset = Reset;
         REFUSE_SHA_FETCH.with(|refuse| refuse.set(true));
-        let root = temp("fallback");
+        let root = TempDir::named("gitsrc-fallback");
         let (url, _) = fixture_repo(&root.0);
         let parent = off_branch_commit(&url, "side.txt");
         let repo = root.0.join("repo");
@@ -976,7 +951,7 @@ mod realization_tests {
         let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        let root = temp("anysha");
+        let root = TempDir::named("gitsrc-anysha");
         let (url, _) = fixture_repo(&root.0);
         let commit = off_branch_commit(&url, "dangling.txt");
         let repo = root.0.join("repo");
@@ -998,7 +973,7 @@ mod realization_tests {
         let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        let root = temp("missing");
+        let root = TempDir::named("gitsrc-missing");
         let (url, _) = fixture_repo(&root.0);
         // A pin that names no commit (NextChat's lock once produced one from
         // a tarball's sha1) is refused before checkout, in plain words.
@@ -1015,7 +990,7 @@ mod realization_tests {
         let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        let root = temp("ref");
+        let root = TempDir::named("gitsrc-ref");
         let (url, commit) = fixture_repo(&root.0);
         let store = store_at(&root.0);
         let activity = &store
@@ -1039,7 +1014,7 @@ mod realization_tests {
         let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        let root = temp("attributes");
+        let root = TempDir::named("gitsrc-attributes");
         let repo = root.0.join("repo");
         fs::create_dir_all(&repo).unwrap();
         git_ok(&["init", "-q", "-b", "main"], Some(&repo), "init").unwrap();
@@ -1075,7 +1050,7 @@ mod realization_tests {
         let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        let root = temp("pack");
+        let root = TempDir::named("gitsrc-pack");
         let checkout = root.0.join("checkout");
         fs::create_dir_all(checkout.join("empty")).unwrap();
         fs::write(checkout.join("line\nname"), b"content\n").unwrap();
@@ -1157,7 +1132,7 @@ mod realization_tests {
 
         // bsdtar drops an overlong path and still exits 0, so relying on the
         // subprocess would cache a truncated archive here instead of failing.
-        let root = temp("pack-failure");
+        let root = TempDir::named("gitsrc-pack-failure");
         let checkout = root.0.join("checkout");
         let long_dir = "d".repeat(119);
         fs::create_dir_all(checkout.join(&long_dir)).unwrap();
@@ -1172,7 +1147,7 @@ mod realization_tests {
         assert!(error.contains("packing"), "{error}");
 
         // The linkname field is 100 bytes with no prefix to spill into.
-        let link_root = temp("pack-link-failure");
+        let link_root = TempDir::named("gitsrc-pack-link-failure");
         let link_checkout = link_root.0.join("checkout");
         fs::create_dir_all(&link_checkout).unwrap();
         fs::write(link_checkout.join("target"), b"content\n").unwrap();
