@@ -2182,7 +2182,7 @@ mod tests {
                 "bin",
                 "/sbin",
                 "--ro-bind",
-                &root.0.join("lib").to_string_lossy().into_owned(),
+                &root.0.join("lib").to_string_lossy(),
                 "/lib",
                 "--symlink",
                 "./lib/../lib",
