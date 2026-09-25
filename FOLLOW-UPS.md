@@ -84,7 +84,6 @@ by position.
   - #228 pnpm importer: underscore peer-suffix trimming, a lenient YAML reader, and two multi-document rules.
   - #226 supervise: Ctrl-C during a sandboxed child is recorded as a script failure and the sync continues.
   - #260 ruby and elixir: an unchanged project can't re-sync offline.
-  - #263 dotnet: csproj checks use substring matches and duplicate the lock parser.
   - #234 ci: nothing runs the 65 ignored e2e tests, acceptance.sh or tests/install.sh.
   - #235 ci: pin the toolchain and actions, scope release permissions, test before release, deny clippy warnings.
   - #262 docs: the planning docs contradict each other, and README's install line can't work.
