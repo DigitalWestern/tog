@@ -957,6 +957,112 @@ fn two_store_replay() {
     }
 }
 
+/// One lock synced into two fresh stores through the binary realizes the
+/// same runtime objects and reports the same status, and it does so for a
+/// release the shipped catalog no longer has. The bundle id covers the rows
+/// and components, not the `release` key, so renaming a section's release
+/// to one no catalog carries leaves a valid lock whose every artifact is
+/// still real: the replay in each store has only the lock to go on.
+/// Environments are store-relative by design, so the comparison is on the
+/// runtime objects, the lock bytes and `tog status`.
+#[test]
+#[ignore]
+fn two_fresh_stores_realize_the_same_runtimes_from_a_retired_release() {
+    let fixture = Fixture::new("two-stores");
+    common::copy_tree(&common::fixture("proj-poly"), fixture.dir());
+    let ecosystems = ["python", "node"];
+    let mut lock =
+        String::from_utf8(build_lock(fixture.dir(), &ecosystems).canonical_bytes()).unwrap();
+    let mut retired = Vec::new();
+    for ecosystem in ecosystems {
+        let release = ToolchainLock::parse(lock.as_bytes())
+            .unwrap()
+            .ecosystem(ecosystem)
+            .unwrap()
+            .release()
+            .to_string();
+        let gone = format!("{release}-retired");
+        assert!(
+            catalog_of(ecosystem)
+                .bundles()
+                .iter()
+                .all(|bundle| bundle.release != gone),
+            "the shipped {ecosystem} catalog has {gone}"
+        );
+        let line = format!("release = \"{release}\"\n");
+        assert_eq!(lock.matches(&line).count(), 1, "{line}");
+        lock = lock.replace(&line, &format!("release = \"{gone}\"\n"));
+        retired.push((ecosystem, gone));
+    }
+    // Still a valid lock: the id does not hash the release key.
+    ToolchainLock::parse(lock.as_bytes()).unwrap();
+    std::fs::write(fixture.dir().join(LOCK_PATH), &lock).unwrap();
+
+    let mut runs = Vec::new();
+    for store in ["store-a", "store-b"] {
+        let store_path = fixture.home.0.join(store);
+        for (args, what) in [
+            (&["sync", "--frozen"][..], "sync"),
+            (&["status"][..], "status"),
+        ] {
+            let out = tog_at(fixture.dir(), &fixture.home.0, &store_path, args);
+            assert!(
+                out.status.success(),
+                "{what} in {store}: {}",
+                text(&out.stderr)
+            );
+            if what == "status" {
+                runs.push((
+                    store,
+                    text(&out.stdout),
+                    runtime_ids(fixture.dir(), &store_path, &retired),
+                ));
+            }
+        }
+        assert_eq!(
+            std::fs::read_to_string(fixture.dir().join(LOCK_PATH)).unwrap(),
+            lock,
+            "{store} rewrote the lock"
+        );
+    }
+    let (a, b) = (&runs[0], &runs[1]);
+    assert_eq!(a.2, b.2, "the stores realized different runtimes");
+    assert_eq!(a.1, b.1, "status differs between {} and {}", a.0, b.0);
+    assert!(a.1.contains("2 of 2 synced"), "{}", a.1);
+}
+
+/// Each ecosystem's runtime object id from its closure, after checking the
+/// closure names the retired release it was built from and an object in
+/// `store`, not one another run left somewhere else.
+fn runtime_ids(dir: &Path, store: &Path, retired: &[(&str, String)]) -> Vec<String> {
+    let store = store.canonicalize().unwrap();
+    retired
+        .iter()
+        .map(|(ecosystem, release)| {
+            let path = dir.join(format!(".tog/closures/{ecosystem}.json"));
+            let closure: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            let body = &closure["body"];
+            assert_eq!(
+                body["toolchain"]["release"],
+                release.as_str(),
+                "{ecosystem}"
+            );
+            let object = Path::new(body["runtime_object"]["path"].as_str().unwrap_or_default());
+            assert!(
+                object.starts_with(&store),
+                "{ecosystem}: {} is outside {}",
+                object.display(),
+                store.display()
+            );
+            body["runtime_object"]["id"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{ecosystem} closure has no runtime object: {body}"))
+                .to_string()
+        })
+        .collect()
+}
+
 /// The lock carries a row per platform, so the file a Linux machine writes
 /// and the file a Mac writes for the same project are the same bytes:
 /// selection reads the intersection of complete releases across every

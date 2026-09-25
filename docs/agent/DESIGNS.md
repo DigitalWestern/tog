@@ -31,7 +31,7 @@ history use them.
 
 ## Contents
 
-1. Toolchain lock (WP2): the open parts (two-machine diff, source policy, extractor coverage, embedded components, WP3)
+1. Toolchain lock (WP2): the open parts (source policy, extractor coverage, embedded components, WP3)
 2. Release catalog and publisher trust (WP3)
 3. Daily-driver gaps (WP4 open items)
 4. The company layer (WP5)
@@ -53,30 +53,6 @@ concurrency" (lock order), `docs/human/CLI.md` (`--frozen`, `tog update
 root). The full reviewed design, with its reasoning, is in git history:
 `git show f2531aa:docs/agent/DESIGNS.md`, section 1. What follows is only
 what has not shipped.
-
-### The two-machine lock diff (#66, #136)
-
-A lock carries one artifact row per supported platform and is written from
-the releases complete on both, so a lock written on Linux must sync on an
-arm64 Mac without rewriting itself, and the reverse. Tests prove the
-selector never consults the host (an asymmetric catalog gives
-byte-identical locks from either platform value). The two-machine half
-ran by hand on 2026-09-25 and passed (Fedora x86_64 and an arm64 Mac, all
-seven ecosystems, byte-identical lock both ways, identical `tog status`);
-the #136 bullet is what is left. The run, part of the macOS gate (#66):
-
-- Sync the same project on Linux and on the Mac. Diff `tog-toolchain.toml`
-  byte for byte, and check that `tog status` says synced on both.
-- Run `cargo test` and the selection `--ignored` tests
-  (`tests/python_select.rs`, `tests/go_e2e.rs`, `tests/toolchain_lock.rs`)
-  on the Mac. The archive extractor's containment tests have run under GNU
-  tar only; this run covers bsdtar.
-- #136, which can run on one machine: sync one locked project into two
-  fresh stores and assert equal runtime object ids and equal `tog status`
-  output, plus a catalog fixture with the locked release removed so replay
-  without the catalog goes through the binary. Environment objects are
-  store-relative by design, so compare runtime objects and lock bytes, not
-  environments.
 
 ### Source policy on every fetch (#239)
 
