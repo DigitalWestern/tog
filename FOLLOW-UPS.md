@@ -146,7 +146,7 @@ by position.
   - #300 heavy: the Elixir end-to-end test cannot run on ubuntu-22.04 (OTP needs glibc 2.43).
   - #301 acceptance.sh: steps 9 and 9b re-run two ignored suites the heavy workflow already runs, one multi-threaded.
   - #302 acceptance.sh: step 13 carries its own copy of the closure signing format.
-  - #307 archive: a tarball with macOS AppleDouble (`._name`) members is refused on macOS but extracted on Linux. The `--no-mac-metadata` listing and extraction flags are in; confirm on the Mac that such a tarball now lists and extracts as on Linux, then close.
+  - #307 archive: a tarball with macOS AppleDouble (`._name`) members is refused on macOS but extracted on Linux. The `--no-mac-metadata` extraction flag is in (the listing omits it: bsdtar marks it extract-only); confirm on the Mac that such a tarball now extracts as on Linux, then close.
   - #308 tests: python fixture tarballs are packed with raw `/usr/bin/tar`, not `tar_create`.
 - **`deps` as a `Tailor` method (#61).** `src/commands/deps.rs` still names
   tailors directly. A `Tailor::edit_manifest` method with an "unsupported"

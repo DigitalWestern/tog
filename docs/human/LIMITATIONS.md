@@ -156,9 +156,12 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   letters, bad checksums), and extracts with `TAR_OPTIONS` unset and tar told to restore no
   extended attributes, ACLs, file flags or AppleDouble metadata: an object holds names, bytes
   and the executable bit, nothing else. PAX values other than `path`, `linkpath` and `size`
-  may be any bytes and are never read. Whether bsdtar's `--no-mac-metadata` also makes
-  `tar -t` list a Mac-packed tarball's `._name` members the way GNU tar does (#307) is
-  unverified until the next macOS run. Three things go through it: the Go toolchain, the
+  may be any bytes and are never read. The extraction tells bsdtar `--no-mac-metadata`
+  so a Mac-packed tarball's `._name` companions land as ordinary files, the way GNU tar
+  lists and extracts them; the `tar -t` listing omits that flag because bsdtar marks it
+  extract-only, so if the listing folds the companions away the cross-check refuses the
+  archive rather than extracting the wrong tree (#307 stays open until a macOS run shows
+  which it is). Three things go through it: the Go toolchain, the
   optional Rust components and cross targets, and the binary `tog update --self` installs.
   The other tarballs are extracted by `/usr/bin/tar` directly, relying on its own defences
   and inheriting the user's `TAR_OPTIONS`: the CPython, uv, Rust, rustfmt, Node, Ruby, .NET,

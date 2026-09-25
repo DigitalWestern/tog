@@ -110,9 +110,10 @@ fn tar_command() -> Command {
     command
 }
 
-/// Flags every tar invocation carries, listing and extraction alike: the
-/// delegated extraction writes object bytes and its command line is fixed,
-/// because a different command line would change what lands in an object.
+/// Flags the listing and the extraction carry. The delegated extraction
+/// writes object bytes and its command line is fixed, because a different
+/// command line would change what lands in an object; the listing carries
+/// the same flags so `tar -t` sees the members the extraction will write.
 ///
 /// `--numeric-owner` protects no parser here, since the listing is read from
 /// the header blocks. The rest keep the extracted tree to what an object's
@@ -122,8 +123,27 @@ fn tar_command() -> Command {
 /// bsdtar restores all of them by default when it runs as root, and its
 /// AppleDouble handling folds `._name` members into the member that
 /// follows, which the header reader does not model.
+///
+/// The listing deliberately omits `--no-mac-metadata`: bsdtar's man page
+/// marks it extract-only, so carrying it on `-t` risks breaking every
+/// listing on macOS with an unknown-option error. A listing flag must never
+/// be able to break all extractions. Worst case without it, `tar -t` folds
+/// a Mac-packed tarball's `._name` members away and the cross-check refuses
+/// the archive rather than extracting the wrong tree.
 #[cfg(target_os = "macos")]
-const TAR_FLAGS: [&str; 5] = [
+const TAR_LIST_FLAGS: [&str; 4] = [
+    "--numeric-owner",
+    "--no-xattrs",
+    "--no-acls",
+    "--no-fflags",
+];
+#[cfg(not(target_os = "macos"))]
+const TAR_LIST_FLAGS: [&str; 3] = ["--numeric-owner", "--no-xattrs", "--no-acls"];
+/// The extraction carries everything the listing does, plus
+/// `--no-mac-metadata` on macOS so AppleDouble companions land as ordinary
+/// files, the way GNU tar lists and extracts them on Linux.
+#[cfg(target_os = "macos")]
+const TAR_EXTRACT_FLAGS: [&str; 5] = [
     "--numeric-owner",
     "--no-xattrs",
     "--no-acls",
@@ -131,7 +151,7 @@ const TAR_FLAGS: [&str; 5] = [
     "--no-mac-metadata",
 ];
 #[cfg(not(target_os = "macos"))]
-const TAR_FLAGS: [&str; 3] = ["--numeric-owner", "--no-xattrs", "--no-acls"];
+const TAR_EXTRACT_FLAGS: [&str; 3] = ["--numeric-owner", "--no-xattrs", "--no-acls"];
 
 /// List `archive` by reading its tar headers, cross-checked against the
 /// platform tar's own listing.
@@ -202,11 +222,12 @@ fn list_names(
     Ok(text.lines().map(str::to_string).collect())
 }
 
-/// `tar -t` over `archive`, with the fixed flags.
+/// `tar -t` over `archive`, with the fixed listing flags (no
+/// `--no-mac-metadata`: bsdtar marks it extract-only).
 fn list_command(archive: &Path, compression: Compression) -> Command {
     let mut command = tar_command();
     command
-        .args(TAR_FLAGS)
+        .args(TAR_LIST_FLAGS)
         .arg(format!("-t{}f", compression.flag()))
         .arg(archive);
     command
@@ -976,7 +997,8 @@ pub(crate) fn extract_validated_with_activity(
     )
 }
 
-/// `tar -x` of `archive` into `destination`, with the fixed flags.
+/// `tar -x` of `archive` into `destination`, with the fixed extraction
+/// flags (the listing flags plus `--no-mac-metadata` on macOS).
 fn extract_command(
     archive: &Path,
     destination: &Path,
@@ -985,7 +1007,7 @@ fn extract_command(
 ) -> Command {
     let mut command = tar_command();
     command
-        .args(TAR_FLAGS)
+        .args(TAR_EXTRACT_FLAGS)
         .arg(format!("-x{}f", compression.flag()))
         .arg(archive)
         .arg("-C")
@@ -1387,39 +1409,54 @@ mod tests {
         }
     }
 
-    /// Listing and extraction run with the same fixed flags, and those flags
-    /// tell tar to restore nothing an object's identity does not cover:
-    /// extended attributes and ACLs on both tars, BSD file flags and
-    /// AppleDouble metadata on bsdtar, which restores all four by default
-    /// as root. The listing carries them too, so `tar -t` sees the same
-    /// members the extraction will write (bsdtar's AppleDouble handling
-    /// otherwise folds `._name` members away).
+    /// The listing and the extraction tell tar to restore nothing an
+    /// object's identity does not cover: extended attributes and ACLs on
+    /// both tars, BSD file flags and AppleDouble metadata on bsdtar, which
+    /// restores all four by default as root. The listing deliberately omits
+    /// `--no-mac-metadata`, which bsdtar marks extract-only: a listing flag
+    /// must never be able to break every listing on macOS with an
+    /// unknown-option error.
     #[test]
     fn listing_and_extraction_tell_tar_to_restore_no_metadata() {
         let archive = Path::new("/tmp/does-not-matter.tar");
         let list = list_command(archive, Compression::Gzip);
         let extract = extract_command(archive, Path::new("/tmp/dest"), 1, Compression::Gzip);
-        for command in [&list, &extract] {
-            let args: Vec<String> = command
-                .get_args()
-                .map(|arg| arg.to_string_lossy().into_owned())
-                .collect();
+        let list_args: Vec<String> = list
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        let extract_args: Vec<String> = extract
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        for (args, flags) in [
+            (&list_args, TAR_LIST_FLAGS.len()),
+            (&extract_args, TAR_EXTRACT_FLAGS.len()),
+        ] {
             for flag in ["--numeric-owner", "--no-xattrs", "--no-acls"] {
                 assert!(args.contains(&flag.to_string()), "{flag} missing: {args:?}");
             }
-            for flag in ["--no-fflags", "--no-mac-metadata"] {
-                assert_eq!(
-                    args.contains(&flag.to_string()),
-                    cfg!(target_os = "macos"),
-                    "{flag}: {args:?}"
-                );
-            }
+            assert_eq!(
+                args.contains(&"--no-fflags".to_string()),
+                cfg!(target_os = "macos"),
+                "--no-fflags: {args:?}"
+            );
             // The flags come before the mode, so tar reads them for it.
             let mode = args
                 .iter()
                 .position(|arg| arg.starts_with("-t") || arg.starts_with("-x"));
-            assert_eq!(mode, Some(TAR_FLAGS.len()), "{args:?}");
+            assert_eq!(mode, Some(flags), "{args:?}");
         }
+        // Only the extraction carries `--no-mac-metadata`.
+        assert!(
+            !list_args.contains(&"--no-mac-metadata".to_string()),
+            "listing must not carry --no-mac-metadata: {list_args:?}"
+        );
+        assert_eq!(
+            extract_args.contains(&"--no-mac-metadata".to_string()),
+            cfg!(target_os = "macos"),
+            "{extract_args:?}"
+        );
     }
 
     /// An archive that carries an extended attribute extracts without it.
