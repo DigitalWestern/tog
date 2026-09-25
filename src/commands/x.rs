@@ -1851,10 +1851,11 @@ pub fn clean(request: CleanRequest) -> io::Result<()> {
 /// `tog x`: `x` has its own cached projection path and therefore does
 /// not pass through sync's policy initialization. Load the cwd policy,
 /// including all applicable ancestors, before realization or any cache-hit
-/// checks.
+/// checks. The dispatcher recorded `--strict` before this runs, so a
+/// strict `x` judges the tool under the policy a strict sync would apply.
 pub fn run(ctx: &Context, request: Request) -> io::Result<i32> {
     let cwd = ctx.project_dir();
-    policy::init(&cwd, false)?;
+    policy::init(&cwd)?;
     launch(ctx.platform, &cwd, request, &ctx.activity)
 }
 

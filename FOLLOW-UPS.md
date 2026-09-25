@@ -81,8 +81,6 @@ by position.
 - **Quality review of 2026-09-24 (#264).** A whole-codebase review after
   the 09-20 to 09-24 run. #264 holds the work order and the overall verdict.
   Each line is one issue and one PR, in order:
-  - #225 cli: --frozen and --strict are accepted and ignored on verbs that don't use them; tog --frozen plan writes a lock.
-  - #224 policy: the first policy::init wins, so --strict is dropped by build, fmt and x.
   - #228 pnpm importer: underscore peer-suffix trimming, a lenient YAML reader, and two multi-document rules.
   - #229 node: yarn1 importer has its own semver that disagrees with node-semver.
   - #230 node: tog run npm --prefix . install bypasses the install refusal.

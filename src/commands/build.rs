@@ -12,7 +12,7 @@ use std::io;
 
 /// Explicit ecosystem, or inferred when exactly one build-capable ecosystem
 /// is present.
-pub fn run(ctx: &Context, args: &[String], frozen: bool, strict: bool) -> io::Result<()> {
+pub fn run(ctx: &Context, args: &[String], frozen: bool) -> io::Result<()> {
     let cwd = ctx.project_dir();
     let explicit = args
         .first()
@@ -64,9 +64,9 @@ pub fn run(ctx: &Context, args: &[String], frozen: bool, strict: bool) -> io::Re
     // request is malformed or its lock section is stale, not when this host
     // cannot run it or its install fails (see
     // `sync::ensure_current_for`).
-    crate::commands::sync::ensure_current_for(ctx, &cwd, Some(tailor.id()), frozen, strict)?;
+    crate::commands::sync::ensure_current_for(ctx, &cwd, Some(tailor.id()), frozen)?;
     let root = tailor.build_root(&cwd)?;
-    policy::init(&root, false)?;
+    policy::init(&root)?;
     // The build itself honors the lock the sync above left and never
     // writes one.
     let held = ProjectRoot::open(&root)?;

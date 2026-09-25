@@ -24,13 +24,11 @@ fn main() {
             args,
             message,
         }) => (
-            options.clone(),
+            options,
             commands::Pending::Script {
                 name,
                 args,
                 message,
-                frozen: options.frozen,
-                strict: options.strict,
             },
         ),
         Err(error) => {
@@ -78,7 +76,7 @@ fn main() {
             exit(cli::EXIT_FAILURE);
         }
     };
-    let code = match commands::dispatch(command) {
+    let code = match commands::dispatch(command, options.sync) {
         Ok(code) => code,
         Err(error) => {
             report(&error.to_string());

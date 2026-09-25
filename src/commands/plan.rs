@@ -9,11 +9,11 @@ use crate::kernel::policy;
 use crate::tailors;
 use std::io;
 
-pub fn run(ctx: &Context) -> io::Result<()> {
+pub fn run(ctx: &Context, frozen: bool) -> io::Result<()> {
     let dir = ctx.project_dir();
     // One descriptor for the whole plan, as sync holds one.
     let root = ProjectRoot::open(&dir)?;
-    policy::init_in(&root, false)?;
+    policy::init_in(&root)?;
     let present = tailors::detected_in(&root)?;
     // Planning reads the lock and writes nothing: no lock is created here,
     // and a project that has none plans against the shipped selection.
@@ -28,7 +28,14 @@ pub fn run(ctx: &Context) -> io::Result<()> {
     for tailor in &present {
         let selected = toolchain.get(tailor.lock_ecosystem())?;
         let mut attribution = policy::Attribution::open("plan")?;
-        tailor.prepare(ctx, &root, selected, &mut attribution)?;
+        // `prepare` is missing-lock generation: it runs the ecosystem's own
+        // tool in the project and writes a dependency lock. Frozen promises
+        // not to modify project inputs, so it never reaches that call at
+        // all; a project with no dependency lock fails inside the tailor,
+        // which is the one place that knows which file is missing.
+        if !frozen {
+            tailor.prepare(ctx, &root, selected, &mut attribution)?;
+        }
         if let Some(text) = tailor.plan(ctx, &root, selected)? {
             println!("{text}");
             any = true;

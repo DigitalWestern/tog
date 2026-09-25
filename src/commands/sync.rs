@@ -107,9 +107,9 @@ fn preflight_detected(
 /// ecosystem before the store is opened. A refused request (an unpinned
 /// patch, a path no root record can hold) must leave no trace: no store
 /// tree created, no maintenance sweep, no lease taken.
-pub fn run_command(platform: Platform, fresh: bool, strict: bool, frozen: bool) -> io::Result<()> {
+pub fn run_command(platform: Platform, fresh: bool, frozen: bool) -> io::Result<()> {
     let mode = if frozen { Mode::Frozen } else { Mode::Writable };
-    run_in_mode(platform, fresh, strict, mode, false)
+    run_in_mode(platform, fresh, mode, false)
 }
 
 /// The one path from a command line into a sync: preflight before the store
@@ -122,7 +122,6 @@ pub fn run_command(platform: Platform, fresh: bool, strict: bool, frozen: bool) 
 pub(crate) fn run_in_mode(
     platform: Platform,
     fresh: bool,
-    strict: bool,
     mode: Mode,
     stop_after_lock: bool,
 ) -> io::Result<()> {
@@ -130,7 +129,7 @@ pub(crate) fn run_in_mode(
     // The one descriptor this whole sync reads and writes the project
     // through, from preflight to the last closure.
     let project = ProjectRoot::open(&dir)?;
-    let (present, mut toolchain) = preflight(platform, &project, strict, mode.clone(), Scope::All)?;
+    let (present, mut toolchain) = preflight(platform, &project, mode.clone(), Scope::All)?;
     // Opening the store can wait on another process's lease. If the
     // directory was renamed or replaced meanwhile, the pathname no longer
     // names the project preflight checked: refuse now rather than at
@@ -172,17 +171,16 @@ pub(crate) fn run_in_mode(
 
 /// Sync with a context the caller already opened (`add`/`remove`/`update`
 /// after their manifest edit).
-pub fn run(ctx: &Context, fresh: bool, strict: bool) -> io::Result<()> {
-    run_in(ctx, &ctx.project_dir(), fresh, strict, false)
+pub fn run(ctx: &Context, fresh: bool) -> io::Result<()> {
+    run_in(ctx, &ctx.project_dir(), fresh, false)
 }
 
 /// The same sync of one named directory: the projected root a command
 /// found by walking up, which is not always the process cwd.
-fn run_in(ctx: &Context, dir: &Path, fresh: bool, strict: bool, frozen: bool) -> io::Result<()> {
+fn run_in(ctx: &Context, dir: &Path, fresh: bool, frozen: bool) -> io::Result<()> {
     let mode = if frozen { Mode::Frozen } else { Mode::Writable };
     let project = ProjectRoot::open(dir)?;
-    let (present, mut toolchain) =
-        preflight(ctx.platform, &project, strict, mode.clone(), Scope::All)?;
+    let (present, mut toolchain) = preflight(ctx.platform, &project, mode.clone(), Scope::All)?;
     sync_preflighted(ctx, &project, &present, &mut toolchain, fresh, &mode)
 }
 
@@ -206,13 +204,8 @@ fn run_in(ctx: &Context, dir: &Path, fresh: bool, strict: bool, frozen: bool) ->
 /// The root is found again after the sync rather than assumed: a Cargo
 /// workspace member syncs and projects at the workspace root, so the
 /// projection to read is not always the directory that was synced.
-pub(crate) fn ensure_current(
-    ctx: &Context,
-    cwd: &Path,
-    frozen: bool,
-    strict: bool,
-) -> io::Result<PathBuf> {
-    ensure_current_for(ctx, cwd, None, frozen, strict)
+pub(crate) fn ensure_current(ctx: &Context, cwd: &Path, frozen: bool) -> io::Result<PathBuf> {
+    ensure_current_for(ctx, cwd, None, frozen)
 }
 
 /// `ensure_current`, deciding on one ecosystem's row only when `only`
@@ -233,7 +226,6 @@ pub(crate) fn ensure_current_for(
     cwd: &Path,
     only: Option<&str>,
     frozen: bool,
-    strict: bool,
 ) -> io::Result<PathBuf> {
     let dir = sync_root(cwd)?;
     let rows = crate::commands::inspect::status(ctx.platform, &dir)?;
@@ -246,8 +238,8 @@ pub(crate) fn ensure_current_for(
     if !stale.is_empty() {
         crate::kernel::ui::note(&format!("syncing first: {}", stale.join("; ")));
         match only {
-            Some(ecosystem) => run_in_only(ctx, &dir, strict, frozen, ecosystem)?,
-            None => run_in(ctx, &dir, false, strict, frozen)?,
+            Some(ecosystem) => run_in_only(ctx, &dir, frozen, ecosystem)?,
+            None => run_in(ctx, &dir, false, frozen)?,
         }
     } else if only.is_some() {
         // No sync runs, but the rows above were narrowed to the built
@@ -290,17 +282,11 @@ fn check_inputs(project: &ProjectRoot, present: &[&dyn Tailor]) -> io::Result<()
 /// tailors rather than the lock inputs is what keeps the lock whole:
 /// resolving a subset would publish a lock with the other sections
 /// truncated.
-fn run_in_only(
-    ctx: &Context,
-    dir: &Path,
-    strict: bool,
-    frozen: bool,
-    only: &str,
-) -> io::Result<()> {
+fn run_in_only(ctx: &Context, dir: &Path, frozen: bool, only: &str) -> io::Result<()> {
     let mode = if frozen { Mode::Frozen } else { Mode::Writable };
     let scope = Scope::Only(only);
     let project = ProjectRoot::open(dir)?;
-    let (present, mut toolchain) = preflight(ctx.platform, &project, strict, mode.clone(), scope)?;
+    let (present, mut toolchain) = preflight(ctx.platform, &project, mode.clone(), scope)?;
     let scoped = scope_to(&present, scope);
     sync_preflighted(ctx, &project, &scoped, &mut toolchain, false, &mode)
 }
@@ -353,11 +339,10 @@ fn stale_reason(row: &crate::commands::inspect::EcosystemStatus) -> String {
 fn preflight(
     platform: Platform,
     project: &ProjectRoot,
-    strict: bool,
     mode: Mode,
     scope: Scope<'_>,
 ) -> io::Result<(Vec<&'static dyn Tailor>, ProjectToolchain)> {
-    policy::init_in(project, strict)?;
+    policy::init_in(project)?;
     // A configured signing key that cannot be loaded fails here, before the
     // store is opened or any closure is written.
     crate::comforter::init_signing()?;
@@ -1042,15 +1027,15 @@ mod tests {
         let _store_env = StoreEnv::enter(&temp.0.join("store"));
         let ctx = Context::open_in(Platform::host().unwrap(), &bare, false).unwrap();
 
-        let root = ensure_current(&ctx, &bare, false, false)
-            .expect("a directory with no manifest is left alone");
+        let root =
+            ensure_current(&ctx, &bare, false).expect("a directory with no manifest is left alone");
         assert_eq!(root, bare);
         assert!(!bare.join(".tog").exists());
 
-        let error = ensure_current(&ctx, &project, false, false).unwrap_err();
+        let error = ensure_current(&ctx, &project, false).unwrap_err();
         assert!(error.to_string().contains("no pinned CPython"), "{error}");
         // From a subdirectory the manifest above is the project.
-        let error = ensure_current(&ctx, &nested, false, false).unwrap_err();
+        let error = ensure_current(&ctx, &nested, false).unwrap_err();
         assert!(error.to_string().contains("no pinned CPython"), "{error}");
         assert_eq!(sync_root(&nested).unwrap(), project);
         assert_eq!(sync_root(&bare).unwrap(), bare);
@@ -1306,7 +1291,7 @@ mod tests {
         let _store_env = StoreEnv::enter(&temp.0.join("store"));
         let ctx = Context::open_in(Platform::host().unwrap(), &project, false).unwrap();
 
-        let error = run(&ctx, false, false).unwrap_err();
+        let error = run(&ctx, false).unwrap_err();
         assert!(
             error
                 .to_string()
