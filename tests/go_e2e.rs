@@ -9,7 +9,7 @@ use std::process::Command;
 
 mod common;
 
-use common::{assert_ok, copy_tree, fixture, tog, TempDir};
+use common::{assert_ok, copy_tree, fixture, snapshot, text, tog, TempDir};
 
 #[test]
 #[ignore]
@@ -73,6 +73,24 @@ fn go_sync_build_and_rebuild_offline() {
         "GOROOT {} is outside committed Go object {}",
         goroot.display(),
         committed_go.display()
+    );
+
+    // Without go.sum the pair is not tidy: --frozen refuses without
+    // touching the project, and a plan tidies it again with the store Go.
+    std::fs::remove_file(project.join("go.sum")).unwrap();
+    let before = snapshot(&project);
+    let frozen = tog(&project, home, &["--frozen"]);
+    assert!(!frozen.status.success(), "--frozen synced an untidy module");
+    let stderr = text(&frozen.stderr);
+    assert!(
+        stderr.contains("go.mod and go.sum in") && stderr.contains("--frozen never updates them"),
+        "{stderr}"
+    );
+    assert_eq!(snapshot(&project), before, "--frozen changed the project");
+    assert_ok(tog(&project, home, &["plan"]), "plan tidies the module");
+    assert!(
+        project.join("go.sum").is_file(),
+        "plan did not restore go.sum"
     );
 
     if cfg!(target_os = "linux") {

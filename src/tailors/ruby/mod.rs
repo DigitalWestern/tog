@@ -724,6 +724,48 @@ fn read_gemfile_lock(project: &ProjectRoot) -> io::Result<String> {
         })
 }
 
+/// The lock every plan reads, or the refusal that names it: `prepare`
+/// generates it, and the command layer skips `prepare` under `--frozen`.
+/// Checked before any toolchain is realized, so a frozen sync of an
+/// unlocked project fails without a download.
+pub fn require_lock(project: &ProjectRoot) -> io::Result<()> {
+    if project.is_input_file(Path::new("Gemfile.lock")) {
+        Ok(())
+    } else {
+        Err(crate::tailors::missing_lock(project, "Gemfile.lock"))
+    }
+}
+
+/// `prepare`: Gemfile.lock, resolved by the store bundler when there is
+/// none. The one place the Ruby tailor writes project inputs.
+pub fn generate_lock(
+    store: &Store,
+    activity: &StoreActivity,
+    project: &ProjectRoot,
+    ruby_obj: &Path,
+) -> io::Result<()> {
+    if !project.is_input_file(Path::new("Gemfile")) {
+        return Err(err("Gemfile not found"));
+    }
+    ui::note("no Gemfile.lock; resolving with the store bundler...");
+    let scratch = store.stage_with_activity(activity)?;
+    let out = run_ruby(
+        activity,
+        ruby_obj,
+        project.path(),
+        &scratch,
+        &["bundle", "lock"],
+    )?;
+    let _ = crate::kernel::store::remove_tree(&scratch);
+    if !out.status.success() {
+        return Err(err(format!(
+            "store bundle lock failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        )));
+    }
+    Ok(())
+}
+
 /// Plan the gem closure: Bundler-delegated lock parsing + platform
 /// selection, tog-pinned hashes (lock CHECKSUMS section when present,
 /// rubygems.org v2 API otherwise). Never cached: every sync re-derives the
@@ -741,25 +783,7 @@ pub fn plan_ruby(
         return Err(err("Gemfile not found"));
     }
     let lock_path = project_dir.join("Gemfile.lock");
-    if !project.is_input_file(Path::new("Gemfile.lock")) {
-        ui::note("no Gemfile.lock; resolving with the store bundler...");
-        let scratch = store.stage_with_activity(activity)?;
-        let out = run_ruby(
-            activity,
-            ruby_obj,
-            project_dir,
-            &scratch,
-            &["bundle", "lock"],
-        )?;
-        let _ = crate::kernel::store::remove_tree(&scratch);
-        if !out.status.success() {
-            return Err(err(format!(
-                "store bundle lock failed: {}",
-                String::from_utf8_lossy(&out.stderr).trim()
-            )));
-        }
-    }
-    // A lock `bundle lock` just generated is read back through the root too.
+    require_lock(project)?;
     let lock = read_gemfile_lock(project)?;
     // No plan cache: an editable cache with a predictable key is forgeable
     // authority. Planning re-derives from the lock every sync; the store's
@@ -1633,5 +1657,29 @@ mod tests {
         assert!(ENV_REMOVE.contains(&"RUBYOPT"));
         assert!(ENV_REMOVE.contains(&"RUBYLIB"));
         assert!(ENV_REMOVE_PREFIXES.contains(&"BUNDLE_"));
+    }
+
+    /// A project with its manifest but no lock is refused by name and
+    /// nothing is written: the lock is `prepare`'s to generate, and a
+    /// frozen run skips `prepare`.
+    #[test]
+    fn a_missing_lock_is_refused_by_name_and_nothing_is_written() {
+        let temp = crate::kernel::testutil::TempDir::named("ruby-frozen");
+        std::fs::write(temp.0.join("Gemfile"), "source \"https://rubygems.org\"\n").unwrap();
+        let project = crate::kernel::fsroot::ProjectRoot::open(&temp.0).unwrap();
+        let error = super::require_lock(&project).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+        let message = error.to_string();
+        assert!(
+            message.contains("Gemfile.lock is missing and --frozen never creates it"),
+            "{message}"
+        );
+        assert!(
+            message.contains("run `tog` once without --frozen"),
+            "{message}"
+        );
+        assert!(!temp.0.join("Gemfile.lock").exists());
+        std::fs::write(temp.0.join("Gemfile.lock"), "").unwrap();
+        super::require_lock(&project).unwrap();
     }
 }

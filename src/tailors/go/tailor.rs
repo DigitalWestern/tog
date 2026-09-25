@@ -36,6 +36,17 @@ impl Tailor for Go {
         go::preflight_platform(platform)
     }
 
+    fn prepare(
+        &self,
+        ctx: &Context,
+        project: &ProjectRoot,
+        toolchain: &Selected,
+        _attribution: &mut crate::kernel::policy::Attribution,
+    ) -> io::Result<()> {
+        let go_obj = go::realize_runtime(&ctx.store, &ctx.activity, ctx.platform, toolchain)?;
+        go::tidy_project(&ctx.store, &ctx.activity, project, &go_obj)
+    }
+
     fn plan(
         &self,
         ctx: &Context,

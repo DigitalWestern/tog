@@ -1412,10 +1412,53 @@ fn read_mix_lock(project: &ProjectRoot) -> io::Result<String> {
         })
 }
 
+/// The lock every plan reads, or the refusal that names it: `prepare`
+/// generates it, and the command layer skips `prepare` under `--frozen`.
+/// Checked before any toolchain is realized, so a frozen sync of an
+/// unlocked project fails without a download.
+pub fn require_lock(project: &ProjectRoot) -> io::Result<()> {
+    if project.is_input_file(Path::new("mix.lock")) {
+        Ok(())
+    } else {
+        Err(crate::tailors::missing_lock(project, "mix.lock"))
+    }
+}
+
+/// `prepare`: mix.lock, resolved by the store mix (planner scratch,
+/// network, unsandboxed) when there is none. The one place the Elixir
+/// tailor writes project inputs.
+pub fn generate_lock(
+    store: &Store,
+    activity: &StoreActivity,
+    project: &ProjectRoot,
+    beam_obj: &Path,
+) -> io::Result<()> {
+    if !project.is_input_file(Path::new("mix.exs")) {
+        return Err(err("mix.exs not found"));
+    }
+    ui::note("no mix.lock; resolving with the store mix (network, unsandboxed)...");
+    let scratch = store.stage_with_activity(activity)?;
+    let out = run_mix(
+        activity,
+        beam_obj,
+        project.path(),
+        &scratch,
+        false,
+        &["mix", "deps.get"],
+    )?;
+    let _ = crate::kernel::store::remove_tree(&scratch);
+    if !out.status.success() {
+        return Err(err(format!(
+            "store mix deps.get failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        )));
+    }
+    Ok(())
+}
+
 /// Plan: AST-parse mix.lock under the pinned toolchain (lock-only, no
-/// eval); missing lock delegates `mix deps.get` (planner scratch, network).
-/// The project is read through the held descriptor; mix itself still runs
-/// in `project.path()`.
+/// eval). The project is read through the held descriptor; mix itself
+/// still runs in `project.path()`.
 pub fn plan_elixir(
     store: &Store,
     activity: &StoreActivity,
@@ -1426,48 +1469,30 @@ pub fn plan_elixir(
     if !project.is_input_file(Path::new("mix.exs")) {
         return Err(err("mix.exs not found"));
     }
+    require_lock(project)?;
     let project_dir = project.path();
     let scratch = store.stage_with_activity(activity)?;
-    if !project.is_input_file(Path::new("mix.lock")) {
-        ui::note("no mix.lock; resolving with the store mix (network, unsandboxed)...");
-        let out = run_mix(
-            activity,
-            beam_obj,
-            project_dir,
-            &scratch,
-            false,
-            &["mix", "deps.get"],
-        )?;
-        if !out.status.success() {
-            let _ = crate::kernel::store::remove_tree(&scratch);
-            return Err(err(format!(
-                "store mix deps.get failed: {}",
-                String::from_utf8_lossy(&out.stderr).trim()
-            )));
-        }
-    } else {
-        // Consistency gate for EXISTING locks: exit status only (this
-        // evaluates mix.exs — delegated trust, never artifact authority).
-        // Network-permitted (plan-phase doctrine): --check-locked needs
-        // the hex registry; a persistent planner HEX_HOME keeps it warm.
-        let planner_home = store.root.join("planner-hexhome");
-        fs::create_dir_all(&planner_home)?;
-        let out = run_mix(
-            activity,
-            beam_obj,
-            project_dir,
-            &planner_home,
-            false,
-            &["mix", "deps.get", "--check-locked"],
-        )?;
-        if !out.status.success() {
-            let _ = crate::kernel::store::remove_tree(&scratch);
-            return Err(err(format!(
-                "mix.exs and mix.lock are out of sync; run `tog run mix \
-                 deps.get` and retry\n{}",
-                String::from_utf8_lossy(&out.stderr).trim()
-            )));
-        }
+    // Consistency gate: exit status only (this evaluates mix.exs —
+    // delegated trust, never artifact authority). Network-permitted
+    // (plan-phase doctrine): --check-locked needs the hex registry; a
+    // persistent planner HEX_HOME keeps it warm.
+    let planner_home = store.root.join("planner-hexhome");
+    fs::create_dir_all(&planner_home)?;
+    let out = run_mix(
+        activity,
+        beam_obj,
+        project_dir,
+        &planner_home,
+        false,
+        &["mix", "deps.get", "--check-locked"],
+    )?;
+    if !out.status.success() {
+        let _ = crate::kernel::store::remove_tree(&scratch);
+        return Err(err(format!(
+            "mix.exs and mix.lock are out of sync; run `tog run mix \
+             deps.get` and retry\n{}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        )));
     }
     let lock = read_mix_lock(project)?;
     let helper = scratch.join("helper.exs");
@@ -2919,5 +2944,33 @@ exit 0
         assert!(!tailor::Elixir
             .detect(&ProjectRoot::open(&project).unwrap())
             .unwrap());
+    }
+
+    /// A project with its manifest but no lock is refused by name and
+    /// nothing is written: the lock is `prepare`'s to generate, and a
+    /// frozen run skips `prepare`.
+    #[test]
+    fn a_missing_lock_is_refused_by_name_and_nothing_is_written() {
+        let temp = crate::kernel::testutil::TempDir::named("elixir-frozen");
+        std::fs::write(
+            temp.0.join("mix.exs"),
+            "defmodule Hello.MixProject do\nend\n",
+        )
+        .unwrap();
+        let project = crate::kernel::fsroot::ProjectRoot::open(&temp.0).unwrap();
+        let error = super::require_lock(&project).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+        let message = error.to_string();
+        assert!(
+            message.contains("mix.lock is missing and --frozen never creates it"),
+            "{message}"
+        );
+        assert!(
+            message.contains("run `tog` once without --frozen"),
+            "{message}"
+        );
+        assert!(!temp.0.join("mix.lock").exists());
+        std::fs::write(temp.0.join("mix.lock"), "").unwrap();
+        super::require_lock(&project).unwrap();
     }
 }

@@ -6,7 +6,7 @@
 
 mod common;
 
-use common::{assert_ok, tog, TempDir};
+use common::{assert_frozen_never_writes_the_lock, assert_ok, tog, TempDir};
 
 #[test]
 #[ignore]
@@ -38,4 +38,8 @@ fn package_json_script_runs_inside_projected_env() {
 
     let second = tog(&subdir, home, &["run", "test", "fail"]);
     assert_eq!(second.status.code(), Some(3));
+
+    // Without its lock the project is refused under --frozen and left
+    // alone; a plan regenerates the lock with the store npm.
+    assert_frozen_never_writes_the_lock(project, home, "package-lock.json");
 }

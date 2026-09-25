@@ -35,6 +35,20 @@ impl Tailor for Ruby {
         ruby::preflight_platform(platform)
     }
 
+    fn prepare(
+        &self,
+        ctx: &Context,
+        project: &ProjectRoot,
+        toolchain: &Selected,
+        _attribution: &mut crate::kernel::policy::Attribution,
+    ) -> io::Result<()> {
+        if ruby::require_lock(project).is_ok() {
+            return Ok(());
+        }
+        let ruby_obj = ruby::realize_runtime(&ctx.store, &ctx.activity, ctx.platform, toolchain)?;
+        ruby::generate_lock(&ctx.store, &ctx.activity, project, &ruby_obj)
+    }
+
     fn plan(
         &self,
         ctx: &Context,
@@ -42,6 +56,7 @@ impl Tailor for Ruby {
         toolchain: &Selected,
     ) -> io::Result<Option<String>> {
         let activity = &ctx.activity;
+        ruby::require_lock(project)?;
         let ruby_obj = ruby::realize_runtime(&ctx.store, activity, ctx.platform, toolchain)?;
         let (plan, _) = ruby::plan_ruby(&ctx.store, activity, project, &ruby_obj, toolchain)?;
         Ok(Some(serde_json::to_string_pretty(&plan)?))
@@ -58,6 +73,7 @@ impl Tailor for Ruby {
         let toolchain = request.toolchain;
         let platform = ctx.platform;
         let store = &ctx.store;
+        ruby::require_lock(project)?;
         let ruby_obj = ruby::realize_runtime(store, activity, platform, toolchain)?;
         let (plan, lock_sha256) = ruby::plan_ruby(store, activity, project, &ruby_obj, toolchain)?;
         let gems = ruby::realize_gems(store, activity, platform, &plan, &ruby_obj, toolchain)?;

@@ -36,6 +36,20 @@ impl Tailor for Elixir {
         elixir::preflight_platform(platform)
     }
 
+    fn prepare(
+        &self,
+        ctx: &Context,
+        project: &ProjectRoot,
+        toolchain: &Selected,
+        _attribution: &mut crate::kernel::policy::Attribution,
+    ) -> io::Result<()> {
+        if elixir::require_lock(project).is_ok() {
+            return Ok(());
+        }
+        let beam = elixir::realize_runtime(&ctx.store, &ctx.activity, ctx.platform, toolchain)?;
+        elixir::generate_lock(&ctx.store, &ctx.activity, project, &beam)
+    }
+
     fn plan(
         &self,
         ctx: &Context,
@@ -43,6 +57,7 @@ impl Tailor for Elixir {
         toolchain: &Selected,
     ) -> io::Result<Option<String>> {
         let activity = &ctx.activity;
+        elixir::require_lock(project)?;
         let beam = elixir::realize_runtime(&ctx.store, activity, ctx.platform, toolchain)?;
         let (plan, _) = elixir::plan_elixir(&ctx.store, activity, project, &beam, toolchain)?;
         Ok(Some(serde_json::to_string_pretty(&plan)?))
@@ -61,6 +76,7 @@ impl Tailor for Elixir {
 
         let platform = ctx.platform;
         let store = &ctx.store;
+        elixir::require_lock(project)?;
         let beam = elixir::realize_runtime(store, activity, platform, toolchain)?;
         let (plan, lock_sha256) = elixir::plan_elixir(store, activity, project, &beam, toolchain)?;
         let deps = elixir::realize_deps(store, activity, platform, &plan, &beam, toolchain)?;

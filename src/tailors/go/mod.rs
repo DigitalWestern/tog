@@ -719,20 +719,15 @@ fn cached_plan(project: &ProjectRoot, input_hash: &str) -> io::Result<Option<GoP
 
 /// Consistency gate: the tidy -diff first pass is non-mutating (prints a
 /// diff, exit nonzero when go.mod/go.sum need changes). Needs the source
-/// tree, so it runs in the real project. On diff failure it resolves with
-/// the store `go mod tidy`. Its module cache is a
-/// persistent planner scratch (resolver-trust only; never feeds objects).
-/// Returns the final, possibly tidied, manifest pair, read back through the
-/// held descriptor; go itself runs in `project.path()`.
-fn tidy_gate(
+/// tree, so it runs in the real project. Its module cache is a persistent
+/// planner scratch (resolver-trust only; never feeds objects); go itself
+/// runs in `project.path()`.
+fn is_tidy(
     activity: &StoreActivity,
     go_obj: &Path,
     project: &ProjectRoot,
     gate_cache: &Path,
-    scratch: &Path,
-    gomod: String,
-    gosum: String,
-) -> io::Result<(String, String)> {
+) -> io::Result<bool> {
     let out = run_go(
         activity,
         go_obj,
@@ -741,28 +736,61 @@ fn tidy_gate(
         false,
         &["mod", "tidy", "-diff"],
     )?;
-    if out.status.success() {
-        return Ok((gomod, gosum));
+    Ok(out.status.success())
+}
+
+/// The planner's module cache for the tidy gate, under the store root.
+fn gate_cache(store: &Store) -> io::Result<PathBuf> {
+    let gate_cache = store.root.join("planner-modcache");
+    fs::create_dir_all(&gate_cache)?;
+    Ok(gate_cache)
+}
+
+/// `prepare`: go.mod and go.sum brought up to date by the store `go mod
+/// tidy` when the tidy gate fails, the same delegated mutation as `cargo
+/// generate-lockfile`. The one place the Go tailor writes project inputs;
+/// a plan that finds the pair untidy refuses instead.
+pub fn tidy_project(
+    store: &Store,
+    activity: &StoreActivity,
+    project: &ProjectRoot,
+    go_obj: &Path,
+) -> io::Result<()> {
+    reject_workspaces(project)?;
+    let gomod =
+        read_gomod(project).map_err(|e| io::Error::new(e.kind(), format!("go.mod: {e}")))?;
+    reject_local_replaces(&gomod)?;
+    let gate_cache = gate_cache(store)?;
+    if is_tidy(activity, go_obj, project, &gate_cache)? {
+        return Ok(());
     }
-    // Out-of-sync manifest: run the ecosystem's resolver, the same
-    // delegated mutation as uv pip compile / cargo generate-lockfile.
     ui::note("go.mod/go.sum need updating; resolving with the store go mod tidy...");
     let out = run_go(
         activity,
         go_obj,
         project.path(),
-        gate_cache,
+        &gate_cache,
         false,
         &["mod", "tidy"],
     )?;
     if !out.status.success() {
-        let _ = crate::kernel::store::remove_tree(scratch);
         return Err(err(format!(
             "store go mod tidy failed: {}",
             String::from_utf8_lossy(&out.stderr).trim()
         )));
     }
-    Ok((read_gomod(project)?, read_gosum(project)))
+    Ok(())
+}
+
+/// The refusal for a go.mod/go.sum pair the tidy gate rejects at planning
+/// time: `prepare` would have tidied it, and the command layer skips
+/// `prepare` under `--frozen`.
+fn untidy(project: &ProjectRoot) -> io::Error {
+    err(format!(
+        "go.mod and go.sum in {} are not tidy and --frozen never updates them; run \
+         `tog` once without --frozen and commit the result",
+        project.path().display()
+    ))
 }
 
 /// go.mod through the held descriptor. Absent is the NotFound a path read
@@ -970,23 +998,13 @@ pub fn plan_go(
         return Ok(plan);
     }
 
-    let scratch = store.stage_with_activity(activity)?;
-    let gate_cache = store.root.join("planner-modcache");
-    fs::create_dir_all(&gate_cache)?;
-    let (gomod, gosum) = tidy_gate(
-        activity,
-        go_obj,
-        project,
-        &gate_cache,
-        &scratch,
-        gomod,
-        gosum,
-    )?;
-    reject_local_replaces(&gomod)?;
-    // Cache under the FINAL (possibly tidied) inputs so the next sync hits.
+    let gate_cache = gate_cache(store)?;
+    if !is_tidy(activity, go_obj, project, &gate_cache)? {
+        return Err(untidy(project));
+    }
     let module = module_path(&gomod)?;
-    let input_hash = plan_cache_key(go_version, &gomod, &gosum, &source_digest(project)?);
 
+    let scratch = store.stage_with_activity(activity)?;
     let work = scratch.join("plan");
     let out = download_closure(activity, go_obj, &work, &gate_cache, &gomod, &gosum)?;
     let result = closure_from_download(store, activity, &out, &gosum);

@@ -133,6 +133,22 @@ fn unsupported(id: &str, verb: &str) -> io::Error {
     )
 }
 
+/// The refusal a plan returns when the dependency lock it reads is absent.
+/// `prepare` is the one method that generates a lock, and the command
+/// layer skips it under `--frozen`, so an absent lock at planning time is
+/// that promise being kept: nothing is generated, and the message names
+/// the file and the way out.
+pub(crate) fn missing_lock(project: &ProjectRoot, lock: &str) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::NotFound,
+        format!(
+            "{} is missing and --frozen never creates it; run `tog` once without \
+             --frozen and commit the file",
+            project.path().join(lock).display()
+        ),
+    )
+}
+
 /// The verbs every ecosystem answers. Methods with a default body are the
 /// optional ones: not every ecosystem builds, contributes run-time
 /// environment, or has doctor checks.
@@ -186,8 +202,11 @@ pub trait Tailor: Sync {
     /// well-formed inputs.
     fn preflight(&self, platform: Platform, project: &ProjectRoot) -> io::Result<()>;
 
-    /// Host-side preparation that must precede planning for one ecosystem.
-    /// Runs for detected ecosystems only, before that ecosystem plans.
+    /// Host-side preparation that must precede planning for one ecosystem:
+    /// missing-lock generation with the ecosystem's own tool, the one place
+    /// a tailor writes project inputs. Runs for detected ecosystems only,
+    /// before that ecosystem plans, and never under `--frozen`; a plan that
+    /// then finds no lock refuses with [`missing_lock`].
     fn prepare(
         &self,
         _ctx: &Context,
