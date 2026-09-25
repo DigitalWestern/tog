@@ -55,7 +55,7 @@ fn pyproject_requires_python_selects_311_and_warm_sync_is_cached() {
         "{first_stderr}"
     );
     assert!(
-        !first_stderr.contains("closures unsigned"),
+        !first_stderr.contains("written unsigned"),
         "a signed sync must not warn about unsigned closures: {first_stderr}"
     );
     let closure: serde_json::Value = serde_json::from_str(
@@ -101,7 +101,7 @@ fn pyproject_requires_python_selects_311_and_warm_sync_is_cached() {
         String::from_utf8_lossy(&unsigned.stderr)
     );
     assert!(
-        String::from_utf8_lossy(&unsigned.stderr).contains("closures unsigned"),
+        String::from_utf8_lossy(&unsigned.stderr).contains("written unsigned"),
         "{}",
         String::from_utf8_lossy(&unsigned.stderr)
     );
