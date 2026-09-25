@@ -17,12 +17,22 @@ pub(crate) fn tar_create() -> Command {
     command
 }
 
+/// A scratch directory named `tog-test-<label>-<pid>-<nanos>`, gone on
+/// drop even when a store inside it has made its objects read-only: a plain
+/// `remove_dir_all` fails on those and leaves the tree behind, and enough
+/// leftovers fill the per-user /tmp quota.
 pub struct TempDir(pub(crate) PathBuf);
 
 impl TempDir {
     pub fn new() -> Self {
+        Self::named("test")
+    }
+
+    /// A scratch directory whose name says which test made it, for the
+    /// leftover a killed run leaves.
+    pub fn named(label: &str) -> Self {
         let path = std::env::temp_dir().join(format!(
-            "tog-test-{}-{}",
+            "tog-{label}-{}-{}",
             std::process::id(),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -30,13 +40,16 @@ impl TempDir {
                 .as_nanos()
         ));
         std::fs::create_dir_all(&path).unwrap();
-        Self(path)
+        // The store records object paths under its canonicalized root and
+        // compares them exactly; on macOS the temp dir sits under /var, a
+        // symlink to /private/var.
+        Self(path.canonicalize().unwrap())
     }
 }
 
 impl Drop for TempDir {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
+        let _ = crate::kernel::store::remove_tree(&self.0);
     }
 }
 
