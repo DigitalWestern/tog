@@ -7,7 +7,7 @@ use crate::kernel::store;
 use crate::kernel::toolchain::Selected;
 use crate::tailors::go;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 pub struct GoInputs {
     pub go_obj: PathBuf,
@@ -31,11 +31,9 @@ pub fn load_go_inputs(
     let go_version = toolchain.version("go")?;
     let go_obj = go::realize_runtime(store, activity, platform, toolchain)?;
     let plan = go::plan_go(store, activity, project, &go_obj, go_version)?;
-    let gosum = project
-        .read_input_string(Path::new("go.sum"))
-        .ok()
-        .flatten()
-        .unwrap_or_default();
+    // An absent go.sum digests as the empty string; an unreadable one is
+    // an error, never a digest of nothing.
+    let gosum = go::read_gosum(project)?.unwrap_or_default();
     use sha2::{Digest, Sha256};
     Ok(GoInputs {
         go_obj,

@@ -6,6 +6,11 @@
 //! STORE Go in a disposable copy. Tog then independently re-verifies
 //! every artifact (dirhash::hash_zip / hash_gomod) before any byte enters
 //! the store — delegation computes, the kernel verifies.
+//!
+//! The finished plan is cached in `.tog/go-plan.json`, which is project
+//! state anyone who ships the repo can write. A hit is therefore held to
+//! the same go.sum ledger a fresh plan is: every cached module's zip and
+//! go.mod lines must be in the current go.sum, or the cache is refused.
 
 pub mod inputs;
 pub mod objects;
@@ -29,7 +34,7 @@ use crate::kernel::types::Identity;
 use crate::kernel::ui;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -697,7 +702,15 @@ const PLAN_CACHE: &str = ".tog/go-plan.json";
 /// attacker-editable project state, so a hit is validated before it is used;
 /// anything unreadable, unparsable, or stale is simply a miss, while a
 /// symlinked or non-regular cache is refused.
-fn cached_plan(project: &ProjectRoot, input_hash: &str) -> io::Result<Option<GoPlan>> {
+///
+/// The key alone proves nothing: a repo author computes it from the repo's
+/// own go.mod and go.sum, and a planted plan may name any module already in
+/// this machine's artifact cache. So a hit is held to the ledger check a
+/// fresh plan applies in `verified_module`: every cached module must have
+/// both its zip line and its go.mod line in `gosum`, the current go.sum. A
+/// fresh plan only keeps modules whose zip line is present, so a module
+/// missing either line is a tampered cache and is refused, not missed.
+fn cached_plan(project: &ProjectRoot, input_hash: &str, gosum: &str) -> io::Result<Option<GoPlan>> {
     let cached = match project.read_file(Path::new(PLAN_CACHE)) {
         Ok(Some(cached)) => cached,
         Ok(None) => return Ok(None),
@@ -710,6 +723,18 @@ fn cached_plan(project: &ProjectRoot, input_hash: &str) -> io::Result<Option<GoP
         if v["input_hash"] == input_hash {
             if let Ok(plan) = serde_json::from_value::<GoPlan>(v["plan"].clone()) {
                 validate_plan(&plan)?;
+                let ledger = ledger_lines(gosum);
+                for m in &plan.modules {
+                    let gap = ledger_has_module(&ledger, &m.path, &m.version, &m.h1, &m.modfile_h1);
+                    if let Err(missing) = gap {
+                        return Err(err(format!(
+                            "{}@{}: {PLAN_CACHE} lists a module whose {missing} is not in \
+                             the project's go.sum; refusing the cached plan (delete \
+                             {PLAN_CACHE} and run tog again)",
+                            m.path, m.version
+                        )));
+                    }
+                }
                 return Ok(Some(plan));
             }
         }
@@ -801,13 +826,12 @@ fn read_gomod(project: &ProjectRoot) -> io::Result<String> {
         .ok_or_else(|| io::Error::from_raw_os_error(libc::ENOENT))
 }
 
-/// go.sum through the held descriptor; absent or unreadable is empty.
-fn read_gosum(project: &ProjectRoot) -> String {
-    project
-        .read_input_string(Path::new("go.sum"))
-        .ok()
-        .flatten()
-        .unwrap_or_default()
+/// go.sum through the held descriptor. `None` only when it is absent; an
+/// unreadable or non-UTF-8 go.sum is an error, because reading it as empty
+/// would drop every module from the ledger and let the sync succeed on a
+/// closure the build cannot use.
+pub(crate) fn read_gosum(project: &ProjectRoot) -> io::Result<Option<String>> {
+    project.read_input_string(Path::new("go.sum"))
 }
 
 /// Run the closure download in a DISPOSABLE copy of the manifest (go mod
@@ -849,8 +873,7 @@ fn closure_from_download(
     out: &std::process::Output,
     gosum: &str,
 ) -> io::Result<Vec<GoModule>> {
-    let ledger: std::collections::BTreeSet<String> =
-        gosum.lines().map(|l| l.trim().to_string()).collect();
+    let ledger = ledger_lines(gosum);
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
     let mut modules = Vec::new();
     let mut de = serde_json::Deserializer::from_str(&stdout).into_iter::<DownloadEntry>();
@@ -869,6 +892,48 @@ fn closure_from_download(
     Ok(modules)
 }
 
+/// go.sum as a set of trimmed lines, the form the ledger checks look up.
+fn ledger_lines(gosum: &str) -> BTreeSet<String> {
+    gosum.lines().map(|l| l.trim().to_string()).collect()
+}
+
+/// Which of a module's two ledger lines go.sum lacks, if either: the zip
+/// line `<path> <version> <h1>` first, then the go.mod line
+/// `<path> <version>/go.mod <modfile_h1>`. Fresh and cached plans both
+/// answer to this one test, so a cache hit can never admit a module a
+/// fresh plan would not.
+fn ledger_has_module(
+    ledger: &BTreeSet<String>,
+    path: &str,
+    version: &str,
+    h1: &str,
+    modfile_h1: &str,
+) -> Result<(), LedgerGap> {
+    if !ledger.contains(&format!("{path} {version} {h1}")) {
+        return Err(LedgerGap::Zip);
+    }
+    if !ledger.contains(&format!("{path} {version}/go.mod {modfile_h1}")) {
+        return Err(LedgerGap::GoMod);
+    }
+    Ok(())
+}
+
+/// The ledger line `ledger_has_module` found missing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LedgerGap {
+    Zip,
+    GoMod,
+}
+
+impl std::fmt::Display for LedgerGap {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            LedgerGap::Zip => "zip sum",
+            LedgerGap::GoMod => "go.mod sum",
+        })
+    }
+}
+
 /// Tog-owned verification of one download entry: recompute both
 /// dirhashes, check the .info's claim, and insert the bytes into the cache.
 /// `Ok(None)` means "outside the closure" — the main module (no artifacts)
@@ -877,7 +942,7 @@ fn verified_module(
     store: &Store,
     activity: &StoreActivity,
     entry: DownloadEntry,
-    ledger: &std::collections::BTreeSet<String>,
+    ledger: &BTreeSet<String>,
 ) -> io::Result<Option<GoModule>> {
     if let Some(msg) = &entry.error {
         return Err(err(format!(
@@ -909,18 +974,16 @@ fn verified_module(
     // import) — exclude them from the closure rather than fail:
     // an offline build never loads their sources, and if one were
     // ever needed the readonly+GOPROXY=off build fails loudly.
-    if !ledger.contains(&format!("{} {} {}", entry.path, entry.version, sum)) {
-        return Ok(None);
-    }
-    if !ledger.contains(&format!(
-        "{} {}/go.mod {}",
-        entry.path, entry.version, gomod_sum
-    )) {
-        return Err(err(format!(
-            "{}@{}: go.mod sum is not in the project's go.sum \
-             ledger; refusing (run `tog run go mod tidy`)",
-            entry.path, entry.version
-        )));
+    match ledger_has_module(ledger, &entry.path, &entry.version, sum, gomod_sum) {
+        Ok(()) => {}
+        Err(LedgerGap::Zip) => return Ok(None),
+        Err(LedgerGap::GoMod) => {
+            return Err(err(format!(
+                "{}@{}: go.mod sum is not in the project's go.sum \
+                 ledger; refusing (run `tog run go mod tidy`)",
+                entry.path, entry.version
+            )))
+        }
     }
     // Tog-owned verification: recompute both dirhashes.
     let got_h1 = dirhash::hash_zip(Path::new(zip), &entry.path, &entry.version)?;
@@ -989,12 +1052,12 @@ pub fn plan_go(
     reject_workspaces(project)?;
     let gomod =
         read_gomod(project).map_err(|e| io::Error::new(e.kind(), format!("go.mod: {e}")))?;
-    let gosum = read_gosum(project);
+    let gosum = read_gosum(project)?.unwrap_or_default();
     reject_local_replaces(&gomod)?;
 
     let src_digest = source_digest(project)?;
     let input_hash = plan_cache_key(go_version, &gomod, &gosum, &src_digest);
-    if let Some(plan) = cached_plan(project, &input_hash)? {
+    if let Some(plan) = cached_plan(project, &input_hash, &gosum)? {
         return Ok(plan);
     }
 
@@ -1020,8 +1083,9 @@ pub fn plan_go(
     validate_plan(&plan)?;
     // Snapshot guard: the manifest must not have changed under us between
     // the gate and now, or the cache key would lie about the plan's inputs.
-    let now_mod = read_gomod(project).unwrap_or_default();
-    let now_sum = read_gosum(project);
+    let now_mod =
+        read_gomod(project).map_err(|e| io::Error::new(e.kind(), format!("go.mod: {e}")))?;
+    let now_sum = read_gosum(project)?.unwrap_or_default();
     if now_mod != gomod || now_sum != gosum {
         return Err(err("go.mod/go.sum changed while planning; re-run 'tog'"));
     }
@@ -2311,10 +2375,16 @@ mod tests {
     /// the store or the go binary.
     fn plan_fixture(project: &Path) -> (String, String, GoPlan) {
         let gomod = "module example.com/m\n\ngo 1.27.0\n";
-        let gosum = "example.com/a v1.0.0 h1:AAAA=\n";
+        // The ledger lines a fresh plan requires for the fixture's module,
+        // so the cached plan below passes the same ledger check on a hit.
+        let gosum = format!(
+            "example.com/a v1.0.0 h1:{a}=\nexample.com/a v1.0.0/go.mod h1:{b}=\n",
+            a = "A".repeat(43),
+            b = "B".repeat(43),
+        );
         fs::create_dir_all(project).unwrap();
         fs::write(project.join("go.mod"), gomod).unwrap();
-        fs::write(project.join("go.sum"), gosum).unwrap();
+        fs::write(project.join("go.sum"), &gosum).unwrap();
         fs::write(project.join("main.go"), "package main\n\nfunc main() {}\n").unwrap();
         let plan = GoPlan {
             go_version: "1.27.0".into(),
@@ -2329,7 +2399,7 @@ mod tests {
                 info_sha256: "c".repeat(64),
             }],
         };
-        (gomod.into(), gosum.into(), plan)
+        (gomod.into(), gosum, plan)
     }
 
     fn write_plan_cache(project: &Path, input_hash: &str, plan: &GoPlan) {
@@ -2461,11 +2531,143 @@ mod tests {
         let cache = project.join(".tog/go-plan.json");
         fs::set_permissions(&cache, fs::Permissions::from_mode(0o200)).unwrap();
         let root = ProjectRoot::open(&project).unwrap();
-        assert!(cached_plan(&root, &input_hash).unwrap().is_none());
+        assert!(cached_plan(&root, &input_hash, &gosum).unwrap().is_none());
         fs::set_permissions(&cache, fs::Permissions::from_mode(0o644)).unwrap();
         assert_eq!(
-            cached_plan(&root, &input_hash).unwrap().unwrap().modules,
+            cached_plan(&root, &input_hash, &gosum)
+                .unwrap()
+                .unwrap()
+                .modules,
             plan.modules
+        );
+    }
+
+    /// A cache hit whose go.sum is rewritten to `gosum` (with the key
+    /// recomputed, as a repo author can) and the error `plan_go` returns.
+    fn cached_plan_error(gosum: &str) -> String {
+        // The plan borrows the caller's lease; these cases never reach the
+        // store, so a lease on a scratch store stands in for it.
+        let (_lease_store, activity) = crate::kernel::testutil::detached_lease();
+        let temp = TempDir::new();
+        let project = temp.0.join("proj");
+        let (gomod, _, plan) = plan_fixture(&project);
+        fs::write(project.join("go.sum"), gosum).unwrap();
+        write_plan_cache(
+            &project,
+            &expected_input_hash(&project, &gomod, gosum),
+            &plan,
+        );
+        let store = Store {
+            root: temp.0.join("absent-store"),
+        };
+        let e = plan_go(
+            &store,
+            &activity,
+            &ProjectRoot::open(&project).unwrap(),
+            Path::new("/nonexistent/go"),
+            "1.27.0",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(!store.root.exists(), "a refused cache touched the store");
+        e
+    }
+
+    #[test]
+    fn cached_module_without_its_zip_line_in_go_sum_is_refused() {
+        let gosum = format!("example.com/a v1.0.0/go.mod h1:{}=\n", "B".repeat(43));
+        let e = cached_plan_error(&gosum);
+        assert!(e.contains("example.com/a@v1.0.0"), "{e}");
+        assert!(e.contains(".tog/go-plan.json"), "{e}");
+        assert!(
+            e.contains("delete .tog/go-plan.json and run tog again"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn cached_module_without_its_go_mod_line_in_go_sum_is_refused() {
+        let gosum = format!("example.com/a v1.0.0 h1:{}=\n", "A".repeat(43));
+        let e = cached_plan_error(&gosum);
+        assert!(e.contains("example.com/a@v1.0.0"), "{e}");
+        assert!(e.contains(".tog/go-plan.json"), "{e}");
+        assert!(
+            e.contains("delete .tog/go-plan.json and run tog again"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn read_gosum_is_none_when_go_sum_is_absent() {
+        let temp = TempDir::new();
+        let project = temp.0.join("proj");
+        plan_fixture(&project);
+        fs::remove_file(project.join("go.sum")).unwrap();
+        let root = ProjectRoot::open(&project).unwrap();
+        assert!(read_gosum(&root).unwrap().is_none());
+    }
+
+    #[test]
+    fn read_gosum_propagates_a_permission_error() {
+        // SAFETY: geteuid has no preconditions.
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        use std::os::unix::fs::PermissionsExt;
+        let temp = TempDir::new();
+        let project = temp.0.join("proj");
+        plan_fixture(&project);
+        fs::set_permissions(project.join("go.sum"), fs::Permissions::from_mode(0o000)).unwrap();
+        let root = ProjectRoot::open(&project).unwrap();
+        let e = read_gosum(&root).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::PermissionDenied, "{e}");
+        assert!(e.to_string().contains("go.sum"), "{e}");
+    }
+
+    #[test]
+    fn read_gosum_propagates_invalid_utf8() {
+        let temp = TempDir::new();
+        let project = temp.0.join("proj");
+        plan_fixture(&project);
+        fs::write(project.join("go.sum"), b"example.com/a v1.0.0 h1:\xff\n").unwrap();
+        let root = ProjectRoot::open(&project).unwrap();
+        let e = read_gosum(&root).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::InvalidData, "{e}");
+        assert!(e.to_string().contains("go.sum"), "{e}");
+    }
+
+    /// An unreadable go.sum is an error, not an empty ledger: a cache keyed
+    /// to an empty go.sum is never served for one tog cannot read.
+    #[test]
+    fn unreadable_go_sum_fails_the_plan() {
+        // SAFETY: geteuid has no preconditions.
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        use std::os::unix::fs::PermissionsExt;
+        let (_lease_store, activity) = crate::kernel::testutil::detached_lease();
+        let temp = TempDir::new();
+        let project = temp.0.join("proj");
+        let (gomod, _, mut plan) = plan_fixture(&project);
+        plan.modules.clear();
+        write_plan_cache(&project, &expected_input_hash(&project, &gomod, ""), &plan);
+        fs::set_permissions(project.join("go.sum"), fs::Permissions::from_mode(0o000)).unwrap();
+        let store = Store {
+            root: temp.0.join("absent-store"),
+        };
+        let e = plan_go(
+            &store,
+            &activity,
+            &ProjectRoot::open(&project).unwrap(),
+            Path::new("/nonexistent/go"),
+            "1.27.0",
+        )
+        .unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::PermissionDenied, "{e}");
+        assert!(e.to_string().contains("go.sum"), "{e}");
+        assert!(
+            !store.root.exists(),
+            "an unreadable go.sum reached the store"
         );
     }
 
@@ -2602,7 +2804,7 @@ mod tests {
 
         assert!(tailor::Go.detect(&root).unwrap());
         assert_eq!(read_gomod(&root).unwrap(), gomod);
-        assert_eq!(read_gosum(&root), gosum);
+        assert_eq!(read_gosum(&root).unwrap().unwrap(), gosum);
         assert_eq!(source_digest(&root).unwrap(), digest);
         // The original's cache is served; the replacement has none, so a
         // read of the replacement would have missed and reached the store.
