@@ -333,8 +333,8 @@ fn stat_at(dirfd: RawFd, name: &[u8]) -> io::Result<libc::stat> {
     Ok(stat)
 }
 
-// `st_dev` is a u64 on Linux but an i32 on macOS; the cast is not a no-op
-// on every target clippy does not see.
+// `st_dev` is a u64 on Linux but an i32 on macOS: the cast is a no-op
+// here and needed there, and clippy only sees the target it runs on.
 #[allow(clippy::unnecessary_cast)]
 fn stat_identity(stat: &libc::stat) -> (u64, u64) {
     (stat.st_dev as u64, stat.st_ino as u64)

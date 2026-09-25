@@ -57,6 +57,11 @@ jobs:
 
       # A tag push does not wait for ci.yml on the tagged commit, so the
       # offline suite runs here, on each platform, before anything ships.
+      # The Linux sandbox tests need bubblewrap, which the runner lacks;
+      # macOS uses the system's own sandbox.
+      - name: Install the Linux sandbox
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y bubblewrap
       - name: Test
         run: cargo test --locked
 

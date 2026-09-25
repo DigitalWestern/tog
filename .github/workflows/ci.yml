@@ -22,7 +22,7 @@ jobs:
       - run: cargo fmt --check
       - run: cargo build --locked
       # Every clippy warning fails the build (Cargo.toml's [lints.clippy]
-      # allows a few style lints). That includes store protection
+      # allows a few lints). That includes store protection
       # (clippy.toml): raw children and lease acquisition only at the
       # reviewed, `#[allow]`ed sites. rust-toolchain.toml brings clippy.
       - name: Clippy, with store children borrowing the caller's lease
