@@ -75,6 +75,69 @@ fn go_sync_build_and_rebuild_offline() {
         committed_go.display()
     );
 
+    // A planted plan cache: the key still matches the repo's own go.mod and
+    // go.sum, but the plan lists a module go.sum never vouched for. A hit
+    // is held to the go.sum ledger, so tog refuses it and names the way
+    // out; deleting the cache lets the next run plan fresh.
+    let cache_path = project.join(".tog/go-plan.json");
+    let mut cache: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&cache_path).unwrap()).unwrap();
+    cache["plan"]["modules"]
+        .as_array_mut()
+        .expect("the cached plan lists its modules")
+        .push(serde_json::json!({
+            "path": "example.com/planted",
+            "version": "v0.0.1",
+            "h1": format!("h1:{}=", "A".repeat(43)),
+            "zip_sha256": "a".repeat(64),
+            "modfile_h1": format!("h1:{}=", "B".repeat(43)),
+            "modfile_sha256": "b".repeat(64),
+            "info_sha256": "c".repeat(64),
+        }));
+    std::fs::write(&cache_path, serde_json::to_vec_pretty(&cache).unwrap()).unwrap();
+    let planted = tog(&project, home, &["sync"]);
+    assert!(!planted.status.success(), "a planted plan cache was served");
+    let stderr = text(&planted.stderr);
+    assert!(
+        stderr.contains("example.com/planted@v0.0.1") && stderr.contains("go-plan.json"),
+        "{stderr}"
+    );
+    std::fs::remove_file(&cache_path).unwrap();
+    assert_ok(
+        tog(&project, home, &["sync"]),
+        "sync after deleting the cache",
+    );
+
+    // An unreadable go.sum is an error, never an empty ledger. A plain sync
+    // meets it first in prepare's store `go mod tidy`; --frozen skips
+    // prepare, so the plan's own go.sum read is the one that must refuse.
+    // SAFETY: geteuid has no preconditions.
+    if unsafe { libc::geteuid() } != 0 {
+        use std::os::unix::fs::PermissionsExt;
+        let gosum = project.join("go.sum");
+        std::fs::set_permissions(&gosum, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let unreadable = tog(&project, home, &["sync"]);
+        let frozen = tog(&project, home, &["--frozen"]);
+        std::fs::set_permissions(&gosum, std::fs::Permissions::from_mode(0o644)).unwrap();
+        for (label, out) in [("sync", &unreadable), ("--frozen", &frozen)] {
+            assert!(
+                !out.status.success(),
+                "{label} succeeded with an unreadable go.sum"
+            );
+            let stderr = text(&out.stderr);
+            assert!(
+                stderr.contains("go.sum") && stderr.to_lowercase().contains("permission denied"),
+                "{label}: {stderr}"
+            );
+        }
+        let stderr = text(&frozen.stderr);
+        assert!(!stderr.contains("go mod tidy"), "{stderr}");
+        assert_ok(
+            tog(&project, home, &["sync"]),
+            "sync after restoring go.sum",
+        );
+    }
+
     // Without go.sum the pair is not tidy: --frozen refuses without
     // touching the project, and a plan tidies it again with the store Go.
     std::fs::remove_file(project.join("go.sum")).unwrap();
