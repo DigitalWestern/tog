@@ -130,6 +130,9 @@ by position.
   - #221 descriptor: `status`, `doctor` and `run`'s environment still read by path.
   - #267 tests: non-tog children in npm_scripts and deps_e2e inherit the developer's environment.
   - #272 pnpm freshness: a new workspace member without an importer passes, and overrides match by name only.
+  - #277 gc: run homes under `<store>/run-homes` are never reclaimed.
+  - #278 rust_path: the version probe's scratch directory can collide between concurrent probes and is created with `create_dir_all`.
+  - #279 node: run refusal misses npm abbreviations and nested installs, and refuses bare `bun`.
 - **`deps` as a `Tailor` method.** `src/commands/deps.rs` still names
   tailors directly. A `Tailor::edit_manifest` method with an "unsupported"
   default would make it registry-driven, the way `Tailor::registry_tool`
