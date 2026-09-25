@@ -51,7 +51,7 @@ pub(crate) fn refused_command(cmd: &[String]) -> Option<String> {
         .find_map(|tailor| tailor.refused_command(cmd))
 }
 
-pub fn run(ctx: &Context, cmd: &[String], frozen: bool, strict: bool) -> io::Result<i32> {
+pub fn run(ctx: &Context, cmd: &[String], frozen: bool) -> io::Result<i32> {
     let activity = &ctx.activity;
     if cmd.is_empty() {
         return Err(io::Error::new(
@@ -72,7 +72,7 @@ pub fn run(ctx: &Context, cmd: &[String], frozen: bool, strict: bool) -> io::Res
     // reported, and the root to read is the one that sync leaves behind.
     // Outside a project this finds nothing to sync and the refusal below
     // explains.
-    let dir = sync::ensure_current(ctx, &cwd, frozen, strict)?;
+    let dir = sync::ensure_current(ctx, &cwd, frozen)?;
     let package_json = node::tailor::projected_package_json(&dir, &cwd)?;
     let script_steps = package_json
         .as_ref()

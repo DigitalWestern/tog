@@ -512,6 +512,18 @@ fn load_with_sources_from(
             SourceOrigin::Project,
         )?;
     }
+    apply_requested_strictness(&mut policy, &mut sources, cli_strict);
+    Ok((policy, sources))
+}
+
+/// Apply the strictness requested outside the policy files: `TOG_STRICT=1`
+/// and `--strict` (`cli_strict`). Shared by every loader and by the
+/// fallback in `current`, so a policy is never built without them.
+fn apply_requested_strictness(
+    policy: &mut Policy,
+    sources: &mut Vec<PolicySource>,
+    cli_strict: bool,
+) {
     let env_strict = std::env::var("TOG_STRICT").as_deref() == Ok("1");
     // A file that already set `strict = true` keeps the attribution: it is
     // the source that outlives the command, so dropping --strict or
@@ -548,28 +560,77 @@ fn load_with_sources_from(
             trusted: None,
         });
     }
-    Ok((policy, sources))
 }
 
-/// Initialize the process policy. Repeated calls keep the first loaded policy.
-pub fn init(project_dir: &Path, cli_strict: bool) -> io::Result<()> {
+/// Whether `--strict` was on the command line. Recorded once by the
+/// dispatcher before any verb runs, so every policy load in the process
+/// reads the same answer whichever verb loads first.
+static REQUESTED_STRICT: OnceLock<bool> = OnceLock::new();
+
+/// Record `--strict` for every policy load in this process. The first call
+/// wins, like `POLICY`: the dispatcher calls it once, before any verb, and
+/// nothing else should, because a second answer would mean two loads in
+/// one process could disagree about the flag.
+pub fn request_strict(strict: bool) {
+    let _ = REQUESTED_STRICT.set(strict);
+}
+
+fn requested_strict() -> bool {
+    REQUESTED_STRICT.get().copied().unwrap_or(false)
+}
+
+/// Initialize the process policy from the chain above `project_dir` and the
+/// recorded `--strict`. Repeated calls keep the first loaded policy.
+pub fn init(project_dir: &Path) -> io::Result<()> {
     if POLICY.get().is_none() {
-        let _ = POLICY.set(load(project_dir, cli_strict)?);
+        install(load(project_dir, requested_strict())?);
     }
     Ok(())
 }
 
 /// `init` for a project held open as a descriptor (sync): the project's own
 /// policy is read through it.
-pub fn init_in(project: &ProjectRoot, cli_strict: bool) -> io::Result<()> {
+pub fn init_in(project: &ProjectRoot) -> io::Result<()> {
     if POLICY.get().is_none() {
-        let _ = POLICY.set(load_with_sources_from(project.path(), Some(project), cli_strict)?.0);
+        install(load_with_sources_from(project.path(), Some(project), requested_strict())?.0);
     }
     Ok(())
 }
 
+/// Make `policy` the process policy and say under `-v` when it is strict
+/// and why, since a strict run refuses things an ordinary one allows.
+fn install(policy: Policy) {
+    if let Some(line) = strict_trace(&policy) {
+        crate::kernel::ui::trace(&line);
+    }
+    let _ = POLICY.set(policy);
+}
+
+/// The `-v` line for a strict policy, naming what made it strict; `None`
+/// for a policy that is not.
+fn strict_trace(policy: &Policy) -> Option<String> {
+    if !policy.strict {
+        return None;
+    }
+    Some(match policy.strict_source.as_ref() {
+        Some(StrictSource::Flag) => "policy: strict (--strict)".to_string(),
+        Some(StrictSource::Env) => "policy: strict (TOG_STRICT=1)".to_string(),
+        Some(StrictSource::File(path)) => format!("policy: strict ({})", path.display()),
+        None => "policy: strict".to_string(),
+    })
+}
+
+/// The process policy. Without an `init` it falls back to the default
+/// policy plus the requested strictness, so an early read cannot drop
+/// `--strict` or `TOG_STRICT=1`. The fallback still misses the policy
+/// files, and it is kept for the rest of the process, so a verb must
+/// `init` before anything reads the policy.
 fn current() -> &'static Policy {
-    POLICY.get_or_init(Policy::default)
+    POLICY.get_or_init(|| {
+        let mut policy = Policy::default();
+        apply_requested_strictness(&mut policy, &mut Vec::new(), requested_strict());
+        policy
+    })
 }
 
 /// Is the policy chain in force strict? Strictness refuses every exception
@@ -1568,6 +1629,59 @@ deny = ["git-dependency"]"#,
         assert_eq!(ours.len(), 1, "{sources:?}");
         assert_eq!(ours[0].origin, SourceOrigin::Machine);
         assert_eq!(ours[0].path.as_deref(), Some(machine.as_path()));
+    }
+
+    /// The fallback in `current` builds its policy with the same helper the
+    /// loaders end on, so with no policy file in reach it must equal what
+    /// `load` returns for the same flag and variable.
+    #[test]
+    fn requested_strictness_on_the_default_policy_matches_a_load() {
+        let scratch = TempDir::named("policy-requested");
+        let root = scratch.0.clone();
+        let _env = test_env_lock();
+        let _home = EnvVarGuard::set("HOME", root.as_os_str());
+        let _policy = EnvVarGuard::remove("TOG_POLICY");
+        for (env, flag) in [(false, false), (false, true), (true, false), (true, true)] {
+            let _strict = if env {
+                EnvVarGuard::set("TOG_STRICT", "1")
+            } else {
+                EnvVarGuard::remove("TOG_STRICT")
+            };
+            let (loaded, loaded_sources) = load_with_sources(&root, flag).unwrap();
+            let mut built = Policy::default();
+            let mut built_sources = Vec::new();
+            apply_requested_strictness(&mut built, &mut built_sources, flag);
+            let label = format!("TOG_STRICT={env} --strict={flag}");
+            assert_eq!(built.strict, loaded.strict, "{label}");
+            assert_eq!(built.strict_source, loaded.strict_source, "{label}");
+            assert_eq!(built.deny, loaded.deny, "{label}");
+            assert_eq!(built.deny_sources, loaded.deny_sources, "{label}");
+            assert_eq!(built.signing, loaded.signing, "{label}");
+            assert_eq!(built_sources, loaded_sources, "{label}");
+            assert_eq!(built.strict, env || flag, "{label}");
+        }
+    }
+
+    #[test]
+    fn the_strict_trace_names_what_made_the_policy_strict() {
+        let mut policy = Policy::default();
+        assert_eq!(strict_trace(&policy), None);
+        policy.strict = true;
+        policy.strict_source = Some(StrictSource::Flag);
+        assert_eq!(
+            strict_trace(&policy).as_deref(),
+            Some("policy: strict (--strict)")
+        );
+        policy.strict_source = Some(StrictSource::Env);
+        assert_eq!(
+            strict_trace(&policy).as_deref(),
+            Some("policy: strict (TOG_STRICT=1)")
+        );
+        policy.strict_source = Some(StrictSource::File(PathBuf::from("/co/.tog/policy.toml")));
+        assert_eq!(
+            strict_trace(&policy).as_deref(),
+            Some("policy: strict (/co/.tog/policy.toml)")
+        );
     }
 
     #[test]

@@ -278,6 +278,37 @@ fn frozen_plan_never_generates_a_lock() {
     );
 }
 
+/// `--strict` holds for every verb that reaches a sync, whichever policy
+/// load runs first. `fmt` loads the policy before it hands a package.json
+/// `fmt` script to `run`, and `run`'s sync must still see the flag: a
+/// strict sync never creates a toolchain lock, so both spellings refuse
+/// before anything is written or downloaded.
+#[test]
+fn strict_fmt_script_never_creates_the_toolchain_lock() {
+    let home = TempDir::boundary("cli-strict-fmt");
+    std::fs::write(
+        home.0.join("package.json"),
+        r#"{"name":"hello","version":"1.0.0","scripts":{"fmt":"node -e 0"}}"#,
+    )
+    .unwrap();
+    for args in [
+        &["--strict", "fmt"][..],
+        &["--strict", "run", "node", "-e", "0"],
+    ] {
+        let out = tog(&home.0, &home.0, args);
+        let stderr = text(&out.stderr);
+        assert!(!out.status.success(), "{args:?} succeeded: {stderr}");
+        assert!(
+            stderr.contains("tog-toolchain.toml is missing and strict policy never creates it"),
+            "{args:?}: {stderr}"
+        );
+        assert!(
+            !home.0.join("tog-toolchain.toml").exists(),
+            "{args:?} wrote the toolchain lock"
+        );
+    }
+}
+
 #[test]
 fn fmt_is_named_and_typos_are_usage_errors() {
     let home = TempDir::boundary("cli-fmt-cli");
