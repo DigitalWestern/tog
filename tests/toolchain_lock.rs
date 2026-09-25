@@ -964,7 +964,8 @@ fn two_store_replay() {
 /// to one no catalog carries leaves a valid lock whose every artifact is
 /// still real: the replay in each store has only the lock to go on.
 /// Environments are store-relative by design, so the comparison is on the
-/// runtime objects, the lock bytes and `tog status`.
+/// runtime objects each store holds and the lock bytes; `tog status` reads
+/// only the project, and is compared because a user reads it.
 #[test]
 #[ignore]
 fn two_fresh_stores_realize_the_same_runtimes_from_a_retired_release() {
@@ -1049,6 +1050,11 @@ fn runtime_ids(dir: &Path, store: &Path, retired: &[(&str, String)]) -> Vec<Stri
                 "{ecosystem}"
             );
             let object = Path::new(body["runtime_object"]["path"].as_str().unwrap_or_default());
+            assert!(
+                object.is_dir(),
+                "{ecosystem}: {} is missing",
+                object.display()
+            );
             assert!(
                 object.starts_with(&store),
                 "{ecosystem}: {} is outside {}",
