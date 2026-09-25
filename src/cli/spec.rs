@@ -1,5 +1,6 @@
 //! The command table: every command's usage, options, and help text.
 
+use super::parse::takes_sync_flags;
 use super::{Group, Spec, VERSION};
 
 const HELP_OPTION: (&str, &str) = ("-h, --help", "print this help");
@@ -919,9 +920,15 @@ fn option_line(flag: &str, width: usize, description: &str) -> String {
 /// options that precede the tool's own arguments. On the bare form
 /// `--frozen` and `--strict` are the command's own flags rather than global
 /// ones, and `add`, `remove` and `update` refuse `--frozen` because they
-/// exist to write the lock.
+/// exist to write the lock, as `x` does because it has no lock to check. A
+/// command that never syncs refuses both, and asks the parser's own rule so
+/// the footer cannot promise otherwise.
 fn global_option_note(name: &str) -> &'static str {
     match name {
+        _ if !takes_sync_flags(name) => {
+            "Global options (-C, -q, -v, --no-color) work before or after the\n\
+             command. --frozen and --strict are refused: this command never syncs.\n"
+        }
         "run" | "build" => {
             "Global options (-C, -q, -v, --no-color, --frozen, --strict) go before the\n\
              command: every argument after it belongs to the program.\n"
@@ -930,9 +937,14 @@ fn global_option_note(name: &str) -> &'static str {
             "Global options (-C, -q, -v, --no-color) go anywhere on the line, and so\n\
              do this command's own --frozen, --fresh and --strict.\n"
         }
-        "fmt" | "x" => {
+        "fmt" => {
             "Global options (-C, -q, -v, --no-color, --frozen, --strict) go before the\n\
              command or ahead of the tool's own arguments.\n"
+        }
+        "x" => {
+            "Global options (-C, -q, -v, --no-color, --strict) go before the command or\n\
+             ahead of the tool's own arguments. --frozen is refused: x resolves its tool\n\
+             from a registry, not a lock. x --clean refuses --strict too.\n"
         }
         "add" | "remove" | "update" => {
             "Global options (-C, -q, -v, --no-color, --strict) work before or after\n\
@@ -1192,6 +1204,46 @@ mod tests {
             assert!(
                 !text.contains(&format!("\n  {word} ")),
                 "the command list shows '{word}'"
+            );
+        }
+    }
+
+    /// A command's help footer says where `--frozen` and `--strict` go, and
+    /// a command that never syncs says it refuses them, by the same rule
+    /// the parser applies.
+    #[test]
+    fn the_footer_of_a_command_that_never_syncs_refuses_the_sync_flags() {
+        for spec in COMMANDS {
+            let footer = global_option_note(spec.name);
+            let refused = "--frozen and --strict are refused: this command never syncs.";
+            let flat = words(footer);
+            assert_eq!(
+                flat.contains(refused),
+                !takes_sync_flags(spec.name),
+                "tog {}: {footer}",
+                spec.name
+            );
+        }
+        for name in [
+            "status", "sbom", "gc", "store", "audit", "doctor", "keygen", "ls",
+        ] {
+            assert!(!takes_sync_flags(name), "{name}");
+        }
+        for name in [
+            "run", "build", "env", "fmt", "plan", "x", "add", "remove", "update",
+        ] {
+            assert!(takes_sync_flags(name), "{name}");
+        }
+        assert!(
+            words(global_option_note("plan")).contains("--frozen, --strict) work before or after")
+        );
+        // The three lock-writing verbs and `x` take `--strict` alone.
+        for name in ["add", "remove", "update", "x"] {
+            let footer = words(global_option_note(name));
+            assert!(footer.contains("--strict) "), "tog {name}: {footer}");
+            assert!(
+                footer.contains("--frozen is refused"),
+                "tog {name}: {footer}"
             );
         }
     }

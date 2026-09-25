@@ -235,6 +235,9 @@ fn usage_errors_exit_2_with_a_next_step() {
         (&["--frozen", "add", "x"], "--frozen checks the lock without writing it, and 'add' exists to write it; run 'tog add' without --frozen", "tog help add"),
         (&["remove", "x", "--frozen"], "--frozen checks the lock without writing it, and 'remove' exists to write it; run 'tog remove' without --frozen", "tog help remove"),
         (&["--frozen", "update"], "--frozen checks the lock without writing it, and 'update' exists to write it; run 'tog update' without --frozen", "tog help update"),
+        (&["--frozen", "status"], "--frozen governs a sync, and 'status' never syncs; run 'tog status' without --frozen", "tog help status"),
+        (&["sbom", "--strict"], "--strict governs a sync, and 'sbom' never syncs; run 'tog sbom' without --strict", "tog help sbom"),
+        (&["--frozen", "x", "black"], "--frozen checks a project's lock, and 'x' resolves its tool from a registry with no lock to check; run 'tog x' without --frozen", "tog help x"),
     ];
     for (args, message, hint) in cases {
         let out = tog(&home.0, &home.0, args);
@@ -247,6 +250,32 @@ fn usage_errors_exit_2_with_a_next_step() {
             "{args:?}"
         );
     }
+}
+
+/// `plan` generates a missing dependency lock the way a sync does, and
+/// `--frozen` promises never to modify project inputs, so a frozen plan of
+/// a project with no lock is refused by the tailor, naming the file, and
+/// leaves the project as it found it. (Without `--frozen` the plan would
+/// fetch Node to generate the lock, so only the frozen side runs offline.)
+#[test]
+fn frozen_plan_never_generates_a_lock() {
+    let project = TempDir::boundary("cli-frozen-plan");
+    std::fs::write(
+        project.0.join("package.json"),
+        r#"{"name":"hello","version":"1.0.0"}"#,
+    )
+    .unwrap();
+    let out = tog(&project.0, &project.0, &["--frozen", "plan"]);
+    let stderr = text(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    assert!(
+        stderr.contains("package-lock.json is missing and --frozen never creates it"),
+        "{stderr}"
+    );
+    assert!(
+        !project.0.join("package-lock.json").exists(),
+        "--frozen plan generated a lock"
+    );
 }
 
 #[test]
@@ -2593,12 +2622,12 @@ fn audit_is_an_offline_admission_gate_over_recorded_exceptions() {
         "{}",
         text(&out.stderr)
     );
-    // `--strict` is global, so it is accepted and the audit runs (exit 1:
-    // nothing synced yet); a real typo stays a usage error.
+    // `audit` never syncs, so `--strict` is refused rather than accepted
+    // and ignored; a real typo stays a usage error too.
     let out = tog(&project.0, &home.0, &["audit", "--strict"]);
-    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(out.status.code(), Some(2));
     assert!(
-        text(&out.stderr).contains("nothing synced"),
+        text(&out.stderr).contains("'audit' never syncs"),
         "{}",
         text(&out.stderr)
     );

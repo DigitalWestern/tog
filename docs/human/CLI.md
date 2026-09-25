@@ -133,9 +133,15 @@ the program's status through. Which files tog reads per ecosystem:
   command's own option is never searched (`tog gc --register -v` registers
   a directory called `-v`; the command table says which options take a
   value). What reaches that slot is then the option's own business — see
-  the next rule. `add`, `remove` and `update` refuse `--frozen`, since
-  they exist to write the lock. Each command's help ends with a line saying
-  where its global options go.
+  the next rule. `--frozen` and `--strict` govern a sync, so only the
+  commands that sync take them: `run`, `env`, `build`, `fmt`, `plan`, a
+  script name, and `x`, `add`, `remove` and `update` for `--strict`. Those
+  four refuse `--frozen` (the three exist to write the lock, and `x`
+  resolves its tool from a registry with no lock to check), and a
+  command that never syncs (`status`, `sbom`, `gc`, `doctor`, `update
+  --self`, ...) refuses both with a usage error (exit 2) that names the
+  command. Each command's help ends with a line saying where its global
+  options go.
 - **Pass-through is sacred.** `run`, `build`, `x`, and `fmt` hand every
   argument after the command to the tool unchanged, and `--` forces
   pass-through (`tog build --release` works). What tog keeps for itself is
@@ -196,9 +202,16 @@ any global option is: `run`, `build` and a script name hand everything after
 them to the program, so there the flags go first (`tog --frozen dev`), and
 `fmt` and `x` take them only ahead of the tool's own arguments. They govern
 the implicit sync of `run`, `env`, `build`, `tog <script>` and a
-package.json `fmt` script. `--strict` also governs the sync after `add`,
-`remove` and `update`; `--frozen` is refused there, because those verbs
-exist to write the lock. `tog help setup` is the
+package.json `fmt` script. `plan` takes both: under `--frozen` it never
+generates a missing dependency lock, so `tog --frozen plan` of a project
+with no lock fails naming the file, and under `--strict` it plans with
+every policy exception refused. `x` takes `--strict` and judges the tool
+under that policy; it refuses `--frozen`, since it resolves its tool from a
+registry and has no lock to check. `--strict` also governs the sync after
+`add`, `remove` and `update`; `--frozen` is refused there, because those
+verbs exist to write the lock. A verb that never syncs refuses both flags with a usage
+error (exit 2) naming the verb: `tog --frozen status` says `status` never
+syncs rather than ignoring the flag. `tog help setup` is the
 bare form's screen and `tog help inputs` the files it reads per ecosystem.
 
 `run`, `env`, `build` and `tog <script>` sync on their own when the project
