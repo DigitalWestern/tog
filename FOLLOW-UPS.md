@@ -135,6 +135,7 @@ by position.
   - #219 descriptor: delegated tools a sync starts still run with a path cwd.
   - #220 descriptor: files above the project (Cargo workspace, `go.work`, .NET `Directory.*`) read by path.
   - #221 descriptor: `status`, `doctor` and `run`'s environment still read by path.
+  - #267 tests: non-tog children in npm_scripts and deps_e2e inherit the developer's environment.
 - **`deps` as a `Tailor` method.** `src/commands/deps.rs` still names
   tailors directly. A `Tailor::edit_manifest` method with an "unsupported"
   default would make it registry-driven, the way `Tailor::registry_tool`
