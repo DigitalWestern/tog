@@ -82,7 +82,6 @@ by position.
   the 09-20 to 09-24 run. #264 holds the work order and the overall verdict.
   Each line is one issue and one PR, in order:
   - #228 pnpm importer: underscore peer-suffix trimming, a lenient YAML reader, and two multi-document rules.
-  - #229 node: yarn1 importer has its own semver that disagrees with node-semver.
   - #226 supervise: Ctrl-C during a sandboxed child is recorded as a script failure and the sync continues.
   - #260 ruby and elixir: an unchanged project can't re-sync offline.
   - #263 dotnet: csproj checks use substring matches and duplicate the lock parser.
