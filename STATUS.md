@@ -22,7 +22,7 @@ Cargo, Go, Ruby, Elixir, .NET.
 | Module layout | Refactor finished 2026-09-12: one folder per layer, the `Tailor` trait and registry, layering enforced by `tests/architecture.rs` (rules in `docs/human/ARCHITECTURE.md`) |
 | Policy admission gate (`tog audit`, company policy template) | Shipped and independently reviewed on Linux. Every record is compared, including the `rustfmt` record against its pin (2026-09-17). Closure records are signed (`tog keygen`, `TOG_SIGNING_KEY`) and `audit` verifies them against the machine policy's `[signing]` table; unsigned or pre-field records are `outdated`, a missing primary closure fails (2026-09-18, PRs #77 and #78) |
 | `tog sync` preflight | Refused syncs no longer touch the store (2026-09-16, PR #40) |
-| Toolchain lock (WP2) | Shipped on Linux 2026-09-21. A committed `tog-toolchain.toml` names the exact toolchain per ecosystem: the first writable sync writes it, every later sync honors it, a source that disagrees stops the sync, `tog --frozen` validates without writing, `tog update --toolchain [<eco>]` is the one writer that replaces it, `tog status` reports the verdict, and `tog x` keys its cache on the selected bundle. Described in `docs/human/ARCHITECTURE.md` "Toolchain lock"; the reasoning stays in `docs/agent/DESIGNS.md` §1. **Not yet run on two machines** — see below |
+| Toolchain lock (WP2) | Shipped on Linux 2026-09-21. A committed `tog-toolchain.toml` names the exact toolchain per ecosystem: the first writable sync writes it, every later sync honors it, a source that disagrees stops the sync, `tog --frozen` validates without writing, `tog update --toolchain [<eco>]` is the one writer that replaces it, `tog status` reports the verdict, and `tog x` keys its cache on the selected bundle. Described in `docs/human/ARCHITECTURE.md` "Toolchain lock"; the parts still open are in `docs/agent/DESIGNS.md` §1. **Not yet run on two machines**: see FOLLOW-UPS.md "Next up, in order" |
 | Release catalog and trust (WP3), company layer (WP5) | Designed, not built (`docs/agent/DESIGNS.md` §2, §4) |
 | Toolchain catalogs (2026-09-24) | Every ecosystem's releases are generated, verified data files (`catalog.toml`, `tools/catalog.py --check`), append-only, with an explicit default (#195). Rust ships 43 releases, 1.70.0 to 1.98.1; `rust-toolchain.toml` targets, components, profile and `path` are lock rows, and tog provisions every component from the signed channel manifest (#213) |
 | Resolution proxy (#68) | Designed and reviewed over four rounds (`docs/agent/DESIGNS.md` §6, #196); PR 0 evidence shipped (#209). Implementation is #198 to #208, in order. Until PR 10, delegated tools (`add`/`remove`/`update`, missing-lock generation) run unsandboxed with network |
@@ -35,25 +35,24 @@ Cargo, Go, Ruby, Elixir, .NET.
 
 ## What is next
 
-The ordered list is issue #73; [FOLLOW-UPS.md](FOLLOW-UPS.md) keeps the
-detail behind each item:
-
-1. The two-machine toolchain-lock diff: sync one project on Linux and on an
-   arm64 Mac, and prove the lock file and `tog status` are identical. It is
-   the last thing between WP2 and done, and it is part of the macOS gate.
-2. The resolution proxy, PR 1 onward (#198).
-3. The macOS gate (#66, #136), which now also covers the per-operation
-   signal sessions implementation (#57) and PR 0's Mach allow-list.
+The ordered list is "Next up, in order" in [FOLLOW-UPS.md](FOLLOW-UPS.md),
+followed by the rest of that file. Each line there points at the GitHub
+issue that holds the detail. This file does not repeat the list, so the two
+cannot disagree.
 
 ## How work happens here
 
-- One folder per PR where possible (see CLAUDE.md).
+- After a pull request merges, every problem found along the way and not
+  shipped in it becomes its own GitHub issue (file paths, the options, the
+  pick), with a one-line pointer in FOLLOW-UPS.md (see CLAUDE.md or
+  AGENTS.md, which say the same).
 - An agent implements; a *different* agent reviews adversarially; the review
   outcome (rounds, findings, what was fixed or declined) goes in the pull
   request description. Self-review does not count.
-- Open work and decisions live only in FOLLOW-UPS.md. Designs live only in
-  `docs/agent/DESIGNS.md`. When something ships, update
-  `docs/human/ARCHITECTURE.md`, `CLI.md`, or `LIMITATIONS.md` and delete its
-  FOLLOW-UPS item.
+- The GitHub issue tracker holds the detail of open work and decisions.
+  FOLLOW-UPS.md holds the order and one line per open item pointing at its
+  issue. Designs live only in `docs/agent/DESIGNS.md`. When something ships,
+  update `docs/human/ARCHITECTURE.md`, `CLI.md`, or `LIMITATIONS.md`, delete
+  its FOLLOW-UPS line and anything it made stale in DESIGNS.md.
 - Do not add new ledger, report, or evidence documents. Evidence goes in the
   PR; history is git.

@@ -2545,9 +2545,9 @@ mod tests {
         let mut cmd = Command::new("true");
         // Prefixes of several lengths, none of which match these names.
         force_env(&mut cmd, &["npm_config_", "PNPM_", "YARN_"], &[], &[]);
-        // Reaching this line at all is the point: the old slicing panicked
-        // here. A sibling test sets its own variables in the same process
-        // environment, so assert about these two names only.
+        // Reaching this line at all is the point: slicing a name at a byte
+        // offset would panic here. A sibling test sets its own variables in
+        // the same process environment, so assert about these two names only.
         let touched: Vec<String> = cmd
             .get_envs()
             .map(|(k, _)| k.to_string_lossy().into_owned())

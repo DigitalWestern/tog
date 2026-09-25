@@ -1,8 +1,13 @@
 # FOLLOW-UPS — open work and decisions
 
-The one to-do list. Every item here is open. When an item ships, delete it;
-its pull request description is the record of what was done and how it was
-reviewed. Detail for designed-but-unbuilt features lives in
+The one ordered to-do list. Every item here is open, and each is one line
+(or a short paragraph) pointing at the GitHub issue that holds the detail:
+the file paths, the options, and the pick. "Next up, in order" is the order
+of work; decisions block their items until the owner makes them; everything
+else is under "Open work", where the quality-review list (#264) is ordered
+and the macOS gate is last by the owner's choice. When an item ships, delete
+its line; its pull request description is the record of what was done and
+how it was reviewed. Designs for work not yet built live in
 `docs/agent/DESIGNS.md`; known, accepted gaps live in
 `docs/human/LIMITATIONS.md`. Code comments cite an item by its title, never
 by position.
@@ -27,26 +32,33 @@ by position.
   followed by the full help screen, which can scroll the sync result away.
   Watch daily use; the candidates are a short footer, the full screen only
   when nothing needed syncing, or leaving it.
-- **A shared system store at `/opt/tog/store`:** decided 2026-09-23: full
-  design round on ownership, permissions, and cross-user GC (see #69).
 - **First outside target.** Cheapest visible artifact: a GitHub Action
   running `tog --frozen` under the company policy plus `tog sbom`, which
   should work on GitHub-hosted Ubuntu runners if unprivileged user
-  namespaces are allowed there. Parked 2026-09-23; revisit after #87
-  (see #70).
-- **Is `skipped-optional` an exception at all?** An optional dependency
-  group the user did not request is a choice, not a waiver, yet it drives the
-  strict hit rate down to 8/30 on Python (`docs/agent/HITRATE.md`).
-  Decided 2026-09-23: informational closure field, not an exception
-  (see #71).
+  namespaces are allowed there. Parked 2026-09-23 until the Ubuntu sandbox
+  behavior (#87) was understood. That condition has fired: #87 was fixed by
+  #173 (the sandbox mirrors the host's `/bin` and `/lib` layout, so Ubuntu
+  22.04 can sandbox) and its follow-up #175 is closed. Un-parking #70 is the
+  owner's call.
 - **Key and credential policy for the trust work.** Where trusted publisher
   keys live, who rotates them, and what revocation means (including a
   company's own internal publisher); a test account for private-registry
   credentials. Blocks the authenticated parts of `docs/agent/DESIGNS.md`
-  §2 and §4.
+  §2 and §4 (#72).
 
 ## Open work, each its own pull request
 
+- **Record `skipped-optional` as an informational closure field (#71).**
+  Decided 2026-09-23: an optional group the user did not request is a
+  choice, not an exception. Record it as `optional_groups_skipped` so
+  `status` and `sbom` still see it, check the python-env identity before
+  assuming no identity impact, then re-run the Python hit rate and add a
+  dated column to `docs/agent/HITRATE.md`.
+- **A shared system store at `/opt/tog/store`: the design round (#69).**
+  Decided 2026-09-23: a full design round with independent review, no code
+  until it lands. Scope: ownership and permissions on the shared path, GC
+  across users, the activity lease across uids, and the trust boundary a
+  shared store changes.
 - **`tog audit` without trusted keys (#144).** It exits 2 by design, so a
   recorded policy exception has no command that judges it in the default
   unsigned setup. Decided 2026-09-23: both an unsigned mode of `audit`
@@ -82,7 +94,6 @@ by position.
   the 09-20 to 09-24 run. #264 holds the work order and the overall verdict.
   Each line is one issue and one PR, in order:
   - #234 ci: nothing runs the 65 ignored e2e tests, acceptance.sh or tests/install.sh.
-  - #262 docs: the planning docs contradict each other, and README's install line can't work.
   - #236 archive: npm, hex, sdist and most toolchain archives are unpacked by raw tar, not kernel::archive.
   - #238 http: pypi, rubygems, dotnet and deps call ureq directly, bypassing kernel::fetch.
   - #239 toolchain: SourcePolicy is documented as enforced on every fetch but never runs.
@@ -131,7 +142,7 @@ by position.
   - #285 pnpm lock reader: four edge cases (trailing colon, parentheses in paths, unquoted `@` keys, a third document) not yet confirmed against js-yaml.
   - #287 store records: no gc for `records/`, orphaned `tmp/record-*` temporaries, Elixir check-locked hash blind spots.
   - #289 interrupt: the bwrap preflight misreports Ctrl-C as "bwrap unavailable", and an interrupted sync exits 1 rather than 130.
-- **`deps` as a `Tailor` method.** `src/commands/deps.rs` still names
+- **`deps` as a `Tailor` method (#61).** `src/commands/deps.rs` still names
   tailors directly. A `Tailor::edit_manifest` method with an "unsupported"
   default would make it registry-driven, the way `Tailor::registry_tool`
   did for `x`. It is its own design review: deps edits user manifests.
@@ -146,22 +157,27 @@ by position.
   never published (#165).
 - **`gc --migrate-metadata` as a `fix:` line (#166).** It resolves only a
   transient failure. Recommended: keep `fix:`.
-- **Two PEP 440 version grammars.** `src/kernel/toolchain/select.rs` has
+- **Two PEP 440 version grammars (#297).** `src/kernel/toolchain/select.rs` has
   the small numeric `Version`/specifier subset the toolchain selector needs;
-  `src/tailors/python/pep440.rs` has the full grammar. The Python source
-  reader (toolchain lock PR 3) must lower one into the other and the kernel
-  cannot import the tailor's copy. Hoist `pep440.rs` into `src/kernel/`
-  and have the selector use it, in its own PR.
-- **Unreproduced test flakes.**
+  `src/tailors/python/pep440.rs` has the full grammar. The toolchain lock's
+  Python source reader (`src/kernel/toolchain/resolve.rs`) parses
+  `requires-python` with the kernel subset while `pyselect` uses the full
+  grammar, and the kernel cannot import the tailor's copy. Hoist
+  `pep440.rs` into `src/kernel/` and have the selector use it, in its own
+  PR.
+- **Unreproduced test flakes (#65).**
   `kernel::gitsrc::realization_tests::realizes_a_commit_and_strips_git_metadata`
   (2026-09-12) and `tailors::cargo::tests::rejects_symlinked_crate_entries`
   (2026-09-15) each failed once in a full parallel run and passed on every
   rerun. The panic messages were not captured. Capture them next time before
   changing anything.
-- **macOS arm64 gate. Last, by the owner's choice.** Run on the Mac:
+- **macOS arm64 gate (#66). Last, by the owner's choice.** Run on the Mac:
   `cargo test`, `cargo test --test gc -- --ignored`,
   `cargo test --test cli audit`, and
   `cargo test --test toolchain_lock -- --ignored`, including the
   case-insensitive-filesystem paths the root-key code relies on. Darwin
   identity goldens must stay byte-identical, and the two-machine lock diff
-  above is run here. Nothing Linux-side clears this.
+  above is run here. It also covers the per-operation signal sessions
+  implementation (#57) once that lands, and the resolution proxy's Mach
+  allow-list (`tools/proxy_spike/macos_mach.sh`). Nothing Linux-side
+  clears this.

@@ -1358,7 +1358,7 @@ mod tests {
                 );
                 assert_ne!(drifted.object_id(), honest.object_id());
 
-                // The legitimate smaller plan the drift used to impersonate
+                // The legitimate smaller plan the drift would impersonate
                 // is a different identity, and it commits cleanly.
                 let smaller = match skipped.strip_prefix("pkg:") {
                     Some(path) => {

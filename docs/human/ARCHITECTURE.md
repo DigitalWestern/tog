@@ -664,8 +664,8 @@ Publication and incomplete-object sweeping serialize on a cross-process file
 lock (`tmp/.publish.lock`), so a concurrent `has()` never mistakes a
 mid-publication object for a crashed one. Store-consuming operations hold an
 activity lease (`src/kernel/activity.rs`), shared or exclusive, with a fixed
-ordering: activity, then x-root, then project transaction, then cache, then
-publication. Each process supervises at most one awaited store-consuming
+ordering: activity, then x-root, then the toolchain-input lock, then project
+transaction, then cache, then publication. Each process supervises at most one awaited store-consuming
 child (`src/kernel/supervise.rs`) and forwards TERM to it. A helper that runs
 such a child takes the caller's `&StoreActivity` rather than taking a lease of
 its own, so the lease that protects a stage directory is visibly the one held
@@ -846,12 +846,14 @@ when the two differ.
 ## Where the rest lives
 
 - `STATUS.md`: where the project is and what is next.
-- `FOLLOW-UPS.md`: open decisions and the ordered to-do list.
+- `FOLLOW-UPS.md`: the ordered to-do list and open decisions, one line
+  per item pointing at its GitHub issue, which holds the detail.
 - `docs/human/CLI.md`: the command reference.
 - `docs/human/LIMITATIONS.md`: known, accepted gaps.
 - `docs/human/ADDING-A-TAILOR.md`: how to add an ecosystem.
-- `docs/agent/DESIGNS.md`: designed but unbuilt work (toolchain lock,
-  release catalog and trust, company policy layer).
+- `docs/agent/DESIGNS.md`: designed but unbuilt work (the toolchain lock's
+  open parts, release catalog and trust, company policy layer, signal
+  sessions, the resolution proxy).
 - `docs/agent/HITRATE.md`: the real-project hit-rate measurement.
 
 Review results live in each pull request's description. Older plans,

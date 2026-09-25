@@ -817,8 +817,8 @@ fn open_real_directory(path: &Path, label: &str) -> io::Result<fs::File> {
 }
 
 /// Recover the store from an explicit realized object path.  This is a
-/// narrow path-shape check for producer APIs, not the old recursive JSON
-/// provenance guess used by legacy x cleanup.
+/// narrow path-shape check for producer APIs. It never infers provenance by
+/// reading JSON.
 pub(crate) fn store_from_object_path(path: &Path) -> Option<Store> {
     let objects = path.parent()?;
     if objects.file_name()?.to_str()? != "objects" {

@@ -144,12 +144,21 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   replacement after commit is undetected.
 - **Delegated planning runs unsandboxed with user privileges** (uv, npm, cargo, go, bundler):
   a hostile manifest executes code at PLAN time.
-- **Only the Go toolchain tarball goes through the pre-materialization extractor**; CPython,
-  Node, Rust, Ruby, .NET, Elixir/OTP and native-library tarballs still rely on the platform
-  tar's own defences. The listing is read from the archive's own headers (ustar names and the
-  POSIX prefix field, PAX `path`/`linkpath`/`size`, GNU long names) and cross-checked against
-  `tar -t`; unmodelled layouts — sparse members, a global header that renames, unknown type
-  letters, bad checksums — refuse the whole archive.
+- **Most archives are unpacked by the platform tar with no pre-check of their own** (#236).
+  The pre-materialization extractor (`src/kernel/archive.rs`) reads every entry from the
+  archive's own headers (ustar names and the POSIX prefix field, PAX `path`/`linkpath`/`size`,
+  GNU long names), cross-checks that listing against `tar -t`, refuses the whole archive on an
+  absolute name, `..`, a hard link, a special file, an escaping symlink, or a layout it cannot
+  model (sparse members, a global header that renames, unknown type letters, bad checksums),
+  and extracts with `TAR_OPTIONS` unset. Three things go through it: the Go toolchain, the
+  optional Rust components and cross targets, and the binary `tog update --self` installs.
+  The other tarballs are extracted by `/usr/bin/tar` directly, relying on its own defences
+  and inheriting the user's `TAR_OPTIONS`: the CPython, uv, Rust, rustfmt, Node, Ruby, .NET,
+  OTP and native-library toolchains, the `.tar.zst` members inside a `.conda` package, npm
+  registry tarballs, Hex packages, tar sdists, and crates. A crate is extracted in full before
+  its 1 GiB size cap is checked. The Elixir release zip and Hex's own `.ez` archive are
+  unpacked by `/usr/bin/unzip`, inheriting the user's `UNZIP`/`UNZIPOPT`. Wheels, zip sdists
+  and the outer zip of a `.conda` package are read in process with the `zip` crate.
 
 ## Python
 

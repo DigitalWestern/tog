@@ -945,8 +945,8 @@ mod tests {
     /// Darwin value is computed here and the macOS gate only confirms it.
     /// The `/2` spelling of the same plan is a different object id, so the
     /// bump reissues every environment; and the drift `/2` could not see —
-    /// a one-wheel plan losing its only `pkg:` key — no longer collides
-    /// with the empty environment.
+    /// a one-wheel plan losing its only `pkg:` key — does not collide with
+    /// the empty environment under `/3`.
     #[test]
     fn environment_identity_goldens_and_dropped_sole_wheel() {
         crate::tailors::install_kinds();

@@ -742,15 +742,15 @@ fn enforce_live_grammar(identity: &Identity, adapter: &KindAdapter) -> Result<()
 
 /// Check a *live* identity against its producer's grammar row.
 ///
-/// Each row describes what its producer builds today, but until now the only
-/// reader of a row was `adapt_inner`, the legacy-record migration path. A
-/// producer that started writing a new input, or stopped writing a required
-/// one, committed fine; the stale row bit much later, during a migration, on
-/// a store nobody could re-create. This closes that gap by reading the row at
-/// commit time.
+/// Each row describes what its producer builds today, and the legacy-record
+/// migration path (`adapt_inner`) reads the same row. The row is checked at
+/// commit time so that a producer which starts writing a new input, or stops
+/// writing a required one, fails its first commit. Otherwise the stale row
+/// would only surface during a later migration, on a store nobody can
+/// re-create.
 ///
-/// A kind absent from every row is refused. This closes the typo path where a
-/// producer can commit a kind such as `cpythno` without any grammar at all.
+/// A kind absent from every row is refused, so a producer cannot commit a
+/// misspelled kind such as `cpythno` that has no grammar at all.
 pub(crate) fn check_identity_grammar(identity: &Identity) -> Result<(), String> {
     let schema = schema_input_of(identity);
     match adapter_for(&identity.kind, schema) {
@@ -3179,10 +3179,10 @@ mod tests {
         assert!(reason.contains("BEAM relocation relation"), "{reason}");
     }
 
-    /// The first drift `python-env/3` closes: a one-wheel plan that drops
-    /// its only `pkg:` key. Under `/2` the result was the legitimate empty
-    /// environment, byte for byte. `package_digest` is written
-    /// unconditionally, so the two are now different identities and the
+    /// The first drift `python-env/3` detects: a one-wheel plan that drops
+    /// its only `pkg:` key. Under `/2` the result is the legitimate empty
+    /// environment, byte for byte. `/3` writes `package_digest`
+    /// unconditionally, so the two are different identities and the
     /// contract names the mismatch.
     #[test]
     fn python_env_one_wheel_dropped_is_detected() {
@@ -3225,7 +3225,7 @@ mod tests {
         assert_eq!(check_identity_grammar(one_wheel), Ok(()));
     }
 
-    /// The second drift `python-env/3` closes: an inspected native sdist
+    /// The second drift `python-env/3` detects: an inspected native sdist
     /// that drops its `native_libs` key. Under `/2` every native check was
     /// conditional on that key. The `native` input says what the producer
     /// decided, so its absence is a contradiction rather than a silence.
@@ -3244,7 +3244,7 @@ mod tests {
         assert_eq!(check_identity_grammar(&native), Ok(()));
     }
 
-    /// The first drift `node-env/4` closes: one package dropped from a
+    /// The first drift `node-env/4` detects: one package dropped from a
     /// multi-package plan. Under `/3` another `pkg:` key remained, so every
     /// presence check passed. `plan_digest` covers the whole set.
     #[test]
@@ -3277,7 +3277,7 @@ mod tests {
         assert_eq!(check_identity_grammar(multi_package), Ok(()));
     }
 
-    /// The second drift `node-env/4` closes: a declared `artifact:` key
+    /// The second drift `node-env/4` detects: a declared `artifact:` key
     /// dropped. Under `/3` the artifact group was optional, so nothing
     /// could prove one had been kept. `plan_digest` spans artifacts too.
     #[test]
@@ -3322,7 +3322,7 @@ mod tests {
         }
     }
 
-    /// The third drift `node-env/4` closes: a Linux `native_libs` key
+    /// The third drift `node-env/4` detects: a Linux `native_libs` key
     /// dropped. Under `/3` the native checks were conditional on that key.
     #[test]
     fn node_env_native_libs_dropped_is_detected() {
@@ -3336,7 +3336,7 @@ mod tests {
         assert_eq!(check_identity_grammar(&native), Ok(()));
     }
 
-    /// The first drift `sdist-build/4` closes: both halves of the
+    /// The first drift `sdist-build/4` detects: both halves of the
     /// `rust`/`vendor` pair dropped together. Under `/3` only a one-sided
     /// pair was rejected, so the drifted build looked like a build that
     /// never had a Rust extension at all.
@@ -3353,7 +3353,7 @@ mod tests {
         assert_eq!(check_identity_grammar(&rust), Ok(()));
     }
 
-    /// The second drift `sdist-build/4` closes: both halves of the
+    /// The second drift `sdist-build/4` detects: both halves of the
     /// `native_libs`/`native_linker` pair dropped together.
     #[test]
     fn sdist_build_native_pair_dropped_is_detected() {
@@ -3523,7 +3523,7 @@ mod tests {
         }
     }
 
-    /// The drift `cargo-vendor/2` closes: a one-crate plan that drops its
+    /// The drift `cargo-vendor/2` detects: a one-crate plan that drops its
     /// only `crate:` key. `version` is `max(1, crate_count)`, so under `/1`
     /// the drifted plan hashed to the empty plan's object id. The explicit
     /// `crates` count separates them.
