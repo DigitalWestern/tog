@@ -155,7 +155,7 @@ fn node_env_contract(identity: &Identity) -> Result<(), String> {
 /// `node-env/4` adds two unconditional inputs to the `/3` shape: a
 /// `plan_digest` over every `pkg:` and `artifact:` entry, and a `native`
 /// decision the producer spells out whether or not it mounts the library
-/// set. A dropped package or declared artifact now leaves a digest no plan
+/// set. A dropped package or declared artifact leaves a digest no plan
 /// produces, and a dropped `native_libs` key leaves `native` claiming a
 /// mount that is not there. Both are recomputed here from the producer's own
 /// functions.
@@ -191,10 +191,10 @@ fn node_env_v4_contract(identity: &Identity) -> Result<(), String> {
 }
 
 /// `node-env/5` adds one unconditional input to the `/4` shape: `gyp_python`,
-/// the object id of the CPython node-gyp runs on. Under `/4` that interpreter
-/// was the shipped pin and named nowhere, so a pin change could rebuild a
-/// native addon under an unchanged id; now it is the project's locked Python
-/// (or the shipped default) and the id commits to it.
+/// the object id of the CPython node-gyp runs on. `/4` names that
+/// interpreter nowhere (it is the shipped pin), so under `/4` a pin change
+/// can rebuild a native addon under an unchanged id. Under `/5` it is the
+/// project's locked Python (or the shipped default) and the id commits to it.
 fn node_env_v5_contract(identity: &Identity) -> Result<(), String> {
     node_env_v4_contract(identity)?;
     let gyp_python = identity

@@ -742,15 +742,15 @@ fn enforce_live_grammar(identity: &Identity, adapter: &KindAdapter) -> Result<()
 
 /// Check a *live* identity against its producer's grammar row.
 ///
-/// Each row describes what its producer builds today, but until now the only
-/// reader of a row was `adapt_inner`, the legacy-record migration path. A
-/// producer that started writing a new input, or stopped writing a required
-/// one, committed fine; the stale row bit much later, during a migration, on
-/// a store nobody could re-create. This closes that gap by reading the row at
-/// commit time.
+/// Each row describes what its producer builds today, and the legacy-record
+/// migration path (`adapt_inner`) reads the same row. The row is checked at
+/// commit time so that a producer which starts writing a new input, or stops
+/// writing a required one, fails its first commit. Otherwise the stale row
+/// would only surface during a later migration, on a store nobody can
+/// re-create.
 ///
-/// A kind absent from every row is refused. This closes the typo path where a
-/// producer can commit a kind such as `cpythno` without any grammar at all.
+/// A kind absent from every row is refused, so a producer cannot commit a
+/// misspelled kind such as `cpythno` that has no grammar at all.
 pub(crate) fn check_identity_grammar(identity: &Identity) -> Result<(), String> {
     let schema = schema_input_of(identity);
     match adapter_for(&identity.kind, schema) {
@@ -3180,10 +3180,10 @@ mod tests {
         assert!(reason.contains("BEAM relocation relation"), "{reason}");
     }
 
-    /// The first drift `python-env/3` closes: a one-wheel plan that drops
-    /// its only `pkg:` key. Under `/2` the result was the legitimate empty
-    /// environment, byte for byte. `package_digest` is written
-    /// unconditionally, so the two are now different identities and the
+    /// The first drift `python-env/3` detects: a one-wheel plan that drops
+    /// its only `pkg:` key. Under `/2` the result is the legitimate empty
+    /// environment, byte for byte. `/3` writes `package_digest`
+    /// unconditionally, so the two are different identities and the
     /// contract names the mismatch.
     #[test]
     fn python_env_one_wheel_dropped_is_detected() {

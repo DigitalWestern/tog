@@ -103,7 +103,7 @@ fn object_id(path: &Path, label: &str) -> io::Result<String> {
 
 /// The four spellings of the `sdist-build/4` mode fields. The producer
 /// writes one of each on every commit, so dropping a whole `rust`/`vendor`
-/// or `native_libs`/`native_linker` pair no longer leaves a valid identity.
+/// or `native_libs`/`native_linker` pair never leaves a valid identity.
 pub(super) const BUILD_MODE_RUST: &str = "rust-vendor";
 pub(super) const BUILD_MODE_PLAIN: &str = "plain";
 pub(super) const NATIVE_MODE_LIBS: &str = "native-libs";
@@ -1643,7 +1643,7 @@ mod tests {
     /// the Darwin value is computed here and the macOS gate only confirms
     /// it. The `/3` spelling of the same build is a different object id, so
     /// the bump reissues every isolated build; and the drift `/3` could not
-    /// see — losing both halves of a pair — is now a contract error.
+    /// see — losing both halves of a pair — is a contract error under `/4`.
     #[test]
     fn isolated_identity_goldens_and_dropped_pairs() {
         let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK

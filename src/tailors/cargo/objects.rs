@@ -164,7 +164,7 @@ fn cargo_vendor_contract(identity: &Identity) -> Result<(), String> {
 
 /// `cargo-vendor/2` adds the `crates` input: the exact number of `crate:`
 /// keys, written unconditionally, including the zero of an empty plan. A
-/// dropped sole `crate:` key now leaves `crates` at 1 with no crate entry, so
+/// dropped sole `crate:` key leaves `crates` at 1 with no crate entry, so
 /// the empty plan and the drifted one-crate plan are different identities and
 /// this contract names the difference.
 fn cargo_vendor_v2_contract(identity: &Identity) -> Result<(), String> {

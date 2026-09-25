@@ -824,8 +824,8 @@ mod tests {
     /// platform input, so there is one value for every host. The `/1`
     /// spelling of the same plan is a different object id, so the bump
     /// reissues every vendor tree; and the drift `/1` could not see — a
-    /// one-crate plan losing its only `crate:` key — is now a contract
-    /// error instead of the empty plan's identity.
+    /// one-crate plan losing its only `crate:` key — is a contract error
+    /// under `/2`, not the empty plan's identity.
     #[test]
     fn vendor_identity_golden_and_dropped_sole_crate() {
         crate::tailors::install_kinds();

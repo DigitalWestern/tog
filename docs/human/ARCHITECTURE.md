@@ -844,12 +844,14 @@ when the two differ.
 ## Where the rest lives
 
 - `STATUS.md`: where the project is and what is next.
-- `FOLLOW-UPS.md`: open decisions and the ordered to-do list.
+- `FOLLOW-UPS.md`: the ordered to-do list and open decisions, one line
+  per item pointing at its GitHub issue, which holds the detail.
 - `docs/human/CLI.md`: the command reference.
 - `docs/human/LIMITATIONS.md`: known, accepted gaps.
 - `docs/human/ADDING-A-TAILOR.md`: how to add an ecosystem.
-- `docs/agent/DESIGNS.md`: designed but unbuilt work (toolchain lock,
-  release catalog and trust, company policy layer).
+- `docs/agent/DESIGNS.md`: designed but unbuilt work (the toolchain lock's
+  open parts, release catalog and trust, company policy layer, signal
+  sessions, the resolution proxy).
 - `docs/agent/HITRATE.md`: the real-project hit-rate measurement.
 
 Review results live in each pull request's description. Older plans,

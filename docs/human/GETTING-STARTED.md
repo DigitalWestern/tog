@@ -17,6 +17,24 @@ are defined in the six-row table at the top of [the README](../../README.md).
 
 ## 1. Install
 
+No release is tagged yet, so build tog from source. With a Rust toolchain
+from [rustup](https://rustup.rs):
+
+```sh
+git clone https://github.com/DigitalWestern/tog
+cd tog
+cargo install --path . --locked
+```
+
+`cargo install` puts `tog` in `~/.cargo/bin`, which rustup already put on
+PATH, so a new terminal has it. The repository is private for now, so the
+clone needs your GitHub access. `tog completions zsh` (or `bash`, `fish`)
+prints shell completions if you want them; the
+[README](../../README.md#install) has the details.
+
+Once `v0.1.0` is tagged, and the repository can be read without logging
+in, a one-line installer replaces all of that:
+
 ```sh
 curl -fsSL https://raw.githubusercontent.com/DigitalWestern/tog/main/install.sh | sh
 ```
@@ -46,7 +64,7 @@ sandbox and native builds need them; the
 
 ```
 $ tog doctor
-ok    version      tog 0.1.0 (7688cfd 2026-09-21); the latest release is v0.1.0 (same version; releases are compared by version, not by commit)
+ok    version      tog 0.1.0 (7688cfd 2026-09-21); newer release not checked (fetch https://api.github.com/repos/DigitalWestern/tog/releases/latest: the server does not have this artifact (404); the index may have yanked it, or the lockfile names a version that is gone)
 ok    platform     x86_64-unknown-linux-gnu
 ok    store        /tmp/tog-demo/store (0 objects, 0 cached artifacts)
 ok    disk         12.1 GiB free under the store
@@ -59,7 +77,8 @@ ok    project      python found; not synced yet: python (run 'tog')
 
 Nine rows, exit 0 when none says `fail`. The first row is the build you
 are running and whether a newer release exists (`warn`, with `tog update
---self` as the fix; `not checked` when offline). This is the command to run
+--self` as the fix; `not checked` when offline or, as here, while no
+release is tagged and GitHub answers 404). This is the command to run
 before you file a bug and the output to paste into it. The `store` row
 answers "where does all this go": one directory per machine, shared by every
 project on it, created the first time something needs it.

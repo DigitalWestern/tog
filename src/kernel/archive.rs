@@ -53,9 +53,10 @@ pub enum EntryKind {
     Special(char),
 }
 
-/// How the archive is compressed; passed explicitly so the delegated tar is
-/// invoked with the same flag the call site used before this module existed
-/// (a byte-identical extraction is part of the object-identity contract).
+/// How the archive is compressed. The caller passes it explicitly, never
+/// sniffed, so each call site keeps one fixed tar flag: a different flag
+/// could change the extracted bytes, and a byte-identical extraction is part
+/// of the object-identity contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Compression {
     None,
@@ -97,9 +98,9 @@ fn tar_command() -> Command {
     command
 }
 
-/// Flags every tar invocation carries. `--numeric-owner` no longer protects a
-/// parser — the listing is read from the header blocks now — but the
-/// delegated extraction writes object bytes, so the flags stay fixed: a
+/// Flags every tar invocation carries. The listing is read from the header
+/// blocks, so `--numeric-owner` protects no parser here. It stays because the
+/// delegated extraction writes object bytes and its command line is fixed: a
 /// different command line would change what lands in an object.
 const TAR_PARSE_FLAGS: [&str; 1] = ["--numeric-owner"];
 

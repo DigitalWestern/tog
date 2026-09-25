@@ -2871,7 +2871,7 @@ exit 0
     }
 
     /// The selection is the only authority on the sync path, so the object
-    /// it realizes must be the object the pin tables used to realize: same
+    /// it realizes must be the object the compiled pin tables realize: same
     /// id, on both platforms. If this drifts, every cached BEAM is orphaned.
     #[test]
     fn a_selected_row_and_the_pins_build_the_same_identity() {

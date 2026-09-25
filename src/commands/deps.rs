@@ -906,8 +906,8 @@ pub fn edit_requirements(path: &Path, add: &[String], remove: &[String]) -> io::
     }
 
     // A requirement and its indented `--hash` continuations are one logical
-    // record.  Editing only physical lines is what used to leave orphaned
-    // hash constraints behind after a remove.
+    // record.  Editing whole records, not physical lines, is what keeps a
+    // remove from leaving orphaned hash constraints behind.
     let physical = physical_lines(&text);
     let mut records = Vec::new();
     let mut index = 0;
@@ -2290,12 +2290,13 @@ mod tests {
         assert!(!missing.contains("pnpm major 9"), "{missing}");
     }
 
-    /// `pnpm-lock.yaml` decides membership, so the two shapes that used to
-    /// send `add` down the npm branch — writing a stray `package-lock.json`
-    /// inside a pnpm workspace — resolve correctly: an alternation group,
-    /// which pnpm's glob engine supports and tog's matcher never did, and
-    /// a block sequence at the parent key's own indent, which is ordinary
-    /// hand-written YAML that tog's lockfile-shaped parser rejects.
+    /// `pnpm-lock.yaml` decides membership, so two shapes a glob-based
+    /// reading would send down the npm branch — writing a stray
+    /// `package-lock.json` inside a pnpm workspace — resolve correctly: an
+    /// alternation group, which pnpm's glob engine supports and tog's
+    /// matcher does not, and a block sequence at the parent key's own
+    /// indent, which is ordinary hand-written YAML that tog's
+    /// lockfile-shaped parser rejects.
     #[test]
     fn workspace_membership_comes_from_the_lock_not_the_glob() {
         let scratch = TempDir::named("ws-importers");

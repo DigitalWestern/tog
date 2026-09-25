@@ -1956,7 +1956,7 @@ mod tests {
     }
 
     /// The selection is the only authority on the sync path, so the object
-    /// it realizes must be the object the pin table used to realize: same
+    /// it realizes must be the object the compiled pin table realizes: same
     /// id, on both platforms. If this drifts, every cached SDK is orphaned.
     #[test]
     fn a_selected_row_and_the_pin_build_the_same_identity() {

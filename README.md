@@ -69,8 +69,31 @@ is on, `tog doctor` names it.
 
 ## Install
 
-One line on Linux x86_64 or macOS arm64. It downloads the release binary
-for your machine, checks its sha256, puts it in `~/.local/bin`, adds that
+No release is tagged yet, so install from source. You need a Rust
+toolchain from [rustup](https://rustup.rs); `cargo install` puts the binary
+in `~/.cargo/bin`, which rustup already added to PATH:
+
+```sh
+git clone https://github.com/DigitalWestern/tog
+cd tog
+cargo install --path . --locked
+tog completions zsh > ~/.zfunc/_tog   # bash | zsh | fish; optional
+```
+
+`cargo install --git https://github.com/DigitalWestern/tog --locked` does
+the same without keeping a checkout. The repository is private for now, so
+both need your GitHub access. Do not `cargo install tog` from crates.io:
+that name belongs to an unrelated crate. To update a source install, pull
+and run `cargo install --path . --locked` again.
+
+### The one-line installer, once v0.1.0 is tagged
+
+Releases are built by
+[.github/workflows/release.yml](.github/workflows/release.yml) on a `v*`
+tag, and none has been pushed. Once `v0.1.0` is tagged, and the
+repository can be read without logging in (it is private now), this is one
+line on Linux x86_64 or macOS arm64. It downloads the release binary for
+your machine, checks its sha256, puts it in `~/.local/bin`, adds that
 directory to PATH if it is not already there, and installs bash, zsh, and
 fish completions:
 
@@ -96,7 +119,7 @@ That removes the binary, `~/.tog/env`, the completions, and the PATH blocks
 it added. It does not remove the store: it prints its path and size and the
 `rm -rf` that would, because the store is downloaded data, not the program.
 
-To update later, ask the binary itself:
+To update an installed release later, ask the binary itself:
 
 ```sh
 tog update --self
@@ -107,22 +130,10 @@ that version, and otherwise downloads the binary for your machine, checks
 the sha256 the release publishes, and renames it over the running one. It
 refuses, naming the directory, when that directory is not writable. `tog
 doctor` says when a newer release exists (one request; "not checked" when
-offline), and `tog --version` prints the commit and its date, so a stale
-binary can be told from a current one. Nothing checks in the background.
-
-From source, with a Rust toolchain (`cargo install` puts the binary in
-`~/.cargo/bin`, which rustup already added to PATH):
-
-```sh
-cargo install --git https://github.com/DigitalWestern/tog --locked
-# or, inside a checkout:
-cargo install --path . --locked
-tog completions zsh > ~/.zfunc/_tog   # bash | zsh | fish; optional
-```
-
-Do not `cargo install tog` from crates.io: that name belongs to an
-unrelated crate. Releases are built by
-[.github/workflows/release.yml](.github/workflows/release.yml) on a `v*` tag.
+offline, or while no release can be read), and `tog --version` prints the
+commit and its date, so a stale binary can be told from a current one.
+Nothing checks in the background. Until a release is tagged, `tog update
+--self` reports that it cannot read the latest release.
 
 ## Use
 

@@ -1555,7 +1555,7 @@ mod patch_hash_tests {
     /// (`tests/fixtures/hitrate-linux-2026-09-11.csv`): `paperclipai/paperclip`
     /// at commit ad0ad43 declares `fymctidcjqjhi4cj72qtivlxry` for
     /// `patches/@agentclientprotocol__claude-agent-acp@0.70.0.patch`. That file
-    /// has sha256 `823c105c…d6c` — the value tog used to print as "got" —
+    /// has sha256 `823c105c…d6c` — what a sha256 reading reports as "got" —
     /// and md5 `2e1829a0624c12747049fea13455778e`, which base32-encodes to the
     /// declared string. It confirms md5, not a truncated sha256, is the input.
     #[test]

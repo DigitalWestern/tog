@@ -541,9 +541,9 @@ pub(super) fn effective_deps<'a>(
 /// any embedded object id, and any 64-hex token, which it treated as a
 /// sha256 cache address. Both are checked against the *transitive* closure of
 /// the proposed evidence, because retaining an object that itself retains the
-/// artifact loses nothing — a Python environment now names the built wheel's
-/// object, and that object names the sdist tarball the environment used to
-/// name directly.
+/// artifact loses nothing — a current Python environment names the built
+/// wheel's object, and that object names the sdist tarball a legacy
+/// environment named directly.
 pub(super) fn certification_covers_legacy_retention(
     record: &crate::kernel::objmeta::Record,
     deps: &ObjectDeps,

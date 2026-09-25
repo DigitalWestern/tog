@@ -222,7 +222,7 @@ fn python_env_contract(identity: &Identity) -> Result<(), String> {
 /// `python-env/3` adds two unconditional inputs to the `/2` shape: a
 /// `package_digest` over every `pkg:` entry, and a `native` decision the
 /// producer spells out whether or not it mounts the library set. A dropped
-/// sole `pkg:` key now leaves a digest no package set produces, and a
+/// sole `pkg:` key leaves a digest no package set produces, and a
 /// dropped `native_libs` key leaves `native` claiming a mount that is not
 /// there. Both are recomputed here from the producer's own functions.
 fn python_env_v3_contract(identity: &Identity) -> Result<(), String> {
@@ -291,7 +291,7 @@ fn sdist_build_v3_contract(identity: &Identity) -> Result<(), String> {
 /// `sdist-build/4` adds the two unconditional mode fields. `build_mode` says
 /// whether this build had a Rust toolchain and vendor tree, and
 /// `native_mode` whether it mounted the native library set, so dropping a
-/// whole pair no longer collapses into the valid shape that never had one.
+/// whole pair never collapses into the valid shape that never had one.
 fn sdist_build_v4_contract(identity: &Identity) -> Result<(), String> {
     sdist_build_v3_contract(identity)?;
     let inputs = &identity.inputs;
