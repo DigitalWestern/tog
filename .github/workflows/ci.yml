@@ -1,6 +1,7 @@
-# Every push to main and every pull request: formatting, build, and the
-# offline test suite. The heavy network tests (`--ignored`) stay manual;
-# see README.md "Test".
+# Every push to main and every pull request: formatting, build, the
+# installer test, and the offline test suite. The heavy network tests
+# (`--ignored`) and tests/acceptance.sh run weekly in heavy.yml; see
+# README.md "Test".
 name: ci
 
 on:
@@ -16,11 +17,17 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - name: Install the Linux sandbox
-        run: sudo apt-get update && sudo apt-get install -y bubblewrap
+      # zsh so tests/install.sh runs, rather than skips, its check that a
+      # zsh user's .zshrc loads and completes.
+      - name: Install the Linux sandbox and zsh
+        run: sudo apt-get update && sudo apt-get install -y bubblewrap zsh
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo fmt --check
       - run: cargo build --locked
+      # Offline: packages target/debug/tog like release.yml, serves it from
+      # a local HTTP server, and runs install.sh into throwaway HOMEs.
+      - name: Installer
+        run: bash tests/install.sh
       # Every clippy warning fails the build (Cargo.toml's [lints.clippy]
       # allows a few lints). That includes store protection
       # (clippy.toml): raw children and lease acquisition only at the

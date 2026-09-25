@@ -93,7 +93,6 @@ by position.
 - **Quality review of 2026-09-24 (#264).** A whole-codebase review after
   the 09-20 to 09-24 run. #264 holds the work order and the overall verdict.
   Each line is one issue and one PR, in order:
-  - #234 ci: nothing runs the 65 ignored e2e tests, acceptance.sh or tests/install.sh.
   - #236 archive: npm, hex, sdist and most toolchain archives are unpacked by raw tar, not kernel::archive.
   - #238 http: pypi, rubygems, dotnet and deps call ureq directly, bypassing kernel::fetch.
   - #239 toolchain: SourcePolicy is documented as enforced on every fetch but never runs.

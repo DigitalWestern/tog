@@ -19,6 +19,8 @@ pass=0; fail=0
 ok()  { pass=$((pass+1)); echo "  ok: $1"; }
 bad() { fail=$((fail+1)); echo "  FAIL: $1"; }
 check() { local desc="$1"; shift; if "$@" >/dev/null 2>&1; then ok "$desc"; else bad "$desc"; fi; }
+# Bash-native, because `sh` is dash on Ubuntu and has no here-strings.
+absent() { ! grep -Fq "$1" <<<"$2"; }
 count_marks() { grep -c '# >>> tog >>>' "$1" 2>/dev/null || true; }
 
 case "$(uname -s)/$(uname -m)" in
@@ -218,7 +220,7 @@ ln -s "$H/nowhere/tog" "$H/.local/bin/tog"
 out="$(run_installer "$H" /bin/bash "$BASE_PATH" --uninstall 2>&1)" || { echo "$out"; bad "--uninstall exited non-zero"; }
 check "broken symlink left in place"      test -L "$H/.local/bin/tog"
 check "says the target does not exist"    grep -Fq 'which does not exist' <<<"$out"
-check "does not claim there is no tog"    sh -c "! grep -Fq 'no tog binary at' <<<\"\$(cat)\"" <<<"$out"
+check "does not claim there is no tog"    absent 'no tog binary at' "$out"
 
 echo "== 17. a relative symlink that escapes the install dir is refused"
 H="$WORK/h19"; mkdir -p "$H/.local/bin" "$H/elsewhere"

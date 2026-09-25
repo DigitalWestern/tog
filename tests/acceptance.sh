@@ -5,9 +5,19 @@ set -euo pipefail
 
 TOG="$(cd "$(dirname "$0")/.." && pwd)/target/debug/tog"
 FIXTURES="$(cd "$(dirname "$0")/fixtures" && pwd)"
-WORK="$(mktemp -d /tmp/tog-accept.XXXXXX)"
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/tog-accept.XXXXXX")"
 export TOG_STORE="$WORK/store"
 trap 'chmod -R u+w "$WORK" 2>/dev/null; rm -rf "$WORK"' EXIT
+# A throwaway home, so the developer's or runner's ~/.tog is never read or
+# written. cargo keeps the real one: rustup and the registry cache live there.
+REAL_HOME="$HOME"
+export HOME="$WORK/home"
+mkdir -p "$HOME"
+# audit trusts only signed closures: every sync here signs with a throwaway
+# key, and the machine policy (TOG_POLICY) trusts it.
+"$TOG" keygen "$WORK/signing.key" > "$WORK/policy.toml"
+export TOG_SIGNING_KEY="$WORK/signing.key"
+export TOG_POLICY="$WORK/policy.toml"
 
 pass=0; fail=0
 
@@ -99,14 +109,14 @@ else
 fi
 
 echo "== 9. a build that attempts network access fails (evil sdist fixture)"
-if (cd "$(dirname "$0")/.." && cargo test --quiet --test sandbox_deny -- --ignored) ; then
+if (cd "$(dirname "$0")/.." && HOME="$REAL_HOME" cargo test --quiet --test sandbox_deny -- --ignored) ; then
   ok "network egress during build was denied"
 else
   bad "evil build did not fail as required"
 fi
 
 echo "== 9b. npm install scripts: sandboxed, network access fails closed"
-if (cd "$(dirname "$0")/.." && cargo test --quiet --test npm_scripts -- --ignored) ; then
+if (cd "$(dirname "$0")/.." && HOME="$REAL_HOME" cargo test --quiet --test npm_scripts -- --ignored) ; then
   ok "install scripts run hermetically; network egress denied"
 else
   bad "npm script sandbox tests failed"
@@ -224,11 +234,17 @@ OUT=$(cd "$WORK/rb" && "$TOG" run sh -c "$WHICH --version")
 case "$OUT" in *13.*) ok "store binstub executes ($OUT)";; *) bad "store binstub: $OUT";; esac
 
 echo "== 10g. elixir: hex deps + sandboxed mix compile (rebar3 dep)"
+# The Linux OTP needs glibc 2.43; a host below that (ubuntu-22.04 in
+# .github/workflows/heavy.yml) sets TOG_ACCEPT_SKIP_ELIXIR=1 and skips it.
+if [ "${TOG_ACCEPT_SKIP_ELIXIR:-}" = 1 ]; then
+  echo "  skip: elixir (TOG_ACCEPT_SKIP_ELIXIR=1; the Linux OTP needs glibc 2.43)"
+else
 cp -R "$FIXTURES/elixir-hello" "$WORK/ex"
 (cd "$WORK/ex" && "$TOG" sync)
 (cd "$WORK/ex" && "$TOG" build)
 OUT=$(cd "$WORK/ex" && "$TOG" run mix run -e 'IO.puts(ExReal.hello())')
 case "$OUT" in *'{"beam":"ok"}'*) ok "elixir build + run ($OUT)";; *) bad "elixir output: $OUT";; esac
+fi
 
 echo "== 10h. dotnet: locked nuget packages + sandboxed two-phase build"
 cp -R "$FIXTURES/dotnet-hello" "$WORK/dn"
@@ -290,15 +306,32 @@ fi
 NODE_CLOSURE="$WORK/p/.tog/closures/node.json"
 mv "$NODE_CLOSURE" "$WORK/node.json.orig"
 cp "$WORK/node.json.orig" "$NODE_CLOSURE"
-python3 - "$NODE_CLOSURE" <<'PLANT'
-import json, sys
-path = sys.argv[1]
+python3 - "$NODE_CLOSURE" "$TOG_SIGNING_KEY" <<'PLANT'
+import json, os, subprocess, sys, tempfile
+path, key_file = sys.argv[1], sys.argv[2]
 doc = json.load(open(path))
 doc["body"]["exceptions"].append({
     "kind": "install-script-failed",
     "subject": "acceptance-plant",
     "detail": "planted by tests/acceptance.sh step 13",
 })
+# Re-sign it with the throwaway key, as kernel::signing does: ed25519 over
+# the envelope minus its signature, compact JSON with sorted keys. Without
+# this, audit reports a bad signature and never looks at the exception.
+seed = bytes.fromhex(open(key_file).read().strip().removeprefix("ed25519:"))
+unsigned = {name: value for name, value in doc.items() if name != "signature"}
+message = json.dumps(unsigned, separators=(",", ":"), sort_keys=True, ensure_ascii=False)
+with tempfile.TemporaryDirectory() as scratch:
+    der = os.path.join(scratch, "key.der")
+    with open(der, "wb") as handle:  # the seed as a PKCS#8 Ed25519 key
+        handle.write(bytes.fromhex("302e020100300506032b657004220420") + seed)
+    signed = os.path.join(scratch, "message")
+    with open(signed, "wb") as handle:
+        handle.write(message.encode())
+    doc["signature"]["sig"] = subprocess.run(
+        ["openssl", "pkeyutl", "-sign", "-rawin", "-keyform", "DER", "-inkey", der, "-in", signed],
+        check=True, capture_output=True,
+    ).stdout.hex()
 with open(path, "w") as handle:
     json.dump(doc, handle, indent=2)
 PLANT
