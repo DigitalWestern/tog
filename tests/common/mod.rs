@@ -83,7 +83,12 @@ pub fn command(cwd: &Path, home: &Path, store: &Path) -> Command {
 /// built: a test of self-update runs a copy it owns, since the update
 /// replaces the file it was started from.
 pub fn command_for(binary: &Path, cwd: &Path, home: &Path, store: &Path) -> Command {
-    let mut command = Command::new(binary);
+    configure(Command::new(binary), cwd, home, store)
+}
+
+/// The environment [`command_for`] gives the binary, applied to `command`,
+/// which may be a wrapper that execs the binary.
+fn configure(mut command: Command, cwd: &Path, home: &Path, store: &Path) -> Command {
     for (name, _) in std::env::vars_os() {
         let leaks = name
             .to_str()
@@ -102,6 +107,33 @@ pub fn command_for(binary: &Path, cwd: &Path, home: &Path, store: &Path) -> Comm
         )
         .env("NO_COLOR", "1");
     command
+}
+
+/// [`command`] with the network cut: a user and network namespace on Linux
+/// (`unshare -rn`), a Seatbelt profile that denies network on macOS, the
+/// same wrappers `tests/acceptance.sh` uses. A run that reaches for the
+/// network fails instead of quietly downloading.
+pub fn offline_command(cwd: &Path, home: &Path, store: &Path) -> Command {
+    let binary = env!("CARGO_BIN_EXE_tog");
+    let mut wrapper = if cfg!(target_os = "macos") {
+        let mut wrapper = Command::new("sandbox-exec");
+        wrapper.args(["-p", "(version 1)(allow default)(deny network*)"]);
+        wrapper
+    } else {
+        let mut wrapper = Command::new("unshare");
+        wrapper.arg("-rn");
+        wrapper
+    };
+    wrapper.arg(binary);
+    configure(wrapper, cwd, home, store)
+}
+
+/// [`tog`] with the network cut, see [`offline_command`].
+pub fn tog_offline(cwd: &Path, home: &Path, args: &[&str]) -> Output {
+    offline_command(cwd, home, &home.join("store"))
+        .args(args)
+        .output()
+        .expect("spawn tog without network")
 }
 
 /// Run the binary in `cwd` with `home` as its home and `home/store` as its

@@ -19,7 +19,7 @@ mod common;
 
 use common::{
     assert_frozen_never_writes_the_lock, assert_ok, assert_private_run_home, copy_tree, fixture,
-    temp_entries, tog, TempDir,
+    temp_entries, tog, tog_offline, TempDir,
 };
 
 const DARWIN_FINGERPRINT: &str = "c35290f692496d51";
@@ -112,6 +112,26 @@ fn elixir_sync_sandboxed_build_and_run() {
     );
     let otp = beam.join("otp");
     assert!(otp.join("bin/erl").is_file());
+
+    // An unchanged project re-syncs with the network cut: the mix.exs and
+    // mix.lock consistency check passed for these exact inputs on the first
+    // sync, so it is not asked of the Hex registry again, and the same
+    // objects are projected. The planner's Mix and Hex home is removed
+    // first: it is scratch every project on the machine shares, so another
+    // project's sync replaces the packages in it, and a re-sync that leans
+    // on it only works offline by luck.
+    remove_tree(&store.join("planner-hexhome"));
+    assert_ok(
+        tog_offline(&project, &temp.0, &["sync"]),
+        "offline re-sync of the unchanged project",
+    );
+    let offline = closure_body(&project);
+    for key in ["beam_object", "deps_object"] {
+        assert_eq!(
+            offline[key], closure[key],
+            "the offline re-sync projected a different {key}"
+        );
+    }
     // Staging is cleaned up: no `stage-` directories left under <store>/tmp.
     let leftovers: Vec<_> = std::fs::read_dir(store_canon.join("tmp"))
         .unwrap()

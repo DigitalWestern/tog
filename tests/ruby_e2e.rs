@@ -15,7 +15,7 @@ use std::process::Command;
 
 mod common;
 
-use common::{assert_frozen_never_writes_the_lock, assert_ok, fixture, tog, TempDir};
+use common::{assert_frozen_never_writes_the_lock, assert_ok, fixture, tog, tog_offline, TempDir};
 
 /// Linux project: only the SOURCE (`ruby` platform) variant of nokogiri, so
 /// the gate compiles its vendored libxml2/libxslt in the sandbox instead of
@@ -539,6 +539,46 @@ fn ruby_sync_native_ext_and_run() {
             "gem object platform must be the pinned interpreter's Gem::Platform.local"
         );
     }
+
+    // An unchanged project re-syncs with the network cut. The lock has no
+    // CHECKSUMS section, so every digest the plan needs comes from what the
+    // first sync verified and recorded in the store, and the same objects
+    // are projected again.
+    let closure = |project: &Path| -> serde_json::Value {
+        serde_json::from_slice(&std::fs::read(project.join(".tog/closures/ruby.json")).unwrap())
+            .unwrap()
+    };
+    let before = closure(&project);
+    assert_ok(
+        tog_offline(&project, &temp.0, &["sync"]),
+        "offline re-sync of the unchanged project",
+    );
+    let after = closure(&project);
+    for key in ["ruby_object", "gems_object"] {
+        assert_eq!(
+            after["body"][key], before["body"][key],
+            "the offline re-sync projected a different {key}"
+        );
+    }
+    // A store whose gem object predates its digest records (or lost them)
+    // records them on the next online sync, which only hits the object:
+    // each gem is verified again from the artifact cache first. After that
+    // the offline re-sync works again.
+    let records = store.join("records/rubygems-sha256");
+    assert!(records.is_dir(), "the sync recorded no rubygems.org digest");
+    tog::kernel::store::remove_tree(&records).unwrap();
+    assert_ok(
+        tog(&project, &temp.0, &["sync"]),
+        "sync over the gem object",
+    );
+    assert!(
+        std::fs::read_dir(&records).unwrap().count() > 0,
+        "an object hit recorded no rubygems.org digest"
+    );
+    assert_ok(
+        tog_offline(&project, &temp.0, &["sync"]),
+        "offline re-sync after an object hit recorded the digests",
+    );
 
     // Nothing that follows may depend on a staging directory: after the
     // commits, clear whatever is left under store/tmp.

@@ -14,7 +14,7 @@ pub mod tailor;
 
 use crate::kernel::activity::StoreActivity;
 use crate::kernel::digest::Algo;
-use crate::kernel::fetch::{download_verified_held, hash_file, Digest};
+use crate::kernel::fetch::{download_verified_held, hash_file, CacheLease, Digest};
 use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::platform::Platform;
 use crate::kernel::sandbox::{force_env, BuildSpec};
@@ -663,6 +663,64 @@ pub struct RubyGem {
     pub platform: String,
     pub full_name: String,
     pub sha256: String,
+    /// The digest came from the rubygems.org API on this plan, so once the
+    /// downloaded bytes match it, it is worth recording in the store.
+    /// Planning state only: never serialized, so closures and object
+    /// identities are unchanged by it.
+    #[serde(skip)]
+    pub digest_from_api: bool,
+}
+
+/// The store record kind holding rubygems.org's sha256 for one gem
+/// coordinate.
+const GEM_DIGESTS: &str = "rubygems-sha256";
+
+/// A gem coordinate as a store record key: a JSON array, so no name,
+/// version or platform spelling can run into the next field.
+fn gem_digest_key(name: &str, version: &str, platform: &str) -> String {
+    serde_json::json!([name, version, platform]).to_string()
+}
+
+/// The sha256 rubygems.org serves for this (name, version, platform), as an
+/// earlier sync recorded it, or `None` when none has.
+///
+/// This is store data, not project data, which is why it may stand in for
+/// the API where a plan cache in the project may not. A file in the project
+/// ships with the repository, so a cache there says whatever the repo's
+/// author wrote, and its predictable key makes it forgeable authority over
+/// which bytes get installed. The store is written only by tog on this
+/// machine, and a record exists only because tog asked rubygems.org for
+/// exactly this coordinate's digest, downloaded
+/// `rubygems.org/downloads/<full_name>.gem`, and found that the bytes hash
+/// to that digest and their embedded gemspec names this coordinate.
+/// rubygems.org never republishes a version, so the answer does not go
+/// stale. A digest from a lock's CHECKSUMS section is never recorded: that
+/// is the repository's claim, not rubygems.org's.
+fn recorded_gem_digest(
+    store: &Store,
+    name: &str,
+    version: &str,
+    platform: &str,
+) -> io::Result<Option<String>> {
+    let value = store.read_record(GEM_DIGESTS, &gem_digest_key(name, version, platform))?;
+    Ok(value
+        .and_then(|value| value["sha256"].as_str().map(str::to_string))
+        .filter(|hex| hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_hexdigit())))
+}
+
+/// Record a digest the API gave for `gem` once its bytes have been checked
+/// against it. A failed write costs the next sync one API call and nothing
+/// else, so it is reported and the sync goes on.
+fn record_gem_digest(store: &Store, activity: &StoreActivity, gem: &RubyGem) {
+    let key = gem_digest_key(&gem.name, &gem.version, &gem.platform);
+    let value = serde_json::json!({"sha256": gem.sha256});
+    if let Err(error) = store.write_record(activity, GEM_DIGESTS, &key, &value) {
+        ui::note(&format!(
+            "{}: rubygems.org digest not recorded in the store ({error}); \
+             the next sync asks rubygems.org again",
+            gem.full_name
+        ));
+    }
 }
 
 /// Where a planned gem's `.gem` is fetched from. rubygems.org is the only
@@ -767,10 +825,12 @@ pub fn generate_lock(
 }
 
 /// Plan the gem closure: Bundler-delegated lock parsing + platform
-/// selection, tog-pinned hashes (lock CHECKSUMS section when present,
-/// rubygems.org v2 API otherwise). Never cached: every sync re-derives the
-/// plan from the lock. The project is read through the held descriptor;
-/// its path is only the store Ruby's working directory and arguments.
+/// selection, tog-pinned hashes (lock CHECKSUMS section when present, else
+/// the digest an earlier sync verified and recorded in the store, else the
+/// rubygems.org v2 API). The plan itself is never cached: every sync
+/// re-derives it from the lock. The project is read through the held
+/// descriptor; its path is only the store Ruby's working directory and
+/// arguments.
 pub fn plan_ruby(
     store: &Store,
     activity: &StoreActivity,
@@ -785,9 +845,10 @@ pub fn plan_ruby(
     let lock_path = project_dir.join("Gemfile.lock");
     require_lock(project)?;
     let lock = read_gemfile_lock(project)?;
-    // No plan cache: an editable cache with a predictable key is forgeable
-    // authority. Planning re-derives from the lock every sync; the store's
-    // object cache still makes realizes instant.
+    // No plan cache in the project: an editable cache with a predictable
+    // key is forgeable authority. Planning re-derives from the lock every
+    // sync; the store's digest records keep an unchanged lock off the
+    // network, and its object cache makes realizes instant.
 
     let scratch = store.stage_with_activity(activity)?;
     let helper = scratch.join("helper.rb");
@@ -860,9 +921,16 @@ pub fn plan_ruby(
 
     let mut gems = Vec::new();
     for g in parsed.gems {
-        let sha256 = match g.checksum {
-            Some(c) => c,
-            None => {
+        let mut digest_from_api = false;
+        let recorded = match g.checksum {
+            Some(_) => None,
+            None => recorded_gem_digest(store, &g.name, &g.version, &g.platform)?,
+        };
+        let sha256 = match (g.checksum, recorded) {
+            (Some(c), _) => c,
+            (None, Some(recorded)) => recorded,
+            (None, None) => {
+                digest_from_api = true;
                 // ALWAYS platform-qualified: the bare endpoint returns the
                 // latest-PUSHED variant (racc 1.8.1 returns the java gem's
                 // sha!). Validate the reply's platform too.
@@ -897,6 +965,7 @@ pub fn plan_ruby(
             platform: g.platform,
             full_name: g.full_name,
             sha256,
+            digest_from_api,
         });
     }
     let plan = RubyPlan {
@@ -917,6 +986,111 @@ pub fn plan_ruby(
     Ok((plan, hex::encode(Sha256::digest(lock.as_bytes()))))
 }
 
+/// Fetch one planned gem into the artifact cache, or find it there, verified
+/// against the plan's sha256, then check that its embedded gemspec names
+/// exactly the planned coordinate. Returns the cache lease, which keeps the
+/// `.gem` from being swept while it is held, and the gem's executables.
+fn verify_gem(
+    store: &Store,
+    activity: &StoreActivity,
+    ruby_obj: &Path,
+    scratch: &Path,
+    helper: &Path,
+    g: &RubyGem,
+) -> io::Result<(CacheLease, Vec<String>)> {
+    let url = gem_url(g);
+    let lease = download_verified_held(store, activity, &url, &g.sha256)
+        .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", g.full_name)))?;
+    let out = run_ruby(
+        activity,
+        ruby_obj,
+        scratch,
+        scratch,
+        &[
+            "ruby",
+            helper
+                .to_str()
+                .ok_or_else(|| err("helper path not UTF-8"))?,
+            "spec",
+            lease.to_str().ok_or_else(|| err("gem path not UTF-8"))?,
+        ],
+    )?;
+    if !out.status.success() {
+        return Err(err(format!(
+            "{}: gemspec read failed: {}",
+            g.full_name,
+            String::from_utf8_lossy(&out.stderr).trim()
+        )));
+    }
+    let spec: serde_json::Value = serde_json::from_slice(&out.stdout)
+        .map_err(|e| err(format!("{}: spec json: {e}", g.full_name)))?;
+    let canonical = if g.platform == "ruby" {
+        format!("{}-{}", g.name, g.version)
+    } else {
+        format!("{}-{}-{}", g.name, g.version, g.platform)
+    };
+    if spec["name"].as_str() != Some(g.name.as_str())
+        || spec["version"].as_str() != Some(g.version.as_str())
+        || spec["platform"].as_str() != Some(g.platform.as_str())
+        || g.full_name != canonical
+    {
+        return Err(err(format!(
+            "{}: embedded gemspec disagrees with the plan ({} {} {})",
+            g.full_name, spec["name"], spec["version"], spec["platform"]
+        )));
+    }
+    let executables = spec["executables"]
+        .as_array()
+        .map(|exes| {
+            exes.iter()
+                .filter_map(|e| e.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok((lease, executables))
+}
+
+/// On an object hit, record the API digests this plan used. The object
+/// shows that some earlier build checked these gems, but a record is only
+/// ever written on a check made now: each gem is verified again from the
+/// artifact cache (or downloaded, when the cache was swept) before its
+/// digest is recorded. Best effort, like every record write.
+fn record_api_digests_on_hit(
+    store: &Store,
+    activity: &StoreActivity,
+    plan: &RubyPlan,
+    ruby_obj: &Path,
+) {
+    let pending: Vec<&RubyGem> = plan.gems.iter().filter(|g| g.digest_from_api).collect();
+    if pending.is_empty() {
+        return;
+    }
+    let result = (|| -> io::Result<()> {
+        let scratch = store.stage_with_activity(activity)?;
+        let helper = scratch.join("helper.rb");
+        let outcome = fs::write(&helper, HELPER).map(|()| {
+            for g in pending {
+                match verify_gem(store, activity, ruby_obj, &scratch, &helper, g) {
+                    Ok(_) => record_gem_digest(store, activity, g),
+                    Err(error) => ui::note(&format!(
+                        "{}: rubygems.org digest not recorded in the store ({error}); \
+                         the next sync asks rubygems.org again",
+                        g.full_name
+                    )),
+                }
+            }
+        });
+        let _ = crate::kernel::store::remove_tree(&scratch);
+        outcome
+    })();
+    if let Err(error) = result {
+        ui::note(&format!(
+            "rubygems.org digests not recorded in the store ({error}); \
+             the next sync asks rubygems.org again"
+        ));
+    }
+}
+
 /// Realize the immutable GEM_HOME object: dependency-first sandboxed
 /// installs (native extensions compile here, network denied).
 pub fn realize_gems(
@@ -935,6 +1109,7 @@ pub fn realize_gems(
     let id = identity.object_id();
     if store.has_with_activity(activity, &id)? {
         crate::kernel::policy::check_cached_with_activity(store, activity, &id)?;
+        record_api_digests_on_hit(store, activity, plan, ruby_obj);
         return Ok(store.object_path(&id));
     }
 
@@ -951,60 +1126,21 @@ pub fn realize_gems(
     let mut _cache_leases = Vec::new();
     let mut executables: BTreeMap<String, String> = BTreeMap::new();
     for g in &plan.gems {
-        let url = gem_url(g);
-        let lease = download_verified_held(store, activity, &url, &g.sha256)
-            .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", g.full_name)))?;
+        let (lease, exes) = verify_gem(store, activity, ruby_obj, &scratch, &helper, g)?;
         let file_path = lease.to_path_buf();
         _cache_leases.push(lease);
-        let out = run_ruby(
-            activity,
-            ruby_obj,
-            &scratch,
-            &scratch,
-            &[
-                "ruby",
-                helper.to_str().unwrap(),
-                "spec",
-                file_path
-                    .to_str()
-                    .ok_or_else(|| err("gem path not UTF-8"))?,
-            ],
-        )?;
-        if !out.status.success() {
-            return Err(err(format!(
-                "{}: gemspec read failed: {}",
-                g.full_name,
-                String::from_utf8_lossy(&out.stderr).trim()
-            )));
+        // The bytes rubygems.org serves match the digest its API gave and
+        // name this coordinate: that is what a digest record vouches for.
+        if g.digest_from_api {
+            record_gem_digest(store, activity, g);
         }
-        let spec: serde_json::Value = serde_json::from_slice(&out.stdout)
-            .map_err(|e| err(format!("{}: spec json: {e}", g.full_name)))?;
-        let canonical = if g.platform == "ruby" {
-            format!("{}-{}", g.name, g.version)
-        } else {
-            format!("{}-{}-{}", g.name, g.version, g.platform)
-        };
-        if spec["name"].as_str() != Some(g.name.as_str())
-            || spec["version"].as_str() != Some(g.version.as_str())
-            || spec["platform"].as_str() != Some(g.platform.as_str())
-            || g.full_name != canonical
-        {
-            return Err(err(format!(
-                "{}: embedded gemspec disagrees with the plan ({} {} {})",
-                g.full_name, spec["name"], spec["version"], spec["platform"]
-            )));
-        }
-        if let Some(exes) = spec["executables"].as_array() {
-            for e in exes {
-                if let Some(e) = e.as_str() {
-                    if let Some(prev) = executables.insert(e.to_string(), g.name.clone()) {
-                        return Err(err(format!(
-                            "executable {e:?} provided by both {prev} and {}; refusing \
-                             ambiguous bin dir",
-                            g.name
-                        )));
-                    }
-                }
+        for e in exes {
+            if let Some(prev) = executables.insert(e.clone(), g.name.clone()) {
+                return Err(err(format!(
+                    "executable {e:?} provided by both {prev} and {}; refusing \
+                     ambiguous bin dir",
+                    g.name
+                )));
             }
         }
         artifacts.push((g, file_path));
@@ -1180,6 +1316,7 @@ pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
             platform: "ruby".into(),
             full_name: "rake-13.2.1".into(),
             sha256: "a".repeat(64),
+            digest_from_api: false,
         }],
         ..empty_plan.clone()
     };
@@ -1274,6 +1411,7 @@ mod tests {
                 platform: "ruby".into(),
                 full_name: "rake-13.2.1".into(),
                 sha256: "a".repeat(64),
+                digest_from_api: false,
             }],
         }
     }
@@ -1392,6 +1530,7 @@ mod tests {
                 platform: "ruby".into(),
                 full_name: "rake-13.2.1".into(),
                 sha256: "a".repeat(64),
+                digest_from_api: false,
             }],
         };
         let identity = ruby_gems_identity(&spec, &plan);
@@ -1409,6 +1548,7 @@ mod tests {
             platform: "ruby".into(),
             full_name: "rake-13.2.1".into(),
             sha256: "a".repeat(64),
+            digest_from_api: false,
         };
         let ok = RubyPlan {
             ruby_version: RUBY_VERSION.into(),
@@ -1451,6 +1591,7 @@ mod tests {
                     platform: "ruby".into(),
                     full_name: "mini_portile2-2.8.9".into(),
                     sha256: "a".repeat(64),
+                    digest_from_api: false,
                 },
                 RubyGem {
                     name: "nokogiri".into(),
@@ -1458,6 +1599,7 @@ mod tests {
                     platform: "x86_64-linux".into(),
                     full_name: "nokogiri-1.18.10-x86_64-linux".into(),
                     sha256: "b".repeat(64),
+                    digest_from_api: false,
                 },
             ],
         };
@@ -1639,6 +1781,67 @@ mod tests {
         let fresh = ProjectRoot::open(&project).unwrap();
         assert!(!tailor::Ruby.detect(&fresh).unwrap());
         assert_eq!(read_gemfile_lock(&fresh).unwrap(), "REPLACEMENT\n");
+    }
+
+    /// A recorded digest is found only by its exact (name, version,
+    /// platform), and a record that is not a sha256 is no record.
+    #[test]
+    fn gem_digest_records_are_keyed_by_the_whole_coordinate() {
+        let temp = TempDir::named("ruby-gem-digests");
+        let root = temp.0.join("store");
+        for sub in ["objects", "meta", "tmp"] {
+            fs::create_dir_all(root.join(sub)).unwrap();
+        }
+        let store = Store {
+            root: root.canonicalize().unwrap(),
+        };
+        let activity = store
+            .activity(crate::kernel::activity::ActivityMode::Shared)
+            .unwrap();
+        let gem = RubyGem {
+            name: "racc".into(),
+            version: "1.8.1".into(),
+            platform: "ruby".into(),
+            full_name: "racc-1.8.1".into(),
+            sha256: "c".repeat(64),
+            digest_from_api: true,
+        };
+        assert_eq!(
+            recorded_gem_digest(&store, "racc", "1.8.1", "ruby").unwrap(),
+            None
+        );
+        record_gem_digest(&store, &activity, &gem);
+        assert_eq!(
+            recorded_gem_digest(&store, "racc", "1.8.1", "ruby").unwrap(),
+            Some("c".repeat(64))
+        );
+        assert_eq!(
+            recorded_gem_digest(&store, "racc", "1.8.1", "java").unwrap(),
+            None
+        );
+        assert_eq!(
+            recorded_gem_digest(&store, "racc", "1.8.2", "ruby").unwrap(),
+            None
+        );
+        // Name and version never run together: "a-1" at "2" is not "a" at
+        // "1-2".
+        let key = gem_digest_key("a-1", "2", "ruby");
+        assert_ne!(key, gem_digest_key("a", "1-2", "ruby"));
+        store
+            .write_record(
+                &activity,
+                GEM_DIGESTS,
+                &key,
+                &serde_json::json!({"sha256": "zz"}),
+            )
+            .unwrap();
+        assert_eq!(
+            recorded_gem_digest(&store, "a-1", "2", "ruby").unwrap(),
+            None
+        );
+        // The digest is planning state: it never reaches a serialized plan.
+        let json = serde_json::to_value(&gem).unwrap();
+        assert!(json.get("digest_from_api").is_none(), "{json}");
     }
 
     #[test]

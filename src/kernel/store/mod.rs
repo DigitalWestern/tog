@@ -18,6 +18,7 @@ mod env;
 mod fsops;
 mod objects;
 mod projection;
+mod records;
 mod roots;
 
 use env::home;
@@ -36,6 +37,7 @@ pub use roots::*;
 ///   <root>/cache/sha256/<hash>      verified downloaded artifacts
 ///   <root>/tmp/                     staging for atomic renames
 ///   <root>/run-homes/<key>/<eco>/   private HOME for `tog run` children
+///   <root>/records/<kind>/<k>.json  facts tog verified itself, by key
 ///
 /// ponytail: store root defaults to ~/.tog/store (TOG_STORE overrides).
 /// The /opt/tog/store decision only matters once binary-cache sharing
@@ -136,6 +138,7 @@ impl Store {
             "backups",
             "root-locks",
             "run-homes",
+            "records",
         ] {
             ensure_directory_tree(&root, Path::new(sub))
                 .map_err(|error| open_error(&root.join(sub), from_env, error))?;

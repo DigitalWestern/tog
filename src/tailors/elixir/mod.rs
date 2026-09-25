@@ -1467,6 +1467,124 @@ pub fn generate_lock(
     Ok(())
 }
 
+/// The store record kind holding, per project, the input hash of the last
+/// `mix deps.get --check-locked` that passed there.
+const CHECK_LOCKED: &str = "mix-check-locked";
+
+/// Directory names the manifest walk never enters: tog's and the user's
+/// dot state, `_build`, fetched dependency sources, and JavaScript assets.
+fn skipped_by_manifest_walk(name: &str) -> bool {
+    name.starts_with('.') || name.starts_with('_') || name == "deps" || name == "node_modules"
+}
+
+/// The hash of everything `mix deps.get --check-locked` reads to decide that
+/// mix.exs and mix.lock agree: the project's canonical path, the BEAM object
+/// that runs the check, the lock, and every `mix.exs` in the project (an
+/// umbrella's apps each have one). Equal hashes mean the check would read
+/// the same bytes and give the same answer, so asking the Hex registry again
+/// is redundant. `None` when a `mix.exs` below the root is a symlink (the
+/// walk never follows one, so it cannot vouch for what it points at) or the
+/// walk cannot read the tree: the check then runs every time. The root's
+/// own mix.exs is read the way mix reads it, following a symlink.
+fn check_locked_inputs(
+    project: &ProjectRoot,
+    beam_obj: &Path,
+    lock: &str,
+) -> io::Result<Option<String>> {
+    use crate::kernel::fsroot::Entry;
+    fn walk(dir: &ProjectRoot, rel: &Path, files: &mut Vec<(String, String)>) -> io::Result<bool> {
+        let names = dir
+            .read_input_dir(Path::new("."))?
+            .ok_or_else(|| err(format!("mix.exs walk: {} vanished", dir.path().display())))?;
+        for name in names {
+            let lossy = name.to_string_lossy();
+            let child = Path::new(&name);
+            match dir.entry(child)? {
+                Entry::Directory if !skipped_by_manifest_walk(&lossy) => {
+                    let sub = dir.subdir(child)?.ok_or_else(|| {
+                        err(format!(
+                            "mix.exs walk: {} vanished",
+                            dir.path().join(child).display()
+                        ))
+                    })?;
+                    if !walk(&sub, &rel.join(child), files)? {
+                        return Ok(false);
+                    }
+                }
+                Entry::Regular if lossy == "mix.exs" && !rel.as_os_str().is_empty() => {
+                    let content = dir.read_file(child)?.ok_or_else(|| {
+                        err(format!(
+                            "mix.exs walk: {} vanished",
+                            dir.path().join(child).display()
+                        ))
+                    })?;
+                    let rel = rel.join(child).to_string_lossy().into_owned();
+                    files.push((rel, hex::encode(Sha256::digest(&content))));
+                }
+                Entry::Symlink if lossy == "mix.exs" && !rel.as_os_str().is_empty() => {
+                    return Ok(false);
+                }
+                _ => {}
+            }
+        }
+        Ok(true)
+    }
+    let root_manifest = project
+        .read_input(Path::new("mix.exs"))?
+        .ok_or_else(|| err("mix.exs not found"))?;
+    let mut files = vec![(
+        "mix.exs".to_string(),
+        hex::encode(Sha256::digest(&root_manifest)),
+    )];
+    // A tree the walk cannot read through (an unreadable directory, an
+    // entry swapped mid-walk) is one it cannot vouch for: the check runs.
+    if !matches!(walk(project, Path::new(""), &mut files), Ok(true)) {
+        return Ok(None);
+    }
+    files.sort();
+    let mut hasher = Sha256::new();
+    hasher.update(b"elixir-check-locked/1\0");
+    hasher.update(project.path().as_os_str().as_encoded_bytes());
+    hasher.update(b"\0");
+    hasher.update(crate::kernel::store::object_id_from_path(beam_obj)?.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(Sha256::digest(lock.as_bytes()));
+    for (rel, hash) in &files {
+        hasher.update(format!("{hash}  {rel}\n").as_bytes());
+    }
+    Ok(Some(hex::encode(hasher.finalize())))
+}
+
+/// Whether the last passing check in this project, as tog recorded it in the
+/// store, read exactly `inputs`. The record is store data: a repository
+/// cannot ship one, so a match means tog itself saw the check pass on these
+/// bytes.
+fn check_locked_passed(store: &Store, project: &ProjectRoot, inputs: &str) -> io::Result<bool> {
+    let key = project.path().display().to_string();
+    Ok(store
+        .read_record(CHECK_LOCKED, &key)?
+        .is_some_and(|value| value["input_hash"].as_str() == Some(inputs)))
+}
+
+/// Record that the check passed on `inputs`. A failed write costs the next
+/// sync one registry round trip and nothing else, so it is reported and the
+/// sync goes on.
+fn record_check_locked(
+    store: &Store,
+    activity: &StoreActivity,
+    project: &ProjectRoot,
+    inputs: &str,
+) {
+    let key = project.path().display().to_string();
+    let value = serde_json::json!({"input_hash": inputs});
+    if let Err(error) = store.write_record(activity, CHECK_LOCKED, &key, &value) {
+        ui::note(&format!(
+            "the passing mix.exs and mix.lock check was not recorded in the store \
+             ({error}); the next sync runs it again"
+        ));
+    }
+}
+
 /// Plan: AST-parse mix.lock under the pinned toolchain (lock-only, no
 /// eval). The project is read through the held descriptor; mix itself
 /// still runs in `project.path()`.
@@ -1482,30 +1600,46 @@ pub fn plan_elixir(
     }
     require_lock(project)?;
     let project_dir = project.path();
-    let scratch = store.stage_with_activity(activity)?;
-    // Consistency gate: exit status only (this evaluates mix.exs —
-    // delegated trust, never artifact authority). Network-permitted
-    // (plan-phase doctrine): --check-locked needs the hex registry; a
-    // persistent planner HEX_HOME keeps it warm.
-    let planner_home = store.root.join("planner-hexhome");
-    fs::create_dir_all(&planner_home)?;
-    let out = run_mix(
-        activity,
-        beam_obj,
-        project_dir,
-        &planner_home,
-        false,
-        &["mix", "deps.get", "--check-locked"],
-    )?;
-    if !out.status.success() {
-        let _ = crate::kernel::store::remove_tree(&scratch);
-        return Err(err(format!(
-            "mix.exs and mix.lock are out of sync; run `tog run mix \
-             deps.get` and retry\n{}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        )));
-    }
     let lock = read_mix_lock(project)?;
+    let inputs = check_locked_inputs(project, beam_obj, &lock)?;
+    let unchanged = match &inputs {
+        Some(inputs) => check_locked_passed(store, project, inputs)?,
+        None => false,
+    };
+    if unchanged {
+        ui::trace("mix.exs and mix.lock unchanged since their last passing check");
+    } else {
+        // Consistency gate: exit status only (this evaluates mix.exs —
+        // delegated trust, never artifact authority). Network-permitted
+        // (plan-phase doctrine): --check-locked needs the hex registry; a
+        // persistent planner HEX_HOME keeps it warm.
+        let planner_home = store.root.join("planner-hexhome");
+        fs::create_dir_all(&planner_home)?;
+        let out = run_mix(
+            activity,
+            beam_obj,
+            project_dir,
+            &planner_home,
+            false,
+            &["mix", "deps.get", "--check-locked"],
+        )?;
+        if !out.status.success() {
+            return Err(err(format!(
+                "mix.exs and mix.lock are out of sync; run `tog run mix \
+                 deps.get` and retry\n{}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            )));
+        }
+        // Recorded only when the inputs still hash the same after the
+        // check, so the record names the bytes the check actually read.
+        let after = check_locked_inputs(project, beam_obj, &read_mix_lock(project)?)?;
+        if let (Some(before), Some(after)) = (&inputs, &after) {
+            if before == after {
+                record_check_locked(store, activity, project, before);
+            }
+        }
+    }
+    let scratch = store.stage_with_activity(activity)?;
     let helper = scratch.join("helper.exs");
     fs::write(&helper, HELPER)?;
     // The helper parses a copy of the bytes read through the held
@@ -2983,5 +3117,66 @@ exit 0
         assert!(!temp.0.join("mix.lock").exists());
         std::fs::write(temp.0.join("mix.lock"), "").unwrap();
         super::require_lock(&project).unwrap();
+    }
+
+    /// The check's input hash moves with the lock, the root mix.exs, an
+    /// umbrella app's mix.exs and the BEAM object, ignores files the check
+    /// does not read, and refuses to vouch for a symlinked app manifest.
+    /// Only a record for the same hash lets a sync skip the check.
+    #[test]
+    fn the_check_locked_inputs_cover_what_the_check_reads() {
+        let temp = TempDir::named("elixir-check-inputs");
+        let root = temp.0.join("app");
+        fs::create_dir_all(root.join("apps/web")).unwrap();
+        fs::create_dir_all(root.join("deps/jason")).unwrap();
+        fs::create_dir_all(root.join("lib")).unwrap();
+        fs::write(root.join("mix.exs"), "root").unwrap();
+        fs::write(root.join("apps/web/mix.exs"), "web").unwrap();
+        fs::write(root.join("deps/jason/mix.exs"), "dep").unwrap();
+        let project = ProjectRoot::open(&root).unwrap();
+        let beam = PathBuf::from(format!("/store/objects/{}-beam-29", "a".repeat(40)));
+        let beam = beam.as_path();
+        let hash = |project: &ProjectRoot, beam: &Path, lock: &str| {
+            check_locked_inputs(project, beam, lock).unwrap().unwrap()
+        };
+        let base = hash(&project, beam, "lock");
+        assert_eq!(hash(&project, beam, "lock"), base);
+        fs::write(root.join("lib/app.ex"), "code").unwrap();
+        fs::write(root.join("deps/jason/mix.exs"), "dep 2").unwrap();
+        assert_eq!(hash(&project, beam, "lock"), base, "unread files moved it");
+        assert_ne!(hash(&project, beam, "lock 2"), base);
+        assert_ne!(
+            hash(
+                &project,
+                &PathBuf::from(format!("/store/objects/{}-beam-29", "b".repeat(40))),
+                "lock"
+            ),
+            base
+        );
+        fs::write(root.join("apps/web/mix.exs"), "web 2").unwrap();
+        let web = hash(&project, beam, "lock");
+        assert_ne!(web, base);
+        fs::write(root.join("mix.exs"), "root 2").unwrap();
+        assert_ne!(hash(&project, beam, "lock"), web);
+
+        let store_root = temp.0.join("store");
+        for sub in ["objects", "meta", "tmp"] {
+            fs::create_dir_all(store_root.join(sub)).unwrap();
+        }
+        let store = Store {
+            root: store_root.canonicalize().unwrap(),
+        };
+        let activity = store
+            .activity(crate::kernel::activity::ActivityMode::Shared)
+            .unwrap();
+        let current = hash(&project, beam, "lock");
+        assert!(!check_locked_passed(&store, &project, &current).unwrap());
+        record_check_locked(&store, &activity, &project, &current);
+        assert!(check_locked_passed(&store, &project, &current).unwrap());
+        assert!(!check_locked_passed(&store, &project, &base).unwrap());
+
+        fs::remove_file(root.join("apps/web/mix.exs")).unwrap();
+        std::os::unix::fs::symlink(root.join("mix.exs"), root.join("apps/web/mix.exs")).unwrap();
+        assert_eq!(check_locked_inputs(&project, beam, "lock").unwrap(), None);
     }
 }
