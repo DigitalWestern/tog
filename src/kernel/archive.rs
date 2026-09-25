@@ -110,38 +110,29 @@ fn tar_command() -> Command {
     command
 }
 
-/// Flags the listing and the extraction carry. The delegated extraction
-/// writes object bytes and its command line is fixed, because a different
-/// command line would change what lands in an object; the listing carries
-/// the same flags so `tar -t` sees the members the extraction will write.
+/// Flags the `tar -t` listing carries. `--numeric-owner` protects no parser
+/// here, since the listing is read from the header blocks; it stays because
+/// the command line is fixed. Nothing else: a listing writes no files, so
+/// the flags that stop tar restoring metadata have nothing to act on there,
+/// and bsdtar's man page marks every one of them for other modes. A flag
+/// that can only fail must not sit on the command every listing runs.
 ///
-/// `--numeric-owner` protects no parser here, since the listing is read from
-/// the header blocks. The rest keep the extracted tree to what an object's
-/// identity covers (names, bytes, the executable bit) by telling tar not to
-/// restore extended attributes, ACLs, BSD file flags or macOS AppleDouble
-/// metadata from the archive. GNU tar restores none of these unless asked;
-/// bsdtar restores all of them by default when it runs as root, and its
-/// AppleDouble handling folds `._name` members into the member that
-/// follows, which the header reader does not model.
-///
-/// The listing deliberately omits `--no-mac-metadata`: bsdtar's man page
-/// marks it extract-only, so carrying it on `-t` risks breaking every
-/// listing on macOS with an unknown-option error. A listing flag must never
-/// be able to break all extractions. Worst case without it, `tar -t` folds
-/// a Mac-packed tarball's `._name` members away and the cross-check refuses
-/// the archive rather than extracting the wrong tree.
-#[cfg(target_os = "macos")]
-const TAR_LIST_FLAGS: [&str; 4] = [
-    "--numeric-owner",
-    "--no-xattrs",
-    "--no-acls",
-    "--no-fflags",
-];
-#[cfg(not(target_os = "macos"))]
-const TAR_LIST_FLAGS: [&str; 3] = ["--numeric-owner", "--no-xattrs", "--no-acls"];
-/// The extraction carries everything the listing does, plus
-/// `--no-mac-metadata` on macOS so AppleDouble companions land as ordinary
-/// files, the way GNU tar lists and extracts them on Linux.
+/// The cost is `._name` members: bsdtar's AppleDouble handling folds them
+/// into the member that follows, which the header reader does not model,
+/// so a Mac-packed tarball's listing disagrees with the reader and the
+/// cross-check refuses it on macOS rather than extracting the wrong tree.
+/// Whether `--no-mac-metadata` on `-t` would lift that is the open half of
+/// the AppleDouble item in FOLLOW-UPS.
+const TAR_LIST_FLAGS: [&str; 1] = ["--numeric-owner"];
+
+/// Flags the extraction carries. The delegated extraction writes object
+/// bytes and its command line is fixed, because a different command line
+/// would change what lands in an object. Beyond `--numeric-owner`, these
+/// keep the extracted tree to what an object's identity covers (names,
+/// bytes, the executable bit) by telling tar not to restore extended
+/// attributes, ACLs, BSD file flags or macOS AppleDouble metadata from the
+/// archive. GNU tar restores none of these unless asked; bsdtar restores
+/// all of them by default when it runs as root.
 #[cfg(target_os = "macos")]
 const TAR_EXTRACT_FLAGS: [&str; 5] = [
     "--numeric-owner",
@@ -222,8 +213,7 @@ fn list_names(
     Ok(text.lines().map(str::to_string).collect())
 }
 
-/// `tar -t` over `archive`, with the fixed listing flags (no
-/// `--no-mac-metadata`: bsdtar marks it extract-only).
+/// `tar -t` over `archive`, with the fixed listing flags.
 fn list_command(archive: &Path, compression: Compression) -> Command {
     let mut command = tar_command();
     command
@@ -873,10 +863,12 @@ pub fn validate(entries: &[Entry], strip: usize) -> io::Result<()> {
     Ok(())
 }
 
-/// The form under which APFS compares two names: canonically decomposed
-/// (NFD, so `é` and `e` plus a combining acute are one) and case-folded.
-/// Lowercasing the decomposed form is the fold Go's module zip applies to
-/// refuse the same collisions.
+/// An approximation of the form under which APFS compares two names:
+/// canonically decomposed (NFD, so `é` and `e` plus a combining acute are
+/// one) and then lowercased. Lowercasing is not full Unicode case folding
+/// (`SS` and `ß` do not meet), so this catches the collisions a real
+/// package can plausibly carry, not every pair APFS would merge. Go's
+/// module zip refuses the same collisions with a similar fold.
 fn folded_name(name: &str) -> String {
     use unicode_normalization::UnicodeNormalization;
     name.nfd().collect::<String>().to_lowercase()
@@ -998,7 +990,7 @@ pub(crate) fn extract_validated_with_activity(
 }
 
 /// `tar -x` of `archive` into `destination`, with the fixed extraction
-/// flags (the listing flags plus `--no-mac-metadata` on macOS).
+/// flags.
 fn extract_command(
     archive: &Path,
     destination: &Path,
@@ -1409,52 +1401,51 @@ mod tests {
         }
     }
 
-    /// The listing and the extraction tell tar to restore nothing an
-    /// object's identity does not cover: extended attributes and ACLs on
-    /// both tars, BSD file flags and AppleDouble metadata on bsdtar, which
-    /// restores all four by default as root. The listing deliberately omits
-    /// `--no-mac-metadata`, which bsdtar marks extract-only: a listing flag
-    /// must never be able to break every listing on macOS with an
-    /// unknown-option error.
+    /// The extraction tells tar to restore nothing an object's identity does
+    /// not cover: extended attributes and ACLs on both tars, BSD file flags
+    /// and AppleDouble metadata on bsdtar, which restores all four by
+    /// default as root. The listing carries none of those flags: it writes
+    /// nothing for them to act on, and bsdtar documents each of them for
+    /// other modes, so on `-t` they could only fail.
     #[test]
-    fn listing_and_extraction_tell_tar_to_restore_no_metadata() {
+    fn extraction_tells_tar_to_restore_no_metadata_and_the_listing_carries_no_such_flag() {
         let archive = Path::new("/tmp/does-not-matter.tar");
-        let list = list_command(archive, Compression::Gzip);
-        let extract = extract_command(archive, Path::new("/tmp/dest"), 1, Compression::Gzip);
-        let list_args: Vec<String> = list
-            .get_args()
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .collect();
-        let extract_args: Vec<String> = extract
-            .get_args()
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .collect();
-        for (args, flags) in [
-            (&list_args, TAR_LIST_FLAGS.len()),
-            (&extract_args, TAR_EXTRACT_FLAGS.len()),
-        ] {
-            for flag in ["--numeric-owner", "--no-xattrs", "--no-acls"] {
-                assert!(args.contains(&flag.to_string()), "{flag} missing: {args:?}");
-            }
-            assert_eq!(
-                args.contains(&"--no-fflags".to_string()),
-                cfg!(target_os = "macos"),
-                "--no-fflags: {args:?}"
-            );
-            // The flags come before the mode, so tar reads them for it.
-            let mode = args
-                .iter()
-                .position(|arg| arg.starts_with("-t") || arg.starts_with("-x"));
-            assert_eq!(mode, Some(flags), "{args:?}");
-        }
-        // Only the extraction carries `--no-mac-metadata`.
-        assert!(
-            !list_args.contains(&"--no-mac-metadata".to_string()),
-            "listing must not carry --no-mac-metadata: {list_args:?}"
-        );
+        let args = |command: &Command| -> Vec<String> {
+            command
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect()
+        };
+        let list_args = args(&list_command(archive, Compression::Gzip));
         assert_eq!(
-            extract_args.contains(&"--no-mac-metadata".to_string()),
-            cfg!(target_os = "macos"),
+            list_args[..2],
+            ["--numeric-owner".to_string(), "-tzf".to_string()],
+            "{list_args:?}"
+        );
+
+        let extract_args = args(&extract_command(
+            archive,
+            Path::new("/tmp/dest"),
+            1,
+            Compression::Gzip,
+        ));
+        for flag in ["--numeric-owner", "--no-xattrs", "--no-acls"] {
+            assert!(
+                extract_args.contains(&flag.to_string()),
+                "{flag} missing: {extract_args:?}"
+            );
+        }
+        for flag in ["--no-fflags", "--no-mac-metadata"] {
+            assert_eq!(
+                extract_args.contains(&flag.to_string()),
+                cfg!(target_os = "macos"),
+                "{flag}: {extract_args:?}"
+            );
+        }
+        // The flags come before the mode, so tar reads them for it.
+        assert_eq!(
+            extract_args.iter().position(|arg| arg == "-xzf"),
+            Some(TAR_EXTRACT_FLAGS.len()),
             "{extract_args:?}"
         );
     }
@@ -1478,11 +1469,12 @@ mod tests {
         // value pointer and length describe a live byte slice.
         let set =
             unsafe { libc::setxattr(path.as_ptr(), key.as_ptr(), b"1".as_ptr().cast(), 1, 0) };
-        if set != 0 {
-            // A filesystem without user xattrs cannot host the fixture.
-            eprintln!("skipping: setxattr failed: {}", io::Error::last_os_error());
-            return;
-        }
+        assert_eq!(
+            set,
+            0,
+            "setxattr failed ({}); this test needs a temp_dir on a filesystem with user xattrs",
+            io::Error::last_os_error()
+        );
         let archive = temp.0.join("pkg.tar");
         assert!(crate::kernel::testutil::tar_create()
             .args(["--format=posix", "--xattrs", "-cf"])
