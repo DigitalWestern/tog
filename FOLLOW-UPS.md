@@ -141,6 +141,15 @@ by position.
   - #285 pnpm lock reader: four edge cases (trailing colon, parentheses in paths, unquoted `@` keys, a third document) not yet confirmed against js-yaml.
   - #287 store records: no gc for `records/`, orphaned `tmp/record-*` temporaries, Elixir check-locked hash blind spots.
   - #289 interrupt: the bwrap preflight misreports Ctrl-C as "bwrap unavailable", and an interrupted sync exits 1 rather than 130.
+  - #293 macOS: six lib tests fail on macos-14 (APFS non-UTF-8 names, SUN_LEN, Seatbelt paths, a Linux-named node test), so no macOS release can ship until fixed.
+  - #294 size ratchet: the function heuristic counts `#[cfg(test)]` functions outside `mod tests` as production code.
+  - #295 tests: four sandbox tests fail instead of skipping when bubblewrap is missing.
+  - #296 ci: add a Dependabot updater for the SHA-pinned actions.
+  - #297 python: two PEP 440 grammars; hoist `pep440.rs` into the kernel.
+  - #298 doctor: the version row shows a package-download message when no release exists.
+  - #300 heavy: the Elixir end-to-end test cannot run on ubuntu-22.04 (OTP needs glibc 2.43).
+  - #301 acceptance.sh: steps 9 and 9b re-run two ignored suites the heavy workflow already runs, one multi-threaded.
+  - #302 acceptance.sh: step 13 carries its own copy of the closure signing format.
 - **`deps` as a `Tailor` method (#61).** `src/commands/deps.rs` still names
   tailors directly. A `Tailor::edit_manifest` method with an "unsupported"
   default would make it registry-driven, the way `Tailor::registry_tool`
@@ -168,8 +177,9 @@ by position.
   `kernel::gitsrc::realization_tests::realizes_a_commit_and_strips_git_metadata`
   (2026-09-12) and `tailors::cargo::tests::rejects_symlinked_crate_entries`
   (2026-09-15) each failed once in a full parallel run and passed on every
-  rerun. The panic messages were not captured. Capture them next time before
-  changing anything.
+  rerun. The panic messages were not captured. Two `supervise_signals`
+  timeouts under a loaded machine (2026-09-25) are captured on #65. Capture
+  the rest the same way before changing anything.
 - **macOS arm64 gate (#66). Last, by the owner's choice.** Run on the Mac:
   `cargo test`, `cargo test --test gc -- --ignored`,
   `cargo test --test cli audit`, and
