@@ -44,14 +44,12 @@ pub enum Pending {
     /// `main` when the sync succeeded), the help alone outside one.
     Implicit,
     /// An unknown first word: a package.json script if one matches. The
-    /// global sync flags travel with it, so `tog --frozen <script>` governs
-    /// the sync `run` performs first.
+    /// sync flags reach `dispatch` beside it, so `tog --frozen <script>`
+    /// governs the sync `run` performs first.
     Script {
         name: String,
         args: Vec<String>,
         message: String,
-        frozen: bool,
-        strict: bool,
     },
 }
 
@@ -66,11 +64,7 @@ pub fn resolve(pending: Pending) -> io::Result<cli::Command> {
             let cwd = project_dir();
             if !inspect::detected(&cwd)?.is_empty() {
                 ui::trace("no command given inside a project: running sync");
-                return Ok(cli::Command::Sync {
-                    fresh: false,
-                    strict: false,
-                    frozen: false,
-                });
+                return Ok(cli::Command::Sync { fresh: false });
             }
             // Nothing to sync, so the whole invocation is the help: it goes
             // to stdout and exits 0, because someone who typed `tog` alone
@@ -88,8 +82,6 @@ pub fn resolve(pending: Pending) -> io::Result<cli::Command> {
             name,
             args,
             message,
-            frozen,
-            strict,
         } => {
             let cwd = project_dir();
             let root = projected_root(&cwd);
@@ -105,11 +97,7 @@ pub fn resolve(pending: Pending) -> io::Result<cli::Command> {
                 ui::trace(&format!("'{name}' is a package.json script: running it"));
                 let mut command = vec![name];
                 command.extend(args);
-                return Ok(cli::Command::Run {
-                    command,
-                    frozen,
-                    strict,
-                });
+                return Ok(cli::Command::Run { command });
             }
             let message = if has_package_json {
                 format!("{message} (no package.json script named '{name}' here)")
@@ -122,8 +110,10 @@ pub fn resolve(pending: Pending) -> io::Result<cli::Command> {
     }
 }
 
-/// Dispatch one parsed command to the verb's file.
-pub fn dispatch(command: cli::Command) -> io::Result<i32> {
+/// Dispatch one parsed command to the verb's file. `sync` holds `--frozen`
+/// and `--strict`; the parser has already refused them for a verb that
+/// never syncs, so every verb that reads them here is one they govern.
+pub fn dispatch(command: cli::Command, sync: cli::SyncFlags) -> io::Result<i32> {
     use cli::Command::*;
     crate::tailors::install_kinds();
     // Maintenance commands do not need host-platform validation. In
@@ -170,32 +160,31 @@ pub fn dispatch(command: cli::Command) -> io::Result<i32> {
         check,
         ref ecosystem,
         ref args,
-        frozen,
-        strict,
     } = command
     {
-        return fmt::run(platform, check, ecosystem.as_deref(), args, frozen, strict);
+        return fmt::run(
+            platform,
+            check,
+            ecosystem.as_deref(),
+            args,
+            sync.frozen,
+            sync.strict,
+        );
     }
     // `sync` preflights (policy, pins, root registrability) before opening
     // the store, so a refused request touches nothing.
-    if let Sync {
-        fresh,
-        strict,
-        frozen,
-    } = command
-    {
-        return sync::run_command(platform, fresh, strict, frozen).map(|_| 0);
+    if let Sync { fresh } = command {
+        return sync::run_command(platform, fresh, sync.strict, sync.frozen).map(|_| 0);
     }
     // `update --toolchain` refuses a stale or unresolvable project the same
     // way sync does, before the store is opened, and then syncs.
     if let Update {
         toolchain: Some(ref update),
         no_sync,
-        strict,
         ..
     } = command
     {
-        return toolchain::run(platform, update, no_sync, strict).map(|_| 0);
+        return toolchain::run(platform, update, no_sync, sync.strict).map(|_| 0);
     }
     let needs_maintenance = matches!(
         &command,
@@ -223,31 +212,18 @@ pub fn dispatch(command: cli::Command) -> io::Result<i32> {
     match command {
         // `json` is not read here: plan's output is JSON either way, and
         // the flag only tells `main` which error renderer to use.
-        Plan { .. } => plan::run(&ctx).map(|_| 0),
-        Build {
-            args,
-            frozen,
-            strict,
-        } => build::run(&ctx, &args, frozen, strict).map(|_| 0),
-        Run {
-            command,
-            frozen,
-            strict,
-        } => run::run(&ctx, &command, frozen, strict),
+        Plan { .. } => plan::run(&ctx, sync).map(|_| 0),
+        Build { args } => build::run(&ctx, &args, sync.frozen, sync.strict).map(|_| 0),
+        Run { command } => run::run(&ctx, &command, sync.frozen, sync.strict),
         // Like `run`, `env` needs the store open: a closure's recorded
         // runtime is a store object, and its bin directory is part of the
         // PATH `env` prints.
-        Env {
-            shell,
-            frozen,
-            strict,
-        } => env::run(&ctx, shell, frozen, strict),
+        Env { shell } => env::run(&ctx, shell, sync.frozen, sync.strict),
         Sbom { output } => sbom::run(output.as_deref()).map(|_| 0),
         Add {
             specs,
             dev,
             no_sync,
-            strict,
         } => deps::run(
             &ctx,
             deps::Request {
@@ -256,14 +232,13 @@ pub fn dispatch(command: cli::Command) -> io::Result<i32> {
                 dev,
             },
             no_sync,
-            strict,
+            sync.strict,
         )
         .map(|_| 0),
         Remove {
             names,
             dev,
             no_sync,
-            strict,
         } => deps::run(
             &ctx,
             deps::Request {
@@ -272,14 +247,13 @@ pub fn dispatch(command: cli::Command) -> io::Result<i32> {
                 dev,
             },
             no_sync,
-            strict,
+            sync.strict,
         )
         .map(|_| 0),
         Update {
             names,
             no_sync,
             toolchain: _,
-            strict,
         } => deps::run(
             &ctx,
             deps::Request {
@@ -288,7 +262,7 @@ pub fn dispatch(command: cli::Command) -> io::Result<i32> {
                 dev: false,
             },
             no_sync,
-            strict,
+            sync.strict,
         )
         .map(|_| 0),
         X {
@@ -304,6 +278,7 @@ pub fn dispatch(command: cli::Command) -> io::Result<i32> {
                 tool,
                 args,
             },
+            sync.strict,
         ),
         Status { json } => status::run(ctx.platform, json),
         Fmt { .. }

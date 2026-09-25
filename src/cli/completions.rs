@@ -1,5 +1,7 @@
 //! Shell completions, generated from the command table.
 
+#[cfg(test)]
+use super::parse::takes_sync_flags;
 use super::parse::{
     all_command_words, command_flags, help_words, option_spellings, GLOBAL_FLAGS, SETUP_FLAGS,
 };
@@ -278,30 +280,48 @@ mod tests {
     }
 
     /// `add`, `remove` and `update` refuse `--frozen` (they exist to write
-    /// the lock), so no shell offers it after them. Global options complete
-    /// only ahead of the verb, where the verb is not yet known; after it
-    /// each shell offers the command's own options alone.
+    /// the lock), so does `x` (it has no lock to check), and a verb that
+    /// never syncs refuses both `--frozen` and
+    /// `--strict`, so no shell offers a refused flag after its verb. Global
+    /// options complete only ahead of the verb, where the verb is not yet
+    /// known; after it each shell offers the command's own options alone.
     #[test]
-    fn completions_never_offer_frozen_after_the_dependency_verbs() {
+    fn completions_never_offer_a_refused_sync_flag_after_the_verb() {
         let bash = completions(Shell::Bash);
         let zsh = completions(Shell::Zsh);
         let fish = completions(Shell::Fish);
-        for verb in ["add", "remove", "update"] {
+        let refusals = listed().flat_map(|spec| {
+            let flags: &[&str] = match spec.name {
+                "add" | "remove" | "update" | "x" => &["frozen"],
+                name if !takes_sync_flags(name) => &["frozen", "strict"],
+                _ => &[],
+            };
+            flags.iter().map(move |flag| (spec.name, *flag))
+        });
+        let mut checked = 0;
+        for (verb, flag) in refusals {
+            checked += 1;
+            let spelled = format!("--{flag}");
             let case = format!("        {verb}) ");
             let line = bash.lines().find(|line| line.starts_with(&case)).unwrap();
-            assert!(!line.contains("--frozen"), "bash {verb}: {line}");
+            assert!(!line.contains(&spelled), "bash {verb}: {line}");
             let case = format!("                {verb})");
             let mut lines = zsh.lines().skip_while(|line| *line != case);
             let line = lines.nth(1).unwrap();
             assert!(line.contains("_arguments"), "zsh {verb}: {line}");
-            assert!(!line.contains("--frozen"), "zsh {verb}: {line}");
+            assert!(!line.contains(&spelled), "zsh {verb}: {line}");
             let seen = format!("__fish_seen_subcommand_from {verb}'");
+            let long = format!("-l {flag}");
             assert!(
                 !fish
                     .lines()
-                    .any(|line| line.contains(&seen) && line.contains("-l frozen")),
-                "fish {verb} offers --frozen"
+                    .any(|line| line.contains(&seen) && line.contains(&long)),
+                "fish {verb} offers {spelled}"
             );
         }
+        // Three dependency verbs plus `x`, and both flags for every verb
+        // that never syncs: a table that lost them would pass the loop
+        // vacuously.
+        assert!(checked > 4 + 2 * 5, "{checked}");
     }
 }
