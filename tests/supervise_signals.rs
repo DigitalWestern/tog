@@ -300,6 +300,31 @@ fn wait_until_stopped(pid: i32, what: &str) {
     }
 }
 
+/// Wait until no instance of `number` is pending for process `pid`, read
+/// from the process-wide `ShdPnd` mask in `/proc/<pid>/status`. A signal
+/// sent with kill(2) stays there until a thread takes it for its handler.
+#[cfg(target_os = "linux")]
+fn wait_until_delivered(pid: i32, number: libc::c_int) {
+    let bit = 1u64 << (number - 1);
+    let deadline = Instant::now() + DEADLINE;
+    loop {
+        let status = std::fs::read_to_string(format!("/proc/{pid}/status")).unwrap();
+        let pending = status
+            .lines()
+            .find_map(|line| line.strip_prefix("ShdPnd:"))
+            .and_then(|mask| u64::from_str_radix(mask.trim(), 16).ok())
+            .expect("ShdPnd in /proc/<pid>/status");
+        if pending & bit == 0 {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "signal {number} stayed pending for {pid}"
+        );
+        std::thread::sleep(TICK);
+    }
+}
+
 /// Every process whose parent is `pid`, from the ppid field of `/proc/*/stat`.
 #[cfg(target_os = "linux")]
 fn proc_children(pid: i32) -> Vec<i32> {
@@ -574,6 +599,25 @@ fn code_of(status: ExitStatus) -> i32 {
         .unwrap_or(1)
 }
 
+/// Print how a supervised child ended and return it as the harness exit
+/// code. A supervisor that was itself signalled while the child ran gets an
+/// `Interrupted` error rather than the status, so that case prints
+/// `INTERRUPTED <signal>` before the child's `EXIT <code>`.
+fn report(result: std::io::Result<ExitStatus>) -> i32 {
+    let status = match result {
+        Ok(status) => status,
+        Err(error) => {
+            let interrupted = supervise::interrupted(&error)
+                .unwrap_or_else(|| panic!("supervision failed: {error}"));
+            assert_eq!(error.kind(), std::io::ErrorKind::Interrupted);
+            say(&format!("INTERRUPTED {}", interrupted.signal));
+            interrupted.status
+        }
+    };
+    say(&format!("EXIT {}", code_of(status)));
+    code_of(status)
+}
+
 /// The calling process's SIGCHLD disposition, in the words the markers use.
 fn sigchld_disposition() -> &'static str {
     // SAFETY: zeroed is a valid output slot that sigaction fills.
@@ -630,9 +674,7 @@ fn run_scenario(scenario: &str, activity: &StoreActivity) -> i32 {
                    printf "CHILDPID %d\nREADY\n" $$
                    while : ; do sleep 0.05 ; done"#
             ));
-            let status = supervise::status(&mut command, activity).unwrap();
-            say(&format!("EXIT {}", code_of(status)));
-            code_of(status)
+            report(supervise::status(&mut command, activity))
         }
         // The same child without a rendezvous, used to sweep the spawn
         // boundary and to receive a group-directed TERM.
@@ -643,14 +685,11 @@ fn run_scenario(scenario: &str, activity: &StoreActivity) -> i32 {
                    while : ; do sleep 0.05 ; done"#,
             );
             match supervise::status(&mut command, activity) {
-                Ok(status) => {
-                    say(&format!("EXIT {}", code_of(status)));
-                    code_of(status)
-                }
-                Err(error) => {
+                Err(error) if supervise::interrupted(&error).is_none() => {
                     say(&format!("ERR {error}"));
                     70
                 }
+                result => report(result),
             }
         }
         "repeat-term" => {
@@ -660,9 +699,25 @@ fn run_scenario(scenario: &str, activity: &StoreActivity) -> i32 {
                    printf "CHILDPID %d\nREADY\n" $$
                    while : ; do sleep 0.05 ; done"#,
             );
-            let status = supervise::status(&mut command, activity).unwrap();
-            say(&format!("EXIT {}", code_of(status)));
-            code_of(status)
+            report(supervise::status(&mut command, activity))
+        }
+        // A child that never sees the signal: INT sent to the supervisor
+        // alone is observed, not forwarded, so the child finishes cleanly
+        // once the FIFO releases it and the supervisor still reports the
+        // interrupt.
+        "int-to-supervisor" => {
+            let fifo = std::env::var("TOG_SUPERVISE_FIFO").unwrap();
+            let mut command = shell(&format!(
+                r#"printf "CHILDPID %d\nREADY\n" $$
+                   read line < "{fifo}"
+                   exit 0"#
+            ));
+            let code = report(supervise::status(&mut command, activity));
+            // The next child in the same process starts from a clean
+            // session: the interrupt was reported once and is not replayed.
+            let after = supervise::status(&mut shell("exit 7"), activity).unwrap();
+            say(&format!("AFTER {}", code_of(after)));
+            code
         }
         // A second supervisory session while one is live. The holder's child
         // announces itself on the FIFO, so the second attempt is made while
@@ -741,8 +796,13 @@ fn run_scenario(scenario: &str, activity: &StoreActivity) -> i32 {
                    read line < "{fifo}"
                    exit 9"#
             ));
-            let guarded = supervise::status(&mut guarded, activity).unwrap();
-            say(&format!("GUARDED_EXIT {}", code_of(guarded)));
+            let guarded = supervise::status(&mut guarded, activity).unwrap_err();
+            let interrupted = supervise::interrupted(&guarded).expect("an interrupted child");
+            say(&format!(
+                "GUARDED_INTERRUPTED {} GUARDED_EXIT {}",
+                interrupted.signal,
+                code_of(interrupted.status)
+            ));
             let after = supervise::status(&mut shell("exit 7"), activity).unwrap();
             say(&format!("AFTER {}", code_of(after)));
             say("READY");
@@ -787,9 +847,7 @@ fn run_scenario(scenario: &str, activity: &StoreActivity) -> i32 {
                    printf "CHILDPID %d\nREADY\n" $$
                    while : ; do sleep 0.05 ; done"#,
             );
-            let status = supervise::status(&mut command, activity).unwrap();
-            say(&format!("EXIT {}", code_of(status)));
-            code_of(status)
+            report(supervise::status(&mut command, activity))
         }
         // A job-control shell: its own session owns the terminal, and the
         // supervisor runs in a separate foreground process group. Without
@@ -950,6 +1008,11 @@ fn parent_term_reaches_the_child_and_holds_activity_until_reap() {
 
     release_fifo(&fifo);
     harness.markers.wait_for("EXIT 45");
+    assert!(
+        harness.markers.text().contains("INTERRUPTED 15"),
+        "a TERM during the wait was not reported as an interruption:\n{}",
+        harness.markers.text()
+    );
     let status = harness.finish();
     assert_eq!(
         status.code(),
@@ -988,6 +1051,12 @@ fn term_across_the_spawn_boundary_is_never_lost() {
             (_, Some(libc::SIGTERM)) => "supervisor died before its session",
             other => panic!("unexpected outcome {other:?} at step {step}; output:\n{text}"),
         };
+        if matches!(status.code(), Some(45 | 143)) {
+            assert!(
+                text.contains("INTERRUPTED 15"),
+                "step {step}: the child's TERM exit was reported as its own status:\n{text}"
+            );
+        }
         *outcomes.entry(outcome).or_insert(0u32) += 1;
         if text.contains("CHILDPID ") {
             let child = harness.markers.child_pid();
@@ -1020,6 +1089,11 @@ fn repeated_parent_term_is_forwarded_every_time() {
     signal(harness.pid(), libc::SIGTERM);
     harness.markers.wait_for("GOT 3");
     harness.markers.wait_for("EXIT 46");
+    assert!(
+        harness.markers.text().contains("INTERRUPTED 15"),
+        "{}",
+        harness.markers.text()
+    );
     assert_eq!(harness.finish().code(), Some(46));
     store.wait_until_free();
 }
@@ -1114,7 +1188,9 @@ fn spawn_failure_restores_dispositions() {
     // forwards it to a child that ignores it, and keeps waiting.
     signal(harness.pid(), libc::SIGTERM);
     release_fifo(&fifo);
-    harness.markers.wait_for("GUARDED_EXIT 9");
+    harness
+        .markers
+        .wait_for("GUARDED_INTERRUPTED 15 GUARDED_EXIT 9");
     assert!(
         harness.process.try_wait().unwrap().is_none(),
         "the supervisor died of a TERM it had installed a handler for"
@@ -1247,7 +1323,37 @@ fn terminal_interrupt_reaches_a_trapping_child_once() {
     let text = harness.markers.text();
     let seen = text.matches("INTSEEN").count();
     assert_eq!(seen, 1, "the child saw INT {seen} times:\n{text}");
+    assert!(
+        text.contains("INTERRUPTED 2"),
+        "a terminal interrupt was reported as the child's own exit:\n{text}"
+    );
     assert_eq!(harness.finish().code(), Some(48));
+    store.wait_until_free();
+}
+
+/// An interrupt counts even when the child never sees it and exits
+/// cleanly: INT sent to the supervisor alone is not forwarded, and the
+/// supervisor still reports it once the child is reaped instead of passing
+/// the clean status on. The next child in the same process runs normally.
+#[cfg(target_os = "linux")]
+#[test]
+fn an_interrupt_the_child_never_sees_is_still_reported() {
+    let store = TempStore::new("int-supervisor");
+    let fifo = store.fifo("int-supervisor-fifo");
+    let mut harness = spawn_harness("int-to-supervisor", &store, None, Some(&fifo));
+    harness.markers.wait_for("READY");
+    let child = harness.markers.child_pid();
+    signal(harness.pid(), libc::SIGINT);
+    // Release the child only once the supervisor's handler has taken the
+    // signal; a still-pending INT would race the child's exit instead.
+    wait_until_delivered(harness.pid(), libc::SIGINT);
+    assert!(alive(child), "INT sent to the supervisor reached the child");
+    release_fifo(&fifo);
+    harness.markers.wait_for("AFTER 7");
+    let text = harness.markers.text();
+    assert!(text.contains("INTERRUPTED 2"), "{text}");
+    assert!(text.contains("EXIT 0"), "{text}");
+    assert_eq!(harness.finish().code(), Some(0));
     store.wait_until_free();
 }
 
@@ -1269,6 +1375,7 @@ fn group_term_terminates_the_child_without_promising_exactly_once() {
         .count();
     println!("group TERM was delivered to the child {delivered} time(s)");
     assert!(delivered >= 1, "{text}");
+    assert!(text.contains("INTERRUPTED 15"), "{text}");
     assert_eq!(harness.finish().code(), Some(45));
     assert!(!alive(child));
     store.wait_until_free();

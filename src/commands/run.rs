@@ -153,15 +153,30 @@ pub fn run(ctx: &Context, cmd: &[String], frozen: bool) -> io::Result<i32> {
             }
             step.env("npm_package_json", package_json_path);
             step.env("INIT_CWD", &cwd);
-            let status = supervise::status(&mut step, activity)
-                .map_err(|e| io::Error::new(e.kind(), format!("run npm script {event}: {e}")))?;
+            let status = match supervise::status(&mut step, activity) {
+                Ok(status) => status,
+                // An interrupt ends the chain: the step's own exit code
+                // when it failed, the signal's when it survived.
+                Err(error) => match supervise::interrupted(&error) {
+                    Some(interrupted) if interrupted.status.success() => {
+                        return Ok(128 + interrupted.signal);
+                    }
+                    Some(interrupted) => return Ok(child_status_code(&interrupted.status)),
+                    None => {
+                        return Err(io::Error::new(
+                            error.kind(),
+                            format!("run npm script {event}: {error}"),
+                        ));
+                    }
+                },
+            };
             if !status.success() {
                 return Ok(child_status_code(&status));
             }
         }
         return Ok(0);
     }
-    let status = supervise::status(&mut command, activity)?;
+    let status = supervise::child_status(supervise::status(&mut command, activity))?;
     Ok(child_status_code(&status))
 }
 

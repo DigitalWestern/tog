@@ -3067,7 +3067,26 @@ mod tests {
             LifecycleFailure::SandboxUnavailable(error) => {
                 assert_eq!(error.kind(), io::ErrorKind::Unsupported);
             }
-            LifecycleFailure::Script(_) => panic!("sandbox failure was downgraded"),
+            LifecycleFailure::Interrupted(_) | LifecycleFailure::Script(_) => {
+                panic!("sandbox failure was downgraded")
+            }
+        }
+    }
+
+    #[test]
+    fn lifecycle_interrupt_is_fatal_before_policy_handling() {
+        let failure = classify_lifecycle_result(Err(io::Error::new(
+            io::ErrorKind::Interrupted,
+            "injected interrupt",
+        )))
+        .unwrap_err();
+        match failure {
+            LifecycleFailure::Interrupted(error) => {
+                assert_eq!(error.kind(), io::ErrorKind::Interrupted);
+            }
+            LifecycleFailure::SandboxUnavailable(_) | LifecycleFailure::Script(_) => {
+                panic!("an interrupt was classified as something else")
+            }
         }
     }
 

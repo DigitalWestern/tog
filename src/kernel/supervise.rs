@@ -6,6 +6,13 @@
 //! the live direct child. INT/QUIT/HUP are observed so the parent waits and
 //! restores its dispositions, while terminal process-group delivery remains
 //! the mechanism that reaches the child for those signals.
+//!
+//! Any of those four arriving while a child runs is a request to stop tog,
+//! not a verdict on the child: once the child is reaped, `status`,
+//! `status_with_stderr` and `output` return an [`io::ErrorKind::Interrupted`]
+//! error carrying [`Interrupted`] instead of the child's status. A caller
+//! that turns a child's failure into something softer (a recorded policy
+//! exception, a fallback) must let that kind through as an error.
 
 /// Serializes tests that supervise a child process.
 ///
@@ -49,8 +56,12 @@ const SIGNALS: [libc::c_int; SIGNAL_COUNT] = [
 static SESSION_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 static NOTIFY_FD: AtomicI32 = AtomicI32::new(-1);
 static CHILD_PID: AtomicI32 = AtomicI32::new(-1);
+/// TERMs not yet forwarded to the child; `forward_pending` consumes it.
 static TERM_COUNT: AtomicU32 = AtomicU32::new(0);
-static OTHER_SIGNALS: AtomicU32 = AtomicU32::new(0);
+/// Every terminating signal the session has caught, one bit each (see
+/// `signal_bit`). Unlike `TERM_COUNT`, forwarding never clears it, so it
+/// still says after the reap that tog was asked to stop.
+static RECEIVED: AtomicU32 = AtomicU32::new(0);
 /// Set by the SIGCHLD handler and cleared only by the waiter. This is
 /// deliberately **not** the self-pipe byte: `forward_pending` drains the pipe
 /// between `try_wait` and the poll, so a notification that lived only in the
@@ -61,6 +72,75 @@ static SIGNAL_BYTE: u8 = 1;
 
 fn session_lock() -> &'static Mutex<()> {
     SESSION_LOCK.get_or_init(|| Mutex::new(()))
+}
+
+/// The terminating signals in the order an error names them when more than
+/// one arrived: the interrupt a person typed first.
+const TERMINATING: [libc::c_int; 4] = [libc::SIGINT, libc::SIGTERM, libc::SIGHUP, libc::SIGQUIT];
+
+fn signal_bit(signal: libc::c_int) -> u32 {
+    match signal {
+        libc::SIGINT => 1,
+        libc::SIGHUP => 2,
+        libc::SIGQUIT => 4,
+        libc::SIGTERM => 8,
+        _ => 0,
+    }
+}
+
+fn signal_name(signal: libc::c_int) -> &'static str {
+    match signal {
+        libc::SIGINT => "SIGINT",
+        libc::SIGTERM => "SIGTERM",
+        libc::SIGHUP => "SIGHUP",
+        libc::SIGQUIT => "SIGQUIT",
+        _ => "a signal",
+    }
+}
+
+/// Why a supervised call returned [`io::ErrorKind::Interrupted`]: tog itself
+/// received `signal` while the child ran. `status` is how the child ended,
+/// kept for callers whose own exit code is the child's (`tog run`), where the
+/// child decides what an interrupt means.
+#[derive(Debug)]
+pub struct Interrupted {
+    pub signal: libc::c_int,
+    pub status: ExitStatus,
+}
+
+impl std::fmt::Display for Interrupted {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "interrupted by {} (the command it was running ended with {})",
+            signal_name(self.signal),
+            self.status
+        )
+    }
+}
+
+impl std::error::Error for Interrupted {}
+
+/// The [`Interrupted`] record inside `error`, when it is the one a
+/// supervised call returned. Wrapping the error in a new message keeps the
+/// kind but drops the record, so callers that need the status look first.
+pub fn interrupted(error: &io::Error) -> Option<&Interrupted> {
+    error.get_ref()?.downcast_ref::<Interrupted>()
+}
+
+/// The child's status even when tog was interrupted while it ran, for
+/// commands whose exit code is the child's (`tog run`, `tog x`). The
+/// interrupt reached the child through the terminal or by forwarding, and
+/// how the child chose to end is then the answer. Every other error passes
+/// through unchanged.
+pub fn child_status(result: io::Result<ExitStatus>) -> io::Result<ExitStatus> {
+    match result {
+        Err(error) => match interrupted(&error) {
+            Some(interrupted) => Ok(interrupted.status),
+            None => Err(error),
+        },
+        ok => ok,
+    }
 }
 
 fn errno_location() -> *mut libc::c_int {
@@ -83,15 +163,10 @@ extern "C" fn signal_handler(signal: libc::c_int) {
     match signal {
         libc::SIGTERM => {
             TERM_COUNT.fetch_add(1, Ordering::SeqCst);
+            RECEIVED.fetch_or(signal_bit(signal), Ordering::SeqCst);
         }
-        libc::SIGINT => {
-            OTHER_SIGNALS.fetch_or(1, Ordering::SeqCst);
-        }
-        libc::SIGHUP => {
-            OTHER_SIGNALS.fetch_or(2, Ordering::SeqCst);
-        }
-        libc::SIGQUIT => {
-            OTHER_SIGNALS.fetch_or(4, Ordering::SeqCst);
+        libc::SIGINT | libc::SIGHUP | libc::SIGQUIT => {
+            RECEIVED.fetch_or(signal_bit(signal), Ordering::SeqCst);
         }
         libc::SIGCHLD => {
             CHILD_EVENT.store(true, Ordering::SeqCst);
@@ -277,7 +352,7 @@ impl Session {
         NOTIFY_FD.store(self.write_fd, Ordering::SeqCst);
         CHILD_PID.store(-1, Ordering::SeqCst);
         TERM_COUNT.store(0, Ordering::SeqCst);
-        OTHER_SIGNALS.store(0, Ordering::SeqCst);
+        RECEIVED.store(0, Ordering::SeqCst);
 
         for number in SIGNALS {
             // SAFETY: zeroed is the conventional initialization for the
@@ -354,7 +429,7 @@ impl Session {
 
     fn reject_pending_before_spawn(&self) -> io::Result<()> {
         self.drain_notifications();
-        if TERM_COUNT.load(Ordering::SeqCst) != 0 || OTHER_SIGNALS.load(Ordering::SeqCst) != 0 {
+        if RECEIVED.load(Ordering::SeqCst) != 0 {
             return Err(io::Error::new(
                 io::ErrorKind::Interrupted,
                 "cancellation arrived before the child was spawned",
@@ -528,9 +603,13 @@ impl Session {
         }
     }
 
-    fn teardown(&mut self) {
+    /// Restore everything the session changed and return the terminating
+    /// signals it caught. The mask is read after the handlers are blocked,
+    /// so a signal is either counted here or arrives once the inherited
+    /// disposition is back and acts on tog itself; none falls between.
+    fn teardown(&mut self) -> u32 {
         if !self.active {
-            return;
+            return 0;
         }
         // Prevent a signal from running the temporary handler while the
         // global pid/fd and dispositions are being dismantled.
@@ -555,7 +634,7 @@ impl Session {
         self.clear_child();
         NOTIFY_FD.store(-1, Ordering::SeqCst);
         TERM_COUNT.store(0, Ordering::SeqCst);
-        OTHER_SIGNALS.store(0, Ordering::SeqCst);
+        let received = RECEIVED.swap(0, Ordering::SeqCst);
         for saved in self.old_actions.iter().rev() {
             if saved.installed {
                 // SAFETY: saved.action came from sigaction and is restored
@@ -576,12 +655,30 @@ impl Session {
         self.read_fd = -1;
         self.write_fd = -1;
         self.active = false;
+        received
+    }
+
+    /// End the session for a reaped child: `value` when no terminating
+    /// signal arrived, the interruption otherwise. A signal that arrives
+    /// after a clean exit still counts, since it asked tog to stop too.
+    fn conclude<T>(mut self, status: ExitStatus, value: T) -> io::Result<T> {
+        let received = self.teardown();
+        match TERMINATING
+            .into_iter()
+            .find(|signal| received & signal_bit(*signal) != 0)
+        {
+            Some(signal) => Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                Interrupted { signal, status },
+            )),
+            None => Ok(value),
+        }
     }
 }
 
 impl Drop for Session {
     fn drop(&mut self) {
-        self.teardown();
+        let _ = self.teardown();
     }
 }
 
@@ -619,7 +716,7 @@ pub fn status(command: &mut Command, activity: &StoreActivity) -> io::Result<Exi
         match child.try_wait() {
             Ok(Some(status)) => {
                 session.clear_child();
-                return Ok(status);
+                return session.conclude(status, status);
             }
             Ok(None) => {}
             Err(error) => {
@@ -704,7 +801,7 @@ pub fn status_with_stderr(
         if let Some(status) = status {
             if stderr.is_none() {
                 session.clear_child();
-                return Ok((status, stderr_bytes));
+                return session.conclude(status, (status, stderr_bytes));
             }
         }
         if let Err(error) = session.forward_pending() {
@@ -840,11 +937,14 @@ pub fn output(command: &mut Command, activity: &StoreActivity) -> io::Result<Out
         if let Some(status) = status {
             if stdout.is_none() && stderr.is_none() {
                 session.clear_child();
-                return Ok(Output {
+                return session.conclude(
                     status,
-                    stdout: stdout_bytes,
-                    stderr: stderr_bytes,
-                });
+                    Output {
+                        status,
+                        stdout: stdout_bytes,
+                        stderr: stderr_bytes,
+                    },
+                );
             }
         }
         if let Err(error) = session.forward_pending() {

@@ -807,3 +807,198 @@ NAPI_MODULE(NODE_GYP_MODULE_NAME, init)
         "{text}"
     );
 }
+
+/// Ctrl-C while a lifecycle script runs stops the sync. A terminal delivers
+/// the interrupt to its foreground process group, which holds tog and the
+/// outer bwrap but not the sandboxed script (bwrap starts it in a new
+/// session), so the case sends SIGINT to tog's own group the same way.
+#[test]
+#[ignore]
+fn interrupt_during_install_script_stops_the_sync() {
+    let _policy_guard = policy_guard();
+    if !cfg!(target_os = "linux") {
+        eprintln!("interrupt_during_install_script_stops_the_sync skipped: Linux only");
+        return;
+    }
+    assert_signal_mid_script_stops_the_sync(libc::SIGINT, true);
+}
+
+/// A TERM sent to tog alone, as `kill <pid>` or a service manager sends it,
+/// is forwarded to bwrap and stops the sync the same way.
+#[test]
+#[ignore]
+fn terminate_during_install_script_stops_the_sync() {
+    let _policy_guard = policy_guard();
+    if !cfg!(target_os = "linux") {
+        eprintln!("terminate_during_install_script_stops_the_sync skipped: Linux only");
+        return;
+    }
+    assert_signal_mid_script_stops_the_sync(libc::SIGTERM, false);
+}
+
+/// Sync a project whose one dependency's postinstall sleeps, send `signal`
+/// to tog (or to its whole process group) once the script is running, and
+/// require that tog exits non-zero, says it was interrupted, and does not
+/// write the interrupted script into the closure as an
+/// `install-script-failed` exception.
+fn assert_signal_mid_script_stops_the_sync(signal: libc::c_int, whole_group: bool) {
+    use std::io::{BufRead, BufReader, Read};
+    use std::os::unix::process::CommandExt;
+    use std::time::{Duration, Instant};
+
+    let temp = TempDir::new("npm-interrupt");
+    let store_root = common::warm_store(&temp);
+    for sub in ["objects", "meta", "cache/sha256", "tmp"] {
+        std::fs::create_dir_all(store_root.join(sub)).unwrap();
+    }
+    let store = Store {
+        root: store_root.canonicalize().unwrap(),
+    };
+    let project = temp.0.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(
+        project.join("package.json"),
+        r#"{"name":"npm-interrupt","version":"1.0.0","private":true}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("package-lock.json"),
+        r#"{"name":"npm-interrupt","version":"1.0.0","lockfileVersion":3,"requires":true,"packages":{"":{"name":"npm-interrupt","version":"1.0.0"}}}"#,
+    )
+    .unwrap();
+    // The marker is how the case knows the script is running inside the
+    // sandbox; the sleep outlives every deadline below, so only the
+    // interrupt can end it.
+    let sleeper_package = serde_json::json!({
+        "name": "fixture-sleeper",
+        "version": "1.0.0",
+        "scripts": {"postinstall": "printf 'TOG_SCRIPT_RUNNING\\n'; sleep 600"},
+        "main": "index.js"
+    })
+    .to_string();
+    let (tarball, sri) = make_fixture_tarball(
+        &temp.0,
+        "fixture-sleeper",
+        &sleeper_package,
+        &[("index.js", b"module.exports = 1;\n")],
+    );
+    seed_verified_fixture(&store, &tarball, &sri);
+    add_fixture_dependency(&project, "fixture-sleeper", &sri);
+
+    let mut command = common::command(&project, &temp.0, &store.root);
+    command
+        .arg("sync")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .process_group(0);
+    let mut child = command.spawn().expect("spawn tog");
+    let pid = child.id() as i32;
+    // Whatever happens below, nothing this case started outlives it.
+    struct GroupGuard(i32);
+    impl Drop for GroupGuard {
+        fn drop(&mut self) {
+            // SAFETY: tog leads its own process group (process_group(0)).
+            unsafe { libc::kill(-self.0, libc::SIGKILL) };
+        }
+    }
+    let _guard = GroupGuard(pid);
+
+    let stdout = child.stdout.take().unwrap();
+    let (lines, received) = std::sync::mpsc::channel::<String>();
+    let reader = std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            let Ok(line) = line else { break };
+            if lines.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let mut stderr = child.stderr.take().unwrap();
+    let stderr_reader = std::thread::spawn(move || {
+        let mut text = String::new();
+        let _ = stderr.read_to_string(&mut text);
+        text
+    });
+
+    // A cold store realizes Node first, so the script can take a while to
+    // start; it is the marker, never a sleep, that decides when to signal.
+    let mut stdout_text = String::new();
+    let start_deadline = Instant::now() + Duration::from_secs(900);
+    loop {
+        let remaining = start_deadline.saturating_duration_since(Instant::now());
+        match received.recv_timeout(remaining.min(Duration::from_secs(1))) {
+            Ok(line) => {
+                stdout_text.push_str(&line);
+                stdout_text.push('\n');
+                if line.contains("TOG_SCRIPT_RUNNING") {
+                    break;
+                }
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                if let Some(status) = child.try_wait().unwrap() {
+                    panic!(
+                        "tog exited ({status}) before the script ran\nstdout:\n{stdout_text}\nstderr:\n{}",
+                        stderr_reader.join().unwrap()
+                    );
+                }
+                assert!(
+                    Instant::now() < start_deadline,
+                    "the install script never started\nstdout:\n{stdout_text}"
+                );
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                panic!(
+                    "tog closed stdout before the script ran\nstdout:\n{stdout_text}\nstderr:\n{}",
+                    stderr_reader.join().unwrap()
+                );
+            }
+        }
+    }
+
+    let target = if whole_group { -pid } else { pid };
+    // SAFETY: a plain kill(2) on the process or group this case created.
+    assert_eq!(unsafe { libc::kill(target, signal) }, 0);
+    let exit_deadline = Instant::now() + Duration::from_secs(120);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        assert!(
+            Instant::now() < exit_deadline,
+            "tog kept running after the interrupt\nstdout:\n{stdout_text}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let stderr_text = stderr_reader.join().unwrap();
+    for line in received.try_iter() {
+        stdout_text.push_str(&line);
+        stdout_text.push('\n');
+    }
+    let _ = reader.join();
+    let report = format!("status: {status:?}\nstdout:\n{stdout_text}\nstderr:\n{stderr_text}");
+    println!("{report}");
+
+    assert!(
+        !status.success(),
+        "an interrupted sync reported success\n{report}"
+    );
+    assert!(
+        stderr_text.contains("interrupted"),
+        "the failure does not say the sync was interrupted\n{report}"
+    );
+    // No closure at all is the expected outcome; a closure that does exist
+    // must not carry the interrupted script as a failure.
+    if let Ok(closure) = comforter::read_closure(&project, "node") {
+        let exceptions = closure["exceptions"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            exceptions
+                .iter()
+                .all(|exception| exception["kind"].as_str() != Some("install-script-failed")),
+            "the interrupted script was recorded as an exception: {exceptions:?}\n{report}"
+        );
+    }
+}
