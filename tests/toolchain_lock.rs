@@ -293,7 +293,7 @@ fn a_rust_sdist_builds_with_the_rust_the_python_section_pins() {
     let pinned_rust = tog::kernel::provider::rust::rust_object_id(platform, &default).unwrap();
     assert_eq!(
         sdist_build_rust(&fixture.store(), "fastuuid"),
-        [pinned_rust.clone()]
+        std::slice::from_ref(&pinned_rust)
     );
     assert!(fixture.store().join("objects").join(&pinned_rust).is_dir());
     let run = fixture.tog(&[

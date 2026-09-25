@@ -868,6 +868,7 @@ mod tests {
 
         let probe = fs::OpenOptions::new()
             .create(true)
+            .truncate(false)
             .write(true)
             .open(store.root.join("gc.lock"))
             .unwrap();

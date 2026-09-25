@@ -228,7 +228,7 @@ fn is_cpython_object_id(value: &str) -> bool {
 /// and `git:<object id>:<name>@<version>:...` for a git package; the name may
 /// be scoped (`@scope/pkg`) but never contains a colon.
 fn package_name_and_version(value: &str) -> Option<(&str, &str)> {
-    let name_version = value.splitn(4, ':').nth(2)?;
+    let name_version = value.split(':').nth(2)?;
     name_version.rsplit_once('@')
 }
 

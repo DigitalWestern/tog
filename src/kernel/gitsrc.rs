@@ -90,9 +90,7 @@ pub fn normalize_url(raw: &str) -> String {
         // Userinfo belongs to the authority, which ends at the first slash.
         // Looking for `@` in the complete remainder incorrectly rewrites a
         // valid path such as `/mirror@other/repo`.
-        let authority_end = rest
-            .find(|character| character == '/' || character == '?')
-            .unwrap_or(rest.len());
+        let authority_end = rest.find(['/', '?']).unwrap_or(rest.len());
         let authority = &rest[..authority_end];
         let path = &rest[authority_end..];
         let authority = if scheme.eq_ignore_ascii_case("ssh") {
@@ -595,7 +593,7 @@ pub fn ensure_git_source(
             "git rev-parse HEAD",
             activity,
         )?;
-        if head.to_ascii_lowercase() != source.commit.to_ascii_lowercase() {
+        if !head.eq_ignore_ascii_case(&source.commit) {
             return Err(err(format!(
                 "{}: checked out {head}, expected {}",
                 source.url, source.commit

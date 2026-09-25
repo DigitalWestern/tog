@@ -1334,11 +1334,11 @@ mod tests {
 
     /// Run the phases by hand so a test can mutate the store between the
     /// plan and its execution.
-    fn planned<'a>(
+    fn planned(
         store: &Store,
         activity: &StoreActivity,
         options: &Options,
-        snapshot: &'a mut Option<Snapshot>,
+        snapshot: &mut Option<Snapshot>,
     ) -> SweepPlan {
         let mut out = Vec::new();
         *snapshot = Some(read(store, activity, options, &BTreeMap::new(), &mut out).unwrap());
@@ -1944,7 +1944,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         perms.set_mode(0o555);
         fs::set_permissions(&meta_dir, perms).unwrap();
-        let outcome = (|| {
+        let outcome = {
             let mut out = Vec::new();
             let result = execute(
                 &sweep_plan,
@@ -1954,7 +1954,7 @@ mod tests {
                 &mut out,
             );
             (result, String::from_utf8(out).unwrap())
-        })();
+        };
         // Restore before asserting, so a failed assertion cannot leave the
         // fixture store uncleanable.
         let mut perms = fs::metadata(&meta_dir).unwrap().permissions();
@@ -1983,7 +1983,14 @@ mod tests {
         assert!(result.is_err(), "a stray record did not block the sweep");
         let activity = store.activity(ActivityMode::Exclusive).unwrap();
         let mut out = Vec::new();
-        let dropped = drop_objects(&store, &activity, &[dead.clone()], false, &mut out).unwrap();
+        let dropped = drop_objects(
+            &store,
+            &activity,
+            std::slice::from_ref(&dead),
+            false,
+            &mut out,
+        )
+        .unwrap();
         drop(activity);
         assert_eq!(dropped, 1, "{}", String::from_utf8_lossy(&out));
         assert!(
@@ -3290,12 +3297,12 @@ mod tests {
             "the fail-closed sweep deleted something"
         );
 
-        let (count, text) = dropped(&store, &[id.clone()], true);
+        let (count, text) = dropped(&store, std::slice::from_ref(&id), true);
         assert_eq!(count.unwrap(), 1, "{text}");
         assert!(text.contains(&format!("would drop object {id}")), "{text}");
         assert!(store.object_path(&id).is_dir(), "a dry run removed it");
 
-        let (count, text) = dropped(&store, &[id.clone()], false);
+        let (count, text) = dropped(&store, std::slice::from_ref(&id), false);
         assert_eq!(count.unwrap(), 1, "{text}");
         assert!(text.contains(&format!("dropped object {id}")), "{text}");
         assert!(!store.object_path(&id).exists(), "{text}");
@@ -3318,7 +3325,7 @@ mod tests {
         let store = temp.store();
         let id = commit(&store, "healthy", None);
 
-        let (result, text) = dropped(&store, &[id.clone()], false);
+        let (result, text) = dropped(&store, std::slice::from_ref(&id), false);
         let error = result.unwrap_err().to_string();
         assert!(error.contains("has usable metadata"), "{error}");
         assert!(error.contains("--forget"), "{error}");
@@ -3338,7 +3345,7 @@ mod tests {
         let mut whole_set = [wedged.clone(), dependent.clone()];
         whole_set.sort();
 
-        let (result, text) = dropped(&store, &[wedged.clone()], false);
+        let (result, text) = dropped(&store, std::slice::from_ref(&wedged), false);
         let error = result.unwrap_err().to_string();
         assert!(
             error.contains(&format!("--drop-object {} {}", whole_set[0], whole_set[1])),
@@ -3401,7 +3408,7 @@ mod tests {
         let store = temp.store();
         let absent = test_identity("absent", None).object_id();
 
-        let (result, text) = dropped(&store, &[absent.clone()], false);
+        let (result, text) = dropped(&store, std::slice::from_ref(&absent), false);
         let error = result.unwrap_err().to_string();
         assert_eq!(error, format!("no such object {absent}"), "{text}");
     }

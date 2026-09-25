@@ -15,22 +15,22 @@ jobs:
   test:
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Install the Linux sandbox
         run: sudo apt-get update && sudo apt-get install -y bubblewrap
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo fmt --check
       - run: cargo build --locked
-      # Store protection (clippy.toml): raw children and lease acquisition
-      # only at the reviewed, `#[allow]`ed sites. Only this lint is denied.
-      - name: Store children borrow the caller's lease
-        run: |
-          rustup component add clippy
-          cargo clippy --locked --all-targets -- -D clippy::disallowed_methods
+      # Every clippy warning fails the build (Cargo.toml's [lints.clippy]
+      # allows a few lints). That includes store protection
+      # (clippy.toml): raw children and lease acquisition only at the
+      # reviewed, `#[allow]`ed sites. rust-toolchain.toml brings clippy.
+      - name: Clippy, with store children borrowing the caller's lease
+        run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo test --locked
       # The catalog generator's offline tests (no network). It reads the
       # catalogs with tomllib, which needs Python 3.11; the runner has 3.10.
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.12"
       - name: Catalog generator (offline)
@@ -53,10 +53,10 @@ jobs:
   sandbox-ubuntu-24:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Install the Linux sandbox
         run: sudo apt-get update && sudo apt-get install -y bubblewrap
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo build --locked
       - name: Doctor agrees with bwrap about user namespaces
         id: host

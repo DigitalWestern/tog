@@ -533,7 +533,7 @@ pub fn edit(
         let files = match eco {
             Eco::Python => python(
                 &store,
-                &activity,
+                activity,
                 platform,
                 &project,
                 request.verb,
@@ -545,7 +545,7 @@ pub fn edit(
             Eco::Node => {
                 let outcome = node(
                     &store,
-                    &activity,
+                    activity,
                     platform,
                     &project,
                     request.verb,
@@ -558,7 +558,7 @@ pub fn edit(
             }
             Eco::Cargo => cargo_delegate(
                 &store,
-                &activity,
+                activity,
                 platform,
                 &project,
                 request.verb,
@@ -568,7 +568,7 @@ pub fn edit(
             )?,
             Eco::Go => go_delegate(
                 &store,
-                &activity,
+                activity,
                 platform,
                 &project,
                 request.verb,
@@ -578,7 +578,7 @@ pub fn edit(
             )?,
             Eco::Ruby => ruby_delegate(
                 &store,
-                &activity,
+                activity,
                 platform,
                 &project,
                 request.verb,
@@ -588,7 +588,7 @@ pub fn edit(
             )?,
             Eco::Elixir => elixir_delegate(
                 &store,
-                &activity,
+                activity,
                 platform,
                 &project,
                 request.verb,
@@ -1496,7 +1496,7 @@ fn is_yarn_berry(root: &Path) -> bool {
         return false;
     };
     version
-        .split(|character| matches!(character, '.' | '-' | '+'))
+        .split(['.', '-', '+'])
         .next()
         .and_then(|major| major.parse::<u64>().ok())
         .is_some_and(|major| major >= 2)

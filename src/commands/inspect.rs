@@ -168,7 +168,7 @@ pub fn listing(closure: &ClosureFile) -> Listing {
 pub fn ls(dir: &Path, filter: Option<&str>, json: bool, verbose: bool) -> io::Result<String> {
     let listings: Vec<Listing> = closures(dir)?
         .iter()
-        .filter(|closure| filter.map_or(true, |name| closure.ecosystem == name))
+        .filter(|closure| filter.is_none_or(|name| closure.ecosystem == name))
         .map(listing)
         .collect();
     if listings.is_empty() {
@@ -1926,10 +1926,9 @@ mod tests {
         // sandbox or C toolchain fails appends a summary after it.
         let last_check = text
             .lines()
-            .filter(|line| {
+            .rfind(|line| {
                 line.starts_with("ok  ") || line.starts_with("warn") || line.starts_with("fail")
             })
-            .next_back()
             .unwrap();
         assert!(last_check.ends_with(&detail("project").detail), "{text}");
 

@@ -696,8 +696,10 @@ These keep the layout organized. The first is enforced by
    becoming its own crate later: no reaching into another folder's private
    items; cross-folder use goes through `pub` items at the folder's `mod.rs`.
 5. **Size budgets:** a file over 1,500 non-test lines or a function over 150
-   lines is a review flag. The architecture test prints offenders
-   (`cargo test --test architecture -- --nocapture`); it does not fail.
+   lines is a review flag. `tests/size_baseline.txt` lists today's
+   offenders at their current size, and the architecture test is a
+   ratchet: it fails when a listed one grows, a new one crosses a budget,
+   or a listed one shrinks without its line being updated.
 6. **Public surface is deliberate.** `lib.rs` exports what tests and the
    binary need. Making an item `pub` is a decision, noted in the module doc
    comment.

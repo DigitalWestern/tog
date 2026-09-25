@@ -56,11 +56,11 @@ pub(super) fn collect_roots<W: Write>(
                     record
                         .projections
                         .iter()
-                        .filter_map(|projection| match projection.base {
+                        .map(|projection| match projection.base {
                             store::ProjectionBase::Forests
                             | store::ProjectionBase::Backups
                             | store::ProjectionBase::LegacyForests
-                            | store::ProjectionBase::LegacyBackups => Some(projection.path(store)),
+                            | store::ProjectionBase::LegacyBackups => projection.path(store),
                         }),
                 );
             continue;

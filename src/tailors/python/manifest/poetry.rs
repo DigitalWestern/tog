@@ -1199,7 +1199,7 @@ pub(super) fn check_poetry_content_hash(
             relevant_poetry.insert(key, toml_json(value)?);
         } else if legacy_keys.contains(&key)
             && relevant_project.is_empty()
-            && group_content.map_or(true, toml::map::Map::is_empty)
+            && group_content.is_none_or(toml::map::Map::is_empty)
         {
             relevant_poetry.insert(key, serde_json::Value::Null);
         }

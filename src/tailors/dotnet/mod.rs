@@ -311,9 +311,9 @@ pub fn realize_runtime(
 fn extract_sdk_archive(tarball: &Path, staged: &Path) -> io::Result<()> {
     let st = Command::new("/usr/bin/tar")
         .args(["-xzf"])
-        .arg(&tarball)
+        .arg(tarball)
         .args(["-C"])
-        .arg(&staged)
+        .arg(staged)
         .status()?;
     if !st.success() || !staged.join("dotnet").is_file() {
         return Err(err("dotnet SDK extraction failed or has unexpected layout"));
@@ -1477,7 +1477,7 @@ fn ensure_dotnet_tmp_at(
     expected_uid: u32,
     precreate_shm: bool,
 ) -> io::Result<PathBuf> {
-    let created = match fs::symlink_metadata(&path) {
+    let created = match fs::symlink_metadata(path) {
         Ok(md) => {
             if md.file_type().is_symlink() || !md.is_dir() {
                 return Err(err(format!(
@@ -1491,7 +1491,7 @@ fn ensure_dotnet_tmp_at(
             // Two tog processes may race here (concurrent syncs share
             // this directory by design); losing the race is fine, the
             // validation below still applies to whatever now exists.
-            match fs::create_dir(&path) {
+            match fs::create_dir(path) {
                 Ok(()) => true,
                 Err(e) if e.kind() == io::ErrorKind::AlreadyExists => false,
                 Err(e) => return Err(e),
@@ -1500,9 +1500,9 @@ fn ensure_dotnet_tmp_at(
         Err(e) => return Err(e),
     };
     if created {
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o700))?;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
     }
-    let md = fs::symlink_metadata(&path)?;
+    let md = fs::symlink_metadata(path)?;
     if md.file_type().is_symlink() || !md.is_dir() {
         return Err(err(format!(
             "{} must be a real directory, not a symlink or non-directory",

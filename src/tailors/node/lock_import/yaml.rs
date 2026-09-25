@@ -566,7 +566,7 @@ pub(super) fn yaml_map<'a>(
     }
 }
 
-pub(super) fn yaml_str<'a>(value: Option<&'a YamlValue>) -> Option<&'a str> {
+pub(super) fn yaml_str(value: Option<&YamlValue>) -> Option<&str> {
     match value {
         Some(YamlValue::Scalar(value)) => Some(value),
         _ => None,

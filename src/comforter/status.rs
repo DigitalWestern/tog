@@ -57,9 +57,7 @@ fn changed_lock(dir: &Path, lock: &str, recorded: &str) -> io::Result<Vec<String
         // hash of the empty string, so match it.
         hex::encode(Sha256::digest(b""))
     };
-    Ok(if recorded.is_empty() {
-        Vec::new()
-    } else if current == recorded {
+    Ok(if recorded.is_empty() || current == recorded {
         Vec::new()
     } else if file.is_file() {
         vec![lock.to_string()]

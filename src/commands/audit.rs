@@ -2580,7 +2580,7 @@ mod tests {
             Some(other_key()),
             |_| {},
         );
-        let verdicts = judge(dir, &permissive(), &[by_other.clone()]);
+        let verdicts = judge(dir, &permissive(), std::slice::from_ref(&by_other));
         assert_eq!(
             verdicts[0].signature,
             Signature::Untrusted {
@@ -2623,7 +2623,7 @@ mod tests {
         };
         let mut chain = permissive();
         policy::merge(&mut chain, &widening, SourceOrigin::Project);
-        let verdicts = judge(dir, &chain, &[by_other.clone()]);
+        let verdicts = judge(dir, &chain, std::slice::from_ref(&by_other));
         assert!(matches!(verdicts[0].signature, Signature::Untrusted { .. }));
         // Nor can the --policy file.
         let mut chain = permissive();
@@ -2672,7 +2672,7 @@ mod tests {
                 trusted: None,
             },
         ];
-        let verdicts = judge_with_sources(dir, &chain, &sources, &[by_test.clone()]);
+        let verdicts = judge_with_sources(dir, &chain, &sources, std::slice::from_ref(&by_test));
         assert_eq!(
             verdicts[0].signature,
             Signature::Untrusted {
@@ -2783,10 +2783,10 @@ mod tests {
             vec!["cargo".to_string()]
         );
         assert_eq!(
-            missing_closures(&[rustfmt.clone()], &present),
+            missing_closures(std::slice::from_ref(&rustfmt), &present),
             vec!["python".to_string(), "cargo".to_string()]
         );
-        assert!(missing_closures(&[python.clone()], &["python"]).is_empty());
+        assert!(missing_closures(std::slice::from_ref(&python), &["python"]).is_empty());
         let verdicts = judge(dir, &permissive(), &[rustfmt.clone(), python.clone()]);
         assert!(verdicts.iter().all(Verdict::passes), "{verdicts:?}");
         let report = Report {
@@ -2841,7 +2841,11 @@ mod tests {
             None,
             |_| {},
         );
-        let verdicts = judge(dir, &deny(&[GIT_DEPENDENCY]), &[closure.clone()]);
+        let verdicts = judge(
+            dir,
+            &deny(&[GIT_DEPENDENCY]),
+            std::slice::from_ref(&closure),
+        );
         assert!(verdicts[0].passes(), "{verdicts:?}");
         assert_eq!(verdicts[0].record_sha256, closure.record_sha256);
         // Reading again judges the new file, under its own digest.

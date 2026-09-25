@@ -1130,7 +1130,6 @@ pub(super) fn realize_node_env_with_node_object(
     // Capture provenance before the package vectors are merged and dropped.
     let mut deps = env_object_deps(plan, node_obj, native_libs_id.as_deref(), &git_objects)?;
 
-    let mut tarballs = tarballs;
     tarballs.append(&mut git_objects);
     link_package_bins(&staged, &tarballs)?;
 
@@ -1142,7 +1141,7 @@ pub(super) fn realize_node_env_with_node_object(
         activity,
         platform,
         &staged,
-        &node_obj,
+        node_obj,
         plan,
         artifacts,
         native_libs.as_ref().map(|set| set.path.as_path()),
@@ -1526,7 +1525,7 @@ fn run_package_phases(
         let result = sandbox.run_in_on_with_activity(
             platform,
             &["/bin/sh", "-c", script],
-            &path_env,
+            path_env,
             tmp,
             pkg_dir,
             &envs_phase,

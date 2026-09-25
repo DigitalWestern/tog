@@ -290,7 +290,7 @@ fn ensure_x_locks_dir(x_dir: &Path) -> io::Result<PathBuf> {
     let mut permissions = fs::metadata(&locks)?.permissions();
     permissions.set_mode(0o700);
     fs::set_permissions(&locks, permissions)?;
-    Ok(locks.canonicalize()?)
+    locks.canonicalize()
 }
 
 fn fd_set_cloexec(fd: RawFd, enabled: bool) -> io::Result<()> {
@@ -333,6 +333,9 @@ fn stat_at(dirfd: RawFd, name: &[u8]) -> io::Result<libc::stat> {
     Ok(stat)
 }
 
+// `st_dev` is a u64 on Linux but an i32 on macOS: the cast is a no-op
+// here and needed there, and clippy only sees the target it runs on.
+#[allow(clippy::unnecessary_cast)]
 fn stat_identity(stat: &libc::stat) -> (u64, u64) {
     (stat.st_dev as u64, stat.st_ino as u64)
 }
@@ -982,6 +985,12 @@ fn read_x_request(root: &Path) -> Option<XRecord> {
         return None;
     }
     let value: serde_json::Value = serde_json::from_reader(file).ok()?;
+    if !matches!(
+        value.get("schema").and_then(serde_json::Value::as_str),
+        Some("x-request/1" | "x-request/2")
+    ) {
+        return None;
+    }
     Some(XRecord {
         ecosystem: value.get("ecosystem")?.as_str()?.to_string(),
         package: value.get("package")?.as_str()?.to_string(),
@@ -996,12 +1005,6 @@ fn read_x_request(root: &Path) -> Option<XRecord> {
         store_root: value
             .get("store_root")
             .and_then(|value| value.as_str().map(PathBuf::from)),
-    })
-    .filter(|_| {
-        matches!(
-            value.get("schema").and_then(serde_json::Value::as_str),
-            Some("x-request/1" | "x-request/2")
-        )
     })
 }
 
@@ -1311,7 +1314,7 @@ fn old_root_matches(path: &Path, filter: &CleanFilter) -> CandidateMatch {
                 && filter
                     .version
                     .as_deref()
-                    .map_or(true, |version| record.version.as_deref() == Some(version))
+                    .is_none_or(|version| record.version.as_deref() == Some(version))
         }) {
             return CandidateMatch::Match;
         }
@@ -1327,15 +1330,15 @@ fn record_matches(record: &XRecord, filter: &CleanFilter) -> bool {
     filter
         .ecosystem
         .as_deref()
-        .map_or(true, |ecosystem| ecosystem == record.ecosystem)
+        .is_none_or(|ecosystem| ecosystem == record.ecosystem)
         && filter
             .package
             .as_deref()
-            .map_or(true, |package| package == record.package)
+            .is_none_or(|package| package == record.package)
         && filter
             .version
             .as_deref()
-            .map_or(true, |version| Some(version) == record.version.as_deref())
+            .is_none_or(|version| Some(version) == record.version.as_deref())
 }
 
 /// Best-effort ecosystem of a candidate, used only to word the summary. The
@@ -1409,7 +1412,8 @@ fn x_request_file_exists(root: &Path) -> bool {
 enum Registration {
     Found {
         store: Store,
-        entry: RootEntry,
+        // Boxed so the enum is not as large as its one big variant.
+        entry: Box<RootEntry>,
     },
     NotFound,
     #[cfg(test)]
@@ -1634,12 +1638,12 @@ fn registration_for_store(root: &Path, store: Store) -> io::Result<Registration>
         entry
             .path
             .canonicalize()
-            .map_or(false, |path| path == canonical)
+            .is_ok_and(|path| path == canonical)
     });
     Ok(
         entry.map_or(Registration::NotFound, |entry| Registration::Found {
             store,
-            entry,
+            entry: Box::new(entry),
         }),
     )
 }
