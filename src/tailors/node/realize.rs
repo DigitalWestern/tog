@@ -1155,6 +1155,10 @@ pub(super) fn realize_node_env_with_node_object(
 
 pub(super) enum LifecycleFailure {
     SandboxUnavailable(io::Error),
+    /// tog was asked to stop while the script ran. The script's own status
+    /// says nothing about the package then, so this ends the sync instead
+    /// of becoming an exception.
+    Interrupted(io::Error),
     Script(io::Error),
 }
 
@@ -1163,6 +1167,9 @@ pub(super) fn classify_lifecycle_result(result: io::Result<()>) -> Result<(), Li
         Ok(()) => Ok(()),
         Err(error) if error.kind() == io::ErrorKind::Unsupported => {
             Err(LifecycleFailure::SandboxUnavailable(error))
+        }
+        Err(error) if error.kind() == io::ErrorKind::Interrupted => {
+            Err(LifecycleFailure::Interrupted(error))
         }
         Err(error) => Err(LifecycleFailure::Script(error)),
     }
@@ -1525,11 +1532,18 @@ fn run_package_phases(
             &envs_phase,
             activity,
         );
-        // A missing sandbox backend is never a script failure: it must
-        // not become a permissive install-script-failed exception.
+        // A missing sandbox backend or an interrupt is never a script
+        // failure: neither may become a permissive install-script-failed
+        // exception.
         let e = match classify_lifecycle_result(result) {
             Ok(()) => continue,
             Err(LifecycleFailure::SandboxUnavailable(e)) => return Err(e),
+            Err(LifecycleFailure::Interrupted(e)) => {
+                return Err(io::Error::new(
+                    e.kind(),
+                    format!("{}: {phase}: {e}; the sync stopped here", p.path),
+                ))
+            }
             Err(LifecycleFailure::Script(e)) => e,
         };
         let hint = "If this package downloads files at install time, declare them as verified inputs in package.json — \

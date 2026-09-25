@@ -1995,7 +1995,10 @@ pub fn launch(
         command.env(key, value);
     }
     ui::trace_command(&command);
-    let status = crate::kernel::supervise::status(&mut command, activity)?;
+    let status = crate::kernel::supervise::child_status(crate::kernel::supervise::status(
+        &mut command,
+        activity,
+    ))?;
     use std::os::unix::process::ExitStatusExt;
     Ok(status
         .code()

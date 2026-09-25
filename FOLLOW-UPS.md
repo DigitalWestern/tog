@@ -81,7 +81,6 @@ by position.
 - **Quality review of 2026-09-24 (#264).** A whole-codebase review after
   the 09-20 to 09-24 run. #264 holds the work order and the overall verdict.
   Each line is one issue and one PR, in order:
-  - #226 supervise: Ctrl-C during a sandboxed child is recorded as a script failure and the sync continues.
   - #234 ci: nothing runs the 65 ignored e2e tests, acceptance.sh or tests/install.sh.
   - #235 ci: pin the toolchain and actions, scope release permissions, test before release, deny clippy warnings.
   - #262 docs: the planning docs contradict each other, and README's install line can't work.
