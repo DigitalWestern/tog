@@ -88,10 +88,11 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   under a root-level lock — is not a toolchain source for tog, though uv or `nvm` would
   honor it. Per-subproject toolchains would need per-subproject sections and are not
   designed.
-- **The two-machine lock diff has not been run.** A lock carries a row per platform and is
-  written from the intersection of releases complete on both, so a Linux-written lock should
-  sync unchanged on an arm64 Mac and produce byte-identical `tog status`. That has been
-  proven by test, not by two machines; the Mac gate is the open item.
+- **The two-machine lock diff has been run once, by hand.** A lock carries a row per
+  platform and is written from the intersection of releases complete on both. On
+  2026-09-25 a seven-ecosystem lock written on Linux synced unchanged on an arm64 Mac, the
+  Mac wrote the same bytes from scratch, and `tog status` matched. No CI job repeats it, so
+  a change after that date is proven by test, not by two machines.
 - **A committed lock is a set of URLs to review.** A lock can aim at any allowlisted
   provider host, and a hostile lock can cause an HTTPS request to a different allowlisted
   host. Reviewing a lock diff is reviewing its URLs. The generic fetch helper still

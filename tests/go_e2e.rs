@@ -9,7 +9,7 @@ use std::process::Command;
 
 mod common;
 
-use common::{assert_ok, copy_tree, fixture, snapshot, text, tog, TempDir};
+use common::{assert_ok, copy_tree, fixture, snapshot, text, tog, tog_at, TempDir};
 
 #[test]
 #[ignore]
@@ -194,4 +194,40 @@ func main() {
         );
         assert_eq!(String::from_utf8_lossy(&cgo_output.stdout).trim(), "42");
     }
+}
+
+/// `.tog/go-plan.json` is project state and outlives the store it was
+/// planned against. Synced into a second, empty store, the cached plan names
+/// artifacts that store never downloaded, so the sync plans again and
+/// fetches them instead of failing on the first missing cache entry; the
+/// module cache object is the same in both stores.
+#[test]
+#[ignore]
+fn go_sync_into_a_second_store_replans_a_cached_plan() {
+    let temp = TempDir::new("go-second-store");
+    let project = temp.0.join("go-hello");
+    copy_tree(&fixture("go-hello"), &project);
+    let home = temp.path();
+
+    // `synced:` lines go to stderr.
+    let sync = |store: &str| {
+        let out = tog_at(&project, home, &temp.0.join(store), &["sync"]);
+        assert!(
+            out.status.success(),
+            "sync into {store}: {}",
+            text(&out.stderr)
+        );
+        text(&out.stderr)
+    };
+    let first = sync("store-1");
+    assert!(project.join(".tog/go-plan.json").is_file());
+    let second = sync("store-2");
+    let object = |out: &str| {
+        out.lines()
+            .find(|line| line.starts_with("synced: go modcache"))
+            .and_then(|line| line.rsplit('/').next())
+            .map(str::to_string)
+            .unwrap_or_else(|| panic!("no go modcache line: {out}"))
+    };
+    assert_eq!(object(&first), object(&second));
 }

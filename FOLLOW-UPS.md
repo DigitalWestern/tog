@@ -14,17 +14,14 @@ by position.
 
 ## Next up, in order
 
-1. **The two-machine toolchain-lock diff.** The toolchain lock shipped on
-   Linux on 2026-09-21; everything but this is done. A lock carries a row per
-   platform and is written from the releases complete on both, so a lock
-   written on Linux must sync on an arm64 Mac without rewriting itself and
-   `tog status` must answer identically on both. Sync the same project on
-   each machine and diff `tog-toolchain.toml` byte for byte. It is proven by
-   test today, not by two machines, and it is part of the macOS gate at the
-   bottom of this file. The same run should sync one locked project into two
-   fresh stores on one machine and compare the realized object ids: the
-   offline replay test (`tests/toolchain_lock.rs`) proves the lock answers
-   without the catalog, not that two stores realize the same objects (#136).
+1. **The two-store toolchain-lock test (#136).** The two-machine lock diff
+   ran by hand on 2026-09-25: a seven-ecosystem lock written on Fedora
+   synced unchanged on an arm64 Mac, the Mac wrote the same bytes from
+   scratch, and `tog status` matched. Two fresh stores on the Mac realized
+   the same runtime, Cargo, Go, Ruby, Elixir and .NET objects. What is left
+   is making the two-store half a network-gated test with a catalog fixture
+   that lacks the locked release, so replay without the catalog runs
+   through the binary.
 
 ## Decisions waiting on the owner
 
@@ -183,14 +180,13 @@ by position.
   timeouts under a loaded machine (2026-09-25) are captured on #65. Capture
   the rest the same way before changing anything.
 - **macOS arm64 gate (#66). Last, by the owner's choice.** The suites
-  below passed on the Mac on 2026-09-25 (4a2bffa, after #305); the lock
-  diff, #57 and the Mach allow-list are what is left. Run on the Mac:
+  below and the two-machine lock diff passed on the Mac on 2026-09-25
+  (after #305); #57 and the Mach allow-list are what is left. Run on the Mac:
   `cargo test`, `cargo test --test gc -- --ignored`,
   `cargo test --test cli audit`, and
   `cargo test --test toolchain_lock -- --ignored`, including the
   case-insensitive-filesystem paths the root-key code relies on. Darwin
-  identity goldens must stay byte-identical, and the two-machine lock diff
-  above is run here. It also covers the per-operation signal sessions
+  identity goldens must stay byte-identical. It also covers the per-operation signal sessions
   implementation (#57) once that lands, and the resolution proxy's Mach
   allow-list (`tools/proxy_spike/macos_mach.sh`). Nothing Linux-side
   clears this.
