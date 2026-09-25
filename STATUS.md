@@ -14,10 +14,10 @@ Cargo, Go, Ruby, Elixir, .NET.
 
 | Area | State |
 |---|---|
-| Seven ecosystems, Linux x86_64 | Shipped, acceptance-tested |
+| Seven ecosystems, Linux x86_64 | Shipped. The offline suite runs on every PR (`.github/workflows/ci.yml`); the network end-to-end tests (`cargo test -- --ignored`) and `tests/acceptance.sh` run nightly in the [`heavy`](.github/workflows/heavy.yml) workflow. The Actions tab holds the last green run |
 | macOS arm64 | Last run 2026-09-10, and it has not run since: every PR after that is Linux-verified only. The toolchain lock adds the two-machine lock diff to what that run has to cover. That run was green (`cargo test`, `gc --ignored` 3/3, sandboxed self-build), but the gate now also has to cover the Darwin identity goldens the schema successors added, which must stay byte-identical. It is deliberately the last item in FOLLOW-UPS.md |
 | Python + npm on real projects | Proven (Next.js, vite, prisma, native addons, FastAPI). Latest hit rate (2026-09-23): Python 26/30, npm 28/30; 27 and 29 with #213's Rust catalog (`docs/agent/HITRATE.md`) |
-| Other ecosystems | Fixture-proven only (`tests/`) |
+| Other ecosystems | Fixture-proven on every PR (`tests/`). Cargo, Go, Ruby, Elixir and .NET each also have a network end-to-end test against the real registry, run nightly by the [`heavy`](.github/workflows/heavy.yml) workflow, not on real projects the way Python and npm are |
 | Store GC (root protection, object metadata, fail-closed sweep) | Shipped and independently reviewed on Linux |
 | Module layout | Refactor finished 2026-09-12: one folder per layer, the `Tailor` trait and registry, layering enforced by `tests/architecture.rs` (rules in `docs/human/ARCHITECTURE.md`) |
 | Policy admission gate (`tog audit`, company policy template) | Shipped and independently reviewed on Linux. Every record is compared, including the `rustfmt` record against its pin (2026-09-17). Closure records are signed (`tog keygen`, `TOG_SIGNING_KEY`) and `audit` verifies them against the machine policy's `[signing]` table; unsigned or pre-field records are `outdated`, a missing primary closure fails (2026-09-18, PRs #77 and #78) |

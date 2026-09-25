@@ -1,0 +1,58 @@
+# Nightly, and by hand from the Actions tab: the heavy network tests
+# (`cargo test -- --ignored`) and tests/acceptance.sh. They download the
+# pinned toolchains and resolve real packages from PyPI, npm, crates.io,
+# the Go proxy, RubyGems, Hex and NuGet, so they prove every ecosystem
+# syncs, builds in the sandbox and runs end to end, not just its fixtures.
+# That takes about 40 minutes on a 12-core machine and depends on those
+# registries being up, so it is not on every PR; ci.yml runs the offline
+# suite there. Every ignored test runs: none needs a Mac or anything this
+# runner lacks beyond bubblewrap.
+# The last green run here is the date the end-to-end claims in STATUS.md
+# were last true.
+name: heavy
+
+on:
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One run at a time: a run started while another is going waits for it.
+concurrency:
+  group: heavy
+  cancel-in-progress: false
+
+jobs:
+  e2e:
+    runs-on: ubuntu-22.04
+    # About 40 minutes locally (2026-09-25): 31 for the ignored tests, 7
+    # for acceptance.sh. The runner has a third of the cores and the
+    # sdist, cargo and node-gyp builds are CPU-bound; this leaves room.
+    timeout-minutes: 150
+    env:
+      # A sandbox check that cannot run fails instead of skipping.
+      TOG_SANDBOX_TESTS: required
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Install the Linux sandbox
+        run: sudo apt-get update && sudo apt-get install -y bubblewrap
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: cargo build --locked
+      # Every later step sees these. Scratch stores and toolchains go on
+      # the runner's disk rather than /tmp. TOG_STORE is the store the
+      # suites share, so a toolchain one test downloaded is reused by the
+      # next; build_isolation and native_libs open it in-process and fail
+      # without it. (Job-level `env` cannot read `runner.temp`.)
+      - name: Scratch directory on the runner disk
+        run: |
+          mkdir -p "$RUNNER_TEMP/tog/tmp"
+          echo "TMPDIR=$RUNNER_TEMP/tog/tmp" >> "$GITHUB_ENV"
+          echo "TOG_STORE=$RUNNER_TEMP/tog/store" >> "$GITHUB_ENV"
+      # One test at a time: tests that realize through a child hold
+      # supervise::SUPERVISION_TEST_LOCK, and every suite shares TOG_STORE.
+      - name: Ignored end-to-end tests
+        run: cargo test --locked -- --ignored --test-threads=1
+      - name: Acceptance checklist
+        run: bash tests/acceptance.sh
