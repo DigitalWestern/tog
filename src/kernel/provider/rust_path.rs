@@ -697,12 +697,16 @@ fn save_cache(path: &Path, files: &BTreeMap<String, CachedFile>) {
     let Ok(bytes) = serde_json::to_vec(&body) else {
         return;
     };
+    // The sequence keeps two writers in one process apart when the clock
+    // does not: macOS's ticks in microseconds.
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let temporary = parent.join(format!(
-        ".tmp-{}-{}",
+        ".tmp-{}-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |elapsed| elapsed.as_nanos())
+            .map_or(0, |elapsed| elapsed.as_nanos()),
+        SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     ));
     let written = fs::create_dir_all(parent)
         .and_then(|()| fs::write(&temporary, &bytes))

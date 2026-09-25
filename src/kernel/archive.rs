@@ -630,9 +630,9 @@ fn pax_records(data: &[u8], name: &str) -> io::Result<Vec<(String, String)>> {
             ))
         })?;
         let key = utf8(&body[..equals], "PAX record key")?.to_string();
-        // Vendor records (macOS tar's `SCHILY.xattr.*`) can hold raw bytes;
-        // `apply_pax` ignores them, so only the others must be text.
-        let value = if key.starts_with("SCHILY.") || key.starts_with("LIBARCHIVE.") {
+        // Extended attributes (macOS tar's `SCHILY.xattr.*`) can hold raw
+        // bytes; `apply_pax` ignores them, so only the others must be text.
+        let value = if key.starts_with("SCHILY.xattr.") || key.starts_with("LIBARCHIVE.xattr.") {
             String::from_utf8_lossy(&body[equals + 1..]).into_owned()
         } else {
             utf8(&body[equals + 1..], "PAX record value")?.to_string()
@@ -659,6 +659,13 @@ fn apply_pax(records: Vec<(String, String)>, name: &str, pending: &mut Pending) 
                 pending.pax_size = Some(size);
             }
             "mtime" | "atime" | "ctime" | "uid" | "gid" | "uname" | "gname" | "comment" => {}
+            // star's sparse-file size: tar extracts the member at this size,
+            // which the reader would not see.
+            "SCHILY.realsize" => {
+                return Err(err(format!(
+                    "archive PAX header {name:?} carries \"SCHILY.realsize\", which would resize the member; refusing to extract"
+                )))
+            }
             other if other.starts_with("SCHILY.") || other.starts_with("LIBARCHIVE.") => {}
             other => {
                 return Err(err(format!(
@@ -674,8 +681,10 @@ fn apply_pax(records: Vec<(String, String)>, name: &str, pending: &mut Pending) 
 /// accepted only when it cannot rename or resize one.
 fn check_global(records: &[(String, String)], name: &str) -> io::Result<()> {
     for (key, _) in records {
-        if matches!(key.as_str(), "path" | "linkpath" | "size" | "hdrcharset")
-            || key.starts_with("GNU.sparse.")
+        if matches!(
+            key.as_str(),
+            "path" | "linkpath" | "size" | "hdrcharset" | "SCHILY.realsize"
+        ) || key.starts_with("GNU.sparse.")
         {
             return Err(err(format!(
                 "archive global PAX header {name:?} carries {key:?}, which would rename or resize members; refusing to extract"
@@ -1416,7 +1425,8 @@ mod tests {
     /// macOS tar stores extended attributes such as `com.apple.provenance`
     /// as `SCHILY.xattr.*` records whose values are raw bytes. They are
     /// metadata the reader ignores, so their bytes need not be text; a
-    /// record the reader uses still must be.
+    /// record the reader uses still must be, and `SCHILY.realsize`, which
+    /// tar extracts a member at, is refused.
     #[test]
     fn binary_xattr_values_are_ignored_and_other_values_must_be_text() {
         let xattr = pax_record_bytes(
@@ -1435,6 +1445,23 @@ mod tests {
             "pax-binary-path",
             &[pax_raw(b'x', &path), ustar("pkg/x", b'0', "", b"x")],
             "not UTF-8",
+        );
+
+        refusal(
+            "pax-realsize",
+            &[
+                pax(&[("SCHILY.realsize", "100000")]),
+                ustar("pkg/f", b'0', "", b"x"),
+            ],
+            "would resize the member",
+        );
+        refusal(
+            "pax-global-realsize",
+            &[
+                pax_global(&[("SCHILY.realsize", "100000")]),
+                ustar("pkg/f", b'0', "", b"x"),
+            ],
+            "SCHILY.realsize",
         );
     }
 

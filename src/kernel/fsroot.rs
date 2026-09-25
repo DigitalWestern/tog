@@ -1179,9 +1179,12 @@ mod tests {
 
     /// A listening socket at `path`. A socket's path must fit in
     /// `sun_path` (104 bytes on macOS, where the temp dir alone is about
-    /// 50), so it is bound at a short name in /tmp and renamed into place;
-    /// a rename keeps the socket.
+    /// 50), so a longer one is bound at a short name in /tmp and renamed
+    /// into place; a rename keeps the socket.
     fn bind_socket(path: &Path) -> std::os::unix::net::UnixListener {
+        if path.as_os_str().len() < 100 {
+            return std::os::unix::net::UnixListener::bind(path).unwrap();
+        }
         static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let short = PathBuf::from(format!(
             "/tmp/tog-sock-{}-{}",

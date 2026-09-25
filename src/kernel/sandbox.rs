@@ -2489,6 +2489,39 @@ mod tests {
         assert!(!profile.contains("/link/"), "{profile}");
     }
 
+    /// Under Seatbelt the scratch, reached through a symlink as macOS's
+    /// TMPDIR is, takes writes, and a directory beside it does not.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn seatbelt_writes_the_scratch_through_a_symlink_and_nothing_beside_it() {
+        let temp = temp_dir("seatbelt-writes");
+        let real = temp.0.join("real");
+        let (scratch, beside) = (real.join("scratch"), real.join("beside"));
+        fs::create_dir_all(&scratch).unwrap();
+        fs::create_dir_all(&beside).unwrap();
+        std::os::unix::fs::symlink(&real, temp.0.join("link")).unwrap();
+        let linked = temp.0.join("link/scratch");
+        let sandbox = Sandbox {
+            read: Vec::new(),
+            write: Vec::new(),
+        };
+        let write = |dir: &Path| {
+            let target = dir.join("out").display().to_string();
+            sandbox.run_in_on(
+                Platform::Aarch64AppleDarwin,
+                &["/bin/sh", "-c", "echo x > \"$0\"", &target],
+                "/usr/bin:/bin",
+                &linked,
+                &linked,
+                &[],
+            )
+        };
+        write(&linked).unwrap();
+        assert_eq!(fs::read(scratch.join("out")).unwrap(), b"x\n");
+        assert!(write(&beside).is_err());
+        assert!(!beside.join("out").exists());
+    }
+
     #[test]
     fn macos_profile_golden() {
         let sandbox = Sandbox {

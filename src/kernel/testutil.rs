@@ -31,6 +31,7 @@ impl TempDir {
 
     /// A scratch directory whose name says which test made it, for the
     /// leftover a killed run leaves.
+    ///
     /// The clock alone is not unique: macOS's ticks in microseconds, so two
     /// tests with one label could share a directory without the sequence.
     pub fn named(label: &str) -> Self {
