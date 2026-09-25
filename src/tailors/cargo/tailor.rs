@@ -55,6 +55,16 @@ impl Tailor for Cargo {
         cargo::preflight_platform(platform)
     }
 
+    fn prepare(
+        &self,
+        ctx: &Context,
+        project: &ProjectRoot,
+        toolchain: &Selected,
+        _attribution: &mut crate::kernel::policy::Attribution,
+    ) -> io::Result<()> {
+        inputs::ensure_lock(ctx.platform, project, &ctx.store, &ctx.activity, toolchain)
+    }
+
     fn plan(
         &self,
         ctx: &Context,

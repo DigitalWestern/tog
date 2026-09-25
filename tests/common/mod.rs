@@ -6,6 +6,7 @@
 //! `mod common;`, so a helper one suite does not use is dead code there.
 #![allow(dead_code)]
 
+use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -171,4 +172,48 @@ pub fn fixture(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures")
         .join(name)
+}
+
+/// Every regular file under `dir` with its bytes, for a before-and-after
+/// comparison that proves a refused run wrote nothing to the project. The
+/// one file left out is `.tog/toolchain-input.lock`: tog's own empty
+/// advisory lock, created by every sync that reaches the store, which is
+/// not a project input.
+pub fn snapshot(dir: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+    let mut files = BTreeMap::new();
+    fn walk(dir: &Path, files: &mut BTreeMap<PathBuf, Vec<u8>>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.symlink_metadata().unwrap().is_dir() {
+                walk(&path, files);
+            } else if path.is_file() && !path.ends_with(".tog/toolchain-input.lock") {
+                files.insert(path.clone(), std::fs::read(&path).unwrap());
+            }
+        }
+    }
+    walk(dir, &mut files);
+    files
+}
+
+/// The lock is gone, so a frozen sync must refuse by name and leave the
+/// project byte-identical; a plan then regenerates it through `prepare`
+/// with the store toolchain. `home` is the scratch home whose `store/` the
+/// project was synced into.
+pub fn assert_frozen_never_writes_the_lock(project: &Path, home: &Path, lock: &str) {
+    std::fs::remove_file(project.join(lock)).unwrap();
+    let before = snapshot(project);
+    let frozen = tog(project, home, &["--frozen"]);
+    assert!(!frozen.status.success(), "--frozen synced without {lock}");
+    let stderr = text(&frozen.stderr);
+    assert!(
+        stderr.contains(&format!("{lock} is missing and --frozen never creates it")),
+        "{stderr}"
+    );
+    assert_eq!(snapshot(project), before, "--frozen changed the project");
+    assert!(!project.join(lock).exists(), "--frozen wrote {lock}");
+    assert_ok(tog(project, home, &["plan"]), "plan regenerates the lock");
+    assert!(
+        project.join(lock).is_file(),
+        "plan did not regenerate {lock}"
+    );
 }

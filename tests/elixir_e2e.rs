@@ -17,7 +17,7 @@ use std::process::{Command, Output};
 
 mod common;
 
-use common::{assert_ok, copy_tree, fixture, tog, TempDir};
+use common::{assert_frozen_never_writes_the_lock, assert_ok, copy_tree, fixture, tog, TempDir};
 
 const DARWIN_FINGERPRINT: &str = "c35290f692496d51";
 
@@ -239,4 +239,7 @@ fn elixir_sync_sandboxed_build_and_run() {
     }
     assert!(std::fs::write(beam.join("tamper"), b"x").is_err());
     assert!(std::fs::write(otp.join("bin/tamper"), b"x").is_err());
+    // Without its lock the project is refused under --frozen and left
+    // alone; a plan regenerates the lock with the store mix.
+    assert_frozen_never_writes_the_lock(&project, &temp.0, "mix.lock");
 }

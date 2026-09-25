@@ -903,54 +903,68 @@ fn path_present(path: &Path) -> io::Result<bool> {
     }
 }
 
-/// Plan from packages.lock.json (v1 only; tog makes the opt-in lock
-/// mandatory). Missing lock delegates a store-SDK restore --use-lock-file
-/// (named resolver mutation, isolated caches).
-///
-/// The project is read through the held descriptor. The restore child runs
-/// in its path, and the lock it generates is read back through the
-/// descriptor.
-pub fn plan_dotnet(
+/// The lock every plan reads, or the refusal that names it: `prepare`
+/// generates it, and the command layer skips `prepare` under `--frozen`.
+/// Checked before any toolchain is realized, so a frozen sync of an
+/// unlocked project fails without a download.
+pub fn require_lock(project: &ProjectRoot) -> io::Result<()> {
+    if project.is_input_file(Path::new(LOCK_FILE)) {
+        Ok(())
+    } else {
+        Err(crate::tailors::missing_lock(project, LOCK_FILE))
+    }
+}
+
+/// `prepare`: packages.lock.json, written by a store-SDK `restore
+/// --use-lock-file` (named resolver mutation, isolated caches) when there
+/// is none. The one place the .NET tailor writes project inputs. The
+/// restore child runs in the project's path.
+pub fn generate_lock(
     store: &Store,
     activity: &StoreActivity,
     project: &ProjectRoot,
     sdk_obj: &Path,
     selected: &Selected,
-) -> io::Result<(DotnetPlan, String)> {
-    let project_dir = project.path();
+) -> io::Result<()> {
+    let sdk_version = selected.version("dotnet-sdk")?.to_string();
+    preflight(project, &sdk_version)?;
+    ui::note("no packages.lock.json; resolving with the store SDK...");
+    let scratch = store.stage_with_activity(activity)?;
+    let config = scratch.join("nuget.config");
+    fs::write(
+        &config,
+        "<configuration><packageSources><clear /><add key=\"nuget.org\" \
+         value=\"https://api.nuget.org/v3/index.json\" protocolVersion=\"3\" />\
+         </packageSources></configuration>",
+    )?;
+    let config = config.canonicalize()?;
+    let config_arg = config.to_string_lossy().into_owned();
+    let out = run_dotnet(
+        activity,
+        sdk_obj,
+        project.path(),
+        &scratch.join("pkgs"),
+        &scratch,
+        &["restore", "--use-lock-file", "--configfile", &config_arg],
+    )?;
+    let ok = out.status.success();
+    let _ = crate::kernel::store::remove_tree(&scratch);
+    if !ok {
+        return Err(err(format!(
+            "store dotnet restore --use-lock-file failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        )));
+    }
+    Ok(())
+}
+
+/// Plan from packages.lock.json (v1 only; tog makes the opt-in lock
+/// mandatory). The project is read through the held descriptor.
+pub fn plan_dotnet(project: &ProjectRoot, selected: &Selected) -> io::Result<(DotnetPlan, String)> {
     let lock_rel = Path::new(LOCK_FILE);
     let sdk_version = selected.version("dotnet-sdk")?.to_string();
-    let (mut csproj, _) = preflight(project, &sdk_version)?;
-    if !project.is_input_file(lock_rel) {
-        ui::note("no packages.lock.json; resolving with the store SDK...");
-        let scratch = store.stage_with_activity(activity)?;
-        let config = scratch.join("nuget.config");
-        fs::write(
-            &config,
-            "<configuration><packageSources><clear /><add key=\"nuget.org\" \
-             value=\"https://api.nuget.org/v3/index.json\" protocolVersion=\"3\" />\
-             </packageSources></configuration>",
-        )?;
-        let config = config.canonicalize()?;
-        let config_arg = config.to_string_lossy().into_owned();
-        let out = run_dotnet(
-            activity,
-            sdk_obj,
-            project_dir,
-            &scratch.join("pkgs"),
-            &scratch,
-            &["restore", "--use-lock-file", "--configfile", &config_arg],
-        )?;
-        let ok = out.status.success();
-        let _ = crate::kernel::store::remove_tree(&scratch);
-        if !ok {
-            return Err(err(format!(
-                "store dotnet restore --use-lock-file failed: {}",
-                String::from_utf8_lossy(&out.stderr).trim()
-            )));
-        }
-        (csproj, _) = preflight(project, &sdk_version)?;
-    }
+    let (csproj, _) = preflight(project, &sdk_version)?;
+    require_lock(project)?;
     let lock = read_input_text(project, lock_rel)?;
     let v: serde_json::Value =
         serde_json::from_str(&lock).map_err(|e| err(format!("packages.lock.json: {e}")))?;
@@ -2532,5 +2546,33 @@ mod tests {
         assert!(!publish_project
             .join(format!(".tog-fp.old.{}", std::process::id()))
             .exists());
+    }
+
+    /// A project with its manifest but no lock is refused by name and
+    /// nothing is written: the lock is `prepare`'s to generate, and a
+    /// frozen run skips `prepare`.
+    #[test]
+    fn a_missing_lock_is_refused_by_name_and_nothing_is_written() {
+        let temp = crate::kernel::testutil::TempDir::named("dotnet-frozen");
+        std::fs::write(
+            temp.0.join("hello.csproj"),
+            "<Project Sdk=\"Microsoft.NET.Sdk\"></Project>\n",
+        )
+        .unwrap();
+        let project = crate::kernel::fsroot::ProjectRoot::open(&temp.0).unwrap();
+        let error = super::require_lock(&project).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+        let message = error.to_string();
+        assert!(
+            message.contains("packages.lock.json is missing and --frozen never creates it"),
+            "{message}"
+        );
+        assert!(
+            message.contains("run `tog` once without --frozen"),
+            "{message}"
+        );
+        assert!(!temp.0.join("packages.lock.json").exists());
+        std::fs::write(temp.0.join("packages.lock.json"), "").unwrap();
+        super::require_lock(&project).unwrap();
     }
 }

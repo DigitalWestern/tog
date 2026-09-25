@@ -15,7 +15,7 @@ use std::process::Command;
 
 mod common;
 
-use common::{assert_ok, fixture, tog, TempDir};
+use common::{assert_frozen_never_writes_the_lock, assert_ok, fixture, tog, TempDir};
 
 /// Linux project: only the SOURCE (`ruby` platform) variant of nokogiri, so
 /// the gate compiles its vendored libxml2/libxslt in the sandbox instead of
@@ -650,4 +650,7 @@ puts JSON.generate("native" => File.realpath(native), "value" => value,
         assert_no_forbidden_prefix(native, &staging, "nokogiri native library");
         assert_elf_resolves_from_system(Path::new(native), &staging);
     }
+    // Without its lock the project is refused under --frozen and left
+    // alone; a plan regenerates the lock with the store bundler.
+    assert_frozen_never_writes_the_lock(&project, &temp.0, "Gemfile.lock");
 }

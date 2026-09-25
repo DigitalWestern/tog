@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 mod common;
 
-use common::{assert_ok, fixture, tog, tog_at, TempDir};
+use common::{assert_frozen_never_writes_the_lock, assert_ok, fixture, tog, tog_at, TempDir};
 
 fn copy_dotnet_hello(project: &Path) {
     std::fs::create_dir_all(project).unwrap();
@@ -128,6 +128,10 @@ fn dotnet_sync_sandboxed_build_and_run() {
     );
 
     assert_realization_does_not_evaluate_user_project(&temp);
+
+    // Without its lock the project is refused under --frozen and left
+    // alone; a plan regenerates the lock with the store SDK.
+    assert_frozen_never_writes_the_lock(&project, &temp.0, "packages.lock.json");
 }
 
 #[test]

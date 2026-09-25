@@ -36,18 +36,28 @@ impl Tailor for Dotnet {
         dotnet::preflight_platform(platform)
     }
 
-    fn plan(
+    fn prepare(
         &self,
         ctx: &Context,
         project: &ProjectRoot,
         toolchain: &Selected,
+        _attribution: &mut crate::kernel::policy::Attribution,
+    ) -> io::Result<()> {
+        if dotnet::require_lock(project).is_ok() {
+            return Ok(());
+        }
+        let sdk = dotnet::realize_runtime(&ctx.store, &ctx.activity, ctx.platform, toolchain)?;
+        dotnet::generate_lock(&ctx.store, &ctx.activity, project, &sdk, toolchain)
+    }
+
+    fn plan(
+        &self,
+        _ctx: &Context,
+        project: &ProjectRoot,
+        toolchain: &Selected,
     ) -> io::Result<Option<String>> {
-        let activity = &ctx.activity;
-        // Preflight before SDK realization: a broken layout should fail
-        // loudly here, not after a toolchain download.
-        dotnet::preflight(project, toolchain.version("dotnet-sdk")?)?;
-        let sdk = dotnet::realize_runtime(&ctx.store, activity, ctx.platform, toolchain)?;
-        let (plan, _) = dotnet::plan_dotnet(&ctx.store, activity, project, &sdk, toolchain)?;
+        // The plan is read from the lock alone: no SDK is realized.
+        let (plan, _) = dotnet::plan_dotnet(project, toolchain)?;
         Ok(Some(serde_json::to_string_pretty(&plan)?))
     }
 
@@ -63,8 +73,9 @@ impl Tailor for Dotnet {
         let platform = ctx.platform;
         let store = &ctx.store;
         dotnet::preflight(project, toolchain.version("dotnet-sdk")?)?;
+        dotnet::require_lock(project)?;
         let sdk = dotnet::realize_runtime(store, activity, platform, toolchain)?;
-        let (plan, lock_sha256) = dotnet::plan_dotnet(store, activity, project, &sdk, toolchain)?;
+        let (plan, lock_sha256) = dotnet::plan_dotnet(project, toolchain)?;
         let packages =
             dotnet::realize_packages(store, activity, platform, &plan, &sdk, project, toolchain)?;
         // The closure is published through the descriptor this sync holds.
@@ -108,7 +119,7 @@ impl Tailor for Dotnet {
         let store = &ctx.store;
         let project = ProjectRoot::open(cwd)?;
         let sdk = dotnet::realize_runtime(store, activity, platform, toolchain)?;
-        let (plan, lock_sha256) = dotnet::plan_dotnet(store, activity, &project, &sdk, toolchain)?;
+        let (plan, lock_sha256) = dotnet::plan_dotnet(&project, toolchain)?;
         let packages =
             dotnet::realize_packages(store, activity, platform, &plan, &sdk, &project, toolchain)?;
         dotnet::project_dotnet_env(

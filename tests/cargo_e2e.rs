@@ -11,7 +11,9 @@ use tog::kernel::platform::Platform;
 
 mod common;
 
-use common::{assert_ok, command, copy_tree, fixture, tog, TempDir};
+use common::{
+    assert_frozen_never_writes_the_lock, assert_ok, command, copy_tree, fixture, tog, TempDir,
+};
 
 /// The binary with a private `TMPDIR` and `HOME` under `tmp`, and the
 /// sandbox required: these suites prove the build runs sandboxed, so a
@@ -208,6 +210,9 @@ fn cargo_sync_build_and_run_again_offline() {
         "run after rebuild",
     );
     assert_eq!(output.trim(), "hello 128");
+    // Without its lock the project is refused under --frozen and left
+    // alone; a plan regenerates the lock with the store Cargo.
+    assert_frozen_never_writes_the_lock(&project, &temp.0, "Cargo.lock");
 }
 
 /// A Cargo exception is published on the Cargo closure only. A git

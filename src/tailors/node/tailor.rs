@@ -136,6 +136,7 @@ impl Tailor for Node {
         toolchain: &Selected,
     ) -> io::Result<Option<String>> {
         let Some(plan) = inputs::load_npm_plan(ctx.platform, project, toolchain)? else {
+            inputs::require_lock(project)?;
             return Ok(None);
         };
         let v: Vec<_> = plan
@@ -168,6 +169,7 @@ impl Tailor for Node {
         // project's toolchain selection names, not the pin table.
         let selected = request.toolchain;
         let Some(plan) = inputs::load_npm_plan(platform, project, selected)? else {
+            inputs::require_lock(project)?;
             return Ok(false);
         };
         // package.json and the lock are read through the held descriptor.

@@ -19,7 +19,7 @@ use std::process::Output;
 
 mod common;
 
-use common::{text, tog, tog_at, TempDir};
+use common::{snapshot, text, tog, tog_at, TempDir};
 
 use tog::comforter::toolchain as project_toolchain;
 use tog::kernel::fsroot::ProjectRoot;
@@ -517,6 +517,73 @@ fn frozen_never_evaluates_project_code() {
         "frozen validation evaluated the Gemfile: {stderr}"
     );
     assert!(!fixture.store().exists(), "{stderr}");
+}
+
+/// The dependency lock is the tailor's to generate, and `--frozen` skips
+/// that step: a project whose toolchain lock is current but whose Gemfile
+/// has no Gemfile.lock is refused by name, before any toolchain is
+/// downloaded, and nothing in the project changes.
+#[test]
+fn frozen_refuses_a_missing_dependency_lock_before_any_download() {
+    let fixture = Fixture::new("frozen-deplock");
+    fixture.write(
+        "Gemfile",
+        "ruby \"3.3.4\"\nsource \"https://rubygems.org\"\n",
+    );
+    fixture.commit_lock("ruby");
+    let before = snapshot(fixture.dir());
+
+    let out = fixture.tog(&["sync", "--frozen"]);
+    let stderr = text(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    assert!(
+        stderr.contains("Gemfile.lock is missing and --frozen never creates it"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("run `tog` once without --frozen"),
+        "{stderr}"
+    );
+    assert_eq!(
+        snapshot(fixture.dir()),
+        before,
+        "--frozen changed the project"
+    );
+    let objects = fixture.store().join("objects");
+    let realized = std::fs::read_dir(&objects)
+        .map(|entries| entries.count())
+        .unwrap_or(0);
+    assert_eq!(
+        realized, 0,
+        "--frozen realized a toolchain for a refused sync"
+    );
+}
+
+/// The same for Node, whose lock generation already lived in `prepare`: a
+/// package.json with no lock tog can import is a refusal under `--frozen`,
+/// not a silent "nothing to sync".
+#[test]
+fn frozen_refuses_a_node_project_without_a_lock() {
+    let fixture = Fixture::new("frozen-nodelock");
+    fixture.write(
+        "package.json",
+        "{\"name\": \"hello\", \"version\": \"1.0.0\"}\n",
+    );
+    fixture.commit_lock("node");
+    let before = snapshot(fixture.dir());
+
+    let out = fixture.tog(&["sync", "--frozen"]);
+    let stderr = text(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    assert!(
+        stderr.contains("package-lock.json is missing and --frozen never creates it"),
+        "{stderr}"
+    );
+    assert_eq!(
+        snapshot(fixture.dir()),
+        before,
+        "--frozen changed the project"
+    );
 }
 
 // ---------------------------------------------------------------------------

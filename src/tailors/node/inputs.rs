@@ -122,6 +122,21 @@ pub fn load_npm_plan(
     Ok(None)
 }
 
+/// A package.json with no lock tog can import is refused by name:
+/// package-lock.json is the lock `prepare` generates, and `--frozen` skips
+/// `prepare`. A directory with no package.json is not a Node project and
+/// plans nothing.
+pub fn require_lock(project: &ProjectRoot) -> io::Result<()> {
+    let locked = ["package-lock.json", "pnpm-lock.yaml", "yarn.lock"]
+        .iter()
+        .any(|lock| input_exists(project, lock));
+    if input_exists(project, "package.json") && !locked {
+        Err(crate::tailors::missing_lock(project, "package-lock.json"))
+    } else {
+        Ok(())
+    }
+}
+
 /// `Path::exists` for a project input, resolved from the held descriptor.
 pub(crate) fn input_exists(project: &ProjectRoot, relative: impl AsRef<Path>) -> bool {
     !matches!(
@@ -147,4 +162,40 @@ pub(crate) fn read_input(project: &ProjectRoot, relative: impl AsRef<Path>) -> i
 pub(crate) fn input_records(project: &ProjectRoot, names: &[&str]) -> io::Result<Vec<InputRecord>> {
     let names: Vec<std::path::PathBuf> = names.iter().map(std::path::PathBuf::from).collect();
     crate::comforter::input_records(project, &names)
+}
+
+#[cfg(test)]
+mod tests {
+    /// A project with its manifest but no lock is refused by name and
+    /// nothing is written: the lock is `prepare`'s to generate, and a
+    /// frozen run skips `prepare`.
+    #[test]
+    fn a_missing_lock_is_refused_by_name_and_nothing_is_written() {
+        let temp = crate::kernel::testutil::TempDir::named("node-frozen");
+        std::fs::write(temp.0.join("package.json"), "{\"name\": \"hello\"}\n").unwrap();
+        let project = crate::kernel::fsroot::ProjectRoot::open(&temp.0).unwrap();
+        let error = super::require_lock(&project).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+        let message = error.to_string();
+        assert!(
+            message.contains("package-lock.json is missing and --frozen never creates it"),
+            "{message}"
+        );
+        assert!(
+            message.contains("run `tog` once without --frozen"),
+            "{message}"
+        );
+        assert!(!temp.0.join("package-lock.json").exists());
+        std::fs::write(temp.0.join("package-lock.json"), "").unwrap();
+        super::require_lock(&project).unwrap();
+    }
+
+    /// A directory with no package.json is not a Node project: nothing to
+    /// plan, and nothing to refuse.
+    #[test]
+    fn no_package_json_is_not_a_missing_lock() {
+        let temp = crate::kernel::testutil::TempDir::named("node-frozen-empty");
+        let project = crate::kernel::fsroot::ProjectRoot::open(&temp.0).unwrap();
+        super::require_lock(&project).unwrap();
+    }
 }

@@ -53,6 +53,11 @@ Rules the tailor must keep:
 - Closures are written through `comforter::write_closure` and read through
   `comforter::read_closure`; `.tog/closures/<eco>.json` is the proof a
   project was synced and is what `status`, `ls`, `sbom`, and `audit` read.
+- `prepare` is the one method that writes project inputs: it generates the
+  dependency lock when there is none, with the ecosystem's own tool. `plan`
+  and `sync` read the lock and refuse a missing one through
+  `tailors::missing_lock`, which names the file. `--frozen` skips `prepare`,
+  so that refusal is how the promise never to modify project inputs is kept.
 - `prepare`, `sync`, and any closure-producing `build` or `fmt` method receive
   a mutable `policy::Attribution`. Forward that token unchanged to the
   comforter writer. The tailor does not record, claim, finish, or discard the
