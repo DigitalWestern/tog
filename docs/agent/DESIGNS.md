@@ -3831,7 +3831,8 @@ design commit itself; each has a slot above.
    through interception as `unattested-index`).
 3. **Go and mix reach the network on ordinary syncs**, not only when a
    lock is missing: Go's `mod tidy -diff` and `mod download -json all` on
-   a plan-cache miss, and mix `deps.get --check-locked` on every sync
+   a plan-cache miss, and mix `deps.get --check-locked` when its inputs
+   changed since its last pass in the project
    (`src/tailors/go/mod.rs`, `src/tailors/elixir/mod.rs`). Slot: PR 4
    (Go) and PR 8 (Elixir), as planner doors.
 4. **`dotnet restore` runs the project's MSBuild on the host** during

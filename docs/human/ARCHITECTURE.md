@@ -29,6 +29,12 @@ Stolen from Nix, minus the interface.
   existing object's meaning is never reinterpreted in place.
 - **Artifact cache** (`cache/sha256/<hash>`): every downloaded file, stored
   by verified content hash. Never refetched; enables offline reconstruction.
+- **Store records** (`records/<kind>/<sha256 of key>.json`): small facts tog
+  checked itself and would otherwise ask the network again, such as the
+  digest rubygems.org serves for a gem coordinate or the inputs of the last
+  passing `mix deps.get --check-locked` in a project. They are store data,
+  never project data: a repository cannot ship one, so a record can stand in
+  for a network answer where a project-owned cache would be forgeable.
 - **Comforters (environments are store objects too)**: a `python-env` object
   is a venv-shaped immutable tree. Identity = CPython object + sorted set of
   package artifact hashes. Identical locks share one object; conflicting
@@ -288,7 +294,11 @@ are delegated to the pinned portable Ruby's own Bundler/RubyGems via a
 helper script, because `Gem::Platform` matching has wildcards and
 specificity scores no hand parser should reimplement. Gem hashes come from
 the lock's CHECKSUMS or rubygems.org, always platform-qualified (the bare
-endpoint returns the latest-pushed variant). Gems install dependency-first
+endpoint returns the latest-pushed variant). A rubygems.org digest is
+recorded in the store by (name, version, platform) once the downloaded
+`.gem` hashes to it and its gemspec names that coordinate, so an unchanged
+lock without CHECKSUMS re-syncs offline; a CHECKSUMS digest is the repo's
+claim and is never recorded. Gems install dependency-first
 inside the network-denied sandbox into one immutable GEM_HOME object;
 binstubs are wrapper scripts, never symlinks (symlinks dangle after the
 store-commit rename; this bit once). Every tog invocation strips
@@ -304,7 +314,11 @@ are dual-checksum verified (outer tar sha256, inner content sha256). The
 OTP-qualified Hex and rebar3 builds (the legacy `hex.ez` hangs on OTP 29;
 found live). Deps are source trees, realized as a `hex-deps` object and
 projected as a writable clonefile copy so native builds can write into their
-own sources. `tog build` sandboxes `mix compile`.
+own sources. `tog build` sandboxes `mix compile`. The consistency gate,
+`mix deps.get --check-locked`, needs the Hex registry, so it runs only when
+its inputs (every `mix.exs`, mix.lock, the BEAM object, the project path)
+hash differently from its last pass in this project, which tog records in
+the store; an unchanged project re-syncs offline.
 
 **dotnet** (`tailors/dotnet/`). NuGet's `packages.lock.json` is opt-in upstream;
 tog makes it mandatory. The lock's `contentHash` is a semantic hash, so

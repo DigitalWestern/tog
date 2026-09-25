@@ -177,6 +177,27 @@ pub(crate) fn rename_at(dirfd: RawFd, old_name: &[u8], new_name: &[u8]) -> io::R
     Ok(())
 }
 
+/// Rename `old_name` under `from_dir` to `new_name` under `to_dir`, both
+/// resolved from held descriptors, so a symlink planted at either parent's
+/// path after it was opened cannot redirect the move.
+pub(super) fn rename_between(
+    from_dir: RawFd,
+    old_name: &[u8],
+    to_dir: RawFd,
+    new_name: &[u8],
+) -> io::Result<()> {
+    let old_name = CString::new(old_name)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "directory entry contains NUL"))?;
+    let new_name = CString::new(new_name)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "directory entry contains NUL"))?;
+    // SAFETY: both names are valid relative names and both descriptors stay
+    // borrowed for this call.
+    if unsafe { libc::renameat(from_dir, old_name.as_ptr(), to_dir, new_name.as_ptr()) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 pub(super) fn unlink_at(dirfd: RawFd, name: &[u8]) {
     let Ok(name) = CString::new(name) else {
         return;
