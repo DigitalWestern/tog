@@ -4,45 +4,14 @@
 // Tests spawn fixtures and take leases freely (see clippy.toml).
 #![allow(clippy::disallowed_methods)]
 
-use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+mod common;
 
-struct TempDir(PathBuf);
-
-impl TempDir {
-    fn new() -> Self {
-        let path = std::env::temp_dir().join(format!(
-            "tog-run-scripts-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&path).unwrap();
-        Self(path)
-    }
-}
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
-fn tog(bin: &Path, project: &Path, store: &Path, args: &[&str]) -> Output {
-    Command::new(bin)
-        .current_dir(project)
-        .env("TOG_STORE", store)
-        .args(args)
-        .output()
-        .unwrap()
-}
+use common::{assert_ok, tog, TempDir};
 
 #[test]
 #[ignore]
 fn package_json_script_runs_inside_projected_env() {
-    let temp = TempDir::new();
+    let temp = TempDir::new("run-scripts");
     let project = &temp.0;
     std::fs::write(
         project.join("package.json"),
@@ -55,31 +24,18 @@ fn package_json_script_runs_inside_projected_env() {
     )
     .unwrap();
 
-    let store = temp.0.join("store");
-    let binary = Path::new(env!("CARGO_BIN_EXE_tog"));
-    let synced = tog(&binary, project, &store, &["sync"]);
-    assert!(
-        synced.status.success(),
-        "sync failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&synced.stdout),
-        String::from_utf8_lossy(&synced.stderr)
-    );
+    let home = temp.path();
+    assert_ok(tog(project, home, &["sync"]), "sync");
 
     let subdir = project.join("subdir");
     std::fs::create_dir(&subdir).unwrap();
     let init_cwd = subdir.canonicalize().unwrap();
-    let first = tog(&binary, &subdir, &store, &["run", "test"]);
-    assert!(
-        first.status.success(),
-        "run test failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&first.stdout),
-        String::from_utf8_lossy(&first.stderr)
-    );
+    assert_ok(tog(&subdir, home, &["run", "test"]), "run test");
     assert_eq!(
         std::fs::read_to_string(project.join("out.txt")).unwrap(),
         format!("pretest\ntest\n{}\nfx\nposttest\n", init_cwd.display())
     );
 
-    let second = tog(&binary, &subdir, &store, &["run", "test", "fail"]);
+    let second = tog(&subdir, home, &["run", "test", "fail"]);
     assert_eq!(second.status.code(), Some(3));
 }

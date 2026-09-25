@@ -4,79 +4,23 @@
 // Tests spawn fixtures and take leases freely (see clippy.toml).
 #![allow(clippy::disallowed_methods)]
 
-use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::path::PathBuf;
+use std::process::Command;
 
-struct TempDir(PathBuf);
+mod common;
 
-impl TempDir {
-    fn new() -> Self {
-        let path = std::env::temp_dir().join(format!(
-            "tog-go-e2e-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&path).unwrap();
-        Self(path)
-    }
-}
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
-fn copy_tree(src: &Path, dest: &Path) {
-    std::fs::create_dir_all(dest).unwrap();
-    for entry in std::fs::read_dir(src).unwrap() {
-        let entry = entry.unwrap();
-        let from = entry.path();
-        let to = dest.join(entry.file_name());
-        if from.is_dir() {
-            copy_tree(&from, &to);
-        } else {
-            std::fs::copy(from, to).unwrap();
-        }
-    }
-}
-
-fn tog(bin: &Path, project: &Path, store: &Path, args: &[&str]) -> Output {
-    Command::new(bin)
-        .current_dir(project)
-        .env("TOG_STORE", store)
-        .args(args)
-        .output()
-        .unwrap()
-}
-
-fn assert_ok(output: Output, label: &str) -> String {
-    assert!(
-        output.status.success(),
-        "{label} failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8(output.stdout).unwrap()
-}
+use common::{assert_ok, copy_tree, fixture, tog, TempDir};
 
 #[test]
 #[ignore]
 fn go_sync_build_and_rebuild_offline() {
-    let temp = TempDir::new();
+    let temp = TempDir::new("go-e2e");
     let project = temp.0.join("go-hello");
-    copy_tree(
-        &PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/go-hello"),
-        &project,
-    );
-    let store = temp.0.join("store");
-    let binary = PathBuf::from(env!("CARGO_BIN_EXE_tog"));
+    copy_tree(&fixture("go-hello"), &project);
+    let home = temp.path();
 
-    assert_ok(tog(&binary, &project, &store, &["sync"]), "sync");
-    assert_ok(tog(&binary, &project, &store, &["build"]), "build");
+    assert_ok(tog(&project, home, &["sync"]), "sync");
+    assert_ok(tog(&project, home, &["build"]), "build");
     let hello = project.join("hello");
     assert!(hello.is_file(), "staged binary moved into project");
     let out = Command::new(&hello)
@@ -89,7 +33,7 @@ fn go_sync_build_and_rebuild_offline() {
     // Clean rebuild: everything must come from the store (tog build is
     // itself the network-denied sandbox; sandboxes cannot nest on macOS).
     std::fs::remove_file(&hello).unwrap();
-    assert_ok(tog(&binary, &project, &store, &["build", "go"]), "rebuild");
+    assert_ok(tog(&project, home, &["build", "go"]), "rebuild");
     assert!(hello.is_file());
     let out = Command::new(&hello)
         .env("LC_ALL", "en_US.UTF-8")
@@ -100,7 +44,7 @@ fn go_sync_build_and_rebuild_offline() {
 
     // tog run uses the pinned toolchain + immutable modcache.
     let version = assert_ok(
-        tog(&binary, &project, &store, &["run", "go", "version"]),
+        tog(&project, home, &["run", "go", "version"]),
         "run go version",
     );
     assert!(version.contains("go1.27.0"), "{version}");
@@ -109,7 +53,7 @@ fn go_sync_build_and_rebuild_offline() {
     }
 
     let goroot = assert_ok(
-        tog(&binary, &project, &store, &["run", "go", "env", "GOROOT"]),
+        tog(&project, home, &["run", "go", "env", "GOROOT"]),
         "run go env GOROOT",
     );
     let goroot = PathBuf::from(goroot.trim());
@@ -155,12 +99,9 @@ func main() {
 "#,
         )
         .unwrap();
+        assert_ok(tog(&cgo_project, home, &["sync"]), "Linux cgo sync");
         assert_ok(
-            tog(&binary, &cgo_project, &store, &["sync"]),
-            "Linux cgo sync",
-        );
-        assert_ok(
-            tog(&binary, &cgo_project, &store, &["build"]),
+            tog(&cgo_project, home, &["build"]),
             "Linux cgo build (requires gcc and glibc-devel)",
         );
         let cgo_binary = cgo_project.join("cgohello");

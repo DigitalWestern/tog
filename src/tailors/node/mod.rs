@@ -816,14 +816,19 @@ pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
     let node_object = PathBuf::from(node.object_id());
     // `store_root` is a real `node-env` identity input, so the fixture store
     // path enters every case. Pin it per process and platform (not per
-    // call) so two builds of the matrix yield identical identities; the
-    // contents written below are idempotent, and the tree is left for the
-    // OS temp cleanup rather than removed under a concurrent caller.
-    let root = std::env::temp_dir().join(format!(
-        "tog-node-identity-fixture-{}-{}",
+    // call) so two builds of the matrix yield identical identities. Builds
+    // take turns with the directory, and each removes it when done, so none
+    // deletes it under another.
+    static FIXTURE_TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _turn = FIXTURE_TURN
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let fixture = crate::kernel::testutil::TempDir::fixed(&format!(
+        "node-identity-fixture-{}-{}",
         std::process::id(),
         platform.triple()
     ));
+    let root = fixture.0.clone();
     for sub in [
         "objects",
         "meta",
@@ -833,11 +838,7 @@ pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
     ] {
         fs::create_dir_all(root.join(sub)).expect("Node identity fixture store");
     }
-    let store = Store {
-        root: root
-            .canonicalize()
-            .expect("canonical Node identity fixture store"),
-    };
+    let store = Store { root };
     let empty_plan = NpmPlan {
         node_version: node.version.clone(),
         packages: Vec::new(),
@@ -998,6 +999,7 @@ pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::kernel::testutil::TempDir;
 
     /// The identity matrix is reproducible: two builds in the same process
     /// yield the same kinds and the same inputs, case for case, on both
@@ -1512,13 +1514,8 @@ mod tests {
         let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let root =
-            std::env::temp_dir().join(format!("tog-npm-cold-{}-{nonce}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
+        let scratch = TempDir::named("npm-cold");
+        let root = scratch.0.clone();
         for subdir in ["objects", "meta", "cache/sha512", "tmp"] {
             fs::create_dir_all(root.join(subdir)).unwrap();
         }
@@ -1651,7 +1648,6 @@ mod tests {
         )
         .expect("warm realization");
         assert_eq!(again, env);
-        crate::kernel::store::remove_tree(&root).unwrap();
     }
 
     /// Characterization of the skip decision in `run_install_scripts_staged`:
@@ -1663,13 +1659,8 @@ mod tests {
     /// network_access_during_install_script_fails).
     #[test]
     fn install_scripts_skip_packages_without_lifecycle_hooks() {
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let root =
-            std::env::temp_dir().join(format!("tog-npm-lifecycle-{}-{nonce}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
+        let scratch = TempDir::named("npm-lifecycle");
+        let root = scratch.0.clone();
         for subdir in ["objects", "meta", "cache/sha256", "tmp"] {
             fs::create_dir_all(root.join(subdir)).unwrap();
         }
@@ -1746,13 +1737,12 @@ mod tests {
             r#"{"name":"plain","scripts":{"test":"echo"}}"#,
             "the package tree is untouched"
         );
-        crate::kernel::store::remove_tree(&root).unwrap();
     }
 
     #[test]
     fn darwin_warm_sync_does_not_fetch_package_tarballs() {
-        let root = std::env::temp_dir().join(format!("tog-npm-darwin-warm-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
+        let scratch = TempDir::named("npm-darwin-warm");
+        let root = scratch.0.clone();
         for subdir in ["objects", "meta", "cache/sha256", "tmp"] {
             std::fs::create_dir_all(root.join(subdir)).unwrap();
         }
@@ -1824,7 +1814,6 @@ mod tests {
                 .count(),
             0
         );
-        crate::kernel::store::remove_tree(&root).unwrap();
     }
 
     /// The Python node-gyp runs on is the one the environment names: a
@@ -1835,8 +1824,8 @@ mod tests {
     #[test]
     fn the_environment_is_keyed_on_the_python_node_gyp_runs_on() {
         crate::tailors::install_kinds();
-        let root = std::env::temp_dir().join(format!("tog-npm-gyp-python-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
+        let scratch = TempDir::named("npm-gyp-python");
+        let root = scratch.0.clone();
         for subdir in ["objects", "meta", "cache/sha256", "tmp"] {
             std::fs::create_dir_all(root.join(subdir)).unwrap();
         }
@@ -1903,13 +1892,12 @@ mod tests {
             published.push(realized);
         }
         assert_ne!(published[0], published[1]);
-        crate::kernel::store::remove_tree(&root).unwrap();
     }
 
     #[test]
     fn linux_warm_sync_uses_persisted_archive_classification() {
-        let root = std::env::temp_dir().join(format!("tog-npm-linux-warm-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
+        let scratch = TempDir::named("npm-linux-warm");
+        let root = scratch.0.clone();
         for subdir in ["objects", "meta", "cache/sha256", "tmp"] {
             std::fs::create_dir_all(root.join(subdir)).unwrap();
         }
@@ -1985,7 +1973,6 @@ mod tests {
                 .count(),
             0
         );
-        crate::kernel::store::remove_tree(&root).unwrap();
     }
 
     #[test]
@@ -2149,8 +2136,8 @@ mod tests {
 
     #[test]
     fn previous_workspace_set_drops_workspace_local_package_entries() {
-        let dir = std::env::temp_dir().join(format!("tog-prev-ws-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
+        let scratch = TempDir::named("prev-ws");
+        let dir = scratch.0.clone();
         fs::create_dir_all(dir.join(".tog/closures")).unwrap();
         fs::write(
             dir.join(".tog/closures/node.json"),
@@ -2164,13 +2151,12 @@ mod tests {
                 "tools/node_modules-shim".to_string()
             ]
         );
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn discovers_string_object_and_legacy_directory_bins() {
-        let dir = std::env::temp_dir().join(format!("tog-npm-bin-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
+        let scratch = TempDir::named("npm-bin");
+        let dir = scratch.0.clone();
         fs::create_dir_all(dir.join("cli")).unwrap();
         fs::write(dir.join("cli/a"), "a").unwrap();
         fs::write(dir.join("cli/b"), "b").unwrap();
@@ -2195,7 +2181,6 @@ mod tests {
             discover_package_bins(r#"{"directories":{"bin":"cli"}}"#, "tool", &dir).unwrap(),
             vec![("a".into(), "cli/a".into()), ("b".into(), "cli/b".into())]
         );
-        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -2233,11 +2218,8 @@ mod tests {
     fn project_node_env_recorded_characterization_pins_the_closure() {
         let _attribution_lock = crate::kernel::policy::attribution_test_lock();
         let mut attribution = crate::kernel::policy::Attribution::open("node").unwrap();
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let root = std::env::temp_dir().join(format!("tog-npm-projection-{nonce}"));
+        let scratch = TempDir::named("npm-projection");
+        let root = scratch.0.clone();
         let project = root.join("project");
         let env = root.join("home/store/objects/env");
         fs::create_dir_all(project.join("packages/lib")).unwrap();
@@ -2359,7 +2341,6 @@ mod tests {
             closure["forest_path"].as_str().unwrap(),
             forest.to_string_lossy()
         );
-        let _ = fs::remove_dir_all(root);
     }
 
     /// What sync records beside the projection: the bundle it planned from
@@ -2369,11 +2350,8 @@ mod tests {
     fn project_node_env_recorded_writes_the_toolchain_record() {
         let _attribution_lock = crate::kernel::policy::attribution_test_lock();
         let mut attribution = crate::kernel::policy::Attribution::open("node").unwrap();
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let root = std::env::temp_dir().join(format!("tog-npm-toolchain-record-{nonce}"));
+        let scratch = TempDir::named("npm-toolchain-record");
+        let root = scratch.0.clone();
         let project = root.join("project");
         let env = root.join("home/store/objects/env");
         fs::create_dir_all(&project).unwrap();
@@ -2425,7 +2403,6 @@ mod tests {
         // The keys ls, status and sbom already read are untouched.
         assert_eq!(closure["node_version"], plan.node_version.as_str());
         assert_eq!(closure["projection_schema"], "node-forest/2");
-        let _ = fs::remove_dir_all(root);
     }
 
     /// With complete object ids the strict path runs, and the durable
@@ -2439,11 +2416,8 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let _attribution_lock = crate::kernel::policy::attribution_test_lock();
         let mut attribution = crate::kernel::policy::Attribution::open("node").unwrap();
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let root = std::env::temp_dir().join(format!("tog-npm-closure-refs-{nonce}"));
+        let scratch = TempDir::named("npm-closure-refs");
+        let root = scratch.0.clone();
         let store_root = root.join("home/store");
         for sub in [
             "objects",
@@ -2579,18 +2553,14 @@ mod tests {
             .unwrap(),
         );
         assert_eq!(reimported.projections, expected);
-        let _ = crate::kernel::store::remove_tree(&root);
     }
 
     #[test]
     fn stale_workspace_projection_is_removed_when_dependency_aligns() {
         let _attribution_lock = crate::kernel::policy::attribution_test_lock();
         let mut attribution = crate::kernel::policy::Attribution::open("node").unwrap();
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let root = std::env::temp_dir().join(format!("tog-npm-stale-workspace-{nonce}"));
+        let scratch = TempDir::named("npm-stale-workspace");
+        let root = scratch.0.clone();
         let project = root.join("project");
         let env = root.join("home/store/objects/env");
         fs::create_dir_all(project.join("packages/lib")).unwrap();
@@ -2669,16 +2639,12 @@ mod tests {
         .unwrap();
         assert!(fs::symlink_metadata(&workspace_nm).is_err());
         attribution.finish(true).unwrap();
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn stale_workspace_ownership_canonicalizes_symlinked_temp_roots() {
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let root = std::env::temp_dir().join(format!("tog-npm-symlinked-tmp-{nonce}"));
+        let scratch = TempDir::named("npm-symlinked-tmp");
+        let root = scratch.0.clone();
         let real = root.join("real");
         let alias = root.join("alias");
         let home = alias.join("home");
@@ -2692,17 +2658,13 @@ mod tests {
         std::os::unix::fs::symlink(&target, &workspace_nm).unwrap();
 
         assert!(managed_projection_symlink(&workspace_nm, &project, &home));
-        let _ = fs::remove_dir_all(root);
     }
 
     #[cfg(unix)]
     #[test]
     fn workspace_parent_preflight_rejects_external_stale_workspace() {
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let root = std::env::temp_dir().join(format!("tog-npm-external-workspace-{nonce}"));
+        let scratch = TempDir::named("npm-external-workspace");
+        let root = scratch.0.clone();
         let project = root.join("project");
         let external = root.join("external");
         fs::create_dir_all(&project).unwrap();
@@ -2715,17 +2677,13 @@ mod tests {
             validate_workspace_parents(&project, &["packages/lib".to_string()], &[]).unwrap_err();
         assert!(error.to_string().contains("outside the project"), "{error}");
         assert_eq!(fs::read_to_string(&marker).unwrap(), "user data");
-        let _ = fs::remove_dir_all(root);
     }
 
     #[cfg(unix)]
     #[test]
     fn workspace_parent_preflight_rejects_unsafe_current_workspace() {
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let root = std::env::temp_dir().join(format!("tog-npm-unsafe-workspace-{nonce}"));
+        let scratch = TempDir::named("npm-unsafe-workspace");
+        let root = scratch.0.clone();
         let project = root.join("project");
         let external = root.join("external");
         fs::create_dir_all(&project).unwrap();
@@ -2740,7 +2698,6 @@ mod tests {
             "{error}"
         );
         assert_eq!(fs::read_to_string(&marker).unwrap(), "user data");
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

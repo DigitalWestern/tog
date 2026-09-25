@@ -870,20 +870,14 @@ mod tests {
     use super::*;
     use crate::kernel::activity::ActivityMode;
     use crate::kernel::store::Store;
-    use std::path::PathBuf;
+    use crate::kernel::testutil::TempDir;
     use std::sync::Mutex;
 
     static TEST_SESSION: Mutex<()> = Mutex::new(());
 
-    fn test_store(label: &str) -> (Store, PathBuf) {
-        let root = std::env::temp_dir().join(format!(
-            "tog-supervise-{label}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+    fn test_store(label: &str) -> (Store, TempDir) {
+        let dir = TempDir::named(&format!("supervise-{label}"));
+        let root = dir.0.clone();
         for sub in [
             "objects",
             "meta",
@@ -898,8 +892,7 @@ mod tests {
         ] {
             std::fs::create_dir_all(root.join(sub)).unwrap();
         }
-        let canonical = root.canonicalize().unwrap();
-        (Store { root: canonical }, root)
+        (Store { root }, dir)
     }
 
     #[test]
@@ -908,7 +901,7 @@ mod tests {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let _test_session = TEST_SESSION.lock().unwrap();
-        let (store, root) = test_store("status");
+        let (store, _root) = test_store("status");
         let activity = store.activity(ActivityMode::Shared).unwrap();
         let mut command = Command::new("/bin/sh");
         command.args(["-c", "exit 42"]);
@@ -917,7 +910,6 @@ mod tests {
         second.args(["-c", "exit 0"]);
         assert!(status(&mut second, &activity).unwrap().success());
         drop(activity);
-        crate::kernel::store::remove_tree(&root).unwrap();
     }
 
     #[test]
@@ -926,7 +918,7 @@ mod tests {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let _test_session = TEST_SESSION.lock().unwrap();
-        let (store, root) = test_store("output");
+        let (store, _root) = test_store("output");
         let activity = store.activity(ActivityMode::Shared).unwrap();
         let mut command = Command::new("/bin/sh");
         command.args([
@@ -937,6 +929,5 @@ mod tests {
         assert_eq!(result.stdout.len(), 131072);
         assert_eq!(result.stderr, b"stderr");
         drop(activity);
-        crate::kernel::store::remove_tree(&root).unwrap();
     }
 }

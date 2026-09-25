@@ -23,11 +23,15 @@ use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use tog::kernel::activity::{ActivityMode, StoreActivity};
 use tog::kernel::store::Store;
 use tog::kernel::supervise;
+
+mod common;
+
+use common::{command, TempDir};
 
 /// Every wait in this file is bounded. A blown deadline fails the case with
 /// the output collected so far rather than hanging the suite.
@@ -37,25 +41,18 @@ const TICK: Duration = Duration::from_millis(2);
 
 // ---------------------------------------------------------------- utilities
 
-fn unique(label: &str) -> String {
-    format!(
-        "tog-supervise-{label}-{}-{}",
-        std::process::id(),
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    )
-}
-
-/// A disposable store. Never point `TOG_STORE` at a real store.
+/// A disposable store. Never point `TOG_STORE` at a real store. Its
+/// scratch root is also the home and working directory of the nested tog
+/// runs and holds the case's FIFOs, so everything goes when the case does.
 struct TempStore {
+    temp: TempDir,
     root: PathBuf,
 }
 
 impl TempStore {
     fn new(label: &str) -> Self {
-        let root = std::env::temp_dir().join(unique(label));
+        let temp = TempDir::new(&format!("supervise-{label}"));
+        let root = temp.0.join("store");
         for sub in [
             "objects",
             "meta",
@@ -70,9 +67,20 @@ impl TempStore {
         ] {
             std::fs::create_dir_all(root.join(sub)).unwrap();
         }
-        Self {
-            root: root.canonicalize().unwrap(),
-        }
+        Self { temp, root }
+    }
+
+    fn home(&self) -> &Path {
+        self.temp.path()
+    }
+
+    /// A rendezvous FIFO under the scratch root.
+    fn fifo(&self, name: &str) -> PathBuf {
+        let path = self.temp.0.join(name);
+        let c_path = CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: c_path is a valid NUL-terminated path this test owns.
+        assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0);
+        path
     }
 
     /// True when nobody holds the store's activity lease. This is the same
@@ -106,12 +114,6 @@ impl TempStore {
             );
             std::thread::sleep(TICK);
         }
-    }
-}
-
-impl Drop for TempStore {
-    fn drop(&mut self) {
-        let _ = tog::kernel::store::remove_tree(&self.root);
     }
 }
 
@@ -409,6 +411,7 @@ fn spawn_harness_with(
         .args(["--exact", "supervisor_harness", "--ignored", "--nocapture"])
         .env("TOG_SUPERVISE_SCENARIO", scenario)
         .env("TOG_SUPERVISE_STORE", &store.root)
+        .env("TOG_SUPERVISE_HOME", store.home())
         .env("RUST_BACKTRACE", "1")
         .env_remove("TOG_STORE");
     if let Some(inner) = inner {
@@ -470,29 +473,6 @@ fn spawn_harness_with(
         process,
         markers,
         reaped: false,
-    }
-}
-
-/// A rendezvous FIFO that is removed even when its case fails.
-struct Fifo(PathBuf);
-
-impl Fifo {
-    fn new(label: &str) -> Self {
-        let path = std::env::temp_dir().join(unique(label));
-        let c_path = CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
-        // SAFETY: c_path is a valid NUL-terminated path this test owns.
-        assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0);
-        Self(path)
-    }
-
-    fn path(&self) -> &Path {
-        &self.0
-    }
-}
-
-impl Drop for Fifo {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
     }
 }
 
@@ -630,12 +610,12 @@ fn set_sigchld_nocldwait() {
     }
 }
 
+/// The binary, run from the case's scratch home against the case's store.
 fn tog_command(args: &[&str]) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_tog"));
-    command.args(args).env(
-        "TOG_STORE",
-        std::env::var_os("TOG_SUPERVISE_STORE").unwrap(),
-    );
+    let home = PathBuf::from(std::env::var_os("TOG_SUPERVISE_HOME").unwrap());
+    let store = PathBuf::from(std::env::var_os("TOG_SUPERVISE_STORE").unwrap());
+    let mut command = command(&home, &home, &store);
+    command.args(args);
     command
 }
 
@@ -947,8 +927,8 @@ fn run_scenario(scenario: &str, activity: &StoreActivity) -> i32 {
 #[test]
 fn parent_term_reaches_the_child_and_holds_activity_until_reap() {
     let store = TempStore::new("term-wait");
-    let fifo = Fifo::new("fifo");
-    let mut harness = spawn_harness("term-during-wait", &store, None, Some(fifo.path()));
+    let fifo = store.fifo("fifo");
+    let mut harness = spawn_harness("term-during-wait", &store, None, Some(&fifo));
     harness.markers.wait_for("READY");
     let child = harness.markers.child_pid();
     assert!(!store.is_free(), "a running job must hold the store lease");
@@ -968,7 +948,7 @@ fn parent_term_reaches_the_child_and_holds_activity_until_reap() {
         "activity was released while a terminating child was still using the store"
     );
 
-    release_fifo(fifo.path());
+    release_fifo(&fifo);
     harness.markers.wait_for("EXIT 45");
     let status = harness.finish();
     assert_eq!(
@@ -1072,8 +1052,8 @@ fn sequential_children_preserve_numeric_and_signal_exits() {
 #[test]
 fn a_second_supervisory_session_is_refused_rather_than_queued() {
     let store = TempStore::new("session-busy");
-    let fifo = Fifo::new("session-busy-fifo");
-    let mut harness = spawn_harness("session-busy", &store, None, Some(fifo.path()));
+    let fifo = store.fifo("session-busy-fifo");
+    let mut harness = spawn_harness("session-busy", &store, None, Some(&fifo));
     harness.markers.wait_for("DONE");
     let text = harness.markers.text();
     assert!(
@@ -1121,8 +1101,8 @@ fn a_child_exit_wakes_the_supervisor_without_waiting_for_a_poll_tick() {
 #[test]
 fn spawn_failure_restores_dispositions() {
     let store = TempStore::new("spawn-fail");
-    let fifo = Fifo::new("spawn-fail-fifo");
-    let mut harness = spawn_harness("spawn-fail", &store, None, Some(fifo.path()));
+    let fifo = store.fifo("spawn-fail-fifo");
+    let mut harness = spawn_harness("spawn-fail", &store, None, Some(&fifo));
     harness.markers.wait_for("GUARDED");
     let text = harness.markers.text();
     assert!(
@@ -1133,7 +1113,7 @@ fn spawn_failure_restores_dispositions() {
     // Mid-child: the session is installed, so the supervisor catches TERM,
     // forwards it to a child that ignores it, and keeps waiting.
     signal(harness.pid(), libc::SIGTERM);
-    release_fifo(fifo.path());
+    release_fifo(&fifo);
     harness.markers.wait_for("GUARDED_EXIT 9");
     assert!(
         harness.process.try_wait().unwrap().is_none(),

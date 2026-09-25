@@ -18,28 +18,9 @@ use tog::kernel::policy;
 use tog::kernel::store::Store;
 use tog::tailors::node::{self, NpmPackage, NpmPlan};
 
-struct TempDir(PathBuf);
+mod common;
 
-impl TempDir {
-    fn new() -> Self {
-        let path = std::env::temp_dir().join(format!(
-            "tog-npm-scripts-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&path).unwrap();
-        Self(path)
-    }
-}
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
+use common::{tog, TempDir};
 
 /// Build a one-package tarball whose postinstall runs `script`.
 fn make_pkg_tarball(dir: &std::path::Path, script: &str) -> (PathBuf, String) {
@@ -271,15 +252,6 @@ fn commit_toolchain_lock(project: &Path, ecosystem: &str) {
     std::fs::write(project.join(LOCK_PATH), lock.canonical_bytes()).unwrap();
 }
 
-fn tog(bin: &Path, project: &Path, store: &Path, args: &[&str]) -> Output {
-    Command::new(bin)
-        .current_dir(project)
-        .env("TOG_STORE", store)
-        .args(args)
-        .output()
-        .unwrap()
-}
-
 #[test]
 #[ignore]
 fn network_access_during_install_script_fails() {
@@ -303,9 +275,8 @@ fn network_access_during_install_script_fails() {
         );
         return;
     }
-    let dir = std::env::temp_dir().join(format!("tog-evil-npm-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    let temp = TempDir::new("evil-npm");
+    let dir = temp.path();
     // Network probe: succeeds (exit 0) with network, exits 1 without.
     let (tarball, sri) = make_pkg_tarball(
         &dir,
@@ -332,7 +303,6 @@ fn network_access_during_install_script_fails() {
         "strict child failed: {}",
         String::from_utf8_lossy(&child.stderr)
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -355,9 +325,8 @@ fn permissive_install_script_is_cached_but_rejected_strict() {
         assert!(err.to_string().contains("'tog --fresh' will not help"));
         return;
     }
-    let dir = std::env::temp_dir().join(format!("tog-permissive-npm-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    let temp = TempDir::new("permissive-npm");
+    let dir = temp.path();
     let (tarball, sri) = make_pkg_tarball(
         &dir,
         "node -e \"require('fs').writeFileSync('partial.txt','partial'); require('https').get('https://registry.npmjs.org/', \
@@ -414,7 +383,6 @@ fn permissive_install_script_is_cached_but_rejected_strict() {
         "strict cached child failed: {}",
         String::from_utf8_lossy(&child.stderr)
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -423,9 +391,8 @@ fn benign_install_script_runs_and_output_is_captured() {
     let _policy_guard = policy_guard();
     let _attribution = policy::Attribution::open("node").expect("test attribution");
     let platform = Platform::host().expect("host platform");
-    let dir = std::env::temp_dir().join(format!("tog-good-npm-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    let temp = TempDir::new("good-npm");
+    let dir = temp.path();
     let (tarball, sri) = make_pkg_tarball(
         &dir,
         "node -e \"require('fs').writeFileSync('built.txt','ok')\"",
@@ -438,7 +405,6 @@ fn benign_install_script_runs_and_output_is_captured() {
         .expect("realize");
     let built = env.join("node_modules/fixture-pkg/built.txt");
     assert_eq!(std::fs::read_to_string(built).unwrap(), "ok");
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -453,7 +419,7 @@ fn linux_npm_roundtrip() {
 
     let platform = Platform::host().expect("Linux glibc host platform");
     assert_eq!(platform, Platform::X86_64UnknownLinuxGnu);
-    let temp = TempDir::new();
+    let temp = TempDir::new("npm-scripts");
     let project = &temp.0;
     let store = store_at(project);
     let activity = &store
@@ -567,8 +533,7 @@ NAPI_MODULE(NODE_GYP_MODULE_NAME, init)
     // Strict policy never creates the toolchain lock, so the project commits
     // one first, exactly as a user runs `tog` once before CI goes strict.
     commit_toolchain_lock(project, "node");
-    let binary = Path::new(env!("CARGO_BIN_EXE_tog"));
-    let synced = tog(binary, project, &store_root, &["sync", "--strict"]);
+    let synced = tog(project, &temp.0, &["sync", "--strict"]);
     assert_success(&synced, "tog --strict");
 
     let closure = comforter::read_closure(project, "node").unwrap();
@@ -608,12 +573,7 @@ if (addon.answer() !== 42) process.exit(13);
 esbuild.transformSync('const answer = 42', {loader: 'js'});
 console.log('linux-npm-roundtrip-ok');
 "#;
-    let run = tog(
-        binary,
-        project,
-        &store_root,
-        &["run", "node", "-e", node_check],
-    );
+    let run = tog(project, &temp.0, &["run", "node", "-e", node_check]);
     assert_success(&run, "tog run Node/esbuild/addon check");
     assert!(String::from_utf8_lossy(&run.stdout).contains("linux-npm-roundtrip-ok"));
 
@@ -632,19 +592,14 @@ console.log('linux-npm-roundtrip-ok');
             .count(),
         0
     );
-    let repeated = tog(binary, project, &store_root, &["sync", "--strict"]);
+    let repeated = tog(project, &temp.0, &["sync", "--strict"]);
     assert_success(&repeated, "offline warm sync --strict");
     let repeated_closure = comforter::read_closure(project, "node").unwrap();
     assert_eq!(
         repeated_closure["env_object"], closure["env_object"],
         "identical inputs produced a different node environment object"
     );
-    let repeated_run = tog(
-        binary,
-        project,
-        &store_root,
-        &["run", "node", "-e", node_check],
-    );
+    let repeated_run = tog(project, &temp.0, &["run", "node", "-e", node_check]);
     assert_success(&repeated_run, "repeat tog run Node/esbuild/addon check");
 }
 
@@ -658,9 +613,8 @@ fn skip_download_switch_is_injected_and_recorded() {
     // visible to the lifecycle process, which is what makes the real installer
     // return without touching the denied network.
     let platform = Platform::host().expect("host platform");
-    let dir = std::env::temp_dir().join(format!("tog-skip-npm-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    let temp = TempDir::new("skip-npm");
+    let dir = temp.path();
     let (tarball, sri) = make_named_pkg_tarball(
         &dir,
         "puppeteer",
@@ -682,7 +636,6 @@ fn skip_download_switch_is_injected_and_recorded() {
         std::fs::read_to_string(env.join("node_modules/puppeteer/skipped.txt")).unwrap(),
         "ok"
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -693,9 +646,8 @@ fn prebuilt_downloader_is_told_to_build_from_source() {
     // A prebuild-install style script: with the network denied the download can
     // never succeed, so tog asks for the source build up front.
     let platform = Platform::host().expect("host platform");
-    let dir = std::env::temp_dir().join(format!("tog-src-npm-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    let temp = TempDir::new("src-npm");
+    let dir = temp.path();
     let (tarball, sri) = make_named_pkg_tarball(
         &dir,
         "fake-prebuilt",
@@ -717,7 +669,6 @@ fn prebuilt_downloader_is_told_to_build_from_source() {
         std::fs::read_to_string(env.join("node_modules/fake-prebuilt/compiled.txt")).unwrap(),
         "ok"
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A project that locks Python builds its native addons on that Python.
@@ -732,7 +683,7 @@ fn node_gyp_builds_on_the_projects_locked_python() {
         eprintln!("node_gyp_builds_on_the_projects_locked_python skipped: supported Linux only");
         return;
     }
-    let temp = TempDir::new();
+    let temp = TempDir::new("npm-scripts");
     let store = store_at(&temp.0);
     let store_root = store.root.clone();
     let record_python = "\"$PYTHON\" -c \"import sys; open('python-version.txt', 'w').write('%d.%d.%d' % sys.version_info[:3])\"";
@@ -766,7 +717,6 @@ NAPI_MODULE(NODE_GYP_MODULE_NAME, init)
         ],
     );
     seed_verified_fixture(&store, &addon_tarball, &addon_sri);
-    let binary = Path::new(env!("CARGO_BIN_EXE_tog"));
 
     let mut envs = Vec::new();
     for (name, locked_python, expected) in [
@@ -799,7 +749,7 @@ NAPI_MODULE(NODE_GYP_MODULE_NAME, init)
             .unwrap();
         }
 
-        let synced = tog(binary, &project, &store_root, &["sync"]);
+        let synced = tog(&project, &temp.0, &["sync"]);
         assert_success(&synced, &format!("tog sync ({name})"));
         let lock = std::fs::read_to_string(project.join("tog-toolchain.toml")).unwrap();
         assert_eq!(lock.contains("cpython"), locked_python.is_some(), "{lock}");
@@ -846,7 +796,7 @@ NAPI_MODULE(NODE_GYP_MODULE_NAME, init)
     let project = temp.0.join("locks-python");
     std::fs::remove_file(project.join("pyproject.toml")).unwrap();
     std::fs::remove_file(project.join(".python-version")).unwrap();
-    let status = tog(binary, &project, &store_root, &["status"]);
+    let status = tog(&project, &temp.0, &["status"]);
     let text = format!(
         "{}{}",
         String::from_utf8_lossy(&status.stdout),

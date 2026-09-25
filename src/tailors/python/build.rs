@@ -243,23 +243,13 @@ pub(crate) struct SdistIdentityPlan {
 }
 
 #[cfg(test)]
-fn test_store(label: &str) -> Store {
-    let root = std::env::temp_dir().join(format!(
-        "tog-build-identity-{label}-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+fn test_store(label: &str) -> (crate::kernel::testutil::TempDir, Store) {
+    let dir = crate::kernel::testutil::TempDir::named(&format!("build-identity-{label}"));
     for sub in ["objects", "meta", "cache/sha256", "tmp"] {
-        fs::create_dir_all(root.join(sub)).expect("create Python identity fixture store");
+        fs::create_dir_all(dir.0.join(sub)).expect("create Python identity fixture store");
     }
-    Store {
-        root: root
-            .canonicalize()
-            .expect("canonical Python identity fixture store"),
-    }
+    let root = dir.0.clone();
+    (dir, Store { root })
 }
 
 /// A byte-identical `.tar.gz` for a fixture tree, with no dependence on
@@ -1220,7 +1210,7 @@ pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
     .expect("Rust isolated sdist identity");
     let mut cases = vec![schema_two, isolated, isolated_rust];
     if platform == Platform::X86_64UnknownLinuxGnu {
-        let store = test_store("matrix-native");
+        let (_store_dir, store) = test_store("matrix-native");
         let activity = &store
             .activity(crate::kernel::activity::ActivityMode::Shared)
             .unwrap();
@@ -1236,9 +1226,8 @@ pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
         )
         .expect("native sdist identity plan");
         cases.push(planned.identity);
-        let _ = crate::kernel::store::remove_tree(&store.root);
     } else if platform.is_macos() {
-        let store = test_store("matrix-rust-darwin");
+        let (_store_dir, store) = test_store("matrix-rust-darwin");
         let activity = &store
             .activity(crate::kernel::activity::ActivityMode::Shared)
             .unwrap();
@@ -1250,7 +1239,6 @@ pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
         // takes the isolated-build path even though Darwin has no native-libs pin.
         assert_eq!(planned.identity.inputs["schema"], "sdist-build/4");
         cases.push(planned.identity);
-        let _ = crate::kernel::store::remove_tree(&store.root);
     }
     cases
 }
@@ -1359,7 +1347,7 @@ mod tests {
             .unwrap_or_else(|error| error.into_inner());
         crate::tailors::install_kinds();
         let platform = crate::kernel::platform::Platform::host().unwrap();
-        let store = super::test_store("locked-rust");
+        let (_store_dir, store) = super::test_store("locked-rust");
         let activity = &store
             .activity(crate::kernel::activity::ActivityMode::Shared)
             .unwrap();
@@ -1458,7 +1446,6 @@ mod tests {
             crate::kernel::objmeta::check_identity_grammar(&planned),
             Ok(())
         );
-        let _ = crate::kernel::store::remove_tree(&store.root);
     }
 
     /// The local sdist fixtures are byte-identical across stores and runs,
@@ -1471,11 +1458,11 @@ mod tests {
         let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        let first_store = super::test_store("repro-first");
+        let (_first_dir, first_store) = super::test_store("repro-first");
         let first_store_activity = &first_store
             .activity(crate::kernel::activity::ActivityMode::Shared)
             .unwrap();
-        let second_store = super::test_store("repro-second");
+        let (_second_dir, second_store) = super::test_store("repro-second");
         let second_store_activity = &second_store
             .activity(crate::kernel::activity::ActivityMode::Shared)
             .unwrap();
@@ -1541,8 +1528,6 @@ mod tests {
                 planned_elsewhere.identity.inputs["sdist_sha256"]
             );
         }
-        let _ = crate::kernel::store::remove_tree(&first_store.root);
-        let _ = crate::kernel::store::remove_tree(&second_store.root);
     }
 
     use super::*;
@@ -1586,7 +1571,7 @@ mod tests {
         let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        let store = test_store("darwin-native");
+        let (_store_dir, store) = test_store("darwin-native");
         let activity = &store
             .activity(crate::kernel::activity::ActivityMode::Shared)
             .unwrap();
@@ -1617,7 +1602,6 @@ mod tests {
             planned.input,
             format!("Sdist:{}:{}", pkg.sha256, derivation_fingerprint())
         );
-        let _ = fs::remove_dir_all(&store.root);
     }
 
     #[test]

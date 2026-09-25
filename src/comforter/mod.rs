@@ -890,21 +890,21 @@ pub fn input_records(
 #[cfg(test)]
 mod closure_platform_tests {
     use super::*;
+    use crate::kernel::testutil::TempDir;
     use std::os::unix::fs::symlink;
     use std::os::unix::fs::PermissionsExt as _;
 
-    fn test_store(label: &str) -> Store {
-        let root = std::env::temp_dir().join(format!(
-            "tog-project-identity-{label}-{}",
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&root);
+    /// An empty store in its own scratch directory, which lives as long as
+    /// the returned `TempDir`.
+    fn test_store(label: &str) -> (TempDir, Store) {
+        let temp = TempDir::named(&format!("{label}-store"));
         for sub in ["objects", "meta", "cache/sha256", "tmp"] {
-            fs::create_dir_all(root.join(sub)).unwrap();
+            fs::create_dir_all(temp.0.join(sub)).unwrap();
         }
-        Store {
-            root: root.canonicalize().unwrap(),
-        }
+        let store = Store {
+            root: temp.0.clone(),
+        };
+        (temp, store)
     }
 
     fn write_closure(dir: &Path, platform: Option<&str>) {
@@ -924,11 +924,11 @@ mod closure_platform_tests {
     fn closures_are_refused_for_a_project_that_cannot_be_registered() {
         let _attribution_lock = crate::kernel::policy::attribution_test_lock();
         let mut attribution = crate::kernel::policy::Attribution::open("python").unwrap();
-        let dir = std::env::temp_dir().join(format!("tog-unrecordable-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
+        let temp = TempDir::named("unrecordable");
+        let dir = &temp.0;
         let project = dir.join("project ");
         fs::create_dir_all(&project).unwrap();
-        let store = test_store("unrecordable");
+        let (_store_dir, store) = test_store("unrecordable");
         let activity = store
             .activity(crate::kernel::activity::ActivityMode::Exclusive)
             .unwrap();
@@ -948,7 +948,6 @@ mod closure_platform_tests {
             "wrote into a project no record can name"
         );
         attribution.finish(false).unwrap();
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -958,20 +957,19 @@ mod closure_platform_tests {
             .unwrap_or_else(|error| error.into_inner());
         let host = Platform::host().unwrap();
         let foreign = Platform::ALL.iter().copied().find(|p| *p != host).unwrap();
-        let dir = std::env::temp_dir().join(format!("tog-closure-plat-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
+        let temp = TempDir::named("closure-plat");
+        let dir = &temp.0;
 
-        write_closure(&dir, Some(foreign.triple()));
-        let err = read_closure(&dir, "python").unwrap_err();
+        write_closure(dir, Some(foreign.triple()));
+        let err = read_closure(dir, "python").unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::Unsupported, "{err}");
         assert!(err.to_string().contains(foreign.triple()), "{err}");
 
-        write_closure(&dir, Some(host.triple()));
-        assert_eq!(read_closure(&dir, "python").unwrap()["ok"], true);
+        write_closure(dir, Some(host.triple()));
+        assert_eq!(read_closure(dir, "python").unwrap()["ok"], true);
 
-        write_closure(&dir, None); // pre-port envelope
-        assert_eq!(read_closure(&dir, "python").unwrap()["ok"], true);
-        let _ = fs::remove_dir_all(&dir);
+        write_closure(dir, None); // pre-port envelope
+        assert_eq!(read_closure(dir, "python").unwrap()["ok"], true);
     }
 
     fn closure_test_body(store: &Store) -> serde_json::Value {
@@ -1015,17 +1013,9 @@ mod closure_platform_tests {
             .unwrap_or_else(|error| error.into_inner());
         let _attribution_lock = crate::kernel::policy::attribution_test_lock();
         let mut attribution = crate::kernel::policy::Attribution::open("python").unwrap();
-        let project = std::env::temp_dir().join(format!(
-            "tog-closure-durable-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let _ = fs::remove_dir_all(&project);
-        let store = test_store("closure-durable");
-        fs::create_dir_all(&project).unwrap();
+        let temp = TempDir::named("closure-durable");
+        let project = &temp.0;
+        let (_store_dir, store) = test_store("closure-durable");
         let id = complete_object(&store, "durable");
 
         // The publication path takes the exclusive lease itself (through the
@@ -1037,7 +1027,7 @@ mod closure_platform_tests {
         let mut refs = super::ClosureRefs::new();
         refs.object_id(&store, &activity, &id).unwrap();
         super::write_closure(
-            &crate::kernel::fsroot::ProjectRoot::open(&project).unwrap(),
+            &crate::kernel::fsroot::ProjectRoot::open(project).unwrap(),
             "python",
             closure_test_body(&store),
             &store,
@@ -1057,21 +1047,10 @@ mod closure_platform_tests {
         assert_eq!(roots.len(), 1, "no durable root record was published");
         let record = roots[0].record.as_ref().expect("root/2 record");
         assert!(record.objects.contains(&id), "{:?}", record.objects);
-        let _ = crate::kernel::store::remove_tree(&store.root);
-        let _ = fs::remove_dir_all(&project);
     }
 
-    fn unique_project(label: &str) -> PathBuf {
-        let project = std::env::temp_dir().join(format!(
-            "tog-closure-{label}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir_all(&project).unwrap();
-        project.canonicalize().unwrap()
+    fn unique_project(label: &str) -> TempDir {
+        TempDir::named(&format!("closure-{label}"))
     }
 
     fn envelope(project: &Path, ecosystem: &str, body: serde_json::Value) {
@@ -1092,7 +1071,7 @@ mod closure_platform_tests {
     /// protection.
     #[test]
     fn closure_refs_reject_a_bare_path_that_merely_contains_an_id() {
-        let store = test_store("bare-id-path");
+        let (_store_dir, store) = test_store("bare-id-path");
         let id = complete_object(&store, "bare-id");
         let mentioned = complete_object(&store, "mentioned");
         let elsewhere = std::env::temp_dir().join("tog-not-a-store");
@@ -1123,9 +1102,10 @@ mod closure_platform_tests {
         // Registration reads the same rule: only a store object path, or an
         // `{"id", "path"}` pair naming one, is a reference. A string that
         // happens to hold an id, bare or inside a relative path, is prose.
-        let project = unique_project("bare-id-import");
+        let project_dir = unique_project("bare-id-import");
+        let project = &project_dir.0;
         envelope(
-            &project,
+            project,
             "python",
             serde_json::json!({
                 "env_object": store.object_path(&id),
@@ -1135,9 +1115,9 @@ mod closure_platform_tests {
             }),
         );
         // A path inside an object is refused outright, not read as the object.
-        assert!(store.root_record_from_project(&project).is_err());
+        assert!(store.root_record_from_project(project).is_err());
         envelope(
-            &project,
+            project,
             "python",
             serde_json::json!({
                 "env_object": store.object_path(&id),
@@ -1145,10 +1125,8 @@ mod closure_platform_tests {
                 "relative": format!("objects/{mentioned}"),
             }),
         );
-        let record = store.root_record_from_project(&project).unwrap();
+        let record = store.root_record_from_project(project).unwrap();
         assert_eq!(record.objects, BTreeSet::from([id]));
-        let _ = crate::kernel::store::remove_tree(&store.root);
-        let _ = fs::remove_dir_all(&project);
     }
 
     /// Publication writes the durable root record, then the visible closure.
@@ -1167,8 +1145,9 @@ mod closure_platform_tests {
             return;
         }
         let mut attribution = crate::kernel::policy::Attribution::open("python").unwrap();
-        let store = test_store("record-before-closure");
-        let project = unique_project("record-before-closure");
+        let (_store_dir, store) = test_store("record-before-closure");
+        let project_dir = unique_project("record-before-closure");
+        let project = &project_dir.0;
         let id = complete_object(&store, "record-first");
         let closures = project.join(".tog/closures");
         fs::create_dir_all(&closures).unwrap();
@@ -1180,7 +1159,7 @@ mod closure_platform_tests {
         let mut refs = ClosureRefs::new();
         refs.object_id(&store, &activity, &id).unwrap();
         let result = super::write_closure(
-            &crate::kernel::fsroot::ProjectRoot::open(&project).unwrap(),
+            &crate::kernel::fsroot::ProjectRoot::open(project).unwrap(),
             "python",
             closure_test_body(&store),
             &store,
@@ -1201,8 +1180,6 @@ mod closure_platform_tests {
         let record = roots[0].record.as_ref().expect("root/2 record");
         assert_eq!(record.objects, BTreeSet::from([id]));
         attribution.discard();
-        let _ = crate::kernel::store::remove_tree(&store.root);
-        let _ = fs::remove_dir_all(&project);
     }
 
     /// A project still on a pathname-only record carries closures from every
@@ -1216,35 +1193,36 @@ mod closure_platform_tests {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let _attribution_lock = crate::kernel::policy::attribution_test_lock();
-        let store = test_store("sync-imports-legacy");
-        let project = unique_project("sync-imports-legacy");
+        let (_store_dir, store) = test_store("sync-imports-legacy");
+        let project_dir = unique_project("sync-imports-legacy");
+        let project = &project_dir.0;
         let old_python = complete_object(&store, "old-python-env");
         let node = complete_object(&store, "node-env");
         let new_python = complete_object(&store, "new-python-env");
         envelope(
-            &project,
+            project,
             "python",
             serde_json::json!({"env_object": store.object_path(&old_python)}),
         );
         envelope(
-            &project,
+            project,
             "node",
             serde_json::json!({"env_object": store.object_path(&node)}),
         );
-        let legacy = store.register_root(&project).unwrap();
+        let legacy = store.register_root(project).unwrap();
         let legacy_bytes = fs::read(&legacy.registry_path).unwrap();
 
         // A closure the importer cannot read stops the switch before any
         // record changes.
-        envelope(&project, "zig", serde_json::json!({}));
+        envelope(project, "zig", serde_json::json!({}));
         let activity = store
             .activity(crate::kernel::activity::ActivityMode::Exclusive)
             .unwrap();
         let mut refs = ClosureRefs::new();
         refs.object_id(&store, &activity, &new_python).unwrap();
-        let project_lock = store.project_lock(&project).unwrap();
+        let project_lock = store.project_lock(project).unwrap();
         let error = persist_root_for_refs_with_project_lock(
-            &crate::kernel::fsroot::ProjectRoot::open(&project).unwrap(),
+            &crate::kernel::fsroot::ProjectRoot::open(project).unwrap(),
             &store,
             &activity,
             &refs,
@@ -1258,7 +1236,7 @@ mod closure_platform_tests {
         // The durable half of a Python resync, before its projection switch:
         // the old Python and Node references are imported with the new one.
         persist_root_for_refs_with_project_lock(
-            &crate::kernel::fsroot::ProjectRoot::open(&project).unwrap(),
+            &crate::kernel::fsroot::ProjectRoot::open(project).unwrap(),
             &store,
             &activity,
             &refs,
@@ -1270,7 +1248,7 @@ mod closure_platform_tests {
         assert_eq!(roots.len(), 1);
         let record = roots[0].record.as_ref().expect("root/2 record");
         assert_eq!(record.objects, everything);
-        let python = read_closure(&project, "python").unwrap();
+        let python = read_closure(project, "python").unwrap();
         assert_eq!(
             python["env_object"],
             serde_json::json!(store.object_path(&old_python)),
@@ -1280,7 +1258,7 @@ mod closure_platform_tests {
         // The visible switch keeps the union.
         let mut attribution = crate::kernel::policy::Attribution::open("python").unwrap();
         super::write_closure_with_project_lock(
-            &crate::kernel::fsroot::ProjectRoot::open(&project).unwrap(),
+            &crate::kernel::fsroot::ProjectRoot::open(project).unwrap(),
             "python",
             serde_json::json!({"env_object": store.object_path(&new_python)}),
             &store,
@@ -1295,8 +1273,6 @@ mod closure_platform_tests {
         drop(activity);
         let roots = store.roots().unwrap();
         assert_eq!(roots[0].record.as_ref().unwrap().objects, everything);
-        let _ = crate::kernel::store::remove_tree(&store.root);
-        let _ = fs::remove_dir_all(&project);
     }
 
     /// Root registration imports the closures the project already has
@@ -1310,13 +1286,15 @@ mod closure_platform_tests {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let _attribution_lock = crate::kernel::policy::attribution_test_lock();
-        let store = test_store("held-import");
-        let project = unique_project("held-import");
-        let outside = unique_project("held-import-outside");
+        let (_store_dir, store) = test_store("held-import");
+        let project_dir = unique_project("held-import");
+        let project = &project_dir.0;
+        let outside_dir = unique_project("held-import-outside");
+        let outside = &outside_dir.0;
         let foreign = complete_object(&store, "foreign-env");
         let own = complete_object(&store, "own-env");
         envelope(
-            &outside,
+            outside,
             "node",
             serde_json::json!({"env_object": store.object_path(&foreign)}),
         );
@@ -1328,7 +1306,7 @@ mod closure_platform_tests {
 
         // A `.tog` that is a symlink to another project's state.
         std::os::unix::fs::symlink(outside.join(".tog"), project.join(".tog")).unwrap();
-        let root = crate::kernel::fsroot::ProjectRoot::open(&project).unwrap();
+        let root = crate::kernel::fsroot::ProjectRoot::open(project).unwrap();
         let project_lock = store.project_lock_in(&root).unwrap();
         let error =
             persist_root_for_refs_with_project_lock(&root, &store, &activity, &refs, &project_lock)
@@ -1340,8 +1318,8 @@ mod closure_platform_tests {
         // The project renamed away and another put at its path, carrying
         // closures that name a foreign object.
         let moved = project.with_extension("moved");
-        fs::rename(&project, &moved).unwrap();
-        fs::rename(&outside, &project).unwrap();
+        fs::rename(project, &moved).unwrap();
+        fs::rename(outside, project).unwrap();
         let error =
             persist_root_for_refs_with_project_lock(&root, &store, &activity, &refs, &project_lock)
                 .unwrap_err();
@@ -1353,8 +1331,8 @@ mod closure_platform_tests {
 
         // Put back, the held project's own (empty) closures are imported and
         // nothing from the other directory is.
-        fs::rename(&project, &outside).unwrap();
-        fs::rename(&moved, &project).unwrap();
+        fs::rename(project, outside).unwrap();
+        fs::rename(&moved, project).unwrap();
         persist_root_for_refs_with_project_lock(&root, &store, &activity, &refs, &project_lock)
             .unwrap();
         let roots = store.roots().unwrap();
@@ -1364,9 +1342,6 @@ mod closure_platform_tests {
         assert_eq!(record.objects, BTreeSet::from([own.clone()]));
         drop(project_lock);
         drop(activity);
-        let _ = crate::kernel::store::remove_tree(&store.root);
-        let _ = fs::remove_dir_all(&project);
-        let _ = fs::remove_dir_all(&outside);
     }
 
     #[test]
@@ -1382,21 +1357,14 @@ mod closure_platform_tests {
             "collision before invalid publication",
         )
         .unwrap();
-        let project = std::env::temp_dir().join(format!(
-            "tog-closure-non-object-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let store = test_store("closure-non-object");
-        fs::create_dir_all(&project).unwrap();
+        let temp = TempDir::named("closure-non-object");
+        let project = &temp.0;
+        let (_store_dir, store) = test_store("closure-non-object");
         let activity = store
             .activity(crate::kernel::activity::ActivityMode::Exclusive)
             .unwrap();
         let error = super::write_closure(
-            &crate::kernel::fsroot::ProjectRoot::open(&project).unwrap(),
+            &crate::kernel::fsroot::ProjectRoot::open(project).unwrap(),
             "python",
             serde_json::json!(["not an object"]),
             &store,
@@ -1409,8 +1377,6 @@ mod closure_platform_tests {
         assert_eq!(crate::kernel::policy::pending().len(), 1);
         assert!(!project.join(".tog").exists());
         attribution.discard();
-        let _ = fs::remove_dir_all(project);
-        let _ = fs::remove_dir_all(store.root);
     }
 
     /// A write that fails after the claim must not count as published: the
@@ -1429,15 +1395,9 @@ mod closure_platform_tests {
             "collision before a failing write",
         )
         .unwrap();
-        let project = std::env::temp_dir().join(format!(
-            "tog-closure-write-fails-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let store = test_store("closure-write-fails");
+        let temp = TempDir::named("closure-write-fails");
+        let project = &temp.0;
+        let (_store_dir, store) = test_store("closure-write-fails");
         let closures = project.join(".tog/closures");
         // A directory squatting on the closure's destination name makes the
         // final rename fail, after the claim and after the temp file was
@@ -1446,7 +1406,7 @@ mod closure_platform_tests {
         fs::create_dir_all(&squatter).unwrap();
 
         let error = super::write_closure_legacy(
-            &project,
+            project,
             "python",
             closure_test_body(&store),
             &mut attribution,
@@ -1470,9 +1430,6 @@ mod closure_platform_tests {
         let next = crate::kernel::policy::Attribution::open("node").unwrap();
         assert!(next.recorded().is_empty());
         next.discard();
-
-        let _ = fs::remove_dir_all(&project);
-        let _ = fs::remove_dir_all(store.root);
     }
 
     #[test]
@@ -1482,19 +1439,13 @@ mod closure_platform_tests {
             .unwrap_or_else(|error| error.into_inner());
         let _attribution_lock = crate::kernel::policy::attribution_test_lock();
         let mut attribution = crate::kernel::policy::Attribution::open("python").unwrap();
-        let project = std::env::temp_dir().join(format!(
-            "tog-closure-normal-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let store = test_store("closure-normal");
-        fs::create_dir_all(&project).unwrap();
+        let temp = TempDir::named("closure-normal");
+        let project = &temp.0;
+        let (_store_dir, store) = test_store("closure-normal");
+        fs::create_dir_all(project).unwrap();
 
         super::write_closure_legacy(
-            &project,
+            project,
             "python",
             closure_test_body(&store),
             &mut attribution,
@@ -1511,9 +1462,6 @@ mod closure_platform_tests {
             Some(store.object_path("closure-test").to_str().unwrap())
         );
         assert!(project.join(".tog/closures").is_dir());
-
-        let _ = fs::remove_dir_all(project);
-        let _ = fs::remove_dir_all(store.root);
     }
 
     #[test]
@@ -1522,16 +1470,10 @@ mod closure_platform_tests {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let _attribution_lock = crate::kernel::policy::attribution_test_lock();
-        let project = std::env::temp_dir().join(format!(
-            "tog-closure-signed-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir_all(&project).unwrap();
-        let store = test_store("closure-signed");
+        let temp = TempDir::named("closure-signed");
+        let project = &temp.0;
+        fs::create_dir_all(project).unwrap();
+        let (_store_dir, store) = test_store("closure-signed");
         let key_path = project.join("signing.key");
         let public = crate::kernel::signing::generate(&key_path).unwrap();
         let key = std::sync::Arc::new(SigningKey::load(&key_path).unwrap());
@@ -1539,7 +1481,7 @@ mod closure_platform_tests {
         let mut attribution = crate::kernel::policy::Attribution::open("python").unwrap();
         crate::kernel::policy::record("skipped-optional", "dev", "not requested").unwrap();
         let written = super::write_closure_legacy(
-            &project,
+            project,
             "python",
             closure_test_body(&store),
             &mut attribution,
@@ -1565,13 +1507,13 @@ mod closure_platform_tests {
         ));
         // `read_closure` accepts the signed record unchanged.
         assert_eq!(
-            super::read_closure(&project, "python").unwrap()["exceptions"][0]["subject"],
+            super::read_closure(project, "python").unwrap()["exceptions"][0]["subject"],
             "dev"
         );
         // Without a key the same writer produces an unsigned record.
         let mut attribution = crate::kernel::policy::Attribution::open("python").unwrap();
         super::write_closure_legacy(
-            &project,
+            project,
             "python",
             closure_test_body(&store),
             &mut attribution,
@@ -1585,8 +1527,6 @@ mod closure_platform_tests {
             crate::kernel::signing::verify(&closure),
             crate::kernel::signing::Verification::Unsigned
         );
-        let _ = fs::remove_dir_all(project);
-        let _ = fs::remove_dir_all(store.root);
     }
 
     #[test]
@@ -1596,17 +1536,11 @@ mod closure_platform_tests {
             .unwrap_or_else(|error| error.into_inner());
         let _attribution_lock = crate::kernel::policy::attribution_test_lock();
         let mut attribution = crate::kernel::policy::Attribution::open("python").unwrap();
-        let root = std::env::temp_dir().join(format!(
-            "tog-closure-tog-symlink-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let temp = TempDir::named("closure-tog-symlink");
+        let root = &temp.0;
         let project = root.join("project");
         let outside = root.join("outside");
-        let store = test_store("closure-tog-symlink");
+        let (_store_dir, store) = test_store("closure-tog-symlink");
         fs::create_dir_all(&project).unwrap();
         fs::create_dir_all(&outside).unwrap();
         symlink(&outside, project.join(".tog")).unwrap();
@@ -1623,8 +1557,6 @@ mod closure_platform_tests {
         assert!(fs::read_dir(&outside).unwrap().next().is_none());
 
         attribution.discard();
-        let _ = fs::remove_dir_all(root);
-        let _ = fs::remove_dir_all(store.root);
     }
 
     #[test]
@@ -1634,17 +1566,11 @@ mod closure_platform_tests {
             .unwrap_or_else(|error| error.into_inner());
         let _attribution_lock = crate::kernel::policy::attribution_test_lock();
         let mut attribution = crate::kernel::policy::Attribution::open("python").unwrap();
-        let root = std::env::temp_dir().join(format!(
-            "tog-closure-dest-symlink-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let temp = TempDir::named("closure-dest-symlink");
+        let root = &temp.0;
         let project = root.join("project");
         let outside = root.join("outside.json");
-        let store = test_store("closure-dest-symlink");
+        let (_store_dir, store) = test_store("closure-dest-symlink");
         fs::create_dir_all(project.join(".tog/closures")).unwrap();
         fs::write(&outside, b"untouched").unwrap();
         symlink(&outside, project.join(".tog/closures/python.json")).unwrap();
@@ -1675,8 +1601,6 @@ mod closure_platform_tests {
         );
 
         attribution.discard();
-        let _ = fs::remove_dir_all(root);
-        let _ = fs::remove_dir_all(store.root);
     }
 
     #[test]
@@ -1686,17 +1610,11 @@ mod closure_platform_tests {
             .unwrap_or_else(|error| error.into_inner());
         let _attribution_lock = crate::kernel::policy::attribution_test_lock();
         let mut attribution = crate::kernel::policy::Attribution::open("python").unwrap();
-        let root = std::env::temp_dir().join(format!(
-            "tog-closure-closures-symlink-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let temp = TempDir::named("closure-closures-symlink");
+        let root = &temp.0;
         let project = root.join("project");
         let outside = root.join("outside");
-        let store = test_store("closure-closures-symlink");
+        let (_store_dir, store) = test_store("closure-closures-symlink");
         fs::create_dir_all(project.join(".tog")).unwrap();
         fs::create_dir_all(&outside).unwrap();
         symlink(&outside, project.join(".tog/closures")).unwrap();
@@ -1713,7 +1631,5 @@ mod closure_platform_tests {
         assert!(fs::read_dir(&outside).unwrap().next().is_none());
 
         attribution.discard();
-        let _ = fs::remove_dir_all(root);
-        let _ = fs::remove_dir_all(store.root);
     }
 }

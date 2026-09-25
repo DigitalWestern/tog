@@ -263,40 +263,29 @@ fn short_sha256(bytes: &[u8], hex_len: usize) -> String {
 mod tests {
     use super::*;
     use crate::kernel::activity::ActivityMode;
+    use crate::kernel::testutil::TempDir;
     use crate::kernel::types::Identity;
     use sha2::Digest;
     use std::collections::BTreeMap;
 
     struct TempStore {
         root: PathBuf,
+        _dir: TempDir,
     }
 
     impl TempStore {
         fn new(label: &str) -> Self {
-            let root = std::env::temp_dir().join(format!(
-                "tog-gc-{label}-{}-{}",
-                std::process::id(),
-                SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_nanos()
-            ));
-            let _ = fs::remove_dir_all(&root);
+            let dir = TempDir::named(&format!("gc-{label}"));
+            let root = dir.0.clone();
             for sub in ["objects", "meta", "cache/sha256", "tmp", "roots"] {
                 fs::create_dir_all(root.join(sub)).unwrap();
             }
-            Self { root }
+            Self { root, _dir: dir }
         }
         fn store(&self) -> Store {
             Store {
-                root: self.root.canonicalize().unwrap(),
+                root: self.root.clone(),
             }
-        }
-    }
-
-    impl Drop for TempStore {
-        fn drop(&mut self) {
-            let _ = store::remove_tree(&self.root);
         }
     }
 

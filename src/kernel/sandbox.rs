@@ -1247,6 +1247,7 @@ fn push_setenv(args: &mut Vec<OsString>, key: &str, value: impl AsRef<OsStr>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::kernel::testutil::TempDir;
     use std::collections::BTreeSet;
     #[cfg(target_os = "linux")]
     use std::fs::File;
@@ -1298,14 +1299,8 @@ mod tests {
         true
     }
 
-    fn temp_dir(test_name: &str) -> PathBuf {
-        let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!(
-            "tog-sandbox-{test_name}-{}-{sequence}",
-            std::process::id()
-        ));
-        fs::create_dir(&path).expect("create unique sandbox test directory");
-        path
+    fn temp_dir(test_name: &str) -> TempDir {
+        TempDir::named(&format!("sandbox-{test_name}"))
     }
 
     fn run(
@@ -1371,7 +1366,7 @@ mod tests {
             "network probe requires /usr/bin/curl"
         );
         let root = temp_dir("network");
-        let scratch = root.join("scratch");
+        let scratch = root.0.join("scratch");
         fs::create_dir(&scratch).unwrap();
         let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
         listener.set_nonblocking(true).unwrap();
@@ -1416,7 +1411,6 @@ mod tests {
         );
         drop(host_connection);
         server.join().unwrap();
-        fs::remove_dir_all(root).unwrap();
         let stdout = result.expect("network probe wrapper failed");
         assert_eq!(
             String::from_utf8_lossy(&stdout).trim(),
@@ -1472,7 +1466,7 @@ mod tests {
             return;
         }
         let root = temp_dir("inherited-fds");
-        let scratch = root.join("scratch");
+        let scratch = root.0.join("scratch");
         fs::create_dir(&scratch).unwrap();
         // Same reason as `linux_home_ssh_is_invisible`: $HOME is read here,
         // and opening a directory a policy test is about to delete is a race.
@@ -1505,7 +1499,6 @@ mod tests {
             &scratch,
             &[],
         );
-        fs::remove_dir_all(root).unwrap();
         assert!(
             result.is_ok(),
             "inherited directory/socket fd leaked: {result:?}"
@@ -1516,8 +1509,8 @@ mod tests {
     #[test]
     fn linux_host_socket_in_writable_root_is_rejected_before_bwrap() {
         let root = temp_dir("host-socket");
-        let scratch = root.join("scratch");
-        let writable = root.join("writable");
+        let scratch = root.0.join("scratch");
+        let writable = root.0.join("writable");
         fs::create_dir(&scratch).unwrap();
         fs::create_dir(&writable).unwrap();
         let socket_path = writable.join("listener.sock");
@@ -1533,7 +1526,6 @@ mod tests {
             &[],
         );
         drop(listener);
-        fs::remove_dir_all(root).unwrap();
         let error = result.expect_err("host Unix socket was exposed");
         assert_eq!(error.kind(), io::ErrorKind::Other);
         assert!(
@@ -1548,9 +1540,9 @@ mod tests {
             return;
         }
         let root = temp_dir("read");
-        let scratch = root.join("scratch");
-        let declared = root.join("declared");
-        let sibling = root.join("sibling");
+        let scratch = root.0.join("scratch");
+        let declared = root.0.join("declared");
+        let sibling = root.0.join("sibling");
         fs::create_dir(&scratch).unwrap();
         fs::create_dir(&declared).unwrap();
         fs::create_dir(&sibling).unwrap();
@@ -1568,7 +1560,6 @@ mod tests {
             &scratch,
             &[],
         );
-        fs::remove_dir_all(root).unwrap();
         assert!(result.is_err(), "undeclared sibling was readable");
     }
 
@@ -1578,9 +1569,9 @@ mod tests {
             return;
         }
         let root = temp_dir("write");
-        let scratch = root.join("scratch");
-        let declared = root.join("declared");
-        let readonly = root.join("readonly");
+        let scratch = root.0.join("scratch");
+        let declared = root.0.join("declared");
+        let readonly = root.0.join("readonly");
         fs::create_dir(&scratch).unwrap();
         fs::create_dir(&declared).unwrap();
         fs::create_dir(&readonly).unwrap();
@@ -1607,7 +1598,6 @@ mod tests {
             &scratch,
             &[],
         );
-        fs::remove_dir_all(root).unwrap();
         assert!(result.is_err(), "read-only root accepted a write");
     }
 
@@ -1617,8 +1607,8 @@ mod tests {
             return;
         }
         let root = temp_dir("overlap");
-        let scratch = root.join("scratch");
-        let parent = root.join("parent");
+        let scratch = root.0.join("scratch");
+        let parent = root.0.join("parent");
         let child = parent.join("w");
         fs::create_dir(&scratch).unwrap();
         fs::create_dir(&parent).unwrap();
@@ -1648,7 +1638,6 @@ mod tests {
             &parent,
             &[],
         );
-        fs::remove_dir_all(root).unwrap();
         assert!(result.is_err(), "read-only parent accepted a write");
     }
 
@@ -1658,8 +1647,8 @@ mod tests {
             return;
         }
         let root = temp_dir("cwd");
-        let scratch = root.join("scratch");
-        let project = root.join("project");
+        let scratch = root.0.join("scratch");
+        let project = root.0.join("project");
         let output = scratch.join("pwd");
         fs::create_dir(&scratch).unwrap();
         fs::create_dir(&project).unwrap();
@@ -1695,7 +1684,6 @@ mod tests {
                 "unreadable".to_string()
             ]
         );
-        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -1704,8 +1692,8 @@ mod tests {
             return;
         }
         let root = temp_dir("cwd-child");
-        let scratch = root.join("scratch");
-        let project = root.join("project");
+        let scratch = root.0.join("scratch");
+        let project = root.0.join("project");
         let out = project.join("out");
         fs::create_dir(&scratch).unwrap();
         fs::create_dir(&project).unwrap();
@@ -1748,7 +1736,6 @@ mod tests {
             !project_file.exists(),
             "implicit cwd write reached the host"
         );
-        fs::remove_dir_all(root).unwrap();
     }
 
     #[cfg(target_os = "linux")]
@@ -1757,21 +1744,20 @@ mod tests {
         // Exercises the pre-5.11 fallback path directly; close_range is
         // available on this host so the production path never reaches it.
         let root = temp_dir("cloexec-fallback");
-        let file = File::open(&root).unwrap();
+        let file = File::open(&root.0).unwrap();
         let fd = file.as_raw_fd();
         // SAFETY: fd is owned by the live `file` value above.
         assert_eq!(unsafe { fcntl(fd, F_SETFD, 0) }, 0);
         // SAFETY: as above.
         assert_eq!(unsafe { fcntl(fd, F_GETFD) } & FD_CLOEXEC, 0);
         let closed_fd = {
-            let extra = File::open(&root).unwrap();
+            let extra = File::open(&root.0).unwrap();
             extra.as_raw_fd()
         };
         mark_fds_cloexec_with_fcntl(&[fd, closed_fd]).expect("EBADF for a closed fd is tolerated");
         // SAFETY: fd is owned by the live `file` value above.
         assert_eq!(unsafe { fcntl(fd, F_GETFD) } & FD_CLOEXEC, FD_CLOEXEC);
         drop(file);
-        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -1780,7 +1766,7 @@ mod tests {
             return;
         }
         let root = temp_dir("env");
-        let scratch = root.join("scratch");
+        let scratch = root.0.join("scratch");
         let output = scratch.join("env");
         fs::create_dir(&scratch).unwrap();
         let sandbox = Sandbox {
@@ -1809,7 +1795,6 @@ mod tests {
         assert!(!read_lines(&output)
             .iter()
             .any(|line| line.starts_with("PWD=")));
-        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -1818,7 +1803,7 @@ mod tests {
             return;
         }
         let root = temp_dir("group");
-        let scratch = root.join("scratch");
+        let scratch = root.0.join("scratch");
         fs::create_dir(&scratch).unwrap();
         let result = run(
             &Sandbox {
@@ -1830,7 +1815,6 @@ mod tests {
             &scratch,
             &[],
         );
-        fs::remove_dir_all(root).unwrap();
         assert!(result.is_ok(), "id -gn failed: {result:?}");
     }
 
@@ -1840,7 +1824,7 @@ mod tests {
             return;
         }
         let root = temp_dir("pid");
-        let scratch = root.join("scratch");
+        let scratch = root.0.join("scratch");
         let output = scratch.join("ps");
         fs::create_dir(&scratch).unwrap();
         let output_string = output.to_str().unwrap();
@@ -1867,7 +1851,6 @@ mod tests {
             .lines()
             .filter(|line| !line.trim().is_empty() && !line.contains("PID"))
             .count();
-        fs::remove_dir_all(root).unwrap();
         assert!(rows <= 3, "PID namespace exposed {rows} processes");
     }
 
@@ -1877,7 +1860,7 @@ mod tests {
             return;
         }
         let root = temp_dir("ipc");
-        let scratch = root.join("scratch");
+        let scratch = root.0.join("scratch");
         let output = scratch.join("ipc");
         fs::create_dir(&scratch).unwrap();
         let host = Command::new("/usr/bin/readlink")
@@ -1904,7 +1887,6 @@ mod tests {
         );
         assert!(result.is_ok(), "IPC namespace probe failed: {result:?}");
         let sandbox_ipc = fs::read_to_string(&output).unwrap();
-        fs::remove_dir_all(root).unwrap();
         assert_ne!(
             sandbox_ipc.trim(),
             String::from_utf8_lossy(&host.stdout).trim()
@@ -1917,7 +1899,7 @@ mod tests {
             return;
         }
         let root = temp_dir("stdin");
-        let scratch = root.join("scratch");
+        let scratch = root.0.join("scratch");
         let output = scratch.join("stdin");
         fs::create_dir(&scratch).unwrap();
         let output_string = output.to_str().unwrap();
@@ -1940,7 +1922,6 @@ mod tests {
         );
         assert!(result.is_ok(), "stdin probe failed: {result:?}");
         assert_eq!(fs::read_to_string(&output).unwrap().trim(), "rc=1");
-        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -1949,8 +1930,8 @@ mod tests {
             return;
         }
         let root = temp_dir("unicode");
-        let scratch = root.join("scratch");
-        let read_root = root.join("read root λ");
+        let scratch = root.0.join("scratch");
+        let read_root = root.0.join("read root λ");
         let input = read_root.join("input file");
         let output = scratch.join("output");
         fs::create_dir(&scratch).unwrap();
@@ -1978,7 +1959,6 @@ mod tests {
         );
         assert!(result.is_ok(), "unicode path command failed: {result:?}");
         assert_eq!(fs::read_to_string(&output).unwrap(), "unicode-ok");
-        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -1987,7 +1967,7 @@ mod tests {
             return;
         }
         let root = temp_dir("failure");
-        let scratch = root.join("scratch");
+        let scratch = root.0.join("scratch");
         fs::create_dir(&scratch).unwrap();
         let sandbox = Sandbox {
             read: vec![],
@@ -2006,7 +1986,6 @@ mod tests {
             error.to_string(),
             "sandboxed command failed (exit status: 7): /usr/bin/sh -c 'exit 7'"
         );
-        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -2015,7 +1994,7 @@ mod tests {
             return;
         }
         let root = temp_dir("stderr");
-        let scratch = root.join("scratch");
+        let scratch = root.0.join("scratch");
         fs::create_dir(&scratch).unwrap();
         let sandbox = Sandbox {
             read: vec![],
@@ -2032,7 +2011,6 @@ mod tests {
                 std::process::Stdio::piped(),
             )
             .unwrap();
-        fs::remove_dir_all(root).unwrap();
         // The relay thread retained the build's own stderr (and forwarded it
         // to ours); a build printing to stderr is still a command failure.
         assert_eq!(output.stderr, b"build diagnostic\n");
@@ -2063,18 +2041,18 @@ mod tests {
     #[test]
     fn system_root_mirrors_merged_usr_symlinks() {
         let fedora = temp_dir("fedora-root");
-        fs::create_dir_all(fedora.join("usr/lib64")).unwrap();
+        fs::create_dir_all(fedora.0.join("usr/lib64")).unwrap();
         for (name, target) in [
             ("bin", "usr/bin"),
             ("sbin", "usr/sbin"),
             ("lib", "usr/lib"),
             ("lib64", "usr/lib64"),
         ] {
-            std::os::unix::fs::symlink(target, fedora.join(name)).unwrap();
+            std::os::unix::fs::symlink(target, fedora.0.join(name)).unwrap();
         }
-        let usr = fedora.join("usr").to_string_lossy().into_owned();
+        let usr = fedora.0.join("usr").to_string_lossy().into_owned();
         assert_eq!(
-            rendered(system_root_args(&fedora)),
+            rendered(system_root_args(&fedora.0)),
             [
                 "--ro-bind",
                 &usr,
@@ -2095,7 +2073,7 @@ mod tests {
         );
 
         let ubuntu = temp_dir("ubuntu-root");
-        fs::create_dir_all(ubuntu.join("usr/lib64")).unwrap();
+        fs::create_dir_all(ubuntu.0.join("usr/lib64")).unwrap();
         for (name, target) in [
             ("bin", "usr/bin"),
             ("sbin", "usr/sbin"),
@@ -2104,11 +2082,11 @@ mod tests {
             ("lib64", "usr/lib64"),
             ("libx32", "usr/libx32"),
         ] {
-            std::os::unix::fs::symlink(target, ubuntu.join(name)).unwrap();
+            std::os::unix::fs::symlink(target, ubuntu.0.join(name)).unwrap();
         }
-        let usr = ubuntu.join("usr").to_string_lossy().into_owned();
+        let usr = ubuntu.0.join("usr").to_string_lossy().into_owned();
         assert_eq!(
-            rendered(system_root_args(&ubuntu)),
+            rendered(system_root_args(&ubuntu.0)),
             [
                 "--ro-bind",
                 &usr,
@@ -2133,8 +2111,6 @@ mod tests {
                 "/libx32",
             ]
         );
-        fs::remove_dir_all(fedora).unwrap();
-        fs::remove_dir_all(ubuntu).unwrap();
     }
 
     /// A split-/usr host (older Debian, some containers) has real `/bin` and
@@ -2144,12 +2120,12 @@ mod tests {
     fn system_root_binds_real_directories_and_skips_missing_ones() {
         let root = temp_dir("split-root");
         for directory in ["usr", "bin", "lib", "lib64"] {
-            fs::create_dir(root.join(directory)).unwrap();
+            fs::create_dir(root.0.join(directory)).unwrap();
         }
-        std::os::unix::fs::symlink("usr/sbin", root.join("sbin")).unwrap();
-        let host = |name: &str| root.join(name).to_string_lossy().into_owned();
+        std::os::unix::fs::symlink("usr/sbin", root.0.join("sbin")).unwrap();
+        let host = |name: &str| root.0.join(name).to_string_lossy().into_owned();
         assert_eq!(
-            rendered(system_root_args(&root)),
+            rendered(system_root_args(&root.0)),
             [
                 "--ro-bind",
                 &host("usr"),
@@ -2168,16 +2144,15 @@ mod tests {
                 "/lib64",
             ]
         );
-        fs::remove_dir_all(root).unwrap();
     }
 
-    fn fake_root(test_name: &str, dirs: &[&str], links: &[(&str, &str)]) -> PathBuf {
+    fn fake_root(test_name: &str, dirs: &[&str], links: &[(&str, &str)]) -> TempDir {
         let root = temp_dir(test_name);
         for directory in dirs {
-            fs::create_dir_all(root.join(directory)).unwrap();
+            fs::create_dir_all(root.0.join(directory)).unwrap();
         }
         for (name, target) in links {
-            std::os::unix::fs::symlink(target, root.join(name)).unwrap();
+            std::os::unix::fs::symlink(target, root.0.join(name)).unwrap();
         }
         root
     }
@@ -2198,7 +2173,7 @@ mod tests {
             ],
         );
         assert_eq!(
-            rendered(system_root_args(&root))[3..],
+            rendered(system_root_args(&root.0))[3..],
             [
                 "--symlink",
                 "/usr/bin",
@@ -2207,7 +2182,7 @@ mod tests {
                 "bin",
                 "/sbin",
                 "--ro-bind",
-                &root.join("lib").to_string_lossy().into_owned(),
+                &root.0.join("lib").to_string_lossy(),
                 "/lib",
                 "--symlink",
                 "./lib/../lib",
@@ -2217,7 +2192,6 @@ mod tests {
                 "/lib32",
             ]
         );
-        fs::remove_dir_all(root).unwrap();
     }
 
     /// A link whose chain leaves the mounted set would dangle inside the
@@ -2230,14 +2204,13 @@ mod tests {
             &["usr", "opt/base/bin"],
             &[("bin", "/opt/base/bin")],
         );
-        let error = system_root_args(&outside).unwrap_err();
+        let error = system_root_args(&outside.0).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::Unsupported);
         let message = error.to_string();
         assert!(
             message.contains("host /bin resolves to /opt/base/bin"),
             "{message}"
         );
-        fs::remove_dir_all(outside).unwrap();
 
         // Multi-hop: each link looks harmless, the chain ends in /opt.
         let chained = fake_root(
@@ -2245,22 +2218,20 @@ mod tests {
             &["usr", "opt/base/lib"],
             &[("lib64", "lib"), ("lib", "alt/lib"), ("alt", "/opt/base")],
         );
-        let message = system_root_args(&chained).unwrap_err().to_string();
+        let message = system_root_args(&chained.0).unwrap_err().to_string();
         assert!(
             message.contains("host /lib resolves to /opt/base/lib"),
             "{message}"
         );
-        fs::remove_dir_all(chained).unwrap();
     }
 
     /// A symlink cycle is an error, as the kernel's ELOOP would be.
     #[test]
     fn system_root_refuses_symlink_loops() {
         let root = fake_root("loop-root", &["usr"], &[("bin", "sbin"), ("sbin", "/bin")]);
-        let error = system_root_args(&root).unwrap_err();
+        let error = system_root_args(&root.0).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::Unsupported);
         assert!(error.to_string().contains("symlink loop"), "{error}");
-        fs::remove_dir_all(root).unwrap();
     }
 
     /// Only a missing entry is skipped. An unreadable host layout fails
@@ -2268,13 +2239,12 @@ mod tests {
     #[test]
     fn system_root_propagates_errors_other_than_missing() {
         let root = fake_root("locked-root", &["usr"], &[]);
-        fs::set_permissions(&root, fs::Permissions::from_mode(0o000)).unwrap();
-        let readable = fs::symlink_metadata(root.join("bin"))
+        fs::set_permissions(&root.0, fs::Permissions::from_mode(0o000)).unwrap();
+        let readable = fs::symlink_metadata(root.0.join("bin"))
             .map(|_| true)
             .unwrap_or_else(|error| error.kind() != io::ErrorKind::PermissionDenied);
-        let result = system_root_args(&root);
-        fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
-        fs::remove_dir_all(&root).unwrap();
+        let result = system_root_args(&root.0);
+        fs::set_permissions(&root.0, fs::Permissions::from_mode(0o755)).unwrap();
         if readable {
             eprintln!("skip: running as a user that ignores directory permissions");
             return;
@@ -2360,7 +2330,7 @@ mod tests {
         }
         let bwrap = bwrap_preflight().unwrap();
         let root = temp_dir("setup-failure");
-        let missing = root.join("does-not-exist");
+        let missing = root.0.join("does-not-exist");
         let mut command = bwrap_command(bwrap).unwrap();
         let output = command
             .args([
@@ -2380,7 +2350,6 @@ mod tests {
             &output.stderr,
             &["/usr/bin/true"],
         );
-        fs::remove_dir_all(root).unwrap();
         assert_eq!(error.kind(), io::ErrorKind::Unsupported);
         assert!(error.to_string().starts_with("bwrap:"));
     }
@@ -2417,9 +2386,9 @@ mod tests {
             return;
         }
         let root = temp_dir("argv");
-        let scratch = root.join("scratch");
-        let read_root = root.join("read root λ");
-        let write_root = root.join("write");
+        let scratch = root.0.join("scratch");
+        let read_root = root.0.join("read root λ");
+        let write_root = root.0.join("write");
         fs::create_dir(&scratch).unwrap();
         fs::create_dir(&read_root).unwrap();
         fs::create_dir(&write_root).unwrap();
@@ -2442,7 +2411,6 @@ mod tests {
             .collect::<Vec<_>>()
             .join(" ");
         println!("bwrap argv sample: bwrap {rendered}");
-        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

@@ -232,30 +232,18 @@ pub(crate) fn reimport_root_for_test(store: &Store, project: &Path) -> io::Resul
 mod tests {
     use super::*;
     use crate::kernel::policy::Exception;
+    use crate::kernel::testutil::TempDir;
     use std::collections::BTreeMap;
     use std::panic::{catch_unwind, AssertUnwindSafe};
     use std::process::Command;
 
-    struct TempDir(PathBuf);
-
-    impl TempDir {
-        fn new() -> Self {
-            let path = std::env::temp_dir().join(format!(
-                "tog-store-test-{}-{}",
-                std::process::id(),
-                nanos()
-            ));
-            for sub in ["objects", "meta", "cache/sha256", "tmp"] {
-                fs::create_dir_all(path.join(sub)).unwrap();
-            }
-            Self(path)
+    /// A scratch directory laid out as an empty store.
+    fn temp_store() -> TempDir {
+        let temp = TempDir::named("store-test");
+        for sub in ["objects", "meta", "cache/sha256", "tmp"] {
+            fs::create_dir_all(temp.0.join(sub)).unwrap();
         }
-    }
-
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = remove_tree(&self.0);
-        }
+        temp
     }
 
     fn identity() -> Identity {
@@ -276,7 +264,7 @@ mod tests {
 
     #[test]
     fn roots_registry_adds_atomically_and_drops_entries() {
-        let temp = TempDir::new();
+        let temp = temp_store();
         let store = Store {
             root: temp.0.canonicalize().unwrap(),
         };
@@ -297,7 +285,7 @@ mod tests {
     /// project under another project's identity.
     #[test]
     fn registration_refuses_a_pathname_no_record_can_hold() {
-        let temp = TempDir::new();
+        let temp = temp_store();
         let store = Store {
             root: temp.0.canonicalize().unwrap(),
         };
@@ -332,7 +320,7 @@ mod tests {
     /// able to refuse; skipping it silently drops a project's protection.
     #[test]
     fn unreadable_records_are_reported_not_skipped() {
-        let temp = TempDir::new();
+        let temp = temp_store();
         let store = Store {
             root: temp.0.canonicalize().unwrap(),
         };
@@ -363,7 +351,7 @@ mod tests {
 
     #[test]
     fn lookup_and_forget_work_off_registry_records_alone() {
-        let temp = TempDir::new();
+        let temp = temp_store();
         let store = Store {
             root: temp.0.canonicalize().unwrap(),
         };
@@ -393,7 +381,7 @@ mod tests {
     /// failure there is no way to recover from.
     #[test]
     fn a_record_that_is_not_a_regular_file_is_never_opened() {
-        let temp = TempDir::new();
+        let temp = temp_store();
         let store = Store {
             root: temp.0.canonicalize().unwrap(),
         };
@@ -424,7 +412,7 @@ mod tests {
     fn exact_key_recovery_ignores_every_other_record() {
         use std::os::unix::fs::PermissionsExt;
 
-        let temp = TempDir::new();
+        let temp = temp_store();
         let store = Store {
             root: temp.0.canonicalize().unwrap(),
         };
@@ -458,7 +446,7 @@ mod tests {
 
     #[test]
     fn commit_reconciles_cached_exceptions() {
-        let temp = TempDir::new();
+        let temp = temp_store();
         let store = Store {
             root: temp.0.canonicalize().unwrap(),
         };
@@ -503,7 +491,7 @@ mod tests {
     #[test]
     #[cfg(debug_assertions)]
     fn commit_rejects_malformed_kernel_identity_before_publishing() {
-        let temp = TempDir::new();
+        let temp = temp_store();
         let store = Store {
             root: temp.0.canonicalize().unwrap(),
         };
@@ -564,7 +552,7 @@ mod tests {
             return;
         }
 
-        let temp = TempDir::new();
+        let temp = temp_store();
         let store = Store {
             root: temp.0.canonicalize().unwrap(),
         };
@@ -606,8 +594,8 @@ mod tests {
     /// not satisfy a check that requires exclusive protection.
     #[test]
     fn a_lease_only_authorizes_the_store_and_mode_it_was_taken_for() {
-        let first = TempDir::new();
-        let second = TempDir::new();
+        let first = temp_store();
+        let second = temp_store();
         let one = Store {
             root: first.0.canonicalize().unwrap(),
         };
@@ -651,8 +639,8 @@ mod tests {
     /// checker: `has_with_activity` must refuse rather than answer.
     #[test]
     fn a_foreign_lease_cannot_drive_a_store_lookup() {
-        let first = TempDir::new();
-        let second = TempDir::new();
+        let first = temp_store();
+        let second = temp_store();
         let one = Store {
             root: first.0.canonicalize().unwrap(),
         };
@@ -674,7 +662,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn root2_roundtrips_a_non_utf8_path() {
-        let temp = TempDir::new();
+        let temp = temp_store();
         let store = Store {
             root: temp.0.canonicalize().unwrap(),
         };
@@ -747,7 +735,7 @@ mod tests {
 
     #[test]
     fn root2_rejects_unknown_schema_before_gc() {
-        let temp = TempDir::new();
+        let temp = temp_store();
         let store = Store {
             root: temp.0.canonicalize().unwrap(),
         };
@@ -812,7 +800,7 @@ mod tests {
     /// when read back.
     #[test]
     fn root2_rejects_absolute_projection() {
-        let temp = TempDir::new();
+        let temp = temp_store();
         let store = store_in(&temp);
         let project = temp.0.join("project");
         fs::create_dir_all(&project).unwrap();
@@ -897,8 +885,8 @@ mod tests {
     /// reference forms are refused at write, and nothing is registered.
     #[test]
     fn root2_rejects_cross_store_object() {
-        let ours = TempDir::new();
-        let theirs = TempDir::new();
+        let ours = temp_store();
+        let theirs = temp_store();
         let store = store_in(&ours);
         let other = store_in(&theirs);
         let foreign = named_object(&other, "foreign");
@@ -947,7 +935,7 @@ mod tests {
     /// ecosystem or environment recorded, and neither does registration.
     #[test]
     fn root2_merge_is_a_union_never_a_replace() {
-        let temp = TempDir::new();
+        let temp = temp_store();
         let store = store_in(&temp);
         let project = temp.0.join("project");
         fs::create_dir_all(&project).unwrap();
@@ -1045,7 +1033,7 @@ mod tests {
     #[test]
     fn published_identity_is_the_validated_identity_or_none() {
         use std::os::unix::fs::PermissionsExt;
-        let temp = TempDir::new();
+        let temp = temp_store();
         let store = Store {
             root: temp.0.canonicalize().unwrap(),
         };
@@ -1156,7 +1144,7 @@ mod tests {
     fn existing_never_creates_and_refuses_a_bent_layout() {
         let _lock = STORE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let old = std::env::var_os("TOG_STORE");
-        let temp = TempDir::new();
+        let temp = temp_store();
         let check = |root: &Path| {
             std::env::set_var("TOG_STORE", root);
             Store::existing()
@@ -1192,7 +1180,7 @@ mod tests {
     /// test; this one covers the legacy shapes and the cross-ecosystem union.
     #[test]
     fn register_imports_legacy_closure_bodies_of_every_ecosystem_together() {
-        let temp = TempDir::new();
+        let temp = temp_store();
         let store = store_in(&temp);
         let project = temp.0.join("project");
         fs::create_dir_all(&project).unwrap();
@@ -1313,7 +1301,7 @@ mod tests {
     #[test]
     fn utf8_keys_unchanged_and_non_utf8_keys_distinct() {
         use sha1::Digest as _;
-        let temp = TempDir::new();
+        let temp = temp_store();
         let store = store_in(&temp);
         let utf8 = temp.0.join("projekt-\u{e9}");
         fs::create_dir_all(&utf8).unwrap();

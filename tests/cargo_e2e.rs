@@ -6,63 +6,20 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+
 use tog::kernel::platform::Platform;
 
-struct TempDir(PathBuf);
+mod common;
 
-impl TempDir {
-    fn new() -> Self {
-        let path = std::env::temp_dir().join(format!(
-            "tog-cargo-e2e-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&path).unwrap();
-        Self(path)
-    }
-}
+use common::{assert_ok, command, copy_tree, fixture, tog, TempDir};
 
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
-fn copy_tree(src: &Path, dest: &Path) {
-    std::fs::create_dir_all(dest).unwrap();
-    for entry in std::fs::read_dir(src).unwrap() {
-        let entry = entry.unwrap();
-        let from = entry.path();
-        let to = dest.join(entry.file_name());
-        if from.is_dir() {
-            copy_tree(&from, &to);
-        } else {
-            std::fs::copy(from, to).unwrap();
-        }
-    }
-}
-
-fn tog(bin: &Path, project: &Path, store: &Path, args: &[&str]) -> Output {
-    Command::new(bin)
-        .current_dir(project)
-        .env("TOG_STORE", store)
-        .args(args)
-        .output()
-        .unwrap()
-}
-
-fn tog_with_tmp(bin: &Path, project: &Path, store: &Path, tmp: &Path, args: &[&str]) -> Output {
-    Command::new(bin)
-        .current_dir(project)
-        .env("TOG_STORE", store)
+/// The binary with a private `TMPDIR` and `HOME` under `tmp`, and the
+/// sandbox required: these suites prove the build runs sandboxed, so a
+/// sandbox that cannot start must fail them rather than skip.
+fn tog_with_tmp(project: &Path, store: &Path, tmp: &Path, args: &[&str]) -> Output {
+    command(project, &tmp.join("home"), store)
         .env("TMPDIR", tmp)
-        .env("HOME", tmp.join("home"))
         .env("TOG_SANDBOX_TESTS", "required")
-        .env_remove("TOG_POLICY")
-        .env_remove("TOG_STRICT")
         .args(args)
         .output()
         .unwrap()
@@ -76,16 +33,6 @@ fn default_rust() -> String {
         .version("rustc")
         .unwrap()
         .to_string()
-}
-
-fn assert_ok(output: Output, label: &str) -> String {
-    assert!(
-        output.status.success(),
-        "{label} failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8(output.stdout).unwrap()
 }
 
 /// A local git repository holding one library crate, and the Cargo project
@@ -200,19 +147,15 @@ fn assert_cargo_closure(project: &Path, store: &Path) -> (PathBuf, PathBuf) {
 #[test]
 #[ignore]
 fn cargo_sync_build_and_run_again_offline() {
-    let temp = TempDir::new();
+    let temp = TempDir::new("cargo-e2e");
     let project = temp.0.join("cargo-hello");
-    copy_tree(
-        &PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/cargo-hello"),
-        &project,
-    );
+    copy_tree(&fixture("cargo-hello"), &project);
     let store = temp.0.join("store");
-    let binary = PathBuf::from(env!("CARGO_BIN_EXE_tog"));
 
-    assert_ok(tog(&binary, &project, &store, &["sync"]), "sync");
+    assert_ok(tog(&project, &temp.0, &["sync"]), "sync");
     let (rust_obj, vendor_obj) = assert_cargo_closure(&project, &store);
     let rustc = assert_ok(
-        tog(&binary, &project, &store, &["run", "rustc", "-vV"]),
+        tog(&project, &temp.0, &["run", "rustc", "-vV"]),
         "rustc -vV",
     );
     assert!(
@@ -225,16 +168,11 @@ fn cargo_sync_build_and_run_again_offline() {
             .any(|line| { line.trim() == format!("host: {}", Platform::host().unwrap().triple()) }),
         "rustc reported the wrong host:\n{rustc}"
     );
-    assert_ok(tog(&binary, &project, &store, &["build"]), "build");
+    assert_ok(tog(&project, &temp.0, &["build"]), "build");
     let executable = project.join("target/debug/cargo-hello");
     assert!(executable.is_file());
     let output = assert_ok(
-        tog(
-            &binary,
-            &project,
-            &store,
-            &["run", "target/debug/cargo-hello"],
-        ),
+        tog(&project, &temp.0, &["run", "target/debug/cargo-hello"]),
         "run",
     );
     assert_eq!(output.trim(), "hello 128");
@@ -260,18 +198,13 @@ fn cargo_sync_build_and_run_again_offline() {
         !executable.exists(),
         "the first build result was not removed"
     );
-    assert_ok(tog(&binary, &project, &store, &["build"]), "rebuild");
+    assert_ok(tog(&project, &temp.0, &["build"]), "rebuild");
     assert!(executable.is_file());
     let (rebuilt_rust_obj, rebuilt_vendor_obj) = assert_cargo_closure(&project, &store);
     assert_eq!(rebuilt_rust_obj, rust_obj);
     assert_eq!(rebuilt_vendor_obj, vendor_obj);
     let output = assert_ok(
-        tog(
-            &binary,
-            &project,
-            &store,
-            &["run", "target/debug/cargo-hello"],
-        ),
+        tog(&project, &temp.0, &["run", "target/debug/cargo-hello"]),
         "run after rebuild",
     );
     assert_eq!(output.trim(), "hello 128");
@@ -282,20 +215,16 @@ fn cargo_sync_build_and_run_again_offline() {
 #[test]
 #[ignore]
 fn dependency_edit_exception_is_not_published_to_cargo_closure() {
-    let temp = TempDir::new();
+    let temp = TempDir::new("cargo-e2e");
     let project = temp.0.join("cargo-hello");
-    copy_tree(
-        &PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/cargo-hello"),
-        &project,
-    );
+    copy_tree(&fixture("cargo-hello"), &project);
     let tmp = temp.0.join("tmp");
     std::fs::create_dir_all(tmp.join("home")).unwrap();
     let store = temp.0.join("store");
     let url = add_git_dependency(&temp.0, &project);
-    let binary = PathBuf::from(env!("CARGO_BIN_EXE_tog"));
 
     assert_ok(
-        tog_with_tmp(&binary, &project, &store, &tmp, &["sync"]),
+        tog_with_tmp(&project, &store, &tmp, &["sync"]),
         "sync with a git dependency",
     );
 
@@ -344,16 +273,12 @@ fn dependency_edit_exception_is_not_published_to_cargo_closure() {
 #[test]
 #[ignore]
 fn toolchain_file_components_and_targets_are_provisioned() {
-    let temp = TempDir::new();
+    let temp = TempDir::new("cargo-e2e");
     let project = temp.0.join("cargo-hello");
-    copy_tree(
-        &PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/cargo-hello"),
-        &project,
-    );
+    copy_tree(&fixture("cargo-hello"), &project);
     let tmp = temp.0.join("tmp");
     std::fs::create_dir_all(tmp.join("home")).unwrap();
     let store = temp.0.join("store");
-    let binary = PathBuf::from(env!("CARGO_BIN_EXE_tog"));
 
     // The base toolchain of the same release first, so the assembled object
     // can be told apart from it and shown to link its files.
@@ -363,7 +288,7 @@ fn toolchain_file_components_and_targets_are_provisioned() {
     )
     .unwrap();
     assert_ok(
-        tog_with_tmp(&binary, &project, &store, &tmp, &["sync"]),
+        tog_with_tmp(&project, &store, &tmp, &["sync"]),
         "plain sync",
     );
     let (base, _) = assert_cargo_closure(&project, &store);
@@ -377,19 +302,13 @@ fn toolchain_file_components_and_targets_are_provisioned() {
     .unwrap();
     // The lock is stale until the toolchain is updated on purpose.
     assert!(
-        !tog_with_tmp(&binary, &project, &store, &tmp, &["--frozen", "sync"])
+        !tog_with_tmp(&project, &store, &tmp, &["--frozen", "sync"])
             .status
             .success(),
         "a frozen sync accepted an edited toolchain file"
     );
     assert_ok(
-        tog_with_tmp(
-            &binary,
-            &project,
-            &store,
-            &tmp,
-            &["update", "--toolchain", "rust"],
-        ),
+        tog_with_tmp(&project, &store, &tmp, &["update", "--toolchain", "rust"]),
         "toolchain update",
     );
     let lock = std::fs::read_to_string(project.join("tog-toolchain.toml")).unwrap();
@@ -402,7 +321,7 @@ fn toolchain_file_components_and_targets_are_provisioned() {
         "{lock}"
     );
     assert_ok(
-        tog_with_tmp(&binary, &project, &store, &tmp, &["sync"]),
+        tog_with_tmp(&project, &store, &tmp, &["sync"]),
         "sync with extras",
     );
 
@@ -422,7 +341,6 @@ fn toolchain_file_components_and_targets_are_provisioned() {
     }
     let sysroot = assert_ok(
         tog_with_tmp(
-            &binary,
             &project,
             &store,
             &tmp,
@@ -440,15 +358,11 @@ fn toolchain_file_components_and_targets_are_provisioned() {
         (&["run", "cargo", "clippy", "--version"][..], "clippy"),
         (&["run", "cargo", "fmt", "--version"][..], "rustfmt"),
     ] {
-        let output = assert_ok(
-            tog_with_tmp(&binary, &project, &store, &tmp, args),
-            &args.join(" "),
-        );
+        let output = assert_ok(tog_with_tmp(&project, &store, &tmp, args), &args.join(" "));
         assert!(output.contains(expect), "{args:?}: {output}");
     }
     assert_ok(
         tog_with_tmp(
-            &binary,
             &project,
             &store,
             &tmp,
@@ -481,13 +395,7 @@ fn toolchain_file_components_and_targets_are_provisioned() {
     )
     .unwrap();
     assert_ok(
-        tog_with_tmp(
-            &binary,
-            &project,
-            &store,
-            &tmp,
-            &["update", "--toolchain", "rust"],
-        ),
+        tog_with_tmp(&project, &store, &tmp, &["update", "--toolchain", "rust"]),
         "toolchain update with a profile",
     );
     let lock = std::fs::read_to_string(project.join("tog-toolchain.toml")).unwrap();
@@ -496,7 +404,7 @@ fn toolchain_file_components_and_targets_are_provisioned() {
         "{lock}"
     );
     assert_ok(
-        tog_with_tmp(&binary, &project, &store, &tmp, &["sync"]),
+        tog_with_tmp(&project, &store, &tmp, &["sync"]),
         "sync with a profile",
     );
     let (profiled, _) = assert_cargo_closure(&project, &store);
@@ -504,7 +412,6 @@ fn toolchain_file_components_and_targets_are_provisioned() {
     assert!(profiled.join("share/doc/rust/html").is_dir());
     let output = assert_ok(
         tog_with_tmp(
-            &binary,
             &project,
             &store,
             &tmp,
@@ -521,15 +428,9 @@ fn toolchain_file_components_and_targets_are_provisioned() {
         "[toolchain]\nchannel = \"1.96.1\"\ncomponents = [\"no-such-component\"]\n",
     )
     .unwrap();
-    let output = tog_with_tmp(
-        &binary,
-        &project,
-        &store,
-        &tmp,
-        &["update", "--toolchain", "rust"],
-    );
+    let output = tog_with_tmp(&project, &store, &tmp, &["update", "--toolchain", "rust"]);
     let output = if output.status.success() {
-        tog_with_tmp(&binary, &project, &store, &tmp, &["sync"])
+        tog_with_tmp(&project, &store, &tmp, &["sync"])
     } else {
         output
     };
@@ -547,12 +448,9 @@ fn toolchain_file_components_and_targets_are_provisioned() {
 #[test]
 #[ignore]
 fn build_syncs_only_the_built_ecosystem_beside_a_failing_one() {
-    let temp = TempDir::new();
+    let temp = TempDir::new("cargo-e2e");
     let project = temp.0.join("cargo-hello");
-    copy_tree(
-        &PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/cargo-hello"),
-        &project,
-    );
+    copy_tree(&fixture("cargo-hello"), &project);
     // No index has this package, so Python's lock generation fails.
     std::fs::write(
         project.join("pyproject.toml"),
@@ -563,9 +461,8 @@ fn build_syncs_only_the_built_ecosystem_beside_a_failing_one() {
     let tmp = temp.0.join("tmp");
     std::fs::create_dir_all(tmp.join("home")).unwrap();
     let store = temp.0.join("store");
-    let binary = PathBuf::from(env!("CARGO_BIN_EXE_tog"));
 
-    let output = tog_with_tmp(&binary, &project, &store, &tmp, &["build"]);
+    let output = tog_with_tmp(&project, &store, &tmp, &["build"]);
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
     assert_ok(output, "build beside a failing python project");
     assert!(stderr.contains("syncing first: cargo"), "{stderr}");
@@ -600,7 +497,7 @@ fn build_syncs_only_the_built_ecosystem_beside_a_failing_one() {
             )
             .unwrap();
         }
-        let output = tog_with_tmp(&binary, &project, &store, &tmp, &["build", "cargo"]);
+        let output = tog_with_tmp(&project, &store, &tmp, &["build", "cargo"]);
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
         assert!(!output.status.success(), "{label}: build succeeded");
         assert!(!stderr.contains("syncing first"), "{label}: {stderr}");
@@ -613,7 +510,7 @@ fn build_syncs_only_the_built_ecosystem_beside_a_failing_one() {
     }
     std::fs::write(project.join("pyproject.toml"), &pyproject).unwrap();
 
-    let output = tog_with_tmp(&binary, &project, &store, &tmp, &[]);
+    let output = tog_with_tmp(&project, &store, &tmp, &[]);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         !output.status.success(),
@@ -632,19 +529,15 @@ fn build_syncs_only_the_built_ecosystem_beside_a_failing_one() {
 #[test]
 #[ignore]
 fn a_local_toolchain_directory_builds_the_project() {
-    let temp = TempDir::new();
+    let temp = TempDir::new("cargo-e2e");
     let project = temp.0.join("cargo-hello");
-    copy_tree(
-        &PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/cargo-hello"),
-        &project,
-    );
+    copy_tree(&fixture("cargo-hello"), &project);
     let tmp = temp.0.join("tmp");
     std::fs::create_dir_all(tmp.join("home")).unwrap();
     let store = temp.0.join("store");
-    let binary = PathBuf::from(env!("CARGO_BIN_EXE_tog"));
 
     assert_ok(
-        tog_with_tmp(&binary, &project, &store, &tmp, &["sync"]),
+        tog_with_tmp(&project, &store, &tmp, &["sync"]),
         "catalog sync",
     );
     let (catalog_rust, _) = assert_cargo_closure(&project, &store);
@@ -670,17 +563,11 @@ fn a_local_toolchain_directory_builds_the_project() {
     .unwrap();
 
     // The toolchain file changed, so the lock is stale until updated.
-    let output = tog_with_tmp(&binary, &project, &store, &tmp, &["sync"]);
+    let output = tog_with_tmp(&project, &store, &tmp, &["sync"]);
     assert!(!output.status.success(), "a stale lock synced");
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
     assert!(stderr.contains("tog update --toolchain rust"), "{stderr}");
-    let output = tog_with_tmp(
-        &binary,
-        &project,
-        &store,
-        &tmp,
-        &["update", "--toolchain", "rust"],
-    );
+    let output = tog_with_tmp(&project, &store, &tmp, &["update", "--toolchain", "rust"]);
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
     assert_ok(output, "update to the local toolchain");
     assert!(stderr.contains("exception external-toolchain"), "{stderr}");
@@ -698,25 +585,16 @@ fn a_local_toolchain_directory_builds_the_project() {
     );
     let closure = std::fs::read_to_string(project.join(".tog/closures/cargo.json")).unwrap();
     assert!(closure.contains("\"external-toolchain\""), "{closure}");
-    assert_ok(
-        tog_with_tmp(&binary, &project, &store, &tmp, &["build"]),
-        "build",
-    );
+    assert_ok(tog_with_tmp(&project, &store, &tmp, &["build"]), "build");
     let output = assert_ok(
-        tog_with_tmp(
-            &binary,
-            &project,
-            &store,
-            &tmp,
-            &["run", "target/debug/cargo-hello"],
-        ),
+        tog_with_tmp(&project, &store, &tmp, &["run", "target/debug/cargo-hello"]),
         "run",
     );
     assert_eq!(output.trim(), "hello 128");
 
     // Editing the directory breaks the lock's content hash: fail closed.
     std::fs::write(local.join("lib/rustlib/extra.txt"), b"edited").unwrap();
-    let output = tog_with_tmp(&binary, &project, &store, &tmp, &["sync"]);
+    let output = tog_with_tmp(&project, &store, &tmp, &["sync"]);
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
     assert!(!output.status.success(), "a changed tree synced\n{stderr}");
     assert!(

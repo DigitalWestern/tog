@@ -412,26 +412,17 @@ fn no_manifest() -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use crate::kernel::testutil::TempDir;
 
-    fn temp_project(name: &str) -> PathBuf {
-        let path = std::env::temp_dir().join(format!(
-            "tog-manifest-{name}-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir_all(&path).unwrap();
-        path
+    fn temp_project(name: &str) -> TempDir {
+        TempDir::named(&format!("manifest-{name}"))
     }
 
     #[test]
     fn a_setup_cache_behind_a_symlinked_tog_is_refused_not_honoured() {
         let root = temp_project("egg-info-symlink");
-        let dir = root.join("project");
-        let outside = root.join("outside");
+        let dir = root.0.join("project");
+        let outside = root.0.join("outside");
         fs::create_dir_all(&dir).unwrap();
         fs::create_dir_all(&outside).unwrap();
         fs::write(
@@ -464,7 +455,7 @@ mod tests {
         let mut manifest = discover(platform, &project, python_version).unwrap();
         assert!(manifest.requires_setup(), "fixture is not a setup.py tree");
         let store = Store {
-            root: root.join("absent-store"),
+            root: root.0.join("absent-store"),
         };
         let lease = crate::kernel::testutil::detached_lease();
         let activity = &lease.1;
@@ -491,8 +482,6 @@ mod tests {
             manifest.requirements
         );
         assert!(!store.root.exists(), "a refused cache touched the store");
-
-        let _ = fs::remove_dir_all(&root);
     }
 
     /// A project renamed mid-sync, with another project put at its old
@@ -501,14 +490,14 @@ mod tests {
     #[test]
     fn discovery_through_a_held_root_survives_the_directory_being_replaced() {
         let root = temp_project("held-root");
-        let dir = root.join("project");
+        let dir = root.0.join("project");
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("requirements.txt"), "-r base.txt\n").unwrap();
         fs::write(dir.join("base.txt"), "six==1.17.0\n").unwrap();
         fs::write(dir.join(".python-version"), "3.12\n").unwrap();
         let project = ProjectRoot::open(&dir).unwrap();
 
-        fs::rename(&dir, root.join("moved")).unwrap();
+        fs::rename(&dir, root.0.join("moved")).unwrap();
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("requirements.txt"), "-r base.txt\n").unwrap();
         fs::write(dir.join("base.txt"), "attacker==6.6.6\n").unwrap();
@@ -523,8 +512,6 @@ mod tests {
         assert_eq!(manifest.requirements, ["six==1.17.0"]);
         let inputs = python_inputs(&project).unwrap();
         assert_eq!(inputs.explicit.unwrap().raw, "3.12");
-
-        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -950,17 +937,20 @@ files = []
     #[test]
     fn constraints_remain_constraint_only_after_flattening() {
         let dir = temp_project("constraints");
-        fs::write(dir.join("requirements.txt"), "-c constraints.txt\nsix>=1\n").unwrap();
-        fs::write(dir.join("constraints.txt"), "six<2\n").unwrap();
+        fs::write(
+            dir.0.join("requirements.txt"),
+            "-c constraints.txt\nsix>=1\n",
+        )
+        .unwrap();
+        fs::write(dir.0.join("constraints.txt"), "six<2\n").unwrap();
         let manifest = discover(
             Platform::X86_64UnknownLinuxGnu,
-            &ProjectRoot::open(&dir).unwrap(),
+            &ProjectRoot::open(&dir.0).unwrap(),
             crate::tailors::python::pyselect::DEFAULT_VERSION,
         )
         .unwrap();
         assert_eq!(manifest.normalized_requirements_text(), "six>=1\n");
         assert_eq!(manifest.constraints_text(), "six<2\n");
-        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -1017,11 +1007,11 @@ files = []
     #[test]
     fn hardware_requirements_default_to_cpu_and_honor_override() {
         let dir = temp_project("hardware");
-        fs::create_dir_all(dir.join("requirements")).unwrap();
-        fs::write(dir.join("requirements/cpu.txt"), "six==1.0\n").unwrap();
-        fs::write(dir.join("requirements/cuda.txt"), "numpy==1.0\n").unwrap();
+        fs::create_dir_all(dir.0.join("requirements")).unwrap();
+        fs::write(dir.0.join("requirements/cpu.txt"), "six==1.0\n").unwrap();
+        fs::write(dir.0.join("requirements/cuda.txt"), "numpy==1.0\n").unwrap();
         let default = requirements_directory_candidate(
-            &ProjectRoot::open(&dir).unwrap(),
+            &ProjectRoot::open(&dir.0).unwrap(),
             &TogPythonConfig::default(),
         )
         .unwrap()
@@ -1032,11 +1022,10 @@ files = []
             extras: BTreeSet::new(),
         };
         let selected =
-            requirements_directory_candidate(&ProjectRoot::open(&dir).unwrap(), &override_cfg)
+            requirements_directory_candidate(&ProjectRoot::open(&dir.0).unwrap(), &override_cfg)
                 .unwrap()
                 .unwrap();
         assert_eq!(selected.file_name().unwrap(), "cuda.txt");
-        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -1044,22 +1033,21 @@ files = []
         let _attribution_lock = crate::kernel::policy::exception_guard();
         let _attribution = crate::kernel::policy::Attribution::open("python").unwrap();
         let dir = temp_project("nested-index");
-        fs::write(dir.join("requirements.txt"), "-r child.txt\n").unwrap();
+        fs::write(dir.0.join("requirements.txt"), "-r child.txt\n").unwrap();
         fs::write(
-            dir.join("child.txt"),
+            dir.0.join("child.txt"),
             "--index-url https://private.invalid/simple\nsix>=1\n",
         )
         .unwrap();
         let manifest = discover(
             Platform::X86_64UnknownLinuxGnu,
-            &ProjectRoot::open(&dir).unwrap(),
+            &ProjectRoot::open(&dir.0).unwrap(),
             crate::tailors::python::pyselect::DEFAULT_VERSION,
         )
         .unwrap();
         assert_eq!(manifest.requirements, ["six>=1"]);
         assert_eq!(manifest.resolver_text(), "six>=1\n");
         let _ = crate::kernel::policy::drain();
-        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -1089,7 +1077,7 @@ files = []
         for (name, files, expected) in cases {
             let dir = temp_project(name);
             for (index, file) in files.split('\n').enumerate() {
-                let path = dir.join(file);
+                let path = dir.0.join(file);
                 if let Some(parent) = path.parent() {
                     fs::create_dir_all(parent).unwrap();
                 }
@@ -1104,21 +1092,20 @@ files = []
                 };
                 fs::write(path, text).unwrap();
                 if index == 0 && name == "reqdir" {
-                    fs::remove_file(dir.join(file)).ok();
+                    fs::remove_file(dir.0.join(file)).ok();
                 }
             }
             if name == "reqdir" {
-                fs::create_dir_all(dir.join("requirements")).unwrap();
-                fs::write(dir.join("requirements/common.txt"), "six>=1\n").unwrap();
+                fs::create_dir_all(dir.0.join("requirements")).unwrap();
+                fs::write(dir.0.join("requirements/common.txt"), "six>=1\n").unwrap();
             }
             let got = discover(
                 Platform::X86_64UnknownLinuxGnu,
-                &ProjectRoot::open(&dir).unwrap(),
+                &ProjectRoot::open(&dir.0).unwrap(),
                 crate::tailors::python::pyselect::DEFAULT_VERSION,
             )
             .unwrap();
             assert_eq!(got.provenance, expected, "{name}");
-            let _ = fs::remove_dir_all(dir);
             let _ = crate::kernel::policy::drain();
         }
     }
@@ -1127,65 +1114,62 @@ files = []
     fn generated_lock_does_not_shadow_the_live_project_source() {
         let dir = temp_project("lock-shadow");
         fs::write(
-            dir.join("pyproject.toml"),
+            dir.0.join("pyproject.toml"),
             "[project]\nname = \"demo\"\ndependencies = [\"idna==3.10\"]\n",
         )
         .unwrap();
-        fs::write(dir.join("requirements.lock.txt"), "six==1.17.0\n").unwrap();
-        fs::create_dir_all(dir.join(".tog")).unwrap();
-        fs::write(dir.join(".tog/lock-source.hash"), "stale\n").unwrap();
+        fs::write(dir.0.join("requirements.lock.txt"), "six==1.17.0\n").unwrap();
+        fs::create_dir_all(dir.0.join(".tog")).unwrap();
+        fs::write(dir.0.join(".tog/lock-source.hash"), "stale\n").unwrap();
 
         let manifest = discover(
             Platform::X86_64UnknownLinuxGnu,
-            &ProjectRoot::open(&dir).unwrap(),
+            &ProjectRoot::open(&dir.0).unwrap(),
             crate::tailors::python::pyselect::DEFAULT_VERSION,
         )
         .unwrap();
         assert_eq!(manifest.provenance, "pyproject.toml [project]");
         assert_eq!(manifest.requirements, ["idna==3.10"]);
-        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
     fn dynamic_project_dependencies_fall_through_to_requirements_directory() {
         let dir = temp_project("dynamic-reqdir");
         fs::write(
-            dir.join("pyproject.toml"),
+            dir.0.join("pyproject.toml"),
             "[project]\nname = \"vllm-shaped\"\ndynamic = [\"version\", \"dependencies\"]\n",
         )
         .unwrap();
-        fs::create_dir_all(dir.join("requirements")).unwrap();
-        fs::write(dir.join("requirements/common.txt"), "six==1.17.0\n").unwrap();
+        fs::create_dir_all(dir.0.join("requirements")).unwrap();
+        fs::write(dir.0.join("requirements/common.txt"), "six==1.17.0\n").unwrap();
 
         let manifest = discover(
             Platform::X86_64UnknownLinuxGnu,
-            &ProjectRoot::open(&dir).unwrap(),
+            &ProjectRoot::open(&dir.0).unwrap(),
             crate::tailors::python::pyselect::DEFAULT_VERSION,
         )
         .unwrap();
         assert_eq!(manifest.input, "requirements/common.txt");
         assert_eq!(manifest.requirements, ["six==1.17.0"]);
         assert!(!manifest.provenance.contains("empty manifest"));
-        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
     fn dynamic_project_without_a_dependency_source_fails_loudly() {
         let dir = temp_project("dynamic-missing");
         fs::write(
-            dir.join("pyproject.toml"),
+            dir.0.join("pyproject.toml"),
             "[project]\nname = \"dynamic-demo\"\ndynamic = [\"dependencies\"]\n",
         )
         .unwrap();
         let error = discover(
             Platform::X86_64UnknownLinuxGnu,
-            &ProjectRoot::open(&dir).unwrap(),
+            &ProjectRoot::open(&dir.0).unwrap(),
             crate::tailors::python::pyselect::DEFAULT_VERSION,
         )
         .unwrap_err();
         assert!(error.to_string().contains("dynamic"));
         assert!(!error.to_string().contains("empty manifest"));
-        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -1806,62 +1790,59 @@ files = [{ file = "old.whl", hash = "sha256:dddddddddddddddddddddddddddddddddddd
     #[test]
     fn requirements_tree_hash_changes_when_an_included_file_changes() {
         let dir = temp_project("requirements-tree-hash");
-        fs::create_dir_all(dir.join("requirements")).unwrap();
-        let top = dir.join("requirements/cpu.txt");
-        let child = dir.join("requirements/common.txt");
+        fs::create_dir_all(dir.0.join("requirements")).unwrap();
+        let top = dir.0.join("requirements/cpu.txt");
+        let child = dir.0.join("requirements/common.txt");
         fs::write(&top, "-r common.txt\n").unwrap();
         fs::write(&child, "six==1.0\n").unwrap();
-        let old = requirements_tree_hash(&ProjectRoot::open(&dir).unwrap(), &top).unwrap();
+        let old = requirements_tree_hash(&ProjectRoot::open(&dir.0).unwrap(), &top).unwrap();
         fs::write(&child, "six==2.0\n").unwrap();
-        let new = requirements_tree_hash(&ProjectRoot::open(&dir).unwrap(), &top).unwrap();
+        let new = requirements_tree_hash(&ProjectRoot::open(&dir.0).unwrap(), &top).unwrap();
         assert_ne!(old, new);
-        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
     fn compact_requirement_includes_are_discovered_and_hashed() {
         let dir = temp_project("compact-includes");
-        fs::create_dir_all(dir.join("requirements")).unwrap();
-        let top = dir.join("requirements/cpu.txt");
+        fs::create_dir_all(dir.0.join("requirements")).unwrap();
+        let top = dir.0.join("requirements/cpu.txt");
         fs::write(
             &top,
             "-rcommon.txt\n-c../constraints.txt\n--requirement=extra.txt\n",
         )
         .unwrap();
-        fs::write(dir.join("requirements/common.txt"), "six\n").unwrap();
-        fs::write(dir.join("requirements/extra.txt"), "idna\n").unwrap();
-        fs::write(dir.join("constraints.txt"), "six<2\n").unwrap();
+        fs::write(dir.0.join("requirements/common.txt"), "six\n").unwrap();
+        fs::write(dir.0.join("requirements/extra.txt"), "idna\n").unwrap();
+        fs::write(dir.0.join("constraints.txt"), "six<2\n").unwrap();
         let manifest = discover(
             Platform::X86_64UnknownLinuxGnu,
-            &ProjectRoot::open(&dir).unwrap(),
+            &ProjectRoot::open(&dir.0).unwrap(),
             crate::tailors::python::pyselect::DEFAULT_VERSION,
         )
         .unwrap();
         assert_eq!(manifest.normalized_requirements_text(), "six\nidna\n");
         assert_eq!(manifest.constraints_text(), "six<2\n");
-        let old = requirements_tree_hash(&ProjectRoot::open(&dir).unwrap(), &top).unwrap();
-        fs::write(dir.join("constraints.txt"), "six<3\n").unwrap();
+        let old = requirements_tree_hash(&ProjectRoot::open(&dir.0).unwrap(), &top).unwrap();
+        fs::write(dir.0.join("constraints.txt"), "six<3\n").unwrap();
         assert_ne!(
             old,
-            requirements_tree_hash(&ProjectRoot::open(&dir).unwrap(), &top).unwrap()
+            requirements_tree_hash(&ProjectRoot::open(&dir.0).unwrap(), &top).unwrap()
         );
-        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
     fn a_constraint_then_requirement_include_uses_both_contexts() {
         let dir = temp_project("include-context");
-        fs::write(dir.join("requirements.txt"), "-c deps.txt\n-r deps.txt\n").unwrap();
-        fs::write(dir.join("deps.txt"), "six\n").unwrap();
+        fs::write(dir.0.join("requirements.txt"), "-c deps.txt\n-r deps.txt\n").unwrap();
+        fs::write(dir.0.join("deps.txt"), "six\n").unwrap();
         let manifest = discover(
             Platform::X86_64UnknownLinuxGnu,
-            &ProjectRoot::open(&dir).unwrap(),
+            &ProjectRoot::open(&dir.0).unwrap(),
             crate::tailors::python::pyselect::DEFAULT_VERSION,
         )
         .unwrap();
         assert_eq!(manifest.normalized_requirements_text(), "six\n");
         assert_eq!(manifest.constraints_text(), "six\n");
-        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -1896,36 +1877,35 @@ files = [{ file = "old.whl", hash = "sha256:dddddddddddddddddddddddddddddddddddd
     #[test]
     fn setup_hash_covers_imported_sources_but_excludes_generated_outputs() {
         let dir = temp_project("setup-tree-hash");
-        fs::write(dir.join("setup.py"), "from deps import requirements\n").unwrap();
-        fs::write(dir.join("deps.py"), "requirements = ['six']\n").unwrap();
-        fs::write(dir.join("requirements.lock.txt"), "stale\n").unwrap();
-        fs::create_dir_all(dir.join(".tog")).unwrap();
-        fs::write(dir.join(".tog/egg-info.json"), "cache\n").unwrap();
-        let old = setup_tree_hash(&ProjectRoot::open(&dir).unwrap()).unwrap();
-        fs::write(dir.join("deps.py"), "requirements = ['idna']\n").unwrap();
-        let changed = setup_tree_hash(&ProjectRoot::open(&dir).unwrap()).unwrap();
+        fs::write(dir.0.join("setup.py"), "from deps import requirements\n").unwrap();
+        fs::write(dir.0.join("deps.py"), "requirements = ['six']\n").unwrap();
+        fs::write(dir.0.join("requirements.lock.txt"), "stale\n").unwrap();
+        fs::create_dir_all(dir.0.join(".tog")).unwrap();
+        fs::write(dir.0.join(".tog/egg-info.json"), "cache\n").unwrap();
+        let old = setup_tree_hash(&ProjectRoot::open(&dir.0).unwrap()).unwrap();
+        fs::write(dir.0.join("deps.py"), "requirements = ['idna']\n").unwrap();
+        let changed = setup_tree_hash(&ProjectRoot::open(&dir.0).unwrap()).unwrap();
         assert_ne!(old, changed);
-        fs::write(dir.join("requirements.lock.txt"), "different\n").unwrap();
-        fs::write(dir.join(".tog/egg-info.json"), "different\n").unwrap();
+        fs::write(dir.0.join("requirements.lock.txt"), "different\n").unwrap();
+        fs::write(dir.0.join(".tog/egg-info.json"), "different\n").unwrap();
         assert_eq!(
             changed,
-            setup_tree_hash(&ProjectRoot::open(&dir).unwrap()).unwrap()
+            setup_tree_hash(&ProjectRoot::open(&dir.0).unwrap()).unwrap()
         );
-        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
     fn setup_cfg_empty_requires_probe_when_setup_py_declares_install_requires() {
         let dir = temp_project("setupcfg-probe");
-        fs::write(dir.join("setup.cfg"), "[options]\ninstall_requires =\n").unwrap();
+        fs::write(dir.0.join("setup.cfg"), "[options]\ninstall_requires =\n").unwrap();
         fs::write(
-            dir.join("setup.py"),
+            dir.0.join("setup.py"),
             "from setuptools import setup as s\ns(install_requires=['six'])\n",
         )
         .unwrap();
         let manifest = discover(
             Platform::X86_64UnknownLinuxGnu,
-            &ProjectRoot::open(&dir).unwrap(),
+            &ProjectRoot::open(&dir.0).unwrap(),
             crate::tailors::python::pyselect::DEFAULT_VERSION,
         )
         .unwrap();
@@ -1934,44 +1914,41 @@ files = [{ file = "old.whl", hash = "sha256:dddddddddddddddddddddddddddddddddddd
         assert!(!is_trivial_setup_py(
             "from setuptools import setup as s\ns(install_requires=['six'])\n"
         ));
-        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
     fn indented_setup_cfg_install_requires_is_a_manifest_dependency() {
         let dir = temp_project("setupcfg-indented-manifest");
         fs::write(
-            dir.join("setup.cfg"),
+            dir.0.join("setup.cfg"),
             "[options]\n  install_requires =\n    six\n",
         )
         .unwrap();
         let manifest = discover(
             Platform::X86_64UnknownLinuxGnu,
-            &ProjectRoot::open(&dir).unwrap(),
+            &ProjectRoot::open(&dir.0).unwrap(),
             crate::tailors::python::pyselect::DEFAULT_VERSION,
         )
         .unwrap();
         assert_eq!(manifest.input, "setup.cfg");
         assert_eq!(manifest.requirements, ["six"]);
         assert!(!manifest.is_empty());
-        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
     fn requirements_include_cycles_are_unreadable_manifests() {
         let dir = temp_project("cycle");
-        fs::write(dir.join("requirements.txt"), "-r other.txt\n").unwrap();
-        fs::write(dir.join("other.txt"), "-r requirements.txt\n").unwrap();
+        fs::write(dir.0.join("requirements.txt"), "-r other.txt\n").unwrap();
+        fs::write(dir.0.join("other.txt"), "-r requirements.txt\n").unwrap();
         let error = discover(
             Platform::X86_64UnknownLinuxGnu,
-            &ProjectRoot::open(&dir).unwrap(),
+            &ProjectRoot::open(&dir.0).unwrap(),
             crate::tailors::python::pyselect::DEFAULT_VERSION,
         )
         .unwrap_err();
         assert!(error.to_string().contains("cannot read"));
         assert!(error.to_string().contains("the manifest is broken"));
         assert!(error.to_string().contains("cycle"));
-        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -1979,7 +1956,7 @@ files = [{ file = "old.whl", hash = "sha256:dddddddddddddddddddddddddddddddddddd
         let dir = temp_project("none");
         let error = discover(
             Platform::X86_64UnknownLinuxGnu,
-            &ProjectRoot::open(&dir).unwrap(),
+            &ProjectRoot::open(&dir.0).unwrap(),
             crate::tailors::python::pyselect::DEFAULT_VERSION,
         )
         .unwrap_err();
@@ -1987,6 +1964,5 @@ files = [{ file = "old.whl", hash = "sha256:dddddddddddddddddddddddddddddddddddd
         assert!(!error.to_string().contains("no_manifest"));
         assert!(error.to_string().contains("nothing to sync here"));
         assert!(error.to_string().contains("setup.py"));
-        let _ = fs::remove_dir_all(dir);
     }
 }

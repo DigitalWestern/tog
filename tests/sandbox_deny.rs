@@ -8,13 +8,16 @@
 #![allow(clippy::disallowed_methods)]
 
 use sha2::{Digest, Sha256};
-use std::path::PathBuf;
 use tog::kernel::platform::Platform;
 use tog::kernel::sandbox::{run_build_spec, BuildSpec};
 use tog::kernel::store::Store;
 use tog::kernel::types::*;
 use tog::tailors::python;
 use tog::tailors::python::build;
+
+mod common;
+
+use common::{fixture, TempDir};
 
 /// `TOG_SANDBOX_TESTS=required` (any non-empty value) turns the Linux
 /// skip into a panic so CI cannot report a skipped check as passed.
@@ -32,7 +35,7 @@ fn skip_or_panic(test_name: &str, reason: impl std::fmt::Display) {
 #[test]
 #[ignore]
 fn network_access_during_build_fails() {
-    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/evil-0.1.tar.gz");
+    let fixture = fixture("evil-0.1.tar.gz");
     let bytes = std::fs::read(&fixture).expect("fixture exists");
     let sha = hex::encode(Sha256::digest(&bytes));
 
@@ -105,8 +108,8 @@ fn bwrap_contract() {
         return;
     }
 
-    let root = std::env::temp_dir().join(format!("tog-sandbox-contract-{}", std::process::id()));
-    std::fs::create_dir(&root).expect("create contract temp directory");
+    let temp = TempDir::new("sandbox-contract");
+    let root = temp.path();
     let scratch = root.join("scratch");
     let writable = root.join("writable");
     let forbidden = root.join("forbidden");
@@ -179,5 +182,4 @@ fn bwrap_contract() {
     run_build_spec(&writes).expect("declared write must work and undeclared write must fail");
     assert!(writable.join("allowed").exists());
     assert!(!forbidden.join("forbidden").exists());
-    std::fs::remove_dir_all(root).unwrap();
 }

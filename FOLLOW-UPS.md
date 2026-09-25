@@ -81,7 +81,6 @@ by position.
 - **Quality review of 2026-09-24 (#264).** A whole-codebase review after
   the 09-20 to 09-24 run. #264 holds the work order and the overall verdict.
   Each line is one issue and one PR, in order:
-  - #233 tests: one shared test harness; temp dirs leak read-only store trees and tests read the real ~/.tog/policy.toml.
   - #223 frozen: cargo, go, ruby, elixir and dotnet still write dependency locks under --frozen.
   - #225 cli: --frozen and --strict are accepted and ignored on verbs that don't use them; tog --frozen plan writes a lock.
   - #224 policy: the first policy::init wins, so --strict is dropped by build, fmt and x.
@@ -136,6 +135,7 @@ by position.
   - #219 descriptor: delegated tools a sync starts still run with a path cwd.
   - #220 descriptor: files above the project (Cargo workspace, `go.work`, .NET `Directory.*`) read by path.
   - #221 descriptor: `status`, `doctor` and `run`'s environment still read by path.
+  - #267 tests: non-tog children in npm_scripts and deps_e2e inherit the developer's environment.
 - **`deps` as a `Tailor` method.** `src/commands/deps.rs` still names
   tailors directly. A `Tailor::edit_manifest` method with an "unsupported"
   default would make it registry-driven, the way `Tailor::registry_tool`

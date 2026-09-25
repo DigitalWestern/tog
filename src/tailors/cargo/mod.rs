@@ -679,33 +679,10 @@ mod tests {
             rust_identity(Platform::X86_64UnknownLinuxGnu, &linux).object_id()
         );
     }
+    use crate::kernel::testutil::TempDir;
     use std::env;
     use std::ffi::OsString;
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    struct TempDir(PathBuf);
-
-    impl TempDir {
-        fn new(prefix: &str) -> Self {
-            let suffix = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos();
-            let path = env::temp_dir().join(format!("{prefix}-{}-{suffix}", std::process::id()));
-            fs::create_dir_all(&path).unwrap();
-            Self(path)
-        }
-
-        fn path(&self) -> &Path {
-            &self.0
-        }
-    }
-
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
+    use std::time::SystemTime;
 
     use crate::kernel::store::STORE_ENV_LOCK;
 
@@ -722,12 +699,12 @@ mod tests {
 
     fn with_temp_store(f: impl FnOnce(&Store, &Path)) {
         let _lock = STORE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let temp = TempDir::new("tog-cargo-store");
+        let temp = TempDir::named("cargo-store");
         let old = env::var_os("TOG_STORE");
-        env::set_var("TOG_STORE", temp.path());
+        env::set_var("TOG_STORE", &temp.0);
         let _env = StoreEnv(old);
         let store = Store::open().unwrap();
-        f(&store, temp.path());
+        f(&store, &temp.0);
     }
 
     fn exception_guard() -> std::sync::MutexGuard<'static, ()> {
@@ -840,12 +817,12 @@ checksum = "{hash_b}"
         let _exception_guard = exception_guard();
         let _attribution = crate::kernel::policy::Attribution::open("python").unwrap();
         let platform = Platform::X86_64UnknownLinuxGnu;
-        let temp = TempDir::new("tog-sdist-toolchain");
-        let sdist = temp.path().join("store/tmp/work/source");
+        let temp = TempDir::named("sdist-toolchain");
+        let sdist = temp.0.join("store/tmp/work/source");
         fs::create_dir_all(&sdist).unwrap();
-        fs::write(temp.path().join("rust-toolchain"), "nightly-2026-01-01\n").unwrap();
+        fs::write(temp.0.join("rust-toolchain"), "nightly-2026-01-01\n").unwrap();
         fs::write(
-            temp.path().join("store/rust-toolchain.toml"),
+            temp.0.join("store/rust-toolchain.toml"),
             "[toolchain]\nchannel = \"1.96.1\"\ncomponents = [\"miri\"]\n",
         )
         .unwrap();
@@ -855,7 +832,7 @@ checksum = "{hash_b}"
             crate::kernel::provider::rust::resolve_toolchain_quiet(platform, &sdist).unwrap(),
             RUST_VERSION
         );
-        assert!(resolve_toolchain(platform, temp.path()).is_err());
+        assert!(resolve_toolchain(platform, &temp.0).is_err());
         crate::kernel::policy::clear();
 
         assert_eq!(
@@ -879,8 +856,8 @@ checksum = "{hash_b}"
         let _exception_guard = exception_guard();
         let _attribution = crate::kernel::policy::Attribution::open("python").unwrap();
         let platform = Platform::X86_64UnknownLinuxGnu;
-        let temp = TempDir::new("tog-sdist-default");
-        let sdist = temp.path().join("source");
+        let temp = TempDir::named("sdist-default");
+        let sdist = temp.0.join("source");
         fs::create_dir_all(&sdist).unwrap();
         let pinned = Some("1.90.0");
         assert_ne!(default_version(), "1.90.0");
@@ -925,8 +902,8 @@ checksum = "{hash_b}"
     fn resolves_toolchain_files_and_pins() {
         let _exception_guard = exception_guard();
         let _attribution = crate::kernel::policy::Attribution::open("cargo").unwrap();
-        let temp = TempDir::new("tog-cargo-toolchain");
-        let project = temp.path().join("project/child");
+        let temp = TempDir::named("cargo-toolchain");
+        let project = temp.0.join("project/child");
         fs::create_dir_all(&project).unwrap();
         let root = project.parent().unwrap();
 
@@ -1036,9 +1013,9 @@ checksum = "{hash_b}"
     #[test]
     fn realization_refuses_a_foreign_selection_and_an_unknown_recipe() {
         use crate::kernel::toolchain::fixtures;
-        let temp = TempDir::new("tog-rust-refusals");
+        let temp = TempDir::named("rust-refusals");
         let store = Store {
-            root: temp.path().join("absent-store"),
+            root: temp.0.join("absent-store"),
         };
         let lease = crate::kernel::testutil::detached_lease();
         let activity = &lease.1;
@@ -1149,8 +1126,8 @@ checksum = "{hash_b}"
     /// toolchains for one machine.
     #[test]
     fn the_lockless_resolver_agrees_with_the_shipped_selection() {
-        let temp = TempDir::new("tog-cargo-lockless");
-        let project = temp.path().join("project");
+        let temp = TempDir::named("cargo-lockless");
+        let project = temp.0.join("project");
         fs::create_dir_all(&project).unwrap();
         for platform in Platform::ALL {
             assert_eq!(
@@ -1172,8 +1149,8 @@ checksum = "{hash_b}"
         use crate::kernel::provider::rust::toolchain_file_extras_within;
         let _exception_guard = exception_guard();
         let _attribution = crate::kernel::policy::Attribution::open("cargo").unwrap();
-        let temp = TempDir::new("tog-cargo-file-extras");
-        let root = temp.path().join("source");
+        let temp = TempDir::named("cargo-file-extras");
+        let root = temp.0.join("source");
         fs::create_dir_all(&root).unwrap();
 
         // No file at all, and a bare channel line: nothing to contribute.
@@ -1211,8 +1188,8 @@ checksum = "{hash_b}"
     fn resolves_linux_toolchain_files_and_ignores_their_lists() {
         let _exception_guard = exception_guard();
         let _attribution = crate::kernel::policy::Attribution::open("cargo").unwrap();
-        let temp = TempDir::new("tog-cargo-linux-toolchain");
-        let project = temp.path().join("project/child");
+        let temp = TempDir::named("cargo-linux-toolchain");
+        let project = temp.0.join("project/child");
         fs::create_dir_all(&project).unwrap();
         let root = project.parent().unwrap();
 
@@ -1343,14 +1320,10 @@ checksum = "{hash_b}"
         let platform = Platform::X86_64UnknownLinuxGnu;
         let components = rust_components(platform).unwrap();
 
-        let correct = TempDir::new("tog-rust-layout-correct");
-        let archives = make_component_archives(
-            correct.path(),
-            &components,
-            platform,
-            Some(platform.triple()),
-        );
-        let staged = correct.path().join("staged");
+        let correct = TempDir::named("rust-layout-correct");
+        let archives =
+            make_component_archives(&correct.0, &components, platform, Some(platform.triple()));
+        let staged = correct.0.join("staged");
         fs::create_dir(&staged).unwrap();
         extract_rust_components(&staged, platform, &component_names(&components), &archives)
             .unwrap();
@@ -1360,9 +1333,9 @@ checksum = "{hash_b}"
             .join(format!("lib/rustlib/{}", platform.triple()))
             .is_dir());
 
-        let missing = TempDir::new("tog-rust-layout-missing");
-        let archives = make_component_archives(missing.path(), &components, platform, None);
-        let staged = missing.path().join("staged");
+        let missing = TempDir::named("rust-layout-missing");
+        let archives = make_component_archives(&missing.0, &components, platform, None);
+        let staged = missing.0.join("staged");
         fs::create_dir(&staged).unwrap();
         assert!(extract_rust_components(
             &staged,
@@ -1372,14 +1345,14 @@ checksum = "{hash_b}"
         )
         .is_err());
 
-        let wrong = TempDir::new("tog-rust-layout-wrong");
+        let wrong = TempDir::named("rust-layout-wrong");
         let archives = make_component_archives(
-            wrong.path(),
+            &wrong.0,
             &components,
             platform,
             Some(Platform::Aarch64AppleDarwin.triple()),
         );
-        let staged = wrong.path().join("staged");
+        let staged = wrong.0.join("staged");
         fs::create_dir(&staged).unwrap();
         assert!(extract_rust_components(
             &staged,
@@ -1537,8 +1510,8 @@ checksum = "{hash_b}"
     fn cargo_env_is_refused_for_a_root_that_cannot_be_registered() {
         let _attribution_lock = crate::kernel::policy::attribution_test_lock();
         let mut attribution = crate::kernel::policy::Attribution::open("cargo").unwrap();
-        let temp = TempDir::new("tog-cargo-unrecordable");
-        let root = temp.path().join("ws ");
+        let temp = TempDir::named("cargo-unrecordable");
+        let root = temp.0.join("ws ");
         fs::create_dir_all(&root).unwrap();
         let plan = CargoPlan {
             rust_version: "1.96.1".into(),
@@ -1550,8 +1523,8 @@ checksum = "{hash_b}"
         let error = project_cargo_env(
             activity,
             &ProjectRoot::open(&root).unwrap(),
-            &temp.path().join("absent-rust"),
-            &temp.path().join("absent-vendor"),
+            &temp.0.join("absent-rust"),
+            &temp.0.join("absent-vendor"),
             &plan,
             &lock_digest("version = 4\n"),
             &selection(),
@@ -1570,10 +1543,10 @@ checksum = "{hash_b}"
     fn projects_cargo_config_wrapper_and_closure() {
         let _attribution_lock = crate::kernel::policy::attribution_test_lock();
         let mut attribution = crate::kernel::policy::Attribution::open("cargo").unwrap();
-        let temp = TempDir::new("tog-cargo-project");
-        let project = temp.path().join("project");
-        let rust = temp.path().join("objects/rust-id");
-        let vendor = temp.path().join("objects/vendor-id");
+        let temp = TempDir::named("cargo-project");
+        let project = temp.0.join("project");
+        let rust = temp.0.join("objects/rust-id");
+        let vendor = temp.0.join("objects/vendor-id");
         fs::create_dir_all(&project).unwrap();
         fs::create_dir_all(rust.join("bin")).unwrap();
         fs::create_dir_all(&vendor).unwrap();
@@ -1654,11 +1627,11 @@ checksum = "{hash_b}"
     fn projection_refuses_symlinked_bin_escape() {
         let _attribution_lock = crate::kernel::policy::attribution_test_lock();
         let mut attribution = crate::kernel::policy::Attribution::open("cargo").unwrap();
-        let temp = TempDir::new("tog-cargo-symlink-bin");
-        let project = temp.path().join("project");
-        let outside = temp.path().join("outside");
-        let rust = temp.path().join("objects/rust-id");
-        let vendor = temp.path().join("objects/vendor-id");
+        let temp = TempDir::named("cargo-symlink-bin");
+        let project = temp.0.join("project");
+        let outside = temp.0.join("outside");
+        let rust = temp.0.join("objects/rust-id");
+        let vendor = temp.0.join("objects/vendor-id");
         fs::create_dir_all(project.join(".tog/cargo-home")).unwrap();
         fs::create_dir_all(&outside).unwrap();
         fs::create_dir_all(rust.join("bin")).unwrap();
@@ -1698,8 +1671,8 @@ checksum = "{hash_b}"
         let _store_env = STORE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _attribution_lock = crate::kernel::policy::attribution_test_lock();
         let mut attribution = crate::kernel::policy::Attribution::open("cargo").unwrap();
-        let temp = TempDir::new("tog-cargo-closure-refs");
-        let store_root = temp.path().join("store");
+        let temp = TempDir::named("cargo-closure-refs");
+        let store_root = temp.0.join("store");
         for sub in ["objects", "meta", "cache/sha256", "tmp", "roots"] {
             fs::create_dir_all(store_root.join(sub)).unwrap();
         }
@@ -1725,7 +1698,7 @@ checksum = "{hash_b}"
             )
             .unwrap();
         }
-        let project = temp.path().join("project");
+        let project = temp.0.join("project");
         fs::create_dir_all(&project).unwrap();
         let plan = CargoPlan {
             rust_version: RUST_VERSION.into(),

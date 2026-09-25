@@ -12,80 +12,31 @@ use std::process::{Command, Output};
 
 use sha2::{Digest as _, Sha224, Sha256, Sha512};
 
-struct TempDir(PathBuf);
+mod common;
 
-impl TempDir {
-    fn new(label: &str) -> Self {
-        let path = std::env::temp_dir().join(format!(
-            "tog-deps-e2e-{label}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&path).unwrap();
-        std::fs::create_dir_all(path.join("home")).unwrap();
-        std::fs::create_dir_all(path.join("tmp")).unwrap();
-        Self(path)
-    }
+use common::{assert_ok, command, copy_tree, fixture, TempDir};
+
+/// A scratch directory that is the project, with `home/` for tog's home and
+/// `tmp/` for the child's `TMPDIR`, so neither lands among the project's
+/// files.
+fn scratch(label: &str) -> TempDir {
+    let temp = TempDir::new(&format!("deps-e2e-{label}"));
+    std::fs::create_dir_all(temp.0.join("home")).unwrap();
+    std::fs::create_dir_all(temp.0.join("tmp")).unwrap();
+    temp
 }
 
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        let _ = tog::kernel::store::remove_tree(&self.0);
-    }
-}
-
-fn run(binary: &Path, project: &Path, store: &Path, args: &[&str], tmp: &Path) -> Output {
-    Command::new(binary)
-        .current_dir(project)
-        .env("TOG_STORE", store)
-        .env("TMPDIR", tmp.join("tmp"))
-        .env("HOME", tmp.join("home"))
+/// Run the binary in `project` with the scratch directory's `home/` and
+/// `tmp/`. A sandbox that cannot start fails the test instead of skipping
+/// it, and the developer's `PNPM_HOME` cannot steer the pnpm tog runs.
+fn run(project: &Path, store: &Path, args: &[&str], temp: &Path) -> Output {
+    command(project, &temp.join("home"), store)
+        .env("TMPDIR", temp.join("tmp"))
         .env("TOG_SANDBOX_TESTS", "required")
         .env_remove("PNPM_HOME")
-        .env_remove("TOG_POLICY")
-        .env_remove("TOG_STRICT")
         .args(args)
         .output()
-        .unwrap()
-}
-
-fn assert_ok(output: Output, label: &str) {
-    assert!(
-        output.status.success(),
-        "{label} failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
-
-fn binary() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_tog"))
-}
-
-fn copy_fixture(temp: &TempDir, fixture: &str) {
-    fn copy_dir(source: &Path, destination: &Path) {
-        std::fs::create_dir_all(destination).unwrap();
-        for entry in std::fs::read_dir(source).unwrap() {
-            let entry = entry.unwrap();
-            let source = entry.path();
-            let destination = destination.join(entry.file_name());
-            if source.is_dir() {
-                copy_dir(&source, &destination);
-            } else {
-                std::fs::copy(source, destination).unwrap();
-            }
-        }
-    }
-
-    copy_dir(
-        &PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures")
-            .join(fixture),
-        &temp.0,
-    );
+        .expect("spawn tog")
 }
 
 fn set_package_manager(project: &Path, value: &str) {
@@ -96,10 +47,10 @@ fn set_package_manager(project: &Path, value: &str) {
     std::fs::write(path, serde_json::to_vec_pretty(&package).unwrap()).unwrap();
 }
 
-fn assert_status_synced(binary: &Path, project: &Path, store: &Path, temp: &TempDir) {
-    let status = run(binary, project, store, &["status"], &temp.0);
+fn assert_status_synced(project: &Path, store: &Path, temp: &TempDir) {
+    let status = run(project, store, &["status"], &temp.0);
     assert_ok(status, "status");
-    let status = run(binary, project, store, &["status"], &temp.0);
+    let status = run(project, store, &["status"], &temp.0);
     assert!(
         String::from_utf8_lossy(&status.stdout).contains("synced"),
         "status was not synced:\nstdout:\n{}\nstderr:\n{}",
@@ -146,15 +97,13 @@ fn closure_exceptions(path: &Path) -> Vec<serde_json::Value> {
 #[test]
 #[ignore]
 fn python_requirements_add_update_remove_roundtrip() {
-    let temp = TempDir::new("python-requirements");
+    let temp = scratch("python-requirements");
     let project = &temp.0;
     let store = project.join("store");
     std::fs::write(project.join("requirements.txt"), "idna==3.10\n").unwrap();
-    let bin = binary();
 
     assert_ok(
         run(
-            &bin,
             project,
             &store,
             &["add", "--no-sync", "charset-normalizer==3.4.3"],
@@ -167,7 +116,6 @@ fn python_requirements_add_update_remove_roundtrip() {
         .contains("charset-normalizer==3.4.3"));
     assert_ok(
         run(
-            &bin,
             project,
             &store,
             &["update", "--no-sync", "charset-normalizer"],
@@ -180,7 +128,6 @@ fn python_requirements_add_update_remove_roundtrip() {
         .contains("charset-normalizer==3.4.3"));
     assert_ok(
         run(
-            &bin,
             project,
             &store,
             &["remove", "--no-sync", "charset-normalizer"],
@@ -195,7 +142,7 @@ fn python_requirements_add_update_remove_roundtrip() {
 #[test]
 #[ignore]
 fn python_uv_add_update_remove_roundtrip() {
-    let temp = TempDir::new("python-uv");
+    let temp = scratch("python-uv");
     let project = &temp.0;
     let store = project.join("store");
     std::fs::write(
@@ -203,11 +150,9 @@ fn python_uv_add_update_remove_roundtrip() {
         "[project]\nname = \"deps-e2e\"\nversion = \"0.1.0\"\ndependencies = []\n",
     )
     .unwrap();
-    let bin = binary();
 
     assert_ok(
         run(
-            &bin,
             project,
             &store,
             &["add", "--dev", "--no-sync", "idna==3.10"],
@@ -219,13 +164,7 @@ fn python_uv_add_update_remove_roundtrip() {
         .unwrap()
         .contains("idna"));
     assert_ok(
-        run(
-            &bin,
-            project,
-            &store,
-            &["update", "--no-sync", "idna"],
-            &temp.0,
-        ),
+        run(project, &store, &["update", "--no-sync", "idna"], &temp.0),
         "uv update",
     );
     assert!(std::fs::read_to_string(project.join("pyproject.toml"))
@@ -233,7 +172,6 @@ fn python_uv_add_update_remove_roundtrip() {
         .contains("idna"));
     assert_ok(
         run(
-            &bin,
             project,
             &store,
             &["remove", "--dev", "--no-sync", "idna"],
@@ -248,7 +186,7 @@ fn python_uv_add_update_remove_roundtrip() {
 #[test]
 #[ignore]
 fn npm_add_update_remove_roundtrip() {
-    let temp = TempDir::new("npm");
+    let temp = scratch("npm");
     let project = &temp.0;
     let store = project.join("store");
     std::fs::write(
@@ -256,11 +194,9 @@ fn npm_add_update_remove_roundtrip() {
         "{\"name\":\"deps-e2e\",\"version\":\"1.0.0\"}\n",
     )
     .unwrap();
-    let bin = binary();
 
     assert_ok(
         run(
-            &bin,
             project,
             &store,
             &["add", "--no-sync", "is-number@7.0.0"],
@@ -274,7 +210,6 @@ fn npm_add_update_remove_roundtrip() {
     assert_eq!(package["dependencies"]["is-number"], "^7.0.0");
     assert_ok(
         run(
-            &bin,
             project,
             &store,
             &["update", "--no-sync", "is-number"],
@@ -288,7 +223,6 @@ fn npm_add_update_remove_roundtrip() {
     assert_eq!(package["dependencies"]["is-number"], "^7.0.0");
     assert_ok(
         run(
-            &bin,
             project,
             &store,
             &["remove", "--no-sync", "is-number"],
@@ -303,16 +237,14 @@ fn npm_add_update_remove_roundtrip() {
 #[test]
 #[ignore]
 fn pnpm_add_update_remove_roundtrip() {
-    let temp = TempDir::new("pnpm");
-    copy_fixture(&temp, "proj-pnpm");
+    let temp = scratch("pnpm");
+    copy_tree(&fixture("proj-pnpm"), &temp.0);
     let project = &temp.0;
     let store = project.join("store");
     set_package_manager(project, "pnpm@9.12.3");
-    let bin = binary();
 
     assert_ok(
         run(
-            &bin,
             project,
             &store,
             &["add", "--dev", "is-number@7.0.0"],
@@ -326,7 +258,7 @@ fn pnpm_add_update_remove_roundtrip() {
     assert_eq!(package["devDependencies"]["is-number"], "7.0.0");
     let first_env_count = node_env_object_count(&store);
     assert!(first_env_count >= 1);
-    assert_status_synced(&bin, project, &store, &temp);
+    assert_status_synced(project, &store, &temp);
 
     let x_root = temp.0.join("home/.tog/x");
     let x_root = std::fs::read_dir(&x_root)
@@ -356,7 +288,6 @@ fn pnpm_add_update_remove_roundtrip() {
     set_package_manager(project, &format!("pnpm@9.12.3+sha224.{corepack_sha224}"));
 
     let update = run(
-        &bin,
         project,
         &store,
         &["update", "--no-sync", "is-number"],
@@ -380,7 +311,6 @@ fn pnpm_add_update_remove_roundtrip() {
     let package_before_wrong = std::fs::read_to_string(project.join("package.json")).unwrap();
     let lock_before_wrong = std::fs::read_to_string(project.join("pnpm-lock.yaml")).unwrap();
     let wrong = run(
-        &bin,
         project,
         &store,
         &["update", "--no-sync", "is-number"],
@@ -417,7 +347,6 @@ fn pnpm_add_update_remove_roundtrip() {
     // against is taken after it: the delegate must leave the file untouched.
     let package_before_sha512 = std::fs::read_to_string(project.join("package.json")).unwrap();
     let wrong = run(
-        &bin,
         project,
         &store,
         &["update", "--no-sync", "is-number"],
@@ -449,7 +378,6 @@ fn pnpm_add_update_remove_roundtrip() {
     );
     let package_before_unknown = std::fs::read_to_string(project.join("package.json")).unwrap();
     let unknown = run(
-        &bin,
         project,
         &store,
         &["update", "--no-sync", "is-number"],
@@ -477,7 +405,6 @@ fn pnpm_add_update_remove_roundtrip() {
     set_package_manager(project, &format!("pnpm@9.12.3+sha512.{corepack_sha512}"));
     assert_ok(
         run(
-            &bin,
             project,
             &store,
             &["remove", "--dev", "--no-sync", "is-number"],
@@ -487,8 +414,8 @@ fn pnpm_add_update_remove_roundtrip() {
     );
     let package = std::fs::read_to_string(project.join("package.json")).unwrap();
     assert!(!package.contains("is-number"), "{package}");
-    assert_ok(run(&bin, project, &store, &["sync"], &temp.0), "pnpm sync");
-    assert_status_synced(&bin, project, &store, &temp);
+    assert_ok(run(project, &store, &["sync"], &temp.0), "pnpm sync");
+    assert_status_synced(project, &store, &temp);
 }
 
 /// A pnpm edit beside a Cargo project: the Cargo sync's exception (a git
@@ -497,10 +424,10 @@ fn pnpm_add_update_remove_roundtrip() {
 #[test]
 #[ignore]
 fn mixed_cargo_pnpm_edit_keeps_cargo_exception_with_cargo() {
-    let temp = TempDir::new("mixed-cargo-pnpm");
+    let temp = scratch("mixed-cargo-pnpm");
     let project = &temp.0;
     let store = project.join("store");
-    copy_fixture(&temp, "proj-pnpm");
+    copy_tree(&fixture("proj-pnpm"), &temp.0);
     std::fs::write(
         project.join("Cargo.toml"),
         "[package]\nname = \"mixed-cargo-pnpm\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
@@ -513,19 +440,12 @@ fn mixed_cargo_pnpm_edit_keeps_cargo_exception_with_cargo() {
     .unwrap();
     std::fs::create_dir_all(project.join("src")).unwrap();
     std::fs::write(project.join("src/main.rs"), "fn main() {}\n").unwrap();
-    let fixtures = TempDir::new("mixed-cargo-pnpm-git");
+    let fixtures = TempDir::new("deps-e2e-mixed-cargo-pnpm-git");
     add_git_dependency(&fixtures.0, project);
     set_package_manager(project, "pnpm@9.12.3");
-    let bin = binary();
 
     assert_ok(
-        run(
-            &bin,
-            project,
-            &store,
-            &["add", "npm:is-number@7.0.0"],
-            &temp.0,
-        ),
+        run(project, &store, &["add", "npm:is-number@7.0.0"], &temp.0),
         "mixed pnpm add",
     );
 
@@ -728,12 +648,11 @@ fn install_with_store_pnpm(temp: &TempDir, project: &Path, store: &Path) {
 #[test]
 #[ignore]
 fn pnpm_edits_leave_an_installed_project_untouched() {
-    let temp = TempDir::new("pnpm-installed");
-    copy_fixture(&temp, "proj-pnpm");
+    let temp = scratch("pnpm-installed");
+    copy_tree(&fixture("proj-pnpm"), &temp.0);
     let project = &temp.0;
     let store = project.join("store");
     set_package_manager(project, "pnpm@9.12.3");
-    let bin = binary();
 
     // A local dependency whose lifecycle scripts all leave a marker.
     let marker = temp.0.join("lifecycle-script-ran");
@@ -766,7 +685,6 @@ fn pnpm_edits_leave_an_installed_project_untouched() {
 
     assert_ok(
         run(
-            &bin,
             project,
             &store,
             &["add", "--no-sync", "is-number@7.0.0"],
@@ -799,7 +717,7 @@ fn pnpm_edits_leave_an_installed_project_untouched() {
         ("remove", vec!["remove", "--no-sync", "is-even"]),
     ] {
         assert_ok(
-            run(&bin, project, &store, &args, &temp.0),
+            run(project, &store, &args, &temp.0),
             &format!("pnpm {label} over an installed project"),
         );
         assert_eq!(
@@ -843,17 +761,15 @@ fn pnpm_edits_leave_an_installed_project_untouched() {
 #[test]
 #[ignore]
 fn pnpm_workspace_member_and_root_roundtrip() {
-    let temp = TempDir::new("pnpm-workspace");
-    copy_fixture(&temp, "proj-pnpm-ws");
+    let temp = scratch("pnpm-workspace");
+    copy_tree(&fixture("proj-pnpm-ws"), &temp.0);
     let project = &temp.0;
     let member = project.join("packages/lib");
     let store = project.join("store");
     set_package_manager(project, "pnpm@9.12.3");
-    let bin = binary();
 
     assert_ok(
         run(
-            &bin,
             &member,
             &store,
             &["add", "--dev", "--no-sync", "is-even@1.0.0"],
@@ -905,7 +821,6 @@ fn pnpm_workspace_member_and_root_roundtrip() {
 
     assert_ok(
         run(
-            &bin,
             &member,
             &store,
             &["remove", "--dev", "--no-sync", "is-even"],
@@ -920,7 +835,6 @@ fn pnpm_workspace_member_and_root_roundtrip() {
 
     assert_ok(
         run(
-            &bin,
             project,
             &store,
             &["add", "--dev", "--no-sync", "is-even@1.0.0"],
@@ -935,7 +849,6 @@ fn pnpm_workspace_member_and_root_roundtrip() {
     assert_eq!(root_package["devDependencies"]["is-even"], "1.0.0");
     assert_ok(
         run(
-            &bin,
             project,
             &store,
             &["remove", "--dev", "--no-sync", "is-even"],
@@ -948,17 +861,17 @@ fn pnpm_workspace_member_and_root_roundtrip() {
     // (moving the existing directory aside, and saying so); that is sync's
     // documented behaviour, not the delegate's, so the snapshot ends here.
     assert_ok(
-        run(&bin, project, &store, &["sync"], &temp.0),
+        run(project, &store, &["sync"], &temp.0),
         "pnpm workspace sync",
     );
-    assert_status_synced(&bin, project, &store, &temp);
+    assert_status_synced(project, &store, &temp);
 }
 
 #[test]
 #[ignore]
 fn nested_independent_npm_project_does_not_use_ancestor_pnpm_lock() {
-    let temp = TempDir::new("pnpm-nested-npm");
-    copy_fixture(&temp, "proj-pnpm-ws");
+    let temp = scratch("pnpm-nested-npm");
+    copy_tree(&fixture("proj-pnpm-ws"), &temp.0);
     let project = &temp.0;
     let store = project.join("store");
     set_package_manager(project, "pnpm@9.12.3");
@@ -975,11 +888,9 @@ fn nested_independent_npm_project_does_not_use_ancestor_pnpm_lock() {
         "{\"name\":\"nested-npm\",\"version\":\"1.0.0\",\"lockfileVersion\":3,\"requires\":true,\"packages\":{\"\":{\"name\":\"nested-npm\",\"version\":\"1.0.0\"}}}\n",
     )
     .unwrap();
-    let bin = binary();
 
     assert_ok(
         run(
-            &bin,
             &nested,
             &store,
             &["add", "--no-sync", "is-number@7.0.0"],
@@ -999,7 +910,7 @@ fn nested_independent_npm_project_does_not_use_ancestor_pnpm_lock() {
 #[test]
 #[ignore]
 fn cargo_add_update_remove_roundtrip() {
-    let temp = TempDir::new("cargo");
+    let temp = scratch("cargo");
     let project = &temp.0;
     let store = project.join("store");
     std::fs::write(
@@ -1009,11 +920,9 @@ fn cargo_add_update_remove_roundtrip() {
     .unwrap();
     std::fs::create_dir(project.join("src")).unwrap();
     std::fs::write(project.join("src/lib.rs"), "pub fn marker() {}\n").unwrap();
-    let bin = binary();
 
     assert_ok(
         run(
-            &bin,
             project,
             &store,
             &["add", "--no-sync", "itoa@1.0.15"],
@@ -1028,26 +937,14 @@ fn cargo_add_update_remove_roundtrip() {
         .unwrap()
         .contains("name = \"itoa\""));
     assert_ok(
-        run(
-            &bin,
-            project,
-            &store,
-            &["update", "--no-sync", "itoa"],
-            &temp.0,
-        ),
+        run(project, &store, &["update", "--no-sync", "itoa"], &temp.0),
         "cargo update",
     );
     assert!(std::fs::read_to_string(project.join("Cargo.lock"))
         .unwrap()
         .contains("name = \"itoa\""));
     assert_ok(
-        run(
-            &bin,
-            project,
-            &store,
-            &["remove", "--no-sync", "itoa"],
-            &temp.0,
-        ),
+        run(project, &store, &["remove", "--no-sync", "itoa"], &temp.0),
         "cargo remove",
     );
     let manifest = std::fs::read_to_string(project.join("Cargo.toml")).unwrap();
@@ -1057,7 +954,7 @@ fn cargo_add_update_remove_roundtrip() {
 #[test]
 #[ignore]
 fn go_add_update_remove_roundtrip() {
-    let temp = TempDir::new("go");
+    let temp = scratch("go");
     let project = &temp.0;
     let store = project.join("store");
     std::fs::write(
@@ -1070,11 +967,9 @@ fn go_add_update_remove_roundtrip() {
         "package main\n\nimport _ \"rsc.io/quote\"\n\nfunc main() {}\n",
     )
     .unwrap();
-    let bin = binary();
 
     assert_ok(
         run(
-            &bin,
             project,
             &store,
             &["add", "--no-sync", "rsc.io/quote@v1.5.2"],
@@ -1090,7 +985,6 @@ fn go_add_update_remove_roundtrip() {
         .contains("rsc.io/quote v1.5.2"));
     assert_ok(
         run(
-            &bin,
             project,
             &store,
             &["update", "--no-sync", "rsc.io/quote"],
@@ -1103,7 +997,6 @@ fn go_add_update_remove_roundtrip() {
         .contains("rsc.io/quote v1.5.2"));
     assert_ok(
         run(
-            &bin,
             project,
             &store,
             &["remove", "--no-sync", "rsc.io/quote"],
@@ -1118,15 +1011,13 @@ fn go_add_update_remove_roundtrip() {
 #[test]
 #[ignore]
 fn ruby_add_update_remove_roundtrip() {
-    let temp = TempDir::new("ruby");
+    let temp = scratch("ruby");
     let project = &temp.0;
     let store = project.join("store");
     std::fs::write(project.join("Gemfile"), "source \"https://rubygems.org\"\n").unwrap();
-    let bin = binary();
 
     assert_ok(
         run(
-            &bin,
             project,
             &store,
             &["add", "--no-sync", "rake@13.2.1"],
@@ -1141,26 +1032,14 @@ fn ruby_add_update_remove_roundtrip() {
         .unwrap()
         .contains("rake (13.2.1)"));
     assert_ok(
-        run(
-            &bin,
-            project,
-            &store,
-            &["update", "--no-sync", "rake"],
-            &temp.0,
-        ),
+        run(project, &store, &["update", "--no-sync", "rake"], &temp.0),
         "ruby update",
     );
     assert!(std::fs::read_to_string(project.join("Gemfile.lock"))
         .unwrap()
         .contains("rake (13.2.1)"));
     assert_ok(
-        run(
-            &bin,
-            project,
-            &store,
-            &["remove", "--no-sync", "rake"],
-            &temp.0,
-        ),
+        run(project, &store, &["remove", "--no-sync", "rake"], &temp.0),
         "ruby remove",
     );
     let gemfile = std::fs::read_to_string(project.join("Gemfile")).unwrap();

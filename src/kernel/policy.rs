@@ -1010,6 +1010,7 @@ pub(crate) fn exception_guard() -> std::sync::MutexGuard<'static, ()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::kernel::testutil::TempDir;
 
     struct EnvVarGuard {
         name: &'static str,
@@ -1366,14 +1367,8 @@ deny = ["git-dependency"]"#,
 
     #[test]
     fn load_with_sources_attributes_each_deny_to_the_file_that_asked_for_it() {
-        let root = std::env::temp_dir().join(format!(
-            "tog-policy-sources-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let scratch = TempDir::named("policy-sources");
+        let root = scratch.0.clone();
         let home = root.join("home");
         let parent = root.join("workspace");
         let project = parent.join("member");
@@ -1440,20 +1435,12 @@ deny = ["git-dependency"]"#,
         assert!(merged.deny.contains(GIT_DEPENDENCY));
         assert!(merged.deny.contains(FILE_COLLISION));
         assert!(merged.deny.contains(WEAK_INTEGRITY));
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn strict_without_a_file_is_recorded_as_the_flag_source() {
-        let root = std::env::temp_dir().join(format!(
-            "tog-policy-strict-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir_all(&root).unwrap();
+        let scratch = TempDir::named("policy-strict");
+        let root = scratch.0.clone();
         let _env = test_env_lock();
         let _home = EnvVarGuard::set("HOME", root.as_os_str());
         let _policy = EnvVarGuard::remove("TOG_POLICY");
@@ -1482,7 +1469,6 @@ deny = ["git-dependency"]"#,
         let message = refusal(&policy, WEAK_INTEGRITY, "left-pad", "sha1");
         assert!(message.contains("unset TOG_STRICT"), "{message}");
         assert!(!message.contains("rerun without --strict"), "{message}");
-        let _ = fs::remove_dir_all(root);
     }
 
     /// A file that sets `strict = true` outlives the command, so it is the
@@ -1490,14 +1476,8 @@ deny = ["git-dependency"]"#,
     /// asked for the same thing: dropping either one lifts nothing.
     #[test]
     fn a_strict_file_owns_the_refusal_even_under_the_flag() {
-        let root = std::env::temp_dir().join(format!(
-            "tog-policy-strict-file-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let scratch = TempDir::named("policy-strict-file");
+        let root = scratch.0.clone();
         let machine = root.join(".tog/policy.toml");
         fs::create_dir_all(root.join(".tog")).unwrap();
         fs::write(&machine, "strict = true\n").unwrap();
@@ -1521,19 +1501,12 @@ deny = ["git-dependency"]"#,
             assert!(!message.contains("rerun without --strict"), "{message}");
             assert!(!message.contains("unset TOG_STRICT"), "{message}");
         }
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn load_with_sources_does_not_duplicate_a_machine_policy_under_home() {
-        let root = std::env::temp_dir().join(format!(
-            "tog-policy-home-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let scratch = TempDir::named("policy-home");
+        let root = scratch.0.clone();
         let home = root.join("home");
         let project = home.join("project");
         let machine = home.join(".tog/policy.toml");
@@ -1567,20 +1540,13 @@ deny = ["git-dependency"]"#,
         );
         assert_eq!(ours[0].path.as_deref(), Some(machine.as_path()));
         assert_eq!(ours[1].path.as_deref(), Some(project_policy.as_path()));
-        let _ = fs::remove_dir_all(root);
     }
 
     #[cfg(unix)]
     #[test]
     fn load_with_sources_does_not_duplicate_a_hard_linked_machine_policy() {
-        let root = std::env::temp_dir().join(format!(
-            "tog-policy-hard-link-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let scratch = TempDir::named("policy-hard-link");
+        let root = scratch.0.clone();
         let home = root.join("home");
         let project = root.join("project");
         let machine = home.join(".tog/policy.toml");
@@ -1602,20 +1568,12 @@ deny = ["git-dependency"]"#,
         assert_eq!(ours.len(), 1, "{sources:?}");
         assert_eq!(ours[0].origin, SourceOrigin::Machine);
         assert_eq!(ours[0].path.as_deref(), Some(machine.as_path()));
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn strict_environment_and_flag_are_recorded_as_separate_sources() {
-        let root = std::env::temp_dir().join(format!(
-            "tog-policy-strict-env-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir_all(&root).unwrap();
+        let scratch = TempDir::named("policy-strict-env");
+        let root = scratch.0.clone();
         let _env = test_env_lock();
         let _home = EnvVarGuard::set("HOME", root.as_os_str());
         let _policy = EnvVarGuard::remove("TOG_POLICY");
@@ -1649,19 +1607,12 @@ deny = ["git-dependency"]"#,
             vec![SourceOrigin::Flag, SourceOrigin::Env]
         );
         assert!(pathless.iter().all(|source| source.path.is_none()));
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn loads_user_and_project_policy_union_from_files() {
-        let root = std::env::temp_dir().join(format!(
-            "tog-policy-test-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let scratch = TempDir::named("policy-test");
+        let root = scratch.0.clone();
         let home = root.join("home");
         let project = root.join("project");
         fs::create_dir_all(home.join(".tog")).unwrap();
@@ -1687,7 +1638,6 @@ deny = ["git-dependency"]"#,
         assert!(loaded.strict);
         assert!(loaded.deny.contains(FILE_COLLISION));
         assert!(loaded.deny.contains(GIT_DEPENDENCY));
-        let _ = fs::remove_dir_all(root);
         assert!(from_member.strict);
         assert!(from_member.deny.contains("file-collision"));
         assert!(from_member.deny.contains("git-dependency"));
@@ -1861,14 +1811,8 @@ deny = ["git-dependency"]"#,
 
     #[test]
     fn load_with_sources_records_each_scopes_trusted_list() {
-        let root = std::env::temp_dir().join(format!(
-            "tog-policy-signing-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let scratch = TempDir::named("policy-signing");
+        let root = scratch.0.clone();
         let home = root.join("home");
         let project = root.join("project");
         fs::create_dir_all(home.join(".tog")).unwrap();
@@ -1918,6 +1862,5 @@ deny = ["git-dependency"]"#,
             fixture_sources(&sources, &root)[0].trusted,
             Some(KeySet::new())
         );
-        let _ = fs::remove_dir_all(root);
     }
 }

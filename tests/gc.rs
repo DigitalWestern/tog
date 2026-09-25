@@ -1,82 +1,21 @@
 //! Ignored end-to-end coverage for project roots and cross-ecosystem GC.
 //!
-//! Run on a Linux host with a throwaway store:
-//! TOG_STORE=$HOME/scratch/tmp/nxgc-store TMPDIR=$HOME/scratch/tmp \
-//! cargo test --test gc -- --ignored --nocapture
+//! Run on a Linux host with TMPDIR under $HOME, so the scratch stores stay
+//! off the small /tmp quota:
+//! TMPDIR=$HOME/scratch/tmp cargo test --test gc -- --ignored --nocapture
 
 // Tests spawn fixtures and take leases freely (see clippy.toml).
 #![allow(clippy::disallowed_methods)]
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Output};
+use std::process::{Child, Output};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
-struct TempDir(PathBuf);
+mod common;
 
-impl TempDir {
-    fn new() -> Self {
-        let base = std::env::var_os("TMPDIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(std::env::temp_dir);
-        let path = base.join(format!(
-            "tog-gc-e2e-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir_all(&path).unwrap();
-        // tog records object paths under the store's canonicalized root
-        // and compares them exactly; on macOS the temp dir sits under /var,
-        // a symlink to /private/var.
-        Self(path.canonicalize().unwrap())
-    }
-}
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        let _ = tog::kernel::store::remove_tree(&self.0);
-    }
-}
-
-fn copy_tree(src: &Path, dest: &Path) {
-    fs::create_dir_all(dest).unwrap();
-    for entry in fs::read_dir(src).unwrap() {
-        let entry = entry.unwrap();
-        let from = entry.path();
-        let to = dest.join(entry.file_name());
-        if from.is_dir() {
-            copy_tree(&from, &to);
-        } else {
-            fs::copy(from, to).unwrap();
-        }
-    }
-}
-
-fn tog(bin: &Path, cwd: &Path, store: &Path, args: &[&str]) -> Output {
-    Command::new(bin)
-        .current_dir(cwd)
-        .env("TOG_STORE", store)
-        .args(args)
-        .output()
-        .unwrap()
-}
-
-fn tog_home(bin: &Path, cwd: &Path, store: &Path, home: &Path, args: &[&str]) -> Output {
-    Command::new(bin)
-        .current_dir(cwd)
-        .env("TOG_STORE", store)
-        .env("HOME", home)
-        .env_remove("TOG_POLICY")
-        .env_remove("TOG_STRICT")
-        .env("NO_COLOR", "1")
-        .args(args)
-        .output()
-        .unwrap()
-}
+use common::{assert_ok, command, copy_tree, fixture, tog, tog_at, TempDir};
 
 struct ChildGuard(Option<Child>);
 
@@ -99,17 +38,7 @@ impl Drop for ChildGuard {
     }
 }
 
-fn ok(output: Output, label: &str) -> String {
-    assert!(
-        output.status.success(),
-        "{label} failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8(output.stdout).unwrap()
-}
-
-/// Like `ok`, for commands that narrate instead of printing a result.
+/// Like `assert_ok`, for commands that narrate instead of printing a result.
 /// CLI.md: stdout is results, stderr is narration. `tog gc` writes its whole
 /// report to stderr, so assertions on gc narration read that stream.
 fn ok_narration(output: Output, label: &str) -> String {
@@ -142,19 +71,18 @@ fn roots_listing(text: &str) -> Vec<(String, String)> {
 #[test]
 #[ignore]
 fn gc_keeps_deleted_node_project_until_forgotten() {
-    let temp = TempDir::new();
+    let temp = TempDir::new("gc-e2e");
     // Keep this test independent of the shared store used by the ignored
     // end-to-end suite. Other projects may legitimately retain node objects.
-    let store = temp.0.join("store");
-    let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let home = temp.path();
+    let store = home.join("store");
     let python = temp.0.join("proj-a");
     let node = temp.0.join("proj-npm");
-    copy_tree(&fixtures.join("proj-a"), &python);
-    copy_tree(&fixtures.join("proj-npm"), &node);
-    let bin = PathBuf::from(env!("CARGO_BIN_EXE_tog"));
+    copy_tree(&fixture("proj-a"), &python);
+    copy_tree(&fixture("proj-npm"), &node);
 
-    ok(tog(&bin, &python, &store, &["sync"]), "sync proj-a");
-    ok(tog(&bin, &node, &store, &["sync"]), "sync proj-npm");
+    assert_ok(tog(&python, home, &["sync"]), "sync proj-a");
+    assert_ok(tog(&node, home, &["sync"]), "sync proj-npm");
     let node_canonical = node.canonicalize().unwrap();
     fs::remove_dir_all(&node).unwrap();
 
@@ -180,12 +108,7 @@ fn gc_keeps_deleted_node_project_until_forgotten() {
 
     // A root/2 record carries its own object set, so a deleted project no
     // longer blocks collection and its tools remain protected.
-    let retained = tog(
-        &bin,
-        &python,
-        &store,
-        &["gc", "--dry-run", "--keep-days", "0"],
-    );
+    let retained = tog(&python, home, &["gc", "--dry-run", "--keep-days", "0"]);
     assert!(
         retained.status.success(),
         "gc refused a self-sufficient root record: stdout={} stderr={}",
@@ -206,8 +129,8 @@ fn gc_keeps_deleted_node_project_until_forgotten() {
         "gc swept a deleted project's rooted node object"
     );
 
-    let keys = roots_listing(&ok(
-        tog(&bin, &python, &store, &["store", "roots"]),
+    let keys = roots_listing(&assert_ok(
+        tog(&python, home, &["store", "roots"]),
         "store roots",
     ));
     let node_key = keys
@@ -218,18 +141,13 @@ fn gc_keeps_deleted_node_project_until_forgotten() {
 
     // Dry-run forget simulates only; the record survives.
     let dry = ok_narration(
-        tog(
-            &bin,
-            &python,
-            &store,
-            &["gc", "--dry-run", "--forget", &node_key],
-        ),
+        tog(&python, home, &["gc", "--dry-run", "--forget", &node_key]),
         "gc dry-run forget",
     );
     assert!(dry.contains("would forget root"), "{dry}");
     assert!(
-        roots_listing(&ok(
-            tog(&bin, &python, &store, &["store", "roots"]),
+        roots_listing(&assert_ok(
+            tog(&python, home, &["store", "roots"]),
             "store roots"
         ))
         .iter()
@@ -237,11 +155,10 @@ fn gc_keeps_deleted_node_project_until_forgotten() {
         "dry-run forgot the record"
     );
 
-    ok(
+    assert_ok(
         tog(
-            &bin,
             &python,
-            &store,
+            home,
             &["gc", "--forget", &node_key, "--keep-days", "0"],
         ),
         "forget the node root",
@@ -264,7 +181,7 @@ fn gc_keeps_deleted_node_project_until_forgotten() {
             .any(|meta| meta.contains(r#""kind": "node-env""#)),
         "forget unexpectedly swept store objects"
     );
-    ok(tog(&bin, &python, &store, &["gc"]), "gc");
+    assert_ok(tog(&python, home, &["gc"]), "gc");
     let objects = fs::read_dir(store.join("objects"))
         .unwrap()
         .map(|entry| {
@@ -283,13 +200,8 @@ fn gc_keeps_deleted_node_project_until_forgotten() {
             .all(|meta| !meta.contains(r#""kind": "node-env""#)),
         "node object survived GC after its record was forgotten"
     );
-    ok(
-        tog(
-            &bin,
-            &python,
-            &store,
-            &["run", "python", "-c", "import six"],
-        ),
+    assert_ok(
+        tog(&python, home, &["run", "python", "-c", "import six"]),
         "python after gc",
     );
 }
@@ -300,7 +212,7 @@ fn gc_keeps_deleted_node_project_until_forgotten() {
 #[test]
 #[ignore]
 fn gc_upgrade_does_not_collect_unregistered_legacy_project() {
-    let temp = TempDir::new();
+    let temp = TempDir::new("gc-e2e");
     let store = temp.0.join("store");
     for sub in ["objects", "meta", "cache/sha256", "tmp"] {
         fs::create_dir_all(store.join(sub)).unwrap();
@@ -333,8 +245,8 @@ fn gc_upgrade_does_not_collect_unregistered_legacy_project() {
     )
     .unwrap();
 
-    let bin = PathBuf::from(env!("CARGO_BIN_EXE_tog"));
-    let refused = tog(&bin, &project, &store, &["gc", "--keep-days", "0"]);
+    let home = temp.path();
+    let refused = tog(&project, home, &["gc", "--keep-days", "0"]);
     assert!(
         !refused.status.success(),
         "uninitialized GC unexpectedly ran"
@@ -351,9 +263,8 @@ fn gc_upgrade_does_not_collect_unregistered_legacy_project() {
     assert!(object.is_dir(), "default upgrade GC deleted the old object");
 
     let registered = tog(
-        &bin,
         &project,
-        &store,
+        home,
         &["gc", "--register", project.to_str().unwrap()],
     );
     assert!(
@@ -377,22 +288,15 @@ fn gc_upgrade_does_not_collect_unregistered_legacy_project() {
 #[test]
 #[ignore]
 fn x_clean_removes_registered_environment_and_running_x_is_busy() {
-    let temp = TempDir::new();
+    let temp = TempDir::new("gc-e2e");
     let store = temp.0.join("store");
     let home = temp.0.join("home");
     let project = temp.0.join("project");
     fs::create_dir_all(&home).unwrap();
     fs::create_dir_all(&project).unwrap();
-    let bin = PathBuf::from(env!("CARGO_BIN_EXE_tog"));
 
-    ok(
-        tog_home(
-            &bin,
-            &project,
-            &store,
-            &home,
-            &["x", "py:ruff", "--version"],
-        ),
+    assert_ok(
+        tog_at(&project, &home, &store, &["x", "py:ruff", "--version"]),
         "realize x ruff",
     );
     let x_dir = home.join(".tog/x");
@@ -412,28 +316,22 @@ fn x_clean_removes_registered_environment_and_running_x_is_busy() {
     // A ready marker is not enough to accept a cache hit: deleting the
     // projection must make the next run reproject the cached environment.
     fs::remove_file(ruff_root.join(".venv")).unwrap();
-    ok(
-        tog_home(
-            &bin,
-            &project,
-            &store,
-            &home,
-            &["x", "py:ruff", "--version"],
-        ),
+    assert_ok(
+        tog_at(&project, &home, &store, &["x", "py:ruff", "--version"]),
         "repair missing x projection",
     );
     assert!(ruff_root.join(".venv").is_symlink());
 
-    let roots = ok(
-        tog_home(&bin, &project, &store, &home, &["store", "roots"]),
+    let roots = assert_ok(
+        tog_at(&project, &home, &store, &["store", "roots"]),
         "x root registration",
     );
     assert!(roots_listing(&roots)
         .iter()
         .any(|(_, path)| Path::new(path) == ruff_canonical));
 
-    let cleaned = ok(
-        tog_home(&bin, &project, &store, &home, &["x", "--clean", "py:ruff"]),
+    let cleaned = assert_ok(
+        tog_at(&project, &home, &store, &["x", "--clean", "py:ruff"]),
         "clean x ruff",
     );
     assert!(cleaned.contains("removed x environment"), "{cleaned}");
@@ -449,8 +347,8 @@ fn x_clean_removes_registered_environment_and_running_x_is_busy() {
         "cleanup left {} behind",
         ruff_lock.display()
     );
-    let roots = ok(
-        tog_home(&bin, &project, &store, &home, &["store", "roots"]),
+    let roots = assert_ok(
+        tog_at(&project, &home, &store, &["store", "roots"]),
         "removed x root registration",
     );
     assert!(!roots_listing(&roots)
@@ -464,8 +362,8 @@ fn x_clean_removes_registered_environment_and_running_x_is_busy() {
         .unwrap()
         .set_modified(SystemTime::now() - Duration::from_secs(11 * 60))
         .unwrap();
-    ok(
-        tog_home(&bin, &project, &store, &home, &["gc", "--keep-days", "0"]),
+    assert_ok(
+        tog_at(&project, &home, &store, &["gc", "--keep-days", "0"]),
         "gc after x clean",
     );
     assert!(
@@ -475,12 +373,11 @@ fn x_clean_removes_registered_environment_and_running_x_is_busy() {
 
     // Prewarm pytest so the busy process reaches the test body quickly and
     // the readiness handshake below tests lock inheritance, not PyPI latency.
-    ok(
-        tog_home(
-            &bin,
+    assert_ok(
+        tog_at(
             &project,
-            &store,
             &home,
+            &store,
             &["x", "--py", "pytest", "--version"],
         ),
         "prewarm x pytest",
@@ -503,10 +400,7 @@ fn x_clean_removes_registered_environment_and_running_x_is_busy() {
     )
     .unwrap();
     let running = ChildGuard(Some(
-        Command::new(&bin)
-            .current_dir(&project)
-            .env("TOG_STORE", &store)
-            .env("HOME", &home)
+        command(&project, &home, &store)
             .env("TOG_TEST_READY", &ready)
             .env("TOG_TEST_RELEASE", &release)
             .args(["x", "--py", "pytest", "-q", "test_sleep.py"])
@@ -521,7 +415,7 @@ fn x_clean_removes_registered_environment_and_running_x_is_busy() {
         ready.is_file(),
         "pytest did not reach the readiness handshake"
     );
-    let busy = tog_home(&bin, &project, &store, &home, &["x", "--clean", "pytest"]);
+    let busy = tog_at(&project, &home, &store, &["x", "--clean", "pytest"]);
     assert_eq!(busy.status.code(), Some(0), "clean while busy failed");
     let busy_text = String::from_utf8_lossy(&busy.stdout);
     assert!(
@@ -538,8 +432,8 @@ fn x_clean_removes_registered_environment_and_running_x_is_busy() {
         String::from_utf8_lossy(&child.stderr)
     );
 
-    let cleaned = ok(
-        tog_home(&bin, &project, &store, &home, &["x", "--clean", "pytest"]),
+    let cleaned = assert_ok(
+        tog_at(&project, &home, &store, &["x", "--clean", "pytest"]),
         "clean pytest after exit",
     );
     assert!(cleaned.contains("removed x environment"), "{cleaned}");
@@ -554,13 +448,12 @@ fn x_clean_removes_registered_environment_and_running_x_is_busy() {
 #[test]
 #[ignore]
 fn x_runs_an_npm_tool_on_the_store_node_and_cleans_it() {
-    let temp = TempDir::new();
+    let temp = TempDir::new("gc-e2e");
     let store = temp.0.join("store");
     let home = temp.0.join("home");
     let project = temp.0.join("project");
     fs::create_dir_all(&home).unwrap();
     fs::create_dir_all(&project).unwrap();
-    let bin = PathBuf::from(env!("CARGO_BIN_EXE_tog"));
     // `semver` is a dependency-free package whose bin is a
     // `#!/usr/bin/env node` script. tog itself needs the system PATH (tar
     // shells out to gzip), so the inherited PATH leads with a decoy `node`
@@ -579,14 +472,8 @@ fn x_runs_an_npm_tool_on_the_store_node_and_cleans_it() {
     }
     let path = format!("{}:/usr/bin:/bin", decoy.display());
     let run = || {
-        Command::new(&bin)
-            .current_dir(&project)
-            .env("TOG_STORE", &store)
-            .env("HOME", &home)
+        command(&project, &home, &store)
             .env("PATH", &path)
-            .env_remove("TOG_POLICY")
-            .env_remove("TOG_STRICT")
-            .env("NO_COLOR", "1")
             .args(["x", "npm:semver@7.6.3", "1.2.3", "-r", ">=1"])
             .output()
             .unwrap()
@@ -594,7 +481,7 @@ fn x_runs_an_npm_tool_on_the_store_node_and_cleans_it() {
 
     let first = run();
     let first_stderr = String::from_utf8_lossy(&first.stderr).into_owned();
-    let stdout = ok(first, "first x semver");
+    let stdout = assert_ok(first, "first x semver");
     assert!(first_stderr.contains("resolving"), "{first_stderr}");
     assert_eq!(stdout.trim(), "1.2.3");
 
@@ -612,22 +499,16 @@ fn x_runs_an_npm_tool_on_the_store_node_and_cleans_it() {
     // A cache hit resolves nothing.
     let second = run();
     let stderr = String::from_utf8_lossy(&second.stderr).into_owned();
-    assert_eq!(ok(second, "cached x semver").trim(), "1.2.3");
+    assert_eq!(assert_ok(second, "cached x semver").trim(), "1.2.3");
     assert!(!stderr.contains("resolving"), "{stderr}");
 
     // A deleted projection is reprojected, not trusted.
     fs::remove_file(root.join("node_modules")).unwrap();
-    assert_eq!(ok(run(), "repair x semver").trim(), "1.2.3");
+    assert_eq!(assert_ok(run(), "repair x semver").trim(), "1.2.3");
     assert!(root.join("node_modules").is_symlink());
 
-    let cleaned = ok(
-        tog_home(
-            &bin,
-            &project,
-            &store,
-            &home,
-            &["x", "--clean", "npm:semver"],
-        ),
+    let cleaned = assert_ok(
+        tog_at(&project, &home, &store, &["x", "--clean", "npm:semver"]),
         "clean x semver",
     );
     assert!(cleaned.contains("removed x environment"), "{cleaned}");

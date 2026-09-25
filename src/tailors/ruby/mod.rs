@@ -1199,30 +1199,8 @@ mod tests {
         }
     }
     use super::*;
+    use crate::kernel::testutil::TempDir;
     use std::os::unix::fs::{symlink, PermissionsExt};
-
-    struct TempDir(PathBuf);
-
-    impl TempDir {
-        fn new() -> Self {
-            let path = std::env::temp_dir().join(format!(
-                "tog-ruby-unit-{}-{}",
-                std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
-            ));
-            fs::create_dir_all(&path).unwrap();
-            Self(path)
-        }
-    }
-
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = crate::kernel::store::remove_tree(&self.0);
-        }
-    }
 
     #[test]
     fn ruby_pins_cover_supported_platforms() {

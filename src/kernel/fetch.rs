@@ -669,6 +669,7 @@ pub(crate) fn download_verified_digest_held(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::kernel::testutil::TempDir;
     use std::time::{Duration, SystemTime};
 
     #[test]
@@ -810,20 +811,12 @@ mod tests {
 
     #[test]
     fn sha1_integrity_accepts_and_rejects_at_verification() {
-        let root = std::env::temp_dir().join(format!(
-            "tog-fetch-test-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let scratch = TempDir::named("fetch-test");
+        let root = scratch.0.clone();
         for sub in ["objects", "meta", "cache/sha256", "cache/sha1", "tmp"] {
             fs::create_dir_all(root.join(sub)).unwrap();
         }
-        let store = Store {
-            root: root.canonicalize().unwrap(),
-        };
+        let store = Store { root: root.clone() };
         let activity = &store
             .activity(crate::kernel::activity::ActivityMode::Shared)
             .unwrap();
@@ -836,25 +829,16 @@ mod tests {
         let wrong = Digest::from_sri("sha1-AAAAAAAAAAAAAAAAAAAAAAAAAAA=").unwrap();
         let error = download_verified_digest(&store, activity, &url, &wrong).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn cache_lease_refreshes_mtime_and_blocks_gc() {
-        let root = std::env::temp_dir().join(format!(
-            "tog-fetch-lease-test-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let scratch = TempDir::named("fetch-lease-test");
+        let root = scratch.0.clone();
         for sub in ["objects", "meta", "cache/sha256", "tmp"] {
             fs::create_dir_all(root.join(sub)).unwrap();
         }
-        let store = Store {
-            root: root.canonicalize().unwrap(),
-        };
+        let store = Store { root: root.clone() };
         let activity = &store
             .activity(crate::kernel::activity::ActivityMode::Shared)
             .unwrap();
@@ -905,6 +889,5 @@ mod tests {
             released,
             "the gc lock was not released when the lease was dropped"
         );
-        let _ = fs::remove_dir_all(root);
     }
 }

@@ -2089,28 +2089,7 @@ mod tests {
     const LINUX: Platform = Platform::X86_64UnknownLinuxGnu;
     const DARWIN: Platform = Platform::Aarch64AppleDarwin;
 
-    struct TempDir(PathBuf);
-
-    impl TempDir {
-        fn new(tag: &str) -> Self {
-            let path = std::env::temp_dir().join(format!(
-                "tog-elixir-{tag}-{}-{}",
-                std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
-            ));
-            fs::create_dir_all(&path).unwrap();
-            Self(path.canonicalize().unwrap())
-        }
-    }
-
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = crate::kernel::store::remove_tree(&self.0);
-        }
-    }
+    use crate::kernel::testutil::TempDir;
 
     // ---- pins / identity / fingerprint -----------------------------------
 
@@ -2250,7 +2229,7 @@ mod tests {
     fn both_platforms_extract_root_level_trees_without_strip() {
         assert_eq!(otp_strip_components(DARWIN), 0);
         assert_eq!(otp_strip_components(LINUX), 0);
-        let temp = TempDir::new("extract");
+        let temp = TempDir::named("extract");
         // Linux-shaped: uninstalled tree.
         let linux_tree = temp.0.join("linux-tree");
         fs::create_dir_all(linux_tree.join("erts-17.0.5/bin")).unwrap();
@@ -2396,7 +2375,7 @@ exit 0
     }
 
     fn fixture(tag: &str, install_script: &str) -> Fixture {
-        let temp = TempDir::new(tag);
+        let temp = TempDir::named(tag);
         let store = temp.0.join("store root");
         let otp_root = store.join("tmp/stage-1/otp");
         let scratch = store.join("tmp/stage-2");
@@ -2840,7 +2819,7 @@ exit 0
             .unwrap_or_else(|error| error.into_inner());
         let _attribution_lock = crate::kernel::policy::attribution_test_lock();
         let mut attribution = crate::kernel::policy::Attribution::open("elixir").unwrap();
-        let temp = TempDir::new("closure-refs");
+        let temp = TempDir::named("closure-refs");
         let store_root = temp.0.join("store");
         for sub in ["objects", "meta", "cache/sha256", "tmp", "roots", "forests"] {
             fs::create_dir_all(store_root.join(sub)).unwrap();
@@ -2923,7 +2902,7 @@ exit 0
     #[test]
     fn held_root_reads_the_original_project_after_a_swap() {
         use crate::tailors::Tailor as _;
-        let temp = TempDir::new("held-root");
+        let temp = TempDir::named("held-root");
         let project = temp.0.join("app");
         fs::create_dir_all(&project).unwrap();
         fs::write(project.join("mix.exs"), "defmodule App.MixProject do end\n").unwrap();

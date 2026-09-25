@@ -502,36 +502,11 @@ fn set_mode(_path: &Path, _mode: u32) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::env;
+    use crate::kernel::testutil::TempDir;
     use std::io::Write;
     use std::path::PathBuf;
-    use std::time::{SystemTime, UNIX_EPOCH};
     use zip::write::SimpleFileOptions;
     use zip::ZipWriter;
-
-    struct TempDir(PathBuf);
-
-    impl TempDir {
-        fn new() -> Self {
-            let suffix = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos();
-            let path = env::temp_dir().join(format!("tog-wheel-{}-{suffix}", std::process::id()));
-            fs::create_dir_all(&path).unwrap();
-            Self(path)
-        }
-
-        fn path(&self) -> &Path {
-            &self.0
-        }
-    }
-
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
 
     fn write_wheel(path: &Path, entries: &[(&str, &[u8])]) {
         let file = fs::File::create(path).unwrap();
@@ -547,12 +522,12 @@ mod tests {
     #[test]
     fn installs_files_scripts_and_entry_points() {
         let temp = TempDir::new();
-        let site = temp.path().join("lib/python3.12/site-packages");
-        let bin = temp.path().join("bin");
+        let site = temp.0.join("lib/python3.12/site-packages");
+        let bin = temp.0.join("bin");
         fs::create_dir_all(&site).unwrap();
         fs::create_dir_all(&bin).unwrap();
         let python = bin.join("python");
-        let wheel = temp.path().join("demo.whl");
+        let wheel = temp.0.join("demo.whl");
         let entry_points = b"# comment\n[console_scripts]\ntool = demo:main.sub [extra]\n[gui_scripts]\ngui = demo:gui\n";
         write_wheel(
             &wheel,
@@ -583,7 +558,7 @@ mod tests {
         );
         assert_eq!(fs::read(site.join("pure.py")).unwrap(), b"pure = True\n");
         assert_eq!(
-            fs::read(temp.path().join("share/demo.txt")).unwrap(),
+            fs::read(temp.0.join("share/demo.txt")).unwrap(),
             b"shared\n"
         );
         assert_eq!(
@@ -654,11 +629,11 @@ mod tests {
     #[test]
     fn rejects_zip_slip_entry() {
         let temp = TempDir::new();
-        let site = temp.path().join("site");
-        let bin = temp.path().join("bin");
+        let site = temp.0.join("site");
+        let bin = temp.0.join("bin");
         fs::create_dir_all(&site).unwrap();
         fs::create_dir_all(&bin).unwrap();
-        let wheel = temp.path().join("bad.whl");
+        let wheel = temp.0.join("bad.whl");
         write_wheel(&wheel, &[("../escaped.txt", b"nope")]);
 
         let error = install_wheel(
@@ -671,7 +646,7 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("../escaped.txt"));
-        assert!(!temp.path().join("escaped.txt").exists());
+        assert!(!temp.0.join("escaped.txt").exists());
     }
 
     #[test]
@@ -679,12 +654,12 @@ mod tests {
         let _attribution_lock = crate::kernel::policy::exception_guard();
         let _attribution = crate::kernel::policy::Attribution::open("python").unwrap();
         let temp = TempDir::new();
-        let site = temp.path().join("site");
-        let bin = temp.path().join("bin");
+        let site = temp.0.join("site");
+        let bin = temp.0.join("bin");
         fs::create_dir_all(&site).unwrap();
         fs::create_dir_all(&bin).unwrap();
-        let first = temp.path().join("a-1.0.whl");
-        let second = temp.path().join("b-1.0.whl");
+        let first = temp.0.join("a-1.0.whl");
+        let second = temp.0.join("b-1.0.whl");
         write_wheel(
             &first,
             &[("shared.py", b"first\n"), ("a-1.0.dist-info/RECORD", b"")],
@@ -733,11 +708,11 @@ mod tests {
     #[test]
     fn installs_headers_in_venv_include_site() {
         let temp = TempDir::new();
-        let site = temp.path().join("lib/python3.12/site-packages");
-        let bin = temp.path().join("bin");
+        let site = temp.0.join("lib/python3.12/site-packages");
+        let bin = temp.0.join("bin");
         fs::create_dir_all(&site).unwrap();
         fs::create_dir_all(&bin).unwrap();
-        let wheel = temp.path().join("demo-1.0.whl");
+        let wheel = temp.0.join("demo-1.0.whl");
         write_wheel(
             &wheel,
             &[
@@ -757,7 +732,7 @@ mod tests {
         )
         .unwrap();
 
-        let headers = temp.path().join("include/site/python3.12/demo");
+        let headers = temp.0.join("include/site/python3.12/demo");
         assert_eq!(
             fs::read(headers.join("demo.h")).unwrap(),
             b"#define DEMO 1\n"
@@ -771,11 +746,11 @@ mod tests {
     #[test]
     fn headers_preserve_underscore_in_distribution_name() {
         let temp = TempDir::new();
-        let site = temp.path().join("lib/python3.12/site-packages");
-        let bin = temp.path().join("bin");
+        let site = temp.0.join("lib/python3.12/site-packages");
+        let bin = temp.0.join("bin");
         fs::create_dir_all(&site).unwrap();
         fs::create_dir_all(&bin).unwrap();
-        let wheel = temp.path().join("foo_bar-1.0.whl");
+        let wheel = temp.0.join("foo_bar-1.0.whl");
         write_wheel(
             &wheel,
             &[
@@ -795,11 +770,11 @@ mod tests {
         .unwrap();
 
         assert!(temp
-            .path()
+            .0
             .join("include/site/python3.12/foo_bar/foo.h")
             .is_file());
         assert!(!temp
-            .path()
+            .0
             .join("include/site/python3.12/foo-bar/foo.h")
             .exists());
     }
@@ -807,8 +782,8 @@ mod tests {
     #[test]
     fn rejects_absolute_and_escaping_data_destinations() {
         let temp = TempDir::new();
-        let site = temp.path().join("lib/python3.12/site-packages");
-        let bin = temp.path().join("bin");
+        let site = temp.0.join("lib/python3.12/site-packages");
+        let bin = temp.0.join("bin");
         fs::create_dir_all(&site).unwrap();
         fs::create_dir_all(&bin).unwrap();
 
@@ -816,7 +791,7 @@ mod tests {
             ("absolute", "demo-1.0.data/data//outside.txt"),
             ("escaping", "demo-1.0.data/data/sub/../../outside.txt"),
         ] {
-            let wheel = temp.path().join(format!("bad-{index}.whl"));
+            let wheel = temp.0.join(format!("bad-{index}.whl"));
             write_wheel(
                 &wheel,
                 &[(data_entry, b"nope"), ("demo-1.0.dist-info/RECORD", b"")],
@@ -832,19 +807,19 @@ mod tests {
             )
             .unwrap_err();
             assert!(error.to_string().contains("unsafe zip entry"), "{error}");
-            assert!(!temp.path().join("outside.txt").exists());
+            assert!(!temp.0.join("outside.txt").exists());
         }
     }
 
     #[test]
     fn rejects_wheels_without_exactly_one_dist_info() {
         let temp = TempDir::new();
-        let site = temp.path().join("lib/python3.12/site-packages");
-        let bin = temp.path().join("bin");
+        let site = temp.0.join("lib/python3.12/site-packages");
+        let bin = temp.0.join("bin");
         fs::create_dir_all(&site).unwrap();
         fs::create_dir_all(&bin).unwrap();
 
-        let missing = temp.path().join("missing.whl");
+        let missing = temp.0.join("missing.whl");
         write_wheel(&missing, &[("demo/__init__.py", b"value = 1\n")]);
         let error = install_wheel(
             &missing,
@@ -863,7 +838,7 @@ mod tests {
             "{error}"
         );
 
-        let doubled = temp.path().join("doubled.whl");
+        let doubled = temp.0.join("doubled.whl");
         write_wheel(
             &doubled,
             &[
@@ -890,11 +865,11 @@ mod tests {
     #[test]
     fn rejects_unsupported_data_scheme() {
         let temp = TempDir::new();
-        let site = temp.path().join("lib/python3.12/site-packages");
-        let bin = temp.path().join("bin");
+        let site = temp.0.join("lib/python3.12/site-packages");
+        let bin = temp.0.join("bin");
         fs::create_dir_all(&site).unwrap();
         fs::create_dir_all(&bin).unwrap();
-        let wheel = temp.path().join("demo-1.0.whl");
+        let wheel = temp.0.join("demo-1.0.whl");
         write_wheel(
             &wheel,
             &[
@@ -922,7 +897,7 @@ mod tests {
     #[test]
     fn reports_unclaimed_and_same_wheel_collisions() {
         let temp = TempDir::new();
-        let wheel = temp.path().join("demo-1.0.whl");
+        let wheel = temp.0.join("demo-1.0.whl");
         write_wheel(
             &wheel,
             &[
@@ -938,8 +913,8 @@ mod tests {
         // Each phase gets a pristine environment: install_wheel writes
         // entries in archive order and stops at the first collision.
         let fresh = |tag: &str| {
-            let site = temp.path().join(tag).join("lib/python3.12/site-packages");
-            let bin = temp.path().join(tag).join("bin");
+            let site = temp.0.join(tag).join("lib/python3.12/site-packages");
+            let bin = temp.0.join(tag).join("bin");
             fs::create_dir_all(&site).unwrap();
             fs::create_dir_all(&bin).unwrap();
             (site, bin)

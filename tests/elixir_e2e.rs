@@ -15,63 +15,11 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+mod common;
+
+use common::{assert_ok, copy_tree, fixture, tog, TempDir};
+
 const DARWIN_FINGERPRINT: &str = "c35290f692496d51";
-
-struct TempDir(PathBuf);
-
-impl TempDir {
-    fn new() -> Self {
-        let path = std::env::temp_dir().join(format!(
-            "tog-elixir-e2e-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&path).unwrap();
-        Self(path)
-    }
-}
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
-fn copy_tree(src: &Path, dest: &Path) {
-    std::fs::create_dir_all(dest).unwrap();
-    for entry in std::fs::read_dir(src).unwrap() {
-        let entry = entry.unwrap();
-        let from = entry.path();
-        let to = dest.join(entry.file_name());
-        if from.is_dir() {
-            copy_tree(&from, &to);
-        } else {
-            std::fs::copy(from, to).unwrap();
-        }
-    }
-}
-
-fn tog(bin: &Path, project: &Path, store: &Path, args: &[&str]) -> Output {
-    Command::new(bin)
-        .current_dir(project)
-        .env("TOG_STORE", store)
-        .args(args)
-        .output()
-        .unwrap()
-}
-
-fn assert_ok(output: Output, label: &str) -> String {
-    assert!(
-        output.status.success(),
-        "{label} failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8(output.stdout).unwrap()
-}
 
 /// Run a binary from the committed object with a cleared environment:
 /// PATH holds only the object's own bin dirs plus the system dirs, so no
@@ -130,20 +78,16 @@ fn remove_tree(path: &Path) {
 #[test]
 #[ignore]
 fn elixir_sync_sandboxed_build_and_run() {
-    let temp = TempDir::new();
+    let temp = TempDir::new("elixir-e2e");
     let project = temp.0.join("elixir-hello");
-    copy_tree(
-        &PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/elixir-hello"),
-        &project,
-    );
+    copy_tree(&fixture("elixir-hello"), &project);
     let store = temp.0.join("store");
     let home = temp.0.join("home");
     std::fs::create_dir_all(&home).unwrap();
-    let binary = PathBuf::from(env!("CARGO_BIN_EXE_tog"));
 
     // Realize the composite BEAM object; everything below uses only its
     // committed path (read from the closure tog wrote).
-    assert_ok(tog(&binary, &project, &store, &["sync"]), "sync");
+    assert_ok(tog(&project, &temp.0, &["sync"]), "sync");
     let closure = closure_body(&project);
     let beam = PathBuf::from(closure["beam_object"]["path"].as_str().unwrap());
     let fingerprint = closure["beam_fingerprint"].as_str().unwrap().to_string();
@@ -198,10 +142,7 @@ fn elixir_sync_sandboxed_build_and_run() {
 
     // Elixir side, through `tog run` (its PATH puts the object first).
     let ex = assert_ok(
-        tog(
-            &binary,
-            &project,
-            &store,
+        tog(&project, &temp.0,
             &[
                 "run",
                 "elixir",
@@ -229,7 +170,7 @@ fn elixir_sync_sandboxed_build_and_run() {
     // rebar3, jason via mix), network denied; then the app probe WITHOUT
     // compiling, so a failed sandboxed build cannot be repaired by this
     // unsandboxed run.
-    assert_ok(tog(&binary, &project, &store, &["build"]), "build");
+    assert_ok(tog(&project, &temp.0, &["build"]), "build");
     let build_dir = project.join(format!("_build/tog-{fingerprint}"));
     assert!(
         build_dir.join("dev/lib/ex_real/ebin").is_dir(),
@@ -247,7 +188,7 @@ fn elixir_sync_sandboxed_build_and_run() {
         "-e",
         "IO.puts(\"e2e: \" <> ExReal.hello())",
     ];
-    let out = assert_ok(tog(&binary, &project, &store, &probe), "run");
+    let out = assert_ok(tog(&project, &temp.0, &probe), "run");
     assert!(out.contains("e2e: {\"beam\":\"ok\"}"), "{out}");
 
     // Drop the qualified build output and refresh the projection (removes
@@ -255,10 +196,7 @@ fn elixir_sync_sandboxed_build_and_run() {
     // objects, rerun.
     remove_tree(&build_dir);
     assert!(!build_dir.exists());
-    assert_ok(
-        tog(&binary, &project, &store, &["sync", "--fresh"]),
-        "sync --fresh",
-    );
+    assert_ok(tog(&project, &temp.0, &["sync", "--fresh"]), "sync --fresh");
     let closure_again = closure_body(&project);
     assert_eq!(
         closure_again["beam_object"]["path"],
@@ -268,11 +206,11 @@ fn elixir_sync_sandboxed_build_and_run() {
         closure_again["deps_object"]["path"],
         closure["deps_object"]["path"]
     );
-    assert_ok(tog(&binary, &project, &store, &["build"]), "rebuild");
-    let out = assert_ok(tog(&binary, &project, &store, &probe), "rerun");
+    assert_ok(tog(&project, &temp.0, &["build"]), "rebuild");
+    let out = assert_ok(tog(&project, &temp.0, &probe), "rerun");
     assert!(out.contains("e2e: {\"beam\":\"ok\"}"), "{out}");
     let vsn = assert_ok(
-        tog(&binary, &project, &store, &["run", "elixir", "--version"]),
+        tog(&project, &temp.0, &["run", "elixir", "--version"]),
         "elixir version",
     );
     assert!(vsn.contains("1.20.4"), "{vsn}");

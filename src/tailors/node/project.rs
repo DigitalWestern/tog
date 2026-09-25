@@ -866,15 +866,15 @@ pub(super) fn normalize_modes(path: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::kernel::testutil::TempDir;
 
     /// A link nested under a registry package would be created through the
     /// forest's symlink into that package's store object. Projection refuses
     /// it by name and leaves the object untouched; a top-level link is fine.
     #[test]
     fn workspace_links_are_never_created_through_a_package_symlink() {
-        let root =
-            std::env::temp_dir().join(format!("tog-link-through-package-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
+        let scratch = TempDir::named("link-through-package");
+        let root = scratch.0.clone();
         let project = root.join("project");
         let forest = root.join("forest/node_modules");
         let object = root.join("store/objects/parent");
@@ -919,7 +919,6 @@ mod tests {
         )
         .unwrap();
         assert!(forest.join("a").symlink_metadata().unwrap().is_symlink());
-        let _ = fs::remove_dir_all(root);
     }
 }
 

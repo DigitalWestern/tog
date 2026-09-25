@@ -1,39 +1,22 @@
-//! Linux-first native-library coverage. Heavy and networked; run with:
-//! `TOG_STORE=$HOME/scratch/tmp/nx12-store TMPDIR=$HOME/scratch/tmp
-//! TOG_SANDBOX_TESTS=required cargo test --test native_libs -- --ignored
+//! Linux-first native-library coverage. Heavy and networked, and it opens
+//! the store in-process, so it needs a throwaway one named up front:
+//! `TOG_STORE=<throwaway-store> TMPDIR=$HOME/scratch/tmp
+//! TOG_SANDBOX_TESTS=required cargo test --test native_libs -- --ignored`
 
 // Tests spawn fixtures and take leases freely (see clippy.toml).
 #![allow(clippy::disallowed_methods)]
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::Command;
+
 use tog::kernel::platform::Platform;
 use tog::kernel::provider::nativelibs::{compose_env, ensure_native_libs, size_bytes};
 use tog::kernel::sandbox::{run_build_spec, BuildSpec};
 use tog::kernel::store::Store;
 
-struct TempDir(PathBuf);
+mod common;
 
-impl TempDir {
-    fn new() -> Self {
-        let root = std::env::temp_dir().join(format!(
-            "tog-native-e2e-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&root).unwrap();
-        Self(root)
-    }
-}
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
+use common::{assert_ok, fixture, tog_at, TempDir};
 
 fn required_sandbox_tests() -> bool {
     matches!(std::env::var_os("TOG_SANDBOX_TESTS"), Some(value) if !value.is_empty())
@@ -61,16 +44,6 @@ fn linux_ready() -> bool {
         }
     }
     true
-}
-
-fn assert_ok(output: Output, label: &str) -> String {
-    assert!(
-        output.status.success(),
-        "{label} failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8(output.stdout).unwrap()
 }
 
 fn shell_quote(path: &Path) -> String {
@@ -108,7 +81,7 @@ fn linux_native_libs_pkg_config_sdist_and_runtime() {
         bytes as f64 / (1024.0 * 1024.0)
     );
 
-    let temp = TempDir::new();
+    let temp = TempDir::new("native-e2e");
     let pkg_scratch = temp.0.join("pkg-config-scratch");
     std::fs::create_dir_all(&pkg_scratch).unwrap();
     let version_file = pkg_scratch.join("pango-version");
@@ -255,18 +228,11 @@ pub unsafe extern "C" fn tog_pango_version_is_pinned() -> bool {
     let project = temp.0.join("manimpango");
     std::fs::create_dir_all(&project).unwrap();
     std::fs::copy(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/native-libs/requirements.txt"),
+        fixture("native-libs/requirements.txt"),
         project.join("requirements.txt"),
     )
     .unwrap();
-    let tog_bin = PathBuf::from(env!("CARGO_BIN_EXE_tog"));
-    let sync = Command::new(&tog_bin)
-        .current_dir(&project)
-        .env("TOG_STORE", &store_path)
-        .arg("sync")
-        .output()
-        .unwrap();
+    let sync = tog_at(&project, &temp.0, &store_path, &["sync"]);
     assert_ok(sync, "manimpango sync");
     let plan: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(project.join(".tog/plan.json")).unwrap())
@@ -285,17 +251,17 @@ pub unsafe extern "C" fn tog_pango_version_is_pinned() -> bool {
     .unwrap();
     assert_eq!(closure["body"]["native_libs"]["id"], native.id);
 
-    let run = Command::new(&tog_bin)
-        .current_dir(&project)
-        .env("TOG_STORE", &store_path)
-        .args([
+    let run = tog_at(
+        &project,
+        &temp.0,
+        &store_path,
+        &[
             "run",
             "python",
             "-c",
             "import manimpango; print('manimpango ok')",
-        ])
-        .output()
-        .unwrap();
+        ],
+    );
     let output = assert_ok(run, "tog run python import manimpango");
     assert!(
         output.contains("manimpango ok"),

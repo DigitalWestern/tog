@@ -13,8 +13,12 @@ use std::fs;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::Output;
 use std::time::{Duration, SystemTime};
+
+mod common;
+
+use common::{command, TempDir};
 
 /// The one hand-written object. Its id must be the real hash of its identity:
 /// the sweep's metadata reader refuses any record whose identity hashes to a
@@ -31,37 +35,16 @@ fn protected_identity() -> tog::kernel::types::Identity {
 }
 
 struct Fixture {
-    base: PathBuf,
+    temp: TempDir,
     store: PathBuf,
     protected: String,
-}
-
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        let _ = tog::kernel::store::remove_tree(&self.base);
-    }
 }
 
 impl Fixture {
     /// A store with one aged, referenced object and an initialized registry.
     fn new(label: &str) -> Self {
-        let base = std::env::var_os("TMPDIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(std::env::temp_dir)
-            .join(format!(
-                "tog-gc-roots-{label}-{}-{}",
-                std::process::id(),
-                SystemTime::now()
-                    .duration_since(SystemTime::UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
-            ));
-        fs::create_dir_all(&base).unwrap();
-        // tog records object paths under the store's canonicalized root
-        // and compares them exactly; on macOS the temp dir sits under /var,
-        // a symlink to /private/var.
-        let base = base.canonicalize().unwrap();
-        let store = base.join("store");
+        let temp = TempDir::new(&format!("gc-roots-{label}"));
+        let store = temp.0.join("store");
         for sub in ["objects", "meta", "cache/sha256", "tmp", "roots"] {
             fs::create_dir_all(store.join(sub)).unwrap();
         }
@@ -88,10 +71,16 @@ impl Fixture {
         .unwrap();
         age(&object);
         Self {
-            base,
+            temp,
             store,
             protected,
         }
+    }
+
+    /// The scratch root: the binary's cwd and HOME, and the parent of the
+    /// store and every project.
+    fn base(&self) -> &Path {
+        self.temp.path()
     }
 
     fn object(&self) -> PathBuf {
@@ -104,7 +93,7 @@ impl Fixture {
 
     /// A project directory; `live` gives it a closure holding the object.
     fn project(&self, name: &str, live: bool) -> PathBuf {
-        let project = self.base.join(name);
+        let project = self.base().join(name);
         self.make_project(&project, live);
         project
     }
@@ -164,15 +153,11 @@ impl Fixture {
     }
 
     fn run<S: AsRef<OsStr>>(&self, args: &[S]) -> Output {
-        self.run_in(self.base.clone(), args)
+        self.run_in(self.base(), args)
     }
 
     fn run_in<S: AsRef<OsStr>, P: AsRef<Path>>(&self, cwd: P, args: &[S]) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_tog"))
-            .current_dir(cwd)
-            .env("TOG_STORE", &self.store)
-            .env("HOME", &self.base)
-            .env("NO_COLOR", "1")
+        command(cwd.as_ref(), self.base(), &self.store)
             .args(args)
             .output()
             .unwrap()
@@ -263,11 +248,11 @@ fn unreadable_records_block_the_sweep_instead_of_disappearing() {
         fs::remove_file(&record).unwrap();
         match shape {
             "symlink" => {
-                let saved = fixture.base.join("saved-record");
+                let saved = fixture.base().join("saved-record");
                 fs::write(&saved, format!("{}\n", project.display())).unwrap();
                 symlink(&saved, &record).unwrap();
             }
-            "dangling-symlink" => symlink(fixture.base.join("absent"), &record).unwrap(),
+            "dangling-symlink" => symlink(fixture.base().join("absent"), &record).unwrap(),
             "empty" => fs::write(&record, b"").unwrap(),
             "not-utf8" => fs::write(&record, b"\xff\n").unwrap(),
             "directory" => fs::create_dir(&record).unwrap(),
@@ -366,7 +351,7 @@ fn a_pathname_a_record_cannot_hold_exactly_is_refused() {
 #[test]
 fn a_pathname_that_is_not_utf8_is_refused() {
     let fixture = Fixture::new("lossy-path");
-    let mut raw = fixture.base.as_os_str().as_bytes().to_vec();
+    let mut raw = fixture.base().as_os_str().as_bytes().to_vec();
     raw.extend_from_slice(b"/project-\xff");
     let raw_project = PathBuf::from(OsString::from_vec(raw));
     match fs::create_dir_all(&raw_project) {
@@ -661,7 +646,7 @@ fn an_ambiguous_or_partly_unknown_request_changes_no_record() {
         let other = fixture.project("other", true);
         let before = fixture.record_snapshot();
 
-        let alias = fixture.base.join("alias");
+        let alias = fixture.base().join("alias");
         let args: Vec<OsString> = match shape {
             // Registering and forgetting one root in a single invocation is
             // ambiguous in either order, including through a symlink that
@@ -937,9 +922,9 @@ fn register_runs_no_project_code() {
     use std::os::unix::fs::PermissionsExt;
     let fixture = Fixture::new("register-no-code");
     let project = fixture.project("project", true);
-    let marker = fixture.base.join("ran");
+    let marker = fixture.base().join("ran");
     let script = format!("#!/bin/sh\necho \"$0\" >> {}\n", marker.display());
-    let fake_bin = fixture.base.join("bin");
+    let fake_bin = fixture.base().join("bin");
     fs::create_dir_all(&fake_bin).unwrap();
     for tool in [
         "sh", "bash", "python", "python3", "pip", "uv", "node", "npm", "npx", "pnpm", "yarn",
@@ -974,12 +959,8 @@ fn register_runs_no_project_code() {
         fs::write(project.join(name), contents).unwrap();
     }
 
-    let register = Command::new(env!("CARGO_BIN_EXE_tog"))
-        .current_dir(&project)
-        .env("TOG_STORE", &fixture.store)
-        .env("HOME", &fixture.base)
+    let register = command(&project, fixture.base(), &fixture.store)
         .env("PATH", &fake_bin)
-        .env("NO_COLOR", "1")
         .args([
             OsStr::new("gc"),
             OsStr::new("--register"),
@@ -1010,7 +991,7 @@ fn forget_registry_symlink_never_touches_its_target() {
         let other_key = fixture.record(&other);
         let target = match shape {
             "file" => {
-                let saved = fixture.base.join("saved-record");
+                let saved = fixture.base().join("saved-record");
                 fs::rename(&link, &saved).unwrap();
                 saved
             }

@@ -154,21 +154,12 @@ pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
             .find(|pin| pin.platform == platform)
             .expect("pinned uv for test platform"),
     );
-    let root = std::env::temp_dir().join(format!(
-        "tog-python-identity-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let fixture = crate::kernel::testutil::TempDir::named("python-identity");
     for sub in ["objects", "meta", "cache/sha256", "tmp"] {
-        fs::create_dir_all(root.join(sub)).expect("Python identity fixture store");
+        fs::create_dir_all(fixture.0.join(sub)).expect("Python identity fixture store");
     }
     let store = Store {
-        root: root
-            .canonicalize()
-            .expect("canonical Python identity fixture store"),
+        root: fixture.0.clone(),
     };
     let activity = &store
         .activity(crate::kernel::activity::ActivityMode::Shared)
@@ -239,7 +230,6 @@ pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
         // uses a Rust sdist whose Cargo.toml selects that path.
     }
     cases.extend(build::live_identity_cases(platform));
-    let _ = crate::kernel::store::remove_tree(&store.root);
     cases
 }
 

@@ -2208,9 +2208,9 @@ fn verify_corepack_hash(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::kernel::testutil::TempDir;
     use std::sync::mpsc;
     use std::thread;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn versions_and_bins() {
@@ -2429,14 +2429,8 @@ mod tests {
     #[test]
     fn an_npm_tool_keys_on_the_projects_gyp_python() {
         let platform = Platform::host().unwrap();
-        let base = std::env::temp_dir().join(format!(
-            "tog-x-gyp-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let temp = TempDir::named("x-gyp");
+        let base = &temp.0;
         let store_root = base.join("store");
         let locks_python = base.join("locks-python");
         let node_only = base.join("node-only");
@@ -2473,19 +2467,12 @@ mod tests {
             name(&locks_python, "node", "prettier"),
             name(&node_only, "node", "prettier")
         );
-        let _ = fs::remove_dir_all(&base);
     }
 
     #[test]
     fn shared_x_lock_blocks_nonblocking_cleanup_until_runner_exit() {
-        let base = std::env::temp_dir().join(format!(
-            "tog-x-lock-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let temp = TempDir::named("x-lock");
+        let base = &temp.0;
         let root = base.join("x").join("py-ruff-test");
         fs::create_dir_all(&root).unwrap();
         let shared = lock_x_root(&root, false, false)
@@ -2520,19 +2507,12 @@ mod tests {
             "exclusive lock stayed blocked for two seconds after the shared lock was dropped"
         );
         drop(exclusive);
-        fs::remove_dir_all(base).unwrap();
     }
 
     #[test]
     fn cleanup_lock_waits_for_runner_recreation() {
-        let base = std::env::temp_dir().join(format!(
-            "tog-x-lock-race-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let temp = TempDir::named("x-lock-race");
+        let base = &temp.0;
         let root = base.join("x").join("py-race-test");
         fs::create_dir_all(&root).unwrap();
         let cleanup = lock_x_root(&root, true, false)
@@ -2559,19 +2539,12 @@ mod tests {
             .expect("runner did not recreate the root after cleanup released its lock");
         runner.join().unwrap();
         assert!(root.join(".tog").is_dir());
-        fs::remove_dir_all(base).unwrap();
     }
 
     #[test]
     fn fd_relative_removal_does_not_follow_replaced_x_directory() {
-        let base = std::env::temp_dir().join(format!(
-            "tog-x-remove-fd-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let temp = TempDir::named("x-remove-fd");
+        let base = &temp.0;
         let x_dir = base.join("home/.tog/x");
         let root = x_dir.join("py-victim-test");
         let victim = base.join("victim");
@@ -2593,19 +2566,12 @@ mod tests {
         assert!(!root.join(".tog/nested/old").exists());
         drop(root_fd);
         drop(validated);
-        fs::remove_dir_all(base).unwrap();
     }
 
     #[test]
     fn dot_prefixed_entries_are_not_x_candidates() {
-        let base = std::env::temp_dir().join(format!(
-            "tog-x-lock-entry-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let temp = TempDir::named("x-lock-entry");
+        let base = &temp.0;
         let x_dir = base.join("home/.tog/x");
         let root = x_dir.join("py-active");
         fs::create_dir_all(root.join(".tog/closures")).unwrap();
@@ -2627,19 +2593,12 @@ mod tests {
             "the permanent lock directory was enumerated as an environment"
         );
         drop(shared);
-        fs::remove_dir_all(base).unwrap();
     }
 
     #[test]
     fn legacy_clean_matching_reads_exact_generated_package() {
-        let base = std::env::temp_dir().join(format!(
-            "tog-x-legacy-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let temp = TempDir::named("x-legacy");
+        let base = &temp.0;
         let exact = base.join("py-ruff-legacy");
         let similar = base.join("py-ruff-lsp-legacy");
         fs::create_dir_all(exact.join(".tog")).unwrap();
@@ -2660,19 +2619,12 @@ mod tests {
             old_root_matches(&unknown, &filter),
             CandidateMatch::Unrecoverable
         );
-        fs::remove_dir_all(base).unwrap();
     }
 
     #[test]
     fn clean_records_package_identity_not_executable_name() {
-        let base = std::env::temp_dir().join(format!(
-            "tog-x-record-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let temp = TempDir::named("x-record");
+        let base = &temp.0;
         let root = base.join("npm-scope-foo");
         fs::create_dir_all(root.join(".tog")).unwrap();
         write_x_request(&root, "node", "@scope/foo", None, "realizing").unwrap();
@@ -2707,22 +2659,12 @@ mod tests {
             },
             &from
         ));
-        fs::remove_dir_all(base).unwrap();
     }
 
     #[test]
     fn cleanup_finds_alias_registration_in_closure_store() {
-        // Closures record canonical object paths (Store::open canonicalizes
-        // its root), and originating_store compares them exactly; temp_dir()
-        // is a symlink alias on macOS (/var -> /private/var).
-        let base = std::env::temp_dir().canonicalize().unwrap().join(format!(
-            "tog-x-registry-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let temp = TempDir::named("x-registry");
+        let base = &temp.0;
         let x_dir = base.join("x");
         let root = x_dir.join("py-ruff-registry");
         let store = Store {
@@ -2769,37 +2711,18 @@ mod tests {
             }
         }
         assert!(store.roots().unwrap().is_empty());
-        fs::remove_dir_all(base).unwrap();
     }
 
     #[test]
     fn realizing_marker_makes_partial_root_a_cleanup_candidate() {
-        let base = std::env::temp_dir().join(format!(
-            "tog-x-partial-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let temp = TempDir::named("x-partial");
+        let base = &temp.0;
         let root = base.join("home/.tog/x/py-partial");
         ensure_x_metadata_dir(&root).unwrap();
         write_x_request(&root, "python", "ruff", None, "realizing").unwrap();
         let candidates = x_candidates(&base.join("home/.tog/x")).unwrap();
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].path, root.canonicalize().unwrap());
-        fs::remove_dir_all(base).unwrap();
-    }
-
-    fn temp_base(label: &str) -> PathBuf {
-        std::env::temp_dir().join(format!(
-            "tog-x-{label}-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ))
     }
 
     /// Prepare an environment root the way the runner does, so cleanup will
@@ -2815,7 +2738,8 @@ mod tests {
     /// just made.
     #[test]
     fn runner_and_cleanup_agree_about_a_symlinked_home() {
-        let base = temp_base("symlinked-home");
+        let temp = TempDir::named("x-symlinked-home");
+        let base = &temp.0;
         let real_home = base.join("volume/home");
         fs::create_dir_all(&real_home).unwrap();
         let home = base.join("home");
@@ -2841,14 +2765,14 @@ mod tests {
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].path, root.canonicalize().unwrap());
         drop(validated);
-        fs::remove_dir_all(base).unwrap();
     }
 
     /// The same contract for a symlinked `~/.tog` — "move the cache off
     /// the root disk".
     #[test]
     fn runner_and_cleanup_agree_about_a_symlinked_tog_directory() {
-        let base = temp_base("symlinked-tog");
+        let temp = TempDir::named("x-symlinked-tog");
+        let base = &temp.0;
         let real_tog = base.join("volume/tog");
         fs::create_dir_all(&real_tog).unwrap();
         let home = base.join("home");
@@ -2868,7 +2792,6 @@ mod tests {
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].path, root.canonicalize().unwrap());
         drop(validated);
-        fs::remove_dir_all(base).unwrap();
     }
 
     /// The final `x` component is where both commands stop following: the
@@ -2876,7 +2799,8 @@ mod tests {
     /// it, so neither can be pointed at a directory outside the home chain.
     #[test]
     fn runner_and_cleanup_both_refuse_a_symlinked_x_directory() {
-        let base = temp_base("symlinked-x");
+        let temp = TempDir::named("x-symlinked-x");
+        let base = &temp.0;
         let home = base.join("home");
         fs::create_dir_all(home.join(".tog")).unwrap();
         let elsewhere = base.join("elsewhere");
@@ -2897,7 +2821,6 @@ mod tests {
             "{cleanup}"
         );
         assert!(elsewhere.is_dir(), "the symlink target was touched");
-        fs::remove_dir_all(base).unwrap();
     }
 
     /// A relative `HOME` is still refused, by both commands, before anything
@@ -2914,7 +2837,8 @@ mod tests {
     /// nothing: it revalidates and locks the file the pathname names now.
     #[test]
     fn cleanup_unlinks_the_root_lock_and_a_waiter_relocks_the_new_file() {
-        let base = temp_base("lock-unlink");
+        let temp = TempDir::named("x-lock-unlink");
+        let base = &temp.0;
         let x_dir = base.join("home/.tog/x");
         let root = x_dir.join("py-unlink");
         fs::create_dir_all(&root).unwrap();
@@ -2964,7 +2888,6 @@ mod tests {
         // Unlinking twice is not an error: the file may already be gone.
         remove_x_root_lock_at(x_fd.as_raw_fd(), &name).unwrap();
         drop(x_fd);
-        fs::remove_dir_all(base).unwrap();
     }
 
     /// The pending-exception queue is shared, so a test that asserts on its
@@ -3026,13 +2949,14 @@ mod tests {
     fn ready_cache_hit_records_each_exception_once() {
         let _guard = exception_guard();
         let _attribution = policy::Attribution::open("python").unwrap();
-        let base = temp_base("ready-exceptions");
+        let temp = TempDir::named("x-ready-exceptions");
+        let base = &temp.0;
         let exception = serde_json::json!({
             "kind": policy::FILE_COLLISION,
             "subject": "ruff",
             "detail": "cached test exception"
         });
-        let (store, root, object) = ready_python_root(&base, &[exception]);
+        let (store, root, object) = ready_python_root(base, &[exception]);
         let activity = store
             .activity(crate::kernel::activity::ActivityMode::Shared)
             .unwrap();
@@ -3056,7 +2980,6 @@ mod tests {
         drop(activity);
         // The object is published read-only; make it removable again.
         fs::set_permissions(&object, fs::Permissions::from_mode(0o755)).unwrap();
-        fs::remove_dir_all(base).unwrap();
     }
 
     /// The cache check runs under the x-root lock, and GC takes the activity
@@ -3068,8 +2991,9 @@ mod tests {
     fn the_x_cache_check_takes_no_lease_under_the_x_root_lock() {
         let _guard = exception_guard();
         let _attribution = policy::Attribution::open("python").unwrap();
-        let base = temp_base("borrowed-lease");
-        let (store, root, object) = ready_python_root(&base, &[]);
+        let temp = TempDir::named("x-borrowed-lease");
+        let base = &temp.0;
+        let (store, root, object) = ready_python_root(base, &[]);
         let exclusive = store
             .activity(crate::kernel::activity::ActivityMode::Exclusive)
             .unwrap();
@@ -3088,14 +3012,14 @@ mod tests {
         drop(exclusive);
         let _ = policy::drain();
         fs::set_permissions(&object, fs::Permissions::from_mode(0o755)).unwrap();
-        fs::remove_dir_all(base).unwrap();
     }
 
     /// A run that considered a root and skipped it as unrecoverable has not
     /// found "nothing to clean": unrecoverable candidates count as matched.
     #[test]
     fn unrecoverable_candidates_count_as_matched() {
-        let base = temp_base("unrecoverable");
+        let temp = TempDir::named("x-unrecoverable");
+        let base = &temp.0;
         let root = base.join("home/.tog/x/mystery");
         fs::create_dir_all(root.join(".tog/closures")).unwrap();
         let filter = clean_filter(CleanRequest {
@@ -3111,7 +3035,6 @@ mod tests {
             CandidateMatch::Unrecoverable
         );
         assert_eq!(candidate_ecosystem(&candidates[0].path), None);
-        fs::remove_dir_all(base).unwrap();
     }
 
     /// `candidate_ecosystem` decides which environments the clean summary
@@ -3119,7 +3042,8 @@ mod tests {
     /// recovered legacy manifest, then the generated name prefix.
     #[test]
     fn candidate_ecosystem_reads_record_then_manifest_then_name() {
-        let base = temp_base("ecosystem");
+        let temp = TempDir::named("x-ecosystem");
+        let base = &temp.0;
         let recorded = base.join("py-recorded");
         ensure_x_metadata_dir(&recorded).unwrap();
         write_x_request(&recorded, "node", "prettier", None, "ready").unwrap();
@@ -3141,7 +3065,6 @@ mod tests {
         let unknown = base.join("mystery");
         fs::create_dir_all(unknown.join(".tog")).unwrap();
         assert_eq!(candidate_ecosystem(&unknown), None);
-        fs::remove_dir_all(base).unwrap();
     }
 
     #[test]
