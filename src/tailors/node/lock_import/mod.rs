@@ -1853,6 +1853,122 @@ dep@1.0.0:
             .any(|link| link.path == "node_modules/@fixture/lib" && link.target == "packages/lib"));
     }
 
+    /// A yarn.lock written before a manifest changed: every direct
+    /// dependency must name a selector the lock holds, and every lock entry
+    /// must be reachable from some manifest.
+    #[test]
+    fn yarn_refuses_a_lock_that_disagrees_with_a_manifest() {
+        let lock = format!(
+            r#"# yarn lockfile v1
+a@^1.0.0:
+  version "1.0.0"
+  resolved "https://registry.yarnpkg.com/a/-/a-1.0.0.tgz"
+  integrity {SRI}
+b@2.0.0:
+  version "2.0.0"
+  resolved "https://registry.yarnpkg.com/b/-/b-2.0.0.tgz"
+  integrity {SRI}
+"#
+        );
+        let plan = |package: &str, lib: Option<&str>| {
+            let dir = project();
+            if let Some(lib) = lib {
+                fs::write(dir.0.join("packages/lib/package.json"), lib).unwrap();
+            }
+            plan_yarn(
+                Platform::X86_64UnknownLinuxGnu,
+                &lock,
+                package,
+                &held(&dir.0),
+                node_version(),
+            )
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+        };
+        let stale = |manifest: &str, field: &str| {
+            Err(format!(
+                "{manifest} {field} disagree with yarn.lock; regenerate the lock (yarn install)"
+            ))
+        };
+        let fresh = r#"{"dependencies":{"a":"^1.0.0"},"devDependencies":{"b":"2.0.0"}}"#;
+        assert_eq!(plan(fresh, None), Ok(()));
+        assert_eq!(
+            plan(
+                r#"{"dependencies":{"a":"^1.0.0","left-pad":"^1.3.0"},"devDependencies":{"b":"2.0.0"}}"#,
+                None
+            ),
+            stale("package.json", "dependencies")
+        );
+        assert_eq!(
+            plan(
+                r#"{"dependencies":{"a":"^1.0.0"},"devDependencies":{"b":"^2.0.0"}}"#,
+                None
+            ),
+            stale("package.json", "devDependencies")
+        );
+        // An optional dependency is locked on every platform, so a missing
+        // one is a stale lock too, not a skipped package.
+        assert_eq!(
+            plan(
+                r#"{"dependencies":{"a":"^1.0.0"},"devDependencies":{"b":"2.0.0"},"optionalDependencies":{"c":"1"}}"#,
+                None
+            ),
+            stale("package.json", "optionalDependencies")
+        );
+        assert_eq!(
+            plan(r#"{"dependencies":{"a":"^1.0.0"}}"#, None),
+            Err(
+                "yarn.lock locks b@2.0.0, which no package.json depends on; \
+                 regenerate the lock (yarn install)"
+                    .to_string()
+            )
+        );
+
+        // A workspace member's own dependencies are checked under its path,
+        // and a member another manifest names is a link, not a lock entry.
+        let root = r#"{"name":"root","workspaces":["packages/*"],
+            "dependencies":{"a":"^1.0.0","lib":"^1.0.0"}}"#;
+        let lib = r#"{"name":"lib","version":"1.2.0","dependencies":{"b":"2.0.0"}}"#;
+        assert_eq!(plan(root, Some(lib)), Ok(()));
+        let edited =
+            r#"{"name":"lib","version":"1.2.0","dependencies":{"b":"2.0.0","left-pad":"^1.3.0"}}"#;
+        assert_eq!(
+            plan(root, Some(edited)),
+            stale("packages/lib/package.json", "dependencies")
+        );
+        let malformed = plan(root, Some("{")).unwrap_err();
+        assert!(
+            malformed.starts_with("Yarn workspace packages/lib: package.json: "),
+            "{malformed}"
+        );
+        assert!(plan("{", None).unwrap_err().starts_with("package.json: "));
+    }
+
+    /// Yarn classic never locks a `link:` dependency, so its absence from
+    /// the lock is not a stale lock.
+    #[test]
+    fn a_yarn_link_dependency_is_not_a_stale_lock() {
+        let dir = project();
+        let error = plan_yarn(
+            Platform::X86_64UnknownLinuxGnu,
+            "# yarn lockfile v1\n",
+            r#"{"optionalDependencies":{"local":"link:./vendor/local"}}"#,
+            &held(&dir.0),
+            node_version(),
+        );
+        assert!(error.is_ok(), "{error:?}");
+        let error = plan_yarn(
+            Platform::X86_64UnknownLinuxGnu,
+            "# yarn lockfile v1\n",
+            r#"{"dependencies":{"local":"link:./vendor/local"}}"#,
+            &held(&dir.0),
+            node_version(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(!error.contains("disagree"), "{error}");
+    }
+
     #[test]
     fn yarn_links_every_discovered_member_at_the_root() {
         let dir = project();

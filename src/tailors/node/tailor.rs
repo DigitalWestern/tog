@@ -139,6 +139,7 @@ impl Tailor for Node {
             inputs::require_lock(project)?;
             return Ok(None);
         };
+        node::freshness::check_lock_freshness(project, &plan)?;
         let v: Vec<_> = plan
             .packages
             .iter()
@@ -172,17 +173,13 @@ impl Tailor for Node {
             inputs::require_lock(project)?;
             return Ok(false);
         };
-        // package.json and the lock are read through the held descriptor.
-        let mut config = node::TogConfig::default();
-        if plan.lock_source == "package-lock.json" {
-            let lock = inputs::read_input(project, "package-lock.json")?;
-            if let Ok(Some(pkg)) = project.read_input_string(Path::new("package.json")) {
-                node::check_lock_freshness(&pkg, &lock)?;
-                config = node::parse_tog_config(&pkg)?;
-            }
-        } else if let Ok(Some(pkg)) = project.read_input_string(Path::new("package.json")) {
-            config = node::parse_tog_config(&pkg)?;
-        }
+        node::freshness::check_lock_freshness(project, &plan)?;
+        // package.json is read through the held descriptor; a lock-only
+        // project has no "tog" config to read.
+        let config = match project.read_input_string(Path::new("package.json"))? {
+            Some(pkg) => node::parse_tog_config(&pkg)?,
+            None => node::TogConfig::default(),
+        };
         let runtime = node::realize_runtime(store, activity, platform, selected)?;
         // node-gyp runs on the helper Python selection when the project has
         // one; a Node-only project gets the shipped default.
