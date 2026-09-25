@@ -54,7 +54,6 @@ impl PnpmManifestRecord {
 /// last one, as for planning, and a single-project v6 lock without an
 /// `importers` map records the root's dependencies at the top level.
 pub(crate) fn pnpm_manifest_record(lock_yaml: &str) -> io::Result<PnpmManifestRecord> {
-    let lock_yaml = lock_yaml.rsplit("\n---").next().unwrap_or(lock_yaml);
     let parsed = parse_yaml(lock_yaml)?;
     let root = yaml_map(&parsed, "pnpm-lock.yaml")?;
     let mut importers = importer_map(root)?;
@@ -103,31 +102,12 @@ pub(crate) fn pnpm_manifest_record(lock_yaml: &str) -> io::Result<PnpmManifestRe
     Ok(record)
 }
 
+/// A version without its peer context. Lockfile v6 and v9, the versions
+/// tog reads, write peer context only in parentheses
+/// (`1.0.0(react@18.0.0)`), so an underscore is an ordinary character of
+/// a version, a `file:` path or a tarball URL.
 pub(super) fn trim_peer_suffix(value: &str) -> &str {
-    let parenthesis = value.find('(');
-    // pnpm v9 also encodes peer context as `_peer@version`. An underscore
-    // before the package/version separator is an ordinary npm package-name
-    // character (for example `evp_bytestokey@1.0.3`) and is not a suffix.
-    let underscore = {
-        let delimiter = if value.starts_with('@') {
-            value[1..].find('@').map(|index| index + 1)
-        } else {
-            value.find('@')
-        };
-        delimiter
-            .and_then(|index| {
-                value[index + 1..]
-                    .find('_')
-                    .map(|offset| index + 1 + offset)
-            })
-            .or_else(|| delimiter.is_none().then(|| value.find('_')).flatten())
-    };
-    [parenthesis, underscore]
-        .into_iter()
-        .flatten()
-        .min()
-        .map(|index| &value[..index])
-        .unwrap_or(value)
+    value.find('(').map_or(value, |index| &value[..index])
 }
 
 pub(super) fn split_identity(value: &str) -> Option<(String, String)> {
@@ -1309,10 +1289,6 @@ fn plan_pnpm_with_recorder(
     node_version: &str,
     record: &mut impl FnMut(&str, &str, &str) -> io::Result<()>,
 ) -> io::Result<NpmPlan> {
-    // pnpm can append a second document when a lock is merged from a
-    // package-manager-generated prelude. The last document is the effective
-    // lock graph.
-    let lock_yaml = lock_yaml.rsplit("\n---").next().unwrap_or(lock_yaml);
     let parsed = parse_yaml(lock_yaml)?;
     let root = yaml_map(&parsed, "pnpm lockfile")?;
     let version = yaml_str(root.get("lockfileVersion")).unwrap_or_default();
@@ -1754,5 +1730,58 @@ mod patch_hash_tests {
         .unwrap()
         .unwrap();
         assert_ne!(first_content, second_content);
+    }
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::*;
+
+    /// Lockfile v6 and v9 write peer context only in parentheses, so an
+    /// underscore anywhere in a version, a `file:` path or a tarball URL is
+    /// part of the value.
+    #[test]
+    fn an_underscore_is_never_a_peer_suffix() {
+        for (value, expected) in [
+            ("1.0.0(react@18.0.0)", "1.0.0"),
+            ("1.0.0(patch_hash=abc)(react@18.0.0)", "1.0.0"),
+            ("file:packages/my_pkg", "file:packages/my_pkg"),
+            (
+                "https://codeload.github.com/o/my_repo/tar.gz/abc",
+                "https://codeload.github.com/o/my_repo/tar.gz/abc",
+            ),
+            ("1.0.0_react@18.0.0", "1.0.0_react@18.0.0"),
+            ("foo@file:packages/my_pkg", "foo@file:packages/my_pkg"),
+            ("evp_bytestokey@1.0.3", "evp_bytestokey@1.0.3"),
+        ] {
+            assert_eq!(trim_peer_suffix(value), expected, "{value}");
+        }
+        assert_eq!(
+            split_identity("foo@file:packages/my_pkg"),
+            Some(("foo".to_string(), "file:packages/my_pkg".to_string()))
+        );
+        assert_eq!(
+            split_identity("@s/foo@https://example.com/a_b.tgz(react@18.0.0)"),
+            Some((
+                "@s/foo".to_string(),
+                "https://example.com/a_b.tgz".to_string()
+            ))
+        );
+    }
+
+    /// A lock `pnpm self-update` wrote holds a prelude document for pnpm
+    /// itself, then the project's own. Every reader takes the project's.
+    #[test]
+    fn every_reader_takes_the_last_document_of_a_two_document_lock() {
+        let lock = "---\nlockfileVersion: '9.0'\n\nimporters:\n\n  .:\n    packageManagerDependencies:\n      pnpm:\n        specifier: 10.0.0\n        version: 10.0.0\n\n---\nlockfileVersion: '9.0'\n\nimporters:\n\n  .:\n    dependencies:\n      a:\n        specifier: ^1.0.0\n        version: 1.0.0\n\n  packages/lib: {}\n";
+        assert_eq!(
+            pnpm_lock_importers(lock).unwrap(),
+            vec![".".to_string(), "packages/lib".to_string()]
+        );
+        let record = pnpm_manifest_record(lock).unwrap();
+        assert_eq!(
+            record.importers["."]["dependencies"]["a"].specifier,
+            "^1.0.0"
+        );
     }
 }

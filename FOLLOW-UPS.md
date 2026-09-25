@@ -81,7 +81,6 @@ by position.
 - **Quality review of 2026-09-24 (#264).** A whole-codebase review after
   the 09-20 to 09-24 run. #264 holds the work order and the overall verdict.
   Each line is one issue and one PR, in order:
-  - #228 pnpm importer: underscore peer-suffix trimming, a lenient YAML reader, and two multi-document rules.
   - #226 supervise: Ctrl-C during a sandboxed child is recorded as a script failure and the sync continues.
   - #260 ruby and elixir: an unchanged project can't re-sync offline.
   - #263 dotnet: csproj checks use substring matches and duplicate the lock parser.

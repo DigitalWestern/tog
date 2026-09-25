@@ -936,3 +936,82 @@ fn yarn_workspace_ranges_that_miss_the_member_do_not_link_it() {
         "{error}"
     );
 }
+/// A lock `pnpm self-update` wrote holds two documents: a prelude for pnpm
+/// itself, then the project's lock. Workspace membership (read by `tog
+/// add`), the manifest check and the plan all read the project's.
+#[test]
+fn every_pnpm_reader_takes_the_project_document_of_a_two_document_lock() {
+    let lock = fs::read_to_string(fixture("proj-pnpm-prelude").join("pnpm-lock.yaml")).unwrap();
+    assert_eq!(
+        tog::tailors::node::lock_import::pnpm_lock_importers(&lock).unwrap(),
+        vec![".".to_string()]
+    );
+    let project = TempDir::boundary("pnpm-prelude");
+    copy_tree(&fixture("proj-pnpm-prelude"), project.path());
+    let plan = tog::tailors::node::lock_import::plan_pnpm(
+        Platform::X86_64UnknownLinuxGnu,
+        &lock,
+        &tog::kernel::fsroot::ProjectRoot::open(project.path()).unwrap(),
+        node_version(),
+    )
+    .unwrap();
+    let mut names = plan
+        .packages
+        .iter()
+        .map(|package| package.name.as_str())
+        .collect::<Vec<_>>();
+    names.sort_unstable();
+    assert_eq!(names, ["is-number", "is-odd"]);
+
+    let home = TempDir::new("prelude-home");
+    let stale = fixture_with_added_dependency("proj-pnpm-prelude", "package.json");
+    let out = tog(stale.path(), home.path(), &["plan"]);
+    let stderr = text(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    assert!(
+        stderr.contains("package.json dependencies disagree with pnpm-lock.yaml"),
+        "{stderr}"
+    );
+}
+
+/// An underscore in a tarball URL is part of the URL: lockfile v6 and v9
+/// write peer context only in parentheses. A peer-suffixed snapshot finds
+/// its package by that identity, so cutting at the underscore would give it
+/// another tarball's bytes.
+#[test]
+fn a_pnpm_tarball_url_keeps_the_underscore_in_its_identity() {
+    let other = "sha512-ZUNzoqUI/328gbYuFUw9oKe0BVi/reurZZ2ut1+B8ZgEtZ6dtNgKMea7Kp8UvKTnF543WvI/8RwetH1Fzkflzw==";
+    let lock = format!(
+        r#"lockfileVersion: '9.0'
+importers:
+  .:
+    dependencies:
+      foo:
+        specifier: https://example.com/my_b.tgz
+        version: https://example.com/my_b.tgz(peer@1.0.0)
+      peer:
+        specifier: 1.0.0
+        version: 1.0.0
+packages:
+  foo@https://example.com/my_a.tgz:
+    resolution: {{integrity: {other}, tarball: https://example.com/my_a.tgz}}
+  foo@https://example.com/my_b.tgz:
+    resolution: {{integrity: {SRI}, tarball: https://example.com/my_b.tgz}}
+  peer@1.0.0:
+    resolution: {{integrity: {SRI}}}
+snapshots:
+  foo@https://example.com/my_b.tgz(peer@1.0.0):
+    dependencies:
+      peer: 1.0.0
+  peer@1.0.0: {{}}
+"#
+    );
+    let plan = plan_local("pnpm-underscore", &[], &lock).unwrap();
+    let foo = plan
+        .packages
+        .iter()
+        .find(|package| package.name == "foo")
+        .unwrap_or_else(|| panic!("{:?}", plan.packages));
+    assert_eq!(foo.url, "https://example.com/my_b.tgz", "{foo:?}");
+    assert_eq!(foo.integrity, SRI, "{foo:?}");
+}
