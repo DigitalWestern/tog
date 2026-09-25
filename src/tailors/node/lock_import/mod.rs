@@ -917,21 +917,16 @@ mod tests {
         assert_eq!(split_key_value("no separator here"), None);
     }
     use super::*;
+    use crate::kernel::testutil::TempDir;
     use std::fs;
-    use std::path::PathBuf;
 
     const SRI: &str =
         "sha512-m3HSJL1i83hdltRq0+o9czGb+8KJDKra4t/3JRXMui/CET1IEDrHK6nHYbdEaGL/uhPMbuF3AGkGxXTVpn3ETw==";
 
-    fn project() -> PathBuf {
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let path =
-            std::env::temp_dir().join(format!("tog-lock-import-{}-{nonce}", std::process::id()));
-        let _ = fs::create_dir_all(path.join("packages/lib"));
-        path
+    fn project() -> TempDir {
+        let dir = TempDir::named("lock-import");
+        fs::create_dir_all(dir.0.join("packages/lib")).unwrap();
+        dir
     }
 
     /// Tests that inspect pending policy exceptions must not overlap with one
@@ -983,7 +978,7 @@ snapshots:
         let plan = plan_pnpm(
             Platform::X86_64UnknownLinuxGnu,
             &lock,
-            &held(&dir),
+            &held(&dir.0),
             node_version(),
         )
         .unwrap();
@@ -998,7 +993,6 @@ snapshots:
             .packages
             .iter()
             .any(|package| package.name == "mac-only"));
-        let _ = fs::remove_dir_all(dir);
     }
 
     /// Characterization: the whole placement result for one graph that
@@ -1054,7 +1048,7 @@ snapshots:
         let plan = plan_pnpm(
             Platform::X86_64UnknownLinuxGnu,
             &lock,
-            &held(&dir),
+            &held(&dir.0),
             node_version(),
         )
         .unwrap();
@@ -1089,7 +1083,6 @@ snapshots:
         assert_eq!(links, vec![("node_modules/lib", "packages/lib")]);
         assert_eq!(plan.lock_source, "pnpm-lock.yaml");
         assert!(plan.workspaces.is_empty());
-        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -1112,7 +1105,7 @@ packages:
         let plan = plan_pnpm(
             Platform::X86_64UnknownLinuxGnu,
             &lock,
-            &held(&dir),
+            &held(&dir.0),
             node_version(),
         )
         .unwrap();
@@ -1121,7 +1114,6 @@ packages:
             .iter()
             .any(|package| package.path == "node_modules/a"));
         assert!(plan.packages.iter().any(|package| package.name == "b"));
-        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -1163,19 +1155,18 @@ importers:
         let plan = plan_pnpm(
             Platform::X86_64UnknownLinuxGnu,
             &lock,
-            &held(&dir),
+            &held(&dir.0),
             node_version(),
         )
         .unwrap();
         assert!(plan.packages.is_empty(), "{:?}", plan.packages);
         assert!(plan.links.is_empty(), "{:?}", plan.links);
-        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
     fn patched_dependencies_are_verified_and_change_the_package_identity() {
         let dir = project();
-        let patch_path = dir.join("patches/foo@1.0.0.patch");
+        let patch_path = dir.0.join("patches/foo@1.0.0.patch");
         fs::create_dir_all(patch_path.parent().unwrap()).unwrap();
         let patch_bytes = b"diff --git a/index.js b/index.js\n";
         fs::write(&patch_path, patch_bytes).unwrap();
@@ -1200,7 +1191,7 @@ snapshots:
         let plan = plan_pnpm(
             Platform::X86_64UnknownLinuxGnu,
             &lock,
-            &held(&dir),
+            &held(&dir.0),
             node_version(),
         )
         .unwrap();
@@ -1215,12 +1206,11 @@ snapshots:
         let error = plan_pnpm(
             Platform::X86_64UnknownLinuxGnu,
             &lock,
-            &held(&dir),
+            &held(&dir.0),
             node_version(),
         )
         .unwrap_err();
         assert!(error.to_string().contains("patch foo@1.0.0 hash mismatch"));
-        let _ = fs::remove_dir_all(dir);
     }
 
     /// pnpm 9 declares patch hashes as base32-encoded md5, not sha256 hex
@@ -1231,7 +1221,7 @@ snapshots:
         let _attribution_lock = crate::kernel::policy::exception_guard();
         let _attribution = crate::kernel::policy::Attribution::open("node").unwrap();
         let dir = project();
-        let patch_path = dir.join("patches/foo@1.0.0.patch");
+        let patch_path = dir.0.join("patches/foo@1.0.0.patch");
         fs::create_dir_all(patch_path.parent().unwrap()).unwrap();
         let patch_bytes = b"diff --git a/index.js b/index.js\n";
         fs::write(&patch_path, patch_bytes).unwrap();
@@ -1258,7 +1248,7 @@ snapshots:
         let plan = plan_pnpm(
             Platform::X86_64UnknownLinuxGnu,
             &lock,
-            &held(&dir),
+            &held(&dir.0),
             node_version(),
         )
         .unwrap();
@@ -1289,7 +1279,7 @@ snapshots:
         let error = plan_pnpm(
             Platform::X86_64UnknownLinuxGnu,
             &lock,
-            &held(&dir),
+            &held(&dir.0),
             node_version(),
         )
         .unwrap_err();
@@ -1300,7 +1290,6 @@ snapshots:
                 .contains("expected kpncbvlbnwqxywzzahw2g7pnwq, got uncj4ibb6pblo7yg3phh2pzyhy"),
             "{error}"
         );
-        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -1308,7 +1297,7 @@ snapshots:
         let _attribution_lock = crate::kernel::policy::exception_guard();
         let _attribution = crate::kernel::policy::Attribution::open("node").unwrap();
         let dir = project();
-        let patch_path = dir.join("patches/foo@1.0.0.patch");
+        let patch_path = dir.0.join("patches/foo@1.0.0.patch");
         fs::create_dir_all(patch_path.parent().unwrap()).unwrap();
         let patch_bytes = b"diff --git a/index.js b/index.js\n";
         fs::write(&patch_path, patch_bytes).unwrap();
@@ -1342,7 +1331,7 @@ snapshots:
         let md5_error = super::pnpm::plan_pnpm_with_policy(
             Platform::X86_64UnknownLinuxGnu,
             &lock("kpncbvlbnwqxywzzahw2g7pnwq"),
-            &held(&dir),
+            &held(&dir.0),
             node_version(),
             &deny_weak_integrity,
         )
@@ -1354,7 +1343,7 @@ snapshots:
         let sha256_plan = super::pnpm::plan_pnpm_with_policy(
             Platform::X86_64UnknownLinuxGnu,
             &lock("2692094a267de7e28825147fd6cb2ebde098a4e68c25dfa3976ac806f4a1a784"),
-            &held(&dir),
+            &held(&dir.0),
             node_version(),
             &deny_weak_integrity,
         )
@@ -1365,7 +1354,6 @@ snapshots:
             .unwrap()
             .content_sha256
             .is_none());
-        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -1397,7 +1385,7 @@ snapshots:
         let plan = plan_pnpm(
             Platform::X86_64UnknownLinuxGnu,
             &lock,
-            &held(&dir),
+            &held(&dir.0),
             node_version(),
         )
         .unwrap();
@@ -1406,7 +1394,6 @@ snapshots:
             .packages
             .iter()
             .any(|package| package.path == "node_modules/b" && package.name == "b"));
-        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -1454,7 +1441,7 @@ snapshots:
         let plan = plan_pnpm(
             Platform::X86_64UnknownLinuxGnu,
             &lock,
-            &held(&dir),
+            &held(&dir.0),
             node_version(),
         )
         .unwrap();
@@ -1472,7 +1459,6 @@ snapshots:
             .packages
             .iter()
             .any(|package| { package.name == "child-b" }));
-        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -1519,7 +1505,7 @@ snapshots:
         let plan = plan_pnpm(
             Platform::X86_64UnknownLinuxGnu,
             &lock,
-            &held(&dir),
+            &held(&dir.0),
             node_version(),
         )
         .unwrap();
@@ -1531,7 +1517,6 @@ snapshots:
             .packages
             .iter()
             .any(|package| { package.path == "node_modules/c" && package.version == "2.0.0" }));
-        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -1554,7 +1539,7 @@ snapshots: {}
         let error = plan_pnpm(
             Platform::X86_64UnknownLinuxGnu,
             required,
-            &held(&dir),
+            &held(&dir.0),
             node_version(),
         )
         .unwrap_err();
@@ -1566,12 +1551,11 @@ snapshots: {}
         let plan = plan_pnpm(
             Platform::X86_64UnknownLinuxGnu,
             &optional,
-            &held(&dir),
+            &held(&dir.0),
             node_version(),
         )
         .unwrap();
         assert!(plan.packages.is_empty());
-        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -1611,7 +1595,7 @@ snapshots:
         let plan = plan_pnpm(
             Platform::X86_64UnknownLinuxGnu,
             &lock,
-            &held(&dir),
+            &held(&dir.0),
             node_version(),
         )
         .unwrap();
@@ -1629,7 +1613,6 @@ snapshots:
             sorted.sort();
             sorted
         });
-        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -1661,7 +1644,7 @@ snapshots:
         let plan = plan_pnpm(
             Platform::X86_64UnknownLinuxGnu,
             &lock,
-            &held(&dir),
+            &held(&dir.0),
             node_version(),
         )
         .unwrap();
@@ -1672,7 +1655,6 @@ snapshots:
         assert!(plan.packages.iter().any(|package| {
             package.path == "packages/lib/node_modules/shared" && package.version == "2.0.0"
         }));
-        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -1709,7 +1691,7 @@ snapshots:
         let plan = plan_pnpm(
             Platform::X86_64UnknownLinuxGnu,
             &lock,
-            &held(&dir),
+            &held(&dir.0),
             node_version(),
         )
         .unwrap();
@@ -1720,7 +1702,6 @@ snapshots:
         assert!(plan.packages.iter().any(|package| {
             package.path == "p/child/node_modules/c" && package.version == "1.0.0"
         }));
-        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -1744,7 +1725,7 @@ is-number@^6.0.0:
             Platform::X86_64UnknownLinuxGnu,
             lock,
             package_json,
-            &held(&dir),
+            &held(&dir.0),
             node_version(),
         )
         .unwrap();
@@ -1758,12 +1739,11 @@ is-number@^6.0.0:
             Platform::X86_64UnknownLinuxGnu,
             berry,
             package_json,
-            &held(&dir),
+            &held(&dir.0),
             node_version(),
         )
         .unwrap_err();
         assert!(error.to_string().contains("cache-zip checksums"));
-        let _ = fs::remove_dir_all(dir);
     }
 
     /// `realizable_node` is shared by the pnpm and Yarn-classic importers, so
@@ -1827,26 +1807,25 @@ snapshots:
         let error = super::pnpm::plan_pnpm_with_policy(
             Platform::X86_64UnknownLinuxGnu,
             lock,
-            &held(&dir),
+            &held(&dir.0),
             node_version(),
             &crate::kernel::policy::Policy::default(),
         )
         .unwrap_err()
         .to_string();
         assert_eq!(error, "is-odd@3.0.1: pnpm-lock.yaml entry has no integrity");
-        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
     fn yarn_v1_workspace_manifests_supply_roots_and_links() {
         let dir = project();
         fs::write(
-            dir.join("package.json"),
+            dir.0.join("package.json"),
             r#"{"name":"root","version":"1.0.0","workspaces":["packages/*"],"dependencies":{"@fixture/lib":"1.0.0"}}"#,
         )
         .unwrap();
         fs::write(
-            dir.join("packages/lib/package.json"),
+            dir.0.join("packages/lib/package.json"),
             r#"{"name":"@fixture/lib","version":"1.0.0","dependencies":{"dep":"1.0.0"}}"#,
         )
         .unwrap();
@@ -1858,12 +1837,12 @@ dep@1.0.0:
   integrity {SRI}
 "#
         );
-        let package = fs::read_to_string(dir.join("package.json")).unwrap();
+        let package = fs::read_to_string(dir.0.join("package.json")).unwrap();
         let plan = plan_yarn(
             Platform::X86_64UnknownLinuxGnu,
             &lock,
             &package,
-            &held(&dir),
+            &held(&dir.0),
             node_version(),
         )
         .unwrap();
@@ -1872,35 +1851,34 @@ dep@1.0.0:
             .links
             .iter()
             .any(|link| link.path == "node_modules/@fixture/lib" && link.target == "packages/lib"));
-        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
     fn yarn_links_every_discovered_member_at_the_root() {
         let dir = project();
-        fs::create_dir_all(dir.join("packages/a")).unwrap();
-        fs::create_dir_all(dir.join("packages/b")).unwrap();
+        fs::create_dir_all(dir.0.join("packages/a")).unwrap();
+        fs::create_dir_all(dir.0.join("packages/b")).unwrap();
         fs::write(
-            dir.join("package.json"),
+            dir.0.join("package.json"),
             r#"{"name":"root","version":"1.0.0","workspaces":["packages/*"]}"#,
         )
         .unwrap();
         fs::write(
-            dir.join("packages/a/package.json"),
+            dir.0.join("packages/a/package.json"),
             r#"{"name":"workspace-a","version":"1.0.0"}"#,
         )
         .unwrap();
         fs::write(
-            dir.join("packages/b/package.json"),
+            dir.0.join("packages/b/package.json"),
             r#"{"name":"workspace-b","version":"1.0.0"}"#,
         )
         .unwrap();
-        let package = fs::read_to_string(dir.join("package.json")).unwrap();
+        let package = fs::read_to_string(dir.0.join("package.json")).unwrap();
         let plan = plan_yarn(
             Platform::X86_64UnknownLinuxGnu,
             "# yarn lockfile v1\n",
             &package,
-            &held(&dir),
+            &held(&dir.0),
             node_version(),
         )
         .unwrap();
@@ -1910,7 +1888,6 @@ dep@1.0.0:
         assert!(plan.links.iter().any(|link| {
             link.path == "node_modules/workspace-b" && link.target == "packages/b"
         }));
-        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -1959,35 +1936,26 @@ snapshots:
         let error = plan_pnpm(
             Platform::Aarch64AppleDarwin,
             &lock,
-            &held(&dir),
+            &held(&dir.0),
             node_version(),
         )
         .unwrap_err();
         let text = error.to_string();
         assert!(text.contains("linux-only@1.0.0"));
         assert!(text.contains("aarch64-apple-darwin"));
-        let _ = fs::remove_dir_all(dir);
     }
 }
 
 #[cfg(test)]
 mod git_import_tests {
     use super::tests::{held, node_version};
+    use crate::kernel::testutil::TempDir;
 
     const SRI: &str =
         "sha512-m3HSJL1i83hdltRq0+o9czGb+8KJDKra4t/3JRXMui/CET1IEDrHK6nHYbdEaGL/uhPMbuF3AGkGxXTVpn3ETw==";
 
-    fn project() -> std::path::PathBuf {
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!(
-            "tog-lock-git-import-{}-{nonce}",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&path).unwrap();
-        path
+    fn project() -> TempDir {
+        TempDir::named("lock-git-import")
     }
 
     #[test]
@@ -2041,14 +2009,13 @@ mod git_import_tests {
         let plan = super::plan_pnpm(
             crate::kernel::platform::Platform::X86_64UnknownLinuxGnu,
             &lock,
-            &held(&project),
+            &held(&project.0),
             node_version(),
         )
         .unwrap();
         let package = plan.packages.iter().find(|p| p.name == "plugin").unwrap();
         assert!(package.git.is_none());
         assert_eq!(package.integrity, SRI);
-        let _ = crate::kernel::store::remove_tree(&project);
     }
 
     #[test]
@@ -2067,14 +2034,13 @@ plugin@1.0.0:
             crate::kernel::platform::Platform::X86_64UnknownLinuxGnu,
             &lock,
             r#"{"dependencies":{"plugin":"1.0.0"}}"#,
-            &held(&project),
+            &held(&project.0),
             node_version(),
         )
         .unwrap();
         let package = plan.packages.iter().find(|p| p.name == "plugin").unwrap();
         assert!(package.git.is_none());
         assert_eq!(package.integrity, SRI);
-        let _ = crate::kernel::store::remove_tree(&project);
     }
 
     /// ChatGPTNextWeb/NextChat's `rt-client`: a GitHub release asset whose
@@ -2098,11 +2064,10 @@ plugin@1.0.0:
             crate::kernel::platform::Platform::X86_64UnknownLinuxGnu,
             &lock,
             &format!(r#"{{"dependencies":{{"rt-client":"{url}"}}}}"#),
-            &held(&project),
+            &held(&project.0),
             node_version(),
         )
         .unwrap();
-        let _ = crate::kernel::store::remove_tree(&project);
         let package = plan
             .packages
             .iter()
@@ -2134,10 +2099,9 @@ plugin@1.0.0:
                 crate::kernel::platform::Platform::X86_64UnknownLinuxGnu,
                 &lock,
                 r#"{"dependencies":{"plugin":"1.0.0"}}"#,
-                &held(&dir),
+                &held(&dir.0),
                 node_version(),
             );
-            let _ = crate::kernel::store::remove_tree(&dir);
             let plan = plan.unwrap();
             let package = plan.packages.iter().find(|p| p.name == "plugin").unwrap();
             assert!(package.git.is_none(), "{url}: {:?}", package.git);
@@ -2153,10 +2117,9 @@ plugin@1.0.0:
                 crate::kernel::platform::Platform::X86_64UnknownLinuxGnu,
                 &lock,
                 r#"{"dependencies":{"plugin":"1.0.0"}}"#,
-                &held(&dir),
+                &held(&dir.0),
                 node_version(),
             );
-            let _ = crate::kernel::store::remove_tree(&dir);
             let error = result
                 .err()
                 .expect("malformed fragment refused")
@@ -2185,15 +2148,8 @@ plugin@1.0.0:
              snapshots:\n\
              \x20\x20plugin@https://codeload.github.com/o/r/tar.gz/{commit}: {{}}\n"
         );
-        let project = std::env::temp_dir().join(format!(
-            "tog-gitimport-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&project).unwrap();
+        let scratch = TempDir::named("gitimport");
+        let project = scratch.0.clone();
         std::fs::write(
             project.join("package.json"),
             r#"{"name":"root","version":"1.0.0"}"#,
@@ -2205,7 +2161,6 @@ plugin@1.0.0:
             &held(&project),
             node_version(),
         );
-        let _ = crate::kernel::store::remove_tree(&project);
         let plan = match result {
             Ok(plan) => plan,
             Err(error) => panic!("codeload dependency was rejected: {error}"),

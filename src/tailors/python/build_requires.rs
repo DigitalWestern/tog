@@ -746,14 +746,11 @@ fn link_target_within(root: &Path, link: &Path, target: &Path) -> io::Result<boo
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::kernel::testutil::TempDir;
     use std::io::Write;
 
-    fn temp_dir(label: &str) -> PathBuf {
-        let path =
-            std::env::temp_dir().join(format!("tog-build-requires-{label}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&path);
-        fs::create_dir_all(&path).unwrap();
-        path
+    fn temp_dir(label: &str) -> TempDir {
+        TempDir::named(&format!("build-requires-{label}"))
     }
 
     fn archive(path: &Path, format: ArchiveKind, pyproject: Option<&[u8]>) {
@@ -805,12 +802,11 @@ build-backend = "hatchling.build"
             ("present.zip", ArchiveKind::Zip),
         ] {
             let dir = temp_dir("present");
-            let path = dir.join(name);
+            let path = dir.0.join(name);
             archive(&path, format, Some(text));
             let info = inspect_sdist(&path).unwrap();
             assert_eq!(info.build_requires, vec!["hatchling>=1"]);
             assert_eq!(info.build_backend, "hatchling.build");
-            fs::remove_dir_all(dir).unwrap();
         }
     }
 
@@ -821,7 +817,7 @@ build-backend = "hatchling.build"
             ("absent.zip", ArchiveKind::Zip),
         ] {
             let dir = temp_dir("absent");
-            let path = dir.join(name);
+            let path = dir.0.join(name);
             archive(&path, format, None);
             let info = inspect_sdist(&path).unwrap();
             assert_eq!(
@@ -829,7 +825,6 @@ build-backend = "hatchling.build"
                 vec!["setuptools>=40.8.0".to_string(), "wheel".to_string()]
             );
             assert_eq!(info.build_backend, DEFAULT_BACKEND);
-            fs::remove_dir_all(dir).unwrap();
         }
     }
 
@@ -841,11 +836,10 @@ build-backend = "hatchling.build"
             ("malformed.zip", ArchiveKind::Zip),
         ] {
             let dir = temp_dir("malformed");
-            let path = dir.join(name);
+            let path = dir.0.join(name);
             archive(&path, format, Some(text));
             let error = inspect_sdist(&path).unwrap_err();
             assert_eq!(error.kind(), io::ErrorKind::InvalidData);
-            fs::remove_dir_all(dir).unwrap();
         }
     }
 
@@ -853,19 +847,19 @@ build-backend = "hatchling.build"
     fn rejects_option_like_tar_root_without_executing_it() {
         let dir = temp_dir("tar-injection");
         let root_name = "--checkpoint-action=exec=touch marker;#";
-        let root = dir.join(root_name);
+        let root = dir.0.join(root_name);
         fs::create_dir_all(&root).unwrap();
         fs::write(
             root.join("pyproject.toml"),
             b"[build-system]\nrequires = []\n",
         )
         .unwrap();
-        let archive = dir.join("malicious.tar.gz");
+        let archive = dir.0.join("malicious.tar.gz");
         let status = Command::new("/usr/bin/tar")
             .args(["-czf"])
             .arg(&archive)
             .args(["-C"])
-            .arg(&dir)
+            .arg(&dir.0)
             .arg("--")
             .arg(root_name)
             .status()
@@ -878,25 +872,24 @@ build-backend = "hatchling.build"
         let error = inspect_sdist(&archive).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         assert!(!marker.exists(), "tar option-like member was executed");
-        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
     fn tar_member_with_dot_prefix_is_inspected() {
         let dir = temp_dir("dot-prefix");
-        let root = dir.join("example-1.0");
+        let root = dir.0.join("example-1.0");
         fs::create_dir_all(&root).unwrap();
         fs::write(
             root.join("pyproject.toml"),
             b"[build-system]\nrequires = [\"hatchling>=1\"]\nbuild-backend = \"hatchling.build\"\n",
         )
         .unwrap();
-        let path = dir.join("dot-prefix.tar.gz");
+        let path = dir.0.join("dot-prefix.tar.gz");
         let status = Command::new("/usr/bin/tar")
             .args(["-czf"])
             .arg(&path)
             .args(["-C"])
-            .arg(&dir)
+            .arg(&dir.0)
             .arg("./example-1.0")
             .status()
             .unwrap();
@@ -906,7 +899,6 @@ build-backend = "hatchling.build"
         let info = inspect_sdist(&path).unwrap();
         assert_eq!(info.build_requires, vec!["hatchling>=1"]);
         assert_eq!(info.build_backend, "hatchling.build");
-        fs::remove_dir_all(dir).unwrap();
     }
 
     #[cfg(unix)]
@@ -915,7 +907,7 @@ build-backend = "hatchling.build"
         use std::os::unix::fs::symlink;
 
         let dir = temp_dir("symlink-escape");
-        let root = dir.join("example-1.0");
+        let root = dir.0.join("example-1.0");
         fs::create_dir_all(&root).unwrap();
         fs::write(
             root.join("Cargo.toml"),
@@ -925,12 +917,12 @@ build-backend = "hatchling.build"
         let outside = std::env::temp_dir().join(format!("tog-escape-{}", std::process::id()));
         let _ = fs::remove_file(&outside);
         symlink(&outside, root.join("Cargo.lock")).unwrap();
-        let path = dir.join("symlink-escape.tar.gz");
+        let path = dir.0.join("symlink-escape.tar.gz");
         let status = Command::new("/usr/bin/tar")
             .args(["-czf"])
             .arg(&path)
             .args(["-C"])
-            .arg(&dir)
+            .arg(&dir.0)
             .arg("example-1.0")
             .status()
             .unwrap();
@@ -938,13 +930,12 @@ build-backend = "hatchling.build"
         fs::remove_dir_all(&root).unwrap();
 
         let info = inspect_sdist(&path).unwrap();
-        let error = extract_sdist(&path, &dir.join("source"), &info).unwrap_err();
+        let error = extract_sdist(&path, &dir.0.join("source"), &info).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         assert!(
             !outside.exists(),
             "extraction created a file outside scratch"
         );
-        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

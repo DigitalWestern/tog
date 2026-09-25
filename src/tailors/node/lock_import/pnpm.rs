@@ -1337,6 +1337,7 @@ pub(super) fn plan_pnpm_with_policy(
 #[cfg(test)]
 mod patch_hash_tests {
     use super::*;
+    use crate::kernel::testutil::TempDir;
 
     #[test]
     fn recorded_patch_hash_refuses_a_malformed_suffix() {
@@ -1610,15 +1611,8 @@ mod patch_hash_tests {
 
     #[test]
     fn normalized_sha256_matches_bind_raw_content_and_raw_matches_do_not() {
-        let root = std::env::temp_dir().join(format!(
-            "tog-pnpm-patch-hash-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir_all(&root).unwrap();
+        let scratch = TempDir::named("pnpm-patch-hash");
+        let root = scratch.0.clone();
         let normalized_path = root.join("normalized.patch");
         let raw_path = root.join("raw.patch");
         let normalized_bytes = b"first line\r\n";
@@ -1640,20 +1634,12 @@ mod patch_hash_tests {
             verify_patch_hash("raw", &raw_path, &fs::read(&raw_path).unwrap(), PATCH_HEX).unwrap(),
             None
         );
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn distinct_raw_files_that_normalize_identically_get_distinct_bindings() {
-        let root = std::env::temp_dir().join(format!(
-            "tog-pnpm-patch-content-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir_all(&root).unwrap();
+        let scratch = TempDir::named("pnpm-patch-content");
+        let root = scratch.0.clone();
         let first = b"+\xff\n";
         let second = b"+\xfe\n";
         assert_eq!(pnpm_normalized(first), pnpm_normalized(second));
@@ -1680,6 +1666,5 @@ mod patch_hash_tests {
         .unwrap()
         .unwrap();
         assert_ne!(first_content, second_content);
-        let _ = fs::remove_dir_all(root);
     }
 }

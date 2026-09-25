@@ -1008,22 +1008,14 @@ pub(crate) mod fixtures {
 mod tests {
     use super::fixtures::fake_toolchain;
     use super::*;
+    use crate::kernel::testutil::TempDir;
 
     fn host() -> Platform {
         Platform::host().unwrap()
     }
 
-    fn temp(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "tog-rust-path-{name}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir_all(&dir).unwrap();
-        dir
+    fn temp(name: &str) -> TempDir {
+        TempDir::named(&format!("rust-path-{name}"))
     }
 
     fn path_row(value: &str) -> InputRow {
@@ -1039,7 +1031,7 @@ mod tests {
     #[test]
     fn the_tree_hash_is_content_and_nothing_else() {
         let dir = temp("hash");
-        let (a, b) = (dir.join("a"), dir.join("b"));
+        let (a, b) = (dir.0.join("a"), dir.0.join("b"));
         fake_toolchain(&a, host(), "1.96.1");
         fake_toolchain(&b, host(), "1.96.1");
         assert_eq!(tree_digest(&a).unwrap(), tree_digest(&b).unwrap());
@@ -1074,7 +1066,6 @@ mod tests {
             Path::new("bin/x"),
             Path::new("../lib/y")
         ));
-        let _ = fs::remove_dir_all(&dir);
     }
 
     fn no_cache(_: &Path) -> Option<PathBuf> {
@@ -1086,9 +1077,9 @@ mod tests {
     #[test]
     fn a_link_that_leaves_through_another_link_is_refused() {
         let dir = temp("chained");
-        let tree = dir.join("tree");
+        let tree = dir.0.join("tree");
         fake_toolchain(&tree, host(), "1.96.1");
-        fs::write(dir.join("secret"), b"outside").unwrap();
+        fs::write(dir.0.join("secret"), b"outside").unwrap();
         fs::create_dir(tree.join("d")).unwrap();
         // d/s is the root itself: inside.
         std::os::unix::fs::symlink("..", tree.join("d/s")).unwrap();
@@ -1114,8 +1105,8 @@ mod tests {
             error.to_string().contains("outside the toolchain"),
             "{error}"
         );
-        fs::create_dir(dir.join("copy")).unwrap();
-        let error = copy_tree(&tree, &dir.join("copy")).unwrap_err();
+        fs::create_dir(dir.0.join("copy")).unwrap();
+        let error = copy_tree(&tree, &dir.0.join("copy")).unwrap_err();
         assert!(
             error.to_string().contains("outside the toolchain"),
             "{error}"
@@ -1127,7 +1118,7 @@ mod tests {
         assert!(tree_digest(&tree).is_err());
         fs::remove_file(tree.join("loop-a")).unwrap();
         fs::remove_file(tree.join("loop-b")).unwrap();
-        std::os::unix::fs::symlink(&dir, tree.join("d/abs")).unwrap();
+        std::os::unix::fs::symlink(&dir.0, tree.join("d/abs")).unwrap();
         assert!(!contained_link(
             &tree,
             Path::new("f"),
@@ -1137,7 +1128,6 @@ mod tests {
         // A dangling link inside the tree stays inside.
         std::os::unix::fs::symlink("not-yet/../bin", tree.join("dangling")).unwrap();
         assert!(tree_digest(&tree).is_ok());
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// A file is read through the descriptor the walk checked: a name
@@ -1146,15 +1136,15 @@ mod tests {
     #[test]
     fn a_file_swapped_for_a_link_mid_walk_is_refused() {
         let dir = temp("swap");
-        let tree = dir.join("tree");
+        let tree = dir.0.join("tree");
         fake_toolchain(&tree, host(), "1.96.1");
-        fs::write(dir.join("secret"), b"outside").unwrap();
+        fs::write(dir.0.join("secret"), b"outside").unwrap();
         let mut refused = Vec::new();
         walk(&tree, &mut |path, entry| {
             if let Entry::File(file) = entry {
                 if path == Path::new("bin/cargo") {
                     fs::remove_file(tree.join(path))?;
-                    std::os::unix::fs::symlink(dir.join("secret"), tree.join(path))?;
+                    std::os::unix::fs::symlink(dir.0.join("secret"), tree.join(path))?;
                     refused.push(file.open(&tree, path).is_err());
                 }
             }
@@ -1162,7 +1152,6 @@ mod tests {
         })
         .unwrap();
         assert_eq!(refused, [true]);
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// An unchanged file's sum comes from the cache; a changed one is read,
@@ -1170,9 +1159,9 @@ mod tests {
     #[test]
     fn unchanged_files_are_hashed_from_the_cache() {
         let dir = temp("cache");
-        let tree = dir.join("tree");
+        let tree = dir.0.join("tree");
         fake_toolchain(&tree, host(), "1.96.1");
-        let cache = dir.join("cache.json");
+        let cache = dir.0.join("cache.json");
         let full = tree_digest(&tree).unwrap();
         // Every file is quiet enough to remember in this test.
         assert_eq!(
@@ -1191,7 +1180,7 @@ mod tests {
             full
         );
         // The verification of the locked tree reads past the wrong sum.
-        let bundle = select_with(host(), &dir, &[path_row("tree")], no_cache)
+        let bundle = select_with(host(), &dir.0, &[path_row("tree")], no_cache)
             .unwrap()
             .unwrap();
         let row = Selected {
@@ -1219,7 +1208,6 @@ mod tests {
         let _ = fs::remove_file(&cache);
         tree_digest_cached(&tree, Some(&cache)).unwrap();
         assert!(!load_cache(&cache).contains_key(&std));
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// A cached sum that lies about a changed file lets verification pass,
@@ -1232,7 +1220,7 @@ mod tests {
         let _attribution_lock = crate::kernel::policy::attribution_test_lock();
         let _attribution = crate::kernel::policy::Attribution::open("cargo").unwrap();
         let dir = temp("realize-cache");
-        let store_root = dir.join("store");
+        let store_root = dir.0.join("store");
         for sub in [
             "objects",
             "meta",
@@ -1251,9 +1239,9 @@ mod tests {
         let activity = store
             .activity(crate::kernel::activity::ActivityMode::Exclusive)
             .unwrap();
-        let tree = dir.join("tree");
+        let tree = dir.0.join("tree");
         fake_toolchain(&tree, host(), "1.96.1");
-        let bundle = select_with(host(), &dir, &[path_row("tree")], no_cache)
+        let bundle = select_with(host(), &dir.0, &[path_row("tree")], no_cache)
             .unwrap()
             .unwrap();
         let selected = Selected {
@@ -1311,18 +1299,17 @@ mod tests {
             "the import holds the locked bytes"
         );
         drop(activity);
-        let _ = crate::kernel::store::remove_tree(&dir);
     }
 
     #[test]
     fn a_path_row_selects_the_probed_and_hashed_tree() {
         let dir = temp("select");
-        let tree = dir.join("custom-rust");
+        let tree = dir.0.join("custom-rust");
         fake_toolchain(&tree, host(), "1.97.0-nightly");
         // No path row: the catalog answers.
-        assert_eq!(select_with(host(), &dir, &[], no_cache).unwrap(), None);
+        assert_eq!(select_with(host(), &dir.0, &[], no_cache).unwrap(), None);
         // Relative to the project, as rustup reads it.
-        let bundle = select_with(host(), &dir, &[path_row("custom-rust")], no_cache)
+        let bundle = select_with(host(), &dir.0, &[path_row("custom-rust")], no_cache)
             .unwrap()
             .unwrap();
         assert_eq!(bundle.release, PATH_RELEASE);
@@ -1342,25 +1329,29 @@ mod tests {
             "rustc 1.97.0-nightly (0123abcde 2026-06-26); cargo 1.97.0-nightly (4567fedcb 2026-06-26)"
         );
         // The same tree named absolutely is the same bundle.
-        let absolute = select_with(host(), &dir, &[path_row(tree.to_str().unwrap())], no_cache)
-            .unwrap()
-            .unwrap();
+        let absolute = select_with(
+            host(),
+            &dir.0,
+            &[path_row(tree.to_str().unwrap())],
+            no_cache,
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(absolute, bundle);
         // A missing tree, or one built for another host, is refused.
-        let error = select_with(host(), &dir, &[path_row("nowhere")], no_cache).unwrap_err();
+        let error = select_with(host(), &dir.0, &[path_row("nowhere")], no_cache).unwrap_err();
         assert!(
             error.to_string().contains("toolchain.path nowhere"),
             "{error}"
         );
-        let foreign = dir.join("foreign");
+        let foreign = dir.0.join("foreign");
         let other = if host() == Platform::X86_64UnknownLinuxGnu {
             Platform::Aarch64AppleDarwin
         } else {
             Platform::X86_64UnknownLinuxGnu
         };
         fake_toolchain(&foreign, other, "1.96.1");
-        let error = select_with(host(), &dir, &[path_row("foreign")], no_cache).unwrap_err();
+        let error = select_with(host(), &dir.0, &[path_row("foreign")], no_cache).unwrap_err();
         assert!(error.to_string().contains("not this host"), "{error}");
-        let _ = fs::remove_dir_all(&dir);
     }
 }

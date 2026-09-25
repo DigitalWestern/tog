@@ -2073,14 +2073,8 @@ mod tests {
 
     #[test]
     fn go_archive_layout_strips_only_the_go_root() {
-        let temp = std::env::temp_dir().join(format!(
-            "tog-go-layout-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let scratch = TempDir::named("go-layout");
+        let temp = scratch.0.clone();
         let source = temp.join("source");
         std::fs::create_dir_all(source.join("go/bin")).unwrap();
         std::fs::create_dir_all(source.join("go/src")).unwrap();
@@ -2126,8 +2120,6 @@ mod tests {
         let error = extract_go_toolchain(&nested_archive, &nested_staged).unwrap_err();
         assert!(error.to_string().contains("unexpected layout"));
         assert!(!nested_staged.join("go").exists());
-
-        let _ = std::fs::remove_dir_all(temp);
     }
 
     #[test]
@@ -2236,15 +2228,8 @@ mod tests {
 
     #[test]
     fn modcache_skeleton_layout() {
-        let temp = std::env::temp_dir().join(format!(
-            "tog-go-skel-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&temp).unwrap();
+        let scratch = TempDir::named("go-skel");
+        let temp = scratch.0.clone();
         let _lock = crate::kernel::store::STORE_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -2300,7 +2285,6 @@ mod tests {
         std::fs::create_dir_all(&staged2).unwrap();
         let e = stage_modcache_skeleton(&store, activity, &plan, &staged2).unwrap_err();
         assert!(e.to_string().contains(&info_hash), "{e}");
-        let _ = std::fs::remove_dir_all(&temp);
     }
     /// Characterization: the plan cache is the
     /// only part of `plan_go` reachable without a real toolchain, and it is

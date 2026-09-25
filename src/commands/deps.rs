@@ -2131,6 +2131,7 @@ fn edit_attribution() -> io::Result<policy::Attribution> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::kernel::testutil::TempDir;
     fn spec(text: &str) -> Spec {
         parse_spec(text)
     }
@@ -2277,10 +2278,8 @@ mod tests {
 
     #[test]
     fn missing_pnpm_package_manager_names_lock_format_without_floating_suggestion() {
-        let root =
-            std::env::temp_dir().join(format!("tog-node-package-manager-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(&root).unwrap();
+        let scratch = TempDir::named("node-package-manager");
+        let root = scratch.0.clone();
         fs::write(root.join("package.json"), "{}\n").unwrap();
         let missing = node_package_manager(&root, "lockfileVersion: '9.0'\n").unwrap_err();
         let missing = missing.to_string();
@@ -2291,7 +2290,6 @@ mod tests {
             "{missing}"
         );
         assert!(!missing.contains("pnpm major 9"), "{missing}");
-        let _ = fs::remove_dir_all(&root);
     }
 
     /// `pnpm-lock.yaml` decides membership, so the two shapes that used to
@@ -2302,14 +2300,8 @@ mod tests {
     /// hand-written YAML that tog's lockfile-shaped parser rejects.
     #[test]
     fn workspace_membership_comes_from_the_lock_not_the_glob() {
-        let root = std::env::temp_dir().join(format!(
-            "tog-ws-importers-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let scratch = TempDir::named("ws-importers");
+        let root = scratch.0.clone();
         let member = root.join("apps/web");
         fs::create_dir_all(&member).unwrap();
         fs::write(
@@ -2355,8 +2347,6 @@ mod tests {
         .unwrap();
         let error = pnpm_membership(&root, &member).unwrap_err();
         assert!(error.to_string().contains("pnpm install"), "{error}");
-
-        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
@@ -2448,8 +2438,8 @@ mod tests {
     /// this path, are what keep that harmless.
     #[test]
     fn pnpm_scratch_paths_resolve_where_pnpm_joins_them() {
-        let root = std::env::temp_dir().join(format!("tog-pnpm-scratch-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
+        let temp = TempDir::named("pnpm-scratch");
+        let root = temp.0.clone();
         let stage = root.join("store/tmp/stage-1");
         let lock_root = root.join("proj");
         let member = lock_root.join("packages/lib");
@@ -2513,7 +2503,6 @@ mod tests {
             relative_path(Path::new("/a"), Path::new("/a/x")),
             PathBuf::from("x")
         );
-        let _ = fs::remove_dir_all(&root);
     }
 
     fn selected(project: &Path) -> (String, PathBuf) {
@@ -2529,8 +2518,8 @@ mod tests {
 
     #[test]
     fn a_backslash_in_a_directory_name_takes_pnpms_own_slash_importer_key() {
-        let root = std::env::temp_dir().join(format!("tog-pnpm-backslash-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
+        let scratch = TempDir::named("pnpm-backslash");
+        let root = scratch.0.clone();
         fs::create_dir_all(root.join("packages").join("a\\b")).unwrap();
         fs::write(
             root.join("pnpm-lock.yaml"),
@@ -2546,13 +2535,12 @@ mod tests {
             "pnpm 9.12.3 writes the importer key packages/a/b for the on-disk \
              directory packages/a\\b, so tog must normalise the same way"
         );
-        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
     fn a_project_the_workspace_lock_does_not_list_refuses_instead_of_selecting_npm() {
-        let root = std::env::temp_dir().join(format!("tog-pnpm-unlisted-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
+        let scratch = TempDir::named("pnpm-unlisted");
+        let root = scratch.0.clone();
         fs::create_dir_all(root.join("packages/listed")).unwrap();
         fs::create_dir_all(root.join("packages/added-since-install")).unwrap();
         fs::write(
@@ -2580,14 +2568,12 @@ mod tests {
             "a member added since the last pnpm install must be reported, not \
              silently handed to npm"
         );
-        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
     fn a_settings_only_pnpm_workspace_yaml_does_not_make_a_single_package_repo_a_workspace() {
-        let root =
-            std::env::temp_dir().join(format!("tog-pnpm-settings-only-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
+        let scratch = TempDir::named("pnpm-settings-only");
+        let root = scratch.0.clone();
         fs::create_dir_all(root.join("examples/demo")).unwrap();
         fs::write(
             root.join("pnpm-lock.yaml"),
@@ -2617,14 +2603,12 @@ mod tests {
             "a lock whose only importer is the root itself describes a \
              single-package repository"
         );
-        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
     fn node_lock_selection_prefers_own_lock_and_reads_workspace_membership_from_the_lock() {
-        let root =
-            std::env::temp_dir().join(format!("tog-node-lock-selection-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
+        let scratch = TempDir::named("node-lock-selection");
+        let root = scratch.0.clone();
         fs::create_dir_all(root.join("packages/lib")).unwrap();
         fs::create_dir_all(root.join("packages/private")).unwrap();
         fs::write(
@@ -2680,14 +2664,12 @@ mod tests {
             selected(&boundary),
             ("package-lock.json".to_string(), boundary)
         );
-        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
     fn ancestor_non_pnpm_locks_and_no_lock_projects_are_boundaries() {
-        let root =
-            std::env::temp_dir().join(format!("tog-node-lock-boundaries-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
+        let scratch = TempDir::named("node-lock-boundaries");
+        let root = scratch.0.clone();
         let nested = root.join("tools/nested");
         fs::create_dir_all(&nested).unwrap();
         fs::write(nested.join("package.json"), "{}\n").unwrap();
@@ -2705,14 +2687,12 @@ mod tests {
         );
         fs::remove_file(root.join("yarn.lock")).unwrap();
         assert_eq!(selected(&nested), ("package-lock.json".to_string(), nested));
-        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
     fn unmatched_pnpm_workspace_is_a_boundary_to_an_outer_workspace() {
-        let root =
-            std::env::temp_dir().join(format!("tog-nested-pnpm-boundary-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
+        let scratch = TempDir::named("nested-pnpm-boundary");
+        let root = scratch.0.clone();
         let inner = root.join("inner");
         let member = inner.join("member");
         fs::create_dir_all(&member).unwrap();
@@ -2731,14 +2711,12 @@ mod tests {
         fs::write(member.join("package.json"), "{}\n").unwrap();
 
         assert_eq!(selected(&member), ("package-lock.json".to_string(), member));
-        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
     fn mixed_sync_roots_are_rejected_before_delegation() {
-        let root =
-            std::env::temp_dir().join(format!("tog-mixed-sync-roots-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
+        let scratch = TempDir::named("mixed-sync-roots");
+        let root = scratch.0.clone();
         fs::create_dir_all(root.join("packages/member")).unwrap();
         fs::write(
             root.join("pnpm-lock.yaml"),
@@ -2757,15 +2735,12 @@ mod tests {
         assert!(message.contains(&member.display().to_string()), "{message}");
         assert!(message.contains(&root.display().to_string()), "{message}");
         assert!(message.contains("run the two adds separately"), "{message}");
-        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
     fn yarn_berry_uses_conversion_refusal_without_delegation() {
-        let root =
-            std::env::temp_dir().join(format!("tog-yarn-berry-detection-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(&root).unwrap();
+        let scratch = TempDir::named("yarn-berry-detection");
+        let root = scratch.0.clone();
         fs::write(
             root.join("package.json"),
             "{\"packageManager\":\"yarn@1.22.22\"}\n",
@@ -2788,7 +2763,6 @@ mod tests {
             ),
             "{error}"
         );
-        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -2882,8 +2856,8 @@ mod tests {
         assert_eq!(requirement_name("--hash=sha256:abc"), None);
         assert_eq!(requirement_name(""), None);
 
-        let temp = std::env::temp_dir().join(format!("tog-deps-{}", std::process::id()));
-        fs::create_dir_all(&temp).unwrap();
+        let scratch = TempDir::named("deps");
+        let temp = scratch.0.clone();
         let file = temp.join("requirements.txt");
         fs::write(&file, "# pinned\nsix==1.16.0\n-r extra.txt\n").unwrap();
         edit_requirements(&file, &["requests>=2".into(), "six==1.17.0".into()], &[]).unwrap();
@@ -2900,14 +2874,12 @@ mod tests {
         assert!(error.to_string().contains("'six' is not declared"));
         let error = edit_requirements(&file, &["-e .".into()], &[]).unwrap_err();
         assert!(error.to_string().contains("not a requirement"));
-        let _ = fs::remove_dir_all(&temp);
     }
 
     #[test]
     fn requirement_edits_are_logical_lossless_and_ambiguous_edits_fail() {
-        let temp = std::env::temp_dir().join(format!("tog-deps-logical-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&temp);
-        fs::create_dir_all(&temp).unwrap();
+        let scratch = TempDir::named("deps-logical");
+        let temp = scratch.0.clone();
         let file = temp.join("requirements.txt");
         fs::write(
             &file,
@@ -2940,7 +2912,6 @@ mod tests {
 
         let error = edit_requirements(&file, &["foo\nbar".into()], &[]).unwrap_err();
         assert!(error.to_string().contains("CR, LF, or NUL"), "{error}");
-        let _ = fs::remove_dir_all(&temp);
     }
 
     #[cfg(unix)]
@@ -2949,9 +2920,8 @@ mod tests {
         use std::os::unix::fs::symlink;
         use std::os::unix::fs::PermissionsExt;
 
-        let temp = std::env::temp_dir().join(format!("tog-deps-atomic-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&temp);
-        fs::create_dir_all(&temp).unwrap();
+        let scratch = TempDir::named("deps-atomic");
+        let temp = scratch.0.clone();
         let file = temp.join("requirements.txt");
         let target = temp.join("outside");
         let old_temp = file.with_extension(format!("tog-edit.{}", std::process::id()));
@@ -2967,14 +2937,12 @@ mod tests {
             fs::metadata(&file).unwrap().permissions().mode() & 0o777,
             0o600
         );
-        let _ = fs::remove_dir_all(&temp);
     }
 
     #[test]
     fn python_shapes_follow_the_sync_order() {
-        let temp = std::env::temp_dir().join(format!("tog-shape-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&temp);
-        fs::create_dir_all(&temp).unwrap();
+        let scratch = TempDir::named("shape");
+        let temp = scratch.0.clone();
         assert!(python_shape(&temp).is_err());
         fs::write(temp.join("setup.py"), "").unwrap();
         assert_eq!(python_shape(&temp).unwrap(), PyShape::Setup);
@@ -2993,7 +2961,6 @@ mod tests {
         );
         fs::write(temp.join("requirements.in"), "six\n").unwrap();
         assert_eq!(python_shape(&temp).unwrap(), PyShape::PipCompile);
-        let _ = fs::remove_dir_all(&temp);
     }
 
     #[test]

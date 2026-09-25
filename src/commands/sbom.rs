@@ -125,17 +125,12 @@ pub fn run(output: Option<&Path>) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::kernel::testutil::TempDir;
 
     #[test]
     fn sbom_from_synthetic_closures() {
-        let dir = std::env::temp_dir().join(format!(
-            "tog-sbom-test-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let scratch = TempDir::named("sbom-test");
+        let dir = scratch.0.clone();
         fs::create_dir_all(dir.join(".tog/closures")).unwrap();
         let write = |eco: &str, body: Value| {
             let envelope = json!({
@@ -234,7 +229,6 @@ mod tests {
             p["name"] == "tog:exception:install-script-failed"
                 && p["value"] == "node_modules/a: postinstall: network-denied"
         }));
-        fs::remove_dir_all(&dir).unwrap();
     }
 
     /// A synced Rust project that has also been formatted has both closures;
@@ -319,9 +313,7 @@ mod tests {
 
     #[test]
     fn no_closures_is_a_loud_error() {
-        let dir = std::env::temp_dir().join(format!("tog-sbom-empty-{}", std::process::id()));
-        fs::create_dir_all(&dir).unwrap();
-        assert!(generate(&dir).is_err());
-        fs::remove_dir_all(&dir).unwrap();
+        let dir = TempDir::named("sbom-empty");
+        assert!(generate(&dir.0).is_err());
     }
 }

@@ -677,6 +677,7 @@ pub(super) fn project_env_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::kernel::testutil::TempDir;
 
     /// What sync writes: the bundle it planned from and the interpreter
     /// object it realized, beside every key `ls`, `status` and `sbom`
@@ -745,7 +746,7 @@ mod tests {
             .unwrap_or_else(|error| error.into_inner());
         let _attribution_lock = crate::kernel::policy::attribution_test_lock();
         let mut attribution = crate::kernel::policy::Attribution::open("python").unwrap();
-        let store = test_store("closure-refs");
+        let (_store_dir, store) = test_store("closure-refs");
         let lease = store
             .activity(crate::kernel::activity::ActivityMode::Shared)
             .unwrap();
@@ -777,11 +778,8 @@ mod tests {
             .unwrap();
         }
         // A real .venv the user made: it is moved into a store backup.
-        let project = std::env::temp_dir().join(format!(
-            "tog-python-closure-refs-project-{}",
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&project);
+        let scratch = TempDir::named("python-closure-refs-project");
+        let project = scratch.0.clone();
         fs::create_dir_all(project.join(".venv/lib")).unwrap();
         let plan = Plan {
             ecosystem: "python".into(),
@@ -828,8 +826,6 @@ mod tests {
         let reimported = crate::kernel::store::reimport_root_for_test(&store, &project).unwrap();
         assert_eq!(reimported.objects, record.objects);
         assert_eq!(reimported.projections, record.projections);
-        let _ = crate::kernel::store::remove_tree(&store.root);
-        let _ = fs::remove_dir_all(&project);
     }
 
     /// The shipped release the fixture plans name. Selection is the
@@ -840,18 +836,13 @@ mod tests {
     use crate::kernel::types::LockedPackage;
     use sha2::Digest as _;
 
-    fn test_store(label: &str) -> Store {
-        let root = std::env::temp_dir().join(format!(
-            "tog-project-identity-{label}-{}",
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&root);
+    fn test_store(label: &str) -> (TempDir, Store) {
+        let dir = TempDir::named(&format!("project-identity-{label}"));
         for sub in ["objects", "meta", "cache/sha256", "tmp"] {
-            fs::create_dir_all(root.join(sub)).unwrap();
+            fs::create_dir_all(dir.0.join(sub)).unwrap();
         }
-        Store {
-            root: root.canonicalize().unwrap(),
-        }
+        let root = dir.0.clone();
+        (dir, Store { root })
     }
 
     fn local_sdist(store: &Store, name: &str, requires: &str) -> LockedPackage {
@@ -1139,7 +1130,7 @@ mod tests {
         let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        let store = test_store("fast-golden");
+        let (_store_dir, store) = test_store("fast-golden");
         let activity = &store
             .activity(crate::kernel::activity::ActivityMode::Shared)
             .unwrap();
@@ -1187,7 +1178,6 @@ mod tests {
         }
         .object_id();
         assert_eq!(actual, expected);
-        let _ = fs::remove_dir_all(&store.root);
     }
 
     #[test]
@@ -1195,7 +1185,7 @@ mod tests {
         let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        let store = test_store("isolated-input");
+        let (_store_dir, store) = test_store("isolated-input");
         let activity = &store
             .activity(crate::kernel::activity::ActivityMode::Shared)
             .unwrap();
@@ -1239,7 +1229,6 @@ mod tests {
                 None,
             )
         );
-        let _ = fs::remove_dir_all(&store.root);
     }
 
     #[test]
@@ -1247,7 +1236,7 @@ mod tests {
         let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        let store = test_store("native-sdist-identity");
+        let (_store_dir, store) = test_store("native-sdist-identity");
         let activity = &store
             .activity(crate::kernel::activity::ActivityMode::Shared)
             .unwrap();
@@ -1281,6 +1270,5 @@ mod tests {
                 Some(native_id.as_str())
             );
         }
-        let _ = fs::remove_dir_all(&store.root);
     }
 }

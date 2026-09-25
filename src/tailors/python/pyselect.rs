@@ -873,6 +873,7 @@ pub fn extract_setup_py_python_requires(text: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::kernel::testutil::TempDir;
 
     fn c(text: &str) -> ConstraintSource {
         ConstraintSource::new(text, "test")
@@ -1183,9 +1184,8 @@ mod tests {
 
     #[test]
     fn poetry_python_table_comes_from_interpreter_constraints() {
-        let temp = std::env::temp_dir().join(format!("tog-pyselect-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&temp);
-        std::fs::create_dir_all(&temp).unwrap();
+        let scratch = TempDir::named("pyselect");
+        let temp = scratch.0.clone();
         std::fs::write(
             temp.join("pyproject.toml"),
             "[tool.poetry.dependencies]\npython = { version = \"^3.9\", python = \">=3.9\" }\n",
@@ -1194,7 +1194,6 @@ mod tests {
         let inputs = collect_project_inputs(&ProjectRoot::open(&temp).unwrap()).unwrap();
         assert_eq!(inputs.constraints.len(), 1);
         assert_eq!(inputs.constraints[0].text, "^3.9");
-        let _ = std::fs::remove_dir_all(temp);
     }
 
     #[test]

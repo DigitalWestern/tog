@@ -168,6 +168,7 @@ pub fn run(ctx: &Context, cmd: &[String], frozen: bool, strict: bool) -> io::Res
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::kernel::testutil::TempDir;
     use crate::tailors::dotnet;
 
     #[test]
@@ -307,13 +308,13 @@ mod tests {
 
     #[test]
     fn dotnet_projection_refuses_resolved_package_scripts() {
-        let dir = std::env::temp_dir().join(format!("tog-run-script-{}", std::process::id()));
+        let scratch = TempDir::named("run-script");
+        let dir = scratch.0.clone();
         std::fs::create_dir_all(dir.join(".tog/closures")).unwrap();
         assert!(package_script_refusal(&dir, true).is_none());
         std::fs::write(dir.join(".tog/closures/dotnet.json"), "{}").unwrap();
         let refusal = package_script_refusal(&dir, true).expect("refused");
         assert!(refusal.contains("tog build dotnet"), "{refusal}");
         assert!(package_script_refusal(&dir, false).is_none());
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

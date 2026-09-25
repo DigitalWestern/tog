@@ -1783,6 +1783,7 @@ mod tests {
         }
     }
     use super::*;
+    use crate::kernel::testutil::TempDir;
     use std::os::unix::fs::{symlink, PermissionsExt};
 
     #[test]
@@ -1911,15 +1912,8 @@ mod tests {
     /// an older SDK keeps passing after the shipped catalog moves on.
     #[test]
     fn the_global_json_gate_compares_against_the_selected_sdk() {
-        let temp = std::env::temp_dir().join(format!(
-            "tog-dotnet-globaljson-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir_all(&temp).unwrap();
+        let scratch = TempDir::named("dotnet-globaljson");
+        let temp = scratch.0.clone();
         fs::write(
             temp.join("global.json"),
             "{\"sdk\":{\"version\":\"9.0.100\",\"rollForward\":\"disable\"}}",
@@ -1931,7 +1925,6 @@ mod tests {
             .to_string();
         assert!(error.contains("requires SDK 9.0.100"), "{error}");
         assert!(error.contains(SDK_VERSION), "{error}");
-        let _ = fs::remove_dir_all(&temp);
     }
 
     /// Every closure this tailor writes carries which bundle realized it and
@@ -1981,14 +1974,8 @@ mod tests {
             .unwrap_or_else(|error| error.into_inner());
         let _attribution_lock = crate::kernel::policy::attribution_test_lock();
         let mut attribution = crate::kernel::policy::Attribution::open("dotnet").unwrap();
-        let temp = std::env::temp_dir().join(format!(
-            "tog-dotnet-closure-refs-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let scratch = TempDir::named("dotnet-closure-refs");
+        let temp = scratch.0.clone();
         let store_root = temp.join("store");
         for sub in ["objects", "meta", "cache/sha256", "tmp", "roots"] {
             fs::create_dir_all(store_root.join(sub)).unwrap();
@@ -2049,7 +2036,6 @@ mod tests {
         let reimported = crate::kernel::store::reimport_root_for_test(&store, &project).unwrap();
         assert_eq!(reimported.objects, record.objects);
         assert_eq!(reimported.projections, record.projections);
-        let _ = crate::kernel::store::remove_tree(&temp);
     }
 
     #[test]
@@ -2066,17 +2052,9 @@ mod tests {
 
     #[test]
     fn dotnet_tmp_validation_is_path_specific_and_testable() {
-        // Canonical base: the validator requires canonical paths, and macOS
-        // TMPDIR lives under /var -> /private/var.
-        let base = std::env::temp_dir().canonicalize().unwrap().join(format!(
-            "tog-dn-tmp-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir_all(&base).unwrap();
+        // The validator requires canonical paths, and a TempDir path is one.
+        let scratch = TempDir::named("dn-tmp");
+        let base = scratch.0.clone();
         let uid = invoking_uid().unwrap();
 
         let safe = base.join("safe");
@@ -2104,17 +2082,12 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("is owned by uid"), "{error}");
-
-        let _ = crate::kernel::store::remove_tree(&base);
     }
 
     #[test]
     fn precreates_shm_under_the_dotnet_tmp_dir_on_every_platform() {
-        let temp = std::env::temp_dir()
-            .canonicalize()
-            .unwrap()
-            .join(format!("tog-dotnet-shm-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&temp);
+        let scratch = TempDir::named("dotnet-shm");
+        let temp = scratch.0.join("tmp");
         let uid = invoking_uid().unwrap();
         let dir = ensure_dotnet_tmp_at(&temp, uid, true).unwrap();
         let shm = dir.join("shm");
@@ -2128,19 +2101,12 @@ mod tests {
         fs::remove_dir(&shm).unwrap();
         std::os::unix::fs::symlink(&temp, &shm).unwrap();
         assert!(ensure_dotnet_tmp_at(&temp, uid, true).is_err());
-        let _ = fs::remove_dir_all(&temp);
     }
 
     #[test]
     fn every_prepared_scratch_is_already_marked_nuget_migrated() {
-        let base = std::env::temp_dir().join(format!(
-            "tog-dn-mig-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let scratch = TempDir::named("dn-mig");
+        let base = scratch.0.clone();
         prepare_scratch(&base).unwrap();
         assert!(base.join("home").is_dir());
         let data_home = forced_env(&base, &base, &base)
@@ -2157,19 +2123,12 @@ mod tests {
             "NuGet reads migrations under XDG_DATA_HOME; the sentinel must land there"
         );
         prepare_scratch(&base).unwrap();
-        let _ = fs::remove_dir_all(&base);
     }
 
     #[test]
     fn all_dotnet_sandbox_phases_add_only_the_selected_tmp_write_root() {
-        let base = std::env::temp_dir().join(format!(
-            "tog-dn-spec-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let scratch = TempDir::named("dn-spec");
+        let base = scratch.0.clone();
         let project = base.join("project");
         let packages = base.join("packages");
         let selected_tmp = base.join(".dotnet");
@@ -2250,15 +2209,8 @@ mod tests {
 
     #[test]
     fn global_json_gate() {
-        let temp = std::env::temp_dir().join(format!(
-            "tog-dn-gj-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&temp).unwrap();
+        let scratch = TempDir::named("dn-gj");
+        let temp = scratch.0.clone();
         assert!(check_global_json(&ProjectRoot::open(&temp).unwrap(), SDK_VERSION).is_ok()); // absent
         std::fs::write(
             temp.join("global.json"),
@@ -2284,7 +2236,6 @@ mod tests {
         )
         .unwrap();
         assert!(check_global_json(&ProjectRoot::open(&temp).unwrap(), SDK_VERSION).is_err());
-        let _ = std::fs::remove_dir_all(&temp);
     }
 
     #[test]
@@ -2320,15 +2271,8 @@ mod tests {
 
     #[test]
     fn preflight_rejects_unsafe_project_shapes() {
-        let base = std::env::temp_dir().join(format!(
-            "tog-dn-preflight-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir_all(&base).unwrap();
+        let scratch = TempDir::named("dn-preflight");
+        let base = scratch.0.clone();
 
         let minimal = base.join("minimal.csproj");
         fs::write(&minimal, minimal_csproj()).unwrap();
@@ -2447,22 +2391,14 @@ mod tests {
             Path::new("projector.csproj")
         )
         .is_err());
-
-        let _ = crate::kernel::store::remove_tree(&base);
     }
 
     /// A project read through a held root keeps reading the original
     /// directory after it is renamed and another project takes its path.
     #[test]
     fn preflight_reads_the_held_project_after_a_rename() {
-        let base = std::env::temp_dir().join(format!(
-            "tog-dn-held-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let scratch = TempDir::named("dn-held");
+        let base = scratch.0.clone();
         let project = base.join("project");
         fs::create_dir_all(&project).unwrap();
         fs::write(project.join("original.csproj"), minimal_csproj()).unwrap();
@@ -2494,21 +2430,12 @@ mod tests {
         assert_eq!(csproj, root.path().join("original.csproj"));
         // The replacement at the old path is what a path read would see.
         assert!(preflight(&ProjectRoot::open(&project).unwrap(), SDK_VERSION).is_err());
-
-        let _ = crate::kernel::store::remove_tree(&base);
     }
 
     #[test]
     fn sdk_extraction_requires_muxer_at_object_root() {
-        let base = std::env::temp_dir().join(format!(
-            "tog-dn-extract-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir_all(&base).unwrap();
+        let scratch = TempDir::named("dn-extract");
+        let base = scratch.0.clone();
 
         let root = base.join("root");
         fs::create_dir(&root).unwrap();
@@ -2547,21 +2474,12 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("unexpected layout"), "{error}");
-
-        let _ = crate::kernel::store::remove_tree(&base);
     }
 
     #[test]
     fn output_roots_reject_symlinks_and_metadata_source_is_fixed() {
-        let base = std::env::temp_dir().join(format!(
-            "tog-dn-output-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir_all(&base).unwrap();
+        let scratch = TempDir::named("dn-output");
+        let base = scratch.0.clone();
         let outside = base.join("outside");
         fs::create_dir(&outside).unwrap();
         let project = base.join("project");
@@ -2614,7 +2532,5 @@ mod tests {
         assert!(!publish_project
             .join(format!(".tog-fp.old.{}", std::process::id()))
             .exists());
-
-        let _ = crate::kernel::store::remove_tree(&base);
     }
 }

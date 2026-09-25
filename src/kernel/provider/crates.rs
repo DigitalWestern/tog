@@ -766,6 +766,7 @@ pub fn project_git_sources(project_dir: &Path) -> Vec<CargoGitSource> {
 mod tests {
     use super::*;
     use crate::kernel::provider::rust::RUST_VERSION;
+    use crate::kernel::testutil::TempDir;
 
     #[test]
     fn cargo_git_sources_parse_only_when_pinned() {
@@ -907,14 +908,8 @@ mod tests {
 
     #[test]
     fn git_crate_selection_uses_the_locked_version() {
-        let root = std::env::temp_dir().join(format!(
-            "tog-cargo-selection-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let scratch = TempDir::named("cargo-selection");
+        let root = scratch.0.clone();
         std::fs::create_dir_all(root.join("old")).unwrap();
         std::fs::create_dir_all(root.join("new")).unwrap();
         for (dir, version) in [("old", "1.0.0"), ("new", "2.0.0")] {
@@ -930,20 +925,12 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("another version"), "{error}");
-        let _ = crate::kernel::store::remove_tree(&root);
     }
 
     #[test]
     fn workspace_inheritance_and_relocated_symlinks_fail_closed() {
-        let root = std::env::temp_dir().join(format!(
-            "tog-cargo-workspace-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&root).unwrap();
+        let scratch = TempDir::named("cargo-workspace");
+        let root = scratch.0.clone();
         std::fs::write(
             root.join("Cargo.toml"),
             "[package]\nname = \"inherited\"\nversion.workspace = true\n",
@@ -961,6 +948,5 @@ mod tests {
         .unwrap();
         std::os::unix::fs::symlink("../../outside", root.join("escape")).unwrap();
         assert!(crate::kernel::gitsrc::validate_symlinks(&root).is_err());
-        let _ = crate::kernel::store::remove_tree(&root);
     }
 }

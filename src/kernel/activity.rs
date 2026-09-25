@@ -323,18 +323,10 @@ impl StoreActivity {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::kernel::testutil::TempDir;
 
-    fn temp_root(label: &str) -> PathBuf {
-        let root = std::env::temp_dir().join(format!(
-            "tog-activity-{label}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&root).unwrap();
-        root.canonicalize().unwrap()
+    fn temp_root(label: &str) -> TempDir {
+        TempDir::named(&format!("activity-{label}"))
     }
 
     /// A thread holding the exclusive lease must not be able to wait on
@@ -342,16 +334,15 @@ mod tests {
     #[test]
     fn a_shared_request_under_this_thread_s_exclusive_lease_is_an_error() {
         let root = temp_root("no-self-wait");
-        let exclusive = StoreActivity::acquire(&root, ActivityMode::Exclusive).unwrap();
-        let error = StoreActivity::acquire(&root, ActivityMode::Shared).unwrap_err();
+        let exclusive = StoreActivity::acquire(&root.0, ActivityMode::Exclusive).unwrap();
+        let error = StoreActivity::acquire(&root.0, ActivityMode::Shared).unwrap_err();
         assert!(
             error.to_string().contains("pass that lease"),
             "unexpected error: {error}"
         );
         drop(exclusive);
         // With the exclusive lease gone the same request succeeds.
-        StoreActivity::acquire(&root, ActivityMode::Shared).unwrap();
-        crate::kernel::store::remove_tree(&root).unwrap();
+        StoreActivity::acquire(&root.0, ActivityMode::Shared).unwrap();
     }
 
     /// `try_exclusive` answers "is this store in use?". A lease held by the
@@ -359,11 +350,10 @@ mod tests {
     #[test]
     fn try_exclusive_reports_busy_rather_than_failing_under_our_own_lease() {
         let root = temp_root("busy-not-error");
-        let shared = StoreActivity::acquire(&root, ActivityMode::Shared).unwrap();
-        assert!(StoreActivity::try_exclusive(&root).unwrap().is_none());
+        let shared = StoreActivity::acquire(&root.0, ActivityMode::Shared).unwrap();
+        assert!(StoreActivity::try_exclusive(&root.0).unwrap().is_none());
         drop(shared);
-        assert!(StoreActivity::try_exclusive(&root).unwrap().is_some());
-        crate::kernel::store::remove_tree(&root).unwrap();
+        assert!(StoreActivity::try_exclusive(&root.0).unwrap().is_some());
     }
 
     /// The blocking form of the same mistake is unsatisfiable and must say so
@@ -371,10 +361,9 @@ mod tests {
     #[test]
     fn a_blocking_upgrade_of_a_held_shared_lease_is_rejected() {
         let root = temp_root("no-upgrade");
-        let _shared = StoreActivity::acquire(&root, ActivityMode::Shared).unwrap();
-        let error = StoreActivity::acquire(&root, ActivityMode::Exclusive).unwrap_err();
+        let _shared = StoreActivity::acquire(&root.0, ActivityMode::Shared).unwrap();
+        let error = StoreActivity::acquire(&root.0, ActivityMode::Exclusive).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
-        crate::kernel::store::remove_tree(&root).unwrap();
     }
 
     /// Independent shared leases coexist; a lease for one store never
@@ -383,17 +372,15 @@ mod tests {
     fn independent_shared_leases_coexist_and_stay_bound_to_their_store() {
         let first = temp_root("store-a");
         let second = temp_root("store-b");
-        let a = StoreActivity::acquire(&first, ActivityMode::Shared).unwrap();
-        let b = StoreActivity::acquire(&second, ActivityMode::Shared).unwrap();
-        assert_eq!(a.root(), first.as_path());
-        assert_eq!(b.root(), second.as_path());
-        assert!(StoreActivity::try_exclusive(&first).unwrap().is_none());
+        let a = StoreActivity::acquire(&first.0, ActivityMode::Shared).unwrap();
+        let b = StoreActivity::acquire(&second.0, ActivityMode::Shared).unwrap();
+        assert_eq!(a.root(), first.0.as_path());
+        assert_eq!(b.root(), second.0.as_path());
+        assert!(StoreActivity::try_exclusive(&first.0).unwrap().is_none());
         drop(a);
-        assert!(StoreActivity::try_exclusive(&first).unwrap().is_some());
+        assert!(StoreActivity::try_exclusive(&first.0).unwrap().is_some());
         // The other store was never affected.
-        assert!(StoreActivity::try_exclusive(&second).unwrap().is_none());
+        assert!(StoreActivity::try_exclusive(&second.0).unwrap().is_none());
         drop(b);
-        crate::kernel::store::remove_tree(&first).unwrap();
-        crate::kernel::store::remove_tree(&second).unwrap();
     }
 }

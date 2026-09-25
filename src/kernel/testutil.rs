@@ -31,14 +31,24 @@ impl TempDir {
     /// A scratch directory whose name says which test made it, for the
     /// leftover a killed run leaves.
     pub fn named(label: &str) -> Self {
-        let path = std::env::temp_dir().join(format!(
+        Self::create(std::env::temp_dir().join(format!(
             "tog-{label}-{}-{}",
             std::process::id(),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_nanos()
-        ));
+        )))
+    }
+
+    /// A scratch directory at `tog-<name>` with no per-call suffix, for a
+    /// fixture whose path enters the result under test and so must be the
+    /// same on every call. Callers serialize their use of one name.
+    pub fn fixed(name: &str) -> Self {
+        Self::create(std::env::temp_dir().join(format!("tog-{name}")))
+    }
+
+    fn create(path: PathBuf) -> Self {
         std::fs::create_dir_all(&path).unwrap();
         // The store records object paths under its canonicalized root and
         // compares them exactly; on macOS the temp dir sits under /var, a

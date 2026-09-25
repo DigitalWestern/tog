@@ -662,6 +662,7 @@ mod tests {
         }
     }
     use super::*;
+    use crate::kernel::testutil::TempDir;
 
     /// The shipped rustfmt row of the fixture release.
     fn component(platform: Platform) -> io::Result<ArtifactSpec> {
@@ -718,14 +719,8 @@ mod tests {
 
     #[test]
     fn scratch_directories_are_named_so_gc_can_sweep_them() {
-        let parent = std::env::temp_dir().join(format!(
-            "tog-rustfmt-scratch-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let scratch = TempDir::named("rustfmt-scratch");
+        let parent = scratch.0.clone();
         for prefix in ["stage-rustfmt-run", "stage-rustfmt-probe"] {
             let dir = super::super::unique_dir(&parent, prefix).unwrap();
             let name = dir.file_name().unwrap().to_str().unwrap().to_string();
@@ -734,7 +729,6 @@ mod tests {
             assert!(name.starts_with("stage-"), "{name}");
             assert!(name.starts_with(prefix), "{name}");
         }
-        let _ = crate::kernel::store::remove_tree(&parent);
     }
 
     /// Under a lock naming a local toolchain, the record `status` expects
@@ -830,14 +824,8 @@ mod tests {
 
     #[test]
     fn rustfmt_object_lib_link_is_relative_to_paired_rust_object() {
-        let root = std::env::temp_dir().join(format!(
-            "tog-rustfmt-link-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let scratch = TempDir::named("rustfmt-link");
+        let root = scratch.0.clone();
         let staged = root.join("staged");
         fs::create_dir_all(&staged).unwrap();
         let rust_id = "b8418440835c4ec1f591381a17ae60ab12d1c727-rust-1.96.1";
@@ -851,8 +839,6 @@ mod tests {
         let link = fs::read_link(staged.join("lib")).unwrap();
         assert!(!link.is_absolute());
         assert_eq!(link, PathBuf::from(format!("../{rust_id}/lib")));
-
-        let _ = crate::kernel::store::remove_tree(&root);
     }
 
     /// The durable root/2 record `tog fmt` publishes (the producer lives in
@@ -873,14 +859,8 @@ mod tests {
             .unwrap_or_else(|error| error.into_inner());
         let _attribution_lock = crate::kernel::policy::attribution_test_lock();
         let mut attribution = crate::kernel::policy::Attribution::open("rustfmt").unwrap();
-        let root = std::env::temp_dir().join(format!(
-            "tog-rustfmt-closure-refs-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let scratch = TempDir::named("rustfmt-closure-refs");
+        let root = scratch.0.clone();
         let previous_store = std::env::var_os("TOG_STORE");
         std::env::set_var("TOG_STORE", root.join("store"));
         let platform = Platform::host().unwrap();
@@ -951,6 +931,5 @@ mod tests {
         let reimported = crate::kernel::store::reimport_root_for_test(&store, &project).unwrap();
         assert_eq!(reimported.objects, record.objects);
         assert_eq!(reimported.projections, record.projections);
-        let _ = crate::kernel::store::remove_tree(&root);
     }
 }

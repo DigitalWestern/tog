@@ -908,10 +908,10 @@ fn status_for(
 mod tests {
     use super::*;
     use crate::kernel::platform::Platform;
+    use crate::kernel::testutil::TempDir;
     use std::fs;
     use std::io::Write;
     use std::path::PathBuf;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn entry(kind: EntryKind, name: &str, link: Option<&str>) -> Entry {
         Entry {
@@ -1040,17 +1040,8 @@ mod tests {
 
     // ---- hand-built archives ----------------------------------------------
 
-    fn temp_dir(label: &str) -> PathBuf {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        static SEQ: AtomicUsize = AtomicUsize::new(0);
-        let dir = std::env::temp_dir().join(format!(
-            "tog-archive-{label}-{}-{}",
-            std::process::id(),
-            SEQ.fetch_add(1, Ordering::Relaxed)
-        ));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        dir
+    fn temp_dir(label: &str) -> TempDir {
+        TempDir::named(&format!("archive-{label}"))
     }
 
     /// Recompute the header checksum over the first block, the way every tar
@@ -1216,11 +1207,9 @@ mod tests {
     /// so the header reader and the `tar -t` cross-check both run.
     fn list_bytes(label: &str, bytes: &[u8]) -> io::Result<Vec<Entry>> {
         let temp = temp_dir(label);
-        let archive = temp.join("a.tar");
+        let archive = temp.0.join("a.tar");
         fs::write(&archive, bytes).unwrap();
-        let result = list(&archive, Compression::None);
-        let _ = fs::remove_dir_all(&temp);
-        result
+        list(&archive, Compression::None)
     }
 
     fn list_members(label: &str, members: &[Vec<u8>]) -> io::Result<Vec<Entry>> {
@@ -1283,15 +1272,8 @@ mod tests {
     /// reach into, so the owner names are simply not part of the answer.
     #[test]
     fn owner_names_containing_spaces_cannot_shift_the_parsed_name() {
-        let base = std::env::temp_dir().join(format!(
-            "tog-archive-owner-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir_all(&base).unwrap();
+        let scratch = TempDir::named("archive-owner");
+        let base = scratch.0.clone();
         let archive = base.join("evil.tar");
         write_tar(
             &archive,
@@ -1322,7 +1304,6 @@ mod tests {
             "a member escaped the destination"
         );
         assert_eq!(fs::read_dir(&destination).unwrap().count(), 0);
-        fs::remove_dir_all(&base).unwrap();
     }
 
     #[test]
@@ -1432,9 +1413,9 @@ mod tests {
     #[test]
     fn conflicting_gnu_and_pax_extensions_are_refused_before_writes() {
         let temp = temp_dir("conflicting-extensions");
-        let sentinel = temp.join("outside-sentinel");
+        let sentinel = temp.0.join("outside-sentinel");
         fs::write(&sentinel, b"untouched").unwrap();
-        let destination = temp.join("dest");
+        let destination = temp.0.join("dest");
         fs::create_dir_all(&destination).unwrap();
         for (kind, key, value) in [(b'L', "path", "pkg/link"), (b'K', "linkpath", "benign")] {
             for reverse in [false, true] {
@@ -1451,7 +1432,7 @@ mod tests {
                 ];
                 members.extend(extensions);
                 members.push(ustar("pkg/link", b'2', "benign", b""));
-                let archive = temp.join("conflict.tar");
+                let archive = temp.0.join("conflict.tar");
                 write_tar(&archive, &members);
                 let error = extract(&archive, &destination, 1, Compression::None)
                     .expect_err("conflicting extensions must be refused before extraction");
@@ -1465,7 +1446,6 @@ mod tests {
                 assert_eq!(fs::read(&sentinel).unwrap(), b"untouched");
             }
         }
-        let _ = fs::remove_dir_all(&temp);
     }
 
     #[test]
@@ -1713,13 +1693,13 @@ mod tests {
     fn gzip_streams_list_identically_to_the_plain_tar() {
         let temp = temp_dir("gzip-inproc");
         let bytes = joined(&sample_members());
-        let plain = temp.join("pkg.tar");
+        let plain = temp.0.join("pkg.tar");
         fs::write(&plain, &bytes).unwrap();
         let expected = list(&plain, Compression::None).unwrap();
 
         let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
         encoder.write_all(&bytes).unwrap();
-        let single = temp.join("pkg.tar.gz");
+        let single = temp.0.join("pkg.tar.gz");
         fs::write(&single, encoder.finish().unwrap()).unwrap();
         assert_eq!(list(&single, Compression::Gzip).unwrap(), expected);
 
@@ -1733,41 +1713,32 @@ mod tests {
             encoder.write_all(half).unwrap();
             concatenated.extend(encoder.finish().unwrap());
         }
-        let multi = temp.join("multi.tar.gz");
+        let multi = temp.0.join("multi.tar.gz");
         fs::write(&multi, &concatenated).unwrap();
         assert_eq!(list(&multi, Compression::Gzip).unwrap(), expected);
-        let _ = fs::remove_dir_all(&temp);
     }
 
     #[test]
     fn an_xz_stream_lists_identically_to_the_plain_tar() {
         let temp = temp_dir("xz-inproc");
         let bytes = joined(&sample_members());
-        let plain = temp.join("pkg.tar");
+        let plain = temp.0.join("pkg.tar");
         fs::write(&plain, &bytes).unwrap();
         let expected = list(&plain, Compression::None).unwrap();
 
         let mut encoder = liblzma::write::XzEncoder::new(Vec::new(), 6);
         encoder.write_all(&bytes).unwrap();
-        let compressed = temp.join("pkg.tar.xz");
+        let compressed = temp.0.join("pkg.tar.xz");
         fs::write(&compressed, encoder.finish().unwrap()).unwrap();
         assert_eq!(list(&compressed, Compression::Xz).unwrap(), expected);
-        let _ = fs::remove_dir_all(&temp);
     }
 
     // ---- end to end with the real tar ------------------------------------
 
     #[test]
     fn dot_components_do_not_inflate_the_symlink_depth_budget() {
-        let base = std::env::temp_dir().join(format!(
-            "tog-archive-dot-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir_all(&base).unwrap();
+        let scratch = TempDir::named("archive-dot");
+        let base = scratch.0.clone();
         let archive = base.join("dot.tar");
         write_tar(&archive, &[ustar("./l", b'2', "../ESCAPED", b"")]);
         let entries = list(&archive, Compression::None).unwrap();
@@ -1786,7 +1757,6 @@ mod tests {
             validate(&entries, 1).is_err(),
             "padded `.` components bought an unbounded climb: {entries:?}"
         );
-        fs::remove_dir_all(&base).unwrap();
     }
 
     #[test]
@@ -1812,9 +1782,9 @@ mod tests {
     #[test]
     fn hostile_members_are_refused_before_anything_is_written() {
         let temp = temp_dir("hostile");
-        let sentinel = temp.join("outside-sentinel");
+        let sentinel = temp.0.join("outside-sentinel");
         fs::write(&sentinel, b"untouched").unwrap();
-        let destination = temp.join("dest");
+        let destination = temp.0.join("dest");
         fs::create_dir_all(&destination).unwrap();
         // Each archive is well-formed except for one hostile member placed
         // AFTER benign members, so a tar that extracted as it read would
@@ -1843,7 +1813,7 @@ mod tests {
             ("absolute name", ustar("/abs/escaped", b'0', "", b"x")),
         ];
         for (label, hostile) in cases {
-            let archive = temp.join(format!("{}.tar", label.replace(' ', "-")));
+            let archive = temp.0.join(format!("{}.tar", label.replace(' ', "-")));
             let mut members = benign.to_vec();
             members.push(hostile);
             write_tar(&archive, &members);
@@ -1859,13 +1829,12 @@ mod tests {
             );
             assert_eq!(fs::read(&sentinel).unwrap(), b"untouched", "{label}");
         }
-        let _ = fs::remove_dir_all(&temp);
     }
 
     #[test]
     fn contained_archives_extract_with_strip_and_keep_their_symlinks() {
         let temp = temp_dir("good");
-        let archive = temp.join("good.tar");
+        let archive = temp.0.join("good.tar");
         write_tar(
             &archive,
             &[
@@ -1879,7 +1848,7 @@ mod tests {
                 ustar("root/a b/file with -> arrow", b'0', "", b"x"),
             ],
         );
-        let destination = temp.join("dest");
+        let destination = temp.0.join("dest");
         fs::create_dir_all(&destination).unwrap();
         let entries = extract(&archive, &destination, 1, Compression::None).unwrap();
         assert_eq!(entries.len(), 8);
@@ -1900,24 +1869,23 @@ mod tests {
 
         // The same archive without strip keeps the root, and the delegated
         // tar ignores TAR_OPTIONS from the environment.
-        let plain = temp.join("plain");
+        let plain = temp.0.join("plain");
         fs::create_dir_all(&plain).unwrap();
         std::env::set_var("TAR_OPTIONS", "--strip-components=1");
         let result = extract(&archive, &plain, 0, Compression::None);
         std::env::remove_var("TAR_OPTIONS");
         result.unwrap();
         assert!(plain.join("root/bin/tool").is_file());
-        let _ = fs::remove_dir_all(&temp);
     }
 
     #[test]
     fn real_tar_lists_a_gzip_archive_made_by_tar_itself() {
         let temp = temp_dir("gzip");
-        let source = temp.join("source");
+        let source = temp.0.join("source");
         fs::create_dir_all(source.join("pkg/bin")).unwrap();
         fs::write(source.join("pkg/bin/tool"), b"tool").unwrap();
         std::os::unix::fs::symlink("tool", source.join("pkg/bin/alias")).unwrap();
-        let archive = temp.join("pkg.tar.gz");
+        let archive = temp.0.join("pkg.tar.gz");
         assert!(crate::kernel::testutil::tar_create()
             .arg("-czf")
             .arg(&archive)
@@ -1934,7 +1902,6 @@ mod tests {
         assert_eq!(alias.kind, EntryKind::Symlink);
         assert_eq!(alias.link.as_deref(), Some("tool"));
         validate(&entries, 1).unwrap();
-        let _ = fs::remove_dir_all(&temp);
     }
 
     /// The same tree written by tar in each of the formats a real toolchain
@@ -1942,7 +1909,7 @@ mod tests {
     #[test]
     fn real_tar_formats_all_list_the_same_tree() {
         let temp = temp_dir("formats");
-        let source = temp.join("source");
+        let source = temp.0.join("source");
         fs::create_dir_all(source.join("pkg/bin")).unwrap();
         fs::write(source.join("pkg/bin/tool"), b"tool").unwrap();
         std::os::unix::fs::symlink("tool", source.join("pkg/bin/alias")).unwrap();
@@ -1952,7 +1919,7 @@ mod tests {
             Platform::X86_64UnknownLinuxGnu => &["gnu", "ustar", "posix", "oldgnu"],
         };
         for &format in formats {
-            let archive = temp.join(format!("{format}.tar"));
+            let archive = temp.0.join(format!("{format}.tar"));
             assert!(crate::kernel::testutil::tar_create()
                 .arg(format!("--format={format}"))
                 .arg("-cf")
@@ -1969,6 +1936,5 @@ mod tests {
         for (format, listing) in &listings[1..] {
             assert_eq!(listing, first, "--format={format} listed differently");
         }
-        let _ = fs::remove_dir_all(&temp);
     }
 }

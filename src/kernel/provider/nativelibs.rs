@@ -1506,7 +1506,7 @@ mod tests {
         let platform = Platform::X86_64UnknownLinuxGnu;
         let store_root = temp_dir("adapter-identity");
         let store = Store {
-            root: store_root.canonicalize().unwrap(),
+            root: store_root.0.clone(),
         };
         let identity = identity(&store, platform).unwrap();
         assert_eq!(identity.kind, "native-libs");
@@ -1527,7 +1527,6 @@ mod tests {
             !recovered.contains(&manifest_sha256(platform).unwrap()),
             "the manifest digest was fabricated as a cached artifact"
         );
-        let _ = crate::kernel::store::remove_tree(&store.root);
     }
 
     /// The manifest hash is a digest over the pinned rows, including each
@@ -1562,17 +1561,10 @@ mod tests {
         );
     }
     use super::*;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use crate::kernel::testutil::TempDir;
 
-    fn temp_dir(label: &str) -> PathBuf {
-        static SEQUENCE: AtomicU64 = AtomicU64::new(0);
-        let path = std::env::temp_dir().join(format!(
-            "tog-native-{label}-{}-{}",
-            std::process::id(),
-            SEQUENCE.fetch_add(1, Ordering::Relaxed)
-        ));
-        fs::create_dir_all(&path).unwrap();
-        path
+    fn temp_dir(label: &str) -> TempDir {
+        TempDir::named(&format!("native-{label}"))
     }
 
     #[test]
@@ -1605,10 +1597,10 @@ mod tests {
         let first = temp_dir("identity-first");
         let second = temp_dir("identity-second");
         let first_store = Store {
-            root: first.canonicalize().unwrap(),
+            root: first.0.clone(),
         };
         let second_store = Store {
-            root: second.canonicalize().unwrap(),
+            root: second.0.clone(),
         };
         assert_eq!(
             object_id_for(&first_store, Platform::X86_64UnknownLinuxGnu).unwrap(),
@@ -1618,15 +1610,13 @@ mod tests {
             object_id_for(&first_store, Platform::X86_64UnknownLinuxGnu).unwrap(),
             object_id_for(&second_store, Platform::X86_64UnknownLinuxGnu).unwrap()
         );
-        fs::remove_dir_all(first).unwrap();
-        fs::remove_dir_all(second).unwrap();
         assert!(packages(Platform::Aarch64AppleDarwin).is_err());
     }
 
     #[test]
     fn rewrites_text_prefixes() {
         let root = temp_dir("text");
-        let path = root.join("pango.pc");
+        let path = root.0.join("pango.pc");
         fs::write(
             &path,
             ["prefix=/old/prefix\nlibdir=$", "{prefix}/lib\n"].concat(),
@@ -1643,13 +1633,12 @@ mod tests {
             fs::read_to_string(&path).unwrap(),
             ["prefix=/store/objects/libset\nlibdir=$", "{prefix}/lib\n"].concat()
         );
-        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
     fn rewrites_binary_prefixes_with_null_padding() {
         let root = temp_dir("binary");
-        let path = root.join("lib.so");
+        let path = root.0.join("lib.so");
         fs::write(&path, b"head/old/prefix\0tail").unwrap();
         rewrite_prefix_file(&path, "/old/prefix", Path::new("/new"), true).unwrap();
         let bytes = fs::read(&path).unwrap();
@@ -1657,13 +1646,12 @@ mod tests {
         expected.extend([0_u8; 8]);
         expected.extend(b"tail");
         assert_eq!(bytes, expected);
-        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
     fn binary_rewrite_preserves_the_complete_path_suffix() {
         let root = temp_dir("binary-suffix");
-        let path = root.join("fontconfig.so");
+        let path = root.0.join("fontconfig.so");
         fs::write(
             &path,
             b"prefix=/old/prefix/etc/fonts/fonts.conf\0trailing-bytes",
@@ -1674,13 +1662,12 @@ mod tests {
             fs::read(&path).unwrap(),
             b"prefix=/new/etc/fonts/fonts.conf\0\0\0\0\0\0\0\0trailing-bytes"
         );
-        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
     fn binary_rewrite_replaces_every_placeholder_in_every_string() {
         let root = temp_dir("binary-all");
-        let path = root.join("fontconfig-cache");
+        let path = root.0.join("fontconfig-cache");
         fs::write(
             &path,
             b"first=/old/prefix/a:/old/prefix/b\0second=/old/prefix/c\0tail",
@@ -1699,18 +1686,17 @@ mod tests {
                 >= 3
         );
         assert!(bytes.ends_with(b"tail"));
-        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
     fn discovers_payload_embedded_placeholders_without_metadata() {
         let root = temp_dir("discover-placeholders");
         fs::write(
-            root.join("payload"),
+            root.0.join("payload"),
             b"/home/conda/feedstock_root/build_artifacts/pkg/_h_env_placehold_placehold_/lib\0placehold_placehold_placehold_/lib\0",
         )
         .unwrap();
-        let placeholders = discover_payload_placeholders(&root).unwrap();
+        let placeholders = discover_payload_placeholders(&root.0).unwrap();
         assert!(placeholders.iter().any(|placeholder| {
             placeholder
                 == "/home/conda/feedstock_root/build_artifacts/pkg/_h_env_placehold_placehold_"
@@ -1718,13 +1704,12 @@ mod tests {
         assert!(placeholders
             .iter()
             .any(|placeholder| placeholder == "placehold_placehold_placehold_"));
-        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
     fn pkg_config_wrapper_does_not_replace_isolation_variables() {
         let root = temp_dir("pkg-config-wrapper");
-        let bin = root.join("bin");
+        let bin = root.0.join("bin");
         fs::create_dir_all(&bin).unwrap();
         fs::write(
             bin.join("pkg-config"),
@@ -1732,26 +1717,24 @@ mod tests {
         )
         .unwrap();
         fs::write(bin.join("pkg-config.bin"), b"real binary").unwrap();
-        replace_pkg_config_wrapper(&root).unwrap();
+        replace_pkg_config_wrapper(&root.0).unwrap();
         let wrapper = fs::read_to_string(bin.join("pkg-config")).unwrap();
         assert_eq!(
             wrapper,
             "#!/bin/sh\nexec \"$(dirname \"$0\")/pkg-config.bin\" \"$@\"\n"
         );
         assert!(!wrapper.contains("/usr/lib/pkgconfig"));
-        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
     fn binary_rewrite_refuses_a_longer_target() {
         let root = temp_dir("long");
-        let path = root.join("lib.so");
+        let path = root.0.join("lib.so");
         fs::write(&path, b"placeholder").unwrap();
         let error = rewrite_prefix_file(&path, "placeholder", Path::new("/a/path/longer"), true)
             .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         assert!(error.to_string().contains("longer than"));
-        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

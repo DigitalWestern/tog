@@ -104,6 +104,7 @@ fn base64_encode(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::kernel::testutil::TempDir;
     use std::path::PathBuf;
 
     fn fixture(name: &str) -> PathBuf {
@@ -129,13 +130,12 @@ mod tests {
     fn wrong_module_prefix_rejected_and_tamper_changes_hash() {
         assert!(hash_zip(&fixture("quote-v1.5.2.zip"), "rsc.io/other", "v1.5.2").is_err());
 
-        let tampered =
-            std::env::temp_dir().join(format!("tog-dirhash-tamper-{}.mod", std::process::id()));
+        let scratch = TempDir::named("dirhash-tamper");
+        let tampered = scratch.0.join("go.mod");
         let mut content = fs::read(fixture("quote-v1.5.2.mod")).unwrap();
         content[0] ^= 1;
         fs::write(&tampered, content).unwrap();
         let h = hash_gomod(&tampered).unwrap();
-        let _ = fs::remove_file(&tampered);
         assert_ne!(h, "h1:LzX7hefJvL54yjefDEDHNONDjII0t9xZLPXsUe+TKr0=");
     }
 }
