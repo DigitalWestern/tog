@@ -399,7 +399,12 @@ one line per ecosystem variable (`VIRTUAL_ENV`, `PYTHONDONTWRITEBYTECODE`,
 value is single-quoted whether it needs it or not, so a path with a space
 or a quote in it survives; the inherited PATH is referenced rather than
 expanded, so the output never freezes one shell's PATH into another's.
-Nothing else reaches stdout.
+Nothing else reaches stdout. Elixir and .NET projections also set `HOME`
+(and the XDG, Mix, Hex and `DOTNET_CLI_HOME` variables beside it) to a
+directory only you can enter, one per project, under
+`<store>/run-homes/`: never a shared temp directory another user could
+seed with startup files, and the same path on every call, so the same
+projection prints the same bytes.
 
 `--shell bash|zsh|fish` picks the syntax. bash and zsh are identical POSIX
 sh; fish gets `set -gx PATH <dir>... $PATH` and `set -e NAME`. The default

@@ -171,8 +171,13 @@ impl Tailor for Dotnet {
             let packages =
                 comforter::closure_object(&ctx.store, activity, &closure, "packages_object", "")?;
             prefix.push(sdk.to_string_lossy().into_owned());
-            let scratch = std::env::temp_dir().join(format!("tog-dn-run-{}", std::process::id()));
-            std::fs::create_dir_all(&scratch)?;
+            // A private per-project home inside the store, laid out like
+            // the sync path's scratch: a home under the shared temp root
+            // lets another user plant files the SDK reads as this user,
+            // and a per-process one would make `tog env` print different
+            // bytes on every call.
+            let scratch = ctx.store.run_home(dir, "dotnet")?;
+            dotnet::prepare_scratch(&scratch)?;
             let (prefixes, remove, set) = dotnet::run_env(&sdk, &packages, &scratch);
             sandbox::force_env(command, &prefixes, &remove, &set);
         }

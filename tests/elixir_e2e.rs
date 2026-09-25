@@ -17,7 +17,10 @@ use std::process::{Command, Output};
 
 mod common;
 
-use common::{assert_frozen_never_writes_the_lock, assert_ok, copy_tree, fixture, tog, TempDir};
+use common::{
+    assert_frozen_never_writes_the_lock, assert_ok, assert_private_run_home, copy_tree, fixture,
+    temp_entries, tog, TempDir,
+};
 
 const DARWIN_FINGERPRINT: &str = "c35290f692496d51";
 
@@ -84,10 +87,20 @@ fn elixir_sync_sandboxed_build_and_run() {
     let store = temp.0.join("store");
     let home = temp.0.join("home");
     std::fs::create_dir_all(&home).unwrap();
+    let temp_before = temp_entries("tog-mix-run-");
 
     // Realize the composite BEAM object; everything below uses only its
     // committed path (read from the closure tog wrote).
     assert_ok(tog(&project, &temp.0, &["sync"]), "sync");
+    // The child's HOME is the project's private run home, and every
+    // directory the forced environment names exists before it starts.
+    let run_home = assert_private_run_home(&project, &temp.0, &store, "elixir", "tog-mix-run-");
+    for sub in ["mix", "hex", "xdg", "xdg-cache"] {
+        assert!(
+            run_home.join(sub).is_dir(),
+            "{sub} missing under the run home"
+        );
+    }
     let closure = closure_body(&project);
     let beam = PathBuf::from(closure["beam_object"]["path"].as_str().unwrap());
     let fingerprint = closure["beam_fingerprint"].as_str().unwrap().to_string();
@@ -242,4 +255,9 @@ fn elixir_sync_sandboxed_build_and_run() {
     // Without its lock the project is refused under --frozen and left
     // alone; a plan regenerates the lock with the store mix.
     assert_frozen_never_writes_the_lock(&project, &temp.0, "mix.lock");
+    let left: Vec<_> = temp_entries("tog-mix-run-")
+        .difference(&temp_before)
+        .cloned()
+        .collect();
+    assert!(left.is_empty(), "runs left {left:?} under the temp root");
 }

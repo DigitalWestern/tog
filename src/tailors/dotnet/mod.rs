@@ -473,7 +473,7 @@ fn xdg_data_home(scratch: &Path) -> PathBuf {
 /// mutex; concurrent syncs then die inside `Mutex.ReleaseMutex`. A home
 /// already marked migrated never takes the mutex, and a directory tog
 /// just created has nothing to migrate.
-fn prepare_scratch(scratch: &Path) -> io::Result<()> {
+pub(crate) fn prepare_scratch(scratch: &Path) -> io::Result<()> {
     fs::create_dir_all(scratch.join("home"))?;
     let migrations = xdg_data_home(scratch).join("NuGet").join("Migrations");
     fs::create_dir_all(&migrations)?;

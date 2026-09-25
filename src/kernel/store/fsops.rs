@@ -103,6 +103,47 @@ pub(super) fn ensure_directory_tree(root: &Path, relative: &Path) -> io::Result<
     Ok(())
 }
 
+/// Create `path` as a directory only this user can enter, or accept an
+/// existing one that is already that. The parent must be trusted: the
+/// check is on the final component, which is never followed if it is a
+/// symlink.
+pub(super) fn ensure_private_directory(path: &Path) -> io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+    match fs::DirBuilder::new().mode(0o700).create(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error),
+    }
+    let refuse = |why: &str| {
+        io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "refusing run home {}: {why}; remove it and run again",
+                path.display()
+            ),
+        )
+    };
+    let stat = fs::symlink_metadata(path)?;
+    if stat.file_type().is_symlink() {
+        return Err(refuse("it is a symlink"));
+    }
+    if !stat.is_dir() {
+        return Err(refuse("it is not a directory"));
+    }
+    // SAFETY: geteuid has no preconditions.
+    let uid = unsafe { libc::geteuid() };
+    if stat.uid() != uid {
+        return Err(refuse(&format!(
+            "it is owned by uid {}, not {uid}",
+            stat.uid()
+        )));
+    }
+    if stat.mode() & 0o777 != 0o700 {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
 pub(crate) fn open_file_at(
     dirfd: RawFd,
     name: &[u8],

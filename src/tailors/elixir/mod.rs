@@ -30,7 +30,6 @@ use sha2::{Digest as _, Sha256};
 use std::collections::BTreeMap;
 use std::fs;
 use std::io;
-use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -1173,6 +1172,18 @@ fn forced_env(beam_obj: &Path, deps_path: &Path, scratch_home: &Path) -> Vec<(St
     ]
 }
 
+/// The subdirectories of a run home that [`run_env`] points the child at.
+const RUN_HOME_DIRS: &[&str] = &["mix", "hex", "xdg", "xdg-cache"];
+
+/// Create every directory [`run_env`] names under `scratch_home`, so the
+/// child starts with its whole home in place and never creates any of it.
+pub fn prepare_run_home(scratch_home: &Path) -> io::Result<()> {
+    for sub in RUN_HOME_DIRS {
+        fs::create_dir_all(scratch_home.join(sub))?;
+    }
+    Ok(())
+}
+
 /// Env for `tog run` (MIX_ENV passes through from the user's shell —
 /// it's on the remove-prefix list, so re-set it when present).
 pub fn run_env(
@@ -1741,7 +1752,7 @@ pub fn expected_projection(
     project_dir: &Path,
     deps_obj: &Path,
 ) -> io::Result<PathBuf> {
-    let key = hex::encode(&Sha256::digest(project_dir.canonicalize()?.as_os_str().as_bytes())[..8]);
+    let key = Store::project_key(project_dir)?;
     let obj_id = deps_obj
         .file_name()
         .and_then(|n| n.to_str())
