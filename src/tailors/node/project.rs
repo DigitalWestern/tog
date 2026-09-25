@@ -610,7 +610,7 @@ fn node_closure_body(
     let mutable_paths: Vec<&str> = plan
         .packages
         .iter()
-        .filter(|p| mutable.iter().any(|m| *m == p.name))
+        .filter(|p| mutable.contains(&p.name))
         .map(|p| p.path.as_str())
         .collect();
     serde_json::json!({
@@ -737,7 +737,7 @@ pub fn project_node_env_recorded(
             &store,
             activity,
             &refs,
-            &project_lock,
+            project_lock,
         )?;
     }
     for (source, backup) in pending_backups {
@@ -809,7 +809,7 @@ pub fn project_node_env_recorded(
         &store,
         activity,
         refs,
-        &project_lock,
+        project_lock,
         attribution,
     )
 }
@@ -861,6 +861,20 @@ pub(super) fn normalize_modes(path: &Path) -> io::Result<()> {
         fs::set_permissions(path, fs::Permissions::from_mode(mode | 0o644))?;
     }
     Ok(())
+}
+
+pub(super) fn dir_size(path: &Path) -> io::Result<u64> {
+    let mut total = 0u64;
+    for entry in fs::read_dir(path)? {
+        let entry = entry?;
+        let md = entry.metadata()?;
+        total += if md.is_dir() {
+            dir_size(&entry.path())?
+        } else {
+            md.len()
+        };
+    }
+    Ok(total)
 }
 
 #[cfg(test)]
@@ -920,18 +934,4 @@ mod tests {
         .unwrap();
         assert!(forest.join("a").symlink_metadata().unwrap().is_symlink());
     }
-}
-
-pub(super) fn dir_size(path: &Path) -> io::Result<u64> {
-    let mut total = 0u64;
-    for entry in fs::read_dir(path)? {
-        let entry = entry?;
-        let md = entry.metadata()?;
-        total += if md.is_dir() {
-            dir_size(&entry.path())?
-        } else {
-            md.len()
-        };
-    }
-    Ok(total)
 }

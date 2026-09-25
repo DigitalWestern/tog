@@ -1219,8 +1219,8 @@ lease are test-only now.
 Two checks pin this. The primary one is the compiler's: `clippy.toml`
 disallows `std::process::Command::{spawn,status,output}`, `Store::activity`,
 `Store::try_activity_exclusive` and `StoreActivity::{acquire,try_exclusive}`,
-and CI runs `cargo clippy --locked --all-targets -- -D
-clippy::disallowed_methods`. Clippy resolves the call, so aliases, path
+and CI runs `cargo clippy --locked --all-targets -- -D warnings`, which
+denies this lint along with every other. Clippy resolves the call, so aliases, path
 calls and raw identifiers cannot hide one. Each reviewed site carries
 `#[allow(clippy::disallowed_methods)]` with its reason; test code allows
 the lint wholesale. The second check,

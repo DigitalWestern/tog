@@ -445,8 +445,8 @@ fn spawn_harness_with(
     if let Some(fifo) = fifo {
         command.env("TOG_SUPERVISE_FIFO", fifo);
     }
-    let markers;
-    match pty {
+
+    let markers = match pty {
         Some(pty) => {
             let slave = pty.slave;
             // SAFETY: the slave stays open in this process for the whole
@@ -470,7 +470,7 @@ fn spawn_harness_with(
                     Ok(())
                 });
             }
-            markers = None;
+            None
         }
         None => {
             command
@@ -486,9 +486,9 @@ fn spawn_harness_with(
                     Ok(())
                 });
             }
-            markers = Some(());
+            Some(())
         }
-    }
+    };
     let mut process = command.spawn().unwrap();
     let markers = match markers {
         Some(()) => Markers::new(process.stdout.take().unwrap().into_raw_fd(), true),

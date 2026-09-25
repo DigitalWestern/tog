@@ -199,9 +199,9 @@ pub fn read_plan(
         ));
     }
 
-    let generated_input = if input.starts_with("requirements") && resolver_source == source {
-        None
-    } else if is_fully_pinned(&source) && resolver_source == source {
+    let generated_input = if (input.starts_with("requirements") || is_fully_pinned(&source))
+        && resolver_source == source
+    {
         None
     } else {
         // The compile input is named to uv by pathname, but tog writes it

@@ -112,8 +112,8 @@ pub(super) fn trim_peer_suffix(value: &str) -> &str {
 
 pub(super) fn split_identity(value: &str) -> Option<(String, String)> {
     let value = trim_peer_suffix(value.trim().trim_start_matches('/'));
-    let at = if value.starts_with('@') {
-        value[1..].find('@')? + 1
+    let at = if let Some(scoped) = value.strip_prefix('@') {
+        scoped.find('@')? + 1
     } else {
         value.find('@')?
     };
@@ -147,8 +147,8 @@ pub(super) fn normalize_pnpm_snapshot_key(key: &str) -> Option<String> {
     let (name, version) = if let Some((name, _version)) = split_identity(raw) {
         // split_identity deliberately strips peer suffixes, so recover the
         // exact version from the separator in the original spelling.
-        let name_end = if raw.starts_with('@') {
-            raw[1..].find('@').map(|index| index + 1)?
+        let name_end = if let Some(scoped) = raw.strip_prefix('@') {
+            scoped.find('@').map(|index| index + 1)?
         } else {
             raw.find('@')?
         };
@@ -377,10 +377,10 @@ fn md5(input: &[u8]) -> [u8; 16] {
         message.push(0);
     }
     message.extend_from_slice(&(input.len() as u64).wrapping_mul(8).to_le_bytes());
-    for block in message.chunks_exact(64) {
+    for block in message.as_chunks::<64>().0 {
         let mut words = [0u32; 16];
-        for (word, raw) in words.iter_mut().zip(block.chunks_exact(4)) {
-            *word = u32::from_le_bytes(raw.try_into().expect("4 bytes"));
+        for (word, raw) in words.iter_mut().zip(block.as_chunks::<4>().0) {
+            *word = u32::from_le_bytes(*raw);
         }
         let [mut a, mut b, mut c, mut d] = state;
         for round in 0..64 {
@@ -405,7 +405,7 @@ fn md5(input: &[u8]) -> [u8; 16] {
         }
     }
     let mut digest = [0u8; 16];
-    for (slot, word) in digest.chunks_exact_mut(4).zip(state) {
+    for (slot, word) in digest.as_chunks_mut::<4>().0.iter_mut().zip(state) {
         slot.copy_from_slice(&word.to_le_bytes());
     }
     digest
@@ -870,7 +870,7 @@ pub(super) fn workspace_target(
     let root = project.path();
     if input_exists(project, &target) {
         let canonical = root.join(&target).canonicalize()?;
-        if !canonical.starts_with(&root) {
+        if !canonical.starts_with(root) {
             return Err(err(format!(
                 "workspace link target {raw:?} is outside the project"
             )));

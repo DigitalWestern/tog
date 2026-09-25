@@ -217,7 +217,7 @@ snapshots:
     let plan = tog::tailors::node::lock_import::plan_pnpm(
         Platform::X86_64UnknownLinuxGnu,
         &lock,
-        &tog::kernel::fsroot::ProjectRoot::open(&dir).unwrap(),
+        &tog::kernel::fsroot::ProjectRoot::open(dir).unwrap(),
         node_version(),
     )
     .unwrap();
@@ -268,13 +268,13 @@ fn plan_local(
     for sub in dirs {
         fs::create_dir_all(dir.join(sub)).unwrap();
     }
-    let plan = tog::tailors::node::lock_import::plan_pnpm(
+
+    tog::tailors::node::lock_import::plan_pnpm(
         Platform::X86_64UnknownLinuxGnu,
         lock,
-        &tog::kernel::fsroot::ProjectRoot::open(&dir).unwrap(),
+        &tog::kernel::fsroot::ProjectRoot::open(dir).unwrap(),
         node_version(),
-    );
-    plan
+    )
 }
 
 /// A local package's dependencies go where Node finds them from the
@@ -480,8 +480,8 @@ snapshots:
 fn two_every_version_patch_keys_are_settled_by_the_recorded_hash() {
     let temp = TempDir::new("pnpm-every-version-twice");
     let dir = temp.path();
-    let bare = write_patch(&dir, "foo.patch", b"diff --git a/bare b/bare\n");
-    let star = write_patch(&dir, "foo-star.patch", b"diff --git a/star b/star\n");
+    let bare = write_patch(dir, "foo.patch", b"diff --git a/bare b/bare\n");
+    let star = write_patch(dir, "foo-star.patch", b"diff --git a/star b/star\n");
     let lock = |recorded: &str| {
         let suffix = if recorded.is_empty() {
             String::new()
@@ -515,7 +515,7 @@ snapshots:
         tog::tailors::node::lock_import::plan_pnpm(
             Platform::X86_64UnknownLinuxGnu,
             lock,
-            &tog::kernel::fsroot::ProjectRoot::open(&dir).unwrap(),
+            &tog::kernel::fsroot::ProjectRoot::open(dir).unwrap(),
             node_version(),
         )
     };
@@ -540,9 +540,9 @@ snapshots:
 fn every_version_patch_keys_sharing_a_hash_must_share_their_bytes() {
     let temp = TempDir::new("pnpm-every-version-crlf");
     let dir = temp.path();
-    let hash = write_patch(&dir, "foo.patch", b"diff --git a/x b/x\n");
-    write_patch(&dir, "foo-star.patch", b"diff --git a/x b/x\r\n");
-    write_patch(&dir, "foo-same.patch", b"diff --git a/x b/x\n");
+    let hash = write_patch(dir, "foo.patch", b"diff --git a/x b/x\n");
+    write_patch(dir, "foo-star.patch", b"diff --git a/x b/x\r\n");
+    write_patch(dir, "foo-same.patch", b"diff --git a/x b/x\n");
     let lock = |star_path: &str, recorded: bool| {
         let suffix = if recorded {
             format!("(patch_hash={hash})")
@@ -576,7 +576,7 @@ snapshots:
         tog::tailors::node::lock_import::plan_pnpm(
             Platform::X86_64UnknownLinuxGnu,
             lock,
-            &tog::kernel::fsroot::ProjectRoot::open(&dir).unwrap(),
+            &tog::kernel::fsroot::ProjectRoot::open(dir).unwrap(),
             node_version(),
         )
     };
@@ -662,17 +662,17 @@ fn pnpm_bare_name_and_range_patches_apply_where_pnpm_applied_them() {
     let temp = TempDir::new("pnpm-bare-patch");
     let dir = temp.path();
     let fastdom = write_patch(
-        &dir,
+        dir,
         "fastdom.patch",
         b"diff --git a/fastdom.js b/fastdom.js\n",
     );
-    let rough = write_patch(&dir, "roughjs.patch", b"diff --git a/rough.js b/rough.js\n");
-    let rough_exact = write_patch(&dir, "roughjs@4.6.6.patch", b"diff --git a/exact b/exact\n");
+    let rough = write_patch(dir, "roughjs.patch", b"diff --git a/rough.js b/rough.js\n");
+    let rough_exact = write_patch(dir, "roughjs@4.6.6.patch", b"diff --git a/exact b/exact\n");
     let plan_for = |lock: &str| {
         tog::tailors::node::lock_import::plan_pnpm(
             Platform::X86_64UnknownLinuxGnu,
             lock,
-            &tog::kernel::fsroot::ProjectRoot::open(&dir).unwrap(),
+            &tog::kernel::fsroot::ProjectRoot::open(dir).unwrap(),
             node_version(),
         )
     };
@@ -701,7 +701,7 @@ fn pnpm_bare_name_and_range_patches_apply_where_pnpm_applied_them() {
         "{error}"
     );
     write_patch(
-        &dir,
+        dir,
         "fastdom.patch",
         b"diff --git a/fastdom.js b/fastdom.js\n",
     );

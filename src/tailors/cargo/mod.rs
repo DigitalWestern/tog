@@ -763,9 +763,7 @@ checksum = "{hash_b}"
         let cases = [
             (
                 "git source",
-                format!(
-                    "name = \"a\"\nversion = \"1.0.0\"\nsource = \"git+https://example.com/a\""
-                ),
+                "name = \"a\"\nversion = \"1.0.0\"\nsource = \"git+https://example.com/a\"".to_string(),
             ),
             (
                 "alternative registry",

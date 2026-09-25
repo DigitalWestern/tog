@@ -84,13 +84,10 @@ pub(crate) fn run_build_spec_on(platform: Platform, spec: &BuildSpec) -> io::Res
     if status.success() {
         return Ok(());
     }
-    Err(io::Error::new(
-        io::ErrorKind::Other,
-        format!(
-            "sandboxed command failed ({status}): {}",
-            crate::kernel::ui::shell_line(&spec.argv)
-        ),
-    ))
+    Err(io::Error::other(format!(
+        "sandboxed command failed ({status}): {}",
+        crate::kernel::ui::shell_line(&spec.argv)
+    )))
 }
 
 /// Store-consuming counterpart to `run_build_spec_on`. The caller's activity
@@ -104,13 +101,10 @@ pub(crate) fn run_build_spec_on_with_activity(
     if status.success() {
         return Ok(());
     }
-    Err(io::Error::new(
-        io::ErrorKind::Other,
-        format!(
-            "sandboxed command failed ({status}): {}",
-            crate::kernel::ui::shell_line(&spec.argv)
-        ),
-    ))
+    Err(io::Error::other(format!(
+        "sandboxed command failed ({status}): {}",
+        crate::kernel::ui::shell_line(&spec.argv)
+    )))
 }
 
 /// Run a build specification and return the child status. Sandbox setup
@@ -242,13 +236,10 @@ impl Sandbox<'_> {
         if status.success() {
             return Ok(());
         }
-        Err(io::Error::new(
-            io::ErrorKind::Other,
-            format!(
-                "sandboxed command failed ({status}): {}",
-                crate::kernel::ui::shell_line(cmd)
-            ),
-        ))
+        Err(io::Error::other(format!(
+            "sandboxed command failed ({status}): {}",
+            crate::kernel::ui::shell_line(cmd)
+        )))
     }
 
     pub(crate) fn run_in_on_with_activity(
@@ -266,13 +257,10 @@ impl Sandbox<'_> {
         if status.success() {
             return Ok(());
         }
-        Err(io::Error::new(
-            io::ErrorKind::Other,
-            format!(
-                "sandboxed command failed ({status}): {}",
-                crate::kernel::ui::shell_line(cmd)
-            ),
-        ))
+        Err(io::Error::other(format!(
+            "sandboxed command failed ({status}): {}",
+            crate::kernel::ui::shell_line(cmd)
+        )))
     }
 
     fn run_in_status_on(
@@ -515,13 +503,10 @@ impl Sandbox<'_> {
             }
             scanned.retain(|parent| !parent.starts_with(&root));
             if let Some(socket) = find_socket_without_following_symlinks(&root)? {
-                return Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    format!(
-                        "host Unix socket exposed by sandbox path: {}",
-                        socket.display()
-                    ),
-                ));
+                return Err(io::Error::other(format!(
+                    "host Unix socket exposed by sandbox path: {}",
+                    socket.display()
+                )));
             }
             scanned.push(root);
         }
@@ -539,12 +524,12 @@ impl Sandbox<'_> {
         let read: Vec<PathBuf> = self
             .read
             .iter()
-            .map(|path| fs::canonicalize(path))
+            .map(fs::canonicalize)
             .collect::<io::Result<_>>()?;
         let mut write: Vec<PathBuf> = self
             .write
             .iter()
-            .map(|path| fs::canonicalize(path))
+            .map(fs::canonicalize)
             .collect::<io::Result<_>>()?;
         let scratch = fs::canonicalize(tmp)?;
         let cwd = fs::canonicalize(cwd)?;
@@ -629,7 +614,7 @@ impl Sandbox<'_> {
         push_arg(&mut args, "-u");
         push_arg(&mut args, "PWD");
         push_arg(&mut args, "--");
-        args.extend(cmd.iter().map(|arg| OsString::from(arg)));
+        args.extend(cmd.iter().map(OsString::from));
         Ok(args)
     }
 }
@@ -663,9 +648,9 @@ fn wait_with_stderr_relay(mut child: std::process::Child) -> io::Result<std::pro
     let stderr = child.stderr.take().expect("stderr is piped");
     let relay = std::thread::spawn(move || relay_stderr(stderr));
     let output = child.wait_with_output()?;
-    let stderr = relay.join().map_err(|_| {
-        io::Error::new(io::ErrorKind::Other, "sandbox stderr relay thread panicked")
-    })?;
+    let stderr = relay
+        .join()
+        .map_err(|_| io::Error::other("sandbox stderr relay thread panicked"))?;
     Ok(std::process::Output {
         status: output.status,
         stdout: output.stdout,
@@ -791,13 +776,10 @@ fn sandbox_failure_error(
             io::ErrorKind::Unsupported,
             explained_bwrap_stderr(&String::from_utf8_lossy(stderr)),
         ),
-        SandboxFailureKind::Command => io::Error::new(
-            io::ErrorKind::Other,
-            format!(
-                "sandboxed command failed ({status}): {}",
-                crate::kernel::ui::shell_line(cmd)
-            ),
-        ),
+        SandboxFailureKind::Command => io::Error::other(format!(
+            "sandboxed command failed ({status}): {}",
+            crate::kernel::ui::shell_line(cmd)
+        )),
     }
 }
 
@@ -1782,7 +1764,7 @@ mod tests {
         );
         fs::write(&output, env_output.expect("env command failed")).unwrap();
         let expected = [
-            format!("CUSTOM=ok"),
+            "CUSTOM=ok".to_string(),
             format!("HOME={}", scratch.display()),
             "LANG=en_US.UTF-8".to_string(),
             "PATH=/usr/bin:/bin".to_string(),
@@ -2411,6 +2393,39 @@ mod tests {
             .collect::<Vec<_>>()
             .join(" ");
         println!("bwrap argv sample: bwrap {rendered}");
+
+        // Compare as strings; `to_str` fails on anything that is not
+        // valid UTF-8, so the `λ` below is checked byte for byte.
+        let argv: Vec<&str> = args.iter().map(|arg| arg.to_str().unwrap()).collect();
+        let has = |run: &[&str]| argv.windows(run.len()).any(|window| window == run);
+        let read = fs::canonicalize(&read_root).unwrap();
+        let read = read.to_str().unwrap();
+        assert!(read.ends_with("/read root λ"), "{read}");
+        let write = fs::canonicalize(&write_root).unwrap();
+        let write = write.to_str().unwrap();
+        assert!(
+            has(&["--ro-bind", read, read]),
+            "no read-only bind of {read}: {rendered}"
+        );
+        assert!(
+            has(&["--bind", write, write]),
+            "no writable bind of {write}: {rendered}"
+        );
+        assert!(argv.contains(&"--unshare-net"), "{rendered}");
+        assert!(argv.contains(&"--clearenv"), "{rendered}");
+        assert!(has(&["--setenv", "CHECK", "ok"]), "{rendered}");
+        assert!(
+            argv.ends_with(&[
+                "/usr/bin/env",
+                "-u",
+                "PWD",
+                "--",
+                "/usr/bin/sh",
+                "-c",
+                "printf sample"
+            ]),
+            "{rendered}"
+        );
     }
 
     #[test]

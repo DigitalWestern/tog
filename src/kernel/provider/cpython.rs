@@ -384,10 +384,7 @@ pub fn realize_runtime(
         .args(["--strip-components", "1"]);
     let status = crate::kernel::supervise::status(&mut command, activity)?;
     if !status.success() {
-        return Err(io::Error::new(
-            io::ErrorKind::Other,
-            "tar extraction failed",
-        ));
+        return Err(io::Error::other("tar extraction failed"));
     }
     store
         .commit_with_activity_and_deps(activity, &identity, &staged, &[], &{

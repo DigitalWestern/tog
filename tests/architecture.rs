@@ -4,8 +4,9 @@
 //! not name a tailor by string either (the tokens scan below).
 //!
 //! Test code (everything from `#[cfg(test)] mod tests` on) is exempt: tests
-//! may wire the whole crate together. Size budgets (layering rule 5) are
-//! reported, not enforced, so drift is visible in `cargo test` output.
+//! may wire the whole crate together. Size budgets (layering rule 5) are a
+//! ratchet against `tests/size_baseline.txt`: what is over budget today may
+//! shrink, nothing may grow or newly cross a budget.
 //!
 //! Four housekeeping rules are enforced the same way: a test that sets
 //! `TOG_STORE` holds `STORE_ENV_LOCK`, comments describe code rather
@@ -94,7 +95,7 @@ fn crate_paths(text: &str) -> Vec<Vec<String>> {
                 let mut segments = head_segments.clone();
                 segments.extend(
                     item.split("::")
-                        .map(|s| s.trim().split_whitespace().next().unwrap_or("").to_string())
+                        .map(|s| s.split_whitespace().next().unwrap_or("").to_string())
                         .filter(|s| !s.is_empty() && !s.starts_with('{')),
                 );
                 out.push(segments);
@@ -200,48 +201,153 @@ fn layers_point_one_way() {
     );
 }
 
-/// Size budgets are advisory: this test prints the files and functions
-/// over budget so `cargo test --test architecture -- --nocapture` shows the
-/// drift.
+/// Size budgets as a ratchet. `tests/size_baseline.txt` lists every file
+/// over 1,500 non-test lines and every non-test function over 150 lines,
+/// with its size today. Nothing new may cross a budget, nothing listed may
+/// grow, and an entry that shrinks or falls back under budget must be
+/// written down, so the baseline only ever moves toward empty.
+///
+/// Baseline format, one entry per line, sorted, `#` comments and blank
+/// lines ignored:
+///
+/// ```text
+/// file <non-test lines> <repo-relative path>
+/// fn <lines> <repo-relative path>::<name>
+/// ```
+///
+/// A function name that appears more than once in a file (methods of two
+/// impls, say) gets `#2`, `#3`, ... after the name for its second and later
+/// occurrences, counted in file order. On failure the test prints the whole
+/// baseline as it should read now, ready to paste over the file.
 #[test]
-fn size_budgets_are_reported() {
-    let root = src();
+fn size_budgets_ratchet() {
+    const FILE_BUDGET: usize = 1500;
+    const FUNCTION_BUDGET: usize = 150;
+    let root = repo();
     let mut files = Vec::new();
-    rust_files(&root, &mut files);
-    let mut over_files = Vec::new();
-    let mut over_functions = Vec::new();
+    rust_files(&src(), &mut files);
+    let mut current = std::collections::BTreeMap::new();
     for file in &files {
         let relative = file
             .strip_prefix(&root)
             .unwrap()
             .to_string_lossy()
-            .to_string();
+            .replace('\\', "/");
         let text = fs::read_to_string(file).unwrap();
         let body = non_test(&text);
         let lines = body.lines().count();
-        if lines > 1500 {
-            over_files.push(format!("{lines:6}  {relative}"));
+        if lines > FILE_BUDGET {
+            current.insert(format!("file {relative}"), lines);
         }
+        let mut seen = std::collections::BTreeMap::<String, usize>::new();
         for (name, length) in function_lengths(body) {
-            if length > 150 {
-                over_functions.push(format!("{length:6}  {relative}::{name}"));
+            let count = seen.entry(name.clone()).or_default();
+            *count += 1;
+            let name = if *count == 1 {
+                name
+            } else {
+                format!("{name}#{count}")
+            };
+            if length > FUNCTION_BUDGET {
+                current.insert(format!("fn {relative}::{name}"), length);
             }
         }
     }
-    over_files.sort_by(|a, b| b.cmp(a));
-    over_functions.sort_by(|a, b| b.cmp(a));
-    println!("files over 1,500 non-test lines: {}", over_files.len());
-    for line in &over_files {
-        println!("{line}");
+
+    let baseline_path = root.join("tests/size_baseline.txt");
+    let baseline_text = fs::read_to_string(&baseline_path).unwrap_or_default();
+    let mut baseline = std::collections::BTreeMap::new();
+    for line in baseline_text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut parts = line.splitn(3, ' ');
+        let (Some(kind), Some(size), Some(name)) = (parts.next(), parts.next(), parts.next())
+        else {
+            panic!("tests/size_baseline.txt: malformed line {line:?}");
+        };
+        let size: usize = size
+            .parse()
+            .unwrap_or_else(|_| panic!("tests/size_baseline.txt: bad size in {line:?}"));
+        baseline.insert(format!("{kind} {name}"), size);
+    }
+
+    let entry = |key: &str, size: usize| {
+        let (kind, name) = key.split_once(' ').unwrap();
+        format!("{kind} {size} {name}")
+    };
+    let budget = |key: &str| {
+        if key.starts_with("file ") {
+            format!("{FILE_BUDGET} non-test lines")
+        } else {
+            format!("{FUNCTION_BUDGET} lines")
+        }
+    };
+    let mut problems = Vec::new();
+    for (key, &size) in &current {
+        match baseline.get(key) {
+            None => problems.push(format!(
+                "new: {key} is {size} lines, over the {} budget. Split it; \
+                 if it must stay this size, add `{}` to the baseline.",
+                budget(key),
+                entry(key, size)
+            )),
+            Some(&allowed) if size > allowed => problems.push(format!(
+                "grew: {key} is {size} lines, baseline {allowed}. Shrink it back; \
+                 if the growth is deliberate, change its baseline line to `{}`.",
+                entry(key, size)
+            )),
+            Some(&allowed) if size < allowed => problems.push(format!(
+                "shrank: {key} is {size} lines, baseline {allowed}. Update the \
+                 baseline downward: `{}`.",
+                entry(key, size)
+            )),
+            Some(_) => {}
+        }
+    }
+    for (key, &allowed) in &baseline {
+        if !current.contains_key(key) {
+            problems.push(format!(
+                "under budget: {key} (baseline {allowed}) is now within the {} \
+                 budget or gone. Delete its line `{}` from the baseline.",
+                budget(key),
+                entry(key, allowed)
+            ));
+        }
+    }
+    if !problems.is_empty() {
+        let mut expected = String::from(BASELINE_HEADER);
+        for (key, &size) in &current {
+            expected.push_str(&entry(key, size));
+            expected.push('\n');
+        }
+        panic!(
+            "size budgets (docs/human/ARCHITECTURE.md, layering rule 5):\n  {}\n\n\
+             tests/size_baseline.txt as it reads now (paste over the file):\n\n{expected}",
+            problems.join("\n  ")
+        );
     }
     println!(
-        "non-test functions over 150 lines: {}",
-        over_functions.len()
+        "size budgets: {} file(s) and {} function(s) over budget, none above baseline",
+        current
+            .keys()
+            .filter(|key| key.starts_with("file "))
+            .count(),
+        current.keys().filter(|key| key.starts_with("fn ")).count()
     );
-    for line in &over_functions {
-        println!("{line}");
-    }
 }
+
+/// The comment block at the top of `tests/size_baseline.txt`.
+const BASELINE_HEADER: &str = "\
+# Size budget ratchet (tests/architecture.rs::size_budgets_ratchet).
+# Every src/ file over 1,500 non-test lines and every non-test function
+# over 150 lines, with its size today. Entries may only shrink or go away;
+# the test prints this file's new contents whenever it must change.
+#
+#   file <non-test lines> <path>
+#   fn <lines> <path>::<name>[#<nth occurrence in the file>]
+";
 
 /// Rough function lengths: a `fn` at indentation ≤ 4 runs to its matching
 /// brace, with strings, chars, and comments blanked so their braces do not

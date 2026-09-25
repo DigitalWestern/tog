@@ -279,7 +279,7 @@ fn network_access_during_install_script_fails() {
     let dir = temp.path();
     // Network probe: succeeds (exit 0) with network, exits 1 without.
     let (tarball, sri) = make_pkg_tarball(
-        &dir,
+        dir,
         "node -e \"require('https').get('https://registry.npmjs.org/', \
          () => process.exit(0)).on('error', () => process.exit(1))\"",
     );
@@ -291,7 +291,7 @@ fn network_access_during_install_script_fails() {
             "--nocapture",
         ])
         .env("TOG_STORE", dir.join("store"))
-        .env("TOG_NPM_STRICT_CHILD", &dir)
+        .env("TOG_NPM_STRICT_CHILD", dir)
         .env("TOG_NPM_TARBALL", &tarball)
         .env("TOG_NPM_SRI", &sri)
         .env("TOG_STRICT", "1")
@@ -328,11 +328,11 @@ fn permissive_install_script_is_cached_but_rejected_strict() {
     let temp = TempDir::new("permissive-npm");
     let dir = temp.path();
     let (tarball, sri) = make_pkg_tarball(
-        &dir,
+        dir,
         "node -e \"require('fs').writeFileSync('partial.txt','partial'); require('https').get('https://registry.npmjs.org/', \
          () => process.exit(0)).on('error', () => process.exit(1))\"",
     );
-    let store = store_at(&dir);
+    let store = store_at(dir);
     let activity = &store
         .activity(tog::kernel::activity::ActivityMode::Shared)
         .unwrap();
@@ -345,7 +345,7 @@ fn permissive_install_script_is_cached_but_rejected_strict() {
     assert!(package_dir.is_dir());
     assert!(package_dir.join("package.json").is_file());
     assert!(!package_dir.join("partial.txt").exists());
-    let project = tog::kernel::fsroot::ProjectRoot::open(&dir).unwrap();
+    let project = tog::kernel::fsroot::ProjectRoot::open(dir).unwrap();
     node::project_node_env(
         activity,
         &project,
@@ -358,7 +358,7 @@ fn permissive_install_script_is_cached_but_rejected_strict() {
     )
     .expect("project");
     attribution.finish(true).expect("test closure attribution");
-    let closure = comforter::read_closure(&dir, "node").unwrap();
+    let closure = comforter::read_closure(dir, "node").unwrap();
     let exceptions = closure["exceptions"].as_array().unwrap();
     assert_eq!(exceptions.len(), 1);
     assert_eq!(exceptions[0]["kind"], "install-script-failed");
@@ -371,7 +371,7 @@ fn permissive_install_script_is_cached_but_rejected_strict() {
             "--nocapture",
         ])
         .env("TOG_STORE", dir.join("store"))
-        .env("TOG_NPM_CACHED_CHILD", &dir)
+        .env("TOG_NPM_CACHED_CHILD", dir)
         .env("TOG_NPM_TARBALL", &tarball)
         .env("TOG_NPM_SRI", &sri)
         .env("TOG_STRICT", "1")
@@ -394,10 +394,10 @@ fn benign_install_script_runs_and_output_is_captured() {
     let temp = TempDir::new("good-npm");
     let dir = temp.path();
     let (tarball, sri) = make_pkg_tarball(
-        &dir,
+        dir,
         "node -e \"require('fs').writeFileSync('built.txt','ok')\"",
     );
-    let store = store_at(&dir);
+    let store = store_at(dir);
     let activity = &store
         .activity(tog::kernel::activity::ActivityMode::Shared)
         .unwrap();
@@ -616,11 +616,11 @@ fn skip_download_switch_is_injected_and_recorded() {
     let temp = TempDir::new("skip-npm");
     let dir = temp.path();
     let (tarball, sri) = make_named_pkg_tarball(
-        &dir,
+        dir,
         "puppeteer",
         "node -e \"if(process.env.PUPPETEER_SKIP_DOWNLOAD!=='true'){process.exit(3)};require('fs').writeFileSync('skipped.txt','ok')\"",
     );
-    let store = store_at(&dir);
+    let store = store_at(dir);
     let activity = &store
         .activity(tog::kernel::activity::ActivityMode::Shared)
         .unwrap();
@@ -649,11 +649,11 @@ fn prebuilt_downloader_is_told_to_build_from_source() {
     let temp = TempDir::new("src-npm");
     let dir = temp.path();
     let (tarball, sri) = make_named_pkg_tarball(
-        &dir,
+        dir,
         "fake-prebuilt",
         "node -e \"if(process.env.npm_config_build_from_source!=='true'){process.exit(3)};require('fs').writeFileSync('compiled.txt','ok')\" # prebuild-install",
     );
-    let store = store_at(&dir);
+    let store = store_at(dir);
     let activity = &store
         .activity(tog::kernel::activity::ActivityMode::Shared)
         .unwrap();

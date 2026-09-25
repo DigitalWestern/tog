@@ -1390,7 +1390,7 @@ digest = "sha256:855d581f8a4eb1a8117e3426de25fe02770592febcfb31369aee1ffbfee9e8e
             ]
         );
         // A row whose value is unchanged is not stale, whatever its digest.
-        let same = vec![input(
+        let same = [input(
             ".python-version",
             "version",
             Some("3.12.14"),

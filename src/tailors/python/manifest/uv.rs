@@ -615,7 +615,7 @@ pub(super) fn parse_uv_requirement(requirement: &str) -> io::Result<UvDependency
         });
     let body = body.trim();
     let name_end = body
-        .find(|character: char| matches!(character, '[' | '<' | '>' | '=' | '!' | '~' | ' ' | '\t'))
+        .find(['[', '<', '>', '=', '!', '~', ' ', '\t'])
         .unwrap_or(body.len());
     let raw_name = body[..name_end].trim();
     if raw_name.is_empty()

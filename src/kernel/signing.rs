@@ -675,7 +675,7 @@ mod tests {
             &key.hex(),
             &format!("ed25519:{}0", key.hex()),
             &format!("ed25519:{}", &key.hex()[..63]),
-            &format!("ed25519:{}", key.hex().replace('0', "g").replace('1', "g")),
+            &format!("ed25519:{}", key.hex().replace(['0', '1'], "g")),
             &format!("rsa:{}", key.hex()),
             &format!("ED25519:{}", key.hex()),
             &format!(" ed25519:{}", key.hex()),

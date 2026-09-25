@@ -191,7 +191,7 @@ fn eligible(
     loop {
         let mut added = false;
         usable_and_present.retain(|id| {
-            let record = index.get(*id).expect("classified from the index");
+            let record = index.get(id).expect("classified from the index");
             let Some(dependency) = record
                 .dependencies
                 .iter()

@@ -893,7 +893,6 @@ pub(crate) fn artifact_sha512(record: &Record, _index: &MetaIndex) -> Result<Obj
 /// Build an index from records the caller constructed, for adapter fixtures
 /// and for the drift checks each producer module keeps next to its own
 /// identity function.
-
 #[cfg(test)]
 pub(crate) fn index_of(records: Vec<Record>) -> MetaIndex {
     let mut entries = BTreeMap::new();
@@ -2654,7 +2653,7 @@ mod tests {
         let (zip, modfile, info) = (sha256('5'), sha256('6'), sha256('7'));
         let mod_entry = format!("h1:AbCd=:{zip}");
         let modfile_entry = format!("h1:EfGh=:{modfile}");
-        let full = vec![
+        let full = [
             ("schema", "go-modcache/1"),
             ("extractor", extractor.as_str()),
             ("mod:golang.org/x/net@v0.1.0", mod_entry.as_str()),
@@ -2956,8 +2955,8 @@ mod tests {
         cases
     }
 
-    fn case_with_input<'a>(
-        cases: &'a [Identity],
+    fn case_with_input(
+        cases: &[Identity],
         kind: &str,
         schema: Option<&str>,
         key: &str,
