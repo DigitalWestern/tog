@@ -83,7 +83,6 @@ by position.
   Each line is one issue and one PR, in order:
   - #225 cli: --frozen and --strict are accepted and ignored on verbs that don't use them; tog --frozen plan writes a lock.
   - #224 policy: the first policy::init wins, so --strict is dropped by build, fmt and x.
-  - #227 node: pnpm and yarn locks are never checked against package.json.
   - #228 pnpm importer: underscore peer-suffix trimming, a lenient YAML reader, and two multi-document rules.
   - #229 node: yarn1 importer has its own semver that disagrees with node-semver.
   - #230 node: tog run npm --prefix . install bypasses the install refusal.
@@ -135,6 +134,7 @@ by position.
   - #220 descriptor: files above the project (Cargo workspace, `go.work`, .NET `Directory.*`) read by path.
   - #221 descriptor: `status`, `doctor` and `run`'s environment still read by path.
   - #267 tests: non-tog children in npm_scripts and deps_e2e inherit the developer's environment.
+  - #272 pnpm freshness: a new workspace member without an importer passes, and overrides match by name only.
 - **`deps` as a `Tailor` method.** `src/commands/deps.rs` still names
   tailors directly. A `Tailor::edit_manifest` method with an "unsupported"
   default would make it registry-driven, the way `Tailor::registry_tool`

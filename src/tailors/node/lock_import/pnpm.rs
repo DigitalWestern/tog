@@ -15,6 +15,94 @@ pub fn pnpm_lock_importers(lock_yaml: &str) -> io::Result<Vec<String>> {
     Ok(importer_map(root)?.into_keys().collect())
 }
 
+/// A dependency as an importer of `pnpm-lock.yaml` records it: the
+/// specifier its package.json wrote, verbatim, and the version pnpm resolved
+/// it to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PnpmLockedDependency {
+    pub(crate) specifier: String,
+    pub(crate) version: String,
+}
+
+/// What `pnpm-lock.yaml` records about the package.json files it was
+/// generated from: each importer's dependency fields, and the settings and
+/// overrides pnpm applies to a manifest before it compares one with the lock.
+#[derive(Debug, Default)]
+pub(crate) struct PnpmManifestRecord {
+    /// importer path (`.` for the root) -> dependency field -> name -> entry.
+    pub(crate) importers:
+        BTreeMap<String, BTreeMap<&'static str, BTreeMap<String, PnpmLockedDependency>>>,
+    pub(crate) auto_install_peers: bool,
+    pub(crate) exclude_links: bool,
+    pub(crate) overrides: BTreeMap<String, String>,
+}
+
+impl PnpmManifestRecord {
+    /// Does an override the lock records rewrite a direct dependency `name`
+    /// to `value`? pnpm applies overrides to each manifest before comparing
+    /// it with the lock, so the importer holds the override's specifier, and
+    /// an override of `-` removes the dependency altogether.
+    pub(crate) fn overrides_to(&self, name: &str, value: &str) -> bool {
+        self.overrides.iter().any(|(selector, replacement)| {
+            let target = selector.rsplit('>').next().unwrap_or(selector);
+            selector_name(target) == name && replacement == value
+        })
+    }
+}
+
+/// Read the manifest side of a pnpm lock. The effective document is the
+/// last one, as for planning, and a single-project v6 lock without an
+/// `importers` map records the root's dependencies at the top level.
+pub(crate) fn pnpm_manifest_record(lock_yaml: &str) -> io::Result<PnpmManifestRecord> {
+    let lock_yaml = lock_yaml.rsplit("\n---").next().unwrap_or(lock_yaml);
+    let parsed = parse_yaml(lock_yaml)?;
+    let root = yaml_map(&parsed, "pnpm-lock.yaml")?;
+    let mut importers = importer_map(root)?;
+    if !importers.contains_key(".") {
+        importers.insert(".".to_string(), pnpm_legacy_root(root));
+    }
+    let mut record = PnpmManifestRecord::default();
+    for (importer_name, importer) in importers {
+        let mut fields = BTreeMap::new();
+        for field in ["dependencies", "devDependencies", "optionalDependencies"] {
+            let mut entries = BTreeMap::new();
+            if let Some(value) = importer.get(field) {
+                let map = yaml_map(value, &format!("importer {importer_name} {field}"))?;
+                for (name, value) in map {
+                    let item =
+                        yaml_map(value, &format!("importer {importer_name} {field} {name}"))?;
+                    entries.insert(
+                        name.clone(),
+                        PnpmLockedDependency {
+                            specifier: yaml_str(item.get("specifier"))
+                                .unwrap_or_default()
+                                .to_string(),
+                            version: yaml_str(item.get("version"))
+                                .unwrap_or_default()
+                                .to_string(),
+                        },
+                    );
+                }
+            }
+            fields.insert(field, entries);
+        }
+        record.importers.insert(importer_name, fields);
+    }
+    if let Some(settings) = root.get("settings") {
+        let settings = yaml_map(settings, "settings")?;
+        record.auto_install_peers = yaml_bool(settings.get("autoInstallPeers"));
+        record.exclude_links = yaml_bool(settings.get("excludeLinksFromLockfile"));
+    }
+    if let Some(overrides) = root.get("overrides") {
+        for (selector, value) in yaml_map(overrides, "overrides")? {
+            if let Some(value) = yaml_str(Some(value)) {
+                record.overrides.insert(selector.clone(), value.to_string());
+            }
+        }
+    }
+    Ok(record)
+}
+
 pub(super) fn trim_peer_suffix(value: &str) -> &str {
     let parenthesis = value.find('(');
     // pnpm v9 also encodes peer context as `_peer@version`. An underscore

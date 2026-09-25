@@ -714,6 +714,11 @@ pub fn plan_yarn(
             });
         }
     }
+    yarn_unused_entry(
+        &entries,
+        &nodes,
+        &[root_deps.as_slice(), workspace_roots.as_slice()].concat(),
+    )?;
     let graph = Graph {
         nodes,
         roots: root_deps,
@@ -727,12 +732,80 @@ pub fn plan_yarn(
     build_plan(platform, graph, "yarn.lock", node_version)
 }
 
+/// The lock entry a manifest's direct dependency names. yarn.lock keys each
+/// entry by the `name@spec` selectors that resolved to it, so a selector
+/// with no entry means the manifest changed after the lock was written.
+/// `link:` is the one form Yarn classic never locks; it stays an
+/// unresolvable target.
+fn yarn_direct_target(
+    selector_to_node: &BTreeMap<String, String>,
+    manifest: &str,
+    field: &str,
+    name: &str,
+    spec: &str,
+) -> io::Result<Target> {
+    let selector = format!("{name}@{spec}");
+    match selector_to_node.get(&selector) {
+        Some(node) => Ok(Target::Node(node.clone())),
+        None if spec.starts_with("link:") => Ok(Target::External(format!(
+            "missing yarn selector {selector}"
+        ))),
+        None => Err(crate::tailors::node::freshness::stale(
+            manifest,
+            field,
+            &crate::tailors::node::freshness::YARN,
+        )),
+    }
+}
+
+/// Every lock entry is reachable from some manifest's dependencies: `yarn
+/// install` drops the ones nothing needs, so one left over means a manifest
+/// lost a dependency after the lock was written.
+fn yarn_unused_entry(
+    entries: &[YarnEntry],
+    nodes: &BTreeMap<String, Node>,
+    roots: &[RootDependency],
+) -> io::Result<()> {
+    let mut reached = BTreeSet::<String>::new();
+    let mut queue: Vec<String> = roots
+        .iter()
+        .filter_map(|root| match &root.dependency.target {
+            Target::Node(key) => Some(key.clone()),
+            _ => None,
+        })
+        .collect();
+    while let Some(key) = queue.pop() {
+        if !reached.insert(key.clone()) {
+            continue;
+        }
+        if let Some(node) = nodes.get(&key) {
+            for dependency in &node.deps {
+                if let Target::Node(child) = &dependency.target {
+                    queue.push(child.clone());
+                }
+            }
+        }
+    }
+    for (index, entry) in entries.iter().enumerate() {
+        if !reached.contains(&format!("yarn:{index}")) {
+            let format = &crate::tailors::node::freshness::YARN;
+            return Err(err(format!(
+                "yarn.lock locks {}, which no package.json depends on; regenerate the lock ({})",
+                entry.selectors[0],
+                format.regenerate()
+            )));
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn yarn_package_dependencies(
     package: &JsonValue,
     selector_to_node: &BTreeMap<String, String>,
     workspaces: &[YarnWorkspace],
-    _importer: Option<&str>,
+    importer: Option<&str>,
 ) -> io::Result<Vec<Dependency>> {
+    let manifest = crate::tailors::node::freshness::manifest_path(importer.unwrap_or("."));
     let mut deps = BTreeMap::<String, Dependency>::new();
     for (field, optional) in [
         ("dependencies", false),
@@ -758,28 +831,14 @@ pub(super) fn yarn_package_dependencies(
                         workspace.name, workspace.version
                     )));
                 } else {
-                    let selector = format!("{name}@{spec}");
-                    selector_to_node
-                        .get(&selector)
-                        .cloned()
-                        .map(Target::Node)
-                        .unwrap_or_else(|| {
-                            Target::External(format!("missing yarn selector {selector}"))
-                        })
+                    yarn_direct_target(selector_to_node, &manifest, field, name, spec)?
                 }
             } else if spec.starts_with("workspace:") {
                 return Err(err(format!(
                     "Yarn workspace dependency {name}@{spec} has no matching workspace member"
                 )));
             } else {
-                let selector = format!("{name}@{spec}");
-                selector_to_node
-                    .get(&selector)
-                    .cloned()
-                    .map(Target::Node)
-                    .unwrap_or_else(|| {
-                        Target::External(format!("missing yarn selector {selector}"))
-                    })
+                yarn_direct_target(selector_to_node, &manifest, field, name, spec)?
             };
             deps.insert(
                 name.clone(),

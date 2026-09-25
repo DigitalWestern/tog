@@ -10,7 +10,7 @@ use tog::kernel::platform::Platform;
 
 mod common;
 
-use common::{assert_ok, command, copy_tree, warm_store, TempDir};
+use common::{assert_ok, command, copy_tree, fixture, text, tog, warm_store, TempDir};
 
 /// The binary with its `TMPDIR` inside the scratch home, so whatever a
 /// sync stages there is removed with the scratch directory.
@@ -729,4 +729,106 @@ fn pnpm_bare_name_and_range_patches_apply_where_pnpm_applied_them() {
             && error.to_string().contains("selects no patch"),
         "{error}"
     );
+}
+
+/// A copy of `name` in its own project boundary, with `"left-pad": "^1.3.0"`
+/// added to the `dependencies` of the package.json at `manifest`.
+fn fixture_with_added_dependency(name: &str, manifest: &str) -> TempDir {
+    let project = TempDir::boundary(&format!("stale-{name}"));
+    copy_tree(&fixture(name), project.path());
+    let path = project.path().join(manifest);
+    let mut package: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    package["dependencies"]["left-pad"] = serde_json::json!("^1.3.0");
+    fs::write(&path, serde_json::to_string_pretty(&package).unwrap()).unwrap();
+    project
+}
+
+/// A package.json that gained a dependency its lock lacks is refused by
+/// `plan` before anything is planned, whichever lock format the project
+/// keeps and whichever manifest (root or workspace member) changed. `plan`
+/// only parses the lock, so this runs offline.
+#[test]
+fn plan_refuses_a_lock_that_disagrees_with_package_json() {
+    let home = TempDir::new("stale-home");
+    for (name, manifest, lock) in [
+        ("proj-npm", "package.json", "package-lock.json"),
+        ("proj-pnpm", "package.json", "pnpm-lock.yaml"),
+        (
+            "proj-pnpm-ws",
+            "packages/lib/package.json",
+            "pnpm-lock.yaml",
+        ),
+        ("proj-yarn1", "package.json", "yarn.lock"),
+    ] {
+        let project = fixture_with_added_dependency(name, manifest);
+        let out = tog(project.path(), home.path(), &["plan"]);
+        let stderr = text(&out.stderr);
+        assert_eq!(out.status.code(), Some(1), "{name}: {stderr}");
+        assert!(
+            stderr.contains(&format!("{manifest} dependencies disagree with {lock}")),
+            "{name}: {stderr}"
+        );
+        assert!(out.stdout.is_empty(), "{name} printed a plan");
+    }
+}
+
+/// An npm workspace member's package.json is checked against the lock's
+/// entry for that member, not only the root's.
+#[test]
+fn plan_refuses_an_npm_lock_that_disagrees_with_a_workspace_member() {
+    let home = TempDir::new("stale-home");
+    let project = TempDir::boundary("stale-npm-ws");
+    let dir = project.path();
+    fs::create_dir_all(dir.join("packages/lib")).unwrap();
+    fs::write(
+        dir.join("package.json"),
+        r#"{"name":"root","workspaces":["packages/lib"]}"#,
+    )
+    .unwrap();
+    fs::write(
+        dir.join("packages/lib/package.json"),
+        r#"{"name":"lib","version":"1.0.0","dependencies":{"left-pad":"^1.3.0"}}"#,
+    )
+    .unwrap();
+    fs::write(
+        dir.join("package-lock.json"),
+        r#"{"name":"root","lockfileVersion":3,"requires":true,"packages":{
+            "":{"name":"root","workspaces":["packages/lib"]},
+            "packages/lib":{"name":"lib","version":"1.0.0"},
+            "node_modules/lib":{"resolved":"packages/lib","link":true}}}"#,
+    )
+    .unwrap();
+    let out = tog(dir, home.path(), &["plan"]);
+    let stderr = text(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    assert!(
+        stderr.contains("packages/lib/package.json dependencies disagree with package-lock.json"),
+        "{stderr}"
+    );
+}
+
+/// A package.json tog cannot read or parse is an error naming it, never a
+/// plan made without it.
+#[test]
+fn plan_names_a_package_json_it_cannot_read() {
+    let home = TempDir::new("stale-home");
+    for name in ["proj-npm", "proj-pnpm", "proj-yarn1"] {
+        for (contents, expected) in [
+            (&b"{ not json"[..], "package.json: "),
+            (
+                &b"{\"name\":\"\xff\"}"[..],
+                "package.json is not valid UTF-8",
+            ),
+        ] {
+            let project = TempDir::boundary(&format!("stale-{name}"));
+            copy_tree(&fixture(name), project.path());
+            fs::write(project.path().join("package.json"), contents).unwrap();
+            let out = tog(project.path(), home.path(), &["plan"]);
+            let stderr = text(&out.stderr);
+            assert_eq!(out.status.code(), Some(1), "{name}: {stderr}");
+            assert!(stderr.contains(expected), "{name}: {stderr}");
+            assert!(out.stdout.is_empty(), "{name} printed a plan");
+        }
+    }
 }

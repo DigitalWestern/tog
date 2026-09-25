@@ -155,7 +155,12 @@ cannot mutate them.
 locally; a pnpm v9/v6 or Yarn classic lockfile is imported by
 `lock_import/` (dependency-free strict YAML for pnpm, `lock_source`
 recorded); with none of these, the store node's bundled npm runs
-`npm install --package-lock-only`. A `file:`/`link:` dependency is a
+`npm install --package-lock-only`. Before planning, `plan` and `sync`
+refuse a lock that disagrees with the package.json files it was generated
+from, as `npm ci` and `--frozen-lockfile` installs do: npm's per-manifest
+dependency maps (the root's and each workspace member's), pnpm's importer
+specifiers, and Yarn classic's `name@spec` selectors (with no entry left
+that nothing depends on). A `file:`/`link:` dependency is a
 symlink into the user's source, so nothing is ever placed beneath one: a
 target that is itself an importer gets its dependencies from its own
 projected `node_modules` (as pnpm installs it), and any other local package
@@ -805,6 +810,7 @@ when the two differ.
     python/run_refusal.rs  `tog run` refusals: pip install into a projected .venv
     node/mod.rs            pins, plan types, scripts, path helpers
     node/plan.rs           package-lock.json planning
+    node/freshness.rs      lock-vs-package.json checks for npm and pnpm locks
     node/realize.rs        env realization and sandboxed install scripts
     node/project.rs        node_modules projection and workspace links
     node/inputs.rs         missing-lock generation, lockfile importers
