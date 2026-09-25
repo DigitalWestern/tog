@@ -11,7 +11,10 @@ BIN="${TOG_BIN:-$ROOT/target/release/tog}"
 [ -x "$BIN" ] || BIN="$ROOT/target/debug/tog"
 [ -x "$BIN" ] || { echo "no tog binary: run cargo build first" >&2; exit 1; }
 
+# Resolved, because the installer prints resolved paths and macOS's TMPDIR
+# sits under /var, a symlink to /private/var.
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/tog-install-test.XXXXXX")"
+WORK="$(cd -P "$WORK" && pwd -P)"
 SERVER=""
 trap '[ -n "$SERVER" ] && kill "$SERVER" 2>/dev/null; rm -rf "$WORK"' EXIT
 
@@ -33,7 +36,8 @@ esac
 asset="tog-$triple.tar.gz"
 mkdir -p "$WORK/release" "$WORK/stage"
 cp "$BIN" "$WORK/stage/tog"
-tar -C "$WORK/stage" -czf "$WORK/release/$asset" tog
+# Packed as release.yml packs it: no macOS AppleDouble or xattr members.
+COPYFILE_DISABLE=1 tar --no-xattrs -C "$WORK/stage" -czf "$WORK/release/$asset" tog
 ( cd "$WORK/release" && { sha256sum "$asset" 2>/dev/null || shasum -a 256 "$asset"; } > "$asset.sha256" )
 
 port="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])')"
@@ -280,10 +284,13 @@ for value in 0 1; do
     env -i HOME="$H" SHELL=/bin/bash PATH="$BASE_PATH" TERM=dumb \
         TOG_NO_MODIFY_PATH="$value" TOG_DOWNLOAD_BASE="$TOG_DOWNLOAD_BASE" \
         sh "$ROOT/install.sh" >/dev/null 2>&1 || bad "installer exited non-zero"
+    # A bash user's file is .bash_profile on macOS, whose terminals start
+    # login shells, and .bashrc elsewhere.
+    rc=.bashrc; [ "$(uname -s)" = Darwin ] && rc=.bash_profile
     if [ "$value" = 0 ]; then
-        check "TOG_NO_MODIFY_PATH=0 still edits .bashrc" test "$(count_marks "$H/.bashrc")" = 1
+        check "TOG_NO_MODIFY_PATH=0 still edits $rc" test "$(count_marks "$H/$rc")" = 1
     else
-        check "TOG_NO_MODIFY_PATH=1 edits nothing"       test ! -e "$H/.bashrc"
+        check "TOG_NO_MODIFY_PATH=1 edits nothing"   test ! -e "$H/.bashrc" -a ! -e "$H/.bash_profile"
     fi
 done
 

@@ -2,6 +2,7 @@
 
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Create fixture archives from the declared tree, without host metadata.
@@ -17,7 +18,7 @@ pub(crate) fn tar_create() -> Command {
     command
 }
 
-/// A scratch directory named `tog-test-<label>-<pid>-<nanos>`, gone on
+/// A scratch directory named `tog-<label>-<pid>-<nanos>-<seq>`, gone on
 /// drop even when a store inside it has made its objects read-only: a plain
 /// `remove_dir_all` fails on those and leaves the tree behind, and enough
 /// leftovers fill the per-user /tmp quota.
@@ -30,14 +31,18 @@ impl TempDir {
 
     /// A scratch directory whose name says which test made it, for the
     /// leftover a killed run leaves.
+    /// The clock alone is not unique: macOS's ticks in microseconds, so two
+    /// tests with one label could share a directory without the sequence.
     pub fn named(label: &str) -> Self {
+        static SEQ: AtomicU64 = AtomicU64::new(0);
         Self::create(std::env::temp_dir().join(format!(
-            "tog-{label}-{}-{}",
+            "tog-{label}-{}-{}-{}",
             std::process::id(),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
-                .as_nanos()
+                .as_nanos(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
         )))
     }
 

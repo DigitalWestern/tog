@@ -18,7 +18,6 @@
 
 use sha2::{Digest as Sha2Digest, Sha256, Sha512};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use tog::kernel::fetch::Digest;
 use tog::kernel::platform::Platform;
 use tog::kernel::policy;
@@ -27,7 +26,7 @@ use tog::tailors::node::{self, DeclaredArtifact, NpmPackage, NpmPlan};
 
 mod common;
 
-use common::TempDir;
+use common::{tar_create, TempDir};
 
 fn store_at(dir: &Path) -> Store {
     let root = dir.join("store");
@@ -69,7 +68,7 @@ fn b64(data: &[u8]) -> String {
 /// Tar `dir/<top>` into `dir/<top>.tgz`.
 fn tar(dir: &Path, top: &str) -> PathBuf {
     let tarball = dir.join(format!("{top}.tgz"));
-    let status = Command::new("/usr/bin/tar")
+    let status = tar_create()
         .arg("-czf")
         .arg(&tarball)
         .arg("-C")

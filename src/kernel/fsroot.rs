@@ -1177,6 +1177,23 @@ mod tests {
         dir
     }
 
+    /// A listening socket at `path`. A socket's path must fit in
+    /// `sun_path` (104 bytes on macOS, where the temp dir alone is about
+    /// 50), so it is bound at a short name in /tmp and renamed into place;
+    /// a rename keeps the socket.
+    fn bind_socket(path: &Path) -> std::os::unix::net::UnixListener {
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let short = PathBuf::from(format!(
+            "/tmp/tog-sock-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        let _ = fs::remove_file(&short);
+        let listener = std::os::unix::net::UnixListener::bind(&short).unwrap();
+        fs::rename(&short, path).unwrap();
+        listener
+    }
+
     fn entries(dir: &Path) -> Vec<String> {
         let mut names: Vec<String> = fs::read_dir(dir)
             .unwrap()
@@ -1497,7 +1514,7 @@ mod tests {
         let temp = TempDir::new();
         let dir = project(&temp);
         fs::create_dir_all(dir.join(".tog")).unwrap();
-        let _listener = std::os::unix::net::UnixListener::bind(dir.join(".tog/plan.json")).unwrap();
+        let _listener = bind_socket(&dir.join(".tog/plan.json"));
         let root = ProjectRoot::open(&dir).unwrap();
         let error = root.read_file(Path::new(".tog/plan.json")).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
@@ -1534,6 +1551,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn non_utf8_names_round_trip() {
         let temp = TempDir::new();
@@ -1545,6 +1563,23 @@ mod tests {
             fs::read(root.path().join(OsStr::from_bytes(b".tog/caf\xe9.json"))).unwrap(),
             b"x"
         );
+    }
+
+    /// APFS stores names as UTF-8 and refuses any other bytes (EILSEQ), so
+    /// on macOS the same write is an error that leaves nothing behind.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn non_utf8_names_are_refused_by_apfs_and_leave_nothing() {
+        let temp = TempDir::new();
+        let dir = project(&temp);
+        let root = ProjectRoot::open(&dir).unwrap();
+        let path = PathBuf::from(OsStr::from_bytes(b".tog/caf\xe9.json"));
+        let error = root.write_file(&path, b"x").unwrap_err();
+        assert!(
+            error.to_string().contains("Illegal byte sequence"),
+            "{error}"
+        );
+        assert_eq!(entries(&dir.join(".tog")), Vec::<String>::new());
     }
 
     #[test]

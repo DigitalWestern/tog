@@ -630,7 +630,13 @@ fn pax_records(data: &[u8], name: &str) -> io::Result<Vec<(String, String)>> {
             ))
         })?;
         let key = utf8(&body[..equals], "PAX record key")?.to_string();
-        let value = utf8(&body[equals + 1..], "PAX record value")?.to_string();
+        // Vendor records (macOS tar's `SCHILY.xattr.*`) can hold raw bytes;
+        // `apply_pax` ignores them, so only the others must be text.
+        let value = if key.starts_with("SCHILY.") || key.starts_with("LIBARCHIVE.") {
+            String::from_utf8_lossy(&body[equals + 1..]).into_owned()
+        } else {
+            utf8(&body[equals + 1..], "PAX record value")?.to_string()
+        };
         records.push((key, value));
         at += length;
     }
@@ -1391,6 +1397,45 @@ mod tests {
         .unwrap();
         assert_eq!(names(&entries), vec!["pkg/from-pax"]);
         assert_eq!(entries[0].link.as_deref(), Some("deep/target"));
+    }
+
+    /// One PAX record with a raw byte value, for values that are not text.
+    fn pax_record_bytes(key: &str, value: &[u8]) -> Vec<u8> {
+        let mut body = format!(" {key}=").into_bytes();
+        body.extend_from_slice(value);
+        body.push(b'\n');
+        let mut digits = 1;
+        while (digits + body.len()).to_string().len() != digits {
+            digits += 1;
+        }
+        let mut record = (digits + body.len()).to_string().into_bytes();
+        record.extend(body);
+        record
+    }
+
+    /// macOS tar stores extended attributes such as `com.apple.provenance`
+    /// as `SCHILY.xattr.*` records whose values are raw bytes. They are
+    /// metadata the reader ignores, so their bytes need not be text; a
+    /// record the reader uses still must be.
+    #[test]
+    fn binary_xattr_values_are_ignored_and_other_values_must_be_text() {
+        let xattr = pax_record_bytes(
+            "SCHILY.xattr.com.apple.provenance",
+            b"\x01\x02\0D\x18\xff\xfe",
+        );
+        let entries = list_members(
+            "pax-binary-xattr",
+            &[pax_raw(b'x', &xattr), ustar("pkg/tog", b'0', "", b"x")],
+        )
+        .unwrap();
+        assert_eq!(names(&entries), vec!["pkg/tog"]);
+
+        let path = pax_record_bytes("path", b"pkg/\xff");
+        refusal(
+            "pax-binary-path",
+            &[pax_raw(b'x', &path), ustar("pkg/x", b'0', "", b"x")],
+            "not UTF-8",
+        );
     }
 
     #[test]

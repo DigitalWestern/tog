@@ -91,7 +91,11 @@ jobs:
           asset="tog-${{ matrix.triple }}.tar.gz"
           mkdir -p dist/stage
           cp "target/${{ matrix.triple }}/release/tog" dist/stage/tog
-          tar -C dist/stage -czf "dist/$asset" tog
+          # No host metadata: macOS's bsdtar otherwise adds `._tog` and
+          # binary xattr records, and tog's own reader, which `tog self
+          # update` unpacks with, refuses an archive whose headers and
+          # tar's listing disagree.
+          COPYFILE_DISABLE=1 tar --no-xattrs -C dist/stage -czf "dist/$asset" tog
           cd dist
           if command -v sha256sum >/dev/null; then
             sha256sum "$asset" > "$asset.sha256"
