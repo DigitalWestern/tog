@@ -112,6 +112,9 @@ Nothing queued; the next item comes from "Open work" below.
   - #321 tests: kernel_smoke realizes against the developer's own store, so a local run can pass on cached objects.
   - #319 archive: read_member runs a tar -t cross-check it does not need.
   - #318 architecture: tar_runs_only_in_kernel_archive cannot see a bare "tar".
+- **Found in the #323 review (2026-09-26).** One issue and one PR each:
+  - #324 ci: adding the heavy label during a path-triggered heavy run restarts it on the same commit.
+  - #325 ci: tailor changes to extraction do not trigger the heavy suite on their own.
 - **Smaller open issues from the 2026-09-23/24 run.** One line each; the
   issue has the options and the pick.
   - #174 npm: git-tracked `node_modules` in workspace members moved into backups.
