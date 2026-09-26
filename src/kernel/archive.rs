@@ -683,11 +683,21 @@ fn apply_pax(records: Vec<(String, Vec<u8>)>, name: &str, pending: &mut Pending)
             "linkpath" => pending.pax_linkpath = Some(utf8(&value, "PAX linkpath")?.to_string()),
             "size" => {
                 let text = utf8(&value, "PAX size")?;
-                let size = text.parse::<u64>().map_err(|_| {
-                    err(format!(
-                        "archive PAX header {name:?} has a size record {text:?} that is not a decimal number"
-                    ))
-                })?;
+                // Digits only. Rust's parser also takes a leading `+`,
+                // which bsdtar reads as zero and GNU tar refuses: a size the
+                // three of us read differently is a stream we walk
+                // differently, and a header hidden in the gap would never
+                // reach `tar -t`.
+                let size = text
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit())
+                    .then(|| text.parse::<u64>().ok())
+                    .flatten()
+                    .ok_or_else(|| {
+                        err(format!(
+                            "archive PAX header {name:?} has a size record {text:?} that is not a decimal number"
+                        ))
+                    })?;
                 pending.pax_size = Some(size);
             }
             // `charset` describes the member's data, which tar does not
@@ -750,10 +760,12 @@ fn check_name_text(name: &str, link: &str) -> io::Result<()> {
 }
 
 /// The first character in `text` that would not show as itself in a
-/// listing, named. Names are read by people (tar's listing, an error, a
-/// diff of two closures), and a character that reorders or hides the text
-/// around it lets one name pass for another. UTF-8 validity does not cover
-/// these: every one is a well-formed scalar value.
+/// listing, named: a control, a bidirectional control, or one of the
+/// invisible and zero-width characters. Names are read by people (tar's
+/// listing, an error, a diff of two closures), and a character that
+/// reorders or hides the text around it lets one name pass for another.
+/// UTF-8 validity does not cover these: every one is a well-formed scalar
+/// value.
 fn invisible(text: &str) -> Option<&'static str> {
     text.chars().find_map(|c| {
         if c.is_control() {
@@ -769,15 +781,32 @@ fn invisible(text: &str) -> Option<&'static str> {
             c,
             '\u{00AD}'
                 | '\u{034F}'
-                | '\u{180E}'
+                | '\u{115F}'
+                | '\u{1160}'
+                | '\u{17B4}'
+                | '\u{17B5}'
+                | '\u{180B}'..='\u{180F}'
                 | '\u{200B}'..='\u{200D}'
+                | '\u{2028}'
+                | '\u{2029}'
                 | '\u{2060}'..='\u{2064}'
+                | '\u{206A}'..='\u{206F}'
+                | '\u{3164}'
+                | '\u{FE00}'..='\u{FE0F}'
                 | '\u{FEFF}'
+                | '\u{FFA0}'
+                | '\u{FFF9}'..='\u{FFFB}'
+                | '\u{E0000}'..='\u{E007F}'
+                | '\u{E0100}'..='\u{E01EF}'
         ) {
-            // Soft hyphen, combining grapheme joiner, Mongolian vowel
-            // separator, zero-width space/joiners, word joiner and the
-            // invisible operators, and the byte-order mark.
-            Some("a zero-width character")
+            // Soft hyphen, combining grapheme joiner, Hangul and Khmer
+            // fillers, Mongolian selectors and vowel separator, zero-width
+            // space/joiners, line and paragraph separators, word joiner and
+            // the invisible operators, deprecated format controls, halfwidth
+            // Hangul filler, variation selectors, the byte-order mark,
+            // interlinear annotation marks, and tag characters. Not the
+            // whole Cf category: that is the Cf-category item in FOLLOW-UPS.
+            Some("an invisible character")
         } else {
             None
         }
@@ -822,28 +851,38 @@ pub fn validate(entries: &[Entry], strip: usize) -> io::Result<()> {
         kept.push((entry, stripped));
     }
     // Two names APFS would treat as one extract as one file there and two
-    // on Linux, so one archive would realize two different trees. Identical
-    // names are tar's ordinary last-one-wins on both.
+    // on Linux, so one archive would realize two different trees. Every
+    // prefix counts, since `Lib/a` and `lib/b` share one directory on APFS
+    // and two on Linux. Identical spellings are tar's ordinary
+    // last-one-wins on both.
     let mut folded: BTreeMap<String, String> = BTreeMap::new();
     for (_, stripped) in &kept {
-        let joined = stripped.join("/");
-        if let Some(other) = folded.insert(folded_name(&joined), joined.clone()) {
-            if other != joined {
-                return Err(err(format!(
-                    "archive entries {other:?} and {joined:?} are one name on a case-insensitive or normalization-insensitive filesystem; refusing to extract"
-                )));
+        for end in 1..=stripped.len() {
+            let prefix = stripped[..end].join("/");
+            match folded.get(&folded_name(&prefix)) {
+                Some(other) if *other != prefix => {
+                    return Err(err(format!(
+                        "archive entries {other:?} and {prefix:?} are one name on a case-insensitive or normalization-insensitive filesystem; refusing to extract"
+                    )));
+                }
+                Some(_) => {}
+                None => {
+                    folded.insert(folded_name(&prefix), prefix);
+                }
             }
         }
     }
+    // Symlink names are held folded, so a target that walks through `S`
+    // is caught by a link named `s`: on APFS they are the same link.
     let symlinks: BTreeSet<String> = kept
         .iter()
         .filter(|(entry, _)| entry.kind == EntryKind::Symlink)
-        .map(|(_, stripped)| stripped.join("/"))
+        .map(|(_, stripped)| folded_name(&stripped.join("/")))
         .collect();
     for (entry, stripped) in &kept {
         for end in 1..stripped.len() {
             let ancestor = stripped[..end].join("/");
-            if symlinks.contains(&ancestor) {
+            if symlinks.contains(&folded_name(&ancestor)) {
                 return Err(err(format!(
                     "archive entry {:?} is written through symlink {:?}",
                     entry.name, ancestor
@@ -865,13 +904,15 @@ pub fn validate(entries: &[Entry], strip: usize) -> io::Result<()> {
 
 /// An approximation of the form under which APFS compares two names:
 /// canonically decomposed (NFD, so `é` and `e` plus a combining acute are
-/// one) and then lowercased. Lowercasing is not full Unicode case folding
-/// (`SS` and `ß` do not meet), so this catches the collisions a real
-/// package can plausibly carry, not every pair APFS would merge. Go's
-/// module zip refuses the same collisions with a similar fold.
+/// one), lowercased, and decomposed again in case lowercasing composed
+/// anything. Lowercasing is not full Unicode case folding (`SS` and `ß` do
+/// not meet), so this catches the collisions a real package can plausibly
+/// carry, not every pair APFS would merge. Go's module zip refuses case
+/// collisions the same way; it does not normalize.
 fn folded_name(name: &str) -> String {
     use unicode_normalization::UnicodeNormalization;
-    name.nfd().collect::<String>().to_lowercase()
+    let decomposed: String = name.nfd().collect();
+    decomposed.to_lowercase().nfd().collect()
 }
 
 /// The name's path components, refusing absolute names, `..`, and empty
@@ -909,6 +950,7 @@ fn contained_components(name: &str) -> Result<Vec<&str>, String> {
 /// A symlink as the target's *final* component is not a traversal — nothing
 /// is resolved through it here — and it is contained by its own validation,
 /// so composing the two stays inside.
+/// `symlinks` holds the archive's symlink names in `folded_name` form.
 fn symlink_contained(
     stripped: &[&str],
     target: &str,
@@ -933,7 +975,8 @@ fn symlink_contained(
             }
             name => {
                 path.push(name);
-                if index + 1 < components.len() && symlinks.contains(&path.join("/")) {
+                if index + 1 < components.len() && symlinks.contains(&folded_name(&path.join("/")))
+                {
                     return Err(format!(
                         "symlink target resolves through another symlink in the archive ({:?})",
                         path.join("/")
@@ -1452,7 +1495,7 @@ mod tests {
 
     /// An archive that carries an extended attribute extracts without it.
     /// GNU tar would drop it anyway, so on Linux this pins the contract and
-    /// proves the host tar accepts the flags in `-t` and `-x` mode on a real
+    /// proves the host tar accepts the flags in `-x` mode on a real
     /// archive; on macOS, run as root, it is the behaviour itself.
     #[test]
     #[cfg(target_os = "linux")]
@@ -1469,12 +1512,17 @@ mod tests {
         // value pointer and length describe a live byte slice.
         let set =
             unsafe { libc::setxattr(path.as_ptr(), key.as_ptr(), b"1".as_ptr().cast(), 1, 0) };
-        assert_eq!(
-            set,
-            0,
-            "setxattr failed ({}); this test needs a temp_dir on a filesystem with user xattrs",
-            io::Error::last_os_error()
-        );
+        if set != 0 {
+            let error = io::Error::last_os_error();
+            // Only a filesystem without user xattrs may skip, and it says so.
+            assert_eq!(
+                error.raw_os_error(),
+                Some(libc::ENOTSUP),
+                "setxattr failed: {error}"
+            );
+            eprintln!("skip extracted_files_carry_no_extended_attributes: {error}");
+            return;
+        }
         let archive = temp.0.join("pkg.tar");
         assert!(crate::kernel::testutil::tar_create()
             .args(["--format=posix", "--xattrs", "-cf"])
@@ -1811,6 +1859,27 @@ mod tests {
         )
         .unwrap();
         assert_eq!(names(&entries), vec!["pkg/x"]);
+        // A global header may carry the same metadata, bytes and all.
+        let mut global = pax_record_bytes("SCHILY.xattr.user.tog", b"\xff\x00");
+        global.extend(pax_record("charset", "BINARY").into_bytes());
+        let entries = list_members(
+            "pax-global-bytes",
+            &[pax_raw(b'g', &global), ustar("pkg/x", b'0', "", b"x")],
+        )
+        .unwrap();
+        assert_eq!(names(&entries), vec!["pkg/x"]);
+        // A size with a sign parses in Rust, reads as zero in bsdtar and is
+        // an error in GNU tar: three readers, three streams. Digits only.
+        for size in ["+5", "-5", " 5", "5 ", ""] {
+            refusal(
+                &format!(
+                    "pax-size-{}",
+                    size.trim().replace('+', "plus").replace('-', "minus")
+                ),
+                &[pax(&[("size", size)]), ustar("pkg/x", b'0', "", b"x")],
+                "not a decimal number",
+            );
+        }
         // A record with no `=` is not a record.
         refusal(
             "pax-noeq",
@@ -1945,9 +2014,12 @@ mod tests {
                 "bidirectional control",
             ),
             ("ltr-isolate", "pkg/\u{2066}x", "bidirectional control"),
-            ("zero-width-space", "pkg/a\u{200B}b", "zero-width"),
-            ("zero-width-joiner", "pkg/a\u{200D}b", "zero-width"),
-            ("bom", "pkg/\u{FEFF}x", "zero-width"),
+            ("zero-width-space", "pkg/a\u{200B}b", "invisible"),
+            ("zero-width-joiner", "pkg/a\u{200D}b", "invisible"),
+            ("bom", "pkg/\u{FEFF}x", "invisible"),
+            ("variation-selector", "pkg/a\u{FE0F}", "invisible"),
+            ("tag", "pkg/a\u{E0041}", "invisible"),
+            ("line-separator", "pkg/a\u{2028}b", "invisible"),
         ] {
             refusal(label, &[ustar(name, b'0', "", b"x")], needle);
             refusal(
@@ -1960,6 +2032,23 @@ mod tests {
             "rtl-link",
             &[ustar("pkg/l", b'2', "tar\u{202E}get", b"")],
             "bidirectional control character in its link target",
+        );
+        // GNU long names and long links are names too.
+        refusal(
+            "rtl-gnu-long",
+            &[
+                gnu_long(b'L', "pkg/\u{202E}txt.exe"),
+                ustar("pkg/x", b'0', "", b"x"),
+            ],
+            "bidirectional control",
+        );
+        refusal(
+            "zero-width-gnu-link",
+            &[
+                gnu_long(b'K', "tar\u{200B}get"),
+                ustar("pkg/l", b'2', "t", b""),
+            ],
+            "invisible character in its link target",
         );
         // Plain non-ASCII text is still a name.
         let entries = list_members("accented", &[ustar("pkg/caf\u{E9}", b'0', "", b"x")]).unwrap();
@@ -1984,6 +2073,9 @@ mod tests {
         collide("pkg/README", "pkg/readme", 0);
         collide("pkg/Caf\u{E9}", "pkg/Cafe\u{301}", 0);
         collide("pkg/Lib/", "pkg/lib", 0);
+        // Two files in what APFS makes one directory and Linux makes two,
+        // with no directory entries to compare.
+        collide("pkg/Lib/a", "pkg/lib/b", 0);
         // After stripping one component the two land in the same place.
         collide("a/README", "b/readme", 1);
         // Exact duplicates are tar's last-one-wins on both platforms.
@@ -1992,6 +2084,27 @@ mod tests {
         validate(&[file("pkg/a/README"), file("pkg/b/readme")], 0).unwrap();
         // Stripped-away entries are never written, so they cannot collide.
         validate(&[file("README"), file("readme")], 1).unwrap();
+
+        // A target that walks through `S` walks through the archive's own
+        // symlink `s` on APFS, and `s` points two levels up: refused as a
+        // traversal, as it would be with the exact spelling.
+        let link = |name: &str, target: &str| entry(EntryKind::Symlink, name, Some(target));
+        let error = validate(&[link("p/q/s", "../.."), link("p/q/a", "S/../../..")], 0)
+            .expect_err("traversal through a case-folded symlink");
+        assert!(
+            error
+                .to_string()
+                .contains("resolves through another symlink"),
+            "{error}"
+        );
+        // A file under a case-folded symlink name is a name collision first:
+        // the prefix `p/S` folds onto the link `p/s`.
+        let error = validate(&[link("p/s", "."), file("p/S/x")], 0)
+            .expect_err("write through a case-folded symlink");
+        assert!(
+            error.to_string().contains("one name on a case-insensitive"),
+            "{error}"
+        );
     }
 
     #[test]
