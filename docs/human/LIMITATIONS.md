@@ -145,29 +145,27 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   replacement after commit is undetected.
 - **Delegated planning runs unsandboxed with user privileges** (uv, npm, cargo, go, bundler):
   a hostile manifest executes code at PLAN time.
-- **Most archives are unpacked by the platform tar with no pre-check of their own** (#236).
-  The pre-materialization extractor (`src/kernel/archive.rs`) reads every entry from the
+- **Every tar archive is unpacked through the pre-materialization extractor**
+  (`src/kernel/archive.rs`, #236). It reads every entry from the
   archive's own headers (ustar names and the POSIX prefix field, PAX `path`/`linkpath`/`size`,
   GNU long names), cross-checks that listing against `tar -t`, refuses the whole archive on an
   absolute name, `..`, a hard link, a special file, an escaping symlink, a name that is not
   UTF-8 or carries a control, bidirectional-override or zero-width character, two names that
   APFS would fold into one (by case or by Unicode normalization), or a layout it cannot model
   (sparse members, a global header that renames, a PAX key it does not know, unknown type
-  letters, bad checksums), and extracts with `TAR_OPTIONS` unset and tar told to restore no
+  letters, bad checksums), refuses past a 1 GiB running member-data budget before anything
+  is written, and extracts with `TAR_OPTIONS` unset and tar told to restore no
   extended attributes, ACLs, file flags or AppleDouble metadata: an object holds names, bytes
-  and the executable bit, nothing else. PAX values other than `path`, `linkpath` and `size`
+  and the executable bit, nothing else. The one `tar -c` in the tree (git-source packing)
+  lives there too, so no other production code names `/usr/bin/tar` at all — an
+  architecture test fails the build if it does. PAX values other than `path`, `linkpath` and `size`
   may be any bytes and are never read. The `tar -t` listing carries only `--numeric-owner`:
   it writes nothing, and bsdtar documents the restore flags for other modes, so on `-t`
   they could only fail. That leaves a Mac-packed tarball's `._name` companions refused on
   macOS by the cross-check, as before, rather than extracted as the wrong tree (#307 stays
-  open until a macOS run shows whether `--no-mac-metadata` on `-t` lifts it). Three things
-  go through it: the Go toolchain, the
-  optional Rust components and cross targets, and the binary `tog update --self` installs.
-  The other tarballs are extracted by `/usr/bin/tar` directly, relying on its own defences
-  and inheriting the user's `TAR_OPTIONS`: the CPython, uv, Rust, rustfmt, Node, Ruby, .NET,
-  OTP and native-library toolchains, the `.tar.zst` members inside a `.conda` package, npm
-  registry tarballs, Hex packages, tar sdists, and crates. A crate is extracted in full before
-  its 1 GiB size cap is checked. The Elixir release zip and Hex's own `.ez` archive are
+  open until a macOS run shows whether `--no-mac-metadata` on `-t` lifts it). Single
+  manifests read out of an sdist come from the same validated in-process stream, never a
+  second tar child. The Elixir release zip and Hex's own `.ez` archive are
   unpacked by `/usr/bin/unzip`, inheriting the user's `UNZIP`/`UNZIPOPT`. Wheels, zip sdists
   and the outer zip of a `.conda` package are read in process with the `zip` crate.
 

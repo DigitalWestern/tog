@@ -9,25 +9,21 @@ use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 
 pub(super) fn tarball_has_binding_gyp(activity: &StoreActivity, path: &Path) -> io::Result<bool> {
-    let mut command = Command::new("/usr/bin/tar");
-    command.args(["-tzf"]).arg(path);
-    let output = crate::kernel::supervise::output(&mut command, activity).map_err(|e| {
+    let entries = crate::kernel::archive::list_with_activity(
+        activity,
+        path,
+        crate::kernel::archive::Compression::Gzip,
+    )
+    .map_err(|e| {
         io::Error::new(
             e.kind(),
             format!("list npm tarball {}: {e}", path.display()),
         )
     })?;
-    if !output.status.success() {
-        return Err(err(format!(
-            "list npm tarball {} failed: {}",
-            path.display(),
-            String::from_utf8_lossy(&output.stderr).trim()
-        )));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .map(|entry| entry.trim_end_matches('/'))
-        .any(|entry| entry == "binding.gyp" || entry.ends_with("/binding.gyp")))
+    Ok(entries.iter().any(|entry| {
+        let trimmed = entry.name.trim_end_matches('/');
+        trimmed == "binding.gyp" || trimmed.ends_with("/binding.gyp")
+    }))
 }
 
 pub(super) const ARCHIVE_CLASSIFICATION_SCHEMA: &str = "npm-archive-classification/1";
@@ -827,26 +823,25 @@ fn extract_tarball_packages(
         let dest = env_package_path(staged, &p.path);
         fs::create_dir_all(&dest)
             .map_err(|e| io::Error::new(e.kind(), format!("{}: create dir: {e}", p.path)))?;
-        let mut tar = Command::new("/usr/bin/tar");
-        tar.arg("-xzf")
-            .arg(tarball)
-            .arg("-C")
-            .arg(&dest)
-            .args(["--strip-components", "1"]);
-        if !platform.is_macos() {
-            // Registry tarballs are packed by arbitrary publishers; some
-            // (pngjs, eta 1.x) carry directories with mode 0666. bsdtar
-            // (macOS) descends into them anyway; GNU tar creates the
-            // directory 0666 and then cannot open its children unless
-            // directory modes are applied after extraction. normalize_modes
-            // below rewrites every mode afterwards, so the store content is
-            // identical either way.
-            tar.arg("--delay-directory-restore");
-        }
-        let status = crate::kernel::supervise::status(&mut tar, activity)?;
-        if !status.success() {
-            return Err(err(format!("{}: tarball extraction failed", p.path)));
-        }
+        // Registry tarballs are packed by arbitrary publishers; some
+        // (pngjs, eta 1.x) carry directories with mode 0666. bsdtar
+        // (macOS) descends into them anyway; GNU tar creates the
+        // directory 0666 and then cannot open its children unless
+        // directory modes are applied after extraction. normalize_modes
+        // below rewrites every mode afterwards, so the store content is
+        // identical either way.
+        let options = crate::kernel::archive::ExtractOptions {
+            strip: 1,
+            delay_directory_restore: !platform.is_macos(),
+        };
+        crate::kernel::archive::extract_with_activity_and_options(
+            activity,
+            tarball,
+            &dest,
+            &options,
+            crate::kernel::archive::Compression::Gzip,
+        )
+        .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", p.path)))?;
         normalize_modes(&dest)
             .map_err(|e| io::Error::new(e.kind(), format!("{}: normalize modes: {e}", p.path)))?;
         if let Some(patch) = &p.patch {

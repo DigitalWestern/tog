@@ -510,32 +510,63 @@ fn stage_rustfmt(
     // The archive's single root directory is named after the component the
     // selection asked for, so the version comes from its row, not the pin.
     let root = format!("rustfmt-{version}-{}", platform.triple());
-    let entries = archive_entries(activity, archive)?;
+    let listed = crate::kernel::archive::list_with_activity(
+        activity,
+        archive,
+        crate::kernel::archive::Compression::Xz,
+    )
+    .map_err(|error| io::Error::new(error.kind(), format!("list rustfmt archive: {error}")))?;
     let allowed: BTreeSet<String> = allowed_entries(&root).into_iter().collect();
-    for entry in entries {
-        if !allowed.contains(&entry) {
+    for entry in &listed {
+        if !allowed.contains(&entry.name) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("rustfmt archive contains unexpected entry {entry:?}"),
+                format!("rustfmt archive contains unexpected entry {:?}", entry.name),
             ));
         }
     }
-    let cargo_fmt = format!("{root}/rustfmt-preview/bin/cargo-fmt");
-    let rustfmt = format!("{root}/rustfmt-preview/bin/rustfmt");
-    let mut command = Command::new("/usr/bin/tar");
-    command
-        .args(["-xJf"])
-        .arg(archive)
-        .args(["-C"])
-        .arg(staged)
-        .args(["--strip-components", "2"])
-        .arg(&cargo_fmt)
-        .arg(&rustfmt);
-    let status = crate::kernel::supervise::status(&mut command, activity)
-        .map_err(|error| io::Error::new(error.kind(), format!("spawn tar for rustfmt: {error}")))?;
-    if !status.success() {
-        return Err(io::Error::other("rustfmt archive extraction failed"));
-    }
+    // The validated extractor writes whole archives, not named members, so
+    // the full component tree lands in a scratch directory and only the two
+    // binaries are carried into the object, modes included: tar restores the
+    // archived modes, and the object's identity covers the executable bit.
+    let full = staged.join(".tog-rustfmt-full");
+    crate::kernel::archive::extract_validated_with_activity(
+        activity,
+        archive,
+        &full,
+        2,
+        crate::kernel::archive::Compression::Xz,
+        &listed,
+    )
+    .map_err(|error| io::Error::new(error.kind(), format!("extract rustfmt archive: {error}")))?;
+    let extracted = (|| -> io::Result<()> {
+        let bin = staged.join("bin");
+        fs::create_dir_all(&bin)?;
+        for name in ["rustfmt", "cargo-fmt"] {
+            let source = full.join("bin").join(name);
+            if fs::symlink_metadata(&source)
+                .map_err(|error| {
+                    io::Error::new(
+                        error.kind(),
+                        format!("rustfmt archive entry {name} is missing: {error}"),
+                    )
+                })?
+                .file_type()
+                .is_symlink()
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("rustfmt archive entry {name} is not a regular file"),
+                ));
+            }
+            let permissions = fs::metadata(&source)?.permissions();
+            fs::copy(&source, bin.join(name))?;
+            fs::set_permissions(bin.join(name), permissions)?;
+        }
+        Ok(())
+    })();
+    let _ = crate::kernel::store::remove_tree(&full);
+    extracted?;
     let bin = staged.join("bin");
     if !bin.join("rustfmt").is_file() || !bin.join("cargo-fmt").is_file() {
         return Err(io::Error::new(
@@ -573,23 +604,6 @@ fn rust_object_lib_link(rust_object: &Path) -> io::Result<PathBuf> {
         .and_then(|name| name.to_str())
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Rust object has no UTF-8 id"))?;
     Ok(PathBuf::from(format!("../{rust_object_id}/lib")))
-}
-
-fn archive_entries(activity: &StoreActivity, archive: &Path) -> io::Result<Vec<String>> {
-    let mut command = Command::new("/usr/bin/tar");
-    command.args(["-tJf"]).arg(archive);
-    let output = crate::kernel::supervise::output(&mut command, activity)
-        .map_err(|error| io::Error::new(error.kind(), format!("list rustfmt archive: {error}")))?;
-    if !output.status.success() {
-        return Err(io::Error::other(format!(
-            "list rustfmt archive failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        )));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .map(str::to_string)
-        .collect())
 }
 
 fn allowed_entries(root: &str) -> Vec<String> {

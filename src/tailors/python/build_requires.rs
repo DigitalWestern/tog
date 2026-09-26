@@ -11,7 +11,6 @@ use crate::tailors::python::pyselect;
 use std::fs::{self, File};
 use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
-use std::process::{Command, ExitStatus, Output};
 use zip::ZipArchive;
 
 const DEFAULT_REQUIRES: &[&str] = &["setuptools>=40.8.0", "wheel"];
@@ -108,45 +107,20 @@ fn clean_entry(raw: &str) -> io::Result<Option<String>> {
     }
 }
 
-// Reviewed site (tests/architecture.rs): `None` arm of `Option<&StoreActivity>`: no store is involved.
-#[allow(clippy::disallowed_methods)]
-fn status_for(command: &mut Command, activity: Option<&StoreActivity>) -> io::Result<ExitStatus> {
-    match activity {
-        Some(activity) => crate::kernel::supervise::status(command, activity),
-        None => command.status(),
-    }
-}
-
-// Reviewed site (tests/architecture.rs): `None` arm of `Option<&StoreActivity>`: no store is involved.
-#[allow(clippy::disallowed_methods)]
-fn output_for(command: &mut Command, activity: Option<&StoreActivity>) -> io::Result<Output> {
-    match activity {
-        Some(activity) => crate::kernel::supervise::output(command, activity),
-        None => command.output(),
-    }
-}
-
 fn tar_entries(path: &Path, activity: Option<&StoreActivity>) -> io::Result<Vec<ArchiveEntry>> {
-    let mut command = Command::new("/usr/bin/tar");
-    command.args(["-tzf"]).arg(path);
-    let output = output_for(&mut command, activity)
-        .map_err(|e| io::Error::new(e.kind(), format!("list {}: {e}", path.display())))?;
-    if !output.status.success() {
-        return Err(invalid(format!(
-            "list {} failed: {}",
-            path.display(),
-            String::from_utf8_lossy(&output.stderr).trim()
-        )));
+    use crate::kernel::archive::Compression;
+    let listed = match activity {
+        Some(activity) => {
+            crate::kernel::archive::list_with_activity(activity, path, Compression::Gzip)
+        }
+        None => crate::kernel::archive::list(path, Compression::Gzip),
     }
-    output
-        .stdout
-        .split(|byte| *byte == b'\n')
-        .filter(|line| !line.is_empty())
-        .map(|line| {
-            let text = std::str::from_utf8(line)
-                .map_err(|_| invalid("sdist archive listing is not UTF-8"))?;
-            Ok(clean_entry(text)?.map(|normalized| ArchiveEntry {
-                original: text.to_string(),
+    .map_err(|e| io::Error::new(e.kind(), format!("list {}: {e}", path.display())))?;
+    listed
+        .into_iter()
+        .map(|entry| {
+            Ok(clean_entry(&entry.name)?.map(|normalized| ArchiveEntry {
+                original: entry.name,
                 normalized,
             }))
         })
@@ -228,18 +202,28 @@ fn archive_file(
 ) -> io::Result<Vec<u8>> {
     match kind {
         ArchiveKind::TarGz => {
-            let mut command = Command::new("/usr/bin/tar");
-            command.args(["-xOzf"]).arg(path).arg("--").arg(member);
-            let output = output_for(&mut command, activity)
-                .map_err(|e| io::Error::new(e.kind(), format!("read {member} from sdist: {e}")))?;
-            if !output.status.success() {
-                return Err(invalid(format!(
-                    "read {member} from {} failed: {}",
-                    path.display(),
-                    String::from_utf8_lossy(&output.stderr).trim()
-                )));
+            // One manifest read, not an extraction: the bytes come from the
+            // validated in-process stream, never from a second tar child.
+            // 16 MiB covers any real manifest; anything larger is refused
+            // rather than buffered.
+            const MEMBER_CAP: u64 = 16 << 20;
+            let bytes = match activity {
+                Some(activity) => crate::kernel::archive::read_member_with_activity(
+                    activity,
+                    path,
+                    crate::kernel::archive::Compression::Gzip,
+                    member,
+                    MEMBER_CAP,
+                ),
+                None => crate::kernel::archive::read_member(
+                    path,
+                    crate::kernel::archive::Compression::Gzip,
+                    member,
+                    MEMBER_CAP,
+                ),
             }
-            Ok(output.stdout)
+            .map_err(|e| invalid(format!("read {member} from {}: {e}", path.display())))?;
+            Ok(bytes)
         }
         ArchiveKind::Zip => {
             let file = File::open(path)?;
@@ -560,29 +544,40 @@ fn extract_sdist_inner(
     fs::create_dir_all(destination)?;
     match archive_kind(path)? {
         ArchiveKind::TarGz => {
-            // Validate archive member paths before tar gets a chance to
-            // materialize anything.  The same check is performed by
-            // inspect_sdist, but extract_sdist is also used directly in the
-            // Rust planning path.
-            let mut command = Command::new("/usr/bin/tar");
-            command
-                .args(["-xzf"])
-                .arg(path)
-                .args(["-C"])
-                .arg(destination)
-                .args([
-                    "--strip-components",
-                    "1",
-                    "--no-same-owner",
-                    "--no-same-permissions",
-                ]);
-            let _ = entries(path, ArchiveKind::TarGz, activity)?;
-            let status = status_for(&mut command, activity).map_err(|e| {
-                io::Error::new(e.kind(), format!("extract {}: {e}", path.display()))
-            })?;
-            if !status.success() {
-                return Err(invalid(format!("extract {} failed", path.display())));
+            // The listing validates every member before the delegated tar
+            // writes anything. The same check runs in inspect_sdist, but
+            // extract_sdist is also used directly in the Rust planning path.
+            use crate::kernel::archive::Compression;
+            let listed = match activity {
+                Some(activity) => {
+                    crate::kernel::archive::list_with_activity(activity, path, Compression::Gzip)
+                }
+                None => crate::kernel::archive::list(path, Compression::Gzip),
             }
+            .map_err(|e| io::Error::new(e.kind(), format!("extract {}: {e}", path.display())))?;
+            // Keep the name-shape check the inspect path applies, so a
+            // direct extract refuses exactly what inspection would refuse.
+            for entry in &listed {
+                clean_entry(&entry.name)?;
+            }
+            match activity {
+                Some(activity) => crate::kernel::archive::extract_validated_with_activity(
+                    activity,
+                    path,
+                    destination,
+                    1,
+                    Compression::Gzip,
+                    &listed,
+                ),
+                None => crate::kernel::archive::extract_validated(
+                    path,
+                    destination,
+                    1,
+                    Compression::Gzip,
+                    &listed,
+                ),
+            }
+            .map_err(|e| io::Error::new(e.kind(), format!("extract {}: {e}", path.display())))?;
         }
         ArchiveKind::Zip => {
             let file = File::open(path)?;
@@ -748,6 +743,7 @@ mod tests {
     use super::*;
     use crate::kernel::testutil::TempDir;
     use std::io::Write;
+    use std::process::Command;
 
     fn temp_dir(label: &str) -> TempDir {
         TempDir::named(&format!("build-requires-{label}"))

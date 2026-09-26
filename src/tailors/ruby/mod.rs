@@ -315,32 +315,26 @@ fn extract_ruby_bottle(activity: &StoreActivity, tarball: &Path, staged: &Path) 
     // The verified Linux and Darwin bottles both use
     // portable-ruby/<version>/<tree>; this is deliberately not Node's
     // strip count. The archive remains unchanged in the verified cache.
-    let mut command = Command::new("/usr/bin/tar");
-    command
-        .args(["-xzf"])
-        .arg(tarball)
-        .args(["-C"])
-        .arg(staged)
-        .args(["--strip-components", "2"]);
-    let status = crate::kernel::supervise::status(&mut command, activity)?;
-    if !status.success() {
-        return Err(err("portable-ruby extraction failed"));
-    }
+    crate::kernel::archive::extract_with_activity_and_options(
+        activity,
+        tarball,
+        staged,
+        &crate::kernel::archive::ExtractOptions::stripped(2),
+        crate::kernel::archive::Compression::Gzip,
+    )
+    .map_err(|e| io::Error::new(e.kind(), format!("extract portable-ruby bottle: {e}")))?;
     validate_ruby_layout(staged)
 }
 
 #[cfg(test)]
 fn extract_ruby_bottle_for_test(tarball: &Path, staged: &Path) -> io::Result<()> {
-    let status = Command::new("/usr/bin/tar")
-        .args(["-xzf"])
-        .arg(tarball)
-        .args(["-C"])
-        .arg(staged)
-        .args(["--strip-components", "2"])
-        .status()?;
-    if !status.success() {
-        return Err(err("portable-ruby extraction failed"));
-    }
+    crate::kernel::archive::extract_with_options(
+        tarball,
+        staged,
+        &crate::kernel::archive::ExtractOptions::stripped(2),
+        crate::kernel::archive::Compression::Gzip,
+    )
+    .map_err(|e| io::Error::new(e.kind(), format!("extract portable-ruby bottle: {e}")))?;
     validate_ruby_layout(staged)
 }
 

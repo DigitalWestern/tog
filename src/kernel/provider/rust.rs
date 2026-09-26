@@ -27,7 +27,6 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 pub use super::rust_extras::{
     project_extras, project_extras_in, realize_toolchain, toolchain_file_extras_within,
@@ -406,18 +405,14 @@ fn extract_rust_components_for(
     }
     for (component, tarball) in components.iter().zip(tarballs) {
         let tarball: &Path = tarball.as_ref();
-        let mut command = Command::new("/usr/bin/tar");
-        command
-            .args(["-xJf"])
-            .arg(tarball.as_os_str())
-            .args(["-C"])
-            .arg(staged)
-            .args(["--strip-components", "2"]);
-        let status = crate::kernel::supervise::status(&mut command, activity)
-            .map_err(|e| io::Error::new(e.kind(), format!("spawn tar for {component}: {e}")))?;
-        if !status.success() {
-            return Err(err(format!("{component} tarball extraction failed")));
-        }
+        crate::kernel::archive::extract_with_activity_and_options(
+            activity,
+            tarball,
+            staged,
+            &crate::kernel::archive::ExtractOptions::stripped(2),
+            crate::kernel::archive::Compression::Xz,
+        )
+        .map_err(|e| io::Error::new(e.kind(), format!("extract tarball for {component}: {e}")))?;
     }
     validate_rust_layout(staged, platform)
 }
@@ -434,17 +429,13 @@ pub fn extract_rust_components(
     }
     for (component, tarball) in components.iter().zip(tarballs) {
         let tarball: &Path = tarball.as_ref();
-        let status = Command::new("/usr/bin/tar")
-            .args(["-xJf"])
-            .arg(tarball.as_os_str())
-            .args(["-C"])
-            .arg(staged)
-            .args(["--strip-components", "2"])
-            .status()
-            .map_err(|e| io::Error::new(e.kind(), format!("spawn tar for {component}: {e}")))?;
-        if !status.success() {
-            return Err(err(format!("{component} tarball extraction failed")));
-        }
+        crate::kernel::archive::extract_with_options(
+            tarball,
+            staged,
+            &crate::kernel::archive::ExtractOptions::stripped(2),
+            crate::kernel::archive::Compression::Xz,
+        )
+        .map_err(|e| io::Error::new(e.kind(), format!("extract tarball for {component}: {e}")))?;
     }
     validate_rust_layout(staged, platform)
 }

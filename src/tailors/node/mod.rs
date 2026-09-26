@@ -412,18 +412,14 @@ pub fn realize_runtime(
     let staged = store
         .stage_with_activity(activity)
         .map_err(|e| io::Error::new(e.kind(), format!("stage: {e}")))?;
-    let mut command = Command::new("/usr/bin/tar");
-    command
-        .arg("-xzf")
-        .arg(&tarball)
-        .arg("-C")
-        .arg(&staged)
-        .args(["--strip-components", "1"]);
-    let status = crate::kernel::supervise::status(&mut command, activity)
-        .map_err(|e| io::Error::new(e.kind(), format!("spawn tar: {e}")))?;
-    if !status.success() {
-        return Err(err("node tarball extraction failed"));
-    }
+    crate::kernel::archive::extract_with_activity_and_options(
+        activity,
+        &tarball,
+        &staged,
+        &crate::kernel::archive::ExtractOptions::stripped(1),
+        crate::kernel::archive::Compression::Gzip,
+    )
+    .map_err(|e| io::Error::new(e.kind(), format!("extract node tarball: {e}")))?;
     validate_node_layout(&staged)?;
     store
         .commit_with_activity_and_deps(activity, &identity, &staged, &[], &{

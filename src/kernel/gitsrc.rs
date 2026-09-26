@@ -1251,38 +1251,19 @@ pub fn pack_checkout(
 
     let archive = work.join(&filename);
     let uncompressed = work.join(format!("{prefix}.tar"));
-    let owner_flags: &[&str] = if platform.is_macos() {
-        // bsdtar
-        &["--uid", "0", "--gid", "0", "--numeric-owner"]
-    } else {
-        // GNU tar
-        &["--owner=0", "--group=0", "--numeric-owner"]
-    };
-    let list_flags: &[&str] = if platform.is_macos() {
-        // bsdtar treats --null input as verbatim; it has no GNU
-        // --verbatim-files-from option.
-        &["--null"]
-    } else {
-        &["--null", "--verbatim-files-from"]
-    };
-    let mut tar = Command::new("/usr/bin/tar");
-    tar.args(["-cf"])
-        .arg(&uncompressed)
-        .args(["--format=ustar", "--no-recursion"])
-        .args(owner_flags)
-        .args(list_flags)
-        .arg("-C")
-        .arg(&work)
-        .arg("-T")
-        .arg(&list);
-    let tar_status = crate::kernel::supervise::status(&mut tar, activity)?;
-    if !tar_status.success() {
-        let _ = fs::remove_file(&uncompressed);
-        return Err(err(format!(
-            "packing {} failed (tar {tar_status})",
-            source_root.display()
-        )));
-    }
+    crate::kernel::archive::pack_ustar_with_activity(
+        activity,
+        &uncompressed,
+        &work,
+        &list,
+        platform.is_macos(),
+    )
+    .map_err(|e| {
+        io::Error::new(
+            e.kind(),
+            format!("packing {} failed: {e}", source_root.display()),
+        )
+    })?;
     let mut gzip = Command::new("/usr/bin/gzip");
     gzip.args(["-n", "-9", "-c"])
         .arg(&uncompressed)
@@ -1291,9 +1272,8 @@ pub fn pack_checkout(
     let _ = fs::remove_file(&uncompressed);
     if !gzip_status.success() {
         return Err(err(format!(
-            "packing {} failed (tar {}, gzip {})",
+            "packing {} failed (gzip {})",
             source_root.display(),
-            tar_status,
             gzip_status,
         )));
     }
