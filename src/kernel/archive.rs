@@ -2043,6 +2043,8 @@ mod tests {
             ("arabic-number-sign", "pkg/a\u{0600}b", "invisible"),
             ("syriac-abbrev", "pkg/a\u{070F}b", "invisible"),
             ("soft-hyphen", "pkg/a\u{00AD}b", "invisible"),
+            ("interlinear-anchor", "pkg/a\u{FFF9}b", "invisible"),
+            ("language-tag", "pkg/a\u{E0001}b", "invisible"),
         ] {
             refusal(label, &[ustar(name, b'0', "", b"x")], needle);
             refusal(
