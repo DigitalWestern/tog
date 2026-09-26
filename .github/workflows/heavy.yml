@@ -5,7 +5,15 @@
 # syncs, builds in the sandbox and runs end to end, not just its fixtures.
 # That takes about 40 minutes on a 12-core machine and depends on those
 # registries being up, so it is not on every PR; ci.yml runs the offline
-# suite there. Weekly rather than nightly because the repository is
+# suite there. It does run on a pull request in two cases, decided by the
+# `gate` job below:
+#   - the PR changes a file listed in `gate` (tar extraction, downloads,
+#     the toolchain providers and catalogs, Cargo.lock, or the heavy
+#     suite itself). Real toolchain archives carry shapes
+#     no fixture had: #316 was green in ci.yml and broke 15 targets here.
+#   - the PR has the `heavy` label. Adding it starts a run, and every
+#     later push to the PR runs again until the label comes off.
+# Weekly rather than nightly because the repository is
 # private and a nightly run of this length would use most of the Actions
 # minutes a free plan includes; change `cron` to `"0 6 * * *"` for nightly.
 #
@@ -24,17 +32,66 @@ on:
   schedule:
     - cron: "0 6 * * 1"
   workflow_dispatch:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
 
 permissions:
   contents: read
 
-# One run at a time: a run started while another is going waits for it.
-concurrency:
-  group: heavy
-  cancel-in-progress: false
-
 jobs:
+  # Pull requests only: says whether this PR needs the heavy suite.
+  gate:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-22.04
+    permissions:
+      pull-requests: read
+    outputs:
+      run: ${{ steps.decide.outputs.run }}
+    steps:
+      - id: decide
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ACTION: ${{ github.event.action }}
+          ADDED_LABEL: ${{ github.event.label.name }}
+          HAS_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'heavy') }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          # The files whose changes need the heavy suite, as one regex:
+          # tar extraction and downloads, the toolchain providers that
+          # extract real archives, the catalogs that pin those archives,
+          # Cargo.lock (the decompression crates), and the heavy suite
+          # itself. The tailors also extract, but nearly every PR touches
+          # them; a tailor change that alters extraction gets the label.
+          watched='^(src/kernel/(archive|fetch)[^/]*|src/kernel/(archive|fetch)/.*|src/kernel/provider/.*|src/.*catalog\.toml|Cargo\.lock|\.github/workflows/heavy\.yml|tests/acceptance\.sh)$'
+          if [ "$ACTION" = labeled ]; then
+            # Some other label was added: nothing about the code changed.
+            if [ "$ADDED_LABEL" = heavy ]; then run=yes; else run=no; fi
+          elif [ "$HAS_LABEL" = true ]; then
+            run=yes
+          else
+            # A renamed file counts under its old name too. If the API
+            # call fails, run: a missed heavy run is the costlier mistake.
+            if ! files=$(gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR/files" \
+                --jq '.[] | .filename, (.previous_filename // empty)'); then
+              echo "::warning::could not list the PR's files; running the heavy suite"
+              run=yes
+            elif grep -qE "$watched" <<< "$files"; then run=yes; else run=no; fi
+          fi
+          echo "run=$run"
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+
   e2e:
+    needs: gate
+    # `gate` is skipped outside pull requests, so `!cancelled()` keeps
+    # the weekly and by-hand runs from being skipped along with it.
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.gate.outputs.run == 'yes') }}
+    # The weekly and by-hand runs go one at a time: one started while
+    # another is going waits for it. On a pull request a new push
+    # cancels that PR's older run, which tested code that is gone.
+    concurrency:
+      group: ${{ github.event_name == 'pull_request' && format('heavy-pr-{0}', github.event.pull_request.number) || 'heavy' }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     runs-on: ubuntu-22.04
     # About 40 minutes locally (2026-09-25): 31 for the ignored tests, 7
     # for acceptance.sh, on 12 cores. The runner has 2 vCPUs and the

@@ -108,7 +108,6 @@ Nothing queued; the next item comes from "Open work" below.
   - #243 sandbox: the macOS Seatbelt profile reads all of /opt, its timezone rule is dead, and CI never runs it.
   - #237 archive: symlink containment compares names case-sensitively.
 - **Found in the #316 review (2026-09-26).** One issue and one PR each:
-  - #320 ci: archive changes are not proven by PR CI; the heavy suite caught #316's CPython break only by hand.
   - #317 archive: hard links in registry packages are refused; allow contained ones.
   - #321 tests: kernel_smoke realizes against the developer's own store, so a local run can pass on cached objects.
   - #319 archive: read_member runs a tar -t cross-check it does not need.

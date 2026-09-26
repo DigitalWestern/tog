@@ -209,7 +209,11 @@ bash tests/acceptance.sh                  # the full end-to-end checklist
 
 CI (`.github/workflows/ci.yml`) runs the first two on every PR. The last
 two download toolchains and packages, so they run weekly instead, in
-`.github/workflows/heavy.yml`; start it by hand from the Actions tab.
+`.github/workflows/heavy.yml`; start it by hand from the Actions tab. It
+also runs on a PR that changes tar extraction or downloads
+(`src/kernel/archive.rs`, `src/kernel/fetch.rs`), the toolchain
+providers or a catalog, `Cargo.lock`, or the heavy suite itself, and on
+any PR with the `heavy` label (the list is in heavy.yml's `gate` job).
 
 On Linux the sandbox is bubblewrap (`dnf install bubblewrap`); set
 `TOG_SANDBOX_TESTS=required` to fail instead of skip when it is missing,
