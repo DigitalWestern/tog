@@ -529,17 +529,22 @@ fn stage_rustfmt(
     // the full component tree lands in a scratch directory and only the two
     // binaries are carried into the object, modes included: tar restores the
     // archived modes, and the object's identity covers the executable bit.
+    // The scratch directory sits inside `staged`, so it must be gone before
+    // commit: a failed cleanup is an error, never a stray tree in the object.
     let full = staged.join(".tog-rustfmt-full");
-    crate::kernel::archive::extract_validated_with_activity(
-        activity,
-        archive,
-        &full,
-        2,
-        crate::kernel::archive::Compression::Xz,
-        &listed,
-    )
-    .map_err(|error| io::Error::new(error.kind(), format!("extract rustfmt archive: {error}")))?;
     let extracted = (|| -> io::Result<()> {
+        fs::create_dir_all(&full)?;
+        crate::kernel::archive::extract_validated_with_activity(
+            activity,
+            archive,
+            &full,
+            2,
+            crate::kernel::archive::Compression::Xz,
+            &listed,
+        )
+        .map_err(|error| {
+            io::Error::new(error.kind(), format!("extract rustfmt archive: {error}"))
+        })?;
         let bin = staged.join("bin");
         fs::create_dir_all(&bin)?;
         for name in ["rustfmt", "cargo-fmt"] {
@@ -565,8 +570,15 @@ fn stage_rustfmt(
         }
         Ok(())
     })();
-    let _ = crate::kernel::store::remove_tree(&full);
+    let cleaned = match crate::kernel::store::remove_tree(&full) {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => Err(io::Error::new(
+            error.kind(),
+            format!("remove rustfmt scratch {}: {error}", full.display()),
+        )),
+        _ => Ok(()),
+    };
     extracted?;
+    cleaned?;
     let bin = staged.join("bin");
     if !bin.join("rustfmt").is_file() || !bin.join("cargo-fmt").is_file() {
         return Err(io::Error::new(
@@ -945,5 +957,71 @@ mod tests {
         let reimported = crate::kernel::store::reimport_root_for_test(&store, &project).unwrap();
         assert_eq!(reimported.objects, record.objects);
         assert_eq!(reimported.projections, record.projections);
+    }
+
+    /// The validated extractor unpacks the whole component into a scratch
+    /// directory and carries only the two binaries into the object: the
+    /// object holds `bin/` and the `lib` link, the scratch tree is gone, and
+    /// the executable bit survives the copy.
+    #[test]
+    fn staging_keeps_only_the_two_binaries_with_their_modes() {
+        use std::os::unix::fs::PermissionsExt;
+        let platform = Platform::host().unwrap();
+        let version = "1.0.0";
+        let root = format!("rustfmt-{version}-{}", platform.triple());
+        let temp = crate::kernel::testutil::TempDir::named("rustfmt-stage");
+        let tree = temp.0.join("tree");
+        let bin = tree.join(&root).join("rustfmt-preview/bin");
+        fs::create_dir_all(&bin).unwrap();
+        for name in ["rustfmt", "cargo-fmt"] {
+            fs::write(bin.join(name), format!("#!{name}\n")).unwrap();
+            fs::set_permissions(bin.join(name), fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        fs::write(tree.join(&root).join("version"), "1.0.0\n").unwrap();
+        let archive = temp.0.join("rustfmt.tar.xz");
+        let status = Command::new("/usr/bin/tar")
+            .arg("-cJf")
+            .arg(&archive)
+            .arg("--no-recursion")
+            .arg("-C")
+            .arg(&tree)
+            // Files only: GNU tar would store directories as `name/`, which
+            // the real dist archives (and so the allow-list) never do.
+            .args(
+                [
+                    "version",
+                    "rustfmt-preview/bin/rustfmt",
+                    "rustfmt-preview/bin/cargo-fmt",
+                ]
+                .map(|entry| format!("{root}/{entry}")),
+            )
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let staged = temp.0.join("staged");
+        fs::create_dir(&staged).unwrap();
+        let rust_object = temp.0.join(format!("{}-rust", "b".repeat(40)));
+        fs::create_dir_all(rust_object.join("lib")).unwrap();
+        let (_store, activity) = crate::kernel::testutil::detached_lease();
+        stage_rustfmt(
+            &activity,
+            &staged,
+            platform,
+            version,
+            &archive,
+            &rust_object,
+        )
+        .unwrap();
+        let top: BTreeSet<String> = fs::read_dir(&staged)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(top, BTreeSet::from(["bin".into(), "lib".into()]));
+        for name in ["rustfmt", "cargo-fmt"] {
+            let path = staged.join("bin").join(name);
+            assert_eq!(fs::read_to_string(&path).unwrap(), format!("#!{name}\n"));
+            let mode = fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o111, 0o111, "{name} lost its executable bit");
+        }
     }
 }

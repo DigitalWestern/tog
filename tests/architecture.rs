@@ -1278,7 +1278,7 @@ fn tar_runs_only_in_kernel_archive() {
             continue;
         }
         for (token, owner) in production_tokens(&text) {
-            if matches!(&token, Token::Str(literal) if literal == "/usr/bin/tar") {
+            if matches!(&token, Token::Str(literal) if names_a_tar(literal)) {
                 sites.push(format!("{relative}:{owner}"));
             }
         }
@@ -1301,6 +1301,39 @@ fn tar_runs_only_in_kernel_archive() {
          archive::pack_ustar_with_activity):\n  {}",
         sites.join("\n  ")
     );
+}
+
+/// A string literal that names a tar binary: any absolute path ending in
+/// `tar`, `bsdtar`, `gtar` or `gnutar`, or one of the last three bare. A bare
+/// `"tar"` is not matched: it is also a file extension (`with_extension`),
+/// so matching it would flag ordinary path code. That spelling is the one
+/// gap left; host tools here are otherwise invoked by absolute path.
+fn names_a_tar(literal: &str) -> bool {
+    const TARS: [&str; 4] = ["tar", "bsdtar", "gtar", "gnutar"];
+    let base = literal.rsplit('/').next().unwrap_or(literal);
+    (literal.starts_with('/') && TARS.contains(&base)) || TARS[1..].contains(&literal)
+}
+
+#[test]
+fn tar_names_are_recognised_in_every_spelling() {
+    for literal in [
+        "/usr/bin/tar",
+        "/bin/tar",
+        "/opt/homebrew/bin/gtar",
+        "bsdtar",
+        "gnutar",
+    ] {
+        assert!(names_a_tar(literal), "{literal}");
+    }
+    for literal in [
+        "tar",
+        "foo.tar",
+        "/usr/bin/star",
+        "contents.tar.gz",
+        "/usr/bin/gzip",
+    ] {
+        assert!(!names_a_tar(literal), "{literal}");
+    }
 }
 
 /// The literal scan reads string contents through every spelling and skips
