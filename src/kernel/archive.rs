@@ -766,49 +766,65 @@ fn check_name_text(name: &str, link: &str) -> io::Result<()> {
 /// reorders or hides the text around it lets one name pass for another.
 /// UTF-8 validity does not cover these: every one is a well-formed scalar
 /// value.
+///
+/// Control (`Cc`) and format (`Cf`) come from the Unicode general category
+/// via `icu_properties`, so a new format control in a future Unicode
+/// version is refused without updating a list. Line and paragraph
+/// separators (`Zl`, `Zp`) and the invisible marks that are not `Cf` — the
+/// joiners and fillers below plus the variation selectors (`Mn`) — stay an
+/// explicit list, because refusing all of `Mn` or `Lo` would refuse
+/// legitimate combining marks and letters.
+fn general_category(c: char) -> icu_properties::props::GeneralCategory {
+    use std::sync::OnceLock;
+    static MAP: OnceLock<
+        icu_properties::CodePointMapDataBorrowed<
+            'static,
+            icu_properties::props::GeneralCategory,
+        >,
+    > = OnceLock::new();
+    MAP.get_or_init(icu_properties::CodePointMapData::new).get(c)
+}
+
 fn invisible(text: &str) -> Option<&'static str> {
-    text.chars().find_map(|c| {
-        if c.is_control() {
-            Some("a control character")
-        } else if matches!(
-            c,
-            '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'
-        ) {
-            // Arabic letter mark, left-to-right and right-to-left marks,
-            // embeddings, overrides, and isolates.
-            Some("a bidirectional control character")
-        } else if matches!(
-            c,
-            '\u{00AD}'
-                | '\u{034F}'
-                | '\u{115F}'
-                | '\u{1160}'
-                | '\u{17B4}'
-                | '\u{17B5}'
-                | '\u{180B}'..='\u{180F}'
-                | '\u{200B}'..='\u{200D}'
-                | '\u{2028}'
-                | '\u{2029}'
-                | '\u{2060}'..='\u{2064}'
-                | '\u{206A}'..='\u{206F}'
-                | '\u{3164}'
-                | '\u{FE00}'..='\u{FE0F}'
-                | '\u{FEFF}'
-                | '\u{FFA0}'
-                | '\u{FFF9}'..='\u{FFFB}'
-                | '\u{E0000}'..='\u{E007F}'
-                | '\u{E0100}'..='\u{E01EF}'
-        ) {
-            // Soft hyphen, combining grapheme joiner, Hangul and Khmer
-            // fillers, Mongolian selectors and vowel separator, zero-width
-            // space/joiners, line and paragraph separators, word joiner and
-            // the invisible operators, deprecated format controls, halfwidth
-            // Hangul filler, variation selectors, the byte-order mark,
-            // interlinear annotation marks, and tag characters. Not the
-            // whole Cf category: that is the Cf-category item in FOLLOW-UPS.
-            Some("an invisible character")
-        } else {
-            None
+    use icu_properties::props::GeneralCategory as Gc;
+    text.chars().find_map(|c| match general_category(c) {
+        Gc::Control => Some("a control character"),
+        Gc::Format => {
+            if matches!(
+                c,
+                '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'
+            ) {
+                // Arabic letter mark, left-to-right and right-to-left marks,
+                // embeddings, overrides, and isolates.
+                Some("a bidirectional control character")
+            } else {
+                Some("an invisible character")
+            }
+        }
+        Gc::LineSeparator | Gc::ParagraphSeparator => Some("an invisible character"),
+        _ => {
+            if matches!(
+                c,
+                '\u{034F}'
+                    | '\u{115F}'
+                    | '\u{1160}'
+                    | '\u{17B4}'
+                    | '\u{17B5}'
+                    | '\u{180B}'..='\u{180D}'
+                    | '\u{180F}'
+                    | '\u{3164}'
+                    | '\u{FE00}'..='\u{FE0F}'
+                    | '\u{FFA0}'
+                    | '\u{E0100}'..='\u{E01EF}'
+            ) {
+                // Combining grapheme joiner, Hangul and Khmer fillers,
+                // Mongolian free-variation selectors, halfwidth Hangul
+                // filler, and the variation selectors. None of these is
+                // `Cf`, so the category check above does not see them.
+                Some("an invisible character")
+            } else {
+                None
+            }
         }
     })
 }
@@ -904,15 +920,16 @@ pub fn validate(entries: &[Entry], strip: usize) -> io::Result<()> {
 
 /// An approximation of the form under which APFS compares two names:
 /// canonically decomposed (NFD, so `é` and `e` plus a combining acute are
-/// one), lowercased, and decomposed again in case lowercasing composed
-/// anything. Lowercasing is not full Unicode case folding (`SS` and `ß` do
-/// not meet), so this catches the collisions a real package can plausibly
-/// carry, not every pair APFS would merge. Go's module zip refuses case
-/// collisions the same way; it does not normalize.
+/// one), full Unicode case-folded (so `SS` and `ß` meet, as do Turkish
+/// dotted/dotless `I` and the Greek final forms), and decomposed again in
+/// case folding composed anything. Go's module zip refuses case collisions
+/// the same way; it does not normalize.
 fn folded_name(name: &str) -> String {
+    use caseless::Caseless;
     use unicode_normalization::UnicodeNormalization;
     let decomposed: String = name.nfd().collect();
-    decomposed.to_lowercase().nfd().collect()
+    let folded: String = decomposed.chars().default_case_fold().collect();
+    folded.nfd().collect()
 }
 
 /// The name's path components, refusing absolute names, `..`, and empty
@@ -2020,6 +2037,14 @@ mod tests {
             ("variation-selector", "pkg/a\u{FE0F}", "invisible"),
             ("tag", "pkg/a\u{E0041}", "invisible"),
             ("line-separator", "pkg/a\u{2028}b", "invisible"),
+            // `Cf` by category, not by list: neither Arabic number sign
+            // nor the Syriac abbreviation mark was in the old explicit
+            // set, and both must still refuse.
+            ("arabic-number-sign", "pkg/a\u{0600}b", "invisible"),
+            ("syriac-abbrev", "pkg/a\u{070F}b", "invisible"),
+            ("soft-hyphen", "pkg/a\u{00AD}b", "invisible"),
+            ("interlinear-anchor", "pkg/a\u{FFF9}b", "invisible"),
+            ("language-tag", "pkg/a\u{E0001}b", "invisible"),
         ] {
             refusal(label, &[ustar(name, b'0', "", b"x")], needle);
             refusal(
@@ -2073,6 +2098,13 @@ mod tests {
         collide("pkg/README", "pkg/readme", 0);
         collide("pkg/Caf\u{E9}", "pkg/Cafe\u{301}", 0);
         collide("pkg/Lib/", "pkg/lib", 0);
+        // Full case folding, not lowercasing: `SS` and `ß` meet, as do a
+        // long `s` and `S` and final and medial sigma. `to_lowercase`
+        // leaves every one of these pairs apart.
+        collide("pkg/STRASSE", "pkg/stra\u{DF}e", 0);
+        collide("pkg/\u{DF}", "pkg/SS", 0);
+        collide("pkg/S", "pkg/\u{17F}", 0);
+        collide("pkg/\u{3C3}", "pkg/\u{3C2}", 0);
         // Two files in what APFS makes one directory and Linux makes two,
         // with no directory entries to compare.
         collide("pkg/Lib/a", "pkg/lib/b", 0);
