@@ -340,7 +340,13 @@ toolchain per ecosystem: the release it was minted from, the components and
 their versions, and one artifact row per supported platform with a verified
 algorithm-qualified digest. Selection reads a catalog; honoring a lock does
 not, so the same file replays in any store and the `release` key may name a
-bundle the catalog no longer has.
+bundle the catalog no longer has. `tests/toolchain_lock.rs`
+(`two_fresh_stores_realize_the_same_runtimes_from_a_retired_release`,
+network-gated) syncs a Python and npm lock whose releases no catalog has
+into two fresh stores and checks equal runtime objects, lock bytes and
+`tog status`. The two-machine half (a lock written on Linux synced unchanged
+on an arm64 Mac, and the Mac writing the same bytes) ran by hand on
+2026-09-25.
 
 `src/comforter/toolchain.rs` is the activation surface. `resolve` answers,
 with no writes at all, which toolchain the project uses and where the answer

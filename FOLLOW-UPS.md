@@ -14,14 +14,7 @@ by position.
 
 ## Next up, in order
 
-1. **The two-store toolchain-lock test (#136).** The two-machine lock diff
-   ran by hand on 2026-09-25: a seven-ecosystem lock written on Fedora
-   synced unchanged on an arm64 Mac, the Mac wrote the same bytes from
-   scratch, and `tog status` matched. Two fresh stores on the Mac realized
-   the same runtime, Cargo, Go, Ruby, Elixir and .NET objects. What is left
-   is making the two-store half a network-gated test with a catalog fixture
-   that lacks the locked release, so replay without the catalog runs
-   through the binary.
+Nothing queued; the next item comes from "Open work" below.
 
 ## Decisions waiting on the owner
 
