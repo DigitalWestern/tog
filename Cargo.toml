@@ -30,6 +30,12 @@ libc = "0.2"
 flate2 = "1"
 liblzma = { version = "0.4", features = ["static"] }
 unicode-normalization = "0.1"
+# #313: full Unicode case folding for the APFS collision check (SS/ß,
+# Turkish I, Greek final forms); a one-line swap from `to_lowercase`.
+caseless = "0.2"
+# #314: the invisible-name check refuses by Unicode general category
+# (Cc, Cf) instead of a listed set; already in the graph via ureq/url/idna.
+icu_properties = "2"
 
 # CI runs `cargo clippy --locked --all-targets -- -D warnings`, so every
 # clippy warning fails the build. These few are allowed project-wide.
