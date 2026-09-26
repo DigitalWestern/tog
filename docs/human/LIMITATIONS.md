@@ -149,9 +149,19 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   The pre-materialization extractor (`src/kernel/archive.rs`) reads every entry from the
   archive's own headers (ustar names and the POSIX prefix field, PAX `path`/`linkpath`/`size`,
   GNU long names), cross-checks that listing against `tar -t`, refuses the whole archive on an
-  absolute name, `..`, a hard link, a special file, an escaping symlink, or a layout it cannot
-  model (sparse members, a global header that renames, unknown type letters, bad checksums),
-  and extracts with `TAR_OPTIONS` unset. Three things go through it: the Go toolchain, the
+  absolute name, `..`, a hard link, a special file, an escaping symlink, a name that is not
+  UTF-8 or carries a control, bidirectional-override or zero-width character, two names that
+  APFS would fold into one (by case or by Unicode normalization), or a layout it cannot model
+  (sparse members, a global header that renames, a PAX key it does not know, unknown type
+  letters, bad checksums), and extracts with `TAR_OPTIONS` unset and tar told to restore no
+  extended attributes, ACLs, file flags or AppleDouble metadata: an object holds names, bytes
+  and the executable bit, nothing else. PAX values other than `path`, `linkpath` and `size`
+  may be any bytes and are never read. The `tar -t` listing carries only `--numeric-owner`:
+  it writes nothing, and bsdtar documents the restore flags for other modes, so on `-t`
+  they could only fail. That leaves a Mac-packed tarball's `._name` companions refused on
+  macOS by the cross-check, as before, rather than extracted as the wrong tree (#307 stays
+  open until a macOS run shows whether `--no-mac-metadata` on `-t` lifts it). Three things
+  go through it: the Go toolchain, the
   optional Rust components and cross targets, and the binary `tog update --self` installs.
   The other tarballs are extracted by `/usr/bin/tar` directly, relying on its own defences
   and inheriting the user's `TAR_OPTIONS`: the CPython, uv, Rust, rustfmt, Node, Ruby, .NET,

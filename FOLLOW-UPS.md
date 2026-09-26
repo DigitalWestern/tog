@@ -139,9 +139,10 @@ Nothing queued; the next item comes from "Open work" below.
   - #300 heavy: the Elixir end-to-end test cannot run on ubuntu-22.04 (OTP needs glibc 2.43).
   - #301 acceptance.sh: steps 9 and 9b re-run two ignored suites the heavy workflow already runs, one multi-threaded.
   - #302 acceptance.sh: step 13 carries its own copy of the closure signing format.
-  - #306 archive: extraction as root lets tar restore xattrs, ACLs and file flags from the archive.
-  - #307 archive: a tarball with macOS AppleDouble (`._name`) members is refused on macOS but extracted on Linux.
+  - #307 archive: a tarball with macOS AppleDouble (`._name`) members is refused on macOS but extracted on Linux. The extraction carries `--no-mac-metadata`; the listing carries no restore flag (bsdtar documents them for other modes). On the Mac, try `/usr/bin/tar --no-mac-metadata -tf` on such a tarball: if it accepts the flag and prints the `._` members, add it to `TAR_LIST_FLAGS` and close.
   - #308 tests: python fixture tarballs are packed with raw `/usr/bin/tar`, not `tar_create`.
+  - #313 archive: `folded_name` lowercases instead of full Unicode case folding (`SS`/`ß` pairs pass).
+  - #314 archive: the invisible-character name check lists code points rather than Unicode's Cf category.
 - **`deps` as a `Tailor` method (#61).** `src/commands/deps.rs` still names
   tailors directly. A `Tailor::edit_manifest` method with an "unsupported"
   default would make it registry-driven, the way `Tailor::registry_tool`

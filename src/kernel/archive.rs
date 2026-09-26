@@ -22,8 +22,20 @@
 //! against `tar -t`, which prints one stored name per line: if the reader and
 //! the tar that will perform the extraction disagree about what the archive
 //! contains, nothing is extracted.
+//!
+//! PAX record values are bytes until a key the reader acts on (`path`,
+//! `linkpath`, `size`) decodes them as UTF-8; the rest are metadata whose
+//! bytes are never read, which lets macOS tar's binary extended-attribute
+//! records through. Names are held to what a listing can show faithfully:
+//! no control, bidirectional-override or zero-width characters. And because
+//! one lock must realize the same tree on Linux and on APFS, which folds
+//! case and Unicode normalization, two names that APFS would treat as one
+//! refuse the archive. The delegated tar is told not to restore extended
+//! attributes, ACLs, file flags or AppleDouble metadata: an object's
+//! identity covers names, bytes and the executable bit, and nothing else
+//! may land in it.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::io::{self, Read};
 use std::path::Path;
@@ -98,11 +110,39 @@ fn tar_command() -> Command {
     command
 }
 
-/// Flags every tar invocation carries. The listing is read from the header
-/// blocks, so `--numeric-owner` protects no parser here. It stays because the
-/// delegated extraction writes object bytes and its command line is fixed: a
-/// different command line would change what lands in an object.
-const TAR_PARSE_FLAGS: [&str; 1] = ["--numeric-owner"];
+/// Flags the `tar -t` listing carries. `--numeric-owner` protects no parser
+/// here, since the listing is read from the header blocks; it stays because
+/// the command line is fixed. Nothing else: a listing writes no files, so
+/// the flags that stop tar restoring metadata have nothing to act on there,
+/// and bsdtar's man page marks every one of them for other modes. A flag
+/// that can only fail must not sit on the command every listing runs.
+///
+/// The cost is `._name` members: bsdtar's AppleDouble handling folds them
+/// into the member that follows, which the header reader does not model,
+/// so a Mac-packed tarball's listing disagrees with the reader and the
+/// cross-check refuses it on macOS rather than extracting the wrong tree.
+/// Whether `--no-mac-metadata` on `-t` would lift that is the open half of
+/// the AppleDouble item in FOLLOW-UPS.
+const TAR_LIST_FLAGS: [&str; 1] = ["--numeric-owner"];
+
+/// Flags the extraction carries. The delegated extraction writes object
+/// bytes and its command line is fixed, because a different command line
+/// would change what lands in an object. Beyond `--numeric-owner`, these
+/// keep the extracted tree to what an object's identity covers (names,
+/// bytes, the executable bit) by telling tar not to restore extended
+/// attributes, ACLs, BSD file flags or macOS AppleDouble metadata from the
+/// archive. GNU tar restores none of these unless asked; bsdtar restores
+/// all of them by default when it runs as root.
+#[cfg(target_os = "macos")]
+const TAR_EXTRACT_FLAGS: [&str; 5] = [
+    "--numeric-owner",
+    "--no-xattrs",
+    "--no-acls",
+    "--no-fflags",
+    "--no-mac-metadata",
+];
+#[cfg(not(target_os = "macos"))]
+const TAR_EXTRACT_FLAGS: [&str; 3] = ["--numeric-owner", "--no-xattrs", "--no-acls"];
 
 /// List `archive` by reading its tar headers, cross-checked against the
 /// platform tar's own listing.
@@ -151,11 +191,7 @@ fn list_names(
     compression: Compression,
     activity: Option<&StoreActivity>,
 ) -> io::Result<Vec<String>> {
-    let mut command = tar_command();
-    command
-        .args(TAR_PARSE_FLAGS)
-        .arg(format!("-t{}f", compression.flag()))
-        .arg(archive);
+    let mut command = list_command(archive, compression);
     let output = match activity {
         Some(activity) => crate::kernel::supervise::output(&mut command, activity),
         None => command.output(),
@@ -175,6 +211,16 @@ fn list_names(
         ))
     })?;
     Ok(text.lines().map(str::to_string).collect())
+}
+
+/// `tar -t` over `archive`, with the fixed listing flags.
+fn list_command(archive: &Path, compression: Compression) -> Command {
+    let mut command = tar_command();
+    command
+        .args(TAR_LIST_FLAGS)
+        .arg(format!("-t{}f", compression.flag()))
+        .arg(archive);
+    command
 }
 
 /// Refuse when the header reader and the platform tar disagree about the
@@ -386,19 +432,7 @@ fn read_entries(mut reader: impl Read) -> io::Result<Vec<Entry>> {
         let size = pending.pax_size.take().unwrap_or(raw_size);
         pending = Pending::default();
 
-        if name.is_empty() {
-            return Err(err("archive entry has an empty name"));
-        }
-        if !graphic(&name) {
-            return Err(err(format!(
-                "archive entry {name:?} has a control character in its name"
-            )));
-        }
-        if !graphic(&link) {
-            return Err(err(format!(
-                "archive entry {name:?} has a control character in its link target {link:?}"
-            )));
-        }
+        check_name_text(&name, &link)?;
 
         let kind = match typeflag {
             b'0' | b'\0' => EntryKind::File,
@@ -592,7 +626,7 @@ fn parse_size(field: &[u8]) -> Result<u64, String> {
 /// PAX records, `"%d %s=%s\n"` where the length counts its own digits, the
 /// space and the newline. Every record must parse and the records must fill
 /// the header's data exactly.
-fn pax_records(data: &[u8], name: &str) -> io::Result<Vec<(String, String)>> {
+fn pax_records(data: &[u8], name: &str) -> io::Result<Vec<(String, Vec<u8>)>> {
     let mut records = Vec::new();
     let mut at = 0usize;
     while at < data.len() {
@@ -630,35 +664,47 @@ fn pax_records(data: &[u8], name: &str) -> io::Result<Vec<(String, String)>> {
             ))
         })?;
         let key = utf8(&body[..equals], "PAX record key")?.to_string();
-        // Extended attributes (macOS tar's `SCHILY.xattr.*`) can hold raw
-        // bytes; `apply_pax` ignores them, so only the others must be text.
-        let value = if key.starts_with("SCHILY.xattr.") || key.starts_with("LIBARCHIVE.xattr.") {
-            String::from_utf8_lossy(&body[equals + 1..]).into_owned()
-        } else {
-            utf8(&body[equals + 1..], "PAX record value")?.to_string()
-        };
-        records.push((key, value));
+        // Values stay bytes: POSIX says UTF-8, but vendors store raw
+        // extended attributes here (macOS tar's `SCHILY.xattr.*`), and only
+        // the keys `apply_pax` acts on need to be text.
+        records.push((key, body[equals + 1..].to_vec()));
         at += length;
     }
     Ok(records)
 }
 
-/// Keys that change the member this reader describes, keys that are only
-/// metadata, and everything else, which is a layout it does not model.
-fn apply_pax(records: Vec<(String, String)>, name: &str, pending: &mut Pending) -> io::Result<()> {
+/// Keys that change the member this reader describes, decoded as UTF-8
+/// here; keys that are only metadata, whose bytes are never read; and
+/// everything else, which is a layout it does not model.
+fn apply_pax(records: Vec<(String, Vec<u8>)>, name: &str, pending: &mut Pending) -> io::Result<()> {
     for (key, value) in records {
         match key.as_str() {
-            "path" => pending.pax_path = Some(value),
-            "linkpath" => pending.pax_linkpath = Some(value),
+            "path" => pending.pax_path = Some(utf8(&value, "PAX path")?.to_string()),
+            "linkpath" => pending.pax_linkpath = Some(utf8(&value, "PAX linkpath")?.to_string()),
             "size" => {
-                let size = value.parse::<u64>().map_err(|_| {
-                    err(format!(
-                        "archive PAX header {name:?} has a size record {value:?} that is not a decimal number"
-                    ))
-                })?;
+                let text = utf8(&value, "PAX size")?;
+                // Digits only. Rust's parser also takes a leading `+`,
+                // which bsdtar reads as zero and GNU tar refuses: a size the
+                // three of us read differently is a stream we walk
+                // differently, and a header hidden in the gap would never
+                // reach `tar -t`.
+                let size = text
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit())
+                    .then(|| text.parse::<u64>().ok())
+                    .flatten()
+                    .ok_or_else(|| {
+                        err(format!(
+                            "archive PAX header {name:?} has a size record {text:?} that is not a decimal number"
+                        ))
+                    })?;
                 pending.pax_size = Some(size);
             }
-            "mtime" | "atime" | "ctime" | "uid" | "gid" | "uname" | "gname" | "comment" => {}
+            // `charset` describes the member's data, which tar does not
+            // convert; `hdrcharset`, which would make names raw bytes, is
+            // not here and so is refused below.
+            "mtime" | "atime" | "ctime" | "uid" | "gid" | "uname" | "gname" | "comment"
+            | "charset" => {}
             // star's sparse-file size: tar extracts the member at this size,
             // which the reader would not see.
             "SCHILY.realsize" => {
@@ -679,7 +725,7 @@ fn apply_pax(records: Vec<(String, String)>, name: &str, pending: &mut Pending) 
 
 /// A global header may set defaults for every following member, so it is
 /// accepted only when it cannot rename or resize one.
-fn check_global(records: &[(String, String)], name: &str) -> io::Result<()> {
+fn check_global(records: &[(String, Vec<u8>)], name: &str) -> io::Result<()> {
     for (key, _) in records {
         if matches!(
             key.as_str(),
@@ -694,8 +740,77 @@ fn check_global(records: &[(String, String)], name: &str) -> io::Result<()> {
     Ok(())
 }
 
-fn graphic(text: &str) -> bool {
-    !text.chars().any(|c| c.is_control())
+/// The name and link target as text: not empty, and free of characters a
+/// listing cannot show faithfully.
+fn check_name_text(name: &str, link: &str) -> io::Result<()> {
+    if name.is_empty() {
+        return Err(err("archive entry has an empty name"));
+    }
+    if let Some(what) = invisible(name) {
+        return Err(err(format!(
+            "archive entry {name:?} has {what} in its name"
+        )));
+    }
+    if let Some(what) = invisible(link) {
+        return Err(err(format!(
+            "archive entry {name:?} has {what} in its link target {link:?}"
+        )));
+    }
+    Ok(())
+}
+
+/// The first character in `text` that would not show as itself in a
+/// listing, named: a control, a bidirectional control, or one of the
+/// invisible and zero-width characters. Names are read by people (tar's
+/// listing, an error, a diff of two closures), and a character that
+/// reorders or hides the text around it lets one name pass for another.
+/// UTF-8 validity does not cover these: every one is a well-formed scalar
+/// value.
+fn invisible(text: &str) -> Option<&'static str> {
+    text.chars().find_map(|c| {
+        if c.is_control() {
+            Some("a control character")
+        } else if matches!(
+            c,
+            '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'
+        ) {
+            // Arabic letter mark, left-to-right and right-to-left marks,
+            // embeddings, overrides, and isolates.
+            Some("a bidirectional control character")
+        } else if matches!(
+            c,
+            '\u{00AD}'
+                | '\u{034F}'
+                | '\u{115F}'
+                | '\u{1160}'
+                | '\u{17B4}'
+                | '\u{17B5}'
+                | '\u{180B}'..='\u{180F}'
+                | '\u{200B}'..='\u{200D}'
+                | '\u{2028}'
+                | '\u{2029}'
+                | '\u{2060}'..='\u{2064}'
+                | '\u{206A}'..='\u{206F}'
+                | '\u{3164}'
+                | '\u{FE00}'..='\u{FE0F}'
+                | '\u{FEFF}'
+                | '\u{FFA0}'
+                | '\u{FFF9}'..='\u{FFFB}'
+                | '\u{E0000}'..='\u{E007F}'
+                | '\u{E0100}'..='\u{E01EF}'
+        ) {
+            // Soft hyphen, combining grapheme joiner, Hangul and Khmer
+            // fillers, Mongolian selectors and vowel separator, zero-width
+            // space/joiners, line and paragraph separators, word joiner and
+            // the invisible operators, deprecated format controls, halfwidth
+            // Hangul filler, variation selectors, the byte-order mark,
+            // interlinear annotation marks, and tag characters. Not the
+            // whole Cf category: that is the Cf-category item in FOLLOW-UPS.
+            Some("an invisible character")
+        } else {
+            None
+        }
+    })
 }
 
 /// Refuse anything that could write or point outside the destination once
@@ -735,15 +850,39 @@ pub fn validate(entries: &[Entry], strip: usize) -> io::Result<()> {
             .collect();
         kept.push((entry, stripped));
     }
+    // Two names APFS would treat as one extract as one file there and two
+    // on Linux, so one archive would realize two different trees. Every
+    // prefix counts, since `Lib/a` and `lib/b` share one directory on APFS
+    // and two on Linux. Identical spellings are tar's ordinary
+    // last-one-wins on both.
+    let mut folded: BTreeMap<String, String> = BTreeMap::new();
+    for (_, stripped) in &kept {
+        for end in 1..=stripped.len() {
+            let prefix = stripped[..end].join("/");
+            match folded.get(&folded_name(&prefix)) {
+                Some(other) if *other != prefix => {
+                    return Err(err(format!(
+                        "archive entries {other:?} and {prefix:?} are one name on a case-insensitive or normalization-insensitive filesystem; refusing to extract"
+                    )));
+                }
+                Some(_) => {}
+                None => {
+                    folded.insert(folded_name(&prefix), prefix);
+                }
+            }
+        }
+    }
+    // Symlink names are held folded, so a target that walks through `S`
+    // is caught by a link named `s`: on APFS they are the same link.
     let symlinks: BTreeSet<String> = kept
         .iter()
         .filter(|(entry, _)| entry.kind == EntryKind::Symlink)
-        .map(|(_, stripped)| stripped.join("/"))
+        .map(|(_, stripped)| folded_name(&stripped.join("/")))
         .collect();
     for (entry, stripped) in &kept {
         for end in 1..stripped.len() {
             let ancestor = stripped[..end].join("/");
-            if symlinks.contains(&ancestor) {
+            if symlinks.contains(&folded_name(&ancestor)) {
                 return Err(err(format!(
                     "archive entry {:?} is written through symlink {:?}",
                     entry.name, ancestor
@@ -761,6 +900,19 @@ pub fn validate(entries: &[Entry], strip: usize) -> io::Result<()> {
         }
     }
     Ok(())
+}
+
+/// An approximation of the form under which APFS compares two names:
+/// canonically decomposed (NFD, so `é` and `e` plus a combining acute are
+/// one), lowercased, and decomposed again in case lowercasing composed
+/// anything. Lowercasing is not full Unicode case folding (`SS` and `ß` do
+/// not meet), so this catches the collisions a real package can plausibly
+/// carry, not every pair APFS would merge. Go's module zip refuses case
+/// collisions the same way; it does not normalize.
+fn folded_name(name: &str) -> String {
+    use unicode_normalization::UnicodeNormalization;
+    let decomposed: String = name.nfd().collect();
+    decomposed.to_lowercase().nfd().collect()
 }
 
 /// The name's path components, refusing absolute names, `..`, and empty
@@ -798,6 +950,7 @@ fn contained_components(name: &str) -> Result<Vec<&str>, String> {
 /// A symlink as the target's *final* component is not a traversal — nothing
 /// is resolved through it here — and it is contained by its own validation,
 /// so composing the two stays inside.
+/// `symlinks` holds the archive's symlink names in `folded_name` form.
 fn symlink_contained(
     stripped: &[&str],
     target: &str,
@@ -822,7 +975,8 @@ fn symlink_contained(
             }
             name => {
                 path.push(name);
-                if index + 1 < components.len() && symlinks.contains(&path.join("/")) {
+                if index + 1 < components.len() && symlinks.contains(&folded_name(&path.join("/")))
+                {
                     return Err(format!(
                         "symlink target resolves through another symlink in the archive ({:?})",
                         path.join("/")
@@ -878,6 +1032,26 @@ pub(crate) fn extract_validated_with_activity(
     )
 }
 
+/// `tar -x` of `archive` into `destination`, with the fixed extraction
+/// flags.
+fn extract_command(
+    archive: &Path,
+    destination: &Path,
+    strip: usize,
+    compression: Compression,
+) -> Command {
+    let mut command = tar_command();
+    command
+        .args(TAR_EXTRACT_FLAGS)
+        .arg(format!("-x{}f", compression.flag()))
+        .arg(archive)
+        .arg("-C")
+        .arg(destination)
+        .arg("--strip-components")
+        .arg(strip.to_string());
+    command
+}
+
 fn extract_validated_inner(
     archive: &Path,
     destination: &Path,
@@ -887,15 +1061,7 @@ fn extract_validated_inner(
     activity: Option<&StoreActivity>,
 ) -> io::Result<()> {
     validate(entries, strip)?;
-    let mut command = tar_command();
-    command
-        .args(TAR_PARSE_FLAGS)
-        .arg(format!("-x{}f", compression.flag()))
-        .arg(archive)
-        .arg("-C")
-        .arg(destination)
-        .arg("--strip-components")
-        .arg(strip.to_string());
+    let mut command = extract_command(archive, destination, strip, compression);
     let status = status_for(&mut command, activity)
         .map_err(|e| io::Error::new(e.kind(), format!("extract {}: {e}", archive.display())))?;
     if !status.success() {
@@ -1278,6 +1444,114 @@ mod tests {
         }
     }
 
+    /// The extraction tells tar to restore nothing an object's identity does
+    /// not cover: extended attributes and ACLs on both tars, BSD file flags
+    /// and AppleDouble metadata on bsdtar, which restores all four by
+    /// default as root. The listing carries none of those flags: it writes
+    /// nothing for them to act on, and bsdtar documents each of them for
+    /// other modes, so on `-t` they could only fail.
+    #[test]
+    fn extraction_tells_tar_to_restore_no_metadata_and_the_listing_carries_no_such_flag() {
+        let archive = Path::new("/tmp/does-not-matter.tar");
+        let args = |command: &Command| -> Vec<String> {
+            command
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect()
+        };
+        let list_args = args(&list_command(archive, Compression::Gzip));
+        assert_eq!(
+            list_args[..2],
+            ["--numeric-owner".to_string(), "-tzf".to_string()],
+            "{list_args:?}"
+        );
+
+        let extract_args = args(&extract_command(
+            archive,
+            Path::new("/tmp/dest"),
+            1,
+            Compression::Gzip,
+        ));
+        for flag in ["--numeric-owner", "--no-xattrs", "--no-acls"] {
+            assert!(
+                extract_args.contains(&flag.to_string()),
+                "{flag} missing: {extract_args:?}"
+            );
+        }
+        for flag in ["--no-fflags", "--no-mac-metadata"] {
+            assert_eq!(
+                extract_args.contains(&flag.to_string()),
+                cfg!(target_os = "macos"),
+                "{flag}: {extract_args:?}"
+            );
+        }
+        // The flags come before the mode, so tar reads them for it.
+        assert_eq!(
+            extract_args.iter().position(|arg| arg == "-xzf"),
+            Some(TAR_EXTRACT_FLAGS.len()),
+            "{extract_args:?}"
+        );
+    }
+
+    /// An archive that carries an extended attribute extracts without it.
+    /// GNU tar would drop it anyway, so on Linux this pins the contract and
+    /// proves the host tar accepts the flags in `-x` mode on a real
+    /// archive; on macOS, run as root, it is the behaviour itself.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn extracted_files_carry_no_extended_attributes() {
+        use std::ffi::CString;
+        let temp = temp_dir("xattr");
+        let source = temp.0.join("source");
+        fs::create_dir_all(source.join("pkg")).unwrap();
+        let file = source.join("pkg/tool");
+        fs::write(&file, b"tool").unwrap();
+        let path = CString::new(file.as_os_str().as_encoded_bytes()).unwrap();
+        let key = CString::new("user.tog").unwrap();
+        // SAFETY: both strings are NUL-terminated and outlive the call; the
+        // value pointer and length describe a live byte slice.
+        let set =
+            unsafe { libc::setxattr(path.as_ptr(), key.as_ptr(), b"1".as_ptr().cast(), 1, 0) };
+        if set != 0 {
+            let error = io::Error::last_os_error();
+            // Only a filesystem without user xattrs may skip, and it says so.
+            assert_eq!(
+                error.raw_os_error(),
+                Some(libc::ENOTSUP),
+                "setxattr failed: {error}"
+            );
+            eprintln!("skip extracted_files_carry_no_extended_attributes: {error}");
+            return;
+        }
+        let archive = temp.0.join("pkg.tar");
+        assert!(crate::kernel::testutil::tar_create()
+            .args(["--format=posix", "--xattrs", "-cf"])
+            .arg(&archive)
+            .arg("-C")
+            .arg(&source)
+            .arg("pkg")
+            .status()
+            .unwrap()
+            .success());
+        let bytes = fs::read(&archive).unwrap();
+        assert!(
+            bytes.windows(21).any(|w| w == b"SCHILY.xattr.user.tog"),
+            "the fixture archive carries no xattr record"
+        );
+        let destination = temp.0.join("out");
+        fs::create_dir_all(&destination).unwrap();
+        let entries = extract(&archive, &destination, 1, Compression::None).unwrap();
+        assert_eq!(names(&entries), vec!["pkg/", "pkg/tool"]);
+        let out = CString::new(destination.join("tool").as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: as above; a null buffer of length zero only queries the size.
+        let got = unsafe { libc::getxattr(out.as_ptr(), key.as_ptr(), std::ptr::null_mut(), 0) };
+        assert_eq!(got, -1, "the extracted file carries the archive's xattr");
+        assert_eq!(
+            io::Error::last_os_error().raw_os_error(),
+            Some(libc::ENODATA)
+        );
+    }
+
     // ---- the header reader -------------------------------------------------
 
     /// Owner and group names are archive content, so an attacker chooses
@@ -1422,30 +1696,44 @@ mod tests {
         record
     }
 
+    /// PAX values are bytes until a key the reader acts on decodes them.
     /// macOS tar stores extended attributes such as `com.apple.provenance`
-    /// as `SCHILY.xattr.*` records whose values are raw bytes. They are
-    /// metadata the reader ignores, so their bytes need not be text; a
-    /// record the reader uses still must be, and `SCHILY.realsize`, which
-    /// tar extracts a member at, is refused.
+    /// as `SCHILY.xattr.*` records whose values are raw bytes, and nothing
+    /// says another metadata record cannot be; the reader never reads
+    /// those bytes, so they need not be text. `path`, `linkpath` and `size`
+    /// become the name, the target and the data length, so they must be.
+    /// `SCHILY.realsize`, which tar extracts a member at, is refused.
     #[test]
-    fn binary_xattr_values_are_ignored_and_other_values_must_be_text() {
-        let xattr = pax_record_bytes(
+    fn pax_values_are_bytes_and_only_the_keys_the_reader_uses_must_be_text() {
+        let binary = b"\x01\x02\0D\x18\xff\xfe";
+        for key in [
             "SCHILY.xattr.com.apple.provenance",
-            b"\x01\x02\0D\x18\xff\xfe",
-        );
-        let entries = list_members(
-            "pax-binary-xattr",
-            &[pax_raw(b'x', &xattr), ustar("pkg/tog", b'0', "", b"x")],
-        )
-        .unwrap();
-        assert_eq!(names(&entries), vec!["pkg/tog"]);
+            "LIBARCHIVE.xattr.com.apple.quarantine",
+            "SCHILY.fflags",
+            "uname",
+            "comment",
+        ] {
+            let record = pax_record_bytes(key, binary);
+            let entries = list_members(
+                &format!("pax-binary-{}", key.to_lowercase().replace('.', "-")),
+                &[pax_raw(b'x', &record), ustar("pkg/tog", b'0', "", b"x")],
+            )
+            .unwrap();
+            assert_eq!(names(&entries), vec!["pkg/tog"], "{key}");
+        }
 
-        let path = pax_record_bytes("path", b"pkg/\xff");
-        refusal(
-            "pax-binary-path",
-            &[pax_raw(b'x', &path), ustar("pkg/x", b'0', "", b"x")],
-            "not UTF-8",
-        );
+        for (key, value) in [
+            ("path", &b"pkg/\xff"[..]),
+            ("linkpath", b"tar\xffget"),
+            ("size", b"1\xff"),
+        ] {
+            let record = pax_record_bytes(key, value);
+            refusal(
+                &format!("pax-binary-{key}"),
+                &[pax_raw(b'x', &record), ustar("pkg/x", b'2', "t", b"")],
+                "not UTF-8",
+            );
+        }
 
         refusal(
             "pax-realsize",
@@ -1541,15 +1829,57 @@ mod tests {
             ],
             "GNU.sparse.map",
         );
-        // So does a charset declaration, and any other unknown key.
+        // So does a header charset, which would make names raw bytes.
         refusal(
-            "pax-charset",
+            "pax-hdrcharset",
             &[
                 pax(&[("hdrcharset", "BINARY")]),
                 ustar("pkg/x", b'0', "", b"x"),
             ],
             "hdrcharset",
         );
+        // A key neither tar acts on is still a layout the reader does not
+        // model: refused rather than ignored, a second guard behind the
+        // extraction flags.
+        refusal(
+            "pax-unknown",
+            &[
+                pax(&[("SUN.holesdata", "0:5")]),
+                ustar("pkg/x", b'0', "", b"x"),
+            ],
+            "unmodelled key \"SUN.holesdata\"",
+        );
+        // `charset` describes the data, which tar does not convert.
+        let entries = list_members(
+            "pax-charset",
+            &[
+                pax(&[("charset", "ISO-IR 10646 2000 UTF-8")]),
+                ustar("pkg/x", b'0', "", b"x"),
+            ],
+        )
+        .unwrap();
+        assert_eq!(names(&entries), vec!["pkg/x"]);
+        // A global header may carry the same metadata, bytes and all.
+        let mut global = pax_record_bytes("SCHILY.xattr.user.tog", b"\xff\x00");
+        global.extend(pax_record("charset", "BINARY").into_bytes());
+        let entries = list_members(
+            "pax-global-bytes",
+            &[pax_raw(b'g', &global), ustar("pkg/x", b'0', "", b"x")],
+        )
+        .unwrap();
+        assert_eq!(names(&entries), vec!["pkg/x"]);
+        // A size with a sign parses in Rust, reads as zero in bsdtar and is
+        // an error in GNU tar: three readers, three streams. Digits only.
+        for size in ["+5", "-5", " 5", "5 ", ""] {
+            refusal(
+                &format!(
+                    "pax-size-{}",
+                    size.trim().replace('+', "plus").replace('-', "minus")
+                ),
+                &[pax(&[("size", size)]), ustar("pkg/x", b'0', "", b"x")],
+                "not a decimal number",
+            );
+        }
         // A record with no `=` is not a record.
         refusal(
             "pax-noeq",
@@ -1668,6 +1998,112 @@ mod tests {
             "empty-target",
             &[ustar("pkg/l", b'2', "", b"")],
             "empty symlink target",
+        );
+    }
+
+    /// Valid UTF-8 can still lie about itself: a right-to-left override
+    /// renders `pkg/\u{202E}txt.exe` as `pkg/exe.txt`, and a zero-width
+    /// space makes two names look like one. Both are refused in names and
+    /// in link targets.
+    #[test]
+    fn bidi_controls_and_zero_width_characters_in_names_are_refused() {
+        for (label, name, needle) in [
+            (
+                "rtl-override",
+                "pkg/\u{202E}txt.exe",
+                "bidirectional control",
+            ),
+            ("ltr-isolate", "pkg/\u{2066}x", "bidirectional control"),
+            ("zero-width-space", "pkg/a\u{200B}b", "invisible"),
+            ("zero-width-joiner", "pkg/a\u{200D}b", "invisible"),
+            ("bom", "pkg/\u{FEFF}x", "invisible"),
+            ("variation-selector", "pkg/a\u{FE0F}", "invisible"),
+            ("tag", "pkg/a\u{E0041}", "invisible"),
+            ("line-separator", "pkg/a\u{2028}b", "invisible"),
+        ] {
+            refusal(label, &[ustar(name, b'0', "", b"x")], needle);
+            refusal(
+                &format!("{label}-pax"),
+                &[pax(&[("path", name)]), ustar("pkg/x", b'0', "", b"x")],
+                needle,
+            );
+        }
+        refusal(
+            "rtl-link",
+            &[ustar("pkg/l", b'2', "tar\u{202E}get", b"")],
+            "bidirectional control character in its link target",
+        );
+        // GNU long names and long links are names too.
+        refusal(
+            "rtl-gnu-long",
+            &[
+                gnu_long(b'L', "pkg/\u{202E}txt.exe"),
+                ustar("pkg/x", b'0', "", b"x"),
+            ],
+            "bidirectional control",
+        );
+        refusal(
+            "zero-width-gnu-link",
+            &[
+                gnu_long(b'K', "tar\u{200B}get"),
+                ustar("pkg/l", b'2', "t", b""),
+            ],
+            "invisible character in its link target",
+        );
+        // Plain non-ASCII text is still a name.
+        let entries = list_members("accented", &[ustar("pkg/caf\u{E9}", b'0', "", b"x")]).unwrap();
+        assert_eq!(names(&entries), vec!["pkg/caf\u{E9}"]);
+    }
+
+    /// APFS compares names case-insensitively and after Unicode
+    /// normalization, so two archive names that differ only there extract
+    /// as one file on a Mac and two on Linux. The same archive would
+    /// realize two trees; refuse it. Identical names, and names that
+    /// `--strip-components` drops, are not collisions.
+    #[test]
+    fn names_that_fold_together_on_apfs_are_refused() {
+        let file = |name: &str| entry(EntryKind::File, name, None);
+        let collide = |a: &str, b: &str, strip: usize| {
+            let error = validate(&[file(a), file(b)], strip).expect_err("collision");
+            assert!(
+                error.to_string().contains("one name on a case-insensitive"),
+                "{a} vs {b}: {error}"
+            );
+        };
+        collide("pkg/README", "pkg/readme", 0);
+        collide("pkg/Caf\u{E9}", "pkg/Cafe\u{301}", 0);
+        collide("pkg/Lib/", "pkg/lib", 0);
+        // Two files in what APFS makes one directory and Linux makes two,
+        // with no directory entries to compare.
+        collide("pkg/Lib/a", "pkg/lib/b", 0);
+        // After stripping one component the two land in the same place.
+        collide("a/README", "b/readme", 1);
+        // Exact duplicates are tar's last-one-wins on both platforms.
+        validate(&[file("pkg/x"), file("pkg/x")], 0).unwrap();
+        // Different directories do not fold together.
+        validate(&[file("pkg/a/README"), file("pkg/b/readme")], 0).unwrap();
+        // Stripped-away entries are never written, so they cannot collide.
+        validate(&[file("README"), file("readme")], 1).unwrap();
+
+        // A target that walks through `S` walks through the archive's own
+        // symlink `s` on APFS, and `s` points two levels up: refused as a
+        // traversal, as it would be with the exact spelling.
+        let link = |name: &str, target: &str| entry(EntryKind::Symlink, name, Some(target));
+        let error = validate(&[link("p/q/s", "../.."), link("p/q/a", "S/../../..")], 0)
+            .expect_err("traversal through a case-folded symlink");
+        assert!(
+            error
+                .to_string()
+                .contains("resolves through another symlink"),
+            "{error}"
+        );
+        // A file under a case-folded symlink name is a name collision first:
+        // the prefix `p/S` folds onto the link `p/s`.
+        let error = validate(&[link("p/s", "."), file("p/S/x")], 0)
+            .expect_err("write through a case-folded symlink");
+        assert!(
+            error.to_string().contains("one name on a case-insensitive"),
+            "{error}"
         );
     }
 

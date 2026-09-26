@@ -29,6 +29,7 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 libc = "0.2"
 flate2 = "1"
 liblzma = { version = "0.4", features = ["static"] }
+unicode-normalization = "0.1"
 
 # CI runs `cargo clippy --locked --all-targets -- -D warnings`, so every
 # clippy warning fails the build. These few are allowed project-wide.
