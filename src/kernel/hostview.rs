@@ -1,0 +1,658 @@
+//! `HostView::RuntimeOnly` on Linux: the host's system directories as a
+//! sandboxed build sees them when it may use the C runtime and nothing else
+//! the host happens to have installed (issue #304).
+//!
+//! The view is bubblewrap mounts applied on top of the full system root
+//! `sandbox::system_root_args` binds. Each curated directory is replaced by
+//! a skeleton directory tog builds on the host for the run, and every kept
+//! file or subdirectory is bound from the host onto its placeholder there.
+//! A dropped entry is simply absent: no header search, `-l` lookup,
+//! pkg-config query or directory listing inside the sandbox can find it.
+
+use crate::kernel::sandbox::{host_layout_error, push_arg};
+use std::ffi::OsString;
+use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
+
+/// The `PKG_CONFIG_LIBDIR` a `RuntimeOnly` build gets unless its caller sets
+/// one. The view already empties every pkg-config directory; this keeps
+/// pkg-config from falling back to the defaults compiled into it. Not the
+/// empty string: pkgconf 2.x treats an empty `PKG_CONFIG_LIBDIR` as unset
+/// and searches its defaults (checked with pkgconf 2.5.1). `/dev/null` is
+/// not a directory on any host, so no `.pc` file resolves under it, for
+/// pkgconf and freedesktop pkg-config alike, and `PKG_CONFIG_PATH` still
+/// works for a build that sets it itself.
+pub(crate) const PKG_CONFIG_LIBDIR: &str = "/dev/null";
+
+/// The `RuntimeOnly` mounts for one run, and the skeleton they mount. The
+/// skeleton must outlive the child, and must not sit under a root the
+/// build may write: its directories become `/usr/include`, `/usr/lib64` and
+/// the rest, so a build that could write to it could add files to the view.
+pub(crate) fn runtime_only_mounts(
+    write_roots: &[PathBuf],
+) -> io::Result<(Vec<OsString>, ViewSkeleton)> {
+    let skeleton = ViewSkeleton::create()?;
+    if let Some(root) = write_roots
+        .iter()
+        .find(|root| skeleton.path().starts_with(root))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!(
+                "the host view skeleton {} would sit inside the writable sandbox root {}; \
+                 point TMPDIR somewhere else",
+                skeleton.path().display(),
+                root.display()
+            ),
+        ));
+    }
+    let mounts = runtime_only_args(Path::new("/"), skeleton.path())?;
+    Ok((mounts, skeleton))
+}
+
+/// How `HostView::RuntimeOnly` treats the entries of one curated directory.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Curation {
+    /// Keep only the names in `C_RUNTIME_HEADERS`.
+    Headers,
+    /// Keep runtime libraries and everything else, drop what only a link
+    /// step reads (`library_entry_kept`).
+    Libraries,
+    /// Keep nothing.
+    Empty,
+}
+
+/// The directories `HostView::RuntimeOnly` rebuilds, in mount order. Each is
+/// curated only where the host has it as a real directory: a symlink (the
+/// merged-/usr `/lib64 -> usr/lib64`) already lands in a curated directory,
+/// and a missing one stays missing. The top-level `/lib*` entries are real
+/// directories only on split-/usr hosts, where `system_root_args` binds them.
+const CURATED_DIRS: &[(&str, Curation)] = &[
+    ("/usr/include", Curation::Headers),
+    ("/usr/local/include", Curation::Headers),
+    ("/usr/lib", Curation::Libraries),
+    ("/usr/lib64", Curation::Libraries),
+    ("/usr/lib32", Curation::Libraries),
+    ("/usr/libx32", Curation::Libraries),
+    ("/usr/local/lib", Curation::Libraries),
+    ("/usr/local/lib64", Curation::Libraries),
+    ("/lib", Curation::Libraries),
+    ("/lib64", Curation::Libraries),
+    ("/lib32", Curation::Libraries),
+    ("/libx32", Curation::Libraries),
+    ("/usr/share/pkgconfig", Curation::Empty),
+    ("/usr/local/share/pkgconfig", Curation::Empty),
+];
+
+/// Debian's multiarch directories, curated with their parent's rule when
+/// the parent's listing reaches them as real directories.
+const CURATED_NESTED: &[&str] = &[
+    "/usr/include/x86_64-linux-gnu",
+    "/usr/lib/x86_64-linux-gnu",
+    "/lib/x86_64-linux-gnu",
+];
+
+/// The top-level include entries the C runtime installs: glibc's headers,
+/// libxcrypt's `crypt.h`, the kernel's UAPI directories, and `c++` (the
+/// compiler's own C++ library headers). The union of what the package
+/// managers list for Fedora 44 (glibc-devel, glibc-headers-x86,
+/// kernel-headers, libxcrypt-devel, libstdc++-devel) and Ubuntu 22.04
+/// (libc6-dev, linux-libc-dev, libcrypt-dev, libstdc++-11-dev).
+///
+/// A name missing here fails loudly: the build stops with a compile error
+/// naming the header. Maintain the list by adding that name after checking
+/// which package owns it, never by widening the rule.
+const C_RUNTIME_HEADERS: &[&str] = &[
+    "a.out.h",
+    "aio.h",
+    "aliases.h",
+    "alloca.h",
+    "ar.h",
+    "argp.h",
+    "argz.h",
+    "arpa",
+    "asm",
+    "asm-generic",
+    "assert.h",
+    "bits",
+    "byteswap.h",
+    "c++",
+    "complex.h",
+    "cpio.h",
+    "crypt.h",
+    "ctype.h",
+    "cxl",
+    "dirent.h",
+    "dlfcn.h",
+    "drm",
+    "elf.h",
+    "endian.h",
+    "envz.h",
+    "err.h",
+    "errno.h",
+    "error.h",
+    "execinfo.h",
+    "fcntl.h",
+    "features-time64.h",
+    "features.h",
+    "fenv.h",
+    "finclude",
+    "fmtmsg.h",
+    "fnmatch.h",
+    "fpu_control.h",
+    "fstab.h",
+    "fts.h",
+    "ftw.h",
+    "fwctl",
+    "gconv.h",
+    "getopt.h",
+    "glob.h",
+    "gnu",
+    "gnu-versions.h",
+    "grp.h",
+    "gshadow.h",
+    "iconv.h",
+    "ieee754.h",
+    "ifaddrs.h",
+    "inttypes.h",
+    "langinfo.h",
+    "lastlog.h",
+    "libgen.h",
+    "libintl.h",
+    "limits.h",
+    "link.h",
+    "linux",
+    "locale.h",
+    "malloc.h",
+    "math.h",
+    "mcheck.h",
+    "memory.h",
+    "misc",
+    "mntent.h",
+    "monetary.h",
+    "mqueue.h",
+    "mtd",
+    "net",
+    "netash",
+    "netatalk",
+    "netax25",
+    "netdb.h",
+    "neteconet",
+    "netinet",
+    "netipx",
+    "netiucv",
+    "netpacket",
+    "netrom",
+    "netrose",
+    "nfs",
+    "nl_types.h",
+    "nss.h",
+    "obstack.h",
+    "paths.h",
+    "poll.h",
+    "printf.h",
+    "proc_service.h",
+    "protocols",
+    "pthread.h",
+    "pty.h",
+    "pwd.h",
+    "rdma",
+    "re_comp.h",
+    "regex.h",
+    "regexp.h",
+    "regulator",
+    "resolv.h",
+    "rpc",
+    "sched.h",
+    "scsi",
+    "search.h",
+    "semaphore.h",
+    "setjmp.h",
+    "sgtty.h",
+    "shadow.h",
+    "signal.h",
+    "sound",
+    "spawn.h",
+    "stab.h",
+    "stdbit.h",
+    "stdc-predef.h",
+    "stdint.h",
+    "stdio.h",
+    "stdio_ext.h",
+    "stdlib.h",
+    "string.h",
+    "strings.h",
+    "sys",
+    "syscall.h",
+    "sysexits.h",
+    "syslog.h",
+    "tar.h",
+    "termio.h",
+    "termios.h",
+    "tgmath.h",
+    "thread_db.h",
+    "threads.h",
+    "time.h",
+    "ttyent.h",
+    "uchar.h",
+    "ucontext.h",
+    "ulimit.h",
+    "unistd.h",
+    "utime.h",
+    "utmp.h",
+    "utmpx.h",
+    "values.h",
+    "video",
+    "wait.h",
+    "wchar.h",
+    "wctype.h",
+    "wordexp.h",
+    "xen",
+];
+
+/// `lib<name>.so` link-time entries of the C runtime, kept even when they
+/// are symlinks or linker scripts (`libc.so` and `libm.so` are text).
+const C_RUNTIME_SHARED: &[&str] = &[
+    "libc",
+    "libm",
+    "libmvec",
+    "libpthread",
+    "libdl",
+    "librt",
+    "libutil",
+    "libresolv",
+    "libanl",
+    "libBrokenLocale",
+    "libthread_db",
+    "libc_malloc_debug",
+    "libnss_compat",
+    "libnss_hesiod",
+    "libcrypt",
+];
+
+/// The C runtime's static archives. `libm-<version>.a` (Debian's, which
+/// the `libm.a` linker script names) is matched by prefix.
+const C_RUNTIME_ARCHIVES: &[&str] = &[
+    "libc",
+    "libc_nonshared",
+    "libm",
+    "libmvec",
+    "libpthread",
+    "libpthread_nonshared",
+    "libdl",
+    "librt",
+    "libutil",
+    "libresolv",
+    "libanl",
+    "libBrokenLocale",
+    "libg",
+    "libmcheck",
+    "libcrypt",
+];
+
+/// The C runtime's start files, which every link of a program reads.
+const C_RUNTIME_OBJECTS: &[&str] = &[
+    "crt1", "Scrt1", "crti", "crtn", "gcrt1", "grcrt1", "Mcrt1", "rcrt1",
+];
+
+const ELF_MAGIC: [u8; 4] = *b"\x7fELF";
+
+/// Does a library directory entry stay in the `RuntimeOnly` view? Dropped:
+/// `pkgconfig` and `cmake` directories, static (`.a`), libtool (`.la`) and
+/// object (`.o`) files, and every `.so` a link step would find by `-l`
+/// (the symlink a `-dev` package adds, or a linker script). A regular ELF
+/// file named `lib*.so` is a runtime library some host program NEEDs
+/// (Fedora's `libnss3.so`), so it stays. The C runtime's own entries of
+/// each kind stay, and every other directory (`gcc`, `gconv`, `perl5`) is
+/// kept whole.
+fn library_entry_kept(name: &str, file_type: fs::FileType, host_entry: &Path) -> bool {
+    if name == "pkgconfig" || name == "cmake" {
+        return false;
+    }
+    if let Some(stem) = name.strip_suffix(".so") {
+        if C_RUNTIME_SHARED.contains(&stem) || file_type.is_dir() {
+            return true;
+        }
+        return file_type.is_file() && starts_with_elf_magic(host_entry);
+    }
+    if let Some(stem) = name.strip_suffix(".a") {
+        return C_RUNTIME_ARCHIVES.contains(&stem) || stem.starts_with("libm-");
+    }
+    if name.ends_with(".la") {
+        return false;
+    }
+    if let Some(stem) = name.strip_suffix(".o") {
+        return C_RUNTIME_OBJECTS.contains(&stem);
+    }
+    true
+}
+
+/// A file tog cannot read is one the build cannot read either, so failing
+/// to read it counts as "not ELF" and drops it.
+fn starts_with_elf_magic(path: &Path) -> bool {
+    use std::io::Read as _;
+    let mut magic = [0u8; 4];
+    fs::File::open(path)
+        .and_then(|mut file| file.read_exact(&mut magic))
+        .is_ok_and(|()| magic == ELF_MAGIC)
+}
+
+/// The host-side tree the `RuntimeOnly` view mounts: one directory per
+/// curated directory, holding the kept symlinks themselves and an empty
+/// file or directory where each kept file or directory is bound on top.
+/// Symlinks cost no bubblewrap arguments this way, which keeps a host with
+/// thousands of library entries under bubblewrap's argument limit
+/// (`sandbox::BWRAP_MAX_ARGS`). Built fresh for every run under the
+/// temporary directory and deleted when dropped.
+pub(crate) struct ViewSkeleton(PathBuf);
+
+impl ViewSkeleton {
+    pub(crate) fn path(&self) -> &Path {
+        &self.0
+    }
+
+    fn create() -> io::Result<Self> {
+        static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let base = fs::canonicalize(std::env::temp_dir())?;
+        loop {
+            let path = base.join(format!(
+                "tog-host-view-{}-{}",
+                std::process::id(),
+                SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
+            match fs::create_dir(&path) {
+                Ok(()) => return Ok(Self(path)),
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(error) => {
+                    return Err(io::Error::new(
+                        error.kind(),
+                        format!("create the sandbox host view {}: {error}", path.display()),
+                    ))
+                }
+            }
+        }
+    }
+}
+
+impl Drop for ViewSkeleton {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+/// The mounts that turn the full system root `system_root_args` binds into
+/// `HostView::RuntimeOnly`, applied after it. Each directory in
+/// `CURATED_DIRS` the host has is replaced by its skeleton directory under
+/// `skeleton` (read-only), and every kept file and subdirectory is
+/// read-only bound from the host onto its placeholder there. Kept symlinks
+/// are recreated in the skeleton with the host's own targets. Nothing is
+/// cached: the host directories are read again on every run.
+///
+/// `host_root` is `/` in production; tests pass a fake host layout.
+fn runtime_only_args(host_root: &Path, skeleton: &Path) -> io::Result<Vec<OsString>> {
+    let mut args = Vec::new();
+    for &(inside, curation) in CURATED_DIRS {
+        let inside = Path::new(inside);
+        let relative = inside.strip_prefix("/").unwrap_or(inside);
+        let host = host_root.join(relative);
+        match fs::symlink_metadata(&host) {
+            Ok(metadata) if metadata.is_dir() => {}
+            Ok(_) => continue,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(host_layout_error(&host, error)),
+        }
+        let mirror = skeleton.join(relative);
+        fs::create_dir_all(&mirror)?;
+        push_arg(&mut args, "--ro-bind");
+        args.push(mirror.clone().into_os_string());
+        args.push(inside.as_os_str().to_os_string());
+        if curation != Curation::Empty {
+            curate_dir(&host, inside, &mirror, curation, &mut args)?;
+        }
+    }
+    Ok(args)
+}
+
+/// Mirror the kept entries of one host directory into `mirror` and bind
+/// the kept files and directories. Entries are visited in name order so
+/// the command line is the same on every run of an unchanged host.
+fn curate_dir(
+    host: &Path,
+    inside: &Path,
+    mirror: &Path,
+    curation: Curation,
+    args: &mut Vec<OsString>,
+) -> io::Result<()> {
+    let mut names = Vec::new();
+    for entry in fs::read_dir(host).map_err(|error| host_layout_error(host, error))? {
+        names.push(
+            entry
+                .map_err(|error| host_layout_error(host, error))?
+                .file_name(),
+        );
+    }
+    names.sort();
+    for name in names {
+        let host_entry = host.join(&name);
+        let inside_entry = inside.join(&name);
+        let mirror_entry = mirror.join(&name);
+        let file_type = fs::symlink_metadata(&host_entry)
+            .map_err(|error| host_layout_error(&host_entry, error))?
+            .file_type();
+        let nested = CURATED_NESTED
+            .iter()
+            .any(|path| Path::new(path) == inside_entry);
+        if nested && file_type.is_dir() {
+            fs::create_dir(&mirror_entry)?;
+            curate_dir(&host_entry, &inside_entry, &mirror_entry, curation, args)?;
+            continue;
+        }
+        let text = name.to_string_lossy();
+        let kept = match curation {
+            Curation::Headers => nested || C_RUNTIME_HEADERS.contains(&text.as_ref()),
+            Curation::Libraries => library_entry_kept(&text, file_type, &host_entry),
+            Curation::Empty => false,
+        };
+        if !kept {
+            continue;
+        }
+        if file_type.is_symlink() {
+            let target = fs::read_link(&host_entry)
+                .map_err(|error| host_layout_error(&host_entry, error))?;
+            std::os::unix::fs::symlink(&target, &mirror_entry)?;
+            continue;
+        }
+        if file_type.is_dir() {
+            fs::create_dir(&mirror_entry)?;
+        } else if file_type.is_file() {
+            fs::File::create(&mirror_entry)?;
+        } else {
+            // Sockets, fifos and device nodes have no business in a system
+            // library or include directory.
+            continue;
+        }
+        push_arg(args, "--ro-bind");
+        args.push(host_entry.into_os_string());
+        args.push(inside_entry.into_os_string());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::kernel::testutil::TempDir;
+
+    fn temp_dir(test_name: &str) -> TempDir {
+        TempDir::named(&format!("hostview-{test_name}"))
+    }
+
+    /// A fake host with one of each entry the `RuntimeOnly` rules decide
+    /// on: allowed and disallowed headers, a multiarch include directory,
+    /// a linker script, a `-dev` symlink chain, a runtime ELF `lib*.so`,
+    /// static, object and package-config entries, and the compiler's own
+    /// directory.
+    fn curated_fake_host(test_name: &str, split_usr: bool) -> TempDir {
+        let root = temp_dir(test_name);
+        let dirs = [
+            "usr/include/sys",
+            "usr/include/c++",
+            "usr/include/x86_64-linux-gnu/bits",
+            "usr/lib64/pkgconfig",
+            "usr/lib64/cmake",
+            "usr/lib64/gcc",
+            "usr/share/pkgconfig",
+        ];
+        for directory in dirs {
+            fs::create_dir_all(root.0.join(directory)).unwrap();
+        }
+        let write = |path: &str, bytes: &[u8]| fs::write(root.0.join(path), bytes).unwrap();
+        write("usr/include/stdio.h", b"/* glibc */\n");
+        write("usr/include/lzma.h", b"/* xz-devel */\n");
+        write(
+            "usr/include/x86_64-linux-gnu/lzma.h",
+            b"/* liblzma-dev */\n",
+        );
+        write(
+            "usr/lib64/libc.so",
+            b"/* GNU ld script */\nGROUP ( libc.so.6 )\n",
+        );
+        write("usr/lib64/liblzma.so.5.2", b"\x7fELF\x02\x01\x01");
+        write("usr/lib64/libnss3.so", b"\x7fELF\x02\x01\x01");
+        write("usr/lib64/libz.a", b"!<arch>\n");
+        write("usr/lib64/crt1.o", b"\x7fELF\x02\x01\x01");
+        write("usr/lib64/foo.o", b"\x7fELF\x02\x01\x01");
+        write("usr/share/pkgconfig/zlib.pc", b"Name: zlib\n");
+        let link = |target: &str, name: &str| {
+            std::os::unix::fs::symlink(target, root.0.join(name)).unwrap();
+        };
+        link("liblzma.so.5", "usr/lib64/liblzma.so");
+        link("liblzma.so.5.2", "usr/lib64/liblzma.so.5");
+        if split_usr {
+            fs::create_dir_all(root.0.join("lib64")).unwrap();
+            write("lib64/libz.so.1", b"\x7fELF\x02\x01\x01");
+            link("libz.so.1", "lib64/libz.so");
+        } else {
+            link("usr/lib64", "lib64");
+        }
+        root
+    }
+
+    /// The `(source, destination)` pairs of every `--ro-bind` in `args`.
+    fn ro_binds(args: &[OsString]) -> Vec<(PathBuf, PathBuf)> {
+        args.windows(3)
+            .filter(|window| window[0] == "--ro-bind")
+            .map(|window| (PathBuf::from(&window[1]), PathBuf::from(&window[2])))
+            .collect()
+    }
+
+    /// Every rule, against a merged-/usr host: allowed entries are bound
+    /// or recreated, everything a link step alone would read is absent,
+    /// and a symlinked `/lib64` is left to its curated target.
+    #[test]
+    fn runtime_only_view_keeps_the_c_runtime_and_drops_host_dev_files() {
+        let host = curated_fake_host("runtime-only-merged", false);
+        let skeleton = temp_dir("runtime-only-merged-skeleton");
+        let args = runtime_only_args(&host.0, &skeleton.0).unwrap();
+        let binds = ro_binds(&args);
+        let bound = |inside: &str| binds.iter().any(|(_, to)| to == Path::new(inside));
+        let from_host = |inside: &str| {
+            binds.contains(&(
+                host.0.join(inside.trim_start_matches('/')),
+                PathBuf::from(inside),
+            ))
+        };
+        let mirrored = |inside: &str| {
+            fs::symlink_metadata(skeleton.0.join(inside.trim_start_matches('/'))).is_ok()
+        };
+
+        // Each curated directory the host has is its skeleton, read-only.
+        for inside in ["/usr/include", "/usr/lib64", "/usr/share/pkgconfig"] {
+            assert!(
+                binds.contains(&(
+                    skeleton.0.join(inside.trim_start_matches('/')),
+                    PathBuf::from(inside)
+                )),
+                "{inside} is not its skeleton: {args:?}"
+            );
+        }
+        // Headers: the C runtime's names, the multiarch directory curated
+        // with the same list, nothing else.
+        for kept in [
+            "/usr/include/stdio.h",
+            "/usr/include/sys",
+            "/usr/include/c++",
+        ] {
+            assert!(from_host(kept), "{kept} not bound from the host: {args:?}");
+            assert!(mirrored(kept), "{kept} has no placeholder");
+        }
+        assert!(from_host("/usr/include/x86_64-linux-gnu/bits"), "{args:?}");
+        assert!(!bound("/usr/include/x86_64-linux-gnu"), "{args:?}");
+        assert!(mirrored("/usr/include/x86_64-linux-gnu"));
+        for dropped in [
+            "/usr/include/lzma.h",
+            "/usr/include/x86_64-linux-gnu/lzma.h",
+        ] {
+            assert!(!bound(dropped), "{dropped} bound: {args:?}");
+            assert!(!mirrored(dropped), "{dropped} mirrored");
+        }
+        // Libraries: the C runtime's linker script and start file, runtime
+        // ELF files (versioned or not), the compiler's directory, and the
+        // soname link, recreated with the host's own target.
+        for kept in [
+            "/usr/lib64/libc.so",
+            "/usr/lib64/liblzma.so.5.2",
+            "/usr/lib64/libnss3.so",
+            "/usr/lib64/crt1.o",
+            "/usr/lib64/gcc",
+        ] {
+            assert!(from_host(kept), "{kept} not bound from the host: {args:?}");
+        }
+        assert_eq!(
+            fs::read_link(skeleton.0.join("usr/lib64/liblzma.so.5")).unwrap(),
+            Path::new("liblzma.so.5.2")
+        );
+        assert!(
+            !bound("/usr/lib64/liblzma.so.5"),
+            "a symlink costs no mount"
+        );
+        for dropped in [
+            "/usr/lib64/liblzma.so",
+            "/usr/lib64/libz.a",
+            "/usr/lib64/foo.o",
+            "/usr/lib64/pkgconfig",
+            "/usr/lib64/cmake",
+            "/usr/share/pkgconfig/zlib.pc",
+        ] {
+            assert!(!bound(dropped), "{dropped} bound: {args:?}");
+            assert!(!mirrored(dropped), "{dropped} mirrored");
+        }
+        // A symlinked /lib64 already lands in /usr/lib64; directories the
+        // host does not have are not invented.
+        for absent in ["/lib64", "/usr/lib", "/usr/local/include", "/lib"] {
+            assert!(!bound(absent), "{absent} curated: {args:?}");
+        }
+        // The whole view is binds of real paths, nothing else.
+        assert_eq!(args.len(), binds.len() * 3, "{args:?}");
+    }
+
+    /// On a split-/usr host the real `/lib64` `system_root_args` binds is
+    /// curated too.
+    #[test]
+    fn runtime_only_view_curates_a_split_usr_lib64() {
+        let host = curated_fake_host("runtime-only-split", true);
+        let skeleton = temp_dir("runtime-only-split-skeleton");
+        let args = runtime_only_args(&host.0, &skeleton.0).unwrap();
+        let binds = ro_binds(&args);
+        assert!(binds.contains(&(skeleton.0.join("lib64"), PathBuf::from("/lib64"))));
+        assert!(binds.contains(&(
+            host.0.join("lib64/libz.so.1"),
+            PathBuf::from("/lib64/libz.so.1")
+        )));
+        assert!(!binds
+            .iter()
+            .any(|(_, to)| to == Path::new("/lib64/libz.so")));
+        assert!(fs::symlink_metadata(skeleton.0.join("lib64/libz.so")).is_err());
+    }
+}

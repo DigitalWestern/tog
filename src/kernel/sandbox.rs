@@ -26,6 +26,27 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
 
+/// How much of the host's system directories a sandboxed build can see.
+/// The host C toolchain is an unpinned build input either way (see
+/// docs/human/LIMITATIONS.md); this decides what else of the host rides
+/// along with it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HostView {
+    /// The whole host `/usr` (and `/bin`, `/lib`, ...), read-only: every
+    /// header, library and pkg-config file this machine has installed is
+    /// visible to the build.
+    Full,
+    /// The host's runtime files plus the C runtime's own development files:
+    /// glibc, libxcrypt and kernel headers, their link-time libraries and
+    /// start files, and the compiler's own directories. Every other host
+    /// header, linker-visible library, static archive, libtool archive,
+    /// pkg-config file and CMake package directory is absent, so a build
+    /// cannot link something one host happens to have installed and
+    /// another does not. Programs keep every shared library they load at
+    /// run time.
+    RuntimeOnly,
+}
+
 /// A sandboxed build, ecosystem-agnostic: tailors construct the spec — argv,
 /// environment, read/write roots, scratch — and the kernel executes it. Keeps
 /// sandbox policy in one place as tailors multiply.
@@ -41,6 +62,8 @@ pub struct BuildSpec {
     pub scratch: PathBuf,
     /// PATH inside the sandbox.
     pub path: String,
+    /// What of the host's system directories the build sees.
+    pub host_view: HostView,
 }
 
 /// Strip every inherited variable whose name starts with one of
@@ -121,6 +144,7 @@ pub(crate) fn run_build_spec_status_on(
     let sandbox = Sandbox {
         read: spec.read.iter().map(PathBuf::as_path).collect(),
         write,
+        host_view: spec.host_view,
     };
     sandbox.run_in_status_on(
         platform,
@@ -143,6 +167,7 @@ pub(crate) fn run_build_spec_status_on_with_activity(
     let sandbox = Sandbox {
         read: spec.read.iter().map(PathBuf::as_path).collect(),
         write,
+        host_view: spec.host_view,
     };
     sandbox.run_in_status_on_with_activity(
         platform,
@@ -160,9 +185,16 @@ pub struct Sandbox<'a> {
     pub read: Vec<&'a Path>,
     /// Directories the build may read AND write (build tmp, output).
     pub write: Vec<&'a Path>,
+    /// What of the host's system directories the build sees.
+    pub host_view: HostView,
 }
 
 impl Sandbox<'_> {
+    /// `HostView::RuntimeOnly` gets this same profile for now: a Darwin
+    /// build compiles against the Xcode or Command Line Tools SDK, which is
+    /// where its headers and linker stubs live, and a curated view of it
+    /// has not been built or validated on macOS. Darwin object identities
+    /// therefore stay as they were.
     fn profile(&self) -> String {
         let mut p = String::from(
             "(version 1)\n\
@@ -227,6 +259,7 @@ impl Sandbox<'_> {
         Ok(Sandbox {
             read: read.iter().map(PathBuf::as_path).collect(),
             write: write.iter().map(PathBuf::as_path).collect(),
+            host_view: self.host_view,
         }
         .profile())
     }
@@ -445,10 +478,11 @@ impl Sandbox<'_> {
         if let Some(activity) = activity {
             self.reject_host_sockets(cwd, tmp)?;
             let bwrap = bwrap_preflight_with_activity(Some(activity))?;
-            let args = self.bwrap_args(cmd, env_path, tmp, cwd, envs)?;
+            // Holds the host view's skeleton until the child is reaped.
+            let invocation = self.bwrap_args(cmd, env_path, tmp, cwd, envs)?;
             let mut command = bwrap_command(bwrap)?;
             command
-                .args(&args)
+                .args(&invocation.args)
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::inherit())
                 .stderr(std::process::Stdio::piped());
@@ -498,14 +532,15 @@ impl Sandbox<'_> {
     ) -> io::Result<std::process::Output> {
         self.reject_host_sockets(cwd, tmp)?;
         let bwrap = bwrap_preflight()?;
-        let args = self.bwrap_args(cmd, env_path, tmp, cwd, envs)?;
+        // Holds the host view's skeleton until the child is reaped.
+        let invocation = self.bwrap_args(cmd, env_path, tmp, cwd, envs)?;
         let mut command = bwrap_command(bwrap)?;
         // stderr is piped so bwrap's own setup errors ("bwrap: ...") can be
         // classified, but the build's diagnostics must still reach the user:
         // a relay thread streams every byte to our stderr and keeps the
         // leading bytes for classification.
         let child = command
-            .args(&args)
+            .args(&invocation.args)
             .stdin(std::process::Stdio::null())
             .stdout(stdout)
             .stderr(std::process::Stdio::piped())
@@ -547,7 +582,7 @@ impl Sandbox<'_> {
         tmp: &Path,
         cwd: &Path,
         envs: &[(String, String)],
-    ) -> io::Result<Vec<OsString>> {
+    ) -> io::Result<BwrapInvocation> {
         let read: Vec<PathBuf> = self
             .read
             .iter()
@@ -578,6 +613,14 @@ impl Sandbox<'_> {
             OsString::from("--clearenv"),
         ];
         args.extend(system_root_args(Path::new("/"))?);
+        let skeleton = match self.host_view {
+            HostView::Full => None,
+            HostView::RuntimeOnly => {
+                let (mounts, skeleton) = crate::kernel::hostview::runtime_only_mounts(&write)?;
+                args.extend(mounts);
+                Some(skeleton)
+            }
+        };
 
         for item in [
             "/etc/ld.so.cache",
@@ -627,6 +670,17 @@ impl Sandbox<'_> {
         push_setenv(&mut args, "TMPDIR", &scratch);
         push_setenv(&mut args, "LANG", "en_US.UTF-8");
         push_setenv(&mut args, "SOURCE_DATE_EPOCH", "315532800");
+        if self.host_view == HostView::RuntimeOnly
+            && !envs.iter().any(|(key, _)| key == "PKG_CONFIG_LIBDIR")
+        {
+            // See `hostview::PKG_CONFIG_LIBDIR`. PKG_CONFIG_PATH is unset by
+            // --clearenv unless the caller sets it.
+            push_setenv(
+                &mut args,
+                "PKG_CONFIG_LIBDIR",
+                crate::kernel::hostview::PKG_CONFIG_LIBDIR,
+            );
+        }
         for (key, value) in envs {
             push_setenv(&mut args, key, value);
         }
@@ -642,8 +696,35 @@ impl Sandbox<'_> {
         push_arg(&mut args, "PWD");
         push_arg(&mut args, "--");
         args.extend(cmd.iter().map(OsString::from));
-        Ok(args)
+        if args.len() > BWRAP_MAX_ARGS {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!(
+                    "the sandbox needs {} bubblewrap arguments, more than the {BWRAP_MAX_ARGS} \
+                     bubblewrap accepts; this host's library directories are too large for the \
+                     C-runtime-only view",
+                    args.len()
+                ),
+            ));
+        }
+        Ok(BwrapInvocation {
+            args,
+            _skeleton: skeleton,
+        })
     }
+}
+
+/// bubblewrap refuses a command line (its `--args` data included) of more
+/// than this many arguments ("Exceeded maximum number of arguments").
+/// Checked before it runs so the refusal names the cause.
+const BWRAP_MAX_ARGS: usize = 9000;
+
+/// One bubblewrap command line, and the host-side skeleton it mounts the
+/// `RuntimeOnly` view from. The skeleton is deleted when this is dropped,
+/// so it must outlive the child.
+struct BwrapInvocation {
+    args: Vec<OsString>,
+    _skeleton: Option<crate::kernel::hostview::ViewSkeleton>,
 }
 
 /// Longest stderr prefix retained for sandbox setup classification; bwrap's own
@@ -1151,7 +1232,7 @@ fn system_root_args(host_root: &Path) -> io::Result<Vec<OsString>> {
     Ok(args)
 }
 
-fn host_layout_error(path: &Path, error: io::Error) -> io::Error {
+pub(crate) fn host_layout_error(path: &Path, error: io::Error) -> io::Error {
     io::Error::new(
         error.kind(),
         format!(
@@ -1231,7 +1312,7 @@ fn resolve_host_path(host_root: &Path, path: &Path) -> io::Result<PathBuf> {
     Ok(resolved)
 }
 
-fn push_arg(args: &mut Vec<OsString>, value: impl Into<OsString>) {
+pub(crate) fn push_arg(args: &mut Vec<OsString>, value: impl Into<OsString>) {
     args.push(value.into());
 }
 
@@ -1401,6 +1482,7 @@ mod tests {
         let sandbox = Sandbox {
             read: vec![],
             write: vec![&scratch],
+            host_view: HostView::Full,
         };
         // curl exit 7 is "could not connect": the only acceptable outcome.
         // 0 means the namespace leaked; anything else means the probe itself
@@ -1448,6 +1530,7 @@ mod tests {
         let sandbox = Sandbox {
             read: vec![],
             write: vec![&scratch],
+            host_view: HostView::Full,
         };
         let home_ssh = home.join(".ssh");
         let home_ssh_string = home_ssh.to_str().expect("home path is UTF-8");
@@ -1495,6 +1578,7 @@ mod tests {
             &Sandbox {
                 read: vec![],
                 write: vec![&scratch],
+                host_view: HostView::Full,
             },
             &[
                 "/usr/bin/sh",
@@ -1528,6 +1612,7 @@ mod tests {
             &Sandbox {
                 read: vec![],
                 write: vec![&writable, &scratch],
+                host_view: HostView::Full,
             },
             &["/usr/bin/true"],
             &scratch,
@@ -1560,6 +1645,7 @@ mod tests {
         let sandbox = Sandbox {
             read: vec![&declared],
             write: vec![&scratch],
+            host_view: HostView::Full,
         };
         let secret_string = secret.to_str().unwrap();
         let result = run(
@@ -1587,6 +1673,7 @@ mod tests {
         let sandbox = Sandbox {
             read: vec![&readonly],
             write: vec![&declared, &scratch],
+            host_view: HostView::Full,
         };
         let declared_string = declared.to_str().unwrap();
         let result = run(
@@ -1625,6 +1712,7 @@ mod tests {
         let sandbox = Sandbox {
             read: vec![&parent],
             write: vec![&child, &scratch],
+            host_view: HostView::Full,
         };
         let child_file = child.join("x");
         let child_file_string = child_file.to_str().unwrap();
@@ -1665,6 +1753,7 @@ mod tests {
         let sandbox = Sandbox {
             read: vec![],
             write: vec![&scratch],
+            host_view: HostView::Full,
         };
         let result = run(
             &sandbox,
@@ -1712,6 +1801,7 @@ mod tests {
         let sandbox = Sandbox {
             read: vec![],
             write: vec![&out, &scratch],
+            host_view: HostView::Full,
         };
         let out_file = out.join("x");
         let result = run(
@@ -1781,6 +1871,7 @@ mod tests {
         let sandbox = Sandbox {
             read: vec![],
             write: vec![&scratch],
+            host_view: HostView::Full,
         };
         let env_output = run_capture(
             &sandbox,
@@ -1818,6 +1909,7 @@ mod tests {
             &Sandbox {
                 read: vec![],
                 write: vec![&scratch],
+                host_view: HostView::Full,
             },
             &["/usr/bin/id", "-gn"],
             &scratch,
@@ -1840,6 +1932,7 @@ mod tests {
         let sandbox = Sandbox {
             read: vec![],
             write: vec![&scratch],
+            host_view: HostView::Full,
         };
         let result = run(
             &sandbox,
@@ -1882,6 +1975,7 @@ mod tests {
             &Sandbox {
                 read: vec![],
                 write: vec![&scratch],
+                host_view: HostView::Full,
             },
             &[
                 "/usr/bin/sh",
@@ -1915,6 +2009,7 @@ mod tests {
         let sandbox = Sandbox {
             read: vec![],
             write: vec![&scratch],
+            host_view: HostView::Full,
         };
         let result = run(
             &sandbox,
@@ -1951,6 +2046,7 @@ mod tests {
         let sandbox = Sandbox {
             read: vec![&read_root],
             write: vec![&scratch],
+            host_view: HostView::Full,
         };
         let result = run(
             &sandbox,
@@ -1981,6 +2077,7 @@ mod tests {
         let sandbox = Sandbox {
             read: vec![],
             write: vec![&scratch],
+            host_view: HostView::Full,
         };
         let result = run(
             &sandbox,
@@ -2008,6 +2105,7 @@ mod tests {
         let sandbox = Sandbox {
             read: vec![],
             write: vec![&scratch],
+            host_view: HostView::Full,
         };
         let cmd = ["/usr/bin/sh", "-c", "echo build diagnostic >&2; exit 3"];
         let output = sandbox
@@ -2263,6 +2361,248 @@ mod tests {
         assert!(error.to_string().contains("cannot read host"), "{error}");
     }
 
+    /// `Full` is the sandbox as it was before views existed: the system
+    /// root, then the fixed `/etc` entries, and no pkg-config override.
+    /// `RuntimeOnly` is the same command line with the view mounted right
+    /// after the system root and pkg-config's default directories cut off.
+    #[test]
+    fn full_view_args_are_unchanged_and_runtime_only_adds_the_view() {
+        let root = temp_dir("view-args");
+        let scratch = root.0.join("scratch");
+        fs::create_dir(&scratch).unwrap();
+        let args = |host_view: HostView| {
+            let sandbox = Sandbox {
+                read: vec![],
+                write: vec![&scratch],
+                host_view,
+            };
+            let invocation = sandbox
+                .bwrap_args(&["/usr/bin/true"], "/usr/bin:/bin", &scratch, &scratch, &[])
+                .unwrap();
+            let args: Vec<String> = invocation
+                .args
+                .iter()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect();
+            (args, invocation)
+        };
+        let system = rendered(system_root_args(Path::new("/")));
+        let (full, _) = args(HostView::Full);
+        let start = full.iter().position(|arg| arg == "--clearenv").unwrap() + 1;
+        assert_eq!(full[start..start + system.len()], system[..]);
+        let after_system = &full[start + system.len()..];
+        assert!(
+            after_system[0] == "--dev" || after_system[1].starts_with("/etc/"),
+            "{after_system:?}"
+        );
+        assert!(
+            !full.iter().any(|arg| arg == "PKG_CONFIG_LIBDIR"),
+            "{full:?}"
+        );
+
+        let (runtime_only, invocation) = args(HostView::RuntimeOnly);
+        let skeleton = invocation._skeleton.as_ref().unwrap().path().to_path_buf();
+        assert!(skeleton.is_dir());
+        assert_eq!(
+            runtime_only[..start + system.len()],
+            full[..start + system.len()]
+        );
+        let view_len = runtime_only.len() - full.len() - 3;
+        let view = &runtime_only[start + system.len()..start + system.len() + view_len];
+        assert!(
+            view.iter()
+                .all(|arg| arg == "--ro-bind" || arg.starts_with('/')),
+            "{view:?}"
+        );
+        let tail = &runtime_only[start + system.len() + view_len..];
+        let full_tail = &full[start + system.len()..];
+        let env = tail
+            .windows(3)
+            .position(|window| window == ["--setenv", "PKG_CONFIG_LIBDIR", "/dev/null"])
+            .expect("RuntimeOnly sets PKG_CONFIG_LIBDIR");
+        let mut without_env = tail.to_vec();
+        without_env.drain(env..env + 3);
+        assert_eq!(without_env, full_tail);
+        // The skeleton lives exactly as long as the command line.
+        drop(invocation);
+        assert!(!skeleton.exists());
+
+        // A caller's own PKG_CONFIG_LIBDIR is left alone.
+        let sandbox = Sandbox {
+            read: vec![],
+            write: vec![&scratch],
+            host_view: HostView::RuntimeOnly,
+        };
+        let own = sandbox
+            .bwrap_args(
+                &["/usr/bin/true"],
+                "/usr/bin:/bin",
+                &scratch,
+                &scratch,
+                &[("PKG_CONFIG_LIBDIR".to_string(), "/mine".to_string())],
+            )
+            .unwrap();
+        let own: Vec<String> = own
+            .args
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            own.iter().filter(|arg| *arg == "PKG_CONFIG_LIBDIR").count(),
+            1
+        );
+        assert!(own
+            .windows(3)
+            .any(|w| w == ["--setenv", "PKG_CONFIG_LIBDIR", "/mine"]));
+    }
+
+    /// The first host library directory (Fedora's or Debian's) that has
+    /// `name`, as seen from `/`.
+    fn host_library(name: &str) -> Option<PathBuf> {
+        ["/usr/lib64", "/usr/lib/x86_64-linux-gnu", "/usr/lib"]
+            .iter()
+            .map(|dir| Path::new(dir).join(name))
+            .find(|path| fs::symlink_metadata(path).is_ok())
+    }
+
+    /// The real host under `RuntimeOnly`: the C and C++ runtimes compile,
+    /// link and run, a runtime library still loads, and zlib's development
+    /// files (header, `-lz` link, pkg-config module) are gone. Parts that
+    /// need something this host lacks are skipped; CI has all of them.
+    #[test]
+    fn linux_runtime_only_view_builds_against_the_c_runtime_alone() {
+        if !linux_ready("linux_runtime_only_view_builds_against_the_c_runtime_alone") {
+            return;
+        }
+        let root = temp_dir("runtime-only-live");
+        let scratch = root.0.join("scratch");
+        fs::create_dir(&scratch).unwrap();
+        let has_cc = Path::new("/usr/bin/cc").exists();
+        let has_cxx = Path::new("/usr/bin/c++").exists();
+        let has_pkg_config = Path::new("/usr/bin/pkg-config").exists();
+        let zlib_dev = host_library("libz.so");
+        let zlib_runtime = host_library("libz.so.1");
+        fs::write(
+            scratch.join("math.c"),
+            "#include <stdio.h>\n#include <math.h>\n#include <pthread.h>\n\
+             static void *work(void *arg) { double *v = arg; *v = sqrt(*v); return 0; }\n\
+             int main(void) { volatile double v = 16.0; double w = v; pthread_t t;\n\
+             if (pthread_create(&t, 0, work, &w)) return 1; pthread_join(t, 0);\n\
+             printf(\"%.0f\\n\", w); return w == 4.0 ? 0 : 1; }\n",
+        )
+        .unwrap();
+        fs::write(
+            scratch.join("load.c"),
+            "#include <dlfcn.h>\nint main(void) { return dlopen(\"libz.so.1\", RTLD_NOW) ? 0 : 1; }\n",
+        )
+        .unwrap();
+        fs::write(
+            scratch.join("zlib.c"),
+            "const char *zlibVersion(void);\nint main(void) { return zlibVersion() == 0; }\n",
+        )
+        .unwrap();
+        fs::write(
+            scratch.join("vector.cc"),
+            "#include <iostream>\n#include <vector>\n#include <thread>\n\
+             int main() { std::vector<int> v{1, 2, 3}; int sum = 0;\n\
+             std::thread t([&] { for (int x : v) sum += x; }); t.join();\n\
+             std::cout << sum << std::endl; return sum == 6 ? 0 : 1; }\n",
+        )
+        .unwrap();
+        let report = scratch.join("report");
+        let script = r#"
+cd "$1"
+check() { if "$@" >/dev/null 2>&1; then echo yes; else echo no; fi; }
+{
+echo "stdio.h=$(check test -e /usr/include/stdio.h)"
+echo "zlib.h=$(check test -e /usr/include/zlib.h)"
+echo "libz.so=$(check test -e "$2")"
+echo "libz.so.1=$(check test -e "$3")"
+echo "c=$(check sh -c 'cc math.c -o math -lm -lpthread && ./math')"
+echo "load=$(check sh -c 'cc load.c -o load -ldl && ./load')"
+echo "c++=$(check sh -c 'c++ vector.cc -o vector -pthread && ./vector')"
+echo "-lz=$(check cc zlib.c -o zlib -lz)"
+echo "pkg-config=$(check pkg-config --exists zlib)"
+echo "PKG_CONFIG_LIBDIR=${PKG_CONFIG_LIBDIR-unset}"
+} > report
+"#;
+        let unused = scratch.join("absent");
+        let sandbox = Sandbox {
+            read: vec![],
+            write: vec![&scratch],
+            host_view: HostView::RuntimeOnly,
+        };
+        let result = run(
+            &sandbox,
+            &[
+                "/usr/bin/sh",
+                "-c",
+                script,
+                "sh",
+                scratch.to_str().unwrap(),
+                zlib_dev.as_deref().unwrap_or(&unused).to_str().unwrap(),
+                zlib_runtime.as_deref().unwrap_or(&unused).to_str().unwrap(),
+            ],
+            &scratch,
+            &scratch,
+            &[],
+        );
+        assert!(result.is_ok(), "RuntimeOnly probe failed: {result:?}");
+        let lines = read_lines(&report);
+        let seen = |line: &str| lines.contains(line);
+        assert!(seen("stdio.h=yes"), "{lines:?}");
+        assert!(seen("zlib.h=no"), "{lines:?}");
+        assert!(seen("libz.so=no"), "{lines:?}");
+        assert!(seen("PKG_CONFIG_LIBDIR=/dev/null"), "{lines:?}");
+        if Path::new("/usr/include/zlib.h").exists() {
+            eprintln!("host has /usr/include/zlib.h; the view hides it");
+        }
+        if zlib_dev.is_none() {
+            eprintln!("host has no libz.so; the -lz check proves less here");
+        }
+        match (&zlib_runtime, has_cc) {
+            (Some(_), true) => {
+                assert!(seen("libz.so.1=yes"), "{lines:?}");
+                assert!(seen("load=yes"), "libz.so.1 does not load: {lines:?}");
+            }
+            _ => eprintln!("skip libz.so.1 load: host lacks libz.so.1 or cc"),
+        }
+        if has_cc {
+            assert!(seen("c=yes"), "C program did not build and run: {lines:?}");
+            assert!(
+                seen("-lz=no"),
+                "-lz linked against a host library: {lines:?}"
+            );
+        } else {
+            eprintln!("skip C checks: host has no /usr/bin/cc");
+        }
+        if has_cxx {
+            assert!(
+                seen("c++=yes"),
+                "C++ program did not build and run: {lines:?}"
+            );
+        } else {
+            eprintln!("skip C++ checks: host has no /usr/bin/c++");
+        }
+        if has_pkg_config {
+            assert!(seen("pkg-config=no"), "pkg-config found zlib: {lines:?}");
+        } else {
+            eprintln!("skip pkg-config check: host has no /usr/bin/pkg-config");
+        }
+
+        // Setup cost, for the record: the view is rebuilt on every run.
+        for host_view in [HostView::Full, HostView::RuntimeOnly] {
+            let sandbox = Sandbox {
+                read: vec![],
+                write: vec![&scratch],
+                host_view,
+            };
+            let started = std::time::Instant::now();
+            run(&sandbox, &["/usr/bin/true"], &scratch, &scratch, &[]).unwrap();
+            eprintln!("sandbox setup, {host_view:?}: {:?}", started.elapsed());
+        }
+    }
+
     /// Doctor names the AppArmor switch only when it is on and bwrap was
     /// refused a namespace. An execvp failure proves the namespace existed.
     #[test]
@@ -2404,6 +2744,7 @@ mod tests {
         let sandbox = Sandbox {
             read: vec![&read_root],
             write: vec![&write_root],
+            host_view: HostView::Full,
         };
         let args = sandbox
             .bwrap_args(
@@ -2413,7 +2754,8 @@ mod tests {
                 &scratch,
                 &[("CHECK".to_string(), "ok".to_string())],
             )
-            .unwrap();
+            .unwrap()
+            .args;
         let rendered = args
             .iter()
             .map(|arg| arg.to_string_lossy().into_owned())
@@ -2470,6 +2812,7 @@ mod tests {
         let sandbox = Sandbox {
             read: vec![&linked_read],
             write: Vec::new(),
+            host_view: HostView::Full,
         };
         let profile = sandbox
             .seatbelt_profile(&temp.0.join("link/scratch"))
@@ -2504,6 +2847,7 @@ mod tests {
         let sandbox = Sandbox {
             read: Vec::new(),
             write: Vec::new(),
+            host_view: HostView::Full,
         };
         let write = |dir: &Path| {
             let target = dir.join("out").display().to_string();
@@ -2527,6 +2871,7 @@ mod tests {
         let sandbox = Sandbox {
             read: vec![Path::new("/fixed/read")],
             write: vec![Path::new("/fixed/write")],
+            host_view: HostView::Full,
         };
         assert_eq!(
             sandbox.profile(),

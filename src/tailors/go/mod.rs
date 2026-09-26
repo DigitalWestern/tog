@@ -1479,6 +1479,7 @@ pub fn build_sandboxed(
         write: vec![],
         scratch: scratch.clone(),
         path: format!("{}:/usr/bin:/bin", go_obj.join("bin").display()),
+        host_view: crate::kernel::sandbox::HostView::Full,
     };
     let result = crate::kernel::sandbox::run_build_spec_on_with_activity(platform, &spec, activity)
         .map_err(|e| {

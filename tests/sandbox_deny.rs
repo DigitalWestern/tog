@@ -158,6 +158,7 @@ fn bwrap_contract() {
         write: vec![],
         scratch: scratch.clone(),
         path: "/usr/bin:/bin".into(),
+        host_view: tog::kernel::sandbox::HostView::Full,
     };
     run_build_spec(&network).expect("network must be denied inside bwrap");
     drop(host_connection);
@@ -178,6 +179,7 @@ fn bwrap_contract() {
         write: vec![writable.clone()],
         scratch,
         path: "/usr/bin:/bin".into(),
+        host_view: tog::kernel::sandbox::HostView::Full,
     };
     run_build_spec(&writes).expect("declared write must work and undeclared write must fail");
     assert!(writable.join("allowed").exists());

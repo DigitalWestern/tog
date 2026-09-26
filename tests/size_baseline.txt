@@ -9,11 +9,11 @@ file 1635 src/comforter/mod.rs
 file 2128 src/commands/deps.rs
 file 2215 src/commands/x.rs
 file 1594 src/kernel/store/roots.rs
-file 1866 src/tailors/dotnet/mod.rs
-file 2183 src/tailors/elixir/mod.rs
-file 1539 src/tailors/go/mod.rs
+file 1869 src/tailors/dotnet/mod.rs
+file 2185 src/tailors/elixir/mod.rs
+file 1540 src/tailors/go/mod.rs
 file 1787 src/tailors/node/lock_import/pnpm.rs
-file 1808 src/tailors/node/realize.rs
+file 1809 src/tailors/node/realize.rs
 fn 176 src/comforter/toolchain.rs::resolve
 fn 167 src/commands/audit.rs::render
 fn 159 src/commands/deps.rs::edit_requirements

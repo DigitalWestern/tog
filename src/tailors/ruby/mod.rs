@@ -17,7 +17,7 @@ use crate::kernel::digest::Algo;
 use crate::kernel::fetch::{download_verified_held, hash_file, CacheLease, Digest};
 use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::platform::Platform;
-use crate::kernel::sandbox::{force_env, BuildSpec};
+use crate::kernel::sandbox::{force_env, BuildSpec, HostView};
 use crate::kernel::store::Store;
 use crate::kernel::toolchain::document::Shipped;
 use crate::kernel::toolchain::{ArtifactRow, Catalog, LegacyEvidence, Selected};
@@ -202,6 +202,15 @@ fn ruby_gems_identity(spec: &RubySpec, plan: &RubyPlan) -> Identity {
         ),
         ("ruby_platform".to_string(), plan.ruby_platform.clone()),
     ]);
+    // On Linux, native extensions compile against the host's C runtime
+    // alone (`HostView::RuntimeOnly`; pure-Ruby gems compile nothing and
+    // install against the full view), which is what makes one object id
+    // mean one set of bytes across hosts. A gem that needs more falls back
+    // to the whole host and records `host-build-inputs` in the object's
+    // metadata. Darwin builds see the whole SDK, and their ids are pinned.
+    if !spec.platform.is_macos() {
+        inputs.insert("build_view".to_string(), "runtime-only/1".to_string());
+    }
     for g in &plan.gems {
         inputs.insert(format!("gem:{}", g.full_name), g.sha256.clone());
     }
@@ -556,7 +565,8 @@ if mode == "spec"
   spec = Gem::Package.new(ARGV[0]).spec
   puts({ "name" => spec.name, "version" => spec.version.to_s,
          "platform" => spec.platform.to_s,
-         "executables" => spec.executables }.to_json)
+         "executables" => spec.executables,
+         "extensions" => spec.extensions }.to_json)
   exit 0
 end
 abort "usage: helper plan <lockfile>" unless mode == "plan"
@@ -983,7 +993,8 @@ pub fn plan_ruby(
 /// Fetch one planned gem into the artifact cache, or find it there, verified
 /// against the plan's sha256, then check that its embedded gemspec names
 /// exactly the planned coordinate. Returns the cache lease, which keeps the
-/// `.gem` from being swept while it is held, and the gem's executables.
+/// `.gem` from being swept while it is held, the gem's executables, and
+/// whether its gemspec declares native extensions.
 fn verify_gem(
     store: &Store,
     activity: &StoreActivity,
@@ -991,7 +1002,7 @@ fn verify_gem(
     scratch: &Path,
     helper: &Path,
     g: &RubyGem,
-) -> io::Result<(CacheLease, Vec<String>)> {
+) -> io::Result<(CacheLease, Vec<String>, bool)> {
     let url = gem_url(g);
     let lease = download_verified_held(store, activity, &url, &g.sha256)
         .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", g.full_name)))?;
@@ -1041,7 +1052,12 @@ fn verify_gem(
                 .collect()
         })
         .unwrap_or_default();
-    Ok((lease, executables))
+    // A spec that does not say is treated as native: the hermetic build is
+    // the safe side of the choice `install_gem` makes.
+    let native = spec["extensions"]
+        .as_array()
+        .is_none_or(|extensions| !extensions.is_empty());
+    Ok((lease, executables, native))
 }
 
 /// On an object hit, record the API digests this plan used. The object
@@ -1111,7 +1127,7 @@ pub fn realize_gems(
     let scratch = store.stage_with_activity(activity)?;
     let helper = scratch.join("helper.rb");
     fs::write(&helper, HELPER)?;
-    let mut artifacts: Vec<(&RubyGem, PathBuf)> = Vec::new();
+    let mut artifacts: Vec<(&RubyGem, PathBuf, bool)> = Vec::new();
     // One download per gem, and the lease from that download is held through
     // the sandboxed installs below, so no sweep can drop a `.gem` between
     // verification and use. That is all the lease closes: a same-user
@@ -1120,7 +1136,7 @@ pub fn realize_gems(
     let mut _cache_leases = Vec::new();
     let mut executables: BTreeMap<String, String> = BTreeMap::new();
     for g in &plan.gems {
-        let (lease, exes) = verify_gem(store, activity, ruby_obj, &scratch, &helper, g)?;
+        let (lease, exes, native) = verify_gem(store, activity, ruby_obj, &scratch, &helper, g)?;
         let file_path = lease.to_path_buf();
         _cache_leases.push(lease);
         // The bytes rubygems.org serves match the digest its API gave and
@@ -1137,13 +1153,13 @@ pub fn realize_gems(
                 )));
             }
         }
-        artifacts.push((g, file_path));
+        artifacts.push((g, file_path, native));
     }
 
     let staged = store.stage_with_activity(activity)?;
     let bin = staged.join("bin");
     fs::create_dir_all(&bin)?;
-    for (g, file) in &artifacts {
+    for (g, file, native) in &artifacts {
         // Re-verify immediately before use. The lease held since the download
         // stops a sweep, not a same-user replacement of the cache entry, so
         // the bytes about to be installed are digested again here.
@@ -1162,37 +1178,46 @@ pub fn realize_gems(
         fs::copy(file, &named)?;
         // Dependency-first order comes from the plan (helper topo-sort):
         // extconf.rb may require already-installed dependency gems.
-        let spec = BuildSpec {
-            argv: vec![
-                ruby_obj.join("bin/ruby").display().to_string(),
-                helper.display().to_string(),
-                "install".to_string(),
-                named.display().to_string(),
-                staged.display().to_string(),
-            ],
-            cwd: scratch.clone(),
-            env: vec![
-                ("GEM_HOME".to_string(), staged.display().to_string()),
-                ("GEM_PATH".to_string(), staged.display().to_string()),
-                ("BUNDLE_IGNORE_CONFIG".to_string(), "1".to_string()),
-            ],
-            read: vec![ruby_obj.to_path_buf()],
-            write: vec![staged.clone()],
-            scratch: scratch.clone(),
-            path: format!("{}:/usr/bin:/bin", ruby_obj.join("bin").display()),
+        let install = |host_view: HostView| {
+            let spec = BuildSpec {
+                argv: vec![
+                    ruby_obj.join("bin/ruby").display().to_string(),
+                    helper.display().to_string(),
+                    "install".to_string(),
+                    named.display().to_string(),
+                    staged.display().to_string(),
+                ],
+                cwd: scratch.clone(),
+                env: vec![
+                    ("GEM_HOME".to_string(), staged.display().to_string()),
+                    ("GEM_PATH".to_string(), staged.display().to_string()),
+                    ("BUNDLE_IGNORE_CONFIG".to_string(), "1".to_string()),
+                ],
+                read: vec![ruby_obj.to_path_buf()],
+                write: vec![staged.clone()],
+                scratch: scratch.clone(),
+                path: format!("{}:/usr/bin:/bin", ruby_obj.join("bin").display()),
+                host_view,
+            };
+            crate::kernel::sandbox::run_build_spec_on_with_activity(platform, &spec, activity)
         };
-        crate::kernel::sandbox::run_build_spec_on_with_activity(platform, &spec, activity)
-            .map_err(|e| {
-                io::Error::new(
-                    e.kind(),
-                    format!(
-                        "{}: sandboxed gem install failed: {e}\n(network is denied; \
-                 gems whose installers need network or missing host \
-                 libraries are unsupported in v0)",
-                        g.full_name
-                    ),
-                )
-            })?;
+        install_gem(
+            platform,
+            *native,
+            &g.full_name,
+            crate::kernel::policy::record,
+            install,
+        )
+        .map_err(|e| {
+            io::Error::new(
+                e.kind(),
+                format!(
+                    "{}: sandboxed gem install failed: {e}\n(network is denied inside the \
+                     sandbox, so a gem whose installer downloads anything cannot be installed)",
+                    g.full_name
+                ),
+            )
+        })?;
     }
     let _ = crate::kernel::store::remove_tree(&scratch);
     let mut deps = crate::kernel::store::ObjectDeps::new();
@@ -1200,9 +1225,94 @@ pub fn realize_gems(
     for gem in &plan.gems {
         deps.cache_digest(Digest::sha256(&gem.sha256)?);
     }
-    store
-        .commit_with_activity_and_deps(activity, &identity, &staged, &[], &deps)
-        .map(|(path, _)| path)
+    // A gem rebuilt against the whole host recorded `host-build-inputs`:
+    // the object carries it, so a later cache hit replays it through
+    // `check_cached_with_activity` above and a policy that denies the kind
+    // refuses the cached object too.
+    let candidate = crate::kernel::policy::object_exceptions();
+    let (object, applied) = store
+        .commit_with_activity_and_deps(activity, &identity, &staged, &candidate, &deps)
+        .map_err(|e| io::Error::new(e.kind(), format!("commit gems: {e}")))?;
+    for exception in applied {
+        if !candidate.contains(&exception) {
+            crate::kernel::policy::record(&exception.kind, &exception.subject, &exception.detail)?;
+        }
+    }
+    Ok(object)
+}
+
+/// Install one gem with the host view its build needs. A gem whose gemspec
+/// declares native extensions builds hermetic-first on Linux
+/// (`install_hermetic_first`). A pure-Ruby gem compiles nothing, so no view
+/// can change its bytes: it installs once against `HostView::Full`, skips
+/// the view's setup cost, and never records `host-build-inputs`. On macOS
+/// Seatbelt has no C-runtime-only view yet (see `HostView`), so a second
+/// attempt would only repeat the first.
+fn install_gem(
+    platform: Platform,
+    native: bool,
+    gem: &str,
+    record: impl FnOnce(&str, &str, &str) -> io::Result<()>,
+    mut install: impl FnMut(HostView) -> io::Result<()>,
+) -> io::Result<()> {
+    if native && !platform.is_macos() {
+        install_hermetic_first(gem, record, install)
+    } else {
+        install(HostView::Full)
+    }
+}
+
+/// What a `host-build-inputs` exception says about a gem.
+const HOST_BUILD_INPUTS_DETAIL: &str = "native extension did not build against the C runtime \
+     alone; rebuilt against this machine's development headers and libraries, so the object \
+     depends on which -dev packages the host has";
+
+/// Install one gem against the host's C runtime alone, and only if that
+/// build fails, against the whole host. The fallback is an exception, and
+/// it is recorded before the second attempt runs, so a policy that denies
+/// `host-build-inputs` stops here with nothing built against the host.
+///
+/// A sandbox that could not be set up, or a run tog was asked to stop,
+/// says nothing about the gem and is returned as is.
+///
+/// The second attempt starts clean without help: `Gem::Installer#install`
+/// removes the gem's directory and its extension directory before it
+/// extracts anything (`FileUtils.rm_rf gem_dir` and
+/// `spec.extension_dir` in rubygems/installer.rb), and a failed extension
+/// build stops it before it writes the build info, binstubs, plugins,
+/// spec or cache entry.
+fn install_hermetic_first(
+    gem: &str,
+    record: impl FnOnce(&str, &str, &str) -> io::Result<()>,
+    mut install: impl FnMut(HostView) -> io::Result<()>,
+) -> io::Result<()> {
+    let hermetic = match install(HostView::RuntimeOnly) {
+        Ok(()) => return Ok(()),
+        Err(error) => error,
+    };
+    if matches!(
+        hermetic.kind(),
+        io::ErrorKind::Unsupported | io::ErrorKind::Interrupted
+    ) {
+        return Err(hermetic);
+    }
+    let attempts = format!("the build against the C runtime alone failed ({hermetic})");
+    if let Err(refusal) = record(
+        crate::kernel::policy::HOST_BUILD_INPUTS,
+        gem,
+        HOST_BUILD_INPUTS_DETAIL,
+    ) {
+        return Err(io::Error::new(
+            refusal.kind(),
+            format!("{attempts}, and it was not retried against the whole host: {refusal}"),
+        ));
+    }
+    install(HostView::Full).map_err(|full| {
+        io::Error::new(
+            full.kind(),
+            format!("{attempts}, and so did the build against this machine's whole /usr ({full})"),
+        )
+    })
 }
 
 /// Project provenance (closure envelope); enforcement is env, set at run.
@@ -1445,9 +1555,187 @@ mod tests {
             ),
             (
                 "192a4c7b501dd09eb3c76a3ebd427e8077fbda6e-ruby-3.4.6".to_string(),
-                "ee94737d938d41b8454fd6ea7d75dc737ccf73e5-gems-1".to_string(),
+                // runtime-only/1: native extensions see the C runtime alone.
+                "24d2dc19be2a56388a92bc93e964986f90568d5e-gems-1".to_string(),
             )
         );
+    }
+
+    /// Linux gem objects name the host view their extensions built
+    /// against; Darwin's inputs are what they were, so its ids stand.
+    #[test]
+    fn linux_gem_identity_names_the_runtime_only_view() {
+        let plan = linux_test_plan();
+        let linux = ruby_gems_identity(&pin_spec(Platform::X86_64UnknownLinuxGnu), &plan);
+        assert_eq!(linux.inputs["build_view"], "runtime-only/1");
+        let darwin = ruby_gems_identity(&pin_spec(Platform::Aarch64AppleDarwin), &plan);
+        assert!(!darwin.inputs.contains_key("build_view"), "{darwin:?}");
+    }
+
+    /// Runs `install_hermetic_first` with scripted attempt results and a
+    /// real attribution frame, returning the result, the views tried in
+    /// order, and what was recorded.
+    fn hermetic_first(
+        policy: &crate::kernel::policy::Policy,
+        mut results: Vec<io::Result<()>>,
+    ) -> (
+        io::Result<()>,
+        Vec<HostView>,
+        Vec<crate::kernel::policy::Exception>,
+    ) {
+        let _lock = crate::kernel::policy::attribution_test_lock();
+        let attribution = crate::kernel::policy::Attribution::open("ruby").unwrap();
+        let mut views = Vec::new();
+        results.reverse();
+        let result = install_hermetic_first(
+            "nokogiri-1.18.10",
+            |kind, subject, detail| {
+                crate::kernel::policy::record_with(policy, kind, subject, detail)
+            },
+            |view| {
+                views.push(view);
+                results.pop().expect("an attempt the test did not script")
+            },
+        );
+        let recorded = attribution.recorded();
+        attribution.discard();
+        (result, views, recorded)
+    }
+
+    fn failed(what: &str) -> io::Result<()> {
+        Err(io::Error::other(format!(
+            "sandboxed command failed: {what}"
+        )))
+    }
+
+    #[test]
+    fn a_gem_that_builds_against_the_c_runtime_records_nothing() {
+        let (result, views, recorded) =
+            hermetic_first(&crate::kernel::policy::Policy::default(), vec![Ok(())]);
+        result.unwrap();
+        assert_eq!(views, [HostView::RuntimeOnly]);
+        assert!(recorded.is_empty(), "{recorded:?}");
+    }
+
+    #[test]
+    fn a_gem_that_needs_the_host_is_rebuilt_and_recorded() {
+        let (result, views, recorded) = hermetic_first(
+            &crate::kernel::policy::Policy::default(),
+            vec![failed("lzma.h not found"), Ok(())],
+        );
+        result.unwrap();
+        assert_eq!(views, [HostView::RuntimeOnly, HostView::Full]);
+        assert_eq!(recorded.len(), 1, "{recorded:?}");
+        assert_eq!(recorded[0].kind, crate::kernel::policy::HOST_BUILD_INPUTS);
+        assert_eq!(recorded[0].subject, "nokogiri-1.18.10");
+        assert_eq!(recorded[0].detail, HOST_BUILD_INPUTS_DETAIL);
+    }
+
+    /// A policy that denies the kind stops before anything is built
+    /// against the host, and says the hermetic build is what failed.
+    #[test]
+    fn a_denied_fallback_never_builds_against_the_host() {
+        let policy = crate::kernel::policy::Policy {
+            deny: [crate::kernel::policy::HOST_BUILD_INPUTS.to_string()]
+                .into_iter()
+                .collect(),
+            ..crate::kernel::policy::Policy::default()
+        };
+        let (result, views, recorded) = hermetic_first(&policy, vec![failed("lzma.h not found")]);
+        let error = result.unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        let message = error.to_string();
+        assert!(message.contains("C runtime alone failed"), "{message}");
+        assert!(message.contains("lzma.h not found"), "{message}");
+        assert!(
+            message.contains("policy denies host-build-inputs"),
+            "{message}"
+        );
+        assert_eq!(views, [HostView::RuntimeOnly]);
+        assert!(recorded.is_empty(), "{recorded:?}");
+    }
+
+    #[test]
+    fn a_gem_that_fails_both_ways_names_both_attempts() {
+        let (result, views, _) = hermetic_first(
+            &crate::kernel::policy::Policy::default(),
+            vec![failed("first"), failed("second")],
+        );
+        let message = result.unwrap_err().to_string();
+        assert!(message.contains("C runtime alone failed"), "{message}");
+        assert!(message.contains("first"), "{message}");
+        assert!(message.contains("whole /usr"), "{message}");
+        assert!(message.contains("second"), "{message}");
+        assert_eq!(views, [HostView::RuntimeOnly, HostView::Full]);
+    }
+
+    /// Only a gem with native extensions pays for the C-runtime-only view
+    /// and can fall back; a pure-Ruby gem installs once against the full
+    /// view even when that install fails, and records nothing.
+    #[test]
+    fn only_native_gems_build_hermetic_first() {
+        let _lock = crate::kernel::policy::attribution_test_lock();
+        let attribution = crate::kernel::policy::Attribution::open("ruby").unwrap();
+        let record = |kind: &str, subject: &str, detail: &str| {
+            crate::kernel::policy::record_with(
+                &crate::kernel::policy::Policy::default(),
+                kind,
+                subject,
+                detail,
+            )
+        };
+        let linux = Platform::X86_64UnknownLinuxGnu;
+        let mut native_views = Vec::new();
+        install_gem(linux, true, "nokogiri-1.18.10", record, |view| {
+            native_views.push(view);
+            match view {
+                HostView::RuntimeOnly => failed("lzma.h not found"),
+                HostView::Full => Ok(()),
+            }
+        })
+        .unwrap();
+        assert_eq!(native_views, [HostView::RuntimeOnly, HostView::Full]);
+        assert_eq!(attribution.recorded().len(), 1);
+
+        crate::kernel::policy::clear();
+        let mut pure_views = Vec::new();
+        let result = install_gem(linux, false, "rake-13.4.2", record, |view| {
+            pure_views.push(view);
+            failed("rake")
+        });
+        assert!(result.is_err());
+        assert_eq!(pure_views, [HostView::Full]);
+        assert!(attribution.recorded().is_empty());
+
+        let mut darwin_views = Vec::new();
+        install_gem(
+            Platform::Aarch64AppleDarwin,
+            true,
+            "nokogiri-1.18.10",
+            record,
+            |view| {
+                darwin_views.push(view);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(darwin_views, [HostView::Full]);
+        attribution.discard();
+    }
+
+    /// A sandbox that could not start, or a stop request, is not the gem
+    /// failing to build: no exception, no second attempt.
+    #[test]
+    fn setup_failures_and_interrupts_are_not_retried() {
+        for kind in [io::ErrorKind::Unsupported, io::ErrorKind::Interrupted] {
+            let (result, views, recorded) = hermetic_first(
+                &crate::kernel::policy::Policy::default(),
+                vec![Err(io::Error::new(kind, "bwrap: setup"))],
+            );
+            assert_eq!(result.unwrap_err().kind(), kind);
+            assert_eq!(views, [HostView::RuntimeOnly]);
+            assert!(recorded.is_empty(), "{recorded:?}");
+        }
     }
 
     #[test]

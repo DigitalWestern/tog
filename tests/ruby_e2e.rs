@@ -174,7 +174,11 @@ fn collect_symlinks(root: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// glibc sonames the portable bottle may legitimately need from the host.
+/// glibc sonames the portable bottle, and a gem extension built against the
+/// host C runtime alone, may legitimately need from the host. Nothing else:
+/// the gem sandbox hides every other host library (`HostView::RuntimeOnly`),
+/// so nokogiri's vendored libxml2 finds neither zlib nor liblzma and links
+/// glibc only, on every host (issue #304).
 fn is_glibc_soname(soname: &str) -> bool {
     [
         "libc.so",
@@ -185,11 +189,6 @@ fn is_glibc_soname(soname: &str) -> bool {
         "libcrypt.so",
         "libutil.so",
         "ld-linux-x86-64.so",
-        // Not glibc, but a host library every source-built native gem may
-        // legitimately link: nokogiri's vendored libxml2 links the host zlib
-        // (zlib-ng-compat-devel on Fedora). Same trust class as the host C
-        // toolchain (docs/human/ARCHITECTURE.md, Platforms).
-        "libz.so",
     ]
     .iter()
     .any(|prefix| soname.starts_with(prefix))
@@ -537,6 +536,23 @@ fn ruby_sync_native_ext_and_run() {
             inputs["ruby_platform"].as_str().unwrap(),
             platform_local,
             "gem object platform must be the pinned interpreter's Gem::Platform.local"
+        );
+        assert_eq!(
+            inputs["build_view"].as_str(),
+            Some("runtime-only/1"),
+            "{inputs:?}"
+        );
+        // Every native gem here (racc, nokogiri) builds against the host C
+        // runtime alone: none fell back to the whole host.
+        let exceptions = gems_meta["exceptions"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            !exceptions
+                .iter()
+                .any(|exception| exception["kind"] == "host-build-inputs"),
+            "a gem was rebuilt against the whole host: {exceptions:?}"
         );
     }
 

@@ -207,6 +207,7 @@ impl Manifest {
             write: vec![scratch.clone()],
             scratch: scratch.clone(),
             path: format!("{}:/usr/bin:/bin", build_env.join("bin").display()),
+            host_view: crate::kernel::sandbox::HostView::Full,
         };
         let result =
             crate::kernel::sandbox::run_build_spec_on_with_activity(platform, &spec, activity);

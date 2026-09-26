@@ -47,6 +47,10 @@ pub const BUILT_FROM_SOURCE: &str = "built-from-source";
 /// The toolchain is a directory on this machine (rustup's `[toolchain]
 /// path`), locked by its content hash, not a pinned catalog release.
 pub const EXTERNAL_TOOLCHAIN: &str = "external-toolchain";
+/// A native extension did not build against the host's C runtime alone and
+/// was rebuilt against the machine's whole `/usr`, so the object depends on
+/// which development packages the building host has installed.
+pub const HOST_BUILD_INPUTS: &str = "host-build-inputs";
 
 pub const KINDS: &[&str] = &[
     REQUIREMENT_SKIPPED,
@@ -63,6 +67,7 @@ pub const KINDS: &[&str] = &[
     ARTIFACT_PROVISIONED,
     BUILT_FROM_SOURCE,
     EXTERNAL_TOOLCHAIN,
+    HOST_BUILD_INPUTS,
 ];
 
 /// Kinds were spelled with two separators until the names were unified on
@@ -982,6 +987,7 @@ pub fn object_exceptions() -> Vec<Exception> {
                             | INSTALL_SCRIPT_FAILED
                             | GIT_DEPENDENCY
                             | UNATTESTED_CARGO_LOCK
+                            | HOST_BUILD_INPUTS
                     )
                 })
                 .cloned()
@@ -1164,6 +1170,34 @@ deny = ["git-dependency"]"#,
         record_with(&Policy::default(), "x", "s", "d").unwrap();
         assert_eq!(drain().len(), 1);
         attribution.discard();
+    }
+
+    /// A gem rebuilt against the whole host has different bytes from one
+    /// built against the C runtime alone, so `host-build-inputs` belongs to
+    /// the object: the commit keeps it and a cache hit replays it.
+    #[test]
+    fn host_build_inputs_is_a_known_object_exception() {
+        assert!(KINDS.contains(&HOST_BUILD_INPUTS));
+        let _guard = exception_guard();
+        let attribution = Attribution::open("ruby").unwrap();
+        record_with(
+            &Policy::default(),
+            HOST_BUILD_INPUTS,
+            "nokogiri-1.18.10",
+            "d",
+        )
+        .unwrap();
+        record_with(&Policy::default(), SKIPPED_OPTIONAL, "extra", "d").unwrap();
+        let object = object_exceptions();
+        attribution.discard();
+        assert_eq!(object.len(), 1, "{object:?}");
+        assert_eq!(object[0].kind, HOST_BUILD_INPUTS);
+        let denying = parse_file(
+            Path::new("/co/policy.toml"),
+            "deny = [\"host-build-inputs\"]\n",
+        )
+        .unwrap();
+        assert!(denied(&denying, HOST_BUILD_INPUTS));
     }
 
     #[test]

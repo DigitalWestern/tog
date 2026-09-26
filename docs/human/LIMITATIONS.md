@@ -125,10 +125,18 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
 - **`cargo test -- --ignored` must run single-threaded**: the supervisor owns process-wide
   signal dispositions and rejects a second concurrent child (`--test-threads=1`; the offline
   suite holds `SUPERVISION_TEST_LOCK`).
-- **Unpinned host build inputs.** The Linux host C toolchain (gcc, glibc headers, host zlib)
+- **Unpinned host build inputs.** The Linux host C toolchain (gcc, binutils, glibc headers)
   and the macOS Xcode/clang/SDK are not in build identity — two hosts can produce different
-  "identical" objects. The Linux OTP artifact needs glibc 2.43 and host `libcrypto.so.3`;
-  source-built gems/addons link host libraries.
+  "identical" objects. The Linux OTP artifact needs glibc 2.43 and host `libcrypto.so.3`.
+  Linux gem native extensions build against the host C runtime alone (glibc, kernel headers,
+  libxcrypt, the compiler's own files): every other host header, `-l` library, static
+  archive and pkg-config file is absent from that sandbox. A gem that needs another host
+  library fails that build, is rebuilt against the whole host, and records
+  `host-build-inputs`, which a policy can deny. Pure-Ruby gems compile nothing and install
+  against the whole host. Setting the view up costs about two seconds per native gem on a
+  Fedora 44 workstation, and more on a host with a larger library directory.
+  Python sdist builds and npm addons still see the whole host `/usr` and can link any host
+  library. macOS gem builds are unchanged.
 - **Pinned native-library objects are store-root-specific**: `native-libs/libset/3` includes
   the canonical `TOG_STORE` root in its identity; moving a store requires re-realizing the
   libset. **Linux sandbox roots are canonical paths** (a symlink alias root is invisible).

@@ -803,6 +803,7 @@ fn run_sdist_build(
             .chain(native_libs)
             .collect(),
         write: vec![work],
+        host_view: crate::kernel::sandbox::HostView::Full,
     };
     crate::kernel::sandbox::run_build_spec_on_with_activity(
         platform,
@@ -814,6 +815,7 @@ fn run_sdist_build(
             write: sb.write.iter().map(|path| path.to_path_buf()).collect(),
             scratch: work.to_path_buf(),
             path,
+            host_view: crate::kernel::sandbox::HostView::Full,
         },
         activity,
     )

@@ -30,12 +30,12 @@ pub static KINDS: &[KindAdapter] = &[
         schema: Some("ruby-gems/1"),
         superseded_by: None,
         live_required: &["schema", "installer", "ruby_platform"],
-        live_optional: &["gem:"],
+        live_optional: &["build_view", "gem:"],
         legacy_only: &[],
         live_contract: Some(ruby_gems_contract),
         grammar: Grammar {
             required: &["schema", "installer"],
-            optional: &["ruby_platform"],
+            optional: &["ruby_platform", "build_view"],
             groups: &[("gem:", None)],
         },
         adapt: ruby_gems,
@@ -66,7 +66,9 @@ fn ruby_gems_contract(identity: &Identity) -> Result<(), String> {
 }
 
 /// `ruby-gems/1`: the installer is a `ruby<version>:<sha256>` fingerprint;
-/// each gem contributes its `.gem` sha256.
+/// each gem contributes its `.gem` sha256. `build_view` (Linux) names what
+/// of the host the native extensions compiled against and carries no
+/// dependency.
 fn ruby_gems(record: &Record, index: &MetaIndex) -> Result<ObjectDeps, String> {
     let installer = input(record, "installer")?;
     let (version, sha256) = installer
@@ -93,7 +95,7 @@ fn ruby_gems(record: &Record, index: &MetaIndex) -> Result<ObjectDeps, String> {
     for (key, value) in &record.identity.inputs {
         if let Some(gem) = key.strip_prefix("gem:") {
             add_digest(&mut deps, Algo::Sha256, value, &format!("gem {gem}"))?;
-        } else if key != "schema" && key != "installer" && key != "ruby_platform" {
+        } else if !["schema", "installer", "ruby_platform", "build_view"].contains(&key.as_str()) {
             return Err(format!("unexpected identity input {key}"));
         }
     }
