@@ -831,8 +831,8 @@ fn extract_tarball_packages(
         // below rewrites every mode afterwards, so the store content is
         // identical either way.
         let options = crate::kernel::archive::ExtractOptions {
-            strip: 1,
             delay_directory_restore: !platform.is_macos(),
+            ..crate::kernel::archive::ExtractOptions::stripped(1)
         };
         crate::kernel::archive::extract_with_activity_and_options(
             activity,

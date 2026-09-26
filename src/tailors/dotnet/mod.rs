@@ -315,7 +315,7 @@ fn extract_sdk_archive(tarball: &Path, staged: &Path) -> io::Result<()> {
     crate::kernel::archive::extract_with_options(
         tarball,
         staged,
-        &ExtractOptions::stripped(0),
+        &ExtractOptions::platform_build(0),
         Compression::Gzip,
     )
     .map(|_| ())
@@ -335,7 +335,7 @@ fn extract_sdk_archive_for(
         activity,
         tarball,
         staged,
-        &ExtractOptions::stripped(0),
+        &ExtractOptions::platform_build(0),
         Compression::Gzip,
     )
     .map(|_| ())

@@ -1009,7 +1009,7 @@ fn extract_otp(
     destination: &Path,
     platform: Platform,
 ) -> io::Result<()> {
-    let options = ExtractOptions::stripped(otp_strip_components(platform) as usize);
+    let options = ExtractOptions::platform_build(otp_strip_components(platform) as usize);
     let extracted = match activity {
         Some(activity) => extract_with_activity_and_options(
             activity,

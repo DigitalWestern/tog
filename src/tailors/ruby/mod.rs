@@ -319,7 +319,7 @@ fn extract_ruby_bottle(activity: &StoreActivity, tarball: &Path, staged: &Path) 
         activity,
         tarball,
         staged,
-        &crate::kernel::archive::ExtractOptions::stripped(2),
+        &crate::kernel::archive::ExtractOptions::platform_build(2),
         crate::kernel::archive::Compression::Gzip,
     )
     .map_err(|e| io::Error::new(e.kind(), format!("extract portable-ruby bottle: {e}")))?;
@@ -331,7 +331,7 @@ fn extract_ruby_bottle_for_test(tarball: &Path, staged: &Path) -> io::Result<()>
     crate::kernel::archive::extract_with_options(
         tarball,
         staged,
-        &crate::kernel::archive::ExtractOptions::stripped(2),
+        &crate::kernel::archive::ExtractOptions::platform_build(2),
         crate::kernel::archive::Compression::Gzip,
     )
     .map_err(|e| io::Error::new(e.kind(), format!("extract portable-ruby bottle: {e}")))?;

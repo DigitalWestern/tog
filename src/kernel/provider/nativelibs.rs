@@ -718,7 +718,7 @@ fn extract_package(
             activity,
             archive,
             package_root,
-            &crate::kernel::archive::ExtractOptions::stripped(0),
+            &crate::kernel::archive::ExtractOptions::platform_build(0),
             crate::kernel::archive::Compression::Bzip2,
         )
         .map_err(|e| io::Error::new(e.kind(), format!("extract {}: {e}", package.filename)))?;
@@ -820,7 +820,7 @@ fn extract_tar(activity: &StoreActivity, archive: &Path, destination: &Path) -> 
         activity,
         archive,
         destination,
-        &crate::kernel::archive::ExtractOptions::stripped(0),
+        &crate::kernel::archive::ExtractOptions::platform_build(0),
         crate::kernel::archive::Compression::None,
     )
     .map(|_| ())

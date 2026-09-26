@@ -575,11 +575,11 @@ fn realize_component(
     let entries = archive::list_with_activity(activity, &lease, archive.compression)?;
     check_installer_layout(&entries, archive)?;
     let staged = store.stage_with_activity(activity)?;
-    let extracted = archive::extract_validated_with_activity(
+    let extracted = archive::extract_validated_with_activity_and_options(
         activity,
         &lease,
         &staged,
-        2,
+        &archive::ExtractOptions::platform_build(2),
         archive.compression,
         &entries,
     )

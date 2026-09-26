@@ -534,11 +534,11 @@ fn stage_rustfmt(
     let full = staged.join(".tog-rustfmt-full");
     let extracted = (|| -> io::Result<()> {
         fs::create_dir_all(&full)?;
-        crate::kernel::archive::extract_validated_with_activity(
+        crate::kernel::archive::extract_validated_with_activity_and_options(
             activity,
             archive,
             &full,
-            2,
+            &crate::kernel::archive::ExtractOptions::platform_build(2),
             crate::kernel::archive::Compression::Xz,
             &listed,
         )

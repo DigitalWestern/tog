@@ -416,7 +416,7 @@ pub fn realize_runtime(
         activity,
         &tarball,
         &staged,
-        &crate::kernel::archive::ExtractOptions::stripped(1),
+        &crate::kernel::archive::ExtractOptions::platform_build(1),
         crate::kernel::archive::Compression::Gzip,
     )
     .map_err(|e| io::Error::new(e.kind(), format!("extract node tarball: {e}")))?;

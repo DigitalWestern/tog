@@ -409,7 +409,7 @@ fn extract_rust_components_for(
             activity,
             tarball,
             staged,
-            &crate::kernel::archive::ExtractOptions::stripped(2),
+            &crate::kernel::archive::ExtractOptions::platform_build(2),
             crate::kernel::archive::Compression::Xz,
         )
         .map_err(|e| io::Error::new(e.kind(), format!("extract tarball for {component}: {e}")))?;
@@ -432,7 +432,7 @@ pub fn extract_rust_components(
         crate::kernel::archive::extract_with_options(
             tarball,
             staged,
-            &crate::kernel::archive::ExtractOptions::stripped(2),
+            &crate::kernel::archive::ExtractOptions::platform_build(2),
             crate::kernel::archive::Compression::Xz,
         )
         .map_err(|e| io::Error::new(e.kind(), format!("extract tarball for {component}: {e}")))?;

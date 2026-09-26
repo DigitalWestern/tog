@@ -957,6 +957,14 @@ fn invisible(text: &str) -> Option<&'static str> {
 /// still checked: a hard link, a device, an absolute name or a `..`
 /// component is refused wherever it sits.
 pub fn validate(entries: &[Entry], strip: usize) -> io::Result<()> {
+    validate_with_options(entries, &ExtractOptions::stripped(strip))
+}
+
+/// [`validate`] under the extraction's full options: `strip`, and whether
+/// the archive is a per-platform build that only this host's platform
+/// ever extracts (see [`ExtractOptions::platform_specific`]).
+pub fn validate_with_options(entries: &[Entry], options: &ExtractOptions) -> io::Result<()> {
+    let strip = options.strip;
     let mut kept: Vec<(&Entry, Vec<&str>)> = Vec::new();
     for entry in entries {
         match entry.kind {
@@ -992,8 +1000,14 @@ pub fn validate(entries: &[Entry], strip: usize) -> io::Result<()> {
     // prefix counts, since `Lib/a` and `lib/b` share one directory on APFS
     // and two on Linux. Identical spellings are tar's ordinary
     // last-one-wins on both.
+    //
+    // A per-platform build is only ever extracted on its own platform, so
+    // there is no second tree to diverge from: Linux keeps both names, as
+    // the archive says. It is still checked on macOS, where APFS would
+    // merge them.
+    let check_folding = !options.platform_specific || cfg!(target_os = "macos");
     let mut folded: BTreeMap<String, String> = BTreeMap::new();
-    for (_, stripped) in &kept {
+    for (_, stripped) in kept.iter().filter(|_| check_folding) {
         for end in 1..=stripped.len() {
             let prefix = stripped[..end].join("/");
             match folded.get(&folded_name(&prefix)) {
@@ -1151,17 +1165,38 @@ pub fn extract(
 /// children. Applying directory modes after extraction keeps the tree
 /// identical on both tars (bsdtar descends anyway). It is a GNU-only flag,
 /// so on macOS it changes nothing.
+///
+/// `platform_specific` marks a per-platform build (a toolchain, a conda
+/// package, tog's own release binary): an archive pinned for one platform
+/// and extracted only there. For those the case and normalization
+/// collision check runs only on a case-insensitive host (macOS), because
+/// on Linux both names are simply two files and no other platform ever
+/// sees the archive. python-build-standalone's Linux CPython ships
+/// `share/terminfo/2/2621A` beside `2621a`, and conda-forge's Linux
+/// ncurses `share/terminfo/N` beside `n`. Registry packages (npm, sdists,
+/// crates, Hex) install on every platform and keep the check everywhere.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ExtractOptions {
     pub strip: usize,
     pub delay_directory_restore: bool,
+    pub platform_specific: bool,
 }
 
 impl ExtractOptions {
+    /// A platform-neutral archive: the collision check runs everywhere.
     pub fn stripped(strip: usize) -> Self {
         ExtractOptions {
             strip,
             delay_directory_restore: false,
+            platform_specific: false,
+        }
+    }
+
+    /// A per-platform build, extracted only on the platform it was built for.
+    pub fn platform_build(strip: usize) -> Self {
+        ExtractOptions {
+            platform_specific: true,
+            ..ExtractOptions::stripped(strip)
         }
     }
 }
@@ -1412,7 +1447,7 @@ fn extract_validated_inner(
     entries: &[Entry],
     activity: Option<&StoreActivity>,
 ) -> io::Result<()> {
-    validate(entries, options.strip)?;
+    validate_with_options(entries, options)?;
     let mut command = extract_command(archive, destination, options, compression);
     let status = status_for(&mut command, activity)
         .map_err(|e| io::Error::new(e.kind(), format!("extract {}: {e}", archive.display())))?;
@@ -2169,6 +2204,7 @@ mod tests {
         let delayed = ExtractOptions {
             strip: 1,
             delay_directory_restore: true,
+            ..ExtractOptions::stripped(1)
         };
         let delayed_args = args(&extract_command(
             archive,
@@ -2559,6 +2595,43 @@ mod tests {
             error.to_string().contains("one name on a case-insensitive"),
             "{error}"
         );
+    }
+
+    /// A per-platform build is extracted only on its own platform, so two
+    /// names that fold together are two files on Linux and a refusal only
+    /// on a case-insensitive host. Linux CPython's terminfo carries
+    /// `2621A` beside `2621a`. Containment is unchanged: a write through a
+    /// case-folded symlink name is still refused everywhere.
+    #[test]
+    fn a_platform_build_checks_folding_only_on_a_case_insensitive_host() {
+        let file = |name: &str| entry(EntryKind::File, name, None);
+        let entries = [
+            file("python/share/terminfo/2/2621A"),
+            file("python/share/terminfo/2/2621a"),
+        ];
+        let platform = validate_with_options(&entries, &ExtractOptions::platform_build(1));
+        if cfg!(target_os = "macos") {
+            let error = platform.expect_err("APFS merges the two names");
+            assert!(
+                error.to_string().contains("one name on a case-insensitive"),
+                "{error}"
+            );
+        } else {
+            platform.unwrap();
+        }
+        // A platform-neutral archive refuses on every host.
+        let error = validate_with_options(&entries, &ExtractOptions::stripped(1))
+            .expect_err("portable archives keep the check");
+        assert!(
+            error.to_string().contains("one name on a case-insensitive"),
+            "{error}"
+        );
+        let link = |name: &str, target: &str| entry(EntryKind::Symlink, name, Some(target));
+        validate_with_options(
+            &[link("p/s", "."), file("p/S/x")],
+            &ExtractOptions::platform_build(0),
+        )
+        .expect_err("write through a case-folded symlink");
     }
 
     #[test]

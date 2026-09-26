@@ -151,7 +151,9 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   GNU long names), cross-checks that listing against `tar -t`, refuses the whole archive on an
   absolute name, `..`, a hard link, a special file, an escaping symlink, a name that is not
   UTF-8 or carries a control, bidirectional-override or zero-width character, two names that
-  APFS would fold into one (by case or by Unicode normalization), or a layout it cannot model
+  APFS would fold into one (by case or by Unicode normalization; for a per-platform build such
+  as a toolchain or conda package, only on macOS, since Linux CPython and ncurses ship
+  terminfo names like `2621A` beside `2621a`), or a layout it cannot model
   (sparse members, a global header that renames, a PAX key it does not know, unknown type
   letters, bad checksums), refuses past a 1 GiB running member-data budget before anything
   is written, and extracts with `TAR_OPTIONS` unset and tar told to restore no
