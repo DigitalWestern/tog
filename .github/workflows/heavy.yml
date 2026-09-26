@@ -8,7 +8,8 @@
 # suite there. It does run on a pull request in two cases, decided by the
 # `gate` job below:
 #   - the PR changes a file listed in `gate` (tar extraction, downloads,
-#     or the heavy suite itself). Real toolchain archives carry shapes
+#     the toolchain providers and catalogs, Cargo.lock, or the heavy
+#     suite itself). Real toolchain archives carry shapes
 #     no fixture had: #316 was green in ci.yml and broke 15 targets here.
 #   - the PR has the `heavy` label. Adding it starts a run, and every
 #     later push to the PR runs again until the label comes off.
@@ -56,16 +57,26 @@ jobs:
           PR: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
-          # The files whose changes need the heavy suite, as one regex.
-          watched='^(src/kernel/archive\.rs|src/kernel/fetch[^/]*|\.github/workflows/heavy\.yml|tests/acceptance\.sh)$'
+          # The files whose changes need the heavy suite, as one regex:
+          # tar extraction and downloads, the toolchain providers that
+          # extract real archives, the catalogs that pin those archives,
+          # Cargo.lock (the decompression crates), and the heavy suite
+          # itself. The tailors also extract, but nearly every PR touches
+          # them; a tailor change that alters extraction gets the label.
+          watched='^(src/kernel/(archive|fetch)[^/]*|src/kernel/(archive|fetch)/.*|src/kernel/provider/.*|src/.*catalog\.toml|Cargo\.lock|\.github/workflows/heavy\.yml|tests/acceptance\.sh)$'
           if [ "$ACTION" = labeled ]; then
             # Some other label was added: nothing about the code changed.
             if [ "$ADDED_LABEL" = heavy ]; then run=yes; else run=no; fi
           elif [ "$HAS_LABEL" = true ]; then
             run=yes
           else
-            files=$(gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR/files" --jq '.[].filename')
-            if grep -qE "$watched" <<< "$files"; then run=yes; else run=no; fi
+            # A renamed file counts under its old name too. If the API
+            # call fails, run: a missed heavy run is the costlier mistake.
+            if ! files=$(gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR/files" \
+                --jq '.[] | .filename, (.previous_filename // empty)'); then
+              echo "::warning::could not list the PR's files; running the heavy suite"
+              run=yes
+            elif grep -qE "$watched" <<< "$files"; then run=yes; else run=no; fi
           fi
           echo "run=$run"
           echo "run=$run" >> "$GITHUB_OUTPUT"
