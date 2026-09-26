@@ -710,3 +710,128 @@ puts JSON.generate("native" => File.realpath(native), "value" => value,
     // alone; a plan regenerates the lock with the store bundler.
     assert_frozen_never_writes_the_lock(&project, &temp.0, "Gemfile.lock");
 }
+
+/// Linux project whose only gem is the source `zlib` gem. Its extension
+/// needs the host's `zlib.h` and `libz.so`, which the C-runtime-only view
+/// hides, and it bundles no zlib source of its own, so its hermetic build
+/// fails and it falls back to the whole host.
+fn zlib_project_files(project: &Path) {
+    std::fs::write(
+        project.join("Gemfile"),
+        r#"source "https://rubygems.org"
+
+gem "zlib", "3.2.3"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("Gemfile.lock"),
+        r#"GEM
+  remote: https://rubygems.org/
+  specs:
+    zlib (3.2.3)
+
+PLATFORMS
+  ruby
+
+DEPENDENCIES
+  zlib (= 3.2.3)
+
+BUNDLED WITH
+   2.6.9
+"#,
+    )
+    .unwrap();
+}
+
+/// A gem that needs host development packages still installs: it falls
+/// back to the whole host, the object is committed under its own
+/// `host-fallback/1` identity with a `host-build-inputs` exception naming
+/// the gem, and the next sync finds that object through the store record
+/// instead of building again (issue #304).
+#[test]
+#[ignore]
+#[cfg(target_os = "linux")]
+fn ruby_gem_needing_host_headers_falls_back_once() {
+    if !Path::new("/usr/include/zlib.h").is_file() {
+        eprintln!("skipped: this host has no /usr/include/zlib.h (zlib development package)");
+        return;
+    }
+    const ZLIB_SHA256: &str = "5bd316698b32f31a64ab910a8b6c282442ca1626a81bbd6a1674e8522e319c20";
+    let temp = TempDir::new("ruby-e2e-fallback");
+    let project = temp.0.join("ruby-zlib");
+    std::fs::create_dir_all(&project).unwrap();
+    zlib_project_files(&project);
+    let store = temp.0.join("store");
+
+    assert_ok(tog(&project, &temp.0, &["sync"]), "sync");
+    let (gems_obj, gems_meta) = find_object(&store, "ruby-gems").expect("gems object published");
+    assert_immutable_tree(&gems_obj);
+    let inputs = gems_meta["identity"]["inputs"].as_object().unwrap();
+    assert_eq!(
+        inputs["gem:zlib-3.2.3"].as_str(),
+        Some(ZLIB_SHA256),
+        "{inputs:?}"
+    );
+    assert_eq!(
+        inputs["build_view"].as_str(),
+        Some("host-fallback/1"),
+        "{inputs:?}"
+    );
+    assert_eq!(
+        inputs["host_fallback"].as_str(),
+        Some("zlib-3.2.3"),
+        "{inputs:?}"
+    );
+    let exceptions = gems_meta["exceptions"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        exceptions
+            .iter()
+            .any(|exception| exception["kind"] == "host-build-inputs"
+                && exception["subject"] == "zlib-3.2.3"),
+        "no host-build-inputs exception for zlib-3.2.3: {exceptions:?}"
+    );
+    // The extension was built against the host's libz.
+    let mut extensions = Vec::new();
+    collect_files(&gems_obj.join("extensions"), "/zlib.so", &mut extensions);
+    assert_eq!(extensions.len(), 1, "{extensions:?}");
+    let dynamic = tool("readelf", &["-dW"], &extensions[0]);
+    assert!(dynamic.contains("[libz.so.1]"), "{dynamic}");
+    let records = store.join("records/ruby-gems-host-fallback");
+    assert_eq!(
+        std::fs::read_dir(&records).unwrap().count(),
+        1,
+        "the fallback was not recorded"
+    );
+
+    // The next sync reaches the fallback object through the record, never
+    // by building again: with the `.gem` gone from the artifact cache and
+    // the network cut, a rebuild could not even start.
+    let closure = |project: &Path| -> serde_json::Value {
+        serde_json::from_slice(&std::fs::read(project.join(".tog/closures/ruby.json")).unwrap())
+            .unwrap()
+    };
+    let before = closure(&project);
+    let cached = store.join("cache/sha256").join(ZLIB_SHA256);
+    assert!(cached.exists(), "the zlib gem is not in the artifact cache");
+    tog::kernel::store::remove_tree(&cached)
+        .or_else(|_| std::fs::remove_file(&cached))
+        .unwrap();
+    let second = assert_ok(
+        tog_offline(&project, &temp.0, &["sync"]),
+        "offline re-sync over the fallback object",
+    );
+    eprintln!("second sync: {second}");
+    let after = closure(&project);
+    assert_eq!(
+        after["body"]["gems_object"], before["body"]["gems_object"],
+        "the re-sync projected a different gems object"
+    );
+    assert_eq!(
+        after["body"]["gems_object"]["id"], gems_meta["id"],
+        "{after}"
+    );
+}

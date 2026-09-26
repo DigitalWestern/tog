@@ -130,11 +130,21 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   "identical" objects. The Linux OTP artifact needs glibc 2.43 and host `libcrypto.so.3`.
   Linux gem native extensions build against the host C runtime alone (glibc, kernel headers,
   libxcrypt, the compiler's own files): every other host header, `-l` library, static
-  archive and pkg-config file is absent from that sandbox. A gem that needs another host
-  library fails that build, is rebuilt against the whole host, and records
-  `host-build-inputs`, which a policy can deny. Pure-Ruby gems compile nothing and install
-  against the whole host. Setting the view up costs about two seconds per native gem on a
-  Fedora 44 workstation, and more on a host with a larger library directory.
+  archive and pkg-config file is absent from the compiler's and linker's default search
+  paths and from pkg-config in that sandbox. Other host shared libraries stay loadable so
+  the compiler and linker themselves run: they are moved into a `.tog-host-runtime`
+  subdirectory of their library directory, which `ld` does not search, and reached through
+  `LD_LIBRARY_PATH`. An explicit `-I` or `-L` into a subdirectory the view keeps (such as
+  `/usr/lib64/python3.14`) is not curated. A gem that needs another host library fails that
+  build, is rebuilt against the whole host, and records `host-build-inputs`, which a policy
+  can deny. The build that failed may only have left its own gem and extension directories
+  behind; anything else it changed in the gem home refuses the retry. The object is then
+  committed under its own `build_view = "host-fallback/1"` identity, keyed by which gems fell
+  back, never by which development packages the host had: it still depends on those, and
+  the next sync on the same machine reuses it through a store record instead of rebuilding.
+  Pure-Ruby gems compile nothing and install against the whole host. Setting the view up
+  costs about two seconds per native gem on a Fedora 44 workstation, and more on a host with
+  a larger library directory.
   Python sdist builds and npm addons still see the whole host `/usr` and can link any host
   library. macOS gem builds are unchanged.
 - **Pinned native-library objects are store-root-specific**: `native-libs/libset/3` includes

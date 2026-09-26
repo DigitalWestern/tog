@@ -137,9 +137,13 @@ Rules the Linux port settled, which apply to any future platform:
   so a build can link any library the host has; `RuntimeOnly` (Linux only;
   Seatbelt treats it as `Full`) keeps the host's runtime files and the C
   runtime's development files and leaves every other header, `-l` library,
-  static archive and pkg-config file out of the sandbox. Ruby gems with
-  native extensions install under `RuntimeOnly`, so a gem object's bytes do
-  not depend on which `-dev` packages the building host has installed.
+  static archive and pkg-config file out of the compiler's and linker's
+  default search paths and out of pkg-config. Other shared libraries the
+  host's tools load move to a `.tog-host-runtime` subdirectory that `ld`
+  never searches, reached through `LD_LIBRARY_PATH`. Ruby gems with native
+  extensions install under `RuntimeOnly`, so a gem object committed under
+  the `runtime-only/1` view does not depend on which `-dev` packages the
+  building host has installed.
 - **Darwin identity goldens stay byte-identical.** A platform change that
   alters a macOS object id is a bug.
 - **Archive extensions must agree.** GNU tar always prefers the PAX record
@@ -315,6 +319,13 @@ declares native extensions installs against the host C runtime alone
 view); a gem whose native extension needs another host
 library is rebuilt against the whole host after recording
 `host-build-inputs`, which the object carries so a cache hit replays it.
+Before that retry the failed attempt's own gem and extension directories
+are removed from the shared GEM_HOME, and any other change it made refuses
+the retry (`ruby/gem_home.rs`). Such an object is committed under its own
+identity (`build_view = "host-fallback/1"`, `host_fallback` = the gems that
+fell back), never under the runtime-only id, and a store record under the
+runtime-only id lets the next sync on the same machine reuse it
+(`ruby/native.rs`).
 Every tog invocation strips
 `BUNDLE_*`/`RUBYOPT` and forces `BUNDLE_FROZEN`, `GEM_HOME`/`GEM_PATH`.
 v0 gaps: non-rubygems.org sources, PATH/GIT gems.
@@ -862,6 +873,8 @@ when the two differ.
     go/mod.rs              module closure via the pinned Go toolchain
     go/inputs.rs           toolchain selection from go.mod, the GoPlan
     ruby/mod.rs            Bundler-delegated planning, tog-verified gems
+    ruby/native.rs         native gems: C-runtime-only first, host fallback identity
+    ruby/gem_home.rs       what a failed gem build may leave before its retry
     elixir/mod.rs          Mix/Hex, AST-validated lockfile
     dotnet/mod.rs          NuGet packages.lock.json (tog-mandatory)
 

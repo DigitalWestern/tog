@@ -8,9 +8,17 @@
 //! file or subdirectory is bound from the host onto its placeholder there.
 //! A dropped entry is simply absent: no header search, `-l` lookup,
 //! pkg-config query or directory listing inside the sandbox can find it.
+//! A regular ELF shared library the linker must not find, but host programs
+//! may load, moves to `RUNTIME_SUBDIR` instead.
+//!
+//! What the view curates is the compiler's and linker's default search
+//! paths and pkg-config. A library subdirectory it keeps is bound whole, so
+//! an explicit `-L` or `-I` into one (`/usr/lib64/python3.14`,
+//! `/usr/lib64/libnl`) still finds whatever the host has there;
+//! LIMITATIONS.md says so.
 
 use crate::kernel::sandbox::{host_layout_error, push_arg};
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -25,13 +33,29 @@ use std::path::{Path, PathBuf};
 /// works for a build that sets it itself.
 pub(crate) const PKG_CONFIG_LIBDIR: &str = "/dev/null";
 
-/// The `RuntimeOnly` mounts for one run, and the skeleton they mount. The
-/// skeleton must outlive the child, and must not sit under a root the
-/// build may write: its directories become `/usr/include`, `/usr/lib64` and
-/// the rest, so a build that could write to it could add files to the view.
-pub(crate) fn runtime_only_mounts(
-    write_roots: &[PathBuf],
-) -> io::Result<(Vec<OsString>, ViewSkeleton)> {
+/// The subdirectory of each curated library directory that holds the
+/// host's regular ELF `lib*.so` files (see `Placement::Runtime`). GNU ld
+/// never searches a subdirectory of its search path, so `-l` cannot find
+/// what is here; the dynamic loader finds it through `LD_LIBRARY_PATH`.
+pub(crate) const RUNTIME_SUBDIR: &str = ".tog-host-runtime";
+
+/// One run's `RuntimeOnly` view.
+pub(crate) struct RuntimeOnlyView {
+    /// The bubblewrap arguments that mount it.
+    pub(crate) mounts: Vec<OsString>,
+    /// The skeleton they mount from; it must outlive the child.
+    pub(crate) skeleton: ViewSkeleton,
+    /// The `RUNTIME_SUBDIR` directories the view has, in library directory
+    /// order: the build's `LD_LIBRARY_PATH`, so host programs still load
+    /// the libraries that were moved out of the linker's reach.
+    pub(crate) library_path: Vec<PathBuf>,
+}
+
+/// The `RuntimeOnly` view for one run. The skeleton must not sit under a
+/// root the build may write: its directories become `/usr/include`,
+/// `/usr/lib64` and the rest, so a build that could write to it could add
+/// files to the view.
+pub(crate) fn runtime_only_mounts(write_roots: &[PathBuf]) -> io::Result<RuntimeOnlyView> {
     let skeleton = ViewSkeleton::create()?;
     if let Some(root) = write_roots
         .iter()
@@ -47,8 +71,12 @@ pub(crate) fn runtime_only_mounts(
             ),
         ));
     }
-    let mounts = runtime_only_args(Path::new("/"), skeleton.path())?;
-    Ok((mounts, skeleton))
+    let (mounts, library_path) = runtime_only_args(Path::new("/"), skeleton.path())?;
+    Ok(RuntimeOnlyView {
+        mounts,
+        skeleton,
+        library_path,
+    })
 }
 
 /// How `HostView::RuntimeOnly` treats the entries of one curated directory.
@@ -298,34 +326,59 @@ const C_RUNTIME_OBJECTS: &[&str] = &[
 
 const ELF_MAGIC: [u8; 4] = *b"\x7fELF";
 
-/// Does a library directory entry stay in the `RuntimeOnly` view? Dropped:
-/// `pkgconfig` and `cmake` directories, static (`.a`), libtool (`.la`) and
-/// object (`.o`) files, and every `.so` a link step would find by `-l`
-/// (the symlink a `-dev` package adds, or a linker script). A regular ELF
-/// file named `lib*.so` is a runtime library some host program NEEDs
-/// (Fedora's `libnss3.so`), so it stays. The C runtime's own entries of
-/// each kind stay, and every other directory (`gcc`, `gconv`, `perl5`) is
-/// kept whole.
-fn library_entry_kept(name: &str, file_type: fs::FileType, host_entry: &Path) -> bool {
-    if name == "pkgconfig" || name == "cmake" {
-        return false;
+/// Where one entry of a curated directory goes in the view.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Placement {
+    /// Where the host has it.
+    Keep,
+    /// Into the directory's `RUNTIME_SUBDIR`: a regular ELF file named
+    /// `*.so` that is not the C runtime's. Such a file is a runtime library
+    /// some host program NEEDs by that very name (Fedora's `libnss3.so`,
+    /// binutils' `libbfd-<version>.so`, which `ld` itself loads), so it
+    /// cannot be dropped, but where it is `-lnss3` would link it.
+    Runtime,
+    /// Absent from the view.
+    Drop,
+}
+
+/// Where a library directory entry goes in the `RuntimeOnly` view.
+/// Dropped: `pkgconfig` and `cmake` directories, static (`.a`), libtool
+/// (`.la`) and object (`.o`) files, and every `.so` symlink or linker
+/// script a link step would find by `-l` (what a `-dev` package adds).
+/// Regular ELF `*.so` files move out of the linker's reach
+/// (`Placement::Runtime`). The C runtime's own entries of each kind stay
+/// where they are, and every other entry, subdirectories included (`gcc`,
+/// `gconv`, `perl5`), is kept whole.
+fn library_entry_placement(name: &str, file_type: fs::FileType, host_entry: &Path) -> Placement {
+    let keep_if = |kept: bool| {
+        if kept {
+            Placement::Keep
+        } else {
+            Placement::Drop
+        }
+    };
+    if name == "pkgconfig" || name == "cmake" || name == RUNTIME_SUBDIR {
+        return Placement::Drop;
     }
     if let Some(stem) = name.strip_suffix(".so") {
         if C_RUNTIME_SHARED.contains(&stem) || file_type.is_dir() {
-            return true;
+            return Placement::Keep;
         }
-        return file_type.is_file() && starts_with_elf_magic(host_entry);
+        if file_type.is_file() && starts_with_elf_magic(host_entry) {
+            return Placement::Runtime;
+        }
+        return Placement::Drop;
     }
     if let Some(stem) = name.strip_suffix(".a") {
-        return C_RUNTIME_ARCHIVES.contains(&stem) || stem.starts_with("libm-");
+        return keep_if(C_RUNTIME_ARCHIVES.contains(&stem) || stem.starts_with("libm-"));
     }
     if name.ends_with(".la") {
-        return false;
+        return Placement::Drop;
     }
     if let Some(stem) = name.strip_suffix(".o") {
-        return C_RUNTIME_OBJECTS.contains(&stem);
+        return keep_if(C_RUNTIME_OBJECTS.contains(&stem));
     }
-    true
+    Placement::Keep
 }
 
 /// A file tog cannot read is one the build cannot read either, so failing
@@ -352,16 +405,29 @@ impl ViewSkeleton {
         &self.0
     }
 
+    /// The root is private (mode 0700, whatever the umask) and its name
+    /// carries a random nonce, so no other local user can find it early or
+    /// change what it mirrors while a build runs. `create` refuses a name
+    /// that already exists, so a planted directory or symlink is skipped,
+    /// never used.
     fn create() -> io::Result<Self> {
+        use std::hash::{BuildHasher as _, Hasher as _};
+        use std::os::unix::fs::DirBuilderExt as _;
         static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let base = fs::canonicalize(std::env::temp_dir())?;
         loop {
+            let sequence = SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            // `RandomState` is seeded from the operating system's random
+            // source; hashing the sequence under it gives an unguessable
+            // nonce without another dependency.
+            let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+            hasher.write_u64(sequence);
             let path = base.join(format!(
-                "tog-host-view-{}-{}",
+                "tog-host-view-{}-{:016x}",
                 std::process::id(),
-                SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                hasher.finish()
             ));
-            match fs::create_dir(&path) {
+            match fs::DirBuilder::new().mode(0o700).create(&path) {
                 Ok(()) => return Ok(Self(path)),
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
                 Err(error) => {
@@ -387,11 +453,16 @@ impl Drop for ViewSkeleton {
 /// `skeleton` (read-only), and every kept file and subdirectory is
 /// read-only bound from the host onto its placeholder there. Kept symlinks
 /// are recreated in the skeleton with the host's own targets. Nothing is
-/// cached: the host directories are read again on every run.
+/// cached: the host directories are read again on every run. Also returns
+/// the `RUNTIME_SUBDIR` directories the view has, in mount order.
 ///
 /// `host_root` is `/` in production; tests pass a fake host layout.
-fn runtime_only_args(host_root: &Path, skeleton: &Path) -> io::Result<Vec<OsString>> {
+fn runtime_only_args(
+    host_root: &Path,
+    skeleton: &Path,
+) -> io::Result<(Vec<OsString>, Vec<PathBuf>)> {
     let mut args = Vec::new();
+    let mut library_path = Vec::new();
     for &(inside, curation) in CURATED_DIRS {
         let inside = Path::new(inside);
         let relative = inside.strip_prefix("/").unwrap_or(inside);
@@ -408,10 +479,17 @@ fn runtime_only_args(host_root: &Path, skeleton: &Path) -> io::Result<Vec<OsStri
         args.push(mirror.clone().into_os_string());
         args.push(inside.as_os_str().to_os_string());
         if curation != Curation::Empty {
-            curate_dir(&host, inside, &mirror, curation, &mut args)?;
+            curate_dir(
+                &host,
+                inside,
+                &mirror,
+                curation,
+                &mut args,
+                &mut library_path,
+            )?;
         }
     }
-    Ok(args)
+    Ok((args, library_path))
 }
 
 /// Mirror the kept entries of one host directory into `mirror` and bind
@@ -423,6 +501,7 @@ fn curate_dir(
     mirror: &Path,
     curation: Curation,
     args: &mut Vec<OsString>,
+    library_path: &mut Vec<PathBuf>,
 ) -> io::Result<()> {
     let mut names = Vec::new();
     for entry in fs::read_dir(host).map_err(|error| host_layout_error(host, error))? {
@@ -433,33 +512,68 @@ fn curate_dir(
         );
     }
     names.sort();
+    let mut entries = Vec::new();
     for name in names {
         let host_entry = host.join(&name);
-        let inside_entry = inside.join(&name);
-        let mirror_entry = mirror.join(&name);
         let file_type = fs::symlink_metadata(&host_entry)
             .map_err(|error| host_layout_error(&host_entry, error))?
             .file_type();
+        let inside_entry = inside.join(&name);
         let nested = CURATED_NESTED
             .iter()
             .any(|path| Path::new(path) == inside_entry);
-        if nested && file_type.is_dir() {
-            fs::create_dir(&mirror_entry)?;
-            curate_dir(&host_entry, &inside_entry, &mirror_entry, curation, args)?;
-            continue;
-        }
         let text = name.to_string_lossy();
-        let kept = match curation {
-            Curation::Headers => nested || C_RUNTIME_HEADERS.contains(&text.as_ref()),
-            Curation::Libraries => library_entry_kept(&text, file_type, &host_entry),
-            Curation::Empty => false,
+        let placement = match curation {
+            _ if nested && file_type.is_dir() => Placement::Keep,
+            Curation::Headers if nested || C_RUNTIME_HEADERS.contains(&text.as_ref()) => {
+                Placement::Keep
+            }
+            Curation::Headers | Curation::Empty => Placement::Drop,
+            Curation::Libraries => library_entry_placement(&text, file_type, &host_entry),
         };
-        if !kept {
+        entries.push((name, file_type, nested, placement));
+    }
+    // A kept symlink naming a moved file in this directory (`libfoo.so.1
+    // -> libfoo.so`) follows it into the runtime subdirectory.
+    let moved: Vec<&OsStr> = entries
+        .iter()
+        .filter(|(_, _, _, placement)| *placement == Placement::Runtime)
+        .map(|(name, ..)| name.as_os_str())
+        .collect();
+    if !moved.is_empty() {
+        fs::create_dir(mirror.join(RUNTIME_SUBDIR))?;
+        library_path.push(inside.join(RUNTIME_SUBDIR));
+    }
+    for (name, file_type, nested, placement) in &entries {
+        let host_entry = host.join(name);
+        let (inside_entry, mirror_entry) = match placement {
+            Placement::Drop => continue,
+            Placement::Keep => (inside.join(name), mirror.join(name)),
+            Placement::Runtime => (
+                inside.join(RUNTIME_SUBDIR).join(name),
+                mirror.join(RUNTIME_SUBDIR).join(name),
+            ),
+        };
+        if *nested && file_type.is_dir() {
+            fs::create_dir(&mirror_entry)?;
+            curate_dir(
+                &host_entry,
+                &inside_entry,
+                &mirror_entry,
+                curation,
+                args,
+                library_path,
+            )?;
             continue;
         }
         if file_type.is_symlink() {
             let target = fs::read_link(&host_entry)
                 .map_err(|error| host_layout_error(&host_entry, error))?;
+            let target = if moved.contains(&target.as_os_str()) {
+                Path::new(RUNTIME_SUBDIR).join(&target)
+            } else {
+                target
+            };
             std::os::unix::fs::symlink(&target, &mirror_entry)?;
             continue;
         }
@@ -529,6 +643,7 @@ mod tests {
         };
         link("liblzma.so.5", "usr/lib64/liblzma.so");
         link("liblzma.so.5.2", "usr/lib64/liblzma.so.5");
+        link("libnss3.so", "usr/lib64/libnss3.so.1");
         if split_usr {
             fs::create_dir_all(root.0.join("lib64")).unwrap();
             write("lib64/libz.so.1", b"\x7fELF\x02\x01\x01");
@@ -554,7 +669,7 @@ mod tests {
     fn runtime_only_view_keeps_the_c_runtime_and_drops_host_dev_files() {
         let host = curated_fake_host("runtime-only-merged", false);
         let skeleton = temp_dir("runtime-only-merged-skeleton");
-        let args = runtime_only_args(&host.0, &skeleton.0).unwrap();
+        let (args, library_path) = runtime_only_args(&host.0, &skeleton.0).unwrap();
         let binds = ro_binds(&args);
         let bound = |inside: &str| binds.iter().any(|(_, to)| to == Path::new(inside));
         let from_host = |inside: &str| {
@@ -597,18 +712,35 @@ mod tests {
             assert!(!bound(dropped), "{dropped} bound: {args:?}");
             assert!(!mirrored(dropped), "{dropped} mirrored");
         }
-        // Libraries: the C runtime's linker script and start file, runtime
-        // ELF files (versioned or not), the compiler's directory, and the
+        // Libraries: the C runtime's linker script and start file,
+        // versioned runtime ELF files, the compiler's directory, and the
         // soname link, recreated with the host's own target.
         for kept in [
             "/usr/lib64/libc.so",
             "/usr/lib64/liblzma.so.5.2",
-            "/usr/lib64/libnss3.so",
             "/usr/lib64/crt1.o",
             "/usr/lib64/gcc",
         ] {
             assert!(from_host(kept), "{kept} not bound from the host: {args:?}");
         }
+        // An unversioned runtime ELF (`libnss3.so`) moves where `-lnss3`
+        // cannot find it and the loader can, and a symlink naming it
+        // follows it there.
+        assert!(!bound("/usr/lib64/libnss3.so"), "{args:?}");
+        assert!(!mirrored("/usr/lib64/libnss3.so"));
+        assert!(binds.contains(&(
+            host.0.join("usr/lib64/libnss3.so"),
+            PathBuf::from("/usr/lib64/.tog-host-runtime/libnss3.so")
+        )));
+        assert!(mirrored("/usr/lib64/.tog-host-runtime/libnss3.so"));
+        assert_eq!(
+            fs::read_link(skeleton.0.join("usr/lib64/libnss3.so.1")).unwrap(),
+            Path::new(".tog-host-runtime/libnss3.so")
+        );
+        assert_eq!(
+            library_path,
+            [PathBuf::from("/usr/lib64/.tog-host-runtime")]
+        );
         assert_eq!(
             fs::read_link(skeleton.0.join("usr/lib64/liblzma.so.5")).unwrap(),
             Path::new("liblzma.so.5.2")
@@ -643,8 +775,13 @@ mod tests {
     fn runtime_only_view_curates_a_split_usr_lib64() {
         let host = curated_fake_host("runtime-only-split", true);
         let skeleton = temp_dir("runtime-only-split-skeleton");
-        let args = runtime_only_args(&host.0, &skeleton.0).unwrap();
+        let (args, library_path) = runtime_only_args(&host.0, &skeleton.0).unwrap();
         let binds = ro_binds(&args);
+        assert_eq!(
+            library_path,
+            [PathBuf::from("/usr/lib64/.tog-host-runtime")],
+            "only /usr/lib64 has an unversioned runtime ELF"
+        );
         assert!(binds.contains(&(skeleton.0.join("lib64"), PathBuf::from("/lib64"))));
         assert!(binds.contains(&(
             host.0.join("lib64/libz.so.1"),

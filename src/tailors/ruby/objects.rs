@@ -30,12 +30,12 @@ pub static KINDS: &[KindAdapter] = &[
         schema: Some("ruby-gems/1"),
         superseded_by: None,
         live_required: &["schema", "installer", "ruby_platform"],
-        live_optional: &["build_view", "gem:"],
+        live_optional: &["build_view", "host_fallback", "gem:"],
         legacy_only: &[],
         live_contract: Some(ruby_gems_contract),
         grammar: Grammar {
             required: &["schema", "installer"],
-            optional: &["ruby_platform", "build_view"],
+            optional: &["ruby_platform", "build_view", "host_fallback"],
             groups: &[("gem:", None)],
         },
         adapt: ruby_gems,
@@ -62,12 +62,41 @@ fn ruby_gems_contract(identity: &Identity) -> Result<(), String> {
             "Ruby gem count/version relation: version {version} does not match {gems} gem: inputs"
         ));
     }
-    Ok(())
+    host_fallback_contract(identity)
+}
+
+/// A `host-fallback/1` object names the gems that fell back, each one a gem
+/// of the object, sorted and without repeats; no other object names any.
+fn host_fallback_contract(identity: &Identity) -> Result<(), String> {
+    let view = identity.inputs.get("build_view").map(String::as_str);
+    let names = identity.inputs.get("host_fallback");
+    match (view, names) {
+        (Some("host-fallback/1"), Some(names)) => {
+            let names: Vec<&str> = names.split(',').collect();
+            if names.windows(2).any(|pair| pair[0] >= pair[1]) {
+                return Err(format!("host_fallback {names:?} is not sorted and unique"));
+            }
+            for name in names {
+                if !identity.inputs.contains_key(&format!("gem:{name}")) {
+                    return Err(format!(
+                        "host_fallback names {name:?}, which is not a gem: input"
+                    ));
+                }
+            }
+            Ok(())
+        }
+        (Some("host-fallback/1"), None) => {
+            Err("build_view host-fallback/1 without host_fallback".to_string())
+        }
+        (_, Some(_)) => Err("host_fallback without build_view host-fallback/1".to_string()),
+        (_, None) => Ok(()),
+    }
 }
 
 /// `ruby-gems/1`: the installer is a `ruby<version>:<sha256>` fingerprint;
 /// each gem contributes its `.gem` sha256. `build_view` (Linux) names what
-/// of the host the native extensions compiled against and carries no
+/// of the host the native extensions compiled against, and `host_fallback`
+/// which gems were rebuilt against the whole host; neither carries a
 /// dependency.
 fn ruby_gems(record: &Record, index: &MetaIndex) -> Result<ObjectDeps, String> {
     let installer = input(record, "installer")?;
@@ -95,7 +124,15 @@ fn ruby_gems(record: &Record, index: &MetaIndex) -> Result<ObjectDeps, String> {
     for (key, value) in &record.identity.inputs {
         if let Some(gem) = key.strip_prefix("gem:") {
             add_digest(&mut deps, Algo::Sha256, value, &format!("gem {gem}"))?;
-        } else if !["schema", "installer", "ruby_platform", "build_view"].contains(&key.as_str()) {
+        } else if ![
+            "schema",
+            "installer",
+            "ruby_platform",
+            "build_view",
+            "host_fallback",
+        ]
+        .contains(&key.as_str())
+        {
             return Err(format!("unexpected identity input {key}"));
         }
     }

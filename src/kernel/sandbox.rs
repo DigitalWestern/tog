@@ -189,6 +189,37 @@ pub struct Sandbox<'a> {
     pub host_view: HostView,
 }
 
+/// The caller's environment, as `--setenv` arguments. A `RuntimeOnly`
+/// view's runtime subdirectories (`hostview::RUNTIME_SUBDIR`) reach the
+/// dynamic loader only through `LD_LIBRARY_PATH`: they are its value when
+/// the caller sets none, and follow the caller's own value when it does.
+fn push_caller_envs(
+    args: &mut Vec<OsString>,
+    envs: &[(String, String)],
+    library_path: &[PathBuf],
+) -> io::Result<()> {
+    let view_path = (!library_path.is_empty())
+        .then(|| std::env::join_paths(library_path))
+        .transpose()
+        .map_err(io::Error::other)?;
+    let caller_sets_it = envs.iter().any(|(key, _)| key == "LD_LIBRARY_PATH");
+    if let (Some(view_path), false) = (&view_path, caller_sets_it) {
+        push_setenv(args, "LD_LIBRARY_PATH", view_path);
+    }
+    for (key, value) in envs {
+        match &view_path {
+            Some(view_path) if key == "LD_LIBRARY_PATH" => {
+                let mut joined = OsString::from(value);
+                joined.push(":");
+                joined.push(view_path);
+                push_setenv(args, key, joined);
+            }
+            _ => push_setenv(args, key, value),
+        }
+    }
+    Ok(())
+}
+
 impl Sandbox<'_> {
     /// `HostView::RuntimeOnly` gets this same profile for now: a Darwin
     /// build compiles against the Xcode or Command Line Tools SDK, which is
@@ -613,12 +644,12 @@ impl Sandbox<'_> {
             OsString::from("--clearenv"),
         ];
         args.extend(system_root_args(Path::new("/"))?);
-        let skeleton = match self.host_view {
-            HostView::Full => None,
+        let (skeleton, library_path) = match self.host_view {
+            HostView::Full => (None, Vec::new()),
             HostView::RuntimeOnly => {
-                let (mounts, skeleton) = crate::kernel::hostview::runtime_only_mounts(&write)?;
-                args.extend(mounts);
-                Some(skeleton)
+                let view = crate::kernel::hostview::runtime_only_mounts(&write)?;
+                args.extend(view.mounts);
+                (Some(view.skeleton), view.library_path)
             }
         };
 
@@ -681,9 +712,7 @@ impl Sandbox<'_> {
                 crate::kernel::hostview::PKG_CONFIG_LIBDIR,
             );
         }
-        for (key, value) in envs {
-            push_setenv(&mut args, key, value);
-        }
+        push_caller_envs(&mut args, envs, &library_path)?;
         push_arg(&mut args, "--chdir");
         args.push(cwd.into_os_string());
         push_arg(&mut args, "--unsetenv");
@@ -2407,7 +2436,12 @@ mod tests {
             runtime_only[..start + system.len()],
             full[..start + system.len()]
         );
-        let view_len = runtime_only.len() - full.len() - 3;
+        let env_len = if runtime_only.iter().any(|arg| arg == "LD_LIBRARY_PATH") {
+            6
+        } else {
+            3
+        };
+        let view_len = runtime_only.len() - full.len() - env_len;
         let view = &runtime_only[start + system.len()..start + system.len() + view_len];
         assert!(
             view.iter()
@@ -2422,6 +2456,20 @@ mod tests {
             .expect("RuntimeOnly sets PKG_CONFIG_LIBDIR");
         let mut without_env = tail.to_vec();
         without_env.drain(env..env + 3);
+        // On a host with unversioned runtime ELF libraries the view moves
+        // them out of the linker's reach and names their directories here.
+        if let Some(path) = without_env
+            .windows(2)
+            .position(|window| window == ["--setenv", "LD_LIBRARY_PATH"])
+        {
+            assert!(
+                without_env[path + 2]
+                    .split(':')
+                    .all(|dir| dir.ends_with("/.tog-host-runtime")),
+                "{without_env:?}"
+            );
+            without_env.drain(path..path + 3);
+        }
         assert_eq!(without_env, full_tail);
         // The skeleton lives exactly as long as the command line.
         drop(invocation);
@@ -2502,6 +2550,11 @@ mod tests {
         )
         .unwrap();
         fs::write(
+            scratch.join("nss.c"),
+            "int NSS_NoDB_Init(const char *);\nint main(void) { return NSS_NoDB_Init(0); }\n",
+        )
+        .unwrap();
+        fs::write(
             scratch.join("vector.cc"),
             "#include <iostream>\n#include <vector>\n#include <thread>\n\
              int main() { std::vector<int> v{1, 2, 3}; int sum = 0;\n\
@@ -2522,6 +2575,8 @@ echo "c=$(check sh -c 'cc math.c -o math -lm -lpthread && ./math')"
 echo "load=$(check sh -c 'cc load.c -o load -ldl && ./load')"
 echo "c++=$(check sh -c 'c++ vector.cc -o vector -pthread && ./vector')"
 echo "-lz=$(check cc zlib.c -o zlib -lz)"
+echo "-lnss3=$(check cc nss.c -o nss -lnss3)"
+echo "ld=$(check ld --version)"
 echo "pkg-config=$(check pkg-config --exists zlib)"
 echo "PKG_CONFIG_LIBDIR=${PKG_CONFIG_LIBDIR-unset}"
 } > report
@@ -2567,12 +2622,26 @@ echo "PKG_CONFIG_LIBDIR=${PKG_CONFIG_LIBDIR-unset}"
             }
             _ => eprintln!("skip libz.so.1 load: host lacks libz.so.1 or cc"),
         }
+        // binutils loads an unversioned `libbfd-<version>.so` on Fedora,
+        // which the view moves into its runtime subdirectory.
+        assert!(seen("ld=yes"), "ld does not start: {lines:?}");
         if has_cc {
             assert!(seen("c=yes"), "C program did not build and run: {lines:?}");
             assert!(
                 seen("-lz=no"),
                 "-lz linked against a host library: {lines:?}"
             );
+            let nss = Path::new("/usr/lib64/libnss3.so");
+            let nss_is_elf = fs::symlink_metadata(nss).is_ok_and(|metadata| metadata.is_file())
+                && fs::read(nss).is_ok_and(|bytes| bytes.starts_with(b"\x7fELF"));
+            if nss_is_elf {
+                assert!(
+                    seen("-lnss3=no"),
+                    "-lnss3 linked the host's runtime libnss3.so: {lines:?}"
+                );
+            } else {
+                eprintln!("skip -lnss3: host has no regular ELF /usr/lib64/libnss3.so");
+            }
         } else {
             eprintln!("skip C checks: host has no /usr/bin/cc");
         }
