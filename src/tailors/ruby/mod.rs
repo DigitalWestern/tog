@@ -26,8 +26,8 @@ use crate::kernel::toolchain::{ArtifactRow, Catalog, LegacyEvidence, Selected};
 use crate::kernel::types::Identity;
 use crate::kernel::ui;
 use native::{
-    cached_gems_object, host_inputs, record_host_fallback, ruby_gems_fallback_identity, GemInstall,
-    RUNTIME_ONLY_VIEW,
+    cached_gems_object, record_host_fallback, ruby_gems_fallback_identity, same_host_state,
+    GemInstall, RUNTIME_ONLY_VIEW,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -1124,8 +1124,8 @@ pub fn realize_gems(
     let spec = ruby_spec(platform, selected)?;
     validate_plan(plan)?;
     let identity = ruby_gems_identity(&spec, plan);
-    let mut host_inputs_slot = None;
-    if let Some(id) = cached_gems_object(store, activity, &identity, &mut host_inputs_slot)? {
+    let lookup_inputs = crate::kernel::hostview::host_build_inputs;
+    if let Some(id) = cached_gems_object(store, activity, &identity, lookup_inputs)? {
         crate::kernel::policy::check_cached_with_activity(store, activity, &id)?;
         record_api_digests_on_hit(store, activity, plan, ruby_obj);
         return Ok(store.object_path(&id));
@@ -1176,6 +1176,8 @@ pub fn realize_gems(
         staged: &staged,
     };
     let mut fell_back = Vec::new();
+    // The host state every fallback was built against (`same_host_state`).
+    let mut host_inputs = None;
     for (g, file, native) in &artifacts {
         // Re-verify immediately before use. The lease held since the download
         // stops a sweep, not a same-user replacement of the cache entry, so
@@ -1195,7 +1197,8 @@ pub fn realize_gems(
         fs::copy(file, &named)?;
         // Dependency-first order comes from the plan (helper topo-sort):
         // extconf.rb may require already-installed dependency gems.
-        if sandboxed.install(g, &named, *native)? {
+        if let Some(built_against) = sandboxed.install(g, &named, *native)? {
+            same_host_state(&mut host_inputs, &g.full_name, built_against)?;
             fell_back.push(g.full_name.clone());
         }
     }
@@ -1209,14 +1212,9 @@ pub fn realize_gems(
     // the object carries it, so a later cache hit replays it through
     // `check_cached_with_activity` above and a policy that denies the kind
     // refuses the cached object too. Such an object is committed under its
-    // own identity, keyed by the host's build inputs too, and a record
-    // under the runtime-only id and those inputs points the next sync on a
-    // host in the same state at it.
-    let host_inputs = if fell_back.is_empty() {
-        None
-    } else {
-        Some(host_inputs(&mut host_inputs_slot)?)
-    };
+    // own identity, keyed by the host build inputs its fallbacks were built
+    // against, and a record under the runtime-only id and those inputs
+    // points a later sync on a host in the same state at it.
     let commit_identity = match &host_inputs {
         None => identity.clone(),
         Some(host_inputs) => ruby_gems_fallback_identity(&identity, &fell_back, host_inputs),

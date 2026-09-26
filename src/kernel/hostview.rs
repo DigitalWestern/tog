@@ -625,152 +625,188 @@ fn classify_dir(host: &Path, inside: &Path, curation: Curation) -> io::Result<Ve
 /// sees that a `RuntimeOnly` build does not, plus the compiler: every entry
 /// the view drops from a curated directory (whole trees for dropped
 /// directories such as `/usr/include/libxml2`, `pkgconfig` and `cmake`),
-/// every library it moves into `RUNTIME_SUBDIR`, what `/usr/bin/cc` and
-/// `/usr/bin/c++` resolve to, and the compiler's internal directories under
-/// `/usr/lib/gcc` and `/usr/libexec/gcc`. Hex SHA-256.
+/// every library it moves into `RUNTIME_SUBDIR`, for each such symlink the
+/// file its chain finally resolves to (a dropped `liblzma.so` covers the
+/// kept `liblzma.so.5.8.1` a `-llzma` link reads), what `/usr/bin/cc` and
+/// `/usr/bin/c++` resolve to, and every file under `/usr/lib/gcc` and
+/// `/usr/libexec/gcc`. Hex SHA-256.
 ///
 /// It is stat-based: each entry contributes its path, type, size,
-/// modification time and symlink target, never its bytes. Installing,
-/// removing or upgrading a development package changes it; an edit that
-/// keeps a file's size and restores its modification time does not. The
-/// walk classifies entries with the view's own rules (`classify_dir`), so
-/// the two cannot disagree about what is dropped.
+/// modification time and symlink target, and a resolved target its inode
+/// and device too, never file bytes. Installing, removing or upgrading a
+/// development package changes it; rewriting a file with bytes of the same
+/// size and putting its modification time back does not. The walk
+/// classifies entries with the view's own rules (`classify_dir`), so the
+/// two cannot disagree about what is dropped. Any read that fails is an
+/// error: an unreadable directory never passes for an empty one.
 pub(crate) fn host_build_inputs() -> io::Result<String> {
     host_build_inputs_at(Path::new("/"))
 }
 
 fn host_build_inputs_at(host_root: &Path) -> io::Result<String> {
     use sha2::Digest as _;
-    let mut digest = sha2::Sha256::new();
-    digest.update(b"tog-host-build-inputs/1");
+    let mut digest = Fingerprint {
+        host_root,
+        digest: sha2::Sha256::new(),
+    };
+    digest.digest.update(b"tog-host-build-inputs/2");
     for (inside, host, curation) in curated_roots(host_root)? {
         if curation == Curation::Empty {
-            digest_tree(&host, inside, &mut digest)?;
+            digest.tree(&host, inside)?;
         } else {
-            digest_dropped(&host, inside, curation, &mut digest)?;
+            digest.dropped(&host, inside, curation)?;
         }
     }
+    // The compilers the full view's PATH finds, by what they resolve to.
     for compiler in ["/usr/bin/cc", "/usr/bin/c++"] {
-        let host = host_root.join(&compiler[1..]);
-        digest_field(&mut digest, compiler.as_bytes());
-        match fs::canonicalize(&host) {
-            Ok(resolved) => {
-                let inside =
-                    Path::new("/").join(resolved.strip_prefix(host_root).unwrap_or(&resolved));
-                digest_entry(&resolved, &inside, &mut digest)?;
-            }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                digest_field(&mut digest, b"absent");
-            }
-            Err(error) => return Err(host_layout_error(&host, error)),
-        }
+        digest.field(compiler.as_bytes());
+        digest.resolved(Path::new(compiler))?;
     }
+    // The compiler's internals, every file of them.
     for internal in ["/usr/lib/gcc", "/usr/libexec/gcc"] {
+        let inside = Path::new(internal);
         let host = host_root.join(&internal[1..]);
-        let Ok(targets) = sorted_names(&host) else {
-            continue;
-        };
-        for target in targets {
-            let Ok(versions) = sorted_names(&host.join(&target)) else {
-                continue;
-            };
-            for version in versions {
-                let relative = Path::new(&target).join(&version);
-                digest_entry(
-                    &host.join(&relative),
-                    &Path::new(internal).join(&relative),
-                    &mut digest,
-                )?;
-            }
+        if digest.entry(&host, inside)? {
+            digest.tree(&host, inside)?;
         }
     }
-    Ok(hex::encode(digest.finalize()))
+    Ok(hex::encode(digest.digest.finalize()))
 }
 
-/// The entries of a curated host directory the view drops or moves, and
-/// the `CURATED_NESTED` directories it curates in turn.
-fn digest_dropped(
-    host: &Path,
-    inside: &Path,
-    curation: Curation,
-    digest: &mut sha2::Sha256,
-) -> io::Result<()> {
-    for (name, file_type, nested, placement) in classify_dir(host, inside, curation)? {
-        let (host_entry, inside_entry) = (host.join(&name), inside.join(&name));
-        match placement {
-            Placement::Keep if nested && file_type.is_dir() => {
-                digest_dropped(&host_entry, &inside_entry, curation, digest)?;
-            }
-            Placement::Keep => {}
-            Placement::Runtime => {
-                digest_entry(&host_entry, &inside_entry, digest)?;
-            }
-            Placement::Drop => {
-                digest_entry(&host_entry, &inside_entry, digest)?;
-                if file_type.is_dir() {
-                    digest_tree(&host_entry, &inside_entry, digest)?;
+/// The walk behind `host_build_inputs`: the host root it reads and the
+/// digest it feeds. Every read that fails is an error naming its path;
+/// only a confirmed `NotFound` is recorded, as absence.
+struct Fingerprint<'a> {
+    host_root: &'a Path,
+    digest: sha2::Sha256,
+}
+
+impl Fingerprint<'_> {
+    /// The entries of a curated host directory the view drops or moves,
+    /// and the `CURATED_NESTED` directories it curates in turn.
+    fn dropped(&mut self, host: &Path, inside: &Path, curation: Curation) -> io::Result<()> {
+        let entries =
+            classify_dir(host, inside, curation).map_err(|error| fingerprint_error(host, error))?;
+        for (name, file_type, nested, placement) in entries {
+            let (host_entry, inside_entry) = (host.join(&name), inside.join(&name));
+            match placement {
+                Placement::Keep if nested && file_type.is_dir() => {
+                    self.dropped(&host_entry, &inside_entry, curation)?;
+                }
+                Placement::Keep => {}
+                Placement::Runtime => {
+                    self.entry(&host_entry, &inside_entry)?;
+                }
+                Placement::Drop => {
+                    if self.entry(&host_entry, &inside_entry)? {
+                        self.tree(&host_entry, &inside_entry)?;
+                    }
                 }
             }
         }
+        Ok(())
     }
-    Ok(())
-}
 
-/// Every entry under `host`, depth first in name order, symlinks recorded
-/// and never followed. A directory tog cannot list is one a build cannot
-/// list either: it counts as its own entry only.
-fn digest_tree(host: &Path, inside: &Path, digest: &mut sha2::Sha256) -> io::Result<()> {
-    let names = match sorted_names(host) {
-        Ok(names) => names,
-        Err(error) if error.kind() == io::ErrorKind::PermissionDenied => return Ok(()),
-        Err(error) => return Err(host_layout_error(host, error)),
-    };
-    for name in names {
-        let (host_entry, inside_entry) = (host.join(&name), inside.join(&name));
-        if digest_entry(&host_entry, &inside_entry, digest)? {
-            digest_tree(&host_entry, &inside_entry, digest)?;
+    /// Every entry under `host`, depth first in name order. Symlinks are
+    /// recorded with what they resolve to (`entry`), never walked into.
+    fn tree(&mut self, host: &Path, inside: &Path) -> io::Result<()> {
+        let mut names = fs::read_dir(host)
+            .and_then(|entries| {
+                entries
+                    .map(|entry| entry.map(|entry| entry.file_name()))
+                    .collect::<io::Result<Vec<_>>>()
+            })
+            .map_err(|error| fingerprint_error(host, error))?;
+        names.sort();
+        for name in names {
+            let (host_entry, inside_entry) = (host.join(&name), inside.join(&name));
+            if self.entry(&host_entry, &inside_entry)? {
+                self.tree(&host_entry, &inside_entry)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// One entry's path (as the sandbox names it), type, size and
+    /// modification time; for a symlink, its target and the stat of what
+    /// the whole chain finally resolves to. `true` when it is a directory.
+    fn entry(&mut self, host: &Path, inside: &Path) -> io::Result<bool> {
+        use std::os::unix::ffi::OsStrExt as _;
+        self.field(inside.as_os_str().as_bytes());
+        let metadata = match fs::symlink_metadata(host) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                self.field(b"absent");
+                return Ok(false);
+            }
+            Err(error) => return Err(fingerprint_error(host, error)),
+        };
+        self.stat(&metadata, false);
+        if metadata.file_type().is_symlink() {
+            let target = fs::read_link(host).map_err(|error| fingerprint_error(host, error))?;
+            self.field(target.as_os_str().as_bytes());
+            self.resolved(inside)?;
+        }
+        Ok(metadata.is_dir())
+    }
+
+    /// The stat of what `inside` resolves to on the host, following every
+    /// symlink on the way (`sandbox::resolve_host_path`): a dropped
+    /// `liblzma.so -> liblzma.so.5 -> liblzma.so.5.8.1` covers the kept
+    /// library a `-llzma` link reads. A dangling chain is recorded as
+    /// missing; a loop is an error.
+    fn resolved(&mut self, inside: &Path) -> io::Result<()> {
+        let resolved = crate::kernel::sandbox::resolve_host_path(self.host_root, inside)
+            .map_err(|error| fingerprint_error(inside, error))?;
+        let host = self
+            .host_root
+            .join(resolved.strip_prefix("/").unwrap_or(&resolved));
+        match fs::symlink_metadata(&host) {
+            Ok(metadata) => self.stat(&metadata, true),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => self.field(b"missing"),
+            Err(error) => return Err(fingerprint_error(&host, error)),
+        }
+        Ok(())
+    }
+
+    /// Type, size and modification time; with `identity`, also the inode
+    /// and device, so a replaced file behind an unchanged chain counts.
+    fn stat(&mut self, metadata: &fs::Metadata, identity: bool) {
+        use std::os::unix::fs::MetadataExt as _;
+        let file_type = metadata.file_type();
+        let kind: &[u8] = if file_type.is_symlink() {
+            b"l"
+        } else if file_type.is_dir() {
+            b"d"
+        } else if file_type.is_file() {
+            b"f"
+        } else {
+            b"o"
+        };
+        self.field(kind);
+        self.field(&metadata.size().to_le_bytes());
+        let modified =
+            i128::from(metadata.mtime()) * 1_000_000_000 + i128::from(metadata.mtime_nsec());
+        self.field(&modified.to_le_bytes());
+        if identity {
+            self.field(&metadata.ino().to_le_bytes());
+            self.field(&metadata.dev().to_le_bytes());
         }
     }
-    Ok(())
+
+    fn field(&mut self, bytes: &[u8]) {
+        digest_field(&mut self.digest, bytes);
+    }
 }
 
-fn sorted_names(dir: &Path) -> io::Result<Vec<OsString>> {
-    let mut names = fs::read_dir(dir)?
-        .map(|entry| entry.map(|entry| entry.file_name()))
-        .collect::<io::Result<Vec<_>>>()?;
-    names.sort();
-    Ok(names)
-}
-
-/// One entry's path (as the sandbox names it), type, size, modification
-/// time and symlink target. `true` when it is a directory.
-fn digest_entry(host: &Path, inside: &Path, digest: &mut sha2::Sha256) -> io::Result<bool> {
-    use std::os::unix::ffi::OsStrExt as _;
-    use std::os::unix::fs::MetadataExt as _;
-    let metadata = fs::symlink_metadata(host).map_err(|error| host_layout_error(host, error))?;
-    let file_type = metadata.file_type();
-    let (kind, target) = if file_type.is_symlink() {
-        let target = fs::read_link(host).map_err(|error| host_layout_error(host, error))?;
-        ("l", Some(target))
-    } else if file_type.is_dir() {
-        ("d", None)
-    } else if file_type.is_file() {
-        ("f", None)
-    } else {
-        ("o", None)
-    };
-    digest_field(digest, inside.as_os_str().as_bytes());
-    digest_field(digest, kind.as_bytes());
-    digest_field(digest, &metadata.size().to_le_bytes());
-    let modified = i128::from(metadata.mtime()) * 1_000_000_000 + i128::from(metadata.mtime_nsec());
-    digest_field(digest, &modified.to_le_bytes());
-    digest_field(
-        digest,
-        target
-            .as_deref()
-            .map_or(&[][..], |target| target.as_os_str().as_bytes()),
-    );
-    Ok(file_type.is_dir())
+fn fingerprint_error(path: &Path, error: io::Error) -> io::Error {
+    io::Error::new(
+        error.kind(),
+        format!(
+            "cannot read host {} to fingerprint its build inputs: {error}",
+            path.display()
+        ),
+    )
 }
 
 /// A length-prefixed field, so no name can run into the next one.
@@ -1067,11 +1103,90 @@ mod tests {
         let after_cc = fingerprint();
         assert_ne!(after_cc, before_compiler, "a new cc did not count");
         fs::create_dir_all(host.0.join("usr/lib/gcc/x86_64-redhat-linux/16")).unwrap();
+        let after_gcc_dir = fingerprint();
         assert_ne!(
-            fingerprint(),
-            after_cc,
+            after_gcc_dir, after_cc,
             "a new gcc internal directory did not count"
         );
+        // Every file under the compiler's internals counts, however deep.
+        fs::create_dir_all(host.0.join("usr/lib/gcc/x86_64-redhat-linux/16/include")).unwrap();
+        fs::write(
+            host.0
+                .join("usr/lib/gcc/x86_64-redhat-linux/16/include/stddef.h"),
+            b"/* gcc */",
+        )
+        .unwrap();
+        assert_ne!(
+            fingerprint(),
+            after_gcc_dir,
+            "a gcc internal header did not count"
+        );
+
+        // A dropped symlink covers the kept file its chain resolves to:
+        // `liblzma.so -> liblzma.so.5 -> liblzma.so.5.2` is what `-llzma`
+        // reads under the full view.
+        let before_target = fingerprint();
+        fs::write(
+            host.0.join("usr/lib64/liblzma.so.5.2"),
+            b"\x7fELF\x02\x01\x01\x00\x00",
+        )
+        .unwrap();
+        touch("usr/lib64/liblzma.so.5.2", 7);
+        let after_target = fingerprint();
+        assert_ne!(
+            after_target, before_target,
+            "a dropped symlink's target did not count"
+        );
+        // The same size and time through a new inode still counts.
+        let target = host.0.join("usr/lib64/liblzma.so.5.2");
+        fs::rename(&target, host.0.join("usr/lib64/old")).unwrap();
+        fs::write(&target, b"\x7fELF\x02\x01\x01\x00\x00").unwrap();
+        touch("usr/lib64/liblzma.so.5.2", 7);
+        fs::remove_file(host.0.join("usr/lib64/old")).unwrap();
+        assert_ne!(
+            fingerprint(),
+            after_target,
+            "a replaced target did not count"
+        );
+    }
+
+    /// A dangling symlink is recorded as such; a symlink loop and a
+    /// directory tog cannot read are errors naming the path, never a
+    /// quietly smaller fingerprint.
+    #[test]
+    fn host_build_inputs_refuse_what_they_cannot_read() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let host = curated_fake_host("fingerprint-errors", false);
+        let link = |target: &str, name: &str| {
+            std::os::unix::fs::symlink(target, host.0.join(name)).unwrap();
+        };
+        let clean = host_build_inputs_at(&host.0).unwrap();
+        link("libgone.so.1", "usr/lib64/libgone.so");
+        let dangling = host_build_inputs_at(&host.0).unwrap();
+        assert_ne!(dangling, clean);
+        fs::remove_file(host.0.join("usr/lib64/libgone.so")).unwrap();
+
+        link("libloop.so.b", "usr/lib64/libloop.so");
+        link("libloop.so", "usr/lib64/libloop.so.b");
+        let error = host_build_inputs_at(&host.0).unwrap_err().to_string();
+        assert!(error.contains("libloop.so"), "{error}");
+        fs::remove_file(host.0.join("usr/lib64/libloop.so")).unwrap();
+        fs::remove_file(host.0.join("usr/lib64/libloop.so.b")).unwrap();
+        assert_eq!(host_build_inputs_at(&host.0).unwrap(), clean);
+
+        // SAFETY: geteuid has no preconditions.
+        if unsafe { libc::geteuid() } == 0 {
+            eprintln!("skip unreadable directory: running as root");
+            return;
+        }
+        let secret = host.0.join("usr/include/secret");
+        fs::create_dir(&secret).unwrap();
+        fs::set_permissions(&secret, fs::Permissions::from_mode(0o000)).unwrap();
+        let result = host_build_inputs_at(&host.0);
+        fs::set_permissions(&secret, fs::Permissions::from_mode(0o755)).unwrap();
+        let error = result.unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied, "{error}");
+        assert!(error.to_string().contains("usr/include/secret"), "{error}");
     }
 
     /// The real host's fingerprint is stable between two walks, and how

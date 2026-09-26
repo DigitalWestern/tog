@@ -1279,7 +1279,7 @@ const SYMLINK_HOP_LIMIT: usize = 40;
 /// absolute targets restarting at `host_root`. A missing component ends
 /// lookup and the rest is kept lexically. A chain longer than
 /// `SYMLINK_HOP_LIMIT` is a loop and an error, as in the kernel (ELOOP).
-fn resolve_host_path(host_root: &Path, path: &Path) -> io::Result<PathBuf> {
+pub(crate) fn resolve_host_path(host_root: &Path, path: &Path) -> io::Result<PathBuf> {
     use std::collections::VecDeque;
     use std::path::Component;
     let mut pending: VecDeque<OsString> = VecDeque::new();

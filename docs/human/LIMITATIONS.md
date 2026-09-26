@@ -145,16 +145,24 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   object is then committed under its own `build_view = "host-fallback/1"` identity, keyed by
   which gems fell back and by a fingerprint of the host build inputs (`host_inputs`): every
   header, library, `pkgconfig` or `cmake` entry the C-runtime-only view hides or relocates,
-  where `/usr/bin/cc` and `/usr/bin/c++` resolve, and the gcc internal directories. The
-  fingerprint is stat-based (path, type, size, modification time, symlink target, never
-  file contents), so a development package installed, removed or upgraded changes it, but
-  an edit that keeps a file's size and restores its modification time does not. It is taken
-  only when the runtime-only object is missing (about 10 ms on a Fedora 44 workstation). A
-  store record keyed by the runtime-only id and that fingerprint lets a later sync over the
-  same store, on any host whose build inputs fingerprint the same, reuse the object instead
-  of rebuilding; a host in another state misses the record and builds. What the fingerprint
-  cannot see (file contents, anything outside the curated directories and the compiler) can
-  still make two hosts with the same fingerprint build different bytes.
+  for each such symlink the file its chain finally resolves to (so a dropped `liblzma.so`
+  covers the kept `liblzma.so.5.8.1` behind it), where `/usr/bin/cc` and `/usr/bin/c++`
+  resolve, and every file under `/usr/lib/gcc` and `/usr/libexec/gcc`. The fingerprint is
+  stat-based, never a hash of file contents: each entry counts by path, type, size,
+  modification time and symlink target, and a resolved target by its inode and device too.
+  A development package installed, removed or upgraded is detected through those file
+  details; a file rewritten with bytes of the same size and its modification time put back
+  is not. A directory it cannot read fails the sync rather than counting as empty. It is
+  taken right before and right after each build against the whole host (about 12 ms on a
+  Fedora 44 workstation); if the two differ, or two gems of one object fell back against
+  different host states, the sync fails ("host development files changed during the build
+  of <gem>; re-run tog"). A store record keyed by the runtime-only id and that build-time
+  fingerprint lets a later sync over the same store, on any host whose build inputs
+  fingerprint the same, reuse the object instead of rebuilding; the lookup fingerprints the
+  host again, only when the runtime-only object is missing, and a host in another state
+  misses the record and builds. What the fingerprint cannot see (file contents, anything
+  outside the curated directories and the compiler) can still make two hosts with the same
+  fingerprint build different bytes.
   Pure-Ruby gems compile nothing and install against the whole host. Setting the view up
   costs about two seconds per native gem on a Fedora 44 workstation, and more on a host with
   a larger library directory.

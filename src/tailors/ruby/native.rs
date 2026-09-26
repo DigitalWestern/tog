@@ -13,17 +13,40 @@ const HOST_FALLBACK_VIEW: &str = "host-fallback/1";
 /// on a host in a given state, the gems that fell back to the whole host.
 const HOST_FALLBACK_RECORDS: &str = "ruby-gems-host-fallback";
 
-/// This host's `hostview::host_build_inputs`, walked at most once per
-/// sync and only when a runtime-only gems object is missing: a cache hit
-/// never pays for it.
-pub(super) fn host_inputs(slot: &mut Option<String>) -> io::Result<String> {
-    if let Some(fingerprint) = slot {
-        return Ok(fingerprint.clone());
+/// A gem's build against the whole host ran while the host's build inputs
+/// changed (the fingerprints taken before and after it differ), or two
+/// gems of one object fell back against different host states. Nothing
+/// built in that sync can be keyed by one host state, so it fails.
+#[derive(Debug)]
+pub(super) struct HostChanged(pub(super) String);
+
+impl std::fmt::Display for HostChanged {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "host development files changed during the build of {}; re-run tog",
+            self.0
+        )
     }
-    let fingerprint = crate::kernel::hostview::host_build_inputs()
-        .map_err(|e| io::Error::new(e.kind(), format!("fingerprint the host build inputs: {e}")))?;
-    *slot = Some(fingerprint.clone());
-    Ok(fingerprint)
+}
+
+impl std::error::Error for HostChanged {}
+
+/// The one host state every fallback of a gems object was built against:
+/// the first fallback's fingerprint, which each later one must equal.
+pub(super) fn same_host_state(
+    first: &mut Option<String>,
+    gem: &str,
+    fingerprint: String,
+) -> io::Result<()> {
+    match first {
+        None => *first = Some(fingerprint),
+        Some(first) if *first != fingerprint => {
+            return Err(io::Error::other(HostChanged(gem.to_string())))
+        }
+        Some(_) => {}
+    }
+    Ok(())
 }
 
 /// The identity a gems object is committed under when `fell_back` gems
@@ -94,13 +117,15 @@ fn recorded_host_fallback(
 /// object itself, or, when a build of it on a host in this host's state
 /// fell back, the host-fallback object that build committed. Rebuilding
 /// would only fall back again against the same host inputs, so the record
-/// stands in for the attempt. The fingerprint is taken only past the
-/// first check, into `host_inputs_slot`.
+/// stands in for the attempt. `fingerprint` (`hostview::host_build_inputs`
+/// in production) is taken only past the first check, so a runtime-only
+/// hit never pays for it, and it serves this lookup only: a build keys its
+/// object by the fingerprints taken around its own fallbacks.
 pub(super) fn cached_gems_object(
     store: &Store,
     activity: &StoreActivity,
     identity: &Identity,
-    host_inputs_slot: &mut Option<String>,
+    fingerprint: impl FnOnce() -> io::Result<String>,
 ) -> io::Result<Option<String>> {
     let id = identity.object_id();
     if store.has_with_activity(activity, &id)? {
@@ -109,7 +134,7 @@ pub(super) fn cached_gems_object(
     if identity.inputs.get("build_view").map(String::as_str) != Some(RUNTIME_ONLY_VIEW) {
         return Ok(None);
     }
-    let host_inputs = host_inputs(host_inputs_slot)?;
+    let host_inputs = fingerprint()?;
     let Some(fell_back) = recorded_host_fallback(store, identity, &host_inputs)? else {
         return Ok(None);
     };
@@ -155,11 +180,17 @@ pub(super) struct GemInstall<'a> {
 
 impl GemInstall<'_> {
     /// Install `gem` from its `.gem` at `named` in the sandbox, with the
-    /// host view its build needs (`install_gem`); `true` when it fell back
-    /// to the whole host. Each attempt gets its own empty HOME and TMPDIR
+    /// host view its build needs (`install_gem`); when it fell back to the
+    /// whole host, the host build inputs fingerprint it was built against.
+    /// Each attempt gets its own empty HOME and TMPDIR
     /// (`AttemptHomes`); the helper and the `.gem` stay readable from the
     /// outer scratch.
-    pub(super) fn install(&self, gem: &RubyGem, named: &Path, native: bool) -> io::Result<bool> {
+    pub(super) fn install(
+        &self,
+        gem: &RubyGem,
+        named: &Path,
+        native: bool,
+    ) -> io::Result<Option<String>> {
         let (platform, ruby_obj, scratch, staged) =
             (self.platform, self.ruby_obj, self.scratch, self.staged);
         let mut homes = AttemptHomes::new(scratch, &gem.full_name);
@@ -198,9 +229,13 @@ impl GemInstall<'_> {
         let attempt = Attempt {
             record: crate::kernel::policy::record,
             discard,
+            fingerprint: crate::kernel::hostview::host_build_inputs,
             install,
         };
         install_gem(platform, native, &gem.full_name, attempt).map_err(|e| {
+            if e.get_ref().is_some_and(|inner| inner.is::<HostChanged>()) {
+                return e;
+            }
             io::Error::new(
                 e.kind(),
                 format!(
@@ -259,10 +294,13 @@ impl<'a> AttemptHomes<'a> {
 
 /// One gem's install as `install_gem` drives it: `record` records an
 /// exception, `discard` undoes what a failed hermetic attempt left in the
-/// GEM_HOME (or refuses), and `install` runs one attempt with a view.
-struct Attempt<R, D, I> {
+/// GEM_HOME (or refuses), `fingerprint` takes the host build inputs
+/// fingerprint (`hostview::host_build_inputs`), and `install` runs one
+/// attempt with a view.
+struct Attempt<R, D, F, I> {
     record: R,
     discard: D,
+    fingerprint: F,
     install: I,
 }
 
@@ -274,21 +312,22 @@ struct Attempt<R, D, I> {
 /// and never records `host-build-inputs`. On macOS Seatbelt has no
 /// C-runtime-only view yet (see `HostView`), so a second attempt would
 /// only repeat the first.
-fn install_gem<R, D, I>(
+fn install_gem<R, D, F, I>(
     platform: Platform,
     native: bool,
     gem: &str,
-    mut attempt: Attempt<R, D, I>,
-) -> io::Result<bool>
+    mut attempt: Attempt<R, D, F, I>,
+) -> io::Result<Option<String>>
 where
     R: FnOnce(&str, &str, &str) -> io::Result<()>,
     D: FnOnce() -> io::Result<()>,
+    F: FnMut() -> io::Result<String>,
     I: FnMut(HostView) -> io::Result<()>,
 {
     if native && !platform.is_macos() {
         install_hermetic_first(gem, attempt)
     } else {
-        (attempt.install)(HostView::Full).map(|()| false)
+        (attempt.install)(HostView::Full).map(|()| None)
     }
 }
 
@@ -298,7 +337,7 @@ const HOST_BUILD_INPUTS_DETAIL: &str = "native extension did not build against t
      depends on which -dev packages the host has";
 
 /// Install one gem against the host's C runtime alone, and only if that
-/// build fails, against the whole host; `true` when it fell back. The
+/// build fails, against the whole host. The
 /// fallback is an exception, and it is recorded before the second attempt
 /// runs, so a policy that denies `host-build-inputs` stops here with
 /// nothing built against the host.
@@ -310,14 +349,23 @@ const HOST_BUILD_INPUTS_DETAIL: &str = "native extension did not build against t
 /// shared GEM_HOME and refuses when the attempt changed anything beyond
 /// RubyGems' own leftovers for this gem (`gem_home::discard_failed_attempt`);
 /// a refusal records nothing.
-fn install_hermetic_first<R, D, I>(gem: &str, mut attempt: Attempt<R, D, I>) -> io::Result<bool>
+///
+/// The host build inputs are fingerprinted immediately before the retry
+/// and again right after it. The fallback returns that fingerprint, the
+/// host state the object was actually built against; when the two differ
+/// the host changed under the build and it fails (`HostChanged`).
+fn install_hermetic_first<R, D, F, I>(
+    gem: &str,
+    mut attempt: Attempt<R, D, F, I>,
+) -> io::Result<Option<String>>
 where
     R: FnOnce(&str, &str, &str) -> io::Result<()>,
     D: FnOnce() -> io::Result<()>,
+    F: FnMut() -> io::Result<String>,
     I: FnMut(HostView) -> io::Result<()>,
 {
     let hermetic = match (attempt.install)(HostView::RuntimeOnly) {
-        Ok(()) => return Ok(false),
+        Ok(()) => return Ok(None),
         Err(error) => error,
     };
     if matches!(
@@ -327,29 +375,32 @@ where
         return Err(hermetic);
     }
     let attempts = format!("the build against the C runtime alone failed ({hermetic})");
-    let refused = (attempt.discard)().and_then(|()| {
+    let prepared = (attempt.discard)().and_then(|()| {
+        let before = (attempt.fingerprint)()?;
         (attempt.record)(
             crate::kernel::policy::HOST_BUILD_INPUTS,
             gem,
             HOST_BUILD_INPUTS_DETAIL,
-        )
+        )?;
+        Ok(before)
     });
-    if let Err(refusal) = refused {
-        return Err(io::Error::new(
+    let before = prepared.map_err(|refusal| {
+        io::Error::new(
             refusal.kind(),
             format!("{attempts}, and it was not retried against the whole host: {refusal}"),
-        ));
+        )
+    })?;
+    (attempt.install)(HostView::Full).map_err(|full| {
+        io::Error::new(
+            full.kind(),
+            format!("{attempts}, and so did the build against this machine's whole /usr ({full})"),
+        )
+    })?;
+    let after = (attempt.fingerprint)()?;
+    if after != before {
+        return Err(io::Error::other(HostChanged(gem.to_string())));
     }
-    (attempt.install)(HostView::Full)
-        .map(|()| true)
-        .map_err(|full| {
-            io::Error::new(
-                full.kind(),
-                format!(
-                    "{attempts}, and so did the build against this machine's whole /usr ({full})"
-                ),
-            )
-        })
+    Ok(Some(after))
 }
 
 #[cfg(test)]
@@ -365,23 +416,42 @@ mod tests {
         policy: &crate::kernel::policy::Policy,
         results: Vec<io::Result<()>>,
     ) -> (
-        io::Result<bool>,
+        io::Result<Option<String>>,
         Vec<HostView>,
         Vec<crate::kernel::policy::Exception>,
     ) {
-        hermetic_first_discarding(policy, results, Ok(()))
+        hermetic_first_scripted(policy, results, Ok(()), vec![HOST.into(); 2])
     }
+
+    /// The host build inputs fingerprint the scripted host keeps.
+    const HOST: &str = "1111111111111111111111111111111111111111111111111111111111111111";
 
     /// `hermetic_first` with `discard` scripted too.
     fn hermetic_first_discarding(
         policy: &crate::kernel::policy::Policy,
-        mut results: Vec<io::Result<()>>,
+        results: Vec<io::Result<()>>,
         discard: io::Result<()>,
     ) -> (
-        io::Result<bool>,
+        io::Result<Option<String>>,
         Vec<HostView>,
         Vec<crate::kernel::policy::Exception>,
     ) {
+        hermetic_first_scripted(policy, results, discard, vec![HOST.into(); 2])
+    }
+
+    /// `hermetic_first` with `discard` and the host fingerprints, in the
+    /// order they are taken, scripted too.
+    fn hermetic_first_scripted(
+        policy: &crate::kernel::policy::Policy,
+        mut results: Vec<io::Result<()>>,
+        discard: io::Result<()>,
+        mut fingerprints: Vec<String>,
+    ) -> (
+        io::Result<Option<String>>,
+        Vec<HostView>,
+        Vec<crate::kernel::policy::Exception>,
+    ) {
+        fingerprints.reverse();
         let _lock = crate::kernel::policy::attribution_test_lock();
         let attribution = crate::kernel::policy::Attribution::open("ruby").unwrap();
         let mut views = Vec::new();
@@ -393,6 +463,11 @@ mod tests {
                     crate::kernel::policy::record_with(policy, kind, subject, detail)
                 },
                 discard: || discard,
+                fingerprint: || {
+                    Ok(fingerprints
+                        .pop()
+                        .expect("a fingerprint the test did not script"))
+                },
                 install: |view| {
                     views.push(view);
                     results.pop().expect("an attempt the test did not script")
@@ -414,7 +489,7 @@ mod tests {
     fn a_gem_that_builds_against_the_c_runtime_records_nothing() {
         let (result, views, recorded) =
             hermetic_first(&crate::kernel::policy::Policy::default(), vec![Ok(())]);
-        assert!(!result.unwrap());
+        assert_eq!(result.unwrap(), None);
         assert_eq!(views, [HostView::RuntimeOnly]);
         assert!(recorded.is_empty(), "{recorded:?}");
     }
@@ -425,7 +500,7 @@ mod tests {
             &crate::kernel::policy::Policy::default(),
             vec![failed("lzma.h not found"), Ok(())],
         );
-        assert!(result.unwrap(), "the gem fell back");
+        assert_eq!(result.unwrap().as_deref(), Some(HOST), "the gem fell back");
         assert_eq!(views, [HostView::RuntimeOnly, HostView::Full]);
         assert_eq!(recorded.len(), 1, "{recorded:?}");
         assert_eq!(recorded[0].kind, crate::kernel::policy::HOST_BUILD_INPUTS);
@@ -540,8 +615,7 @@ mod tests {
         let (host, upgraded) = ("a".repeat(64), "b".repeat(64));
         let fallback = ruby_gems_fallback_identity(&runtime_only, &["rake-13.2.1".into()], &host);
         let lookup = |host: &str| {
-            let mut slot = Some(host.to_string());
-            cached_gems_object(&store, &activity, &runtime_only, &mut slot).unwrap()
+            cached_gems_object(&store, &activity, &runtime_only, || Ok(host.to_string())).unwrap()
         };
         let fell_back = ["rake-13.2.1".to_string()];
 
@@ -568,12 +642,13 @@ mod tests {
         plant(&runtime_only.object_id());
         assert_eq!(lookup(&upgraded), Some(runtime_only.object_id()));
         // And a hit on it never fingerprints the host.
-        let mut slot = None;
         assert_eq!(
-            cached_gems_object(&store, &activity, &runtime_only, &mut slot).unwrap(),
+            cached_gems_object(&store, &activity, &runtime_only, || {
+                panic!("a runtime-only hit fingerprinted the host")
+            })
+            .unwrap(),
             Some(runtime_only.object_id())
         );
-        assert_eq!(slot, None);
         for id in [runtime_only.object_id(), fallback.object_id()] {
             fs::set_permissions(store.object_path(&id), fs::Permissions::from_mode(0o755)).unwrap();
         }
@@ -592,6 +667,7 @@ mod tests {
             Attempt {
                 record: |_: &str, _: &str, _: &str| Ok(()),
                 discard: || Ok(()),
+                fingerprint: || Ok(HOST.to_string()),
                 install: |view| {
                     let home = homes.next()?;
                     assert_eq!(fs::read_dir(&home)?.count(), 0, "a home that is not empty");
@@ -613,10 +689,44 @@ mod tests {
                 },
             },
         );
-        assert!(result.unwrap(), "the gem fell back");
+        assert_eq!(result.unwrap().as_deref(), Some(HOST), "the gem fell back");
         assert_eq!(seen.len(), 2);
         assert_ne!(seen[0], seen[1]);
         assert!(!seen[0].exists() && seen[1].is_dir());
+    }
+
+    /// A host whose build inputs change while the build against it runs
+    /// fails the gem: its object could not be keyed by one host state.
+    #[test]
+    fn a_host_that_changes_under_the_fallback_fails_it() {
+        let upgraded = "2".repeat(64);
+        let (result, views, _) = hermetic_first_scripted(
+            &crate::kernel::policy::Policy::default(),
+            vec![failed("lzma.h not found"), Ok(())],
+            Ok(()),
+            vec![HOST.into(), upgraded],
+        );
+        let error = result.unwrap_err();
+        assert!(error
+            .get_ref()
+            .is_some_and(|inner| inner.is::<HostChanged>()));
+        assert_eq!(
+            error.to_string(),
+            "host development files changed during the build of nokogiri-1.18.10; re-run tog"
+        );
+        assert_eq!(views, [HostView::RuntimeOnly, HostView::Full]);
+
+        // Two fallbacks of one object against different host states fail
+        // the same way; the same state twice is one state.
+        let mut first = None;
+        same_host_state(&mut first, "nokogiri-1.18.10", HOST.into()).unwrap();
+        same_host_state(&mut first, "sqlite3-2.7.0", HOST.into()).unwrap();
+        let error = same_host_state(&mut first, "pg-1.6.0", "2".repeat(64)).unwrap_err();
+        assert!(
+            error.to_string().contains("during the build of pg-1.6.0"),
+            "{error}"
+        );
+        assert_eq!(first.as_deref(), Some(HOST));
     }
 
     /// A failed attempt that changed the GEM_HOME beyond its own leftovers
@@ -663,6 +773,7 @@ mod tests {
         ) -> Attempt<
             fn(&str, &str, &str) -> io::Result<()>,
             fn() -> io::Result<()>,
+            fn() -> io::Result<String>,
             impl FnMut(HostView) -> io::Result<()> + '_,
         > {
             let mut full = Some(full);
@@ -676,6 +787,7 @@ mod tests {
                     )
                 },
                 discard: || Ok(()),
+                fingerprint: || Ok(HOST.to_string()),
                 install: move |view| {
                     views.push(view);
                     match view {
@@ -694,7 +806,7 @@ mod tests {
             attempt(&mut native_views, Ok(())),
         )
         .unwrap();
-        assert!(used_host);
+        assert_eq!(used_host.as_deref(), Some(HOST));
         assert_eq!(native_views, [HostView::RuntimeOnly, HostView::Full]);
         assert_eq!(attribution.recorded().len(), 1);
 
@@ -718,7 +830,7 @@ mod tests {
             attempt(&mut darwin_views, Ok(())),
         )
         .unwrap();
-        assert!(!used_host, "the only attempt is no fallback");
+        assert_eq!(used_host, None, "the only attempt is no fallback");
         assert_eq!(darwin_views, [HostView::Full]);
         attribution.discard();
     }
