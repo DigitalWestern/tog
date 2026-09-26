@@ -323,9 +323,11 @@ Before that retry the failed attempt's own gem and extension directories
 are removed from the shared GEM_HOME, and any other change it made refuses
 the retry (`ruby/gem_home.rs`). Such an object is committed under its own
 identity (`build_view = "host-fallback/1"`, `host_fallback` = the gems that
-fell back), never under the runtime-only id, and a store record under the
-runtime-only id lets the next sync on the same machine reuse it
-(`ruby/native.rs`).
+fell back, `host_inputs` = `hostview::host_build_inputs`, a stat-based
+fingerprint of what the full view shows beyond the C-runtime-only one plus
+the compiler), never under the runtime-only id, and a store record keyed by
+the runtime-only id and that fingerprint lets a later sync over the same
+store on a host in the same state reuse it (`ruby/native.rs`).
 Every tog invocation strips
 `BUNDLE_*`/`RUBYOPT` and forces `BUNDLE_FROZEN`, `GEM_HOME`/`GEM_PATH`.
 v0 gaps: non-rubygems.org sources, PATH/GIT gems.

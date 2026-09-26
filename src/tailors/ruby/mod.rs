@@ -26,7 +26,7 @@ use crate::kernel::toolchain::{ArtifactRow, Catalog, LegacyEvidence, Selected};
 use crate::kernel::types::Identity;
 use crate::kernel::ui;
 use native::{
-    cached_gems_object, record_host_fallback, ruby_gems_fallback_identity, GemInstall,
+    cached_gems_object, host_inputs, record_host_fallback, ruby_gems_fallback_identity, GemInstall,
     RUNTIME_ONLY_VIEW,
 };
 use serde::{Deserialize, Serialize};
@@ -1124,7 +1124,8 @@ pub fn realize_gems(
     let spec = ruby_spec(platform, selected)?;
     validate_plan(plan)?;
     let identity = ruby_gems_identity(&spec, plan);
-    if let Some(id) = cached_gems_object(store, activity, &identity)? {
+    let mut host_inputs_slot = None;
+    if let Some(id) = cached_gems_object(store, activity, &identity, &mut host_inputs_slot)? {
         crate::kernel::policy::check_cached_with_activity(store, activity, &id)?;
         record_api_digests_on_hit(store, activity, plan, ruby_obj);
         return Ok(store.object_path(&id));
@@ -1208,19 +1209,24 @@ pub fn realize_gems(
     // the object carries it, so a later cache hit replays it through
     // `check_cached_with_activity` above and a policy that denies the kind
     // refuses the cached object too. Such an object is committed under its
-    // own identity, and a record under the runtime-only id points the next
-    // sync on this machine at it.
-    let commit_identity = if fell_back.is_empty() {
-        identity.clone()
+    // own identity, keyed by the host's build inputs too, and a record
+    // under the runtime-only id and those inputs points the next sync on a
+    // host in the same state at it.
+    let host_inputs = if fell_back.is_empty() {
+        None
     } else {
-        ruby_gems_fallback_identity(&identity, &fell_back)
+        Some(host_inputs(&mut host_inputs_slot)?)
+    };
+    let commit_identity = match &host_inputs {
+        None => identity.clone(),
+        Some(host_inputs) => ruby_gems_fallback_identity(&identity, &fell_back, host_inputs),
     };
     let candidate = crate::kernel::policy::object_exceptions();
     let (object, applied) = store
         .commit_with_activity_and_deps(activity, &commit_identity, &staged, &candidate, &deps)
         .map_err(|e| io::Error::new(e.kind(), format!("commit gems: {e}")))?;
-    if !fell_back.is_empty() {
-        record_host_fallback(store, activity, &identity, &fell_back);
+    if let Some(host_inputs) = &host_inputs {
+        record_host_fallback(store, activity, &identity, host_inputs, &fell_back);
     }
     for exception in applied {
         if !candidate.contains(&exception) {
@@ -1342,7 +1348,11 @@ pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
     let gems = ruby_gems_identity(&spec, &gem_plan);
     let mut cases = vec![ruby, ruby_gems_identity(&spec, &empty_plan), gems.clone()];
     if !platform.is_macos() {
-        cases.push(ruby_gems_fallback_identity(&gems, &["rake-13.2.1".into()]));
+        cases.push(ruby_gems_fallback_identity(
+            &gems,
+            &["rake-13.2.1".into()],
+            &"f".repeat(64),
+        ));
     }
     cases
 }

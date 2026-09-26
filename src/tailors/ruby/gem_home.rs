@@ -32,8 +32,11 @@ const STANDARD_SUBDIRECTORIES: &[&str] = &[
 ];
 
 /// One path's state. A directory is compared by kind, mode and inode only:
-/// its size and modification time change whenever an entry under it is
-/// added or removed, and every such entry has its own line in the manifest.
+/// its size and times change whenever an entry under it is added or
+/// removed, and every such entry has its own line in the manifest. Anything
+/// else also carries its status-change time, which no unprivileged process
+/// can set: a rewrite in place that restores the modification time still
+/// moves it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Entry {
     kind: char,
@@ -41,6 +44,7 @@ struct Entry {
     inode: u64,
     size: u64,
     modified_ns: i128,
+    changed_ns: i128,
     target: Option<PathBuf>,
 }
 
@@ -82,6 +86,11 @@ fn walk(root: &Path, relative: &Path, entries: &mut BTreeMap<PathBuf, Entry>) ->
                     0
                 } else {
                     i128::from(metadata.mtime()) * 1_000_000_000 + i128::from(metadata.mtime_nsec())
+                },
+                changed_ns: if directory {
+                    0
+                } else {
+                    i128::from(metadata.ctime()) * 1_000_000_000 + i128::from(metadata.ctime_nsec())
                 },
                 target,
             },
@@ -220,6 +229,26 @@ mod tests {
         let file = home.0.join("gems/pure-1.0/lib/pure.rb");
         fs::remove_file(&file).unwrap();
         fs::write(&file, "module Evil; end\n").unwrap();
+        assert_eq!(
+            first_change(&before, &manifest(&home.0).unwrap()),
+            Some(PathBuf::from("gems/pure-1.0/lib/pure.rb"))
+        );
+
+        // Same inode, same size, modification time put back: the change
+        // time still moves.
+        let home = gem_home("diff-in-place");
+        let file = home.0.join("gems/pure-1.0/lib/pure.rb");
+        let modified = fs::metadata(&file).unwrap().modified().unwrap();
+        let before = manifest(&home.0).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        {
+            use std::io::Write as _;
+            let mut handle = fs::File::options().write(true).open(&file).unwrap();
+            handle.write_all(b"module Evil; end").unwrap();
+            handle.set_modified(modified).unwrap();
+        }
+        assert_eq!(fs::read(&file).unwrap(), b"module Evil; end\n");
+        assert_eq!(fs::metadata(&file).unwrap().modified().unwrap(), modified);
         assert_eq!(
             first_change(&before, &manifest(&home.0).unwrap()),
             Some(PathBuf::from("gems/pure-1.0/lib/pure.rb"))

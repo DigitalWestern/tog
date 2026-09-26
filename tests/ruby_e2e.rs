@@ -747,8 +747,8 @@ BUNDLED WITH
 /// A gem that needs host development packages still installs: it falls
 /// back to the whole host, the object is committed under its own
 /// `host-fallback/1` identity with a `host-build-inputs` exception naming
-/// the gem, and the next sync finds that object through the store record
-/// instead of building again (issue #304).
+/// the gem, and the next sync on the unchanged host finds that object
+/// through the store record instead of building again (issue #304).
 #[test]
 #[ignore]
 #[cfg(target_os = "linux")]
@@ -781,6 +781,13 @@ fn ruby_gem_needing_host_headers_falls_back_once() {
     assert_eq!(
         inputs["host_fallback"].as_str(),
         Some("zlib-3.2.3"),
+        "{inputs:?}"
+    );
+    // Keyed by this host's build inputs too (`hostview::host_build_inputs`).
+    assert!(
+        inputs["host_inputs"]
+            .as_str()
+            .is_some_and(|hex| hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_hexdigit())),
         "{inputs:?}"
     );
     let exceptions = gems_meta["exceptions"]

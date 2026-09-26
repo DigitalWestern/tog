@@ -412,7 +412,7 @@ impl ViewSkeleton {
     /// never used.
     fn create() -> io::Result<Self> {
         use std::hash::{BuildHasher as _, Hasher as _};
-        use std::os::unix::fs::DirBuilderExt as _;
+        use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
         static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let base = fs::canonicalize(std::env::temp_dir())?;
         loop {
@@ -428,7 +428,14 @@ impl ViewSkeleton {
                 hasher.finish()
             ));
             match fs::DirBuilder::new().mode(0o700).create(&path) {
-                Ok(()) => return Ok(Self(path)),
+                Ok(()) => {
+                    // The umask can only narrow the mode `create` asked
+                    // for; under `umask 077`-and-stricter it could leave a
+                    // root bubblewrap cannot traverse. Set it outright.
+                    let skeleton = Self(path);
+                    fs::set_permissions(skeleton.path(), fs::Permissions::from_mode(0o700))?;
+                    return Ok(skeleton);
+                }
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
                 Err(error) => {
                     return Err(io::Error::new(
@@ -463,16 +470,8 @@ fn runtime_only_args(
 ) -> io::Result<(Vec<OsString>, Vec<PathBuf>)> {
     let mut args = Vec::new();
     let mut library_path = Vec::new();
-    for &(inside, curation) in CURATED_DIRS {
-        let inside = Path::new(inside);
+    for (inside, host, curation) in curated_roots(host_root)? {
         let relative = inside.strip_prefix("/").unwrap_or(inside);
-        let host = host_root.join(relative);
-        match fs::symlink_metadata(&host) {
-            Ok(metadata) if metadata.is_dir() => {}
-            Ok(_) => continue,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(host_layout_error(&host, error)),
-        }
         let mirror = skeleton.join(relative);
         fs::create_dir_all(&mirror)?;
         push_arg(&mut args, "--ro-bind");
@@ -492,6 +491,23 @@ fn runtime_only_args(
     Ok((args, library_path))
 }
 
+/// The `CURATED_DIRS` this host has as real directories: where each is in
+/// the sandbox, where it is under `host_root`, and its curation.
+fn curated_roots(host_root: &Path) -> io::Result<Vec<(&'static Path, PathBuf, Curation)>> {
+    let mut roots = Vec::new();
+    for &(inside, curation) in CURATED_DIRS {
+        let inside = Path::new(inside);
+        let host = host_root.join(inside.strip_prefix("/").unwrap_or(inside));
+        match fs::symlink_metadata(&host) {
+            Ok(metadata) if metadata.is_dir() => roots.push((inside, host, curation)),
+            Ok(_) => continue,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(host_layout_error(&host, error)),
+        }
+    }
+    Ok(roots)
+}
+
 /// Mirror the kept entries of one host directory into `mirror` and bind
 /// the kept files and directories. Entries are visited in name order so
 /// the command line is the same on every run of an unchanged host.
@@ -503,36 +519,7 @@ fn curate_dir(
     args: &mut Vec<OsString>,
     library_path: &mut Vec<PathBuf>,
 ) -> io::Result<()> {
-    let mut names = Vec::new();
-    for entry in fs::read_dir(host).map_err(|error| host_layout_error(host, error))? {
-        names.push(
-            entry
-                .map_err(|error| host_layout_error(host, error))?
-                .file_name(),
-        );
-    }
-    names.sort();
-    let mut entries = Vec::new();
-    for name in names {
-        let host_entry = host.join(&name);
-        let file_type = fs::symlink_metadata(&host_entry)
-            .map_err(|error| host_layout_error(&host_entry, error))?
-            .file_type();
-        let inside_entry = inside.join(&name);
-        let nested = CURATED_NESTED
-            .iter()
-            .any(|path| Path::new(path) == inside_entry);
-        let text = name.to_string_lossy();
-        let placement = match curation {
-            _ if nested && file_type.is_dir() => Placement::Keep,
-            Curation::Headers if nested || C_RUNTIME_HEADERS.contains(&text.as_ref()) => {
-                Placement::Keep
-            }
-            Curation::Headers | Curation::Empty => Placement::Drop,
-            Curation::Libraries => library_entry_placement(&text, file_type, &host_entry),
-        };
-        entries.push((name, file_type, nested, placement));
-    }
+    let entries = classify_dir(host, inside, curation)?;
     // A kept symlink naming a moved file in this directory (`libfoo.so.1
     // -> libfoo.so`) follows it into the runtime subdirectory.
     let moved: Vec<&OsStr> = entries
@@ -591,6 +578,206 @@ fn curate_dir(
         args.push(inside_entry.into_os_string());
     }
     Ok(())
+}
+
+/// One entry of a curated host directory: its name, its type, whether it
+/// is a `CURATED_NESTED` directory, and where the view puts it.
+type Classified = (OsString, fs::FileType, bool, Placement);
+
+/// Where the view puts each entry of the curated host directory `host`
+/// (`inside` in the sandbox), in name order. The one place the curation
+/// rules are applied, so the view and `host_build_inputs` cannot disagree.
+fn classify_dir(host: &Path, inside: &Path, curation: Curation) -> io::Result<Vec<Classified>> {
+    let mut names = Vec::new();
+    for entry in fs::read_dir(host).map_err(|error| host_layout_error(host, error))? {
+        names.push(
+            entry
+                .map_err(|error| host_layout_error(host, error))?
+                .file_name(),
+        );
+    }
+    names.sort();
+    let mut entries = Vec::new();
+    for name in names {
+        let host_entry = host.join(&name);
+        let file_type = fs::symlink_metadata(&host_entry)
+            .map_err(|error| host_layout_error(&host_entry, error))?
+            .file_type();
+        let inside_entry = inside.join(&name);
+        let nested = CURATED_NESTED
+            .iter()
+            .any(|path| Path::new(path) == inside_entry);
+        let text = name.to_string_lossy();
+        let placement = match curation {
+            _ if nested && file_type.is_dir() => Placement::Keep,
+            Curation::Headers if nested || C_RUNTIME_HEADERS.contains(&text.as_ref()) => {
+                Placement::Keep
+            }
+            Curation::Headers | Curation::Empty => Placement::Drop,
+            Curation::Libraries => library_entry_placement(&text, file_type, &host_entry),
+        };
+        entries.push((name, file_type, nested, placement));
+    }
+    Ok(entries)
+}
+
+/// A digest of everything a build against the whole host (`HostView::Full`)
+/// sees that a `RuntimeOnly` build does not, plus the compiler: every entry
+/// the view drops from a curated directory (whole trees for dropped
+/// directories such as `/usr/include/libxml2`, `pkgconfig` and `cmake`),
+/// every library it moves into `RUNTIME_SUBDIR`, what `/usr/bin/cc` and
+/// `/usr/bin/c++` resolve to, and the compiler's internal directories under
+/// `/usr/lib/gcc` and `/usr/libexec/gcc`. Hex SHA-256.
+///
+/// It is stat-based: each entry contributes its path, type, size,
+/// modification time and symlink target, never its bytes. Installing,
+/// removing or upgrading a development package changes it; an edit that
+/// keeps a file's size and restores its modification time does not. The
+/// walk classifies entries with the view's own rules (`classify_dir`), so
+/// the two cannot disagree about what is dropped.
+pub(crate) fn host_build_inputs() -> io::Result<String> {
+    host_build_inputs_at(Path::new("/"))
+}
+
+fn host_build_inputs_at(host_root: &Path) -> io::Result<String> {
+    use sha2::Digest as _;
+    let mut digest = sha2::Sha256::new();
+    digest.update(b"tog-host-build-inputs/1");
+    for (inside, host, curation) in curated_roots(host_root)? {
+        if curation == Curation::Empty {
+            digest_tree(&host, inside, &mut digest)?;
+        } else {
+            digest_dropped(&host, inside, curation, &mut digest)?;
+        }
+    }
+    for compiler in ["/usr/bin/cc", "/usr/bin/c++"] {
+        let host = host_root.join(&compiler[1..]);
+        digest_field(&mut digest, compiler.as_bytes());
+        match fs::canonicalize(&host) {
+            Ok(resolved) => {
+                let inside =
+                    Path::new("/").join(resolved.strip_prefix(host_root).unwrap_or(&resolved));
+                digest_entry(&resolved, &inside, &mut digest)?;
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                digest_field(&mut digest, b"absent");
+            }
+            Err(error) => return Err(host_layout_error(&host, error)),
+        }
+    }
+    for internal in ["/usr/lib/gcc", "/usr/libexec/gcc"] {
+        let host = host_root.join(&internal[1..]);
+        let Ok(targets) = sorted_names(&host) else {
+            continue;
+        };
+        for target in targets {
+            let Ok(versions) = sorted_names(&host.join(&target)) else {
+                continue;
+            };
+            for version in versions {
+                let relative = Path::new(&target).join(&version);
+                digest_entry(
+                    &host.join(&relative),
+                    &Path::new(internal).join(&relative),
+                    &mut digest,
+                )?;
+            }
+        }
+    }
+    Ok(hex::encode(digest.finalize()))
+}
+
+/// The entries of a curated host directory the view drops or moves, and
+/// the `CURATED_NESTED` directories it curates in turn.
+fn digest_dropped(
+    host: &Path,
+    inside: &Path,
+    curation: Curation,
+    digest: &mut sha2::Sha256,
+) -> io::Result<()> {
+    for (name, file_type, nested, placement) in classify_dir(host, inside, curation)? {
+        let (host_entry, inside_entry) = (host.join(&name), inside.join(&name));
+        match placement {
+            Placement::Keep if nested && file_type.is_dir() => {
+                digest_dropped(&host_entry, &inside_entry, curation, digest)?;
+            }
+            Placement::Keep => {}
+            Placement::Runtime => {
+                digest_entry(&host_entry, &inside_entry, digest)?;
+            }
+            Placement::Drop => {
+                digest_entry(&host_entry, &inside_entry, digest)?;
+                if file_type.is_dir() {
+                    digest_tree(&host_entry, &inside_entry, digest)?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Every entry under `host`, depth first in name order, symlinks recorded
+/// and never followed. A directory tog cannot list is one a build cannot
+/// list either: it counts as its own entry only.
+fn digest_tree(host: &Path, inside: &Path, digest: &mut sha2::Sha256) -> io::Result<()> {
+    let names = match sorted_names(host) {
+        Ok(names) => names,
+        Err(error) if error.kind() == io::ErrorKind::PermissionDenied => return Ok(()),
+        Err(error) => return Err(host_layout_error(host, error)),
+    };
+    for name in names {
+        let (host_entry, inside_entry) = (host.join(&name), inside.join(&name));
+        if digest_entry(&host_entry, &inside_entry, digest)? {
+            digest_tree(&host_entry, &inside_entry, digest)?;
+        }
+    }
+    Ok(())
+}
+
+fn sorted_names(dir: &Path) -> io::Result<Vec<OsString>> {
+    let mut names = fs::read_dir(dir)?
+        .map(|entry| entry.map(|entry| entry.file_name()))
+        .collect::<io::Result<Vec<_>>>()?;
+    names.sort();
+    Ok(names)
+}
+
+/// One entry's path (as the sandbox names it), type, size, modification
+/// time and symlink target. `true` when it is a directory.
+fn digest_entry(host: &Path, inside: &Path, digest: &mut sha2::Sha256) -> io::Result<bool> {
+    use std::os::unix::ffi::OsStrExt as _;
+    use std::os::unix::fs::MetadataExt as _;
+    let metadata = fs::symlink_metadata(host).map_err(|error| host_layout_error(host, error))?;
+    let file_type = metadata.file_type();
+    let (kind, target) = if file_type.is_symlink() {
+        let target = fs::read_link(host).map_err(|error| host_layout_error(host, error))?;
+        ("l", Some(target))
+    } else if file_type.is_dir() {
+        ("d", None)
+    } else if file_type.is_file() {
+        ("f", None)
+    } else {
+        ("o", None)
+    };
+    digest_field(digest, inside.as_os_str().as_bytes());
+    digest_field(digest, kind.as_bytes());
+    digest_field(digest, &metadata.size().to_le_bytes());
+    let modified = i128::from(metadata.mtime()) * 1_000_000_000 + i128::from(metadata.mtime_nsec());
+    digest_field(digest, &modified.to_le_bytes());
+    digest_field(
+        digest,
+        target
+            .as_deref()
+            .map_or(&[][..], |target| target.as_os_str().as_bytes()),
+    );
+    Ok(file_type.is_dir())
+}
+
+/// A length-prefixed field, so no name can run into the next one.
+fn digest_field(digest: &mut sha2::Sha256, bytes: &[u8]) {
+    use sha2::Digest as _;
+    digest.update((bytes.len() as u64).to_le_bytes());
+    digest.update(bytes);
 }
 
 #[cfg(test)]
@@ -791,5 +978,119 @@ mod tests {
             .iter()
             .any(|(_, to)| to == Path::new("/lib64/libz.so")));
         assert!(fs::symlink_metadata(skeleton.0.join("lib64/libz.so")).is_err());
+    }
+
+    /// The fingerprint is a pure function of the host: the same tree gives
+    /// the same digest, and so does a copy made at another time or path.
+    /// It moves with what only `Full` exposes (a dropped header, a dropped
+    /// directory's contents, a relocated library, the compiler), never with
+    /// what the view keeps.
+    #[test]
+    fn host_build_inputs_track_only_what_the_view_hides() {
+        use std::time::{Duration, SystemTime};
+        let host = curated_fake_host("fingerprint", false);
+        fs::create_dir_all(host.0.join("usr/bin")).unwrap();
+        fs::write(host.0.join("usr/bin/gcc-15"), b"\x7fELF").unwrap();
+        std::os::unix::fs::symlink("gcc-15", host.0.join("usr/bin/cc")).unwrap();
+        fs::create_dir_all(host.0.join("usr/lib/gcc/x86_64-redhat-linux/15")).unwrap();
+        let fingerprint = || host_build_inputs_at(&host.0).unwrap();
+        let first = fingerprint();
+        assert_eq!(first.len(), 64);
+        assert_eq!(fingerprint(), first, "not deterministic");
+
+        // Pin every modification time so each change below differs from
+        // the baseline only in what it changes.
+        let touch = |path: &str, seconds: u64| {
+            let file = fs::File::options()
+                .write(true)
+                .open(host.0.join(path))
+                .unwrap();
+            file.set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(seconds))
+                .unwrap();
+        };
+
+        // A kept C-runtime header does not count, whatever happens to it.
+        fs::write(host.0.join("usr/include/stdio.h"), b"/* glibc 2.44 */\n").unwrap();
+        touch("usr/include/stdio.h", 7);
+        assert_eq!(
+            fingerprint(),
+            first,
+            "a kept header changed the fingerprint"
+        );
+
+        // A dropped header does, as does a new file in a dropped directory.
+        fs::write(host.0.join("usr/include/lzma.h"), b"/* xz-devel 5.8 */\n").unwrap();
+        let after_header = fingerprint();
+        assert_ne!(after_header, first, "a dropped header did not count");
+        fs::write(
+            host.0.join("usr/lib64/pkgconfig/liblzma.pc"),
+            b"Name: liblzma\n",
+        )
+        .unwrap();
+        let after_pc = fingerprint();
+        assert_ne!(after_pc, after_header, "a new .pc file did not count");
+        fs::create_dir_all(host.0.join("usr/include/libxml2/libxml")).unwrap();
+        let after_dir = fingerprint();
+        assert_ne!(after_dir, after_pc, "a new header directory did not count");
+        fs::write(host.0.join("usr/include/libxml2/libxml/tree.h"), b"").unwrap();
+        touch("usr/include/libxml2/libxml/tree.h", 7);
+        let after_nested = fingerprint();
+        assert_ne!(
+            after_nested, after_dir,
+            "a header inside a dropped directory did not count"
+        );
+
+        // A relocated runtime library counts by size and modification time.
+        touch("usr/lib64/libnss3.so", 7);
+        let after_touch = fingerprint();
+        assert_ne!(
+            after_touch, after_nested,
+            "a relocated library's mtime did not count"
+        );
+        fs::write(
+            host.0.join("usr/lib64/libnss3.so"),
+            b"\x7fELF\x02\x01\x01\x00",
+        )
+        .unwrap();
+        touch("usr/lib64/libnss3.so", 7);
+        assert_ne!(
+            fingerprint(),
+            after_touch,
+            "a relocated library's size did not count"
+        );
+
+        // The compiler: where `cc` resolves, and its internal directory.
+        let before_compiler = fingerprint();
+        fs::write(host.0.join("usr/bin/gcc-16"), b"\x7fELF").unwrap();
+        fs::remove_file(host.0.join("usr/bin/cc")).unwrap();
+        std::os::unix::fs::symlink("gcc-16", host.0.join("usr/bin/cc")).unwrap();
+        let after_cc = fingerprint();
+        assert_ne!(after_cc, before_compiler, "a new cc did not count");
+        fs::create_dir_all(host.0.join("usr/lib/gcc/x86_64-redhat-linux/16")).unwrap();
+        assert_ne!(
+            fingerprint(),
+            after_cc,
+            "a new gcc internal directory did not count"
+        );
+    }
+
+    /// The real host's fingerprint is stable between two walks, and how
+    /// long a walk takes here is printed for the record.
+    #[test]
+    fn this_hosts_build_inputs_are_stable() {
+        let started = std::time::Instant::now();
+        let first = host_build_inputs().unwrap();
+        let elapsed = started.elapsed();
+        assert_eq!(host_build_inputs().unwrap(), first);
+        eprintln!("host build inputs {first} in {elapsed:?}");
+    }
+
+    /// The skeleton root is 0700 whatever the umask left.
+    #[test]
+    fn the_skeleton_root_is_private() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let skeleton = ViewSkeleton::create().unwrap();
+        let mode = fs::metadata(skeleton.path()).unwrap().permissions().mode();
+        assert_eq!(mode & 0o7777, 0o700);
     }
 }

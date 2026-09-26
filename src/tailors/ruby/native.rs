@@ -9,40 +9,71 @@ use super::*;
 pub(super) const RUNTIME_ONLY_VIEW: &str = "runtime-only/1";
 const HOST_FALLBACK_VIEW: &str = "host-fallback/1";
 
-/// The store record kind naming, for a runtime-only gems identity, the
-/// gems that fell back to the whole host when it was last built here.
+/// The store record kind naming, for a runtime-only gems identity built
+/// on a host in a given state, the gems that fell back to the whole host.
 const HOST_FALLBACK_RECORDS: &str = "ruby-gems-host-fallback";
+
+/// This host's `hostview::host_build_inputs`, walked at most once per
+/// sync and only when a runtime-only gems object is missing: a cache hit
+/// never pays for it.
+pub(super) fn host_inputs(slot: &mut Option<String>) -> io::Result<String> {
+    if let Some(fingerprint) = slot {
+        return Ok(fingerprint.clone());
+    }
+    let fingerprint = crate::kernel::hostview::host_build_inputs()
+        .map_err(|e| io::Error::new(e.kind(), format!("fingerprint the host build inputs: {e}")))?;
+    *slot = Some(fingerprint.clone());
+    Ok(fingerprint)
+}
 
 /// The identity a gems object is committed under when `fell_back` gems
 /// were rebuilt against the whole host: the runtime-only identity, with
-/// the view renamed and the fallen-back gems listed. Its bytes still
-/// depend on the host's development packages; the id only keeps such an
-/// object from ever answering for the runtime-only identity.
+/// the view renamed, the fallen-back gems listed, and the fingerprint of
+/// the host state they were built against (`host_inputs`). Two hosts, or
+/// one host before and after a development package changed, get
+/// different ids; the object never answers for the runtime-only identity.
 pub(super) fn ruby_gems_fallback_identity(
     runtime_only: &Identity,
     fell_back: &[String],
+    host_inputs: &str,
 ) -> Identity {
-    let mut names = fell_back.to_vec();
-    names.sort();
-    names.dedup();
     let mut identity = runtime_only.clone();
     identity
         .inputs
         .insert("build_view".to_string(), HOST_FALLBACK_VIEW.to_string());
     identity
         .inputs
-        .insert("host_fallback".to_string(), names.join(","));
+        .insert("host_fallback".to_string(), sorted(fell_back).join(","));
+    identity
+        .inputs
+        .insert("host_inputs".to_string(), host_inputs.to_string());
     identity
 }
 
-/// The gems a previous build of `runtime_only` on this machine rebuilt
-/// against the whole host, as its store record says. A record that names a
-/// gem outside the plan, or no gem, is ignored.
+fn sorted(names: &[String]) -> Vec<String> {
+    let mut names = names.to_vec();
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// A fallback record's key: the runtime-only id and the host fingerprint,
+/// so a host in another state finds no record and builds.
+fn record_key(runtime_only: &Identity, host_inputs: &str) -> String {
+    serde_json::json!([runtime_only.object_id(), host_inputs]).to_string()
+}
+
+/// The gems a previous build of `runtime_only`, on a host whose build
+/// inputs had this fingerprint, rebuilt against the whole host, as its
+/// store record says. A record that names a gem outside the plan, or no
+/// gem, is ignored.
 fn recorded_host_fallback(
     store: &Store,
     runtime_only: &Identity,
+    host_inputs: &str,
 ) -> io::Result<Option<Vec<String>>> {
-    let Some(value) = store.read_record(HOST_FALLBACK_RECORDS, &runtime_only.object_id())? else {
+    let key = record_key(runtime_only, host_inputs);
+    let Some(value) = store.read_record(HOST_FALLBACK_RECORDS, &key)? else {
         return Ok(None);
     };
     let names: Option<Vec<String>> = value["host_fallback"].as_array().and_then(|names| {
@@ -60,13 +91,16 @@ fn recorded_host_fallback(
 }
 
 /// The gems object already in the store for `identity`: the runtime-only
-/// object itself, or, when this machine's last build of it fell back, the
-/// host-fallback object that build committed. Rebuilding would only fall
-/// back again on the same host, so the record stands in for the attempt.
+/// object itself, or, when a build of it on a host in this host's state
+/// fell back, the host-fallback object that build committed. Rebuilding
+/// would only fall back again against the same host inputs, so the record
+/// stands in for the attempt. The fingerprint is taken only past the
+/// first check, into `host_inputs_slot`.
 pub(super) fn cached_gems_object(
     store: &Store,
     activity: &StoreActivity,
     identity: &Identity,
+    host_inputs_slot: &mut Option<String>,
 ) -> io::Result<Option<String>> {
     let id = identity.object_id();
     if store.has_with_activity(activity, &id)? {
@@ -75,35 +109,31 @@ pub(super) fn cached_gems_object(
     if identity.inputs.get("build_view").map(String::as_str) != Some(RUNTIME_ONLY_VIEW) {
         return Ok(None);
     }
-    let Some(fell_back) = recorded_host_fallback(store, identity)? else {
+    let host_inputs = host_inputs(host_inputs_slot)?;
+    let Some(fell_back) = recorded_host_fallback(store, identity, &host_inputs)? else {
         return Ok(None);
     };
-    let fallback = ruby_gems_fallback_identity(identity, &fell_back).object_id();
+    let fallback = ruby_gems_fallback_identity(identity, &fell_back, &host_inputs).object_id();
     Ok(store
         .has_with_activity(activity, &fallback)?
         .then_some(fallback))
 }
 
-/// Record which gems of `runtime_only` fell back, so the next sync on this
-/// machine finds the host-fallback object instead of building again. A
-/// failed write costs the next sync a rebuild and nothing else, so it is
+/// Record which gems of `runtime_only` fell back against these host
+/// inputs, so the next sync over the same store on a host in the same
+/// state finds the host-fallback object instead of building again. A
+/// failed write costs that sync a rebuild and nothing else, so it is
 /// reported and the sync goes on.
 pub(super) fn record_host_fallback(
     store: &Store,
     activity: &StoreActivity,
     runtime_only: &Identity,
+    host_inputs: &str,
     fell_back: &[String],
 ) {
-    let mut names = fell_back.to_vec();
-    names.sort();
-    names.dedup();
-    let value = serde_json::json!({ "host_fallback": names });
-    if let Err(error) = store.write_record(
-        activity,
-        HOST_FALLBACK_RECORDS,
-        &runtime_only.object_id(),
-        &value,
-    ) {
+    let value = serde_json::json!({ "host_fallback": sorted(fell_back) });
+    let key = record_key(runtime_only, host_inputs);
+    if let Err(error) = store.write_record(activity, HOST_FALLBACK_RECORDS, &key, &value) {
         ui::note(&format!(
             "gems built against the whole host were not recorded in the store ({error}); \
              the next sync builds them again"
@@ -126,17 +156,15 @@ pub(super) struct GemInstall<'a> {
 impl GemInstall<'_> {
     /// Install `gem` from its `.gem` at `named` in the sandbox, with the
     /// host view its build needs (`install_gem`); `true` when it fell back
-    /// to the whole host. Each attempt gets its own empty HOME and TMPDIR,
-    /// so nothing a failed attempt left there reaches the next one; the
-    /// helper and the `.gem` stay readable from the outer scratch.
+    /// to the whole host. Each attempt gets its own empty HOME and TMPDIR
+    /// (`AttemptHomes`); the helper and the `.gem` stay readable from the
+    /// outer scratch.
     pub(super) fn install(&self, gem: &RubyGem, named: &Path, native: bool) -> io::Result<bool> {
         let (platform, ruby_obj, scratch, staged) =
             (self.platform, self.ruby_obj, self.scratch, self.staged);
-        let mut attempts = 0;
+        let mut homes = AttemptHomes::new(scratch, &gem.full_name);
         let install = |host_view: HostView| {
-            attempts += 1;
-            let home = scratch.join(format!("{}-attempt-{attempts}", gem.full_name));
-            fs::create_dir(&home)?;
+            let home = homes.next()?;
             let spec = BuildSpec {
                 argv: vec![
                     ruby_obj.join("bin/ruby").display().to_string(),
@@ -182,6 +210,50 @@ impl GemInstall<'_> {
                 ),
             )
         })
+    }
+}
+
+/// The HOME and TMPDIR of each attempt at one gem's install: a fresh empty
+/// directory under the scratch directory. Every attempt can read the whole
+/// scratch directory (the helper and the `.gem` live there), so the
+/// previous attempt's directory is removed before the next one is made:
+/// nothing a failed attempt left behind reaches the retry.
+struct AttemptHomes<'a> {
+    scratch: &'a Path,
+    gem: &'a str,
+    count: u32,
+    current: Option<PathBuf>,
+}
+
+impl<'a> AttemptHomes<'a> {
+    fn new(scratch: &'a Path, gem: &'a str) -> Self {
+        Self {
+            scratch,
+            gem,
+            count: 0,
+            current: None,
+        }
+    }
+
+    fn next(&mut self) -> io::Result<PathBuf> {
+        if let Some(previous) = self.current.take() {
+            crate::kernel::store::remove_tree(&previous).map_err(|e| {
+                io::Error::new(
+                    e.kind(),
+                    format!(
+                        "remove the failed attempt's home {}: {e}",
+                        previous.display()
+                    ),
+                )
+            })?;
+        }
+        self.count += 1;
+        let home = self
+            .scratch
+            .join(format!("{}-attempt-{}", self.gem, self.count));
+        fs::create_dir(&home)?;
+        self.current = Some(home.clone());
+        Ok(home)
     }
 }
 
@@ -396,29 +468,46 @@ mod tests {
         second.full_name = "nokogiri-1.18.10".into();
         plan.gems.push(second);
         let runtime_only = ruby_gems_identity(&pin_spec(Platform::X86_64UnknownLinuxGnu), &plan);
-        let one = ruby_gems_fallback_identity(&runtime_only, &["nokogiri-1.18.10".into()]);
+        let host = "a".repeat(64);
+        let one = ruby_gems_fallback_identity(&runtime_only, &["nokogiri-1.18.10".into()], &host);
         let both = ruby_gems_fallback_identity(
             &runtime_only,
             &["rake-13.2.1".into(), "nokogiri-1.18.10".into()],
+            &host,
+        );
+        // The same gems against another host state.
+        let upgraded = ruby_gems_fallback_identity(
+            &runtime_only,
+            &["nokogiri-1.18.10".into()],
+            &"b".repeat(64),
         );
         assert_eq!(one.inputs["build_view"], HOST_FALLBACK_VIEW);
         assert_eq!(one.inputs["host_fallback"], "nokogiri-1.18.10");
+        assert_eq!(one.inputs["host_inputs"], host);
         assert_eq!(both.inputs["host_fallback"], "nokogiri-1.18.10,rake-13.2.1");
-        let ids = [runtime_only.object_id(), one.object_id(), both.object_id()];
-        assert!(
-            ids[0] != ids[1] && ids[1] != ids[2] && ids[0] != ids[2],
-            "{ids:?}"
-        );
+        let ids = [
+            runtime_only.object_id(),
+            one.object_id(),
+            both.object_id(),
+            upgraded.object_id(),
+        ];
+        for (index, id) in ids.iter().enumerate() {
+            assert!(!ids[index + 1..].contains(id), "{ids:?}");
+        }
         // Order of discovery does not matter.
         let reordered = ruby_gems_fallback_identity(
             &runtime_only,
             &["nokogiri-1.18.10".into(), "rake-13.2.1".into()],
+            &host,
         );
         assert_eq!(reordered.object_id(), both.object_id());
         crate::tailors::install_kinds();
-        for identity in [&one, &both] {
+        for identity in [&one, &both, &upgraded] {
             crate::kernel::objmeta::check_identity_grammar(identity).unwrap();
         }
+        let mut unfingerprinted = one.clone();
+        unfingerprinted.inputs.remove("host_inputs");
+        assert!(crate::kernel::objmeta::check_identity_grammar(&unfingerprinted).is_err());
     }
 
     /// The runtime-only object answers first; without it, the record of
@@ -448,32 +537,86 @@ mod tests {
             &pin_spec(Platform::X86_64UnknownLinuxGnu),
             &linux_test_plan(),
         );
-        let fallback = ruby_gems_fallback_identity(&runtime_only, &["rake-13.2.1".into()]);
-        let lookup = || cached_gems_object(&store, &activity, &runtime_only).unwrap();
+        let (host, upgraded) = ("a".repeat(64), "b".repeat(64));
+        let fallback = ruby_gems_fallback_identity(&runtime_only, &["rake-13.2.1".into()], &host);
+        let lookup = |host: &str| {
+            let mut slot = Some(host.to_string());
+            cached_gems_object(&store, &activity, &runtime_only, &mut slot).unwrap()
+        };
+        let fell_back = ["rake-13.2.1".to_string()];
 
         plant(&fallback.object_id());
-        assert_eq!(lookup(), None, "no record, no fallback object");
-        record_host_fallback(&store, &activity, &runtime_only, &["rake-13.2.1".into()]);
-        assert_eq!(lookup(), Some(fallback.object_id()));
+        assert_eq!(lookup(&host), None, "no record, no fallback object");
+        record_host_fallback(&store, &activity, &runtime_only, &host, &fell_back);
+        assert_eq!(lookup(&host), Some(fallback.object_id()));
+        // A host whose build inputs changed finds no record, and builds.
+        assert_eq!(lookup(&upgraded), None);
 
         // A record naming a gem outside the plan is ignored.
         store
             .write_record(
                 &activity,
                 HOST_FALLBACK_RECORDS,
-                &runtime_only.object_id(),
+                &record_key(&runtime_only, &host),
                 &serde_json::json!({"host_fallback": ["rails-8.0.0"]}),
             )
             .unwrap();
-        assert_eq!(lookup(), None);
-        record_host_fallback(&store, &activity, &runtime_only, &["rake-13.2.1".into()]);
+        assert_eq!(lookup(&host), None);
+        record_host_fallback(&store, &activity, &runtime_only, &host, &fell_back);
 
         // The runtime-only object wins over any record.
         plant(&runtime_only.object_id());
-        assert_eq!(lookup(), Some(runtime_only.object_id()));
+        assert_eq!(lookup(&upgraded), Some(runtime_only.object_id()));
+        // And a hit on it never fingerprints the host.
+        let mut slot = None;
+        assert_eq!(
+            cached_gems_object(&store, &activity, &runtime_only, &mut slot).unwrap(),
+            Some(runtime_only.object_id())
+        );
+        assert_eq!(slot, None);
         for id in [runtime_only.object_id(), fallback.object_id()] {
             fs::set_permissions(store.object_path(&id), fs::Permissions::from_mode(0o755)).unwrap();
         }
+    }
+
+    /// The retry against the whole host starts in a fresh home, and the
+    /// failed attempt's home is gone before it starts: nothing the first
+    /// attempt left in its HOME or TMPDIR is readable to the second.
+    #[test]
+    fn the_retry_never_sees_the_failed_attempts_home() {
+        let scratch = TempDir::named("ruby-attempt-homes");
+        let mut homes = AttemptHomes::new(&scratch.0, "nokogiri-1.18.10");
+        let mut seen = Vec::new();
+        let result = install_hermetic_first(
+            "nokogiri-1.18.10",
+            Attempt {
+                record: |_: &str, _: &str, _: &str| Ok(()),
+                discard: || Ok(()),
+                install: |view| {
+                    let home = homes.next()?;
+                    assert_eq!(fs::read_dir(&home)?.count(), 0, "a home that is not empty");
+                    seen.push(home.clone());
+                    match view {
+                        HostView::RuntimeOnly => {
+                            fs::create_dir(home.join("tmp"))?;
+                            fs::write(home.join("tmp/probe-result"), "yes")?;
+                            failed("lzma.h not found")
+                        }
+                        HostView::Full => {
+                            assert!(
+                                !seen[0].exists(),
+                                "the failed attempt's home is still there"
+                            );
+                            Ok(())
+                        }
+                    }
+                },
+            },
+        );
+        assert!(result.unwrap(), "the gem fell back");
+        assert_eq!(seen.len(), 2);
+        assert_ne!(seen[0], seen[1]);
+        assert!(!seen[0].exists() && seen[1].is_dir());
     }
 
     /// A failed attempt that changed the GEM_HOME beyond its own leftovers

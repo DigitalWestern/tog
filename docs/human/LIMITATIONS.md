@@ -134,14 +134,27 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   paths and from pkg-config in that sandbox. Other host shared libraries stay loadable so
   the compiler and linker themselves run: they are moved into a `.tog-host-runtime`
   subdirectory of their library directory, which `ld` does not search, and reached through
-  `LD_LIBRARY_PATH`. An explicit `-I` or `-L` into a subdirectory the view keeps (such as
-  `/usr/lib64/python3.14`) is not curated. A gem that needs another host library fails that
-  build, is rebuilt against the whole host, and records `host-build-inputs`, which a policy
-  can deny. The build that failed may only have left its own gem and extension directories
-  behind; anything else it changed in the gem home refuses the retry. The object is then
-  committed under its own `build_view = "host-fallback/1"` identity, keyed by which gems fell
-  back, never by which development packages the host had: it still depends on those, and
-  the next sync on the same machine reuses it through a store record instead of rebuilding.
+  `LD_LIBRARY_PATH`. That variable outranks a program's own `DT_RUNPATH`: a program a gem
+  bundles and runs during its build, relying on its RUNPATH for a library with the same
+  soname as a relocated host library, loads the host copy instead. An explicit `-I` or `-L`
+  into a subdirectory the view keeps (such as `/usr/lib64/python3.14`) is not curated. A gem
+  that needs another host library fails that build, is rebuilt against the whole host, and
+  records `host-build-inputs`, which a policy can deny. The build that failed may only have
+  left its own gem and extension directories behind; anything else it changed in the gem
+  home refuses the retry, and its HOME and TMPDIR are deleted before the retry starts. The
+  object is then committed under its own `build_view = "host-fallback/1"` identity, keyed by
+  which gems fell back and by a fingerprint of the host build inputs (`host_inputs`): every
+  header, library, `pkgconfig` or `cmake` entry the C-runtime-only view hides or relocates,
+  where `/usr/bin/cc` and `/usr/bin/c++` resolve, and the gcc internal directories. The
+  fingerprint is stat-based (path, type, size, modification time, symlink target, never
+  file contents), so a development package installed, removed or upgraded changes it, but
+  an edit that keeps a file's size and restores its modification time does not. It is taken
+  only when the runtime-only object is missing (about 10 ms on a Fedora 44 workstation). A
+  store record keyed by the runtime-only id and that fingerprint lets a later sync over the
+  same store, on any host whose build inputs fingerprint the same, reuse the object instead
+  of rebuilding; a host in another state misses the record and builds. What the fingerprint
+  cannot see (file contents, anything outside the curated directories and the compiler) can
+  still make two hosts with the same fingerprint build different bytes.
   Pure-Ruby gems compile nothing and install against the whole host. Setting the view up
   costs about two seconds per native gem on a Fedora 44 workstation, and more on a host with
   a larger library directory.
