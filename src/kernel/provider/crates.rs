@@ -21,7 +21,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
-use std::process::Command;
 
 fn err(msg: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, msg.into())
@@ -191,7 +190,7 @@ fn normalize_checksum(checksum: &str) -> io::Result<String> {
 /// Realize the registry closure as a Cargo directory source.
 ///
 /// The Rust toolchain is deliberately **not** a dependency of the result.
-/// `realize_vendor_inner` shells out only to `/usr/bin/tar` and the
+/// `realize_vendor_inner` extracts only through `kernel::archive` and the
 /// git-source realizer — no part of the toolchain is a build input — and
 /// `vendor_identity` does not commit to one, so recording it would let the
 /// same identity be published with two different dependency sets. That
@@ -202,7 +201,7 @@ fn normalize_checksum(checksum: &str) -> io::Result<String> {
 /// own `root/2` closure, which records `rust_object` directly.
 ///
 /// The Rust object remains a separate closure dependency because the vendor
-/// tree is produced by the host tar, not by a build that reads the toolchain.
+/// tree is produced by the validated archive extractor, not by a build that reads the toolchain.
 pub fn realize_vendor(
     store: &Store,
     activity: &StoreActivity,
@@ -464,25 +463,19 @@ fn realize_vendor_inner(
                 format!("{}@{}: create staging dir: {e}", krate.name, krate.version),
             )
         })?;
-        let mut command = Command::new("/usr/bin/tar");
-        command
-            .args(["-xzf"])
-            .arg(&*archive)
-            .args(["-C"])
-            .arg(&crate_dir)
-            .args(["--strip-components", "1"]);
-        let status = crate::kernel::supervise::status(&mut command, activity).map_err(|e| {
+        crate::kernel::archive::extract_with_activity_and_options(
+            activity,
+            &archive,
+            &crate_dir,
+            &crate::kernel::archive::ExtractOptions::stripped(1),
+            crate::kernel::archive::Compression::Gzip,
+        )
+        .map_err(|e| {
             io::Error::new(
                 e.kind(),
-                format!("{}@{}: spawn tar: {e}", krate.name, krate.version),
+                format!("{}@{}: extract archive: {e}", krate.name, krate.version),
             )
         })?;
-        if !status.success() {
-            return Err(err(format!(
-                "{}@{}: crate extraction failed",
-                krate.name, krate.version
-            )));
-        }
 
         let (files, size) = inspect_crate(&crate_dir, krate)?;
         if size > 1 << 30 {

@@ -73,6 +73,7 @@ pub enum EntryKind {
 pub enum Compression {
     None,
     Gzip,
+    Bzip2,
     Xz,
 }
 
@@ -81,10 +82,19 @@ impl Compression {
         match self {
             Compression::None => "",
             Compression::Gzip => "z",
+            Compression::Bzip2 => "j",
             Compression::Xz => "J",
         }
     }
 }
+
+/// Ceiling on the total member bytes one archive may carry. The header
+/// reader adds up every regular file's declared size (plus metadata
+/// headers) before the delegated tar writes anything and refuses past
+/// this: a compression bomb must not fill the disk first. It matches the
+/// per-package 1 GiB cap the registry extractors already enforced after
+/// the fact, and every pinned toolchain is orders of magnitude below it.
+pub const MAX_ARCHIVE_BYTES: u64 = 1 << 30;
 
 fn err(msg: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, msg.into())
@@ -287,13 +297,21 @@ const METADATA_LIMIT: u64 = 1 << 20;
 fn read_archive(archive: &Path, compression: Compression) -> io::Result<Vec<Entry>> {
     let file = io::BufReader::new(File::open(archive)?);
     match compression {
-        Compression::None => read_entries(file),
+        Compression::None => read_entries(file, None),
         // Multi-member, matching what `tar -z` accepts.
-        Compression::Gzip => {
-            read_entries(io::BufReader::new(flate2::read::MultiGzDecoder::new(file)))
+        Compression::Gzip => read_entries(
+            io::BufReader::new(flate2::read::MultiGzDecoder::new(file)),
+            None,
+        ),
+        Compression::Bzip2 => {
+            read_entries(io::BufReader::new(bzip2::read::BzDecoder::new(file)), None)
         }
-        Compression::Xz => read_entries(io::BufReader::new(liblzma::read::XzDecoder::new(file))),
+        Compression::Xz => read_entries(
+            io::BufReader::new(liblzma::read::XzDecoder::new(file)),
+            None,
+        ),
     }
+    .map(|(entries, _)| entries)
 }
 
 /// Header state that a `L`, `K` or `x` block leaves for the member that
@@ -320,8 +338,19 @@ impl Pending {
 
 /// Read an uncompressed tar stream and return one `Entry` per member, or a
 /// refusal naming the member that could not be modelled.
-fn read_entries(mut reader: impl Read) -> io::Result<Vec<Entry>> {
+///
+/// `want` names one regular-file member whose bytes are captured instead of
+/// skipped (at most its `u64` cap): the single-member read behind
+/// `read_member`. Everything else about the walk is identical, so the bytes
+/// come from the same modelled stream the listing describes. Only the first
+/// member with that exact stored name is captured.
+fn read_entries(
+    mut reader: impl Read,
+    want: Option<(&str, u64)>,
+) -> io::Result<(Vec<Entry>, Option<Vec<u8>>)> {
     let mut entries = Vec::new();
+    let mut wanted: Option<Vec<u8>> = None;
+    let mut budget = Budget::default();
     let mut pending = Pending::default();
     let mut block = [0u8; BLOCK];
     loop {
@@ -343,7 +372,7 @@ fn read_entries(mut reader: impl Read) -> io::Result<Vec<Entry>> {
                 ));
             }
             // Both tars stop at the first all-zero block; so does this.
-            return Ok(entries);
+            return Ok((entries, wanted));
         }
         if !checksum_matches(&block) {
             return Err(err(format!(
@@ -360,19 +389,19 @@ fn read_entries(mut reader: impl Read) -> io::Result<Vec<Entry>> {
         // members themselves and do not clear each other's state.
         match typeflag {
             b'x' => {
-                let data = read_metadata(&mut reader, raw_size, &header_name)?;
+                let data = read_metadata(&mut reader, raw_size, &header_name, &mut budget)?;
                 let records = pax_records(&data, &header_name)?;
                 apply_pax(records, &header_name, &mut pending)?;
                 continue;
             }
             b'g' => {
-                let data = read_metadata(&mut reader, raw_size, &header_name)?;
+                let data = read_metadata(&mut reader, raw_size, &header_name, &mut budget)?;
                 let records = pax_records(&data, &header_name)?;
                 check_global(&records, &header_name)?;
                 continue;
             }
             b'L' | b'K' => {
-                let data = read_metadata(&mut reader, raw_size, &header_name)?;
+                let data = read_metadata(&mut reader, raw_size, &header_name, &mut budget)?;
                 let value = utf8(c_string(&data), "GNU long name")?.to_string();
                 if typeflag == b'L' {
                     pending.long_name = Some(value);
@@ -463,9 +492,16 @@ fn read_entries(mut reader: impl Read) -> io::Result<Vec<Entry>> {
             )));
         }
         if kind == EntryKind::File {
-            skip(&mut reader, size, &name)?;
-            skip(&mut reader, padding(size), &name)?;
+            budget.add(size, &format!("entry {name:?}"))?;
         }
+        take_or_skip(
+            &mut reader,
+            &name,
+            size,
+            kind == EntryKind::File,
+            want,
+            &mut wanted,
+        )?;
         let link = if kind == EntryKind::Symlink {
             Some(link)
         } else {
@@ -473,6 +509,63 @@ fn read_entries(mut reader: impl Read) -> io::Result<Vec<Entry>> {
         };
         entries.push(Entry { kind, name, link });
     }
+}
+
+/// Running byte budget: every declared file size and every metadata header
+/// counts before its data is even skipped, so a bomb refuses on its headers
+/// rather than after filling the disk.
+#[derive(Default)]
+struct Budget {
+    total: u64,
+}
+
+impl Budget {
+    fn add(&mut self, more: u64, what: &str) -> io::Result<()> {
+        self.total = self.total.checked_add(more).ok_or_else(|| {
+            err(format!(
+                "archive holds more than {MAX_ARCHIVE_BYTES} bytes of member data; refusing to extract"
+            ))
+        })?;
+        if self.total > MAX_ARCHIVE_BYTES {
+            return Err(err(format!(
+                "archive {what} passes the {MAX_ARCHIVE_BYTES} byte budget; refusing to extract"
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// Capture one member's bytes when it is the wanted member, else skip its
+/// data; refuse a wanted member that is not a regular file. Only the first
+/// member with that exact stored name is captured.
+fn take_or_skip(
+    reader: &mut impl Read,
+    name: &str,
+    size: u64,
+    is_file: bool,
+    want: Option<(&str, u64)>,
+    wanted: &mut Option<Vec<u8>>,
+) -> io::Result<()> {
+    if !is_file {
+        if wanted.is_none() && want.is_some_and(|(member, _)| member == name) {
+            return Err(err(format!(
+                "archive member {name:?} is not a regular file"
+            )));
+        }
+        return Ok(());
+    }
+    if wanted.is_none() && want.is_some_and(|(member, _)| member == name) {
+        let cap = want.map(|(_, cap)| cap).unwrap_or(0);
+        if size > cap {
+            return Err(err(format!(
+                "archive member {name:?} holds {size} bytes, more than the {cap} byte read cap"
+            )));
+        }
+        *wanted = Some(read_member_data(reader, size, name)?);
+    } else {
+        skip(reader, size, name)?;
+    }
+    skip(reader, padding(size), name)
 }
 
 /// Bytes of NUL padding after `size` bytes of member data.
@@ -509,8 +602,37 @@ fn skip(reader: &mut impl Read, count: u64, name: &str) -> io::Result<()> {
     Ok(())
 }
 
-/// Read the data a metadata header carries, plus its padding.
-fn read_metadata(reader: &mut impl Read, size: u64, name: &str) -> io::Result<Vec<u8>> {
+/// Read exactly `size` bytes of one member's data; a short stream is a
+/// truncated archive. The caller checked `size` against its cap first, so
+/// the allocation is bounded by that cap.
+fn read_member_data(reader: &mut impl Read, size: u64, name: &str) -> io::Result<Vec<u8>> {
+    let mut data = vec![0u8; size as usize];
+    let mut filled = 0;
+    while filled < data.len() {
+        match reader.read(&mut data[filled..]) {
+            Ok(0) => break,
+            Ok(read) => filled += read,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error),
+        }
+    }
+    if filled != data.len() {
+        return Err(err(format!(
+            "truncated archive: entry {name:?} declares more data than the stream holds"
+        )));
+    }
+    Ok(data)
+}
+
+/// Read the data a metadata header carries, plus its padding, counting it
+/// against the byte budget: metadata counts like member data, so a stream
+/// of unbounded extended headers refuses the same way a bomb does.
+fn read_metadata(
+    reader: &mut impl Read,
+    size: u64,
+    name: &str,
+    budget: &mut Budget,
+) -> io::Result<Vec<u8>> {
     if size > METADATA_LIMIT {
         return Err(err(format!(
             "archive extended header {name:?} carries {size} bytes, more than this reader accepts"
@@ -531,6 +653,7 @@ fn read_metadata(reader: &mut impl Read, size: u64, name: &str) -> io::Result<Ve
             "truncated archive: extended header {name:?} is cut short"
         )));
     }
+    budget.add(data.len() as u64, "extended headers")?;
     skip(reader, padding(size), name)?;
     Ok(data)
 }
@@ -777,12 +900,10 @@ fn check_name_text(name: &str, link: &str) -> io::Result<()> {
 fn general_category(c: char) -> icu_properties::props::GeneralCategory {
     use std::sync::OnceLock;
     static MAP: OnceLock<
-        icu_properties::CodePointMapDataBorrowed<
-            'static,
-            icu_properties::props::GeneralCategory,
-        >,
+        icu_properties::CodePointMapDataBorrowed<'static, icu_properties::props::GeneralCategory>,
     > = OnceLock::new();
-    MAP.get_or_init(icu_properties::CodePointMapData::new).get(c)
+    MAP.get_or_init(icu_properties::CodePointMapData::new)
+        .get(c)
 }
 
 fn invisible(text: &str) -> Option<&'static str> {
@@ -836,6 +957,14 @@ fn invisible(text: &str) -> Option<&'static str> {
 /// still checked: a hard link, a device, an absolute name or a `..`
 /// component is refused wherever it sits.
 pub fn validate(entries: &[Entry], strip: usize) -> io::Result<()> {
+    validate_with_options(entries, &ExtractOptions::stripped(strip))
+}
+
+/// [`validate`] under the extraction's full options: `strip`, and whether
+/// the archive is a per-platform build that only this host's platform
+/// ever extracts (see [`ExtractOptions::platform_specific`]).
+pub fn validate_with_options(entries: &[Entry], options: &ExtractOptions) -> io::Result<()> {
+    let strip = options.strip;
     let mut kept: Vec<(&Entry, Vec<&str>)> = Vec::new();
     for entry in entries {
         match entry.kind {
@@ -871,8 +1000,14 @@ pub fn validate(entries: &[Entry], strip: usize) -> io::Result<()> {
     // prefix counts, since `Lib/a` and `lib/b` share one directory on APFS
     // and two on Linux. Identical spellings are tar's ordinary
     // last-one-wins on both.
+    //
+    // A per-platform build is only ever extracted on its own platform, so
+    // there is no second tree to diverge from: Linux keeps both names, as
+    // the archive says. It is still checked on macOS, where APFS would
+    // merge them.
+    let check_folding = !options.platform_specific || cfg!(target_os = "macos");
     let mut folded: BTreeMap<String, String> = BTreeMap::new();
-    for (_, stripped) in &kept {
+    for (_, stripped) in kept.iter().filter(|_| check_folding) {
         for end in 1..=stripped.len() {
             let prefix = stripped[..end].join("/");
             match folded.get(&folded_name(&prefix)) {
@@ -1013,8 +1148,92 @@ pub fn extract(
     strip: usize,
     compression: Compression,
 ) -> io::Result<Vec<Entry>> {
+    extract_with_options(
+        archive,
+        destination,
+        &ExtractOptions::stripped(strip),
+        compression,
+    )
+}
+
+/// How the delegated `tar -x` writes: how many leading path components it
+/// strips, and whether GNU tar applies directory modes after extraction.
+///
+/// `delay_directory_restore` is npm's `--delay-directory-restore`: registry
+/// tarballs packed by arbitrary publishers carry directories with mode
+/// 0666, and GNU tar creates such a directory 0666, then cannot open its
+/// children. Applying directory modes after extraction keeps the tree
+/// identical on both tars (bsdtar descends anyway). It is a GNU-only flag,
+/// so on macOS it changes nothing.
+///
+/// `platform_specific` marks a per-platform build (a toolchain, a conda
+/// package, tog's own release binary): an archive pinned for one platform
+/// and extracted only there. For those the case and normalization
+/// collision check runs only on a case-insensitive host (macOS), because
+/// on Linux both names are simply two files and no other platform ever
+/// sees the archive. python-build-standalone's Linux CPython ships
+/// `share/terminfo/2/2621A` beside `2621a`, and conda-forge's Linux
+/// ncurses `share/terminfo/N` beside `n`. Registry packages (npm, sdists,
+/// crates, Hex) install on every platform and keep the check everywhere.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExtractOptions {
+    pub strip: usize,
+    pub delay_directory_restore: bool,
+    pub platform_specific: bool,
+}
+
+impl ExtractOptions {
+    /// A platform-neutral archive: the collision check runs everywhere.
+    pub fn stripped(strip: usize) -> Self {
+        ExtractOptions {
+            strip,
+            delay_directory_restore: false,
+            platform_specific: false,
+        }
+    }
+
+    /// A per-platform build, extracted only on the platform it was built for.
+    pub fn platform_build(strip: usize) -> Self {
+        ExtractOptions {
+            platform_specific: true,
+            ..ExtractOptions::stripped(strip)
+        }
+    }
+}
+
+/// List, validate, and extract with full options, returning the validated
+/// listing. Nothing is written when validation fails.
+pub fn extract_with_options(
+    archive: &Path,
+    destination: &Path,
+    options: &ExtractOptions,
+    compression: Compression,
+) -> io::Result<Vec<Entry>> {
     let entries = list(archive, compression)?;
-    extract_validated(archive, destination, strip, compression, &entries)?;
+    extract_validated_with_options(archive, destination, options, compression, &entries)?;
+    Ok(entries)
+}
+
+/// Store-consuming list, validate, and extract with full options, returning
+/// the validated listing. The caller's activity lease covers the listing,
+/// the validation, and the extraction child. Nothing is written when
+/// validation fails.
+pub(crate) fn extract_with_activity_and_options(
+    activity: &StoreActivity,
+    archive: &Path,
+    destination: &Path,
+    options: &ExtractOptions,
+    compression: Compression,
+) -> io::Result<Vec<Entry>> {
+    let entries = list_with_activity(activity, archive, compression)?;
+    extract_validated_with_activity_and_options(
+        activity,
+        archive,
+        destination,
+        options,
+        compression,
+        &entries,
+    )?;
     Ok(entries)
 }
 
@@ -1028,7 +1247,24 @@ pub fn extract_validated(
     compression: Compression,
     entries: &[Entry],
 ) -> io::Result<()> {
-    extract_validated_inner(archive, destination, strip, compression, entries, None)
+    extract_validated_with_options(
+        archive,
+        destination,
+        &ExtractOptions::stripped(strip),
+        compression,
+        entries,
+    )
+}
+
+/// Extract a listed archive with full options, validating the listing again.
+pub fn extract_validated_with_options(
+    archive: &Path,
+    destination: &Path,
+    options: &ExtractOptions,
+    compression: Compression,
+    entries: &[Entry],
+) -> io::Result<()> {
+    extract_validated_inner(archive, destination, options, compression, entries, None)
 }
 
 pub(crate) fn extract_validated_with_activity(
@@ -1042,11 +1278,142 @@ pub(crate) fn extract_validated_with_activity(
     extract_validated_inner(
         archive,
         destination,
-        strip,
+        &ExtractOptions::stripped(strip),
         compression,
         entries,
         Some(activity),
     )
+}
+
+pub(crate) fn extract_validated_with_activity_and_options(
+    activity: &StoreActivity,
+    archive: &Path,
+    destination: &Path,
+    options: &ExtractOptions,
+    compression: Compression,
+    entries: &[Entry],
+) -> io::Result<()> {
+    extract_validated_inner(
+        archive,
+        destination,
+        options,
+        compression,
+        entries,
+        Some(activity),
+    )
+}
+
+/// Read one regular-file member's bytes without writing anything to disk:
+/// the `tar -xO` use (a manifest read out of an sdist) without a second
+/// tar invocation whose flags the environment could shift. The archive is
+/// still listed and cross-checked first, so the bytes come from the same
+/// modelled stream an extraction would see. `member` is the exact stored
+/// name from `list`; `cap` bounds the member's declared size.
+pub fn read_member(
+    archive: &Path,
+    compression: Compression,
+    member: &str,
+    cap: u64,
+) -> io::Result<Vec<u8>> {
+    read_member_inner(archive, compression, member, cap, None)
+}
+
+/// Store-consuming single-member read. The caller's activity lease is
+/// borrowed for the whole read, so GC cannot observe the store as idle.
+pub(crate) fn read_member_with_activity(
+    activity: &StoreActivity,
+    archive: &Path,
+    compression: Compression,
+    member: &str,
+    cap: u64,
+) -> io::Result<Vec<u8>> {
+    read_member_inner(archive, compression, member, cap, Some(activity))
+}
+
+fn read_member_inner(
+    archive: &Path,
+    compression: Compression,
+    member: &str,
+    cap: u64,
+    activity: Option<&StoreActivity>,
+) -> io::Result<Vec<u8>> {
+    // The listing cross-checks the header reader against the tar that
+    // would perform an extraction; a disagreement refuses before any
+    // member bytes are trusted.
+    match activity {
+        Some(activity) => list_with_activity(activity, archive, compression)?,
+        None => list(archive, compression)?,
+    };
+    let file = io::BufReader::new(File::open(archive)?);
+    let (_, wanted) = match compression {
+        Compression::None => read_entries(file, Some((member, cap)))?,
+        Compression::Gzip => read_entries(
+            io::BufReader::new(flate2::read::MultiGzDecoder::new(file)),
+            Some((member, cap)),
+        )?,
+        Compression::Bzip2 => read_entries(
+            io::BufReader::new(bzip2::read::BzDecoder::new(file)),
+            Some((member, cap)),
+        )?,
+        Compression::Xz => read_entries(
+            io::BufReader::new(liblzma::read::XzDecoder::new(file)),
+            Some((member, cap)),
+        )?,
+    };
+    wanted.ok_or_else(|| {
+        err(format!(
+            "archive {} has no member {member:?}",
+            archive.display()
+        ))
+    })
+}
+
+/// Pack `work`'s explicit null-delimited `list` into `uncompressed` with
+/// the deterministic ustar layout git sources publish: the one `tar -c`
+/// invocation in the tree, kept here so every `/usr/bin/tar` argv lives
+/// in this module. `is_macos` picks bsdtar's owner and list flags over
+/// GNU's; the packed bytes are identical either way (zeroed owners, ustar
+/// headers, sorted null-delimited input).
+pub(crate) fn pack_ustar_with_activity(
+    activity: &StoreActivity,
+    uncompressed: &Path,
+    work: &Path,
+    list: &Path,
+    is_macos: bool,
+) -> io::Result<()> {
+    let owner_flags: &[&str] = if is_macos {
+        // bsdtar
+        &["--uid", "0", "--gid", "0", "--numeric-owner"]
+    } else {
+        // GNU tar
+        &["--owner=0", "--group=0", "--numeric-owner"]
+    };
+    let list_flags: &[&str] = if is_macos {
+        // bsdtar treats --null input as verbatim; it has no GNU
+        // --verbatim-files-from option.
+        &["--null"]
+    } else {
+        &["--null", "--verbatim-files-from"]
+    };
+    let mut tar = tar_command();
+    tar.args(["-cf"])
+        .arg(uncompressed)
+        .args(["--format=ustar", "--no-recursion"])
+        .args(owner_flags)
+        .args(list_flags)
+        .arg("-C")
+        .arg(work)
+        .arg("-T")
+        .arg(list);
+    let status = crate::kernel::supervise::status(&mut tar, activity)?;
+    if !status.success() {
+        let _ = std::fs::remove_file(uncompressed);
+        return Err(err(format!(
+            "packing {} failed (tar {status})",
+            work.display()
+        )));
+    }
+    Ok(())
 }
 
 /// `tar -x` of `archive` into `destination`, with the fixed extraction
@@ -1054,7 +1421,7 @@ pub(crate) fn extract_validated_with_activity(
 fn extract_command(
     archive: &Path,
     destination: &Path,
-    strip: usize,
+    options: &ExtractOptions,
     compression: Compression,
 ) -> Command {
     let mut command = tar_command();
@@ -1065,20 +1432,23 @@ fn extract_command(
         .arg("-C")
         .arg(destination)
         .arg("--strip-components")
-        .arg(strip.to_string());
+        .arg(options.strip.to_string());
+    if options.delay_directory_restore && !cfg!(target_os = "macos") {
+        command.arg("--delay-directory-restore");
+    }
     command
 }
 
 fn extract_validated_inner(
     archive: &Path,
     destination: &Path,
-    strip: usize,
+    options: &ExtractOptions,
     compression: Compression,
     entries: &[Entry],
     activity: Option<&StoreActivity>,
 ) -> io::Result<()> {
-    validate(entries, strip)?;
-    let mut command = extract_command(archive, destination, strip, compression);
+    validate_with_options(entries, options)?;
+    let mut command = extract_command(archive, destination, options, compression);
     let status = status_for(&mut command, activity)
         .map_err(|e| io::Error::new(e.kind(), format!("extract {}: {e}", archive.display())))?;
     if !status.success() {
@@ -1486,7 +1856,7 @@ mod tests {
         let extract_args = args(&extract_command(
             archive,
             Path::new("/tmp/dest"),
-            1,
+            &ExtractOptions::stripped(1),
             Compression::Gzip,
         ));
         for flag in ["--numeric-owner", "--no-xattrs", "--no-acls"] {
@@ -1771,6 +2141,94 @@ mod tests {
     }
 
     #[test]
+    fn member_data_past_the_budget_is_refused_before_anything_is_written() {
+        // A PAX size overrides the header size, so one member can declare
+        // past the budget while carrying a byte of real data: the refusal
+        // names the budget, not a short stream, and the destination stays
+        // empty.
+        let size = (MAX_ARCHIVE_BYTES + 1).to_string();
+        let mut member = pax(&[("path", "pkg/big"), ("size", size.as_str())]);
+        member.extend(ustar("pkg/big", b'0', "", b"x"));
+        let temp = temp_dir("budget");
+        let archive = temp.0.join("a.tar");
+        write_tar(&archive, &[member]);
+        let dest = temp.0.join("dest");
+        fs::create_dir(&dest).unwrap();
+        for error in [
+            list(&archive, Compression::None).expect_err("budget"),
+            extract(&archive, &dest, 0, Compression::None).expect_err("budget"),
+        ] {
+            assert!(error.to_string().contains("byte budget"), "{error}");
+        }
+        assert!(fs::read_dir(&dest).unwrap().next().is_none());
+        // Accumulation across members refuses the same way.
+        let mut budget = Budget::default();
+        budget.add(MAX_ARCHIVE_BYTES, "test").unwrap();
+        let error = budget.add(1, "test").expect_err("budget");
+        assert!(error.to_string().contains("byte budget"), "{error}");
+    }
+
+    #[test]
+    fn read_member_returns_one_members_bytes() {
+        let temp = temp_dir("read-member");
+        let archive = temp.0.join("a.tar");
+        write_tar(
+            &archive,
+            &[
+                ustar("pkg/pyproject.toml", b'0', "", b"[build-system]\n"),
+                ustar("pkg/other.txt", b'0', "", b"other"),
+                ustar("pkg/dir", b'5', "", b""),
+            ],
+        );
+        let bytes =
+            read_member(&archive, Compression::None, "pkg/pyproject.toml", 16 << 20).unwrap();
+        assert_eq!(bytes, b"[build-system]\n");
+        let error =
+            read_member(&archive, Compression::None, "pkg/missing", 16 << 20).expect_err("missing");
+        assert!(error.to_string().contains("has no member"), "{error}");
+        let error = read_member(&archive, Compression::None, "pkg/dir", 16 << 20).expect_err("dir");
+        assert!(error.to_string().contains("not a regular file"), "{error}");
+        let error = read_member(&archive, Compression::None, "pkg/other.txt", 2).expect_err("cap");
+        assert!(error.to_string().contains("read cap"), "{error}");
+    }
+
+    #[test]
+    fn delay_directory_restore_is_a_gnu_only_extraction_flag() {
+        let archive = Path::new("/tmp/does-not-matter.tar");
+        let args = |command: &Command| -> Vec<String> {
+            command
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect()
+        };
+        let delayed = ExtractOptions {
+            strip: 1,
+            delay_directory_restore: true,
+            ..ExtractOptions::stripped(1)
+        };
+        let delayed_args = args(&extract_command(
+            archive,
+            Path::new("/tmp/dest"),
+            &delayed,
+            Compression::Gzip,
+        ));
+        assert_eq!(
+            delayed_args.contains(&"--delay-directory-restore".to_string()),
+            !cfg!(target_os = "macos"),
+        );
+        let plain_args = args(&extract_command(
+            archive,
+            Path::new("/tmp/dest"),
+            &ExtractOptions::stripped(1),
+            Compression::Gzip,
+        ));
+        assert!(
+            !plain_args.contains(&"--delay-directory-restore".to_string()),
+            "{plain_args:?}"
+        );
+    }
+
+    #[test]
     fn matching_gnu_and_pax_extensions_are_accepted_in_either_order() {
         for reverse in [false, true] {
             let mut members = vec![
@@ -1952,7 +2410,7 @@ mod tests {
                 ustar("pkg/big", b'0', "", b"hello"),
                 1 << 40,
             )],
-            "truncated archive",
+            "byte budget",
         );
         // A negative base-256 size is not a size.
         let mut member = ustar("pkg/big", b'0', "", b"hello");
@@ -2137,6 +2595,43 @@ mod tests {
             error.to_string().contains("one name on a case-insensitive"),
             "{error}"
         );
+    }
+
+    /// A per-platform build is extracted only on its own platform, so two
+    /// names that fold together are two files on Linux and a refusal only
+    /// on a case-insensitive host. Linux CPython's terminfo carries
+    /// `2621A` beside `2621a`. Containment is unchanged: a write through a
+    /// case-folded symlink name is still refused everywhere.
+    #[test]
+    fn a_platform_build_checks_folding_only_on_a_case_insensitive_host() {
+        let file = |name: &str| entry(EntryKind::File, name, None);
+        let entries = [
+            file("python/share/terminfo/2/2621A"),
+            file("python/share/terminfo/2/2621a"),
+        ];
+        let platform = validate_with_options(&entries, &ExtractOptions::platform_build(1));
+        if cfg!(target_os = "macos") {
+            let error = platform.expect_err("APFS merges the two names");
+            assert!(
+                error.to_string().contains("one name on a case-insensitive"),
+                "{error}"
+            );
+        } else {
+            platform.unwrap();
+        }
+        // A platform-neutral archive refuses on every host.
+        let error = validate_with_options(&entries, &ExtractOptions::stripped(1))
+            .expect_err("portable archives keep the check");
+        assert!(
+            error.to_string().contains("one name on a case-insensitive"),
+            "{error}"
+        );
+        let link = |name: &str, target: &str| entry(EntryKind::Symlink, name, Some(target));
+        validate_with_options(
+            &[link("p/s", "."), file("p/S/x")],
+            &ExtractOptions::platform_build(0),
+        )
+        .expect_err("write through a case-folded symlink");
     }
 
     #[test]

@@ -291,18 +291,18 @@ fn extract_go_toolchain_inner(
     }
 
     match activity {
-        Some(activity) => crate::kernel::archive::extract_validated_with_activity(
+        Some(activity) => crate::kernel::archive::extract_validated_with_activity_and_options(
             activity,
             archive,
             staged,
-            1,
+            &crate::kernel::archive::ExtractOptions::platform_build(1),
             Compression::Gzip,
             &entries,
         )?,
-        None => crate::kernel::archive::extract_validated(
+        None => crate::kernel::archive::extract_validated_with_options(
             archive,
             staged,
-            1,
+            &crate::kernel::archive::ExtractOptions::platform_build(1),
             Compression::Gzip,
             &entries,
         )?,

@@ -1015,8 +1015,6 @@ const RAW_CHILD_SITES: &[(&str, &str, usize)] = &[
     ("src/kernel/archive.rs", "list_names", 1),
     ("src/kernel/archive.rs", "status_for", 1),
     ("src/kernel/sandbox.rs", "bwrap_preflight_with_activity", 2),
-    ("src/tailors/python/build_requires.rs", "output_for", 1),
-    ("src/tailors/python/build_requires.rs", "status_for", 1),
     // `git ls-remote`: a network query with no working directory.
     ("src/kernel/gitsrc.rs", "run_git", 1),
     // Unmanaged sandbox entry points, for callers that consume no store.
@@ -1257,6 +1255,85 @@ fn commands_do_not_name_tailors_by_string() {
          `Tailor` or `RegistryTool` method instead (or, when a row's issue lands, \
          delete the row)"
     );
+}
+
+/// Every `/usr/bin/tar` argv lives in `kernel::archive`: extraction runs
+/// only through the validated extractor (or the single-member read), and
+/// packing (git sources) through its deterministic packer, so the user's
+/// `TAR_OPTIONS` cannot reshape what lands in an object. `#[cfg(test)]`
+/// items are dropped by `production_tokens`, which exempts test-only
+/// extractors and fixture builders; `src/kernel/testutil.rs` is named
+/// below because it is test-only by the `cfg(test)` gate on its `mod`
+/// declaration in `kernel/mod.rs`, which a per-file scan cannot see.
+#[test]
+fn tar_runs_only_in_kernel_archive() {
+    const OWNER: &str = "src/kernel/archive.rs";
+    const TEST_ONLY_BY_MOD_GATE: &[&str] = &["src/kernel/testutil.rs"];
+    let mut sites = Vec::new();
+    for (relative, text) in all_sources() {
+        if !relative.starts_with("src/")
+            || relative == OWNER
+            || TEST_ONLY_BY_MOD_GATE.contains(&relative.as_str())
+        {
+            continue;
+        }
+        for (token, owner) in production_tokens(&text) {
+            if matches!(&token, Token::Str(literal) if names_a_tar(literal)) {
+                sites.push(format!("{relative}:{owner}"));
+            }
+        }
+    }
+    // Positive control: the scan sees the owner's own invocation, so a
+    // refactor that moves tar out of a string literal fails loudly here
+    // instead of passing silently.
+    let root = repo();
+    let owner_text = fs::read_to_string(root.join(OWNER)).unwrap();
+    assert!(
+        production_tokens(&owner_text)
+            .iter()
+            .any(|(token, _)| matches!(token, Token::Str(literal) if literal == "/usr/bin/tar")),
+        "the tar scan no longer sees {OWNER}'s own invocation; it is passing vacuously"
+    );
+    assert!(
+        sites.is_empty(),
+        "tar invoked outside kernel::archive (route it through \
+         archive::extract_validated_with_activity, archive::read_member, or \
+         archive::pack_ustar_with_activity):\n  {}",
+        sites.join("\n  ")
+    );
+}
+
+/// A string literal that names a tar binary: any absolute path ending in
+/// `tar`, `bsdtar`, `gtar` or `gnutar`, or one of the last three bare. A bare
+/// `"tar"` is not matched: it is also a file extension (`with_extension`),
+/// so matching it would flag ordinary path code. That spelling is the one
+/// gap left; host tools here are otherwise invoked by absolute path.
+fn names_a_tar(literal: &str) -> bool {
+    const TARS: [&str; 4] = ["tar", "bsdtar", "gtar", "gnutar"];
+    let base = literal.rsplit('/').next().unwrap_or(literal);
+    (literal.starts_with('/') && TARS.contains(&base)) || TARS[1..].contains(&literal)
+}
+
+#[test]
+fn tar_names_are_recognised_in_every_spelling() {
+    for literal in [
+        "/usr/bin/tar",
+        "/bin/tar",
+        "/opt/homebrew/bin/gtar",
+        "bsdtar",
+        "gnutar",
+    ] {
+        assert!(names_a_tar(literal), "{literal}");
+    }
+    for literal in [
+        "tar",
+        "foo.tar",
+        "/usr/bin/star",
+        "contents.tar.gz",
+        "/usr/bin/gzip",
+    ] {
+        assert!(!names_a_tar(literal), "{literal}");
+    }
 }
 
 /// The literal scan reads string contents through every spelling and skips

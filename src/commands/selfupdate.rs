@@ -436,7 +436,12 @@ pub fn run(platform: Platform) -> io::Result<i32> {
         )?;
         let archive_path = scratch.0.join(&asset);
         fetch::download_file(asset_url, &archive_path, &expected)?;
-        archive::extract(&archive_path, &scratch.0, 0, Compression::Gzip)?;
+        archive::extract_with_options(
+            &archive_path,
+            &scratch.0,
+            &archive::ExtractOptions::platform_build(0),
+            Compression::Gzip,
+        )?;
         let binary = scratch.0.join("tog");
         if !binary.is_file() {
             return Err(io::Error::new(

@@ -14,6 +14,7 @@ pub mod objects;
 pub mod tailor;
 
 use crate::kernel::activity::StoreActivity;
+use crate::kernel::archive::{extract_with_activity_and_options, Compression, ExtractOptions};
 use crate::kernel::fetch::{download_verified_digest_held, download_verified_held, Digest};
 use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::platform::Platform;
@@ -990,21 +991,7 @@ fn otp_strip_components(platform: Platform) -> u32 {
 
 #[cfg(test)]
 fn extract_otp_archive(archive: &Path, destination: &Path, platform: Platform) -> io::Result<()> {
-    let mut command = Command::new("/usr/bin/tar");
-    command.arg("-xzf").arg(archive).arg("-C").arg(destination);
-    let strip = otp_strip_components(platform);
-    if strip > 0 {
-        command.arg(format!("--strip-components={strip}"));
-    }
-    let status = command.status()?;
-    if !status.success() {
-        return Err(err(format!(
-            "OTP extraction failed ({status}) for {} into {}",
-            archive.display(),
-            destination.display()
-        )));
-    }
-    Ok(())
+    extract_otp(None, archive, destination, platform)
 }
 
 fn extract_otp_archive_for(
@@ -1013,21 +1000,38 @@ fn extract_otp_archive_for(
     destination: &Path,
     platform: Platform,
 ) -> io::Result<()> {
-    let mut command = Command::new("/usr/bin/tar");
-    command.arg("-xzf").arg(archive).arg("-C").arg(destination);
-    let strip = otp_strip_components(platform);
-    if strip > 0 {
-        command.arg(format!("--strip-components={strip}"));
-    }
-    let status = crate::kernel::supervise::status(&mut command, activity)?;
-    if !status.success() {
-        return Err(err(format!(
-            "OTP extraction failed ({status}) for {} into {}",
+    extract_otp(Some(activity), archive, destination, platform)
+}
+
+fn extract_otp(
+    activity: Option<&StoreActivity>,
+    archive: &Path,
+    destination: &Path,
+    platform: Platform,
+) -> io::Result<()> {
+    let options = ExtractOptions::platform_build(otp_strip_components(platform) as usize);
+    let extracted = match activity {
+        Some(activity) => extract_with_activity_and_options(
+            activity,
+            archive,
+            destination,
+            &options,
+            Compression::Gzip,
+        ),
+        None => crate::kernel::archive::extract_with_options(
+            archive,
+            destination,
+            &options,
+            Compression::Gzip,
+        ),
+    };
+    extracted.map(|_| ()).map_err(|e| {
+        err(format!(
+            "OTP extraction failed for {} into {}: {e}",
             archive.display(),
             destination.display()
-        )));
-    }
-    Ok(())
+        ))
+    })
 }
 
 /// Ensure the composite BEAM toolchain object: otp/ + elixir/ (separate
@@ -1758,16 +1762,21 @@ pub fn realize_deps(
         );
         let tar = download_verified_held(store, activity, &url, &d.outer_sha256)
             .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", d.app)))?;
-        // Unpack the OUTER tar (VERSION, metadata.config, contents.tar.gz,
-        // CHECKSUM) into scratch.
+        // Unpack the OUTER tar (VERSION, metadata.config, contents.tar.gz, CHECKSUM).
         let outer_dir = scratch.join(format!("outer-{}", d.app));
+        let app: &str = &d.app;
+        let extract = |archive: &Path, dest: &Path, compression: Compression, what: &str| {
+            extract_with_activity_and_options(
+                activity,
+                archive,
+                dest,
+                &ExtractOptions::stripped(0),
+                compression,
+            )
+            .map_err(|e| io::Error::new(e.kind(), format!("{app}: {what} extraction failed: {e}")))
+        };
         fs::create_dir_all(&outer_dir)?;
-        let mut command = Command::new("/usr/bin/tar");
-        command.args(["-xf"]).arg(&tar).args(["-C"]).arg(&outer_dir);
-        let st = crate::kernel::supervise::status(&mut command, activity)?;
-        if !st.success() {
-            return Err(err(format!("{}: outer tar extraction failed", d.app)));
-        }
+        extract(&tar, &outer_dir, Compression::None, "outer tar")?;
         // Inner checksum per hex spec — over REGULAR outer members only.
         let mut hasher = Sha256::new();
         for part in ["VERSION", "metadata.config", "contents.tar.gz", "CHECKSUM"] {
@@ -1804,16 +1813,12 @@ pub fn realize_deps(
         // Layout keyed by the lock APP name (may differ from package).
         let dep_dir = staged.join(&d.app);
         fs::create_dir_all(&dep_dir)?;
-        let mut command = Command::new("/usr/bin/tar");
-        command
-            .args(["-xzf"])
-            .arg(outer_dir.join("contents.tar.gz"))
-            .args(["-C"])
-            .arg(&dep_dir);
-        let st = crate::kernel::supervise::status(&mut command, activity)?;
-        if !st.success() {
-            return Err(err(format!("{}: contents extraction failed", d.app)));
-        }
+        extract(
+            &outer_dir.join("contents.tar.gz"),
+            &dep_dir,
+            Compression::Gzip,
+            "contents",
+        )?;
         check_dep_tree(&dep_dir, &d.app)?;
         // Reserved destinations must not pre-exist in package contents —
         // a shipped symlink named .hex/hex_metadata.config would carry our

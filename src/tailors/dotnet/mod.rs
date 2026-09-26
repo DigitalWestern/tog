@@ -14,6 +14,7 @@ pub mod objects;
 pub mod tailor;
 
 use crate::kernel::activity::StoreActivity;
+use crate::kernel::archive::{Compression, ExtractOptions};
 use crate::kernel::fetch::{cache_insert, download_verified_digest_held, Digest};
 use crate::kernel::fsroot::{Entry, ProjectRoot};
 use crate::kernel::platform::Platform;
@@ -309,13 +310,17 @@ pub fn realize_runtime(
 
 #[cfg(test)]
 fn extract_sdk_archive(tarball: &Path, staged: &Path) -> io::Result<()> {
-    let st = Command::new("/usr/bin/tar")
-        .args(["-xzf"])
-        .arg(tarball)
-        .args(["-C"])
-        .arg(staged)
-        .status()?;
-    if !st.success() || !staged.join("dotnet").is_file() {
+    // No activity lease: test threads run in parallel and supervision runs
+    // its children one at a time process-wide.
+    crate::kernel::archive::extract_with_options(
+        tarball,
+        staged,
+        &ExtractOptions::platform_build(0),
+        Compression::Gzip,
+    )
+    .map(|_| ())
+    .map_err(|e| io::Error::new(e.kind(), format!("extract dotnet SDK archive: {e}")))?;
+    if !staged.join("dotnet").is_file() {
         return Err(err("dotnet SDK extraction failed or has unexpected layout"));
     }
     Ok(())
@@ -326,10 +331,16 @@ fn extract_sdk_archive_for(
     tarball: &Path,
     staged: &Path,
 ) -> io::Result<()> {
-    let mut command = Command::new("/usr/bin/tar");
-    command.args(["-xzf"]).arg(tarball).args(["-C"]).arg(staged);
-    let status = crate::kernel::supervise::status(&mut command, activity)?;
-    if !status.success() || !staged.join("dotnet").is_file() {
+    crate::kernel::archive::extract_with_activity_and_options(
+        activity,
+        tarball,
+        staged,
+        &ExtractOptions::platform_build(0),
+        Compression::Gzip,
+    )
+    .map(|_| ())
+    .map_err(|e| io::Error::new(e.kind(), format!("extract dotnet SDK archive: {e}")))?;
+    if !staged.join("dotnet").is_file() {
         return Err(err("dotnet SDK extraction failed or has unexpected layout"));
     }
     Ok(())

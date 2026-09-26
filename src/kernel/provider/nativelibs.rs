@@ -714,21 +714,14 @@ fn extract_package(
     if archive.to_string_lossy().ends_with(".conda") || package.filename.ends_with(".conda") {
         extract_conda(activity, archive, package_root, info_root)
     } else {
-        let mut command = Command::new("/usr/bin/tar");
-        command
-            .args(["-xjf"])
-            .arg(archive)
-            .arg("-C")
-            .arg(package_root)
-            .args(["--no-same-owner", "--no-same-permissions"]);
-        let status = crate::kernel::supervise::status(&mut command, activity)
-            .map_err(|e| io::Error::new(e.kind(), format!("extract {}: {e}", package.filename)))?;
-        if !status.success() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("extract {} failed", package.filename),
-            ));
-        }
+        crate::kernel::archive::extract_with_activity_and_options(
+            activity,
+            archive,
+            package_root,
+            &crate::kernel::archive::ExtractOptions::platform_build(0),
+            crate::kernel::archive::Compression::Bzip2,
+        )
+        .map_err(|e| io::Error::new(e.kind(), format!("extract {}: {e}", package.filename)))?;
         if package_root.join("info").is_dir() {
             // Keep metadata separate from payload so it cannot leave the
             // build prefix in the committed object.
@@ -823,21 +816,20 @@ fn zstd_decompress(activity: &StoreActivity, input: &Path, output: &Path) -> io:
 }
 
 fn extract_tar(activity: &StoreActivity, archive: &Path, destination: &Path) -> io::Result<()> {
-    let mut command = Command::new("/usr/bin/tar");
-    command
-        .args(["-xf"])
-        .arg(archive)
-        .arg("-C")
-        .arg(destination)
-        .args(["--no-same-owner", "--no-same-permissions"]);
-    let status = crate::kernel::supervise::status(&mut command, activity)?;
-    if !status.success() {
-        return Err(invalid_conda(format!(
-            "tar extraction failed for {}",
+    crate::kernel::archive::extract_with_activity_and_options(
+        activity,
+        archive,
+        destination,
+        &crate::kernel::archive::ExtractOptions::platform_build(0),
+        crate::kernel::archive::Compression::None,
+    )
+    .map(|_| ())
+    .map_err(|e| {
+        invalid_conda(format!(
+            "tar extraction failed for {}: {e}",
             archive.display()
-        )));
-    }
-    Ok(())
+        ))
+    })
 }
 
 fn invalid_conda(message: impl Into<String>) -> io::Error {

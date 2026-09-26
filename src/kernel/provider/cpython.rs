@@ -24,7 +24,6 @@ use crate::kernel::types::Identity;
 use std::collections::BTreeMap;
 use std::io;
 use std::path::PathBuf;
-use std::process::Command;
 use std::sync::OnceLock;
 
 /// The shipped Python catalog: every python-build-standalone build of the
@@ -330,15 +329,15 @@ pub fn realize_uv(
     let tarball = download_verified_held(store, activity, &spec.url, sha256)?;
     let staged = store.stage_with_activity(activity)?;
     // Tarball root is platform-specific; strip it.
-    let mut command = Command::new("/usr/bin/tar");
-    command
-        .args(["-xzf"])
-        .arg(&tarball)
-        .args(["-C"])
-        .arg(&staged)
-        .args(["--strip-components", "1"]);
-    let status = crate::kernel::supervise::status(&mut command, activity)?;
-    if !status.success() || !staged.join("uv").is_file() {
+    crate::kernel::archive::extract_with_activity_and_options(
+        activity,
+        &tarball,
+        &staged,
+        &crate::kernel::archive::ExtractOptions::platform_build(1),
+        crate::kernel::archive::Compression::Gzip,
+    )
+    .map_err(|e| io::Error::new(e.kind(), format!("extract uv tarball: {e}")))?;
+    if !staged.join("uv").is_file() {
         return Err(io::Error::other("uv tarball extraction failed"));
     }
     store
@@ -375,17 +374,14 @@ pub fn realize_runtime(
     let tarball = download_verified_held(store, activity, &spec.url, sha256)?;
     let staged = store.stage_with_activity(activity)?;
     // Tarball root is "python/"; strip it so the object root IS the prefix.
-    let mut command = Command::new("/usr/bin/tar");
-    command
-        .args(["-xzf"])
-        .arg(&tarball)
-        .args(["-C"])
-        .arg(&staged)
-        .args(["--strip-components", "1"]);
-    let status = crate::kernel::supervise::status(&mut command, activity)?;
-    if !status.success() {
-        return Err(io::Error::other("tar extraction failed"));
-    }
+    crate::kernel::archive::extract_with_activity_and_options(
+        activity,
+        &tarball,
+        &staged,
+        &crate::kernel::archive::ExtractOptions::platform_build(1),
+        crate::kernel::archive::Compression::Gzip,
+    )
+    .map_err(|e| io::Error::new(e.kind(), format!("extract CPython tarball: {e}")))?;
     store
         .commit_with_activity_and_deps(activity, &identity, &staged, &[], &{
             let mut deps = crate::kernel::store::ObjectDeps::new();
