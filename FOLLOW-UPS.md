@@ -83,7 +83,6 @@ Nothing queued; the next item comes from "Open work" below.
 - **Quality review of 2026-09-24 (#264).** A whole-codebase review after
   the 09-20 to 09-24 run. #264 holds the work order and the overall verdict.
   Each line is one issue and one PR, in order:
-  - #236 archive: npm, hex, sdist and most toolchain archives are unpacked by raw tar, not kernel::archive.
   - #238 http: pypi, rubygems, dotnet and deps call ureq directly, bypassing kernel::fetch.
   - #239 toolchain: SourcePolicy is documented as enforced on every fetch but never runs.
   - #241 store: object commit never fsyncs; a power loss can leave an empty completion record.
@@ -108,6 +107,12 @@ Nothing queued; the next item comes from "Open work" below.
   - #258 design: an error type that separates refusals, staleness, network and bugs.
   - #243 sandbox: the macOS Seatbelt profile reads all of /opt, its timezone rule is dead, and CI never runs it.
   - #237 archive: symlink containment compares names case-sensitively.
+- **Found in the #316 review (2026-09-26).** One issue and one PR each:
+  - #320 ci: archive changes are not proven by PR CI; the heavy suite caught #316's CPython break only by hand.
+  - #317 archive: hard links in registry packages are refused; allow contained ones.
+  - #321 tests: kernel_smoke realizes against the developer's own store, so a local run can pass on cached objects.
+  - #319 archive: read_member runs a tar -t cross-check it does not need.
+  - #318 architecture: tar_runs_only_in_kernel_archive cannot see a bare "tar".
 - **Smaller open issues from the 2026-09-23/24 run.** One line each; the
   issue has the options and the pick.
   - #174 npm: git-tracked `node_modules` in workspace members moved into backups.
