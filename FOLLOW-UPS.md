@@ -80,11 +80,18 @@ Nothing queued; the next item comes from "Open work" below.
   #207, #208 (PR 10, remove `Legacy`). Found by PR 0 and slotted into those:
   #210 (uv ignores `UV_PYTHON`), #211 (`bundle add` installs), #212 (npm
   notifier and audit requests).
+- **Test-suite audit of 2026-09-27 (#351).** Nine reviewers, one per
+  area, looked for tests that stay green when the code they name is
+  broken. The fake passes were fixed in #351; what remains is grouped by
+  theme, one issue and one PR (or one per file block) each:
+  - #347 tests: about 60 error tests accept any error instead of the expected one.
+  - #348 tests: security and integrity checks with no offline test.
+  - #349 product and CI problems found by the audit.
+  - #350 tests: duplicate and trivial tests to delete or merge, and ignored tests to promote.
 - **Quality review of 2026-09-24 (#264).** A whole-codebase review after
   the 09-20 to 09-24 run. #264 holds the work order and the overall verdict.
   Each line is one issue and one PR, in order:
   - #238 http: pypi, rubygems, dotnet and deps call ureq directly, bypassing kernel::fetch.
-  - #239 toolchain: SourcePolicy is documented as enforced on every fetch but never runs.
   - #241 store: object commit never fsyncs; a power loss can leave an empty completion record.
   - #242 gc: crashed download temp files in tmp/ are never removed.
   - #240 store: a CacheLease holds gc.lock exclusively, so separate tog processes download one at a time.
@@ -121,7 +128,6 @@ Nothing queued; the next item comes from "Open work" below.
   - #334 sandbox: RuntimeOnly setup costs ~2 s per native gem; measure on the runner.
   - #330 sandbox: HostView::RuntimeOnly is a no-op on macOS.
   - #332 hostview: LD_LIBRARY_PATH outranks DT_RUNPATH for relocated host libraries.
-  - #336 tests: objmeta every_row_rejects_each_missing_live_required_input flakes under parallel tests.
   - #335 hostview: stale view skeletons after SIGKILL.
   - #337 tests: no subprocess test that the view skeleton is 0700 under umask 0777.
   - #331 hostview: kept library subdirectories are bound whole (accepted unless a gem hits it).
