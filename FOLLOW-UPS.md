@@ -84,10 +84,10 @@ Nothing queued; the next item comes from "Open work" below.
   area, looked for tests that stay green when the code they name is
   broken. The fake passes were fixed in #351; what remains is grouped by
   theme, one issue and one PR (or one per file block) each:
-  - #347 tests: about 60 error tests accept any error instead of the expected one.
   - #348 tests: security and integrity checks with no offline test.
   - #349 product and CI problems found by the audit.
   - #350 tests: duplicate and trivial tests to delete or merge, and ignored tests to promote.
+  - #355 store: a path inside a local object is treated as foreign during closure import (from the #354 review).
 - **Quality review of 2026-09-24 (#264).** A whole-codebase review after
   the 09-20 to 09-24 run. #264 holds the work order and the overall verdict.
   Each line is one issue and one PR, in order:
