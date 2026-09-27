@@ -763,44 +763,48 @@ checksum = "{hash_b}"
         let hash = "a".repeat(64);
         let cases = [
             (
-                "git source",
+                "git dependency is not pinned to a commit",
                 "name = \"a\"\nversion = \"1.0.0\"\nsource = \"git+https://example.com/a\"".to_string(),
             ),
             (
-                "alternative registry",
+                "alternative registries are unsupported",
                 format!(
                     "name = \"a\"\nversion = \"1.0.0\"\nsource = \"registry+https://example.com/index\"\nchecksum = \"{hash}\""
                 ),
             ),
             (
-                "missing checksum",
+                "registry crate a@1.0.0 is missing checksum",
                 "name = \"a\"\nversion = \"1.0.0\"\nsource = \"sparse+https://index.crates.io/\"".into(),
             ),
             (
-                "bad checksum",
+                "invalid Cargo crate checksum \"zz\"",
                 "name = \"a\"\nversion = \"1.0.0\"\nsource = \"sparse+https://index.crates.io/\"\nchecksum = \"zz\"".into(),
             ),
             (
-                "hostile name",
+                "invalid crate name \"../evil\"",
                 format!("name = \"../evil\"\nversion = \"1.0.0\"\nchecksum = \"{hash}\""),
             ),
         ];
-        for (label, package) in cases {
-            assert!(
-                plan_cargo(&package_lock(&package, 4), "1.96.1").is_err(),
-                "{label} should fail"
-            );
+        let refused = |lock: &str, needle: &str| {
+            let error =
+                plan_cargo(lock, "1.96.1").expect_err(&format!("{needle}: accepted {lock}"));
+            assert!(error.to_string().contains(needle), "{needle:?}: {error}");
+        };
+        for (needle, package) in cases {
+            refused(&package_lock(&package, 4), needle);
         }
 
-        assert!(plan_cargo(
+        refused(
             &package_lock("name = \"a\"\nversion = \"1.0.0\"", 2),
-            "1.96.1"
-        )
-        .is_err());
+            "unsupported Cargo.lock version 2",
+        );
         let duplicate = format!(
             "name = \"a\"\nversion = \"1.0.0\"\nchecksum = \"{hash}\"\n\n[[package]]\nname = \"a\"\nversion = \"1.0.0\"\nchecksum = \"{hash}\""
         );
-        assert!(plan_cargo(&package_lock(&duplicate, 4), "1.96.1").is_err());
+        refused(
+            &package_lock(&duplicate, 4),
+            "duplicate Cargo.lock package a@1.0.0",
+        );
     }
 
     /// An unpacked sdist reads only its own toolchain file. The store's
@@ -1336,13 +1340,15 @@ checksum = "{hash_b}"
         let archives = make_component_archives(&missing.0, &components, platform, None);
         let staged = missing.0.join("staged");
         fs::create_dir(&staged).unwrap();
-        assert!(extract_rust_components(
-            &staged,
-            platform,
-            &component_names(&components),
-            &archives
-        )
-        .is_err());
+        let error =
+            extract_rust_components(&staged, platform, &component_names(&components), &archives)
+                .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("Rust toolchain extraction has an unexpected layout"),
+            "{error}"
+        );
 
         let wrong = TempDir::named("rust-layout-wrong");
         let archives = make_component_archives(
@@ -1353,13 +1359,15 @@ checksum = "{hash_b}"
         );
         let staged = wrong.0.join("staged");
         fs::create_dir(&staged).unwrap();
-        assert!(extract_rust_components(
-            &staged,
-            platform,
-            &component_names(&components),
-            &archives
-        )
-        .is_err());
+        let error =
+            extract_rust_components(&staged, platform, &component_names(&components), &archives)
+                .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("Rust toolchain extraction has an unexpected layout"),
+            "{error}"
+        );
     }
 
     fn make_crate(dir: &Path, name: &str, version: &str, symlink: bool) -> (PathBuf, String) {
@@ -1653,9 +1661,12 @@ checksum = "{hash_b}"
             &selection(),
             &mut attribution,
         );
+        let error = result.expect_err("symlinked bin must not carry writes outside the project");
         assert!(
-            result.is_err(),
-            "symlinked bin must not carry writes outside the project"
+            error
+                .to_string()
+                .contains("cargo-home/bin is not a real directory"),
+            "{error}"
         );
         assert!(!outside.join("cargo").exists());
         attribution.discard();

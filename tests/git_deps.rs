@@ -148,12 +148,11 @@ fn an_unpinned_git_reference_is_refused() {
         r#"{{"lockfileVersion":3,"packages":{{"":{{}},"node_modules/git-dep":{{"version":"1.0.0","resolved":"{url}#main"}}}}}}"#
     );
     let error = node::plan_npm(platform, &lock)
-        .err()
-        .map(|e| e.to_string())
-        .unwrap_or_default();
+        .expect_err("an unpinned ref must be refused")
+        .to_string();
     assert!(
-        error.contains("npm_git_dep") || error.contains("commit"),
-        "an unpinned ref must be refused, got: {error:?}"
+        error.contains("npm_git_dep: git-dep:") && error.contains("commit main;"),
+        "an unpinned ref must be refused by name, got: {error:?}"
     );
 }
 

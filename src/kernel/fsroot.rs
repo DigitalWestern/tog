@@ -1950,7 +1950,13 @@ mod tests {
         assert_eq!(root.read_link(Path::new("absent")).unwrap(), None);
         fs::write(dir.join("file"), b"x").unwrap();
         assert_eq!(root.read_link(Path::new("file")).unwrap(), None);
-        assert!(root.remove_symlink(Path::new("file")).is_err());
+        let error = root.remove_symlink(Path::new("file")).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("is not a symlink; refusing to remove it"),
+            "{error}"
+        );
         root.remove_symlink(Path::new(".venv")).unwrap();
         root.remove_symlink(Path::new(".venv")).unwrap();
         assert!(dir.join(".venv").symlink_metadata().is_err());

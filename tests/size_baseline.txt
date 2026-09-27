@@ -5,7 +5,6 @@
 #
 #   file <non-test lines> <path>
 #   fn <lines> <path>::<name>[#<nth occurrence in the file>]
-file 1635 src/comforter/mod.rs
 file 2128 src/commands/deps.rs
 file 2215 src/commands/x.rs
 file 1594 src/kernel/store/roots.rs

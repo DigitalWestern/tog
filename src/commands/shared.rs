@@ -311,7 +311,13 @@ mod tests {
         assert!(error.to_string().contains("tog-toolchain.toml"), "{error}");
         let dir_lock = t.0.join("dir-lock");
         std::fs::create_dir_all(dir_lock.join(lock::LOCK_PATH)).unwrap();
-        assert!(selected_toolchain(platform, &dir_lock, "python").is_err());
+        let error = selected_toolchain(platform, &dir_lock, "python").unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("tog-toolchain.toml is not a regular file"),
+            "{error}"
+        );
     }
 
     #[test]

@@ -280,16 +280,27 @@ mod tests {
     /// A malformed fmt closure is an error, never a silently thinner SBOM.
     #[test]
     fn rustfmt_closure_requires_both_objects_and_the_version() {
-        for body in [
-            json!({"rustfmt_object": {"id": "fmt012"}, "rust_version": "1.96.1"}),
-            json!({"rust_object": {"id": "rust789"}, "rust_version": "1.96.1"}),
-            json!({"rust_object": {"id": "rust789"},
-                   "rustfmt_object": {"id": "fmt012"}}),
+        for (body, missing) in [
+            (
+                json!({"rustfmt_object": {"id": "fmt012"}, "rust_version": "1.96.1"}),
+                "rust_object",
+            ),
+            (
+                json!({"rust_object": {"id": "rust789"}, "rust_version": "1.96.1"}),
+                "rustfmt_object",
+            ),
+            (
+                json!({"rust_object": {"id": "rust789"},
+                       "rustfmt_object": {"id": "fmt012"}}),
+                "rust_version",
+            ),
         ] {
             let mut out = Vec::new();
+            let error =
+                eco_components("rustfmt", &body, &mut out).expect_err(&format!("accepted {body}"));
             assert!(
-                eco_components("rustfmt", &body, &mut out).is_err(),
-                "accepted {body}"
+                error.to_string().contains(&format!("'{missing}'")),
+                "{body}: {error}"
             );
         }
     }
@@ -314,6 +325,7 @@ mod tests {
     #[test]
     fn no_closures_is_a_loud_error() {
         let dir = TempDir::named("sbom-empty");
-        assert!(generate(&dir.0).is_err());
+        let error = generate(&dir.0).unwrap_err();
+        assert!(error.to_string().contains("no closures found"), "{error}");
     }
 }

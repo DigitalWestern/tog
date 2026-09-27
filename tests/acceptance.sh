@@ -178,10 +178,12 @@ if (cd "$WORK/cargo" && "$TOG" build) && [ "$(cd "$WORK/cargo" && "$TOG" run tar
 else
   bad "hostile config was honored"
 fi
-if (cd "$WORK/cargo" && "$TOG" build --config 'net.offline=false' 2>/dev/null); then
+if (cd "$WORK/cargo" && "$TOG" build --config 'net.offline=false' 2>"$WORK/config-takeover.err"); then
   bad "--config takeover accepted"
-else
+elif grep -q -- '--config is managed by tog' "$WORK/config-takeover.err"; then
   ok "--config takeover rejected"
+else
+  bad "--config takeover failed for another reason: $(cat "$WORK/config-takeover.err")"
 fi
 rm -rf "$WORK/cargo/.cargo" "$WORK/cargo/fake-rustc"
 # build.rs that PANICS if the network is reachable: build success = denial.

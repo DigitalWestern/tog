@@ -906,27 +906,30 @@ mod tests {
             ("~=3.10.2", "3.10.21"),
             ("^3.9", "3.12.14"),
             ("^3.9.2", "3.12.14"),
-            ("~3.9", "error"),
-            ("~3.9.1", "error"),
+            ("~3.9", "error: no pinned CPython satisfies"),
+            ("~3.9.1", "error: no pinned CPython satisfies"),
             (">=3.10, !=3.11.*", "3.12.14"),
             ("<3.11 || >=3.14", "3.14.7"),
-            ("==3.10.0", "error"),
+            ("==3.10.0", "error: no pinned CPython satisfies"),
             ("<=3.10.21", "3.10.21"),
             (">=3.14.0", "3.14.7"),
             ("!=3.14.*", "3.12.14"),
             (">=3.12.14", "3.12.14"),
             (">3.14", "3.14.7"),
-            ("^0.4.1", "error"),
+            ("^0.4.1", "error: no pinned CPython satisfies"),
             ("~3.12", "3.12.14"),
             ("===3.11.16", "3.11.16"),
         ];
         assert!(cases.len() >= 30);
         for (specifier, expected) in cases {
             let actual = selected(specifier);
-            if expected == "error" {
+            if let Some(needle) = expected.strip_prefix("error: ") {
+                let error = actual
+                    .expect_err(&format!("{specifier} selected a version"))
+                    .to_string();
                 assert!(
-                    actual.is_err(),
-                    "{specifier} unexpectedly selected {actual:?}"
+                    error.contains(&format!("{needle} {specifier} from")),
+                    "{specifier}: {error}"
                 );
             } else {
                 assert_eq!(actual.unwrap(), expected, "{specifier}");
