@@ -3095,17 +3095,27 @@ mod tests {
         let gosum = format!("rsc.io/quote v1.5.2/go.mod {QUOTE_MOD_H1}\n");
         let modules = case.run(&[case.entry()], &gosum, 0).unwrap();
         assert!(modules.is_empty(), "{modules:?}");
+        // A zip line with another sum is no line for these bytes either.
+        let gosum = quote_gosum(WRONG_H1, QUOTE_MOD_H1);
+        let modules = case.run(&[case.entry()], &gosum, 0).unwrap();
+        assert!(modules.is_empty(), "{modules:?}");
     }
 
     #[test]
     fn a_module_without_its_go_mod_line_in_go_sum_is_refused() {
         let case = DownloadCase::new();
-        let gosum = format!("rsc.io/quote v1.5.2 {QUOTE_H1}\n");
-        let e = case.refusal(case.entry(), &gosum);
-        assert!(
-            e.starts_with("rsc.io/quote@v1.5.2: go.mod sum is not in the project's go.sum ledger"),
-            "{e}"
-        );
+        for gosum in [
+            format!("rsc.io/quote v1.5.2 {QUOTE_H1}\n"),
+            quote_gosum(QUOTE_H1, WRONG_H1),
+        ] {
+            let e = case.refusal(case.entry(), &gosum);
+            assert!(
+                e.starts_with(
+                    "rsc.io/quote@v1.5.2: go.mod sum is not in the project's go.sum ledger"
+                ),
+                "{gosum}: {e}"
+            );
+        }
     }
 
     /// go.sum and the download agree on a sum the bytes do not hash to:
@@ -3195,6 +3205,7 @@ mod tests {
         let gosum = quote_gosum(QUOTE_H1, QUOTE_MOD_H1);
         for replace in [
             serde_json::json!({"Path": "../quote", "Version": ""}),
+            serde_json::json!({"Path": "quote", "Version": ""}),
             serde_json::json!({"Path": "./quote", "Version": "v1.5.2"}),
             serde_json::json!({"Path": "/src/quote", "Version": "v1.5.2"}),
         ] {
