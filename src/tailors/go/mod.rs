@@ -2973,4 +2973,282 @@ mod tests {
             "the swap made the plan miss its cache"
         );
     }
+
+    const QUOTE_H1: &str = "h1:w5fcysjrx7yqtD/aO+QwRjYZOKnaM9Uh2b40tElTs3Y=";
+    const QUOTE_MOD_H1: &str = "h1:LzX7hefJvL54yjefDEDHNONDjII0t9xZLPXsUe+TKr0=";
+    /// Well-formed but wrong: the shape of an h1 sum, not the fixture's.
+    const WRONG_H1: &str = "h1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+
+    /// A scratch store plus the real rsc.io/quote v1.5.2 artifacts, for
+    /// driving `closure_from_download` with a hand-written download stream.
+    struct DownloadCase {
+        scratch: TempDir,
+        store: Store,
+        activity: StoreActivity,
+        fix: PathBuf,
+    }
+
+    impl DownloadCase {
+        fn new() -> Self {
+            let scratch = TempDir::named("go-download");
+            let root = scratch.0.join("store");
+            for sub in ["objects", "meta", "cache/sha256", "tmp"] {
+                fs::create_dir_all(root.join(sub)).unwrap();
+            }
+            let store = Store { root };
+            let activity = store
+                .activity(crate::kernel::activity::ActivityMode::Shared)
+                .unwrap();
+            let info = scratch.0.join("quote.info");
+            fs::write(&info, r#"{"Version":"v1.5.2"}"#).unwrap();
+            let fix = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/go-dirhash");
+            DownloadCase {
+                scratch,
+                store,
+                activity,
+                fix,
+            }
+        }
+
+        /// The download entry `go mod download -json` prints for the fixture.
+        fn entry(&self) -> serde_json::Value {
+            serde_json::json!({
+                "Path": "rsc.io/quote",
+                "Version": "v1.5.2",
+                "Sum": QUOTE_H1,
+                "GoModSum": QUOTE_MOD_H1,
+                "Zip": self.fix.join("quote-v1.5.2.zip"),
+                "GoMod": self.fix.join("quote-v1.5.2.mod"),
+                "Info": self.scratch.0.join("quote.info"),
+            })
+        }
+
+        fn run(
+            &self,
+            entries: &[serde_json::Value],
+            gosum: &str,
+            exit: i32,
+        ) -> io::Result<Vec<GoModule>> {
+            use std::os::unix::process::ExitStatusExt;
+            let stdout: String = entries.iter().map(|e| format!("{e}\n")).collect();
+            let out = std::process::Output {
+                status: std::process::ExitStatus::from_raw(exit << 8),
+                stdout: stdout.into_bytes(),
+                stderr: b"go: something broke\n".to_vec(),
+            };
+            closure_from_download(&self.store, &self.activity, &out, gosum)
+        }
+
+        fn refusal(&self, entry: serde_json::Value, gosum: &str) -> String {
+            match self.run(&[entry], gosum, 0) {
+                Ok(modules) => panic!("the entry was accepted: {modules:?}"),
+                Err(e) => e.to_string(),
+            }
+        }
+    }
+
+    /// The go.sum lines a tidied project holds for the fixture module.
+    fn quote_gosum(h1: &str, mod_h1: &str) -> String {
+        format!("rsc.io/quote v1.5.2 {h1}\nrsc.io/quote v1.5.2/go.mod {mod_h1}\n")
+    }
+
+    #[test]
+    fn a_verified_download_becomes_a_plan_row() {
+        let case = DownloadCase::new();
+        let main = serde_json::json!({"Path": "example.com/app", "Version": ""});
+        let modules = case
+            .run(
+                &[main, case.entry()],
+                &quote_gosum(QUOTE_H1, QUOTE_MOD_H1),
+                0,
+            )
+            .unwrap();
+        assert_eq!(modules.len(), 1, "{modules:?}");
+        let row = &modules[0];
+        assert_eq!(
+            (row.path.as_str(), row.version.as_str()),
+            ("rsc.io/quote", "v1.5.2")
+        );
+        assert_eq!(
+            (row.h1.as_str(), row.modfile_h1.as_str()),
+            (QUOTE_H1, QUOTE_MOD_H1)
+        );
+        let sha =
+            |p: &Path| crate::kernel::fetch::hash_file(p, crate::kernel::digest::Algo::Sha256);
+        for (hex, source) in [
+            (&row.zip_sha256, case.fix.join("quote-v1.5.2.zip")),
+            (&row.modfile_sha256, case.fix.join("quote-v1.5.2.mod")),
+            (&row.info_sha256, case.scratch.0.join("quote.info")),
+        ] {
+            assert_eq!(*hex, sha(&source).unwrap(), "{}", source.display());
+            assert!(
+                case.store.cache_path("sha256", hex).is_file(),
+                "{} not cached",
+                source.display()
+            );
+        }
+    }
+
+    #[test]
+    fn a_module_without_its_zip_line_in_go_sum_is_left_out_of_the_closure() {
+        let case = DownloadCase::new();
+        let gosum = format!("rsc.io/quote v1.5.2/go.mod {QUOTE_MOD_H1}\n");
+        let modules = case.run(&[case.entry()], &gosum, 0).unwrap();
+        assert!(modules.is_empty(), "{modules:?}");
+    }
+
+    #[test]
+    fn a_module_without_its_go_mod_line_in_go_sum_is_refused() {
+        let case = DownloadCase::new();
+        let gosum = format!("rsc.io/quote v1.5.2 {QUOTE_H1}\n");
+        let e = case.refusal(case.entry(), &gosum);
+        assert!(
+            e.starts_with("rsc.io/quote@v1.5.2: go.mod sum is not in the project's go.sum ledger"),
+            "{e}"
+        );
+    }
+
+    /// go.sum and the download agree on a sum the bytes do not hash to:
+    /// only Tog's own dirhash catches it.
+    #[test]
+    fn a_zip_that_does_not_hash_to_its_sum_is_refused() {
+        let case = DownloadCase::new();
+        let mut entry = case.entry();
+        entry["Sum"] = WRONG_H1.into();
+        let e = case.refusal(entry, &quote_gosum(WRONG_H1, QUOTE_MOD_H1));
+        assert!(
+            e.starts_with("rsc.io/quote@v1.5.2: zip dirhash mismatch"),
+            "{e}"
+        );
+        assert!(e.contains(&format!("expected {WRONG_H1}")), "{e}");
+        assert!(e.contains(&format!("got      {QUOTE_H1}")), "{e}");
+    }
+
+    #[test]
+    fn a_go_mod_that_does_not_hash_to_its_sum_is_refused() {
+        let case = DownloadCase::new();
+        let mut entry = case.entry();
+        entry["GoModSum"] = WRONG_H1.into();
+        let e = case.refusal(entry, &quote_gosum(QUOTE_H1, WRONG_H1));
+        assert!(
+            e.starts_with("rsc.io/quote@v1.5.2: go.mod dirhash mismatch"),
+            "{e}"
+        );
+        assert!(e.contains(&format!("expected {WRONG_H1}")), "{e}");
+        assert!(e.contains(&format!("got      {QUOTE_MOD_H1}")), "{e}");
+    }
+
+    #[test]
+    fn info_file_refusals() {
+        let case = DownloadCase::new();
+        let gosum = quote_gosum(QUOTE_H1, QUOTE_MOD_H1);
+        let info = |name: &str, body: &str| {
+            let path = case.scratch.0.join(name);
+            fs::write(&path, body).unwrap();
+            serde_json::Value::from(path.to_str().unwrap())
+        };
+        let cases = [
+            (
+                serde_json::Value::Null,
+                "rsc.io/quote@v1.5.2: download entry has no Info file",
+            ),
+            (
+                info("junk.info", "not json"),
+                "rsc.io/quote@v1.5.2: bad .info: ",
+            ),
+            (
+                info("other.info", r#"{"Version":"v1.5.3"}"#),
+                "rsc.io/quote@v1.5.2: .info Version String(\"v1.5.3\") does not match",
+            ),
+            (
+                info("none.info", "{}"),
+                "rsc.io/quote@v1.5.2: .info Version Null does not match",
+            ),
+        ];
+        for (info, needle) in cases {
+            let mut entry = case.entry();
+            entry["Info"] = info.clone();
+            let e = case.refusal(entry, &gosum);
+            assert!(e.starts_with(needle), "{info}: {e}");
+        }
+    }
+
+    #[test]
+    fn a_module_that_failed_to_download_is_refused() {
+        let case = DownloadCase::new();
+        let failed = serde_json::json!({
+            "Path": "rsc.io/quote",
+            "Version": "v1.5.2",
+            "Error": "unrecognized import path",
+        });
+        let e = case.refusal(failed, "");
+        assert_eq!(
+            e,
+            "rsc.io/quote@v1.5.2: unrecognized import path (a selected module \
+             failed to download; the closure would be incomplete)"
+        );
+    }
+
+    #[test]
+    fn a_local_path_replace_is_refused() {
+        let case = DownloadCase::new();
+        let gosum = quote_gosum(QUOTE_H1, QUOTE_MOD_H1);
+        for replace in [
+            serde_json::json!({"Path": "../quote", "Version": ""}),
+            serde_json::json!({"Path": "./quote", "Version": "v1.5.2"}),
+            serde_json::json!({"Path": "/src/quote", "Version": "v1.5.2"}),
+        ] {
+            let mut entry = case.entry();
+            entry["Replace"] = replace.clone();
+            let e = case.refusal(entry, &gosum);
+            assert!(
+                e.starts_with("rsc.io/quote: local-path replace directives are not supported"),
+                "{replace}: {e}"
+            );
+        }
+        let mut entry = case.entry();
+        entry["Replace"] = serde_json::json!({"Path": "example.com/fork", "Version": "v1.5.2"});
+        assert_eq!(case.run(&[entry], &gosum, 0).unwrap().len(), 1);
+    }
+
+    /// Per-module errors ride in the stream, so the stream is read before
+    /// the exit status: the module's own message wins over the generic one.
+    #[test]
+    fn a_failed_download_names_the_module_before_the_exit_status() {
+        let case = DownloadCase::new();
+        let gosum = quote_gosum(QUOTE_H1, QUOTE_MOD_H1);
+        let failed = serde_json::json!({
+            "Path": "rsc.io/sampler",
+            "Version": "v1.3.0",
+            "Error": "checksum mismatch",
+        });
+        let e = case
+            .run(&[case.entry(), failed], &gosum, 1)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.starts_with("rsc.io/sampler@v1.3.0: checksum mismatch"),
+            "{e}"
+        );
+
+        let e = case
+            .run(&[case.entry()], &gosum, 1)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(e, "go mod download failed: go: something broke");
+    }
+
+    #[test]
+    fn a_malformed_download_stream_is_refused() {
+        let case = DownloadCase::new();
+        let out = std::process::Output {
+            status: std::os::unix::process::ExitStatusExt::from_raw(0),
+            stdout: br#"{"Path": "rsc.io/quote", "Version": 7}"#.to_vec(),
+            stderr: Vec::new(),
+        };
+        let e = closure_from_download(&case.store, &case.activity, &out, "")
+            .unwrap_err()
+            .to_string();
+        assert!(e.starts_with("go mod download JSON: "), "{e}");
+    }
 }
