@@ -1637,6 +1637,7 @@ pub(super) fn run_install_scripts_staged(
                 .chain(native_libs)
                 .collect(),
             write: vec![&pkg_dir, &tmp],
+            host_view: crate::kernel::sandbox::HostView::Full,
         };
         run_package_phases(
             platform, staged, plan, p, &pkg_dir, &snapshot, &tmp, &phases, &envs, path_env,

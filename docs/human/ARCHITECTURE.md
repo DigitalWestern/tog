@@ -133,6 +133,17 @@ Rules the Linux port settled, which apply to any future platform:
   sandbox the platform lacks fails loudly; it never runs unsandboxed.
 - **The host C toolchain is an unpinned build input** on both platforms
   (Xcode clang on macOS, `/usr` gcc on Linux). Pinning it is a backlog item.
+  A build spec also names its host view: `Full` binds the host's whole `/usr`,
+  so a build can link any library the host has; `RuntimeOnly` (Linux only;
+  Seatbelt treats it as `Full`) keeps the host's runtime files and the C
+  runtime's development files and leaves every other header, `-l` library,
+  static archive and pkg-config file out of the compiler's and linker's
+  default search paths and out of pkg-config. Other shared libraries the
+  host's tools load move to a `.tog-host-runtime` subdirectory that `ld`
+  never searches, reached through `LD_LIBRARY_PATH`. Ruby gems with native
+  extensions install under `RuntimeOnly`, so a gem object committed under
+  the `runtime-only/1` view does not depend on which `-dev` packages the
+  building host has installed.
 - **Darwin identity goldens stay byte-identical.** A platform change that
   alters a macOS object id is a bug.
 - **Archive extensions must agree.** GNU tar always prefers the PAX record
@@ -301,7 +312,25 @@ lock without CHECKSUMS re-syncs offline; a CHECKSUMS digest is the repo's
 claim and is never recorded. Gems install dependency-first
 inside the network-denied sandbox into one immutable GEM_HOME object;
 binstubs are wrapper scripts, never symlinks (symlinks dangle after the
-store-commit rename; this bit once). Every tog invocation strips
+store-commit rename; this bit once). On Linux each gem whose gemspec
+declares native extensions installs against the host C runtime alone
+(`HostView::RuntimeOnly`, recorded in the gem object's identity as
+`build_view`; pure-Ruby gems compile nothing and install against the full
+view); a gem whose native extension needs another host
+library is rebuilt against the whole host after recording
+`host-build-inputs`, which the object carries so a cache hit replays it.
+Before that retry the failed attempt's own gem and extension directories
+are removed from the shared GEM_HOME, and any other change it made refuses
+the retry (`ruby/gem_home.rs`). Such an object is committed under its own
+identity (`build_view = "host-fallback/1"`, `host_fallback` = the gems that
+fell back, `host_inputs` = `hostview::host_build_inputs`, a stat-based
+fingerprint of what the full view shows beyond the C-runtime-only one,
+what its symlinks resolve to, and the compiler, taken before and after each
+fallback build and required to match), never under the runtime-only id,
+and a store record keyed by the runtime-only id and that fingerprint lets
+a later sync over the same store on a host in the same state reuse it
+(`ruby/native.rs`).
+Every tog invocation strips
 `BUNDLE_*`/`RUBYOPT` and forces `BUNDLE_FROZEN`, `GEM_HOME`/`GEM_PATH`.
 v0 gaps: non-rubygems.org sources, PATH/GIT gems.
 
@@ -770,6 +799,8 @@ and build inputs tailors share, so no tailor reaches into another):
                     requests and the global order, source.rs the typed
                     endpoint policy, legacy.rs seeding from closures
     sandbox.rs      hermetic build sandbox (Seatbelt / bubblewrap)
+    hostview.rs     HostView::RuntimeOnly on Linux: the host's runtime files
+                    plus the C runtime's development files, nothing else
     provider/       shared toolchain providers, the pinned things more than one
                     tailor realizes: cpython.rs (CPython + uv from
                     cpython.catalog.toml, realization; node-gyp's
@@ -846,6 +877,8 @@ when the two differ.
     go/mod.rs              module closure via the pinned Go toolchain
     go/inputs.rs           toolchain selection from go.mod, the GoPlan
     ruby/mod.rs            Bundler-delegated planning, tog-verified gems
+    ruby/native.rs         native gems: C-runtime-only first, host fallback identity
+    ruby/gem_home.rs       what a failed gem build may leave before its retry
     elixir/mod.rs          Mix/Hex, AST-validated lockfile
     dotnet/mod.rs          NuGet packages.lock.json (tog-mandatory)
 

@@ -1361,6 +1361,7 @@ pub fn realize_packages(
             write: dotnet_write_roots(platform, vec![staged.clone()])?,
             scratch: scratch.clone(),
             path: format!("{}:/usr/bin:/bin", sdk_obj.display()),
+            host_view: crate::kernel::sandbox::HostView::Full,
         },
         activity,
     );
@@ -1790,6 +1791,7 @@ pub fn build_sandboxed(
         write: dotnet_write_roots(platform, vec![objdir.clone()])?,
         scratch: scratch.clone(),
         path: format!("{}:/usr/bin:/bin", sdk_obj.display()),
+        host_view: crate::kernel::sandbox::HostView::Full,
     };
     crate::kernel::sandbox::run_build_spec_on_with_activity(platform, &spec, activity).map_err(
         |e| {
@@ -1829,6 +1831,7 @@ pub fn build_sandboxed(
         write: dotnet_write_roots(platform, vec![output_scratch.clone(), objdir.clone()])?,
         scratch: scratch.clone(),
         path: format!("{}:/usr/bin:/bin", sdk_obj.display()),
+        host_view: crate::kernel::sandbox::HostView::Full,
     };
     if let Err(e) =
         crate::kernel::sandbox::run_build_spec_on_with_activity(platform, &spec, activity)

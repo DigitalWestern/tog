@@ -9,6 +9,8 @@
 //! env vars, so every tog-controlled invocation scrubs BUNDLE_*/RUBY*
 //! preload vars and sets BUNDLE_IGNORE_CONFIG=1.
 
+mod gem_home;
+mod native;
 pub mod objects;
 pub mod tailor;
 
@@ -17,12 +19,16 @@ use crate::kernel::digest::Algo;
 use crate::kernel::fetch::{download_verified_held, hash_file, CacheLease, Digest};
 use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::platform::Platform;
-use crate::kernel::sandbox::{force_env, BuildSpec};
+use crate::kernel::sandbox::{force_env, BuildSpec, HostView};
 use crate::kernel::store::Store;
 use crate::kernel::toolchain::document::Shipped;
 use crate::kernel::toolchain::{ArtifactRow, Catalog, LegacyEvidence, Selected};
 use crate::kernel::types::Identity;
 use crate::kernel::ui;
+use native::{
+    cached_gems_object, record_host_fallback, ruby_gems_fallback_identity, same_host_state,
+    GemInstall, RUNTIME_ONLY_VIEW,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use std::collections::BTreeMap;
@@ -202,6 +208,17 @@ fn ruby_gems_identity(spec: &RubySpec, plan: &RubyPlan) -> Identity {
         ),
         ("ruby_platform".to_string(), plan.ruby_platform.clone()),
     ]);
+    // On Linux, native extensions compile against the host's C runtime
+    // alone (`HostView::RuntimeOnly`; pure-Ruby gems compile nothing and
+    // install against the full view), so the headers and libraries a build
+    // sees are the same on every host with the same C runtime. A gem that
+    // needs more falls back to the whole host, records `host-build-inputs`,
+    // and the object is committed under `ruby_gems_fallback_identity`
+    // instead, never under this id. Darwin builds see the whole SDK, and
+    // their ids are pinned.
+    if !spec.platform.is_macos() {
+        inputs.insert("build_view".to_string(), RUNTIME_ONLY_VIEW.to_string());
+    }
     for g in &plan.gems {
         inputs.insert(format!("gem:{}", g.full_name), g.sha256.clone());
     }
@@ -556,7 +573,8 @@ if mode == "spec"
   spec = Gem::Package.new(ARGV[0]).spec
   puts({ "name" => spec.name, "version" => spec.version.to_s,
          "platform" => spec.platform.to_s,
-         "executables" => spec.executables }.to_json)
+         "executables" => spec.executables,
+         "extensions" => spec.extensions }.to_json)
   exit 0
 end
 abort "usage: helper plan <lockfile>" unless mode == "plan"
@@ -983,7 +1001,8 @@ pub fn plan_ruby(
 /// Fetch one planned gem into the artifact cache, or find it there, verified
 /// against the plan's sha256, then check that its embedded gemspec names
 /// exactly the planned coordinate. Returns the cache lease, which keeps the
-/// `.gem` from being swept while it is held, and the gem's executables.
+/// `.gem` from being swept while it is held, the gem's executables, and
+/// whether its gemspec declares native extensions.
 fn verify_gem(
     store: &Store,
     activity: &StoreActivity,
@@ -991,7 +1010,7 @@ fn verify_gem(
     scratch: &Path,
     helper: &Path,
     g: &RubyGem,
-) -> io::Result<(CacheLease, Vec<String>)> {
+) -> io::Result<(CacheLease, Vec<String>, bool)> {
     let url = gem_url(g);
     let lease = download_verified_held(store, activity, &url, &g.sha256)
         .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", g.full_name)))?;
@@ -1041,7 +1060,12 @@ fn verify_gem(
                 .collect()
         })
         .unwrap_or_default();
-    Ok((lease, executables))
+    // A spec that does not say is treated as native: the hermetic build is
+    // the safe side of the choice `install_gem` makes.
+    let native = spec["extensions"]
+        .as_array()
+        .is_none_or(|extensions| !extensions.is_empty());
+    Ok((lease, executables, native))
 }
 
 /// On an object hit, record the API digests this plan used. The object
@@ -1100,8 +1124,8 @@ pub fn realize_gems(
     let spec = ruby_spec(platform, selected)?;
     validate_plan(plan)?;
     let identity = ruby_gems_identity(&spec, plan);
-    let id = identity.object_id();
-    if store.has_with_activity(activity, &id)? {
+    let lookup_inputs = crate::kernel::hostview::host_build_inputs;
+    if let Some(id) = cached_gems_object(store, activity, &identity, lookup_inputs)? {
         crate::kernel::policy::check_cached_with_activity(store, activity, &id)?;
         record_api_digests_on_hit(store, activity, plan, ruby_obj);
         return Ok(store.object_path(&id));
@@ -1111,7 +1135,7 @@ pub fn realize_gems(
     let scratch = store.stage_with_activity(activity)?;
     let helper = scratch.join("helper.rb");
     fs::write(&helper, HELPER)?;
-    let mut artifacts: Vec<(&RubyGem, PathBuf)> = Vec::new();
+    let mut artifacts: Vec<(&RubyGem, PathBuf, bool)> = Vec::new();
     // One download per gem, and the lease from that download is held through
     // the sandboxed installs below, so no sweep can drop a `.gem` between
     // verification and use. That is all the lease closes: a same-user
@@ -1120,7 +1144,7 @@ pub fn realize_gems(
     let mut _cache_leases = Vec::new();
     let mut executables: BTreeMap<String, String> = BTreeMap::new();
     for g in &plan.gems {
-        let (lease, exes) = verify_gem(store, activity, ruby_obj, &scratch, &helper, g)?;
+        let (lease, exes, native) = verify_gem(store, activity, ruby_obj, &scratch, &helper, g)?;
         let file_path = lease.to_path_buf();
         _cache_leases.push(lease);
         // The bytes rubygems.org serves match the digest its API gave and
@@ -1137,13 +1161,24 @@ pub fn realize_gems(
                 )));
             }
         }
-        artifacts.push((g, file_path));
+        artifacts.push((g, file_path, native));
     }
 
     let staged = store.stage_with_activity(activity)?;
     let bin = staged.join("bin");
     fs::create_dir_all(&bin)?;
-    for (g, file) in &artifacts {
+    let sandboxed = GemInstall {
+        platform,
+        activity,
+        ruby_obj,
+        helper: &helper,
+        scratch: &scratch,
+        staged: &staged,
+    };
+    let mut fell_back = Vec::new();
+    // The host state every fallback was built against (`same_host_state`).
+    let mut host_inputs = None;
+    for (g, file, native) in &artifacts {
         // Re-verify immediately before use. The lease held since the download
         // stops a sweep, not a same-user replacement of the cache entry, so
         // the bytes about to be installed are digested again here.
@@ -1162,37 +1197,10 @@ pub fn realize_gems(
         fs::copy(file, &named)?;
         // Dependency-first order comes from the plan (helper topo-sort):
         // extconf.rb may require already-installed dependency gems.
-        let spec = BuildSpec {
-            argv: vec![
-                ruby_obj.join("bin/ruby").display().to_string(),
-                helper.display().to_string(),
-                "install".to_string(),
-                named.display().to_string(),
-                staged.display().to_string(),
-            ],
-            cwd: scratch.clone(),
-            env: vec![
-                ("GEM_HOME".to_string(), staged.display().to_string()),
-                ("GEM_PATH".to_string(), staged.display().to_string()),
-                ("BUNDLE_IGNORE_CONFIG".to_string(), "1".to_string()),
-            ],
-            read: vec![ruby_obj.to_path_buf()],
-            write: vec![staged.clone()],
-            scratch: scratch.clone(),
-            path: format!("{}:/usr/bin:/bin", ruby_obj.join("bin").display()),
-        };
-        crate::kernel::sandbox::run_build_spec_on_with_activity(platform, &spec, activity)
-            .map_err(|e| {
-                io::Error::new(
-                    e.kind(),
-                    format!(
-                        "{}: sandboxed gem install failed: {e}\n(network is denied; \
-                 gems whose installers need network or missing host \
-                 libraries are unsupported in v0)",
-                        g.full_name
-                    ),
-                )
-            })?;
+        if let Some(built_against) = sandboxed.install(g, &named, *native)? {
+            same_host_state(&mut host_inputs, &g.full_name, built_against)?;
+            fell_back.push(g.full_name.clone());
+        }
     }
     let _ = crate::kernel::store::remove_tree(&scratch);
     let mut deps = crate::kernel::store::ObjectDeps::new();
@@ -1200,9 +1208,30 @@ pub fn realize_gems(
     for gem in &plan.gems {
         deps.cache_digest(Digest::sha256(&gem.sha256)?);
     }
-    store
-        .commit_with_activity_and_deps(activity, &identity, &staged, &[], &deps)
-        .map(|(path, _)| path)
+    // A gem rebuilt against the whole host recorded `host-build-inputs`:
+    // the object carries it, so a later cache hit replays it through
+    // `check_cached_with_activity` above and a policy that denies the kind
+    // refuses the cached object too. Such an object is committed under its
+    // own identity, keyed by the host build inputs its fallbacks were built
+    // against, and a record under the runtime-only id and those inputs
+    // points a later sync on a host in the same state at it.
+    let commit_identity = match &host_inputs {
+        None => identity.clone(),
+        Some(host_inputs) => ruby_gems_fallback_identity(&identity, &fell_back, host_inputs),
+    };
+    let candidate = crate::kernel::policy::object_exceptions();
+    let (object, applied) = store
+        .commit_with_activity_and_deps(activity, &commit_identity, &staged, &candidate, &deps)
+        .map_err(|e| io::Error::new(e.kind(), format!("commit gems: {e}")))?;
+    if let Some(host_inputs) = &host_inputs {
+        record_host_fallback(store, activity, &identity, host_inputs, &fell_back);
+    }
+    for exception in applied {
+        if !candidate.contains(&exception) {
+            crate::kernel::policy::record(&exception.kind, &exception.subject, &exception.detail)?;
+        }
+    }
+    Ok(object)
 }
 
 /// Project provenance (closure envelope); enforcement is env, set at run.
@@ -1314,11 +1343,16 @@ pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
         }],
         ..empty_plan.clone()
     };
-    vec![
-        ruby,
-        ruby_gems_identity(&spec, &empty_plan),
-        ruby_gems_identity(&spec, &gem_plan),
-    ]
+    let gems = ruby_gems_identity(&spec, &gem_plan);
+    let mut cases = vec![ruby, ruby_gems_identity(&spec, &empty_plan), gems.clone()];
+    if !platform.is_macos() {
+        cases.push(ruby_gems_fallback_identity(
+            &gems,
+            &["rake-13.2.1".into()],
+            &"f".repeat(64),
+        ));
+    }
+    cases
 }
 
 #[cfg(test)]
@@ -1394,7 +1428,7 @@ mod tests {
         );
     }
 
-    fn linux_test_plan() -> RubyPlan {
+    pub(super) fn linux_test_plan() -> RubyPlan {
         RubyPlan {
             ruby_version: RUBY_VERSION.into(),
             ruby_platform: "x86_64-linux".into(),
@@ -1445,9 +1479,21 @@ mod tests {
             ),
             (
                 "192a4c7b501dd09eb3c76a3ebd427e8077fbda6e-ruby-3.4.6".to_string(),
-                "ee94737d938d41b8454fd6ea7d75dc737ccf73e5-gems-1".to_string(),
+                // runtime-only/1: native extensions see the C runtime alone.
+                "24d2dc19be2a56388a92bc93e964986f90568d5e-gems-1".to_string(),
             )
         );
+    }
+
+    /// Linux gem objects name the host view their extensions built
+    /// against; Darwin's inputs are what they were, so its ids stand.
+    #[test]
+    fn linux_gem_identity_names_the_runtime_only_view() {
+        let plan = linux_test_plan();
+        let linux = ruby_gems_identity(&pin_spec(Platform::X86_64UnknownLinuxGnu), &plan);
+        assert_eq!(linux.inputs["build_view"], "runtime-only/1");
+        let darwin = ruby_gems_identity(&pin_spec(Platform::Aarch64AppleDarwin), &plan);
+        assert!(!darwin.inputs.contains_key("build_view"), "{darwin:?}");
     }
 
     #[test]

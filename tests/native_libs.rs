@@ -196,6 +196,7 @@ pub unsafe extern "C" fn tog_pango_version_is_pinned() -> bool {
         write: vec![pkg_scratch.clone()],
         scratch: pkg_scratch,
         path: path.clone(),
+        host_view: tog::kernel::sandbox::HostView::Full,
     })
     .expect("sandboxed pkg-config");
     let pango_version = std::fs::read_to_string(&version_file).unwrap();
@@ -216,6 +217,7 @@ pub unsafe extern "C" fn tog_pango_version_is_pinned() -> bool {
         write: vec![temp.0.clone()],
         scratch: temp.0.clone(),
         path,
+        host_view: tog::kernel::sandbox::HostView::Full,
     })
     .expect("sandboxed fontconfig pkg-config");
     let confdir = std::fs::read_to_string(&confdir_file).unwrap();

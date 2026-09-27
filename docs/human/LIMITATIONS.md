@@ -125,10 +125,49 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
 - **`cargo test -- --ignored` must run single-threaded**: the supervisor owns process-wide
   signal dispositions and rejects a second concurrent child (`--test-threads=1`; the offline
   suite holds `SUPERVISION_TEST_LOCK`).
-- **Unpinned host build inputs.** The Linux host C toolchain (gcc, glibc headers, host zlib)
+- **Unpinned host build inputs.** The Linux host C toolchain (gcc, binutils, glibc headers)
   and the macOS Xcode/clang/SDK are not in build identity — two hosts can produce different
-  "identical" objects. The Linux OTP artifact needs glibc 2.43 and host `libcrypto.so.3`;
-  source-built gems/addons link host libraries.
+  "identical" objects. The Linux OTP artifact needs glibc 2.43 and host `libcrypto.so.3`.
+  Linux gem native extensions build against the host C runtime alone (glibc, kernel headers,
+  libxcrypt, the compiler's own files): every other host header, `-l` library, static
+  archive and pkg-config file is absent from the compiler's and linker's default search
+  paths and from pkg-config in that sandbox. Other host shared libraries stay loadable so
+  the compiler and linker themselves run: they are moved into a `.tog-host-runtime`
+  subdirectory of their library directory, which `ld` does not search, and reached through
+  `LD_LIBRARY_PATH`. That variable outranks a program's own `DT_RUNPATH`: a program a gem
+  bundles and runs during its build, relying on its RUNPATH for a library with the same
+  soname as a relocated host library, loads the host copy instead. An explicit `-I` or `-L`
+  into a subdirectory the view keeps (such as `/usr/lib64/python3.14`) is not curated. A gem
+  that needs another host library fails that build, is rebuilt against the whole host, and
+  records `host-build-inputs`, which a policy can deny. The build that failed may only have
+  left its own gem and extension directories behind; anything else it changed in the gem
+  home refuses the retry, and its HOME and TMPDIR are deleted before the retry starts. The
+  object is then committed under its own `build_view = "host-fallback/1"` identity, keyed by
+  which gems fell back and by a fingerprint of the host build inputs (`host_inputs`): every
+  header, library, `pkgconfig` or `cmake` entry the C-runtime-only view hides or relocates,
+  for each such symlink the file its chain finally resolves to (so a dropped `liblzma.so`
+  covers the kept `liblzma.so.5.8.1` behind it), where `/usr/bin/cc` and `/usr/bin/c++`
+  resolve, and every file under `/usr/lib/gcc` and `/usr/libexec/gcc`. The fingerprint is
+  stat-based, never a hash of file contents: each entry counts by path, type, size,
+  modification time and symlink target, and a resolved target by its inode and device too.
+  A development package installed, removed or upgraded is detected through those file
+  details; a file rewritten with bytes of the same size and its modification time put back
+  is not. A directory it cannot read fails the sync rather than counting as empty. It is
+  taken right before and right after each build against the whole host (about 12 ms on a
+  Fedora 44 workstation); if the two differ, or two gems of one object fell back against
+  different host states, the sync fails ("host development files changed during the build
+  of <gem>; re-run tog"). A store record keyed by the runtime-only id and that build-time
+  fingerprint lets a later sync over the same store, on any host whose build inputs
+  fingerprint the same, reuse the object instead of rebuilding; the lookup fingerprints the
+  host again, only when the runtime-only object is missing, and a host in another state
+  misses the record and builds. What the fingerprint cannot see (file contents, anything
+  outside the curated directories and the compiler) can still make two hosts with the same
+  fingerprint build different bytes.
+  Pure-Ruby gems compile nothing and install against the whole host. Setting the view up
+  costs about two seconds per native gem on a Fedora 44 workstation, and more on a host with
+  a larger library directory.
+  Python sdist builds and npm addons still see the whole host `/usr` and can link any host
+  library. macOS gem builds are unchanged.
 - **Pinned native-library objects are store-root-specific**: `native-libs/libset/3` includes
   the canonical `TOG_STORE` root in its identity; moving a store requires re-realizing the
   libset. **Linux sandbox roots are canonical paths** (a symlink alias root is invisible).

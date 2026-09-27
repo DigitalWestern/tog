@@ -397,6 +397,7 @@ pub fn ensure_rustfmt(
         write: vec![],
         scratch: scratch.clone(),
         path: format!("{}:/usr/bin:/bin", staged.join("bin").display()),
+        host_view: crate::kernel::sandbox::HostView::Full,
     };
     let probe_result =
         crate::kernel::sandbox::run_build_spec_on_with_activity(platform, &probe, activity);
@@ -492,6 +493,7 @@ pub fn run_sandboxed(
             rustfmt_object.join("bin").display(),
             rust_object.join("bin").display()
         ),
+        host_view: crate::kernel::sandbox::HostView::Full,
     };
     let result =
         crate::kernel::sandbox::run_build_spec_status_on_with_activity(platform, &spec, activity);

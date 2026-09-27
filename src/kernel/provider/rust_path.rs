@@ -100,6 +100,7 @@ fn version_output(platform: Platform, tree: &Path, binary: &str, flag: &str) -> 
     let sandbox = Sandbox {
         read: vec![tree],
         write: Vec::new(),
+        host_view: crate::kernel::sandbox::HostView::Full,
     };
     let ran = sandbox.run_in_on(
         platform,

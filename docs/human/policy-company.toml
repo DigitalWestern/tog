@@ -100,6 +100,18 @@ deny = [
 #                                    none; every crate in it is still
 #                                    hash-verified. Commit the lock to make
 #                                    this disappear.
+#   host-build-inputs                a native extension (a Ruby gem's) did
+#                                    not build against the host's C runtime
+#                                    alone, so it was rebuilt against the
+#                                    machine's whole /usr: the object depends
+#                                    on which -dev packages that host has,
+#                                    and another machine may build different
+#                                    bytes. Every input is still verified;
+#                                    only reproducibility across hosts is
+#                                    lost. Teams that need identical objects
+#                                    on every builder may add this kind to
+#                                    the list above and provide the library
+#                                    another way.
 
 # Closure signing. `tog audit` accepts only records signed by a key in
 # the machine policy's [signing] table; a project or --policy copy of this

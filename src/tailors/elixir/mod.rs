@@ -664,6 +664,7 @@ fn otp_install_spec(otp_root: &Path, final_root: &Path, scratch: &Path) -> io::R
         write: vec![otp_root.to_path_buf()],
         scratch: scratch.to_path_buf(),
         path: "/usr/bin:/bin".to_string(),
+        host_view: crate::kernel::sandbox::HostView::Full,
     })
 }
 
@@ -2079,6 +2080,7 @@ pub fn build_sandboxed(
         write: vec![build, deps_projection.clone()],
         scratch: scratch.clone(),
         path: beam_path(&beam_obj),
+        host_view: crate::kernel::sandbox::HostView::Full,
     };
     let result = crate::kernel::sandbox::run_build_spec_on_with_activity(platform, &spec, activity)
         .map_err(|e| {
