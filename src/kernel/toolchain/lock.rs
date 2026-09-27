@@ -939,12 +939,22 @@ digest = "sha256:855d581f8a4eb1a8117e3426de25fe02770592febcfb31369aee1ffbfee9e8e
         // stays whole and only the name check can refuse.
         let dotted_eco = NODE_LOCK.replace("toolchain.node", "toolchain.\"no.de\"");
         let error = ToolchainLock::parse(dotted_eco.as_bytes()).unwrap_err();
-        assert!(error.to_string().contains("bare TOML key"), "{error}");
+        assert!(
+            error
+                .to_string()
+                .contains("ecosystem name is not a bare TOML key"),
+            "{error}"
+        );
         let dotted_component = NODE_LOCK
             .replace("\"node-gyp\"", "\"node.gyp\"")
             .replace("component.node-gyp]", "component.\"node.gyp\"]");
         let error = ToolchainLock::parse(dotted_component.as_bytes()).unwrap_err();
-        assert!(error.to_string().contains("bare TOML key"), "{error}");
+        assert!(
+            error
+                .to_string()
+                .contains("component name \"node.gyp\" is not a bare TOML key"),
+            "{error}"
+        );
     }
 
     #[test]

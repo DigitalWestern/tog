@@ -1120,6 +1120,8 @@ mod tests {
             }),
         );
         // A path inside an object is refused outright, not read as the object.
+        // The foreign-store scan in `import_absolute_reference` runs before
+        // the local "must name an object root" check, hence the wording.
         let error = store
             .root_record_from_project(project)
             .unwrap_err()

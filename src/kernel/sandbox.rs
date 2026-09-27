@@ -1710,6 +1710,18 @@ mod tests {
                 .contains("sandboxed command failed (exit status: 1)"),
             "{error}"
         );
+        // Control: the same `cat` reads a declared file, so the failure
+        // above is the undeclared path and not the command.
+        let visible = declared.join("visible");
+        fs::write(&visible, "declared").unwrap();
+        run(
+            &sandbox,
+            &["/usr/bin/cat", visible.to_str().unwrap()],
+            &scratch,
+            &scratch,
+            &[],
+        )
+        .expect("a declared read root must stay readable");
     }
 
     #[test]
@@ -1754,6 +1766,10 @@ mod tests {
                 .to_string()
                 .contains("sandboxed command failed (exit status: 1)"),
             "{error}"
+        );
+        assert!(
+            !readonly.join("blocked").exists(),
+            "a write into a read-only root reached the host"
         );
     }
 
