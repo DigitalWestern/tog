@@ -729,6 +729,18 @@ dependencies = [{ name = "six" }]
         );
     }
 
+    /// The drained records as `(kind, subject, detail)`, in record order.
+    fn drained_records() -> Vec<(String, String, String)> {
+        crate::kernel::policy::drain()
+            .into_iter()
+            .map(|exception| (exception.kind, exception.subject, exception.detail))
+            .collect()
+    }
+
+    fn record(kind: &str, subject: &str, detail: &str) -> (String, String, String) {
+        (kind.into(), subject.into(), detail.into())
+    }
+
     #[test]
     fn uv_lock_without_a_project_root_takes_every_non_local_package() {
         let _attribution_lock = crate::kernel::policy::exception_guard();
@@ -775,7 +787,22 @@ dependencies = [{ name = "six" }]
                 .collect::<Vec<_>>(),
             ["private", "six"]
         );
-        let _ = crate::kernel::policy::drain();
+        use crate::kernel::policy::{REQUIREMENT_SKIPPED, UNATTESTED_INDEX};
+        assert_eq!(
+            drained_records(),
+            [
+                record(
+                    UNATTESTED_INDEX,
+                    "private",
+                    "uv lock package names a non-public registry source"
+                ),
+                record(
+                    REQUIREMENT_SKIPPED,
+                    "vendored",
+                    "uv lock package is a local or VCS source, not a locked registry artifact"
+                ),
+            ]
+        );
     }
 
     #[test]
@@ -900,7 +927,14 @@ files = [{ file = "vendored.whl", hash = "sha256:ccccccccccccccccccccccccccccccc
             requirements[0].starts_with("six==1.17.0"),
             "{requirements:?}"
         );
-        let _ = crate::kernel::policy::drain();
+        assert_eq!(
+            drained_records(),
+            [record(
+                crate::kernel::policy::REQUIREMENT_SKIPPED,
+                "vendored",
+                "Poetry lock package uses unsupported directory source"
+            )]
+        );
     }
 
     #[test]
@@ -1048,57 +1082,86 @@ files = []
         .unwrap();
         assert_eq!(manifest.requirements, ["six>=1"]);
         assert_eq!(manifest.resolver_text(), "six>=1\n");
-        let _ = crate::kernel::policy::drain();
+        assert_eq!(
+            drained_records(),
+            [record(
+                crate::kernel::policy::UNATTESTED_INDEX,
+                "--index-url https://private.invalid/simple",
+                "requirements index/find-links options are recorded but never followed"
+            )]
+        );
     }
 
     #[test]
-    fn discovery_order_prefers_requirements_then_project_then_poetry_then_setup_and_dir() {
+    fn discovery_prefers_requirements_then_project_then_poetry_then_setup_then_dir() {
         let _attribution_lock = crate::kernel::policy::exception_guard();
         let _attribution = crate::kernel::policy::Attribution::open("python").unwrap();
-        let cases = [
-            ("requirements", "requirements.txt", "requirements.txt"),
-            ("project", "pyproject.toml", "pyproject.toml [project]"),
+        const REQUIREMENTS: (&str, &str) = ("requirements.txt", "six>=1\n");
+        const PROJECT: (&str, &str) = ("pyproject.toml", "[project]\ndependencies = [\"six\"]\n");
+        const POETRY: (&str, &str) = (
+            "pyproject.toml",
+            "[tool.poetry.dependencies]\nsix = \"^1.0\"\n",
+        );
+        // One pyproject carrying both tables: PEP 621 wins over Poetry.
+        const PROJECT_AND_POETRY: (&str, &str) = (
+            "pyproject.toml",
+            "[project]\ndependencies = [\"six\"]\n[tool.poetry.dependencies]\nsix = \"^1.0\"\n",
+        );
+        const POETRY_LOCK: (&str, &str) = ("poetry.lock", "[[package]]\nname=\"six\"\nversion=\"1.0\"\nfiles=[{file=\"six.whl\",hash=\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}]\n[metadata]\ncontent-hash=\"\"\n");
+        const SETUP_CFG: (&str, &str) = ("setup.cfg", "[options]\n");
+        const SETUP_PY: (&str, &str) = ("setup.py", "from setuptools import setup\nsetup()\n");
+        const REQ_DIR: (&str, &str) = ("requirements/common.txt", "six>=1\n");
+        const PROJECT_PROVENANCE: &str = "pyproject.toml [project]";
+        const POETRY_PROVENANCE: &str = "pyproject.toml [tool.poetry] (+ poetry.lock)";
+        const SETUP_CFG_PROVENANCE: &str = "setup.cfg [options] (empty manifest)";
+        const SETUP_PY_PROVENANCE: &str = "setup.py (sandboxed egg_info)";
+        let cases: &[(&str, &[(&str, &str)], &str)] = &[
+            // Each source on its own.
+            ("requirements", &[REQUIREMENTS], "requirements.txt"),
+            ("project", &[PROJECT], PROJECT_PROVENANCE),
+            ("poetry", &[POETRY, POETRY_LOCK], POETRY_PROVENANCE),
+            ("setupcfg", &[SETUP_CFG], SETUP_CFG_PROVENANCE),
+            ("setuppy", &[SETUP_PY], SETUP_PY_PROVENANCE),
+            ("reqdir", &[REQ_DIR], "requirements/common.txt"),
+            // Competing sources: the earlier one in the order wins.
             (
-                "poetry",
-                "pyproject.toml\npoetry.lock",
-                "pyproject.toml [tool.poetry] (+ poetry.lock)",
+                "requirements-over-project",
+                &[REQUIREMENTS, PROJECT, SETUP_CFG],
+                "requirements.txt",
             ),
             (
-                "setupcfg",
-                "setup.cfg",
-                "setup.cfg [options] (empty manifest)",
+                "project-over-poetry",
+                &[PROJECT_AND_POETRY, POETRY_LOCK, SETUP_CFG],
+                PROJECT_PROVENANCE,
             ),
-            ("setuppy", "setup.py", "setup.py (sandboxed egg_info)"),
             (
-                "reqdir",
-                "requirements/common.txt",
-                "requirements/common.txt",
+                "poetry-over-setup",
+                &[POETRY, POETRY_LOCK, SETUP_CFG, SETUP_PY],
+                POETRY_PROVENANCE,
+            ),
+            // A declared install_requires makes setup.cfg authoritative over
+            // setup.py (an empty one defers to setup.py's egg_info).
+            (
+                "setupcfg-over-setuppy-and-dir",
+                &[
+                    ("setup.cfg", "[options]\ninstall_requires =\n    six>=1\n"),
+                    SETUP_PY,
+                    REQ_DIR,
+                ],
+                "setup.cfg [options]",
+            ),
+            (
+                "setuppy-over-dir",
+                &[SETUP_PY, REQ_DIR],
+                SETUP_PY_PROVENANCE,
             ),
         ];
         for (name, files, expected) in cases {
             let dir = temp_project(name);
-            for (index, file) in files.split('\n').enumerate() {
+            for (file, text) in files.iter() {
                 let path = dir.0.join(file);
-                if let Some(parent) = path.parent() {
-                    fs::create_dir_all(parent).unwrap();
-                }
-                let text = match file {
-                    "requirements.txt" | "requirements/common.txt" => "six>=1\n",
-                    "pyproject.toml" if name == "project" => "[project]\ndependencies = [\"six\"]\n",
-                    "pyproject.toml" => "[tool.poetry.dependencies]\nsix = \"^1.0\"\n",
-                    "poetry.lock" => "[[package]]\nname=\"six\"\nversion=\"1.0\"\nfiles=[{file=\"six.whl\",hash=\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}]\n[metadata]\ncontent-hash=\"\"\n",
-                    "setup.cfg" => "[options]\n",
-                    "setup.py" => "from setuptools import setup\nsetup()\n",
-                    _ => "",
-                };
+                fs::create_dir_all(path.parent().unwrap()).unwrap();
                 fs::write(path, text).unwrap();
-                if index == 0 && name == "reqdir" {
-                    fs::remove_file(dir.0.join(file)).ok();
-                }
-            }
-            if name == "reqdir" {
-                fs::create_dir_all(dir.0.join("requirements")).unwrap();
-                fs::write(dir.0.join("requirements/common.txt"), "six>=1\n").unwrap();
             }
             let got = discover(
                 Platform::X86_64UnknownLinuxGnu,
@@ -1106,7 +1169,7 @@ files = []
                 crate::tailors::python::pyselect::DEFAULT_VERSION,
             )
             .unwrap();
-            assert_eq!(got.provenance, expected, "{name}");
+            assert_eq!(got.provenance, *expected, "{name}");
             let _ = crate::kernel::policy::drain();
         }
     }

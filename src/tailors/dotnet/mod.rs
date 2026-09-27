@@ -1348,25 +1348,15 @@ pub fn realize_packages(
     let config = verifier.join("nuget.config").canonicalize()?;
     let result = crate::kernel::sandbox::run_build_spec_on_with_activity(
         platform,
-        &BuildSpec {
-            argv: vec![
-                sdk_obj.join("dotnet").display().to_string(),
-                "restore".to_string(),
-                "--locked-mode".to_string(),
-                "--no-cache".to_string(),
-                "--disable-build-servers".to_string(),
-                "--configfile".to_string(),
-                config.display().to_string(),
-                "-noAutoResponse".to_string(),
-            ],
-            cwd: verifier.clone(),
-            env: forced_env(&sdk_obj, &staged, &scratch),
-            read: vec![sdk_obj.to_path_buf(), feed.clone(), verifier.clone()],
-            write: dotnet_write_roots(platform, vec![staged.clone()])?,
-            scratch: scratch.clone(),
-            path: format!("{}:/usr/bin:/bin", sdk_obj.display()),
-            host_view: crate::kernel::sandbox::HostView::Full,
-        },
+        &verify_spec(
+            &sdk_obj,
+            &feed,
+            &verifier,
+            &config,
+            &staged,
+            &scratch,
+            ensure_dotnet_tmp(platform)?,
+        ),
         activity,
     );
     if let Err(e) = result {
@@ -1579,11 +1569,85 @@ fn add_dotnet_tmp_write_root(mut roots: Vec<PathBuf>, dotnet_tmp: PathBuf) -> Ve
     roots
 }
 
-fn dotnet_write_roots(platform: Platform, roots: Vec<PathBuf>) -> io::Result<Vec<PathBuf>> {
-    Ok(add_dotnet_tmp_write_root(
-        roots,
-        ensure_dotnet_tmp(platform)?,
-    ))
+/// The locked-mode package verification: `dotnet restore` of the synthetic
+/// verifier project against the local feed. It writes only the staged
+/// package tree and the selected CoreCLR tmp root.
+fn verify_spec(
+    sdk_obj: &Path,
+    feed: &Path,
+    verifier: &Path,
+    config: &Path,
+    staged: &Path,
+    scratch: &Path,
+    dotnet_tmp: PathBuf,
+) -> BuildSpec {
+    BuildSpec {
+        argv: vec![
+            sdk_obj.join("dotnet").display().to_string(),
+            "restore".to_string(),
+            "--locked-mode".to_string(),
+            "--no-cache".to_string(),
+            "--disable-build-servers".to_string(),
+            "--configfile".to_string(),
+            config.display().to_string(),
+            "-noAutoResponse".to_string(),
+        ],
+        cwd: verifier.to_path_buf(),
+        env: forced_env(sdk_obj, staged, scratch),
+        read: vec![
+            sdk_obj.to_path_buf(),
+            feed.to_path_buf(),
+            verifier.to_path_buf(),
+        ],
+        write: add_dotnet_tmp_write_root(vec![staged.to_path_buf()], dotnet_tmp),
+        scratch: scratch.to_path_buf(),
+        path: format!("{}:/usr/bin:/bin", sdk_obj.display()),
+        host_view: crate::kernel::sandbox::HostView::Full,
+    }
+}
+
+/// The paths a sandboxed project restore and build run over. The project
+/// and the package object are read-only: each phase writes only its own
+/// scratch directories and the selected CoreCLR tmp root.
+struct ProjectPhase<'a> {
+    project_dir: &'a Path,
+    sdk_obj: &'a Path,
+    packages_obj: &'a Path,
+    scratch: &'a Path,
+    objdir: &'a Path,
+    output_scratch: &'a Path,
+}
+
+impl ProjectPhase<'_> {
+    /// The offline locked restore writes the scratch obj/ only; the
+    /// `--no-restore` build (`build`) writes the scratch output too.
+    fn spec(
+        &self,
+        build: bool,
+        argv: Vec<String>,
+        env: Vec<(String, String)>,
+        dotnet_tmp: PathBuf,
+    ) -> BuildSpec {
+        let mut write = Vec::new();
+        if build {
+            write.push(self.output_scratch.to_path_buf());
+        }
+        write.push(self.objdir.to_path_buf());
+        BuildSpec {
+            argv,
+            cwd: self.project_dir.to_path_buf(),
+            env,
+            read: vec![
+                self.project_dir.to_path_buf(),
+                self.sdk_obj.to_path_buf(),
+                self.packages_obj.to_path_buf(),
+            ],
+            write: add_dotnet_tmp_write_root(write, dotnet_tmp),
+            scratch: self.scratch.to_path_buf(),
+            path: format!("{}:/usr/bin:/bin", self.sdk_obj.display()),
+            host_view: crate::kernel::sandbox::HostView::Full,
+        }
+    }
 }
 
 fn validate_build_args(args: &[String]) -> io::Result<()> {
@@ -1787,16 +1851,15 @@ pub fn build_sandboxed(
         "-nodeReuse:false".to_string(),
         "--disable-build-servers".to_string(),
     ]);
-    let spec = BuildSpec {
-        argv: restore,
-        cwd: project_dir.clone(),
-        env: env.clone(),
-        read: vec![project_dir.clone(), sdk_obj.clone(), packages_obj.clone()],
-        write: dotnet_write_roots(platform, vec![objdir.clone()])?,
-        scratch: scratch.clone(),
-        path: format!("{}:/usr/bin:/bin", sdk_obj.display()),
-        host_view: crate::kernel::sandbox::HostView::Full,
+    let phase = ProjectPhase {
+        project_dir: &project_dir,
+        sdk_obj: &sdk_obj,
+        packages_obj: &packages_obj,
+        scratch: &scratch,
+        objdir: &objdir,
+        output_scratch: &output_scratch,
     };
+    let spec = phase.spec(false, restore, env.clone(), ensure_dotnet_tmp(platform)?);
     crate::kernel::sandbox::run_build_spec_on_with_activity(platform, &spec, activity).map_err(
         |e| {
             io::Error::new(
@@ -1827,16 +1890,7 @@ pub fn build_sandboxed(
         "-nodeReuse:false".to_string(),
         "--disable-build-servers".to_string(),
     ]);
-    let spec = BuildSpec {
-        argv: build,
-        cwd: project_dir.clone(),
-        env,
-        read: vec![project_dir.clone(), sdk_obj.clone(), packages_obj.clone()],
-        write: dotnet_write_roots(platform, vec![output_scratch.clone(), objdir.clone()])?,
-        scratch: scratch.clone(),
-        path: format!("{}:/usr/bin:/bin", sdk_obj.display()),
-        host_view: crate::kernel::sandbox::HostView::Full,
-    };
+    let spec = phase.spec(true, build, env, ensure_dotnet_tmp(platform)?);
     if let Err(e) =
         crate::kernel::sandbox::run_build_spec_on_with_activity(platform, &spec, activity)
     {
@@ -2160,6 +2214,40 @@ mod tests {
         assert_eq!(reimported.projections, record.projections);
     }
 
+    /// `tog run`'s dotnet guard: a build verb is found past leading options,
+    /// `dotnet exec` of MSBuild.dll is refused by file name, and running a
+    /// built app is allowed.
+    #[test]
+    fn dotnet_run_guard_handles_options_and_msbuild_dll() {
+        let refused = |words: &[&str]| {
+            refused_run_command(&words.iter().map(|w| w.to_string()).collect::<Vec<_>>())
+        };
+        assert_eq!(
+            refused(&["dotnet", "-d", "build"]).as_deref(),
+            Some(
+                "`dotnet build` compiles/executes MSBuild code and must run sandboxed: \
+                 use `tog build dotnet ...`"
+            )
+        );
+        assert_eq!(
+            refused(&["dotnet", "MSBuild"]).as_deref(),
+            Some(
+                "`dotnet MSBuild` compiles/executes MSBuild code and must run sandboxed: \
+                 use `tog build dotnet ...`"
+            )
+        );
+        assert_eq!(
+            refused(&["dotnet", "exec", "/tmp/tools/msbuild.DLL"]).as_deref(),
+            Some(
+                "`dotnet exec .../MSBuild.dll` executes MSBuild code and must run sandboxed: \
+                 use `tog build dotnet ...`"
+            )
+        );
+        assert_eq!(refused(&["dotnet", "exec", "app.dll"]), None);
+        assert_eq!(refused(&["dotnet", "--info"]), None);
+        assert_eq!(refused(&["/usr/bin/env", "dotnet", "build"]), None);
+    }
+
     #[test]
     fn dotnet_tmp_paths_are_platform_specific() {
         assert_eq!(
@@ -2247,23 +2335,56 @@ mod tests {
         prepare_scratch(&base).unwrap();
     }
 
+    /// Every sandboxed dotnet phase (package verification, restore, build)
+    /// writes exactly its own scratch directories plus the selected CoreCLR
+    /// tmp root: never the project, the SDK, the package object, or the
+    /// feed it reads. Built through the same spec constructors the phases
+    /// run, so a write root added to any of them fails here.
     #[test]
-    fn all_dotnet_sandbox_phases_add_only_the_selected_tmp_write_root() {
-        let scratch = TempDir::named("dn-spec");
-        let base = scratch.0.clone();
-        let project = base.join("project");
-        let packages = base.join("packages");
-        let selected_tmp = base.join(".dotnet");
-        let phases = [
-            vec![base.join("staged-packages")],
-            vec![base.join("obj")],
-            vec![base.join("output"), base.join("obj")],
-        ];
-        for phase in phases {
-            let writes = add_dotnet_tmp_write_root(phase, selected_tmp.clone());
-            assert!(writes.iter().any(|path| path == &selected_tmp));
-            assert!(!writes.iter().any(|path| path == &project));
-            assert!(!writes.iter().any(|path| path == &packages));
+    fn every_dotnet_sandbox_phase_writes_only_its_scratch_and_the_selected_tmp_root() {
+        let base = PathBuf::from("/fixture");
+        let project_dir = base.join("project");
+        let sdk_obj = base.join("store/objects/sdk");
+        let packages_obj = base.join("store/objects/packages");
+        let scratch = base.join("store/tmp/stage-1");
+        let objdir = scratch.join("obj");
+        let output_scratch = scratch.join("output");
+        let staged = base.join("store/tmp/stage-2");
+        let feed = scratch.join("feed");
+        let verifier = scratch.join("verifier");
+        let dotnet_tmp = base.join("tmp/.dotnet");
+        let phase = ProjectPhase {
+            project_dir: &project_dir,
+            sdk_obj: &sdk_obj,
+            packages_obj: &packages_obj,
+            scratch: &scratch,
+            objdir: &objdir,
+            output_scratch: &output_scratch,
+        };
+        let verify = verify_spec(
+            &sdk_obj,
+            &feed,
+            &verifier,
+            &verifier.join("nuget.config"),
+            &staged,
+            &scratch,
+            dotnet_tmp.clone(),
+        );
+        let restore = phase.spec(false, Vec::new(), Vec::new(), dotnet_tmp.clone());
+        let build = phase.spec(true, Vec::new(), Vec::new(), dotnet_tmp.clone());
+        assert_eq!(verify.write, [staged.clone(), dotnet_tmp.clone()]);
+        assert_eq!(restore.write, [objdir.clone(), dotnet_tmp.clone()]);
+        assert_eq!(
+            build.write,
+            [output_scratch.clone(), objdir.clone(), dotnet_tmp.clone()]
+        );
+        // What each phase reads stays read-only.
+        assert_eq!(verify.read, [sdk_obj.clone(), feed, verifier]);
+        for spec in [&restore, &build] {
+            assert_eq!(
+                spec.read,
+                [project_dir.clone(), sdk_obj.clone(), packages_obj.clone()]
+            );
         }
     }
 

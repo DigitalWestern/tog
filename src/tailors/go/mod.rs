@@ -568,7 +568,16 @@ struct DownloadEntry {
 /// The project's own go.work is read through the held descriptor; the
 /// directories above it are outside the project and checked by path.
 pub fn reject_workspaces(project: &ProjectRoot) -> io::Result<()> {
-    if std::env::var_os("GOWORK").is_some_and(|v| !v.is_empty() && v != "off") {
+    reject_workspaces_with(project, std::env::var_os("GOWORK"))
+}
+
+/// `reject_workspaces` with the `GOWORK` value passed in, so tests can cover
+/// it without mutating the process environment under parallel tests.
+fn reject_workspaces_with(
+    project: &ProjectRoot,
+    gowork: Option<std::ffi::OsString>,
+) -> io::Result<()> {
+    if gowork.is_some_and(|v| !v.is_empty() && v != "off") {
         return Err(err("GOWORK is set; Go workspaces are not supported yet"));
     }
     let project_dir = project.path();
@@ -2310,9 +2319,52 @@ mod tests {
     }
 
     #[test]
-    fn module_path_and_workspace_guard() {
+    fn module_path_reads_the_module_directive_and_requires_one() {
         assert_eq!(module_path("module hello\n\ngo 1.27\n").unwrap(), "hello");
         assert!(module_path("go 1.27\n").is_err());
+    }
+
+    /// v0 builds single-module projects only: a `go.work` in the project or
+    /// in any directory above it is refused, and so is a `GOWORK` naming a
+    /// workspace file. `GOWORK=off` or empty is the single-module default.
+    #[test]
+    fn go_workspaces_are_refused_in_the_project_above_it_and_through_gowork() {
+        let scratch = TempDir::named("go-workspace-guard");
+        let project = scratch.0.join("outer/project");
+        fs::create_dir_all(&project).unwrap();
+        let root = || ProjectRoot::open(&project).unwrap();
+        for gowork in [None, Some(""), Some("off")] {
+            reject_workspaces_with(&root(), gowork.map(Into::into))
+                .unwrap_or_else(|error| panic!("{gowork:?}: {error}"));
+        }
+
+        let error = reject_workspaces_with(&root(), Some("/elsewhere/go.work".into()))
+            .unwrap_err()
+            .to_string();
+        assert_eq!(error, "GOWORK is set; Go workspaces are not supported yet");
+
+        let above = scratch.0.join("outer/go.work");
+        fs::write(&above, "go 1.27\n").unwrap();
+        let error = reject_workspaces_with(&root(), None)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.starts_with(&format!(
+                "{}/go.work found; ",
+                root().path().parent().unwrap().display()
+            )),
+            "{error}"
+        );
+        fs::remove_file(&above).unwrap();
+
+        fs::write(project.join("go.work"), "go 1.27\n").unwrap();
+        let error = reject_workspaces_with(&root(), None)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.starts_with(&format!("{}/go.work found; ", root().path().display())),
+            "{error}"
+        );
     }
 
     /// A plan the store can realize: its object is there, or every artifact
@@ -2536,6 +2588,12 @@ mod tests {
         // The plan borrows the caller's lease; these cases never reach the
         // store, so a lease on a scratch store stands in for it.
         let (_lease_store, activity) = crate::kernel::testutil::detached_lease();
+        // The changed selection below reaches the re-plan path, which runs
+        // the store go through the supervisor: one supervised child at a
+        // time (see `plan_cache_key_covers_the_go_sources`).
+        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let temp = TempDir::new();
         let project = temp.0.join("proj");
         let (_, gosum, plan) = plan_fixture(&project);
@@ -2573,8 +2631,10 @@ mod tests {
         assert!(!store.root.exists(), "a cache hit touched the store");
 
         // A different selection is a different plan: the cache keyed to the
-        // old one is not served for it.
-        assert!(plan_go(
+        // old one is not served for it. The miss goes on to the tidy gate,
+        // which creates its module cache in the store before running the
+        // (absent) go; that directory is the proof the cache was skipped.
+        plan_go(
             &store,
             &activity,
             &ProjectRoot::open(&project).unwrap(),
@@ -2582,7 +2642,11 @@ mod tests {
             "1.28.0",
             true,
         )
-        .is_err());
+        .unwrap_err();
+        assert!(
+            store.root.join("planner-modcache").is_dir(),
+            "a changed selection was served the cached plan"
+        );
     }
 
     #[test]
@@ -2822,6 +2886,28 @@ mod tests {
         let (gomod, gosum, plan) = plan_fixture(&project);
         let input_hash = expected_input_hash(&project, &gomod, &gosum);
         write_plan_cache(&project, &input_hash, &plan);
+        let store_root = temp.0.join("store");
+        for sub in ["objects", "meta", "cache/sha256", "tmp", "roots"] {
+            fs::create_dir_all(store_root.join(sub)).unwrap();
+        }
+        let store = Store { root: store_root };
+        // A miss goes on to the tidy gate, which creates its module cache in
+        // the store before running the (absent) go: that directory is how
+        // the test tells a miss from a hit through `plan_go` itself.
+        let gate_cache = store.root.join("planner-modcache");
+        let plan_now = || {
+            plan_go(
+                &store,
+                &activity,
+                &ProjectRoot::open(&project).unwrap(),
+                Path::new("/nonexistent/go"),
+                "1.27.0",
+                true,
+            )
+        };
+        // Unchanged sources: the cached plan is served.
+        assert_eq!(plan_now().unwrap().modules, plan.modules);
+        assert!(!gate_cache.exists(), "unchanged sources missed the cache");
         // Editing a .go source invalidates the key, so the cached plan is
         // not returned; without a toolchain the re-plan can only fail.
         fs::write(
@@ -2829,21 +2915,8 @@ mod tests {
             "package main\n\nfunc main() { _ = 1 }\n",
         )
         .unwrap();
-        assert_ne!(expected_input_hash(&project, &gomod, &gosum), input_hash);
-        let store_root = temp.0.join("store");
-        for sub in ["objects", "meta", "cache/sha256", "tmp", "roots"] {
-            fs::create_dir_all(store_root.join(sub)).unwrap();
-        }
-        let store = Store { root: store_root };
-        assert!(plan_go(
-            &store,
-            &activity,
-            &ProjectRoot::open(&project).unwrap(),
-            Path::new("/nonexistent/go"),
-            "1.27.0",
-            true,
-        )
-        .is_err());
+        plan_now().unwrap_err();
+        assert!(gate_cache.is_dir(), "an edited source was served the cache");
     }
 
     /// A project renamed away mid-sync and replaced by another at the same

@@ -1337,16 +1337,49 @@ mod tests {
         for tailor in registry() {
             let catalog = tailor.toolchain_catalog().unwrap();
             let newest = catalog.select(&Request::newest()).unwrap();
-            let body = legacy_body(tailor.id(), newest);
-            assert!(body.get("platform").is_none());
-            for platform in Platform::ALL {
-                let evidence =
-                    tailor.legacy_toolchain_evidence(tailor.id(), Some(*platform), &body, None);
-                assert_eq!(evidence.platform, Some(*platform));
-                let seeded = seed(&catalog, &evidence)
-                    .unwrap_or_else(|error| panic!("{}: {error}", tailor.id()));
-                assert_eq!(seeded.release, newest.release, "{}", tailor.id());
+            // Every release the catalog ships, the older ones included: a
+            // seed that ignored the record and returned the newest release
+            // passes for the newest alone.
+            let mut seeded_an_older_release = false;
+            for bundle in catalog.bundles() {
+                let body = legacy_body(tailor.id(), bundle);
+                assert!(body.get("platform").is_none());
+                let versions = bundle.primary_versions().unwrap();
+                // A re-published revision shares its versions with another
+                // release; the record cannot tell those apart.
+                let unique = catalog
+                    .bundles()
+                    .iter()
+                    .filter(|other| other.primary_versions().unwrap() == versions)
+                    .count()
+                    == 1;
+                for platform in Platform::ALL {
+                    let evidence =
+                        tailor.legacy_toolchain_evidence(tailor.id(), Some(*platform), &body, None);
+                    assert_eq!(evidence.platform, Some(*platform));
+                    let seeded = seed(&catalog, &evidence)
+                        .unwrap_or_else(|error| panic!("{}: {error}", tailor.id()));
+                    assert_eq!(
+                        seeded.primary_versions().unwrap(),
+                        versions,
+                        "{} {}",
+                        tailor.id(),
+                        bundle.release
+                    );
+                    if unique {
+                        assert_eq!(seeded.release, bundle.release, "{}", tailor.id());
+                    }
+                }
+                if unique && bundle.release != newest.release {
+                    seeded_an_older_release = true;
+                }
             }
+            assert!(
+                seeded_an_older_release,
+                "{}: no older release was seeded",
+                tailor.id()
+            );
+            let body = legacy_body(tailor.id(), newest);
             // No envelope platform: refuse, naming the update verb.
             let evidence = tailor.legacy_toolchain_evidence(tailor.id(), None, &body, None);
             let error = seed(&catalog, &evidence).unwrap_err();

@@ -382,7 +382,7 @@ pub fn ensure_rustfmt(
         return Err(error);
     }
 
-    let scratch = super::unique_dir(&store.root.join("tmp"), "stage-rustfmt-probe")?;
+    let scratch = probe_scratch(&store.root.join("tmp"))?;
     // The staged object is under store/tmp, so its committed relative lib
     // link cannot resolve until publication beside the Rust object. The stage
     // carries an absolute link for this probe, so protected macOS binaries do
@@ -444,6 +444,24 @@ pub fn ensure_rustfmt(
         .map_err(|error| io::Error::new(error.kind(), format!("commit rustfmt object: {error}")))
 }
 
+/// The `store/tmp` scratch names for the pre-publication `rustfmt --version`
+/// probe and for a sandboxed `cargo fmt` run. Both carry the `stage-` prefix
+/// `gc::collect` sweeps, so a run killed before its cleanup leaks nothing
+/// permanent.
+const PROBE_SCRATCH_PREFIX: &str = "stage-rustfmt-probe";
+const RUN_SCRATCH_PREFIX: &str = "stage-rustfmt-run";
+
+/// The scratch directory the publication probe runs in. The probe goes
+/// through here, so the gc sweep test covers the name it really uses.
+fn probe_scratch(store_tmp: &Path) -> io::Result<PathBuf> {
+    super::unique_dir(store_tmp, PROBE_SCRATCH_PREFIX)
+}
+
+/// The scratch directory one sandboxed `cargo fmt` runs in.
+fn run_scratch(store_tmp: &Path) -> io::Result<PathBuf> {
+    super::unique_dir(store_tmp, RUN_SCRATCH_PREFIX)
+}
+
 pub fn run_sandboxed(
     platform: Platform,
     invocation_dir: &Path,
@@ -454,13 +472,12 @@ pub fn run_sandboxed(
     check: bool,
     args: &[String],
 ) -> io::Result<std::process::ExitStatus> {
-    let scratch = super::unique_dir(
+    let scratch = run_scratch(
         &rustfmt_object
             .parent()
             .and_then(Path::parent)
             .map(|path| path.join("tmp"))
             .ok_or_else(|| io::Error::other("cannot locate store tmp for rustfmt"))?,
-        "stage-rustfmt-run",
     )?;
     let cargo = rust_object.join("bin/cargo");
     let cargo_fmt = rustfmt_object.join("bin/cargo-fmt");
@@ -746,18 +763,50 @@ mod tests {
         );
     }
 
+    /// A probe or `cargo fmt` run killed before its own cleanup leaves its
+    /// scratch under `store/tmp`. `gc::collect` reclaims exactly
+    /// `store/tmp/stage-*`, so both scratch names have to live there.
     #[test]
-    fn scratch_directories_are_named_so_gc_can_sweep_them() {
-        let scratch = TempDir::named("rustfmt-scratch");
-        let parent = scratch.0.clone();
-        for prefix in ["stage-rustfmt-run", "stage-rustfmt-probe"] {
-            let dir = super::super::unique_dir(&parent, prefix).unwrap();
-            let name = dir.file_name().unwrap().to_str().unwrap().to_string();
-            // `gc::collect` reclaims exactly `store/tmp/stage-*`, so a run
-            // interrupted before its cleanup is still collectable.
-            assert!(name.starts_with("stage-"), "{name}");
-            assert!(name.starts_with(prefix), "{name}");
-        }
+    fn leftover_rustfmt_scratches_are_swept_by_gc() {
+        super::super::tests::with_temp_store(|store, root| {
+            // Through the helpers the probe and the run use, so a prefix that
+            // drifts out of the swept namespace fails here.
+            let tmp = store.root.join("tmp");
+            let scratches = [probe_scratch(&tmp).unwrap(), run_scratch(&tmp).unwrap()];
+            // Only stages older than a day are stale; a live run's scratch is
+            // never swept out from under it.
+            let old = std::time::SystemTime::now()
+                .checked_sub(std::time::Duration::from_secs(2 * 24 * 60 * 60))
+                .unwrap();
+            for scratch in &scratches {
+                fs::write(scratch.join("leftover"), b"leftover").unwrap();
+                fs::File::open(scratch).unwrap().set_modified(old).unwrap();
+            }
+            // A registered, resolvable root: the sweep refuses outright when
+            // the root registry is empty or a project cannot be resolved.
+            let project = root.join("project");
+            fs::create_dir_all(project.join(".tog/closures")).unwrap();
+            fs::write(
+                project.join(".tog/closures/cargo.json"),
+                serde_json::to_vec(&json!({
+                    "schema": "closure/1",
+                    "ecosystem": "cargo",
+                    "body": {},
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            store.register_root(&project).unwrap();
+            let mut out = Vec::new();
+            let report =
+                crate::kernel::gc::collect(store, crate::kernel::gc::Options::default(), &mut out)
+                    .unwrap();
+            let text = String::from_utf8(out).unwrap();
+            assert_eq!(report.stages, 2, "{text}");
+            for scratch in &scratches {
+                assert!(!scratch.exists(), "{}: {text}", scratch.display());
+            }
+        });
     }
 
     /// Under a lock naming a local toolchain, the record `status` expects
@@ -969,6 +1018,12 @@ mod tests {
     #[test]
     fn staging_keeps_only_the_two_binaries_with_their_modes() {
         use std::os::unix::fs::PermissionsExt;
+        // Staging extracts through a supervised child, and the supervisor
+        // owns process-wide signal dispositions: one supervised child at a
+        // time, as in every other test that can reach one.
+        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let platform = Platform::host().unwrap();
         let version = "1.0.0";
         let root = format!("rustfmt-{version}-{}", platform.triple());

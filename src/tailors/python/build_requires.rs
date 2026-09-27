@@ -840,7 +840,7 @@ build-backend = "hatchling.build"
     }
 
     #[test]
-    fn rejects_option_like_tar_root_without_executing_it() {
+    fn rejects_an_option_like_tar_member_path() {
         let dir = temp_dir("tar-injection");
         let root_name = "--checkpoint-action=exec=touch marker;#";
         let root = dir.0.join(root_name);
@@ -863,11 +863,17 @@ build-backend = "hatchling.build"
         assert!(status.success());
         fs::remove_dir_all(&root).unwrap();
 
-        let marker = std::env::current_dir().unwrap().join("marker");
-        let _ = fs::remove_file(&marker);
+        // The archive is listed in-process, so nothing could execute the
+        // name; what matters is that a member a `tar` command line would
+        // read as an option is refused outright.
         let error = inspect_sdist(&archive).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
-        assert!(!marker.exists(), "tar option-like member was executed");
+        assert!(
+            error.to_string().contains(&format!(
+                "sdist archive contains an option-like path {root_name:?}"
+            )),
+            "{error}"
+        );
     }
 
     #[test]

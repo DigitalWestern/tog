@@ -698,7 +698,7 @@ mod tests {
         }
     }
 
-    fn with_temp_store(f: impl FnOnce(&Store, &Path)) {
+    pub(super) fn with_temp_store(f: impl FnOnce(&Store, &Path)) {
         let _lock = STORE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let temp = TempDir::named("cargo-store");
         let old = env::var_os("TOG_STORE");

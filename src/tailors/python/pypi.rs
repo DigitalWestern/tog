@@ -877,7 +877,10 @@ six==1.17.0 \\\n\
         // '#' inside a token is not a comment -- but such names then fail
         // the project-name grammar, which is the correct outcome.
         let text = "a#b==1.0 --hash=sha256:0000000000000000000000000000000000000000000000000000000000000001\n";
-        assert!(parse_requirements(text).is_err());
+        // The whole token reached the name check: had `#b...` been cut off
+        // as a comment, `a` would have failed differently (no hash).
+        let error = parse_requirements(text).unwrap_err().to_string();
+        assert_eq!(error, "invalid project name: a#b");
         let text2 = "six==1.0 --hash=sha256:0000000000000000000000000000000000000000000000000000000000000001 # trailing\n";
         assert_eq!(parse_requirements(text2).unwrap()[0].version, "1.0");
     }

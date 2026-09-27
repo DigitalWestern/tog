@@ -845,28 +845,19 @@ mod tests {
         (dir, Store { root })
     }
 
+    /// A byte-reproducible sdist (see `deterministic_tar_gz`), so its
+    /// sha256 and every identity over it can be pinned as a golden.
     fn local_sdist(store: &Store, name: &str, requires: &str) -> LockedPackage {
-        let source = store.root.join(format!("{name}-source"));
-        let root = source.join(format!("{name}-1.0"));
-        fs::create_dir_all(&root).unwrap();
-        fs::write(
-            root.join("pyproject.toml"),
-            format!("[build-system]\nrequires = [{requires}]\nbuild-backend = \"setuptools.build_meta\"\n"),
-        )
-        .unwrap();
         let archive = store.root.join(format!("{name}-1.0.tar.gz"));
-        let status = std::process::Command::new("/usr/bin/tar")
-            .args(["-czf"])
-            .arg(&archive)
-            .args(["-C"])
-            .arg(&source)
-            .arg(format!("{name}-1.0"))
-            .status()
-            .unwrap();
-        assert!(status.success());
-        let bytes = fs::read(&archive).unwrap();
+        let bytes = crate::tailors::python::build::deterministic_tar_gz(
+            &format!("{name}-1.0"),
+            &[(
+                "pyproject.toml",
+                &format!("[build-system]\nrequires = [{requires}]\nbuild-backend = \"setuptools.build_meta\"\n"),
+            )],
+        );
+        fs::write(&archive, &bytes).unwrap();
         let sha256 = hex::encode(sha2::Sha256::digest(bytes));
-        let _ = fs::remove_dir_all(source);
         LockedPackage {
             name: name.into(),
             version: "1.0".into(),
@@ -1140,44 +1131,71 @@ mod tests {
             python_version: "3.12.14".into(),
             packages: vec![fast.clone()],
         };
-        let actual = planned_env_object_id(
-            &store,
-            activity,
-            Platform::host().unwrap(),
-            &plan,
-            &selected_3_12(),
-            None,
-        )
-        .unwrap();
-        let mut inputs = BTreeMap::from([
-            ("schema".to_string(), "python-env/3".to_string()),
+        // The fixture archive is byte-reproducible, so its hash is a literal;
+        // a fast (non-isolated) sdist's parent input is the legacy
+        // `Sdist:<sha256>:<derivation fingerprint>` with no build-env part.
+        const SDIST_SHA256: &str =
+            "6f21f0ffe383acb91d90df2d8fc502857fad2108b0039b5817291b241335a971";
+        assert_eq!(fast.sha256, SDIST_SHA256);
+        let pkg_input = format!(
+            "Sdist:{SDIST_SHA256}:sdist-build/2;toolchain:\
+             71138adf1f4ca900cdb7d289c21b7494329f2332b6d85f0e1c42108c0384ed3e,\
+             51a52592b3b99e102b609654876bd65f19f999935166d1352678931132b0c670,\
+             3217dcc807155e45db462d7ef2431f5ddda0d7273b700d05a67b271ceb1287ab"
+        );
+        for (platform, golden) in [
             (
-                "store_root".into(),
-                store.root.to_string_lossy().into_owned(),
+                Platform::X86_64UnknownLinuxGnu,
+                "d2e3be1a4083e0b84ac330da60c9d411edba3c26-env-3.12.14",
             ),
             (
-                "cpython".into(),
-                python::object_id_for(Platform::host().unwrap(), "3.12.14").unwrap(),
+                Platform::Aarch64AppleDarwin,
+                "a301ce7f5f46a0c9061c5787feb552e30e7da55f-env-3.12.14",
             ),
-            (
-                "pkg:fast-golden".into(),
-                format!(
-                    "Sdist:{}:{}",
-                    fast.sha256,
-                    crate::tailors::python::build::derivation_fingerprint()
-                ),
-            ),
-        ]);
-        inputs.insert("package_digest".into(), package_digest_of_inputs(&inputs));
-        inputs.insert("native".into(), NATIVE_NONE.into());
-        let expected = Identity {
-            kind: "python-env".into(),
-            name: "env".into(),
-            version: "3.12.14".into(),
-            inputs,
+        ] {
+            let cpython = python::object_id_for(platform, "3.12.14").unwrap();
+            let identity = environment_identity(
+                &store,
+                activity,
+                platform,
+                &plan,
+                &cpython,
+                &selected_3_12(),
+                None,
+            )
+            .unwrap();
+            assert_eq!(identity.inputs["pkg:fast-golden"], pkg_input);
+            assert_eq!(
+                identity.inputs["package_digest"],
+                "sha256:fb32a8449436b9a5d2ccd4fe85c1f75cdc45fc2a65063dd7174c6a12a25dd6e6"
+            );
+            assert_eq!(identity.inputs["native"], NATIVE_NONE);
+            assert_eq!(
+                identity.inputs["store_root"],
+                store.root.to_string_lossy().as_ref()
+            );
+            // The store root is a real input but a scratch path here; with
+            // it fixed, every other input is pinned by the object id.
+            let mut fixed = identity.clone();
+            fixed
+                .inputs
+                .insert("store_root".into(), "/fixture/tog-store".into());
+            assert_eq!(fixed.object_id(), golden, "{}", platform.triple());
+            if platform == Platform::host().unwrap() {
+                assert_eq!(
+                    planned_env_object_id(
+                        &store,
+                        activity,
+                        platform,
+                        &plan,
+                        &selected_3_12(),
+                        None
+                    )
+                    .unwrap(),
+                    identity.object_id()
+                );
+            }
         }
-        .object_id();
-        assert_eq!(actual, expected);
     }
 
     #[test]
@@ -1250,7 +1268,32 @@ mod tests {
         let planned =
             planned_env_object_id(&store, activity, platform, &plan, &selected_3_12(), None)
                 .unwrap();
-        let cpython_id = python::object_id_for(platform, &plan.python_version).unwrap();
+
+        // Seed the store the way a previous sync would have left it: the
+        // selected CPython under the id realization will look it up by,
+        // and an environment published under the planned id. Realization
+        // then answers from its cache lookup only if the id it computes
+        // from the realized interpreter is the planned one; any other id
+        // is a miss that goes on to build the sdist, which needs the
+        // network and fails here.
+        let spec = selected_3_12().artifact(platform, "cpython").unwrap();
+        let cpython =
+            crate::kernel::provider::cpython::cpython_identity_of(&spec, platform).unwrap();
+        let staged = store.stage().unwrap();
+        fs::create_dir_all(staged.join("bin")).unwrap();
+        let (cpython_path, _) = store
+            .commit_with_deps(
+                &cpython,
+                &staged,
+                &[],
+                &crate::kernel::store::ObjectDeps::new(),
+            )
+            .unwrap();
+        let cpython_id = cpython_path
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
         let realized = environment_identity(
             &store,
             activity,
@@ -1261,7 +1304,20 @@ mod tests {
             None,
         )
         .unwrap();
-        assert_eq!(planned, realized.object_id());
+        let staged = store.stage().unwrap();
+        let (published, _) = store
+            .commit_with_deps(
+                &realized,
+                &staged,
+                &[],
+                &crate::kernel::store::ObjectDeps::new(),
+            )
+            .unwrap();
+        assert_eq!(published, store.object_path(&planned));
+        let got =
+            realize_env_at_depth(&store, activity, platform, &plan, &selected_3_12(), None, 0)
+                .unwrap();
+        assert_eq!(got, store.object_path(&planned));
         if matches!(platform, Platform::X86_64UnknownLinuxGnu) {
             let native_id =
                 crate::kernel::provider::nativelibs::object_id_for(&store, platform).unwrap();
