@@ -164,13 +164,24 @@ mod tests {
         /// The package, with `contents` (relative path, body) as its tree
         /// and `metadata` as its metadata.config.
         fn new(contents: &[(&str, &str)], metadata: &str) -> Self {
+            Self::build(
+                |tree| {
+                    for (rel, body) in contents {
+                        let path = tree.join(rel);
+                        fs::create_dir_all(path.parent().unwrap()).unwrap();
+                        fs::write(path, body).unwrap();
+                    }
+                },
+                metadata,
+            )
+        }
+
+        /// The package whose contents tree `fill` writes.
+        fn build(fill: impl FnOnce(&Path), metadata: &str) -> Self {
             let temp = TempDir::named("hextar");
             let tree = temp.0.join("tree");
-            for (rel, body) in contents {
-                let path = tree.join(rel);
-                fs::create_dir_all(path.parent().unwrap()).unwrap();
-                fs::write(path, body).unwrap();
-            }
+            fs::create_dir_all(&tree).unwrap();
+            fill(&tree);
             let outer = temp.0.join("outer");
             fs::create_dir_all(&outer).unwrap();
             let mut pack = tar_create();
@@ -180,25 +191,34 @@ mod tests {
             assert!(pack.status().unwrap().success());
             fs::write(outer.join("VERSION"), "3").unwrap();
             fs::write(outer.join("metadata.config"), metadata).unwrap();
-            let mut inner = Sha256::new();
-            for part in ["VERSION", "metadata.config", "contents.tar.gz"] {
-                inner.update(fs::read(outer.join(part)).unwrap());
-            }
-            let inner = hex::encode(inner.finalize());
-            fs::write(outer.join("CHECKSUM"), inner.to_uppercase()).unwrap();
             let dep = HexDep {
                 app: "demo".into(),
                 package: "demo".into(),
                 version: "1.0.0".into(),
-                inner_sha256: inner,
+                inner_sha256: String::new(),
                 outer_sha256: "0".repeat(64),
                 managers: vec!["mix".into()],
             };
-            Package { temp, outer, dep }
+            let mut package = Package { temp, outer, dep };
+            package.reseal();
+            package
         }
 
         fn good() -> Self {
             Self::new(&[("lib/demo.ex", "defmodule Demo do\nend\n")], METADATA)
+        }
+
+        /// Recompute the inner checksum over the outer members as they
+        /// stand, into both CHECKSUM and the lock row, so a later check is
+        /// reached with the checksum gates passed.
+        fn reseal(&mut self) {
+            let mut inner = Sha256::new();
+            for part in ["VERSION", "metadata.config", "contents.tar.gz"] {
+                inner.update(fs::read(self.outer.join(part)).unwrap());
+            }
+            let inner = hex::encode(inner.finalize());
+            fs::write(self.outer.join("CHECKSUM"), inner.to_uppercase()).unwrap();
+            self.dep.inner_sha256 = inner;
         }
 
         fn unpack(&self) -> io::Result<PathBuf> {
@@ -211,6 +231,10 @@ mod tests {
                 }
             }
             assert!(pack.status().unwrap().success());
+            self.unpack_tar(&tar)
+        }
+
+        fn unpack_tar(&self, tar: &Path) -> io::Result<PathBuf> {
             let (lease, activity) = detached_lease();
             let scratch = self.temp.0.join("scratch");
             let staged = self.temp.0.join("staged");
@@ -219,7 +243,7 @@ mod tests {
             let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
-            let unpacked = unpack_verified(&activity, &tar, &scratch, &staged, &self.dep);
+            let unpacked = unpack_verified(&activity, tar, &scratch, &staged, &self.dep);
             drop(lease);
             unpacked
         }
@@ -288,6 +312,11 @@ mod tests {
         fs::remove_file(package.outer.join("VERSION")).unwrap();
         fs::create_dir(package.outer.join("VERSION")).unwrap();
         assert_eq!(package.refusal(), "demo: VERSION is not a regular file");
+        // A link is refused as a link, not followed to a regular file.
+        let package = Package::good();
+        fs::remove_file(package.outer.join("CHECKSUM")).unwrap();
+        std::os::unix::fs::symlink("VERSION", package.outer.join("CHECKSUM")).unwrap();
+        assert_eq!(package.refusal(), "demo: CHECKSUM is not a regular file");
     }
 
     #[test]
@@ -328,14 +357,65 @@ mod tests {
         std::os::unix::fs::symlink("lib/demo.ex", dep.join("inside")).unwrap();
         check_dep_tree(&dep, "demo").unwrap();
 
+        // The target exists, so only the containment comparison refuses it.
+        fs::write(temp.0.join("outside"), "").unwrap();
         std::os::unix::fs::symlink("../../outside", dep.join("lib/escape")).unwrap();
         let e = check_dep_tree(&dep, "demo").unwrap_err().to_string();
         assert_eq!(e, "demo: symlink escapes the package");
         fs::remove_file(dep.join("lib/escape")).unwrap();
 
+        std::os::unix::fs::symlink("missing.ex", dep.join("lib/dangling")).unwrap();
+        let e = check_dep_tree(&dep, "demo").unwrap_err().to_string();
+        assert_eq!(e, "demo: symlink escapes the package");
+        fs::remove_file(dep.join("lib/dangling")).unwrap();
+
         let fifo = std::ffi::CString::new(dep.join("pipe").to_str().unwrap()).unwrap();
         assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
         let e = check_dep_tree(&dep, "demo").unwrap_err().to_string();
         assert_eq!(e, "demo: hostile special entry");
+    }
+
+    /// The tree walk runs on what `unpack_verified` extracts: a link the
+    /// archive layer lets through (relative, inside) but that resolves to
+    /// nothing is refused; one that resolves inside is kept.
+    #[test]
+    fn unpacking_runs_the_tree_check_on_the_contents() {
+        let with_link = |target: &'static str| {
+            Package::build(
+                move |tree| {
+                    fs::create_dir_all(tree.join("lib")).unwrap();
+                    fs::write(tree.join("lib/demo.ex"), "").unwrap();
+                    std::os::unix::fs::symlink(target, tree.join("lib/alias.ex")).unwrap();
+                },
+                METADATA,
+            )
+        };
+        let package = with_link("demo.ex");
+        let dir = package.unpack().unwrap();
+        assert_eq!(
+            fs::read_link(dir.join("lib/alias.ex")).unwrap(),
+            Path::new("demo.ex")
+        );
+
+        assert_eq!(
+            with_link("missing.ex").refusal(),
+            "demo: symlink escapes the package"
+        );
+    }
+
+    #[test]
+    fn archives_that_do_not_extract_are_refused_with_their_stage() {
+        let package = Package::good();
+        let tar = package.temp.0.join("junk.tar");
+        fs::write(&tar, "not a tar archive").unwrap();
+        let e = package.unpack_tar(&tar).unwrap_err().to_string();
+        assert!(e.starts_with("demo: outer tar extraction failed: "), "{e}");
+
+        // Checksums resealed over the junk, so only extraction refuses it.
+        let mut package = Package::good();
+        fs::write(package.outer.join("contents.tar.gz"), "not gzip").unwrap();
+        package.reseal();
+        let e = package.refusal();
+        assert!(e.starts_with("demo: contents extraction failed: "), "{e}");
     }
 }
