@@ -2959,7 +2959,7 @@ mod tests {
             r#"{"lockfileVersion":1,"packages":{}}"#,
             "unsupported lockfileVersion 1",
         );
-        // link entry
+        // link entry whose target is a URL, not a project path
         refused(
             &lock(r#""node_modules/a":{"link":true,"resolved":"https://r/a.tgz"}"#),
             "unsafe link target",
