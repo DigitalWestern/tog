@@ -115,6 +115,17 @@ Nothing queued; the next item comes from "Open work" below.
 - **Found in the #323 review (2026-09-26).** One issue and one PR each:
   - #324 ci: adding the heavy label during a path-triggered heavy run restarts it on the same commit.
   - #325 ci: tailor changes to extraction do not trigger the heavy suite on their own.
+- **Found in the #327 work (2026-09-26).** One issue and one PR each:
+  - #328 sandbox: opt Python sdist builds and npm addons into HostView::RuntimeOnly.
+  - #329 ruby: give native gem builds tog's pinned native-libs set.
+  - #334 sandbox: RuntimeOnly setup costs ~2 s per native gem; measure on the runner.
+  - #330 sandbox: HostView::RuntimeOnly is a no-op on macOS.
+  - #332 hostview: LD_LIBRARY_PATH outranks DT_RUNPATH for relocated host libraries.
+  - #336 tests: objmeta every_row_rejects_each_missing_live_required_input flakes under parallel tests.
+  - #335 hostview: stale view skeletons after SIGKILL.
+  - #337 tests: no subprocess test that the view skeleton is 0700 under umask 0777.
+  - #331 hostview: kept library subdirectories are bound whole (accepted unless a gem hits it).
+  - #333 ruby: host-fallback fingerprint is stat-based, not content-based (accepted).
 - **Smaller open issues from the 2026-09-23/24 run.** One line each; the
   issue has the options and the pick.
   - #174 npm: git-tracked `node_modules` in workspace members moved into backups.
