@@ -225,10 +225,15 @@ mod tests {
         );
         fs::remove_file(home.0.join("bin/marker")).unwrap();
 
-        // Same size, new bytes through a new inode: still a change.
+        // Same size, new bytes through a new inode: still a change. The
+        // replacement is written beside the file and renamed over it, so
+        // it really is a new inode: remove-then-create can hand the new
+        // file the old inode number, and within one timestamp tick the
+        // manifest then has nothing to tell them apart by.
         let file = home.0.join("gems/pure-1.0/lib/pure.rb");
-        fs::remove_file(&file).unwrap();
-        fs::write(&file, "module Evil; end\n").unwrap();
+        let replacement = home.0.join("gems/pure-1.0/lib/pure.rb.new");
+        fs::write(&replacement, "module Evil; end\n").unwrap();
+        fs::rename(&replacement, &file).unwrap();
         assert_eq!(
             first_change(&before, &manifest(&home.0).unwrap()),
             Some(PathBuf::from("gems/pure-1.0/lib/pure.rb"))
