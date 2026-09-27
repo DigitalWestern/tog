@@ -2781,10 +2781,7 @@ mod tests {
         let archive = base.join("dot.tar");
         write_tar(&archive, &[ustar("./l", b'2', "../ESCAPED", b"")]);
         let entries = list(&archive, Compression::None).unwrap();
-        assert!(
-            validate(&entries, 0).is_err(),
-            "a `.` component bought an extra level of climb: {entries:?}"
-        );
+        refused(&entries, 0, "symlink target escapes the destination");
 
         let padded = base.join("padded.tar");
         write_tar(
@@ -2792,10 +2789,7 @@ mod tests {
             &[ustar("pkg/././././l", b'2', "../../../../ESCAPED", b"")],
         );
         let entries = list(&padded, Compression::None).unwrap();
-        assert!(
-            validate(&entries, 1).is_err(),
-            "padded `.` components bought an unbounded climb: {entries:?}"
-        );
+        refused(&entries, 1, "symlink target escapes the destination");
     }
 
     #[test]
@@ -2832,34 +2826,57 @@ mod tests {
             ustar("pkg/", b'5', "", b""),
             ustar("pkg/benign", b'0', "", b"hello"),
         ];
-        let cases: Vec<(&str, Vec<u8>)> = vec![
+        let cases: Vec<(&str, Vec<u8>, &str)> = vec![
             (
                 "symlink escapes",
                 ustar("pkg/escape", b'2', "../../outside-sentinel", b""),
+                "symlink target escapes the destination",
             ),
             (
                 "absolute symlink",
                 ustar("pkg/abs", b'2', "/etc/passwd", b""),
+                "absolute symlink target",
             ),
             (
                 "symlink escapes after strip",
                 ustar("pkg/up", b'2', "../outside-sentinel", b""),
+                "symlink target escapes the destination",
             ),
-            ("hard link", ustar("pkg/hard", b'1', "pkg/benign", b"")),
-            ("character device", ustar("pkg/dev", b'3', "", b"")),
-            ("fifo", ustar("pkg/fifo", b'6', "", b"")),
-            ("dot-dot name", ustar("pkg/../escaped", b'0', "", b"x")),
-            ("absolute name", ustar("/abs/escaped", b'0', "", b"x")),
+            (
+                "hard link",
+                ustar("pkg/hard", b'1', "pkg/benign", b""),
+                "hard links are refused",
+            ),
+            (
+                "character device",
+                ustar("pkg/dev", b'3', "", b""),
+                "is a special file (type '3')",
+            ),
+            (
+                "fifo",
+                ustar("pkg/fifo", b'6', "", b""),
+                "is a special file (type '6')",
+            ),
+            (
+                "dot-dot name",
+                ustar("pkg/../escaped", b'0', "", b"x"),
+                "`..` path component",
+            ),
+            (
+                "absolute name",
+                ustar("/abs/escaped", b'0', "", b"x"),
+                "absolute member name",
+            ),
         ];
-        for (label, hostile) in cases {
+        for (label, hostile, needle) in cases {
             let archive = temp.0.join(format!("{}.tar", label.replace(' ', "-")));
             let mut members = benign.to_vec();
             members.push(hostile);
             write_tar(&archive, &members);
             let error = extract(&archive, &destination, 1, Compression::None).expect_err(label);
             assert!(
-                !error.to_string().is_empty(),
-                "{label}: refusal must explain itself"
+                error.to_string().contains(needle),
+                "{label}: {needle:?} not in {error}"
             );
             assert_eq!(
                 fs::read_dir(&destination).unwrap().count(),

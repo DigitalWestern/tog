@@ -128,7 +128,14 @@ mod tests {
 
     #[test]
     fn wrong_module_prefix_rejected_and_tamper_changes_hash() {
-        assert!(hash_zip(&fixture("quote-v1.5.2.zip"), "rsc.io/other", "v1.5.2").is_err());
+        let error = hash_zip(&fixture("quote-v1.5.2.zip"), "rsc.io/other", "v1.5.2")
+            .expect_err("a zip under another module path was hashed");
+        assert!(
+            error
+                .to_string()
+                .contains("escapes module prefix \"rsc.io/other@v1.5.2/\""),
+            "{error}"
+        );
 
         let scratch = TempDir::named("dirhash-tamper");
         let tampered = scratch.0.join("go.mod");

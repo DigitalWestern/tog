@@ -1159,7 +1159,7 @@ deny = ["git-dependency"]"#,
     fn record_denied_and_allowed() {
         let _guard = exception_guard();
         let attribution = Attribution::open("test").unwrap();
-        assert!(record_with(
+        let error = record_with(
             &Policy {
                 strict: true,
                 deny: BTreeSet::new(),
@@ -1168,9 +1168,16 @@ deny = ["git-dependency"]"#,
             },
             "x",
             "s",
-            "d"
+            "d",
         )
-        .is_err());
+        .expect_err("strict policy recorded an exception");
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied, "{error}");
+        assert!(
+            error
+                .to_string()
+                .contains("this policy refuses every exception kind"),
+            "{error}"
+        );
         record_with(&Policy::default(), "x", "s", "d").unwrap();
         assert_eq!(drain().len(), 1);
         attribution.discard();

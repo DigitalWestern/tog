@@ -1462,9 +1462,12 @@ mod tests {
                 ..Options::default()
             },
         );
+        let error = result.expect_err("a corrupt root record did not stop the sweep");
         assert!(
-            result.is_err(),
-            "a corrupt root record did not stop the sweep: {text}"
+            error
+                .to_string()
+                .contains(&format!("root {last} has an unusable registry record")),
+            "{error}\n{text}"
         );
         assert!(
             store.object_path(&dead).is_dir(),
@@ -1497,7 +1500,17 @@ mod tests {
                 ..Options::default()
             },
         );
-        assert!(result.is_err(), "{text}");
+        let error = result.expect_err("corrupt metadata did not stop the sweep");
+        assert!(
+            error
+                .to_string()
+                .contains("metadata maintenance left 1 unresolved record(s)"),
+            "{error}\n{text}"
+        );
+        assert!(
+            text.contains(&format!("metadata record unusable: meta/{last}.json")),
+            "{text}"
+        );
         for id in &ids {
             assert!(
                 store.object_path(id).is_dir(),
@@ -1949,8 +1962,18 @@ mod tests {
         let path = store.root.join("roots").join(format!(".{key}.tmp.1234.0"));
         fs::write(&path, b"crash residue").unwrap();
 
-        let (result, _) = sweep(&store, Options::default());
-        assert!(result.is_err(), "a legacy record did not stop the sweep");
+        let (result, text) = sweep(&store, Options::default());
+        let error = result.expect_err("a legacy record did not stop the sweep");
+        assert!(
+            error
+                .to_string()
+                .contains("metadata maintenance left 1 unresolved record(s)"),
+            "{error}\n{text}"
+        );
+        assert!(
+            text.contains("no adapter covers kind not-a-known-kind"),
+            "{text}"
+        );
         assert!(
             path.is_file(),
             "a failed validation deleted a registry temporary"
@@ -2467,7 +2490,17 @@ mod tests {
                 ..Options::default()
             },
         );
-        assert!(result.is_err(), "{text}");
+        let error = result.expect_err("an unresolvable legacy record did not stop the sweep");
+        assert!(
+            error
+                .to_string()
+                .contains("metadata maintenance left 1 unresolved record(s)"),
+            "{error}\n{text}"
+        );
+        assert!(
+            text.contains("no go object in this store matches Go 1.25.3"),
+            "{text}"
+        );
         assert!(
             store.object_path(&dead).is_dir(),
             "an object was deleted: {text}"

@@ -2158,19 +2158,22 @@ mod tests {
 
     #[test]
     fn specs_reject_empty_options_and_control_bytes() {
-        for text in [
-            "",
-            "   ",
-            "--prefix=/tmp/elsewhere",
-            "npm:--prefix=/tmp/elsewhere",
-            "cargo:--manifest-path=/tmp/Cargo.toml",
-            "npm:\nreact",
-            "requests\0evil",
+        let option = "looks like a tool option";
+        let control = "must not contain CR, LF, or NUL";
+        for (text, needle) in [
+            ("", "must not be empty"),
+            ("   ", "must not be empty"),
+            (" requests", "must not begin or end with whitespace"),
+            ("--prefix=/tmp/elsewhere", option),
+            ("npm:--prefix=/tmp/elsewhere", option),
+            ("cargo:--manifest-path=/tmp/Cargo.toml", option),
+            ("requests>=-1", "contains an option-shaped constraint"),
+            ("pkg@--x", "contains an option-shaped constraint"),
+            ("npm:\nreact", control),
+            ("requests\0evil", control),
         ] {
-            assert!(
-                validate_spec(text).is_err(),
-                "accepted unsafe spec {text:?}"
-            );
+            let error = validate_spec(text).expect_err(&format!("accepted unsafe spec {text:?}"));
+            assert!(error.to_string().contains(needle), "{text:?}: {error}");
         }
         assert!(validate_spec("npm:react@18").is_ok());
         assert!(validate_spec("gem:rails@~> 7.1").is_ok());

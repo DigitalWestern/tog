@@ -919,15 +919,26 @@ Six==1.0 --hash=sha256:000000000000000000000000000000000000000000000000000000000
 
     #[test]
     fn rejections() {
-        for bad in [
-            "six>=1.0 --hash=sha256:0000000000000000000000000000000000000000000000000000000000000001",
-            "six==1.0",                    // no hash
-            "six[extra]==1.0 --hash=sha256:0000000000000000000000000000000000000000000000000000000000000001",
-            "six==1.0; python_version<'3' --hash=sha256:0000000000000000000000000000000000000000000000000000000000000001",
-            "-e sixpkg",                  // editable that is neither local nor a URL
-            "six==1.0 --hash=md5:abc",
+        for (bad, needle) in [
+            (
+                "six>=1.0 --hash=sha256:0000000000000000000000000000000000000000000000000000000000000001",
+                "only exact '==' pins are supported",
+            ),
+            ("six==1.0", "tog requires hash-pinned requirements"),
+            (
+                "six[extra]==1.0 --hash=sha256:0000000000000000000000000000000000000000000000000000000000000001",
+                "extras are not supported",
+            ),
+            (
+                "six==1.0; python_version<'3' --hash=sha256:0000000000000000000000000000000000000000000000000000000000000001",
+                "environment markers are not supported",
+            ),
+            // editable that is neither local nor a URL
+            ("-e sixpkg", "editable requirements are not supported"),
+            ("six==1.0 --hash=md5:abc", "only sha256 hashes are supported"),
         ] {
-            assert!(parse_requirements(bad).is_err(), "should reject: {bad}");
+            let error = parse_requirements(bad).expect_err(&format!("should reject: {bad}"));
+            assert!(error.to_string().contains(needle), "{bad}: {error}");
         }
         assert!(
             parse_requirements("-r other.txt\n--index-url https://private.invalid/simple\n")

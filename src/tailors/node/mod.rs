@@ -2845,7 +2845,8 @@ mod tests {
             r#""node_modules/required":{{"version":"1","libc":["!glibc"],"resolved":"https://r/required.tgz","integrity":"{TEST_SRI}"}}"#
         ));
         let error = plan_npm(Platform::X86_64UnknownLinuxGnu, &l).unwrap_err();
-        assert!(error.to_string().contains("!glibc"));
+        assert!(error.to_string().contains("libc restriction"), "{error}");
+        assert!(error.to_string().contains("!glibc"), "{error}");
     }
 
     #[test]
@@ -2879,15 +2880,13 @@ mod tests {
             let l = lock(&format!(
                 r#""node_modules/restricted":{{"version":"1","os":{restriction},"resolved":"https://r/restricted.tgz","integrity":"{TEST_SRI}"}}"#
             ));
-            let result = plan_npm(Platform::X86_64UnknownLinuxGnu, &l);
-            assert_eq!(result.is_ok(), compatible, "os restriction {restriction}");
+            restriction_verdict(Platform::X86_64UnknownLinuxGnu, &l, "os", compatible);
         }
         for (restriction, compatible) in [(r#"["x64"]"#, true), (r#"["!x64"]"#, false)] {
             let l = lock(&format!(
                 r#""node_modules/restricted":{{"version":"1","cpu":{restriction},"resolved":"https://r/restricted.tgz","integrity":"{TEST_SRI}"}}"#
             ));
-            let result = plan_npm(Platform::X86_64UnknownLinuxGnu, &l);
-            assert_eq!(result.is_ok(), compatible, "cpu restriction {restriction}");
+            restriction_verdict(Platform::X86_64UnknownLinuxGnu, &l, "cpu", compatible);
         }
 
         for libc in [r#"["glibc"]"#, r#"["!musl"]"#, r#"["any"]"#, r#""glibc""#] {
@@ -2903,10 +2902,22 @@ mod tests {
             let l = lock(&format!(
                 r#""node_modules/restricted":{{"version":"1","libc":{libc},"resolved":"https://r/restricted.tgz","integrity":"{TEST_SRI}"}}"#
             ));
-            assert!(
-                plan_npm(Platform::X86_64UnknownLinuxGnu, &l).is_err(),
-                "libc {libc}"
-            );
+            restriction_verdict(Platform::X86_64UnknownLinuxGnu, &l, "libc", false);
+        }
+    }
+
+    /// Plan `lock` on `platform`: a compatible package plans, and an
+    /// incompatible one is refused by the `field` restriction, not by
+    /// something else about the fixture.
+    fn restriction_verdict(platform: Platform, lock: &str, field: &str, compatible: bool) {
+        match (plan_npm(platform, lock), compatible) {
+            (Ok(_), true) => {}
+            (Err(error), false) => assert!(
+                error.to_string().contains(&format!("{field} restriction")),
+                "{field}: {error}\n{lock}"
+            ),
+            (Ok(_), false) => panic!("{field} restriction accepted on {platform:?}: {lock}"),
+            (Err(error), true) => panic!("{field} restriction refused on {platform:?}: {error}"),
         }
     }
 
@@ -2927,12 +2938,7 @@ mod tests {
             let l = lock(&format!(
                 r#""node_modules/restricted":{{"version":"1","os":{restriction},"resolved":"https://r/restricted.tgz","integrity":"{TEST_SRI}"}}"#
             ));
-            let result = plan_npm(Platform::Aarch64AppleDarwin, &l);
-            assert_eq!(
-                result.is_ok(),
-                compatible,
-                "darwin os restriction {restriction}"
-            );
+            restriction_verdict(Platform::Aarch64AppleDarwin, &l, "os", compatible);
         }
         // Darwin ignores libc entirely.
         let l = lock(&format!(
@@ -2943,28 +2949,40 @@ mod tests {
 
     #[test]
     fn rejections() {
+        let refused = |lock: &str, needle: &str| {
+            let error = plan_npm(Platform::Aarch64AppleDarwin, lock)
+                .expect_err(&format!("accepted {lock}"));
+            assert!(error.to_string().contains(needle), "{needle:?}: {error}");
+        };
         // v1 lockfile
-        assert!(plan_npm(
-            Platform::Aarch64AppleDarwin,
-            r#"{"lockfileVersion":1,"packages":{}}"#
-        )
-        .is_err());
+        refused(
+            r#"{"lockfileVersion":1,"packages":{}}"#,
+            "unsupported lockfileVersion 1",
+        );
         // link entry
-        let l = lock(r#""node_modules/a":{"link":true,"resolved":"https://r/a.tgz"}"#);
-        assert!(plan_npm(Platform::Aarch64AppleDarwin, &l).is_err());
+        refused(
+            &lock(r#""node_modules/a":{"link":true,"resolved":"https://r/a.tgz"}"#),
+            "unsafe link target",
+        );
         // missing integrity
-        let l = lock(r#""node_modules/a":{"version":"1.0.0","resolved":"https://r/a.tgz"}"#);
-        assert!(plan_npm(Platform::Aarch64AppleDarwin, &l).is_err());
+        refused(
+            &lock(r#""node_modules/a":{"version":"1.0.0","resolved":"https://r/a.tgz"}"#),
+            "missing 'integrity'",
+        );
         // path traversal
-        let l = lock(
-            r#""node_modules/../evil":{"version":"1","resolved":"https://r/a.tgz","integrity":"sha512-m3HSJL1i83hdltRq0+o9czGb+8KJDKra4t/3JRXMui/CET1IEDrHK6nHYbdEaGL/uhPMbuF3AGkGxXTVpn3ETw=="}"#,
+        refused(
+            &lock(
+                r#""node_modules/../evil":{"version":"1","resolved":"https://r/a.tgz","integrity":"sha512-m3HSJL1i83hdltRq0+o9czGb+8KJDKra4t/3JRXMui/CET1IEDrHK6nHYbdEaGL/uhPMbuF3AGkGxXTVpn3ETw=="}"#,
+            ),
+            "malformed lockfile package path: node_modules/../evil",
         );
-        assert!(plan_npm(Platform::Aarch64AppleDarwin, &l).is_err());
         // git URL
-        let l = lock(
-            r#""node_modules/a":{"version":"1","resolved":"git+ssh://git@x/a.git","integrity":"sha512-m3HSJL1i83hdltRq0+o9czGb+8KJDKra4t/3JRXMui/CET1IEDrHK6nHYbdEaGL/uhPMbuF3AGkGxXTVpn3ETw=="}"#,
+        refused(
+            &lock(
+                r#""node_modules/a":{"version":"1","resolved":"git+ssh://git@x/a.git","integrity":"sha512-m3HSJL1i83hdltRq0+o9czGb+8KJDKra4t/3JRXMui/CET1IEDrHK6nHYbdEaGL/uhPMbuF3AGkGxXTVpn3ETw=="}"#,
+            ),
+            "npm_git_dep: a: repo ssh://git@x/a.git",
         );
-        assert!(plan_npm(Platform::Aarch64AppleDarwin, &l).is_err());
     }
 
     #[test]
@@ -3006,26 +3024,39 @@ mod tests {
             ok.mutable_packages,
             vec!["@prisma/engines".to_string(), "b".to_string()]
         );
+        let refused = |config: &str, needle: &str| {
+            let error = parse_tog_config(config).expect_err(&format!("accepted {config}"));
+            assert!(error.to_string().contains(needle), "{needle:?}: {error}");
+        };
         // unknown key, bad names, wrong types: hard errors
-        assert!(parse_tog_config(r#"{"tog":{"mutable":["a"]}}"#).is_err());
-        assert!(parse_tog_config(r#"{"tog":{"mutablePackages":["../x"]}}"#).is_err());
-        assert!(parse_tog_config(r#"{"tog":{"mutablePackages":"a"}}"#).is_err());
-        assert!(parse_tog_config(r#"{"tog":{"mutablePackages":[""]}}"#).is_err());
-        assert!(parse_tog_config(r#"{"tog":[]}"#).is_err());
+        refused(
+            r#"{"tog":{"mutable":["a"]}}"#,
+            "unknown tog key \"mutable\"",
+        );
+        refused(
+            r#"{"tog":{"mutablePackages":["../x"]}}"#,
+            "bad name \"../x\"",
+        );
+        refused(
+            r#"{"tog":{"mutablePackages":"a"}}"#,
+            "tog.mutablePackages must be an array",
+        );
+        refused(r#"{"tog":{"mutablePackages":[""]}}"#, "bad name \"\"");
+        refused(r#"{"tog":[]}"#, "\"tog\" must be an object");
         // artifacts: happy path + validation
         let a = parse_tog_config(
             r#"{"tog":{"artifacts":[{"url":"https://x/y.tar","sha256":"0000000000000000000000000000000000000000000000000000000000000000","path":".npm/_libvips/y.tar"}]}}"#,
         )
         .unwrap();
         assert_eq!(a.artifacts.len(), 1);
-        assert!(parse_tog_config(
-            r#"{"tog":{"artifacts":[{"url":"http://x/y","sha256":"00","path":"p"}]}}"#
-        )
-        .is_err());
-        assert!(parse_tog_config(
-            r#"{"tog":{"artifacts":[{"url":"https://x/y","sha256":"0000000000000000000000000000000000000000000000000000000000000000","path":"../evil"}]}}"#
-        )
-        .is_err());
+        refused(
+            r#"{"tog":{"artifacts":[{"url":"http://x/y","sha256":"00","path":"p"}]}}"#,
+            "url must be https",
+        );
+        refused(
+            r#"{"tog":{"artifacts":[{"url":"https://x/y","sha256":"0000000000000000000000000000000000000000000000000000000000000000","path":"../evil"}]}}"#,
+            "unsafe path \"../evil\"",
+        );
     }
 
     #[test]

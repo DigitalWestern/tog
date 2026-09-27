@@ -935,8 +935,11 @@ digest = "sha256:855d581f8a4eb1a8117e3426de25fe02770592febcfb31369aee1ffbfee9e8e
         // The canonical writer puts ecosystem and component names in table
         // headers unquoted, so a name with a dot or quote would either
         // re-parse as a different key or not parse at all.
-        let dotted_eco = NODE_LOCK.replace("[toolchain.node]", "[toolchain.\"no.de\"]");
-        assert!(ToolchainLock::parse(dotted_eco.as_bytes()).is_err());
+        // Every table under the ecosystem moves with it, so the TOML shape
+        // stays whole and only the name check can refuse.
+        let dotted_eco = NODE_LOCK.replace("toolchain.node", "toolchain.\"no.de\"");
+        let error = ToolchainLock::parse(dotted_eco.as_bytes()).unwrap_err();
+        assert!(error.to_string().contains("bare TOML key"), "{error}");
         let dotted_component = NODE_LOCK
             .replace("\"node-gyp\"", "\"node.gyp\"")
             .replace("component.node-gyp]", "component.\"node.gyp\"]");

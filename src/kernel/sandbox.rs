@@ -1701,7 +1701,15 @@ mod tests {
             &scratch,
             &[],
         );
-        assert!(result.is_err(), "undeclared sibling was readable");
+        // `cat` itself must fail: a bwrap setup failure would also be an
+        // error, but not this one.
+        let error = result.expect_err("undeclared sibling was readable");
+        assert!(
+            error
+                .to_string()
+                .contains("sandboxed command failed (exit status: 1)"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -1740,7 +1748,13 @@ mod tests {
             &scratch,
             &[],
         );
-        assert!(result.is_err(), "read-only root accepted a write");
+        let error = result.expect_err("read-only root accepted a write");
+        assert!(
+            error
+                .to_string()
+                .contains("sandboxed command failed (exit status: 1)"),
+            "{error}"
+        );
     }
 
     #[test]

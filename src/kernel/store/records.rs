@@ -241,10 +241,20 @@ mod tests {
         fs::create_dir_all(&elsewhere).unwrap();
         fs::create_dir_all(store.root.join(RECORDS)).unwrap();
         std::os::unix::fs::symlink(&elsewhere, store.root.join(RECORDS).join("demo")).unwrap();
-        assert!(store.read_record("demo", "a").is_err());
-        assert!(store
+        let error = store.read_record("demo", "a").unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{error}");
+        assert!(
+            error.to_string().contains("is not a real directory"),
+            "{error}"
+        );
+        let error = store
             .write_record(&activity, "demo", "a", &serde_json::json!(1))
-            .is_err());
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{error}");
+        assert!(
+            error.to_string().contains("is not a real directory"),
+            "{error}"
+        );
         assert_eq!(fs::read_dir(&elsewhere).unwrap().count(), 0);
 
         fs::remove_file(store.root.join(RECORDS).join("demo")).unwrap();
@@ -258,6 +268,11 @@ mod tests {
         .unwrap();
         let error = store.read_record("demo", "a").unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{error}");
-        assert!(check_kind("../x").is_err() && check_kind("").is_err());
+        assert!(error.to_string().contains("is a symlink"), "{error}");
+        for kind in ["../x", ""] {
+            let error = check_kind(kind).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "{error}");
+            assert!(error.to_string().contains("is not a plain name"), "{error}");
+        }
     }
 }

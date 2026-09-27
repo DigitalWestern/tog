@@ -2530,18 +2530,30 @@ mod tests {
             "<Project Sdk=\"Microsoft.NET.Sdk\"><Sdk Name=\"X\" /></Project>",
         )
         .unwrap();
-        assert!(validate_csproj(
+        let error = validate_csproj(
             &ProjectRoot::open(&base).unwrap(),
-            Path::new("sdk-element.csproj")
+            Path::new("sdk-element.csproj"),
         )
-        .is_err());
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported MSBuild/project feature <Sdk>"),
+            "{error}"
+        );
         let garbage = base.join("garbage.csproj");
         fs::write(&garbage, "not XML").unwrap();
-        assert!(validate_csproj(
+        let error = validate_csproj(
             &ProjectRoot::open(&base).unwrap(),
-            Path::new("garbage.csproj")
+            Path::new("garbage.csproj"),
         )
-        .is_err());
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("not a supported project file (expected <Project root)"),
+            "{error}"
+        );
 
         let symlinked = base.join("symlinked");
         fs::create_dir(&symlinked).unwrap();
@@ -2551,7 +2563,13 @@ mod tests {
             symlinked.join("project.csproj"),
         )
         .unwrap();
-        assert!(preflight(&ProjectRoot::open(&symlinked).unwrap(), SDK_VERSION).is_err());
+        let error = preflight(&ProjectRoot::open(&symlinked).unwrap(), SDK_VERSION).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("csproj must be a regular file, not a symlink"),
+            "{error}"
+        );
 
         let project_lock = base.join("project-lock");
         fs::create_dir(&project_lock).unwrap();
@@ -2590,13 +2608,25 @@ mod tests {
             "<Project Sdk=\"Microsoft.NET.Sdk\"><Import Project=\"evil.targets\" /></Project>",
         )
         .unwrap();
-        assert!(preflight(&ProjectRoot::open(&import).unwrap(), SDK_VERSION).is_err());
+        let error = preflight(&ProjectRoot::open(&import).unwrap(), SDK_VERSION).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported MSBuild/project feature <Import>"),
+            "{error}"
+        );
 
         let bad_global = base.join("bad-global");
         fs::create_dir(&bad_global).unwrap();
         fs::write(bad_global.join("project.csproj"), minimal_csproj()).unwrap();
         fs::write(bad_global.join("global.json"), "{}").unwrap();
-        assert!(preflight(&ProjectRoot::open(&bad_global).unwrap(), SDK_VERSION).is_err());
+        let error = preflight(&ProjectRoot::open(&bad_global).unwrap(), SDK_VERSION).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("global.json must contain an sdk object"),
+            "{error}"
+        );
 
         let ancestor = base.join("ancestor");
         fs::create_dir(&ancestor).unwrap();
@@ -2624,16 +2654,27 @@ mod tests {
             "<Project Sdk=\"Microsoft.NET.Sdk\"><Sdk\rName=\"X\"/></Project>",
         )
         .unwrap();
+        let error = validate_csproj(&ProjectRoot::open(&bypass).unwrap(), Path::new("cr.csproj"))
+            .unwrap_err();
         assert!(
-            validate_csproj(&ProjectRoot::open(&bypass).unwrap(), Path::new("cr.csproj")).is_err()
+            error
+                .to_string()
+                .contains("unsupported MSBuild/project feature <Sdk>"),
+            "{error}"
         );
         let projector = bypass.join("projector.csproj");
         fs::write(&projector, "<Projector/>").unwrap();
-        assert!(validate_csproj(
+        let error = validate_csproj(
             &ProjectRoot::open(&bypass).unwrap(),
-            Path::new("projector.csproj")
+            Path::new("projector.csproj"),
         )
-        .is_err());
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("not a supported project file (expected <Project root)"),
+            "{error}"
+        );
     }
 
     /// Preflight and planning read the lock through one parser, so a lock

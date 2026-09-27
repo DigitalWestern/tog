@@ -1185,7 +1185,13 @@ mod tests {
             format!("{pyproject}requires-python = \"invalid\"\n"),
         )
         .unwrap();
-        check_whole_project(platform, &project).unwrap_err();
+        let error = check_whole_project(platform, &project).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("invalid PEP 440 specifier `invalid`"),
+            "{error}"
+        );
         assert_eq!(
             std::fs::read(project.join("tog-toolchain.toml")).unwrap(),
             lock

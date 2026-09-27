@@ -888,7 +888,7 @@ pub fn input_records(
 }
 
 #[cfg(test)]
-mod closure_platform_tests {
+mod tests {
     use super::*;
     use crate::kernel::testutil::TempDir;
     use std::os::unix::fs::symlink;
@@ -1078,17 +1078,22 @@ mod closure_platform_tests {
         let activity = store
             .activity(crate::kernel::activity::ActivityMode::Exclusive)
             .unwrap();
-        for path in [
-            elsewhere.join(&id),
-            elsewhere.join("objects").join(&id),
-            store.object_path(&id).join("bin"),
-            store.root.join("cache").join(&id),
-            store.root.join("objects").join(format!("{id}-copy")),
+        let outside = "is outside this store";
+        for (path, needle) in [
+            (elsewhere.join(&id), outside),
+            (elsewhere.join("objects").join(&id), outside),
+            (store.object_path(&id).join("bin"), outside),
+            (store.root.join("cache").join(&id), outside),
+            (
+                store.root.join("objects").join(format!("{id}-copy")),
+                "unavailable",
+            ),
         ] {
             let mut refs = ClosureRefs::new();
+            let error = refs.object_path(&store, &activity, &path).unwrap_err();
             assert!(
-                refs.object_path(&store, &activity, &path).is_err(),
-                "accepted {}",
+                error.to_string().contains(needle),
+                "{}: {error}",
                 path.display()
             );
             assert!(refs.is_empty());
@@ -1115,7 +1120,14 @@ mod closure_platform_tests {
             }),
         );
         // A path inside an object is refused outright, not read as the object.
-        assert!(store.root_record_from_project(project).is_err());
+        let error = store
+            .root_record_from_project(project)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("python\" belongs to another store"),
+            "{error}"
+        );
         envelope(
             project,
             "python",

@@ -738,17 +738,26 @@ mod tests {
         fs::write(root.join("safe.txt"), b"safe").unwrap();
         std::os::unix::fs::symlink("safe.txt", root.join("safe-link")).unwrap();
         validate_symlinks(root).unwrap();
+        let escaped = |root: &Path| {
+            let error = validate_symlinks(root).expect_err("an escaping symlink was accepted");
+            assert!(
+                error
+                    .to_string()
+                    .contains("symlink target escaped the checkout"),
+                "{error}"
+            );
+        };
         std::os::unix::fs::symlink("../outside", root.join("escape")).unwrap();
-        assert!(validate_symlinks(root).is_err());
+        escaped(root);
         fs::remove_file(root.join("escape")).unwrap();
         std::os::unix::fs::symlink(".", root.join("a")).unwrap();
         std::os::unix::fs::symlink("a/../outside", root.join("escape-via-dot")).unwrap();
-        assert!(validate_symlinks(root).is_err());
+        escaped(root);
         fs::remove_file(root.join("a")).unwrap();
         fs::remove_file(root.join("escape-via-dot")).unwrap();
         std::os::unix::fs::symlink("chain-end", root.join("chain-start")).unwrap();
         std::os::unix::fs::symlink("../../outside", root.join("chain-end")).unwrap();
-        assert!(validate_symlinks(root).is_err());
+        escaped(root);
     }
 }
 
@@ -842,7 +851,10 @@ mod realization_tests {
             .unwrap_err()
             .to_string();
         assert!(
-            error.contains("fetch") || error.contains("checkout"),
+            error.contains(&format!(
+                "commit {} is not in the repository",
+                "0".repeat(40)
+            )),
             "{error}"
         );
     }
