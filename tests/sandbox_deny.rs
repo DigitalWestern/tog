@@ -17,7 +17,8 @@ use tog::tailors::python::build;
 
 mod common;
 
-use common::{fixture, TempDir};
+use common::TempDir;
+use std::path::Path;
 
 /// `TOG_SANDBOX_TESTS=required` (any non-empty value) turns the Linux
 /// skip into a panic so CI cannot report a skipped check as passed.
@@ -32,35 +33,117 @@ fn skip_or_panic(test_name: &str, reason: impl std::fmt::Display) {
     eprintln!("skip {test_name}: {reason}");
 }
 
+/// A setuptools sdist named `name`, version 0.1, whose setup.py runs
+/// `prelude` first and ships the one module `modules` names, if any,
+/// packed with the host tar into `dir`.
+fn sdist(dir: &Path, name: &str, prelude: &str, modules: &str) -> LockedPackage {
+    let root = dir.join(format!("{name}-0.1"));
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(
+        root.join("PKG-INFO"),
+        format!("Metadata-Version: 2.1\nName: {name}\nVersion: 0.1\n"),
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("pyproject.toml"),
+        "[build-system]\nrequires = [\"setuptools\"]\nbuild-backend = \"setuptools.build_meta\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("setup.py"),
+        // The scratch path makes every run's sdist new to the store, so the
+        // build runs here rather than coming back from an earlier run's
+        // cached wheel.
+        format!(
+            "# built from {}\n{prelude}\nfrom setuptools import setup\n\
+             setup(name=\"{name}\", version=\"0.1\", py_modules=[{modules}])\n",
+            dir.display()
+        ),
+    )
+    .unwrap();
+    let filename = format!("{name}-0.1.tar.gz");
+    let archive = dir.join(&filename);
+    let status = std::process::Command::new("tar")
+        .arg("-czf")
+        .arg(&archive)
+        .arg("-C")
+        .arg(dir)
+        .arg(format!("{name}-0.1"))
+        .status()
+        .unwrap();
+    assert!(status.success(), "tar {filename}");
+    let bytes = std::fs::read(&archive).unwrap();
+    LockedPackage {
+        name: name.into(),
+        version: "0.1".into(),
+        filename,
+        url: format!("file://{}", archive.display()),
+        sha256: hex::encode(Sha256::digest(&bytes)),
+        kind: ArtifactKind::Sdist,
+        git: None,
+    }
+}
+
+/// Connect to an IP literal (no resolver involved) and keep what happened
+/// in `outcome`: `connected`, or the repr of the error connect raised.
+const CONNECT_PROBE: &str = "import socket\n\
+    try:\n    \
+        socket.create_connection((\"1.1.1.1\", 443), timeout=10).close()\n    \
+        outcome = \"connected\"\n\
+    except OSError as error:\n    \
+        outcome = repr(error)\n";
+
+/// A build that opens a connection fails, and the reason is the network
+/// namespace itself, not an HTTP error, a DNS failure, or a missing
+/// setuptools. pip keeps a build backend's output out of both the relayed
+/// stderr and the error's log tail, so the evidence travels in a wheel:
+/// a recorder sdist runs the same connect, writes what it raised into a
+/// module, and builds. That build succeeding is also the control that the
+/// build toolchain works offline.
 #[test]
 #[ignore]
 fn network_access_during_build_fails() {
-    let fixture = fixture("evil-0.1.tar.gz");
-    let bytes = std::fs::read(&fixture).expect("fixture exists");
-    let sha = hex::encode(Sha256::digest(&bytes));
-
+    let temp = TempDir::new("sandbox-deny");
     let store = Store::open().expect("store");
     let activity = &store
         .activity(tog::kernel::activity::ActivityMode::Shared)
         .unwrap();
-    let pkg = LockedPackage {
-        name: "evil".into(),
-        version: "0.1".into(),
-        filename: "evil-0.1.tar.gz".into(),
-        url: format!("file://{}", fixture.display()),
-        sha256: sha,
-        kind: ArtifactKind::Sdist,
-        git: None,
-    };
+    let python = python::shipped_selection("3.12.14").unwrap();
+    let platform = Platform::host().unwrap();
 
-    let result = build::build_sdist_wheel(
-        &store,
-        activity,
-        Platform::host().unwrap(),
-        &pkg,
-        &python::shipped_selection("3.12.14").unwrap(),
+    let recorder = sdist(
+        temp.path(),
+        "connectrecord",
+        &format!(
+            "{CONNECT_PROBE}open(\"connectrecord.py\", \"w\").write(\"OUTCOME = %r\\n\" % outcome)\n"
+        ),
+        "\"connectrecord\"",
     );
-    let err = result.expect_err("build reaching the network must fail");
+    let wheel = build::build_sdist_wheel(&store, activity, platform, &recorder, &python)
+        .expect("the recorder sdist must build: the build toolchain works offline");
+    let mut archive = zip::ZipArchive::new(std::fs::File::open(&wheel).unwrap()).unwrap();
+    let mut recorded = String::new();
+    std::io::Read::read_to_string(
+        &mut archive.by_name("connectrecord.py").unwrap(),
+        &mut recorded,
+    )
+    .unwrap();
+    // A namespace with no route out: the kernel refuses the connect before
+    // a packet leaves. A timeout would mean the packet left and was dropped
+    // somewhere else, which is not the sandbox's denial.
+    assert_eq!(
+        recorded, "OUTCOME = \"OSError(101, 'Network is unreachable')\"\n",
+        "the build's connect was not refused by the sandbox"
+    );
+
+    let probe = sdist(
+        temp.path(),
+        "phonehome",
+        &format!("{CONNECT_PROBE}assert outcome == \"connected\", outcome\n"),
+        "",
+    );
+    let err = build::build_sdist_wheel(&store, activity, platform, &probe, &python)
+        .expect_err("build reaching the network must fail");
     let msg = err.to_string();
     // A sandbox that failed to set up (Unsupported) is not evidence of
     // denial: the build must have run and exited non-zero inside it.
@@ -70,7 +153,7 @@ fn network_access_during_build_fails() {
         "sandbox did not run: {msg}"
     );
     assert!(
-        msg.contains("sandboxed build of evil==0.1 failed"),
+        msg.contains("sandboxed build of phonehome==0.1 failed"),
         "unexpected error shape: {msg}"
     );
     assert!(

@@ -107,8 +107,10 @@ fn gc_keeps_deleted_node_project_until_forgotten() {
     }
 
     // A root/2 record carries its own object set, so a deleted project no
-    // longer blocks collection and its tools remain protected.
-    let retained = tog(&python, home, &["gc", "--dry-run", "--keep-days", "0"]);
+    // longer blocks collection and its tools remain protected. A real
+    // sweep, not a dry run: only a sweep that deletes can prove the record
+    // kept the aged, now-unreachable node objects.
+    let retained = tog(&python, home, &["gc", "--keep-days", "0"]);
     assert!(
         retained.status.success(),
         "gc refused a self-sufficient root record: stdout={} stderr={}",

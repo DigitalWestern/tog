@@ -19,7 +19,7 @@ use std::process::Output;
 
 mod common;
 
-use common::{snapshot, text, tog, tog_at, TempDir};
+use common::{snapshot, text, tog, tog_at, tog_env, TempDir};
 
 use tog::comforter::toolchain as project_toolchain;
 use tog::kernel::fsroot::ProjectRoot;
@@ -495,8 +495,13 @@ fn frozen_refuses_a_stale_lock_without_rewriting_it() {
 
 /// Frozen validation evaluates no project code. A Gemfile is a Ruby program
 /// and the `ruby` directive sits beside arbitrary statements, so this one
-/// writes a marker file when it is evaluated: validation finishes, and the
-/// marker is not there.
+/// writes a marker file when it is evaluated. The toolchain lock is
+/// committed and current, so every toolchain check runs and passes; the
+/// refusal is the last frozen gate before anything is realized, the
+/// missing Gemfile.lock that a writable sync would generate by running
+/// bundler over the Gemfile. A `ruby` and a `bundle` on PATH write a
+/// marker too, so reading the Gemfile through the host's Ruby is caught
+/// as well.
 #[test]
 fn frozen_never_evaluates_project_code() {
     let fixture = Fixture::new("frozen-gemfile");
@@ -506,17 +511,60 @@ fn frozen_never_evaluates_project_code() {
          ruby \"3.3.4\"\n\
          source \"https://rubygems.org\"\n",
     );
-    fixture.write("Gemfile.lock", "DEPENDENCIES\n\nBUNDLED WITH\n   2.5.9\n");
+    fixture.commit_lock("ruby");
 
-    let out = fixture.tog(&["sync", "--frozen"]);
+    let fake_bin = fixture.home.0.join("fake-bin");
+    std::fs::create_dir_all(&fake_bin).unwrap();
+    let host_marker = fixture.home.0.join("host-ruby.marker");
+    for name in ["ruby", "bundle"] {
+        let path = fake_bin.join(name);
+        std::fs::write(
+            &path,
+            format!("#!/bin/sh\necho \"$0 $*\" >> '{}'\n", host_marker.display()),
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o755);
+        std::fs::set_permissions(&path, permissions).unwrap();
+    }
+    let path = format!(
+        "{}:{}",
+        fake_bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let before = snapshot(fixture.dir());
+
+    let out = tog_env(
+        fixture.dir(),
+        &fixture.home.0,
+        &["sync", "--frozen"],
+        &[("PATH", &path)],
+    );
     let stderr = text(&out.stderr);
     assert_eq!(out.status.code(), Some(1), "{stderr}");
-    assert!(stderr.contains("tog-toolchain.toml"), "{stderr}");
+    // Past the toolchain lock: the refusal is the dependency lock's.
+    assert!(
+        stderr.contains("Gemfile.lock is missing and --frozen never creates it"),
+        "{stderr}"
+    );
     assert!(
         !fixture.dir().join("evaluated.marker").exists(),
         "frozen validation evaluated the Gemfile: {stderr}"
     );
-    assert!(!fixture.store().exists(), "{stderr}");
+    assert!(
+        !host_marker.exists(),
+        "frozen validation ran the host's ruby or bundle: {}",
+        std::fs::read_to_string(&host_marker).unwrap_or_default()
+    );
+    assert_eq!(
+        snapshot(fixture.dir()),
+        before,
+        "--frozen changed the project"
+    );
+    let realized = std::fs::read_dir(fixture.store().join("objects"))
+        .map(|entries| entries.count())
+        .unwrap_or(0);
+    assert_eq!(realized, 0, "--frozen realized a toolchain: {stderr}");
 }
 
 /// The dependency lock is the tailor's to generate, and `--frozen` skips

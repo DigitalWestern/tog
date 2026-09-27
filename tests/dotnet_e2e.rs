@@ -44,10 +44,22 @@ fn assert_realization_does_not_evaluate_user_project(temp: &TempDir) {
     copy_dotnet_hello(&project);
     let csproj = project.join("proj.csproj");
     let mut text = std::fs::read_to_string(&csproj).unwrap();
+    // Two tripwires. The property fires on evaluation itself: MSBuild
+    // expands every property in a PropertyGroup before any target runs,
+    // and `ReadAllText` of a file that does not exist fails that
+    // evaluation (MSB4184), so a sync that so much as evaluates the
+    // project fails. The target fires on any build of it: an initial
+    // target runs before whatever target was asked for, restore included.
+    text = text.replace(
+        "<Project Sdk=\"Microsoft.NET.Sdk\">",
+        "<Project Sdk=\"Microsoft.NET.Sdk\" InitialTargets=\"Tripwire\">",
+    );
     text = text.replace(
         "</Project>",
-        "<Target Name=\"Tripwire\" BeforeTargets=\"Restore\"><WriteLinesToFile File=\"tripwire.txt\" Lines=\"executed\" Overwrite=\"true\" /></Target></Project>",
+        "<PropertyGroup><TripwireEvaluated>$([System.IO.File]::ReadAllText('$(MSBuildProjectDirectory)/tripwire-must-not-exist.txt'))</TripwireEvaluated></PropertyGroup>\
+         <Target Name=\"Tripwire\" BeforeTargets=\"Restore\"><WriteLinesToFile File=\"tripwire.txt\" Lines=\"executed\" Overwrite=\"true\" /></Target></Project>",
     );
+    assert!(text.contains("InitialTargets"), "{text}");
     std::fs::write(csproj, text).unwrap();
     let store = temp.0.join("tripwire-store");
     assert_ok(

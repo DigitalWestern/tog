@@ -287,6 +287,14 @@ pub fn note(message: &str) {
     eprintln!("tog: {message}");
 }
 
+/// A handle for narration a lower layer renders itself: the store
+/// maintenance and GC reports write to any `Write`, so their tests can
+/// capture them. `--quiet` still silences it, at the descriptor level.
+/// Every line written through it starts with `tog: `, like `note`.
+pub fn narration() -> io::StderrLock<'static> {
+    io::stderr().lock()
+}
+
 /// The line each ecosystem prints when its projection is in place.
 pub fn synced(what: &str, target: &std::path::Path) {
     if quiet() {

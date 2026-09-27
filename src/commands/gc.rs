@@ -4,6 +4,7 @@
 use crate::cli;
 use crate::kernel::gc;
 use crate::kernel::store;
+use crate::kernel::ui;
 use std::io;
 use std::io::Write;
 
@@ -20,8 +21,8 @@ pub fn run(args: &cli::GcArgs) -> io::Result<()> {
     let store = store::Store::open()?;
     // gc narrates; it does not produce a document. CLI.md reserves stdout
     // for results (`plan`, `sbom`, `store path`, the `--json` forms), so
-    // every line below goes to stderr, where `--quiet` can silence it.
-    let mut narrate = io::stderr().lock();
+    // every line below is narration, where `--quiet` can silence it.
+    let mut narrate = ui::narration();
     // A dry run writes nothing and registration is a write, so the two
     // cannot both be honoured. Previewing the sweep as though the project
     // were registered would mean protecting a root with no record, which is
@@ -43,7 +44,10 @@ pub fn run(args: &cli::GcArgs) -> io::Result<()> {
                 "a Tog job is using this store; retry when it finishes",
             ));
         }
-        writeln!(narrate, "cleanup skipped: a Tog job is using this store")?;
+        writeln!(
+            narrate,
+            "tog: cleanup skipped: a Tog job is using this store"
+        )?;
         return Ok(());
     };
     // Dropping is a targeted removal, not a sweep and not a registry edit.

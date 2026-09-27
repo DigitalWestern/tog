@@ -353,6 +353,20 @@ fn ls_accepts_every_ecosystem_name_it_can_print() {
                     "rustfmt_object":{"path":"/store/objects/f","id":"f"}}}"#,
     )
     .unwrap();
+    // A second closure, so the filter has something to leave out.
+    std::fs::write(
+        project.0.join(".tog/closures/python.json"),
+        r#"{"schema":"closure/1","ecosystem":"python","projected_at":0,
+            "body":{"python":{"version":"3.12.14"},
+                    "plan":{"packages":[{"name":"six","version":"1.17.0",
+                                         "filename":"six-1.17.0-py2.py3-none-any.whl"}]}}}"#,
+    )
+    .unwrap();
+    let everything = text(&tog(&project.0, &home.0, &["ls"]).stdout);
+    assert!(
+        everything.contains("rustfmt 1.96.1") && everything.contains("six  1.17.0"),
+        "{everything}"
+    );
 
     let out = tog(&project.0, &home.0, &["ls", "rustfmt"]);
     assert_eq!(
@@ -362,10 +376,11 @@ fn ls_accepts_every_ecosystem_name_it_can_print() {
         text(&out.stdout),
         text(&out.stderr)
     );
+    let filtered = text(&out.stdout);
+    assert!(filtered.contains("rustfmt 1.96.1"), "{filtered}");
     assert!(
-        text(&out.stdout).contains("rustfmt 1.96.1"),
-        "{}",
-        text(&out.stdout)
+        !filtered.contains("six") && !filtered.contains("python"),
+        "the rustfmt filter listed another closure:\n{filtered}"
     );
 
     // The help text names the same set the parser accepts.
@@ -761,21 +776,43 @@ fn failures_exit_1_and_survive_quiet() {
 fn directory_option_changes_where_the_command_runs() {
     let home = TempDir::boundary("cli-chdir");
     let project = TempDir::boundary("cli-chdir-project");
-    // Run from `home`, point at the empty project: the empty project's
-    // failure proves the command ran there.
-    let out = tog(
-        &home.0,
-        &home.0,
-        &["-C", project.0.to_str().unwrap(), "plan"],
+    // Only the project has a manifest. From `home` there is no project;
+    // pointed at the project, status reports its python manifest, which
+    // only a command that ran there can see.
+    std::fs::write(project.0.join("requirements.txt"), "six==1.17.0\n").unwrap();
+    let here = tog(&home.0, &home.0, &["status"]);
+    assert_eq!(here.status.code(), Some(1));
+    assert!(
+        text(&here.stderr).contains("no project in"),
+        "{}",
+        text(&here.stderr)
     );
-    assert_eq!(out.status.code(), Some(1));
-    assert!(text(&out.stderr).contains("nothing to sync here"));
-    let out = tog(
-        &home.0,
-        &home.0,
-        &["--directory", project.0.to_str().unwrap(), "-v", "plan"],
+    assert!(
+        !text(&here.stdout).contains("python"),
+        "{}",
+        text(&here.stdout)
     );
-    assert!(text(&out.stderr).contains("[verbose] working directory:"));
+    for option in ["-C", "--directory"] {
+        let out = tog(
+            &home.0,
+            &home.0,
+            &[option, project.0.to_str().unwrap(), "-v", "status"],
+        );
+        assert!(
+            text(&out.stdout).contains("python  not synced"),
+            "{option}: stdout:\n{}\nstderr:\n{}",
+            text(&out.stdout),
+            text(&out.stderr)
+        );
+        assert!(
+            text(&out.stderr).contains(&format!(
+                "[verbose] working directory: {}",
+                project.0.display()
+            )),
+            "{option}: {}",
+            text(&out.stderr)
+        );
+    }
 
     let missing = project.0.join("missing");
     let out = tog(&home.0, &home.0, &["-C", missing.to_str().unwrap(), "plan"]);
@@ -2787,8 +2824,15 @@ fn audit_is_an_offline_admission_gate_over_recorded_exceptions() {
         text(&out.stdout)
     );
     std::fs::remove_file(project.0.join(".tog/policy.toml")).unwrap();
+    // With the project policy gone, the genuine record is clean again and
+    // its exception is permitted and counted.
     let out = tog(&project.0, &home.0, &["audit"]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stdout));
+    let stdout = text(&out.stdout);
+    assert!(
+        stdout.contains("python  clean         closure "),
+        "{stdout}"
+    );
     assert!(stdout.contains("permitted: git-dependency 1"), "{stdout}");
     // The audit never created a store.
     assert!(!home.0.join("store").exists());

@@ -199,10 +199,17 @@ fn main() {
     }
 }
 NETDENY
-if (cd "$WORK/netdeny" && "$TOG" sync && "$TOG" build); then
-  ok "build.rs network probe confirms denial"
+# Positive control first: the probe's target must be reachable from this
+# machine, or a build that "denies" the network proves nothing.
+if (exec 3<>/dev/tcp/1.1.1.1/80) 2>/dev/null; then
+  ok "build.rs network probe target is reachable outside the sandbox"
+  if (cd "$WORK/netdeny" && "$TOG" sync && "$TOG" build); then
+    ok "build.rs network probe confirms denial"
+  else
+    bad "netdeny build failed (or network was reachable)"
+  fi
 else
-  bad "netdeny build failed (or network was reachable)"
+  bad "build.rs network probe target 1.1.1.1:80 is unreachable from this machine; the denial check cannot run"
 fi
 
 echo "== 10e. go: modcache projection + sandboxed build + offline rebuild"

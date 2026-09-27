@@ -11,7 +11,7 @@
 //! Four housekeeping rules are enforced the same way: a test that sets
 //! `TOG_STORE` holds `STORE_ENV_LOCK`, comments describe code rather
 //! than cite plan documents or review rounds, narration goes through
-//! `kernel::ui` rather than a raw `eprintln!`, and `docs/agent/` holds only
+//! `kernel::ui` rather than a raw stderr write, and `docs/agent/` holds only
 //! its two files.
 
 // Tests spawn fixtures and take leases freely (see clippy.toml).
@@ -68,44 +68,135 @@ fn non_test(text: &str) -> &str {
     }
 }
 
-/// Every `crate::a::b` path in `text`, with grouped `use crate::{a, b::c}`
-/// imports expanded one level, as segment vectors.
-fn crate_paths(text: &str) -> Vec<Vec<String>> {
+/// Every path `text` names into the crate, as segment vectors from the
+/// crate root: `crate::a::b`, `$crate::a::b`, and `super::…` resolved
+/// against `module` (the module path of the file, `["kernel", "gc"]` for
+/// `src/kernel/gc/mod.rs`). Grouped imports expand at any depth:
+/// `use crate::{a::{b, c}, d}` yields `a::b`, `a::c` and `d`, and `self` in
+/// a group names the group's own prefix. A `super` inside an inline module
+/// resolves one level too high, which can only report a violation that is
+/// not there, never hide one.
+fn crate_paths(text: &str, module: &[String]) -> Vec<Vec<String>> {
+    let chars: Vec<char> = text.chars().collect();
     let mut out = Vec::new();
-    let mut rest = text;
-    while let Some(index) = rest.find("crate::") {
-        let after = &rest[index + "crate::".len()..];
-        let head: String = after
-            .chars()
-            .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == ':')
-            .collect();
-        let head_segments: Vec<String> = head
-            .split("::")
-            .filter(|s| !s.is_empty())
-            .map(str::to_string)
-            .collect();
-        let tail = &after[head.len()..];
-        if let Some(group) = tail.strip_prefix('{') {
-            let close = group.find('}').unwrap_or(group.len());
-            for item in group[..close].split(',') {
-                let item = item.trim();
-                if item.is_empty() {
-                    continue;
-                }
-                let mut segments = head_segments.clone();
-                segments.extend(
-                    item.split("::")
-                        .map(|s| s.split_whitespace().next().unwrap_or("").to_string())
-                        .filter(|s| !s.is_empty() && !s.starts_with('{')),
-                );
-                out.push(segments);
+    let mut i = 0;
+    while i < chars.len() {
+        let boundary = i == 0 || !is_ident_char(chars[i - 1]);
+        if boundary && starts_with_at(&chars, i, "crate::") {
+            let mut at = i + "crate::".len();
+            parse_use_tree(&chars, &mut at, Vec::new(), &mut out);
+            i = at.max(i + 1);
+        } else if boundary && starts_with_at(&chars, i, "super::") {
+            let mut prefix = module.to_vec();
+            let mut at = i;
+            while starts_with_at(&chars, at, "super::") {
+                prefix.pop();
+                at += "super::".len();
             }
+            parse_use_tree(&chars, &mut at, prefix, &mut out);
+            i = at.max(i + 1);
         } else {
-            out.push(head_segments);
+            i += 1;
         }
-        rest = &rest[index + "crate::".len()..];
     }
     out
+}
+
+fn is_ident_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+fn starts_with_at(chars: &[char], at: usize, word: &str) -> bool {
+    word.chars()
+        .enumerate()
+        .all(|(offset, c)| chars.get(at + offset) == Some(&c))
+}
+
+fn skip_whitespace(chars: &[char], at: &mut usize) {
+    while chars.get(*at).is_some_and(|c| c.is_whitespace()) {
+        *at += 1;
+    }
+}
+
+/// One use tree starting at `at` (`a::b`, `a::{b, c::{d}}`, `a as x`),
+/// every leaf path of it pushed to `out` behind `prefix`.
+fn parse_use_tree(chars: &[char], at: &mut usize, prefix: Vec<String>, out: &mut Vec<Vec<String>>) {
+    let mut segments = prefix;
+    loop {
+        skip_whitespace(chars, at);
+        if chars.get(*at) == Some(&'{') {
+            *at += 1;
+            loop {
+                skip_whitespace(chars, at);
+                match chars.get(*at) {
+                    None => return,
+                    Some('}') => {
+                        *at += 1;
+                        return;
+                    }
+                    Some(',') => *at += 1,
+                    Some(_) => {
+                        let before = *at;
+                        parse_use_tree(chars, at, segments.clone(), out);
+                        if *at == before {
+                            // Not a use tree (`*`, a stray token): step over it.
+                            *at += 1;
+                        }
+                    }
+                }
+            }
+        }
+        let start = *at;
+        while chars.get(*at).is_some_and(|&c| is_ident_char(c)) {
+            *at += 1;
+        }
+        let word: String = chars[start..*at].iter().collect();
+        if word.is_empty() {
+            if !segments.is_empty() {
+                out.push(segments);
+            }
+            return;
+        }
+        if word != "self" {
+            segments.push(word);
+        }
+        let mut next = *at;
+        skip_whitespace(chars, &mut next);
+        if starts_with_at(chars, next, "::") {
+            *at = next + 2;
+        } else {
+            // `a as x`: the alias is a local name, not a path segment.
+            if starts_with_at(chars, next, "as")
+                && chars.get(next + 2).is_some_and(|c| c.is_whitespace())
+            {
+                *at = next + 2;
+                skip_whitespace(chars, at);
+                while chars.get(*at).is_some_and(|&c| is_ident_char(c)) {
+                    *at += 1;
+                }
+            }
+            out.push(segments);
+            return;
+        }
+    }
+}
+
+/// The module path of a file under `src/`: `kernel/gc/mod.rs` is
+/// `kernel::gc`, `kernel/gc/sweep.rs` is `kernel::gc::sweep`, and the crate
+/// roots `lib.rs` and `main.rs` are the empty path.
+fn module_path(relative: &Path) -> Vec<String> {
+    let mut segments: Vec<String> = relative
+        .with_extension("")
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().to_string())
+        .collect();
+    if matches!(
+        segments.last().map(String::as_str),
+        Some("mod" | "lib" | "main")
+    ) {
+        segments.pop();
+    }
+    segments
 }
 
 /// Layer of a source file: the first folder under `src/`, or the file stem.
@@ -149,56 +240,129 @@ fn allowed(relative: &str, path: &[String]) -> bool {
         .any(|(file, exact, _)| relative == *file && joined == *exact)
 }
 
+/// The paths `text`, the source of `relative` (under `src/`), names against
+/// the layering rules, and how many crate paths it named in all.
+/// `tailor_dirs` are the folders under `src/tailors/`, one per tailor.
+fn layer_violations(relative: &Path, text: &str, tailor_dirs: &[String]) -> (Vec<String>, usize) {
+    let relative_str = relative.to_string_lossy().replace('\\', "/");
+    let layer = layer(relative);
+    let paths = crate_paths(non_test(text), &module_path(relative));
+    let mut violations = Vec::new();
+    for path in &paths {
+        let Some(target) = path.first() else { continue };
+        let forbidden = match layer.as_str() {
+            "kernel" => matches!(
+                target.as_str(),
+                "tailors" | "comforter" | "commands" | "cli"
+            ),
+            "comforter" => matches!(target.as_str(), "tailors" | "commands" | "cli"),
+            "tailors" => {
+                matches!(target.as_str(), "commands" | "cli")
+                    || (target == "tailors"
+                        && path.len() >= 2
+                        && relative.components().nth(1).is_some_and(|own| {
+                            let own = own.as_os_str().to_string_lossy();
+                            // another tailor's folder: tailors::<other>::…
+                            path[1] != own && tailor_dirs.contains(&path[1])
+                        }))
+            }
+            "cli" => matches!(
+                target.as_str(),
+                "tailors" | "comforter" | "kernel" | "commands"
+            ),
+            _ => false,
+        };
+        if forbidden && !allowed(&relative_str, path) {
+            violations.push(format!("{relative_str}: crate::{}", path.join("::")));
+        }
+    }
+    (violations, paths.len())
+}
+
+/// The folders under `src/tailors/`: one per tailor.
+fn tailor_dirs() -> Vec<String> {
+    fs::read_dir(src().join("tailors"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.is_dir())
+        .map(|path| path.file_name().unwrap().to_string_lossy().to_string())
+        .collect()
+}
+
 #[test]
 fn layers_point_one_way() {
     let root = src();
     let mut files = Vec::new();
     rust_files(&root, &mut files);
+    let dirs = tailor_dirs();
     let mut violations = Vec::new();
+    let mut seen = 0;
     for file in &files {
         let relative = file.strip_prefix(&root).unwrap();
-        let relative_str = relative.to_string_lossy().replace('\\', "/");
         let text = fs::read_to_string(file).unwrap();
-        let layer = layer(relative);
-        for path in crate_paths(non_test(&text)) {
-            let Some(target) = path.first() else { continue };
-            let forbidden = match layer.as_str() {
-                "kernel" => matches!(
-                    target.as_str(),
-                    "tailors" | "comforter" | "commands" | "cli"
-                ),
-                "comforter" => matches!(target.as_str(), "tailors" | "commands" | "cli"),
-                "tailors" => {
-                    matches!(target.as_str(), "commands" | "cli")
-                        || (target == "tailors"
-                            && path.len() >= 2
-                            && relative.components().nth(1).is_some_and(|own| {
-                                let own = own.as_os_str().to_string_lossy();
-                                // another tailor's folder: tailors::<other>::…
-                                path[1] != own
-                                    && files.iter().any(|f| {
-                                        f.strip_prefix(&root)
-                                            .unwrap()
-                                            .starts_with(Path::new("tailors").join(&path[1]))
-                                    })
-                            }))
-                }
-                "cli" => matches!(
-                    target.as_str(),
-                    "tailors" | "comforter" | "kernel" | "commands"
-                ),
-                _ => false,
-            };
-            if forbidden && !allowed(&relative_str, &path) {
-                violations.push(format!("{relative_str}: crate::{}", path.join("::")));
-            }
-        }
+        let (found, paths) = layer_violations(relative, &text, &dirs);
+        violations.extend(found);
+        seen += paths;
     }
+    // Positive control: the crate names itself thousands of times. A scan
+    // that stops finding paths (a parser regression, a renamed prefix)
+    // fails here instead of passing with nothing to check.
+    assert!(
+        seen >= 1000,
+        "the layering scan found only {seen} crate paths under src/; it is passing vacuously"
+    );
     assert!(
         violations.is_empty(),
         "layering violations (docs/human/ARCHITECTURE.md, layering rule 1):\n  {}",
         violations.join("\n  ")
     );
+}
+
+/// Every spelling of a path into another layer is seen: nested groups,
+/// `self` in a group, `super` chains, `$crate`, whitespace inside a group;
+/// and paths that stay in the layer are not reported.
+#[test]
+fn the_layering_scan_sees_every_spelling() {
+    let dirs = vec!["node".to_string(), "python".to_string()];
+    let kernel = "use crate::{store::Store, kernel::{ui, gc::{sweep::{self, Plan}}}};\n\
+        use crate::{\n    comforter::{\n        toolchain as t,\n    },\n};\n\
+        use super::super::super::commands::gc;\n\
+        use super::sibling;\n\
+        fn f() { $crate::cli::parse(); not_crate::tailors::x(); }";
+    let (found, _) = layer_violations(Path::new("kernel/gc/sweep.rs"), kernel, &dirs);
+    assert_eq!(
+        found,
+        [
+            "kernel/gc/sweep.rs: crate::comforter::toolchain",
+            "kernel/gc/sweep.rs: crate::commands::gc",
+            "kernel/gc/sweep.rs: crate::cli::parse",
+        ]
+    );
+    assert_eq!(
+        crate_paths(kernel, &module_path(Path::new("kernel/gc/sweep.rs")))[..4],
+        [
+            vec!["store", "Store"],
+            vec!["kernel", "ui"],
+            vec!["kernel", "gc", "sweep"],
+            vec!["kernel", "gc", "sweep", "Plan"],
+        ]
+    );
+
+    let tailor = "use super::super::node::Lock;\n\
+        use super::wheel;\n\
+        use crate::tailors::{python::venv, Tailor};";
+    let (found, _) = layer_violations(Path::new("tailors/python/sync.rs"), tailor, &dirs);
+    assert_eq!(
+        found,
+        ["tailors/python/sync.rs: crate::tailors::node::Lock"]
+    );
+
+    let (found, _) = layer_violations(
+        Path::new("kernel/mod.rs"),
+        "#[cfg(test)]\nmod tests { use crate::tailors::x; }",
+        &dirs,
+    );
+    assert!(found.is_empty(), "test modules are exempt: {found:?}");
 }
 
 /// Size budgets as a ratchet. `tests/size_baseline.txt` lists every file
@@ -493,22 +657,166 @@ fn blank_literals(text: &str) -> String {
 
 /// `TOG_STORE` is process-global. A test that sets or clears it without
 /// holding `store::STORE_ENV_LOCK` redirects a concurrent test to the real
-/// store, so any file that touches the variable must name the lock.
+/// store, so every write must happen with the lock held: in a function
+/// that took the lock earlier in its body, or in a method of an env guard
+/// (`impl Drop for StoreEnv`, `StoreEnv::enter`), where every function that
+/// names the guard took the lock before naming it. The scan reads code
+/// tokens, so the lock named in a comment or a string does not count.
 #[test]
 fn store_env_writes_hold_the_lock() {
     let mut violations = Vec::new();
+    let mut writes = 0;
     for (relative, text) in all_sources() {
-        let writes =
-            text.contains("set_var(\"TOG_STORE\"") || text.contains("remove_var(\"TOG_STORE\"");
-        if writes && !text.contains("STORE_ENV_LOCK") {
-            violations.push(relative);
-        }
+        let (found, sites) = store_env_violations(&text);
+        writes += sites;
+        violations.extend(found.into_iter().map(|v| format!("{relative}: {v}")));
     }
+    // Positive control: the unit tests that point the store elsewhere
+    // write the variable dozens of times.
+    assert!(
+        writes >= 20,
+        "the TOG_STORE scan found only {writes} writes; it is passing vacuously"
+    );
     assert!(
         violations.is_empty(),
-        "files that write TOG_STORE without STORE_ENV_LOCK:\n  {}",
+        "TOG_STORE written without STORE_ENV_LOCK held:\n  {}",
         violations.join("\n  ")
     );
+}
+
+/// What a `{` opened, for the TOG_STORE scan.
+enum EnvScope {
+    /// Index into the function table.
+    Function(usize),
+    /// The type an `impl` block is for.
+    Impl(String),
+    Block,
+}
+
+/// The TOG_STORE writes in `text` made without the lock held, and how many
+/// writes there were.
+fn store_env_violations(text: &str) -> (Vec<String>, usize) {
+    let tokens = tokenize(text);
+    let write_at = |i: usize| {
+        (is_ident(tokens.get(i), "set_var") || is_ident(tokens.get(i), "remove_var"))
+            && is_punct(tokens.get(i + 1), '(')
+            && matches!(tokens.get(i + 2), Some(Token::Str(name)) if name == "TOG_STORE")
+    };
+    // Pass one finds the guard types: impls whose methods write the
+    // variable. Pass two checks every write and every use of a guard.
+    let mut guards: Vec<String> = Vec::new();
+    let mut violations = Vec::new();
+    let mut sites = 0;
+    for pass in 0..2 {
+        // (name, impl type, lock taken so far)
+        let mut functions: Vec<(String, Option<String>, bool)> = Vec::new();
+        let mut scopes: Vec<EnvScope> = Vec::new();
+        let mut pending_fn: Option<String> = None;
+        let mut pending_impl: Option<Option<String>> = None;
+        for i in 0..tokens.len() {
+            let current = scopes.iter().rev().find_map(|scope| match scope {
+                EnvScope::Function(index) => Some(*index),
+                _ => None,
+            });
+            match &tokens[i] {
+                Token::Ident(word) if word == "fn" => {
+                    if let Some(Token::Ident(name)) = tokens.get(i + 1) {
+                        pending_fn = Some(name.clone());
+                    }
+                }
+                Token::Ident(word) if word == "impl" => pending_impl = Some(None),
+                Token::Ident(word) if pending_impl.is_some() && pending_fn.is_none() => {
+                    pending_impl = Some(Some(word.clone()));
+                }
+                Token::Punct(';') => {
+                    pending_fn = None;
+                    pending_impl = None;
+                }
+                Token::Punct('{') => {
+                    if let Some(name) = pending_fn.take() {
+                        // `impl Trait` in a signature opens no impl block.
+                        pending_impl = None;
+                        let owner = scopes.iter().rev().find_map(|scope| match scope {
+                            EnvScope::Impl(ty) => Some(ty.clone()),
+                            EnvScope::Function(_) => Some(String::new()),
+                            EnvScope::Block => None,
+                        });
+                        let owner = owner.filter(|ty| !ty.is_empty());
+                        functions.push((name, owner, false));
+                        scopes.push(EnvScope::Function(functions.len() - 1));
+                    } else if let Some(ty) = pending_impl.take() {
+                        scopes.push(EnvScope::Impl(ty.unwrap_or_default()));
+                    } else {
+                        scopes.push(EnvScope::Block);
+                    }
+                }
+                Token::Punct('}') => {
+                    scopes.pop();
+                }
+                _ => {}
+            }
+            let Some(index) = current else { continue };
+            let (name, owner, locked) = &functions[index];
+            if is_ident(tokens.get(i), "STORE_ENV_LOCK") {
+                functions[index].2 = true;
+            } else if write_at(i) {
+                match owner {
+                    Some(ty) if pass == 0 => {
+                        if !guards.contains(ty) {
+                            guards.push(ty.clone());
+                        }
+                    }
+                    _ if pass == 0 => {}
+                    _ if *locked => sites += 1,
+                    Some(ty) if guards.contains(ty) => sites += 1,
+                    _ => {
+                        sites += 1;
+                        violations
+                            .push(format!("fn {name} writes TOG_STORE before taking the lock"));
+                    }
+                }
+            } else if pass == 1 {
+                if let Some(Token::Ident(word)) = tokens.get(i) {
+                    if guards.contains(word) && owner.as_ref() != Some(word) && !*locked {
+                        violations.push(format!(
+                            "fn {name} uses the TOG_STORE guard {word} before taking the lock"
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    (violations, sites)
+}
+
+#[test]
+fn the_store_env_scan_sees_through_comments_and_guards() {
+    let unlocked = "// STORE_ENV_LOCK is held by the caller\n\
+        fn t() { let s = \"STORE_ENV_LOCK\"; std::env::set_var(\"TOG_STORE\", p); }";
+    assert_eq!(
+        store_env_violations(unlocked).0,
+        ["fn t writes TOG_STORE before taking the lock"]
+    );
+    let late = "fn t() { env::remove_var(\"TOG_STORE\"); let _l = STORE_ENV_LOCK.lock(); }";
+    assert_eq!(
+        store_env_violations(late).0,
+        ["fn t writes TOG_STORE before taking the lock"]
+    );
+    let guarded = "struct StoreEnv(Option<OsString>);\n\
+        impl StoreEnv { fn enter(p: &Path) -> Self { std::env::set_var(\"TOG_STORE\", p); Self(None) } }\n\
+        impl Drop for StoreEnv { fn drop(&mut self) { std::env::remove_var(\"TOG_STORE\"); } }\n\
+        fn good() { let _l = STORE_ENV_LOCK.lock(); let _e = StoreEnv::enter(p); }\n\
+        fn bad() { let _e = StoreEnv::enter(p); }";
+    let (found, sites) = store_env_violations(guarded);
+    assert_eq!(
+        found,
+        ["fn bad uses the TOG_STORE guard StoreEnv before taking the lock"]
+    );
+    assert_eq!(sites, 2);
+    let nested = "fn t() { let _l = STORE_ENV_LOCK.lock();\n\
+        struct G; impl Drop for G { fn drop(&mut self) { std::env::remove_var(\"TOG_STORE\"); } }\n\
+        std::env::set_var(\"TOG_STORE\", p); let _g = G; }";
+    assert_eq!(store_env_violations(nested), (Vec::<String>::new(), 2));
 }
 
 /// Plan documents and review rounds get deleted; a comment that cites one
@@ -591,33 +899,122 @@ fn comment_text(line: &str) -> Option<&str> {
 /// phase. Test modules are exempt: a skip message is for whoever ran the
 /// suite, not for a user.
 ///
-/// Only `eprintln!` is a line of tog's own narration. `eprint!` is the
-/// verbatim pass-through of a subprocess's captured output and of an
+/// Two spellings are tog's own narration: `eprintln!`, and a handle from
+/// `io::stderr()` written with `writeln!`. `eprint!` is the verbatim
+/// pass-through of a subprocess's captured output and of an
 /// already-rendered usage error, neither of which takes a `tog:` prefix.
+/// A lower layer that renders its own narration into a `Write` gets its
+/// handle from `ui::narration()`.
+///
+/// The `io::stderr()` sites below are not narration, each for the reason
+/// given. The match is on the line's code, so a second site in a listed
+/// file is still reported, and a listed site that disappears fails the
+/// test until its row goes too.
+const STDERR_HANDLES: &[(&str, &str, &str)] = &[
+    (
+        "src/kernel/supervise.rs",
+        "let _ = io::stderr().write_all(&buffer[..count]);",
+        "verbatim relay of a supervised child's stderr",
+    ),
+    (
+        "src/kernel/sandbox.rs",
+        "let mut sink = io::stderr();",
+        "verbatim relay of a sandboxed build's stderr",
+    ),
+    (
+        "src/commands/deps.rs",
+        "if !(io::stderr().is_terminal() && io::stdin().is_terminal()) {",
+        "a terminal test; writes nothing",
+    ),
+    (
+        "src/commands/deps.rs",
+        "let mut stderr = io::stderr();",
+        "the interactive which-registry prompt, a question rather than narration",
+    ),
+];
+
+/// Does this line of code write tog's narration to stderr directly? The
+/// comment part of the line is ignored; `.stderr(…)` (a `Command` method)
+/// and `child.stderr` (a field) are not the process's stderr.
+fn writes_stderr(line: &str) -> bool {
+    let code = match comment_text(line) {
+        Some(comment) => &line[..line.len() - comment.len()],
+        None => line,
+    };
+    code.contains("eprintln!")
+        || code.match_indices("stderr()").any(|(at, _)| {
+            !code[..at]
+                .chars()
+                .next_back()
+                .is_some_and(|c| c == '.' || is_ident_char(c))
+        })
+}
+
 #[test]
 fn narration_goes_through_kernel_ui() {
     let mut violations = Vec::new();
+    let mut listed = vec![false; STDERR_HANDLES.len()];
     for (relative, text) in all_sources() {
         if !relative.starts_with("src/") || relative == "src/kernel/ui.rs" {
             continue;
         }
         for (index, line) in outside_test_modules(&text).lines().enumerate() {
-            if line.contains("eprintln!") {
-                violations.push(format!("{relative}:{}: {}", index + 1, line.trim()));
+            if !writes_stderr(line) {
+                continue;
+            }
+            match STDERR_HANDLES
+                .iter()
+                .position(|(file, code, _)| *file == relative && line.trim() == *code)
+            {
+                Some(row) => listed[row] = true,
+                None => violations.push(format!("{relative}:{}: {}", index + 1, line.trim())),
             }
         }
     }
+    let stale: Vec<_> = STDERR_HANDLES
+        .iter()
+        .zip(&listed)
+        .filter(|(_, seen)| !**seen)
+        .map(|((file, code, _), _)| format!("{file}: {code}"))
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "STDERR_HANDLES rows that match nothing (delete them):\n  {}",
+        stale.join("\n  ")
+    );
     assert!(
         violations.is_empty(),
         "stderr written outside kernel::ui (use ui::note for progress, \
-         ui::warning for an advisory, ui::error for a failure):\n  {}",
+         ui::warning for an advisory, ui::error for a failure, \
+         ui::narration for a report rendered into a writer):\n  {}",
         violations.join("\n  ")
     );
 }
 
+#[test]
+fn the_stderr_scan_sees_every_spelling() {
+    for line in [
+        "eprintln!(\"tog: x\");",
+        "let mut out = io::stderr().lock();",
+        "writeln!(std::io::stderr(), \"x\")?;",
+        "let e = stderr(); // after `use std::io::stderr`",
+    ] {
+        assert!(writes_stderr(line), "{line}");
+    }
+    for line in [
+        "eprint!(\"{captured}\");",
+        "command.stderr(Stdio::piped());",
+        "let pipe = child.stderr.take();",
+        "// io::stderr() is locked by ui::narration",
+        "let s = my_stderr();",
+    ] {
+        assert!(!writes_stderr(line), "{line}");
+    }
+}
+
 /// The part of a file before its first `#[cfg(test)]` module. Unlike
 /// `non_test`, this finds a test module under any name (`mod tests`,
-/// `mod patch_snapshot_tests`), which is what a scan for test-only output
+/// `mod fixture_tests`), which is what a scan for test-only output
 /// needs; a `#[cfg(test)]` helper `fn` is not a module and does not cut.
 fn outside_test_modules(text: &str) -> &str {
     let mut rest = text;
