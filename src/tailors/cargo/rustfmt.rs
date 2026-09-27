@@ -7,7 +7,7 @@
 
 use crate::comforter::status::State;
 use crate::kernel::activity::StoreActivity;
-use crate::kernel::fetch::download_verified_digest_held;
+use crate::kernel::fetch::download_toolchain_artifact_held;
 use crate::kernel::platform::{no_pin, Platform};
 use crate::kernel::sandbox::BuildSpec;
 use crate::kernel::store::Store;
@@ -367,7 +367,8 @@ pub fn ensure_rustfmt(
             platform.triple()
         ));
     }
-    let archive = download_verified_digest_held(store, activity, &row.url, &row.digest)?;
+    let archive =
+        download_toolchain_artifact_held(store, activity, &row.provider, &row.url, &row.digest)?;
     let staged = store.stage_with_activity(activity)?;
     if let Err(error) = stage_rustfmt(
         activity,

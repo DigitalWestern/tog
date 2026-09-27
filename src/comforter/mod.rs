@@ -942,7 +942,7 @@ mod closure_platform_tests {
             &mut attribution,
         )
         .unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("path is padded"), "{error}");
         assert!(
             !project.join(".tog").exists(),
             "wrote into a project no record can name"

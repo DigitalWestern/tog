@@ -20,7 +20,7 @@ use crate::kernel::activity::StoreActivity;
 use crate::kernel::archive::Compression;
 use crate::kernel::dirhash;
 use crate::kernel::fetch::{
-    cache_insert, cache_verified_held, download_verified_digest_held, Digest,
+    cache_insert, cache_verified_held, download_toolchain_artifact_held, Digest,
 };
 use crate::kernel::fsroot::{Entry, ProjectRoot};
 use crate::kernel::platform::{no_pin, Platform};
@@ -334,7 +334,8 @@ pub fn realize_runtime(
         crate::kernel::policy::check_cached_with_activity(store, activity, &id)?;
         return Ok(store.object_path(&id));
     }
-    let tarball = download_verified_digest_held(store, activity, &row.url, &row.digest)?;
+    let tarball =
+        download_toolchain_artifact_held(store, activity, &row.provider, &row.url, &row.digest)?;
     let staged = store.stage_with_activity(activity)?;
     extract_go_toolchain_for(activity, &tarball, &staged)?;
     store

@@ -15,7 +15,7 @@ pub mod tailor;
 
 use crate::kernel::activity::StoreActivity;
 use crate::kernel::archive::{Compression, ExtractOptions};
-use crate::kernel::fetch::{cache_insert, download_verified_digest_held, Digest};
+use crate::kernel::fetch::{cache_insert, download_toolchain_artifact_held, Digest};
 use crate::kernel::fsroot::{Entry, ProjectRoot};
 use crate::kernel::platform::Platform;
 use crate::kernel::sandbox::{force_env, BuildSpec};
@@ -125,6 +125,7 @@ const SDK_RECIPE: &str = "dotnet-sdk/1";
 struct SdkSpec {
     platform: Platform,
     version: String,
+    provider: String,
     url: String,
     sha512: String,
 }
@@ -156,6 +157,7 @@ fn sdk_spec(platform: Platform, selected: &Selected) -> io::Result<SdkSpec> {
     Ok(SdkSpec {
         platform,
         version: row.version,
+        provider: row.provider,
         url: row.url,
         sha512: row.digest.hex().to_string(),
     })
@@ -226,6 +228,7 @@ fn pin_spec(platform: Platform) -> SdkSpec {
     SdkSpec {
         platform: pin.platform,
         version: SDK_VERSION.to_string(),
+        provider: pin.provider.clone(),
         url: pin.url.to_string(),
         sha512: pin.digest.hex().to_string(),
     }
@@ -296,7 +299,8 @@ pub fn realize_runtime(
         return Ok(store.object_path(&id));
     }
     let digest = Digest::sha512(&spec.sha512)?;
-    let tarball = download_verified_digest_held(store, activity, &spec.url, &digest)?;
+    let tarball =
+        download_toolchain_artifact_held(store, activity, &spec.provider, &spec.url, &digest)?;
     let staged = store.stage_with_activity(activity)?;
     extract_sdk_archive_for(activity, &tarball, &staged)?;
     store

@@ -2972,8 +2972,13 @@ mod tests {
         );
     }
 
+    /// The scope `run` opens for an edit: exceptions recorded in it, and
+    /// in an ecosystem scope nested under it, are gone once it is
+    /// discarded, so the sync after the edit starts from nothing. This
+    /// covers the scope, not `run`'s own call to `discard`: `run` edits
+    /// through a real package manager, which needs the network.
     #[test]
-    fn dependency_edit_scope_clears_exceptions_before_sync() {
+    fn discarding_the_edit_scope_leaves_no_exception_pending() {
         let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());

@@ -314,8 +314,12 @@ mod tests {
         path
     }
 
+    /// A record is written under a temporary name and renamed into place,
+    /// so the add leaves only the record and the registry marker behind,
+    /// with no temporary file in `roots/` or `tmp/`. The rename being atomic
+    /// is the kernel's promise, not something a test can observe.
     #[test]
-    fn roots_registry_adds_atomically_and_drops_entries() {
+    fn roots_registry_adds_leaving_no_temporary_file_and_drops_entries() {
         let temp = temp_store();
         let store = Store {
             root: temp.0.canonicalize().unwrap(),
@@ -328,6 +332,17 @@ mod tests {
             fs::read_to_string(&root.registry_path).unwrap().trim(),
             project.canonicalize().unwrap().display().to_string()
         );
+        let names = |dir: &str| -> BTreeSet<String> {
+            fs::read_dir(store.root.join(dir))
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+                .collect()
+        };
+        assert_eq!(
+            names("roots"),
+            BTreeSet::from([root.key.clone(), roots::ROOTS_INITIALIZED.to_string()])
+        );
+        assert!(names("tmp").is_empty(), "{:?}", names("tmp"));
         store.remove_root_entry(&root).unwrap();
         assert!(store.roots().unwrap().is_empty());
     }
@@ -427,10 +442,9 @@ mod tests {
     }
 
     /// A record that is not a regular file is refused on its metadata,
-    /// before anything opens it. Removing that check does not make this test
-    /// fail — it makes it hang: reading a FIFO nobody writes to blocks the
-    /// listing, the sweep and `--forget` alike, which is the one registry
-    /// failure there is no way to recover from.
+    /// before anything opens it. Without that check, reading a FIFO nobody
+    /// writes to blocks the listing, the sweep and `--forget` alike, which
+    /// is the one registry failure there is no way to recover from.
     #[test]
     fn a_record_that_is_not_a_regular_file_is_never_opened() {
         let temp = temp_store();
@@ -446,7 +460,17 @@ mod tests {
         assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
         fs::create_dir(roots.join("b".repeat(40))).unwrap();
 
-        let records = store.roots().unwrap();
+        // A regression blocks on the FIFO, so the listing runs on its own
+        // thread and a stall fails the test instead of hanging it.
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let reader = store.clone();
+        std::thread::spawn(move || {
+            let _ = sender.send(reader.roots());
+        });
+        let records = receiver
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("roots() blocked on a FIFO record")
+            .unwrap();
         assert_eq!(records.len(), 2);
         for record in records {
             let reason = record.unusable.expect("read as a usable record");
@@ -621,12 +645,13 @@ mod tests {
                 &ObjectDeps::new(),
             )
             .unwrap();
+        // libtest names a test by its path inside the crate, so the crate
+        // name `module_path!` leads with is dropped. A wrong name selects
+        // no test and the child exits 0 having checked nothing.
+        let (_, module) = module_path!().split_once("::").unwrap();
+        let name = format!("{module}::strict_policy_rejects_cached_exceptions");
         let child = Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "store::tests::strict_policy_rejects_cached_exceptions",
-                "--nocapture",
-            ])
+            .args(["--exact", &name, "--nocapture"])
             .env("TOG_STORE", &store.root)
             .env("TOG_STORE_STRICT_CHILD", "1")
             .env("TOG_STRICT", "1")
@@ -634,10 +659,15 @@ mod tests {
             .env("HOME", &temp.0)
             .output()
             .unwrap();
+        let stdout = String::from_utf8_lossy(&child.stdout);
         assert!(
             child.status.success(),
-            "strict child failed: {}",
+            "strict child failed: {stdout}{}",
             String::from_utf8_lossy(&child.stderr)
+        );
+        assert!(
+            stdout.contains("test result: ok. 1 passed;"),
+            "the child did not run exactly this test: {stdout}"
         );
     }
 

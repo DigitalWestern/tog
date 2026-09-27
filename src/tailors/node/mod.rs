@@ -34,7 +34,9 @@ pub use project::*;
 pub use realize::*;
 
 use crate::kernel::activity::StoreActivity;
-use crate::kernel::fetch::{download_verified_digest_held, download_verified_held, Digest};
+use crate::kernel::fetch::{
+    download_toolchain_artifact_held, download_verified_digest_held, download_verified_held, Digest,
+};
 use crate::kernel::platform::{no_pin, Platform};
 use crate::kernel::store::Store;
 use crate::kernel::toolchain::document::Shipped;
@@ -408,7 +410,13 @@ pub fn realize_runtime(
         return Ok(store.object_path(&id));
     }
     let sha256 = spec.digest.hex();
-    let tarball = download_verified_held(store, activity, &spec.url, sha256)?;
+    let tarball = download_toolchain_artifact_held(
+        store,
+        activity,
+        &spec.provider,
+        &spec.url,
+        &Digest::sha256(sha256)?,
+    )?;
     let staged = store
         .stage_with_activity(activity)
         .map_err(|e| io::Error::new(e.kind(), format!("stage: {e}")))?;

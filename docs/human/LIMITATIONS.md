@@ -93,10 +93,14 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   2026-09-25 a seven-ecosystem lock written on Linux synced unchanged on an arm64 Mac, the
   Mac wrote the same bytes from scratch, and `tog status` matched. No CI job repeats it, so
   a change after that date is proven by test, not by two machines.
-- **A committed lock is a set of URLs to review.** A lock can aim at any allowlisted
-  provider host, and a hostile lock can cause an HTTPS request to a different allowlisted
-  host. Reviewing a lock diff is reviewing its URLs. The generic fetch helper still
-  accepts `file://`; the lock does not authorize that path, and does not close it either.
+- **A committed lock is a set of URLs to review.** A lock row's URL must sit under an
+  endpoint the source policy admits for the row's own `provider`, and so must every
+  redirect, but a hostile lock can still name another file under that publisher's
+  endpoints, or name a different shipped publisher as its provider. Reviewing a lock
+  diff is reviewing its URLs and providers. A downloaded toolchain row can no longer
+  name `file://` (a Rust `source = "path"` row names a local tree and downloads
+  nothing); the generic fetch helper that package-registry downloads use still
+  accepts it.
 - **Frozen validation reads declarative files only.** A project whose only statement of
   its runtime version is computed — `setup.py` metadata, `mix.exs` compatibility, a
   Gemfile `ruby` directive — cannot be validated under `--frozen` and is refused with the

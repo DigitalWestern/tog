@@ -3,14 +3,24 @@
 //!
 //! The shipped defaults are configuration, not a compiled allow-list baked
 //! into lock validity: a lock stays valid when policy tightens, and
-//! retrieval refuses instead. Every fetch and every redirect is checked
-//! against the effective policy under the row's own `provider`, so a
-//! redirect to another origin gets that origin's credential or none, never
-//! the original endpoint's. No secret is ever stored here or in a catalog
-//! row: a [`CredentialRef`] names where an operator keeps one.
+//! retrieval refuses instead. Every toolchain artifact download
+//! (`kernel::fetch::download_toolchain_artifact_held`) checks the row's URL
+//! against the effective policy under the row's own `provider` before it
+//! looks in the cache, and checks every redirect `Location` again before
+//! requesting it, so a redirect off the publisher's endpoints refuses.
+//! Package-registry downloads (npm, PyPI, crates, gems) are not toolchain
+//! rows and do not pass through here.
+//!
+//! An endpoint may name a credential *reference*, and a redirect is matched
+//! to the target endpoint, so it would get that endpoint's credential or
+//! none, never the original endpoint's. No shipped endpoint names one, and
+//! retrieval sends none (credential handling waits on #72). No secret is
+//! ever stored here or in a catalog row: a [`CredentialRef`] names where an
+//! operator keeps one.
 
 use super::invalid;
 use std::io;
+use std::sync::OnceLock;
 
 /// A named reference to a credential held outside tog (an environment
 /// variable or keychain entry an operator configures). Never the secret.
@@ -148,8 +158,15 @@ pub struct SourcePolicy {
     publishers: Vec<Publisher>,
 }
 
+#[cfg(test)]
+thread_local! {
+    static TEST_POLICY: std::cell::Cell<Option<&'static SourcePolicy>> =
+        const { std::cell::Cell::new(None) };
+}
+
 /// What an authorized fetch may do: contact `endpoint` on behalf of
-/// `publisher`, sending that endpoint's credential reference if it has one.
+/// `publisher`. The endpoint's credential reference, if it has one, is the
+/// only credential that hop could carry; retrieval sends none today (#72).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Authorized<'a> {
     pub publisher: &'a str,
@@ -214,6 +231,33 @@ impl SourcePolicy {
                 .expect("shipped publisher");
         }
         policy
+    }
+
+    /// The policy every toolchain download is checked against: the shipped
+    /// defaults, built once per process. Nothing configures it yet.
+    pub fn effective() -> &'static SourcePolicy {
+        #[cfg(test)]
+        if let Some(policy) = TEST_POLICY.with(std::cell::Cell::get) {
+            return policy;
+        }
+        static EFFECTIVE: OnceLock<SourcePolicy> = OnceLock::new();
+        EFFECTIVE.get_or_init(SourcePolicy::shipped)
+    }
+
+    /// Run `body` with `policy` as this thread's effective policy, for unit
+    /// tests whose rows point at a local address the shipped policy refuses.
+    /// The shipped policy itself is never loosened.
+    #[cfg(test)]
+    pub(crate) fn with_test_policy<R>(policy: SourcePolicy, body: impl FnOnce() -> R) -> R {
+        struct Restore(Option<&'static SourcePolicy>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                TEST_POLICY.with(|cell| cell.set(self.0));
+            }
+        }
+        let leaked: &'static SourcePolicy = Box::leak(Box::new(policy));
+        let _restore = Restore(TEST_POLICY.with(|cell| cell.replace(Some(leaked))));
+        body()
     }
 
     pub fn publishers(&self) -> &[Publisher] {
@@ -408,16 +452,8 @@ mod tests {
     }
 
     #[test]
-    fn shipped_defaults_are_anonymous_https_endpoints() {
+    fn shipped_github_publishers_admit_the_asset_cdn_hop() {
         let policy = SourcePolicy::shipped();
-        assert!(!policy.publishers().is_empty());
-        for publisher in policy.publishers() {
-            assert!(!publisher.endpoints.is_empty(), "{}", publisher.id);
-            for endpoint in &publisher.endpoints {
-                assert!(endpoint.base.starts_with("https://"), "{}", endpoint.base);
-                assert!(endpoint.credential.is_none(), "{}", endpoint.base);
-            }
-        }
         // GitHub release downloads redirect to the asset CDN; the shipped
         // publisher admits that hop under the same publisher.
         let hop = policy

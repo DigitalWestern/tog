@@ -16,7 +16,9 @@ pub mod tailor;
 
 use crate::kernel::activity::StoreActivity;
 use crate::kernel::digest::Algo;
-use crate::kernel::fetch::{download_verified_held, hash_file, CacheLease, Digest};
+use crate::kernel::fetch::{
+    download_toolchain_artifact_held, download_verified_held, hash_file, CacheLease, Digest,
+};
 use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::platform::Platform;
 use crate::kernel::sandbox::{force_env, BuildSpec, HostView};
@@ -143,6 +145,7 @@ const RUBY_RECIPE: &str = "ruby-toolchain/1";
 struct RubySpec {
     platform: Platform,
     version: String,
+    provider: String,
     url: String,
     sha256: String,
 }
@@ -173,6 +176,7 @@ fn ruby_spec(platform: Platform, selected: &Selected) -> io::Result<RubySpec> {
     Ok(RubySpec {
         platform,
         version: row.version,
+        provider: row.provider,
         url: row.url,
         sha256: row.digest.hex().to_string(),
     })
@@ -388,7 +392,13 @@ pub fn realize_runtime(
         crate::kernel::policy::check_cached_with_activity(store, activity, &id)?;
         return Ok(store.object_path(&id));
     }
-    let tarball = download_verified_held(store, activity, &spec.url, &spec.sha256)?;
+    let tarball = download_toolchain_artifact_held(
+        store,
+        activity,
+        &spec.provider,
+        &spec.url,
+        &Digest::sha256(&spec.sha256)?,
+    )?;
     let staged = store.stage_with_activity(activity)?;
     if let Err(error) = extract_ruby_bottle(activity, &tarball, &staged) {
         let _ = crate::kernel::store::remove_tree(&staged);
@@ -1308,6 +1318,7 @@ fn pin_spec(platform: Platform) -> RubySpec {
     RubySpec {
         platform: pin.platform,
         version: RUBY_VERSION.to_string(),
+        provider: pin.provider.clone(),
         url: pin.url.to_string(),
         sha256: pin.digest.hex().to_string(),
     }

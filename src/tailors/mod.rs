@@ -698,6 +698,7 @@ mod tests {
     #[test]
     fn every_tailor_ships_a_complete_catalog_under_the_shipped_source_policy() {
         let policy = SourcePolicy::shipped();
+        let mut providers = std::collections::BTreeSet::new();
         for tailor in registry() {
             let catalog = tailor.toolchain_catalog().unwrap();
             assert_eq!(catalog.ecosystem(), tailor.id());
@@ -717,6 +718,7 @@ mod tests {
                                 panic!("{}: {}: {error}", tailor.id(), bundle.release)
                             });
                     assert_eq!(authorized.publisher, row.provider);
+                    providers.insert(row.provider.clone());
                     assert!(
                         row.recipe.contains('/'),
                         "{}: recipe {}",
@@ -731,6 +733,130 @@ mod tests {
             let again = catalog.select(&Request::newest()).unwrap().bundle_id();
             assert_eq!(first, again);
         }
+        // Every shipped publisher serves some tailor's rows: a catalog that
+        // drops out of the registry leaves its publisher unused and fails here.
+        let shipped: std::collections::BTreeSet<String> = policy
+            .publishers()
+            .iter()
+            .map(|publisher| publisher.id.clone())
+            .collect();
+        assert_eq!(providers, shipped);
+    }
+
+    /// Every toolchain realization asks the source policy before it fetches:
+    /// with each row pointed off its publisher's endpoints, every one is
+    /// refused naming that URL, before the cache or the network is touched.
+    #[test]
+    fn every_toolchain_realization_checks_its_rows_against_the_source_policy() {
+        use crate::kernel::activity::StoreActivity;
+        use crate::kernel::store::Store;
+        type Realize = fn(&Store, &StoreActivity, Platform, &Selected) -> io::Result<PathBuf>;
+        fn rustfmt(
+            store: &Store,
+            activity: &StoreActivity,
+            platform: Platform,
+            selected: &Selected,
+        ) -> io::Result<PathBuf> {
+            // The formatter pairs with a Rust object that must exist.
+            let rust = store.object_path(&crate::kernel::provider::rust::runtime_object_id(
+                platform, selected,
+            )?);
+            std::fs::create_dir_all(&rust)?;
+            crate::tailors::cargo::rustfmt::ensure_rustfmt(
+                store, activity, platform, selected, &rust,
+            )
+        }
+        fn rust_extras(
+            store: &Store,
+            activity: &StoreActivity,
+            platform: Platform,
+            selected: &Selected,
+        ) -> io::Result<PathBuf> {
+            let extras = crate::kernel::provider::rust_extras::Extras {
+                components: vec!["clippy".into()],
+                targets: Vec::new(),
+                profile: None,
+            };
+            crate::kernel::provider::rust_extras::realize_toolchain(
+                store, activity, platform, selected, &extras,
+            )
+        }
+        let cases: [(&str, &str, Realize); 10] = [
+            (
+                "python",
+                "cpython",
+                crate::kernel::provider::cpython::realize_runtime,
+            ),
+            ("python", "uv", crate::kernel::provider::cpython::realize_uv),
+            (
+                "cargo",
+                "rustc",
+                crate::kernel::provider::rust::realize_runtime,
+            ),
+            ("cargo", "channel-manifest", rust_extras),
+            ("cargo", "rustfmt", rustfmt),
+            ("node", "node", crate::tailors::node::realize_runtime),
+            ("go", "go", crate::tailors::go::realize_runtime),
+            ("ruby", "ruby", crate::tailors::ruby::realize_runtime),
+            ("elixir", "otp", crate::tailors::elixir::realize_runtime),
+            (
+                "dotnet",
+                "dotnet-sdk",
+                crate::tailors::dotnet::realize_runtime,
+            ),
+        ];
+        let platform = Platform::host().unwrap();
+        let temp = crate::kernel::testutil::TempDir::new();
+        let store = scratch_store(&temp, "store");
+        std::fs::create_dir_all(store.root.join("tmp")).unwrap();
+        let activity = &store
+            .activity(crate::kernel::activity::ActivityMode::Shared)
+            .unwrap();
+        for (tailor, component, realize) in cases {
+            let catalog = by_id(tailor).unwrap().toolchain_catalog().unwrap();
+            let mut selected = crate::kernel::toolchain::shipped(&catalog).unwrap();
+            for row in &mut selected.bundle.artifacts {
+                row.url = format!("https://elsewhere.example/{}", row.component);
+            }
+            let error = realize(&store, activity, platform, &selected)
+                .err()
+                .unwrap_or_else(|| panic!("{tailor} {component} realized off-policy"));
+            assert_eq!(error.kind(), io::ErrorKind::PermissionDenied, "{error}");
+            assert!(
+                error.to_string().contains(&format!(
+                    "source policy refuses https://elsewhere.example/{component} for "
+                )),
+                "{tailor} {component}: {error}"
+            );
+        }
+    }
+
+    /// Each shipped publisher's real redirect chain stays inside its own
+    /// endpoints: one row of the default releases per publisher, on any
+    /// platform, is opened through the policy-checked fetch and its first
+    /// bytes read.
+    #[test]
+    #[ignore = "network: opens one shipped artifact per publisher"]
+    fn every_publishers_real_redirects_stay_inside_the_shipped_policy() {
+        use std::io::Read as _;
+        let policy = SourcePolicy::shipped();
+        let mut opened = std::collections::BTreeSet::new();
+        for tailor in registry() {
+            let catalog = tailor.toolchain_catalog().unwrap();
+            let bundle = crate::kernel::toolchain::shipped(&catalog).unwrap().bundle;
+            for row in &bundle.artifacts {
+                if !opened.insert(row.provider.clone()) {
+                    continue;
+                }
+                let (mut body, _) =
+                    crate::kernel::fetch::open_authorized(&policy, &row.provider, &row.url)
+                        .unwrap_or_else(|error| panic!("{}: {error}", row.provider));
+                let mut first = [0u8; 16];
+                body.read_exact(&mut first)
+                    .unwrap_or_else(|error| panic!("{}: {error}", row.url));
+            }
+        }
+        assert_eq!(opened.len(), policy.publishers().len());
     }
 
     #[test]

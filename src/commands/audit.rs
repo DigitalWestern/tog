@@ -1594,10 +1594,13 @@ mod tests {
             &temp.0,
             &[exception(INSTALL_SCRIPT_FAILED, "sharp@0.33.0")],
         )];
-        let mut chain = permissive();
+        let _env = policy::test_env_lock();
+        let _machine = MachinePolicy::trusting("extra-machine", &[test_key()]);
+        let (chain, _) = effective_policy(&temp.0, None).unwrap();
         assert!(judge(&temp.0, &chain, &closures)[0].passes());
-        policy::union(&mut chain, &read_policy_file(&extra).unwrap());
-        let verdicts = judge(&temp.0, &chain, &closures);
+        let file = read_policy_file(&extra).unwrap();
+        let (policy, _) = effective_policy(&temp.0, Some((extra.as_path(), &file))).unwrap();
+        let verdicts = judge(&temp.0, &policy, &closures);
         assert!(!verdicts[0].passes());
         assert_eq!(
             verdicts[0].denied.as_deref().unwrap()[0].kind,
@@ -1605,6 +1608,8 @@ mod tests {
         );
     }
 
+    /// A `--policy` file that denies nothing and is not strict leaves a
+    /// strict machine policy's denial and strictness in force.
     #[test]
     fn extra_policy_cannot_loosen_the_chain() {
         let temp = python_project("loosen");
@@ -1614,26 +1619,57 @@ mod tests {
             &temp.0,
             &[exception(GIT_DEPENDENCY, "left-pad")],
         )];
+        let _env = policy::test_env_lock();
+        let _machine = MachinePolicy::trusting("loosen-machine", &[test_key()]);
+        fs::write(
+            std::env::var_os("TOG_POLICY").unwrap(),
+            format!(
+                "strict = true\ndeny = [\"git-dependency\"]\n[signing]\ntrusted = [\"{}\"]\n",
+                test_key().public_key()
+            ),
+        )
+        .unwrap();
         let permissive = read_policy_file(&extra).unwrap();
-        let mut chain = deny(&[GIT_DEPENDENCY]);
-        policy::union(&mut chain, &permissive);
-        assert!(chain.deny.contains(GIT_DEPENDENCY));
-        assert!(!judge(&temp.0, &chain, &closures)[0].passes());
-        // Nor can it lift strict.
-        let mut strict = Policy {
-            strict: true,
-            deny: BTreeSet::new(),
-            signing: None,
-            ..Policy::default()
-        };
-        policy::union(&mut strict, &permissive);
-        assert!(strict.strict);
+        let (policy, _) = effective_policy(&temp.0, Some((extra.as_path(), &permissive))).unwrap();
+        assert!(policy.deny.contains(GIT_DEPENDENCY));
+        assert!(policy.strict);
+        assert!(!judge(&temp.0, &policy, &closures)[0].passes());
         // A file with an unknown kind is refused, not silently ignored; so
         // is a missing one, so the gate never runs under a policy the
         // caller did not get.
         fs::write(&extra, "deny = [\"typo\"]\n").unwrap();
         assert!(read_policy_file(&extra).is_err());
         assert!(read_policy_file(&temp.0.join("absent.toml")).is_err());
+    }
+
+    /// Only the machine scope vouches for keys. A `--policy` file's
+    /// `[signing]` list intersects with the machine's, so it can drop the
+    /// machine's key A but never add its own key B.
+    #[test]
+    fn extra_policy_can_drop_trusted_keys_but_never_add_one() {
+        let temp = python_project("extra-trust");
+        let extra = temp.0.join("company.toml");
+        let _env = policy::test_env_lock();
+        let _machine = MachinePolicy::trusting("extra-trust-machine", &[test_key()]);
+        let trusted_after = |keys: &[&SigningKey]| {
+            let entries: Vec<String> = keys
+                .iter()
+                .map(|key| format!("\"{}\"", key.public_key()))
+                .collect();
+            fs::write(
+                &extra,
+                format!("[signing]\ntrusted = [{}]\n", entries.join(", ")),
+            )
+            .unwrap();
+            let file = read_policy_file(&extra).unwrap();
+            let (policy, _) = effective_policy(&temp.0, Some((extra.as_path(), &file))).unwrap();
+            trusted_keys(&policy).unwrap().clone()
+        };
+        let only_b = trusted_after(&[other_key()]);
+        assert!(!only_b.contains(&other_key().public_key()), "{only_b:?}");
+        assert!(only_b.is_empty(), "{only_b:?}");
+        let both = trusted_after(&[test_key(), other_key()]);
+        assert_eq!(both, trusting(&[test_key()]).unwrap().trusted);
     }
 
     #[test]

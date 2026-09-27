@@ -5,10 +5,10 @@
 //! into [`Bundle`]s and a [`Catalog`] with an explicit default; nothing here
 //! names an ecosystem. `select` chooses a bundle from the releases that are
 //! complete on every supported platform, `source` is the typed endpoint
-//! policy retrieval will check, and `legacy` seeds a selection from a closure
-//! written before the lock existed. Realization reads the selected bundle's
-//! rows: a catalog row carries the URL and digest the object identity is
-//! built from, it does not mint a new identity.
+//! policy every toolchain download checks, and `legacy` seeds a selection
+//! from a closure written before the lock existed. Realization reads the
+//! selected bundle's rows: a catalog row carries the URL and digest the
+//! object identity is built from, it does not mint a new identity.
 
 pub mod document;
 pub mod input;

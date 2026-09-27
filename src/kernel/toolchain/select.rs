@@ -642,25 +642,50 @@ mod tests {
         );
     }
 
+    /// Embedded components ship inside their parent's archive, so they have
+    /// no artifact rows of their own. That must not make the release look
+    /// incomplete: the newest release, the one with embedded components,
+    /// wins over an older plain one, and carries them with their parents.
     #[test]
     fn a_bundle_with_embedded_components_selects_and_carries_them() {
-        let mut node = bundle("node", "node", "24.20.0", Platform::ALL);
+        let older = bundle("node-22", "node", "22.21.0", Platform::ALL);
+        let mut node = bundle("node-24", "node", "24.20.0", Platform::ALL);
         node.components
             .push(Component::embedded("bundled-npm", "11.19.0", "node"));
         node.components
             .push(Component::embedded("node-gyp", "12.4.0", "bundled-npm"));
-        let catalog = Catalog::new("node", vec![node]).unwrap();
+        let catalog = Catalog::new("node", vec![older, node]).unwrap();
         let selected = catalog.select(&Request::newest()).unwrap();
+        assert_eq!(selected.release, "node-24");
+        let carried: Vec<(&str, &str, Option<&str>)> = selected
+            .components
+            .iter()
+            .map(|c| {
+                (
+                    c.name.as_str(),
+                    c.version.as_str(),
+                    c.embedded_in.as_deref(),
+                )
+            })
+            .collect();
         assert_eq!(
-            selected
-                .component("node-gyp")
-                .unwrap()
-                .embedded_in
-                .as_deref(),
-            Some("bundled-npm")
+            carried,
+            [
+                ("node", "24.20.0", None),
+                ("bundled-npm", "11.19.0", Some("node")),
+                ("node-gyp", "12.4.0", Some("bundled-npm")),
+            ]
         );
         assert!(selected.artifact(LINUX, "node-gyp").is_none());
-        let _: &ArtifactRow = selected.artifact(LINUX, "node").unwrap();
+        let node_row: &ArtifactRow = selected.artifact(LINUX, "node").unwrap();
+        assert_eq!(node_row.component, "node");
+        // The older release is still selectable when asked for, and carries
+        // no embedded components.
+        let older = catalog
+            .select(&Request::exact("node", "22.21.0").unwrap())
+            .unwrap();
+        assert_eq!(older.release, "node-22");
+        assert_eq!(older.components.len(), 1);
     }
 
     #[test]

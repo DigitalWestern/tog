@@ -489,10 +489,15 @@ component (`24.0.x` is `>=24.0,<24.1`), and `>`, `<=`, `^`, `~` and
 hyphen ranges bound the stated line (`<=22` is `<23`, `1.2 - 2.3` is
 `>=1.2,<2.4`). The Node catalog holds every release of the LTS lines
 Node's release schedule lists as active, so an exact `.node-version` on
-one of them selects it. `SourcePolicy` is the typed endpoint policy retrieval will check
-(shipped `https://` defaults per publisher, credential references only,
+one of them selects it. `SourcePolicy` is the typed endpoint policy every toolchain
+download checks (shipped `https://` defaults per publisher, credential references only,
 never a secret, and not part of lock validity; the defaults are data the
-kernel owns, so a new tailor's publisher is added there). `seed` chooses a bundle
+kernel owns, so a new tailor's publisher is added there). A toolchain row's
+URL must fall under one of its `provider`'s endpoints before the cache is
+consulted, and a network fetch follows redirects itself, at most ten and
+`https://` only, authorizing each `Location` before requesting it; a row or
+hop off the policy fails with the URL and publisher named. No credential is
+sent yet (#72). Package-registry downloads do not pass through it. `seed` chooses a bundle
 from a pre-lock closure's recorded platform and exact versions and refuses,
 naming `tog update --toolchain`, when either is missing, when the
 version is not in the catalog, or when the bundle is incomplete on the

@@ -469,6 +469,18 @@ mod tests {
     /// and the descriptor is put back afterwards, on the error path too.
     #[test]
     fn a_job_and_its_children_print_to_the_redirected_descriptor() {
+        // What a descriptor names, as (device, inode): fd 1 equal before
+        // and after means it was put back, not merely that a stdout exists.
+        let identity = |fd: i32| {
+            let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+            // SAFETY: fstat writes a full `stat` into the buffer on success.
+            assert_eq!(unsafe { libc::fstat(fd, stat.as_mut_ptr()) }, 0);
+            // SAFETY: initialized by the successful fstat above.
+            let stat = unsafe { stat.assume_init() };
+            (stat.st_dev, stat.st_ino)
+        };
+        let stdout = io::stdout().as_raw_fd();
+        let before = identity(stdout);
         let mut fds = [0i32; 2];
         assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
         let (read_end, write_end) = (fds[0], fds[1]);
@@ -485,6 +497,10 @@ mod tests {
         })
         .unwrap_err();
         assert_eq!(error.to_string(), "job failed");
+        // Checked before the pipe is drained: a descriptor left pointing at
+        // the pipe would hold its write end open and block the read below.
+        assert_eq!(identity(stdout), before, "fd 1 was not restored");
+        assert_ne!(identity(write_end), before);
         unsafe { libc::close(write_end) };
         let mut captured = String::new();
         // SAFETY: the read end is ours; File takes ownership and closes it.
@@ -497,14 +513,6 @@ mod tests {
             2,
             "{captured}"
         );
-        // fd 1 is stdout again: a child sees a descriptor that is not the
-        // (now closed) pipe.
-        let after = std::process::Command::new("sh")
-            .args(["-c", "echo after >&1"])
-            .stdout(std::process::Stdio::piped())
-            .output()
-            .unwrap();
-        assert_eq!(String::from_utf8_lossy(&after.stdout), "after\n");
     }
 
     #[test]
@@ -542,8 +550,19 @@ mod tests {
     /// pipe, so `live` must be false, nothing may be drawn, and no progress
     /// line may be left holding the cursor for the panic hook to clear.
     /// The byte count is kept regardless, because the caller reads it.
+    /// `LINE_HELD` is one process-wide flag; the tests that set and read
+    /// it take this lock so a parallel one cannot flip it mid-assertion.
+    static LINE_HELD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn line_held_lock() -> std::sync::MutexGuard<'static, ()> {
+        LINE_HELD_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     #[test]
     fn progress_is_silent_when_stderr_is_not_a_terminal() {
+        let _line = line_held_lock();
         assert!(
             !io::stderr().is_terminal(),
             "the test harness is expected to capture stderr"
@@ -570,6 +589,7 @@ mod tests {
     /// mid-transfer does not print onto the tail of the progress line.
     #[test]
     fn a_held_progress_line_is_erased_once() {
+        let _line = line_held_lock();
         LINE_HELD.store(true, Ordering::Relaxed);
         erase_progress_line();
         assert!(!LINE_HELD.load(Ordering::Relaxed));

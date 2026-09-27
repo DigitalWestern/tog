@@ -1,10 +1,13 @@
 //! Verified downloads into the store (kernel layer): fetch a URL, check
-//! its digest, and hold the bytes as a store object.
+//! its digest, and hold the bytes as a store object. A toolchain artifact
+//! row also passes the source policy, on its URL and on every redirect
+//! (`download_toolchain_artifact_held`).
 
 use crate::kernel::activity::StoreActivity;
 use crate::kernel::digest::Algo;
 pub use crate::kernel::digest::Digest;
 use crate::kernel::store::{self, Store};
+use crate::kernel::toolchain::SourcePolicy;
 use sha1::Sha1;
 use sha2::{Digest as _, Sha256, Sha512};
 use std::collections::HashMap;
@@ -533,6 +536,208 @@ pub(crate) fn download_verified_digest_held(
     url: &str,
     digest: &Digest,
 ) -> io::Result<CacheLease> {
+    cache_or_download(store, activity, url, digest, || {
+        open_url(url, "download", None)
+    })
+}
+
+/// Download one toolchain artifact row: the bytes a catalog or lock row
+/// names by `url` and `digest`, published by the row's `provider`. The
+/// effective [`SourcePolicy`] must authorize `url` for `publisher` before
+/// anything else happens, cache hit or not, so a row the policy refuses is
+/// refused the same way online and offline. A network fetch then follows
+/// redirects itself and authorizes every `Location` before requesting it.
+/// No credential is sent: none is shipped, and sending one waits on #72.
+pub(crate) fn download_toolchain_artifact_held(
+    store: &Store,
+    activity: &StoreActivity,
+    publisher: &str,
+    url: &str,
+    digest: &Digest,
+) -> io::Result<CacheLease> {
+    download_toolchain_artifact_under(
+        SourcePolicy::effective(),
+        store,
+        activity,
+        publisher,
+        url,
+        digest,
+    )
+}
+
+fn download_toolchain_artifact_under(
+    policy: &SourcePolicy,
+    store: &Store,
+    activity: &StoreActivity,
+    publisher: &str,
+    url: &str,
+    digest: &Digest,
+) -> io::Result<CacheLease> {
+    policy.authorize(publisher, url)?;
+    cache_or_download(store, activity, url, digest, || {
+        open_authorized(policy, publisher, url)
+    })
+}
+
+/// The most redirects one toolchain download follows.
+const MAX_REDIRECTS: usize = 10;
+
+/// What one request answered: the body to stream, or where to go next.
+enum Hop<B> {
+    Body(B),
+    Redirect(String),
+}
+
+/// Open a toolchain artifact over https, following redirects by hand so
+/// that every hop is authorized for `publisher` before it is requested.
+pub(crate) fn open_authorized(
+    policy: &SourcePolicy,
+    publisher: &str,
+    url: &str,
+) -> io::Result<(Box<dyn Read>, Option<u64>)> {
+    let agent = ureq::AgentBuilder::new()
+        .https_only(true)
+        .redirects(0)
+        .build();
+    follow_redirects(
+        url,
+        |next| policy.authorize(publisher, next).map(drop),
+        |hop| {
+            // With redirects off, ureq hands a 3xx back as a response.
+            let resp = agent
+                .get(hop)
+                .call()
+                .map_err(|e| network_error("download", hop, e))?;
+            // Spelled as a path call: the architecture scan reads a bare
+            // `.status()` as a child process.
+            let status = ureq::Response::status(&resp);
+            if (300..400).contains(&status) {
+                let location = resp.header("Location").ok_or_else(|| {
+                    io::Error::other(format!(
+                        "download {hop}: redirect {status} names no Location"
+                    ))
+                })?;
+                return Ok(Hop::Redirect(location.to_string()));
+            }
+            let declared = resp
+                .header("Content-Length")
+                .and_then(|value| value.trim().parse::<u64>().ok());
+            Ok(Hop::Body((
+                Box::new(resp.into_reader()) as Box<dyn Read>,
+                declared,
+            )))
+        },
+    )
+}
+
+/// Request `url`, and each redirect after it, through `request` until one
+/// answers with a body. `authorize` runs on every URL before it is
+/// requested; a relative `Location` resolves against the URL that sent it;
+/// a hop off `https://` or past [`MAX_REDIRECTS`] refuses.
+fn follow_redirects<B>(
+    url: &str,
+    authorize: impl Fn(&str) -> io::Result<()>,
+    mut request: impl FnMut(&str) -> io::Result<Hop<B>>,
+) -> io::Result<B> {
+    let mut current = url.to_string();
+    authorize(&current)?;
+    let mut followed = 0;
+    loop {
+        let location = match request(&current)? {
+            Hop::Body(body) => return Ok(body),
+            Hop::Redirect(location) => location,
+        };
+        if followed == MAX_REDIRECTS {
+            return Err(io::Error::other(format!(
+                "download {url}: more than {MAX_REDIRECTS} redirects; refusing"
+            )));
+        }
+        followed += 1;
+        let next = resolve_location(&current, &location);
+        if !next.starts_with("https://") {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!(
+                    "download {url}: {current} redirects to {next}, which is not https://; refusing"
+                ),
+            ));
+        }
+        authorize(&next)?;
+        current = next;
+    }
+}
+
+/// A redirect `Location` as an absolute URL, resolved against `base` the
+/// way RFC 3986 section 5.2 does: an absolute URL stands as it is, and a
+/// network-path, absolute-path, query-only or relative-path reference takes
+/// what it lacks from `base`, with `.` and `..` segments applied.
+fn resolve_location(base: &str, location: &str) -> String {
+    let location = location.trim();
+    let has_scheme = location.split_once(':').is_some_and(|(scheme, _)| {
+        scheme.starts_with(|c: char| c.is_ascii_alphabetic())
+            && scheme
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+    });
+    if has_scheme {
+        return location.to_string();
+    }
+    let (scheme, rest) = base.split_once("://").unwrap_or(("https", base));
+    if let Some(network) = location.strip_prefix("//") {
+        return format!("{scheme}://{network}");
+    }
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let origin = format!("{scheme}://{}", &rest[..authority_end]);
+    let base_path = rest[authority_end..].split(['?', '#']).next().unwrap_or("");
+    let base_path = if base_path.is_empty() { "/" } else { base_path };
+    if location.is_empty() || location.starts_with('#') {
+        return base.split('#').next().unwrap_or(base).to_string();
+    }
+    if location.starts_with('?') {
+        return format!("{origin}{base_path}{location}");
+    }
+    let (path, tail) = location.split_at(location.find(['?', '#']).unwrap_or(location.len()));
+    let merged = if path.starts_with('/') {
+        path.to_string()
+    } else {
+        let directory = &base_path[..base_path.rfind('/').map_or(0, |i| i + 1)];
+        format!("{directory}{path}")
+    };
+    format!("{origin}{}{tail}", remove_dot_segments(&merged))
+}
+
+/// An absolute path with its `.` and `..` segments applied.
+fn remove_dot_segments(path: &str) -> String {
+    let segments: Vec<&str> = path.split('/').skip(1).collect();
+    let mut out: Vec<&str> = Vec::new();
+    for (index, segment) in segments.iter().enumerate() {
+        match *segment {
+            "." => {}
+            ".." => {
+                out.pop();
+            }
+            other => {
+                out.push(other);
+                continue;
+            }
+        }
+        // A trailing `.` or `..` names a directory: keep its slash.
+        if index + 1 == segments.len() {
+            out.push("");
+        }
+    }
+    format!("/{}", out.join("/"))
+}
+
+/// A verified cache entry for `digest`, fetched through `open` only when
+/// the cache does not already hold good bytes.
+fn cache_or_download(
+    store: &Store,
+    activity: &StoreActivity,
+    url: &str,
+    digest: &Digest,
+    open: impl FnOnce() -> io::Result<(Box<dyn Read>, Option<u64>)>,
+) -> io::Result<CacheLease> {
     store.require_activity(activity, "a verified download")?;
     let activity = activity.clone();
     let gc_lock = acquire_gc_lock(store)?;
@@ -573,7 +778,7 @@ pub(crate) fn download_verified_digest_held(
         digest.hex()
     ));
 
-    let (mut reader, declared) = open_url(url, "download", None)?;
+    let (mut reader, declared) = open()?;
     // A first sync moves hundreds of MB. Narrate it, so the wait has a
     // visible cause. Inert off a terminal and under --quiet, and erased
     // when the download ends.
@@ -890,5 +1095,205 @@ mod tests {
             released,
             "the gc lock was not released when the lease was dropped"
         );
+    }
+
+    const UV_RELEASE: &str = "https://github.com/astral-sh/uv/releases/download/0.9.0/uv.tar.gz";
+
+    /// Walk `follow_redirects` over a fake network where each URL in `hops`
+    /// redirects to its `Location` and any other URL answers with a body.
+    /// Returns the outcome and every URL actually requested.
+    fn walk(
+        start: &str,
+        hops: &[(&str, &str)],
+        authorize: impl Fn(&str) -> io::Result<()>,
+    ) -> (io::Result<String>, Vec<String>) {
+        let mut requested = Vec::new();
+        let outcome = follow_redirects(start, authorize, |url| {
+            requested.push(url.to_string());
+            Ok(match hops.iter().find(|(from, _)| *from == url) {
+                Some((_, location)) => Hop::Redirect(location.to_string()),
+                None => Hop::Body(url.to_string()),
+            })
+        });
+        (outcome, requested)
+    }
+
+    fn as_uv(policy: &SourcePolicy) -> impl Fn(&str) -> io::Result<()> + '_ {
+        |url| policy.authorize("uv", url).map(drop)
+    }
+
+    #[test]
+    fn a_redirect_chain_inside_the_publishers_endpoints_is_followed() {
+        let policy = SourcePolicy::shipped();
+        let cdn = "https://objects.githubusercontent.com/release/1";
+        let assets = "https://release-assets.githubusercontent.com/release/2";
+        let (outcome, requested) = walk(
+            UV_RELEASE,
+            &[(UV_RELEASE, cdn), (cdn, assets)],
+            as_uv(&policy),
+        );
+        assert_eq!(outcome.unwrap(), assets);
+        assert_eq!(requested, [UV_RELEASE, cdn, assets]);
+    }
+
+    #[test]
+    fn a_hop_off_the_publishers_endpoints_is_refused_before_it_is_requested() {
+        let policy = SourcePolicy::shipped();
+        for off in [
+            "https://evil.example/uv.tar.gz",
+            // Another publisher's endpoint is still off this publisher's.
+            "https://github.com/astral-sh/python-build-standalone/releases/download/x/y.tar.gz",
+        ] {
+            let (outcome, requested) = walk(UV_RELEASE, &[(UV_RELEASE, off)], as_uv(&policy));
+            let error = outcome.unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::PermissionDenied, "{error}");
+            assert!(error.to_string().contains(off), "{error}");
+            assert!(error.to_string().contains("for uv"), "{error}");
+            assert_eq!(requested, [UV_RELEASE], "{off} was requested");
+        }
+        // The first URL is checked too: nothing is requested at all.
+        let (outcome, requested) = walk("file:///tmp/uv.tar.gz", &[], as_uv(&policy));
+        assert_eq!(outcome.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+        assert!(requested.is_empty());
+    }
+
+    #[test]
+    fn a_redirect_off_https_is_refused_whatever_the_policy_admits() {
+        let anything = |_: &str| Ok(());
+        let plain = "http://objects.githubusercontent.com/release/1";
+        let (outcome, requested) = walk(UV_RELEASE, &[(UV_RELEASE, plain)], anything);
+        let error = outcome.unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied, "{error}");
+        assert!(error.to_string().contains("not https://"), "{error}");
+        assert_eq!(requested, [UV_RELEASE]);
+    }
+
+    #[test]
+    fn relative_locations_resolve_against_the_url_that_sent_them() {
+        let policy = SourcePolicy::shipped();
+        let moved = "https://github.com/astral-sh/uv/releases/download/0.9.1/uv.tar.gz";
+        let sibling = "https://github.com/astral-sh/uv/releases/download/0.9.2/uv.tar.gz";
+        let cdn = "https://objects.githubusercontent.com/release/3";
+        let (outcome, requested) = walk(
+            UV_RELEASE,
+            &[
+                (
+                    UV_RELEASE,
+                    "/astral-sh/uv/releases/download/0.9.1/uv.tar.gz",
+                ),
+                (moved, "../0.9.2/./uv.tar.gz"),
+                (sibling, "//objects.githubusercontent.com/release/3"),
+            ],
+            as_uv(&policy),
+        );
+        assert_eq!(outcome.unwrap(), cdn);
+        assert_eq!(requested, [UV_RELEASE, moved, sibling, cdn]);
+        // A relative reference that climbs out of the publisher's prefix
+        // resolves first and is then refused like any other foreign URL.
+        let (outcome, requested) = walk(
+            UV_RELEASE,
+            &[(UV_RELEASE, "../../../../other/releases/download/x")],
+            as_uv(&policy),
+        );
+        let error = outcome.unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("https://github.com/astral-sh/other/releases/download/x"),
+            "{error}"
+        );
+        assert_eq!(requested, [UV_RELEASE]);
+    }
+
+    #[test]
+    fn resolve_location_follows_rfc_3986_reference_forms() {
+        let base = "https://h.example/a/b/c?q=1#f";
+        for (location, want) in [
+            ("https://o.example/x", "https://o.example/x"),
+            ("//o.example/x", "https://o.example/x"),
+            ("/x/y", "https://h.example/x/y"),
+            ("d", "https://h.example/a/b/d"),
+            ("./d?z", "https://h.example/a/b/d?z"),
+            ("../d", "https://h.example/a/d"),
+            ("../../../../d", "https://h.example/d"),
+            ("..", "https://h.example/a/"),
+            ("?z=2", "https://h.example/a/b/c?z=2"),
+            ("#g", "https://h.example/a/b/c?q=1"),
+            ("", "https://h.example/a/b/c?q=1"),
+        ] {
+            assert_eq!(resolve_location(base, location), want, "{location:?}");
+        }
+        assert_eq!(
+            resolve_location("https://h.example", "d"),
+            "https://h.example/d"
+        );
+    }
+
+    #[test]
+    fn at_most_ten_redirects_are_followed() {
+        let urls: Vec<String> = (0..=11)
+            .map(|n| format!("https://objects.githubusercontent.com/hop/{n}"))
+            .collect();
+        let chain = |length: usize| -> Vec<(&str, &str)> {
+            (0..length)
+                .map(|n| (urls[n].as_str(), urls[n + 1].as_str()))
+                .collect()
+        };
+        let anything = |_: &str| Ok(());
+        let (outcome, requested) = walk(&urls[0], &chain(10), anything);
+        assert_eq!(outcome.unwrap(), urls[10]);
+        assert_eq!(requested.len(), 11);
+        let (outcome, requested) = walk(&urls[0], &chain(11), anything);
+        let error = outcome.unwrap_err();
+        assert!(
+            error.to_string().contains("more than 10 redirects"),
+            "{error}"
+        );
+        assert_eq!(requested.len(), 11, "the eleventh redirect was followed");
+    }
+
+    #[test]
+    fn a_toolchain_row_the_policy_refuses_is_refused_even_when_cached() {
+        let scratch = TempDir::named("fetch-policy-test");
+        let root = scratch.0.clone();
+        for sub in ["objects", "meta", "cache/sha256", "tmp"] {
+            fs::create_dir_all(root.join(sub)).unwrap();
+        }
+        let store = Store { root: root.clone() };
+        let activity = &store
+            .activity(crate::kernel::activity::ActivityMode::Shared)
+            .unwrap();
+        let input = root.join("artifact");
+        fs::write(&input, b"toolchain").unwrap();
+        let (hex, _) = cache_insert(&store, activity, &input).unwrap();
+        let digest = Digest::sha256(&hex).unwrap();
+        let mut policy = SourcePolicy::empty();
+        policy
+            .allow(
+                "test",
+                crate::kernel::toolchain::Endpoint::new("https://127.0.0.1:9/").unwrap(),
+            )
+            .unwrap();
+        // The generic path would serve this file:// URL; a toolchain row
+        // may not name one, cache hit or not.
+        let local = format!("file://{}", input.display());
+        assert!(download_verified_digest_held(&store, activity, &local, &digest).is_ok());
+        let error =
+            download_toolchain_artifact_under(&policy, &store, activity, "test", &local, &digest)
+                .err()
+                .expect("a file:// toolchain row was served");
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied, "{error}");
+        // Another publisher's row is refused on the same cache hit.
+        let admitted = "https://127.0.0.1:9/artifact.tar.gz";
+        let error = download_toolchain_artifact_under(
+            &policy, &store, activity, "other", admitted, &digest,
+        )
+        .err()
+        .expect("an unknown publisher's row was served");
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied, "{error}");
+        // An admitted row is served from the cache without the network:
+        // nothing answers at that address.
+        download_toolchain_artifact_under(&policy, &store, activity, "test", admitted, &digest)
+            .unwrap();
     }
 }
