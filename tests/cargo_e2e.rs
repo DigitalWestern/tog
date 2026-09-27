@@ -228,13 +228,16 @@ fn cargo_sync_build_and_run_again_offline() {
 }
 
 /// A Cargo exception is published on the Cargo closure only. A git
-/// dependency is the exception a Cargo sync records.
+/// dependency is the exception a Cargo sync records; the project is also a
+/// Python project, so there is a second closure the exception must stay
+/// off.
 #[test]
 #[ignore]
-fn dependency_edit_exception_is_not_published_to_cargo_closure() {
+fn git_dependency_exception_is_published_on_the_cargo_closure_only() {
     let temp = TempDir::new("cargo-e2e");
     let project = temp.0.join("cargo-hello");
     copy_tree(&fixture("cargo-hello"), &project);
+    std::fs::write(project.join("requirements.txt"), "six==1.17.0\n").unwrap();
     let tmp = temp.0.join("tmp");
     std::fs::create_dir_all(tmp.join("home")).unwrap();
     let store = temp.0.join("store");
@@ -260,11 +263,13 @@ fn dependency_edit_exception_is_not_published_to_cargo_closure() {
         exceptions[0]["detail"]
     );
 
+    let mut others = Vec::new();
     for entry in std::fs::read_dir(&closures).unwrap() {
         let path = entry.unwrap().path();
         if path.file_name().and_then(|name| name.to_str()) == Some("cargo.json") {
             continue;
         }
+        others.push(path.file_name().unwrap().to_string_lossy().to_string());
         let closure: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         let other = closure["body"]["exceptions"]
@@ -279,6 +284,8 @@ fn dependency_edit_exception_is_not_published_to_cargo_closure() {
             path.display()
         );
     }
+    // The loop above checked something: the Python closure is there.
+    assert_eq!(others, ["python.json"], "the closures besides cargo.json");
 }
 
 /// Components and targets a `rust-toolchain.toml` asks for are provisioned

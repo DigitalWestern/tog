@@ -46,7 +46,7 @@ use super::rust_channel::{Archive, ChannelManifest, ANY_TARGET, STD_PACKAGE};
 use crate::kernel::activity::StoreActivity;
 use crate::kernel::archive::{self, Compression};
 use crate::kernel::digest::Digest;
-use crate::kernel::fetch::download_verified_digest_held;
+use crate::kernel::fetch::download_toolchain_artifact_held;
 use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::platform::Platform;
 use crate::kernel::store::{ObjectDeps, Store};
@@ -240,7 +240,14 @@ fn plan(
     }
     let version = selected.version("rustc")?;
     let row = rust::channel_manifest(platform, selected)?;
-    let manifest = load_manifest(store, activity, version, &row.url, &row.digest)?;
+    let manifest = load_manifest(
+        store,
+        activity,
+        version,
+        &row.provider,
+        &row.url,
+        &row.digest,
+    )?;
     plan_with_manifest(platform, selected, &wanted, &manifest, &row.digest)
 }
 
@@ -254,15 +261,18 @@ fn load_manifest(
     store: &Store,
     activity: &StoreActivity,
     version: &str,
+    publisher: &str,
     url: &str,
     pin: &Digest,
 ) -> io::Result<ChannelManifest> {
-    let lease = download_verified_digest_held(store, activity, url, pin).map_err(|error| {
-        io::Error::new(
-            error.kind(),
-            format!("fetch the channel manifest for Rust {version}: {error}"),
-        )
-    })?;
+    let lease = download_toolchain_artifact_held(store, activity, publisher, url, pin).map_err(
+        |error| {
+            io::Error::new(
+                error.kind(),
+                format!("fetch the channel manifest for Rust {version}: {error}"),
+            )
+        },
+    )?;
     let text = fs::read_to_string(&*lease).map_err(|error| {
         io::Error::new(
             error.kind(),
@@ -524,9 +534,14 @@ pub fn realize_toolchain(
         return Ok(store.object_path(&id));
     }
     let base = rust::realize_runtime(store, activity, platform, selected)?;
+    // The channel manifest's publisher is the one whose archives it lists.
+    let publisher = rust::channel_manifest(platform, selected)?.provider;
     let mut parts = Vec::new();
     for extension in &plan.extensions {
-        parts.push((extension, realize_component(store, activity, extension)?));
+        parts.push((
+            extension,
+            realize_component(store, activity, &publisher, extension)?,
+        ));
     }
     let staged = store.stage_with_activity(activity)?;
     let assembled = assemble(&staged, &base, &parts).and_then(|()| {
@@ -563,6 +578,7 @@ fn base_id(base: &Path) -> io::Result<String> {
 fn realize_component(
     store: &Store,
     activity: &StoreActivity,
+    publisher: &str,
     extension: &Extension,
 ) -> io::Result<PathBuf> {
     let id = extension.identity.object_id();
@@ -571,7 +587,13 @@ fn realize_component(
         return Ok(store.object_path(&id));
     }
     let archive = &extension.archive;
-    let lease = download_verified_digest_held(store, activity, &archive.url, &archive.digest)?;
+    let lease = download_toolchain_artifact_held(
+        store,
+        activity,
+        publisher,
+        &archive.url,
+        &archive.digest,
+    )?;
     let entries = archive::list_with_activity(activity, &lease, archive.compression)?;
     check_installer_layout(&entries, archive)?;
     let staged = store.stage_with_activity(activity)?;
@@ -1110,9 +1132,22 @@ mod tests {
                 .unwrap(),
         )
         .unwrap();
-        let offline = "http://127.0.0.1:9/channel-rust-1.96.1.toml";
-        let error =
-            load_manifest(&store, &activity, rust::RUST_VERSION, offline, &pin).unwrap_err();
+        // The shipped policy refuses a loopback address, so this test admits
+        // one for its own publisher.
+        let mut policy = crate::kernel::toolchain::SourcePolicy::empty();
+        policy
+            .allow(
+                "test",
+                crate::kernel::toolchain::Endpoint::new("https://127.0.0.1:9/").unwrap(),
+            )
+            .unwrap();
+        let offline = "https://127.0.0.1:9/channel-rust-1.96.1.toml";
+        let load = || {
+            crate::kernel::toolchain::SourcePolicy::with_test_policy(policy.clone(), || {
+                load_manifest(&store, &activity, rust::RUST_VERSION, "test", offline, &pin)
+            })
+        };
+        let error = load().unwrap_err();
         assert!(
             error
                 .to_string()
@@ -1120,7 +1155,7 @@ mod tests {
             "{error}"
         );
         crate::kernel::fetch::cache_insert(&store, &activity, &fixture).unwrap();
-        let manifest = load_manifest(&store, &activity, rust::RUST_VERSION, offline, &pin).unwrap();
+        let manifest = load().unwrap();
         let wanted = extras(&["clippy"], &["wasm32-unknown-unknown"]);
         let plan = plan_with_manifest(LINUX, &shipped(), &wanted, &manifest, &pin).unwrap();
         assert_eq!(plan.extensions.len(), 2);

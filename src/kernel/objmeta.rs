@@ -1410,11 +1410,22 @@ mod tests {
     #[test]
     fn adapter_go_modcache_refuses_an_ambiguous_toolchain_match() {
         let artifact = sha256('4');
-        // Two Go objects with the same version and artifact: the extractor
-        // fingerprint cannot pick between them, so it must not try.
+        // Two Go objects with the same version and artifact, told apart only
+        // by an input the extractor fingerprint does not cover: it cannot
+        // pick between them, so it must not try. Differing identities keep
+        // the pair a store could actually hold (one id per identity).
         let one = go_record("1.25.3", &artifact);
-        let mut two = go_record("1.25.3", &artifact);
-        two.id = oid('9', "go-1.25.3");
+        let two = legacy_record(ident(
+            "go",
+            "go",
+            "1.25.3",
+            &[
+                ("schema", "go-toolchain/1"),
+                ("artifact_sha256", &artifact),
+                ("platform", "aarch64-unknown-linux-gnu"),
+            ],
+        ));
+        assert_ne!(one.id, two.id);
         let reason = unresolved(
             ident(
                 "go-modcache",
@@ -2588,11 +2599,22 @@ mod tests {
             );
             for key in required {
                 match adapt_without(record, key, others.clone()) {
-                    Adaptation::Unresolved(reason) => assert!(
-                        reason.contains(key),
-                        "deleting {key} of {} did not name it: {reason}",
-                        record.identity.kind
-                    ),
+                    Adaptation::Unresolved(reason) => {
+                        // Every refusal leads with `describe()`, which says
+                        // "schema" whether or not one is present, so only
+                        // the cause after it can prove the key was named.
+                        let (_, cause) = reason.split_once(": ").unwrap();
+                        let named = if *key == "schema" {
+                            "schema input"
+                        } else {
+                            key
+                        };
+                        assert!(
+                            cause.contains(named),
+                            "deleting {key} of {} did not name it: {reason}",
+                            record.identity.kind
+                        )
+                    }
                     Adaptation::Proven(_) => panic!(
                         "deleting required input {key} of {} still certified a complete set",
                         record.identity.kind
@@ -2663,6 +2685,7 @@ mod tests {
         for key in [
             "mod:golang.org/x/net@v0.1.0",
             "modfile:golang.org/x/net@v0.1.0",
+            "info:golang.org/x/net@v0.1.0",
         ] {
             let mut inputs: Vec<(String, String)> = full
                 .iter()

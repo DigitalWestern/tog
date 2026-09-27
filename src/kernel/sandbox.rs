@@ -1556,28 +1556,45 @@ mod tests {
             TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir(&scratch).unwrap();
+        // A host without `~/.ssh` would pass the first check vacuously, so
+        // two controls this test owns: a sentinel beside the scratch
+        // directory, undeclared and so as hidden as `~/.ssh`, and a file in
+        // the declared scratch directory, which must be seen.
+        let hidden = cache.join(format!(
+            "tog-test-ssh-sentinel-{}",
+            TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::write(&hidden, b"secret").unwrap();
+        let visible = scratch.join("declared");
+        fs::write(&visible, b"declared").unwrap();
         let sandbox = Sandbox {
             read: vec![],
             write: vec![&scratch],
             host_view: HostView::Full,
         };
         let home_ssh = home.join(".ssh");
-        let home_ssh_string = home_ssh.to_str().expect("home path is UTF-8");
         let result = run(
             &sandbox,
             &[
                 "/usr/bin/sh",
                 "-c",
-                "if [ -e \"$1\" ]; then exit 1; fi",
+                "if [ -e \"$1\" ]; then exit 1; fi; \
+                 if [ -e \"$2\" ]; then exit 2; fi; \
+                 if [ ! -e \"$3\" ]; then exit 3; fi",
                 "sh",
-                home_ssh_string,
+                home_ssh.to_str().expect("home path is UTF-8"),
+                hidden.to_str().expect("home path is UTF-8"),
+                visible.to_str().expect("home path is UTF-8"),
             ],
             &scratch,
             &scratch,
             &[],
         );
-        fs::remove_dir(&scratch).unwrap();
-        assert!(result.is_ok(), "$HOME/.ssh was visible: {result:?}");
+        fs::remove_file(&hidden).unwrap();
+        fs::remove_dir_all(&scratch).unwrap();
+        // Exit 1: `~/.ssh` seen. 2: the undeclared sentinel seen. 3: the
+        // declared file missing, so the probe proves nothing.
+        assert!(result.is_ok(), "$HOME was visible: {result:?}");
     }
 
     #[cfg(target_os = "linux")]
@@ -2025,9 +2042,45 @@ mod tests {
         );
     }
 
+    /// The sandboxed command reads EOF even when tog's own stdin has input
+    /// waiting. The probe runs in a re-executed copy of this test whose
+    /// stdin is a pipe the parent holds open with a line in it, so an
+    /// inherited stdin would read that line instead of EOF. Run directly,
+    /// the test's own stdin is usually already at EOF and proves nothing.
     #[test]
     fn linux_stdin_is_null() {
         if !linux_ready("linux_stdin_is_null") {
+            return;
+        }
+        if std::env::var_os("TOG_SANDBOX_STDIN_CHILD").is_none() {
+            use std::io::Write as _;
+            // libtest names a test by its path inside the crate.
+            let (_, module) = module_path!().split_once("::").unwrap();
+            let name = format!("{module}::linux_stdin_is_null");
+            let mut child = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", &name, "--nocapture"])
+                .env("TOG_SANDBOX_STDIN_CHILD", "1")
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            // Held, not dropped, until the child exits: the pipe stays open
+            // with input waiting for anything that inherited it.
+            let mut stdin = child.stdin.take().unwrap();
+            stdin.write_all(b"inherited\n").unwrap();
+            let output = child.wait_with_output().unwrap();
+            drop(stdin);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                output.status.success(),
+                "stdin child failed: {stdout}{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(
+                stdout.contains("test result: ok. 1 passed;"),
+                "the child did not run exactly this test: {stdout}"
+            );
             return;
         }
         let root = temp_dir("stdin");
@@ -2150,12 +2203,9 @@ mod tests {
         // The relay thread retained the build's own stderr (and forwarded it
         // to ours); a build printing to stderr is still a command failure.
         assert_eq!(output.stderr, b"build diagnostic\n");
-        let error = sandbox_failure_error(
-            SandboxFailureKind::Command,
-            &output.status,
-            &output.stderr,
-            &cmd,
-        );
+        let kind = classify_sandbox_failure(&output.status, &output.stderr);
+        assert_eq!(kind, Some(SandboxFailureKind::Command));
+        let error = sandbox_failure_error(kind.unwrap(), &output.status, &output.stderr, &cmd);
         assert_eq!(error.kind(), io::ErrorKind::Other);
         assert_eq!(
             error.to_string(),
@@ -2762,8 +2812,16 @@ echo "PKG_CONFIG_LIBDIR=${PKG_CONFIG_LIBDIR-unset}"
             .stderr(std::process::Stdio::piped())
             .output()
             .unwrap();
+        // bwrap's own refusal, as it really prints it, must classify as setup.
+        let kind = classify_sandbox_failure(&output.status, &output.stderr);
+        assert_eq!(
+            kind,
+            Some(SandboxFailureKind::Setup),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         let error = sandbox_failure_error(
-            SandboxFailureKind::Setup,
+            kind.unwrap(),
             &output.status,
             &output.stderr,
             &["/usr/bin/true"],
@@ -2988,6 +3046,9 @@ echo "PKG_CONFIG_LIBDIR=${PKG_CONFIG_LIBDIR-unset}"
             "pnpm_tog_test_home",
             "TOG_FORCE_ENV_KEEP",
         ];
+        // Writing the process environment while another test reads it is
+        // a data race, so hold the crate's env lock for the whole test.
+        let _env = crate::kernel::policy::test_env_lock();
         for name in names {
             std::env::set_var(name, "user");
         }
@@ -3048,6 +3109,7 @@ echo "PKG_CONFIG_LIBDIR=${PKG_CONFIG_LIBDIR-unset}"
         assert!(!straddles.is_char_boundary(5));
         // A non-UTF-8 name reaches the same place through `to_string_lossy`.
         let invalid = OsStr::from_bytes(b"abc\xff_tog_test");
+        let _env = crate::kernel::policy::test_env_lock();
         std::env::set_var(straddles, "user");
         std::env::set_var(invalid, "user");
         let mut cmd = Command::new("true");

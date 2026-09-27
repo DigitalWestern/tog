@@ -229,29 +229,93 @@ fn fish_completions() -> String {
 mod tests {
     use super::*;
 
+    /// The words one shell offers after `verb`: its bash `case` arm, its
+    /// zsh `_arguments` arm, or its fish `__fish_seen_subcommand_from`
+    /// lines, split into tokens with the quoting and zsh's `[description]`
+    /// and `(word list)` syntax taken off.
+    fn verb_tokens(shell: Shell, script: &str, verb: &str) -> Vec<String> {
+        let block: Vec<&str> = match shell {
+            Shell::Bash => {
+                let case = format!("        {verb}) ");
+                let multi = format!("        {verb})");
+                let mut lines = script
+                    .lines()
+                    .skip_while(|line| !line.starts_with(&case) && *line != multi);
+                let first = lines
+                    .next()
+                    .unwrap_or_else(|| panic!("bash has no {verb} arm"));
+                let mut block = vec![first];
+                if !first.ends_with(";;") {
+                    block.extend(lines.take_while(|line| !line.ends_with(";;")));
+                }
+                block
+            }
+            Shell::Zsh => {
+                let case = format!("                {verb})");
+                let mut lines = script.lines().skip_while(|line| *line != case);
+                assert!(lines.next().is_some(), "zsh has no {verb} arm");
+                lines.take_while(|line| line.trim() != ";;").collect()
+            }
+            Shell::Fish => {
+                let seen = format!("__fish_seen_subcommand_from {verb}'");
+                script.lines().filter(|line| line.contains(&seen)).collect()
+            }
+        };
+        block
+            .iter()
+            .flat_map(|line| line.split(|c: char| c.is_whitespace() || "'\"()[".contains(c)))
+            .filter(|token| !token.is_empty())
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// Each verb's own completion offers its own options and words. A flag
+    /// or word offered only by some other verb does not count: the check
+    /// reads the verb's arm, never the whole script.
     #[test]
     fn completions_cover_every_command_and_option() {
         for shell in [Shell::Bash, Shell::Zsh, Shell::Fish] {
             let script = completions(shell);
             for spec in listed() {
-                assert!(script.contains(spec.name), "{shell:?} lacks {}", spec.name);
+                // The verb itself completes at the top level.
+                let top = match shell {
+                    Shell::Bash => format!(" {} ", spec.name),
+                    Shell::Zsh => format!("        '{}:", spec.name),
+                    Shell::Fish => format!("'__fish_use_subcommand' -a {} -d", spec.name),
+                };
+                let offered = script.lines().any(|line| match shell {
+                    // The one word list that mixes verbs and script names.
+                    Shell::Bash => {
+                        line.contains("compgen -W")
+                            && line.contains("$(_tog_scripts)")
+                            && line.replace('"', " ").contains(&top)
+                    }
+                    _ => line.contains(&top),
+                });
+                assert!(offered, "{shell:?} does not offer {}", spec.name);
+                // `run` completes a script or a program name, then files:
+                // what follows it belongs to that program, not to tog.
+                if spec.name == "run" {
+                    continue;
+                }
+                let tokens = verb_tokens(shell, &script, spec.name);
                 for flag in command_flags(spec) {
                     // fish spells `--json` as `-l json` and `-o` as `-s o`.
-                    let spelled = match (shell, flag.strip_prefix("--")) {
-                        (Shell::Fish, Some(long)) => format!("-l {long}"),
-                        (Shell::Fish, None) => format!("-s {}", &flag[1..]),
-                        _ => flag.to_string(),
+                    let offered = match (shell, flag.strip_prefix("--")) {
+                        (Shell::Fish, Some(long)) => tokens
+                            .windows(2)
+                            .any(|pair| pair[0] == "-l" && pair[1] == long),
+                        (Shell::Fish, None) => tokens
+                            .windows(2)
+                            .any(|pair| pair[0] == "-s" && pair[1] == flag[1..]),
+                        _ => tokens.iter().any(|token| token == flag),
                     };
-                    assert!(
-                        script.contains(&spelled),
-                        "{shell:?} lacks {} {spelled}",
-                        spec.name
-                    );
+                    assert!(offered, "{shell:?} {} lacks {flag}: {tokens:?}", spec.name);
                 }
                 for word in spec.words {
                     assert!(
-                        script.contains(word),
-                        "{shell:?} lacks {} {word}",
+                        tokens.iter().any(|token| token == word),
+                        "{shell:?} {} lacks {word}: {tokens:?}",
                         spec.name
                     );
                 }

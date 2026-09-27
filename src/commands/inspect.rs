@@ -1151,9 +1151,20 @@ mod tests {
         assert_eq!(node.packages[0].name, "@s/b");
         assert_eq!(node.packages[1].name, "a");
         let text = ls(&temp.0, None, false, false).unwrap();
-        assert!(text.starts_with("python  (cpython 3.12.14; 1 package)\n  six  1.17.0\n"));
-        assert!(text.contains("\nnode  (node 24.0.0; 2 packages)\n"));
-        assert!(text.contains("  Newtonsoft.Json  13.0\n"));
+        // Every shape renders its own toolchain line and its packages, in
+        // ecosystem order; node's nested path is listed by package name.
+        assert_eq!(
+            text,
+            concat!(
+                "python  (cpython 3.12.14; 1 package)\n  six  1.17.0\n\n",
+                "node  (node 24.0.0; 2 packages)\n  @s/b  2.0.0\n  a     1.0.0\n\n",
+                "cargo  (rust 1.96.1; 1 package)\n  serde  1.0.0\n\n",
+                "go  (go 1.25; 1 package)\n  github.com/x/y  v1.2.3\n\n",
+                "ruby  (ruby 3.4.6, bundler 2.6; 1 package)\n  rake  13.0\n\n",
+                "elixir  (elixir 1.18, otp 27; 1 package)\n  jason  1.4\n\n",
+                "dotnet  (dotnet-sdk 9.0; 1 package)\n  Newtonsoft.Json  13.0\n",
+            )
+        );
         let only = ls(&temp.0, Some("go"), false, true).unwrap();
         assert_eq!(only, "go  (go 1.25; 1 package)\n  github.com/x/y  v1.2.3\n");
         let json_text = ls(&temp.0, Some("cargo"), true, false).unwrap();
@@ -1165,8 +1176,10 @@ mod tests {
         let error = ls(&empty.0, None, false, false).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::NotFound);
         assert!(error.to_string().contains("run 'tog' first"));
-        let error = ls(&temp.0, Some("python"), false, false);
-        assert!(error.is_ok());
+        assert_eq!(
+            ls(&temp.0, Some("python"), false, false).unwrap(),
+            "python  (cpython 3.12.14; 1 package)\n  six  1.17.0\n"
+        );
         let missing = {
             let solo = TempDir::named("ls-solo");
             write_closure(

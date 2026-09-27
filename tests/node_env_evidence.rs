@@ -81,8 +81,16 @@ fn tar(dir: &Path, top: &str) -> PathBuf {
 }
 
 /// A Node release stub with exactly the layout `realize_runtime` checks, and
-/// a selection whose host row points at it by file URL and digest.
-fn stub_node_selection(dir: &Path, platform: Platform) -> tog::kernel::toolchain::Selected {
+/// a selection whose host row names it by digest. The row keeps its shipped
+/// nodejs.org URL, which the source policy admits, and the stub is seeded
+/// into the verified cache under that digest, so realizing it is a cache
+/// hit and never reaches the network.
+fn stub_node_selection(
+    dir: &Path,
+    store: &Store,
+    activity: &tog::kernel::activity::StoreActivity,
+    platform: Platform,
+) -> tog::kernel::toolchain::Selected {
     let root = dir.join("node-stub");
     for (relative, contents) in [
         ("bin/node", "#!/bin/sh\nexit 1\n"),
@@ -98,7 +106,7 @@ fn stub_node_selection(dir: &Path, platform: Platform) -> tog::kernel::toolchain
         std::fs::write(path, contents).unwrap();
     }
     let tarball = tar(dir, "node-stub");
-    let sha256 = hex::encode(Sha256::digest(std::fs::read(&tarball).unwrap()));
+    let (sha256, _) = tog::kernel::fetch::cache_insert(store, activity, &tarball).unwrap();
     let mut selected = node::shipped_selection().unwrap();
     let row = selected
         .bundle
@@ -106,7 +114,6 @@ fn stub_node_selection(dir: &Path, platform: Platform) -> tog::kernel::toolchain
         .iter_mut()
         .find(|row| row.platform == platform && row.component == "node")
         .expect("the shipped Node release has a host row");
-    row.url = format!("file://{}", tarball.display());
     row.digest = Digest::sha256(&sha256).unwrap();
     selected
 }
@@ -254,7 +261,7 @@ fn realize_scriptless_electron(artifacts: &[DeclaredArtifact]) -> (Vec<String>, 
         .activity(tog::kernel::activity::ActivityMode::Shared)
         .unwrap();
     let version = "42.5.0";
-    let selected = stub_node_selection(&dir.0, platform);
+    let selected = stub_node_selection(&dir.0, &store, activity, platform);
     let electron = electron_package(&dir.0, version, None);
     let zip_sha256 = "6705a9d0cc5c8f225d705d6e1c2607b2b5be8667d2befb18cdafe8b7b29b8008";
     seed_electron_shasums(&store, platform, version, zip_sha256);
@@ -350,7 +357,7 @@ fn consumed_artifacts_are_recorded_and_survive_a_sweep() {
         .unwrap();
     let activity = &lease;
     let version = "42.5.0";
-    let selected = stub_node_selection(&dir.0, platform);
+    let selected = stub_node_selection(&dir.0, &store, activity, platform);
     seed_gyp_python(&store, platform);
     // The zip is seeded into the verified cache under its own sha256, so
     // provisioning is a cache hit and never reaches GitHub.
@@ -461,7 +468,7 @@ fn a_failed_provisioning_publishes_no_environment() {
         .activity(tog::kernel::activity::ActivityMode::Shared)
         .unwrap();
     let version = "42.5.0";
-    let selected = stub_node_selection(&dir.0, platform);
+    let selected = stub_node_selection(&dir.0, &store, activity, platform);
     node::realize_runtime(&store, activity, platform, &selected).unwrap();
     seed_gyp_python(&store, platform);
     seed_electron_shasums(&store, platform, version, &"0".repeat(64));
@@ -565,7 +572,7 @@ fn a_lifecycle_reference_to_the_gyp_python_survives_a_sweep() {
         .activity(tog::kernel::activity::ActivityMode::Shared)
         .unwrap();
     let activity = &lease;
-    let selected = stub_node_selection(&dir.0, platform);
+    let selected = stub_node_selection(&dir.0, &store, activity, platform);
     seed_gyp_python(&store, platform);
     let gyp_python = node::shipped_gyp_python().unwrap();
     let python_id = tog::tailors::python::runtime_object_id(platform, &gyp_python).unwrap();

@@ -2162,6 +2162,23 @@ mod tests {
         assert!(message(&["x", "--", "--weird-tool"]).contains("x: invalid tool"));
         assert!(message(&["x"]).starts_with("x: no tool given"));
         assert_eq!(message(&["x", "--from"]), "--from needs a package name");
+        // `--from six@1` and `six@2` name two different versions for one
+        // run; the parser refuses the pair, for a run and for a clean.
+        let conflict = "x: --from package version conflicts with the tool version; specify only one or use the same version";
+        assert_eq!(message(&["x", "--from", "six@1", "six@2"]), conflict);
+        assert_eq!(
+            message(&["x", "--clean", "--from", "six@1", "six@2"]),
+            conflict
+        );
+        assert_eq!(
+            command(&["x", "--from", "six@1", "six@1"]),
+            Command::X {
+                ecosystem: None,
+                from: Some("six@1".into()),
+                tool: "six@1".into(),
+                args: vec![],
+            }
+        );
         assert_eq!(
             message(&["x", "--pyy", "ruff"]),
             "x: unknown option '--pyy'; did you mean '--py'?"

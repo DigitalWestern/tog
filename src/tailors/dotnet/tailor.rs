@@ -266,3 +266,71 @@ impl Tailor for Dotnet {
         &["dotnet-sdk"]
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::kernel::testutil::TempDir;
+
+    /// The run guard is wired into the tailor's `tog run` environment: under
+    /// a .NET projection a build verb is refused before any closure object
+    /// is read; without one, the tailor adds nothing and refuses nothing.
+    #[test]
+    fn tog_run_under_a_dotnet_projection_refuses_build_verbs() {
+        let _store_env = crate::kernel::store::STORE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let scratch = TempDir::named("dotnet-run-guard");
+        let previous_store = std::env::var_os("TOG_STORE");
+        std::env::set_var("TOG_STORE", scratch.0.join("store"));
+        let ctx = Context::open(Platform::host().unwrap(), false);
+        match previous_store {
+            Some(value) => std::env::set_var("TOG_STORE", value),
+            None => std::env::remove_var("TOG_STORE"),
+        }
+        let ctx = ctx.unwrap();
+        let project = scratch.0.join("project");
+        std::fs::create_dir_all(project.join(".tog/closures")).unwrap();
+        let cmd = |words: &[&str]| words.iter().map(|w| w.to_string()).collect::<Vec<_>>();
+        let build = cmd(&["dotnet", "build"]);
+
+        let prefix = Dotnet
+            .run_env(
+                &ctx,
+                &project,
+                &project,
+                &build,
+                &mut Command::new("dotnet"),
+            )
+            .unwrap();
+        assert!(prefix.is_empty());
+
+        // A closure that names no objects: reaching it would fail on the
+        // missing `sdk_object`, not with the guard's refusal.
+        std::fs::write(project.join(".tog/closures/dotnet.json"), "{}").unwrap();
+        let error = Dotnet
+            .run_env(
+                &ctx,
+                &project,
+                &project,
+                &build,
+                &mut Command::new("dotnet"),
+            )
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "{error}");
+        assert_eq!(
+            error.to_string(),
+            dotnet::refused_run_command(&build).unwrap()
+        );
+        let error = Dotnet
+            .run_env(
+                &ctx,
+                &project,
+                &project,
+                &cmd(&["dotnet", "exec", "app.dll"]),
+                &mut Command::new("dotnet"),
+            )
+            .unwrap_err();
+        assert!(!error.to_string().contains("must run sandboxed"), "{error}");
+    }
+}

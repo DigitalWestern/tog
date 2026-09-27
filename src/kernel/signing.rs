@@ -802,12 +802,23 @@ mod tests {
             "{}",
             error(&fifo)
         );
-        // A file whose reported size lies is still read bounded.
-        if Path::new("/proc/self/environ").exists() {
-            let message = SigningKey::load(Path::new("/proc/self/environ"))
-                .unwrap_err()
-                .to_string();
-            assert!(message.starts_with("signing key"), "{message}");
+        // A file whose reported size lies (procfs says 0) passes the size
+        // check, so the length of what was read is what refuses it. This
+        // pins that check; the `.take()` bounding the read is not visible
+        // here, since an unbounded read of a finite file ends in the same
+        // refusal, only after reading more.
+        let environ = Path::new("/proc/self/environ");
+        if environ.exists() {
+            assert_eq!(fs::metadata(environ).unwrap().len(), 0);
+            let message = SigningKey::load(environ).unwrap_err().to_string();
+            if fs::read(environ).unwrap().len() > 1024 {
+                assert!(
+                    message.ends_with(": longer than 1024 bytes; not a key file"),
+                    "{message}"
+                );
+            } else {
+                assert!(message.starts_with("signing key"), "{message}");
+            }
         }
         let huge = temp.0.join("huge");
         fs::write(&huge, vec![b'a'; 4096]).unwrap();

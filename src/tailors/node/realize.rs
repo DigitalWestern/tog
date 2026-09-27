@@ -1672,7 +1672,7 @@ pub(super) fn remove_dangling_bin_links(staged: &Path, plan: &NpmPlan) -> io::Re
 }
 
 #[cfg(test)]
-mod patch_snapshot_tests {
+mod tests {
     use super::*;
     use std::os::unix::fs::MetadataExt;
 
@@ -1805,5 +1805,83 @@ mod patch_snapshot_tests {
             fs::read(dest.join("index.js")).unwrap(),
             b"after verified\n"
         );
+    }
+
+    /// A sandbox that cannot run a package's install script ends the sync:
+    /// it is never downgraded to the permissive install-script-failed
+    /// exception, which would restore the package and carry on. Offline and
+    /// deterministic on Linux: more bubblewrap arguments than bubblewrap
+    /// accepts is refused as `Unsupported` before any script runs (and a
+    /// host without bubblewrap refuses the same way at preflight).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_sandbox_failure_ends_the_sync_instead_of_becoming_an_exception() {
+        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _attribution_lock = crate::kernel::policy::exception_guard();
+        let attribution = crate::kernel::policy::Attribution::open("node").unwrap();
+        let (_lease_store, activity) = crate::kernel::testutil::detached_lease();
+        let temp = crate::kernel::testutil::TempDir::named("npm-lifecycle-sandbox");
+        let staged = temp.0.join("staged");
+        let pkg_dir = staged.join("node_modules/native");
+        let snapshot = temp.0.join("snapshot");
+        let tmp = temp.0.join("tmp");
+        for dir in [&pkg_dir, &snapshot, &tmp] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        fs::write(pkg_dir.join("state"), b"mid-install").unwrap();
+        fs::write(snapshot.join("state"), b"pristine").unwrap();
+        let package = NpmPackage {
+            path: "node_modules/native".into(),
+            name: "native".into(),
+            version: "1.0.0".into(),
+            url: "https://127.0.0.1:9/never-requested.tgz".into(),
+            integrity: String::new(),
+            bin: Vec::new(),
+            optional: false,
+            patch: None,
+            git: None,
+        };
+        let plan = NpmPlan {
+            node_version: "24.20.0".into(),
+            packages: vec![package.clone()],
+            links: Vec::new(),
+            workspaces: Vec::new(),
+            lock_source: "package-lock.json".into(),
+        };
+        // Three bubblewrap arguments each (`--setenv K V`): well past the
+        // limit bubblewrap accepts.
+        let envs: Vec<(String, String)> = (0..4000)
+            .map(|i| (format!("TOG_FILL_{i}"), "x".to_string()))
+            .collect();
+        let sandbox = crate::kernel::sandbox::Sandbox {
+            read: Vec::new(),
+            write: vec![staged.as_path()],
+            host_view: crate::kernel::sandbox::HostView::Full,
+        };
+        let error = run_package_phases(
+            Platform::X86_64UnknownLinuxGnu,
+            &staged,
+            &plan,
+            &package,
+            &pkg_dir,
+            &snapshot,
+            &tmp,
+            &[("install", "exit 0".to_string())],
+            &envs,
+            "/usr/bin:/bin",
+            &sandbox,
+            &activity,
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Unsupported, "{error}");
+        assert!(!error.to_string().contains("script failed"), "{error}");
+        // No exception, and the package was not rolled back to its snapshot
+        // as a tolerated script failure would be.
+        assert!(crate::kernel::policy::pending().is_empty());
+        assert_eq!(fs::read(pkg_dir.join("state")).unwrap(), b"mid-install");
+        assert!(snapshot.join("state").is_file());
+        attribution.discard();
     }
 }

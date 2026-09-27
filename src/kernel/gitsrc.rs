@@ -876,11 +876,23 @@ mod realization_tests {
         )
     }
 
+    /// A local transport would hand over the commit by sha alone, so the
+    /// sha fetch is refused here: the commit arrives only if the fallback
+    /// fetches the non-default ref that reaches it, a branch or a
+    /// `refs/pull/*` ref that is neither branch nor tag.
     #[test]
-    fn a_commit_reachable_only_from_a_non_default_ref_is_realized() {
+    fn a_commit_reachable_only_from_a_non_default_ref_is_realized_by_the_ref_fallback() {
         let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                REFUSE_SHA_FETCH.with(|refuse| refuse.set(false));
+            }
+        }
+        let _reset = Reset;
+        REFUSE_SHA_FETCH.with(|refuse| refuse.set(true));
         for reference in ["refs/heads/side", "refs/pull/1/head"] {
             let root = TempDir::named("gitsrc-side");
             let (url, _) = fixture_repo(&root.0);
@@ -944,21 +956,17 @@ mod realization_tests {
         );
     }
 
+    /// No ref reaches the pin, so the all-refs fallback cannot supply it:
+    /// only the fetch by sha can. A local transport accepts any sha, so no
+    /// server setting is involved.
     #[test]
-    fn an_unreferenced_commit_is_fetched_by_sha_when_the_server_allows_it() {
+    fn an_unreferenced_commit_is_fetched_by_sha() {
         let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let root = TempDir::named("gitsrc-anysha");
         let (url, _) = fixture_repo(&root.0);
         let commit = off_branch_commit(&url, "dangling.txt");
-        let repo = root.0.join("repo");
-        git_ok(
-            &["config", "uploadpack.allowAnySHA1InWant", "true"],
-            Some(&repo),
-            "cfg",
-        )
-        .unwrap();
         let object = realize(&root.0, &url, &commit).unwrap();
         assert_eq!(
             std::fs::read_to_string(object.join("dangling.txt")).unwrap(),

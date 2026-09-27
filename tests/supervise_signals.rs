@@ -427,6 +427,19 @@ fn spawn_harness_with(
 ) -> Harness {
     let exe = std::env::current_exe().unwrap();
     let mut command = Command::new(exe);
+    // The supervisor keeps an inherited SIG_IGN for INT and QUIT on
+    // purpose, so a harness that inherited one from the suite's launcher
+    // (a background job of a non-interactive shell starts every process
+    // that way) would never report the interrupts these cases send. The
+    // harness starts from the default dispositions whatever launched it.
+    // SAFETY: signal(2) between fork and exec, on two signal numbers.
+    unsafe {
+        command.pre_exec(|| {
+            libc::signal(libc::SIGINT, libc::SIG_DFL);
+            libc::signal(libc::SIGQUIT, libc::SIG_DFL);
+            Ok(())
+        });
+    }
     configure(&mut command);
     let (scenario, inner) = match scenario.split_once(':') {
         Some((outer, inner)) => (outer, Some(inner)),
@@ -501,9 +514,32 @@ fn spawn_harness_with(
     }
 }
 
-/// Release a child blocked on `read < fifo`.
+/// Release a child blocked on `read < fifo`. A blocking open for write
+/// waits for a reader forever, so a child that never reaches its `read`
+/// (because a signal killed it first, say) would hang the case instead of
+/// failing it. The open is non-blocking, retried until `DEADLINE`: with no
+/// reader it fails with ENXIO rather than waiting.
 fn release_fifo(path: &Path) {
-    let mut file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+    use std::os::unix::fs::OpenOptionsExt;
+    let deadline = Instant::now() + DEADLINE;
+    let mut file = loop {
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(path)
+        {
+            Ok(file) => break file,
+            Err(error) if error.raw_os_error() == Some(libc::ENXIO) => {
+                assert!(
+                    Instant::now() < deadline,
+                    "nothing ever opened {} to read; the child is not waiting on it",
+                    path.display()
+                );
+                std::thread::sleep(TICK);
+            }
+            Err(error) => panic!("open {}: {error}", path.display()),
+        }
+    };
     file.write_all(b"go\n").unwrap();
 }
 
@@ -571,6 +607,9 @@ fn supervisor_harness() {
         say(&format!("CHILD_SIGCHLD {}", sigchld_disposition()));
         std::process::exit(0);
     }
+    if scenario == "int-counter" {
+        int_counter();
+    }
     let root = PathBuf::from(std::env::var_os("TOG_SUPERVISE_STORE").unwrap());
     let store = Store {
         root: root.canonicalize().unwrap(),
@@ -636,6 +675,57 @@ fn sigchld_disposition() -> &'static str {
 }
 
 extern "C" fn inherited_sigchld_handler(_: libc::c_int) {}
+
+static INTS_SEEN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+extern "C" fn count_int(_: libc::c_int) {
+    INTS_SEEN.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// How long the counting child keeps running after its first INT, so a
+/// second delivery (a forwarded copy, which follows the first within
+/// milliseconds) lands in the count rather than after the exit.
+const INT_GRACE: Duration = Duration::from_millis(500);
+
+/// A supervised child that counts every INT in the handler itself: a
+/// shell trap runs once for any number of INTs that arrive before it gets
+/// to run, which would hide a duplicate. Prints `INTSEEN <n>` as the count
+/// changes; `INT_GRACE` after the first one it prints `INTCOUNT <n>` and
+/// exits 48, so the only signal the supervisor ever sees is the INT under
+/// test. The token is deliberately not "INT": a PTY echoes the ^C that
+/// generated the signal, and an echo must not be counted as delivery.
+fn int_counter() -> ! {
+    use std::sync::atomic::Ordering;
+    // SAFETY: zeroed is followed by sigemptyset; the handler only touches
+    // an atomic.
+    unsafe {
+        let mut action: libc::sigaction = std::mem::zeroed();
+        libc::sigemptyset(&mut action.sa_mask);
+        action.sa_flags = libc::SA_RESTART;
+        action.sa_sigaction = count_int as extern "C" fn(libc::c_int) as *const () as usize;
+        assert_eq!(
+            libc::sigaction(libc::SIGINT, &action, std::ptr::null_mut()),
+            0
+        );
+    }
+    say(&format!("CHILDPID {}", std::process::id()));
+    say("READY");
+    let mut reported = 0;
+    let mut first_seen: Option<Instant> = None;
+    loop {
+        let seen = INTS_SEEN.load(Ordering::SeqCst);
+        if seen != reported {
+            say(&format!("INTSEEN {seen}"));
+            reported = seen;
+            first_seen.get_or_insert_with(Instant::now);
+        }
+        if first_seen.is_some_and(|at| at.elapsed() >= INT_GRACE) {
+            say(&format!("INTCOUNT {seen}"));
+            std::process::exit(48);
+        }
+        std::thread::sleep(TICK);
+    }
+}
 
 /// Installs a SIGCHLD handler with `SA_NOCLDWAIT`, which asks the kernel to
 /// reap children as they exit just as `SIG_IGN` does. A handler cannot
@@ -762,18 +852,18 @@ fn run_scenario(scenario: &str, activity: &StoreActivity) -> i32 {
             0
         }
         // Three children through one lease: a numeric exit, a clean exit, and
-        // a self-signalled exit.
+        // a self-signalled exit, each printed as the raw wait status
+        // `supervise::status` returned.
         "sequential" => {
+            let raw = |status: ExitStatus| {
+                format!("code={:?} signal={:?}", status.code(), status.signal())
+            };
             let first = supervise::status(&mut shell("exit 42"), activity).unwrap();
-            say(&format!("A {}", code_of(first)));
+            say(&format!("A {}", raw(first)));
             let second = supervise::status(&mut shell("exit 0"), activity).unwrap();
-            say(&format!("B {}", code_of(second)));
+            say(&format!("B {}", raw(second)));
             let third = supervise::status(&mut shell("kill -TERM $$"), activity).unwrap();
-            say(&format!(
-                "C {} raw_signal={:?}",
-                code_of(third),
-                third.signal()
-            ));
+            say(&format!("C {}", raw(third)));
             say("DONE");
             0
         }
@@ -839,14 +929,15 @@ fn run_scenario(scenario: &str, activity: &StoreActivity) -> i32 {
             say(&format!("EXIT {}", code_of(status)));
             code_of(status)
         }
-        // The token is deliberately not "INT": a PTY echoes the ^C that
-        // generated the signal, and an echo must not be counted as delivery.
+        // The child is `int-counter`, which counts INT in its signal handler
+        // and exits only a grace period later, so a second delivery (a
+        // forwarded copy of the terminal's INT) is counted rather than lost
+        // to an exit or merged into one shell trap run.
         "int-trap" => {
-            let mut command = shell(
-                r#"trap 'printf "INTSEEN\n"; exit 48' INT
-                   printf "CHILDPID %d\nREADY\n" $$
-                   while : ; do sleep 0.05 ; done"#,
-            );
+            let mut command = Command::new(std::env::current_exe().unwrap());
+            command
+                .args(["--exact", "supervisor_harness", "--ignored", "--nocapture"])
+                .env("TOG_SUPERVISE_SCENARIO", "int-counter");
             report(supervise::status(&mut command, activity))
         }
         // A job-control shell: its own session owns the terminal, and the
@@ -1098,20 +1189,22 @@ fn repeated_parent_term_is_forwarded_every_time() {
     store.wait_until_free();
 }
 
-/// Sequential children through one lease preserve numeric exits, and a
-/// signalled child maps to 128 + signal at the command boundary while the raw
-/// wait status still says "signalled". Session reset across those children is
+/// Sequential children through one lease each get their own wait status
+/// back from `supervise::status`: a numeric exit as its code, and a
+/// signalled child as "signalled", with no code. The 128 + signal mapping
+/// at the command boundary is not exercised here: it lives in `tog run`,
+/// which needs a synced environment. Session reset across those children is
 /// covered by `spawn_failure_restores_dispositions`, which is the case that
 /// actually distinguishes an installed session from an absent one.
 #[test]
-fn sequential_children_preserve_numeric_and_signal_exits() {
+fn sequential_children_report_numeric_and_signal_wait_statuses() {
     let store = TempStore::new("sequential");
     let mut harness = spawn_harness("sequential", &store, None, None);
     harness.markers.wait_for("DONE");
     let text = harness.markers.text();
-    assert!(text.contains("A 42"), "{text}");
-    assert!(text.contains("B 0"), "{text}");
-    assert!(text.contains("C 143 raw_signal=Some(15)"), "{text}");
+    assert!(text.contains("A code=Some(42) signal=None"), "{text}");
+    assert!(text.contains("B code=Some(0) signal=None"), "{text}");
+    assert!(text.contains("C code=None signal=Some(15)"), "{text}");
     assert_eq!(harness.finish().code(), Some(0));
     store.wait_until_free();
 }
@@ -1319,10 +1412,13 @@ fn terminal_interrupt_reaches_a_trapping_child_once() {
     harness.markers.wait_for("READY");
 
     pty.write_control(0x03); // ^C
+                             // The child outlives its INT by a grace period before it reports the
+                             // count and exits, so a forwarded copy would have been counted.
     harness.markers.wait_for("EXIT 48");
     let text = harness.markers.text();
     let seen = text.matches("INTSEEN").count();
     assert_eq!(seen, 1, "the child saw INT {seen} times:\n{text}");
+    assert!(text.contains("INTCOUNT 1"), "{text}");
     assert!(
         text.contains("INTERRUPTED 2"),
         "a terminal interrupt was reported as the child's own exit:\n{text}"

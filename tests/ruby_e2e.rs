@@ -754,6 +754,14 @@ BUNDLED WITH
 #[cfg(target_os = "linux")]
 fn ruby_gem_needing_host_headers_falls_back_once() {
     if !Path::new("/usr/include/zlib.h").is_file() {
+        // `TOG_SANDBOX_TESTS=required` (any non-empty value) turns the skip
+        // into a failure, so CI cannot report a skipped check as passed.
+        let required =
+            matches!(std::env::var_os("TOG_SANDBOX_TESTS"), Some(value) if !value.is_empty());
+        assert!(
+            !required,
+            "required host-fallback test needs /usr/include/zlib.h (the zlib development package)"
+        );
         eprintln!("skipped: this host has no /usr/include/zlib.h (zlib development package)");
         return;
     }

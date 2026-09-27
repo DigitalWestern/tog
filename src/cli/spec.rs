@@ -1076,7 +1076,7 @@ mod tests {
             assert!(help.contains("DETAILS:"), "tog {}", spec.name);
             for (command, gloss) in spec.examples {
                 assert!(
-                    *command == "tog" || command.starts_with("tog ") || command.contains("tog "),
+                    *command == "tog" || command.starts_with("tog ") || command.contains("$(tog "),
                     "tog {}: '{command}' does not run tog",
                     spec.name
                 );

@@ -15,7 +15,7 @@
 //! identity goldens and object-kind rows beside it.
 
 use crate::kernel::activity::StoreActivity;
-use crate::kernel::fetch::download_verified_digest_held;
+use crate::kernel::fetch::download_toolchain_artifact_held;
 use crate::kernel::platform::{no_pin, Platform};
 use crate::kernel::store::Store;
 use crate::kernel::toolchain::document::Shipped;
@@ -345,9 +345,10 @@ pub fn realize_runtime(
 
     let mut tarballs = Vec::new();
     for row in &rows {
-        tarballs.push(download_verified_digest_held(
+        tarballs.push(download_toolchain_artifact_held(
             store,
             activity,
+            &row.provider,
             &row.url,
             &row.digest,
         )?);

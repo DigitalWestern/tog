@@ -53,6 +53,41 @@ fn test_store() -> Option<Store> {
     Some(Store::open().expect("store"))
 }
 
+/// The store object a built wheel was published in, by its meta record.
+fn wheel_object_meta(store: &Store, wheel: &std::path::Path) -> serde_json::Value {
+    let id = wheel
+        .parent()
+        .unwrap()
+        .file_name()
+        .unwrap()
+        .to_string_lossy();
+    serde_json::from_slice(
+        &std::fs::read(store.root.join("meta").join(format!("{id}.json"))).unwrap(),
+    )
+    .unwrap()
+}
+
+/// The dist-info directory names in the site-packages of the build
+/// environment a wheel's record names: what the build actually saw.
+fn build_env_dists(store: &Store, wheel: &std::path::Path) -> Vec<String> {
+    let meta = wheel_object_meta(store, wheel);
+    let inputs = &meta["identity"]["inputs"];
+    assert_eq!(inputs["schema"], "sdist-build/4", "{inputs}");
+    let build_env = inputs["build_env"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no build_env input: {inputs}"));
+    let site = store
+        .object_path(build_env)
+        .join("lib/python3.12/site-packages");
+    let mut dists: Vec<String> = std::fs::read_dir(&site)
+        .unwrap_or_else(|error| panic!("{}: {error}", site.display()))
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| name.ends_with(".dist-info"))
+        .collect();
+    dists.sort();
+    dists
+}
+
 fn attribution_guard() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -104,6 +139,18 @@ fn pure_python_flit_sdist_uses_isolated_build_env() {
         &wheel,
         "import tomli_w; assert tomli_w.dumps({'ok': True}) == 'ok = true\\n'",
     );
+    // The build ran in an isolated environment holding the sdist's own
+    // build backend (flit_core), not the fast setuptools path: the wheel's
+    // record names that environment, and the environment has flit_core.
+    let dists = build_env_dists(&store, &wheel);
+    assert!(
+        dists.iter().any(|name| name.starts_with("flit_core-")),
+        "build environment without flit_core: {dists:?}"
+    );
+    assert!(
+        !dists.iter().any(|name| name.starts_with("setuptools-")),
+        "build environment carries setuptools: {dists:?}"
+    );
     attribution.discard();
 }
 
@@ -133,6 +180,14 @@ fn insightface_sdist_builds_with_runtime_numpy_constraint() {
     )
     .expect("insightface sdist build");
     assert!(wheel.is_file(), "built insightface wheel disappeared");
+    // The runtime plan's numpy pin constrained the build environment: it
+    // holds exactly numpy 1.26.4, not the newest numpy the sdist's own
+    // `numpy` build requirement would resolve to.
+    let dists = build_env_dists(&store, &wheel);
+    assert!(
+        dists.contains(&"numpy-1.26.4.dist-info".to_string()),
+        "build environment did not see the runtime numpy constraint: {dists:?}"
+    );
     // insightface/__init__.py imports onnxruntime, which this test does not
     // realize. Import an onnxruntime-free leaf from the built wheel instead;
     // the wheel's package contents are exercised without downloading models.
@@ -143,62 +198,47 @@ fn insightface_sdist_builds_with_runtime_numpy_constraint() {
     attribution.discard();
 }
 
+/// A Rust sdist (fastuuid, a pyo3 extension) builds through the vendored
+/// Cargo path: its wheel record names the Rust toolchain and the vendor
+/// object the build ran against. tokenizers 0.13.3 used to be the subject;
+/// the pinned Rust rejects its legacy invalid_reference_casting code, so
+/// the smaller real sdist that exercises the same path is the test.
 #[test]
 #[ignore]
-fn tokenizers_rust_sdist_builds_offline_after_vendoring() {
+fn fastuuid_rust_sdist_builds_offline_after_vendoring() {
     let Some(store) = test_store() else { return };
     let activity = &store
         .activity(tog::kernel::activity::ActivityMode::Shared)
         .unwrap();
     let _attribution_guard = attribution_guard();
-    let mut attribution = tog::kernel::policy::Attribution::open("python").unwrap();
-    let tokenizers = package(
-        "tokenizers",
-        "0.13.3",
-        "tokenizers-0.13.3.tar.gz",
-        "https://files.pythonhosted.org/packages/29/9c/936ebad6dd963616189d6362f4c2c03a0314cf2a221ba15e48dd714d29cf/tokenizers-0.13.3.tar.gz",
-        "2e546dbb68b623008a5442353137fbb0123d311a6d7ba52f2667c8862a75af2e",
+    let attribution = tog::kernel::policy::Attribution::open("python").unwrap();
+    let fastuuid = package(
+        "fastuuid",
+        "0.14.0",
+        "fastuuid-0.14.0.tar.gz",
+        "https://files.pythonhosted.org/packages/c3/7d/d9daedf0f2ebcacd20d599928f8913e9d2aea1d56d2d355a93bfa2b611d7/fastuuid-0.14.0.tar.gz",
+        "178947fc2f995b38497a74172adee64fdeb8b7ec18f2a5934d037641ba265d26",
     );
-    let wheel = match build::build_sdist_wheel(
+    let wheel = build::build_sdist_wheel(
         &store,
         activity,
         Platform::host().unwrap(),
-        &tokenizers,
+        &fastuuid,
         &python::shipped_selection("3.12.14").unwrap(),
-    ) {
-        Ok(wheel) => wheel,
-        Err(error) => {
-            // The pinned Rust rejects tokenizers 0.13.3's legacy
-            // invalid_reference_casting code, so fall back to the smaller
-            // real fastuuid sdist, which exercises the same Rust build path.
-            eprintln!("TODO tokenizers on CPython 3.11: {error}");
-            attribution.discard();
-            attribution = tog::kernel::policy::Attribution::open("python").unwrap();
-            let fallback = package(
-                "fastuuid",
-                "0.14.0",
-                "fastuuid-0.14.0.tar.gz",
-                "https://files.pythonhosted.org/packages/c3/7d/d9daedf0f2ebcacd20d599928f8913e9d2aea1d56d2d355a93bfa2b611d7/fastuuid-0.14.0.tar.gz",
-                "178947fc2f995b38497a74172adee64fdeb8b7ec18f2a5934d037641ba265d26",
-            );
-            build::build_sdist_wheel(
-                &store,
-                activity,
-                Platform::host().unwrap(),
-                &fallback,
-                &python::shipped_selection("3.12.14").unwrap(),
-            )
-            .expect("fastuuid Rust fallback sdist build")
-        }
-    };
+    )
+    .expect("fastuuid Rust sdist build");
     assert!(wheel.is_file());
     // pyo3 0.18 cannot name CPython 3.12 directly; the implementation sets
     // PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 for this Rust build path.
     let name = wheel.file_name().unwrap().to_string_lossy();
-    assert!(
-        name.starts_with("tokenizers-0.13.3-") || name.starts_with("fastuuid-0.14.0-"),
-        "{}",
-        name
-    );
+    assert!(name.starts_with("fastuuid-0.14.0-"), "{name}");
+    let inputs = wheel_object_meta(&store, &wheel)["identity"]["inputs"].clone();
+    assert_eq!(inputs["schema"], "sdist-build/4", "{inputs}");
+    for input in ["rust", "vendor", "build_env"] {
+        assert!(
+            inputs[input].as_str().is_some_and(|id| !id.is_empty()),
+            "no {input} input on the Rust wheel's record: {inputs}"
+        );
+    }
     attribution.discard();
 }

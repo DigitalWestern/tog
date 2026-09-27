@@ -904,14 +904,30 @@ digest = "sha256:855d581f8a4eb1a8117e3426de25fe02770592febcfb31369aee1ffbfee9e8e
             "primary = \"node\"\n",
             "primary = \"node\"\nunknown_field = 1\n",
         );
-        assert!(ToolchainLock::parse(with_extra.as_bytes()).is_err());
+        let error = ToolchainLock::parse(with_extra.as_bytes()).unwrap_err();
+        assert!(
+            error.to_string().contains("unknown field `unknown_field`"),
+            "{error}"
+        );
+        // Refused by the digest-shape check itself, before the id is ever
+        // recomputed from the rows (which would also disagree).
         let bad_id = NODE_LOCK.replace(
             "bundle_id = \"sha256:683bc7a0c5d38d3fcc9e73a6e55ab75bda308fb66204c4808942e750b5c1266b\"",
             "bundle_id = \"md5:abc\"",
         );
-        assert!(ToolchainLock::parse(bad_id.as_bytes()).is_err());
+        let error = ToolchainLock::parse(bad_id.as_bytes()).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "tog-toolchain.toml [node]: bad bundle_id \"md5:abc\""
+        );
         let both = NODE_LOCK.replace("absent = true\n", "absent = true\nvalue = \"24.20.0\"\n");
-        assert!(ToolchainLock::parse(both.as_bytes()).is_err());
+        let error = ToolchainLock::parse(both.as_bytes()).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("input package.json has both a value and absent = true"),
+            "{error}"
+        );
     }
 
     #[test]

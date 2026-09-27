@@ -63,6 +63,21 @@ fn store_at(root: &Path) -> Store {
     }
 }
 
+/// Runs `realize` with the store's `tmp` read-only. A cache hit answers
+/// from the published object and never stages; a rebuild stages under
+/// `store/tmp` first, and with it read-only that fails instead of
+/// quietly re-publishing the same content-addressed object. (Equal paths
+/// or ids cannot tell those two apart.)
+fn without_staging<T>(store: &Store, realize: impl FnOnce() -> T) -> T {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = store.root.join("tmp");
+    let writable = std::fs::metadata(&tmp).unwrap().permissions();
+    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let result = realize();
+    std::fs::set_permissions(&tmp, writable).unwrap();
+    result
+}
+
 fn attribution_guard() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -102,9 +117,12 @@ fn npm_git_dependency_is_realized_from_its_commit() {
     // The repository's own .git must never reach the environment.
     assert!(!env.join("node_modules/git-dep/.git").exists());
 
-    // The commit is the identity: the same plan hits the cache.
-    let again =
-        node::realize_node_env(&store, activity, platform, &plan, &[]).expect("second realize");
+    // The commit is the identity: the same plan hits the cache, which is
+    // to say the environment is answered without being staged again.
+    let again = without_staging(&store, || {
+        node::realize_node_env(&store, activity, platform, &plan, &[])
+    })
+    .expect("second realize was not a cache hit");
     assert_eq!(env, again);
 
     let kinds: Vec<String> = attribution
@@ -281,10 +299,29 @@ fn python_git_dependency_builds_a_wheel_from_its_commit() {
         "VALUE = 'from-git-python'\n"
     );
 
-    // The commit determines the environment: realizing again is a cache hit.
-    let again = tog::tailors::python::env::realize_env(&store, activity, platform, &plan)
-        .expect("second realize");
-    assert_eq!(env, again);
+    // The commit determines the environment: realizing again is a cache
+    // hit. Packing the checkout stages on every call, hit or not, so a
+    // read-only tmp cannot tell the two apart here; what only a rebuild
+    // needs is the built wheel, so an unreadable wheel fails a rebuild and
+    // leaves a hit untouched.
+    let wheel = std::fs::read_dir(store.root.join("objects"))
+        .unwrap()
+        .flat_map(|object| std::fs::read_dir(object.unwrap().path()).unwrap())
+        .map(|entry| entry.unwrap().path())
+        .find(|path| {
+            path.file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with("gitdep-"))
+                && path.extension().is_some_and(|ext| ext == "whl")
+        })
+        .expect("the built gitdep wheel in the store");
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let readable = std::fs::metadata(&wheel).unwrap().permissions();
+        std::fs::set_permissions(&wheel, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let again = tog::tailors::python::env::realize_env(&store, activity, platform, &plan);
+        std::fs::set_permissions(&wheel, readable).unwrap();
+        assert_eq!(again.expect("second realize was not a cache hit"), env);
+    }
 }
 
 /// A local repository holding one small library crate.
@@ -345,8 +382,11 @@ fn cargo_git_dependency_is_vendored_from_its_commit() {
         "the .git directory must not be vendored"
     );
 
-    // Realizing again is a cache hit on the same object.
-    let again =
-        tog::tailors::cargo::realize_vendor(&store, activity, &plan).expect("second vendor");
+    // Realizing again is a cache hit on the same object: answered without
+    // staging a second vendor tree.
+    let again = without_staging(&store, || {
+        tog::tailors::cargo::realize_vendor(&store, activity, &plan)
+    })
+    .expect("second vendor was not a cache hit");
     assert_eq!(vendor, again);
 }

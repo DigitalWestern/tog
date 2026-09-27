@@ -104,8 +104,11 @@ jobs:
       TOG_ACCEPT_SKIP_ELIXIR: "1"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - name: Install the Linux sandbox
-        run: sudo apt-get update && sudo apt-get install -y bubblewrap
+      # zlib1g-dev is the host development package the Ruby host-fallback
+      # test (tests/ruby_e2e.rs) builds a native gem against; without it
+      # that test has nothing to prove and fails under TOG_SANDBOX_TESTS.
+      - name: Install the Linux sandbox and the host headers the suite needs
+        run: sudo apt-get update && sudo apt-get install -y bubblewrap zlib1g-dev
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo build --locked
       # Every later step sees these. Scratch stores and toolchains go on

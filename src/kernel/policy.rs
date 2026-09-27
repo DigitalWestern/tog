@@ -1140,15 +1140,19 @@ deny = ["git-dependency"]"#,
     }
 
     #[test]
-    fn union_semantics_adds_all_deny_entries() {
+    fn union_keeps_every_deny_entry_and_any_strictness() {
         let mut merged = Policy::default();
-        for text in [r#"deny = ["x"]"#, r#"deny = ["y"]"#] {
+        for text in ["strict = true\ndeny = [\"x\"]", r#"deny = ["y"]"#] {
             let other = toml::from_str::<Policy>(text).unwrap();
-            merged.strict |= other.strict;
-            merged.deny.extend(other.deny);
+            union(&mut merged, &other);
         }
-        assert!(denied(&merged, "x"));
-        assert!(denied(&merged, "y"));
+        // The set itself, not `denied`: strictness denies every kind.
+        assert_eq!(
+            merged.deny,
+            BTreeSet::from(["x".to_string(), "y".to_string()])
+        );
+        // A later scope without `strict` does not relax an earlier one.
+        assert!(merged.strict);
     }
 
     #[test]

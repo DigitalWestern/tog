@@ -15,7 +15,7 @@ pub mod tailor;
 
 use crate::kernel::activity::StoreActivity;
 use crate::kernel::archive::{extract_with_activity_and_options, Compression, ExtractOptions};
-use crate::kernel::fetch::{download_verified_digest_held, download_verified_held, Digest};
+use crate::kernel::fetch::{download_toolchain_artifact_held, download_verified_held, Digest};
 use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::platform::Platform;
 use crate::kernel::sandbox::{force_env, BuildSpec};
@@ -1070,13 +1070,19 @@ pub fn realize_runtime(
         crate::kernel::policy::check_cached_with_activity(store, activity, &id)?;
         return Ok(store.object_path(&id));
     }
-    let otp_tar = download_verified_held(store, activity, &spec.otp_url, &spec.otp_sha256)?;
-    let elixir_zip =
-        download_verified_held(store, activity, &spec.elixir_url, &spec.elixir_sha256)?;
+    // Each artifact is fetched for the publisher its own row names.
+    let fetch = |component: &str, url: &str, digest: &Digest| {
+        let publisher = selected.artifact(platform, component)?.provider;
+        download_toolchain_artifact_held(store, activity, &publisher, url, digest)
+    };
+    let otp_digest = Digest::sha256(&spec.otp_sha256)?;
+    let otp_tar = fetch("otp", &spec.otp_url, &otp_digest)?;
+    let elixir_digest = Digest::sha256(&spec.elixir_sha256)?;
+    let elixir_zip = fetch("elixir", &spec.elixir_url, &elixir_digest)?;
     let hex_digest = Digest::sha512(&spec.hex_sha512)?;
-    let hex_ez = download_verified_digest_held(store, activity, &spec.hex_url, &hex_digest)?;
+    let hex_ez = fetch("hex", &spec.hex_url, &hex_digest)?;
     let rebar3_digest = Digest::sha512(&spec.rebar3_sha512)?;
-    let rebar3 = download_verified_digest_held(store, activity, &spec.rebar3_url, &rebar3_digest)?;
+    let rebar3 = fetch("rebar3", &spec.rebar3_url, &rebar3_digest)?;
 
     let staged = store.stage_with_activity(activity)?;
     let result = (|| {
@@ -1133,8 +1139,8 @@ pub fn realize_runtime(
             fs::set_permissions(staged.join("rebar3"), fs::Permissions::from_mode(0o755))?;
         }
         let mut deps = crate::kernel::store::ObjectDeps::new();
-        deps.cache_digest(Digest::sha256(&spec.otp_sha256)?);
-        deps.cache_digest(Digest::sha256(&spec.elixir_sha256)?);
+        deps.cache_digest(otp_digest);
+        deps.cache_digest(elixir_digest);
         deps.cache_digest(hex_digest);
         deps.cache_digest(rebar3_digest);
         store

@@ -2419,10 +2419,55 @@ mod tests {
         );
     }
 
+    /// `--from six@1` asks for version 1 of the package while the tool
+    /// `six@2` asks for version 2. The parser refuses that pair, but a
+    /// `Request` can reach `x` without the parser, so a run and a clean
+    /// each refuse it themselves instead of silently picking one version.
+    /// Agreeing versions are fine.
     #[test]
-    fn from_version_is_split_and_conflicts_are_rejected() {
-        let (package, version) = split_version("six@1.17.0");
-        assert_eq!((package, version), ("six", Some("1.17.0")));
+    fn a_from_version_that_disagrees_with_the_tool_version_is_refused() {
+        let (_store, activity) = crate::kernel::testutil::detached_lease();
+        let cwd = TempDir::named("x-conflict");
+        let error = launch(
+            Platform::host().unwrap(),
+            &cwd.0,
+            Request {
+                ecosystem: Some("python".into()),
+                from: Some("six@1".into()),
+                tool: "six@2".into(),
+                args: vec![],
+            },
+            &activity,
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("--from package version conflicts with the tool version"),
+            "{error}"
+        );
+
+        let clean = |from: &str, tool: &str| {
+            clean_filter(CleanRequest {
+                ecosystem: Some("python".into()),
+                from: Some(from.into()),
+                tool: Some(tool.into()),
+            })
+        };
+        let error = clean("six@1", "six@2").unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("--from package version conflicts with the tool version"),
+            "{error}"
+        );
+        let agreed = clean("six@1", "six@1").unwrap();
+        assert_eq!(agreed.package.as_deref(), Some("six"));
+        assert_eq!(agreed.version.as_deref(), Some("1"));
+    }
+
+    #[test]
+    fn package_bin_and_version_inputs_are_validated() {
         let error = validate_package("python", "/tmp/tool").unwrap_err();
         assert!(error.to_string().contains("invalid package"), "{error}");
         assert!(validate_from_bin("../tool").is_err());

@@ -7,6 +7,7 @@ use crate::kernel::activity::{ActivityMode, StoreActivity};
 use crate::kernel::gc;
 use crate::kernel::platform::Platform;
 use crate::kernel::store::Store;
+use crate::kernel::ui;
 use std::io;
 use std::path::PathBuf;
 
@@ -52,7 +53,7 @@ impl Context {
             // Scope the narration's stderr handle to the one call that uses
             // it: a lock held across a child whose stderr is relayed from
             // another thread is a pipe that stops being drained.
-            let mut stderr = io::stderr().lock();
+            let mut stderr = ui::narration();
             gc::automatic_maintenance(&store, &mut stderr)?;
         }
         let activity = store.activity(ActivityMode::Shared)?;

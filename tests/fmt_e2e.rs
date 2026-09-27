@@ -45,7 +45,7 @@ fn default_rust() -> String {
 
 #[test]
 #[ignore]
-fn fmt_is_lockless_cached_sandboxed_and_gc_rooted() {
+fn fmt_is_lockless_cached_and_gc_rooted_until_forgotten() {
     let temp = TempDir::new("fmt-e2e");
     let project = temp.0.join("cargo-hello");
     copy_tree(&fixture("cargo-hello"), &project);
@@ -245,9 +245,20 @@ fn fmt_is_lockless_cached_sandboxed_and_gc_rooted() {
         "status 2 was tog's usage error, not the formatter's:\n{bad_tool_stderr}"
     );
 
+    // The fmt closure roots both objects: an aged sweep keeps them. A
+    // sweep that deletes nothing would pass that alone, so the same sweep
+    // has to reclaim something unrooted: a stale `store/tmp/stage-*`
+    // leftover, which is what an interrupted fmt run leaves behind.
     for entry in fs::read_dir(store.join("objects")).unwrap() {
         age(&entry.unwrap().path());
     }
+    let leftover = store.join("tmp/stage-rustfmt-run-leftover");
+    fs::create_dir_all(&leftover).unwrap();
+    fs::write(leftover.join("scratch"), b"leftover").unwrap();
+    fs::File::open(&leftover)
+        .unwrap()
+        .set_modified(SystemTime::now() - Duration::from_secs(2 * 24 * 60 * 60))
+        .unwrap();
     let gc = tog_at(&project, &home, &store, &["gc", "--keep-days", "0"]);
     assert!(
         gc.status.success(),
@@ -257,6 +268,72 @@ fn fmt_is_lockless_cached_sandboxed_and_gc_rooted() {
     );
     assert!(store.join("objects").join(rust_id).is_dir());
     assert!(store.join("objects").join(rustfmt_id).is_dir());
+    assert!(!leftover.exists(), "gc left the stale stage behind");
+
+    // Forgetting the project's root record unroots the objects: the next
+    // aged sweep reclaims both. A second registered project keeps the
+    // registry non-empty (an empty one makes the sweep refuse) and roots
+    // objects of its own, which the same sweep has to keep. A root record
+    // needs a closure naming a real store object, so the second project
+    // is a synced one.
+    let other = temp.0.join("other");
+    fs::create_dir_all(&other).unwrap();
+    fs::write(other.join("requirements.txt"), "six==1.17.0\n").unwrap();
+    let synced = tog_at(&other, &home, &store, &["sync"]);
+    assert!(
+        synced.status.success(),
+        "second project sync failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&synced.stdout),
+        String::from_utf8_lossy(&synced.stderr)
+    );
+    let python_closure: serde_json::Value =
+        serde_json::from_slice(&fs::read(other.join(".tog/closures/python.json")).unwrap())
+            .unwrap();
+    let python_env = PathBuf::from(python_closure["body"]["env_object"].as_str().unwrap());
+    assert!(python_env.is_dir(), "{}", python_env.display());
+    let roots = tog_at(&project, &home, &store, &["store", "roots"]);
+    let roots = String::from_utf8_lossy(&roots.stdout).into_owned();
+    let canonical = project.canonicalize().unwrap();
+    let key = roots
+        .lines()
+        .filter_map(|line| line.split_once("  "))
+        .find(|(_, path)| Path::new(path) == canonical)
+        .map(|(key, _)| key.to_string())
+        .unwrap_or_else(|| panic!("no root record for {}:\n{roots}", canonical.display()));
+    let forgotten = tog_at(
+        &project,
+        &home,
+        &store,
+        &["gc", "--forget", &key, "--keep-days", "0"],
+    );
+    assert!(
+        forgotten.status.success(),
+        "forget failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&forgotten.stdout),
+        String::from_utf8_lossy(&forgotten.stderr)
+    );
+    for entry in fs::read_dir(store.join("objects")).unwrap() {
+        age(&entry.unwrap().path());
+    }
+    let swept = tog_at(&project, &home, &store, &["gc", "--keep-days", "0"]);
+    assert!(
+        swept.status.success(),
+        "gc after forget failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&swept.stdout),
+        String::from_utf8_lossy(&swept.stderr)
+    );
+    assert!(
+        !store.join("objects").join(rustfmt_id).exists(),
+        "gc kept the unrooted rustfmt object"
+    );
+    assert!(
+        !store.join("objects").join(rust_id).exists(),
+        "gc kept the unrooted rust object"
+    );
+    assert!(
+        python_env.is_dir(),
+        "gc swept the other project's rooted environment"
+    );
 }
 
 /// Run from a workspace member, `tog fmt` formats with the Rust the

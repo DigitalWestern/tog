@@ -940,7 +940,7 @@ mod tests {
     }
 
     #[test]
-    fn pnpm_v9_catalog_peer_link_and_optional_platform() {
+    fn pnpm_v9_catalog_peer_link_optional_platform_and_undefined_catalog() {
         let dir = project();
         let lock = format!(
             r#"lockfileVersion: '9.0'
@@ -995,6 +995,33 @@ snapshots:
             .packages
             .iter()
             .any(|package| package.name == "mac-only"));
+
+        // A `catalog:` specifier the lock's catalogs do not define is refused:
+        // a named catalog that is absent, and a default catalog without an
+        // entry for the dependency.
+        for (lock, catalog) in [
+            (
+                lock.replace("specifier: catalog:", "specifier: catalog:absent"),
+                "absent",
+            ),
+            (
+                lock.replace("    is-odd: ^3.0.0\n", "    other: ^1.0.0\n"),
+                "",
+            ),
+        ] {
+            let error = plan_pnpm(
+                Platform::X86_64UnknownLinuxGnu,
+                &lock,
+                &held(&dir.0),
+                node_version(),
+            )
+            .unwrap_err()
+            .to_string();
+            assert_eq!(
+                error,
+                format!("importer . dependency is-odd: catalog:{catalog} is not defined")
+            );
+        }
     }
 
     /// Characterization: the whole placement result for one graph that
@@ -1522,7 +1549,7 @@ snapshots:
     }
 
     #[test]
-    fn pnpm_required_git_errors_but_optional_git_is_skipped() {
+    fn pnpm_required_git_errors_and_optional_git_is_skipped_with_an_exception() {
         let _policy_guard = exception_guard();
         let dir = project();
         let required = "\
@@ -1547,9 +1574,12 @@ snapshots: {}
         .unwrap_err();
         assert!(error.to_string().contains("npm_git_dep"));
 
+        // Renamed in the importer and the package key alike, so the
+        // optional importer entry still resolves to the git package.
         let optional = required
             .replace("dependencies:", "optionalDependencies:")
-            .replace("git-required:", "git-optional:");
+            .replace("git-required", "git-optional");
+        let _attribution = crate::kernel::policy::Attribution::open("node").unwrap();
         let plan = plan_pnpm(
             Platform::X86_64UnknownLinuxGnu,
             &optional,
@@ -1558,6 +1588,16 @@ snapshots: {}
         )
         .unwrap();
         assert!(plan.packages.is_empty());
+        let exceptions = crate::kernel::policy::drain();
+        assert_eq!(exceptions.len(), 1, "{exceptions:?}");
+        assert_eq!(exceptions[0].kind, crate::kernel::policy::GIT_DEPENDENCY);
+        assert_eq!(exceptions[0].subject, "git-optional");
+        assert!(
+            exceptions[0]
+                .detail
+                .starts_with("npm_git_dep: git-optional: repo https://example.invalid/a"),
+            "{exceptions:?}"
+        );
     }
 
     #[test]
@@ -1706,8 +1746,11 @@ snapshots:
         }));
     }
 
+    /// A yarn v1 entry keyed by several selectors serves the manifest's
+    /// later one too; its `#sha1` fragments are accepted as sha1 integrity
+    /// and each recorded as weak; a Berry lock is refused.
     #[test]
-    fn yarn_v1_multi_key_sha1_and_berry_rejection() {
+    fn yarn_v1_later_selector_resolves_sha1_is_recorded_weak_and_berry_is_refused() {
         let _attribution_lock = crate::kernel::policy::exception_guard();
         let _attribution = crate::kernel::policy::Attribution::open("node").unwrap();
         let dir = project();
@@ -1722,7 +1765,8 @@ is-number@^6.0.0:
   version \"6.0.0\"
   resolved \"https://registry.yarnpkg.com/is-number/-/is-number-6.0.0.tgz#0000000000000000000000000000000000000000\"
 ";
-        let package_json = r#"{"dependencies":{"is-odd":"3.0.1"}}"#;
+        // The entry's second key: the first one alone would not serve it.
+        let package_json = r#"{"dependencies":{"is-odd":"^3.0.0"}}"#;
         let plan = plan_yarn(
             Platform::X86_64UnknownLinuxGnu,
             lock,
@@ -1736,6 +1780,30 @@ is-number@^6.0.0:
             .packages
             .iter()
             .all(|package| package.integrity.starts_with("sha1-")));
+        // Both entries are recorded as weak. Subjects are the importer's
+        // entry keys (`yarn:<index>`), each recorded at parse and again
+        // when the entry is realized, so match per entry, not the count.
+        let exceptions = crate::kernel::policy::drain();
+        assert!(!exceptions.is_empty());
+        for exception in &exceptions {
+            assert_eq!(
+                exception.kind,
+                crate::kernel::policy::WEAK_INTEGRITY,
+                "{exceptions:?}"
+            );
+            assert_eq!(
+                exception.detail,
+                "sha1 integrity accepted and verified, but is cryptographically weak"
+            );
+        }
+        for entry in ["yarn:0", "yarn:1"] {
+            assert!(
+                exceptions
+                    .iter()
+                    .any(|exception| exception.subject.ends_with(entry)),
+                "{entry}: {exceptions:?}"
+            );
+        }
         let berry = "__metadata:\n  version: 6\n";
         let error = plan_yarn(
             Platform::X86_64UnknownLinuxGnu,
@@ -1947,9 +2015,11 @@ b@2.0.0:
     }
 
     /// Yarn classic never locks a `link:` dependency, so its absence from
-    /// the lock is not a stale lock.
+    /// the lock is not a stale lock. An optional one is skipped; a required
+    /// one is refused as an unresolvable dependency, not as a lock that
+    /// disagrees with the manifest (link: support is tracked in #349).
     #[test]
-    fn a_yarn_link_dependency_is_not_a_stale_lock() {
+    fn an_unlocked_yarn_link_is_skipped_when_optional_and_unresolvable_when_required() {
         let dir = project();
         let error = plan_yarn(
             Platform::X86_64UnknownLinuxGnu,
@@ -1968,7 +2038,10 @@ b@2.0.0:
         )
         .unwrap_err()
         .to_string();
-        assert!(!error.contains("disagree"), "{error}");
+        assert_eq!(
+            error,
+            "local: missing yarn selector local@link:./vendor/local"
+        );
     }
 
     #[test]

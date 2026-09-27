@@ -277,11 +277,14 @@ fn network_access_during_install_script_fails() {
     }
     let temp = TempDir::new("evil-npm");
     let dir = temp.path();
-    // Network probe: succeeds (exit 0) with network, exits 1 without.
+    // Network probe: connects to an IP literal, so no resolver is involved,
+    // and says how the connect ended on its stderr, which the sandbox
+    // relays to the strict child's stderr. Exits 0 when connected, 1 not.
     let (tarball, sri) = make_pkg_tarball(
         dir,
-        "node -e \"require('https').get('https://registry.npmjs.org/', \
-         () => process.exit(0)).on('error', () => process.exit(1))\"",
+        "node -e \"require('net').connect(443, '1.1.1.1')\
+         .on('connect', () => { console.error('TOG-PROBE connected'); process.exit(0) })\
+         .on('error', (e) => { console.error('TOG-PROBE connect failed: ' + e.code); process.exit(1) })\"",
     );
     let child = Command::new(std::env::current_exe().unwrap())
         .args([
@@ -298,10 +301,15 @@ fn network_access_during_install_script_fails() {
         .env_remove("TOG_POLICY")
         .output()
         .unwrap();
+    let stderr = String::from_utf8_lossy(&child.stderr);
+    assert!(child.status.success(), "strict child failed: {stderr}");
+    // "network-denied" is in every strict script failure's message; the
+    // probe's own words say the failure was the connect, refused by a
+    // namespace with no route out (not a DNS error, not a timeout).
+    assert!(!stderr.contains("TOG-PROBE connected"), "{stderr}");
     assert!(
-        child.status.success(),
-        "strict child failed: {}",
-        String::from_utf8_lossy(&child.stderr)
+        stderr.contains("TOG-PROBE connect failed: ENETUNREACH"),
+        "the install script did not fail on a refused connection:\n{stderr}"
     );
 }
 
@@ -607,7 +615,7 @@ console.log('linux-npm-roundtrip-ok');
 #[ignore]
 fn skip_download_switch_is_injected_and_recorded() {
     let _policy_guard = policy_guard();
-    let _attribution = policy::Attribution::open("node").expect("test attribution");
+    let attribution = policy::Attribution::open("node").expect("test attribution");
     // puppeteer's installer reads PUPPETEER_SKIP_DOWNLOAD (verified against the
     // package's own getConfiguration.js). The script here asserts the switch is
     // visible to the lifecycle process, which is what makes the real installer
@@ -636,6 +644,20 @@ fn skip_download_switch_is_injected_and_recorded() {
         std::fs::read_to_string(env.join("node_modules/puppeteer/skipped.txt")).unwrap(),
         "ok"
     );
+    // The skip is recorded: the user learns the browser was not
+    // downloaded and the one command that downloads it.
+    let skipped: Vec<_> = attribution
+        .recorded()
+        .into_iter()
+        .filter(|exception| exception.kind == policy::ARTIFACT_NOT_PROVISIONED)
+        .collect();
+    assert_eq!(skipped.len(), 1, "{skipped:?}");
+    assert_eq!(skipped[0].subject, "puppeteer@1.0.0");
+    assert_eq!(
+        skipped[0].detail,
+        "install-time download skipped; run: npx puppeteer browsers install chrome"
+    );
+    attribution.discard();
 }
 
 #[test]
@@ -836,6 +858,22 @@ fn terminate_during_install_script_stops_the_sync() {
     assert_signal_mid_script_stops_the_sync(libc::SIGTERM, false);
 }
 
+/// Live `sleep <arg>` processes, by pid, read from `/proc/*/cmdline`. A
+/// zombie has an empty cmdline, so only a process still running counts.
+fn sleepers(arg: &str) -> Vec<i32> {
+    let wanted = format!("sleep\0{arg}\0");
+    std::fs::read_dir("/proc")
+        .unwrap()
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let pid: i32 = entry.file_name().to_str()?.parse().ok()?;
+            let cmdline = std::fs::read(entry.path().join("cmdline")).ok()?;
+            let base = cmdline.rsplit(|&byte| byte == b'/').next()?;
+            (cmdline.ends_with(wanted.as_bytes()) && base.starts_with(b"sleep\0")).then_some(pid)
+        })
+        .collect()
+}
+
 /// Sync a project whose one dependency's postinstall sleeps, send `signal`
 /// to tog (or to its whole process group) once the script is running, and
 /// require that tog exits non-zero, says it was interrupted, and does not
@@ -868,11 +906,15 @@ fn assert_signal_mid_script_stops_the_sync(signal: libc::c_int, whole_group: boo
     .unwrap();
     // The marker is how the case knows the script is running inside the
     // sandbox; the sleep outlives every deadline below, so only the
-    // interrupt can end it.
+    // interrupt can end it. Its duration is unique to this run, so the
+    // sleep can be found in /proc afterwards: the sandbox gives it its own
+    // pid namespace and session, so neither a pid it prints nor tog's
+    // process group names it from out here.
+    let sleep_arg = format!("600.{}", std::process::id());
     let sleeper_package = serde_json::json!({
         "name": "fixture-sleeper",
         "version": "1.0.0",
-        "scripts": {"postinstall": "printf 'TOG_SCRIPT_RUNNING\\n'; sleep 600"},
+        "scripts": {"postinstall": format!("printf 'TOG_SCRIPT_RUNNING\\n'; sleep {sleep_arg}")},
         "main": "index.js"
     })
     .to_string();
@@ -986,6 +1028,23 @@ fn assert_signal_mid_script_stops_the_sync(signal: libc::c_int, whole_group: boo
     assert!(
         stderr_text.contains("interrupted"),
         "the failure does not say the sync was interrupted\n{report}"
+    );
+    // The sandboxed script went with the sync: no `sleep` survives it as
+    // an orphan. A process that was killed may take a moment to be reaped,
+    // so this waits a bounded time for the list to empty.
+    let survivors = || sleepers(&sleep_arg);
+    let orphan_deadline = Instant::now() + Duration::from_secs(10);
+    while !survivors().is_empty() && Instant::now() < orphan_deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let left = survivors();
+    for pid in &left {
+        // SAFETY: a plain kill(2) of a process this case started.
+        unsafe { libc::kill(*pid, libc::SIGKILL) };
+    }
+    assert!(
+        left.is_empty(),
+        "the sandboxed script outlived the interrupted sync: pids {left:?}\n{report}"
     );
     // No closure at all is the expected outcome; a closure that does exist
     // must not carry the interrupted script as a failure.

@@ -184,39 +184,6 @@ pub fn run(ctx: &Context, cmd: &[String], frozen: bool) -> io::Result<i32> {
 mod tests {
     use super::*;
     use crate::kernel::testutil::TempDir;
-    use crate::tailors::dotnet;
-
-    #[test]
-    fn dotnet_run_guard_handles_options_and_msbuild_dll() {
-        assert!(dotnet::refused_run_command(
-            &["dotnet", "-d", "build"]
-                .into_iter()
-                .map(String::from)
-                .collect::<Vec<_>>()
-        )
-        .is_some());
-        assert!(dotnet::refused_run_command(
-            &["dotnet", "msbuild"]
-                .into_iter()
-                .map(String::from)
-                .collect::<Vec<_>>()
-        )
-        .is_some());
-        assert!(dotnet::refused_run_command(
-            &["dotnet", "exec", "/tmp/tools/MSBuild.dll"]
-                .into_iter()
-                .map(String::from)
-                .collect::<Vec<_>>()
-        )
-        .is_some());
-        assert!(dotnet::refused_run_command(
-            &["dotnet", "exec", "app.dll"]
-                .into_iter()
-                .map(String::from)
-                .collect::<Vec<_>>()
-        )
-        .is_none());
-    }
 
     fn refusal(words: &[&str]) -> Option<String> {
         refused_command(&words.iter().map(|w| w.to_string()).collect::<Vec<_>>())

@@ -276,7 +276,10 @@ mod tests {
     impl TempStore {
         fn new(label: &str) -> Self {
             let dir = TempDir::named(&format!("gc-{label}"));
-            let root = dir.0.clone();
+            // One level down, so the store's parent (where the legacy
+            // shared `forests/` and `backups/` live) is private to the test
+            // and removed with it, never the system temp directory.
+            let root = dir.0.join("store");
             for sub in ["objects", "meta", "cache/sha256", "tmp", "roots"] {
                 fs::create_dir_all(root.join(sub)).unwrap();
             }
@@ -661,7 +664,11 @@ mod tests {
         let child = commit(&store, "child", None);
         let parent = commit(&store, "parent", Some(&child));
         let dead = commit(&store, "dead", None);
-        age(&store.object_path(&dead));
+        // All three are past the active window, so only the walk from the
+        // closure to the parent and on to the child keeps those two.
+        for id in [&child, &parent, &dead] {
+            age(&store.object_path(id));
+        }
         let project = temp.root.join("project");
         fs::create_dir_all(&project).unwrap();
         closure(
@@ -686,7 +693,13 @@ mod tests {
         .unwrap();
         assert_eq!(report.objects, 1);
         assert!(store.object_path(&dead).is_dir());
-        assert!(String::from_utf8(output).unwrap().contains(&dead));
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains(&dead), "{output}");
+        // Project protection is silent; an object kept any other way (by
+        // policy, or by depending on something policy keeps) is narrated.
+        // So neither the parent nor the child may appear.
+        assert!(!output.contains(&parent), "{output}");
+        assert!(!output.contains(&child), "{output}");
     }
 
     #[test]
@@ -707,6 +720,12 @@ mod tests {
         let object = meta.as_object_mut().unwrap();
         object.insert("evidence".into(), serde_json::json!("adapted:test@1"));
         object.insert("legacy_retention".into(), serde_json::json!(true));
+        // The object names the artifact, so the artifact lives and dies with
+        // the object's retention rather than on its own age.
+        object.insert(
+            "cache_digests".into(),
+            serde_json::json!([{"algo": "sha256", "hex": artifact}]),
+        );
         fs::write(&meta_path, serde_json::to_vec(&meta).unwrap()).unwrap();
         age(&store.object_path(&id));
         let project = temp.root.join("project");
@@ -718,12 +737,14 @@ mod tests {
         let anchor = commit(&store, "anchor", None);
         closure(&project, &store.object_path(&anchor), serde_json::json!({}));
         store.register_root(&project).unwrap();
+        // Both runs sweep everything past the active window; only the
+        // opt-in changes between them, so it alone decides the outcome.
         let mut output = Vec::new();
         let report = collect(
             &store,
             Options {
                 dry_run: false,
-                keep_days: 30,
+                keep_days: 0,
                 project: false,
                 collect_legacy: false,
                 forgotten: Vec::new(),
@@ -734,6 +755,7 @@ mod tests {
         assert_eq!(report.objects, 0);
         assert_eq!(report.cached_artifacts, 0);
         assert!(store.object_path(&id).exists());
+        assert!(artifact_path.exists());
         let report = collect(
             &store,
             Options {
@@ -846,11 +868,16 @@ mod tests {
         let project = temp.root.join("project");
         fs::create_dir_all(project.join(".tog/closures")).unwrap();
         let project = project.canonicalize().unwrap();
-        let home = store.root.parent().unwrap();
         let project_key =
             &hex::encode(sha2::Sha256::digest(project.to_string_lossy().as_bytes()))[..32];
         let projection_id = "a".repeat(32);
-        let forest = home.join("forests").join(project_key).join(&projection_id);
+        // The store's own `forests/`, the namespace the sweep reads: only
+        // the closure's projection id, rebuilt into this path, keeps it.
+        let forest = store
+            .root
+            .join("forests")
+            .join(project_key)
+            .join(&projection_id);
         let workspace_forest = forest.join("workspaces/packages%2Flib/node_modules");
         fs::create_dir_all(&workspace_forest).unwrap();
         fs::create_dir_all(project.join("packages/lib")).unwrap();
@@ -937,9 +964,12 @@ mod tests {
         let parent = commit(&store, "fresh-parent", Some(&child));
         let project = temp.root.join("project");
         // A resolvable root owns a closure naming a real object (an
-        // unresolvable reference is exactly what the sweep refuses); the
-        // object it names is the fresh parent, which retention keeps anyway.
-        closure(&project, &store.object_path(&parent), serde_json::json!({}));
+        // unresolvable reference is exactly what the sweep refuses). It
+        // names an unrelated anchor, so neither the parent nor the child is
+        // root-live: the parent survives on retention policy alone, and the
+        // child only through the policy walk over the parent's dependencies.
+        let anchor = commit(&store, "anchor", None);
+        closure(&project, &store.object_path(&anchor), serde_json::json!({}));
         store.register_root(&project).unwrap();
 
         let mut output = Vec::new();
@@ -1134,7 +1164,7 @@ mod tests {
         let project = temp.root.join("project");
         fs::create_dir_all(&project).unwrap();
         closure(&project, &store.object_path(&id), serde_json::json!({}));
-        store.register_root(&project).unwrap();
+        let entry = store.register_root(&project).unwrap();
         fs::remove_dir_all(project.join(".tog/closures")).unwrap();
 
         let mut output = Vec::new();
@@ -1150,7 +1180,12 @@ mod tests {
             &mut output,
         )
         .unwrap_err();
-        assert!(error.to_string().contains("closures"), "{error}");
+        // The refusal names the root and the miss itself. Matching
+        // "closures" would also match the scratch directory's name.
+        let message = error.to_string();
+        let missing = io::Error::from_raw_os_error(libc::ENOENT).to_string();
+        assert!(message.contains(&entry.key), "{message}");
+        assert!(message.contains(&missing), "{message}");
         assert!(store.object_path(&id).is_dir());
     }
 
@@ -1261,8 +1296,10 @@ mod tests {
         )
         .unwrap_err();
         let message = error.to_string();
+        let symlink_loop = io::Error::from_raw_os_error(libc::ELOOP).to_string();
         assert!(message.contains("refusing to sweep"), "{message}");
         assert!(message.contains(&entry.key), "{message}");
+        assert!(message.contains(&symlink_loop), "{message}");
         assert!(store.object_path(&id).is_dir());
         assert!(store.roots().unwrap().len() == 1, "record was removed");
     }
@@ -1476,6 +1513,11 @@ mod tests {
         let child = commit(&store, "child", None);
         let parent = commit(&store, "parent", Some(&child));
         register_objects(&store, &temp.root.join("project"), &[&parent]);
+        // The child is gone entirely, object and record. With its directory
+        // left behind the read phase would refuse the orphan first; this way
+        // only the parent's dependency names it, and the refusal can only
+        // come from the transitive walk.
+        store::remove_tree(&store.object_path(&child)).unwrap();
         fs::remove_file(store.root.join("meta").join(format!("{child}.json"))).unwrap();
 
         let (result, _) = sweep(
@@ -1487,11 +1529,12 @@ mod tests {
         );
         let error = result.unwrap_err().to_string();
         assert!(
-            error.contains(&child),
-            "the missing id is not named: {error}"
+            error.contains(&format!(
+                "object {child}, reachable from {parent}, has no metadata"
+            )),
+            "the missing id is not named by the walk: {error}"
         );
         assert!(store.object_path(&parent).is_dir());
-        assert!(store.object_path(&child).is_dir());
     }
 
     /// The marking walk seeds from root objects as well as from retention
@@ -2699,13 +2742,37 @@ mod tests {
         register_objects(&store, &temp.root.join("other"), &[]);
         let project = temp.root.join("project");
         fs::create_dir_all(&project).unwrap();
-        // Real publication with an unavailable reference: it must fail
-        // before either durable write, so nothing is published.
+        // Real publication with an unavailable reference: the reference is
+        // refused, and publishing what is left must fail before either
+        // durable write, so nothing is published.
+        let _attribution_lock = crate::kernel::policy::attribution_test_lock();
+        let mut attribution = crate::kernel::policy::Attribution::open("python").unwrap();
         let activity = store.activity(ActivityMode::Exclusive).unwrap();
         let mut refs = crate::comforter::ClosureRefs::new();
         refs.object_id(&store, &activity, &("0".repeat(40) + "-missing-1"))
             .unwrap_err();
-        assert!(!project.join(".tog/closures").exists());
+        let error = crate::comforter::write_closure(
+            &crate::kernel::fsroot::ProjectRoot::open(&project).unwrap(),
+            "python",
+            serde_json::json!({"ok": true}),
+            &store,
+            &activity,
+            refs,
+            &mut attribution,
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("no object references"),
+            "{error}"
+        );
+        // The frame knows the claimed closure never landed.
+        let unfinished = attribution.finish(false).unwrap_err();
+        assert!(
+            unfinished.to_string().contains("did not complete"),
+            "{unfinished}"
+        );
+        let project = project.canonicalize().unwrap();
+        assert!(!project.join(".tog/closures/python.json").exists());
         let roots = store.roots().unwrap();
         assert!(
             roots.iter().all(|root| root
@@ -2715,7 +2782,6 @@ mod tests {
                 .unwrap_or(true)),
             "a failed publication wrote a durable record"
         );
-        assert!(!project.join(".tog/closures").exists());
         drop(activity);
 
         let (report, text) = sweep(

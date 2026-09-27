@@ -86,6 +86,74 @@ fn find_files(root: &Path, name: &str, found: &mut Vec<PathBuf>) {
     }
 }
 
+/// The version `uv.lock` in `project` records for `name`.
+fn uv_locked_version(project: &Path, name: &str) -> String {
+    let lock: toml::Value =
+        toml::from_str(&std::fs::read_to_string(project.join("uv.lock")).unwrap()).unwrap();
+    lock["package"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|package| package["name"].as_str() == Some(name))
+        .unwrap_or_else(|| panic!("{name} in uv.lock"))["version"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+/// The version `package-lock.json` in `project` records for `name`.
+fn npm_locked_version(project: &Path, name: &str) -> String {
+    let lock: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(project.join("package-lock.json")).unwrap()).unwrap();
+    lock["packages"][format!("node_modules/{name}")]["version"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{name} in package-lock.json"))
+        .to_string()
+}
+
+/// The version `Cargo.lock` in `project` records for `name`.
+fn cargo_locked_version(project: &Path, name: &str) -> String {
+    let lock: toml::Value =
+        toml::from_str(&std::fs::read_to_string(project.join("Cargo.lock")).unwrap()).unwrap();
+    lock["package"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|package| package["name"].as_str() == Some(name))
+        .unwrap_or_else(|| panic!("{name} in Cargo.lock"))["version"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+/// The version `go.mod` in `project` requires for `module`.
+fn go_required_version(project: &Path, module: &str) -> String {
+    let go_mod = std::fs::read_to_string(project.join("go.mod")).unwrap();
+    go_mod
+        .lines()
+        .map(str::trim)
+        .filter_map(|line| {
+            line.strip_prefix("require ")
+                .unwrap_or(line)
+                .split_once(' ')
+        })
+        .find(|(name, _)| *name == module)
+        .map(|(_, version)| version.split_whitespace().next().unwrap().to_string())
+        .unwrap_or_else(|| panic!("{module} in go.mod:\n{go_mod}"))
+}
+
+/// The version `Gemfile.lock` in `project` records for `gem`.
+fn gem_locked_version(project: &Path, gem: &str) -> String {
+    let lock = std::fs::read_to_string(project.join("Gemfile.lock")).unwrap();
+    lock.lines()
+        .map(str::trim)
+        .filter_map(|line| line.strip_prefix(gem)?.strip_prefix(" ("))
+        .filter_map(|rest| rest.strip_suffix(')'))
+        .next()
+        .map(str::to_string)
+        .unwrap_or_else(|| panic!("{gem} in Gemfile.lock:\n{lock}"))
+}
+
 fn closure_exceptions(path: &Path) -> Vec<serde_json::Value> {
     serde_json::from_slice::<serde_json::Value>(&std::fs::read(path).unwrap()).unwrap()["body"]
         ["exceptions"]
@@ -114,6 +182,19 @@ fn python_requirements_add_update_remove_roundtrip() {
     assert!(std::fs::read_to_string(project.join("requirements.txt"))
         .unwrap()
         .contains("charset-normalizer==3.4.3"));
+    // Update moves the lock within the requirement's range: loosen the pin
+    // to a range and lock an older release, so only an update that
+    // re-resolves reaches the top of the range.
+    std::fs::write(
+        project.join("requirements.txt"),
+        "idna==3.10\ncharset-normalizer>=3.0,<=3.4.3\n",
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("requirements.lock.txt"),
+        "charset-normalizer==3.0.0\nidna==3.10\n",
+    )
+    .unwrap();
     assert_ok(
         run(
             project,
@@ -123,9 +204,9 @@ fn python_requirements_add_update_remove_roundtrip() {
         ),
         "python requirements update",
     );
-    assert!(std::fs::read_to_string(project.join("requirements.txt"))
-        .unwrap()
-        .contains("charset-normalizer==3.4.3"));
+    let lock = std::fs::read_to_string(project.join("requirements.lock.txt")).unwrap();
+    assert!(lock.contains("charset-normalizer==3.4.3"), "{lock}");
+    assert!(!lock.contains("charset-normalizer==3.0.0"), "{lock}");
     assert_ok(
         run(
             project,
@@ -155,21 +236,26 @@ fn python_uv_add_update_remove_roundtrip() {
         run(
             project,
             &store,
-            &["add", "--dev", "--no-sync", "idna==3.10"],
+            &["add", "--dev", "--no-sync", "idna==3.7"],
             &temp.0,
         ),
         "uv add",
     );
-    assert!(std::fs::read_to_string(project.join("pyproject.toml"))
-        .unwrap()
-        .contains("idna"));
+    let pyproject = std::fs::read_to_string(project.join("pyproject.toml")).unwrap();
+    assert!(pyproject.contains("idna==3.7"), "{pyproject}");
+    assert_eq!(uv_locked_version(project, "idna"), "3.7");
+    // Loosen the pin to a range the lock already satisfies: the locked 3.7
+    // stays until an update re-resolves to the top of the range.
+    std::fs::write(
+        project.join("pyproject.toml"),
+        pyproject.replace("idna==3.7", "idna>=3.7,<=3.10"),
+    )
+    .unwrap();
     assert_ok(
         run(project, &store, &["update", "--no-sync", "idna"], &temp.0),
         "uv update",
     );
-    assert!(std::fs::read_to_string(project.join("pyproject.toml"))
-        .unwrap()
-        .contains("idna"));
+    assert_eq!(uv_locked_version(project, "idna"), "3.10");
     assert_ok(
         run(
             project,
@@ -199,15 +285,24 @@ fn npm_add_update_remove_roundtrip() {
         run(
             project,
             &store,
-            &["add", "--no-sync", "is-number@7.0.0"],
+            &["add", "--no-sync", "is-number@6.0.0"],
             &temp.0,
         ),
         "npm add",
     );
-    let package: serde_json::Value =
+    let mut package: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(project.join("package.json")).unwrap())
             .unwrap();
-    assert_eq!(package["dependencies"]["is-number"], "^7.0.0");
+    assert_eq!(package["dependencies"]["is-number"], "^6.0.0");
+    assert_eq!(npm_locked_version(project, "is-number"), "6.0.0");
+    // Widen the range past the locked release: the lock keeps 6.0.0 until
+    // an update re-resolves to the top of the range.
+    package["dependencies"]["is-number"] = ">=6.0.0 <=7.0.0".into();
+    std::fs::write(
+        project.join("package.json"),
+        serde_json::to_vec_pretty(&package).unwrap(),
+    )
+    .unwrap();
     assert_ok(
         run(
             project,
@@ -217,10 +312,7 @@ fn npm_add_update_remove_roundtrip() {
         ),
         "npm update",
     );
-    let package: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(project.join("package.json")).unwrap())
-            .unwrap();
-    assert_eq!(package["dependencies"]["is-number"], "^7.0.0");
+    assert_eq!(npm_locked_version(project, "is-number"), "7.0.0");
     assert_ok(
         run(
             project,
@@ -925,24 +1017,35 @@ fn cargo_add_update_remove_roundtrip() {
         run(
             project,
             &store,
-            &["add", "--no-sync", "itoa@1.0.15"],
+            &["add", "--no-sync", "itoa@1.0.10"],
             &temp.0,
         ),
         "cargo add",
     );
-    assert!(std::fs::read_to_string(project.join("Cargo.toml"))
-        .unwrap()
-        .contains("itoa"));
-    assert!(std::fs::read_to_string(project.join("Cargo.lock"))
-        .unwrap()
-        .contains("name = \"itoa\""));
-    assert_ok(
-        run(project, &store, &["update", "--no-sync", "itoa"], &temp.0),
-        "cargo update",
-    );
-    assert!(std::fs::read_to_string(project.join("Cargo.lock"))
-        .unwrap()
-        .contains("name = \"itoa\""));
+    // `cargo add itoa@1.0.10` writes the caret requirement `1.0.10` and
+    // locks the newest release it admits, so the lock starts above the
+    // floor; whatever that release is, it is not 1.0.10.
+    let manifest = std::fs::read_to_string(project.join("Cargo.toml")).unwrap();
+    assert!(manifest.contains("itoa = \"1.0.10\""), "{manifest}");
+    let added = cargo_locked_version(project, "itoa");
+    assert_ne!(added, "1.0.10", "{manifest}");
+    // Update re-resolves the lock to fit the manifest, in both directions:
+    // pinned down to 1.0.10, then up to the top of a widened range. A
+    // no-op update leaves the lock where `add` put it and fails here.
+    let with_requirement = |requirement: &str| {
+        std::fs::write(
+            project.join("Cargo.toml"),
+            manifest.replace("itoa = \"1.0.10\"", &format!("itoa = \"{requirement}\"")),
+        )
+        .unwrap();
+        assert_ok(
+            run(project, &store, &["update", "--no-sync", "itoa"], &temp.0),
+            "cargo update",
+        );
+        cargo_locked_version(project, "itoa")
+    };
+    assert_eq!(with_requirement("=1.0.10"), "1.0.10");
+    assert_eq!(with_requirement(">=1.0.10, <=1.0.15"), "1.0.15");
     assert_ok(
         run(project, &store, &["remove", "--no-sync", "itoa"], &temp.0),
         "cargo remove",
@@ -972,17 +1075,18 @@ fn go_add_update_remove_roundtrip() {
         run(
             project,
             &store,
-            &["add", "--no-sync", "rsc.io/quote@v1.5.2"],
+            &["add", "--no-sync", "rsc.io/quote@v1.5.1"],
             &temp.0,
         ),
         "go add",
     );
-    assert!(std::fs::read_to_string(project.join("go.mod"))
-        .unwrap()
-        .contains("rsc.io/quote v1.5.2"));
+    assert_eq!(go_required_version(project, "rsc.io/quote"), "v1.5.1");
     assert!(std::fs::read_to_string(project.join("go.sum"))
         .unwrap()
-        .contains("rsc.io/quote v1.5.2"));
+        .contains("rsc.io/quote v1.5.1"));
+    // Go modules pin the exact version in go.mod, so an update that
+    // re-resolves moves the requirement itself: v1.5.2 is the newest
+    // release of rsc.io/quote v1.
     assert_ok(
         run(
             project,
@@ -992,7 +1096,8 @@ fn go_add_update_remove_roundtrip() {
         ),
         "go update",
     );
-    assert!(std::fs::read_to_string(project.join("go.mod"))
+    assert_eq!(go_required_version(project, "rsc.io/quote"), "v1.5.2");
+    assert!(std::fs::read_to_string(project.join("go.sum"))
         .unwrap()
         .contains("rsc.io/quote v1.5.2"));
     assert_ok(
@@ -1020,24 +1125,34 @@ fn ruby_add_update_remove_roundtrip() {
         run(
             project,
             &store,
-            &["add", "--no-sync", "rake@13.2.1"],
+            &["add", "--no-sync", "rake@13.0.6"],
             &temp.0,
         ),
         "ruby add",
     );
-    assert!(std::fs::read_to_string(project.join("Gemfile"))
-        .unwrap()
-        .contains("gem \"rake\""));
-    assert!(std::fs::read_to_string(project.join("Gemfile.lock"))
-        .unwrap()
-        .contains("rake (13.2.1)"));
+    let gemfile = std::fs::read_to_string(project.join("Gemfile")).unwrap();
+    assert!(gemfile.contains("gem \"rake\""), "{gemfile}");
+    assert_eq!(gem_locked_version(project, "rake"), "13.0.6");
+    // Loosen the pin to a range the lock already satisfies: the locked
+    // 13.0.6 stays until an update re-resolves to the top of the range.
+    let loosened = gemfile
+        .lines()
+        .map(|line| {
+            if line.trim_start().starts_with("gem \"rake\"") {
+                "gem \"rake\", \">= 13.0.6\", \"<= 13.2.1\"".to_string()
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    std::fs::write(project.join("Gemfile"), loosened).unwrap();
     assert_ok(
         run(project, &store, &["update", "--no-sync", "rake"], &temp.0),
         "ruby update",
     );
-    assert!(std::fs::read_to_string(project.join("Gemfile.lock"))
-        .unwrap()
-        .contains("rake (13.2.1)"));
+    assert_eq!(gem_locked_version(project, "rake"), "13.2.1");
     assert_ok(
         run(project, &store, &["remove", "--no-sync", "rake"], &temp.0),
         "ruby remove",

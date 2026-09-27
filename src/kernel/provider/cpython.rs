@@ -13,7 +13,7 @@
 //! tailor keeps its identity goldens and object-kind rows beside it.
 
 use crate::kernel::activity::StoreActivity;
-use crate::kernel::fetch::{download_verified_held, Digest};
+use crate::kernel::fetch::{download_toolchain_artifact_held, Digest};
 use crate::kernel::platform::Platform;
 use crate::kernel::store::Store;
 use crate::kernel::toolchain::document::Shipped;
@@ -326,7 +326,13 @@ pub fn realize_uv(
         return Ok(store.object_path(&id));
     }
     let sha256 = artifact_sha256(spec)?;
-    let tarball = download_verified_held(store, activity, &spec.url, sha256)?;
+    let tarball = download_toolchain_artifact_held(
+        store,
+        activity,
+        &spec.provider,
+        &spec.url,
+        &Digest::sha256(sha256)?,
+    )?;
     let staged = store.stage_with_activity(activity)?;
     // Tarball root is platform-specific; strip it.
     crate::kernel::archive::extract_with_activity_and_options(
@@ -371,7 +377,13 @@ pub fn realize_runtime(
     }
 
     let sha256 = artifact_sha256(spec)?;
-    let tarball = download_verified_held(store, activity, &spec.url, sha256)?;
+    let tarball = download_toolchain_artifact_held(
+        store,
+        activity,
+        &spec.provider,
+        &spec.url,
+        &Digest::sha256(sha256)?,
+    )?;
     let staged = store.stage_with_activity(activity)?;
     // Tarball root is "python/"; strip it so the object root IS the prefix.
     crate::kernel::archive::extract_with_activity_and_options(

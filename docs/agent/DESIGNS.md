@@ -54,19 +54,26 @@ root). The full reviewed design, with its reasoning, is in git history:
 `git show f2531aa:docs/agent/DESIGNS.md`, section 1. What follows is only
 what has not shipped.
 
-### Source policy on every fetch (#239)
+### Source policy: configuration and credentials (#239, #72)
 
 The design gives retrieval a typed source policy: shipped `https://`
 endpoint defaults per publisher that configuration can change, never an
-append-only host list baked into lock validity. Every endpoint and every
-redirect is checked against the effective policy, and `file://` or an
-unauthorized destination fails before the fetch. Credentials are
+append-only host list baked into lock validity. Credentials are
 references scoped to an endpoint and audience, never lock contents, and a
 redirect to another origin receives none unless separately authorized.
-What shipped is the `SourcePolicy` type and its defaults
-(`src/kernel/toolchain/source.rs`). Nothing on the download path calls it
-yet; #239 wires it in. Integrity does not depend on it: every artifact
-is still checked against its pinned digest.
+
+Enforcement shipped with #239: every toolchain artifact row (the
+interpreter, runtime, SDK, compiler, rustfmt, Rust channel manifest and
+components, uv, and the BEAM parts) downloads through
+`kernel::fetch::download_toolchain_artifact_held`, which authorizes the
+row's URL under its `provider` before the cache lookup, follows redirects
+itself (at most ten, `https://` only) and authorizes each `Location`
+before requesting it. The policy is `SourcePolicy::shipped()`
+(`src/kernel/toolchain/source.rs`), built once per process. Still open:
+operator configuration of the policy, and sending an endpoint's credential,
+which waits on the owner decision in #72; no shipped endpoint names one
+and retrieval sends none. Integrity does not depend on the policy: every
+artifact is still checked against its pinned digest.
 
 ### Every toolchain archive through the extractor (#236)
 

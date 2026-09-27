@@ -1881,9 +1881,12 @@ mod tests {
     }
 
     /// An archive that carries an extended attribute extracts without it.
-    /// GNU tar would drop it anyway, so on Linux this pins the contract and
-    /// proves the host tar accepts the flags in `-x` mode on a real
-    /// archive; on macOS, run as root, it is the behaviour itself.
+    /// GNU tar drops xattrs on extraction unless asked, so on Linux this
+    /// cannot notice `--no-xattrs` going missing: the argv test above is
+    /// what guards the flag. Here it proves the host tar accepts the flags
+    /// in `-x` mode on a real archive, and fails if the command line ever
+    /// asks for `--xattrs`. It only runs on Linux, so bsdtar's restore-by-
+    /// default behaviour on macOS is covered by the argv test alone.
     #[test]
     #[cfg(target_os = "linux")]
     fn extracted_files_carry_no_extended_attributes() {
@@ -2904,12 +2907,19 @@ mod tests {
         assert!(!destination.join("root").exists(), "strip was not applied");
 
         // The same archive without strip keeps the root, and the delegated
-        // tar ignores TAR_OPTIONS from the environment.
+        // tar ignores TAR_OPTIONS from the environment. The planted option
+        // is one the fixed command line has no flag to override (an
+        // explicit `--strip-components 0` would beat a planted strip), so
+        // tar reading it would drop the file.
         let plain = temp.0.join("plain");
         fs::create_dir_all(&plain).unwrap();
-        std::env::set_var("TAR_OPTIONS", "--strip-components=1");
-        let result = extract(&archive, &plain, 0, Compression::None);
-        std::env::remove_var("TAR_OPTIONS");
+        let result = {
+            let _env = crate::kernel::policy::test_env_lock();
+            std::env::set_var("TAR_OPTIONS", "--exclude=tool");
+            let result = extract(&archive, &plain, 0, Compression::None);
+            std::env::remove_var("TAR_OPTIONS");
+            result
+        };
         result.unwrap();
         assert!(plain.join("root/bin/tool").is_file());
     }

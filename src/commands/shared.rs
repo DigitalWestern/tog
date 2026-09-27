@@ -263,6 +263,7 @@ mod tests {
         // version file above says.
         let bare = t.0.join("bare");
         std::fs::create_dir_all(&bare).unwrap();
+        std::fs::write(t.0.join(".python-version"), format!("{other}\n")).unwrap();
         let shipped = selected_toolchain(platform, &bare, "python").unwrap();
         assert_eq!(shipped.source, crate::kernel::toolchain::Source::Shipped);
         assert_ne!(shipped.version("cpython").unwrap(), other);
@@ -275,6 +276,31 @@ mod tests {
         let selected = selected_toolchain(platform, &project.join("src"), "python").unwrap();
         assert_eq!(selected.version("cpython").unwrap(), other);
         assert_eq!(selected.source, crate::kernel::toolchain::Source::Shipped);
+
+        // A committed lock decides, even with no `.tog` beside it, and a
+        // lock its inputs have moved away from refuses as a sync would.
+        let locked = t.0.join("locked");
+        std::fs::create_dir_all(&locked).unwrap();
+        std::fs::write(locked.join(".python-version"), format!("{other}\n")).unwrap();
+        let root = ProjectRoot::open(&locked).unwrap();
+        let python = crate::tailors::by_id("python").unwrap();
+        let created = comforter::toolchain::resolve(
+            &root,
+            platform,
+            ecosystem_inputs(&locked, &[python]).unwrap(),
+            comforter::toolchain::Mode::Writable,
+            false,
+        )
+        .unwrap();
+        created.pending.unwrap().publish_via(&root).unwrap();
+        let honored = selected_toolchain(platform, &locked.join("src"), "python").unwrap();
+        assert_eq!(honored.source, crate::kernel::toolchain::Source::Lock);
+        assert_eq!(honored.version("cpython").unwrap(), other);
+        let default = shipped.version("cpython").unwrap();
+        std::fs::write(locked.join(".python-version"), format!("{default}\n")).unwrap();
+        let error = selected_toolchain(platform, &locked, "python").unwrap_err();
+        assert!(error.to_string().contains("is stale for python"), "{error}");
+        assert!(!locked.join(".tog").exists());
 
         // A lock entry that is not a regular file refuses; it never falls
         // through to the default.

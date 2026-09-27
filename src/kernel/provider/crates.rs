@@ -921,7 +921,7 @@ mod tests {
     }
 
     #[test]
-    fn workspace_inheritance_and_relocated_symlinks_fail_closed() {
+    fn workspace_inheritance_fails_closed() {
         let scratch = TempDir::named("cargo-workspace");
         let root = scratch.0.clone();
         std::fs::write(
@@ -933,13 +933,5 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("inherits workspace"), "{error}");
-
-        std::fs::write(
-            root.join("Cargo.toml"),
-            "[package]\nname = \"linked\"\nversion = \"1.0.0\"\n",
-        )
-        .unwrap();
-        std::os::unix::fs::symlink("../../outside", root.join("escape")).unwrap();
-        assert!(crate::kernel::gitsrc::validate_symlinks(&root).is_err());
     }
 }

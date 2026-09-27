@@ -34,7 +34,9 @@ pub use project::*;
 pub use realize::*;
 
 use crate::kernel::activity::StoreActivity;
-use crate::kernel::fetch::{download_verified_digest_held, download_verified_held, Digest};
+use crate::kernel::fetch::{
+    download_toolchain_artifact_held, download_verified_digest_held, download_verified_held, Digest,
+};
 use crate::kernel::platform::{no_pin, Platform};
 use crate::kernel::store::Store;
 use crate::kernel::toolchain::document::Shipped;
@@ -408,7 +410,13 @@ pub fn realize_runtime(
         return Ok(store.object_path(&id));
     }
     let sha256 = spec.digest.hex();
-    let tarball = download_verified_held(store, activity, &spec.url, sha256)?;
+    let tarball = download_toolchain_artifact_held(
+        store,
+        activity,
+        &spec.provider,
+        &spec.url,
+        &Digest::sha256(sha256)?,
+    )?;
     let staged = store
         .stage_with_activity(activity)
         .map_err(|e| io::Error::new(e.kind(), format!("stage: {e}")))?;
@@ -1047,6 +1055,22 @@ mod tests {
 
     const TEST_SRI: &str =
         "sha512-m3HSJL1i83hdltRq0+o9czGb+8KJDKra4t/3JRXMui/CET1IEDrHK6nHYbdEaGL/uhPMbuF3AGkGxXTVpn3ETw==";
+
+    /// A warm sync never downloads a package archive: nothing sits in the
+    /// cache directory a `TEST_SRI` fetch lands in. The directory comes from
+    /// the digest itself, so it cannot drift from where a fetch writes.
+    fn assert_no_test_archive_fetched(store: &Store) {
+        let digest = Digest::from_sri(TEST_SRI).unwrap();
+        let archive = store.cache_path(digest.algo(), digest.hex());
+        assert!(!archive.exists(), "{}", archive.display());
+        let cache = archive.parent().unwrap();
+        let entries = match std::fs::read_dir(cache) {
+            Ok(entries) => entries.count(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+            Err(error) => panic!("{}: {error}", cache.display()),
+        };
+        assert_eq!(entries, 0, "{}", cache.display());
+    }
 
     #[test]
     fn node_pins_cover_each_supported_platform() {
@@ -1740,7 +1764,7 @@ mod tests {
     fn darwin_warm_sync_does_not_fetch_package_tarballs() {
         let scratch = TempDir::named("npm-darwin-warm");
         let root = scratch.0.clone();
-        for subdir in ["objects", "meta", "cache/sha256", "tmp"] {
+        for subdir in ["objects", "meta", "cache/sha512", "tmp"] {
             std::fs::create_dir_all(root.join(subdir)).unwrap();
         }
         let store = Store {
@@ -1805,12 +1829,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(realized, expected);
-        assert_eq!(
-            std::fs::read_dir(store.root.join("cache/sha256"))
-                .unwrap()
-                .count(),
-            0
-        );
+        assert_no_test_archive_fetched(&store);
     }
 
     /// The Python node-gyp runs on is the one the environment names: a
@@ -1895,7 +1914,7 @@ mod tests {
     fn linux_warm_sync_uses_persisted_archive_classification() {
         let scratch = TempDir::named("npm-linux-warm");
         let root = scratch.0.clone();
-        for subdir in ["objects", "meta", "cache/sha256", "tmp"] {
+        for subdir in ["objects", "meta", "cache/sha512", "tmp"] {
             std::fs::create_dir_all(root.join(subdir)).unwrap();
         }
         let store = Store {
@@ -1966,12 +1985,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(realized, expected);
-        assert_eq!(
-            std::fs::read_dir(store.root.join("cache/sha256"))
-                .unwrap()
-                .count(),
-            0
-        );
+        assert_no_test_archive_fetched(&store);
     }
 
     #[test]
@@ -1989,14 +2003,41 @@ mod tests {
         );
     }
 
+    /// A failure realizing the Node runtime comes out of the environment
+    /// realization labelled as such, with its kind intact so callers that
+    /// branch on it (a sandbox boundary's `Unsupported`, say) still can.
+    /// Offline: a selection that is not a Node one fails before any store
+    /// access or download.
     #[test]
-    fn realize_node_env_preserves_unsupported_kind() {
-        let error = wrap_ensure_node_error(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "injected sandbox boundary failure",
-        ));
-        assert_eq!(error.kind(), io::ErrorKind::Unsupported);
-        assert!(error.to_string().contains("ensure node"));
+    fn realize_node_env_labels_a_runtime_failure_and_keeps_its_kind() {
+        let store = Store {
+            root: PathBuf::from("/nonexistent/tog-test-store"),
+        };
+        let lease = crate::kernel::testutil::detached_lease();
+        let plan = NpmPlan {
+            node_version: "24.20.0".into(),
+            packages: Vec::new(),
+            links: Vec::new(),
+            workspaces: Vec::new(),
+            lock_source: "package-lock.json".into(),
+        };
+        let not_node = crate::kernel::provider::cpython::shipped_selection("3.13").unwrap();
+        let error = realize_node_env_for(
+            &store,
+            &lease.1,
+            Platform::host().unwrap(),
+            &plan,
+            &[],
+            &not_node,
+            &test_gyp_python(),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "{error}");
+        assert_eq!(
+            error.to_string(),
+            "ensure node: node: asked to realize a python toolchain"
+        );
+        assert!(!store.root.exists());
     }
 
     #[test]
@@ -3030,71 +3071,79 @@ mod tests {
         );
     }
 
+    /// An environment with no packages is its own layout (an empty
+    /// `node_modules`), and its identity says so; one with packages carries
+    /// no layout input at all.
     #[test]
-    fn empty_node_env_layout_changes_identity() {
-        let mut with_layout = BTreeMap::new();
-        let empty: &[NpmPackage] = &[];
-        add_node_env_layout_input(&mut with_layout, empty);
+    fn an_empty_node_env_names_its_empty_layout_in_the_identity() {
+        let scratch = TempDir::named("npm-empty-layout");
+        let store = Store {
+            root: scratch.0.canonicalize().unwrap(),
+        };
+        let platform = Platform::X86_64UnknownLinuxGnu;
+        let node_obj = store.object_path("node-cache");
+        let mut plan = NpmPlan {
+            node_version: "24.20.0".into(),
+            packages: Vec::new(),
+            links: Vec::new(),
+            workspaces: Vec::new(),
+            lock_source: "package-lock.json".into(),
+        };
+        let identity = |plan: &NpmPlan| {
+            node_env_identity(
+                &store,
+                platform,
+                &node_obj,
+                plan,
+                &[],
+                None,
+                &test_gyp_python_id(platform),
+            )
+            .unwrap()
+        };
         assert_eq!(
-            with_layout.get("layout").map(String::as_str),
+            identity(&plan).inputs.get("layout").map(String::as_str),
             Some("empty-node_modules")
         );
-        let identity = |inputs| Identity {
-            kind: "node-env".into(),
-            name: "env".into(),
-            version: node_pin(Platform::Aarch64AppleDarwin)
-                .unwrap()
-                .version
-                .into(),
-            inputs,
-        };
-        assert_ne!(
-            identity(with_layout).object_id(),
-            identity(BTreeMap::new()).object_id()
-        );
+        plan.packages.push(NpmPackage {
+            path: "node_modules/a".into(),
+            name: "a".into(),
+            version: "1.0.0".into(),
+            url: "https://127.0.0.1:9/never-requested.tgz".into(),
+            integrity: TEST_SRI.into(),
+            bin: Vec::new(),
+            optional: false,
+            patch: None,
+            git: None,
+        });
+        assert_eq!(identity(&plan).inputs.get("layout"), None);
     }
 
+    /// The classifier behind the lifecycle failure handling: a missing
+    /// sandbox and an interrupt each get their own class, so neither can
+    /// reach the install-script-failed exception; everything else is the
+    /// script's own failure. The handling of the sandbox class is covered
+    /// through `run_package_phases` in `realize::tests`.
     #[test]
-    fn lifecycle_sandbox_failure_is_fatal_before_policy_handling() {
-        let failure = classify_lifecycle_result(Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "injected sandbox unavailable",
-        )))
-        .unwrap_err();
-        match failure {
-            LifecycleFailure::SandboxUnavailable(error) => {
-                assert_eq!(error.kind(), io::ErrorKind::Unsupported);
-            }
-            LifecycleFailure::Interrupted(_) | LifecycleFailure::Script(_) => {
-                panic!("sandbox failure was downgraded")
-            }
+    fn lifecycle_results_classify_sandbox_interrupt_and_script_failures() {
+        assert!(classify_lifecycle_result(Ok(())).is_ok());
+        for (kind, expected) in [
+            (io::ErrorKind::Unsupported, "sandbox"),
+            (io::ErrorKind::Interrupted, "interrupt"),
+            (io::ErrorKind::Other, "script"),
+            (io::ErrorKind::PermissionDenied, "script"),
+        ] {
+            let failure = classify_lifecycle_result(Err(io::Error::new(kind, "injected")))
+                .err()
+                .unwrap_or_else(|| panic!("{kind:?} classified as success"));
+            let (class, error) = match failure {
+                LifecycleFailure::SandboxUnavailable(error) => ("sandbox", error),
+                LifecycleFailure::Interrupted(error) => ("interrupt", error),
+                LifecycleFailure::Script(error) => ("script", error),
+            };
+            assert_eq!(class, expected, "{kind:?}");
+            assert_eq!(error.kind(), kind);
         }
-    }
-
-    #[test]
-    fn lifecycle_interrupt_is_fatal_before_policy_handling() {
-        let failure = classify_lifecycle_result(Err(io::Error::new(
-            io::ErrorKind::Interrupted,
-            "injected interrupt",
-        )))
-        .unwrap_err();
-        match failure {
-            LifecycleFailure::Interrupted(error) => {
-                assert_eq!(error.kind(), io::ErrorKind::Interrupted);
-            }
-            LifecycleFailure::SandboxUnavailable(_) | LifecycleFailure::Script(_) => {
-                panic!("an interrupt was classified as something else")
-            }
-        }
-    }
-
-    #[test]
-    fn lifecycle_script_failure_is_separate_from_sandbox_failure() {
-        let failure =
-            classify_lifecycle_result(Err(io::Error::other("script exited 1"))).unwrap_err();
-        assert!(
-            matches!(failure, LifecycleFailure::Script(error) if error.kind() == io::ErrorKind::Other)
-        );
     }
 }
 

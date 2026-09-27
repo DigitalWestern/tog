@@ -177,6 +177,27 @@ pub unsafe extern "C" fn tog_pango_version_is_pinned() -> bool {
         probe.display(),
         native_lib.display()
     );
+    // The probe's own check, called: the Pango it linked reports the
+    // pinned version, so the runpath resolved to the libset at run time
+    // and not merely on paper.
+    let pinned = assert_ok(
+        Command::new("python3")
+            .args([
+                "-c",
+                "import ctypes, sys; lib = ctypes.CDLL(sys.argv[1]); \
+                 lib.tog_pango_version_is_pinned.restype = ctypes.c_bool; \
+                 print('pinned' if lib.tog_pango_version_is_pinned() else 'unpinned')",
+            ])
+            .arg(&probe)
+            .output()
+            .unwrap(),
+        "call the Rust Pango probe",
+    );
+    assert_eq!(
+        pinned.trim(),
+        "pinned",
+        "the Rust probe's Pango is not the pinned 1.50.11"
+    );
 
     let path = env
         .iter()
@@ -270,4 +291,56 @@ pub unsafe extern "C" fn tog_pango_version_is_pinned() -> bool {
         "unexpected run output: {output}"
     );
     println!("tog run python import manimpango: ok");
+    // The import proves little on a host with its own Pango: the
+    // extension's dynamic linkage has to name the libset's Pango. Every
+    // compiled module in the package is checked, not just the first.
+    let package_dir = assert_ok(
+        tog_at(
+            &project,
+            &temp.0,
+            &store_path,
+            &[
+                "run",
+                "python",
+                "-c",
+                "import manimpango, os; print(os.path.dirname(manimpango.__file__))",
+            ],
+        ),
+        "locate manimpango",
+    );
+    let package_dir = PathBuf::from(package_dir.trim());
+    let extensions: Vec<PathBuf> = std::fs::read_dir(&package_dir)
+        .unwrap_or_else(|error| panic!("{}: {error}", package_dir.display()))
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "so"))
+        .collect();
+    assert!(
+        !extensions.is_empty(),
+        "no compiled extension under {}",
+        package_dir.display()
+    );
+    for extension in &extensions {
+        let ldd = assert_ok(
+            Command::new("ldd").arg(extension).output().unwrap(),
+            "ldd manimpango extension",
+        );
+        assert!(
+            ldd.lines()
+                .any(|line| line.contains(&native_lib.display().to_string())),
+            "{} resolved a host Pango instead of {}:\n{ldd}",
+            extension.display(),
+            native_lib.display()
+        );
+        assert!(
+            !ldd.lines().any(|line| {
+                line.contains("libpango") && !line.contains(&native.path.display().to_string())
+            }),
+            "{} resolves a Pango library outside the libset:\n{ldd}",
+            extension.display()
+        );
+    }
+    println!(
+        "manimpango extensions link the libset Pango: {}",
+        extensions.len()
+    );
 }
