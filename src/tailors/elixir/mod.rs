@@ -10,6 +10,7 @@
 //! native deps (make/rebar3 ports) write INTO their source trees, so the
 //! deps projection is a writable clonefile copy, recorded unattested.
 
+mod hextar;
 pub mod objects;
 pub mod tailor;
 
@@ -1702,40 +1703,6 @@ pub fn plan_elixir(
     Ok((plan, hex::encode(Sha256::digest(lock.as_bytes()))))
 }
 
-/// Extraction containment: regular files and dirs, plus symlinks whose
-/// target resolves INSIDE the dep dir (hex packages legitimately contain
-/// safe symlinks — stricter-than-cargo here would be a regression).
-fn check_dep_tree(dep_dir: &Path, app: &str) -> io::Result<()> {
-    fn walk(root: &Path, dir: &Path, app: &str) -> io::Result<()> {
-        for entry in fs::read_dir(dir)? {
-            let entry = entry?;
-            let path = entry.path();
-            let md = fs::symlink_metadata(&path)?;
-            let ft = md.file_type();
-            if ft.is_symlink() {
-                let target = fs::read_link(&path)?;
-                let resolved = path
-                    .parent()
-                    .map(|p| p.join(&target))
-                    .and_then(|t| t.canonicalize().ok());
-                let root_canon = root.canonicalize()?;
-                let ok = resolved
-                    .map(|c| c.starts_with(&root_canon))
-                    .unwrap_or(false);
-                if !ok {
-                    return Err(err(format!("{app}: symlink escapes the package")));
-                }
-            } else if ft.is_dir() {
-                walk(root, &path, app)?;
-            } else if !ft.is_file() {
-                return Err(err(format!("{app}: hostile special entry")));
-            }
-        }
-        Ok(())
-    }
-    walk(dep_dir, dep_dir, app)
-}
-
 /// Realize the immutable deps-source object (kind "hex-deps"): every
 /// tarball dual-checksum-verified by tog (outer = sha256 of the .tar,
 /// inner = sha256(VERSION ++ metadata.config ++ contents.tar.gz)).
@@ -1769,89 +1736,7 @@ pub fn realize_deps(
         );
         let tar = download_verified_held(store, activity, &url, &d.outer_sha256)
             .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", d.app)))?;
-        // Unpack the OUTER tar (VERSION, metadata.config, contents.tar.gz, CHECKSUM).
-        let outer_dir = scratch.join(format!("outer-{}", d.app));
-        let app: &str = &d.app;
-        let extract = |archive: &Path, dest: &Path, compression: Compression, what: &str| {
-            extract_with_activity_and_options(
-                activity,
-                archive,
-                dest,
-                &ExtractOptions::stripped(0),
-                compression,
-            )
-            .map_err(|e| io::Error::new(e.kind(), format!("{app}: {what} extraction failed: {e}")))
-        };
-        fs::create_dir_all(&outer_dir)?;
-        extract(&tar, &outer_dir, Compression::None, "outer tar")?;
-        // Inner checksum per hex spec — over REGULAR outer members only.
-        let mut hasher = Sha256::new();
-        for part in ["VERSION", "metadata.config", "contents.tar.gz", "CHECKSUM"] {
-            let p = outer_dir.join(part);
-            let md = fs::symlink_metadata(&p).map_err(|e| {
-                io::Error::new(
-                    e.kind(),
-                    format!("{}: missing {part} in tarball: {e}", d.app),
-                )
-            })?;
-            if !md.file_type().is_file() {
-                return Err(err(format!("{}: {part} is not a regular file", d.app)));
-            }
-            if part != "CHECKSUM" {
-                hasher.update(&fs::read(&p)?);
-            }
-        }
-        let got_inner = hex::encode(hasher.finalize());
-        if got_inner != d.inner_sha256 {
-            return Err(err(format!(
-                "{}: inner checksum mismatch\n  expected {}\n  got      {got_inner}",
-                d.app, d.inner_sha256
-            )));
-        }
-        // The tarball's own CHECKSUM member is the (deprecated) inner hash;
-        // agreement is cheap belt-and-braces.
-        let shipped = fs::read_to_string(outer_dir.join("CHECKSUM"))?;
-        if !shipped.trim().eq_ignore_ascii_case(&d.inner_sha256) {
-            return Err(err(format!(
-                "{}: tarball CHECKSUM member disagrees with the lock",
-                d.app
-            )));
-        }
-        // Layout keyed by the lock APP name (may differ from package).
-        let dep_dir = staged.join(&d.app);
-        fs::create_dir_all(&dep_dir)?;
-        extract(
-            &outer_dir.join("contents.tar.gz"),
-            &dep_dir,
-            Compression::Gzip,
-            "contents",
-        )?;
-        check_dep_tree(&dep_dir, &d.app)?;
-        // Reserved destinations must not pre-exist in package contents —
-        // a shipped symlink named .hex/hex_metadata.config would carry our
-        // writes through the link.
-        for reserved in [".hex", "hex_metadata.config"] {
-            if fs::symlink_metadata(dep_dir.join(reserved)).is_ok() {
-                return Err(err(format!(
-                    "{}: package ships a reserved {reserved} entry; refusing",
-                    d.app
-                )));
-            }
-        }
-        // Metadata cross-check: the app/version inside metadata.config must
-        // agree with the lock coordinates.
-        let meta = fs::read_to_string(outer_dir.join("metadata.config"))?;
-        let has_kv = |k: &str, v: &str| meta.contains(&format!("{{<<\"{k}\">>,<<\"{v}\">>}}"));
-        if !has_kv("app", &d.app) || !has_kv("version", &d.version) {
-            return Err(err(format!(
-                "{}: hex metadata disagrees with the lock (app/version)",
-                d.app
-            )));
-        }
-        fs::copy(
-            outer_dir.join("metadata.config"),
-            dep_dir.join("hex_metadata.config"),
-        )?;
+        let dep_dir = hextar::unpack_verified(activity, &tar, &scratch, &staged, d)?;
         // .hex marker via the pinned toolchain (ETF binary).
         let out = run_mix(
             activity,
