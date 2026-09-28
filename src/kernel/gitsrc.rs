@@ -39,8 +39,25 @@ pub fn is_safe_component(value: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'_' || b == b'-' || b == b'+')
 }
 
+/// Does the host, or the user before it, start with a dash? Git hands the
+/// authority of an `ssh://` URL to ssh as its host and login, and an
+/// option-looking one is handed to it before git's own guard would run.
+/// `normalize_url` turns `-oProxyCommand=x:repo` into
+/// `ssh://-oProxyCommand=x/repo`, so a leading dash has to be caught on the
+/// authority, not only on the whole URL.
+fn option_looking_authority(url: &str) -> bool {
+    let Some((_, rest)) = url.split_once("://") else {
+        return false;
+    };
+    let authority = &rest[..rest.find(['/', '?']).unwrap_or(rest.len())];
+    authority.starts_with('-')
+        || authority
+            .rsplit_once('@')
+            .is_some_and(|(_, host)| host.starts_with('-'))
+}
+
 /// Refuse a source git must not be handed: an unknown scheme, an
-/// option-looking URL, or a malformed commit.
+/// option-looking URL or host, or a malformed commit.
 pub fn validate_source(source: &GitSource) -> io::Result<()> {
     if !is_full_commit(&source.commit) {
         return Err(err(format!(
@@ -53,6 +70,12 @@ pub fn validate_source(source: &GitSource) -> io::Result<()> {
             "refusing git URL {:?}: expected one of {}",
             source.url,
             ALLOWED_SCHEMES.join(", ")
+        )));
+    }
+    if option_looking_authority(&source.url) {
+        return Err(err(format!(
+            "refusing git URL {:?}: the host looks like an option",
+            source.url
         )));
     }
     if let Some(subdirectory) = &source.subdirectory {
@@ -253,8 +276,13 @@ pub fn resolve_ref(url: &str, reference: &str) -> io::Result<String> {
     if is_full_commit(reference) {
         return Ok(reference.to_ascii_lowercase());
     }
+    // Before normalization: `-oProxyCommand=x:repo` would otherwise be
+    // read as an scp-style spelling and come out as an ssh:// URL.
+    if url.trim_start().starts_with('-') {
+        return Err(err(format!("refusing git URL {url:?}")));
+    }
     let url = normalize_url(url);
-    if url.starts_with('-') || !ALLOWED_SCHEMES.iter().any(|s| url.starts_with(s)) {
+    if !ALLOWED_SCHEMES.iter().any(|s| url.starts_with(s)) || option_looking_authority(&url) {
         return Err(err(format!("refusing git URL {url:?}")));
     }
     if reference.starts_with('-') || reference.contains(char::is_whitespace) {
@@ -265,7 +293,14 @@ pub fn resolve_ref(url: &str, reference: &str) -> io::Result<String> {
         None,
         &format!("git ls-remote {url} {reference}"),
     )?;
-    let commit = out
+    commit_from_ls_remote(&url, reference, &out)
+}
+
+/// The commit in a `git ls-remote <url> <ref>` listing: the first field of
+/// the first line, which must be a full hash. An empty listing means the
+/// remote has no such ref.
+fn commit_from_ls_remote(url: &str, reference: &str, listing: &str) -> io::Result<String> {
+    let commit = listing
         .lines()
         .next()
         .and_then(|line| line.split_whitespace().next())
@@ -396,6 +431,12 @@ fn resolve_target_components(
                         &nested,
                         seen,
                     )?;
+                    // `seen` is the chain being expanded, not every link
+                    // ever visited: a target that passes through the same
+                    // link twice on its way (`alias/../../alias/file`) is
+                    // not a cycle, so the link leaves the set once its
+                    // expansion is complete.
+                    seen.remove(&candidate);
                 } else {
                     current = candidate;
                 }
@@ -1469,6 +1510,31 @@ mod refusal_tests {
                 "{url}"
             );
         }
+        // The scheme is fine; the host, or the login before it, is what
+        // ssh would read as an option. This is what a normalized
+        // `-oProxyCommand=x:repo` looks like.
+        for url in [
+            "ssh://-oProxyCommand=touch/repo",
+            "ssh://git@-oProxyCommand=touch/repo",
+            "ssh://-oProxyCommand=touch@github.com/repo",
+            "https://-host/repo",
+            "git://-host/repo",
+        ] {
+            assert_eq!(
+                refusal(&source(url, COMMIT, None)),
+                format!("refusing git URL {url:?}: the host looks like an option"),
+                "{url}"
+            );
+        }
+        // A dash inside the host, the login, or the path is ordinary.
+        for url in [
+            "ssh://git@github.com/owner/-repo",
+            "https://github.com/-owner/repo",
+            "file:///srv/-git/repo",
+            "https://user-name@git-host.example/repo",
+        ] {
+            validate_source(&source(url, COMMIT, None)).unwrap_or_else(|e| panic!("{url}: {e}"));
+        }
     }
 
     #[test]
@@ -1526,9 +1592,22 @@ mod refusal_tests {
             resolve_ref("http://never.contacted/repo", &upper).unwrap(),
             COMMIT
         );
+        // A leading dash is refused before normalization, which would
+        // otherwise read `-o...:repo` as an scp-style URL.
+        for url in [
+            "-oProxyCommand=touch:repo",
+            "  -oProxyCommand=touch:repo",
+            "--upload-pack=touch",
+        ] {
+            assert_eq!(
+                resolve_ref(url, "main").unwrap_err().to_string(),
+                format!("refusing git URL {url:?}"),
+                "{url}"
+            );
+        }
         // Otherwise the URL is normalized, then checked against the
-        // allow-list. Port 9 answers nothing, so a lookup would fail
-        // differently.
+        // allow-list and for an option-looking host. Port 9 answers
+        // nothing, so a lookup would fail differently.
         for (url, normalized) in [
             ("http://127.0.0.1:9/repo", "http://127.0.0.1:9/repo"),
             (
@@ -1536,6 +1615,11 @@ mod refusal_tests {
                 "http://127.0.0.1:9/repo",
             ),
             ("ftp://127.0.0.1:9/repo", "ftp://127.0.0.1:9/repo"),
+            (
+                "git+ssh://-oProxyCommand=touch/repo",
+                "ssh://-oProxyCommand=touch/repo",
+            ),
+            ("ssh://git@-host/repo", "ssh://git@-host/repo"),
         ] {
             assert_eq!(
                 resolve_ref(url, "main").unwrap_err().to_string(),
@@ -1558,6 +1642,40 @@ mod refusal_tests {
                 "{reference}"
             );
         }
+    }
+
+    #[test]
+    fn an_ls_remote_listing_without_a_full_hash_is_refused() {
+        let url = "https://example.invalid/repo";
+        for listing in ["", "\n\n"] {
+            assert_eq!(
+                commit_from_ls_remote(url, "main", listing)
+                    .unwrap_err()
+                    .to_string(),
+                "https://example.invalid/repo: ref main not found",
+                "{listing:?}"
+            );
+        }
+        for listing in ["abc123\trefs/heads/main\n", "warning: something\n"] {
+            let first = listing.split_whitespace().next().unwrap();
+            assert_eq!(
+                commit_from_ls_remote(url, "main", listing)
+                    .unwrap_err()
+                    .to_string(),
+                format!("https://example.invalid/repo: ref main resolved to {first:?}"),
+                "{listing:?}"
+            );
+        }
+        // Control: the first field of the first line, lowercased.
+        let listing = format!(
+            "{}\trefs/heads/main\n{}\trefs/tags/v1\n",
+            COMMIT.to_ascii_uppercase(),
+            "f".repeat(40)
+        );
+        assert_eq!(
+            commit_from_ls_remote(url, "main", &listing).unwrap(),
+            COMMIT
+        );
     }
 
     fn link(target: &str, at: &Path) {
@@ -1591,26 +1709,38 @@ mod refusal_tests {
     fn a_symlink_that_loops_is_refused() {
         let temp = TempDir::named("gitsrc-cycle");
         let root = &temp.0;
+        let canonical = root.canonicalize().unwrap();
+        let named =
+            |name: &str| format!("symlink cycle involving {}", canonical.join(name).display());
         link("me", &root.join("me"));
-        assert_eq!(
-            symlink_refusal(root),
-            format!(
-                "symlink cycle involving {}",
-                root.canonicalize().unwrap().join("me").display()
-            )
-        );
+        assert_eq!(symlink_refusal(root), named("me"));
         fs::remove_file(root.join("me")).unwrap();
-        // A two-link cycle, and one that goes through a directory.
+        // A two-link cycle: whichever link the walk reaches first is the
+        // one the message names.
         link("b", &root.join("a"));
         link("a", &root.join("b"));
         let error = symlink_refusal(root);
-        assert!(error.starts_with("symlink cycle involving "), "{error}");
+        assert!(error == named("a") || error == named("b"), "{error}");
         fs::remove_file(root.join("a")).unwrap();
         fs::remove_file(root.join("b")).unwrap();
+        // One that goes through a directory.
         fs::create_dir(root.join("dir")).unwrap();
         link("../dir/loop", &root.join("dir/loop"));
-        let error = symlink_refusal(root);
-        assert!(error.starts_with("symlink cycle involving "), "{error}");
+        assert_eq!(symlink_refusal(root), named("dir/loop"));
+    }
+
+    #[test]
+    fn control_a_target_that_passes_the_same_link_twice_is_not_a_cycle() {
+        // `alias/../../alias/file` goes through `alias` twice on its way to
+        // a file that is inside the checkout. Only a link that expands to
+        // itself is a cycle.
+        let temp = TempDir::named("gitsrc-twice");
+        let root = &temp.0;
+        fs::create_dir_all(root.join("dir/sub")).unwrap();
+        fs::write(root.join("dir/sub/file"), b"x").unwrap();
+        link("dir/sub", &root.join("alias"));
+        link("alias/../../alias/file", &root.join("twice"));
+        validate_symlinks(root).unwrap();
     }
 
     #[test]
