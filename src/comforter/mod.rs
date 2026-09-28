@@ -652,11 +652,9 @@ pub fn closure_object(
     let id = closure[key]["id"]
         .as_str()
         .ok_or_else(|| bad("missing id"))?;
-    if id.is_empty()
-        || !id
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
-    {
+    // The full object-id shape, as `ClosureRefs::object_id` demands at
+    // publication: a bare `.` or `..` would name `objects/` or the store root.
+    if !crate::kernel::store::is_object_id(id) {
         return Err(bad("malformed id"));
     }
     if !store.has_with_activity(activity, id)? {
@@ -666,7 +664,7 @@ pub fn closure_object(
     if closure[key]["path"].as_str().map(Path::new) != Some(path.as_path()) {
         return Err(bad("recorded path disagrees with the store"));
     }
-    if !probe.is_empty() && !path.join(probe).exists() {
+    if !probe.is_empty() && !path.join(probe).is_file() {
         return Err(bad("object is missing its expected content"));
     }
     Ok(path)
@@ -896,7 +894,7 @@ mod tests {
 
     /// An empty store in its own scratch directory, which lives as long as
     /// the returned `TempDir`.
-    fn test_store(label: &str) -> (TempDir, Store) {
+    pub(super) fn test_store(label: &str) -> (TempDir, Store) {
         let temp = TempDir::named(&format!("{label}-store"));
         for sub in ["objects", "meta", "cache/sha256", "tmp"] {
             fs::create_dir_all(temp.0.join(sub)).unwrap();
@@ -976,7 +974,7 @@ mod tests {
         serde_json::json!({"store_object": store.object_path("closure-test")})
     }
 
-    fn complete_object(store: &Store, name: &str) -> String {
+    pub(super) fn complete_object(store: &Store, name: &str) -> String {
         let activity = &store
             .activity(crate::kernel::activity::ActivityMode::Shared)
             .unwrap();
@@ -1043,6 +1041,10 @@ mod tests {
         assert!(project.join(".tog/closures/python.json").is_file());
         // ...but the durable root record is what protects the object, and it
         // must name exactly the references the producer supplied.
+        let envelope: serde_json::Value =
+            serde_json::from_slice(&fs::read(project.join(".tog/closures/python.json")).unwrap())
+                .unwrap();
+        assert_eq!(envelope["platform"], Platform::host().unwrap().triple());
         let roots = store.roots().unwrap();
         assert_eq!(roots.len(), 1, "no durable root record was published");
         let record = roots[0].record.as_ref().expect("root/2 record");
@@ -1645,5 +1647,267 @@ mod tests {
         assert!(fs::read_dir(&outside).unwrap().next().is_none());
 
         attribution.discard();
+    }
+}
+
+/// `closure_object` and `read_closure` turn a project-editable file into a
+/// store path that `tog run` executes from. Each refusal below is a closure
+/// that must not reach the child.
+#[cfg(test)]
+mod closure_object_tests {
+    use super::tests::{complete_object, test_store};
+    use super::*;
+    use crate::kernel::activity::ActivityMode;
+    use crate::kernel::testutil::TempDir;
+
+    fn refusal(store: &Store, closure: serde_json::Value, probe: &str) -> io::Error {
+        let activity = store.activity(ActivityMode::Shared).unwrap();
+        closure_object(store, &activity, &closure, "runtime_object", probe).unwrap_err()
+    }
+
+    fn assert_refused(error: io::Error, reason: &str) {
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{error}");
+        assert_eq!(
+            error.to_string(),
+            format!("closure runtime_object: {reason}; run `tog` first")
+        );
+    }
+
+    #[test]
+    fn a_missing_id_is_refused() {
+        let (_dir, store) = test_store("closure-object-missing-id");
+        for closure in [
+            serde_json::json!({}),
+            serde_json::json!({"runtime_object": {"path": "/x"}}),
+            serde_json::json!({"runtime_object": {"id": 7}}),
+        ] {
+            assert_refused(refusal(&store, closure, ""), "missing id");
+        }
+    }
+
+    /// `.` and `..` pass a plain character filter and name `objects/` and
+    /// the store root; before the shape check, the store lookup took `.` for
+    /// a crashed object and emptied `objects/`.
+    #[test]
+    fn a_malformed_id_is_refused_and_the_store_is_untouched() {
+        let (dir, store) = test_store("closure-object-malformed");
+        fs::write(dir.0.join("objects/victim"), "keep").unwrap();
+        for id in [
+            "",
+            ".",
+            "..",
+            "../x",
+            "a/b",
+            "/etc",
+            "not-an-object-id",
+            "0000000000000000000000000000000000000000-",
+            "0000000000000000000000000000000000000000-a..b",
+            "000000000000000000000000000000000000000g-a-1",
+            "0000000000000000000000000000000000000000_pkg",
+            "0000000000000000000000000000000000000000-a@b",
+            "0000000000000000000000000000000000000000-a/b",
+        ] {
+            let closure = serde_json::json!({
+                "runtime_object": {"id": id, "path": store.object_path(id)}
+            });
+            assert_refused(refusal(&store, closure, ""), "malformed id");
+            assert!(dir.0.join("objects/victim").is_file(), "id {id:?}");
+        }
+    }
+
+    #[test]
+    fn an_id_the_store_does_not_hold_is_refused() {
+        let (_dir, store) = test_store("closure-object-absent");
+        let id = "0000000000000000000000000000000000000000-absent-1";
+        let closure = serde_json::json!({
+            "runtime_object": {"id": id, "path": store.object_path(id)}
+        });
+        assert_refused(refusal(&store, closure, ""), "object not in the store");
+    }
+
+    /// Something at the object's path that is not a published object: a
+    /// writable directory, one without metadata, and a symlink out of the
+    /// store. Each is refused, and the symlink's target is left alone.
+    #[test]
+    fn an_unpublished_entry_at_the_object_path_is_refused() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let (dir, store) = test_store("closure-object-unpublished");
+        let outside = TempDir::named("closure-object-outside");
+        fs::write(outside.0.join("sentinel"), "keep").unwrap();
+        let writable = "1111111111111111111111111111111111111111-writable-1";
+        fs::create_dir(store.object_path(writable)).unwrap();
+        fs::write(dir.0.join(format!("meta/{writable}.json")), "{}").unwrap();
+        let unrecorded = "2222222222222222222222222222222222222222-unrecorded-1";
+        fs::create_dir(store.object_path(unrecorded)).unwrap();
+        fs::set_permissions(
+            store.object_path(unrecorded),
+            fs::Permissions::from_mode(0o555),
+        )
+        .unwrap();
+        let linked = "3333333333333333333333333333333333333333-linked-1";
+        std::os::unix::fs::symlink(&outside.0, store.object_path(linked)).unwrap();
+        fs::write(dir.0.join(format!("meta/{linked}.json")), "{}").unwrap();
+        for id in [writable, unrecorded, linked] {
+            let closure = serde_json::json!({
+                "runtime_object": {"id": id, "path": store.object_path(id)}
+            });
+            assert_refused(refusal(&store, closure, ""), "object not in the store");
+        }
+        assert_eq!(
+            fs::read_to_string(outside.0.join("sentinel")).unwrap(),
+            "keep"
+        );
+    }
+
+    #[test]
+    fn a_path_that_disagrees_with_the_store_is_refused() {
+        let (_dir, store) = test_store("closure-object-path");
+        let id = complete_object(&store, "runtime");
+        let other = complete_object(&store, "other");
+        let elsewhere = TempDir::named("closure-object-elsewhere");
+        for path in [
+            None,
+            Some(elsewhere.0.join(&id)),
+            Some(store.object_path(&id).join("payload")),
+            Some(store.root.join("objects/../objects").join(&id)),
+            Some(store.object_path(&other)),
+        ] {
+            let closure = serde_json::json!({"runtime_object": {"id": id, "path": path}});
+            assert_refused(
+                refusal(&store, closure, ""),
+                "recorded path disagrees with the store",
+            );
+        }
+    }
+
+    #[test]
+    fn an_object_without_its_probe_is_refused() {
+        let (_dir, store) = test_store("closure-object-probe");
+        let id = complete_object(&store, "runtime");
+        let closure = serde_json::json!({
+            "runtime_object": {"id": id, "path": store.object_path(&id)}
+        });
+        assert_refused(
+            refusal(&store, closure, "bin/go"),
+            "object is missing its expected content",
+        );
+        // A directory where the probe file belongs is not the content.
+        assert_refused(
+            refusal(&store, closure_for(&store, &id), "."),
+            "object is missing its expected content",
+        );
+    }
+
+    fn closure_for(store: &Store, id: &str) -> serde_json::Value {
+        serde_json::json!({"runtime_object": {"id": id, "path": store.object_path(id)}})
+    }
+
+    /// The key names which reference is resolved and labels the refusal.
+    #[test]
+    fn the_requested_key_is_the_one_resolved() {
+        let (_dir, store) = test_store("closure-object-key");
+        let go = complete_object(&store, "go");
+        let runtime = complete_object(&store, "runtime");
+        let activity = store.activity(ActivityMode::Shared).unwrap();
+        let closure = serde_json::json!({
+            "go_object": {"id": go, "path": store.object_path(&go)},
+            "runtime_object": {"id": runtime, "path": store.object_path(&runtime)},
+            "modcache_object": {"id": ".", "path": store.object_path(&runtime)},
+        });
+        let resolved = closure_object(&store, &activity, &closure, "go_object", "payload");
+        assert_eq!(resolved.unwrap(), store.object_path(&go));
+        let error = closure_object(&store, &activity, &closure, "modcache_object", "")
+            .map(drop)
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "closure modcache_object: malformed id; run `tog` first"
+        );
+    }
+
+    #[test]
+    fn a_matching_object_resolves_to_its_store_path() {
+        let (_dir, store) = test_store("closure-object-control");
+        let id = complete_object(&store, "runtime");
+        let closure = serde_json::json!({
+            "runtime_object": {"id": id, "path": store.object_path(&id)}
+        });
+        let activity = store.activity(ActivityMode::Shared).unwrap();
+        for probe in ["", "payload"] {
+            let path = closure_object(&store, &activity, &closure, "runtime_object", probe);
+            assert_eq!(path.unwrap(), store.object_path(&id));
+        }
+    }
+
+    fn write_envelope(project: &Path, text: &str) -> PathBuf {
+        let closures = project.join(".tog/closures");
+        fs::create_dir_all(&closures).unwrap();
+        let path = closures.join("python.json");
+        fs::write(&path, text).unwrap();
+        path
+    }
+
+    #[test]
+    fn read_closure_refuses_a_wrong_schema_or_ecosystem() {
+        let project = TempDir::named("read-closure-shape");
+        for envelope in [
+            serde_json::json!({"schema": "closure/2", "ecosystem": "python", "body": {}}),
+            serde_json::json!({"ecosystem": "python", "body": {}}),
+            serde_json::json!({"schema": "closure/1", "ecosystem": "node", "body": {}}),
+            serde_json::json!({"schema": "closure/1", "body": {}}),
+        ] {
+            let path = write_envelope(&project.0, &envelope.to_string());
+            let error = read_closure(&project.0, "python").unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{error}");
+            assert_eq!(
+                error.to_string(),
+                format!(
+                    "{}: unknown closure schema/ecosystem; re-run `tog`",
+                    path.display()
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn read_closure_refuses_a_missing_or_unparsable_file() {
+        let project = TempDir::named("read-closure-missing");
+        let path = project.0.join(".tog/closures/python.json");
+        let error = read_closure(&project.0, "python").unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::NotFound, "{error}");
+        assert!(
+            error
+                .to_string()
+                .starts_with(&format!("read {}: ", path.display()))
+                && error.to_string().ends_with("; run `tog` first"),
+            "{error}"
+        );
+
+        write_envelope(&project.0, "{not json");
+        let error = read_closure(&project.0, "python").unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{error}");
+        assert!(
+            error
+                .to_string()
+                .starts_with(&format!("parse {}: ", path.display()))
+                && error.to_string().ends_with("; run `tog` first"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn read_closure_returns_the_body_of_a_matching_envelope() {
+        let project = TempDir::named("read-closure-control");
+        let envelope = serde_json::json!({
+            "schema": "closure/1",
+            "ecosystem": "python",
+            "platform": Platform::host().unwrap().triple(),
+            "body": {"runtime_object": {"id": "x"}},
+        });
+        write_envelope(&project.0, &envelope.to_string());
+        assert_eq!(
+            read_closure(&project.0, "python").unwrap(),
+            envelope["body"]
+        );
     }
 }

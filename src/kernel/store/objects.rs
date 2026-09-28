@@ -210,6 +210,16 @@ impl Store {
     /// fallible, so a lock failure cannot be mistaken for a cache miss.
     pub fn has_with_activity(&self, activity: &StoreActivity, id: &str) -> io::Result<bool> {
         self.require_activity(activity, "store object lookup")?;
+        // The id names one entry under `objects/`. `.` or `..` would name
+        // `objects/` itself or the store root, which the crashed-publication
+        // cleanup below would then empty. Ids read back from a closure are
+        // project-editable, so refuse anything that is not one plain name.
+        if !is_single_entry_name(id) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("malformed object id {id:?}"),
+            ));
+        }
         let _lock = self.publish_lock()?;
         match self.is_complete(id) {
             None => Ok(false),
@@ -618,6 +628,13 @@ pub(crate) fn is_object_id(value: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || *b == b'.' || *b == b'_' || *b == b'-')
 }
 
+/// One plain directory entry name: not empty, not `.` or `..`, no `/` or
+/// NUL. Looser than `is_object_id` on purpose: `Identity::object_id` keeps
+/// `.` from names and versions, so a committed id may contain `..`.
+fn is_single_entry_name(value: &str) -> bool {
+    !value.is_empty() && value != "." && value != ".." && !value.contains(['/', '\0'])
+}
+
 pub(super) fn is_sha1(value: &str) -> bool {
     value.len() == 40 && value.bytes().all(|b| b.is_ascii_hexdigit())
 }
@@ -795,4 +812,61 @@ pub(super) fn validate_cached_dependency_evidence(
         )));
     }
     Ok(())
+}
+
+/// `has_with_activity` runs crashed-publication cleanup on whatever the id
+/// names under `objects/`, so an id that is not one plain entry name must be
+/// refused before anything is looked up or removed.
+#[cfg(test)]
+mod object_id_guard_tests {
+    use super::*;
+    use crate::kernel::testutil::TempDir;
+
+    #[test]
+    fn a_lookup_refuses_ids_that_are_not_one_entry_name() {
+        let temp = TempDir::named("object-id-guard");
+        for sub in ["objects", "meta", "cache/sha256", "tmp"] {
+            fs::create_dir_all(temp.0.join(sub)).unwrap();
+        }
+        fs::write(temp.0.join("objects/victim"), "keep").unwrap();
+        fs::write(temp.0.join("keep"), "keep").unwrap();
+        let store = Store {
+            root: temp.0.clone(),
+        };
+        let activity = store.activity(ActivityMode::Shared).unwrap();
+        for id in ["", ".", "..", "a/b", "../keep", "/etc", "a\0b"] {
+            let error = store.has_with_activity(&activity, id).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "{error}");
+            assert_eq!(error.to_string(), format!("malformed object id {id:?}"));
+            assert!(temp.0.join("objects/victim").is_file(), "id {id:?}");
+            assert!(temp.0.join("keep").is_file(), "id {id:?}");
+        }
+        // A plain name that is not a strict object id is still a lookup:
+        // committed ids may carry `..` from a sanitized name or version.
+        for id in ["absent", "0000000000000000000000000000000000000000-a..b-1"] {
+            assert!(
+                !store.has_with_activity(&activity, id).unwrap(),
+                "id {id:?}"
+            );
+        }
+        crate::kernel::objmeta::register_test_kinds();
+        let identity = Identity {
+            kind: "test".into(),
+            name: "a..b".into(),
+            version: "1".into(),
+            inputs: Default::default(),
+        };
+        let id = identity.object_id();
+        assert!(!is_object_id(&id) && id.ends_with("-a..b-1"), "{id}");
+        let staged = store.stage_with_activity(&activity).unwrap();
+        fs::write(staged.join("payload"), "a..b").unwrap();
+        store
+            .commit_with_activity_and_deps(&activity, &identity, &staged, &[], &ObjectDeps::new())
+            .unwrap();
+        assert!(store.has_with_activity(&activity, &id).unwrap());
+        assert_eq!(
+            fs::read_to_string(store.object_path(&id).join("payload")).unwrap(),
+            "a..b"
+        );
+    }
 }
