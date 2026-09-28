@@ -288,12 +288,43 @@ fn read_index(
 /// Parse and validate one metadata file. Shared by the index and by the
 /// sweep reader so a record can never be understood two different ways.
 pub fn read_record_at(path: &Path) -> io::Result<Record> {
-    let stat = fs::symlink_metadata(path)?;
-    if stat.file_type().is_symlink() || !stat.is_file() {
-        return Err(io::Error::new(
+    use std::os::unix::fs::OpenOptionsExt as _;
+    use std::os::unix::io::AsRawFd as _;
+    // Open first, then check what was opened: a stat before the open could
+    // be answered by a regular file that is swapped for a FIFO (the open
+    // would block) or a symlink (it would be followed) before the open.
+    let not_regular = || {
+        io::Error::new(
             io::ErrorKind::InvalidData,
             format!("object metadata {} is not a regular file", path.display()),
-        ));
+        )
+    };
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+        .map_err(|error| {
+            // A symlink (ELOOP), a socket (ENXIO on Linux, EOPNOTSUPP on
+            // macOS) or an unreadable directory (EACCES) fails to open. Name
+            // what is there when it is not a regular file. Any other error,
+            // and these on a regular file, keep their own kind.
+            let by_type = matches!(
+                error.raw_os_error(),
+                Some(libc::ELOOP | libc::ENXIO | libc::EOPNOTSUPP | libc::EACCES)
+            );
+            match fs::symlink_metadata(path) {
+                Ok(metadata) if by_type && !metadata.is_file() => not_regular(),
+                _ => error,
+            }
+        })?;
+    if !file.metadata()?.is_file() {
+        return Err(not_regular());
+    }
+    // O_NONBLOCK was only for the open; a regular-file read must not see
+    // EAGAIN from a filesystem that honours it (FUSE).
+    // SAFETY: fcntl on a descriptor this function owns.
+    if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_SETFL, 0) } != 0 {
+        return Err(io::Error::last_os_error());
     }
     let id = path
         .file_stem()
@@ -312,9 +343,14 @@ pub fn read_record_at(path: &Path) -> io::Result<Record> {
         ));
     }
     let value: serde_json::Value =
-        serde_json::from_reader(fs::File::open(path)?).map_err(|error| {
+        serde_json::from_reader(std::io::BufReader::new(file)).map_err(|error| {
+            // A failed read is a storage problem, not malformed metadata.
+            let kind = match error.io_error_kind() {
+                Some(kind) if error.is_io() => kind,
+                _ => io::ErrorKind::InvalidData,
+            };
             io::Error::new(
-                io::ErrorKind::InvalidData,
+                kind,
                 format!("parse object metadata {}: {error}", path.display()),
             )
         })?;
@@ -2969,7 +3005,7 @@ mod tests {
         assert_eq!(seen, 5);
     }
 
-    fn live_identity_cases(platform: Platform) -> Vec<Identity> {
+    pub(super) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
         let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
@@ -3622,6 +3658,419 @@ mod tests {
         assert!(
             message.contains("different (kind, schema) set"),
             "{message}"
+        );
+    }
+}
+
+/// Object metadata is read back from disk on every cache hit, gc and
+/// migration. Each malformed shape below is refused with its own message;
+/// none may turn into a record with invented evidence.
+#[cfg(test)]
+mod record_value_tests {
+    use super::*;
+    use crate::kernel::testutil::TempDir;
+    use serde_json::json;
+    use std::fs;
+
+    fn identity() -> Identity {
+        tests::register_test_kinds();
+        Identity {
+            kind: "test".into(),
+            name: "record".into(),
+            version: "1".into(),
+            inputs: Default::default(),
+        }
+    }
+
+    fn explicit(id: &str) -> serde_json::Value {
+        json!({
+            "id": id,
+            "identity": identity(),
+            "schema": "object-meta/2",
+            "dependencies": [],
+            "cache_digests": [],
+            "evidence": "explicit",
+        })
+    }
+
+    fn refusal(id: &str, value: serde_json::Value) -> String {
+        let error = read_record_value(id, value).map(drop).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{error}");
+        error.to_string()
+    }
+
+    fn with(id: &str, edit: impl FnOnce(&mut serde_json::Value)) -> serde_json::Value {
+        let mut value = explicit(id);
+        edit(&mut value);
+        value
+    }
+
+    #[test]
+    fn a_malformed_identity_is_refused() {
+        let id = identity().object_id();
+        let other = Identity {
+            name: "other".into(),
+            ..identity()
+        };
+        let cases = [
+            (
+                with(&id, |v| drop(v.as_object_mut().unwrap().remove("identity"))),
+                format!("object {id} metadata has no identity"),
+            ),
+            (
+                with(&id, |v| v["identity"]["kind"] = json!("")),
+                format!("object {id} metadata has no identity kind"),
+            ),
+            (
+                with(&id, |v| v["identity"] = json!(other)),
+                format!("object {id} identity hashes to a different object id"),
+            ),
+            (
+                with(&id, |v| {
+                    v["id"] = json!("0000000000000000000000000000000000000000-x-1")
+                }),
+                format!("object metadata {id} has a mismatched id"),
+            ),
+            (
+                with(&id, |v| v["id"] = json!(7)),
+                format!("object metadata {id} has a mismatched id"),
+            ),
+        ];
+        for (value, expected) in cases {
+            assert_eq!(refusal(&id, value), expected);
+        }
+        let reason = refusal(&id, with(&id, |v| v["identity"] = json!("text")));
+        assert!(
+            reason.starts_with(&format!("object {id} has malformed identity: ")),
+            "{reason}"
+        );
+    }
+
+    #[test]
+    fn a_malformed_object_meta_2_body_is_refused() {
+        let id = identity().object_id();
+        let dep = "0000000000000000000000000000000000000000-dep-1";
+        let sha = "a".repeat(64);
+        let cases: Vec<(serde_json::Value, String)> = vec![
+            (
+                with(&id, |v| v["schema"] = json!(2)),
+                format!("object {id} has an invalid metadata schema"),
+            ),
+            (
+                with(&id, |v| v["schema"] = json!("object-meta/3")),
+                format!("object {id} has unknown metadata schema object-meta/3"),
+            ),
+            (
+                with(&id, |v| {
+                    drop(v.as_object_mut().unwrap().remove("dependencies"))
+                }),
+                format!("object {id} metadata has no explicit dependencies"),
+            ),
+            (
+                with(&id, |v| v["dependencies"] = json!(dep)),
+                format!("object {id} metadata has no explicit dependencies"),
+            ),
+            (
+                with(&id, |v| v["dependencies"] = json!([1])),
+                format!("object {id} has a non-string dependency"),
+            ),
+            (
+                with(&id, |v| v["dependencies"] = json!(["../escape"])),
+                format!("object {id} has a malformed or duplicate dependency \"../escape\""),
+            ),
+            (
+                with(&id, |v| v["dependencies"] = json!([dep, dep])),
+                format!("object {id} has a malformed or duplicate dependency {dep:?}"),
+            ),
+            (
+                with(&id, |v| {
+                    drop(v.as_object_mut().unwrap().remove("cache_digests"))
+                }),
+                format!("object {id} metadata has no explicit cache digests"),
+            ),
+            (
+                with(&id, |v| v["cache_digests"] = json!(["sha256:aa"])),
+                format!("object {id} has a malformed cache digest"),
+            ),
+            (
+                with(&id, |v| v["cache_digests"] = json!([{"hex": sha}])),
+                format!("object {id} cache digest has no algorithm"),
+            ),
+            (
+                with(&id, |v| v["cache_digests"] = json!([{"algo": "sha256"}])),
+                format!("object {id} cache digest has no hex"),
+            ),
+            (
+                with(&id, |v| {
+                    v["cache_digests"] = json!([{"algo": "md5", "hex": sha}])
+                }),
+                format!("object {id} cache digest: unsupported cache algorithm md5"),
+            ),
+            (
+                with(
+                    &id,
+                    |v| {
+                        v["cache_digests"] =
+                            json!([{"algo": "sha256", "hex": sha}, {"algo": "sha256", "hex": sha}])
+                    },
+                ),
+                format!("object {id} has a duplicate cache digest"),
+            ),
+            (
+                with(&id, |v| drop(v.as_object_mut().unwrap().remove("evidence"))),
+                format!("object {id} metadata has no evidence marker"),
+            ),
+            (
+                with(&id, |v| v["evidence"] = json!("adapted:")),
+                format!("object {id} has an empty adapted marker"),
+            ),
+            (
+                with(&id, |v| v["evidence"] = json!("trusted")),
+                format!("object {id} has unknown evidence marker trusted"),
+            ),
+        ];
+        for (value, expected) in cases {
+            assert_eq!(refusal(&id, value), expected);
+        }
+        // A digest of the wrong length is refused through the digest parser.
+        let reason = refusal(
+            &id,
+            with(&id, |v| {
+                v["cache_digests"] = json!([{"algo": "sha256", "hex": "aa"}])
+            }),
+        );
+        assert!(
+            reason.starts_with(&format!("object {id} cache digest: ")),
+            "{reason}"
+        );
+    }
+
+    #[test]
+    fn a_malformed_legacy_record_is_refused() {
+        let id = identity().object_id();
+        let legacy = |refs: serde_json::Value| json!({"identity": identity(), "refs": refs});
+        assert_eq!(
+            refusal(&id, legacy(json!("x"))),
+            format!("object {id} legacy refs is not an array")
+        );
+        assert_eq!(
+            refusal(&id, legacy(json!(["x", 1]))),
+            format!("object {id} legacy refs contains a non-string")
+        );
+    }
+
+    /// Controls: each accepted shape reads back with the evidence and the
+    /// legacy retention boundary it recorded.
+    #[test]
+    fn well_formed_records_read_back() {
+        let id = identity().object_id();
+        let dep = "0000000000000000000000000000000000000000-dep-1";
+        let sha = "b".repeat(64);
+        let record = read_record_value(
+            &id,
+            with(&id, |v| {
+                v["dependencies"] = json!([dep]);
+                v["cache_digests"] = json!([{"algo": "sha256", "hex": sha}]);
+            }),
+        )
+        .unwrap();
+        assert_eq!(record.evidence, Evidence::Explicit);
+        assert!(record.dependencies.contains(dep));
+        assert_eq!(record.cache.len(), 1);
+        assert!(record.had_legacy_refs);
+
+        let record =
+            read_record_value(&id, with(&id, |v| v["evidence"] = json!("adapted:test@1"))).unwrap();
+        assert_eq!(record.evidence, Evidence::Adapted("test@1".into()));
+        assert!(record.had_legacy_refs);
+        let record = read_record_value(
+            &id,
+            with(&id, |v| {
+                v["evidence"] = json!("adapted:test@1");
+                v["legacy_retention"] = json!(true);
+            }),
+        )
+        .unwrap();
+        assert!(!record.had_legacy_refs);
+
+        // Explicit evidence always keeps the boundary; an adapted record
+        // keeps it unless it says `legacy_retention: true`.
+        for (evidence, retention, kept) in [
+            ("explicit", json!(true), true),
+            ("explicit", json!(false), true),
+            ("adapted:test@1", json!(false), true),
+            ("adapted:test@1", json!("true"), true),
+            ("adapted:test@1", json!(true), false),
+        ] {
+            let record = read_record_value(
+                &id,
+                with(&id, |v| {
+                    v["evidence"] = json!(evidence);
+                    v["legacy_retention"] = retention.clone();
+                }),
+            )
+            .unwrap();
+            assert_eq!(record.had_legacy_refs, kept, "{evidence} {retention}");
+        }
+
+        let record =
+            read_record_value(&id, json!({"identity": identity(), "refs": ["a"]})).unwrap();
+        assert_eq!(record.evidence, Evidence::Legacy);
+        assert!(record.had_legacy_refs);
+        let record = read_record_value(&id, json!({"identity": identity()})).unwrap();
+        assert!(!record.had_legacy_refs);
+        // An absent `id` field is allowed; the file name is the id.
+        let record = read_record_value(
+            &id,
+            with(&id, |v| drop(v.as_object_mut().unwrap().remove("id"))),
+        )
+        .unwrap();
+        assert_eq!(record.id, id);
+    }
+
+    #[test]
+    fn read_record_at_refuses_what_is_not_a_regular_metadata_file() {
+        // Short label: the socket case below needs a path under 108 bytes.
+        let temp = TempDir::named("om");
+        let id = identity().object_id();
+        let meta = temp.0.join(format!("{id}.json"));
+
+        fs::create_dir(&meta).unwrap();
+        let error = read_record_at(&meta).map(drop).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{error}");
+        assert_eq!(
+            error.to_string(),
+            format!("object metadata {} is not a regular file", meta.display())
+        );
+        fs::remove_dir(&meta).unwrap();
+
+        let target = temp.0.join("target.json");
+        fs::write(&target, explicit(&id).to_string()).unwrap();
+        std::os::unix::fs::symlink(&target, &meta).unwrap();
+        let error = read_record_at(&meta).map(drop).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!("object metadata {} is not a regular file", meta.display())
+        );
+        fs::remove_file(&meta).unwrap();
+
+        let malformed = temp.0.join("not-an-id.json");
+        fs::write(&malformed, explicit(&id).to_string()).unwrap();
+        let error = read_record_at(&malformed).map(drop).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{error}");
+        assert_eq!(
+            error.to_string(),
+            "object metadata id \"not-an-id\" is malformed"
+        );
+
+        // A socket cannot be opened at all. Linux only: macOS's temporary
+        // directory is too deep for a 104-byte socket path.
+        #[cfg(target_os = "linux")]
+        {
+            let listener = std::os::unix::net::UnixListener::bind(&meta).unwrap();
+            let error = read_record_at(&meta).map(drop).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{error}");
+            assert_eq!(
+                error.to_string(),
+                format!("object metadata {} is not a regular file", meta.display())
+            );
+            drop(listener);
+            fs::remove_file(&meta).unwrap();
+        }
+
+        // An unreadable directory is still reported as what it is, not as a
+        // permission error (root reads it regardless).
+        // SAFETY: geteuid has no preconditions.
+        if unsafe { libc::geteuid() } != 0 {
+            use std::os::unix::fs::PermissionsExt as _;
+            fs::create_dir(&meta).unwrap();
+            fs::set_permissions(&meta, fs::Permissions::from_mode(0o000)).unwrap();
+            let result = read_record_at(&meta).map(drop);
+            fs::set_permissions(&meta, fs::Permissions::from_mode(0o755)).unwrap();
+            fs::remove_dir(&meta).unwrap();
+            let error = result.unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{error}");
+            assert_eq!(
+                error.to_string(),
+                format!("object metadata {} is not a regular file", meta.display())
+            );
+        }
+
+        // A FIFO is refused without waiting for a writer.
+        let fifo = std::ffi::CString::new(meta.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: `fifo` is a NUL-terminated path that outlives the call.
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+        let (send, receive) = std::sync::mpsc::channel();
+        let reader = meta.clone();
+        std::thread::spawn(move || {
+            let _ = send.send(read_record_at(&reader).map(drop).map_err(|e| e.to_string()));
+        });
+        let answer = receive
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("reading a FIFO metadata file blocked");
+        assert_eq!(
+            answer,
+            Err(format!(
+                "object metadata {} is not a regular file",
+                meta.display()
+            ))
+        );
+        fs::remove_file(&meta).unwrap();
+
+        let error = read_record_at(&meta).map(drop).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::NotFound, "{error}");
+
+        fs::write(&meta, b"{not json").unwrap();
+        let error = read_record_at(&meta).map(drop).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{error}");
+        assert!(
+            error
+                .to_string()
+                .starts_with(&format!("parse object metadata {}: ", meta.display())),
+            "{error}"
+        );
+
+        fs::write(&meta, explicit(&id).to_string()).unwrap();
+        assert_eq!(read_record_at(&meta).unwrap().id, id);
+    }
+
+    /// A platform input must name a platform tog knows; the live grammar
+    /// check refuses a producer that writes anything else.
+    #[test]
+    fn a_junk_platform_input_is_refused() {
+        let mut identity = identity();
+        assert_eq!(platform_of(&identity), Ok(None));
+        for platform in Platform::ALL {
+            identity
+                .inputs
+                .insert("platform".into(), platform.triple().into());
+            assert_eq!(platform_of(&identity), Ok(Some(*platform)));
+        }
+        for junk in [
+            "",
+            "linux",
+            "x86_64-unknown-linux-gnu ",
+            "X86_64-UNKNOWN-LINUX-GNU",
+        ] {
+            identity.inputs.insert("platform".into(), junk.into());
+            assert_eq!(
+                platform_of(&identity),
+                Err(format!(
+                    "identity has an unparseable platform input {junk:?}"
+                ))
+            );
+        }
+
+        let live = tests::live_identity_cases(Platform::X86_64UnknownLinuxGnu)
+            .into_iter()
+            .find(|identity| identity.inputs.contains_key("platform"))
+            .expect("a live producer identity with a platform input");
+        assert_eq!(check_identity_grammar(&live), Ok(()));
+        let mut junk = live.clone();
+        junk.inputs.insert("platform".into(), "junk".into());
+        assert_eq!(
+            check_identity_grammar(&junk),
+            Err("identity has an unparseable platform input \"junk\"".to_string())
         );
     }
 }
