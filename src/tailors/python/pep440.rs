@@ -63,34 +63,31 @@ impl Version {
             (0, public)
         };
 
-        let release_end = public
-            .char_indices()
-            .find(|(_, byte)| !byte.is_ascii_digit() && *byte != '.')
-            .map(|(index, _)| index)
-            .unwrap_or(public.len());
-        let mut release_text = &public[..release_end];
-        while release_text.ends_with('.') {
-            release_text = &release_text[..release_text.len() - 1];
+        // Release: N(.N)*. A dot not followed by a digit belongs to the
+        // suffix (`1.0.a1`), where the suffix grammar decides whether it is
+        // a valid separator.
+        let bytes = public.as_bytes();
+        let mut release_end = 0;
+        while release_end < bytes.len() && bytes[release_end].is_ascii_digit() {
+            release_end += 1;
         }
-        if release_text.is_empty() {
+        if release_end == 0 {
             return Err("release segment is missing".into());
         }
-        let release_parts: Vec<_> = release_text.split('.').collect();
-        if release_parts.iter().any(|part| part.is_empty()) {
-            return Err("release segments must be numeric".into());
-        }
-        let mut release = Vec::with_capacity(release_parts.len());
-        for part in &release_parts {
-            if !part.bytes().all(|byte| byte.is_ascii_digit()) {
-                return Err("release segments must be numeric".into());
+        while release_end + 1 < bytes.len()
+            && bytes[release_end] == b'.'
+            && bytes[release_end + 1].is_ascii_digit()
+        {
+            release_end += 1;
+            while release_end < bytes.len() && bytes[release_end].is_ascii_digit() {
+                release_end += 1;
             }
+        }
+        let mut release = Vec::new();
+        for part in public[..release_end].split('.') {
             release.push(parse_number(part)?);
         }
-
-        let suffix = public[release_end..]
-            .trim_start_matches(['.', '-', '_'])
-            .replace(['-', '_'], ".");
-        let (pre, post, dev) = parse_suffix(&suffix)?;
+        let (pre, post, dev) = parse_suffix(&public[release_end..])?;
         Ok(Self {
             raw: raw.to_string(),
             epoch,
@@ -105,6 +102,44 @@ impl Version {
 
     pub fn raw(&self) -> &str {
         &self.raw
+    }
+
+    /// The normalized spelling, as `packaging` prints it: `V1.0-RC1` is
+    /// `1.0rc1`, `1.0-1` is `1.0.post1`. Release segments keep their count.
+    pub fn canonical(&self) -> String {
+        let mut text = String::new();
+        if self.epoch != 0 {
+            text.push_str(&format!("{}!", self.epoch));
+        }
+        let release = (0..self.release_len)
+            .map(|index| self.release.get(index).copied().unwrap_or(0).to_string())
+            .collect::<Vec<_>>();
+        text.push_str(&release.join("."));
+        if let Some((kind, number)) = self.pre {
+            let kind = match kind {
+                PreKind::Alpha => "a",
+                PreKind::Beta => "b",
+                PreKind::ReleaseCandidate => "rc",
+            };
+            text.push_str(&format!("{kind}{number}"));
+        }
+        if let Some(number) = self.post {
+            text.push_str(&format!(".post{number}"));
+        }
+        if let Some(number) = self.dev {
+            text.push_str(&format!(".dev{number}"));
+        }
+        if let Some(local) = &self.local {
+            let parts = local
+                .iter()
+                .map(|part| match part {
+                    LocalPart::Numeric(number) => number.to_string(),
+                    LocalPart::Alpha(text) => text.clone(),
+                })
+                .collect::<Vec<_>>();
+            text.push_str(&format!("+{}", parts.join(".")));
+        }
+        text
     }
 
     pub fn release(&self) -> &[u64] {
@@ -294,101 +329,68 @@ fn parse_local(text: &str) -> Result<Vec<LocalPart>, String> {
         .collect()
 }
 
+/// The pre-, post- and dev-release parts, in that order, each optional,
+/// as PEP 440 (and `packaging`) spell them: at most one `.`, `-` or `_`
+/// before a part and between its letters and its number, and an implicit
+/// post-release only as `-N`. If anything is left over the whole suffix is
+/// refused: which part the leftover "belongs" to is a guess (`.rc1` after
+/// `a1` half-reads as the post-release `.r`), so the message quotes it all.
 fn parse_suffix(
     suffix: &str,
 ) -> Result<(Option<(PreKind, u64)>, Option<u64>, Option<u64>), String> {
-    if suffix.is_empty() {
-        return Ok((None, None, None));
-    }
-    let mut pre = None;
-    let mut post = None;
-    let mut dev = None;
-    let mut rest = suffix.trim_matches('.');
-    while !rest.is_empty() {
-        rest = rest.trim_start_matches('.');
-        if rest.is_empty() {
-            break;
-        }
-        let (kind, consumed) = if let Some(consumed) = rest.strip_prefix("alpha") {
-            (Some(PreKind::Alpha), rest.len() - consumed.len())
-        } else if let Some(consumed) = rest.strip_prefix("a") {
-            (Some(PreKind::Alpha), rest.len() - consumed.len())
-        } else if let Some(consumed) = rest.strip_prefix("beta") {
-            (Some(PreKind::Beta), rest.len() - consumed.len())
-        } else if let Some(consumed) = rest.strip_prefix("b") {
-            (Some(PreKind::Beta), rest.len() - consumed.len())
-        } else if let Some(consumed) = rest.strip_prefix("preview") {
-            (Some(PreKind::ReleaseCandidate), rest.len() - consumed.len())
-        } else if let Some(consumed) = rest.strip_prefix("pre") {
-            (Some(PreKind::ReleaseCandidate), rest.len() - consumed.len())
-        } else if let Some(consumed) = rest.strip_prefix("rc") {
-            (Some(PreKind::ReleaseCandidate), rest.len() - consumed.len())
-        } else if let Some(consumed) = rest.strip_prefix("c") {
-            (Some(PreKind::ReleaseCandidate), rest.len() - consumed.len())
-        } else {
-            (None, 0)
-        };
-        if let Some(kind) = kind {
-            let after = rest[consumed..].trim_start_matches('.');
-            let digits = after.chars().take_while(char::is_ascii_digit).count();
-            let number = if digits == 0 {
-                0
-            } else {
-                parse_number(&after[..digits])?
-            };
-            if pre.replace((kind, number)).is_some() {
-                return Err("duplicate pre-release segment".into());
-            }
+    let mut rest = suffix;
+    let pre = take_part(
+        &mut rest,
+        &[
+            ("alpha", PreKind::Alpha),
+            ("a", PreKind::Alpha),
+            ("beta", PreKind::Beta),
+            ("b", PreKind::Beta),
+            ("preview", PreKind::ReleaseCandidate),
+            ("pre", PreKind::ReleaseCandidate),
+            ("rc", PreKind::ReleaseCandidate),
+            ("c", PreKind::ReleaseCandidate),
+        ],
+    )?;
+    let post = match rest.strip_prefix('-') {
+        Some(after) if after.starts_with(|c: char| c.is_ascii_digit()) => {
+            let digits = after.len() - after.trim_start_matches(|c: char| c.is_ascii_digit()).len();
             rest = &after[digits..];
-            continue;
+            Some(parse_number(&after[..digits])?)
         }
-
-        let (is_post, consumed) = if let Some(after) = rest.strip_prefix("post") {
-            (true, rest.len() - after.len())
-        } else if let Some(after) = rest.strip_prefix("rev") {
-            (true, rest.len() - after.len())
-        } else if let Some(after) = rest.strip_prefix("r") {
-            (true, rest.len() - after.len())
-        } else if rest
-            .bytes()
-            .next()
-            .is_some_and(|byte| byte.is_ascii_digit())
-        {
-            (true, 0)
-        } else {
-            (false, 0)
-        };
-        if is_post {
-            let after = rest[consumed..].trim_start_matches('.');
-            let digits = after.chars().take_while(char::is_ascii_digit).count();
-            let number = if digits == 0 {
-                0
-            } else {
-                parse_number(&after[..digits])?
-            };
-            if post.replace(number).is_some() {
-                return Err("duplicate post-release segment".into());
-            }
-            rest = &after[digits..];
-            continue;
-        }
-        if let Some(after) = rest.strip_prefix("dev") {
-            let after = after.trim_start_matches('.');
-            let digits = after.chars().take_while(char::is_ascii_digit).count();
-            let number = if digits == 0 {
-                0
-            } else {
-                parse_number(&after[..digits])?
-            };
-            if dev.replace(number).is_some() {
-                return Err("duplicate dev-release segment".into());
-            }
-            rest = &after[digits..];
-            continue;
-        }
-        return Err(format!("unrecognized version suffix `{rest}`"));
+        _ => take_part(&mut rest, &[("post", ()), ("rev", ()), ("r", ())])?.map(|((), n)| n),
+    };
+    let dev = take_part(&mut rest, &[("dev", ())])?.map(|((), n)| n);
+    if !rest.is_empty() {
+        return Err(format!("unrecognized version suffix `{suffix}`"));
     }
     Ok((pre, post, dev))
+}
+
+/// One `[sep]<word>[sep][digits]` part, the first word that matches (list
+/// longer spellings first). Both separators and the number are optional on
+/// their own, as in `packaging`: `1.0a.` is `1.0a0`. An absent number is 0.
+fn take_part<T: Copy>(rest: &mut &str, words: &[(&str, T)]) -> Result<Option<(T, u64)>, String> {
+    let text = *rest;
+    let body = text.strip_prefix(['.', '-', '_']).unwrap_or(text);
+    let Some((after, value)) = words
+        .iter()
+        .find_map(|(word, value)| body.strip_prefix(word).map(|after| (after, *value)))
+    else {
+        return Ok(None);
+    };
+    let number_start = after.strip_prefix(['.', '-', '_']).unwrap_or(after);
+    let digits = number_start.len()
+        - number_start
+            .trim_start_matches(|c: char| c.is_ascii_digit())
+            .len();
+    let number = if digits == 0 {
+        0
+    } else {
+        parse_number(&number_start[..digits])?
+    };
+    *rest = &number_start[digits..];
+    Ok(Some((value, number)))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -803,6 +805,53 @@ pub fn matches_specifier(specifier: &str, version: &str) -> io::Result<bool> {
     Ok(SpecifierSet::parse(specifier, "specifier")?.matches(&candidate))
 }
 
+/// Evaluate one environment-marker comparison `version op target` the way
+/// `packaging` does: if `op target` is one PEP 440 specifier, compare as
+/// versions, pre-releases included (`3.13.0rc1 > 3.12.14` holds), and
+/// refuse a `version` that is not one. `None` means `op target` is not a
+/// specifier, and the caller compares strings instead.
+pub fn marker_version_matches(op: &str, target: &str, version: &str) -> io::Result<Option<bool>> {
+    let source = "environment marker";
+    let target = target.trim();
+    // One specifier: no second clause after a space, `,` or `||`, and not
+    // the Poetry-only bare `*`.
+    if target.is_empty()
+        || target == "*"
+        || target.contains(|c: char| c.is_whitespace() || c == ',' || c == '|')
+    {
+        return Ok(None);
+    }
+    let specifier = if op == "===" {
+        None
+    } else {
+        match SpecifierSet::parse(&format!("{op}{target}"), source) {
+            Ok(specifier) => Some(specifier),
+            // A number past u64 is a valid specifier tog cannot hold, not
+            // an invalid one: comparing it as a string would be a guess.
+            Err(error)
+                if error
+                    .to_string()
+                    .ends_with("numeric version segment is too large") =>
+            {
+                return Err(error)
+            }
+            Err(_) => return Ok(None),
+        }
+    };
+    let candidate = Version::parse(version).map_err(|why| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{source}: invalid PEP 440 version `{version}`: {why}"),
+        )
+    })?;
+    Ok(Some(match specifier {
+        Some(specifier) => specifier.matches_raw(&candidate),
+        // Arbitrary equality: the normalized candidate against the text,
+        // case-insensitively, as `packaging` compares them.
+        None => candidate.canonical().eq_ignore_ascii_case(target),
+    }))
+}
+
 /// Match an intersected set of specifiers against one candidate, applying
 /// PEP 440's pre-release fallback when the supplied candidate set has no
 /// matching final release.
@@ -953,5 +1002,151 @@ mod tests {
             );
         }
         assert!(!matches_specifier("<=1.0b1", "1.0preview1").unwrap());
+    }
+}
+
+/// Versions come from lock files and package indexes. A string that is not
+/// a PEP 440 version is refused with the rule it breaks, never read as some
+/// other version.
+#[cfg(test)]
+mod rejection_tests {
+    use super::*;
+
+    #[test]
+    fn malformed_versions_are_refused_with_the_rule_they_break() {
+        let cases = [
+            ("", "version is empty"),
+            ("   ", "version is empty"),
+            ("1.0+", "invalid local version"),
+            ("1.0+a+b", "invalid local version"),
+            ("1.0+a..b", "invalid local version segment"),
+            ("1.0+a.", "invalid local version segment"),
+            ("1.0+a!b", "invalid local version segment"),
+            ("!1.0", "invalid epoch"),
+            ("x!1.0", "invalid epoch"),
+            ("1a!1.0", "invalid epoch"),
+            ("1!", "release segment is missing"),
+            ("a1", "release segment is missing"),
+            ("v", "release segment is missing"),
+            ("1..0", "unrecognized version suffix `..0`"),
+            (".1", "release segment is missing"),
+            // Each part appears once, in the order pre, post, dev.
+            ("1.0a1a2", "unrecognized version suffix `a1a2`"),
+            ("1.0a1.rc1", "unrecognized version suffix `a1.rc1`"),
+            (
+                "1.0.post1.post2",
+                "unrecognized version suffix `.post1.post2`",
+            ),
+            ("1.0-1-2", "unrecognized version suffix `-1-2`"),
+            ("1.0.dev1.dev2", "unrecognized version suffix `.dev1.dev2`"),
+            (
+                "1.0.dev1.post1",
+                "unrecognized version suffix `.dev1.post1`",
+            ),
+            ("1.0.post1a1", "unrecognized version suffix `.post1a1`"),
+            // At most one separator, and never a dangling one.
+            ("1.0.", "unrecognized version suffix `.`"),
+            ("1.0-", "unrecognized version suffix `-`"),
+            ("1.0..a1", "unrecognized version suffix `..a1`"),
+            ("1.0__1", "unrecognized version suffix `__1`"),
+            ("1.0.+abc", "unrecognized version suffix `.`"),
+            ("1.0-+abc", "unrecognized version suffix `-`"),
+            ("1.0a..1", "unrecognized version suffix `a..1`"),
+            ("1.0foo", "unrecognized version suffix `foo`"),
+            ("1.0-x", "unrecognized version suffix `-x`"),
+            (
+                "99999999999999999999",
+                "numeric version segment is too large",
+            ),
+            (
+                "99999999999999999999!1",
+                "numeric version segment is too large",
+            ),
+            (
+                "1.0+99999999999999999999",
+                "numeric version segment is too large",
+            ),
+        ];
+        for (text, why) in cases {
+            assert_eq!(Version::parse(text), Err(why.to_string()), "{text:?}");
+        }
+    }
+
+    /// Spellings PEP 440 accepts and normalizes, including the implicit
+    /// post-release `1.0-1`.
+    #[test]
+    fn valid_spellings_normalize_to_the_same_version() {
+        let same = [
+            ("1.0-1", "1.0.post1"),
+            ("1.0_r2", "1.0.post2"),
+            ("1.0rev3", "1.0.post3"),
+            ("v1.0", "1.0"),
+            ("V1.0RC1", "1.0rc1"),
+            ("1.0-alpha.1", "1.0a1"),
+            ("1.0.post", "1.0.post0"),
+            ("1.0-dev", "1.0.dev0"),
+            ("0!1.0", "1.0"),
+            ("1.0+Ubuntu.1", "1.0+ubuntu.1"),
+            ("1.0+local-7", "1.0+local.7"),
+            ("1.0.a1", "1.0a1"),
+            ("1.0a1-1", "1.0a1.post1"),
+            ("1.0.0-rc.1", "1.0.0rc1"),
+            ("1.0_pre_2", "1.0rc2"),
+            ("1.0a1.post2.dev3", "1.0a1.post2.dev3"),
+            ("1.0a.", "1.0a0"),
+            ("1.0post_", "1.0.post0"),
+            ("1.0dev-", "1.0.dev0"),
+            ("1.0a--post1", "1.0a0.post1"),
+        ];
+        for (spelled, normal) in same {
+            let spelled_version = Version::parse(spelled).unwrap();
+            assert_eq!(
+                spelled_version.cmp(&Version::parse(normal).unwrap()),
+                Ordering::Equal,
+                "{spelled} vs {normal}"
+            );
+        }
+        for (spelled, canonical) in [
+            ("V1.0-RC1", "1.0rc1"),
+            ("1.0-1", "1.0.post1"),
+            ("1.0.0", "1.0.0"),
+            ("3.12.14.0", "3.12.14.0"),
+            ("0!1.0", "1.0"),
+            ("2!1.0_ALPHA-2.r3-dev4", "2!1.0a2.post3.dev4"),
+            ("1.0b", "1.0b0"),
+            ("1.0+Ubuntu-01.X", "1.0+ubuntu.1.x"),
+        ] {
+            assert_eq!(
+                Version::parse(spelled).unwrap().canonical(),
+                canonical,
+                "{spelled}"
+            );
+        }
+        assert!(Version::parse("1!1.0").unwrap() > Version::parse("2.0").unwrap());
+        assert!(Version::parse("1.0+local").unwrap().has_local());
+    }
+
+    #[test]
+    fn a_malformed_version_or_specifier_is_refused_by_the_matchers() {
+        let error = matches_specifier(">=1.0", "1..0").unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{error}");
+        assert_eq!(
+            error.to_string(),
+            "specifier: invalid PEP 440 version `1..0`: unrecognized version suffix `..0`"
+        );
+        let error = matches_specifiers_with_candidates(&[">=1.0"], "1.0", &["1.0+"]).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "specifier: invalid PEP 440 version `1.0+`: invalid local version"
+        );
+        let error = matches_specifier(">=1..0", "1.0").unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{error}");
+        assert!(
+            error
+                .to_string()
+                .starts_with("specifier: invalid PEP 440 specifier `>=1..0`"),
+            "{error}"
+        );
+        assert!(matches_specifier(">=1.0", "1.0-1").unwrap());
     }
 }
