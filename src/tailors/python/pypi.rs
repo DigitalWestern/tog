@@ -651,8 +651,14 @@ fn fetch_candidates(name: &str, version: &str) -> io::Result<Vec<FileCandidate>>
         .map_err(|e| err(format!("PyPI lookup failed for {name}=={version}: {e}")))?
         .into_string()
         .map_err(|e| err(format!("PyPI response for {name}: {e}")))?;
+    candidates_from_json(name, &body)
+}
+
+/// The files PyPI's JSON API lists for one release. An entry without a
+/// filename, URL or sha256 digest is dropped: it can never match a pin.
+fn candidates_from_json(name: &str, body: &str) -> io::Result<Vec<FileCandidate>> {
     let v: serde_json::Value =
-        serde_json::from_str(&body).map_err(|e| err(format!("PyPI JSON for {name}: {e}")))?;
+        serde_json::from_str(body).map_err(|e| err(format!("PyPI JSON for {name}: {e}")))?;
     let urls = v["urls"]
         .as_array()
         .ok_or_else(|| err(format!("PyPI JSON for {name} has no urls array")))?;
@@ -693,52 +699,65 @@ pub fn lock_requirements(
             continue;
         }
         let all = fetch_candidates(&r.name, &r.version)?;
-        let matching: Vec<FileCandidate> = all
-            .iter()
-            .filter(|f| r.sha256s.contains(&f.sha256))
-            .cloned()
-            .collect();
-        if matching.is_empty() {
-            return Err(err(format!(
-                "{}=={}: none of PyPI's files match the pinned hashes \
-                 (supply-chain mismatch or stale lock). PyPI has: {}",
-                r.name,
-                r.version,
-                all.iter()
-                    .map(|f| f.filename.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )));
-        }
-        let Some((chosen, kind)) = select_file(&matching, python_tag, platform, glibc) else {
-            let host = if matches!(platform, Platform::X86_64UnknownLinuxGnu) {
-                format!("{} (glibc {}.{})", platform.triple(), glibc.0, glibc.1)
-            } else {
-                platform.triple().to_string()
-            };
-            return Err(err(format!(
-                "{}=={}: no file compatible with {python_tag} on {host} \
-                 among hash-matched files: {}",
-                r.name,
-                r.version,
-                matching
-                    .iter()
-                    .map(|f| f.filename.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )));
-        };
-        out.push(LockedPackage {
-            name: r.name.clone(),
-            version: r.version.clone(),
-            filename: chosen.filename.clone(),
-            url: chosen.url.clone(),
-            sha256: chosen.sha256.clone(),
-            kind,
-            git: None,
-        });
+        out.push(lock_from_candidates(r, &all, python_tag, platform, glibc)?);
     }
     Ok(out)
+}
+
+/// Pick the file for one requirement from the files PyPI listed. Only a
+/// file whose sha256 is among the requirement's pins is eligible; among
+/// those, `select_file` picks the best fit for this interpreter and host.
+fn lock_from_candidates(
+    r: &Requirement,
+    all: &[FileCandidate],
+    python_tag: &str,
+    platform: Platform,
+    glibc: Glibc,
+) -> io::Result<LockedPackage> {
+    let matching: Vec<FileCandidate> = all
+        .iter()
+        .filter(|f| r.sha256s.contains(&f.sha256))
+        .cloned()
+        .collect();
+    if matching.is_empty() {
+        return Err(err(format!(
+            "{}=={}: none of PyPI's files match the pinned hashes \
+             (supply-chain mismatch or stale lock). PyPI has: {}",
+            r.name,
+            r.version,
+            all.iter()
+                .map(|f| f.filename.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )));
+    }
+    let Some((chosen, kind)) = select_file(&matching, python_tag, platform, glibc) else {
+        let host = if matches!(platform, Platform::X86_64UnknownLinuxGnu) {
+            format!("{} (glibc {}.{})", platform.triple(), glibc.0, glibc.1)
+        } else {
+            platform.triple().to_string()
+        };
+        return Err(err(format!(
+            "{}=={}: no file compatible with {python_tag} on {host} \
+             among hash-matched files: {}",
+            r.name,
+            r.version,
+            matching
+                .iter()
+                .map(|f| f.filename.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )));
+    };
+    Ok(LockedPackage {
+        name: r.name.clone(),
+        version: r.version.clone(),
+        filename: chosen.filename.clone(),
+        url: chosen.url.clone(),
+        sha256: chosen.sha256.clone(),
+        kind,
+        git: None,
+    })
 }
 
 /// End-to-end planner: text -> Plan.
@@ -1399,5 +1418,185 @@ mod git_requirement_tests {
         let six = reqs.iter().find(|r| r.name == "six").expect("six");
         assert!(six.git.is_none());
         assert_eq!(six.version, "1.17.0");
+    }
+}
+
+/// Offline tests for the hash pin check (#348). `lock_from_candidates` is
+/// what stands between a PyPI listing and a plan row: a file is only
+/// eligible when its sha256 is one of the requirement's `--hash` pins.
+#[cfg(test)]
+mod hash_pin_tests {
+    use super::*;
+
+    const PIN: &str = "1111111111111111111111111111111111111111111111111111111111111111";
+    const OTHER: &str = "2222222222222222222222222222222222222222222222222222222222222222";
+
+    fn req(sha256s: &[&str]) -> Requirement {
+        Requirement {
+            name: "six".into(),
+            version: "1.17.0".into(),
+            sha256s: sha256s.iter().map(|s| s.to_string()).collect(),
+            git: None,
+        }
+    }
+
+    fn file(filename: &str, sha256: &str) -> FileCandidate {
+        FileCandidate {
+            filename: filename.into(),
+            url: format!("https://files.pythonhosted.org/{filename}"),
+            sha256: sha256.into(),
+        }
+    }
+
+    fn lock(r: &Requirement, all: &[FileCandidate]) -> io::Result<LockedPackage> {
+        lock_from_candidates(r, all, "cp312", Platform::Aarch64AppleDarwin, Glibc(0, 0))
+    }
+
+    #[test]
+    fn a_file_whose_hash_differs_from_every_pin_is_refused() {
+        // One nibble off: the file PyPI serves is not the one that was locked.
+        let served = format!("{}0", &PIN[..63]);
+        let error = lock(
+            &req(&[PIN]),
+            &[file("six-1.17.0-py3-none-any.whl", &served)],
+        )
+        .unwrap_err()
+        .to_string();
+        assert_eq!(
+            error,
+            "six==1.17.0: none of PyPI's files match the pinned hashes \
+             (supply-chain mismatch or stale lock). PyPI has: six-1.17.0-py3-none-any.whl"
+        );
+    }
+
+    #[test]
+    fn a_release_with_no_files_is_refused() {
+        let error = lock(&req(&[PIN]), &[]).unwrap_err().to_string();
+        assert_eq!(
+            error,
+            "six==1.17.0: none of PyPI's files match the pinned hashes \
+             (supply-chain mismatch or stale lock). PyPI has: "
+        );
+    }
+
+    #[test]
+    fn a_requirement_with_no_pins_accepts_nothing() {
+        // parse_requirements never produces this shape, but "no pins"
+        // must mean "nothing is eligible", not "anything goes".
+        let error = lock(&req(&[]), &[file("six-1.17.0-py3-none-any.whl", PIN)])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("none of PyPI's files match the pinned hashes"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_compatible_file_with_the_wrong_hash_is_not_chosen_over_a_pinned_one() {
+        // The pure wheel would install fine, but only the sdist is pinned.
+        let all = [
+            file("six-1.17.0-py3-none-any.whl", OTHER),
+            file("six-1.17.0.tar.gz", PIN),
+        ];
+        let locked = lock(&req(&[PIN]), &all).unwrap();
+        assert_eq!(locked.filename, "six-1.17.0.tar.gz");
+        assert_eq!(locked.sha256, PIN);
+        assert!(matches!(locked.kind, ArtifactKind::Sdist));
+    }
+
+    #[test]
+    fn a_pinned_file_the_host_cannot_use_is_refused_not_swapped() {
+        // The cp311 wheel is pinned; the pure wheel is usable but unpinned.
+        // The unpinned file must not be picked as a fallback.
+        let all = [
+            file("six-1.17.0-cp311-cp311-macosx_11_0_arm64.whl", PIN),
+            file("six-1.17.0-py3-none-any.whl", OTHER),
+        ];
+        let error = lock(&req(&[PIN]), &all).unwrap_err().to_string();
+        assert_eq!(
+            error,
+            "six==1.17.0: no file compatible with cp312 on aarch64-apple-darwin \
+             among hash-matched files: six-1.17.0-cp311-cp311-macosx_11_0_arm64.whl"
+        );
+    }
+
+    #[test]
+    fn the_glibc_floor_is_named_when_a_linux_wheel_is_too_new() {
+        let all = [file(
+            "six-1.17.0-cp312-cp312-manylinux_2_34_x86_64.whl",
+            PIN,
+        )];
+        let error = lock_from_candidates(
+            &req(&[PIN]),
+            &all,
+            "cp312",
+            Platform::X86_64UnknownLinuxGnu,
+            Glibc(2, 17),
+        )
+        .unwrap_err()
+        .to_string();
+        assert_eq!(
+            error,
+            "six==1.17.0: no file compatible with cp312 on x86_64-unknown-linux-gnu \
+             (glibc 2.17) among hash-matched files: \
+             six-1.17.0-cp312-cp312-manylinux_2_34_x86_64.whl"
+        );
+    }
+
+    #[test]
+    fn control_a_pinned_compatible_file_becomes_the_locked_package() {
+        let all = [
+            file("six-1.17.0.tar.gz", OTHER),
+            file("six-1.17.0-py3-none-any.whl", PIN),
+        ];
+        let locked = lock(&req(&[OTHER, PIN]), &all).unwrap();
+        assert_eq!(locked.name, "six");
+        assert_eq!(locked.version, "1.17.0");
+        assert_eq!(locked.filename, "six-1.17.0-py3-none-any.whl");
+        assert_eq!(
+            locked.url,
+            "https://files.pythonhosted.org/six-1.17.0-py3-none-any.whl"
+        );
+        assert_eq!(locked.sha256, PIN);
+        assert!(matches!(locked.kind, ArtifactKind::Wheel));
+        assert!(locked.git.is_none());
+    }
+
+    #[test]
+    fn pypi_json_without_a_urls_array_is_refused() {
+        for body in [r#"{"info": {}}"#, r#"{"urls": {}}"#, r#"{"urls": null}"#] {
+            let error = candidates_from_json("six", body).unwrap_err().to_string();
+            assert_eq!(error, "PyPI JSON for six has no urls array", "{body}");
+        }
+        let error = candidates_from_json("six", "not json")
+            .unwrap_err()
+            .to_string();
+        assert!(error.starts_with("PyPI JSON for six: "), "{error}");
+    }
+
+    #[test]
+    fn pypi_json_entries_without_a_sha256_digest_are_dropped() {
+        // A file with only an md5, or no digests at all, can never match a
+        // sha256 pin, so it is not a candidate. The good entry survives with
+        // its digest lowercased.
+        let body = format!(
+            r#"{{"urls": [
+                {{"filename": "a.whl", "url": "https://x/a.whl", "digests": {{"md5": "abc"}}}},
+                {{"filename": "b.whl", "url": "https://x/b.whl"}},
+                {{"filename": "c.whl", "digests": {{"sha256": "{PIN}"}}}},
+                {{"url": "https://x/d.whl", "digests": {{"sha256": "{PIN}"}}}},
+                {{"filename": "e.whl", "url": "https://x/e.whl", "digests": {{"sha256": "{}"}}}}
+            ]}}"#,
+            PIN.to_ascii_uppercase().replace('1', "A")
+        );
+        let files = candidates_from_json("six", &body).unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].filename, "e.whl");
+        assert_eq!(files[0].url, "https://x/e.whl");
+        assert_eq!(files[0].sha256, "a".repeat(64));
+        // And such a listing cannot satisfy a pin on the dropped entries.
+        let error = lock(&req(&[PIN]), &files).unwrap_err().to_string();
+        assert!(error.ends_with("PyPI has: e.whl"), "{error}");
     }
 }
