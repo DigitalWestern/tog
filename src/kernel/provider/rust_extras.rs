@@ -1335,8 +1335,9 @@ mod layout_tests {
                 .to_string(),
             refused
         );
-        // Control: anything besides the file list is a payload.
+        // Control: a file besides the file list is a payload.
         fs::create_dir_all(staged.join("bin")).unwrap();
+        fs::write(staged.join("bin/cargo-clippy"), b"#!/bin/sh\n").unwrap();
         check_payload(&staged, &archive("clippy-preview", TARGET)).unwrap();
     }
 
@@ -1347,9 +1348,11 @@ mod layout_tests {
                 release: super::super::rust_path::PATH_RELEASE.into(),
                 revision: None,
                 primary: vec!["rustc".into()],
+                // As a real path selection declares them: cargo rides in
+                // the rustc tree, so it has no artifact row of its own.
                 components: vec![
                     Component::new("rustc", "1.97.0"),
-                    Component::new("cargo", "1.97.0"),
+                    Component::embedded("cargo", "1.97.0", "rustc"),
                 ],
                 artifacts: vec![ArtifactRow {
                     platform,
@@ -1384,21 +1387,52 @@ mod layout_tests {
             .unwrap();
         let platform = Platform::X86_64UnknownLinuxGnu;
         let selected = path_selected(platform);
+        let refused = |components: &str, targets: &str, profile: &str| {
+            format!(
+                "the project's Rust is a local toolchain (toolchain.path), which is used as it is; \
+                 it cannot also provide components [{components}], targets [{targets}] or \
+                 profile {profile}; name a channel in rust-toolchain.toml instead"
+            )
+        };
+        let refusal = |asked: &Extras| {
+            let error = plan(&store, activity, platform, &selected, asked)
+                .map(drop)
+                .unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+            error.to_string()
+        };
+        // Each kind of extra is refused on its own.
+        let component_only = Extras {
+            components: vec!["clippy".into()],
+            targets: Vec::new(),
+            profile: None,
+        };
+        assert_eq!(refusal(&component_only), refused("clippy", "", "none"));
+        let target_only = Extras {
+            components: Vec::new(),
+            targets: vec!["aarch64-apple-darwin".into()],
+            profile: None,
+        };
+        assert_eq!(
+            refusal(&target_only),
+            refused("", "aarch64-apple-darwin", "none")
+        );
+        let profile_only = Extras {
+            components: Vec::new(),
+            targets: Vec::new(),
+            profile: Some("default".into()),
+        };
+        assert_eq!(refusal(&profile_only), refused("", "", "default"));
+        // Together, the message names what is beyond the base, not the
+        // whole request: rustc and the host triple are the base.
         let asked = Extras {
             components: vec!["clippy".into(), "rustc".into()],
             targets: vec!["aarch64-apple-darwin".into(), platform.triple().into()],
             profile: Some("default".into()),
         };
-        // The message names what is beyond the base, not the whole request.
-        let error = plan(&store, activity, platform, &selected, &asked)
-            .map(drop)
-            .unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         assert_eq!(
-            error.to_string(),
-            "the project's Rust is a local toolchain (toolchain.path), which is used as it is; \
-             it cannot also provide components [clippy], targets [aarch64-apple-darwin] or \
-             profile default; name a channel in rust-toolchain.toml instead"
+            refusal(&asked),
+            refused("clippy", "aarch64-apple-darwin", "default")
         );
         // Control: a request the base already satisfies plans the tree as
         // it is, with no manifest and no extensions.

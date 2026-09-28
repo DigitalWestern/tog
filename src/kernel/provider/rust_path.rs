@@ -1389,9 +1389,11 @@ mod locked_row_tests {
                 release: PATH_RELEASE.into(),
                 revision: None,
                 primary: vec!["rustc".into()],
+                // As a real path selection declares them: cargo rides in
+                // the rustc tree, so it has no artifact row of its own.
                 components: vec![
                     Component::new("rustc", "1.97.0"),
-                    Component::new("cargo", "1.97.0"),
+                    Component::embedded("cargo", "1.97.0", "rustc"),
                 ],
                 artifacts: vec![ArtifactRow {
                     platform: host(),
