@@ -91,6 +91,7 @@ Nothing queued; the next item comes from "Open work" below.
   - #359 elixir: Hex metadata cross-check matches substrings, not the top-level app/version (from the #358 review).
   - #367 tests: the artifact size caps in kernel::fetch (8 GiB artifact, 256 MiB text) have no test (from the #363 review).
   - #369 python: wheel entry-point and entry-name validation leftovers (from the #368 review).
+  - #371 comforter: closure_object probe follows symlinks out of the object (from the #370 review).
 - **Quality review of 2026-09-24 (#264).** A whole-codebase review after
   the 09-20 to 09-24 run. #264 holds the work order and the overall verdict.
   Each line is one issue and one PR, in order:
