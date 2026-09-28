@@ -16,6 +16,9 @@ use std::io::{Read as _, Write as _};
 
 const RECORDS: &str = "records";
 
+/// The largest record `read_record` accepts: records are small facts.
+const RECORD_CAP: u64 = 1 << 20;
+
 /// A record kind is one path component tog names itself: lowercase ASCII,
 /// digits and `-`.
 fn check_kind(kind: &str) -> io::Result<()> {
@@ -106,8 +109,13 @@ impl Store {
         if !file.metadata()?.is_file() {
             return Ok(None);
         }
+        // Read one byte past the cap so a longer file is refused whole, not
+        // parsed from a prefix that happens to be complete JSON.
         let mut bytes = Vec::new();
-        (&file).take(1 << 20).read_to_end(&mut bytes)?;
+        (&file).take(RECORD_CAP + 1).read_to_end(&mut bytes)?;
+        if bytes.len() as u64 > RECORD_CAP {
+            return Ok(None);
+        }
         let Ok(record) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
             return Ok(None);
         };
@@ -182,7 +190,7 @@ mod tests {
     use super::*;
     use crate::kernel::activity::ActivityMode;
 
-    fn store() -> (Store, crate::kernel::testutil::TempDir) {
+    pub(super) fn store() -> (Store, crate::kernel::testutil::TempDir) {
         let dir = crate::kernel::testutil::TempDir::named("records");
         let root = dir.0.join("store");
         for sub in ["objects", "meta", "tmp"] {
@@ -274,5 +282,135 @@ mod tests {
             assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "{error}");
             assert!(error.to_string().contains("is not a plain name"), "{error}");
         }
+    }
+}
+
+/// The read side trusts nothing it finds under `records/`: a FIFO, a
+/// directory or an oversized file where a record belongs is no record, and
+/// the write side takes only this store's own lease.
+#[cfg(test)]
+mod record_guard_tests {
+    use super::tests::store;
+    use super::*;
+    use crate::kernel::activity::ActivityMode;
+
+    fn record_path(store: &Store, kind: &str, key: &str) -> PathBuf {
+        store.root.join(RECORDS).join(kind).join(file_name(key))
+    }
+
+    /// Opening a FIFO without `O_NONBLOCK` would wait for a writer forever.
+    /// The read runs on its own thread so a regression fails here instead
+    /// of hanging the suite.
+    #[test]
+    fn a_fifo_where_a_record_belongs_is_no_record_and_does_not_block() {
+        let (store, _dir) = store();
+        let path = record_path(&store, "demo", "a");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let fifo = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: `fifo` is a NUL-terminated path that outlives the call.
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+        let (send, receive) = std::sync::mpsc::channel();
+        let reader = store.clone();
+        std::thread::spawn(move || {
+            let _ = send.send(reader.read_record("demo", "a").map_err(|e| e.to_string()));
+        });
+        let answer = receive
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("reading a FIFO record blocked");
+        assert_eq!(answer, Ok(None));
+    }
+
+    #[test]
+    fn a_directory_where_a_record_belongs_is_no_record() {
+        let (store, _dir) = store();
+        fs::create_dir_all(record_path(&store, "demo", "a")).unwrap();
+        assert_eq!(store.read_record("demo", "a").unwrap(), None);
+    }
+
+    /// A record of exactly 1 MiB reads back; one byte more is no record,
+    /// even when its first MiB is complete JSON.
+    #[test]
+    fn a_record_over_one_mib_is_no_record() {
+        let (store, _dir) = store();
+        let activity = store.activity(ActivityMode::Shared).unwrap();
+        let envelope = |value: &str| {
+            serde_json::to_vec_pretty(&serde_json::json!({"key": "a", "value": value})).unwrap()
+        };
+        let overhead = envelope("").len();
+        let path = record_path(&store, "demo", "a");
+        store
+            .write_record(&activity, "demo", "a", &serde_json::json!("seed"))
+            .unwrap();
+
+        let fits = "x".repeat((1 << 20) - overhead);
+        fs::write(&path, envelope(&fits)).unwrap();
+        assert_eq!(fs::metadata(&path).unwrap().len(), 1 << 20);
+        assert_eq!(
+            store.read_record("demo", "a").unwrap(),
+            Some(serde_json::json!(fits))
+        );
+
+        let over = "x".repeat((1 << 20) - overhead + 1);
+        fs::write(&path, envelope(&over)).unwrap();
+        assert_eq!(store.read_record("demo", "a").unwrap(), None);
+
+        // A complete record in the first MiB does not excuse what follows.
+        for tail in [&b" "[..], b"\n", b"garbage"] {
+            let mut bytes = envelope(&fits);
+            bytes.extend_from_slice(tail);
+            fs::write(&path, bytes).unwrap();
+            assert_eq!(store.read_record("demo", "a").unwrap(), None, "{tail:?}");
+        }
+    }
+
+    #[test]
+    fn a_write_under_another_stores_lease_is_refused() {
+        let (store, _dir) = store();
+        let (other, _other_dir) = super::tests::store();
+        let foreign = other.activity(ActivityMode::Shared).unwrap();
+        let error = store
+            .write_record(&foreign, "demo", "a", &serde_json::json!(1))
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Other, "{error}");
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "store record write requires an active shared lease for store {}; \
+                 the supplied lease belongs to {}",
+                store.root.display(),
+                other.root.display()
+            )
+        );
+        assert!(!store.root.join(RECORDS).exists());
+        drop(foreign);
+        let own = store.activity(ActivityMode::Shared).unwrap();
+        store
+            .write_record(&own, "demo", "a", &serde_json::json!(1))
+            .unwrap();
+        assert_eq!(
+            store.read_record("demo", "a").unwrap(),
+            Some(serde_json::json!(1))
+        );
+    }
+
+    #[test]
+    fn a_kind_that_is_not_a_plain_name_is_refused() {
+        let (store, _dir) = store();
+        let activity = store.activity(ActivityMode::Shared).unwrap();
+        for kind in ["", "Demo", "a/b", "..", ".", "a_b", "a.b"] {
+            let expected = format!("store record kind {kind:?} is not a plain name");
+            let error = store.read_record(kind, "a").unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "{error}");
+            assert_eq!(error.to_string(), expected);
+            let error = store
+                .write_record(&activity, kind, "a", &serde_json::json!(1))
+                .unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "{error}");
+            assert_eq!(error.to_string(), expected);
+        }
+        assert!(!store.root.join(RECORDS).exists());
+        store
+            .write_record(&activity, "demo-2", "a", &serde_json::json!(1))
+            .unwrap();
     }
 }
