@@ -39,8 +39,57 @@ pub fn is_safe_component(value: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'_' || b == b'-' || b == b'+')
 }
 
+/// Does the host, or the user before it, start with a dash? Git hands the
+/// authority of an `ssh://` URL to ssh as its host and login, and an
+/// option-looking one is handed to it before git's own guard would run.
+/// `normalize_url` turns `-oProxyCommand=x:repo` into
+/// `ssh://-oProxyCommand=x/repo`, so a leading dash has to be caught on the
+/// authority, not only on the whole URL.
+fn option_looking_authority(url: &str) -> bool {
+    let Some((_, rest)) = url.split_once("://") else {
+        return false;
+    };
+    // Git percent-decodes the authority and takes an IPv6 host out of its
+    // brackets before handing it on, so the check looks at what ssh would
+    // see: `%2Dhost` and `[-host]` are `-host`.
+    let authority = percent_decode(&rest[..rest.find(['/', '?']).unwrap_or(rest.len())]);
+    // One bracket layer comes off, and only when it closes, as git takes
+    // it off: `[-host` and `[[-host]]` reach ssh with a `[` in front.
+    let leads_with_dash = |part: &str| {
+        part.strip_prefix('[')
+            .filter(|_| part.contains(']'))
+            .unwrap_or(part)
+            .starts_with('-')
+    };
+    leads_with_dash(&authority)
+        || authority
+            .rsplit_once('@')
+            .is_some_and(|(_, host)| leads_with_dash(host))
+}
+
+/// `%XX` escapes decoded, everything else as it was. A malformed escape is
+/// kept literally, as git keeps it.
+fn percent_decode(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let escape = std::str::from_utf8(&bytes[i + 1..i + 3]).ok();
+            if let Some(value) = escape.and_then(|hex| u8::from_str_radix(hex, 16).ok()) {
+                out.push(value);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 /// Refuse a source git must not be handed: an unknown scheme, an
-/// option-looking URL, or a malformed commit.
+/// option-looking URL or host, or a malformed commit.
 pub fn validate_source(source: &GitSource) -> io::Result<()> {
     if !is_full_commit(&source.commit) {
         return Err(err(format!(
@@ -53,6 +102,12 @@ pub fn validate_source(source: &GitSource) -> io::Result<()> {
             "refusing git URL {:?}: expected one of {}",
             source.url,
             ALLOWED_SCHEMES.join(", ")
+        )));
+    }
+    if option_looking_authority(&source.url) {
+        return Err(err(format!(
+            "refusing git URL {:?}: the host looks like an option",
+            source.url
         )));
     }
     if let Some(subdirectory) = &source.subdirectory {
@@ -253,8 +308,13 @@ pub fn resolve_ref(url: &str, reference: &str) -> io::Result<String> {
     if is_full_commit(reference) {
         return Ok(reference.to_ascii_lowercase());
     }
+    // Before normalization: `-oProxyCommand=x:repo` would otherwise be
+    // read as an scp-style spelling and come out as an ssh:// URL.
+    if url.trim_start().starts_with('-') {
+        return Err(err(format!("refusing git URL {url:?}")));
+    }
     let url = normalize_url(url);
-    if url.starts_with('-') || !ALLOWED_SCHEMES.iter().any(|s| url.starts_with(s)) {
+    if !ALLOWED_SCHEMES.iter().any(|s| url.starts_with(s)) || option_looking_authority(&url) {
         return Err(err(format!("refusing git URL {url:?}")));
     }
     if reference.starts_with('-') || reference.contains(char::is_whitespace) {
@@ -265,7 +325,14 @@ pub fn resolve_ref(url: &str, reference: &str) -> io::Result<String> {
         None,
         &format!("git ls-remote {url} {reference}"),
     )?;
-    let commit = out
+    commit_from_ls_remote(&url, reference, &out)
+}
+
+/// The commit in a `git ls-remote <url> <ref>` listing: the first field of
+/// the first line, which must be a full hash. An empty listing means the
+/// remote has no such ref.
+fn commit_from_ls_remote(url: &str, reference: &str, listing: &str) -> io::Result<String> {
+    let commit = listing
         .lines()
         .next()
         .and_then(|line| line.split_whitespace().next())
@@ -334,6 +401,12 @@ fn collect_symlinks(root: &Path, out: &mut Vec<PathBuf>) -> io::Result<()> {
     Ok(())
 }
 
+/// How many link expansions one link's resolution may take. The cycle set
+/// only holds the chain being expanded, so an acyclic web of links could
+/// otherwise double the work at every level; a few dozen links would stall
+/// the walk. Real source trees resolve in a handful.
+const MAX_LINK_EXPANSIONS: u32 = 64;
+
 fn resolve_symlink_path(
     root: &Path,
     link: &Path,
@@ -346,7 +419,8 @@ fn resolve_symlink_path(
     }
     let target = fs::read_link(link)?;
     let parent = link.parent().ok_or_else(|| err("symlink has no parent"))?;
-    resolve_target_components(root, parent, &target, seen).map(|_| ())
+    let mut expansions = 0;
+    resolve_target_components(root, parent, &target, seen, &mut expansions).map(|_| ())
 }
 
 /// Resolve path components in kernel order. We must process a symlink before
@@ -357,6 +431,7 @@ fn resolve_target_components(
     base: &Path,
     target: &Path,
     seen: &mut std::collections::BTreeSet<PathBuf>,
+    expansions: &mut u32,
 ) -> io::Result<PathBuf> {
     if target.is_absolute() {
         return Err(err("symlink target has an absolute path"));
@@ -382,6 +457,13 @@ fn resolve_target_components(
                 };
                 if is_symlink {
                     let nested = fs::read_link(&candidate)?;
+                    *expansions += 1;
+                    if *expansions > MAX_LINK_EXPANSIONS {
+                        return Err(err(format!(
+                            "symlink chain too long involving {}",
+                            candidate.display()
+                        )));
+                    }
                     if !seen.insert(candidate.clone()) {
                         return Err(err(format!(
                             "symlink cycle involving {}",
@@ -395,7 +477,14 @@ fn resolve_target_components(
                             .ok_or_else(|| err("symlink has no parent"))?,
                         &nested,
                         seen,
+                        expansions,
                     )?;
+                    // `seen` is the chain being expanded, not every link
+                    // ever visited: a target that passes through the same
+                    // link twice on its way (`alias/../../alias/file`) is
+                    // not a cycle, so the link leaves the set once its
+                    // expansion is complete.
+                    seen.remove(&candidate);
                 } else {
                     current = candidate;
                 }
@@ -740,12 +829,7 @@ mod tests {
         validate_symlinks(root).unwrap();
         let escaped = |root: &Path| {
             let error = validate_symlinks(root).expect_err("an escaping symlink was accepted");
-            assert!(
-                error
-                    .to_string()
-                    .contains("symlink target escaped the checkout"),
-                "{error}"
-            );
+            assert_eq!(error.to_string(), "symlink target escaped the checkout");
         };
         std::os::unix::fs::symlink("../outside", root.join("escape")).unwrap();
         escaped(root);
@@ -1407,4 +1491,381 @@ fn collect_paths(root: &Path, base: &Path, out: &mut Vec<PathBuf>) -> io::Result
         }
     }
     Ok(())
+}
+
+/// Offline tests for what git is never handed (#348): a source that is not
+/// pinned, a URL or ref that could be read as an option, a scheme outside
+/// the allow-list, a subdirectory that escapes the checkout, and symlinks
+/// that leave it or loop. Each refusal returns before any git command
+/// runs, so nothing here needs a repository or the network.
+#[cfg(test)]
+mod refusal_tests {
+    use super::*;
+    use crate::kernel::testutil::TempDir;
+
+    const COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
+
+    fn source(url: &str, commit: &str, subdirectory: Option<&str>) -> GitSource {
+        GitSource {
+            url: url.into(),
+            commit: commit.into(),
+            subdirectory: subdirectory.map(str::to_string),
+        }
+    }
+
+    fn refusal(source: &GitSource) -> String {
+        validate_source(source)
+            .expect_err("the source must be refused")
+            .to_string()
+    }
+
+    #[test]
+    fn a_source_not_pinned_to_a_full_commit_is_refused() {
+        for commit in [
+            "main",
+            "v1.2.3",
+            &COMMIT[..39],
+            &format!("{}g", &COMMIT[..39]),
+            "",
+        ] {
+            assert_eq!(
+                refusal(&source("https://example.invalid/repo.git", commit, None)),
+                format!(
+                    "https://example.invalid/repo.git: git sources must be pinned to a full commit, got {commit:?}"
+                ),
+                "{commit}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_url_git_could_read_as_an_option_or_an_unknown_scheme_is_refused() {
+        for url in [
+            "-oProxyCommand=touch /tmp/pwned",
+            "--upload-pack=touch /tmp/pwned",
+            "http://example.invalid/repo.git",
+            "ftp://example.invalid/repo.git",
+            "ext::sh -c 'touch /tmp/pwned'",
+            "github.com/owner/repo",
+            "/srv/git/repo.git",
+            "",
+        ] {
+            assert_eq!(
+                refusal(&source(url, COMMIT, None)),
+                format!(
+                    "refusing git URL {url:?}: expected one of https://, ssh://, git://, file://"
+                ),
+                "{url}"
+            );
+        }
+        // The scheme is fine; the host, or the login before it, is what
+        // ssh would read as an option. This is what a normalized
+        // `-oProxyCommand=x:repo` looks like.
+        for url in [
+            "ssh://-oProxyCommand=touch/repo",
+            "ssh://git@-oProxyCommand=touch/repo",
+            "ssh://-oProxyCommand=touch@github.com/repo",
+            "https://-host/repo",
+            "git://-host/repo",
+            // What git would decode or unbracket into a dash-led host.
+            "ssh://%2DoProxyCommand=touch/repo",
+            "ssh://git@%2dhost/repo",
+            "ssh://[-oProxyCommand=touch]/repo",
+            "ssh://git@[-host]:22/repo",
+        ] {
+            assert_eq!(
+                refusal(&source(url, COMMIT, None)),
+                format!("refusing git URL {url:?}: the host looks like an option"),
+                "{url}"
+            );
+        }
+        // A dash inside the host, the login, or the path is ordinary, as
+        // are bracketed IPv6 hosts, ports, escapes elsewhere, and the
+        // empty authority of a file:// URL.
+        for url in [
+            "ssh://git@github.com/owner/-repo",
+            "https://github.com/-owner/repo",
+            "file:///srv/-git/repo",
+            "file:///srv/%2Dgit/repo",
+            "https://user-name@git-host.example/repo",
+            "ssh://[::1]/repo",
+            "https://git@[2001:db8::1]:8443/owner/repo",
+            "https://github.com/owner/repo%2D",
+            "https://github.com/%/repo",
+            // Git takes one bracket layer off, and only a closed one, so
+            // these reach ssh with a `[` in front and are not options.
+            "ssh://git@%5B-host/repo",
+            "ssh://git@[[-host]]/repo",
+        ] {
+            validate_source(&source(url, COMMIT, None)).unwrap_or_else(|e| panic!("{url}: {e}"));
+        }
+    }
+
+    #[test]
+    fn a_subdirectory_that_escapes_the_checkout_is_refused() {
+        for subdirectory in [
+            "/etc",
+            "/",
+            "..",
+            "../sibling",
+            "pkg/../../outside",
+            "pkg/..",
+            "..\\outside",
+            "pkg\\..\\..\\outside",
+        ] {
+            assert_eq!(
+                refusal(&source(
+                    "https://example.invalid/repo.git",
+                    COMMIT,
+                    Some(subdirectory)
+                )),
+                format!("refusing git subdirectory {subdirectory:?}: it escapes the checkout"),
+                "{subdirectory}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_commit_is_checked_before_the_url_and_the_url_before_the_subdirectory() {
+        let error = refusal(&source("http://x/repo", "main", Some("/etc")));
+        assert!(error.contains("must be pinned to a full commit"), "{error}");
+        let error = refusal(&source("http://x/repo", COMMIT, Some("/etc")));
+        assert!(error.starts_with("refusing git URL"), "{error}");
+    }
+
+    #[test]
+    fn control_every_allowed_scheme_passes_with_a_contained_subdirectory() {
+        for url in [
+            "https://github.com/owner/repo",
+            "ssh://git@github.com/owner/repo.git",
+            "git://example.invalid/repo.git",
+            "file:///srv/git/repo.git",
+        ] {
+            validate_source(&source(url, COMMIT, None)).unwrap();
+            for subdirectory in ["pkg", "python/pkg", ".", "pkg/./sub", "..pkg", "pkg.."] {
+                validate_source(&source(url, COMMIT, Some(subdirectory))).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn resolve_ref_refuses_a_bad_url_or_ref_before_running_git() {
+        // A pinned reference is answered without a lookup, lowercased.
+        let upper = COMMIT.to_ascii_uppercase();
+        assert_eq!(
+            resolve_ref("http://never.contacted/repo", &upper).unwrap(),
+            COMMIT
+        );
+        // A leading dash is refused before normalization, which would
+        // otherwise read `-o...:repo` as an scp-style URL.
+        for url in [
+            "-oProxyCommand=touch:repo",
+            "  -oProxyCommand=touch:repo",
+            "--upload-pack=touch",
+        ] {
+            assert_eq!(
+                resolve_ref(url, "main").unwrap_err().to_string(),
+                format!("refusing git URL {url:?}"),
+                "{url}"
+            );
+        }
+        // Otherwise the URL is normalized, then checked against the
+        // allow-list and for an option-looking host. Port 9 answers
+        // nothing, so a lookup would fail differently.
+        for (url, normalized) in [
+            ("http://127.0.0.1:9/repo", "http://127.0.0.1:9/repo"),
+            (
+                "git+http://127.0.0.1:9/repo#egg=x",
+                "http://127.0.0.1:9/repo",
+            ),
+            ("ftp://127.0.0.1:9/repo", "ftp://127.0.0.1:9/repo"),
+            (
+                "git+ssh://-oProxyCommand=touch/repo",
+                "ssh://-oProxyCommand=touch/repo",
+            ),
+            ("ssh://git@-host/repo", "ssh://git@-host/repo"),
+        ] {
+            assert_eq!(
+                resolve_ref(url, "main").unwrap_err().to_string(),
+                format!("refusing git URL {normalized:?}"),
+                "{url}"
+            );
+        }
+        for reference in [
+            "-oProxyCommand=touch /tmp/pwned",
+            "--upload-pack=touch",
+            "main --upload-pack=touch",
+            "main\tmaster",
+            "main\n",
+        ] {
+            assert_eq!(
+                resolve_ref("https://127.0.0.1:9/repo", reference)
+                    .unwrap_err()
+                    .to_string(),
+                format!("refusing git ref {reference:?}"),
+                "{reference}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_ls_remote_listing_without_a_full_hash_is_refused() {
+        let url = "https://example.invalid/repo";
+        for listing in ["", "\n\n"] {
+            assert_eq!(
+                commit_from_ls_remote(url, "main", listing)
+                    .unwrap_err()
+                    .to_string(),
+                "https://example.invalid/repo: ref main not found",
+                "{listing:?}"
+            );
+        }
+        for listing in ["abc123\trefs/heads/main\n", "warning: something\n"] {
+            let first = listing.split_whitespace().next().unwrap();
+            assert_eq!(
+                commit_from_ls_remote(url, "main", listing)
+                    .unwrap_err()
+                    .to_string(),
+                format!("https://example.invalid/repo: ref main resolved to {first:?}"),
+                "{listing:?}"
+            );
+        }
+        // Control: the first field of the first line, lowercased.
+        let listing = format!(
+            "{}\trefs/heads/main\n{}\trefs/tags/v1\n",
+            COMMIT.to_ascii_uppercase(),
+            "f".repeat(40)
+        );
+        assert_eq!(
+            commit_from_ls_remote(url, "main", &listing).unwrap(),
+            COMMIT
+        );
+    }
+
+    fn link(target: &str, at: &Path) {
+        std::os::unix::fs::symlink(target, at).unwrap();
+    }
+
+    fn symlink_refusal(root: &Path) -> String {
+        validate_symlinks(root)
+            .expect_err("the checkout must be refused")
+            .to_string()
+    }
+
+    #[test]
+    fn a_symlink_with_an_absolute_target_is_refused() {
+        let temp = TempDir::named("gitsrc-absolute");
+        let root = &temp.0;
+        link("/etc/passwd", &root.join("passwd"));
+        assert_eq!(symlink_refusal(root), "symlink target has an absolute path");
+        // Even one that points back inside the checkout: the checkout moves
+        // when it is imported, and the absolute path does not move with it.
+        fs::remove_file(root.join("passwd")).unwrap();
+        fs::write(root.join("inside"), b"x").unwrap();
+        link(
+            root.join("inside").to_str().unwrap(),
+            &root.join("self-absolute"),
+        );
+        assert_eq!(symlink_refusal(root), "symlink target has an absolute path");
+    }
+
+    #[test]
+    fn a_symlink_that_loops_is_refused() {
+        let temp = TempDir::named("gitsrc-cycle");
+        let root = &temp.0;
+        let canonical = root.canonicalize().unwrap();
+        let named =
+            |name: &str| format!("symlink cycle involving {}", canonical.join(name).display());
+        link("me", &root.join("me"));
+        assert_eq!(symlink_refusal(root), named("me"));
+        fs::remove_file(root.join("me")).unwrap();
+        // A two-link cycle: whichever link the walk reaches first is the
+        // one the message names.
+        link("b", &root.join("a"));
+        link("a", &root.join("b"));
+        let error = symlink_refusal(root);
+        assert!(error == named("a") || error == named("b"), "{error}");
+        fs::remove_file(root.join("a")).unwrap();
+        fs::remove_file(root.join("b")).unwrap();
+        // One that goes through a directory.
+        fs::create_dir(root.join("dir")).unwrap();
+        link("../dir/loop", &root.join("dir/loop"));
+        assert_eq!(symlink_refusal(root), named("dir/loop"));
+    }
+
+    #[test]
+    fn control_a_target_that_passes_the_same_link_twice_is_not_a_cycle() {
+        // `alias/../../alias/file` goes through `alias` twice on its way to
+        // a file that is inside the checkout. Only a link that expands to
+        // itself is a cycle.
+        let temp = TempDir::named("gitsrc-twice");
+        let root = &temp.0;
+        fs::create_dir_all(root.join("dir/sub")).unwrap();
+        fs::write(root.join("dir/sub/file"), b"x").unwrap();
+        link("dir/sub", &root.join("alias"));
+        link("alias/../../alias/file", &root.join("twice"));
+        validate_symlinks(root).unwrap();
+    }
+
+    #[test]
+    fn a_web_of_links_that_doubles_at_every_level_is_refused_not_walked() {
+        // a1 -> a2/a2, a2 -> a3/a3, ... aN -> . : acyclic, inside the
+        // checkout, and 2^N expansions to resolve. The budget refuses it
+        // long before that; without the budget this test would not finish.
+        let temp = TempDir::named("gitsrc-doubling");
+        let root = &temp.0;
+        let depth = 40;
+        for i in 1..depth {
+            link(
+                &format!("a{}/a{}", i + 1, i + 1),
+                &root.join(format!("a{i}")),
+            );
+        }
+        link(".", &root.join(format!("a{depth}")));
+        let error = symlink_refusal(root);
+        assert!(
+            error.starts_with("symlink chain too long involving "),
+            "{error}"
+        );
+        // A plain chain well under the budget resolves.
+        let temp = TempDir::named("gitsrc-chain");
+        let root = &temp.0;
+        fs::write(root.join("end"), b"x").unwrap();
+        for i in 0..32 {
+            let target = if i == 0 {
+                "end".to_string()
+            } else {
+                format!("c{}", i - 1)
+            };
+            link(&target, &root.join(format!("c{i}")));
+        }
+        validate_symlinks(root).unwrap();
+    }
+
+    #[test]
+    fn a_symlink_that_escapes_from_a_subdirectory_is_refused_exactly() {
+        let temp = TempDir::named("gitsrc-escape");
+        let root = &temp.0;
+        fs::create_dir_all(root.join("a/b")).unwrap();
+        // Two levels up from a/b is the root: allowed. Three is out.
+        link("../../inside", &root.join("a/b/up-two"));
+        validate_symlinks(root).unwrap();
+        link("../../../outside", &root.join("a/b/up-three"));
+        assert_eq!(symlink_refusal(root), "symlink target escaped the checkout");
+    }
+
+    #[test]
+    fn control_broken_and_nested_links_inside_the_checkout_pass() {
+        let temp = TempDir::named("gitsrc-inside");
+        let root = &temp.0;
+        fs::create_dir_all(root.join("src/lib")).unwrap();
+        fs::write(root.join("src/lib/mod.rs"), b"x").unwrap();
+        // Relative into a sibling directory, through a directory link, and
+        // a dangling link: all stay inside, so all are valid source content.
+        link("src/lib", &root.join("lib-link"));
+        link("../lib-link/mod.rs", &root.join("src/via-link"));
+        link("does-not-exist", &root.join("dangling"));
+        link("./src/../src/lib", &root.join("dotted"));
+        validate_symlinks(root).unwrap();
+    }
 }
