@@ -96,6 +96,7 @@ Nothing queued; the next item comes from "Open work" below.
   - #375 store: metadata readers and record writer leftovers (from the #374 review).
   - #377 catalog: uv GitHub digest unchecked, uv .sha256 parse, Node signer not pinned (from the #348 Tooling review).
   - #380 python markers: platform_release/platform_version, and documented divergences from packaging (from the #348 Python markers block).
+  - #382 node: credentials in lockfile URLs beyond tarballs, mutable-mode hoisting, bin case collisions (from the #348 Lockfile shapes block).
 - **Quality review of 2026-09-24 (#264).** A whole-codebase review after
   the 09-20 to 09-24 run. #264 holds the work order and the overall verdict.
   Each line is one issue and one PR, in order:

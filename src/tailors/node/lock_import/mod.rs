@@ -80,13 +80,53 @@ struct Graph {
 }
 
 fn integrity_policy(path: &str, integrity: &str) -> io::Result<()> {
+    integrity_policy_with(path, integrity, &mut crate::kernel::policy::record)
+}
+
+/// `integrity_policy` recording through `record`, so a test can pass a
+/// policy of its own instead of the process one.
+fn integrity_policy_with(
+    path: &str,
+    integrity: &str,
+    record: &mut impl FnMut(&str, &str, &str) -> io::Result<()>,
+) -> io::Result<()> {
     let digest = Digest::from_sri(integrity)?;
     if digest.algo() == "sha1" {
-        crate::kernel::policy::record(
+        record(
             crate::kernel::policy::WEAK_INTEGRITY,
             path,
             "sha1 integrity accepted and verified, but is cryptographically weak",
         )?;
+    }
+    Ok(())
+}
+
+/// Refuse a link target (project-relative, plain names only) that a
+/// symlink carries outside `root`. A target that does not exist yet is
+/// judged by its deepest existing ancestor: the rest is plain names, so
+/// whatever is created there stays beneath it. A symlink that resolves
+/// nowhere could lead anywhere once its target appears, so it is refused.
+/// Resolved on the pathname: ProjectRoot has no canonicalize.
+fn contain_link_target(root: &Path, target: &str, raw: &str) -> io::Result<()> {
+    let mut existing = root.join(target);
+    let canonical = loop {
+        match existing.canonicalize() {
+            Ok(canonical) => break canonical,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                if existing.is_symlink() {
+                    return Err(err(format!(
+                        "workspace link target {raw:?} passes through a dangling symlink; tog cannot tell whether it stays in the project"
+                    )));
+                }
+                existing.pop();
+            }
+            Err(error) => return Err(err(format!("workspace link target {raw:?}: {error}"))),
+        }
+    };
+    if !canonical.starts_with(root) {
+        return Err(err(format!(
+            "workspace link target {raw:?} is outside the project"
+        )));
     }
     Ok(())
 }
@@ -392,6 +432,9 @@ fn realizable_node<'a>(
             dependency.name
         ))
     })?;
+    // A pnpm identity may carry its tarball URL as the version; never
+    // print that URL's credentials.
+    let version = crate::tailors::node::redact_url_userinfo(&node.version);
     if !node_compatible(platform, node) {
         if dependency.optional || node.optional {
             // pnpm records every platform variant in one lockfile;
@@ -401,7 +444,7 @@ fn realizable_node<'a>(
         return Err(err(format!(
             "{}@{}: required dependency does not support host {} (os={:?}, cpu={:?}, libc={:?})",
             node.name,
-            node.version,
+            version,
             platform.triple(),
             node.os,
             node.cpu,
@@ -419,7 +462,7 @@ fn realizable_node<'a>(
             }
             return Ok(None);
         }
-        return Err(err(format!("{}@{}: {detail}", node.name, node.version)));
+        return Err(err(format!("{}@{version}: {detail}", node.name)));
     }
     // A git source is verified by its commit, so it legitimately
     // has no tarball integrity.
@@ -433,7 +476,7 @@ fn realizable_node<'a>(
         // pnpm-lock.yaml and `integrity` in yarn.lock.
         return Err(err(format!(
             "{}@{}: {lock_source} entry has no integrity",
-            node.name, node.version
+            node.name, version
         )));
     }
     // Git sources carry `git:<commit>` instead of an SRI.
@@ -809,6 +852,23 @@ fn build_plan(
         }
     }
     let packages = resolved_packages(occupied, &graph.nodes)?;
+    check_destinations(&packages, &links)?;
+    Ok(NpmPlan {
+        node_version: node_version.to_string(),
+        packages,
+        links: links.into_values().collect(),
+        workspaces: workspace_paths.into_iter().collect(),
+        lock_source: lock_source.to_string(),
+    })
+}
+
+/// Check the settled package and link paths together before they become a
+/// plan: each is a well-formed lock path, none lies beneath a link, and no
+/// two share a directory on a case-insensitive filesystem.
+fn check_destinations(
+    packages: &[NpmPackage],
+    links: &BTreeMap<String, NpmLink>,
+) -> io::Result<()> {
     for link in links.values() {
         crate::tailors::node::validate_lock_path(&link.path)?;
     }
@@ -835,13 +895,12 @@ fn build_plan(
             )));
         }
     }
-    Ok(NpmPlan {
-        node_version: node_version.to_string(),
-        packages,
-        links: links.into_values().collect(),
-        workspaces: workspace_paths.into_iter().collect(),
-        lock_source: lock_source.to_string(),
-    })
+    crate::tailors::node::refuse_case_colliding_paths(
+        packages
+            .iter()
+            .map(|package| package.path.as_str())
+            .chain(links.keys().map(String::as_str)),
+    )
 }
 
 #[cfg(test)]
@@ -922,10 +981,10 @@ mod tests {
     use crate::kernel::testutil::TempDir;
     use std::fs;
 
-    const SRI: &str =
+    pub(super) const SRI: &str =
         "sha512-m3HSJL1i83hdltRq0+o9czGb+8KJDKra4t/3JRXMui/CET1IEDrHK6nHYbdEaGL/uhPMbuF3AGkGxXTVpn3ETw==";
 
-    fn project() -> TempDir {
+    pub(super) fn project() -> TempDir {
         let dir = TempDir::named("lock-import");
         fs::create_dir_all(dir.0.join("packages/lib")).unwrap();
         dir
@@ -2346,5 +2405,917 @@ plugin@1.0.0:
         let source = package.git.as_ref().expect("a git source");
         assert_eq!(source.commit, commit);
         assert_eq!(source.url, "https://github.com/o/r");
+    }
+}
+
+#[cfg(test)]
+mod placement_tests {
+    use super::tests::{held, node_version, project, SRI};
+    use super::*;
+
+    fn node(name: &str, version: &str) -> Node {
+        Node {
+            key: format!("{name}@{version}"),
+            name: name.into(),
+            version: version.into(),
+            url: format!("https://r/{name}-{version}.tgz"),
+            integrity: SRI.into(),
+            optional: false,
+            os: Vec::new(),
+            cpu: Vec::new(),
+            libc: Vec::new(),
+            external: None,
+            patch: None,
+            deps: Vec::new(),
+        }
+    }
+
+    fn requires(name: &str, target: Target, workspace: Option<&str>) -> RootDependency {
+        RootDependency {
+            dependency: Dependency {
+                name: name.into(),
+                target,
+                optional: false,
+            },
+            workspace: workspace.map(str::to_string),
+        }
+    }
+
+    /// c@1.0.0, c@2.0.0 and c@3.0.0 as graph nodes, with a packages/lib
+    /// workspace.
+    fn graph(roots: Vec<RootDependency>, workspace_roots: Vec<RootDependency>) -> Graph {
+        Graph {
+            nodes: ["1.0.0", "2.0.0", "3.0.0"]
+                .into_iter()
+                .map(|version| (format!("c@{version}"), node("c", version)))
+                .collect(),
+            roots,
+            workspace_roots,
+            workspace_paths: BTreeSet::from(["packages/lib".to_string()]),
+            local_link_deps: BTreeMap::new(),
+        }
+    }
+
+    fn c(version: &str) -> Target {
+        Target::Node(format!("c@{version}"))
+    }
+
+    fn placed(graph: Graph) -> io::Result<Vec<(String, String)>> {
+        build_plan(
+            Platform::X86_64UnknownLinuxGnu,
+            graph,
+            "pnpm-lock.yaml",
+            node_version(),
+        )
+        .map(|plan| {
+            plan.packages
+                .into_iter()
+                .map(|package| (package.path, package.version))
+                .chain(
+                    plan.links
+                        .into_iter()
+                        .map(|link| (link.path, format!("link:{}", link.target))),
+                )
+                .collect()
+        })
+    }
+
+    fn refused(graph: Graph, expected: &str) {
+        let error = placed(graph).unwrap_err();
+        assert_eq!(error.to_string(), expected);
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn two_root_requirements_of_one_name_conflict() {
+        refused(
+            graph(
+                vec![
+                    requires("c", c("1.0.0"), None),
+                    requires("c", c("2.0.0"), None),
+                ],
+                Vec::new(),
+            ),
+            "c: root dependencies conflict between c@1.0.0 and c@2.0.0",
+        );
+    }
+
+    #[test]
+    fn two_versions_at_one_workspace_path_conflict() {
+        refused(
+            graph(
+                vec![requires("c", c("1.0.0"), None)],
+                vec![
+                    requires("c", c("2.0.0"), Some("packages/lib")),
+                    requires("c", c("3.0.0"), Some("packages/lib")),
+                ],
+            ),
+            "c: two versions conflict at packages/lib/node_modules/c (c@2.0.0 and c@3.0.0)",
+        );
+    }
+
+    #[test]
+    fn a_version_and_a_link_at_one_workspace_path_conflict() {
+        refused(
+            graph(
+                vec![requires("c", c("1.0.0"), None)],
+                vec![
+                    requires("c", c("2.0.0"), Some("packages/lib")),
+                    requires("c", Target::Link("vendor/c".into()), Some("packages/lib")),
+                ],
+            ),
+            "c: two workspace versions conflict at packages/lib/node_modules/c (c@2.0.0 and link:vendor/c)",
+        );
+    }
+
+    #[test]
+    fn a_root_version_and_a_root_link_of_one_name_conflict() {
+        refused(
+            graph(
+                vec![
+                    requires("c", c("1.0.0"), None),
+                    requires("c", Target::Link("vendor/c".into()), None),
+                ],
+                Vec::new(),
+            ),
+            "c: workspace hoisting conflict between c@1.0.0 and link:vendor/c",
+        );
+    }
+
+    /// The passing shape of the same graphs: a repeated identical
+    /// requirement shares one placement, and a workspace's differing
+    /// version and link nest under their own importers.
+    #[test]
+    fn identical_requirements_share_and_differing_ones_nest() {
+        let mut graph = graph(
+            vec![
+                requires("c", c("1.0.0"), None),
+                requires("c", c("1.0.0"), None),
+            ],
+            vec![
+                requires("c", c("2.0.0"), Some("packages/lib")),
+                requires("c", c("2.0.0"), Some("packages/lib")),
+                requires("c", Target::Link("vendor/c".into()), Some("packages/app")),
+            ],
+        );
+        graph.workspace_paths.insert("packages/app".into());
+        assert_eq!(
+            placed(graph).unwrap(),
+            vec![
+                ("node_modules/c".to_string(), "1.0.0".to_string()),
+                (
+                    "packages/lib/node_modules/c".to_string(),
+                    "2.0.0".to_string()
+                ),
+                (
+                    "packages/app/node_modules/c".to_string(),
+                    "link:vendor/c".to_string()
+                ),
+            ]
+        );
+    }
+
+    /// Yarn links every workspace member at the root; a root dependency on
+    /// a registry package of the same name but another version cannot sit
+    /// beside it.
+    #[test]
+    fn yarn_root_dependency_and_workspace_member_of_one_name_conflict() {
+        let dir = project();
+        fs::write(
+            dir.0.join("packages/lib/package.json"),
+            r#"{"name":"lib","version":"1.0.0"}"#,
+        )
+        .unwrap();
+        let lock = format!(
+            "# yarn lockfile v1\nlib@^2.0.0:\n  version \"2.0.0\"\n  resolved \"https://r/lib-2.0.0.tgz\"\n  integrity {SRI}\n"
+        );
+        let error = plan_yarn(
+            Platform::X86_64UnknownLinuxGnu,
+            &lock,
+            r#"{"workspaces":["packages/*"],"dependencies":{"lib":"^2.0.0"}}"#,
+            &held(&dir.0),
+            node_version(),
+        )
+        .map(drop)
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "lib: workspace hoisting conflict between lib@2.0.0 and link:packages/lib"
+        );
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+
+    /// A pnpm importer keyed `node_modules/foo` while the root links foo:
+    /// its nested dependency would be written through the link into the
+    /// user's source tree.
+    #[test]
+    fn a_package_beneath_a_link_is_refused() {
+        let dir = project();
+        let lock = format!(
+            r#"lockfileVersion: '9.0'
+importers:
+  .:
+    dependencies:
+      c:
+        specifier: 1.0.0
+        version: 1.0.0
+      foo:
+        specifier: link:vendor/foo
+        version: link:vendor/foo
+  node_modules/foo:
+    dependencies:
+      c:
+        specifier: 2.0.0
+        version: 2.0.0
+packages:
+  c@1.0.0:
+    resolution: {{integrity: {SRI}}}
+  c@2.0.0:
+    resolution: {{integrity: {SRI}}}
+snapshots:
+  c@1.0.0: {{}}
+  c@2.0.0: {{}}
+"#
+        );
+        let error = plan_pnpm(
+            Platform::X86_64UnknownLinuxGnu,
+            &lock,
+            &held(&dir.0),
+            node_version(),
+        )
+        .map(drop)
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "node_modules/foo/node_modules/c would be placed inside the linked source directory node_modules/foo; refusing to write into it"
+        );
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+
+    /// The mirror image: an importer keyed `node_modules/x` under a
+    /// registry package x whose link would be planted in store content.
+    #[test]
+    fn a_link_beneath_a_package_is_refused() {
+        let dir = project();
+        let lock = format!(
+            r#"lockfileVersion: '9.0'
+importers:
+  .:
+    dependencies:
+      x:
+        specifier: 1.0.0
+        version: 1.0.0
+  node_modules/x:
+    dependencies:
+      lib:
+        specifier: link:../../vendor/lib
+        version: link:../../vendor/lib
+packages:
+  x@1.0.0:
+    resolution: {{integrity: {SRI}}}
+snapshots:
+  x@1.0.0: {{}}
+"#
+        );
+        let error = plan_pnpm(
+            Platform::X86_64UnknownLinuxGnu,
+            &lock,
+            &held(&dir.0),
+            node_version(),
+        )
+        .map(drop)
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "link node_modules/x/node_modules/lib -> vendor/lib would be planted inside the package node_modules/x, which is store content; tog cannot project a local package nested under a registry package"
+        );
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+}
+
+/// pnpm lockfile shapes. The checks live in pnpm.rs; the tests live here
+/// because pnpm.rs has no `mod tests` and its whole text counts against the
+/// size ratchet in tests/size_baseline.txt.
+#[cfg(test)]
+mod pnpm_lock_shape_tests {
+    use super::pnpm::patch_path;
+    use super::tests::{held, node_version, project, SRI};
+    use super::*;
+    use crate::kernel::testutil::TempDir;
+
+    fn plan(dir: &Path, lock: &str) -> io::Result<NpmPlan> {
+        plan_pnpm(
+            Platform::X86_64UnknownLinuxGnu,
+            lock,
+            &held(dir),
+            node_version(),
+        )
+    }
+
+    fn refused(dir: &Path, lock: &str) -> io::Error {
+        plan(dir, lock).map(drop).unwrap_err()
+    }
+
+    fn assert_invalid(error: io::Error, expected: &str) {
+        assert_eq!(error.to_string(), expected);
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{expected}");
+    }
+
+    #[test]
+    fn unsupported_pnpm_lockfile_versions_are_refused() {
+        let dir = project();
+        for (line, shown) in [
+            ("lockfileVersion: '5.4'\n", "5.4"),
+            ("lockfileVersion: '10.0'\n", "10.0"),
+            ("lockfileVersion: '9.1'\n", "9.1"),
+            ("lockfileVersion: '90'\n", "90"),
+            ("lockfileVersion: 7\n", "7"),
+            ("", ""),
+        ] {
+            let lock = format!("{line}importers:\n  .: {{}}\n");
+            assert_invalid(
+                refused(&dir.0, &lock),
+                &format!("unsupported pnpm lockfileVersion {shown:?} (tog supports 9.0 and 6.0)"),
+            );
+        }
+    }
+
+    #[test]
+    fn pnpm_lockfile_versions_9_and_6_are_accepted_in_every_spelling() {
+        let dir = project();
+        for version in ["'9.0'", "9.0", "9", "'9'", "'9.0.0'", "'6.0'", "6.0"] {
+            let lock = format!("lockfileVersion: {version}\nimporters:\n  .: {{}}\n");
+            let plan = plan(&dir.0, &lock).unwrap_or_else(|error| panic!("{version}: {error}"));
+            assert!(plan.packages.is_empty(), "{version}");
+        }
+    }
+
+    /// Two peer variants of is-number and an edge that names only its
+    /// version: choosing one would be a guess, so the edge is unresolved.
+    fn ambiguous_peer_lock(field: &str) -> String {
+        format!(
+            r#"lockfileVersion: '9.0'
+importers:
+  .:
+    dependencies:
+      is-odd:
+        specifier: 3.0.1
+        version: 3.0.1
+packages:
+  is-odd@3.0.1:
+    resolution: {{integrity: {SRI}}}
+  is-number@6.0.0:
+    resolution: {{integrity: {SRI}}}
+snapshots:
+  is-odd@3.0.1:
+    {field}:
+      is-number: 6.0.0
+  is-number@6.0.0(peer@1.0.0): {{}}
+  is-number@6.0.0(peer@2.0.0): {{}}
+"#
+        )
+    }
+
+    #[test]
+    fn an_ambiguous_peer_edge_is_refused_when_required() {
+        let dir = project();
+        assert_invalid(
+            refused(&dir.0, &ambiguous_peer_lock("dependencies")),
+            "is-number: missing snapshot for is-number@6.0.0",
+        );
+    }
+
+    #[test]
+    fn an_ambiguous_peer_edge_is_dropped_when_optional() {
+        let dir = project();
+        let plan = plan(&dir.0, &ambiguous_peer_lock("optionalDependencies")).unwrap();
+        let paths: Vec<&str> = plan.packages.iter().map(|p| p.path.as_str()).collect();
+        assert_eq!(paths, vec!["node_modules/is-odd"]);
+    }
+
+    /// With a single peer variant the version-only edge is unambiguous.
+    #[test]
+    fn a_single_peer_variant_resolves_a_version_only_edge() {
+        let dir = project();
+        let lock =
+            ambiguous_peer_lock("dependencies").replace("  is-number@6.0.0(peer@2.0.0): {}\n", "");
+        let plan = plan(&dir.0, &lock).unwrap();
+        let paths: Vec<&str> = plan.packages.iter().map(|p| p.path.as_str()).collect();
+        assert_eq!(paths, vec!["node_modules/is-number", "node_modules/is-odd"]);
+    }
+
+    fn link_lock(importer: &str, field: &str, reference: &str) -> String {
+        format!(
+            r#"lockfileVersion: '9.0'
+importers:
+  .:
+    dependencies:
+      keep:
+        specifier: 1.0.0
+        version: 1.0.0
+  {importer}:
+    {field}:
+      evil:
+        specifier: {reference}
+        version: {reference}
+packages:
+  keep@1.0.0:
+    resolution: {{integrity: {SRI}}}
+snapshots:
+  keep@1.0.0: {{}}
+"#
+        )
+    }
+
+    /// A project with a symlink `escape` that leads outside it.
+    fn project_with_escape() -> (TempDir, TempDir) {
+        let dir = project();
+        let outside = TempDir::named("lock-import-outside");
+        std::os::unix::fs::symlink(&outside.0, dir.0.join("escape")).unwrap();
+        (dir, outside)
+    }
+
+    #[test]
+    fn a_link_outside_the_project_is_refused_on_an_importer_edge() {
+        let (dir, _outside) = project_with_escape();
+        for (importer, reference, raw) in [
+            ("packages/lib", "link:../../../x", "../../../x"),
+            ("packages/lib", "link:/etc", "/etc"),
+            ("packages/lib", "link:~/x", "~/x"),
+            ("packages/lib", "link:../../escape", "../../escape"),
+            ("packages/lib", "file:../../../x", "../../../x"),
+            ("packages/lib", "evil@file:../../../x", "../../../x"),
+        ] {
+            let error = refused(&dir.0, &link_lock(importer, "dependencies", reference));
+            assert_invalid(
+                error,
+                &format!(
+                    "evil: workspace link target {raw:?} is outside the project (reference {reference:?}, importer {importer:?})"
+                ),
+            );
+        }
+    }
+
+    /// A target that does not exist yet is judged by its deepest existing
+    /// ancestor, so `escape/missing` is outside once `escape` leads out. A
+    /// dangling symlink could lead anywhere once its target appears.
+    #[test]
+    fn a_link_through_an_unresolved_target_is_refused() {
+        let (dir, outside) = project_with_escape();
+        std::os::unix::fs::symlink(outside.0.join("absent"), dir.0.join("dangling")).unwrap();
+        for (reference, raw, reason) in [
+            (
+                "link:../../escape/missing",
+                "../../escape/missing",
+                "is outside the project",
+            ),
+            (
+                "link:../../escape/missing/deeper",
+                "../../escape/missing/deeper",
+                "is outside the project",
+            ),
+            (
+                "link:../../dangling",
+                "../../dangling",
+                "passes through a dangling symlink; tog cannot tell whether it stays in the project",
+            ),
+            (
+                "link:../../dangling/child",
+                "../../dangling/child",
+                "passes through a dangling symlink; tog cannot tell whether it stays in the project",
+            ),
+        ] {
+            let error = refused(&dir.0, &link_lock("packages/lib", "dependencies", reference));
+            assert_invalid(
+                error,
+                &format!(
+                    "evil: workspace link target {raw:?} {reason} (reference {reference:?}, importer \"packages/lib\")"
+                ),
+            );
+        }
+        // A symlink loop resolves nowhere either; the OS error is carried.
+        std::os::unix::fs::symlink(dir.0.join("loop"), dir.0.join("loop")).unwrap();
+        let error = refused(
+            &dir.0,
+            &link_lock("packages/lib", "dependencies", "link:../../loop"),
+        );
+        assert_invalid(
+            error,
+            &format!(
+                "evil: workspace link target \"../../loop\": {} (reference \"link:../../loop\", importer \"packages/lib\")",
+                io::Error::from_raw_os_error(libc::ELOOP)
+            ),
+        );
+        // A missing target below a real directory stays a link.
+        let plan = plan(
+            &dir.0,
+            &link_lock("packages/lib", "dependencies", "link:../other/missing"),
+        )
+        .unwrap();
+        assert_eq!(plan.links[0].target, "packages/other/missing");
+    }
+
+    #[test]
+    fn an_optional_link_outside_the_project_is_dropped() {
+        let dir = project();
+        let plan = plan(
+            &dir.0,
+            &link_lock("packages/lib", "optionalDependencies", "link:../../../x"),
+        )
+        .unwrap();
+        assert!(plan.links.is_empty(), "{:?}", plan.links);
+    }
+
+    /// Inside the project, the same relative spelling is a link.
+    #[test]
+    fn a_link_inside_the_project_is_accepted() {
+        let dir = project();
+        let plan = plan(
+            &dir.0,
+            &link_lock("packages/lib", "dependencies", "link:../other"),
+        )
+        .unwrap();
+        let links: Vec<(&str, &str)> = plan
+            .links
+            .iter()
+            .map(|link| (link.path.as_str(), link.target.as_str()))
+            .collect();
+        assert_eq!(
+            links,
+            vec![("packages/lib/node_modules/evil", "packages/other")]
+        );
+    }
+
+    #[test]
+    fn a_link_outside_the_project_is_refused_on_a_snapshot_edge() {
+        let dir = project();
+        let lock = format!(
+            r#"lockfileVersion: '9.0'
+importers:
+  .:
+    dependencies:
+      parent:
+        specifier: 1.0.0
+        version: 1.0.0
+packages:
+  parent@1.0.0:
+    resolution: {{integrity: {SRI}}}
+snapshots:
+  parent@1.0.0:
+    dependencies:
+      evil: link:../x
+"#
+        );
+        assert_invalid(
+            refused(&dir.0, &lock),
+            r#"evil: workspace link target "../x" is outside the project (reference "link:../x", importer ".")"#,
+        );
+    }
+
+    /// A local snapshot key names its target directly; an escaping one is
+    /// refused unwrapped, even when nothing depends on it.
+    #[test]
+    fn a_local_snapshot_outside_the_project_is_refused() {
+        let (dir, _outside) = project_with_escape();
+        for raw in ["../x", "link:../x", "/etc", "escape"] {
+            let (version, target) = match raw.strip_prefix("link:") {
+                Some(target) => (raw.to_string(), target),
+                None => (format!("file:{raw}"), raw),
+            };
+            let lock = format!(
+                "lockfileVersion: '9.0'\nimporters:\n  .: {{}}\nsnapshots:\n  a@{version}: {{}}\n"
+            );
+            assert_invalid(
+                refused(&dir.0, &lock),
+                &format!("workspace link target {target:?} is outside the project"),
+            );
+        }
+    }
+
+    fn patch_project() -> (TempDir, TempDir) {
+        let (dir, outside) = project_with_escape();
+        fs::create_dir_all(dir.0.join("patches")).unwrap();
+        fs::write(dir.0.join("patches/foo.patch"), "diff\n").unwrap();
+        fs::write(outside.0.join("secret.patch"), "diff\n").unwrap();
+        std::os::unix::fs::symlink(
+            outside.0.join("secret.patch"),
+            dir.0.join("patches/evil.patch"),
+        )
+        .unwrap();
+        (dir, outside)
+    }
+
+    #[test]
+    fn a_patch_path_that_is_not_project_relative_is_refused() {
+        let (dir, outside) = patch_project();
+        let secret = outside.0.join("secret.patch");
+        for raw in [
+            String::new(),
+            "../secret.patch".to_string(),
+            "patches/../../secret.patch".to_string(),
+            secret.display().to_string(),
+            "/etc/passwd".to_string(),
+            "~/secret.patch".to_string(),
+            "~".to_string(),
+        ] {
+            let error = patch_path(&held(&dir.0), &raw).unwrap_err();
+            assert_invalid(
+                error,
+                &format!("pnpm patch path {raw:?} must be a project-relative file"),
+            );
+        }
+    }
+
+    #[test]
+    fn a_patch_path_escaping_through_a_symlink_or_naming_a_directory_is_refused() {
+        let (dir, _outside) = patch_project();
+        for raw in [
+            "patches/evil.patch",
+            "escape/secret.patch",
+            "patches",
+            "./patches/",
+        ] {
+            let error = patch_path(&held(&dir.0), raw).unwrap_err();
+            assert_invalid(
+                error,
+                &format!("pnpm patch path {raw:?} is outside the project or is not a file"),
+            );
+        }
+    }
+
+    #[test]
+    fn a_project_relative_patch_file_is_accepted() {
+        let (dir, _outside) = patch_project();
+        let expected = dir.0.join("patches/foo.patch").canonicalize().unwrap();
+        for raw in [
+            "patches/foo.patch",
+            "./patches/foo.patch",
+            "patches/./foo.patch",
+        ] {
+            assert_eq!(patch_path(&held(&dir.0), raw).unwrap(), expected, "{raw}");
+        }
+    }
+
+    /// An alias (`foo: bar@1.0.0`) is placed under the name the importer
+    /// uses while the package keeps its real name and version.
+    #[test]
+    fn a_pnpm_alias_is_placed_by_its_alias_and_named_by_its_package() {
+        let dir = project();
+        let lock = format!(
+            r#"lockfileVersion: '9.0'
+importers:
+  .:
+    dependencies:
+      foo:
+        specifier: npm:bar@^1.0.0
+        version: bar@1.0.0
+      '@s/alias':
+        specifier: npm:@t/real@2.0.0
+        version: '@t/real@2.0.0'
+packages:
+  bar@1.0.0:
+    resolution: {{integrity: {SRI}, tarball: https://r/bar-1.0.0.tgz}}
+  '@t/real@2.0.0':
+    resolution: {{integrity: {SRI}, tarball: https://r/real-2.0.0.tgz}}
+snapshots:
+  bar@1.0.0: {{}}
+  '@t/real@2.0.0': {{}}
+"#
+        );
+        let plan = plan(&dir.0, &lock).unwrap();
+        let placed: Vec<(&str, &str, &str, &str)> = plan
+            .packages
+            .iter()
+            .map(|p| {
+                (
+                    p.path.as_str(),
+                    p.name.as_str(),
+                    p.version.as_str(),
+                    p.url.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            placed,
+            vec![
+                (
+                    "node_modules/@s/alias",
+                    "@t/real",
+                    "2.0.0",
+                    "https://r/real-2.0.0.tgz"
+                ),
+                (
+                    "node_modules/foo",
+                    "bar",
+                    "1.0.0",
+                    "https://r/bar-1.0.0.tgz"
+                ),
+            ]
+        );
+    }
+
+    /// `a` (required) and `o` (optional) with tarball URLs `a_url` and
+    /// `o_url`, beside a plain https package `b`.
+    fn tarball_lock(a_url: &str, o_url: &str) -> String {
+        format!(
+            r#"lockfileVersion: '9.0'
+importers:
+  .:
+    dependencies:
+      a:
+        specifier: 1.0.0
+        version: 1.0.0
+      b:
+        specifier: 1.0.0
+        version: 1.0.0
+    optionalDependencies:
+      o:
+        specifier: 1.0.0
+        version: 1.0.0
+packages:
+  a@1.0.0:
+    resolution: {{integrity: {SRI}, tarball: {a_url}}}
+  b@1.0.0:
+    resolution: {{integrity: {SRI}, tarball: 'https://r/@s/b-1.0.0.tgz'}}
+  o@1.0.0:
+    resolution: {{integrity: {SRI}, tarball: {o_url}}}
+snapshots:
+  a@1.0.0: {{}}
+  b@1.0.0: {{}}
+  o@1.0.0: {{}}
+"#
+        )
+    }
+
+    /// pnpm tarballs are https-only and carry no credentials, as npm's and
+    /// Yarn's are: a required one is refused, an optional one dropped.
+    #[test]
+    fn a_non_https_or_credentialed_tarball_is_refused_or_dropped() {
+        let dir = project();
+        let credentials =
+            "tarball URL carries credentials (user:pass@ before its host); tog will not record them";
+        for (url, detail) in [
+            (
+                "http://r/x.tgz",
+                "non-https tarball URL http://r/x.tgz".to_string(),
+            ),
+            (
+                "ftp://r/x.tgz",
+                "non-https tarball URL ftp://r/x.tgz".to_string(),
+            ),
+            ("https://u:secret@r/x.tgz", credentials.to_string()),
+            ("https://token@r/x.tgz", credentials.to_string()),
+            ("https://user@r/x.tgz", credentials.to_string()),
+            ("https:///user:secret@r/x.tgz", credentials.to_string()),
+            ("http://user:secret@r/x.tgz", credentials.to_string()),
+            (
+                "http://user:secret@",
+                "non-https tarball URL <URL withheld: it may carry credentials>".to_string(),
+            ),
+        ] {
+            let error = refused(&dir.0, &tarball_lock(url, "https://r/o.tgz"));
+            assert!(!error.to_string().contains("secret"), "{error}");
+            assert_invalid(error, &format!("a@1.0.0: {detail}"));
+            let plan = plan(&dir.0, &tarball_lock("https://r/a.tgz", url)).unwrap();
+            let paths: Vec<&str> = plan.packages.iter().map(|p| p.path.as_str()).collect();
+            assert_eq!(paths, vec!["node_modules/a", "node_modules/b"], "{url}");
+        }
+        let upper = plan(&dir.0, &tarball_lock("HTTPS://r/a.tgz", "https://r/o.tgz")).unwrap();
+        assert_eq!(upper.packages[0].url, "HTTPS://r/a.tgz");
+        let plan = plan(&dir.0, &tarball_lock("https://r/a.tgz", "https://r/o.tgz")).unwrap();
+        let urls: Vec<&str> = plan.packages.iter().map(|p| p.url.as_str()).collect();
+        assert_eq!(
+            urls,
+            vec![
+                "https://r/a.tgz",
+                "https://r/@s/b-1.0.0.tgz",
+                "https://r/o.tgz"
+            ]
+        );
+    }
+
+    /// A tarball identity keeps its URL as the version; the refusal
+    /// names the package without the URL's credentials.
+    #[test]
+    fn a_credentialed_tarball_identity_is_refused_without_its_secret() {
+        let dir = project();
+        let lock = |version: &str| {
+            format!(
+                r#"lockfileVersion: '9.0'
+importers:
+  .:
+    dependencies:
+      a:
+        specifier: https://user:secret@r/a.tgz
+        version: {version}
+packages:
+  a@https://user:secret@r/a.tgz:
+    resolution: {{integrity: {SRI}, tarball: https://user:secret@r/a.tgz}}
+snapshots:
+  a@https://user:secret@r/a.tgz: {{}}
+"#
+            )
+        };
+        for (version, expected) in [
+            (
+                "a@https://user:secret@r/a.tgz",
+                "a@https://***:***@r/a.tgz: tarball URL carries credentials (user:pass@ before its host); tog will not record them",
+            ),
+            // The bare URL does not name the snapshot; the miss is
+            // reported without the secret too.
+            (
+                "https://user:secret@r/a.tgz",
+                "a: missing snapshot for a@https://***:***@r/a.tgz",
+            ),
+        ] {
+            let error = refused(&dir.0, &lock(version));
+            assert!(!error.to_string().contains("secret"), "{error}");
+            assert_invalid(error, expected);
+        }
+    }
+
+    /// Two importers' dependencies placed at `node_modules/Foo` and
+    /// `node_modules/foo` would share one directory on macOS.
+    #[test]
+    fn pnpm_destinations_differing_only_in_case_are_refused() {
+        let dir = project();
+        let lock = |second: &str| {
+            format!(
+                r#"lockfileVersion: '9.0'
+importers:
+  .:
+    dependencies:
+      Foo:
+        specifier: 1.0.0
+        version: 1.0.0
+      {second}:
+        specifier: 1.0.0
+        version: 1.0.0
+packages:
+  Foo@1.0.0:
+    resolution: {{integrity: {SRI}}}
+  {second}@1.0.0:
+    resolution: {{integrity: {SRI}}}
+snapshots:
+  Foo@1.0.0: {{}}
+  {second}@1.0.0: {{}}
+"#
+            )
+        };
+        assert_invalid(
+            refused(&dir.0, &lock("foo")),
+            "lockfile paths node_modules/Foo and node_modules/foo differ only in letter case; a case-insensitive filesystem would put both in one directory",
+        );
+        let plan = plan(&dir.0, &lock("bar")).unwrap();
+        let paths: Vec<&str> = plan.packages.iter().map(|p| p.path.as_str()).collect();
+        assert_eq!(paths, vec!["node_modules/Foo", "node_modules/bar"]);
+    }
+
+    /// An alias naming one peer variant of its package resolves by the
+    /// exact snapshot key, not by a version-only lookup that would find
+    /// two candidates.
+    #[test]
+    fn a_pnpm_alias_to_a_peer_variant_resolves_its_exact_snapshot() {
+        let dir = project();
+        let lock = format!(
+            r#"lockfileVersion: '9.0'
+importers:
+  .:
+    dependencies:
+      foo:
+        specifier: npm:bar@^1.0.0
+        version: bar@1.0.0(peer@2.0.0)
+packages:
+  bar@1.0.0:
+    resolution: {{integrity: {SRI}, tarball: https://r/bar-1.0.0.tgz}}
+  one@1.0.0:
+    resolution: {{integrity: {SRI}}}
+  two@1.0.0:
+    resolution: {{integrity: {SRI}}}
+snapshots:
+  bar@1.0.0(peer@1.0.0):
+    dependencies:
+      one: 1.0.0
+  bar@1.0.0(peer@2.0.0):
+    dependencies:
+      two: 1.0.0
+  one@1.0.0: {{}}
+  two@1.0.0: {{}}
+"#
+        );
+        let plan = plan(&dir.0, &lock).unwrap();
+        let placed: Vec<(&str, &str, &str)> = plan
+            .packages
+            .iter()
+            .map(|p| (p.path.as_str(), p.name.as_str(), p.version.as_str()))
+            .collect();
+        // Only the chosen variant's child is installed.
+        assert_eq!(
+            placed,
+            vec![
+                ("node_modules/foo", "bar", "1.0.0"),
+                ("node_modules/two", "two", "1.0.0"),
+            ]
+        );
     }
 }

@@ -11,7 +11,7 @@ file 1594 src/kernel/store/roots.rs
 file 1927 src/tailors/dotnet/mod.rs
 file 2076 src/tailors/elixir/mod.rs
 file 1550 src/tailors/go/mod.rs
-file 1787 src/tailors/node/lock_import/pnpm.rs
+file 1777 src/tailors/node/lock_import/pnpm.rs
 file 1673 src/tailors/node/realize.rs
 fn 176 src/comforter/toolchain.rs::resolve
 fn 167 src/commands/audit.rs::render
@@ -26,9 +26,9 @@ fn 151 src/kernel/gitsrc.rs::ensure_git_source
 fn 164 src/kernel/provider/crates.rs::realize_vendor_inner
 fn 209 src/kernel/toolchain/lock.rs::validate
 fn 163 src/kernel/toolchain/resolve.rs::request_for
-fn 224 src/tailors/node/lock_import/mod.rs::build_plan
+fn 199 src/tailors/node/lock_import/mod.rs::build_plan
 fn 160 src/tailors/node/lock_import/pnpm.rs::pnpm_nodes
-fn 157 src/tailors/node/lock_import/yarn1.rs::plan_yarn
+fn 156 src/tailors/node/lock_import/yarn1.rs::plan_yarn
 fn 186 src/tailors/node/mod.rs::live_identity_cases
 fn 170 src/tailors/node/project.rs::project_node_env_recorded
 fn 163 src/tailors/python/build.rs::build_sdist_wheel_at_depth

@@ -46,6 +46,18 @@ pub(super) fn selector_name(selector: &str) -> String {
     }
 }
 
+/// The package a selector installs: the target of an alias
+/// (`foo@npm:bar@^1` installs `bar`), else the selector's own name. The
+/// alias stays the install path, which comes from the dependency's name,
+/// as npm and pnpm record aliases.
+pub(super) fn selector_package(selector: &str) -> String {
+    let name = selector_name(selector);
+    match selector[name.len()..].strip_prefix("@npm:") {
+        Some(target) => selector_name(target),
+        None => name,
+    }
+}
+
 pub(super) fn parse_yarn_value(value: &str) -> String {
     yaml_unquote(value.trim())
 }
@@ -152,7 +164,7 @@ pub(super) fn parse_yarn_entries(lock: &str) -> io::Result<Vec<YarnEntry>> {
         let resolved =
             resolved.ok_or_else(|| err(format!("yarn.lock line {line}: missing resolved URL")))?;
         entries.push(YarnEntry {
-            name: selector_name(&selectors[0]),
+            name: selector_package(&selectors[0]),
             selectors,
             version,
             resolved,
@@ -193,6 +205,22 @@ pub(super) fn yarn_integrity(
     integrity: Option<String>,
     path: &str,
 ) -> io::Result<String> {
+    yarn_integrity_with(
+        resolved,
+        integrity,
+        path,
+        &mut crate::kernel::policy::record,
+    )
+}
+
+/// `yarn_integrity` recording through `record`, so a test can pass a
+/// policy of its own instead of the process one.
+fn yarn_integrity_with(
+    resolved: &str,
+    integrity: Option<String>,
+    path: &str,
+    record: &mut impl FnMut(&str, &str, &str) -> io::Result<()>,
+) -> io::Result<String> {
     if let Some(integrity) = integrity {
         let selected = integrity
             .split_whitespace()
@@ -208,7 +236,7 @@ pub(super) fn yarn_integrity(
                     .find(|value| value.starts_with("sha1-"))
             })
             .ok_or_else(|| err(format!("{path}: malformed Yarn integrity")))?;
-        integrity_policy(path, selected)?;
+        integrity_policy_with(path, selected, record)?;
         Digest::from_sri(selected)?;
         return Ok(selected.to_string());
     }
@@ -232,7 +260,7 @@ pub(super) fn yarn_integrity(
         return Err(err(format!("{path}: malformed yarn sha1 fragment")));
     };
     let sri = format!("sha1-{}", base64_encode(&bytes));
-    integrity_policy(path, &sri)?;
+    integrity_policy_with(path, &sri, record)?;
     Ok(sri)
 }
 
@@ -327,7 +355,7 @@ pub(super) fn collect_workspace_manifests(
             continue;
         }
         if project.is_input_file(&path.join("package.json")) {
-            let relative = path.to_string_lossy().replace('\\', "/");
+            let relative = path.to_string_lossy().into_owned();
             if !relative.is_empty() {
                 result.push(relative);
             }
@@ -408,6 +436,14 @@ pub(super) fn yarn_workspace_manifests(
     }
     let mut workspaces = Vec::new();
     for path in selected {
+        // A backslash is an ordinary filename byte here, but a Windows
+        // separator to anyone reading the path back; `..\x` must not be
+        // mistaken for, or turned into, `../x`.
+        if path.contains('\\') {
+            return Err(err(format!(
+                "Yarn workspace {path:?} has a backslash in its path; rename the directory"
+            )));
+        }
         let text = crate::tailors::node::inputs::read_input(
             project,
             Path::new(&path).join("package.json"),
@@ -500,13 +536,12 @@ pub fn plan_yarn(
             Some(source) => format!("git+{}#{}", source.url, source.commit),
             None => url.to_string(),
         };
-        let external = if let Some(detail) = git_detail {
-            Some(detail)
-        } else if pinned_git.is_none() && !url.starts_with("https://") {
-            Some(format!("non-https resolved URL {url}"))
-        } else {
-            None
-        };
+        let external = git_detail.or_else(|| {
+            pinned_git
+                .is_none()
+                .then(|| crate::tailors::node::tarball_url_detail(&url, "non-https resolved URL"))
+                .flatten()
+        });
         let mut deps = Vec::new();
         let mut all_deps = entry.dependencies.clone();
         for (name, spec) in &entry.optional_dependencies {
@@ -733,4 +768,409 @@ pub(super) fn yarn_package_dependencies(
         }
     }
     Ok(deps.into_values().collect())
+}
+
+#[cfg(test)]
+mod lock_shape_tests {
+    use super::super::tests::{held, node_version, project, SRI};
+    use super::*;
+
+    /// sha1 and sha256 of zero bytes as SRIs: well-formed digests.
+    const SHA1_SRI: &str = "sha1-AAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+    const SHA256_SRI: &str = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+
+    fn plan(lock: &str, package_json: &str) -> io::Result<NpmPlan> {
+        let dir = project();
+        plan_yarn(
+            Platform::X86_64UnknownLinuxGnu,
+            lock,
+            package_json,
+            &held(&dir.0),
+            node_version(),
+        )
+    }
+
+    fn assert_invalid(error: io::Error, expected: &str) {
+        assert_eq!(error.to_string(), expected);
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{expected}");
+    }
+
+    #[test]
+    fn selector_names_keep_scopes_and_drop_alias_targets() {
+        for (selector, name) in [
+            ("plain@^1.0.0", "plain"),
+            ("plain", "plain"),
+            ("@s/n@^1.0.0", "@s/n"),
+            ("@s/n", "@s/n"),
+            ("foo@npm:bar@1", "foo"),
+            ("@s/foo@npm:@t/bar@^2", "@s/foo"),
+        ] {
+            assert_eq!(selector_name(selector), name, "{selector}");
+        }
+    }
+
+    #[test]
+    fn selector_packages_are_alias_targets() {
+        for (selector, package) in [
+            ("plain@^1.0.0", "plain"),
+            ("plain", "plain"),
+            ("@s/n@^1.0.0", "@s/n"),
+            ("foo@npm:bar@1", "bar"),
+            ("foo@npm:bar", "bar"),
+            ("@s/foo@npm:@t/bar@^2", "@t/bar"),
+            ("foo@npm:@t/bar", "@t/bar"),
+        ] {
+            assert_eq!(selector_package(selector), package, "{selector}");
+        }
+    }
+
+    #[test]
+    fn a_scoped_entry_is_placed_under_its_scope() {
+        let lock = format!(
+            "# yarn lockfile v1\n\"@s/n@^1.0.0\":\n  version \"1.2.0\"\n  resolved \"https://r/n-1.2.0.tgz\"\n  integrity {SRI}\n"
+        );
+        let plan = plan(&lock, r#"{"dependencies":{"@s/n":"^1.0.0"}}"#).unwrap();
+        assert_eq!(plan.packages.len(), 1);
+        assert_eq!(plan.packages[0].path, "node_modules/@s/n");
+        assert_eq!(plan.packages[0].name, "@s/n");
+        assert_eq!(plan.packages[0].version, "1.2.0");
+    }
+
+    /// `foo@npm:bar@^1.0.0` lands at node_modules/foo and is the package
+    /// bar: realization provisions and names it by its real name.
+    #[test]
+    fn a_yarn_alias_is_placed_by_its_alias_and_fetches_the_real_package() {
+        let lock = format!(
+            "# yarn lockfile v1\n\"foo@npm:bar@^1.0.0\":\n  version \"1.0.0\"\n  resolved \"https://registry.yarnpkg.com/bar/-/bar-1.0.0.tgz\"\n  integrity {SRI}\n\"@s/alias@npm:@t/real@^2.0.0\":\n  version \"2.0.0\"\n  resolved \"https://registry.yarnpkg.com/@t/real/-/real-2.0.0.tgz\"\n  integrity {SRI}\n"
+        );
+        let plan = plan(
+            &lock,
+            r#"{"dependencies":{"foo":"npm:bar@^1.0.0","@s/alias":"npm:@t/real@^2.0.0"}}"#,
+        )
+        .unwrap();
+        let placed: Vec<(&str, &str, &str, &str, &str)> = plan
+            .packages
+            .iter()
+            .map(|p| {
+                (
+                    p.path.as_str(),
+                    p.name.as_str(),
+                    p.version.as_str(),
+                    p.url.as_str(),
+                    p.integrity.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            placed,
+            vec![
+                (
+                    "node_modules/@s/alias",
+                    "@t/real",
+                    "2.0.0",
+                    "https://registry.yarnpkg.com/@t/real/-/real-2.0.0.tgz",
+                    SRI
+                ),
+                (
+                    "node_modules/foo",
+                    "bar",
+                    "1.0.0",
+                    "https://registry.yarnpkg.com/bar/-/bar-1.0.0.tgz",
+                    SRI
+                ),
+            ]
+        );
+    }
+
+    /// The strongest listed digest wins: sha512, then sha256, then sha1.
+    #[test]
+    fn yarn_integrity_prefers_the_strongest_digest() {
+        let url = "https://r/a.tgz";
+        let all = format!("{SHA1_SRI} {SHA256_SRI} {SRI}");
+        assert_eq!(yarn_integrity(url, Some(all), "yarn:0").unwrap(), SRI);
+        let reversed = format!("{SRI} {SHA256_SRI} {SHA1_SRI}");
+        assert_eq!(yarn_integrity(url, Some(reversed), "yarn:0").unwrap(), SRI);
+        let weaker = format!("{SHA1_SRI} {SHA256_SRI}");
+        assert_eq!(
+            yarn_integrity(url, Some(weaker), "yarn:0").unwrap(),
+            SHA256_SRI
+        );
+        // An integrity field wins over a #sha1 fragment.
+        let fragment = "https://r/a.tgz#0000000000000000000000000000000000000000";
+        assert_eq!(
+            yarn_integrity(fragment, Some(SRI.to_string()), "yarn:0").unwrap(),
+            SRI
+        );
+    }
+
+    #[test]
+    fn a_sha1_yarn_integrity_is_recorded_inside_an_attribution() {
+        let _attribution_lock = crate::kernel::policy::attribution_test_lock();
+        let _attribution = crate::kernel::policy::Attribution::open("node").unwrap();
+        // An explicit permissive policy: TOG_STRICT=1 in the environment
+        // would otherwise refuse the exception this test expects recorded.
+        let permissive = crate::kernel::policy::Policy::default();
+        let mut record = |kind: &str, subject: &str, detail: &str| {
+            crate::kernel::policy::record_with(&permissive, kind, subject, detail)
+        };
+        for (url, integrity) in [
+            ("https://r/a.tgz", Some(SHA1_SRI.to_string())),
+            (
+                "https://r/a.tgz#0000000000000000000000000000000000000000",
+                None,
+            ),
+        ] {
+            assert_eq!(
+                yarn_integrity_with(url, integrity, "yarn:3", &mut record).unwrap(),
+                SHA1_SRI
+            );
+            let exceptions = crate::kernel::policy::drain();
+            assert_eq!(exceptions.len(), 1, "{exceptions:?}");
+            assert_eq!(exceptions[0].kind, crate::kernel::policy::WEAK_INTEGRITY);
+            assert_eq!(exceptions[0].subject, "yarn:3");
+        }
+    }
+
+    /// Outside an attribution the weak digest is refused with the policy
+    /// error itself (unlike npm, not wrapped in an algorithm message).
+    #[test]
+    fn a_sha1_yarn_integrity_is_refused_outside_any_attribution() {
+        let _attribution_lock = crate::kernel::policy::attribution_test_lock();
+        let error =
+            yarn_integrity("https://r/a.tgz", Some(SHA1_SRI.to_string()), "yarn:0").unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "exception recorded outside any attribution"
+        );
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+    }
+
+    #[test]
+    fn an_integrity_with_no_supported_digest_is_malformed() {
+        for integrity in [
+            "md5-AAAAAAAAAAAAAAAAAAAAAA==",
+            "sha384-AAAA",
+            "",
+            "sha5120-x",
+        ] {
+            let error = yarn_integrity("https://r/a.tgz", Some(integrity.to_string()), "yarn:2")
+                .unwrap_err();
+            assert_invalid(error, "yarn:2: malformed Yarn integrity");
+        }
+        // And through plan_yarn: the subject is the entry's index key.
+        let lock = "# yarn lockfile v1\na@1.0.0:\n  version \"1.0.0\"\n  resolved \"https://r/a.tgz\"\n  integrity md5-AAAAAAAAAAAAAAAAAAAAAA==\n";
+        let error = plan(lock, r#"{"dependencies":{"a":"1.0.0"}}"#)
+            .map(drop)
+            .unwrap_err();
+        assert_invalid(error, "yarn:0: malformed Yarn integrity");
+    }
+
+    #[test]
+    fn an_entry_with_neither_integrity_nor_fragment_is_refused() {
+        for url in ["https://r/a.tgz", "https://r/a.tgz#"] {
+            let error = yarn_integrity(url, None, "yarn:1").unwrap_err();
+            assert_invalid(
+                error,
+                "yarn:1: yarn entry has neither integrity nor a #sha1 fragment",
+            );
+        }
+        for url in ["https://r/a.tgz#abc", "https://r/a.tgz#sha1-zz"] {
+            let error = yarn_integrity(url, None, "yarn:1").unwrap_err();
+            assert_invalid(error, "yarn:1: malformed yarn sha1 fragment");
+        }
+    }
+
+    fn http_lock() -> String {
+        format!(
+            "# yarn lockfile v1\na@1.0.0:\n  version \"1.0.0\"\n  resolved \"http://r/a-1.0.0.tgz\"\n  integrity {SRI}\nb@1.0.0:\n  version \"1.0.0\"\n  resolved \"https://r/b-1.0.0.tgz\"\n  integrity {SRI}\n"
+        )
+    }
+
+    #[test]
+    fn a_required_non_https_entry_is_refused() {
+        let error = plan(
+            &http_lock(),
+            r#"{"dependencies":{"a":"1.0.0","b":"1.0.0"}}"#,
+        )
+        .map(drop)
+        .unwrap_err();
+        assert_invalid(
+            error,
+            "a@1.0.0: non-https resolved URL http://r/a-1.0.0.tgz",
+        );
+    }
+
+    #[test]
+    fn an_optional_non_https_entry_is_dropped() {
+        let plan = plan(
+            &http_lock(),
+            r#"{"dependencies":{"b":"1.0.0"},"optionalDependencies":{"a":"1.0.0"}}"#,
+        )
+        .unwrap();
+        let paths: Vec<&str> = plan.packages.iter().map(|p| p.path.as_str()).collect();
+        assert_eq!(paths, vec!["node_modules/b"]);
+    }
+
+    fn credentials_lock() -> String {
+        http_lock().replace("http://r/a-1.0.0.tgz", "https://u:secret@r/a-1.0.0.tgz")
+    }
+
+    /// Credentials win over the scheme, so an http URL's secret is not
+    /// echoed in the non-https message either.
+    #[test]
+    fn a_required_entry_with_url_credentials_is_refused() {
+        for lock in [
+            credentials_lock(),
+            http_lock().replace("http://r/", "http://u:secret@r/"),
+        ] {
+            let error = plan(&lock, r#"{"dependencies":{"a":"1.0.0","b":"1.0.0"}}"#)
+                .map(drop)
+                .unwrap_err();
+            assert!(!error.to_string().contains("secret"), "{error}");
+            assert_invalid(
+                error,
+                "a@1.0.0: tarball URL carries credentials (user:pass@ before its host); tog will not record them",
+            );
+        }
+    }
+
+    #[test]
+    fn an_optional_entry_with_url_credentials_is_dropped() {
+        let plan = plan(
+            &credentials_lock(),
+            r#"{"dependencies":{"b":"1.0.0"},"optionalDependencies":{"a":"1.0.0"}}"#,
+        )
+        .unwrap();
+        let paths: Vec<&str> = plan.packages.iter().map(|p| p.path.as_str()).collect();
+        assert_eq!(paths, vec!["node_modules/b"]);
+    }
+
+    /// A project with members at packages/a, packages/b and packages/deep/c.
+    fn members() -> crate::kernel::testutil::TempDir {
+        let dir = project();
+        for (path, name) in [
+            ("packages/a", "a"),
+            ("packages/b", "b"),
+            ("packages/deep/c", "c"),
+        ] {
+            fs::create_dir_all(dir.0.join(path)).unwrap();
+            fs::write(
+                dir.0.join(path).join("package.json"),
+                format!(r#"{{"name":"{name}","version":"1.0.0"}}"#),
+            )
+            .unwrap();
+        }
+        dir
+    }
+
+    fn workspaces(dir: &Path, declared: &str) -> io::Result<Vec<String>> {
+        let package: JsonValue =
+            serde_json::from_str(&format!(r#"{{"workspaces":{declared}}}"#)).unwrap();
+        yarn_workspace_manifests(&package, &held(dir))
+            .map(|found| found.into_iter().map(|member| member.path).collect())
+    }
+
+    #[test]
+    fn a_workspace_pattern_escaping_the_project_is_refused() {
+        let dir = members();
+        for pattern in [
+            "../x",
+            "/abs/*",
+            "!../x",
+            "packages/../../x",
+            "./../x",
+            "packages/..",
+        ] {
+            let error = workspaces(&dir.0, &format!(r#"["packages/*",{pattern:?}]"#)).unwrap_err();
+            assert_invalid(
+                error,
+                &format!("Yarn workspaces pattern {pattern:?} escapes the project"),
+            );
+        }
+    }
+
+    /// On Unix `..\outside` is one directory name. Read back as `../outside`
+    /// it would name the project's sibling, whose manifest must not be read.
+    #[test]
+    fn a_workspace_directory_with_a_backslash_is_refused() {
+        let wrapper = crate::kernel::testutil::TempDir::named("yarn-backslash");
+        let project = wrapper.0.join("project");
+        for (path, name) in [("project/..\\outside", "inside"), ("outside", "sibling")] {
+            fs::create_dir_all(wrapper.0.join(path)).unwrap();
+            fs::write(
+                wrapper.0.join(path).join("package.json"),
+                format!(r#"{{"name":"{name}","version":"1.0.0"}}"#),
+            )
+            .unwrap();
+        }
+        let error = workspaces(&project, r#"["**"]"#).unwrap_err();
+        assert_invalid(
+            error,
+            r#"Yarn workspace "..\\outside" has a backslash in its path; rename the directory"#,
+        );
+        fs::create_dir_all(project.join("packages/a")).unwrap();
+        fs::write(
+            project.join("packages/a/package.json"),
+            r#"{"name":"a","version":"1.0.0"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            workspaces(&project, r#"["packages/*"]"#).unwrap(),
+            vec!["packages/a"]
+        );
+    }
+
+    #[test]
+    fn a_workspace_declaration_with_no_patterns_is_refused() {
+        let dir = members();
+        for declared in ["[]", r#"{"packages":[]}"#] {
+            let error = workspaces(&dir.0, declared).unwrap_err();
+            assert_invalid(
+                error,
+                "Yarn workspaces declared with no package patterns; unsupported monorepo shape",
+            );
+        }
+    }
+
+    #[test]
+    fn a_workspace_declaration_matching_nothing_is_refused() {
+        let dir = members();
+        for declared in [
+            r#"["nope/*"]"#,
+            r#"["packages/*","!packages/*"]"#,
+            r#"["packages/a","!packages/a"]"#,
+        ] {
+            let error = workspaces(&dir.0, declared).unwrap_err();
+            assert_invalid(
+                error,
+                "Yarn workspaces declared but no workspace package.json matched the supported patterns",
+            );
+        }
+    }
+
+    #[test]
+    fn workspace_globs_exclude_with_bang_and_recurse_with_double_star() {
+        let dir = members();
+        assert_eq!(
+            workspaces(&dir.0, r#"["packages/*"]"#).unwrap(),
+            vec!["packages/a", "packages/b"]
+        );
+        assert_eq!(
+            workspaces(&dir.0, r#"["packages/*","!packages/b"]"#).unwrap(),
+            vec!["packages/a"]
+        );
+        assert_eq!(
+            workspaces(&dir.0, r#"{"packages":["./packages/**"]}"#).unwrap(),
+            vec!["packages/a", "packages/b", "packages/deep/c"]
+        );
+        assert_eq!(
+            workspaces(&dir.0, r#"["packages/**","!packages/deep/**"]"#).unwrap(),
+            vec!["packages/a", "packages/b"]
+        );
+        assert!(workspace_glob_matches("packages/**", "packages/deep/c"));
+        assert!(workspace_glob_matches("**", "a"));
+        assert!(workspace_glob_matches("packages/?", "packages/a"));
+        assert!(!workspace_glob_matches("packages/*", "packages/deep/c"));
+        assert!(!workspace_glob_matches("packages/?", "packages/ab"));
+    }
 }
