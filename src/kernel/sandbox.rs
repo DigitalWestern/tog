@@ -1024,36 +1024,43 @@ fn bwrap_command(path: &Path) -> io::Result<Command> {
 }
 
 fn find_socket_without_following_symlinks(path: &Path) -> io::Result<Option<PathBuf>> {
-    let metadata = fs::symlink_metadata(path)?;
+    scan_for_socket(path, true)
+}
+
+/// Walk `path` for a Unix socket without following symlinks. A declared
+/// root must be readable whole, so every error there is fatal. Below it, an
+/// entry that is gone by the time it is looked at or listed (a project
+/// being edited while a build starts) is skipped; every other error still
+/// stops the run. The scan is best effort against concurrent changes: an
+/// entry renamed or replaced while the walk runs can escape it, the same
+/// race as a socket created after the scan (LIMITATIONS.md).
+fn scan_for_socket(path: &Path, is_root: bool) -> io::Result<Option<PathBuf>> {
+    let vanished = |error: &io::Error| !is_root && error.kind() == io::ErrorKind::NotFound;
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if vanished(&error) => return Ok(None),
+        Err(error) => return Err(error),
+    };
     let file_type = metadata.file_type();
     if file_type.is_socket() {
         return Ok(Some(path.to_path_buf()));
     }
-    if !file_type.is_dir() {
+    if file_type.is_symlink() || !file_type.is_dir() {
         return Ok(None);
     }
-
-    let entries = fs::read_dir(path).map_err(|error| {
-        io::Error::new(
-            error.kind(),
-            format!("cannot scan {} for host sockets: {error}", path.display()),
-        )
-    })?;
+    let entries = match fs::read_dir(path) {
+        Ok(entries) => entries,
+        Err(error) if vanished(&error) => return Ok(None),
+        Err(error) => {
+            return Err(io::Error::new(
+                error.kind(),
+                format!("cannot scan {} for host sockets: {error}", path.display()),
+            ))
+        }
+    };
     for entry in entries {
-        let entry = entry?;
-        let entry_path = entry.path();
-        let metadata = fs::symlink_metadata(&entry_path)?;
-        let file_type = metadata.file_type();
-        if file_type.is_symlink() {
-            continue;
-        }
-        if file_type.is_socket() {
-            return Ok(Some(entry_path));
-        }
-        if file_type.is_dir() {
-            if let Some(socket) = find_socket_without_following_symlinks(&entry_path)? {
-                return Ok(Some(socket));
-            }
+        if let Some(socket) = scan_for_socket(&entry?.path(), false)? {
+            return Ok(Some(socket));
         }
     }
     Ok(None)
@@ -3486,6 +3493,41 @@ mod containment_tests {
                     )),
                 "{message}"
             );
+        }
+    }
+
+    /// An entry below a declared root that is gone when the walk reaches it
+    /// is skipped; the declared root itself missing is still an error. (The
+    /// listing half, a directory removed between its lookup and its
+    /// `read_dir`, needs a real race and is not exercised here.)
+    #[test]
+    fn a_vanished_entry_below_a_root_is_skipped_but_a_missing_root_is_not() {
+        let root = temp_dir("vanished");
+        let gone = root.0.join("gone");
+        assert!(scan_for_socket(&gone, false).unwrap().is_none());
+        assert!(scan_for_socket(&gone.join("child"), false)
+            .unwrap()
+            .is_none());
+        let error = find_socket_without_following_symlinks(&gone).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::NotFound, "{error}");
+        // A file where a directory was listed is not a vanished entry.
+        fs::write(root.0.join("file"), "x").unwrap();
+        assert!(scan_for_socket(&root.0.join("file"), false)
+            .unwrap()
+            .is_none());
+        let error = scan_for_socket(&root.0.join("file/child"), false).unwrap_err();
+        assert_ne!(error.kind(), io::ErrorKind::NotFound, "{error}");
+        // A symlink below the root is skipped, not followed.
+        #[cfg(target_os = "linux")]
+        {
+            let elsewhere = temp_dir("vanished-elsewhere");
+            let listener =
+                std::os::unix::net::UnixListener::bind(elsewhere.0.join("l.sock")).unwrap();
+            std::os::unix::fs::symlink(elsewhere.0.join("l.sock"), root.0.join("link")).unwrap();
+            assert!(find_socket_without_following_symlinks(&root.0)
+                .unwrap()
+                .is_none());
+            drop(listener);
         }
     }
 }
