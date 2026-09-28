@@ -788,7 +788,10 @@ pub(super) fn source_error(
     if tarball.starts_with("file:") || tarball.starts_with("link:") {
         return Some(format!("local dependency {tarball}"));
     }
-    None
+    // No tarball means the default registry URL, which is https.
+    (!tarball.is_empty())
+        .then(|| crate::tailors::node::tarball_url_detail(tarball, "non-https tarball URL"))
+        .flatten()
 }
 
 pub(super) fn dep_version_key(
@@ -864,18 +867,7 @@ pub(super) fn workspace_target(
     } else {
         relative.join("/")
     };
-    // Whether the target exists is asked of the held descriptor; where a
-    // symlink in it leads is still resolved on the pathname (ProjectRoot
-    // has no canonicalize).
-    let root = project.path();
-    if input_exists(project, &target) {
-        let canonical = root.join(&target).canonicalize()?;
-        if !canonical.starts_with(root) {
-            return Err(err(format!(
-                "workspace link target {raw:?} is outside the project"
-            )));
-        }
-    }
+    contain_link_target(project.path(), &target, raw)?;
     Ok(target)
 }
 
@@ -928,16 +920,14 @@ pub(super) fn target_for_ref(
             return Target::Node(snapshot_key);
         }
     }
-    if let Some((real_name, real_version)) = split_identity(reference) {
-        return match dep_version_key(&real_name, &real_version, snapshots) {
-            Some(key) => Target::Node(key),
-            None => Target::External(format!("missing snapshot for {name}@{reference}")),
-        };
-    }
-    match dep_version_key(name, reference, snapshots) {
-        Some(key) => Target::Node(key),
-        None => Target::External(format!("missing snapshot for {name}@{reference}")),
-    }
+    let key = match split_identity(reference) {
+        Some((real_name, real_version)) => dep_version_key(&real_name, &real_version, snapshots),
+        None => dep_version_key(name, reference, snapshots),
+    };
+    key.map(Target::Node).unwrap_or_else(|| {
+        let shown = crate::tailors::node::redact_url_userinfo(reference);
+        Target::External(format!("missing snapshot for {name}@{shown}"))
+    })
 }
 
 pub(super) fn importer_dependencies(
