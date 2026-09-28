@@ -965,20 +965,7 @@ pub fn plan_ruby(
                     .map_err(|e| err(format!("{}: {url}: {e}", g.full_name)))?
                     .into_string()
                     .map_err(|e| err(format!("{}: read: {e}", g.full_name)))?;
-                let v: serde_json::Value = serde_json::from_str(&body)
-                    .map_err(|e| err(format!("{}: api json: {e}", g.full_name)))?;
-                if v["number"].as_str() != Some(g.version.as_str())
-                    || v["platform"].as_str() != Some(g.platform.as_str())
-                {
-                    return Err(err(format!(
-                        "{}: api returned {}-{} instead",
-                        g.full_name, v["number"], v["platform"]
-                    )));
-                }
-                v["sha"]
-                    .as_str()
-                    .ok_or_else(|| err(format!("{}: api has no sha", g.full_name)))?
-                    .to_string()
+                digest_from_api_reply(&g.full_name, &g.version, &g.platform, &body)?
             }
         };
         gems.push(RubyGem {
@@ -1006,6 +993,69 @@ pub fn plan_ruby(
         return Err(err("Gemfile.lock changed while planning; re-run 'tog'"));
     }
     Ok((plan, hex::encode(Sha256::digest(lock.as_bytes()))))
+}
+
+/// The sha256 in one rubygems.org version reply, once the reply is shown to
+/// describe the coordinate that was asked for. The bare endpoint answers
+/// with whichever variant was pushed last, so a reply naming another
+/// version or platform is refused rather than trusted for its digest.
+fn digest_from_api_reply(
+    full_name: &str,
+    version: &str,
+    platform: &str,
+    body: &str,
+) -> io::Result<String> {
+    let v: serde_json::Value =
+        serde_json::from_str(body).map_err(|e| err(format!("{full_name}: api json: {e}")))?;
+    if v["number"].as_str() != Some(version) || v["platform"].as_str() != Some(platform) {
+        return Err(err(format!(
+            "{}: api returned {}-{} instead",
+            full_name, v["number"], v["platform"]
+        )));
+    }
+    Ok(v["sha"]
+        .as_str()
+        .ok_or_else(|| err(format!("{full_name}: api has no sha")))?
+        .to_string())
+}
+
+/// Check that the gemspec the helper read out of a downloaded `.gem` names
+/// exactly the planned coordinate, and that the plan's `full_name` is the
+/// canonical spelling of that coordinate (the download URL is built from
+/// it). Returns the gem's executables and whether it declares native
+/// extensions.
+fn spec_matches_plan(g: &RubyGem, spec_json: &[u8]) -> io::Result<(Vec<String>, bool)> {
+    let spec: serde_json::Value = serde_json::from_slice(spec_json)
+        .map_err(|e| err(format!("{}: spec json: {e}", g.full_name)))?;
+    let canonical = if g.platform == "ruby" {
+        format!("{}-{}", g.name, g.version)
+    } else {
+        format!("{}-{}-{}", g.name, g.version, g.platform)
+    };
+    if spec["name"].as_str() != Some(g.name.as_str())
+        || spec["version"].as_str() != Some(g.version.as_str())
+        || spec["platform"].as_str() != Some(g.platform.as_str())
+        || g.full_name != canonical
+    {
+        return Err(err(format!(
+            "{}: embedded gemspec disagrees with the plan ({} {} {})",
+            g.full_name, spec["name"], spec["version"], spec["platform"]
+        )));
+    }
+    let executables = spec["executables"]
+        .as_array()
+        .map(|exes| {
+            exes.iter()
+                .filter_map(|e| e.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    // A spec that does not say is treated as native: the hermetic build is
+    // the safe side of the choice `install_gem` makes.
+    let native = spec["extensions"]
+        .as_array()
+        .is_none_or(|extensions| !extensions.is_empty());
+    Ok((executables, native))
 }
 
 /// Fetch one planned gem into the artifact cache, or find it there, verified
@@ -1045,36 +1095,7 @@ fn verify_gem(
             String::from_utf8_lossy(&out.stderr).trim()
         )));
     }
-    let spec: serde_json::Value = serde_json::from_slice(&out.stdout)
-        .map_err(|e| err(format!("{}: spec json: {e}", g.full_name)))?;
-    let canonical = if g.platform == "ruby" {
-        format!("{}-{}", g.name, g.version)
-    } else {
-        format!("{}-{}-{}", g.name, g.version, g.platform)
-    };
-    if spec["name"].as_str() != Some(g.name.as_str())
-        || spec["version"].as_str() != Some(g.version.as_str())
-        || spec["platform"].as_str() != Some(g.platform.as_str())
-        || g.full_name != canonical
-    {
-        return Err(err(format!(
-            "{}: embedded gemspec disagrees with the plan ({} {} {})",
-            g.full_name, spec["name"], spec["version"], spec["platform"]
-        )));
-    }
-    let executables = spec["executables"]
-        .as_array()
-        .map(|exes| {
-            exes.iter()
-                .filter_map(|e| e.as_str().map(str::to_string))
-                .collect()
-        })
-        .unwrap_or_default();
-    // A spec that does not say is treated as native: the hermetic build is
-    // the safe side of the choice `install_gem` makes.
-    let native = spec["extensions"]
-        .as_array()
-        .is_none_or(|extensions| !extensions.is_empty());
+    let (executables, native) = spec_matches_plan(g, &out.stdout)?;
     Ok((lease, executables, native))
 }
 
@@ -1936,5 +1957,216 @@ mod tests {
         assert!(!temp.0.join("Gemfile.lock").exists());
         std::fs::write(temp.0.join("Gemfile.lock"), "").unwrap();
         super::require_lock(&project).unwrap();
+    }
+}
+
+/// Offline tests for the two rubygems.org checks (#348): the version reply
+/// that supplies a digest, and the embedded gemspec that must name the
+/// planned coordinate before a downloaded `.gem` is installed.
+#[cfg(test)]
+mod rubygems_check_tests {
+    use super::*;
+
+    const SHA: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    fn api_reply(number: &str, platform: &str) -> String {
+        serde_json::json!({
+            "name": "racc", "number": number, "platform": platform, "sha": SHA,
+            "gem_uri": format!("https://rubygems.org/gems/racc-{number}.gem"),
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn an_api_reply_for_another_version_is_refused() {
+        let error =
+            digest_from_api_reply("racc-1.8.1", "1.8.1", "ruby", &api_reply("1.8.0", "ruby"))
+                .unwrap_err()
+                .to_string();
+        assert_eq!(error, "racc-1.8.1: api returned \"1.8.0\"-\"ruby\" instead");
+    }
+
+    #[test]
+    fn an_api_reply_for_another_platform_is_refused() {
+        // The racc 1.8.1 case that motivated the platform query: the bare
+        // endpoint answers with the java gem, whose sha is not the ruby one.
+        let error =
+            digest_from_api_reply("racc-1.8.1", "1.8.1", "ruby", &api_reply("1.8.1", "java"))
+                .unwrap_err()
+                .to_string();
+        assert_eq!(error, "racc-1.8.1: api returned \"1.8.1\"-\"java\" instead");
+    }
+
+    #[test]
+    fn an_api_reply_with_no_version_or_platform_field_is_refused() {
+        for body in [
+            r#"{"sha": "aa"}"#,
+            r#"{"number": null, "platform": "ruby", "sha": "aa"}"#,
+            r#"{"number": 1.81, "platform": "ruby", "sha": "aa"}"#,
+            r#"[]"#,
+        ] {
+            let error = digest_from_api_reply("racc-1.8.1", "1.8.1", "ruby", body)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.starts_with("racc-1.8.1: api returned ") && error.ends_with(" instead"),
+                "{body}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_api_reply_without_a_string_sha_is_refused() {
+        for sha in ["null", "123", "[]", "{}"] {
+            let body = format!(r#"{{"number": "1.8.1", "platform": "ruby", "sha": {sha}}}"#);
+            let error = digest_from_api_reply("racc-1.8.1", "1.8.1", "ruby", &body)
+                .unwrap_err()
+                .to_string();
+            assert_eq!(error, "racc-1.8.1: api has no sha", "{sha}");
+        }
+        let body = r#"{"number": "1.8.1", "platform": "ruby"}"#;
+        let error = digest_from_api_reply("racc-1.8.1", "1.8.1", "ruby", body)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(error, "racc-1.8.1: api has no sha");
+    }
+
+    #[test]
+    fn an_api_reply_that_is_not_json_is_refused() {
+        let error = digest_from_api_reply("racc-1.8.1", "1.8.1", "ruby", "<html>")
+            .unwrap_err()
+            .to_string();
+        assert!(error.starts_with("racc-1.8.1: api json: "), "{error}");
+    }
+
+    #[test]
+    fn control_a_matching_api_reply_yields_its_sha() {
+        let sha = digest_from_api_reply("racc-1.8.1", "1.8.1", "ruby", &api_reply("1.8.1", "ruby"))
+            .unwrap();
+        assert_eq!(sha, SHA);
+        // A platform-qualified coordinate matches its own variant.
+        let body = api_reply("1.18.10", "x86_64-linux");
+        let sha = digest_from_api_reply(
+            "nokogiri-1.18.10-x86_64-linux",
+            "1.18.10",
+            "x86_64-linux",
+            &body,
+        )
+        .unwrap();
+        assert_eq!(sha, SHA);
+    }
+
+    fn gem(name: &str, version: &str, platform: &str, full_name: &str) -> RubyGem {
+        RubyGem {
+            name: name.into(),
+            version: version.into(),
+            platform: platform.into(),
+            full_name: full_name.into(),
+            sha256: SHA.into(),
+            digest_from_api: false,
+        }
+    }
+
+    fn spec(name: &str, version: &str, platform: &str) -> Vec<u8> {
+        serde_json::json!({
+            "name": name, "version": version, "platform": platform,
+            "executables": ["rake"], "extensions": [],
+        })
+        .to_string()
+        .into_bytes()
+    }
+
+    #[test]
+    fn a_gemspec_naming_another_gem_version_or_platform_is_refused() {
+        let planned = gem("rake", "13.2.1", "ruby", "rake-13.2.1");
+        for (name, version, platform, shown) in [
+            ("rack", "13.2.1", "ruby", "\"rack\" \"13.2.1\" \"ruby\""),
+            ("rake", "13.2.0", "ruby", "\"rake\" \"13.2.0\" \"ruby\""),
+            ("rake", "13.2.1", "java", "\"rake\" \"13.2.1\" \"java\""),
+            ("Rake", "13.2.1", "ruby", "\"Rake\" \"13.2.1\" \"ruby\""),
+        ] {
+            let error = spec_matches_plan(&planned, &spec(name, version, platform))
+                .unwrap_err()
+                .to_string();
+            assert_eq!(
+                error,
+                format!("rake-13.2.1: embedded gemspec disagrees with the plan ({shown})"),
+            );
+        }
+        // Fields missing from the spec read as null and disagree too.
+        let error = spec_matches_plan(&planned, br#"{"name": "rake"}"#)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            error,
+            "rake-13.2.1: embedded gemspec disagrees with the plan (\"rake\" null null)"
+        );
+    }
+
+    #[test]
+    fn a_plan_full_name_that_is_not_the_canonical_spelling_is_refused() {
+        // The gemspec agrees with name/version/platform, but the download
+        // URL is built from full_name, so it must be the canonical spelling.
+        for (platform, full_name) in [
+            ("ruby", "rake-13.2.1-ruby"),
+            ("ruby", "rake-13.2.0"),
+            ("ruby", "rack-13.2.1"),
+            ("x86_64-linux", "rake-13.2.1"),
+            ("x86_64-linux", "rake-13.2.1-java"),
+        ] {
+            let planned = gem("rake", "13.2.1", platform, full_name);
+            let error = spec_matches_plan(&planned, &spec("rake", "13.2.1", platform))
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.starts_with(&format!(
+                    "{full_name}: embedded gemspec disagrees with the plan ("
+                )),
+                "{full_name}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_gemspec_that_is_not_json_is_refused() {
+        let planned = gem("rake", "13.2.1", "ruby", "rake-13.2.1");
+        let error = spec_matches_plan(&planned, b"not json")
+            .unwrap_err()
+            .to_string();
+        assert!(error.starts_with("rake-13.2.1: spec json: "), "{error}");
+    }
+
+    #[test]
+    fn control_a_matching_gemspec_yields_executables_and_the_native_flag() {
+        let planned = gem("rake", "13.2.1", "ruby", "rake-13.2.1");
+        let (executables, native) =
+            spec_matches_plan(&planned, &spec("rake", "13.2.1", "ruby")).unwrap();
+        assert_eq!(executables, ["rake"]);
+        assert!(!native, "an empty extensions list is pure ruby");
+
+        let qualified = gem(
+            "nokogiri",
+            "1.18.10",
+            "x86_64-linux",
+            "nokogiri-1.18.10-x86_64-linux",
+        );
+        let body = serde_json::json!({
+            "name": "nokogiri", "version": "1.18.10", "platform": "x86_64-linux",
+            "executables": ["nokogiri", 7], "extensions": ["ext/nokogiri/extconf.rb"],
+        })
+        .to_string();
+        let (executables, native) = spec_matches_plan(&qualified, body.as_bytes()).unwrap();
+        assert_eq!(
+            executables,
+            ["nokogiri"],
+            "a non-string executable is dropped"
+        );
+        assert!(native);
+
+        // A spec that does not list extensions at all is treated as native.
+        let body = br#"{"name": "rake", "version": "13.2.1", "platform": "ruby"}"#;
+        let (executables, native) = spec_matches_plan(&planned, body).unwrap();
+        assert!(executables.is_empty());
+        assert!(native);
     }
 }

@@ -34,4 +34,3 @@ fn 170 src/tailors/node/project.rs::project_node_env_recorded
 fn 163 src/tailors/python/build.rs::build_sdist_wheel_at_depth
 fn 157 src/tailors/python/env.rs::realize_env_at_depth
 fn 220 src/tailors/python/inputs.rs::read_plan
-fn 154 src/tailors/ruby/mod.rs::plan_ruby
