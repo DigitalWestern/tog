@@ -88,6 +88,7 @@ Nothing queued; the next item comes from "Open work" below.
   - #349 product and CI problems found by the audit.
   - #350 tests: duplicate and trivial tests to delete or merge, and ignored tests to promote.
   - #355 store: a path inside a local object is treated as foreign during closure import (from the #354 review).
+  - #359 elixir: Hex metadata cross-check matches substrings, not the top-level app/version (from the #358 review).
 - **Quality review of 2026-09-24 (#264).** A whole-codebase review after
   the 09-20 to 09-24 run. #264 holds the work order and the overall verdict.
   Each line is one issue and one PR, in order:
