@@ -579,6 +579,116 @@ wheels = [{ url = "https://files.pythonhosted.org/six.whl", hash = "sha256:bbbbb
     }
 
     #[test]
+    fn uv_lock_file_without_a_sha256_hash_is_refused() {
+        // #348: every file a uv.lock names must carry a sha256, or there is
+        // nothing to verify the download against. Each shape below lacks
+        // one, and each is refused with the same message.
+        let base = r#"[[package]]
+name = "six"
+version = "1.17.0"
+source = { registry = "https://pypi.org/simple" }
+"#;
+        for (wheel, why) in [
+            (
+                r#"{ url = "https://files.pythonhosted.org/six.whl" }"#,
+                "no hash",
+            ),
+            (
+                r#"{ url = "https://files.pythonhosted.org/six.whl", hash = "md5:abcdef" }"#,
+                "md5 hash",
+            ),
+            (
+                r#"{ url = "https://files.pythonhosted.org/six.whl", hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }"#,
+                "bare hex without the sha256: prefix",
+            ),
+            (
+                r#"{ url = "https://files.pythonhosted.org/six.whl", hash = "SHA256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }"#,
+                "uppercase algorithm prefix",
+            ),
+            (
+                r#"{ url = "https://files.pythonhosted.org/six.whl", hash = 42 }"#,
+                "hash is not a string",
+            ),
+            (
+                r#"{ url = "https://files.pythonhosted.org/six.whl", hash = "sha256:" }"#,
+                "empty digest",
+            ),
+            (
+                r#"{ url = "https://files.pythonhosted.org/six.whl", hash = "sha256:aaaaaaaa" }"#,
+                "short digest",
+            ),
+            (
+                r#"{ url = "https://files.pythonhosted.org/six.whl", hash = "sha256:zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz" }"#,
+                "non-hex digest",
+            ),
+            (
+                r#"{ hash = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }"#,
+                "no url",
+            ),
+        ] {
+            let error = parse_uv_lock(&format!("{base}wheels = [{wheel}]\n"))
+                .expect_err(why)
+                .to_string();
+            assert_eq!(
+                error, "uv.lock six wheel lacks a URL and sha256 hash",
+                "{why}"
+            );
+        }
+        let error = parse_uv_lock(&format!(
+            "{base}sdist = {{ url = \"https://files.pythonhosted.org/six.tar.gz\" }}\n"
+        ))
+        .unwrap_err()
+        .to_string();
+        assert_eq!(error, "uv.lock six.sdist lacks a URL and sha256 hash");
+    }
+
+    #[test]
+    fn uv_lock_file_tables_of_the_wrong_shape_are_refused() {
+        let base = r#"[[package]]
+name = "six"
+version = "1.17.0"
+source = { registry = "https://pypi.org/simple" }
+"#;
+        for (tail, message) in [
+            (
+                "sdist = \"not a table\"\n",
+                "uv.lock six.sdist is not a table",
+            ),
+            (
+                "wheels = \"not an array\"\n",
+                "uv.lock six.wheels is not an array",
+            ),
+            (
+                "wheels = [\"not a table\"]\n",
+                "uv.lock six wheel is not a table",
+            ),
+        ] {
+            let error = parse_uv_lock(&format!("{base}{tail}"))
+                .expect_err(message)
+                .to_string();
+            assert_eq!(error, message);
+        }
+    }
+
+    #[test]
+    fn uv_lock_hashes_are_lowercased_and_filenames_drop_query_strings() {
+        let packages = parse_uv_lock(
+            r#"[[package]]
+name = "six"
+version = "1.17.0"
+source = { registry = "https://pypi.org/simple" }
+wheels = [{ url = "https://files.pythonhosted.org/p/six-1.17.0-py3-none-any.whl?x=1#frag", hash = "sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" }]
+"#,
+        )
+        .unwrap();
+        let file = &packages[0].files[0];
+        assert_eq!(file.hash, "a".repeat(64));
+        assert_eq!(file.filename, "six-1.17.0-py3-none-any.whl");
+        assert!(file.url.ends_with("?x=1#frag"));
+        assert!(matches!(file.kind, ArtifactKind::Wheel));
+    }
+
+    #[test]
     fn uv_lock_project_root_may_omit_a_version() {
         let packages = parse_uv_lock(
             r#"[[package]]
