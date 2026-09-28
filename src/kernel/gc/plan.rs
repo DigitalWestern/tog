@@ -409,3 +409,299 @@ pub(super) fn report_plan<W: Write>(plan: &SweepPlan, out: &mut W) -> io::Result
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod plan_tests {
+    use super::super::tests::TempStore;
+    use super::*;
+    use crate::kernel::activity::ActivityMode;
+    use std::time::UNIX_EPOCH;
+
+    /// Every fixture's mtime is a whole second counted from here, and every
+    /// plan runs at a frozen `now` counted from the same place, so each age
+    /// below is exact rather than "roughly a day, give or take the test".
+    const T0: u64 = 1_700_000_000;
+
+    fn at(seconds: u64) -> SystemTime {
+        UNIX_EPOCH + Duration::from_secs(T0 + seconds)
+    }
+
+    /// A directory holding one five-byte file, its mtime set last (writing
+    /// the file would bump it) to `T0 + seconds`.
+    fn entry(path: &Path, seconds: u64) -> PathBuf {
+        fs::create_dir_all(path).unwrap();
+        fs::write(path.join("payload"), b"bytes").unwrap();
+        fs::File::open(path)
+            .unwrap()
+            .set_modified(at(seconds))
+            .unwrap();
+        path.to_path_buf()
+    }
+
+    fn forest(components: &[&str]) -> store::ProjectionRef {
+        store::ProjectionRef::new(
+            store::ProjectionBase::Forests,
+            components.iter().map(|c| (*c).into()).collect(),
+        )
+        .unwrap()
+    }
+
+    fn backup(name: &str) -> store::ProjectionRef {
+        store::ProjectionRef::new(store::ProjectionBase::Backups, vec![name.into()]).unwrap()
+    }
+
+    /// Register one durable root record claiming `projections`. A sweep
+    /// needs a registry to read, so even an unclaimed fixture registers one.
+    fn claim(temp: &TempStore, projections: Vec<store::ProjectionRef>) {
+        let store = temp.store();
+        let project = temp.root.join("project");
+        fs::create_dir_all(&project).unwrap();
+        let project = project.canonicalize().unwrap();
+        store
+            .register_root_record(store::RootRecord {
+                key: Store::root_key(&project).unwrap(),
+                project_path: project,
+                objects: BTreeSet::new(),
+                projections: projections.into_iter().collect(),
+                updated: 1,
+            })
+            .unwrap();
+    }
+
+    /// The real read and validate phases, with the snapshot's decision time
+    /// frozen at `now`. `read_options` and `plan_options` differ only in the
+    /// test of the `project` gate, which needs a snapshot that *has*
+    /// projections planned by a sweep that must ignore them.
+    fn plan_at(
+        store: &Store,
+        read_options: &Options,
+        plan_options: &Options,
+        now: SystemTime,
+    ) -> SweepPlan {
+        let activity = store.activity(ActivityMode::Exclusive).unwrap();
+        let mut out = Vec::new();
+        let mut snapshot =
+            read(store, &activity, read_options, &BTreeMap::new(), &mut out).unwrap();
+        snapshot.now = now;
+        let validated = validate(&snapshot, plan_options).unwrap();
+        plan(&validated, plan_options).unwrap()
+    }
+
+    fn removed(plan: &SweepPlan, counter: Counter) -> Vec<String> {
+        let mut displays: Vec<String> = plan
+            .removals
+            .iter()
+            .filter(|removal| removal.counter == counter)
+            .map(|removal| removal.display.clone())
+            .collect();
+        displays.sort();
+        displays
+    }
+
+    fn sorted(mut lines: Vec<String>) -> Vec<String> {
+        lines.sort();
+        lines
+    }
+
+    fn project(keep_days: u64) -> Options {
+        Options {
+            keep_days,
+            project: true,
+            ..Options::default()
+        }
+    }
+
+    const WINDOW: u64 = STAGE_WINDOW.as_secs();
+
+    /// An interrupted stage is removed once it is older than the stage
+    /// window, and not a second sooner: at exactly the window it is kept.
+    /// `--keep-days` does not move that line in either direction.
+    #[test]
+    fn a_stage_older_than_the_stage_window_is_planned_and_a_younger_one_is_not() {
+        let temp = TempStore::new("plan-stage");
+        let store = temp.store();
+        let stage = store.stage().unwrap();
+        entry(&stage, 0);
+        claim(&temp, Vec::new());
+        let stale = format!("stale stage {} (5 B)", stage.display());
+
+        for keep_days in [0, 30, 365] {
+            let options = Options::keep_days(keep_days);
+            let plan = plan_at(&store, &options, &options, at(WINDOW + 1));
+            assert_eq!(
+                removed(&plan, Counter::Stages),
+                std::slice::from_ref(&stale)
+            );
+            assert_eq!(plan.removals.len(), 1);
+            assert_eq!(plan.report().stages, 1);
+            assert_eq!(plan.report().freed_bytes, 5);
+            assert!(plan.skips.is_empty(), "{:?}", plan.skips);
+
+            for now in [WINDOW, WINDOW - 1, 60 * 60, 0] {
+                let plan = plan_at(&store, &options, &options, at(now));
+                assert!(
+                    plan.removals.is_empty(),
+                    "a stage {now}s old was planned with --keep-days {keep_days}"
+                );
+                assert_eq!(plan.report(), Report::default());
+            }
+        }
+    }
+
+    /// Forest claims, in every direction `related` recognises, and the one
+    /// it must not: a sibling that merely shares a name prefix.
+    #[test]
+    fn a_claimed_forest_is_skipped_and_only_a_stale_unclaimed_one_is_removed() {
+        let temp = TempStore::new("plan-forests");
+        let store = temp.store();
+        let forests = store.root.join("forests");
+        // Claimed exactly.
+        let exact = entry(&forests.join("k1/exact"), 0);
+        // Claimed through an ancestor: the record names the whole project.
+        let below = entry(&forests.join("k2/node_modules"), 0);
+        // Claimed through a descendant: the record names a path inside it.
+        let above = entry(&forests.join("k3/hex-deps/deps/jason"), 0);
+        let above = above.parent().unwrap().parent().unwrap().to_path_buf();
+        fs::File::open(&above).unwrap().set_modified(at(0)).unwrap();
+        // `proj` is claimed; `proj2` shares its name as a string prefix only.
+        let proj = entry(&forests.join("k4/proj"), 0);
+        let proj2 = entry(&forests.join("k4/proj2"), 0);
+        // Unclaimed: stale, exactly at the window, and fresh.
+        let stale = entry(&forests.join("k5/stale"), 0);
+        let boundary = entry(&forests.join("k5/boundary"), 1);
+        let fresh = entry(&forests.join("k5/fresh"), WINDOW - 60 * 60);
+        claim(
+            &temp,
+            vec![
+                forest(&["k1", "exact"]),
+                forest(&["k2"]),
+                forest(&["k3", "hex-deps", "deps"]),
+                forest(&["k4", "proj"]),
+            ],
+        );
+
+        // Forest age is the stage window, whatever `--keep-days` says.
+        for keep_days in [0, 30] {
+            let options = project(keep_days);
+            let plan = plan_at(&store, &options, &options, at(WINDOW + 1));
+            assert_eq!(
+                removed(&plan, Counter::Forests),
+                sorted(vec![
+                    format!("stale forest {} (5 B)", proj2.display()),
+                    format!("stale forest {} (5 B)", stale.display()),
+                ]),
+                "--keep-days {keep_days}"
+            );
+            assert_eq!(plan.report().forests, 2);
+            assert_eq!(
+                sorted(plan.skips.clone()),
+                sorted(
+                    [&exact, &below, &above, &proj]
+                        .iter()
+                        .map(|path| format!(
+                            "forest {} is claimed by a surviving root record",
+                            path.display()
+                        ))
+                        .collect()
+                )
+            );
+            for kept in [&boundary, &fresh] {
+                let name = kept.display().to_string();
+                assert!(
+                    !plan.removals.iter().any(|r| r.display.contains(&name))
+                        && !plan.skips.iter().any(|s| s.contains(&name)),
+                    "{name} was planned or narrated"
+                );
+            }
+        }
+    }
+
+    /// Backups: claimed ones are skipped, and an unclaimed one goes only
+    /// once it is older than `--keep-days`, which moves the line.
+    #[test]
+    fn an_unclaimed_backup_is_removed_only_past_keep_days_and_a_claimed_one_is_skipped() {
+        let temp = TempStore::new("plan-backups");
+        let store = temp.store();
+        let backups = store.root.join("backups");
+        const DAY: u64 = 24 * 60 * 60;
+        let claimed = entry(&backups.join("key-node_modules"), 0);
+        let sibling = entry(&backups.join("key-node_modules2"), 0);
+        let old = entry(&backups.join("old"), 0);
+        let boundary = entry(&backups.join("boundary"), 1);
+        let young = entry(&backups.join("young"), 2 * DAY);
+        claim(&temp, vec![backup("key-node_modules")]);
+        let now = at(3 * DAY + 1);
+        let gone = |paths: &[&PathBuf]| -> Vec<String> {
+            sorted(
+                paths
+                    .iter()
+                    .map(|path| format!("backup {} (5 B)", path.display()))
+                    .collect(),
+            )
+        };
+        let skip = format!(
+            "backup {} is claimed by a surviving root record",
+            claimed.display()
+        );
+
+        // keep_days 3: `old` is one second past it, `boundary` exactly at it.
+        let plan = plan_at(&store, &project(3), &project(3), now);
+        assert_eq!(removed(&plan, Counter::Backups), gone(&[&old, &sibling]));
+        assert_eq!(plan.report().backups, 2);
+        assert_eq!(plan.skips, std::slice::from_ref(&skip));
+
+        // A longer keep window keeps them all; a shorter one takes `young`.
+        let plan = plan_at(&store, &project(4), &project(4), now);
+        assert_eq!(removed(&plan, Counter::Backups), Vec::<String>::new());
+        assert_eq!(plan.skips, std::slice::from_ref(&skip));
+        let plan = plan_at(&store, &project(1), &project(1), now);
+        assert_eq!(
+            removed(&plan, Counter::Backups),
+            gone(&[&old, &sibling, &boundary, &young])
+        );
+        assert_eq!(plan.skips, [skip]);
+        assert!(claimed.is_dir(), "planning removed something");
+    }
+
+    /// Forests and backups are the project sweep's business. A snapshot
+    /// that has read them is still planned without them unless the sweep
+    /// was asked for `--project`.
+    #[test]
+    fn forests_and_backups_are_planned_only_for_a_project_sweep() {
+        let temp = TempStore::new("plan-project-gate");
+        let store = temp.store();
+        let forest = entry(&store.root.join("forests/k/stale"), 0);
+        let backup = entry(&store.root.join("backups/stale"), 0);
+        // A legacy sibling namespace, whose note is project-sweep output too.
+        fs::create_dir_all(store.root.parent().unwrap().join("forests")).unwrap();
+        claim(&temp, Vec::new());
+        let now = at(WINDOW + 1);
+
+        let plan = plan_at(&store, &project(0), &Options::keep_days(0), now);
+        assert!(
+            plan.removals.is_empty(),
+            "{:?}",
+            removed(&plan, Counter::Forests)
+        );
+        assert!(plan.skips.is_empty(), "{:?}", plan.skips);
+        assert!(plan.notes.is_empty(), "{:?}", plan.notes);
+        assert_eq!(plan.report(), Report::default());
+
+        let plan = plan_at(&store, &project(0), &project(0), now);
+        assert_eq!(
+            removed(&plan, Counter::Forests),
+            [format!("stale forest {} (5 B)", forest.display())]
+        );
+        assert_eq!(
+            removed(&plan, Counter::Backups),
+            [format!("backup {} (5 B)", backup.display())]
+        );
+        assert_eq!(
+            plan.notes,
+            [format!(
+                "legacy project projections under {} are shared by sibling stores",
+                store.root.parent().unwrap().display()
+            )]
+        );
+    }
+}

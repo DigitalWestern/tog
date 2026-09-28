@@ -241,7 +241,7 @@ pub(super) fn migrate_metadata_locked<W: Write>(
             // One line, one decision: the id to drop, or the file to
             // restore. The reason is kept because it is what a backup or a
             // bug report needs.
-            let (message, fix) = if store::is_object_id(stem) {
+            let (message, fix) = if drop_object_accepts(store, file, stem) {
                 (
                     format!(
                         "store record meta/{file} is unusable ({reason}); the next sync \
@@ -255,16 +255,13 @@ pub(super) fn migrate_metadata_locked<W: Write>(
                         "store record meta/{file} is unusable ({reason}); restore it from a \
                          backup instead if you have one"
                     ),
-                    crate::kernel::ui::shell_line(&[
-                        "rm",
-                        &store.root.join("meta").join(file).display().to_string(),
-                    ]),
+                    remove_record_line(store, file),
                 )
             };
             out.write_all(plain_advisory(&message, &fix).as_bytes())?;
             continue;
         }
-        let advice = if store::is_object_id(stem) {
+        let advice = if drop_object_accepts(store, file, stem) {
             format!(
                 "Drop it with `tog gc --drop-object {stem}` (the next sync that needs the \
                  object rebuilds it), or restore the file from a backup."
@@ -604,6 +601,34 @@ pub(super) fn certification_covers_legacy_retention(
         }
     }
     Ok(())
+}
+
+/// Whether `tog gc --drop-object {stem}` clears this record: the id must be
+/// one drop accepts, and the record a regular file (drop refuses a symlink
+/// or directory under meta/, so naming it would send the operator in a
+/// circle). A legacy id (a label with `..`) counts: deleting its record by
+/// hand would leave an object the sweep refuses to read.
+fn drop_object_accepts(store: &Store, file: &str, stem: &str) -> bool {
+    (store::is_object_id(stem) || store::is_legacy_object_id(stem))
+        // The same rule drop applies: a regular file, or gone (a record that
+        // vanished since the index was read is no obstacle to the drop).
+        && match fs::symlink_metadata(store.root.join("meta").join(file)) {
+            Ok(metadata) => metadata.file_type().is_file(),
+            Err(error) => error.kind() == io::ErrorKind::NotFound,
+        }
+}
+
+/// The shell line that removes an unusable record: `rm`, or `rm -r` for a
+/// directory (which `rm -r` removes; a symlink is removed, not followed).
+pub(super) fn remove_record_line(store: &Store, file: &str) -> String {
+    let path = store.root.join("meta").join(file);
+    let is_dir = fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.is_dir());
+    let path = path.display().to_string();
+    if is_dir {
+        crate::kernel::ui::shell_line(&["rm", "-r", &path])
+    } else {
+        crate::kernel::ui::shell_line(&["rm", &path])
+    }
 }
 
 /// Object ids embedded anywhere in a legacy identity's inputs. This is the

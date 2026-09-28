@@ -268,13 +268,13 @@ mod tests {
     use sha2::Digest;
     use std::collections::BTreeMap;
 
-    struct TempStore {
-        root: PathBuf,
+    pub(super) struct TempStore {
+        pub(super) root: PathBuf,
         _dir: TempDir,
     }
 
     impl TempStore {
-        fn new(label: &str) -> Self {
+        pub(super) fn new(label: &str) -> Self {
             let dir = TempDir::named(&format!("gc-{label}"));
             // One level down, so the store's parent (where the legacy
             // shared `forests/` and `backups/` live) is private to the test
@@ -285,14 +285,14 @@ mod tests {
             }
             Self { root, _dir: dir }
         }
-        fn store(&self) -> Store {
+        pub(super) fn store(&self) -> Store {
             Store {
                 root: self.root.clone(),
             }
         }
     }
 
-    fn test_identity(name: &str, input: Option<&str>) -> Identity {
+    pub(super) fn test_identity(name: &str, input: Option<&str>) -> Identity {
         crate::kernel::objmeta::register_test_kinds();
         Identity {
             kind: "test".into(),
@@ -1334,7 +1334,7 @@ mod tests {
     // =======================================================================
 
     /// Register `project` as a durable root/2 record naming `objects`.
-    fn register_objects(store: &Store, project: &Path, objects: &[&str]) -> String {
+    pub(super) fn register_objects(store: &Store, project: &Path, objects: &[&str]) -> String {
         fs::create_dir_all(project).unwrap();
         let project = project.canonicalize().unwrap();
         let key = store::Store::root_key(&project).unwrap();
@@ -3327,7 +3327,7 @@ mod tests {
     /// Publish an object under an id its own identity does not produce.
     /// The object directory is read-only exactly as a real commit leaves it,
     /// so another object can still name this one as a dependency.
-    fn wedge(store: &Store, name: &str) -> String {
+    pub(super) fn wedge(store: &Store, name: &str) -> String {
         let identity = test_identity(name, None);
         let id = mismatched_id(&identity.object_id());
         let object = store.object_path(&id);
