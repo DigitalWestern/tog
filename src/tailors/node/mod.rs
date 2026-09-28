@@ -563,6 +563,43 @@ pub(crate) fn validate_lock_path(path: &str) -> io::Result<()> {
     Ok(())
 }
 
+/// Refuse two package or link destinations that differ only in ASCII case,
+/// or a destination whose ancestor directory is another destination spelled
+/// differently. Each path is valid alone, but a case-insensitive filesystem
+/// (macOS by default) would put both in one directory: a link at
+/// `node_modules/Foo` and a package at `node_modules/foo/node_modules/bar`
+/// meet at `node_modules/foo`. A structural directory that is no
+/// destination (`node_modules`, a scope) is shared harmlessly.
+pub(crate) fn refuse_case_colliding_paths<'a>(
+    paths: impl IntoIterator<Item = &'a str>,
+) -> io::Result<()> {
+    let collision = |first: &str, second: &str| {
+        err(format!(
+            "lockfile paths {first} and {second} differ only in letter case; a case-insensitive filesystem would put both in one directory"
+        ))
+    };
+    let mut destinations = BTreeMap::<String, &str>::new();
+    let paths: Vec<&str> = paths.into_iter().collect();
+    for &path in &paths {
+        let other = *destinations
+            .entry(path.to_ascii_lowercase())
+            .or_insert(path);
+        if other != path {
+            return Err(collision(other, path));
+        }
+    }
+    for path in paths {
+        for (index, _) in path.match_indices('/') {
+            let prefix = &path[..index];
+            match destinations.get(&prefix.to_ascii_lowercase()) {
+                Some(&other) if other != prefix => return Err(collision(prefix, other)),
+                _ => {}
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Return the workspace importer and its importer-relative node_modules path.
 /// Root-importer paths return `None`.
 fn workspace_path(path: &str) -> Option<(&str, &str)> {
@@ -1053,7 +1090,7 @@ mod tests {
         }
     }
 
-    const TEST_SRI: &str =
+    pub(super) const TEST_SRI: &str =
         "sha512-m3HSJL1i83hdltRq0+o9czGb+8KJDKra4t/3JRXMui/CET1IEDrHK6nHYbdEaGL/uhPMbuF3AGkGxXTVpn3ETw==";
 
     /// A warm sync never downloads a package archive: nothing sits in the
@@ -2064,7 +2101,7 @@ mod tests {
         assert!(error.to_string().contains(foreign.triple()));
     }
 
-    fn lock(packages: &str) -> String {
+    pub(super) fn lock(packages: &str) -> String {
         format!(r#"{{"name":"x","lockfileVersion":3,"packages":{{"":{{"name":"x"}},{packages}}}}}"#)
     }
 
@@ -3289,6 +3326,114 @@ mod toolchain_tests {
                 "node on {}",
                 platform.triple()
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod lock_path_tests {
+    use super::*;
+
+    /// Every shape `validate_lock_path` refuses, with the exact message a
+    /// hostile or damaged package-lock.json key gets.
+    #[test]
+    fn malformed_lockfile_package_paths_are_refused_with_the_path() {
+        for path in [
+            // Traversal and dot names in a node_modules unit.
+            "node_modules/..",
+            "node_modules/../evil",
+            "node_modules/.",
+            "node_modules/.hidden",
+            "node_modules/a/node_modules/..",
+            // Empty segments, trailing slash, and a bare node_modules.
+            "",
+            "node_modules",
+            "node_modules/",
+            "node_modules//a",
+            "node_modules/a/",
+            "node_modules/a//node_modules/b",
+            // Absolute and backslash spellings.
+            "/node_modules/a",
+            "/etc/node_modules/a",
+            "node_modules/a\\b",
+            "node_modules/..\\evil",
+            // A unit that is not node_modules/<name>, or names node_modules.
+            "node_modules/a/b",
+            "node_modules/a/nested/b",
+            "node_modules/node_modules",
+            "node_modules/a b",
+            // Scopes without a name, and malformed scope names.
+            "node_modules/@s",
+            "node_modules/@s/",
+            "node_modules/@/a",
+            "node_modules/@.s/a",
+            "node_modules/@s/..",
+            "node_modules/@s/.a",
+            "node_modules/@s/node_modules",
+            "node_modules/@s/@t",
+            // Workspace prefixes that are not safe project-relative paths.
+            "evil",
+            "packages/lib",
+            "../x/node_modules/a",
+            "./x/node_modules/a",
+            "x/../node_modules/a",
+            "x//y/node_modules/a",
+            "x/.git/node_modules/a",
+            "x/node_modules/node_modules/a",
+            "a b/node_modules/c",
+            "x\\y/node_modules/a",
+            "packages/lib/node_modules/../evil",
+            "packages/lib/node_modules/a/b",
+        ] {
+            let error = validate_lock_path(path).expect_err(path);
+            assert_eq!(
+                error.to_string(),
+                format!("malformed lockfile package path: {path}")
+            );
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{path}");
+        }
+    }
+
+    #[test]
+    fn well_formed_lockfile_package_paths_are_accepted() {
+        for path in [
+            "node_modules/a",
+            "node_modules/a.b_c-d+e",
+            "node_modules/@s/a",
+            "node_modules/a/node_modules/b",
+            "node_modules/a/node_modules/@s/b",
+            "node_modules/@s/a/node_modules/b/node_modules/@t/c",
+            "packages/lib/node_modules/c",
+            "packages/lib/node_modules/@s/c/node_modules/d",
+            "@mono/lib/node_modules/a",
+            "tools/node_modules-shim/node_modules/c",
+            "x.y/node_modules/a",
+        ] {
+            validate_lock_path(path).unwrap_or_else(|error| panic!("{path}: {error}"));
+        }
+    }
+
+    /// The whole way through `plan_npm`: a malformed key is refused with
+    /// its exact path, not only matched by a substring.
+    #[test]
+    fn plan_npm_refuses_a_malformed_key_by_its_exact_path() {
+        for path in [
+            "node_modules/../evil",
+            "node_modules/@s",
+            "node_modules/a/b",
+        ] {
+            let lock = tests::lock(&format!(
+                r#""{path}":{{"version":"1","resolved":"https://r/a.tgz","integrity":"{}"}}"#,
+                tests::TEST_SRI
+            ));
+            let error = plan_npm(Platform::X86_64UnknownLinuxGnu, &lock)
+                .map(drop)
+                .unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                format!("malformed lockfile package path: {path}")
+            );
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         }
     }
 }

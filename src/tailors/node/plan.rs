@@ -48,6 +48,74 @@ pub(crate) fn is_github_archive_url(url: &str) -> bool {
             .is_some_and(|path| archive(path, "archive"))
 }
 
+/// Why tog will not fetch a locked tarball URL as written. Each importer
+/// words `NotHttps` its own way; `Credentials` never echoes the URL, since a
+/// `user:pass@` authority would copy the secret into the plan and into
+/// fetch errors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TarballUrlRefusal {
+    NotHttps,
+    Credentials,
+}
+
+pub(crate) const TARBALL_URL_CREDENTIALS: &str =
+    "tarball URL carries credentials (user:pass@ before its host); tog will not record them";
+
+/// A locked URL parsed the way the fetcher parses it (ureq, through the
+/// `url` crate), so the check here and the download there read one URL:
+/// `https:///u:p@host` has credentials to both. `None` when ureq could not
+/// request it at all.
+fn fetcher_url(url: &str) -> Option<ureq::RequestUrl> {
+    ureq::get(url).request_url().ok()
+}
+
+/// The refusal for a locked tarball URL, if any: tog never fetches from a
+/// URL with userinfo, and fetches https only. Credentials are checked
+/// first, so a credentialed http URL is refused without being echoed.
+pub(crate) fn tarball_url_refusal(url: &str) -> Option<TarballUrlRefusal> {
+    let Some(parsed) = fetcher_url(url) else {
+        return Some(TarballUrlRefusal::NotHttps);
+    };
+    let parsed = parsed.as_url();
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Some(TarballUrlRefusal::Credentials);
+    }
+    (parsed.scheme() != "https").then_some(TarballUrlRefusal::NotHttps)
+}
+
+/// The external-dependency detail for a refused tarball URL, if refused:
+/// `not_https` is the importer's own wording, followed by the redacted URL.
+pub(crate) fn tarball_url_detail(url: &str, not_https: &str) -> Option<String> {
+    Some(match tarball_url_refusal(url)? {
+        TarballUrlRefusal::NotHttps => format!("{not_https} {}", redact_url_userinfo(url)),
+        TarballUrlRefusal::Credentials => TARBALL_URL_CREDENTIALS.to_string(),
+    })
+}
+
+/// `text` for a message, with any URL userinfo replaced by `***`. Text the
+/// fetcher cannot parse is withheld whole when an `@` follows its `://`,
+/// since where its credentials end cannot be told; other text (a plain
+/// version) is returned as written.
+pub(crate) fn redact_url_userinfo(text: &str) -> String {
+    let Some(parsed) = fetcher_url(text) else {
+        return match text.split_once("://") {
+            Some((_, rest)) if rest.contains('@') => {
+                "<URL withheld: it may carry credentials>".to_string()
+            }
+            _ => text.to_string(),
+        };
+    };
+    let mut url = parsed.as_url().clone();
+    if url.username().is_empty() && url.password().is_none() {
+        return text.to_string();
+    }
+    let _ = url.set_username("***");
+    if url.password().is_some() {
+        let _ = url.set_password(Some("***"));
+    }
+    url.to_string()
+}
+
 /// Why a git dependency that is not pinned to a full commit cannot be
 /// realized. The wording is persisted verbatim, down to its trailing tag: it
 /// is recorded as `git-dependency` exception detail in closures and store
@@ -280,6 +348,7 @@ fn pinned_git_for_entry(
     name: &str,
     resolved: &str,
     entry: &serde_json::Value,
+    record: &mut impl FnMut(&str, &str, &str) -> io::Result<()>,
 ) -> io::Result<PinnedGit> {
     let pinned_git = explicit_git_source(resolved).or_else(|| {
         entry["integrity"]
@@ -291,20 +360,23 @@ fn pinned_git_for_entry(
     if pinned_git.is_none() {
         if let Some(detail) = git_dependency_detail(name, resolved) {
             if entry["optional"].as_bool() == Some(true) {
-                crate::kernel::policy::record(
-                    crate::kernel::policy::GIT_DEPENDENCY,
-                    path,
-                    &detail,
-                )?;
+                record(crate::kernel::policy::GIT_DEPENDENCY, path, &detail)?;
                 return Ok(PinnedGit::SkipOptional);
             }
             return Err(err(format!("{path}: {detail}")));
         }
     }
-    if pinned_git.is_none() && !resolved.starts_with("https://") {
-        return Err(err(format!(
-            "{path}: only https registry tarballs supported (v0), got {resolved}"
-        )));
+    match pinned_git.is_none().then(|| tarball_url_refusal(resolved)) {
+        Some(Some(TarballUrlRefusal::NotHttps)) => {
+            return Err(err(format!(
+                "{path}: only https registry tarballs supported (v0), got {}",
+                redact_url_userinfo(resolved)
+            )))
+        }
+        Some(Some(TarballUrlRefusal::Credentials)) => {
+            return Err(err(format!("{path}: {TARBALL_URL_CREDENTIALS}")))
+        }
+        _ => {}
     }
     Ok(PinnedGit::Resolved(pinned_git))
 }
@@ -315,6 +387,7 @@ fn entry_integrity(
     path: &str,
     entry: &serde_json::Value,
     pinned_git: &Option<crate::kernel::gitsrc::GitSource>,
+    record: &mut impl FnMut(&str, &str, &str) -> io::Result<()>,
 ) -> io::Result<String> {
     if pinned_git.is_some() {
         return Ok(String::new());
@@ -326,7 +399,7 @@ fn entry_integrity(
     })?;
     let digest = Digest::from_sri(integrity)?; // validate early
     if digest.algo() == "sha1" {
-        if let Err(policy_error) = crate::kernel::policy::record(
+        if let Err(policy_error) = record(
             crate::kernel::policy::WEAK_INTEGRITY,
             path,
             "sha1 integrity accepted and verified, but is cryptographically weak",
@@ -393,6 +466,22 @@ pub fn plan_npm_with(
     lock_json: &str,
     node_version: &str,
 ) -> io::Result<NpmPlan> {
+    plan_npm_recording(
+        platform,
+        lock_json,
+        node_version,
+        &mut crate::kernel::policy::record,
+    )
+}
+
+/// `plan_npm_with` recording exceptions through `record`, so a test can
+/// pass a policy of its own instead of the process one.
+fn plan_npm_recording(
+    platform: Platform,
+    lock_json: &str,
+    node_version: &str,
+    record: &mut impl FnMut(&str, &str, &str) -> io::Result<()>,
+) -> io::Result<NpmPlan> {
     let v: serde_json::Value =
         serde_json::from_str(lock_json).map_err(|e| err(format!("package-lock.json: {e}")))?;
     let lockfile_version = v["lockfileVersion"].as_u64().unwrap_or(0);
@@ -427,6 +516,9 @@ pub fn plan_npm_with(
     let mut paths: Vec<&String> = packages.keys().collect();
     paths.sort();
     let mut skipped: Vec<String> = Vec::new();
+    // Bundled packages are not fetched, but their parent's extraction
+    // still creates their directories.
+    let mut bundled: Vec<&str> = Vec::new();
     for path in paths {
         let entry = &packages[path];
         if path.is_empty() {
@@ -447,6 +539,7 @@ pub fn plan_npm_with(
         // parent's integrity hash) and carry no resolved/integrity of
         // their own; extraction of the parent materializes them.
         if entry["inBundle"].as_bool() == Some(true) {
+            bundled.push(path.as_str());
             continue;
         }
         if !entry_platform_compatible(platform, entry, path)? {
@@ -462,20 +555,26 @@ pub fn plan_npm_with(
             .as_str()
             .map(str::to_string)
             .unwrap_or_else(|| name_from_path(path));
-        let pinned_git = match pinned_git_for_entry(path, &name, resolved, entry)? {
+        let pinned_git = match pinned_git_for_entry(path, &name, resolved, entry, record)? {
             PinnedGit::Resolved(pinned_git) => pinned_git,
             PinnedGit::SkipOptional => {
                 skipped.push(format!("{path}/"));
                 continue;
             }
         };
-        let integrity = entry_integrity(path, entry, &pinned_git)?;
+        let integrity = entry_integrity(path, entry, &pinned_git, record)?;
         out.push(npm_package_from_entry(
             path, entry, resolved, pinned_git, integrity,
         ));
     }
     out.sort_by(|a, b| a.path.cmp(&b.path));
     links.sort_by(|a, b| a.path.cmp(&b.path));
+    refuse_case_colliding_paths(
+        out.iter()
+            .map(|package| package.path.as_str())
+            .chain(links.iter().map(|link| link.path.as_str()))
+            .chain(bundled),
+    )?;
     Ok(NpmPlan {
         node_version: node_version.to_string(),
         packages: out,
@@ -483,4 +582,389 @@ pub fn plan_npm_with(
         workspaces: workspace_dirs.into_iter().map(str::to_string).collect(),
         lock_source: "package-lock.json".into(),
     })
+}
+
+#[cfg(test)]
+mod lock_shape_tests {
+    use super::super::tests::{lock, TEST_SRI};
+    use super::*;
+
+    /// sha1 of twenty zero bytes, as an SRI: well-formed, and weak.
+    const SHA1_SRI: &str = "sha1-AAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+
+    fn entry(path: &str, resolved: &str, integrity: &str) -> String {
+        lock(&format!(
+            r#""{path}":{{"version":"1.0.0","resolved":"{resolved}","integrity":"{integrity}"}}"#
+        ))
+    }
+
+    fn refused(lock: &str) -> io::Error {
+        plan_npm(Platform::X86_64UnknownLinuxGnu, lock)
+            .map(drop)
+            .unwrap_err()
+    }
+
+    /// Inside an attribution a sha1 entry is accepted, verified by its
+    /// digest, and recorded as a weak-integrity exception on its lock path.
+    #[test]
+    fn sha1_integrity_is_accepted_and_recorded_inside_an_attribution() {
+        let _attribution_lock = crate::kernel::policy::attribution_test_lock();
+        let _attribution = crate::kernel::policy::Attribution::open("node").unwrap();
+        // An explicit permissive policy: TOG_STRICT=1 in the environment
+        // would otherwise refuse the exception this test expects recorded.
+        let permissive = crate::kernel::policy::Policy::default();
+        let shipped = crate::tailors::node::shipped_selection().unwrap();
+        let plan = plan_npm_recording(
+            Platform::X86_64UnknownLinuxGnu,
+            &entry("node_modules/a", "https://r/a.tgz", SHA1_SRI),
+            shipped.version("node").unwrap(),
+            &mut |kind: &str, subject: &str, detail: &str| {
+                crate::kernel::policy::record_with(&permissive, kind, subject, detail)
+            },
+        )
+        .unwrap();
+        assert_eq!(plan.packages.len(), 1);
+        assert_eq!(plan.packages[0].integrity, SHA1_SRI);
+        let exceptions = crate::kernel::policy::drain();
+        assert_eq!(exceptions.len(), 1, "{exceptions:?}");
+        assert_eq!(exceptions[0].kind, crate::kernel::policy::WEAK_INTEGRITY);
+        assert_eq!(exceptions[0].subject, "node_modules/a");
+        assert_eq!(
+            exceptions[0].detail,
+            "sha1 integrity accepted and verified, but is cryptographically weak"
+        );
+    }
+
+    /// With no attribution to record the exception into, the sha1 entry is
+    /// refused, carrying the policy's reason.
+    #[test]
+    fn sha1_integrity_is_refused_outside_any_attribution() {
+        let _attribution_lock = crate::kernel::policy::attribution_test_lock();
+        let error = refused(&entry("node_modules/a", "https://r/a.tgz", SHA1_SRI));
+        assert_eq!(
+            error.to_string(),
+            "unsupported integrity algorithm: sha1 (exception recorded outside any attribution)"
+        );
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+
+    /// A strong digest needs no attribution at all: nothing is recorded,
+    /// since a record here, outside any attribution, would have failed.
+    #[test]
+    fn sha512_integrity_records_nothing() {
+        let _attribution_lock = crate::kernel::policy::attribution_test_lock();
+        let plan = plan_npm(
+            Platform::X86_64UnknownLinuxGnu,
+            &entry("node_modules/a", "https://r/a.tgz", TEST_SRI),
+        )
+        .unwrap();
+        assert_eq!(plan.packages[0].integrity, TEST_SRI);
+    }
+
+    #[test]
+    fn non_https_registry_tarballs_are_refused() {
+        for resolved in [
+            "http://registry.npmjs.org/a/-/a-1.0.0.tgz",
+            "file:../a-1.0.0.tgz",
+            "ftp://r/a.tgz",
+            "https:///",
+            "not a url",
+        ] {
+            let error = refused(&entry("node_modules/a", resolved, TEST_SRI));
+            assert_eq!(
+                error.to_string(),
+                format!(
+                    "node_modules/a: only https registry tarballs supported (v0), got {resolved}"
+                )
+            );
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        }
+        let plan = plan_npm(
+            Platform::X86_64UnknownLinuxGnu,
+            &entry(
+                "node_modules/a",
+                "https://registry.npmjs.org/a/-/a-1.0.0.tgz",
+                TEST_SRI,
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            plan.packages[0].url,
+            "https://registry.npmjs.org/a/-/a-1.0.0.tgz"
+        );
+    }
+
+    /// A tarball URL with userinfo is refused without echoing it; an `@` in
+    /// the path (a scoped package) is not userinfo.
+    #[test]
+    fn a_tarball_url_carrying_credentials_is_refused() {
+        // The fetcher's parser skips the extra slash of `https:///` and sees
+        // the userinfo; credentials win over the scheme, so an http URL
+        // with a secret is not echoed either.
+        for resolved in [
+            "https://user:secret@r/a.tgz",
+            "https://token@r/a.tgz",
+            "https://user@r/a.tgz",
+            "https://:secret@r/a.tgz",
+            "https://u:secret@r?x#y",
+            "https:///user:secret@r/a.tgz",
+            "http://user:secret@r/a.tgz",
+            "HTTPS://user:secret@r/a.tgz",
+        ] {
+            let error = refused(&entry("node_modules/a", resolved, TEST_SRI));
+            assert_eq!(
+                error.to_string(),
+                "node_modules/a: tarball URL carries credentials (user:pass@ before its host); tog will not record them",
+                "{resolved}"
+            );
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        }
+        // An `@` after the authority, in a query or fragment, is not
+        // userinfo; an uppercase scheme is still https.
+        for resolved in [
+            "https://r?by=a@b",
+            "https://r#a@b",
+            "https://r/a.tgz?x=@y",
+            "https://r/@s/a.tgz",
+            "HTTPS://r/a.tgz",
+        ] {
+            let plan = plan_npm(
+                Platform::X86_64UnknownLinuxGnu,
+                &entry("node_modules/a", resolved, TEST_SRI),
+            )
+            .unwrap();
+            assert_eq!(plan.packages[0].url, resolved);
+        }
+        let scoped = "https://r/@s/a/-/a-1.0.0.tgz";
+        let plan = plan_npm(
+            Platform::X86_64UnknownLinuxGnu,
+            &entry("node_modules/@s/a", scoped, TEST_SRI),
+        )
+        .unwrap();
+        assert_eq!(plan.packages[0].url, scoped);
+    }
+
+    /// A URL the fetcher cannot parse is non-https, and shown withheld when
+    /// it might carry credentials.
+    #[test]
+    fn an_unparseable_credentialed_url_is_withheld() {
+        let error = refused(&entry("node_modules/a", "http://user:secret@", TEST_SRI));
+        assert_eq!(
+            error.to_string(),
+            "node_modules/a: only https registry tarballs supported (v0), got <URL withheld: it may carry credentials>"
+        );
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+
+    /// Messages show a URL with its userinfo replaced; a plain version and
+    /// a URL without userinfo are shown as written.
+    #[test]
+    fn url_userinfo_is_redacted_for_messages() {
+        for (text, shown) in [
+            ("https://user:secret@r/a.tgz", "https://***:***@r/a.tgz"),
+            ("https://user@r/a.tgz", "https://***@r/a.tgz"),
+            ("https:///user:secret@r/a.tgz", "https://***:***@r/a.tgz"),
+            (
+                "http://u:secret@r/a.tgz(p@1)",
+                "http://***:***@r/a.tgz(p@1)",
+            ),
+            (
+                "http://user:secret@",
+                "<URL withheld: it may carry credentials>",
+            ),
+            ("HTTPS://r/a.tgz", "HTTPS://r/a.tgz"),
+            ("https://r/@s/a.tgz", "https://r/@s/a.tgz"),
+            ("1.0.0(react@18.0.0)", "1.0.0(react@18.0.0)"),
+            ("file:../a@1.tgz", "file:../a@1.tgz"),
+        ] {
+            assert_eq!(redact_url_userinfo(text), shown, "{text}");
+        }
+    }
+
+    /// `node_modules/Foo` and `node_modules/foo` are distinct lock paths but
+    /// one directory on a case-insensitive filesystem; a link counts too.
+    #[test]
+    fn destinations_differing_only_in_case_are_refused() {
+        let pair = |first: &str, second: &str| {
+            lock(&format!(
+                r#""{first}":{{"version":"1.0.0","resolved":"https://r/a.tgz","integrity":"{TEST_SRI}"}},{second}"#
+            ))
+        };
+        let error = refused(&pair(
+            "node_modules/Foo",
+            &format!(
+                r#""node_modules/foo":{{"version":"1.0.0","resolved":"https://r/a.tgz","integrity":"{TEST_SRI}"}}"#
+            ),
+        ));
+        assert_eq!(
+            error.to_string(),
+            "lockfile paths node_modules/Foo and node_modules/foo differ only in letter case; a case-insensitive filesystem would put both in one directory"
+        );
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        let error = refused(&pair(
+            "node_modules/foo",
+            r#""packages/lib":{"version":"1.0.0"},"node_modules/FOO":{"resolved":"packages/lib","link":true}"#,
+        ));
+        assert_eq!(
+            error.to_string(),
+            "lockfile paths node_modules/foo and node_modules/FOO differ only in letter case; a case-insensitive filesystem would put both in one directory"
+        );
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        // An ancestor counts: the link's directory is the package's parent.
+        let error = refused(&pair(
+            "node_modules/foo/node_modules/bar",
+            r#""packages/lib":{"version":"1.0.0"},"node_modules/Foo":{"resolved":"packages/lib","link":true}"#,
+        ));
+        assert_eq!(
+            error.to_string(),
+            "lockfile paths node_modules/foo and node_modules/Foo differ only in letter case; a case-insensitive filesystem would put both in one directory"
+        );
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        // And the other way round: the package's parent spelled uppercase.
+        let error = refused(&pair(
+            "node_modules/Foo/node_modules/bar",
+            r#""packages/lib":{"version":"1.0.0"},"node_modules/foo":{"resolved":"packages/lib","link":true}"#,
+        ));
+        assert_eq!(
+            error.to_string(),
+            "lockfile paths node_modules/Foo and node_modules/foo differ only in letter case; a case-insensitive filesystem would put both in one directory"
+        );
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        // A bundled package is not fetched, but its directory is created.
+        let error = refused(&pair(
+            "node_modules/a/node_modules/foo",
+            &format!(
+                r#""node_modules/a":{{"version":"1.0.0","resolved":"https://r/a.tgz","integrity":"{TEST_SRI}"}},"node_modules/a/node_modules/Foo":{{"version":"1.0.0","inBundle":true}}"#
+            ),
+        ));
+        assert_eq!(
+            error.to_string(),
+            "lockfile paths node_modules/a/node_modules/foo and node_modules/a/node_modules/Foo differ only in letter case; a case-insensitive filesystem would put both in one directory"
+        );
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        // A scope directory that is no destination is shared harmlessly.
+        let plan = plan_npm(
+            Platform::X86_64UnknownLinuxGnu,
+            &pair(
+                "node_modules/@Scope/a",
+                &format!(
+                    r#""node_modules/@scope/b":{{"version":"1.0.0","resolved":"https://r/a.tgz","integrity":"{TEST_SRI}"}}"#
+                ),
+            ),
+        )
+        .unwrap();
+        let paths: Vec<&str> = plan.packages.iter().map(|p| p.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            vec!["node_modules/@Scope/a", "node_modules/@scope/b"]
+        );
+        // One spelling shared by a package and its nested child is fine.
+        let plan = plan_npm(
+            Platform::X86_64UnknownLinuxGnu,
+            &pair(
+                "node_modules/foo/node_modules/bar",
+                &format!(
+                    r#""node_modules/foo":{{"version":"1.0.0","resolved":"https://r/a.tgz","integrity":"{TEST_SRI}"}}"#
+                ),
+            ),
+        )
+        .unwrap();
+        assert_eq!(plan.packages.len(), 2);
+        let plan = plan_npm(
+            Platform::X86_64UnknownLinuxGnu,
+            &pair(
+                "node_modules/foo",
+                &format!(
+                    r#""node_modules/bar":{{"version":"1.0.0","resolved":"https://r/a.tgz","integrity":"{TEST_SRI}"}}"#
+                ),
+            ),
+        )
+        .unwrap();
+        assert_eq!(plan.packages.len(), 2);
+    }
+
+    /// Anything but lockfileVersion 2 or 3 is refused; a missing or
+    /// non-integer version reads as 0.
+    #[test]
+    fn unsupported_lockfile_versions_are_refused() {
+        for (version, shown) in [
+            ("1", "1"),
+            ("4", "4"),
+            ("0", "0"),
+            (r#""3""#, "0"),
+            ("3.0", "0"),
+            ("-3", "0"),
+            ("null", "0"),
+        ] {
+            let lock = format!(r#"{{"lockfileVersion":{version},"packages":{{}}}}"#);
+            let error = refused(&lock);
+            assert_eq!(
+                error.to_string(),
+                format!(
+                    "unsupported lockfileVersion {shown} (need 2 or 3; run npm install --package-lock-only with npm >= 7)"
+                ),
+                "{version}"
+            );
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        }
+        let error = refused(r#"{"packages":{}}"#);
+        assert_eq!(
+            error.to_string(),
+            "unsupported lockfileVersion 0 (need 2 or 3; run npm install --package-lock-only with npm >= 7)"
+        );
+    }
+
+    #[test]
+    fn lockfile_versions_2_and_3_plan() {
+        for version in [2, 3] {
+            let lock = format!(
+                r#"{{"name":"x","lockfileVersion":{version},"packages":{{"":{{"name":"x"}},
+                   "node_modules/a":{{"version":"1.0.0","resolved":"https://r/a.tgz","integrity":"{TEST_SRI}"}}}}}}"#
+            );
+            let plan = plan_npm(Platform::X86_64UnknownLinuxGnu, &lock).unwrap();
+            assert_eq!(plan.packages.len(), 1, "v{version}");
+            assert_eq!(plan.packages[0].path, "node_modules/a");
+        }
+    }
+
+    /// An npm alias (`"foo": "npm:bar@1.0.0"`) sits at node_modules/foo,
+    /// while the package it installs is bar: the name comes from the entry,
+    /// the path from the key.
+    #[test]
+    fn an_npm_alias_is_placed_by_its_key_and_named_by_its_entry() {
+        let lock = lock(&format!(
+            r#""node_modules/foo":{{"name":"bar","version":"1.0.0","resolved":"https://r/bar-1.0.0.tgz","integrity":"{TEST_SRI}"}},
+               "node_modules/@s/alias":{{"name":"@t/real","version":"2.0.0","resolved":"https://r/real-2.0.0.tgz","integrity":"{TEST_SRI}"}}"#
+        ));
+        let plan = plan_npm(Platform::X86_64UnknownLinuxGnu, &lock).unwrap();
+        let placed: Vec<(&str, &str, &str, &str)> = plan
+            .packages
+            .iter()
+            .map(|p| {
+                (
+                    p.path.as_str(),
+                    p.name.as_str(),
+                    p.version.as_str(),
+                    p.url.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            placed,
+            vec![
+                (
+                    "node_modules/@s/alias",
+                    "@t/real",
+                    "2.0.0",
+                    "https://r/real-2.0.0.tgz"
+                ),
+                (
+                    "node_modules/foo",
+                    "bar",
+                    "1.0.0",
+                    "https://r/bar-1.0.0.tgz"
+                ),
+            ]
+        );
+    }
 }
