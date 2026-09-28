@@ -610,6 +610,18 @@ source = { registry = "https://pypi.org/simple" }
                 "hash is not a string",
             ),
             (
+                r#"{ url = "https://files.pythonhosted.org/six.whl", hash = "sha256:" }"#,
+                "empty digest",
+            ),
+            (
+                r#"{ url = "https://files.pythonhosted.org/six.whl", hash = "sha256:aaaaaaaa" }"#,
+                "short digest",
+            ),
+            (
+                r#"{ url = "https://files.pythonhosted.org/six.whl", hash = "sha256:zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz" }"#,
+                "non-hex digest",
+            ),
+            (
                 r#"{ hash = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }"#,
                 "no url",
             ),

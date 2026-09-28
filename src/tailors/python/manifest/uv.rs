@@ -241,6 +241,11 @@ pub(super) fn uv_file(
         .as_str()?
         .strip_prefix("sha256:")?
         .to_ascii_lowercase();
+    // The downloader would refuse a malformed digest too, but the lock is
+    // the place to say so: a hash that cannot match anything is no hash.
+    if hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
     let filename = url
         .rsplit('/')
         .next()?
