@@ -49,11 +49,36 @@ fn option_looking_authority(url: &str) -> bool {
     let Some((_, rest)) = url.split_once("://") else {
         return false;
     };
-    let authority = &rest[..rest.find(['/', '?']).unwrap_or(rest.len())];
-    authority.starts_with('-')
+    // Git percent-decodes the authority and takes an IPv6 host out of its
+    // brackets before handing it on, so the check looks at what ssh would
+    // see: `%2Dhost` and `[-host]` are `-host`.
+    let authority = percent_decode(&rest[..rest.find(['/', '?']).unwrap_or(rest.len())]);
+    let leads_with_dash = |part: &str| part.trim_start_matches('[').starts_with('-');
+    leads_with_dash(&authority)
         || authority
             .rsplit_once('@')
-            .is_some_and(|(_, host)| host.starts_with('-'))
+            .is_some_and(|(_, host)| leads_with_dash(host))
+}
+
+/// `%XX` escapes decoded, everything else as it was. A malformed escape is
+/// kept literally, as git keeps it.
+fn percent_decode(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let escape = std::str::from_utf8(&bytes[i + 1..i + 3]).ok();
+            if let Some(value) = escape.and_then(|hex| u8::from_str_radix(hex, 16).ok()) {
+                out.push(value);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// Refuse a source git must not be handed: an unknown scheme, an
@@ -369,6 +394,12 @@ fn collect_symlinks(root: &Path, out: &mut Vec<PathBuf>) -> io::Result<()> {
     Ok(())
 }
 
+/// How many link expansions one link's resolution may take. The cycle set
+/// only holds the chain being expanded, so an acyclic web of links could
+/// otherwise double the work at every level; a few dozen links would stall
+/// the walk. Real source trees resolve in a handful.
+const MAX_LINK_EXPANSIONS: u32 = 64;
+
 fn resolve_symlink_path(
     root: &Path,
     link: &Path,
@@ -381,7 +412,8 @@ fn resolve_symlink_path(
     }
     let target = fs::read_link(link)?;
     let parent = link.parent().ok_or_else(|| err("symlink has no parent"))?;
-    resolve_target_components(root, parent, &target, seen).map(|_| ())
+    let mut expansions = 0;
+    resolve_target_components(root, parent, &target, seen, &mut expansions).map(|_| ())
 }
 
 /// Resolve path components in kernel order. We must process a symlink before
@@ -392,6 +424,7 @@ fn resolve_target_components(
     base: &Path,
     target: &Path,
     seen: &mut std::collections::BTreeSet<PathBuf>,
+    expansions: &mut u32,
 ) -> io::Result<PathBuf> {
     if target.is_absolute() {
         return Err(err("symlink target has an absolute path"));
@@ -417,6 +450,13 @@ fn resolve_target_components(
                 };
                 if is_symlink {
                     let nested = fs::read_link(&candidate)?;
+                    *expansions += 1;
+                    if *expansions > MAX_LINK_EXPANSIONS {
+                        return Err(err(format!(
+                            "symlink chain too long involving {}",
+                            candidate.display()
+                        )));
+                    }
                     if !seen.insert(candidate.clone()) {
                         return Err(err(format!(
                             "symlink cycle involving {}",
@@ -430,6 +470,7 @@ fn resolve_target_components(
                             .ok_or_else(|| err("symlink has no parent"))?,
                         &nested,
                         seen,
+                        expansions,
                     )?;
                     // `seen` is the chain being expanded, not every link
                     // ever visited: a target that passes through the same
@@ -1519,6 +1560,11 @@ mod refusal_tests {
             "ssh://-oProxyCommand=touch@github.com/repo",
             "https://-host/repo",
             "git://-host/repo",
+            // What git would decode or unbracket into a dash-led host.
+            "ssh://%2DoProxyCommand=touch/repo",
+            "ssh://git@%2dhost/repo",
+            "ssh://[-oProxyCommand=touch]/repo",
+            "ssh://git@[-host]:22/repo",
         ] {
             assert_eq!(
                 refusal(&source(url, COMMIT, None)),
@@ -1526,12 +1572,19 @@ mod refusal_tests {
                 "{url}"
             );
         }
-        // A dash inside the host, the login, or the path is ordinary.
+        // A dash inside the host, the login, or the path is ordinary, as
+        // are bracketed IPv6 hosts, ports, escapes elsewhere, and the
+        // empty authority of a file:// URL.
         for url in [
             "ssh://git@github.com/owner/-repo",
             "https://github.com/-owner/repo",
             "file:///srv/-git/repo",
+            "file:///srv/%2Dgit/repo",
             "https://user-name@git-host.example/repo",
+            "ssh://[::1]/repo",
+            "https://git@[2001:db8::1]:8443/owner/repo",
+            "https://github.com/owner/repo%2D",
+            "https://github.com/%/repo",
         ] {
             validate_source(&source(url, COMMIT, None)).unwrap_or_else(|e| panic!("{url}: {e}"));
         }
@@ -1740,6 +1793,41 @@ mod refusal_tests {
         fs::write(root.join("dir/sub/file"), b"x").unwrap();
         link("dir/sub", &root.join("alias"));
         link("alias/../../alias/file", &root.join("twice"));
+        validate_symlinks(root).unwrap();
+    }
+
+    #[test]
+    fn a_web_of_links_that_doubles_at_every_level_is_refused_not_walked() {
+        // a1 -> a2/a2, a2 -> a3/a3, ... aN -> . : acyclic, inside the
+        // checkout, and 2^N expansions to resolve. The budget refuses it
+        // long before that; without the budget this test would not finish.
+        let temp = TempDir::named("gitsrc-doubling");
+        let root = &temp.0;
+        let depth = 40;
+        for i in 1..depth {
+            link(
+                &format!("a{}/a{}", i + 1, i + 1),
+                &root.join(format!("a{i}")),
+            );
+        }
+        link(".", &root.join(format!("a{depth}")));
+        let error = symlink_refusal(root);
+        assert!(
+            error.starts_with("symlink chain too long involving "),
+            "{error}"
+        );
+        // A plain chain well under the budget resolves.
+        let temp = TempDir::named("gitsrc-chain");
+        let root = &temp.0;
+        fs::write(root.join("end"), b"x").unwrap();
+        for i in 0..32 {
+            let target = if i == 0 {
+                "end".to_string()
+            } else {
+                format!("c{}", i - 1)
+            };
+            link(&target, &root.join(format!("c{i}")));
+        }
         validate_symlinks(root).unwrap();
     }
 
