@@ -1297,3 +1297,305 @@ mod tests {
             .unwrap();
     }
 }
+
+/// Offline tests for the cache and download integrity checks (#348). The
+/// download path takes its network opener as a callback, so every branch
+/// runs here against a scratch store with `file://` sources and readers
+/// that fail on purpose.
+#[cfg(test)]
+mod integrity_tests {
+    use super::*;
+    use crate::kernel::activity::ActivityMode;
+    use crate::kernel::testutil::TempDir;
+
+    fn scratch_store(label: &str) -> (TempDir, Store) {
+        let scratch = TempDir::named(label);
+        let root = scratch.0.clone();
+        for sub in ["objects", "meta", "cache/sha256", "tmp"] {
+            fs::create_dir_all(root.join(sub)).unwrap();
+        }
+        (scratch, Store { root })
+    }
+
+    fn sha256_hex(bytes: &[u8]) -> String {
+        hex::encode(Sha256::digest(bytes))
+    }
+
+    /// Names of the download temp files left in the store's tmp dir.
+    fn leftover_downloads(store: &Store) -> Vec<String> {
+        fs::read_dir(store.root.join("tmp"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with("dl-"))
+            .collect()
+    }
+
+    /// A stream that serves `head` and then fails, like a connection that
+    /// drops mid-download.
+    struct DroppedStream {
+        head: &'static [u8],
+        served: bool,
+    }
+
+    impl Read for DroppedStream {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if self.served {
+                return Err(io::Error::new(
+                    io::ErrorKind::ConnectionReset,
+                    "connection reset by peer",
+                ));
+            }
+            self.served = true;
+            buf[..self.head.len()].copy_from_slice(self.head);
+            Ok(self.head.len())
+        }
+    }
+
+    #[test]
+    fn a_corrupted_cache_entry_is_refused_and_removed() {
+        let (_scratch, store) = scratch_store("fetch-corrupt");
+        let activity = &store.activity(ActivityMode::Shared).unwrap();
+        let hex = sha256_hex(b"hello");
+        let cache = store.cache_path("sha256", &hex);
+        fs::write(&cache, b"hellp").unwrap();
+        let digest = Digest::sha256(&hex).unwrap();
+
+        let error = cache_verified_digest_held(&store, activity, &digest)
+            .map(drop)
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(
+            error.to_string(),
+            format!("cache entry sha256:{hex} was corrupted (removed)")
+        );
+        assert!(!cache.exists(), "the corrupted entry must be removed");
+
+        // Through the sha256-hex wrapper the cause is kept.
+        fs::write(&cache, b"hellp").unwrap();
+        let error = cache_verified_held(&store, activity, &hex)
+            .map(drop)
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "cache entry {hex} was corrupted or unreadable: \
+                 cache entry sha256:{hex} was corrupted (removed)"
+            )
+        );
+        assert!(!cache.exists());
+    }
+
+    #[test]
+    fn a_missing_cache_entry_is_unreadable_not_corrupted() {
+        let (_scratch, store) = scratch_store("fetch-missing");
+        let activity = &store.activity(ActivityMode::Shared).unwrap();
+        let hex = sha256_hex(b"hello");
+        let digest = Digest::sha256(&hex).unwrap();
+        let error = cache_verified_digest_held(&store, activity, &digest)
+            .map(drop)
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+        assert!(
+            error
+                .to_string()
+                .starts_with(&format!("cache entry sha256:{hex} is unreadable: ")),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn control_a_cache_entry_with_the_right_bytes_is_served() {
+        let (_scratch, store) = scratch_store("fetch-good-entry");
+        let activity = &store.activity(ActivityMode::Shared).unwrap();
+        let hex = sha256_hex(b"hello");
+        let cache = store.cache_path("sha256", &hex);
+        fs::write(&cache, b"hello").unwrap();
+        let lease = cache_verified_held(&store, activity, &hex).unwrap();
+        assert_eq!(&*lease, cache.as_path());
+        assert_eq!(fs::read(&lease).unwrap(), b"hello");
+        assert_eq!(
+            read_cache_verified_digest(&store, activity, &Digest::sha256(&hex).unwrap()).unwrap(),
+            b"hello"
+        );
+    }
+
+    #[test]
+    fn a_poisoned_cache_entry_is_replaced_by_a_fresh_download() {
+        let (_scratch, store) = scratch_store("fetch-poisoned");
+        let activity = &store.activity(ActivityMode::Shared).unwrap();
+        let hex = sha256_hex(b"hello");
+        let cache = store.cache_path("sha256", &hex);
+        // Same length, different bytes: only the hash can tell.
+        fs::write(&cache, b"hellp").unwrap();
+        let source = store.root.join("source");
+        fs::write(&source, b"hello").unwrap();
+        let url = format!("file://{}", source.display());
+
+        let lease = download_verified_held(&store, activity, &url, &hex).unwrap();
+        assert_eq!(&*lease, cache.as_path());
+        assert_eq!(fs::read(&cache).unwrap(), b"hello");
+        assert!(leftover_downloads(&store).is_empty());
+    }
+
+    #[test]
+    fn a_poisoned_cache_entry_is_removed_even_when_the_refetch_fails() {
+        let (_scratch, store) = scratch_store("fetch-poisoned-offline");
+        let activity = &store.activity(ActivityMode::Shared).unwrap();
+        let hex = sha256_hex(b"hello");
+        let cache = store.cache_path("sha256", &hex);
+        fs::write(&cache, b"hellp").unwrap();
+        let digest = Digest::sha256(&hex).unwrap();
+
+        let error = cache_or_download(&store, activity, "https://x/hello", &digest, || {
+            Err(io::Error::other("no network"))
+        })
+        .map(drop)
+        .unwrap_err();
+        assert_eq!(error.to_string(), "no network");
+        assert!(!cache.exists(), "the poisoned entry must not survive");
+        assert!(leftover_downloads(&store).is_empty());
+    }
+
+    #[test]
+    fn control_a_good_cache_entry_is_served_without_opening_the_source() {
+        let (_scratch, store) = scratch_store("fetch-hit");
+        let activity = &store.activity(ActivityMode::Shared).unwrap();
+        let hex = sha256_hex(b"hello");
+        let cache = store.cache_path("sha256", &hex);
+        fs::write(&cache, b"hello").unwrap();
+        let digest = Digest::sha256(&hex).unwrap();
+        let lease = cache_or_download(&store, activity, "https://x/hello", &digest, || {
+            panic!("a cache hit must not open the source")
+        })
+        .unwrap();
+        assert_eq!(fs::read(&lease).unwrap(), b"hello");
+    }
+
+    #[test]
+    fn a_download_whose_hash_differs_is_refused_and_leaves_nothing_behind() {
+        let (_scratch, store) = scratch_store("fetch-mismatch");
+        let activity = &store.activity(ActivityMode::Shared).unwrap();
+        let source = store.root.join("source");
+        fs::write(&source, b"hellp").unwrap();
+        let url = format!("file://{}", source.display());
+        let expected = sha256_hex(b"hello");
+        let got = sha256_hex(b"hellp");
+
+        let error = download_verified_held(&store, activity, &url, &expected)
+            .map(drop)
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(
+            error.to_string(),
+            format!("hash mismatch for {url}\n  expected sha256 {expected}\n  got      {got}")
+        );
+        assert!(!store.cache_path("sha256", &expected).exists());
+        assert!(
+            !store.cache_path("sha256", &got).exists(),
+            "the bytes must not be cached under their own hash either"
+        );
+        assert!(leftover_downloads(&store).is_empty());
+    }
+
+    #[test]
+    fn a_download_that_drops_mid_stream_leaves_no_partial_file() {
+        let (_scratch, store) = scratch_store("fetch-dropped");
+        let activity = &store.activity(ActivityMode::Shared).unwrap();
+        let hex = sha256_hex(b"hello");
+        let digest = Digest::sha256(&hex).unwrap();
+        let error = cache_or_download(&store, activity, "https://x/hello", &digest, || {
+            Ok((
+                Box::new(DroppedStream {
+                    head: b"hel",
+                    served: false,
+                }) as Box<dyn Read>,
+                Some(5),
+            ))
+        })
+        .map(drop)
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::ConnectionReset);
+        assert!(!store.cache_path("sha256", &hex).exists());
+        assert!(
+            leftover_downloads(&store).is_empty(),
+            "partial download left in tmp"
+        );
+    }
+
+    #[test]
+    fn a_download_that_streams_the_right_bytes_is_cached_read_only() {
+        let (_scratch, store) = scratch_store("fetch-stream-ok");
+        let activity = &store.activity(ActivityMode::Shared).unwrap();
+        let hex = sha256_hex(b"hello");
+        let digest = Digest::sha256(&hex).unwrap();
+        let lease = cache_or_download(&store, activity, "https://x/hello", &digest, || {
+            Ok((Box::new(&b"hello"[..]) as Box<dyn Read>, Some(5)))
+        })
+        .unwrap();
+        assert_eq!(fs::read(&lease).unwrap(), b"hello");
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(&lease).unwrap().permissions().mode() & 0o777,
+            0o444
+        );
+        assert!(leftover_downloads(&store).is_empty());
+    }
+
+    #[test]
+    fn an_http_url_is_refused_before_anything_is_requested() {
+        // Port 9 answers nothing; a refusal that came from a connection
+        // attempt would say so instead of naming the scheme.
+        let url = "http://127.0.0.1:9/artifact.tar.gz";
+        let error = open_url(url, "download", None).map(drop).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "download {url}: tog fetches over https only; \
+                 an http:// mirror is refused rather than downgraded"
+            )
+        );
+        // The same refusal reaches every caller, and no file is created.
+        let scratch = TempDir::named("fetch-http");
+        let dest = scratch.0.join("tog");
+        let error = download_file(url, &dest, &sha256_hex(b"hello"))
+            .map(drop)
+            .unwrap_err();
+        assert!(
+            error.to_string().starts_with(&format!("download {url}: ")),
+            "{error}"
+        );
+        assert!(!dest.exists());
+        let error = fetch_text(url).map(drop).unwrap_err();
+        assert!(
+            error.to_string().starts_with(&format!("fetch {url}: ")),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn download_file_removes_its_destination_on_a_hash_mismatch() {
+        let scratch = TempDir::named("fetch-file-mismatch");
+        let source = scratch.0.join("source");
+        fs::write(&source, b"hellp").unwrap();
+        let url = format!("file://{}", source.display());
+        let dest = scratch.0.join("dest");
+        let expected = sha256_hex(b"hello");
+        let error = download_file(&url, &dest, &expected).map(drop).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "hash mismatch for {url}\n  expected sha256 {expected}\n  got      {}",
+                sha256_hex(b"hellp")
+            )
+        );
+        assert!(
+            !dest.exists(),
+            "a mismatched download must not be left at dest"
+        );
+        // Control: the right bytes land at dest.
+        download_file(&url, &dest, &sha256_hex(b"hellp")).unwrap();
+        assert_eq!(fs::read(&dest).unwrap(), b"hellp");
+    }
+}
