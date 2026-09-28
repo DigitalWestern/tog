@@ -357,6 +357,19 @@ def expect_equal(what, a, b):
         raise Failure(f"{what}: {a} != {b}")
 
 
+def checksum_lines(source, text):
+    """A `sha256sum` checksum file as (digest, name) pairs: `<hex>  <name>`
+    (text mode) or `<hex> *<name>` (binary mode), the name kept verbatim.
+    Any other line is an error naming `source` and the line."""
+    pairs = []
+    for line in text.splitlines():
+        m = re.fullmatch(r"([0-9a-fA-F]{64}) [ *](.+)", line)
+        if m is None:
+            raise Failure(f"{source}: malformed checksum line {line!r}")
+        pairs.append(m.groups())
+    return pairs
+
+
 # --------------------------------------------------------------------------
 # Go: go.dev's release JSON (sha256), cross-checked with dl.google.com's
 # per-file .sha256. Supported lines are the ones go.dev lists without
@@ -462,11 +475,7 @@ def node_shasums(version, keyring):
                             capture_output=True, text=True)
     if result.returncode != 0:
         raise Failure(f"node {version}: SHASUMS256.txt signature does not verify:\n{result.stderr}")
-    sums = {}
-    for line in text.decode().splitlines():
-        digest, name = line.split()
-        sums[name] = digest
-    return sums
+    return {name: digest for digest, name in checksum_lines(f"node {version}: SHASUMS256.txt", text.decode())}
 
 
 def node_release(version, sums):
@@ -534,11 +543,7 @@ def pbs_sums(tag):
     text = fetch_text(pbs_url(tag, "SHA256SUMS"), missing_ok=True)
     if text is None:
         return None
-    sums = {}
-    for line in text.splitlines():
-        digest, name = line.split()
-        sums[name.lstrip("*")] = digest
-    return sums
+    return {name: digest for digest, name in checksum_lines(f"python: PBS {tag} SHA256SUMS", text)}
 
 
 def generate_python(existing, report, default_key):
@@ -622,7 +627,11 @@ def generate_python(existing, report, default_key):
             if a["component"] != "cpython":
                 continue
             name = urllib.parse.unquote(a["url"].rsplit("/", 1)[1])
-            recorded = digests[a["build"]].get(name)
+            if name not in digests[a["build"]]:
+                raise Failure(f"python: PBS {a['build']} release has no asset {name}")
+            # An asset GitHub recorded no digest for is still verified: every
+            # cpython row's digest is the one SHA256SUMS lists (above).
+            recorded = digests[a["build"]][name]
             if recorded is not None:
                 expect_equal(f"python {name} GitHub digest", recorded, a["digest"])
     # uv: its own published .sha256, and GitHub's digest.

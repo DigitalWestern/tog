@@ -7,6 +7,8 @@ verbatim from builds.hex.pm/installs (2026-09-23); the archives are
 stand-ins whose digests the fake listings publish, so every verification
 path runs for real.
 """
+import contextlib
+import datetime
 import hashlib
 import io
 import json
@@ -66,14 +68,20 @@ class Base(unittest.TestCase):
     def setUp(self):
         self.net = FakeNetwork()
         self.scratch = tempfile.TemporaryDirectory()
-        self.saved = (catalog.http_get, catalog.CACHE, catalog.run_linux_bottle, catalog.REPO)
+        self.saved = (catalog.http_get, catalog.CACHE, catalog.run_linux_bottle, catalog.REPO,
+                      catalog.SCRATCH, catalog.TODAY)
         catalog.http_get = self.net
         catalog.CACHE = os.path.join(self.scratch.name, "cache")
+        # Keyrings, signatures and manifests land in the test's own scratch
+        # directory, which is removed afterwards, not in a fresh /tmp one.
+        catalog.SCRATCH = os.path.join(self.scratch.name, "work")
+        os.makedirs(catalog.SCRATCH)
         # Running a stand-in bottle's bin/ruby is not the point here.
         catalog.run_linux_bottle = lambda *args: False
 
     def tearDown(self):
-        catalog.http_get, catalog.CACHE, catalog.run_linux_bottle, catalog.REPO = self.saved
+        (catalog.http_get, catalog.CACHE, catalog.run_linux_bottle, catalog.REPO,
+         catalog.SCRATCH, catalog.TODAY) = self.saved
         self.scratch.cleanup()
 
 
@@ -131,6 +139,96 @@ def github_releases(net, repo, releases):
 
 def asset(name, body):
     return {"name": name, "digest": f"sha256:{sha256(body)}"}
+
+
+def run_quietly(eco, check):
+    """`catalog.run` on the catalog under `catalog.REPO`: (ok, what it printed)."""
+    args = type("Args", (), {"check": check, "set_default": None})()
+    with contextlib.redirect_stdout(io.StringIO()) as out:
+        ok = catalog.run(eco, args)
+    return ok, out.getvalue()
+
+
+def read(path):
+    with open(path) as f:
+        return f.read()
+
+
+def assert_every_field_is_checked(test, eco, existing, generate):
+    """A shipped row whose digest still matches but whose URL, recipe,
+    provider or build differs from upstream's is refused like a changed
+    digest: the whole row is compared, not just its checksum."""
+    rel = existing[0]
+    primary = catalog.PRIMARY[eco][0]
+    i = max(n for n, a in enumerate(rel["artifacts"]) if a["component"] == primary)
+    for field, value in (("url", rel["artifacts"][i]["url"] + ".moved"), ("recipe", "other/1"),
+                         ("provider", "elsewhere.invalid"), ("build", "0")):
+        with test.subTest(field=field):
+            changed = dict(rel, artifacts=[dict(a) for a in rel["artifacts"]])
+            changed["artifacts"][i][field] = value
+            with test.assertRaises(catalog.Failure) as cm:
+                generate([changed] + existing[1:])
+            lines = str(cm.exception).splitlines()
+            test.assertEqual(lines[0], f"{eco}: {rel['key']}: the checked-in row no longer matches upstream")
+            test.assertIn(repr(value), lines[1])
+
+
+def gpg_home(cls):
+    """A throwaway GnuPG home and the gpg command that uses it. Removal is
+    registered as a class cleanup before any key is made, so it runs even if
+    setUpClass fails; it stops the home's gpg-agent and removes its socket
+    directory first, so no agent or socket outlives the tests."""
+    home = tempfile.TemporaryDirectory()
+
+    def cleanup():
+        for args in (["--kill", "gpg-agent"], ["--remove-socketdir"]):
+            try:
+                subprocess.run(["gpgconf", "--homedir", home.name] + args, capture_output=True)
+            except OSError:
+                pass
+        home.cleanup()
+
+    cls.addClassCleanup(cleanup)
+    os.chmod(home.name, 0o700)
+    gpg = ["gpg", "--homedir", home.name, "--batch", "--quiet", "--pinentry-mode", "loopback",
+           "--passphrase", ""]
+    return home.name, gpg
+
+
+def gen_key(gpg, uid):
+    """A new ed25519 signing key in `gpg`'s home: its fingerprint."""
+    subprocess.run(gpg + ["--quick-gen-key", uid, "ed25519", "sign", "never"],
+                   check=True, capture_output=True)
+    listing = subprocess.run(gpg + ["--with-colons", "--list-keys", uid], check=True,
+                             capture_output=True, text=True).stdout
+    return next(line.split(":")[9] for line in listing.splitlines() if line.startswith("fpr:"))
+
+
+class ChecksumLines(unittest.TestCase):
+    """The exact `sha256sum` output format, nothing looser."""
+
+    D = "ab" * 32
+
+    def test_text_and_binary_modes_keep_the_name_verbatim(self):
+        text = f"{self.D}  node.tar.gz\r\n{self.D.upper()} *bin.zip\n{self.D}  name with  spaces \n"
+        self.assertEqual(
+            catalog.checksum_lines("src", text),
+            [(self.D, "node.tar.gz"), (self.D.upper(), "bin.zip"), (self.D, "name with  spaces ")],
+        )
+
+    def test_other_shapes_are_refused(self):
+        for line in [
+            f"{self.D} one-space.tar.gz",
+            f"{self.D}\ttab.tar.gz",
+            f" {self.D}  leading.tar.gz",
+            f"{self.D}  ",
+            f"{self.D[:-1]}  short.tar.gz",
+            f"{self.D}0  long.tar.gz",
+            "",
+        ]:
+            with self.subTest(line=line), self.assertRaises(catalog.Failure) as cm:
+                catalog.checksum_lines("src", f"{self.D}  ok.tar.gz\n{line}\n")
+            self.assertEqual(str(cm.exception), f"src: malformed checksum line {line!r}")
 
 
 class Elixir(Base):
@@ -322,25 +420,12 @@ class Rust(Base):
 
     @classmethod
     def setUpClass(cls):
-        cls.gnupg = tempfile.TemporaryDirectory()
-        home = cls.gnupg.name
-        os.chmod(home, 0o700)
-        cls.gpg = ["gpg", "--homedir", home, "--batch", "--quiet", "--pinentry-mode", "loopback",
-                   "--passphrase", ""]
-        subprocess.run(cls.gpg + ["--quick-gen-key", "Test Rust Key <rust@example.invalid>",
-                                  "ed25519", "sign", "never"], check=True, capture_output=True)
-        listing = subprocess.run(cls.gpg + ["--with-colons", "--list-keys"], check=True,
-                                 capture_output=True, text=True).stdout
-        cls.fingerprint = next(line.split(":")[9] for line in listing.splitlines()
-                               if line.startswith("fpr:"))
+        home, cls.gpg = gpg_home(cls)
+        cls.fingerprint = gen_key(cls.gpg, "Test Rust Key <rust@example.invalid>")
         cls.key = os.path.join(home, "test-key.asc")
         with open(cls.key, "wb") as f:
             f.write(subprocess.run(cls.gpg + ["--armor", "--export"], check=True,
                                    capture_output=True).stdout)
-
-    @classmethod
-    def tearDownClass(cls):
-        cls.gnupg.cleanup()
 
     def setUp(self):
         super().setUp()
@@ -494,6 +579,790 @@ class Rust(Base):
             fixture = f.read()
         with self.assertRaisesRegex(catalog.Failure, "does not verify"):
             catalog.rust_verify("1.96.1", fixture, signature, catalog.rust_keyring())
+
+
+class Go(Base):
+    """go.dev's release JSON, cross-checked with dl.google.com's .sha256."""
+
+    ALL = "https://go.dev/dl/?mode=json&include=all"
+    SUPPORTED = "https://go.dev/dl/?mode=json"
+
+    def setUp(self):
+        super().setUp()
+        self.all = []
+        self.supported = []
+
+    @staticmethod
+    def archive(version, platform):
+        return f"go{version}.{'darwin-arm64' if platform == DARWIN else 'linux-amd64'}.tar.gz"
+
+    def publish(self, version, platforms=(DARWIN, LINUX), stable=True, supported=True):
+        files = [{"filename": f"go{version}.src.tar.gz", "os": "", "arch": "", "kind": "source",
+                  "sha256": sha256(b"src")},
+                 {"filename": f"go{version}.darwin-arm64.pkg", "os": "darwin", "arch": "arm64",
+                  "kind": "installer", "sha256": sha256(b"pkg")}]
+        for platform in platforms:
+            name = self.archive(version, platform)
+            os_, arch = ("darwin", "arm64") if platform == DARWIN else ("linux", "amd64")
+            files.append({"filename": name, "os": os_, "arch": arch, "kind": "archive",
+                          "sha256": sha256(name.encode())})
+            self.net.bodies[f"https://dl.google.com/go/{name}.sha256"] = sha256(name.encode())
+        entry = {"version": f"go{version}", "stable": stable, "files": files}
+        self.all.insert(0, entry)
+        if supported:
+            self.supported.insert(0, entry)
+        self.net.json(self.ALL, self.all)
+        self.net.json(self.SUPPORTED, self.supported)
+
+    def generate(self, existing):
+        report = catalog.Report("go")
+        return catalog.generate_go(existing, report), report
+
+    def shipped(self, *versions):
+        out, _ = self.generate([])
+        return written("go", self.scratch.name, [out[f"go-{v}"] for v in versions])
+
+    def expected(self, version):
+        return {
+            "key": f"go-{version}", "revision": None,
+            "components": [{"name": "go", "version": version}],
+            "artifacts": [
+                {"platform": platform, "component": "go", "provider": "go.dev", "build": version,
+                 "recipe": "go-toolchain/1", "url": f"https://go.dev/dl/{self.archive(version, platform)}",
+                 "digest": "sha256:" + sha256(self.archive(version, platform).encode())}
+                for platform in (DARWIN, LINUX)
+            ],
+        }
+
+    def test_supported_stable_releases_enter_with_go_devs_digests(self):
+        self.publish("1.25.9", supported=False)
+        self.publish("1.26.3")
+        self.publish("1.27rc1", stable=False)
+        self.publish("1.26.4", stable=False)  # go.dev's own flag, even on a x.y.z version
+        out, report = self.generate([])
+        self.assertEqual(out, {"go-1.26.3": self.expected("1.26.3")})
+        self.assertEqual((report.added, report.skipped), (["go-1.26.3"], []))
+        self.assertEqual(out["go-1.26.3"]["artifacts"][1]["url"],
+                         "https://go.dev/dl/go1.26.3.linux-amd64.tar.gz")
+
+    def test_shipped_releases_are_kept_and_a_new_patch_enters_beside_them(self):
+        self.publish("1.25.9")
+        self.publish("1.26.3")
+        existing = self.shipped("1.26.3", "1.25.9")
+        # The 1.25 line leaves go.dev's supported list; its shipped row stays.
+        self.supported[:] = [r for r in self.supported if r["version"] != "go1.25.9"]
+        self.publish("1.26.4")
+        out, report = self.generate(existing)
+        self.assertEqual(out["go-1.26.3"], existing[0])
+        self.assertEqual(out["go-1.25.9"], existing[1])
+        self.assertEqual(out["go-1.26.4"], self.expected("1.26.4"))
+        self.assertEqual(report.added, ["go-1.26.4"])
+        again, report = self.generate(list(out.values()))
+        self.assertEqual((again, report.added), (out, []))
+
+    def test_a_release_without_both_archives_is_skipped_with_the_reason(self):
+        self.publish("1.26.3", platforms=(LINUX,))
+        out, report = self.generate([])
+        self.assertEqual(out, {})
+        self.assertEqual(report.skipped, [("go-1.26.3", f"go.dev publishes no archive for {DARWIN}")])
+
+    def test_a_shipped_release_go_dev_withdrew_is_an_error(self):
+        self.publish("1.26.3")
+        existing = self.shipped("1.26.3")
+        self.all[0]["files"] = [f for f in self.all[0]["files"] if f["os"] != "darwin"]
+        self.net.json(self.ALL, self.all)
+        with self.assertRaises(catalog.Failure) as cm:
+            self.generate(existing)
+        self.assertEqual(str(cm.exception), "go: go-1.26.3: go.dev no longer lists both archives")
+        self.all.clear()
+        self.publish("1.26.4")
+        with self.assertRaises(catalog.Failure) as cm:
+            self.generate(existing)
+        self.assertEqual(str(cm.exception), "go: go-1.26.3: go.dev no longer lists both archives")
+
+    def test_a_shipped_row_whose_digest_changed_upstream_is_an_error(self):
+        self.publish("1.26.3")
+        existing = self.shipped("1.26.3")
+        self.all[0]["files"][-1]["sha256"] = "e" * 64
+        self.net.json(self.ALL, self.all)
+        with self.assertRaises(catalog.Failure) as cm:
+            self.generate(existing)
+        lines = str(cm.exception).splitlines()
+        self.assertEqual(lines[0], "go: go-1.26.3: the checked-in row no longer matches upstream")
+        self.assertIn("sha256:" + "e" * 64, lines[2])
+
+    def test_a_shipped_row_differing_in_any_field_but_its_digest_is_an_error(self):
+        self.publish("1.26.3")
+        assert_every_field_is_checked(self, "go", self.shipped("1.26.3"), self.generate)
+
+    def test_a_stable_release_whose_version_is_not_x_y_z_is_not_admitted(self):
+        # go.dev flags it stable and its line is supported: only the
+        # version-format guard keeps it out.
+        self.publish("1.26.3")
+        self.publish("1.26.4rc1", supported=False)
+        self.publish("1.26.4.1", supported=False)
+        out, report = self.generate([])
+        self.assertEqual(out, {"go-1.26.3": self.expected("1.26.3")})
+        self.assertEqual((report.added, report.skipped), (["go-1.26.3"], []))
+
+    def test_a_dl_google_sha256_that_disagrees_is_an_error(self):
+        self.publish("1.26.3")
+        name = "go1.26.3.linux-amd64.tar.gz"
+        self.net.bodies[f"https://dl.google.com/go/{name}.sha256"] = "0" * 64
+        with self.assertRaises(catalog.Failure) as cm:
+            self.generate([])
+        self.assertEqual(str(cm.exception),
+                         f"go {name} .sha256: sha256:{'0' * 64} != sha256:{sha256(name.encode())}")
+
+    def test_a_shipped_row_whose_dl_google_sha256_disagrees_is_an_error(self):
+        self.publish("1.26.3")
+        existing = self.shipped("1.26.3")
+        name = "go1.26.3.darwin-arm64.tar.gz"
+        self.net.bodies[f"https://dl.google.com/go/{name}.sha256"] = "0" * 64
+        with self.assertRaises(catalog.Failure) as cm:
+            self.generate(existing)
+        self.assertEqual(str(cm.exception),
+                         f"go {name} .sha256: sha256:{'0' * 64} != sha256:{sha256(name.encode())}")
+
+    def test_a_missing_dl_google_sha256_is_an_error(self):
+        self.publish("1.26.3")
+        url = "https://dl.google.com/go/go1.26.3.linux-amd64.tar.gz.sha256"
+        del self.net.bodies[url]
+        with self.assertRaises(catalog.Failure) as cm:
+            self.generate([])
+        self.assertEqual(str(cm.exception), f"{url}: 404")
+
+    def test_check_reports_a_new_release_as_drift_and_writes_nothing(self):
+        self.publish("1.26.3")
+        self.shipped("1.26.3")
+        path = os.path.join(self.scratch.name, catalog.FILES["go"])
+        text = read(path)
+        self.assertEqual(run_quietly("go", check=True)[0], True)
+        self.publish("1.26.4")
+        ok, out = run_quietly("go", check=True)
+        self.assertFalse(ok)
+        self.assertIn("go: src/tailors/go/catalog.toml differs from what upstream publishes today "
+                      "(1 new, 0 of them new revisions)", out)
+        self.assertEqual(read(path), text)
+        self.assertTrue(run_quietly("go", check=False)[0])
+        now = read(path)
+        self.assertIn('default = "go-1.26.3"', now)
+        self.assertIn('key = "go-1.26.4"', now)
+        self.assertIn(text[text.index('\n[[release]]'):], now)
+
+
+class Node(Base):
+    """nodejs.org's index and SHASUMS256.txt, whose detached signature is
+    made for real by a throwaway key standing in for the Node release keys
+    (served as the keyring), so gpgv runs on every path."""
+
+    INDEX = "https://nodejs.org/dist/index.json"
+    SCHEDULE = "https://raw.githubusercontent.com/nodejs/Release/main/schedule.json"
+    KEYRING = "https://raw.githubusercontent.com/nodejs/release-keys/main/gpg/pubring.kbx"
+
+    @classmethod
+    def setUpClass(cls):
+        _, cls.gpg = gpg_home(cls)
+        cls.release_key = gen_key(cls.gpg, "Test Node Releaser <node@example.invalid>")
+        cls.stranger = gen_key(cls.gpg, "Someone Else <stranger@example.invalid>")
+        cls.keyring = subprocess.run(cls.gpg + ["--export", cls.release_key], check=True,
+                                     capture_output=True).stdout
+
+    def setUp(self):
+        super().setUp()
+        # gpgv runs without --homedir: keep it out of the user's ~/.gnupg.
+        self.home = os.environ.get("GNUPGHOME")
+        os.environ["GNUPGHOME"] = os.path.join(self.scratch.name, "gnupg")
+        os.makedirs(os.environ["GNUPGHOME"], mode=0o700)
+        catalog.TODAY = datetime.date(2026, 6, 1)
+        self.net.bodies[self.KEYRING] = self.keyring
+        self.net.json(self.SCHEDULE, {
+            "v20": {"start": "2023-04-18", "end": "2026-04-30"},
+            "v22": {"start": "2024-04-24", "end": "2027-04-30"},
+            "v24": {"start": "2025-05-06", "end": "2028-04-30"},
+            "v26": {"start": "2026-10-20", "end": "2029-04-30"},
+        })
+        self.index = []
+
+    def tearDown(self):
+        if self.home is None:
+            os.environ.pop("GNUPGHOME", None)
+        else:
+            os.environ["GNUPGHOME"] = self.home
+        super().tearDown()
+
+    def sign(self, body, key=None):
+        path = os.path.join(self.scratch.name, "to-sign")
+        with open(path, "wb") as f:
+            f.write(body)
+        return subprocess.run(self.gpg + ["--local-user", key or self.release_key, "--detach-sign",
+                                          "--output", "-", path], check=True, capture_output=True).stdout
+
+    @staticmethod
+    def tarball(version, platform):
+        return f"node-v{version}-{'darwin-arm64' if platform == DARWIN else 'linux-x64'}.tar.gz"
+
+    def shasums(self, version, platforms=(DARWIN, LINUX), digest=None):
+        lines = [f"{sha256(b'src')}  node-v{version}.tar.gz",
+                 f"{sha256(b'exe')}  win-x64/node.exe"]
+        for platform in platforms:
+            name = self.tarball(version, platform)
+            lines.append(f"{digest or sha256(name.encode())}  {name}")
+        return ("\n".join(lines) + "\n").encode()
+
+    def publish(self, version, platforms=(DARWIN, LINUX), listed=True):
+        base = f"https://nodejs.org/dist/v{version}/"
+        body = self.shasums(version, platforms)
+        self.net.bodies[base + "SHASUMS256.txt"] = body
+        self.net.bodies[base + "SHASUMS256.txt.sig"] = self.sign(body)
+        if listed:
+            self.index.insert(0, {"version": f"v{version}"})
+            self.net.json(self.INDEX, self.index)
+
+    def generate(self, existing):
+        report = catalog.Report("node")
+        return catalog.generate_node(existing, report), report
+
+    def shipped(self, *versions):
+        out, _ = self.generate([])
+        return written("node", self.scratch.name, [out[f"node-{v}"] for v in versions])
+
+    def expected(self, version):
+        return {
+            "key": f"node-{version}", "revision": None,
+            "components": [{"name": "node", "version": version}],
+            "artifacts": [
+                {"platform": platform, "component": "node", "provider": "nodejs.org", "build": version,
+                 "recipe": "nodejs/legacy",
+                 "url": f"https://nodejs.org/dist/v{version}/{self.tarball(version, platform)}",
+                 "digest": "sha256:" + sha256(self.tarball(version, platform).encode())}
+                for platform in (DARWIN, LINUX)
+            ],
+        }
+
+    def test_releases_of_lines_the_schedule_supports_enter_with_signed_digests(self):
+        self.publish("20.19.5")   # line ended
+        self.publish("22.20.0")
+        self.publish("24.9.0")
+        self.publish("26.0.0")    # line not started
+        out, report = self.generate([])
+        self.assertEqual(out, {"node-24.9.0": self.expected("24.9.0"),
+                               "node-22.20.0": self.expected("22.20.0")})
+        self.assertEqual((report.added, report.skipped), (["node-24.9.0", "node-22.20.0"], []))
+        self.assertEqual(out["node-24.9.0"]["artifacts"][1]["url"],
+                         "https://nodejs.org/dist/v24.9.0/node-v24.9.0-linux-x64.tar.gz")
+
+    def test_shipped_releases_are_kept_even_after_their_line_ends(self):
+        self.publish("24.9.0")
+        existing = self.shipped("24.9.0")
+        catalog.TODAY = datetime.date(2028, 6, 1)
+        self.publish("24.10.0")
+        out, report = self.generate(existing)
+        self.assertEqual(list(out.values()), existing)
+        self.assertEqual(report.added, [])
+
+    def test_a_new_release_enters_beside_the_shipped_one(self):
+        self.publish("24.9.0")
+        existing = self.shipped("24.9.0")
+        self.publish("24.10.0")
+        out, report = self.generate(existing)
+        self.assertEqual(out["node-24.9.0"], existing[0])
+        self.assertEqual(out["node-24.10.0"], self.expected("24.10.0"))
+        self.assertEqual(report.added, ["node-24.10.0"])
+
+    def test_shasums_the_signature_does_not_cover_are_refused(self):
+        self.publish("24.9.0")
+        self.net.bodies["https://nodejs.org/dist/v24.9.0/SHASUMS256.txt.sig"] = self.sign(b"other bytes\n")
+        with self.assertRaises(catalog.Failure) as cm:
+            self.generate([])
+        self.assertTrue(str(cm.exception).startswith(
+            "node 24.9.0: SHASUMS256.txt signature does not verify:\n"), str(cm.exception))
+
+    def test_shasums_signed_by_a_key_outside_the_keyring_are_refused(self):
+        self.publish("24.9.0")
+        body = self.net.bodies["https://nodejs.org/dist/v24.9.0/SHASUMS256.txt"]
+        self.net.bodies["https://nodejs.org/dist/v24.9.0/SHASUMS256.txt.sig"] = self.sign(body, self.stranger)
+        with self.assertRaises(catalog.Failure) as cm:
+            self.generate([])
+        self.assertTrue(str(cm.exception).startswith(
+            "node 24.9.0: SHASUMS256.txt signature does not verify:\n"), str(cm.exception))
+
+    def test_a_shipped_release_whose_shasums_no_longer_verify_is_an_error(self):
+        self.publish("24.9.0")
+        existing = self.shipped("24.9.0")
+        self.net.bodies["https://nodejs.org/dist/v24.9.0/SHASUMS256.txt.sig"] = self.sign(b"x", self.stranger)
+        with self.assertRaises(catalog.Failure) as cm:
+            self.generate(existing)
+        self.assertTrue(str(cm.exception).startswith(
+            "node 24.9.0: SHASUMS256.txt signature does not verify:\n"), str(cm.exception))
+
+    def test_a_missing_signature_is_an_error(self):
+        self.publish("24.9.0")
+        url = "https://nodejs.org/dist/v24.9.0/SHASUMS256.txt.sig"
+        del self.net.bodies[url]
+        with self.assertRaises(catalog.Failure) as cm:
+            self.generate([])
+        self.assertEqual(str(cm.exception), f"{url}: 404")
+
+    def test_a_shipped_row_whose_digest_changed_upstream_is_an_error(self):
+        self.publish("24.9.0")
+        existing = self.shipped("24.9.0")
+        # Re-published and properly signed: still not the shipped bytes.
+        body = self.shasums("24.9.0", digest="e" * 64)
+        self.net.bodies["https://nodejs.org/dist/v24.9.0/SHASUMS256.txt"] = body
+        self.net.bodies["https://nodejs.org/dist/v24.9.0/SHASUMS256.txt.sig"] = self.sign(body)
+        with self.assertRaises(catalog.Failure) as cm:
+            self.generate(existing)
+        lines = str(cm.exception).splitlines()
+        self.assertEqual(lines[0], "node: node-24.9.0: the checked-in row no longer matches upstream")
+        self.assertIn("sha256:" + "e" * 64, lines[2])
+
+    def test_a_shipped_row_differing_in_any_field_but_its_digest_is_an_error(self):
+        self.publish("24.9.0")
+        assert_every_field_is_checked(self, "node", self.shipped("24.9.0"), self.generate)
+
+    def test_a_malformed_shasums_line_is_an_error(self):
+        self.publish("24.9.0")
+        body = self.shasums("24.9.0") + b"not-a-digest  node-v24.9.0-extra.tar.gz\n"
+        self.net.bodies["https://nodejs.org/dist/v24.9.0/SHASUMS256.txt"] = body
+        self.net.bodies["https://nodejs.org/dist/v24.9.0/SHASUMS256.txt.sig"] = self.sign(body)
+        with self.assertRaises(catalog.Failure) as cm:
+            self.generate([])
+        self.assertEqual(str(cm.exception), "node 24.9.0: SHASUMS256.txt: malformed checksum line "
+                                            "'not-a-digest  node-v24.9.0-extra.tar.gz'")
+
+    def test_a_shipped_row_upstream_withdrew_is_an_error(self):
+        self.publish("24.9.0")
+        existing = self.shipped("24.9.0")
+        self.publish("24.9.0", platforms=(LINUX,), listed=False)
+        with self.assertRaises(catalog.Failure) as cm:
+            self.generate(existing)
+        lines = str(cm.exception).splitlines()
+        self.assertEqual(lines[0], "node: node-24.9.0: the checked-in row no longer matches upstream")
+        self.assertEqual(lines[2], "  upstream:   None")
+
+    def test_a_release_missing_a_tarball_is_skipped_with_the_reason(self):
+        self.publish("24.9.0", platforms=(LINUX,))
+        out, report = self.generate([])
+        self.assertEqual(out, {})
+        self.assertEqual(report.skipped, [("node-24.9.0", f"nodejs.org publishes no {DARWIN} tarball")])
+
+    def test_check_reports_a_new_release_as_drift_and_writes_nothing(self):
+        self.publish("24.9.0")
+        self.shipped("24.9.0")
+        path = os.path.join(self.scratch.name, catalog.FILES["node"])
+        text = read(path)
+        self.assertTrue(run_quietly("node", check=True)[0])
+        self.publish("24.10.0")
+        ok, out = run_quietly("node", check=True)
+        self.assertFalse(ok)
+        self.assertIn("node: src/tailors/node/catalog.toml differs from what upstream publishes today "
+                      "(1 new, 0 of them new revisions)", out)
+        self.assertEqual(read(path), text)
+
+
+class Python(Base):
+    """python-build-standalone's per-release SHA256SUMS, cross-checked with
+    GitHub's asset digests; uv rides along from the default release."""
+
+    UV = "0.12.7"
+
+    def setUp(self):
+        super().setUp()
+        self.net.json("https://peps.python.org/api/release-cycle.json", {
+            "3.13": {"status": "bugfix"}, "3.12": {"status": "security"},
+            "3.9": {"status": "end-of-life"},
+        })
+        self.sums = {}      # tag -> {asset name: digest}
+        self.tags = ["20260101", "20210101"]  # no SHA256SUMS: skipped, named
+        for platform in (DARWIN, LINUX):
+            url = f"https://github.com/astral-sh/uv/releases/download/{self.UV}/uv-{platform}.tar.gz"
+            self.net.bodies[url + ".sha256"] = f"{sha256(url.encode())}  uv-{platform}.tar.gz\n"
+        self.sync()
+
+    def sync(self):
+        self.net.json(f"https://api.github.com/repos/{catalog.PBS}/tags?per_page=100&page=1",
+                      [{"name": t} for t in self.tags + ["latest"]])
+        for tag, sums in self.sums.items():
+            # Alternate sha256sum's text (`  name`) and binary (` *name`) modes.
+            lines = [f"{digest} {'*' if i % 2 else ' '}{name}" for i, (name, digest) in enumerate(sums.items())]
+            self.net.bodies[catalog.pbs_url(tag, "SHA256SUMS")] = "\n".join(lines) + "\n"
+            self.net.json(f"https://api.github.com/repos/{catalog.PBS}/releases/tags/{tag}",
+                          {"assets": [{"name": n, "digest": f"sha256:{d}"} for n, d in sums.items()]
+                           + [{"name": "SHA256SUMS", "digest": None}]})
+
+    def publish(self, tag, versions, platforms=(DARWIN, LINUX)):
+        if tag not in self.tags:
+            self.tags.insert(0, tag)
+        sums = self.sums.setdefault(tag, {})
+        for version in versions:
+            for platform in platforms:
+                name = catalog.pbs_asset(version, tag, platform)
+                sums[name] = sha256(name.encode())
+            sums[f"cpython-{version}+{tag}-{LINUX}-debug-full.tar.zst"] = sha256(b"debug")
+        self.sync()
+
+    def github_digest(self, tag, name, digest):
+        """PBS `tag`'s GitHub release, with `name`'s recorded digest set to
+        `digest` (None: GitHub recorded none), or the asset gone (`...`)."""
+        url = f"https://api.github.com/repos/{catalog.PBS}/releases/tags/{tag}"
+        release = json.loads(self.net.bodies[url])
+        release["assets"] = [dict(a, digest=digest) if a["name"] == name else a
+                             for a in release["assets"] if not (a["name"] == name and digest is ...)]
+        self.net.json(url, release)
+
+    def uv_rows(self):
+        return [{"platform": platform, "component": "uv", "provider": "uv", "build": self.UV,
+                 "recipe": "uv/legacy",
+                 "url": f"https://github.com/astral-sh/uv/releases/download/{self.UV}/uv-{platform}.tar.gz",
+                 "digest": "sha256:" + sha256(
+                     f"https://github.com/astral-sh/uv/releases/download/{self.UV}/uv-{platform}.tar.gz".encode())}
+                for platform in (DARWIN, LINUX)]
+
+    def expected(self, version, tag):
+        return {
+            "key": f"cpython-{version}", "revision": None,
+            "components": [{"name": "cpython", "version": version}, {"name": "uv", "version": self.UV}],
+            "artifacts": [
+                {"platform": platform, "component": "cpython", "provider": "python-build-standalone",
+                 "build": tag, "recipe": "cpython/legacy",
+                 "url": catalog.pbs_url(tag, catalog.pbs_asset(version, tag, platform)),
+                 "digest": "sha256:" + sha256(catalog.pbs_asset(version, tag, platform).encode())}
+                for platform in (DARWIN, LINUX)
+            ] + self.uv_rows(),
+        }
+
+    def shipped(self):
+        """cpython-3.12.1 from PBS 20260801, the default, as checked in."""
+        self.publish("20260801", ["3.12.1"])
+        return written("python", self.scratch.name, [self.expected("3.12.1", "20260801")])
+
+    def generate(self, existing, default="cpython-3.12.1"):
+        report = catalog.Report("python")
+        return catalog.generate_python(existing, report, default), report
+
+    def test_new_versions_take_the_newest_pbs_release_and_shipped_rows_keep_theirs(self):
+        existing = self.shipped()
+        self.publish("20260801", ["3.13.0"])
+        self.publish("20260910", ["3.12.1", "3.12.2", "3.13.0", "3.13.1", "3.9.25"])
+        out, report = self.generate(existing)
+        self.assertEqual(out, {
+            "cpython-3.12.1": existing[0],
+            "cpython-3.12.2": self.expected("3.12.2", "20260910"),
+            "cpython-3.13.0": self.expected("3.13.0", "20260910"),
+            "cpython-3.13.1": self.expected("3.13.1", "20260910"),
+        })
+        self.assertEqual(out["cpython-3.12.1"]["artifacts"][0]["build"], "20260801")
+        self.assertEqual(
+            out["cpython-3.13.1"]["artifacts"][1]["url"],
+            "https://github.com/astral-sh/python-build-standalone/releases/download/20260910/"
+            "cpython-3.13.1%2B20260910-x86_64-unknown-linux-gnu-install_only.tar.gz")
+        self.assertEqual(report.added, ["cpython-3.12.2", "cpython-3.13.0", "cpython-3.13.1"])
+        self.assertEqual(report.skipped, [
+            ("PBS releases 20260101, 1 releases before 20220227",
+             "no SHA256SUMS published, so nothing to verify a row against"),
+            ("cpython-3.12.0", "no PBS release with a SHA256SUMS publishes it for both platforms"),
+        ])
+        again, report = self.generate(list(out.values()))
+        self.assertEqual((again, report.added), (out, []))
+
+    def test_a_version_no_pbs_release_builds_for_both_platforms_is_skipped(self):
+        existing = self.shipped()
+        self.publish("20260910", ["3.13.0"], platforms=(LINUX,))
+        self.publish("20260801", ["3.13.0"], platforms=(DARWIN,))
+        out, report = self.generate(existing)
+        self.assertEqual(list(out), ["cpython-3.12.1"])
+        self.assertIn(("cpython-3.13.0", "no PBS release publishes install_only builds for both platforms"),
+                      report.skipped)
+        self.assertEqual([what for what, _ in report.skipped].count("cpython-3.13.0"), 1)
+
+    def test_the_default_must_be_checked_in(self):
+        existing = self.shipped()
+        with self.assertRaises(catalog.Failure) as cm:
+            self.generate(existing, default="cpython-3.13.0")
+        self.assertEqual(str(cm.exception),
+                         "python: default cpython-3.13.0 is not checked in; the uv pin is read from it")
+
+    def test_a_shipped_row_its_sha256sums_no_longer_lists_is_an_error(self):
+        existing = self.shipped()
+        del self.sums["20260801"][catalog.pbs_asset("3.12.1", "20260801", DARWIN)]
+        self.sync()
+        with self.assertRaises(catalog.Failure) as cm:
+            self.generate(existing)
+        message = "python: cpython-3.12.1: PBS 20260801 SHA256SUMS no longer lists both builds"
+        self.assertEqual(str(cm.exception), message)
+        # Nor when the whole SHA256SUMS is gone.
+        del self.net.bodies[catalog.pbs_url("20260801", "SHA256SUMS")]
+        with self.assertRaises(catalog.Failure) as cm:
+            self.generate(existing)
+        self.assertEqual(str(cm.exception), message)
+
+    def test_a_shipped_row_whose_digest_changed_upstream_is_an_error(self):
+        existing = self.shipped()
+        self.sums["20260801"][catalog.pbs_asset("3.12.1", "20260801", LINUX)] = "e" * 64
+        self.sync()
+        with self.assertRaises(catalog.Failure) as cm:
+            self.generate(existing)
+        lines = str(cm.exception).splitlines()
+        self.assertEqual(lines[0], "python: cpython-3.12.1: the checked-in row no longer matches upstream")
+        self.assertIn("sha256:" + "e" * 64, lines[2])
+
+    def test_a_github_digest_that_disagrees_is_an_error(self):
+        existing = self.shipped()
+        self.publish("20260910", ["3.13.0"])
+        name = catalog.pbs_asset("3.13.0", "20260910", LINUX)
+        self.github_digest("20260910", name, "sha256:" + "0" * 64)
+        with self.assertRaises(catalog.Failure) as cm:
+            self.generate(existing)
+        self.assertEqual(str(cm.exception),
+                         f"python {name} GitHub digest: sha256:{'0' * 64} != sha256:{sha256(name.encode())}")
+
+    def test_a_shipped_rows_github_digest_that_disagrees_is_an_error(self):
+        existing = self.shipped()
+        name = catalog.pbs_asset("3.12.1", "20260801", DARWIN)
+        self.github_digest("20260801", name, "sha256:" + "0" * 64)
+        with self.assertRaises(catalog.Failure) as cm:
+            self.generate(existing)
+        self.assertEqual(str(cm.exception),
+                         f"python {name} GitHub digest: sha256:{'0' * 64} != sha256:{sha256(name.encode())}")
+
+    def test_a_uv_sha256_that_disagrees_is_an_error(self):
+        existing = self.shipped()
+        for platform in (DARWIN, LINUX):
+            with self.subTest(platform=platform):
+                url = f"https://github.com/astral-sh/uv/releases/download/{self.UV}/uv-{platform}.tar.gz"
+                good = self.net.bodies[url + ".sha256"]
+                self.net.bodies[url + ".sha256"] = "0" * 64 + "  x\n"
+                try:
+                    with self.assertRaises(catalog.Failure) as cm:
+                        self.generate(existing)
+                finally:
+                    self.net.bodies[url + ".sha256"] = good
+                self.assertEqual(str(cm.exception), f"uv uv-{platform}.tar.gz .sha256: "
+                                                    f"sha256:{'0' * 64} != sha256:{sha256(url.encode())}")
+
+    def test_a_shipped_row_differing_in_any_field_but_its_digest_is_an_error(self):
+        assert_every_field_is_checked(self, "python", self.shipped(), self.generate)
+
+    def test_a_cpython_asset_missing_from_its_github_release_is_an_error(self):
+        existing = self.shipped()
+        self.publish("20260910", ["3.13.0"])
+        # A shipped row's release, and a new row's.
+        for tag, version, platform in (("20260801", "3.12.1", DARWIN), ("20260910", "3.13.0", LINUX)):
+            with self.subTest(tag=tag, platform=platform):
+                self.sync()
+                name = catalog.pbs_asset(version, tag, platform)
+                self.github_digest(tag, name, ...)
+                with self.assertRaises(catalog.Failure) as cm:
+                    self.generate(existing)
+                self.assertEqual(str(cm.exception), f"python: PBS {tag} release has no asset {name}")
+
+    def test_a_cpython_asset_github_recorded_no_digest_for_rests_on_sha256sums(self):
+        existing = self.shipped()
+        self.publish("20260910", ["3.13.0"])
+        self.github_digest("20260801", catalog.pbs_asset("3.12.1", "20260801", LINUX), None)
+        self.github_digest("20260910", catalog.pbs_asset("3.13.0", "20260910", DARWIN), None)
+        out, report = self.generate(existing)
+        self.assertEqual(out, {"cpython-3.12.1": existing[0],
+                               "cpython-3.13.0": self.expected("3.13.0", "20260910")})
+        self.assertEqual(report.added, ["cpython-3.13.0"])
+        # The digest the row carries is still the one SHA256SUMS lists.
+        self.sums["20260910"][catalog.pbs_asset("3.13.0", "20260910", DARWIN)] = "e" * 64
+        self.sync()
+        self.github_digest("20260910", catalog.pbs_asset("3.13.0", "20260910", DARWIN), None)
+        out, _ = self.generate(existing)
+        self.assertEqual(out["cpython-3.13.0"]["artifacts"][0]["digest"], "sha256:" + "e" * 64)
+
+    def test_a_malformed_sha256sums_line_is_an_error(self):
+        existing = self.shipped()
+        url = catalog.pbs_url("20260801", "SHA256SUMS")
+        self.net.bodies[url] += "0123  cpython-3.12.1+20260801-extra.tar.gz extra\n"
+        with self.assertRaises(catalog.Failure) as cm:
+            self.generate(existing)
+        self.assertEqual(str(cm.exception), "python: PBS 20260801 SHA256SUMS: malformed checksum line "
+                                            "'0123  cpython-3.12.1+20260801-extra.tar.gz extra'")
+
+    def test_check_reports_a_new_version_as_drift_and_writes_nothing(self):
+        self.shipped()
+        path = os.path.join(self.scratch.name, catalog.FILES["python"])
+        text = read(path)
+        self.assertTrue(run_quietly("python", check=True)[0])
+        self.publish("20260910", ["3.12.2"])
+        ok, out = run_quietly("python", check=True)
+        self.assertFalse(ok)
+        self.assertIn("python: src/kernel/provider/cpython.catalog.toml differs from what upstream "
+                      "publishes today (1 new, 0 of them new revisions)", out)
+        self.assertEqual(read(path), text)
+
+
+class Dotnet(Base):
+    """Microsoft's release metadata (sha512), cross-checked with the
+    .sha512 file beside each archive."""
+
+    META = "https://builds.dotnet.microsoft.com/dotnet/release-metadata"
+
+    def setUp(self):
+        super().setUp()
+        self.channels = {"10.0": "active", "9.0": "maintenance", "8.0": "eol", "11.0": "preview"}
+        self.releases = {channel: [] for channel in self.channels}
+        self.net.json(f"{self.META}/releases-index.json", {"releases-index": [
+            {"channel-version": c, "support-phase": phase, "releases.json": f"{self.META}/{c}/releases.json"}
+            for c, phase in self.channels.items()
+        ]})
+        self.sync()
+
+    def sync(self):
+        for channel, releases in self.releases.items():
+            self.net.json(f"{self.META}/{channel}/releases.json", {"releases": releases})
+
+    @staticmethod
+    def url(version, platform):
+        slug = "osx-arm64" if platform == DARWIN else "linux-x64"
+        return f"https://builds.dotnet.microsoft.com/dotnet/Sdk/{version}/dotnet-sdk-{version}-{slug}.tar.gz"
+
+    def sdk(self, version, platforms=(DARWIN, LINUX), sidecar=True):
+        files = [{"name": "dotnet-sdk-win-x64.zip", "url": "https://example.invalid/sdk.zip", "hash": "AB"}]
+        for platform in platforms:
+            url = self.url(version, platform)
+            name = "dotnet-sdk-osx-arm64.tar.gz" if platform == DARWIN else "dotnet-sdk-linux-x64.tar.gz"
+            files.append({"name": name, "url": url, "hash": sha512(url.encode()).upper()})
+            if sidecar:
+                self.net.bodies[url + ".sha512"] = sha512(url.encode()) + "\n"
+        return {"version": version, "files": files}
+
+    def publish(self, channel, *versions, old_style=False, **kw):
+        sdks = [self.sdk(v, **kw) for v in versions]
+        entry = {"sdk": sdks[0]} if old_style else {"sdk": sdks[0], "sdks": sdks}
+        self.releases[channel].insert(0, entry)
+        self.sync()
+
+    def generate(self, existing):
+        report = catalog.Report("dotnet")
+        return catalog.generate_dotnet(existing, report), report
+
+    def expected(self, version):
+        return {
+            "key": f"dotnet-sdk-{version}", "revision": None,
+            "components": [{"name": "dotnet-sdk", "version": version}],
+            "artifacts": [
+                {"platform": platform, "component": "dotnet-sdk", "provider": "builds.dotnet.microsoft.com",
+                 "build": version, "recipe": "dotnet-sdk/1", "url": self.url(version, platform),
+                 "digest": "sha512:" + sha512(self.url(version, platform).encode())}
+                for platform in (DARWIN, LINUX)
+            ],
+        }
+
+    def shipped(self, *versions):
+        return written("dotnet", self.scratch.name, [self.expected(v) for v in versions])
+
+    def test_supported_channels_enter_and_previews_and_eol_channels_do_not(self):
+        self.publish("10.0", "10.0.100", "10.0.100-rc.2.25502.107")
+        self.publish("9.0", "9.0.300", old_style=True)
+        self.publish("8.0", "8.0.400")
+        self.publish("11.0", "11.0.100-preview.1.26101.1")
+        out, report = self.generate([])
+        self.assertEqual(out, {"dotnet-sdk-9.0.300": self.expected("9.0.300"),
+                               "dotnet-sdk-10.0.100": self.expected("10.0.100")})
+        self.assertEqual((report.added, report.skipped, report.notes),
+                         (["dotnet-sdk-9.0.300", "dotnet-sdk-10.0.100"], [], []))
+        self.assertNotIn(f"{self.META}/8.0/releases.json", self.net.requests)
+
+    def test_shipped_rows_are_kept_even_in_an_eol_channel(self):
+        self.publish("8.0", "8.0.400")
+        self.publish("10.0", "10.0.100")
+        existing = self.shipped("8.0.400")
+        # Read now that a shipped row may live there, but nothing new enters.
+        self.publish("8.0", "8.0.401")
+        out, report = self.generate(existing)
+        self.assertEqual(out, {"dotnet-sdk-8.0.400": existing[0],
+                               "dotnet-sdk-10.0.100": self.expected("10.0.100")})
+        self.assertEqual(report.added, ["dotnet-sdk-10.0.100"])
+
+    def test_a_shipped_release_no_longer_in_the_metadata_is_an_error(self):
+        self.publish("10.0", "10.0.100")
+        existing = self.shipped("9.0.300")
+        with self.assertRaises(catalog.Failure) as cm:
+            self.generate(existing)
+        self.assertEqual(str(cm.exception), "dotnet: dotnet-sdk-9.0.300: no longer in the release metadata")
+
+    def test_a_shipped_row_whose_hash_changed_upstream_is_an_error(self):
+        self.publish("10.0", "10.0.100")
+        existing = self.shipped("10.0.100")
+        self.releases["10.0"][0]["sdks"][0]["files"][-1]["hash"] = "E" * 128
+        self.sync()
+        with self.assertRaises(catalog.Failure) as cm:
+            self.generate(existing)
+        lines = str(cm.exception).splitlines()
+        self.assertEqual(lines[0], "dotnet: dotnet-sdk-10.0.100: the checked-in row no longer matches upstream")
+        self.assertIn("sha512:" + "e" * 128, lines[2])
+
+    def test_a_shipped_row_differing_in_any_field_but_its_digest_is_an_error(self):
+        self.publish("10.0", "10.0.100")
+        assert_every_field_is_checked(self, "dotnet", self.shipped("10.0.100"), self.generate)
+
+    def test_a_shipped_row_upstream_withdrew_is_an_error(self):
+        self.publish("10.0", "10.0.100", platforms=(LINUX,))
+        existing = self.shipped("10.0.100")
+        with self.assertRaises(catalog.Failure) as cm:
+            self.generate(existing)
+        lines = str(cm.exception).splitlines()
+        self.assertEqual(lines[0], "dotnet: dotnet-sdk-10.0.100: the checked-in row no longer matches upstream")
+        self.assertEqual(lines[2], "  upstream:   None")
+
+    def test_an_archive_off_the_shipped_endpoint_is_refused(self):
+        self.publish("10.0", "10.0.100")
+        self.releases["10.0"][0]["sdks"][0]["files"][1]["url"] = "https://evil.example/dotnet-sdk.tar.gz"
+        self.sync()
+        with self.assertRaises(catalog.Failure) as cm:
+            self.generate([])
+        self.assertEqual(str(cm.exception),
+                         "dotnet 10.0.100: https://evil.example/dotnet-sdk.tar.gz is not on the shipped endpoint")
+
+    def test_a_sha512_beside_the_archive_that_disagrees_is_an_error(self):
+        self.publish("10.0", "10.0.100")
+        url = self.url("10.0.100", LINUX)
+        self.net.bodies[url + ".sha512"] = "0" * 128
+        with self.assertRaises(catalog.Failure) as cm:
+            self.generate([])
+        self.assertEqual(str(cm.exception),
+                         f"dotnet {url} .sha512: sha512:{'0' * 128} != sha512:{sha512(url.encode())}")
+
+    def test_a_shipped_rows_sha512_that_disagrees_is_an_error(self):
+        self.publish("10.0", "10.0.100")
+        existing = self.shipped("10.0.100")
+        url = self.url("10.0.100", DARWIN)
+        self.net.bodies[url + ".sha512"] = "0" * 128
+        with self.assertRaises(catalog.Failure) as cm:
+            self.generate(existing)
+        self.assertEqual(str(cm.exception),
+                         f"dotnet {url} .sha512: sha512:{'0' * 128} != sha512:{sha512(url.encode())}")
+
+    def test_rows_without_a_sha512_beside_them_are_noted(self):
+        self.publish("10.0", "10.0.100")
+        self.publish("9.0", "9.0.300", sidecar=False)
+        out, report = self.generate([])
+        self.assertEqual(sorted(out), ["dotnet-sdk-10.0.100", "dotnet-sdk-9.0.300"])
+        self.assertEqual(report.notes, ["2 of 4 rows have no .sha512 beside the archive; "
+                                        "the release metadata is their only published checksum"])
+
+    def test_a_release_missing_an_archive_is_skipped_with_the_reason(self):
+        self.publish("10.0", "10.0.101", platforms=(LINUX,))
+        out, report = self.generate([])
+        self.assertEqual(out, {})
+        self.assertEqual(report.skipped, [("dotnet-sdk-10.0.101", f"no {DARWIN} archive in the release metadata")])
+
+    def test_check_reports_a_new_release_as_drift_and_writes_nothing(self):
+        self.publish("10.0", "10.0.100")
+        self.shipped("10.0.100")
+        path = os.path.join(self.scratch.name, catalog.FILES["dotnet"])
+        text = read(path)
+        self.assertTrue(run_quietly("dotnet", check=True)[0])
+        self.publish("10.0", "10.0.101")
+        ok, out = run_quietly("dotnet", check=True)
+        self.assertFalse(ok)
+        self.assertIn("dotnet: src/tailors/dotnet/catalog.toml differs from what upstream publishes today "
+                      "(1 new, 0 of them new revisions)", out)
+        self.assertEqual(read(path), text)
 
 
 if __name__ == "__main__":
