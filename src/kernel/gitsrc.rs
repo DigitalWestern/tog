@@ -53,7 +53,14 @@ fn option_looking_authority(url: &str) -> bool {
     // brackets before handing it on, so the check looks at what ssh would
     // see: `%2Dhost` and `[-host]` are `-host`.
     let authority = percent_decode(&rest[..rest.find(['/', '?']).unwrap_or(rest.len())]);
-    let leads_with_dash = |part: &str| part.trim_start_matches('[').starts_with('-');
+    // One bracket layer comes off, and only when it closes, as git takes
+    // it off: `[-host` and `[[-host]]` reach ssh with a `[` in front.
+    let leads_with_dash = |part: &str| {
+        part.strip_prefix('[')
+            .filter(|_| part.contains(']'))
+            .unwrap_or(part)
+            .starts_with('-')
+    };
     leads_with_dash(&authority)
         || authority
             .rsplit_once('@')
@@ -1585,6 +1592,10 @@ mod refusal_tests {
             "https://git@[2001:db8::1]:8443/owner/repo",
             "https://github.com/owner/repo%2D",
             "https://github.com/%/repo",
+            // Git takes one bracket layer off, and only a closed one, so
+            // these reach ssh with a `[` in front and are not options.
+            "ssh://git@%5B-host/repo",
+            "ssh://git@[[-host]]/repo",
         ] {
             validate_source(&source(url, COMMIT, None)).unwrap_or_else(|e| panic!("{url}: {e}"));
         }
