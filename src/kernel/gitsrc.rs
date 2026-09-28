@@ -740,12 +740,7 @@ mod tests {
         validate_symlinks(root).unwrap();
         let escaped = |root: &Path| {
             let error = validate_symlinks(root).expect_err("an escaping symlink was accepted");
-            assert!(
-                error
-                    .to_string()
-                    .contains("symlink target escaped the checkout"),
-                "{error}"
-            );
+            assert_eq!(error.to_string(), "symlink target escaped the checkout");
         };
         std::os::unix::fs::symlink("../outside", root.join("escape")).unwrap();
         escaped(root);
@@ -1407,4 +1402,241 @@ fn collect_paths(root: &Path, base: &Path, out: &mut Vec<PathBuf>) -> io::Result
         }
     }
     Ok(())
+}
+
+/// Offline tests for what git is never handed (#348): a source that is not
+/// pinned, a URL or ref that could be read as an option, a scheme outside
+/// the allow-list, a subdirectory that escapes the checkout, and symlinks
+/// that leave it or loop. Each refusal returns before any git command
+/// runs, so nothing here needs a repository or the network.
+#[cfg(test)]
+mod refusal_tests {
+    use super::*;
+    use crate::kernel::testutil::TempDir;
+
+    const COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
+
+    fn source(url: &str, commit: &str, subdirectory: Option<&str>) -> GitSource {
+        GitSource {
+            url: url.into(),
+            commit: commit.into(),
+            subdirectory: subdirectory.map(str::to_string),
+        }
+    }
+
+    fn refusal(source: &GitSource) -> String {
+        validate_source(source)
+            .expect_err("the source must be refused")
+            .to_string()
+    }
+
+    #[test]
+    fn a_source_not_pinned_to_a_full_commit_is_refused() {
+        for commit in [
+            "main",
+            "v1.2.3",
+            &COMMIT[..39],
+            &format!("{}g", &COMMIT[..39]),
+            "",
+        ] {
+            assert_eq!(
+                refusal(&source("https://example.invalid/repo.git", commit, None)),
+                format!(
+                    "https://example.invalid/repo.git: git sources must be pinned to a full commit, got {commit:?}"
+                ),
+                "{commit}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_url_git_could_read_as_an_option_or_an_unknown_scheme_is_refused() {
+        for url in [
+            "-oProxyCommand=touch /tmp/pwned",
+            "--upload-pack=touch /tmp/pwned",
+            "http://example.invalid/repo.git",
+            "ftp://example.invalid/repo.git",
+            "ext::sh -c 'touch /tmp/pwned'",
+            "github.com/owner/repo",
+            "/srv/git/repo.git",
+            "",
+        ] {
+            assert_eq!(
+                refusal(&source(url, COMMIT, None)),
+                format!(
+                    "refusing git URL {url:?}: expected one of https://, ssh://, git://, file://"
+                ),
+                "{url}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_subdirectory_that_escapes_the_checkout_is_refused() {
+        for subdirectory in [
+            "/etc",
+            "/",
+            "..",
+            "../sibling",
+            "pkg/../../outside",
+            "pkg/..",
+            "..\\outside",
+            "pkg\\..\\..\\outside",
+        ] {
+            assert_eq!(
+                refusal(&source(
+                    "https://example.invalid/repo.git",
+                    COMMIT,
+                    Some(subdirectory)
+                )),
+                format!("refusing git subdirectory {subdirectory:?}: it escapes the checkout"),
+                "{subdirectory}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_commit_is_checked_before_the_url_and_the_url_before_the_subdirectory() {
+        let error = refusal(&source("http://x/repo", "main", Some("/etc")));
+        assert!(error.contains("must be pinned to a full commit"), "{error}");
+        let error = refusal(&source("http://x/repo", COMMIT, Some("/etc")));
+        assert!(error.starts_with("refusing git URL"), "{error}");
+    }
+
+    #[test]
+    fn control_every_allowed_scheme_passes_with_a_contained_subdirectory() {
+        for url in [
+            "https://github.com/owner/repo",
+            "ssh://git@github.com/owner/repo.git",
+            "git://example.invalid/repo.git",
+            "file:///srv/git/repo.git",
+        ] {
+            validate_source(&source(url, COMMIT, None)).unwrap();
+            for subdirectory in ["pkg", "python/pkg", ".", "pkg/./sub", "..pkg", "pkg.."] {
+                validate_source(&source(url, COMMIT, Some(subdirectory))).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn resolve_ref_refuses_a_bad_url_or_ref_before_running_git() {
+        // A pinned reference is answered without a lookup, lowercased.
+        let upper = COMMIT.to_ascii_uppercase();
+        assert_eq!(
+            resolve_ref("http://never.contacted/repo", &upper).unwrap(),
+            COMMIT
+        );
+        // Otherwise the URL is normalized, then checked against the
+        // allow-list. Port 9 answers nothing, so a lookup would fail
+        // differently.
+        for (url, normalized) in [
+            ("http://127.0.0.1:9/repo", "http://127.0.0.1:9/repo"),
+            (
+                "git+http://127.0.0.1:9/repo#egg=x",
+                "http://127.0.0.1:9/repo",
+            ),
+            ("ftp://127.0.0.1:9/repo", "ftp://127.0.0.1:9/repo"),
+        ] {
+            assert_eq!(
+                resolve_ref(url, "main").unwrap_err().to_string(),
+                format!("refusing git URL {normalized:?}"),
+                "{url}"
+            );
+        }
+        for reference in [
+            "-oProxyCommand=touch /tmp/pwned",
+            "--upload-pack=touch",
+            "main --upload-pack=touch",
+            "main\tmaster",
+            "main\n",
+        ] {
+            assert_eq!(
+                resolve_ref("https://127.0.0.1:9/repo", reference)
+                    .unwrap_err()
+                    .to_string(),
+                format!("refusing git ref {reference:?}"),
+                "{reference}"
+            );
+        }
+    }
+
+    fn link(target: &str, at: &Path) {
+        std::os::unix::fs::symlink(target, at).unwrap();
+    }
+
+    fn symlink_refusal(root: &Path) -> String {
+        validate_symlinks(root)
+            .expect_err("the checkout must be refused")
+            .to_string()
+    }
+
+    #[test]
+    fn a_symlink_with_an_absolute_target_is_refused() {
+        let temp = TempDir::named("gitsrc-absolute");
+        let root = &temp.0;
+        link("/etc/passwd", &root.join("passwd"));
+        assert_eq!(symlink_refusal(root), "symlink target has an absolute path");
+        // Even one that points back inside the checkout: the checkout moves
+        // when it is imported, and the absolute path does not move with it.
+        fs::remove_file(root.join("passwd")).unwrap();
+        fs::write(root.join("inside"), b"x").unwrap();
+        link(
+            root.join("inside").to_str().unwrap(),
+            &root.join("self-absolute"),
+        );
+        assert_eq!(symlink_refusal(root), "symlink target has an absolute path");
+    }
+
+    #[test]
+    fn a_symlink_that_loops_is_refused() {
+        let temp = TempDir::named("gitsrc-cycle");
+        let root = &temp.0;
+        link("me", &root.join("me"));
+        assert_eq!(
+            symlink_refusal(root),
+            format!(
+                "symlink cycle involving {}",
+                root.canonicalize().unwrap().join("me").display()
+            )
+        );
+        fs::remove_file(root.join("me")).unwrap();
+        // A two-link cycle, and one that goes through a directory.
+        link("b", &root.join("a"));
+        link("a", &root.join("b"));
+        let error = symlink_refusal(root);
+        assert!(error.starts_with("symlink cycle involving "), "{error}");
+        fs::remove_file(root.join("a")).unwrap();
+        fs::remove_file(root.join("b")).unwrap();
+        fs::create_dir(root.join("dir")).unwrap();
+        link("../dir/loop", &root.join("dir/loop"));
+        let error = symlink_refusal(root);
+        assert!(error.starts_with("symlink cycle involving "), "{error}");
+    }
+
+    #[test]
+    fn a_symlink_that_escapes_from_a_subdirectory_is_refused_exactly() {
+        let temp = TempDir::named("gitsrc-escape");
+        let root = &temp.0;
+        fs::create_dir_all(root.join("a/b")).unwrap();
+        // Two levels up from a/b is the root: allowed. Three is out.
+        link("../../inside", &root.join("a/b/up-two"));
+        validate_symlinks(root).unwrap();
+        link("../../../outside", &root.join("a/b/up-three"));
+        assert_eq!(symlink_refusal(root), "symlink target escaped the checkout");
+    }
+
+    #[test]
+    fn control_broken_and_nested_links_inside_the_checkout_pass() {
+        let temp = TempDir::named("gitsrc-inside");
+        let root = &temp.0;
+        fs::create_dir_all(root.join("src/lib")).unwrap();
+        fs::write(root.join("src/lib/mod.rs"), b"x").unwrap();
+        // Relative into a sibling directory, through a directory link, and
+        // a dangling link: all stay inside, so all are valid source content.
+        link("src/lib", &root.join("lib-link"));
+        link("../lib-link/mod.rs", &root.join("src/via-link"));
+        link("does-not-exist", &root.join("dangling"));
+        link("./src/../src/lib", &root.join("dotted"));
+        validate_symlinks(root).unwrap();
+    }
 }
