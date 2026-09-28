@@ -49,8 +49,10 @@ pub fn drop_objects<W: Write>(
     for (index, id) in ids.iter().enumerate() {
         // The CLI already checks the shape, but this is the layer that turns
         // an id into a path under `objects/`, so it is the layer that must
-        // never take one on trust.
-        if !store::is_object_id(id) {
+        // never take one on trust. A legacy id (a label with `..`) is
+        // accepted here and nowhere else: a store may still hold one, and
+        // this is the only command that can remove it.
+        if !store::is_object_id(id) && !store::is_legacy_object_id(id) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!("{id:?} is not a store object id"),
@@ -321,4 +323,407 @@ fn remove_object(store: &Store, id: &str) -> io::Result<()> {
 
 fn record_path(store: &Store, id: &str) -> PathBuf {
     store.root.join("meta").join(format!("{id}.json"))
+}
+
+#[cfg(test)]
+mod drop_tests {
+    use super::super::tests::{register_objects, test_identity, wedge, TempStore};
+    use super::*;
+    use crate::kernel::activity::ActivityMode;
+
+    fn run(
+        store: &Store,
+        activity: &StoreActivity,
+        ids: &[String],
+        dry_run: bool,
+    ) -> (io::Result<usize>, String) {
+        let mut out = Vec::new();
+        let result = drop_objects(store, activity, ids, dry_run, &mut out);
+        (result, String::from_utf8(out).unwrap())
+    }
+
+    fn exclusive(store: &Store, ids: &[String], dry_run: bool) -> (io::Result<usize>, String) {
+        let activity = store.activity(ActivityMode::Exclusive).unwrap();
+        run(store, &activity, ids, dry_run)
+    }
+
+    /// An object directory with no record: droppable, with a fixed reason.
+    fn bare(store: &Store, name: &str) -> String {
+        let id = test_identity(name, None).object_id();
+        fs::create_dir_all(store.object_path(&id)).unwrap();
+        fs::write(store.object_path(&id).join("payload"), name).unwrap();
+        id
+    }
+
+    fn refusal(result: io::Result<usize>) -> (io::ErrorKind, String) {
+        let error = result.expect_err("the drop was not refused");
+        (error.kind(), error.to_string())
+    }
+
+    /// Both halves of a wedged object are still on disk.
+    fn intact(store: &Store, id: &str) -> bool {
+        store.object_path(id).join("payload").is_file() && record_path(store, id).is_file()
+    }
+
+    /// Every shape that would turn an id into a path outside `objects/`, or
+    /// into more than one entry inside it, or that is neither an object id
+    /// nor a legacy one: the prefix is 40 hex (lowercase, when the label
+    /// has `..`), byte 40 is `-`, and the label is `[A-Za-z0-9._-]`.
+    fn hostile() -> Vec<String> {
+        let hex = "0".repeat(40);
+        let valid = test_identity("valid", None).object_id();
+        let short = "0".repeat(39);
+        vec![
+            String::new(),
+            "..".into(),
+            ".".into(),
+            "../x".into(),
+            "a/b".into(),
+            "/abs".into(),
+            format!("{hex}-../../x"),
+            format!("{hex}-../x"),
+            format!("{hex}-x/y"),
+            format!("{valid}\0"),
+            format!("{hex}-na\0me"),
+            format!("{hex}-a..b\0"),
+            hex.clone(),
+            format!("{hex}-"),
+            // The prefix: one non-hex digit, uppercase with a `..` label,
+            // and one digit short.
+            format!("g{short}-name-1"),
+            format!("g{short}-a..b-1"),
+            format!("{}-a..b-1", "A".repeat(40)),
+            format!("{short}-name-1"),
+            format!("{short}-a..b-1"),
+            // Byte 40 is the separator, and nothing else is.
+            format!("{hex}_name-1"),
+            format!("{hex}.name-1"),
+            format!("{hex}_a..b-1"),
+            format!("{hex}0-name-1"),
+            // The label.
+            format!("{hex}-na me-1"),
+            format!("{hex}-name-1\t"),
+            format!("{hex}-a..b 1"),
+            format!("{hex}-nam\u{e9}-1"),
+            format!("{hex}-a..b-\u{e9}"),
+        ]
+    }
+
+    /// Well-formed legacy ids: past the shape check, so an absent one is
+    /// refused as absent, not as hostile.
+    fn legacy_shapes() -> Vec<String> {
+        let hex = "0".repeat(40);
+        let valid = test_identity("valid", None).object_id();
+        vec![
+            format!("{hex}-name..version"),
+            format!("{valid}.."),
+            format!("{hex}-a..b-1"),
+            format!("{hex}-..."),
+        ]
+    }
+
+    /// Publish an object under a legacy id, the way a store written before
+    /// `sanitize` split dot runs holds one: read-only tree, and a record
+    /// filed under the same id.
+    fn legacy(store: &Store, name: &str) -> String {
+        let identity = test_identity(name, None);
+        let id = format!("{}-a..b-1", &identity.object_id()[..40]);
+        assert!(!store::is_object_id(&id) && store::is_legacy_object_id(&id));
+        let object = store.object_path(&id);
+        fs::create_dir_all(&object).unwrap();
+        fs::write(object.join("payload"), name).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = fs::metadata(&object).unwrap().permissions();
+        permissions.set_mode(permissions.mode() & !0o222);
+        fs::set_permissions(&object, permissions).unwrap();
+        fs::write(
+            record_path(store, &id),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "id": id,
+                "identity": identity,
+                "created": 0,
+                "exceptions": [],
+                "refs": [],
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        id
+    }
+
+    /// The reason `wedge`'s record is unusable, as the drop prints it.
+    fn mismatch(id: &str) -> String {
+        format!("object {id} identity hashes to a different object id")
+    }
+
+    fn sweep(store: &Store) -> (io::Result<Report>, String) {
+        let activity = store.activity(ActivityMode::Exclusive).unwrap();
+        let mut out = Vec::new();
+        let result = collect_with_activity(store, &activity, Options::default(), &mut out);
+        (result, String::from_utf8(out).unwrap())
+    }
+
+    #[test]
+    fn an_empty_id_list_is_refused() {
+        let temp = TempStore::new("drop-empty");
+        let store = temp.store();
+        let id = bare(&store, "kept");
+
+        let (result, text) = exclusive(&store, &[], false);
+        assert_eq!(
+            refusal(result),
+            (
+                io::ErrorKind::InvalidInput,
+                "--drop-object needs at least one store object id".to_string()
+            )
+        );
+        assert!(text.is_empty(), "{text}");
+        assert!(store.object_path(&id).is_dir());
+    }
+
+    /// Checked alone, and last in a batch whose first id is really
+    /// droppable: the shape check runs over every id before anything is
+    /// removed, so neither half of the first object may go.
+    #[test]
+    fn a_hostile_id_is_refused_before_anything_is_removed() {
+        let temp = TempStore::new("drop-hostile");
+        let store = temp.store();
+        let wedged = wedge(&store, "wedged");
+        let objects = store.root.join("objects");
+        for id in hostile() {
+            let expected = (
+                io::ErrorKind::InvalidInput,
+                format!("{id:?} is not a store object id"),
+            );
+            for batch in [vec![id.clone()], vec![wedged.clone(), id.clone()]] {
+                let (result, text) = exclusive(&store, &batch, false);
+                assert_eq!(refusal(result), expected, "{batch:?}");
+                assert!(text.is_empty(), "{batch:?}: {text}");
+                assert!(
+                    intact(&store, &wedged) && objects.is_dir(),
+                    "{batch:?} removed something before its shape was refused"
+                );
+            }
+        }
+        for id in legacy_shapes() {
+            let expected = (io::ErrorKind::NotFound, format!("no such object {id}"));
+            for batch in [vec![id.clone()], vec![wedged.clone(), id.clone()]] {
+                let (result, text) = exclusive(&store, &batch, false);
+                assert_eq!(refusal(result), expected, "{batch:?}");
+                assert!(text.is_empty(), "{batch:?}: {text}");
+                assert!(intact(&store, &wedged), "{batch:?} removed something");
+            }
+        }
+        // The control: the same first id, with nothing hostile after it,
+        // does go. So the refusals above were the shape check, not a store
+        // that could not drop it anyway.
+        let (count, text) = exclusive(&store, std::slice::from_ref(&wedged), false);
+        assert_eq!(count.unwrap(), 1, "{text}");
+        assert!(!store.object_path(&wedged).exists(), "{text}");
+    }
+
+    #[test]
+    fn a_duplicate_id_is_refused_before_anything_is_removed() {
+        let temp = TempStore::new("drop-duplicate");
+        let store = temp.store();
+        let first = wedge(&store, "first");
+        let second = bare(&store, "second");
+        for batch in [
+            vec![second.clone(), second.clone()],
+            vec![first.clone(), second.clone(), first.clone()],
+        ] {
+            let repeated = batch.last().unwrap();
+            let (result, text) = exclusive(&store, &batch, false);
+            assert_eq!(
+                refusal(result),
+                (
+                    io::ErrorKind::InvalidInput,
+                    format!("refusing to drop object {repeated} more than once in one invocation")
+                )
+            );
+            assert!(text.is_empty(), "{text}");
+            assert!(intact(&store, &first));
+            assert!(store.object_path(&second).is_dir());
+        }
+    }
+
+    /// A shared lease, or another store's exclusive one, authorizes nothing.
+    #[test]
+    fn dropping_requires_this_stores_exclusive_lease() {
+        let temp = TempStore::new("drop-lease");
+        let store = temp.store();
+        let other_temp = TempStore::new("drop-lease-other");
+        let other = other_temp.store();
+        let id = wedge(&store, "wedged");
+        let expected = (
+            io::ErrorKind::Other,
+            format!(
+                "dropping store objects requires an active exclusive lease for store {}",
+                store.root.canonicalize().unwrap().display()
+            ),
+        );
+
+        let shared = store.activity(ActivityMode::Shared).unwrap();
+        let (result, text) = run(&store, &shared, std::slice::from_ref(&id), false);
+        assert_eq!(refusal(result), expected);
+        assert!(text.is_empty(), "{text}");
+        drop(shared);
+
+        let foreign = other.activity(ActivityMode::Exclusive).unwrap();
+        let (result, text) = run(&store, &foreign, std::slice::from_ref(&id), false);
+        assert_eq!(refusal(result), expected);
+        assert!(text.is_empty(), "{text}");
+        drop(foreign);
+
+        assert!(intact(&store, &id), "a refused lease removed something");
+    }
+
+    /// Both objects keep every byte, and so do their records: a dry run
+    /// that unlinked records before deciding it was a dry run would leave
+    /// the objects and lose the records.
+    #[test]
+    fn a_dry_run_reports_and_removes_nothing() {
+        let temp = TempStore::new("drop-dry-run");
+        let store = temp.store();
+        let wedged = wedge(&store, "wedged");
+        let old = legacy(&store, "legacy");
+        let bare = bare(&store, "bare");
+        let files = [
+            store.object_path(&wedged).join("payload"),
+            record_path(&store, &wedged),
+            store.object_path(&old).join("payload"),
+            record_path(&store, &old),
+            store.object_path(&bare).join("payload"),
+        ];
+        let before: Vec<Vec<u8>> = files.iter().map(|file| fs::read(file).unwrap()).collect();
+
+        let batch = [wedged.clone(), old.clone(), bare.clone()];
+        let (count, text) = exclusive(&store, &batch, true);
+        assert_eq!(count.unwrap(), 3, "{text}");
+        assert_eq!(
+            text,
+            format!(
+                "tog: would drop object {wedged} ({})\n\
+                 tog: would drop object {old} (object metadata id {old:?} is malformed)\n\
+                 tog: would drop object {bare} (object without metadata)\n",
+                mismatch(&wedged)
+            )
+        );
+        let after: Vec<Vec<u8>> = files.iter().map(|file| fs::read(file).unwrap()).collect();
+        assert_eq!(before, after);
+    }
+
+    /// A legacy `..` object wedges the sweep, `--drop-object` accepts its
+    /// id and removes both halves, and the sweep then runs.
+    #[test]
+    fn a_legacy_dot_run_object_is_dropped_and_unwedges_the_sweep() {
+        let temp = TempStore::new("drop-legacy");
+        let store = temp.store();
+        let id = legacy(&store, "legacy");
+        register_objects(&store, &temp.root.join("project"), &[]);
+
+        let (result, text) = sweep(&store);
+        assert_eq!(
+            refusal(result.map(|_| 0)),
+            (
+                io::ErrorKind::InvalidData,
+                "refusing to sweep: metadata maintenance left 1 unresolved record(s); nothing \
+                 was deleted. Run `tog gc --migrate-metadata` for the full list, then repair \
+                 the records it names or drop the ones you cannot with `tog gc --drop-object \
+                 <id>`"
+                    .to_string()
+            )
+        );
+        assert!(
+            text.contains(&format!(
+                "metadata record unusable: meta/{id}.json \u{2014} object metadata id {id:?} is \
+                 malformed. Drop it with `tog gc --drop-object {id}`"
+            )),
+            "{text}"
+        );
+        assert!(intact(&store, &id), "the refused sweep removed something");
+
+        let (count, text) = exclusive(&store, std::slice::from_ref(&id), false);
+        assert_eq!(count.unwrap(), 1, "{text}");
+        assert_eq!(
+            text,
+            format!("tog: dropped object {id} (object metadata id {id:?} is malformed)\n")
+        );
+        assert!(!store.object_path(&id).exists(), "{text}");
+        assert!(!record_path(&store, &id).exists(), "{text}");
+
+        let (report, text) = sweep(&store);
+        report.unwrap_or_else(|error| panic!("{error}: {text}"));
+    }
+
+    /// A record that is a symlink or a directory is one drop refuses, so
+    /// the advice must not send the operator to `--drop-object`.
+    #[test]
+    fn a_record_drop_would_refuse_is_not_advised_as_a_drop() {
+        let temp = TempStore::new("drop-advice");
+        let store = temp.store();
+        let id = legacy(&store, "legacy");
+        register_objects(&store, &temp.root.join("project"), &[]);
+        let record = record_path(&store, &id);
+        let file = format!("{id}.json");
+        let kept = temp.root.join("kept.json");
+        fs::rename(&record, &kept).unwrap();
+        for (shape, rm) in [("symlink", "rm"), ("directory", "rm -r")] {
+            if shape == "symlink" {
+                std::os::unix::fs::symlink(&kept, &record).unwrap();
+            } else {
+                fs::create_dir(&record).unwrap();
+            }
+            let (result, text) = sweep(&store);
+            assert!(result.is_err(), "{shape}: {text}");
+            assert!(
+                text.contains(&format!("metadata record unusable: meta/{file} \u{2014} ")),
+                "{shape}: {text}"
+            );
+            assert!(
+                text.contains(&format!(
+                    "Delete meta/{file} by hand, or restore the file from a backup."
+                )),
+                "{shape}: {text}"
+            );
+            assert!(
+                !text.contains(&format!("--drop-object {id}")),
+                "{shape}: {text}"
+            );
+            assert_eq!(
+                super::super::migrate::remove_record_line(&store, &file),
+                crate::kernel::ui::shell_line(
+                    &rm.split(' ')
+                        .chain([record.display().to_string().as_str()])
+                        .collect::<Vec<_>>()
+                ),
+                "{shape}"
+            );
+            if shape == "symlink" {
+                fs::remove_file(&record).unwrap();
+            } else {
+                fs::remove_dir(&record).unwrap();
+            }
+        }
+    }
+
+    /// The passing control: a wedged object and its record both go, and a
+    /// healthy neighbour is not touched.
+    #[test]
+    fn a_real_drop_removes_the_object_and_its_record() {
+        let temp = TempStore::new("drop-control");
+        let store = temp.store();
+        let id = wedge(&store, "wedged");
+        let neighbour = bare(&store, "neighbour");
+
+        let (count, text) = exclusive(&store, std::slice::from_ref(&id), false);
+        assert_eq!(count.unwrap(), 1, "{text}");
+        assert_eq!(
+            text,
+            format!("tog: dropped object {id} ({})\n", mismatch(&id))
+        );
+        assert!(!store.object_path(&id).exists(), "{text}");
+        assert!(!record_path(&store, &id).exists(), "{text}");
+        assert!(store.object_path(&neighbour).is_dir(), "{text}");
+    }
 }
