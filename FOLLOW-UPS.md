@@ -93,6 +93,7 @@ Nothing queued; the next item comes from "Open work" below.
   - #369 python: wheel entry-point and entry-name validation leftovers (from the #368 review).
   - #371 comforter: closure_object probe follows symlinks out of the object (from the #370 review).
   - #373 sandbox: host-socket scan leftovers (from the #372 review).
+  - #375 store: metadata readers and record writer leftovers (from the #374 review).
 - **Quality review of 2026-09-24 (#264).** A whole-codebase review after
   the 09-20 to 09-24 run. #264 holds the work order and the overall verdict.
   Each line is one issue and one PR, in order:
