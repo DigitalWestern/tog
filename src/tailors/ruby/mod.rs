@@ -1968,21 +1968,29 @@ mod rubygems_check_tests {
     use super::*;
 
     const SHA: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const OTHER_SHA: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
-    fn api_reply(number: &str, platform: &str) -> String {
+    /// A rubygems.org version reply for one coordinate, with the fields
+    /// tog reads and the ones it ignores, all consistent with each other.
+    fn api_reply(name: &str, number: &str, platform: &str, sha: &str) -> String {
+        let full_name = if platform == "ruby" {
+            format!("{name}-{number}")
+        } else {
+            format!("{name}-{number}-{platform}")
+        };
         serde_json::json!({
-            "name": "racc", "number": number, "platform": platform, "sha": SHA,
-            "gem_uri": format!("https://rubygems.org/gems/racc-{number}.gem"),
+            "name": name, "number": number, "platform": platform, "sha": sha,
+            "gem_uri": format!("https://rubygems.org/gems/{full_name}.gem"),
         })
         .to_string()
     }
 
     #[test]
     fn an_api_reply_for_another_version_is_refused() {
-        let error =
-            digest_from_api_reply("racc-1.8.1", "1.8.1", "ruby", &api_reply("1.8.0", "ruby"))
-                .unwrap_err()
-                .to_string();
+        let body = api_reply("racc", "1.8.0", "ruby", SHA);
+        let error = digest_from_api_reply("racc-1.8.1", "1.8.1", "ruby", &body)
+            .unwrap_err()
+            .to_string();
         assert_eq!(error, "racc-1.8.1: api returned \"1.8.0\"-\"ruby\" instead");
     }
 
@@ -1990,27 +1998,45 @@ mod rubygems_check_tests {
     fn an_api_reply_for_another_platform_is_refused() {
         // The racc 1.8.1 case that motivated the platform query: the bare
         // endpoint answers with the java gem, whose sha is not the ruby one.
-        let error =
-            digest_from_api_reply("racc-1.8.1", "1.8.1", "ruby", &api_reply("1.8.1", "java"))
-                .unwrap_err()
-                .to_string();
+        let body = api_reply("racc", "1.8.1", "java", SHA);
+        let error = digest_from_api_reply("racc-1.8.1", "1.8.1", "ruby", &body)
+            .unwrap_err()
+            .to_string();
         assert_eq!(error, "racc-1.8.1: api returned \"1.8.1\"-\"java\" instead");
     }
 
     #[test]
     fn an_api_reply_with_no_version_or_platform_field_is_refused() {
-        for body in [
-            r#"{"sha": "aa"}"#,
-            r#"{"number": null, "platform": "ruby", "sha": "aa"}"#,
-            r#"{"number": 1.81, "platform": "ruby", "sha": "aa"}"#,
-            r#"[]"#,
+        // One field at a time: the other is correct, so only the missing or
+        // mistyped one can be what refuses the reply.
+        for (body, shown) in [
+            (r#"{"platform": "ruby", "sha": "aa"}"#, "null-\"ruby\""),
+            (
+                r#"{"number": null, "platform": "ruby", "sha": "aa"}"#,
+                "null-\"ruby\"",
+            ),
+            (
+                r#"{"number": 1.81, "platform": "ruby", "sha": "aa"}"#,
+                "1.81-\"ruby\"",
+            ),
+            (r#"{"number": "1.8.1", "sha": "aa"}"#, "\"1.8.1\"-null"),
+            (
+                r#"{"number": "1.8.1", "platform": null, "sha": "aa"}"#,
+                "\"1.8.1\"-null",
+            ),
+            (
+                r#"{"number": "1.8.1", "platform": ["ruby"], "sha": "aa"}"#,
+                "\"1.8.1\"-[\"ruby\"]",
+            ),
+            (r#"[]"#, "null-null"),
         ] {
             let error = digest_from_api_reply("racc-1.8.1", "1.8.1", "ruby", body)
                 .unwrap_err()
                 .to_string();
-            assert!(
-                error.starts_with("racc-1.8.1: api returned ") && error.ends_with(" instead"),
-                "{body}: {error}"
+            assert_eq!(
+                error,
+                format!("racc-1.8.1: api returned {shown} instead"),
+                "{body}"
             );
         }
     }
@@ -2036,16 +2062,19 @@ mod rubygems_check_tests {
         let error = digest_from_api_reply("racc-1.8.1", "1.8.1", "ruby", "<html>")
             .unwrap_err()
             .to_string();
-        assert!(error.starts_with("racc-1.8.1: api json: "), "{error}");
+        let serde = serde_json::from_str::<serde_json::Value>("<html>").unwrap_err();
+        assert_eq!(error, format!("racc-1.8.1: api json: {serde}"));
     }
 
     #[test]
     fn control_a_matching_api_reply_yields_its_sha() {
-        let sha = digest_from_api_reply("racc-1.8.1", "1.8.1", "ruby", &api_reply("1.8.1", "ruby"))
-            .unwrap();
+        // Two replies with different digests: the value must come from the
+        // reply, not from anywhere else.
+        let body = api_reply("racc", "1.8.1", "ruby", SHA);
+        let sha = digest_from_api_reply("racc-1.8.1", "1.8.1", "ruby", &body).unwrap();
         assert_eq!(sha, SHA);
         // A platform-qualified coordinate matches its own variant.
-        let body = api_reply("1.18.10", "x86_64-linux");
+        let body = api_reply("nokogiri", "1.18.10", "x86_64-linux", OTHER_SHA);
         let sha = digest_from_api_reply(
             "nokogiri-1.18.10-x86_64-linux",
             "1.18.10",
@@ -2053,7 +2082,7 @@ mod rubygems_check_tests {
             &body,
         )
         .unwrap();
-        assert_eq!(sha, SHA);
+        assert_eq!(sha, OTHER_SHA);
     }
 
     fn gem(name: &str, version: &str, platform: &str, full_name: &str) -> RubyGem {
@@ -2093,14 +2122,31 @@ mod rubygems_check_tests {
                 format!("rake-13.2.1: embedded gemspec disagrees with the plan ({shown})"),
             );
         }
-        // Fields missing from the spec read as null and disagree too.
-        let error = spec_matches_plan(&planned, br#"{"name": "rake"}"#)
-            .unwrap_err()
-            .to_string();
-        assert_eq!(
-            error,
-            "rake-13.2.1: embedded gemspec disagrees with the plan (\"rake\" null null)"
-        );
+        // A field missing from the spec reads as null and disagrees too,
+        // one at a time with the other two correct.
+        for (body, shown) in [
+            (
+                r#"{"version": "13.2.1", "platform": "ruby"}"#,
+                "null \"13.2.1\" \"ruby\"",
+            ),
+            (
+                r#"{"name": "rake", "platform": "ruby"}"#,
+                "\"rake\" null \"ruby\"",
+            ),
+            (
+                r#"{"name": "rake", "version": "13.2.1"}"#,
+                "\"rake\" \"13.2.1\" null",
+            ),
+        ] {
+            let error = spec_matches_plan(&planned, body.as_bytes())
+                .unwrap_err()
+                .to_string();
+            assert_eq!(
+                error,
+                format!("rake-13.2.1: embedded gemspec disagrees with the plan ({shown})"),
+                "{body}"
+            );
+        }
     }
 
     #[test]
@@ -2118,11 +2164,13 @@ mod rubygems_check_tests {
             let error = spec_matches_plan(&planned, &spec("rake", "13.2.1", platform))
                 .unwrap_err()
                 .to_string();
-            assert!(
-                error.starts_with(&format!(
-                    "{full_name}: embedded gemspec disagrees with the plan ("
-                )),
-                "{full_name}: {error}"
+            assert_eq!(
+                error,
+                format!(
+                    "{full_name}: embedded gemspec disagrees with the plan \
+                     (\"rake\" \"13.2.1\" \"{platform}\")"
+                ),
+                "{full_name}"
             );
         }
     }
@@ -2133,7 +2181,8 @@ mod rubygems_check_tests {
         let error = spec_matches_plan(&planned, b"not json")
             .unwrap_err()
             .to_string();
-        assert!(error.starts_with("rake-13.2.1: spec json: "), "{error}");
+        let serde = serde_json::from_slice::<serde_json::Value>(b"not json").unwrap_err();
+        assert_eq!(error, format!("rake-13.2.1: spec json: {serde}"));
     }
 
     #[test]
