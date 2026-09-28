@@ -480,12 +480,68 @@ fn parse_entry_points(text: &str) -> io::Result<Vec<(String, String, String)>> {
         };
         let module = module.trim();
         let attr = attr.trim();
-        if module.is_empty() || attr.is_empty() || attr.split('.').any(|part| part.is_empty()) {
+        // Both sides become `from {module} import {attr}` in the launcher,
+        // so every dotted component must be a Python identifier or the
+        // generated script is a SyntaxError at run time.
+        if !module.split('.').all(is_identifier) || !attr.split('.').all(is_identifier) {
             return Err(invalid_data(format!("invalid entry point value: {value}")));
         }
         entries.push((name.to_string(), module.to_string(), attr.to_string()));
     }
     Ok(entries)
+}
+
+/// The ASCII shape of a Python identifier: not empty, not a keyword, no
+/// leading ASCII digit, and no ASCII byte outside `[A-Za-z0-9_]`. Non-ASCII
+/// characters pass through untouched: Python decides those by XID class
+/// after NFKC normalisation, and reproducing that table here would reject
+/// names Python accepts.
+fn is_identifier(part: &str) -> bool {
+    const KEYWORDS: &[&str] = &[
+        "False",
+        "None",
+        "True",
+        "and",
+        "as",
+        "assert",
+        "async",
+        "await",
+        "break",
+        "class",
+        "continue",
+        "def",
+        "del",
+        "elif",
+        "else",
+        "except",
+        "finally",
+        "for",
+        "from",
+        "global",
+        "if",
+        "import",
+        "in",
+        "is",
+        "lambda",
+        "nonlocal",
+        "not",
+        "or",
+        "pass",
+        "raise",
+        "return",
+        "try",
+        "while",
+        "with",
+        "yield",
+        "__debug__",
+    ];
+    let ascii_shape = |c: char| !c.is_ascii() || c == '_' || c.is_ascii_alphanumeric();
+    let mut chars = part.chars();
+    chars
+        .next()
+        .is_some_and(|first| !first.is_ascii_digit() && ascii_shape(first))
+        && chars.all(ascii_shape)
+        && !KEYWORDS.contains(&part)
 }
 
 #[cfg(unix)]
@@ -987,6 +1043,169 @@ mod tests {
         assert_eq!(
             error.to_string(),
             format!("console-script collision: {}", bin.join("tool").display())
+        );
+    }
+}
+
+/// Offline tests for the wheel entry guards (#348): the zip entry names a
+/// wheel may carry, symlink entries, and entry-point script names.
+#[cfg(test)]
+mod entry_guard_tests {
+    use super::*;
+    use crate::kernel::testutil::TempDir;
+    use std::io::Write;
+    use zip::write::SimpleFileOptions;
+    use zip::ZipWriter;
+
+    #[test]
+    fn an_entry_name_that_leaves_the_wheel_root_is_refused() {
+        for name in [
+            "/etc/passwd",
+            "\\windows\\system32",
+            "../escaped.txt",
+            "pkg/../../escaped.txt",
+            "pkg\\..\\..\\escaped.txt",
+            "..",
+        ] {
+            let error = validate_entry_name(name).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{name}");
+            assert_eq!(error.to_string(), format!("unsafe zip entry: {name}"));
+        }
+        for name in [
+            "pkg/mod.py",
+            "pkg-1.0.dist-info/METADATA",
+            "..pkg/x",
+            "pkg../x",
+        ] {
+            validate_entry_name(name).unwrap_or_else(|e| panic!("{name}: {e}"));
+        }
+    }
+
+    #[test]
+    fn a_symlink_entry_is_refused_and_nothing_is_written() {
+        let temp = TempDir::named("wheel-symlink");
+        let site = temp.0.join("site");
+        let bin = temp.0.join("bin");
+        fs::create_dir_all(&site).unwrap();
+        fs::create_dir_all(&bin).unwrap();
+        let wheel = temp.0.join("pkg-1.0-py3-none-any.whl");
+        let file = fs::File::create(&wheel).unwrap();
+        let mut writer = ZipWriter::new(file);
+        let options = SimpleFileOptions::default().unix_permissions(0o600);
+        writer
+            .start_file("pkg-1.0.dist-info/METADATA", options)
+            .unwrap();
+        writer.write_all(b"Name: pkg\nVersion: 1.0\n").unwrap();
+        writer.start_file("pkg/__init__.py", options).unwrap();
+        writer.write_all(b"").unwrap();
+        writer
+            .add_symlink("pkg/passwd", "../../../etc/passwd", options)
+            .unwrap();
+        writer.finish().unwrap();
+
+        let error = install_wheel(
+            &wheel,
+            &site,
+            &bin,
+            "3.12",
+            &bin.join("python"),
+            &mut BTreeMap::new(),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(
+            error.to_string(),
+            "symlink entry is not allowed: pkg/passwd"
+        );
+        assert!(
+            fs::read_dir(&site).unwrap().next().is_none(),
+            "the scan must refuse before anything is written"
+        );
+    }
+
+    #[test]
+    fn an_entry_point_name_that_is_a_path_is_refused() {
+        for name in ["../tog", "bin/tog", "bin\\tog", ".", "..", ""] {
+            let text = format!("[console_scripts]\n{name} = pkg.cli:main\n");
+            let error = parse_entry_points(&text).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{name:?}");
+            assert_eq!(
+                error.to_string(),
+                format!("invalid entry point name: {name}"),
+                "{name:?}"
+            );
+        }
+        // The same names under gui_scripts.
+        let error = parse_entry_points("[gui_scripts]\n../tog = pkg.cli:main\n").unwrap_err();
+        assert_eq!(error.to_string(), "invalid entry point name: ../tog");
+    }
+
+    #[test]
+    fn an_invalid_entry_point_value_is_refused() {
+        for value in [
+            "pkg.cli",
+            "pkg.cli:",
+            ":main",
+            "pkg.cli:a..b",
+            "pkg.cli:.main",
+            " : ",
+            "pkg..cli:main",
+            "pkg-name:main",
+            "1pkg:main",
+            "pkg.cli:main()",
+            "pkg cli:main",
+            "pkg:class",
+            "pkg.class:main",
+            "pkg:Cli.class",
+            "pkg:__debug__",
+        ] {
+            let text = format!("[console_scripts]\ntog = {value}\n");
+            let error = parse_entry_points(&text).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{value:?}");
+            assert_eq!(
+                error.to_string(),
+                format!("invalid entry point value: {}", value.trim()),
+                "{value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn control_only_script_sections_are_read_and_extras_are_dropped() {
+        let text = "\
+# comment\n\
+[some.plugins]\n\
+../ignored = pkg:thing\n\
+[console_scripts]\n\
+tog = pkg.cli:main [extra1,extra2]\n\
+; another comment\n\
+\n\
+tog-admin=pkg.admin:Cli.run\n\
+caf = caf\u{e9}.cli:_run2\n\
+[gui_scripts]\n\
+tog-gui = pkg.gui:main\n\
+[other]\n\
+bad/name = x:y\n";
+        assert_eq!(
+            parse_entry_points(text).unwrap(),
+            [
+                ("tog".to_string(), "pkg.cli".to_string(), "main".to_string()),
+                (
+                    "tog-admin".to_string(),
+                    "pkg.admin".to_string(),
+                    "Cli.run".to_string()
+                ),
+                (
+                    "caf".to_string(),
+                    "caf\u{e9}.cli".to_string(),
+                    "_run2".to_string()
+                ),
+                (
+                    "tog-gui".to_string(),
+                    "pkg.gui".to_string(),
+                    "main".to_string()
+                ),
+            ]
         );
     }
 }

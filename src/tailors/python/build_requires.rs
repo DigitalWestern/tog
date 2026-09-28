@@ -999,3 +999,203 @@ build-backend = "hatchling.build"
             .any(|line| line.to_ascii_lowercase().starts_with("numpy")));
     }
 }
+
+/// Offline tests for the extracted-sdist link guard (#348). The walk runs
+/// on a directory, so each case is a scratch tree with one hostile entry.
+#[cfg(test)]
+mod link_guard_tests {
+    use super::*;
+    use crate::kernel::testutil::TempDir;
+    use std::io::Write;
+    use std::os::unix::fs::symlink;
+
+    fn tree(label: &str) -> (TempDir, PathBuf) {
+        let dir = TempDir::named(&format!("build-requires-links-{label}"));
+        let root = dir.0.join("source");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("setup.py"), b"").unwrap();
+        let root = root.canonicalize().unwrap();
+        (dir, root)
+    }
+
+    fn refusal(root: &Path) -> String {
+        let error = validate_extracted_links(root).expect_err("the tree must be refused");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        error.to_string()
+    }
+
+    #[test]
+    fn a_link_with_an_absolute_target_is_refused() {
+        let (_dir, root) = tree("absolute");
+        symlink("/etc/passwd", root.join("passwd")).unwrap();
+        assert_eq!(
+            refusal(&root),
+            format!(
+                "extracted sdist link escapes the source root: {} -> /etc/passwd",
+                root.join("passwd").display()
+            )
+        );
+    }
+
+    #[test]
+    fn a_link_that_climbs_out_is_refused() {
+        let (_dir, root) = tree("climb");
+        fs::create_dir_all(root.join("pkg")).unwrap();
+        symlink("../../outside", root.join("pkg/escape")).unwrap();
+        assert_eq!(
+            refusal(&root),
+            format!(
+                "extracted sdist link escapes the source root: {} -> ../../outside",
+                root.join("pkg/escape").display()
+            )
+        );
+    }
+
+    #[test]
+    fn a_link_that_climbs_out_past_a_missing_component_is_refused() {
+        // The resolver stops at the first missing component; the climb after
+        // it must still be refused instead of being taken as harmless.
+        let (_dir, root) = tree("missing-climb");
+        symlink("missing/../../outside", root.join("escape")).unwrap();
+        assert_eq!(
+            refusal(&root),
+            format!(
+                "extracted sdist link escapes the source root: {} -> missing/../../outside",
+                root.join("escape").display()
+            )
+        );
+    }
+
+    #[test]
+    fn a_link_that_escapes_through_another_link_is_refused() {
+        // Lexically `here/../outside` stays under the root, but `here` is a
+        // link to the root itself, so the `..` steps out.
+        let (_dir, root) = tree("through");
+        symlink(".", root.join("here")).unwrap();
+        symlink("here/../outside", root.join("escape")).unwrap();
+        assert_eq!(
+            refusal(&root),
+            format!(
+                "extracted sdist link escapes the source root: {} -> here/../outside",
+                root.join("escape").display()
+            )
+        );
+    }
+
+    #[test]
+    fn a_hard_link_is_refused() {
+        let (_dir, root) = tree("hard");
+        fs::write(root.join("a"), b"a").unwrap();
+        fs::hard_link(root.join("a"), root.join("b")).unwrap();
+        let error = refusal(&root);
+        // Either name is the second link to the same inode.
+        assert!(
+            error
+                == format!(
+                    "extracted sdist contains a hard link: {}",
+                    root.join("a").display()
+                )
+                || error
+                    == format!(
+                        "extracted sdist contains a hard link: {}",
+                        root.join("b").display()
+                    ),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_special_file_is_refused() {
+        let (_dir, root) = tree("fifo");
+        let fifo = root.join("pipe");
+        let c_path = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0);
+        assert_eq!(
+            refusal(&root),
+            format!(
+                "extracted sdist contains a special file: {}",
+                fifo.display()
+            )
+        );
+    }
+
+    #[test]
+    fn a_link_loop_is_refused() {
+        let (_dir, root) = tree("loop");
+        symlink("b", root.join("a")).unwrap();
+        symlink("a", root.join("b")).unwrap();
+        assert_eq!(refusal(&root), "extracted sdist contains a symlink loop");
+    }
+
+    #[test]
+    fn control_links_that_stay_inside_pass() {
+        let (_dir, root) = tree("inside");
+        fs::create_dir_all(root.join("pkg/sub")).unwrap();
+        fs::write(root.join("pkg/data"), b"d").unwrap();
+        // Relative, through a directory link, dangling, and dotted.
+        symlink("../data", root.join("pkg/sub/up")).unwrap();
+        symlink("pkg", root.join("pkg-link")).unwrap();
+        symlink("pkg-link/data", root.join("via-link")).unwrap();
+        symlink("pkg/missing", root.join("dangling")).unwrap();
+        symlink("./pkg/../pkg/data", root.join("dotted")).unwrap();
+        validate_extracted_links(&root).unwrap();
+    }
+
+    #[test]
+    fn a_tar_sdist_with_a_link_loop_is_refused_after_extraction() {
+        // The archive guard accepts relative in-root links, so a loop only
+        // shows up once the tree is on disk: this goes through extract_sdist
+        // rather than calling the walker directly.
+        let dir = TempDir::named("build-requires-tar-loop");
+        let staged = dir.0.join("example-1.0");
+        fs::create_dir_all(&staged).unwrap();
+        fs::write(
+            staged.join("pyproject.toml"),
+            b"[build-system]\nrequires = [\"setuptools\"]\n",
+        )
+        .unwrap();
+        symlink("b", staged.join("a")).unwrap();
+        symlink("a", staged.join("b")).unwrap();
+        let path = dir.0.join("example-1.0.tar.gz");
+        let status = std::process::Command::new("/usr/bin/tar")
+            .arg("-czf")
+            .arg(&path)
+            .arg("-C")
+            .arg(&dir.0)
+            .arg("example-1.0")
+            .status()
+            .unwrap();
+        assert!(status.success());
+        fs::remove_dir_all(&staged).unwrap();
+        let info = inspect_sdist(&path).unwrap();
+        let destination = dir.0.join("source");
+        let error = extract_sdist(&path, &destination, &info).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(error.to_string(), "extracted sdist contains a symlink loop");
+    }
+
+    #[test]
+    fn a_zip_sdist_with_a_symlink_entry_is_refused_before_extraction() {
+        let dir = TempDir::named("build-requires-zip-symlink");
+        let path = dir.0.join("example-1.0.zip");
+        let file = File::create(&path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default();
+        zip.start_file("example-1.0/pyproject.toml", options)
+            .unwrap();
+        zip.write_all(b"[build-system]\nrequires = [\"setuptools\"]\n")
+            .unwrap();
+        zip.add_symlink("example-1.0/passwd", "/etc/passwd", options)
+            .unwrap();
+        zip.finish().unwrap();
+        let info = inspect_sdist(&path).unwrap();
+        let destination = dir.0.join("source");
+        let error = extract_sdist(&path, &destination, &info).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(
+            error.to_string(),
+            "sdist archive contains a symlink entry: example-1.0/passwd"
+        );
+        assert!(!destination.join("passwd").exists());
+    }
+}
