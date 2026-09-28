@@ -1209,3 +1209,69 @@ mod tests {
         assert_eq!(mode & 0o7777, 0o700);
     }
 }
+
+/// The skeleton becomes `/usr/include`, `/usr/lib64` and the rest inside the
+/// sandbox, so it must never sit under a root the build may write.
+#[cfg(test)]
+mod skeleton_tests {
+    use super::*;
+    use crate::kernel::testutil::TempDir;
+
+    fn refused(write_roots: &[PathBuf]) -> io::Error {
+        let error = runtime_only_mounts(write_roots).map(drop).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Unsupported, "{error}");
+        error
+    }
+
+    /// The message names the skeleton and the root; the refused skeleton
+    /// is removed, not left behind in TMPDIR.
+    #[test]
+    fn a_skeleton_inside_a_writable_root_is_refused() {
+        let temp = fs::canonicalize(std::env::temp_dir()).unwrap();
+        let unrelated = TempDir::named("hostview-unrelated-root");
+        for (root, others) in [
+            (temp.clone(), vec![]),
+            (PathBuf::from("/"), vec![]),
+            (temp.clone(), vec![unrelated.0.clone()]),
+        ] {
+            let mut roots = others.clone();
+            roots.push(root.clone());
+            let message = refused(&roots).to_string();
+            let skeleton = message
+                .strip_prefix("the host view skeleton ")
+                .and_then(|rest| rest.split_once(" would sit inside the writable sandbox root "))
+                .map(|(skeleton, _)| PathBuf::from(skeleton))
+                .unwrap_or_else(|| panic!("{message}"));
+            assert!(skeleton.starts_with(&temp), "{message}");
+            assert_eq!(
+                message,
+                format!(
+                    "the host view skeleton {} would sit inside the writable sandbox root {}; \
+                     point TMPDIR somewhere else",
+                    skeleton.display(),
+                    root.display()
+                )
+            );
+            assert!(
+                !skeleton.exists(),
+                "refused skeleton left behind: {message}"
+            );
+        }
+    }
+
+    /// Control: write roots beside the skeleton, including one whose name
+    /// merely shares its prefix, do not contain it.
+    #[test]
+    fn a_skeleton_beside_the_writable_roots_is_accepted() {
+        let temp = fs::canonicalize(std::env::temp_dir()).unwrap();
+        let beside = TempDir::named("hostview-beside");
+        let view = runtime_only_mounts(&[
+            beside.0.clone(),
+            temp.join("tog-host-view"),
+            temp.join(format!("tog-host-view-{}", std::process::id())),
+        ])
+        .unwrap();
+        assert!(view.skeleton.path().starts_with(&temp));
+        assert!(view.skeleton.path().is_dir());
+    }
+}

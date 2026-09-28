@@ -7,9 +7,11 @@
 //! hostile code — it makes "undeclared network access fails" true, which is
 //! what the kernel needs.
 //!
-//! Unix sockets in writable roots, the working directory, and scratch are
-//! rejected before mounting. Immutable read roots are intentionally not
-//! scanned: sockets there remain an accepted cooperative-hermeticity gap.
+//! On Linux, Unix sockets under any declared root (read or write), the
+//! working directory, and scratch are rejected before bubblewrap runs: `connect` needs no
+//! write access to the mount, so a read-only bind exposes a socket too. The
+//! system directories bubblewrap binds (`/usr`, `/etc` entries) are trusted
+//! and not scanned, and a socket created after the scan is not caught.
 
 use crate::kernel::activity::StoreActivity;
 use crate::kernel::platform::Platform;
@@ -579,8 +581,12 @@ impl Sandbox<'_> {
         wait_with_stderr_relay(child)
     }
 
+    /// A Unix socket is reachable through a read-only bind as well as a
+    /// writable one (`connect` needs no write access to the mount), so every
+    /// declared root is scanned, not only the writable ones.
     fn reject_host_sockets(&self, cwd: &Path, scratch: &Path) -> io::Result<()> {
-        let mut roots = Vec::with_capacity(self.write.len() + 2);
+        let mut roots = Vec::with_capacity(self.read.len() + self.write.len() + 2);
+        roots.extend(self.read.iter().copied());
         roots.extend(self.write.iter().copied());
         roots.push(cwd);
         roots.push(scratch);
@@ -1027,7 +1033,13 @@ fn find_socket_without_following_symlinks(path: &Path) -> io::Result<Option<Path
         return Ok(None);
     }
 
-    for entry in fs::read_dir(path)? {
+    let entries = fs::read_dir(path).map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!("cannot scan {} for host sockets: {error}", path.display()),
+        )
+    })?;
+    for entry in entries {
         let entry = entry?;
         let entry_path = entry.path();
         let metadata = fs::symlink_metadata(&entry_path)?;
@@ -1387,7 +1399,7 @@ mod tests {
         matches!(std::env::var_os("TOG_SANDBOX_TESTS"), Some(value) if !value.is_empty())
     }
 
-    fn linux_ready(test_name: &str) -> bool {
+    pub(super) fn linux_ready(test_name: &str) -> bool {
         match Platform::host() {
             Ok(Platform::X86_64UnknownLinuxGnu) => {}
             Ok(platform) => {
@@ -1418,11 +1430,11 @@ mod tests {
         true
     }
 
-    fn temp_dir(test_name: &str) -> TempDir {
+    pub(super) fn temp_dir(test_name: &str) -> TempDir {
         TempDir::named(&format!("sandbox-{test_name}"))
     }
 
-    fn run(
+    pub(super) fn run(
         sandbox: &Sandbox<'_>,
         cmd: &[&str],
         scratch: &Path,
@@ -3158,6 +3170,321 @@ echo "PKG_CONFIG_LIBDIR=${PKG_CONFIG_LIBDIR-unset}"
             assert!(
                 !touched.iter().any(|seen| seen == name),
                 "a name matching no prefix was scrubbed: {touched:?}"
+            );
+        }
+    }
+}
+
+/// The containment edges of the Linux sandbox that the tests above do not
+/// reach: host sockets under a read-only root, a symlink out of a writable
+/// root, writes aimed at the system root, the session and parent-death
+/// flags, and the argument ceiling.
+#[cfg(test)]
+mod containment_tests {
+    use super::tests::{linux_ready, run, temp_dir};
+    use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_host_socket_under_a_read_root_is_refused_before_bwrap() {
+        // Short names: a socket path is capped at 108 bytes.
+        let root = temp_dir("rs");
+        let scratch = root.0.join("s");
+        let readable = root.0.join("r");
+        fs::create_dir(&scratch).unwrap();
+        fs::create_dir_all(readable.join("n")).unwrap();
+        let socket = readable.join("n/l.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let sandbox = Sandbox {
+            read: vec![&readable],
+            write: vec![&scratch],
+            host_view: HostView::Full,
+        };
+        let result = run(&sandbox, &["/usr/bin/true"], &scratch, &scratch, &[]);
+        drop(listener);
+        let error = result.expect_err("a host socket under a read root was exposed");
+        assert_eq!(error.kind(), io::ErrorKind::Other, "{error}");
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "host Unix socket exposed by sandbox path: {}",
+                fs::canonicalize(&readable)
+                    .unwrap()
+                    .join("n/l.sock")
+                    .display()
+            )
+        );
+    }
+
+    /// Control for the scan: a read root with no socket, and a symlink in
+    /// it that names a socket elsewhere (the scan does not follow links; the
+    /// target is not mounted, so the link dangles inside the sandbox).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_read_root_without_a_socket_passes_the_scan() {
+        let root = temp_dir("rn");
+        let scratch = root.0.join("s");
+        let readable = root.0.join("r");
+        let elsewhere = root.0.join("e");
+        fs::create_dir(&scratch).unwrap();
+        fs::create_dir(&readable).unwrap();
+        fs::create_dir(&elsewhere).unwrap();
+        fs::write(readable.join("file"), "x").unwrap();
+        let listener = std::os::unix::net::UnixListener::bind(elsewhere.join("l.sock")).unwrap();
+        std::os::unix::fs::symlink(elsewhere.join("l.sock"), readable.join("link")).unwrap();
+        let sandbox = Sandbox {
+            read: vec![&readable],
+            write: vec![&scratch],
+            host_view: HostView::Full,
+        };
+        sandbox.reject_host_sockets(&scratch, &scratch).unwrap();
+        drop(listener);
+    }
+
+    /// A read root the scan cannot list is refused, naming the directory,
+    /// instead of being bound unscanned.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_unlistable_directory_in_a_read_root_is_refused_by_name() {
+        // SAFETY: geteuid has no preconditions.
+        if unsafe { libc::geteuid() } == 0 {
+            eprintln!("skip: root lists every directory");
+            return;
+        }
+        let root = temp_dir("unlistable");
+        let scratch = root.0.join("s");
+        let readable = root.0.join("r");
+        let closed = readable.join("closed");
+        fs::create_dir(&scratch).unwrap();
+        fs::create_dir_all(&closed).unwrap();
+        fs::set_permissions(&closed, fs::Permissions::from_mode(0o000)).unwrap();
+        let sandbox = Sandbox {
+            read: vec![&readable],
+            write: vec![&scratch],
+            host_view: HostView::Full,
+        };
+        let result = sandbox.reject_host_sockets(&scratch, &scratch);
+        fs::set_permissions(&closed, fs::Permissions::from_mode(0o755)).unwrap();
+        let error = result.unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied, "{error}");
+        let closed = fs::canonicalize(&closed).unwrap();
+        assert!(
+            error.to_string().starts_with(&format!(
+                "cannot scan {} for host sockets: ",
+                closed.display()
+            )),
+            "{error}"
+        );
+    }
+
+    /// A symlink planted in a writable root that points at an undeclared
+    /// host path reads nothing: the target is not mounted.
+    #[test]
+    fn a_symlink_out_of_a_writable_root_reaches_nothing() {
+        if !linux_ready("a_symlink_out_of_a_writable_root_reaches_nothing") {
+            return;
+        }
+        let root = temp_dir("symlink-out");
+        let scratch = root.0.join("scratch");
+        let writable = root.0.join("writable");
+        let undeclared = root.0.join("undeclared");
+        fs::create_dir(&scratch).unwrap();
+        fs::create_dir(&writable).unwrap();
+        fs::create_dir(&undeclared).unwrap();
+        fs::write(undeclared.join("secret"), "undeclared").unwrap();
+        std::os::unix::fs::symlink(undeclared.join("secret"), writable.join("link")).unwrap();
+        let sandbox = Sandbox {
+            read: vec![],
+            write: vec![&writable, &scratch],
+            host_view: HostView::Full,
+        };
+        let link = writable.join("link");
+        let error = run(
+            &sandbox,
+            &["/usr/bin/cat", link.to_str().unwrap()],
+            &scratch,
+            &scratch,
+            &[],
+        )
+        .expect_err("a symlink out of a writable root read an undeclared file");
+        assert!(
+            error
+                .to_string()
+                .contains("sandboxed command failed (exit status: 1)"),
+            "{error}"
+        );
+        // Control: the same link resolves once its target is declared.
+        let out = scratch.join("out");
+        run(
+            &Sandbox {
+                read: vec![&undeclared],
+                write: vec![&writable, &scratch],
+                host_view: HostView::Full,
+            },
+            &[
+                "/usr/bin/sh",
+                "-c",
+                "/usr/bin/cat \"$1\" > \"$2\"",
+                "sh",
+                link.to_str().unwrap(),
+                out.to_str().unwrap(),
+            ],
+            &scratch,
+            &scratch,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(fs::read_to_string(&out).unwrap(), "undeclared");
+    }
+
+    /// Removes a host path on drop, so a failed assertion cannot leave the
+    /// probe behind.
+    struct RemoveOnDrop(PathBuf);
+
+    impl Drop for RemoveOnDrop {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.0);
+        }
+    }
+
+    /// `/usr` is a read-only bind of the host's: a write there fails in the
+    /// sandbox and nothing appears on the host. The argv check pins the bind
+    /// mode itself, which host permissions alone would hide from a non-root
+    /// run.
+    #[test]
+    fn a_write_to_usr_stays_out_of_the_host() {
+        if !linux_ready("a_write_to_usr_stays_out_of_the_host") {
+            return;
+        }
+        let root = temp_dir("usr-write");
+        let scratch = root.0.join("scratch");
+        fs::create_dir(&scratch).unwrap();
+        let name = root.0.file_name().unwrap().to_str().unwrap();
+        let probe = RemoveOnDrop(Path::new("/usr").join(format!("{name}-probe")));
+        let target = probe.0.to_str().unwrap().to_string();
+        let sandbox = Sandbox {
+            read: vec![],
+            write: vec![&scratch],
+            host_view: HostView::Full,
+        };
+        let args = argv(&sandbox, &["/usr/bin/true"], &scratch).unwrap();
+        let usr = args
+            .windows(3)
+            .filter(|w| w[1] == "/usr" && w[2] == "/usr")
+            .map(|w| w[0].as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(usr, ["--ro-bind"], "{args:?}");
+        let error = run(
+            &sandbox,
+            &["/usr/bin/touch", &target],
+            &scratch,
+            &scratch,
+            &[],
+        )
+        .expect_err("a write to /usr succeeded");
+        assert!(
+            error
+                .to_string()
+                .contains("sandboxed command failed (exit status: 1)"),
+            "{error}"
+        );
+        assert!(!Path::new(&target).exists(), "{target} reached the host");
+    }
+
+    fn argv(sandbox: &Sandbox<'_>, cmd: &[&str], scratch: &Path) -> io::Result<Vec<String>> {
+        let invocation = sandbox.bwrap_args(cmd, "/usr/bin:/bin", scratch, scratch, &[])?;
+        Ok(invocation
+            .args
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect())
+    }
+
+    /// `--new-session` keeps the child off the caller's terminal (no
+    /// TIOCSTI injection); `--die-with-parent` kills it when tog dies. Both
+    /// come before the command, among bubblewrap's own options.
+    #[test]
+    fn the_session_and_parent_death_flags_are_always_set() {
+        let root = temp_dir("session-flags");
+        let scratch = root.0.join("scratch");
+        fs::create_dir(&scratch).unwrap();
+        for host_view in [HostView::Full, HostView::RuntimeOnly] {
+            let sandbox = Sandbox {
+                read: vec![],
+                write: vec![&scratch],
+                host_view,
+            };
+            let args = argv(&sandbox, &["/usr/bin/true"], &scratch).unwrap();
+            let command = args.iter().position(|arg| arg == "/usr/bin/env").unwrap();
+            for flag in ["--new-session", "--die-with-parent"] {
+                let at = args.iter().position(|arg| arg == flag);
+                assert!(at.is_some_and(|at| at < command), "{flag}: {args:?}");
+            }
+        }
+    }
+
+    /// A command line bubblewrap would reject is refused first, naming the
+    /// count and the limit; one at the limit is accepted.
+    #[test]
+    fn a_command_line_over_the_bubblewrap_limit_is_refused() {
+        // bubblewrap's own ceiling; the rest of the test derives from it.
+        assert_eq!(BWRAP_MAX_ARGS, 9000);
+        let root = temp_dir("max-args");
+        let scratch = root.0.join("scratch");
+        fs::create_dir(&scratch).unwrap();
+        let sandbox = Sandbox {
+            read: vec![],
+            write: vec![&scratch],
+            host_view: HostView::Full,
+        };
+        let base = argv(&sandbox, &[], &scratch).unwrap().len();
+        let fill = vec!["x"; BWRAP_MAX_ARGS - base];
+        assert_eq!(
+            argv(&sandbox, &fill, &scratch).unwrap().len(),
+            BWRAP_MAX_ARGS
+        );
+        let over = vec!["x"; BWRAP_MAX_ARGS - base + 1];
+        let error = argv(&sandbox, &over, &scratch).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Unsupported, "{error}");
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "the sandbox needs {} bubblewrap arguments, more than the {BWRAP_MAX_ARGS} \
+                 bubblewrap accepts; this host's library directories are too large for the \
+                 C-runtime-only view",
+                BWRAP_MAX_ARGS + 1
+            )
+        );
+    }
+
+    /// The production caller passes its writable roots to the host view:
+    /// `RuntimeOnly` with TMPDIR as a writable root, or as the scratch that
+    /// is added to them, is refused before any argv is returned.
+    #[test]
+    fn runtime_only_refuses_a_writable_root_that_holds_the_skeleton() {
+        let temp = fs::canonicalize(std::env::temp_dir()).unwrap();
+        let root = temp_dir("skeleton-wiring");
+        let scratch = root.0.join("scratch");
+        fs::create_dir(&scratch).unwrap();
+        for (write, scratch) in [
+            (vec![temp.as_path()], scratch.as_path()),
+            (vec![], temp.as_path()),
+        ] {
+            let sandbox = Sandbox {
+                read: vec![],
+                write,
+                host_view: HostView::RuntimeOnly,
+            };
+            let error = argv(&sandbox, &["/usr/bin/true"], scratch).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::Unsupported, "{error}");
+            let message = error.to_string();
+            assert!(
+                message.starts_with("the host view skeleton ")
+                    && message.ends_with(&format!(
+                        " would sit inside the writable sandbox root {}; point TMPDIR somewhere else",
+                        temp.display()
+                    )),
+                "{message}"
             );
         }
     }
