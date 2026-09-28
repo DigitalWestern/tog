@@ -1321,12 +1321,12 @@ mod integrity_tests {
         hex::encode(Sha256::digest(bytes))
     }
 
-    /// Names of the download temp files left in the store's tmp dir.
+    /// Everything left in the store's tmp dir. The scratch store is this
+    /// test's own, so anything at all is a leak, whatever it is called.
     fn leftover_downloads(store: &Store) -> Vec<String> {
         fs::read_dir(store.root.join("tmp"))
             .unwrap()
             .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
-            .filter(|name| name.starts_with("dl-"))
             .collect()
     }
 
@@ -1334,20 +1334,22 @@ mod integrity_tests {
     /// drops mid-download.
     struct DroppedStream {
         head: &'static [u8],
-        served: bool,
+        served: usize,
     }
 
     impl Read for DroppedStream {
         fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-            if self.served {
+            let rest = &self.head[self.served..];
+            if rest.is_empty() {
                 return Err(io::Error::new(
                     io::ErrorKind::ConnectionReset,
                     "connection reset by peer",
                 ));
             }
-            self.served = true;
-            buf[..self.head.len()].copy_from_slice(self.head);
-            Ok(self.head.len())
+            let n = rest.len().min(buf.len());
+            buf[..n].copy_from_slice(&rest[..n]);
+            self.served += n;
+            Ok(n)
         }
     }
 
@@ -1508,7 +1510,7 @@ mod integrity_tests {
             Ok((
                 Box::new(DroppedStream {
                     head: b"hel",
-                    served: false,
+                    served: 0,
                 }) as Box<dyn Read>,
                 Some(5),
             ))
@@ -1516,11 +1518,38 @@ mod integrity_tests {
         .map(drop)
         .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::ConnectionReset);
+        assert_eq!(error.to_string(), "connection reset by peer");
         assert!(!store.cache_path("sha256", &hex).exists());
         assert!(
             leftover_downloads(&store).is_empty(),
             "partial download left in tmp"
         );
+    }
+
+    #[test]
+    fn a_download_that_ends_early_is_a_hash_mismatch_not_a_cache_entry() {
+        // The declared length is narration only: a stream that ends clean
+        // after three of five bytes is caught by the hash, not the count.
+        let (_scratch, store) = scratch_store("fetch-short");
+        let activity = &store.activity(ActivityMode::Shared).unwrap();
+        let hex = sha256_hex(b"hello");
+        let digest = Digest::sha256(&hex).unwrap();
+        let error = cache_or_download(&store, activity, "https://x/hello", &digest, || {
+            Ok((Box::new(&b"hel"[..]) as Box<dyn Read>, Some(5)))
+        })
+        .map(drop)
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "hash mismatch for https://x/hello\n  expected sha256 {hex}\n  got      {}",
+                sha256_hex(b"hel")
+            )
+        );
+        assert!(!store.cache_path("sha256", &hex).exists());
+        assert!(!store.cache_path("sha256", &sha256_hex(b"hel")).exists());
+        assert!(leftover_downloads(&store).is_empty());
     }
 
     #[test]
@@ -1547,30 +1576,24 @@ mod integrity_tests {
         // Port 9 answers nothing; a refusal that came from a connection
         // attempt would say so instead of naming the scheme.
         let url = "http://127.0.0.1:9/artifact.tar.gz";
-        let error = open_url(url, "download", None).map(drop).unwrap_err();
-        assert_eq!(
-            error.to_string(),
+        let refused = |verb: &str| {
             format!(
-                "download {url}: tog fetches over https only; \
+                "{verb} {url}: tog fetches over https only; \
                  an http:// mirror is refused rather than downgraded"
             )
-        );
+        };
+        let error = open_url(url, "download", None).map(drop).unwrap_err();
+        assert_eq!(error.to_string(), refused("download"));
         // The same refusal reaches every caller, and no file is created.
         let scratch = TempDir::named("fetch-http");
         let dest = scratch.0.join("tog");
         let error = download_file(url, &dest, &sha256_hex(b"hello"))
             .map(drop)
             .unwrap_err();
-        assert!(
-            error.to_string().starts_with(&format!("download {url}: ")),
-            "{error}"
-        );
+        assert_eq!(error.to_string(), refused("download"));
         assert!(!dest.exists());
         let error = fetch_text(url).map(drop).unwrap_err();
-        assert!(
-            error.to_string().starts_with(&format!("fetch {url}: ")),
-            "{error}"
-        );
+        assert_eq!(error.to_string(), refused("fetch"));
     }
 
     #[test]
