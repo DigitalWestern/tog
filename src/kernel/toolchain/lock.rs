@@ -922,11 +922,9 @@ digest = "sha256:855d581f8a4eb1a8117e3426de25fe02770592febcfb31369aee1ffbfee9e8e
         );
         let both = NODE_LOCK.replace("absent = true\n", "absent = true\nvalue = \"24.20.0\"\n");
         let error = ToolchainLock::parse(both.as_bytes()).unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("input package.json has both a value and absent = true"),
-            "{error}"
+        assert_eq!(
+            error.to_string(),
+            "tog-toolchain.toml [node]: input package.json has both a value and absent = true"
         );
     }
 
@@ -939,21 +937,17 @@ digest = "sha256:855d581f8a4eb1a8117e3426de25fe02770592febcfb31369aee1ffbfee9e8e
         // stays whole and only the name check can refuse.
         let dotted_eco = NODE_LOCK.replace("toolchain.node", "toolchain.\"no.de\"");
         let error = ToolchainLock::parse(dotted_eco.as_bytes()).unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("ecosystem name is not a bare TOML key"),
-            "{error}"
+        assert_eq!(
+            error.to_string(),
+            "tog-toolchain.toml [no.de]: ecosystem name is not a bare TOML key"
         );
         let dotted_component = NODE_LOCK
             .replace("\"node-gyp\"", "\"node.gyp\"")
             .replace("component.node-gyp]", "component.\"node.gyp\"]");
         let error = ToolchainLock::parse(dotted_component.as_bytes()).unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("component name \"node.gyp\" is not a bare TOML key"),
-            "{error}"
+        assert_eq!(
+            error.to_string(),
+            "tog-toolchain.toml [node]: component name \"node.gyp\" is not a bare TOML key"
         );
     }
 
@@ -980,35 +974,43 @@ digest = "sha256:855d581f8a4eb1a8117e3426de25fe02770592febcfb31369aee1ffbfee9e8e
             (
                 "primary = \"node\"",
                 "primary = \"npm\"",
-                "not a listed component",
+                "primary npm is not a listed component",
             ),
             (
                 "embedded_in = \"bundled-npm\"",
                 "embedded_in = \"node-gyp\"",
-                "cyclic",
+                "component node-gyp embedding is cyclic",
             ),
             (
                 "path = \"package.json\"",
                 "path = \"../package.json\"",
-                "project-relative",
+                "input path \"../package.json\" is not a normalized project-relative path",
             ),
-            ("absent = true\n", "absent = false\n", "absent = false"),
+            (
+                "absent = true\n",
+                "absent = false\n",
+                "input package.json spells absent = false; omit the key instead",
+            ),
             (
                 "sha256 = \"5b9d0e73029969ae9000117cb877f17bb9841c1279bfe8024e294acfcf017800\"\n",
                 "",
-                "value but no sha256",
+                "input .node-version has a value but no sha256",
             ),
             (
                 "[toolchain.node.platforms.\"x86_64-unknown-linux-gnu\".artifacts.node]",
                 "[toolchain.node.platforms.\"x86_64-unknown-linux-gnu\".artifacts.npm]",
-                "lacks an artifact row",
+                "platform x86_64-unknown-linux-gnu lacks an artifact row for component node",
             ),
         ];
         for (from, to, expect) in cases {
             let text = NODE_LOCK.replace(from, to);
             assert_ne!(text, NODE_LOCK, "{from} not found");
             let error = ToolchainLock::parse(text.as_bytes()).unwrap_err();
-            assert!(error.to_string().contains(expect), "{from}: {error}");
+            assert_eq!(
+                error.to_string(),
+                format!("tog-toolchain.toml [node]: {expect}"),
+                "{from}"
+            );
         }
         let extra_row = |component: &str| {
             NODE_LOCK.trim_end().to_string()
@@ -1020,9 +1022,15 @@ digest = "sha256:855d581f8a4eb1a8117e3426de25fe02770592febcfb31369aee1ffbfee9e8e
         };
         let embedded_row = extra_row("bundled-npm");
         let error = ToolchainLock::parse(embedded_row.as_bytes()).unwrap_err();
-        assert!(error.to_string().contains("embedded component"), "{error}");
+        assert_eq!(
+            error.to_string(),
+            "tog-toolchain.toml [node]: embedded component bundled-npm has its own artifact row"
+        );
         let error = ToolchainLock::parse(extra_row("npm").as_bytes()).unwrap_err();
-        assert!(error.to_string().contains("unknown component"), "{error}");
+        assert_eq!(
+            error.to_string(),
+            "tog-toolchain.toml [node]: artifact row for unknown component npm"
+        );
     }
 
     #[test]
@@ -1485,10 +1493,15 @@ mod validate_tests {
     use super::tests::NODE_LOCK;
     use super::*;
 
+    /// The fixture with `from` replaced by `to`. The needle must occur
+    /// exactly once, so the edit lands where the test says it does.
     fn edited(from: &str, to: &str) -> String {
-        let text = NODE_LOCK.replacen(from, to, 1);
-        assert_ne!(text, NODE_LOCK, "{from:?} not found in the fixture");
-        text
+        assert_eq!(
+            NODE_LOCK.matches(from).count(),
+            1,
+            "{from:?} must occur exactly once in the fixture"
+        );
+        NODE_LOCK.replacen(from, to, 1)
     }
 
     fn refusal(text: &str) -> String {
@@ -1571,8 +1584,9 @@ mod validate_tests {
         }
         // A table for a component the list does not name.
         let unlisted = edited(
-            "[[toolchain.node.inputs]]",
-            "[toolchain.node.component.extra]\nversion = \"1\"\n[[toolchain.node.inputs]]",
+            "[[toolchain.node.inputs]]\npath = \".node-version\"",
+            "[toolchain.node.component.extra]\nversion = \"1\"\n\
+             [[toolchain.node.inputs]]\npath = \".node-version\"",
         );
         assert_eq!(
             refusal(&unlisted),
@@ -1657,8 +1671,18 @@ mod validate_tests {
                 "unsupported platform triple \"riscv64-unknown-linux-gnu\"",
             ),
             (
-                "provider = \"nodejs.org\"",
-                "provider = \"\"",
+                "artifacts.node]\nprovider = \"nodejs.org\"\nbuild = \"24.20.0\"\nrecipe = \"nodejs/legacy\"\nurl = \"https://nodejs.org/dist/v24.20.0/node-v24.20.0-darwin-arm64.tar.gz\"",
+                "artifacts.node]\nprovider = \"\"\nbuild = \"24.20.0\"\nrecipe = \"nodejs/legacy\"\nurl = \"https://nodejs.org/dist/v24.20.0/node-v24.20.0-darwin-arm64.tar.gz\"",
+                "artifact row aarch64-apple-darwin/node lacks provider, build, recipe or url",
+            ),
+            (
+                "artifacts.node]\nprovider = \"nodejs.org\"\nbuild = \"24.20.0\"\nrecipe = \"nodejs/legacy\"\nurl = \"https://nodejs.org/dist/v24.20.0/node-v24.20.0-darwin-arm64.tar.gz\"",
+                "artifacts.node]\nprovider = \"nodejs.org\"\nbuild = \"\"\nrecipe = \"nodejs/legacy\"\nurl = \"https://nodejs.org/dist/v24.20.0/node-v24.20.0-darwin-arm64.tar.gz\"",
+                "artifact row aarch64-apple-darwin/node lacks provider, build, recipe or url",
+            ),
+            (
+                "artifacts.node]\nprovider = \"nodejs.org\"\nbuild = \"24.20.0\"\nrecipe = \"nodejs/legacy\"\nurl = \"https://nodejs.org/dist/v24.20.0/node-v24.20.0-darwin-arm64.tar.gz\"",
+                "artifacts.node]\nprovider = \"nodejs.org\"\nbuild = \"24.20.0\"\nrecipe = \"\"\nurl = \"https://nodejs.org/dist/v24.20.0/node-v24.20.0-darwin-arm64.tar.gz\"",
                 "artifact row aarch64-apple-darwin/node lacks provider, build, recipe or url",
             ),
             (
@@ -1733,16 +1757,15 @@ mod validate_tests {
             "digest = \"sha256:40e5607e5ecb3db9192723776da2d75d966260fc74a7a9e731c1bd67dda96bc8\"",
             "digest = \"sha256:0000000000000000000000000000000000000000000000000000000000000000\"",
         );
-        let error = refusal(&text);
-        let head = "tog-toolchain.toml [node]: bundle_id \
-                    sha256:683bc7a0c5d38d3fcc9e73a6e55ab75bda308fb66204c4808942e750b5c1266b \
-                    does not match its rows and helper pins (sha256:";
-        let tail = "); the file was edited, run `tog update --toolchain node`";
-        assert!(error.starts_with(head) && error.ends_with(tail), "{error}");
-        // The computed id is the one the rows would carry: a lock built
-        // from them by the writer is accepted.
-        let computed = &error[head.len()..error.len() - tail.len()];
-        assert!(is_hex_of_length(computed, 64), "{computed}");
+        // The computed id is the section id of the edited rows, pinned
+        // here so the message is checked whole.
+        assert_eq!(
+            refusal(&text),
+            "tog-toolchain.toml [node]: bundle_id \
+             sha256:683bc7a0c5d38d3fcc9e73a6e55ab75bda308fb66204c4808942e750b5c1266b \
+             does not match its rows and helper pins (sha256:5419c27039c163698f07224f3b288589eae2e2f35d950b911fc081350d54e895); the file was \
+             edited, run `tog update --toolchain node`"
+        );
     }
 
     #[test]
