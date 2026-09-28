@@ -628,6 +628,24 @@ pub(crate) fn is_object_id(value: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || *b == b'.' || *b == b'_' || *b == b'-')
 }
 
+/// An id a store written before `sanitize` split dot runs may still hold:
+/// 40 lowercase hex, `-`, then a label of `[A-Za-z0-9._-]` that may contain
+/// `..`. Accepted only by `tog gc --drop-object`, so such a store can be
+/// emptied of it; everything else keeps refusing it through `is_object_id`.
+/// The label cannot hold `/` or NUL, so the id is one entry under
+/// `objects/` and cannot traverse, and it is never `.` or `..` itself.
+pub(crate) fn is_legacy_object_id(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() > 41
+        && bytes[..40]
+            .iter()
+            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+        && bytes[40] == b'-'
+        && bytes[41..]
+            .iter()
+            .all(|b| b.is_ascii_alphanumeric() || *b == b'.' || *b == b'_' || *b == b'-')
+}
+
 /// One plain directory entry name: not empty, not `.` or `..`, no `/` or
 /// NUL. Looser than `is_object_id` on purpose: `Identity::object_id` keeps
 /// `.` from names and versions, so a committed id may contain `..`.
@@ -842,7 +860,7 @@ mod object_id_guard_tests {
             assert!(temp.0.join("keep").is_file(), "id {id:?}");
         }
         // A plain name that is not a strict object id is still a lookup:
-        // committed ids may carry `..` from a sanitized name or version.
+        // stores written before `sanitize` split dot runs hold ids with `..`.
         for id in ["absent", "0000000000000000000000000000000000000000-a..b-1"] {
             assert!(
                 !store.has_with_activity(&activity, id).unwrap(),
@@ -857,7 +875,7 @@ mod object_id_guard_tests {
             inputs: Default::default(),
         };
         let id = identity.object_id();
-        assert!(!is_object_id(&id) && id.ends_with("-a..b-1"), "{id}");
+        assert!(is_object_id(&id) && id.ends_with("-a.-b-1"), "{id}");
         let staged = store.stage_with_activity(&activity).unwrap();
         fs::write(staged.join("payload"), "a..b").unwrap();
         store
