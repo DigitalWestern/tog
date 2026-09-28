@@ -1189,3 +1189,232 @@ mod tests {
         crate::kernel::store::remove_tree(&base).unwrap();
     }
 }
+
+/// Offline tests for the component archive checks and the path-toolchain
+/// refusal (#348). The layout checks take an entry list or a directory, so
+/// they run on hand-built inputs; the path refusal in `plan` returns
+/// before the store or the network is touched.
+#[cfg(test)]
+mod layout_tests {
+    use super::*;
+    use crate::kernel::archive::{Entry, EntryKind};
+    use crate::kernel::testutil::TempDir;
+    use crate::kernel::toolchain::{ArtifactRow, Bundle, Component, Source, PATH_SOURCE};
+
+    const TARGET: &str = "x86_64-unknown-linux-gnu";
+
+    fn archive(package: &str, target: &str) -> Archive {
+        Archive {
+            package: package.into(),
+            target: target.into(),
+            url: format!("https://static.rust-lang.org/dist/{package}-{target}.tar.xz"),
+            digest: Digest::sha256(&"a".repeat(64)).unwrap(),
+            compression: Compression::Xz,
+        }
+    }
+
+    fn entries(names: &[&str]) -> Vec<Entry> {
+        names
+            .iter()
+            .map(|name| Entry {
+                kind: if name.ends_with('/') {
+                    EntryKind::Dir
+                } else {
+                    EntryKind::File
+                },
+                name: name.to_string(),
+                link: None,
+            })
+            .collect()
+    }
+
+    fn layout_refusal(names: &[&str]) -> String {
+        check_installer_layout(&entries(names), &archive("clippy-preview", TARGET))
+            .expect_err("the layout must be refused")
+            .to_string()
+    }
+
+    #[test]
+    fn an_archive_with_two_roots_or_two_payloads_is_refused() {
+        assert_eq!(
+            layout_refusal(&[
+                "a/",
+                "a/clippy/bin/cargo-clippy",
+                "b/",
+                "b/clippy/bin/clippy"
+            ]),
+            "Rust clippy-preview archive for x86_64-unknown-linux-gnu has an unexpected layout \
+             (roots {\"a\", \"b\"}, payloads {\"clippy\"})"
+        );
+        assert_eq!(
+            layout_refusal(&["a/", "a/clippy/bin/cargo-clippy", "a/rls/bin/rls"]),
+            "Rust clippy-preview archive for x86_64-unknown-linux-gnu has an unexpected layout \
+             (roots {\"a\"}, payloads {\"clippy\", \"rls\"})"
+        );
+    }
+
+    #[test]
+    fn an_archive_with_no_payload_directory_is_refused() {
+        // Only the root and its file list: nothing to strip two levels from.
+        assert_eq!(
+            layout_refusal(&["a/", "a/manifest.in", "a/version"]),
+            "Rust clippy-preview archive for x86_64-unknown-linux-gnu has an unexpected layout \
+             (roots {\"a\"}, payloads {})"
+        );
+        assert_eq!(
+            layout_refusal(&[]),
+            "Rust clippy-preview archive for x86_64-unknown-linux-gnu has an unexpected layout \
+             (roots {}, payloads {})"
+        );
+    }
+
+    #[test]
+    fn control_one_root_and_one_payload_pass_the_layout_check() {
+        check_installer_layout(
+            &entries(&[
+                "clippy-1.97.0-x86_64-unknown-linux-gnu/",
+                "clippy-1.97.0-x86_64-unknown-linux-gnu/manifest.in",
+                "clippy-1.97.0-x86_64-unknown-linux-gnu/clippy-preview/",
+                "clippy-1.97.0-x86_64-unknown-linux-gnu/clippy-preview/manifest.in",
+                "clippy-1.97.0-x86_64-unknown-linux-gnu/clippy-preview/bin/cargo-clippy",
+                "clippy-1.97.0-x86_64-unknown-linux-gnu/clippy-preview/bin/clippy-driver",
+            ]),
+            &archive("clippy-preview", TARGET),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_standard_library_must_land_where_rustc_looks() {
+        let scratch = TempDir::named("rust-extras-std");
+        let tree = scratch.0.join("staged");
+        fs::create_dir_all(&tree).unwrap();
+        let std = archive(STD_PACKAGE, "aarch64-unknown-linux-gnu");
+        assert_eq!(
+            check_std_layout(&tree, &std).unwrap_err().to_string(),
+            "the rust-std archive for aarch64-unknown-linux-gnu has no \
+             lib/rustlib/aarch64-unknown-linux-gnu/lib; refusing to commit"
+        );
+        // Another target's directory does not count.
+        fs::create_dir_all(tree.join("lib/rustlib").join(TARGET).join("lib")).unwrap();
+        assert!(check_std_layout(&tree, &std).is_err());
+        // A file where the directory should be does not count either.
+        fs::create_dir_all(tree.join("lib/rustlib/aarch64-unknown-linux-gnu")).unwrap();
+        fs::write(tree.join("lib/rustlib/aarch64-unknown-linux-gnu/lib"), b"").unwrap();
+        assert!(check_std_layout(&tree, &std).is_err());
+        // Control: the right directory passes.
+        fs::remove_file(tree.join("lib/rustlib/aarch64-unknown-linux-gnu/lib")).unwrap();
+        fs::create_dir_all(tree.join("lib/rustlib/aarch64-unknown-linux-gnu/lib")).unwrap();
+        check_std_layout(&tree, &std).unwrap();
+        // The check is for a target's std only: a target-less std row and
+        // any other package are not asked for the directory.
+        let empty = scratch.0.join("empty");
+        fs::create_dir_all(&empty).unwrap();
+        check_std_layout(&empty, &archive(STD_PACKAGE, ANY_TARGET)).unwrap();
+        check_std_layout(&empty, &archive("clippy-preview", TARGET)).unwrap();
+    }
+
+    #[test]
+    fn an_archive_that_extracted_only_its_file_list_is_refused() {
+        let scratch = TempDir::named("rust-extras-payload");
+        let staged = scratch.0.join("staged");
+        fs::create_dir_all(&staged).unwrap();
+        let refused =
+            "Rust clippy-preview archive for x86_64-unknown-linux-gnu extracted nothing; \
+                       refusing to commit";
+        assert_eq!(
+            check_payload(&staged, &archive("clippy-preview", TARGET))
+                .unwrap_err()
+                .to_string(),
+            refused
+        );
+        fs::write(staged.join(INSTALLER_MANIFEST), b"file:bin/cargo-clippy\n").unwrap();
+        assert_eq!(
+            check_payload(&staged, &archive("clippy-preview", TARGET))
+                .unwrap_err()
+                .to_string(),
+            refused
+        );
+        // Control: anything besides the file list is a payload.
+        fs::create_dir_all(staged.join("bin")).unwrap();
+        check_payload(&staged, &archive("clippy-preview", TARGET)).unwrap();
+    }
+
+    fn path_selected(platform: Platform) -> Selected {
+        Selected {
+            ecosystem: "rust".into(),
+            bundle: Bundle {
+                release: super::super::rust_path::PATH_RELEASE.into(),
+                revision: None,
+                primary: vec!["rustc".into()],
+                components: vec![
+                    Component::new("rustc", "1.97.0"),
+                    Component::new("cargo", "1.97.0"),
+                ],
+                artifacts: vec![ArtifactRow {
+                    platform,
+                    component: "rustc".into(),
+                    provider: PATH_SOURCE.into(),
+                    build: "rustc 1.97.0 (0123abcde 2026-06-26)".into(),
+                    recipe: super::super::rust_path::PATH_RECIPE.into(),
+                    url: "file:///opt/rust".into(),
+                    digest: Digest::sha256(&"a".repeat(64)).unwrap(),
+                }],
+            },
+            lock_sha256: None,
+            source: Source::Lock,
+            helpers: BTreeMap::new(),
+        }
+    }
+
+    fn scratch_store(label: &str) -> (TempDir, Store) {
+        let scratch = TempDir::named(label);
+        let root = scratch.0.clone();
+        for sub in ["objects", "meta", "cache/sha256", "tmp"] {
+            fs::create_dir_all(root.join(sub)).unwrap();
+        }
+        (scratch, Store { root })
+    }
+
+    #[test]
+    fn a_path_toolchain_cannot_also_ask_for_extras() {
+        let (_scratch, store) = scratch_store("rust-extras-path");
+        let activity = &store
+            .activity(crate::kernel::activity::ActivityMode::Shared)
+            .unwrap();
+        let platform = Platform::X86_64UnknownLinuxGnu;
+        let selected = path_selected(platform);
+        let asked = Extras {
+            components: vec!["clippy".into(), "rustc".into()],
+            targets: vec!["aarch64-apple-darwin".into(), platform.triple().into()],
+            profile: Some("default".into()),
+        };
+        // The message names what is beyond the base, not the whole request.
+        let error = plan(&store, activity, platform, &selected, &asked)
+            .map(drop)
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(
+            error.to_string(),
+            "the project's Rust is a local toolchain (toolchain.path), which is used as it is; \
+             it cannot also provide components [clippy], targets [aarch64-apple-darwin] or \
+             profile default; name a channel in rust-toolchain.toml instead"
+        );
+        // Control: a request the base already satisfies plans the tree as
+        // it is, with no manifest and no extensions.
+        let base_only = Extras {
+            components: vec!["rustc".into(), "cargo".into()],
+            targets: vec![platform.triple().into()],
+            profile: Some(MINIMAL_PROFILE.into()),
+        };
+        let plan = plan(&store, activity, platform, &selected, &base_only).unwrap();
+        assert!(plan.manifest.is_none());
+        assert!(plan.extensions.is_empty());
+        assert_eq!(
+            plan.identity.object_id(),
+            super::super::rust_path::identity(platform, &selected)
+                .unwrap()
+                .object_id()
+        );
+    }
+}

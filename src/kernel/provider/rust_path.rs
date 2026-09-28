@@ -1369,3 +1369,117 @@ mod tests {
         assert!(error.to_string().contains("not this host"), "{error}");
     }
 }
+
+/// Offline tests for `locked_row` (#348): what a path selection's locked
+/// row must look like before any tree is read. Reached through
+/// `identity`, the public caller that touches nothing else.
+#[cfg(test)]
+mod locked_row_tests {
+    use super::*;
+    use crate::kernel::toolchain::Source;
+
+    fn host() -> Platform {
+        Platform::host().unwrap()
+    }
+
+    fn selected(recipe: &str, url: &str, digest: Digest) -> Selected {
+        Selected {
+            ecosystem: "rust".into(),
+            bundle: Bundle {
+                release: PATH_RELEASE.into(),
+                revision: None,
+                primary: vec!["rustc".into()],
+                components: vec![
+                    Component::new("rustc", "1.97.0"),
+                    Component::new("cargo", "1.97.0"),
+                ],
+                artifacts: vec![ArtifactRow {
+                    platform: host(),
+                    component: "rustc".into(),
+                    provider: PATH_SOURCE.into(),
+                    build: "rustc 1.97.0 (0123abcde 2026-06-26)".into(),
+                    recipe: recipe.into(),
+                    url: url.into(),
+                    digest,
+                }],
+            },
+            lock_sha256: None,
+            source: Source::Lock,
+            helpers: BTreeMap::new(),
+        }
+    }
+
+    fn sha256() -> Digest {
+        Digest::sha256(&"a".repeat(64)).unwrap()
+    }
+
+    fn refusal(selected: &Selected) -> String {
+        identity(host(), selected)
+            .map(drop)
+            .expect_err("the row must be refused")
+            .to_string()
+    }
+
+    #[test]
+    fn a_recipe_this_tog_does_not_know_is_refused() {
+        assert_eq!(
+            refusal(&selected("rust-path/2", "file:///opt/rust", sha256())),
+            "cargo: recipe rust-path/2 in tog-toolchain.toml is not known to this tog; upgrade tog"
+        );
+    }
+
+    #[test]
+    fn a_tree_digest_that_is_not_sha256_is_refused() {
+        let sha512 = Digest::sha512(&"b".repeat(128)).unwrap();
+        assert_eq!(
+            refusal(&selected(PATH_RECIPE, "file:///opt/rust", sha512)),
+            "cargo: the local Rust toolchain row is a sha512 digest; this tog hashes trees with sha256"
+        );
+    }
+
+    #[test]
+    fn a_url_that_is_not_an_absolute_file_path_is_refused() {
+        for url in [
+            "https://static.rust-lang.org/dist/rust.tar.xz",
+            "file://opt/rust",
+            "file://./rust",
+            "file://",
+            "/opt/rust",
+        ] {
+            assert_eq!(
+                refusal(&selected(PATH_RECIPE, url, sha256())),
+                format!(
+                    "cargo: the local Rust toolchain row names {url}, not an absolute file:// path"
+                ),
+                "{url}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_recipe_is_checked_before_the_digest_and_the_url() {
+        // Every field wrong: the recipe refusal wins, so an old tog says
+        // "upgrade" rather than complaining about a row it cannot read.
+        let sha512 = Digest::sha512(&"b".repeat(128)).unwrap();
+        let error = refusal(&selected("rust-path/2", "https://x/rust", sha512.clone()));
+        assert!(error.starts_with("cargo: recipe rust-path/2"), "{error}");
+        let error = refusal(&selected(PATH_RECIPE, "https://x/rust", sha512));
+        assert!(error.contains("is a sha512 digest"), "{error}");
+    }
+
+    #[test]
+    fn control_a_well_formed_row_names_the_tree_object() {
+        let identity =
+            identity(host(), &selected(PATH_RECIPE, "file:///opt/rust", sha256())).unwrap();
+        assert_eq!(identity.kind, "rust");
+        assert_eq!(identity.name, "rust");
+        assert_eq!(identity.version, "1.97.0");
+        assert_eq!(identity.inputs["schema"], PATH_RECIPE);
+        assert_eq!(identity.inputs["platform"], host().triple());
+        assert_eq!(identity.inputs["tree_sha256"], "a".repeat(64));
+        assert_eq!(
+            identity.inputs["build"],
+            "rustc 1.97.0 (0123abcde 2026-06-26)"
+        );
+    }
+}
