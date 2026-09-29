@@ -367,7 +367,7 @@ impl Route {
         let upstream = self
             .protocol
             .upstream(&self.endpoints, path)
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| scrub_echo(&error.to_string(), path, self.protocol))?;
         let url = match &upstream {
             Upstream::Fetch(url) => url,
             Upstream::Local(answer) => &answer.url,
@@ -380,7 +380,7 @@ impl Route {
         }
         if !self.endpoints.iter().any(|endpoint| endpoint.serves(url)) {
             return Err(format!(
-                "route {} mapped {path} to {}, which is not one of its endpoints",
+                "route {} mapped the path to {}, which is not one of its endpoints",
                 self.protocol.route_id(),
                 url.origin().ascii_serialization()
             ));
@@ -420,12 +420,26 @@ impl Route {
     }
 }
 
+/// A protocol's error text with any echo of the raw mirror path (or its
+/// query) replaced by the redacted form, since the query may hold a secret.
+fn scrub_echo(text: &str, path: &str, protocol: &dyn RegistryProtocol) -> String {
+    let keys = protocol.content_query_keys();
+    let mut text = text.replace(path, &super::redact::url(path, keys));
+    if let Some((_, query)) = path.split_once('?') {
+        let redacted = super::redact::url(&format!("?{query}"), keys);
+        text = text.replace(query, &redacted[1..]);
+    }
+    super::redact::text(&text)
+}
+
 /// The grammar every mirror path must satisfy before a protocol sees it:
 /// an absolute path, no empty, `.`, or `..` segment (percent-encoded or
 /// not), no percent-encoded `/`, `\`, or NUL, no backslash, and no URL
 /// inside it. The query is not restricted beyond well-formed escapes.
 pub fn check_route_path(path_and_query: &str) -> Result<(), String> {
-    let refuse = |why: &str| Err(format!("mirror path {path_and_query:?} refused: {why}"));
+    // The path is not echoed (its query may hold a secret); the caller
+    // names the request with its redacted URL.
+    let refuse = |why: &str| Err(format!("mirror path refused: {why}"));
     let (path, query) = match path_and_query.split_once('?') {
         Some((path, query)) => (path, Some(query)),
         None => (path_and_query, None),

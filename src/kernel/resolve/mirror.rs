@@ -148,7 +148,7 @@ pub(crate) fn refuse(
     record.commit(state);
     let mut headers = extra.clone();
     headers.set("Content-Type", TEXT);
-    let body = format!("tog: {reason}\n");
+    let body = format!("tog: {}\n", state.clean(reason));
     http::write_response(
         &mut Out(out),
         status,
@@ -263,7 +263,8 @@ impl Exchange<'_> {
         record.commit(self.state);
         let mut headers = Headers::new();
         headers.set("Content-Type", TEXT);
-        self.reply(out, status, &headers, format!("tog: {reason}\n").as_bytes())
+        let body = format!("tog: {}\n", self.state.clean(&reason));
+        self.reply(out, status, &headers, body.as_bytes())
     }
 
     fn refuse(
@@ -644,7 +645,8 @@ impl Exchange<'_> {
         let downloaded = fetch::cache_from_reader(
             &config.store,
             &config.activity,
-            url.as_str(),
+            // Only named in error text, so it is the redacted form.
+            &record.url,
             &claim.0,
             || -> io::Result<Box<dyn Read>> {
                 opened = true;

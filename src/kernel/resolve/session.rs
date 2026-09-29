@@ -14,6 +14,7 @@
 
 use super::cache::MetaCache;
 use super::ledger::{DiagRequest, Diagnostics, Entry, PortableLedger};
+use super::redact;
 use super::routes::{Claim, Permitted, Route};
 use crate::kernel::activity::StoreActivity;
 use crate::kernel::policy::{self, Policy};
@@ -238,6 +239,12 @@ impl State {
         &self.token
     }
 
+    /// `text` as it may be shown or stored: embedded URLs redacted and the
+    /// session token removed.
+    pub(crate) fn clean(&self, text: &str) -> String {
+        redact::text(text).replace(&self.token, redact::REDACTED)
+    }
+
     pub(crate) fn token_matches(&self, candidate: &str) -> bool {
         constant_time_eq(candidate.as_bytes(), self.token.as_bytes())
     }
@@ -255,7 +262,11 @@ impl State {
     }
 
     /// Record one request: its portable entry and its diagnostics row.
-    pub(crate) fn record(&self, entry: Entry, mut diag: DiagRequest) {
+    pub(crate) fn record(&self, mut entry: Entry, mut diag: DiagRequest) {
+        entry.url = self.clean(&entry.url);
+        diag.url = self.clean(&diag.url);
+        diag.detail = diag.detail.map(|detail| self.clean(&detail));
+        diag.hops = diag.hops.iter().map(|hop| self.clean(hop)).collect();
         let mut inner = self.inner();
         inner.seq += 1;
         diag.seq = inner.seq;
@@ -291,6 +302,7 @@ impl State {
         subject: &str,
         detail: &str,
     ) -> Result<(), String> {
+        let (subject, detail) = (&self.clean(subject), &self.clean(detail));
         let mut inner = self.inner();
         if policy::denied(&self.config.policy, kind) {
             let text = policy::refusal(&self.config.policy, kind, subject, detail);
@@ -311,6 +323,7 @@ impl State {
     /// as a request). Diagnostics only: there is no method or URL to put in
     /// portable evidence.
     pub(crate) fn note_refusal(&self, text: String) {
+        let text = self.clean(&text);
         self.inner().diagnostics.refusals.push(text);
     }
 
@@ -319,6 +332,7 @@ impl State {
     }
 
     pub(crate) fn hard_failure(&self, text: String) {
+        let text = self.clean(&text);
         let mut inner = self.inner();
         if !inner.facts.hard_failures.contains(&text) {
             inner.facts.hard_failures.push(text);
@@ -326,9 +340,10 @@ impl State {
     }
 
     pub(crate) fn offline_miss(&self, url: &str) {
+        let url = self.clean(url);
         let mut inner = self.inner();
         if inner.facts.first_offline_miss.is_none() {
-            inner.facts.first_offline_miss = Some(url.to_string());
+            inner.facts.first_offline_miss = Some(url);
         }
     }
 
@@ -351,7 +366,7 @@ impl State {
             inner.facts.refusals.push(text.clone());
         }
         if inner.facts.first_stale_refused.is_none() {
-            inner.facts.first_stale_refused = Some(url.to_string());
+            inner.facts.first_stale_refused = Some(self.clean(url));
         }
         Err(text)
     }

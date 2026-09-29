@@ -168,7 +168,11 @@ fn parse_request_line(line: &[u8]) -> Result<(String, String, bool), ParseError>
     let (Some(method), Some(target), Some(version), None) =
         (parts.next(), parts.next(), parts.next(), parts.next())
     else {
-        return Err(malformed(format!("bad request line {line:?}")));
+        // The line is not echoed: its target may carry a token or a
+        // secret query.
+        return Err(malformed(
+            "bad request line: expected METHOD SP target SP version",
+        ));
     };
     if !is_token(method) {
         return Err(malformed(format!("bad method {method:?}")));

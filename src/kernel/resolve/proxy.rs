@@ -444,7 +444,7 @@ fn serve_connection<S: Read + Write>(stream: S, context: &Context) {
                 context.state.note_refusal(error.to_string());
                 let mut headers = Headers::new();
                 headers.set("Content-Type", "text/plain; charset=utf-8");
-                let body = format!("tog: {error}\n");
+                let body = format!("tog: {}\n", context.state.clean(&error.to_string()));
                 let _ = http::write_response(
                     reader.get_mut(),
                     status,
@@ -513,8 +513,10 @@ struct Tunnel<'a> {
 
 fn connect(context: &Context, request: &Request, out: &mut dyn Write) -> io::Result<()> {
     let state = &*context.state;
-    let authority = request.target.as_str();
-    let record = Record::new("refused", "CONNECT", redact::url(authority, &[]));
+    // Userinfo in a CONNECT target is dropped before anything names it.
+    let shown = redact::url(&request.target, &[]);
+    let authority = shown.as_str();
+    let record = Record::new("refused", "CONNECT", shown.clone());
     if !authenticated(state, &request.headers) {
         let reason = format!("CONNECT {authority} without this session's proxy token");
         return mirror::refuse(
@@ -647,7 +649,7 @@ fn mirror_request(context: &Context, request: &Request, out: &mut dyn Write) -> 
         return Ok(false);
     }
     let Some(route) = route else {
-        let reason = format!("this session has no route {route_id:?}");
+        let reason = format!("this session has no route for {shown}");
         mirror::refuse(
             state,
             out,
@@ -1320,5 +1322,86 @@ mod tests {
         );
         session.finish();
         assert!(!path.exists(), "the socket is removed");
+    }
+
+    /// Secrets a tool puts in a URL (userinfo, a query value) never reach a
+    /// response body, the ledger, the diagnostics, or a fact, on any path:
+    /// refusals, route errors, transport failures, redirects, malformed
+    /// requests.
+    #[test]
+    fn no_secret_in_a_request_reaches_a_body_diagnostic_or_fact() {
+        use crate::kernel::testutil::upstream::{Behavior, Reply};
+        let harness = Harness::new("proxy-secret-errors");
+        let port = harness.upstream.port();
+        let (session, address) =
+            harness.open(harness.config(deny(&[policy::UNATTESTED_INDEX]), Mode::Online));
+        let auth = proxy_authorization(address.token());
+        harness
+            .upstream
+            .set("/index/drop?token=hunter2", Behavior::Drop);
+        harness.upstream.set(
+            "/meta/away?token=hunter2",
+            Behavior::Reply(Reply::new(302, b"").header(
+                "Location",
+                &format!("https://u:hunter2@third.test:{port}/x?sig=hunter2"),
+            )),
+        );
+        let mut answers = vec![
+            connect(
+                &address,
+                "u:hunter2@evil.example:443",
+                Some(address.token()),
+            ),
+            connect(&address, "u:hunter2@evil.example:443", None),
+            get(
+                &address,
+                "http://u:hunter2@x.example/p?token=hunter2",
+                &auth,
+            ),
+        ];
+        // A malformed request line: the proxy answers 400 and closes with
+        // the rest of the head unread, which may reset the connection, so
+        // only what it recorded is checked.
+        {
+            let mut stream = TcpStream::connect(address.address).unwrap();
+            let _ = stream.write_all(b"GET /a?token=hunter2 HTTP/1.1 extra\r\nHost: x\r\n\r\n");
+            let _ = stream.read_to_end(&mut Vec::new());
+        }
+        for path in [
+            "/elsewhere/x?token=hunter2",
+            "/forbidden/x?token=hunter2",
+            "/meta/../x?token=hunter2",
+            "/index/drop?token=hunter2",
+            "/meta/away?token=hunter2",
+        ] {
+            answers.push(get(&address, &mirror(&address, path), ""));
+        }
+        answers.push(get(
+            &address,
+            &format!("/{}/nosuch?token=hunter2", address.token()),
+            "",
+        ));
+        for answer in &answers {
+            assert!(answer.status >= 400, "{answer:?}");
+            assert!(!answer.text().contains("hunter2"), "{}", answer.text());
+            assert!(
+                !answer.text().contains(address.token()),
+                "{}",
+                answer.text()
+            );
+        }
+        let report = session.finish();
+        let everything = format!(
+            "{}{}{:?}",
+            String::from_utf8(report.ledger.bytes()).unwrap(),
+            String::from_utf8(report.diagnostics.bytes()).unwrap(),
+            report.facts
+        );
+        assert!(!everything.contains("hunter2"), "{everything}");
+        assert!(!everything.contains(address.token()), "{everything}");
+        assert!(
+            everything.contains("evil.example:443"),
+            "the host is still named"
+        );
     }
 }

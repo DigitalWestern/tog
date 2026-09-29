@@ -97,10 +97,19 @@ pub fn url(raw: &str, keep: &[&str]) -> String {
 
 /// `scheme://user:pw@host/...` without `user:pw@`. The authority ends at the
 /// first `/` after the scheme; an `@` after that is part of the path (npm
-/// scopes) and is kept.
+/// scopes) and is kept. Without a scheme, an authority-form target
+/// (`user:pw@host:443`, a `CONNECT`) loses its userinfo the same way; a
+/// path (starting with `/`) has no authority.
 fn strip_userinfo(base: &str) -> String {
     let Some((scheme, after)) = base.split_once("://") else {
-        return base.to_string();
+        if base.starts_with('/') {
+            return base.to_string();
+        }
+        let end = base.find('/').unwrap_or(base.len());
+        return match base[..end].rfind('@') {
+            Some(at) => base[at + 1..].to_string(),
+            None => base.to_string(),
+        };
     };
     let authority_end = after.find('/').unwrap_or(after.len());
     let (authority, path) = after.split_at(authority_end);
@@ -134,6 +143,13 @@ fn embedded_urls(text: &str) -> String {
     }
     out.push_str(rest);
     out
+}
+
+/// Free text (an error, a refusal reason) with every embedded URL
+/// redacted. Everything the proxy writes into a body, a diagnostic, or a
+/// fact passes through here.
+pub fn text(message: &str) -> String {
+    embedded_urls(message)
 }
 
 /// What the operand after a flag is.
