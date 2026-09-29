@@ -72,6 +72,29 @@ pub const ELIXIR_FORCED: &[&str] = &[
     "HEX_OFFLINE",
     "MIX_TARGET",
 ];
+/// The Ruby tailor's environment scrub and forced variables, shared the
+/// same way for the `spec` form.
+pub const RUBY_ENV_REMOVE_PREFIXES: &[&str] = &["BUNDLE_", "BUNDLER_"];
+pub const RUBY_ENV_REMOVE: &[&str] = &[
+    "RUBYOPT",
+    "RUBYLIB",
+    "RUBYGEMS_GEMDEPS",
+    "GEM_SPEC_CACHE",
+    "GEM_HOME",
+    "GEM_PATH",
+];
+pub const RUBY_FORCED: &[&str] = &[
+    "GEM_HOME",
+    "GEM_PATH",
+    "BUNDLE_IGNORE_CONFIG",
+    "BUNDLE_GEMFILE",
+    "BUNDLE_FROZEN",
+    "BUNDLE_DISABLE_SHARED_GEMS",
+    "BUNDLE_AUTO_INSTALL",
+    "BUNDLE_DISABLE_VERSION_CHECK",
+    "GEMRC",
+];
+
 const ELIXIR_FORCED_PATHS: &[&str] = &[
     "MIX_DEPS_PATH",
     "MIX_ARCHIVES",
@@ -141,9 +164,11 @@ impl Invocation<'_> {
         }
     }
 
-    /// Whether the command itself sets `key` to a path inside the store.
+    /// Whether the command itself sets `key` to one path inside the store
+    /// (not a `:`-separated list that could append another).
     fn set_under_store(&self, key: &str) -> bool {
-        matches!(self.edit(key), Some(Some(value)) if self.under_store(Path::new(value)))
+        matches!(self.edit(key), Some(Some(value))
+            if !value.to_string_lossy().contains(':') && self.under_store(Path::new(value)))
     }
 
     /// Whether the program is a store file: a realized object or a staged
@@ -169,11 +194,6 @@ impl Invocation<'_> {
             Some((_, value)) => value.map(OsStr::to_os_string),
             None => std::env::var_os(key),
         }
-    }
-
-    /// Whether the child sees `key` unset or empty.
-    fn unset(&self, key: &str) -> bool {
-        self.effective(key).is_none_or(|value| value.is_empty())
     }
 
     /// Whether the child sees no variable of a scrubbed family (a name
@@ -394,6 +414,39 @@ fn otp_probe(run: &Invocation) -> bool {
         && run.set_to("LANG", "C")
 }
 
+/// The Ruby helper's `spec` mode as the Ruby tailor builds it: the store
+/// `ruby` running the pinned helper over a `.gem` in the store. The
+/// scrubbed family carries only the forced variables (no `RUBYOPT`,
+/// `RUBYLIB` or `RUBYGEMS_GEMDEPS`), every one of them set; `GEM_HOME` and
+/// `GEM_PATH` are in the store, so RubyGems activates no gem from
+/// elsewhere at startup; `GEMRC=/dev/null` and `HOME` in the store keep a
+/// user `.gemrc` out; and the store Ruby comes first on `PATH`.
+fn ruby_spec(run: &Invocation) -> bool {
+    let ruby_first_on_path = || {
+        let Some(Some(path)) = run.edit("PATH") else {
+            return false;
+        };
+        let first = std::env::split_paths(path).next();
+        let bin = run.program.as_deref().and_then(Path::parent);
+        bin.is_some() && first.and_then(|dir| dir.canonicalize().ok()).as_deref() == bin
+    };
+    run.args.len() == 3
+        && run.is_helper(0, "helper.rb", RUBY_HELPER_SHA256)
+        && run.arg(1) == Some("spec")
+        && run.no_options_from(1)
+        && run.under_store(Path::new(run.args[2]))
+        && run.program_in_store()
+        && run.family_clean(RUBY_ENV_REMOVE_PREFIXES, RUBY_ENV_REMOVE, RUBY_FORCED)
+        && RUBY_FORCED
+            .iter()
+            .all(|key| matches!(run.edit(key), Some(Some(_))))
+        && run.set_under_store("GEM_HOME")
+        && run.set_under_store("GEM_PATH")
+        && run.set_to("GEMRC", "/dev/null")
+        && run.set_under_store("HOME")
+        && ruby_first_on_path()
+}
+
 const OFFLINE_FORMS: &[OfflineForm] = &[
     // The Cargo tailor's workspace lookup: the store Cargo (a rustup proxy
     // could install a toolchain the project names), forbidden the network.
@@ -420,19 +473,10 @@ const OFFLINE_FORMS: &[OfflineForm] = &[
         matches: otp_probe,
     },
     // The Ruby helper's `spec` mode: reads the gemspec of a .gem tog
-    // already verified, with no interpreter option variables.
+    // already verified.
     OfflineForm {
         program: "ruby",
-        matches: |run| {
-            run.args.len() == 3
-                && run.is_helper(0, "helper.rb", RUBY_HELPER_SHA256)
-                && run.arg(1) == Some("spec")
-                && run.no_options_from(1)
-                && Path::new(run.args[2]).is_absolute()
-                && ["RUBYOPT", "RUBYLIB", "RUBYGEMS_GEMDEPS"]
-                    .iter()
-                    .all(|key| run.unset(key))
-        },
+        matches: ruby_spec,
     },
 ];
 

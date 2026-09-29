@@ -415,16 +415,10 @@ pub fn realize_runtime(
 }
 
 /// The forced environment for EVERY tog-controlled ruby/bundler run.
-/// Removal lists close the .bundle/config and preload side doors.
-const ENV_REMOVE_PREFIXES: &[&str] = &["BUNDLE_", "BUNDLER_"];
-const ENV_REMOVE: &[&str] = &[
-    "RUBYOPT",
-    "RUBYLIB",
-    "RUBYGEMS_GEMDEPS",
-    "GEM_SPEC_CACHE",
-    "GEM_HOME",
-    "GEM_PATH",
-];
+/// Removal lists close the .bundle/config and preload side doors; they live
+/// with the host-local tripwire, which checks the `spec` read by them.
+const ENV_REMOVE_PREFIXES: &[&str] = crate::kernel::resolve::tripwire::RUBY_ENV_REMOVE_PREFIXES;
+const ENV_REMOVE: &[&str] = crate::kernel::resolve::tripwire::RUBY_ENV_REMOVE;
 
 fn forced_env(project_dir: &Path, gem_home: &Path) -> Vec<(String, String)> {
     vec![
@@ -529,9 +523,22 @@ fn read_gem_spec(
     gem_home: &Path,
     args: &[&str],
 ) -> io::Result<std::process::Output> {
-    let mut cmd = ruby_tool_spec(ruby_obj, cwd, args, &forced_env(cwd, gem_home)).command();
+    let mut cmd = gem_spec_command(ruby_obj, cwd, gem_home, args);
     crate::kernel::supervise::local_output(&mut cmd, activity)
         .map_err(|e| io::Error::new(e.kind(), format!("run store ruby {args:?}: {e}")))
+}
+
+/// The command `read_gem_spec` starts: the forced environment, with `HOME`
+/// in `cwd` so no user `.gemrc` or `.gem` directory is read.
+fn gem_spec_command(
+    ruby_obj: &Path,
+    cwd: &Path,
+    gem_home: &Path,
+    args: &[&str],
+) -> std::process::Command {
+    let mut spec = ruby_tool_spec(ruby_obj, cwd, args, &forced_env(cwd, gem_home));
+    spec.env("HOME", cwd);
+    spec.command()
 }
 
 /// The store Ruby tool `args[0]` with tog's forced environment, its output
@@ -1447,30 +1454,75 @@ mod tests {
     #[test]
     fn the_gem_spec_read_passes_the_tripwire_only_as_built() {
         use crate::kernel::resolve::tripwire::refusal;
+        use crate::kernel::testutil::{loosened, store_program};
         let store = TempDir::named("ruby-tripwire");
         let refused = |command: &Command| refusal(command, &store.0);
-        crate::kernel::testutil::store_program(&store.0, "objects/ruby/bin/ruby");
+        store_program(&store.0, "objects/ruby/bin/ruby");
         let ruby = store.0.join("objects/ruby");
         let scratch = store.0.join("tmp/stage-scratch");
         fs::create_dir_all(&scratch).unwrap();
         let helper = scratch.join("helper.rb");
         fs::write(&helper, HELPER).unwrap();
         let gem = store.0.join("cache/sha256/x.gem");
-        let args = [
-            "ruby",
-            helper.to_str().unwrap(),
-            "spec",
-            gem.to_str().unwrap(),
-        ];
-        let build =
-            || ruby_tool_spec(&ruby, &scratch, &args, &forced_env(&scratch, &scratch)).command();
-        let command = build();
-        assert!(refused(&command).is_none(), "{:?}", refused(&command));
-        for (key, value) in [("RUBYOPT", "-r/tmp/evil"), ("RUBYLIB", "/tmp")] {
+        let spec_args = |gem: &Path| {
+            [
+                "ruby",
+                helper.to_str().unwrap(),
+                "spec",
+                gem.to_str().unwrap(),
+            ]
+            .map(str::to_string)
+        };
+        let build_at = |ruby: &Path, gem: &Path| {
+            let args = spec_args(gem);
+            let args: Vec<&str> = args.iter().map(String::as_str).collect();
+            gem_spec_command(ruby, &scratch, &scratch, &args)
+        };
+        let build = || build_at(&ruby, &gem);
+        assert!(refused(&build()).is_none(), "{:?}", refused(&build()));
+        for (key, value) in [
+            ("RUBYOPT", "-r/tmp/evil"),
+            ("RUBYLIB", "/tmp"),
+            ("RUBYGEMS_GEMDEPS", "-"),
+            ("BUNDLE_PATH", "/tmp"),
+            ("GEM_PATH", "/tmp/gems"),
+            ("GEM_HOME", "/tmp/gems"),
+            ("GEMRC", "/home/someone/.gemrc"),
+            ("HOME", "/home/someone"),
+            ("PATH", "/home/someone/.rbenv/shims"),
+        ] {
             let mut command = build();
             command.env(key, value);
             assert!(refused(&command).is_some(), "{key}");
         }
+        let mut appended = build();
+        appended.env("GEM_PATH", format!("{}:/tmp/gems", scratch.display()));
+        assert!(refused(&appended).is_some(), "GEM_PATH with a second entry");
+        let loosened_spec = loosened(build);
+        let keys: Vec<&str> = loosened_spec.iter().map(|(key, _)| key.as_str()).collect();
+        for key in [
+            "GEM_HOME",
+            "GEM_PATH",
+            "GEMRC",
+            "HOME",
+            "PATH",
+            "BUNDLE_GEMFILE",
+        ] {
+            assert!(keys.contains(&key), "{key} is not forced: {keys:?}");
+        }
+        for (key, command) in &loosened_spec {
+            assert!(refused(command).is_some(), "loosened {key}");
+        }
+        assert!(
+            refused(&build_at(&ruby, Path::new("/tmp/x.gem"))).is_some(),
+            "a .gem outside the store"
+        );
+        let host = TempDir::named("ruby-tripwire-host");
+        store_program(&host.0, "ruby/bin/ruby");
+        assert!(
+            refused(&build_at(&host.0.join("ruby"), &gem)).is_some(),
+            "a ruby outside the store"
+        );
     }
 
     fn recovered_cache(identity: crate::kernel::types::Identity) -> Vec<String> {
@@ -2003,6 +2055,14 @@ mod tests {
         assert!(ENV_REMOVE.contains(&"RUBYOPT"));
         assert!(ENV_REMOVE.contains(&"RUBYLIB"));
         assert!(ENV_REMOVE_PREFIXES.contains(&"BUNDLE_"));
+        // The host-local tripwire checks the spec read against its own copy
+        // of the forced list.
+        let env = forced_env(Path::new("/p"), Path::new("/g"));
+        let mut keys: Vec<&str> = env.iter().map(|(key, _)| key.as_str()).collect();
+        let mut checked = crate::kernel::resolve::tripwire::RUBY_FORCED.to_vec();
+        keys.sort_unstable();
+        checked.sort_unstable();
+        assert_eq!(keys, checked);
     }
 
     /// A project with its manifest but no lock is refused by name and
