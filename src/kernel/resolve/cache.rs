@@ -66,7 +66,7 @@ pub fn key(method: &str, url: &str, forwarded: &[(&str, &str)], credentials: &st
     }
     for (name, value) in &fields {
         hasher.update(name.as_bytes());
-        hasher.update([b':']);
+        hasher.update(b":");
         hasher.update(value.as_bytes());
         hasher.update([0u8]);
     }
