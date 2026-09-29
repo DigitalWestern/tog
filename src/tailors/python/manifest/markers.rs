@@ -289,7 +289,9 @@ impl Environment<'_> {
             "not in" => return Ok(!right_value.contains(left_value.as_str())),
             // An extra is a name, never a version: `extra == '01'` does not
             // match the extra `1`. `packaging` compares them as versions
-            // here; uv, which writes the lock, compares names.
+            // here; uv, which writes the lock, compares names and ignores
+            // any other operator with a warning (`in` included, which tog
+            // still reads as `packaging` does). Tog refuses the rest.
             "==" if extra => return Ok(left_value == right_value),
             "!=" if extra => return Ok(left_value != right_value),
             _ if extra => {
