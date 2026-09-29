@@ -418,4 +418,142 @@ mod tests {
         assert!(route.resolve("/github.com/google/uuid/@v/list").is_ok());
         assert!(route.resolve("/github.com/google/../uuid/@v/list").is_err());
     }
+
+    /// `go mod tidy` then `go get golang.org/x/sync@v0.10.0`, the census's
+    /// order, confined and answered by the recorded Go registry: the
+    /// checksum database is reached only through the mirror, and its
+    /// `supported` probe is answered locally.
+    ///
+    /// Ignored: it realizes the store Go toolchain, which is fetched over
+    /// the network. The resolution itself is offline.
+    #[test]
+    #[ignore = "realizes the store Go toolchain over the network"]
+    fn go_get_through_mirror_uses_proxied_sumdb() {
+        use crate::kernel::platform::Platform;
+        use crate::kernel::policy::{self, Attribution};
+        use crate::kernel::resolve::door::RELAY_FOR_TEST;
+        use crate::kernel::resolve::ledger;
+        use crate::kernel::resolve::routes::{Permitted, Route};
+        use crate::kernel::resolve::testing::{relay, Harness, Reach};
+        use crate::kernel::resolve::DoorKind;
+        use crate::kernel::resolve::ResolutionDoor;
+        use crate::tailors::go::tool::{go_confined, go_spec, GoPublish, GoRun};
+        use std::fs;
+
+        let Some(relay) = relay("go_get_through_mirror_uses_proxied_sumdb") else {
+            return;
+        };
+        let harness = Harness::serving(
+            "go-mirror",
+            Reach::loopback(),
+            &[PROXY_HOST, SUMDB_HOST],
+            "go",
+        );
+        let port = harness.upstream.port();
+        let store = &harness.store;
+        let activity = &harness.activity;
+        let go_obj = super::super::ensure_go(store, activity, "1.27.0").unwrap();
+        let modcache = super::super::gate_cache(store).unwrap();
+        let temp = crate::kernel::testutil::TempDir::named("go-mirror-project");
+        let project = temp.0.join("project");
+        fs::create_dir_all(&project).unwrap();
+        fs::write(project.join("go.mod"), "module spike\n\ngo 1.23\n").unwrap();
+        fs::write(
+            project.join("main.go"),
+            "package main\n\nimport \"github.com/google/uuid\"\n\nfunc main() { _ = uuid.New() }\n",
+        )
+        .unwrap();
+        let project = project.canonicalize().unwrap();
+
+        let _serial = policy::attribution_test_lock();
+        RELAY_FOR_TEST.with(|slot| *slot.borrow_mut() = Some(relay));
+        let run = |kind: DoorKind, args: &[&str]| {
+            let mut attribution = Attribution::open("go").unwrap();
+            let mut door = ResolutionDoor::open(
+                store,
+                activity,
+                Platform::host().unwrap(),
+                kind,
+                &mut attribution,
+            )
+            .unwrap();
+            let go = GoRun {
+                go_obj: &go_obj,
+                lock_root: &project,
+                modcache: &modcache,
+                args,
+                publish: GoPublish::Project { receipt: None },
+            };
+            let mut confined = go_confined(&go, GoPublish::Project { receipt: None }).unwrap();
+            confined.routes = vec![Route::new(
+                &GO_PROXY,
+                vec![
+                    Endpoint::for_test(PROXY_HOST, port),
+                    Endpoint::for_test(SUMDB_HOST, port),
+                ],
+            )
+            .unwrap()];
+            confined.proxy = Some(&harness.proxy);
+            confined.permitted = Permitted::compiled()
+                .with_origin(PROXY_HOST, port)
+                .with_origin(SUMDB_HOST, port);
+            let spec = go_spec(&go_obj, &project, &modcache, false, args);
+            let report = door.run_confined(spec, confined).unwrap();
+            assert!(
+                report.status.success(),
+                "go {}: {}",
+                args.join(" "),
+                String::from_utf8_lossy(&report.stderr)
+            );
+            let recorded = attribution.recorded();
+            attribution.discard();
+            (report, recorded)
+        };
+
+        let (tidy, _) = run(DoorKind::MissingLock, &["mod", "tidy"]);
+        let gosum = fs::read_to_string(project.join("go.sum")).unwrap();
+        assert!(
+            gosum.contains("github.com/google/uuid v1.6.0 h1:"),
+            "{gosum}"
+        );
+        let (get, recorded) = run(DoorKind::Edit, &["get", "golang.org/x/sync@v0.10.0"]);
+        RELAY_FOR_TEST.with(|slot| *slot.borrow_mut() = None);
+        assert!(recorded.is_empty(), "{recorded:?}");
+        let gomod = fs::read_to_string(project.join("go.mod")).unwrap();
+        assert!(gomod.contains("golang.org/x/sync v0.10.0"), "{gomod}");
+        let gosum = fs::read_to_string(project.join("go.sum")).unwrap();
+        assert!(gosum.contains("golang.org/x/sync v0.10.0 h1:"), "{gosum}");
+
+        let sum = format!("https://{SUMDB_HOST}:{port}");
+        for (report, lookup) in [
+            (&tidy, "github.com/google/uuid@v1.6.0"),
+            (&get, "golang.org/x/sync@v0.10.0"),
+        ] {
+            let objects = report.ledger.as_ref().unwrap();
+            let portable = ledger::PortableLedger::parse(
+                &ledger::read_portable(store, &objects.ledger).unwrap(),
+            )
+            .unwrap();
+            let entries: Vec<_> = portable.entries().collect();
+            assert!(
+                entries
+                    .iter()
+                    .any(|entry| entry.url == format!("{sum}/lookup/{lookup}")
+                        && entry.class == "sumdb"
+                        && entry.status == 200),
+                "{entries:?}"
+            );
+            assert!(
+                entries.iter().all(|entry| entry.class != "refused"),
+                "{entries:?}"
+            );
+            assert!(
+                entries.iter().all(|entry| entry.url.starts_with(&sum)
+                    || entry
+                        .url
+                        .starts_with(&format!("https://{PROXY_HOST}:{port}/"))),
+                "every request went to the two Go hosts: {entries:?}"
+            );
+        }
+    }
 }

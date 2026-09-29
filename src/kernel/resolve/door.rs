@@ -757,50 +757,9 @@ mod tests {
     use crate::kernel::platform::Platform;
     use crate::kernel::policy::Attribution;
     use crate::kernel::resolve::confine::{Engine, Missing, TierOffer, TIERS_FOR_TEST};
-    use crate::kernel::resolve::testing::Harness;
+    use crate::kernel::resolve::testing::{relay, Harness};
     use crate::kernel::testutil::TempDir;
     use std::collections::BTreeMap;
-
-    /// `TOG_SANDBOX_TESTS=required` (any non-empty value) turns a skip into
-    /// a panic, so CI cannot report a skipped check as passed.
-    fn skip_or_panic(test: &str, reason: impl std::fmt::Display) {
-        if matches!(std::env::var_os("TOG_SANDBOX_TESTS"), Some(value) if !value.is_empty()) {
-            panic!("required Linux sandbox test {test} unavailable: {reason}");
-        }
-        eprintln!("skip {test}: {reason}");
-    }
-
-    /// The tog binary cargo built beside this test binary, which the
-    /// sandbox binds as the relay; `None` (after a skip) when the host
-    /// cannot run a confined door.
-    fn relay(test: &str) -> Option<PathBuf> {
-        if !matches!(Platform::host(), Ok(Platform::X86_64UnknownLinuxGnu)) {
-            skip_or_panic(test, "not a supported Linux host");
-            return None;
-        }
-        if let Err(error) = crate::kernel::sandbox::bwrap_preflight_with_activity(None) {
-            skip_or_panic(test, format!("bubblewrap preflight failed: {error}"));
-            return None;
-        }
-        let exe = std::env::current_exe().unwrap();
-        let tog = exe
-            .parent()
-            .and_then(Path::parent)
-            .map(|dir| dir.join("tog"));
-        match tog {
-            Some(tog) if tog.is_file() => Some(tog),
-            _ => {
-                skip_or_panic(
-                    test,
-                    format!(
-                        "no tog binary beside {} (run `cargo test`, which builds it)",
-                        exe.display()
-                    ),
-                );
-                None
-            }
-        }
-    }
 
     struct Fixture {
         harness: Harness,

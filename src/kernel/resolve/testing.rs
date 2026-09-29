@@ -156,6 +156,52 @@ impl Reach {
     }
 }
 
+/// `TOG_SANDBOX_TESTS=required` (any non-empty value) turns a skip into
+/// a panic, so CI cannot report a skipped check as passed.
+#[cfg(test)]
+pub(crate) fn skip_or_panic(test: &str, reason: impl std::fmt::Display) {
+    if matches!(std::env::var_os("TOG_SANDBOX_TESTS"), Some(value) if !value.is_empty()) {
+        panic!("required Linux sandbox test {test} unavailable: {reason}");
+    }
+    eprintln!("skip {test}: {reason}");
+}
+
+/// The tog binary cargo built beside this test binary, which the
+/// sandbox binds as the relay; `None` (after a skip) when the host
+/// cannot run a confined door.
+#[cfg(test)]
+pub(crate) fn relay(test: &str) -> Option<std::path::PathBuf> {
+    if !matches!(
+        crate::kernel::platform::Platform::host(),
+        Ok(crate::kernel::platform::Platform::X86_64UnknownLinuxGnu)
+    ) {
+        skip_or_panic(test, "not a supported Linux host");
+        return None;
+    }
+    if let Err(error) = crate::kernel::sandbox::bwrap_preflight_with_activity(None) {
+        skip_or_panic(test, format!("bubblewrap preflight failed: {error}"));
+        return None;
+    }
+    let exe = std::env::current_exe().unwrap();
+    let tog = exe
+        .parent()
+        .and_then(std::path::Path::parent)
+        .map(|dir| dir.join("tog"));
+    match tog {
+        Some(tog) if tog.is_file() => Some(tog),
+        _ => {
+            skip_or_panic(
+                test,
+                format!(
+                    "no tog binary beside {} (run `cargo test`, which builds it)",
+                    exe.display()
+                ),
+            );
+            None
+        }
+    }
+}
+
 /// A scratch store, a fixture upstream serving the kernel registry, and a
 /// proxy that trusts only the fixture's CA.
 #[cfg(test)]
@@ -176,12 +222,19 @@ impl Harness {
     }
 
     pub(crate) fn with(label: &str, reach: Reach) -> Self {
+        Self::serving(label, reach, FIXTURE_HOSTS, "kernel")
+    }
+
+    /// A harness whose upstream answers for `hosts` from the recorded
+    /// registry `tests/fixtures/proxy/registry/<registry>`.
+    pub(crate) fn serving(label: &str, reach: Reach, hosts: &[&str], registry: &str) -> Self {
         let (temp, store, activity) = scratch_store(label);
         let ca = FixtureCa::new();
-        let upstream = FixtureUpstream::start(&ca, FIXTURE_HOSTS);
+        let upstream = FixtureUpstream::start(&ca, hosts);
         upstream.load_registry(
             &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("tests/fixtures/proxy/registry/kernel"),
+                .join("tests/fixtures/proxy/registry")
+                .join(registry),
         );
         let fixture = upstream.address();
         let connect_to: Option<Arc<dyn Fn(SocketAddr) -> SocketAddr + Send + Sync>> =
