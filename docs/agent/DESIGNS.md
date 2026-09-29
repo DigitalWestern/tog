@@ -785,8 +785,10 @@ When this section is fully built:
 3. The proxy forwards only to **permitted endpoints**. It connects only to
    the exact address it validated (never loopback, private, or link-local)
    and never forwards a credential the tool sent.
-4. Every request the proxy answers or refuses becomes a **ledger entry**
-   with credentials redacted. The ledger is a store object with its own
+4. Every request of the tool's session that the proxy answers or refuses
+   becomes a **ledger entry** with credentials redacted. A request
+   without the session token is not the tool's session, so it is a
+   diagnostics entry only. The ledger is a store object with its own
    identity and kind contract, kept alive by the closure that joins it.
 5. Policy is applied **per request, in real time**, with the same
    `policy::Policy` the rest of the run uses. A denied kind is a refused
@@ -891,7 +893,7 @@ The proxy speaks two dialects on one listener:
   inside, and fetches each one upstream itself over real TLS. Requests
   inside an authenticated tunnel carry no token and need none (standard
   clients never add proxy credentials to inner requests). A `CONNECT`
-  without a valid token gets `407` and a ledger entry.
+  without a valid token gets `407` and a diagnostics entry.
 - **Registry mirror** (plain HTTP). The tool's registry base URL is set to
   a proxy route (`http://127.0.0.1:<port>/<token>/<route>/`). The token in
   the path authenticates every request. The proxy maps the route to its
@@ -2575,7 +2577,7 @@ there before (if any) still describes them.
 | A descendant outlives the tool | the tree is stopped before validation; contents are read only from the immutable output copy |
 | Socket found in a mounted root at preflight | door refuses, naming the path |
 | Request matches no route and is not interceptable | 403 with a tog body, ledger `refused`; the door fails if the refusal was a policy denial, even when the tool exits 0 (npm tolerates failed optional fetches) |
-| `CONNECT` or mirror request without the session token | 407/403, ledger entry; never forwarded |
+| `CONNECT` or mirror request without the session token | 407/403, diagnostics entry (capped, counted); never forwarded. Not a ledger entry: the portable ledger is signed evidence of the tool's traffic, and a request without the token is not the tool's session (anything on the machine can send one) |
 | Upstream bytes do not match the claimed digest | 502 to the tool, nothing cached, the door fails with both digests named; no stale fallback |
 | Redirect to a non-permitted origin | refused; credentials never follow a redirect to another origin |
 | Any resolved upstream address is not globally routable (IANA special-purpose registries) | refused (SSRF rule) |
@@ -2959,7 +2961,7 @@ the flexible option:
 - **Listeners are per session.** `Session::listen_tcp` and
   `Session::listen_unix(path, advertised)` bind listeners owned by one
   session, so a request with a wrong token is still recorded in the
-  ledger of the session it reached, and a token from another session is
+  diagnostics of the session it reached, and a token from another session is
   just a wrong token. The advertised address (what rewritten responses
   point at) is separate from the bind address, for the relay.
 - **Header allowlists both ways, not a strip list.** Upstream gets only
@@ -2992,6 +2994,16 @@ the flexible option:
   hit and a miss give the same portable entry. `freshness` is absent only
   when nothing was served. A malformed request has no method or URL, so
   it is noted in diagnostics only.
+- **Unauthenticated requests are diagnostics only.** A `CONNECT`,
+  absolute-form request, or mirror request without this session's token
+  gets its 407 or 403 and a diagnostics row, counted in
+  `unauthenticated`, with its URL and reason cut to 512 bytes. It never
+  enters the portable ledger, which is signed evidence of the tool's
+  traffic: anything on the machine that can reach the port could
+  otherwise write its own method and URL into a signed record. It does
+  not fail the door. Every diagnostics list keeps at most 10,000 rows
+  per session and counts the rest (`requests_dropped`,
+  `refusals_dropped`).
 - **Policy facts.** A refused `CONNECT` or plain-`http` request records
   `unattested-index`; port 9418 or a `git://` URL records
   `git-dependency` ("git:// is unauthenticated; use https://"). A SHA-1

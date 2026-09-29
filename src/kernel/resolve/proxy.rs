@@ -771,14 +771,13 @@ fn connect(context: &Context, request: &Request, out: &mut dyn Write) -> io::Res
     let record = Record::new("refused", "CONNECT", shown.clone());
     if !authenticated(state, &request.headers) {
         let reason = format!("CONNECT {authority} without this session's proxy token");
-        return mirror::refuse(
+        return mirror::refuse_unauthenticated(
             state,
             out,
             record,
             407,
             &reason,
             &proxy_auth_challenge(),
-            false,
         );
     }
     let parsed = authority
@@ -840,14 +839,13 @@ fn absolute_form(context: &Context, request: &Request, out: &mut dyn Write) -> i
             "{} {shown} without this session's proxy token",
             request.method
         );
-        return mirror::refuse(
+        return mirror::refuse_unauthenticated(
             state,
             out,
             record,
             407,
             &reason,
             &proxy_auth_challenge(),
-            false,
         );
     }
     let Ok(url) = url::Url::parse(&request.target) else {
@@ -892,7 +890,7 @@ fn mirror_request(context: &Context, request: &Request, out: &mut dyn Write) -> 
     let record = Record::new("refused", &request.method, shown.clone());
     if !state.token_matches(token) {
         let reason = format!("{shown} does not carry this session's token");
-        mirror::refuse(state, out, record, 403, &reason, &Headers::new(), false)?;
+        mirror::refuse_unauthenticated(state, out, record, 403, &reason, &Headers::new())?;
         return Ok(false);
     }
     let Some(route) = route else {
@@ -1153,19 +1151,49 @@ mod tests {
             "nothing was forwarded"
         );
         let report = one.finish();
-        // Six requests; the ledger is a set, and the two 407 CONNECTs are
-        // one entry, as are the two mirror requests with a wrong token.
+        // Six requests without the token: diagnostics rows and a count,
+        // never portable entries (they are not the tool's session).
         assert_eq!(report.diagnostics.requests.len(), 6);
-        assert_eq!(report.diagnostics.duplicates, 2);
+        assert_eq!(report.diagnostics.unauthenticated, 6);
+        assert_eq!(report.diagnostics.refusals.len(), 6);
+        assert!(report
+            .diagnostics
+            .requests
+            .iter()
+            .all(|row| row.disposition == "refused"));
         let recorded = entries(&report);
-        assert_eq!(recorded.len(), 4, "{recorded:#?}");
-        assert!(recorded.iter().all(|entry| entry.class == "refused"));
+        assert!(recorded.is_empty(), "{recorded:#?}");
+        assert!(report.facts.failure().is_none(), "{:?}", report.facts);
         let bytes = String::from_utf8(report.ledger.bytes()).unwrap();
         assert!(!bytes.contains(first.token()) && !bytes.contains(second.token()));
         assert!(
             entries(&two.finish()).is_empty(),
             "each session records only its own"
         );
+    }
+
+    #[test]
+    fn unauthenticated_floods_stay_out_of_the_ledger_and_are_capped() {
+        let harness = Harness::new("proxy-flood");
+        let (session, address) = harness.session();
+        let long = "a".repeat(4096);
+        for index in 0..3 {
+            let target = format!("/not-the-token/{long}/{index}");
+            assert_eq!(get(&address, &target, "").status, 403);
+        }
+        let report = session.finish();
+        assert!(entries(&report).is_empty());
+        assert_eq!(report.diagnostics.unauthenticated, 3);
+        for row in &report.diagnostics.requests {
+            assert!(row.url.len() <= 515, "{}", row.url.len());
+            assert!(row
+                .detail
+                .as_ref()
+                .is_some_and(|detail| detail.len() <= 515));
+        }
+        for refusal in &report.diagnostics.refusals {
+            assert!(refusal.len() < 1100, "{}", refusal.len());
+        }
     }
 
     #[test]
@@ -1204,8 +1232,9 @@ mod tests {
                 .collect::<Vec<_>>(),
             [(policy::UNATTESTED_INDEX, "pypi.org:443")]
         );
-        assert_eq!(entries(&two).len(), 1);
-        assert_eq!(entries(&two)[0].status, 407);
+        assert!(entries(&two).is_empty(), "the 407 is diagnostics only");
+        assert_eq!(two.diagnostics.unauthenticated, 1);
+        assert_eq!(two.diagnostics.requests[0].status, 407);
         assert!(
             two.facts.exceptions.is_empty(),
             "an unauthenticated CONNECT establishes nothing"

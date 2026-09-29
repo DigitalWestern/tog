@@ -119,6 +119,11 @@ impl PortableLedger {
         self.entries.insert(entry.canonical(), entry).is_none()
     }
 
+    /// Take `entry` out of the set. Returns false when it was not there.
+    pub fn remove(&mut self, entry: &Entry) -> bool {
+        self.entries.remove(&entry.canonical()).is_some()
+    }
+
     pub fn ecosystem(&self) -> &str {
         &self.ecosystem
     }
@@ -242,6 +247,16 @@ pub struct Diagnostics {
     pub bytes: u64,
     /// Every refusal, in words.
     pub refusals: Vec<String>,
+    /// Requests without the session token. They are not the tool's
+    /// traffic, so they are rows here and never portable entries.
+    pub unauthenticated: u64,
+    /// Rows not kept once `requests` reached its cap.
+    pub requests_dropped: u64,
+    /// Refusal texts not kept once `refusals` reached its cap.
+    pub refusals_dropped: u64,
+    /// Failed attempts left out of the portable ledger because the same
+    /// method and URL was answered in the session (their rows stay here).
+    pub superseded: u64,
     /// Further run-local facts a door records (the Linux exec log).
     pub extra: BTreeMap<String, Value>,
 }

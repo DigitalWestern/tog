@@ -20,10 +20,15 @@ use crate::kernel::activity::StoreActivity;
 use crate::kernel::policy::{self, Policy};
 use crate::kernel::store::Store;
 use ring::rand::{SecureRandom, SystemRandom};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io;
 use std::sync::Mutex;
 use url::Url;
+
+/// The most rows each diagnostics list keeps per session. Past it, rows
+/// are counted, not kept: a tool (or anything else that can reach the
+/// port) cannot grow a sidecar without bound.
+pub(crate) const MAX_DIAGNOSTIC_ROWS: usize = 10_000;
 
 /// What the proxy does with a `CONNECT` it may not forward as-is. TLS
 /// interception, the other answer, arrives with the tools that need it.
@@ -136,6 +141,9 @@ struct Inner {
     stale: BTreeMap<String, u64>,
     /// Endpoints whose stale refusal was already reported.
     stale_refused: BTreeSet<String>,
+    /// The texts already in `facts.refusals` and `facts.hard_failures`.
+    refusal_texts: HashSet<String>,
+    failure_texts: HashSet<String>,
     seq: u64,
     /// The session finished: nothing more is recorded or allowed.
     closed: bool,
@@ -299,14 +307,24 @@ impl State {
             inner.diagnostics.duplicates += 1;
         }
         inner.diagnostics.bytes += diag.bytes;
-        if matches!(diag.disposition.as_str(), "refused" | "failed") {
-            let detail = diag.detail.clone().unwrap_or_default();
-            inner
-                .diagnostics
-                .refusals
-                .push(format!("{} {}: {detail}", diag.method, diag.url));
+        push_row(&mut inner.diagnostics, diag);
+    }
+
+    /// Record a request that did not carry the session token. It is not
+    /// the tool's session, so it never enters the portable ledger (which
+    /// is signed evidence of the tool's traffic): it is a diagnostics row
+    /// and a count.
+    pub(crate) fn record_unauthenticated(&self, mut diag: DiagRequest) {
+        diag.url = shorten(self.clean(&diag.url));
+        diag.detail = diag.detail.map(|detail| shorten(self.clean(&detail)));
+        let mut inner = self.inner();
+        if inner.closed {
+            return;
         }
-        inner.diagnostics.requests.push(diag);
+        inner.seq += 1;
+        diag.seq = inner.seq;
+        inner.diagnostics.unauthenticated += 1;
+        push_row(&mut inner.diagnostics, diag);
     }
 
     /// Apply policy to `kind`. Denied: the refusal text, which also fails
@@ -324,7 +342,7 @@ impl State {
         }
         if policy::denied(&self.config.policy, kind) {
             let text = policy::refusal(&self.config.policy, kind, subject, detail);
-            if !inner.facts.refusals.contains(&text) {
+            if inner.refusal_texts.insert(text.clone()) {
                 inner.facts.refusals.push(text.clone());
             }
             return Err(text);
@@ -344,7 +362,7 @@ impl State {
         let text = self.clean(&text);
         let mut inner = self.inner();
         if !inner.closed {
-            inner.diagnostics.refusals.push(text);
+            push_refusal(&mut inner.diagnostics, text);
         }
     }
 
@@ -355,7 +373,7 @@ impl State {
     pub(crate) fn hard_failure(&self, text: String) {
         let text = self.clean(&text);
         let mut inner = self.inner();
-        if !inner.closed && !inner.facts.hard_failures.contains(&text) {
+        if !inner.closed && inner.failure_texts.insert(text.clone()) {
             inner.facts.hard_failures.push(text);
         }
     }
@@ -386,7 +404,9 @@ impl State {
         if inner.closed {
             return Err(text);
         }
-        if inner.stale_refused.insert(endpoint.to_string()) {
+        if inner.stale_refused.insert(endpoint.to_string())
+            && inner.refusal_texts.insert(text.clone())
+        {
             inner.facts.refusals.push(text.clone());
         }
         if inner.facts.first_stale_refused.is_none() {
@@ -473,9 +493,94 @@ impl State {
     }
 }
 
+/// The longest URL or detail an unauthenticated row keeps, in bytes.
+const MAX_UNAUTHENTICATED_TEXT: usize = 512;
+
+/// `text` cut to [`MAX_UNAUTHENTICATED_TEXT`] bytes on a character
+/// boundary, marked when cut: anything on the machine chooses these.
+fn shorten(mut text: String) -> String {
+    if text.len() > MAX_UNAUTHENTICATED_TEXT {
+        let mut end = MAX_UNAUTHENTICATED_TEXT;
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        text.truncate(end);
+        text.push_str("...");
+    }
+    text
+}
+
+/// Keep `diag` (and its refusal text, for a refusal or failure) unless
+/// the list is full, then count it.
+fn push_row(diagnostics: &mut Diagnostics, diag: DiagRequest) {
+    if matches!(diag.disposition.as_str(), "refused" | "failed") {
+        let detail = diag.detail.clone().unwrap_or_default();
+        push_refusal(
+            diagnostics,
+            format!("{} {}: {detail}", diag.method, diag.url),
+        );
+    }
+    if diagnostics.requests.len() < MAX_DIAGNOSTIC_ROWS {
+        diagnostics.requests.push(diag);
+    } else {
+        diagnostics.requests_dropped += 1;
+    }
+}
+
+fn push_refusal(diagnostics: &mut Diagnostics, text: String) {
+    if diagnostics.refusals.len() < MAX_DIAGNOSTIC_ROWS {
+        diagnostics.refusals.push(text);
+    } else {
+        diagnostics.refusals_dropped += 1;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn row(disposition: &str) -> DiagRequest {
+        DiagRequest {
+            seq: 0,
+            class: "refused".into(),
+            method: "GET".into(),
+            url: "/x".into(),
+            status: 403,
+            served_status: 403,
+            disposition: disposition.into(),
+            bytes: 0,
+            hops: Vec::new(),
+            detail: Some("why".into()),
+        }
+    }
+
+    #[test]
+    fn diagnostics_lists_stop_growing_at_their_cap_and_count_the_rest() {
+        let mut diagnostics = Diagnostics::default();
+        for _ in 0..MAX_DIAGNOSTIC_ROWS + 5 {
+            push_row(&mut diagnostics, row("refused"));
+        }
+        push_row(&mut diagnostics, row("hit"));
+        assert_eq!(diagnostics.requests.len(), MAX_DIAGNOSTIC_ROWS);
+        assert_eq!(diagnostics.requests_dropped, 6);
+        assert_eq!(diagnostics.refusals.len(), MAX_DIAGNOSTIC_ROWS);
+        assert_eq!(diagnostics.refusals_dropped, 5);
+    }
+
+    #[test]
+    fn unauthenticated_text_is_cut_on_a_character_boundary() {
+        assert_eq!(shorten("short".into()), "short");
+        let long = format!(
+            "{}é{}",
+            "a".repeat(MAX_UNAUTHENTICATED_TEXT - 1),
+            "b".repeat(10)
+        );
+        let cut = shorten(long);
+        assert_eq!(
+            cut,
+            format!("{}...", "a".repeat(MAX_UNAUTHENTICATED_TEXT - 1))
+        );
+    }
 
     #[test]
     fn tokens_are_long_random_and_compared_whole() {

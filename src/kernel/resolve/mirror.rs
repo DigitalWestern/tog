@@ -105,6 +105,11 @@ impl Record {
     }
 
     pub(crate) fn commit(self, state: &State) {
+        let (entry, diag) = self.into_parts();
+        state.record(entry, diag);
+    }
+
+    fn into_parts(self) -> (Entry, DiagRequest) {
         let entry = Entry {
             class: self.class.clone(),
             method: self.method.clone(),
@@ -127,7 +132,7 @@ impl Record {
             hops: self.hops,
             detail: self.detail,
         };
-        state.record(entry, diag);
+        (entry, diag)
     }
 }
 
@@ -135,17 +140,47 @@ impl Record {
 pub(crate) fn refuse(
     state: &State,
     out: &mut dyn Write,
-    mut record: Record,
+    record: Record,
     status: u16,
     reason: &str,
     extra: &Headers,
     keep_alive: bool,
 ) -> io::Result<()> {
+    refused(record, status, reason).commit(state);
+    answer_refusal(state, out, status, reason, extra, keep_alive)
+}
+
+/// Refuse a request that did not carry the session token: answered like
+/// any refusal, recorded in diagnostics only.
+pub(crate) fn refuse_unauthenticated(
+    state: &State,
+    out: &mut dyn Write,
+    record: Record,
+    status: u16,
+    reason: &str,
+    extra: &Headers,
+) -> io::Result<()> {
+    let (_, diag) = refused(record, status, reason).into_parts();
+    state.record_unauthenticated(diag);
+    answer_refusal(state, out, status, reason, extra, false)
+}
+
+fn refused(mut record: Record, status: u16, reason: &str) -> Record {
     record.class = "refused".into();
     record.status = status;
     record.disposition = "refused";
     record.detail = Some(reason.to_string());
-    record.commit(state);
+    record
+}
+
+fn answer_refusal(
+    state: &State,
+    out: &mut dyn Write,
+    status: u16,
+    reason: &str,
+    extra: &Headers,
+    keep_alive: bool,
+) -> io::Result<()> {
     let mut headers = extra.clone();
     headers.set("Content-Type", TEXT);
     let body = format!("tog: {}\n", state.clean(reason));
