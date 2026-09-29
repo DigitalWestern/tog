@@ -5,6 +5,7 @@
 
 pub mod build;
 pub(crate) mod build_requires;
+pub mod edit;
 pub mod env;
 pub mod inputs;
 pub mod manifest;
@@ -182,9 +183,12 @@ pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
         ..empty_plan.clone()
     };
     let env_empty = env::environment_identity(
-        &store,
-        activity,
-        platform,
+        &mut crate::kernel::testutil::DoorScope::new().door(
+            &store,
+            activity,
+            platform,
+            crate::kernel::resolve::DoorKind::Planner,
+        ),
         &empty_plan,
         &cpython.object_id(),
         &selected,
@@ -192,9 +196,12 @@ pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
     )
     .expect("empty Python environment identity");
     let env_wheel = env::environment_identity(
-        &store,
-        activity,
-        platform,
+        &mut crate::kernel::testutil::DoorScope::new().door(
+            &store,
+            activity,
+            platform,
+            crate::kernel::resolve::DoorKind::Planner,
+        ),
         &wheel_plan,
         &cpython.object_id(),
         &selected,
@@ -209,9 +216,12 @@ pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
             ..empty_plan.clone()
         };
         let env_native = env::environment_identity(
-            &store,
-            activity,
-            platform,
+            &mut crate::kernel::testutil::DoorScope::new().door(
+                &store,
+                activity,
+                platform,
+                crate::kernel::resolve::DoorKind::Planner,
+            ),
             &native_plan,
             &cpython.object_id(),
             &selected,

@@ -13,6 +13,12 @@
 //! error carrying [`Interrupted`] instead of the child's status. A caller
 //! that turns a child's failure into something softer (a recorded policy
 //! exception, a fallback) must let that kind through as an error.
+//!
+//! The three primitives are unrestricted, so clippy refuses them outside
+//! the reviewed kernel sites (`clippy.toml`). Everything else starts a
+//! child through `local_status`, `local_status_with_stderr` or
+//! `local_output`, which refuse a dependency tool (it goes through
+//! `kernel::resolve`'s door).
 
 /// Serializes tests that supervise a child process.
 ///
@@ -965,6 +971,46 @@ pub fn output(command: &mut Command, activity: &StoreActivity) -> io::Result<Out
     }
 }
 
+/// [`status`] for a host-local helper: a child that needs no network
+/// (`cp`, `patch`, an offline extraction). A dependency tool is refused
+/// unless its argv is one of the reviewed offline forms
+/// (`kernel::resolve::tripwire`); it starts through `kernel::resolve`'s
+/// door instead. Nothing is spawned for a refused command.
+// Reviewed site (tests/architecture.rs): the supervisor itself: a helper that passed the tripwire.
+#[allow(clippy::disallowed_methods)]
+pub fn local_status(command: &mut Command, activity: &StoreActivity) -> io::Result<ExitStatus> {
+    refuse_resolver(command)?;
+    status(command, activity)
+}
+
+/// [`status_with_stderr`] for a host-local helper; refuses a dependency
+/// tool as [`local_status`] does.
+// Reviewed site (tests/architecture.rs): the supervisor itself: a helper that passed the tripwire.
+#[allow(clippy::disallowed_methods)]
+pub fn local_status_with_stderr(
+    command: &mut Command,
+    activity: &StoreActivity,
+) -> io::Result<(ExitStatus, Vec<u8>)> {
+    refuse_resolver(command)?;
+    status_with_stderr(command, activity)
+}
+
+/// [`output`] for a host-local helper; refuses a dependency tool as
+/// [`local_status`] does.
+// Reviewed site (tests/architecture.rs): the supervisor itself: a helper that passed the tripwire.
+#[allow(clippy::disallowed_methods)]
+pub fn local_output(command: &mut Command, activity: &StoreActivity) -> io::Result<Output> {
+    refuse_resolver(command)?;
+    output(command, activity)
+}
+
+fn refuse_resolver(command: &Command) -> io::Result<()> {
+    match crate::kernel::resolve::tripwire::refusal(command) {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -995,6 +1041,8 @@ mod tests {
         (Store { root }, dir)
     }
 
+    // Reviewed site (tests/architecture.rs): the supervisor's own tests of its primitives.
+    #[allow(clippy::disallowed_methods)]
     #[test]
     fn status_preserves_a_numeric_exit_across_sequential_children() {
         let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
@@ -1012,6 +1060,52 @@ mod tests {
         drop(activity);
     }
 
+    /// Every `local_*` form refuses a dependency tool before spawning it,
+    /// naming the program and the door, and lets a plain helper and a
+    /// reviewed offline form through to the supervisor.
+    #[test]
+    fn local_supervise_refuses_resolver_programs() {
+        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _test_session = TEST_SESSION.lock().unwrap();
+        let (store, _root) = test_store("local");
+        let activity = store.activity(ActivityMode::Shared).unwrap();
+        // The resolver named by a path that does not exist: had it been
+        // spawned, the error would be NotFound, not the refusal.
+        let resolver = || {
+            let mut command = Command::new("/nonexistent/tog-test/bin/npm");
+            command.args(["install", "--package-lock-only"]);
+            command
+        };
+        let refusals = [
+            local_status(&mut resolver(), &activity).unwrap_err(),
+            local_status_with_stderr(&mut resolver(), &activity).unwrap_err(),
+            local_output(&mut resolver(), &activity).unwrap_err(),
+        ];
+        for error in refusals {
+            assert_eq!(error.kind(), io::ErrorKind::PermissionDenied, "{error}");
+            let message = error.to_string();
+            assert!(message.contains("npm"), "{message}");
+            assert!(message.contains("kernel::resolve"), "{message}");
+        }
+        let mut offline = Command::new("/nonexistent/tog-test/bin/cargo");
+        offline.args(["locate-project", "--offline"]);
+        assert_eq!(
+            local_output(&mut offline, &activity).unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
+        let mut helper = Command::new("/bin/sh");
+        helper.args(["-c", "exit 3"]);
+        assert_eq!(
+            local_status(&mut helper, &activity).unwrap().code(),
+            Some(3)
+        );
+        drop(activity);
+    }
+
+    // Reviewed site (tests/architecture.rs): the supervisor's own tests of its primitives.
+    #[allow(clippy::disallowed_methods)]
     #[test]
     fn output_drains_both_pipes_before_reaping() {
         let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK

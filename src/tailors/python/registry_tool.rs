@@ -5,7 +5,7 @@
 use crate::comforter::status::canonical_symlink_target;
 use crate::kernel::activity::StoreActivity;
 use crate::kernel::platform::Platform;
-use crate::kernel::policy::Attribution;
+use crate::kernel::resolve::{DelegateSpec, ResolutionDoor};
 use crate::kernel::store::Store;
 use crate::kernel::toolchain::Selected;
 use crate::kernel::ui;
@@ -15,7 +15,6 @@ use serde_json::Value;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 pub struct PythonTool;
 
@@ -84,16 +83,14 @@ impl RegistryTool for PythonTool {
 
     fn realize(
         &self,
-        store: &Store,
-        activity: &StoreActivity,
-        platform: Platform,
+        door: &mut ResolutionDoor<'_>,
         root: &Path,
         package: &str,
         version: Option<&str>,
         toolchain: &Selected,
         _helpers: &std::collections::BTreeMap<String, Selected>,
-        attribution: &mut Attribution,
     ) -> io::Result<()> {
+        let (store, activity, platform) = (door.store(), door.lease(), door.platform());
         fs::create_dir_all(root)?;
         // The environment runs on the runtime the caller resolved, not on
         // the global default: inside a project with a lock that is the
@@ -115,20 +112,20 @@ impl RegistryTool for PythonTool {
         ui::note(&format!("resolving {} with the store uv...", spec.trim()));
         // The bundle names the uv build this environment resolves with.
         let uv = python::realize_uv(store, activity, platform, toolchain)?.join("uv");
-        let mut command = Command::new(uv);
-        command
+        let mut uv_spec = DelegateSpec::new(uv);
+        uv_spec
             .args(["pip", "compile"])
             .arg(&input)
             .arg("--generate-hashes");
         if !ui::verbose() {
-            command.arg("--quiet");
+            uv_spec.arg("--quiet");
         }
-        command
+        uv_spec
             .args(["--python-version", pin.version])
             .args(["--index-url", "https://pypi.org/simple"])
             .arg("-o")
             .arg(&output)
-            .current_dir(root)
+            .lock_root(root)
             .env_remove("UV_INDEX_URL")
             .env_remove("UV_DEFAULT_INDEX")
             .env_remove("UV_EXTRA_INDEX_URL")
@@ -136,8 +133,8 @@ impl RegistryTool for PythonTool {
             .env_remove("PIP_EXTRA_INDEX_URL")
             .env_remove("PIP_TRUSTED_HOST")
             .env_remove("PIP_FIND_LINKS");
-        ui::trace_command(&command);
-        let status = crate::kernel::supervise::status(&mut command, activity)?;
+        uv_spec.trace();
+        let status = door.run(uv_spec)?.status;
         if !status.success() {
             return Err(io::Error::other(format!(
                 "could not resolve '{}' from PyPI (uv pip compile exit {status})",
@@ -146,14 +143,14 @@ impl RegistryTool for PythonTool {
         }
         let text = fs::read_to_string(&output)?;
         let plan = pypi::plan_python(platform, &text, pin.version)?;
-        let env = env::realize_env_for(store, activity, platform, &plan, toolchain)?;
+        let env = env::realize_env_for(door, &plan, toolchain)?;
         env::project_env_with_selection(
             activity,
             &crate::kernel::fsroot::ProjectRoot::open(root)?,
             &env,
             &plan,
             &selection,
-            attribution,
+            door.attribution(),
         )?;
         ui::synced(&format!("x {package}"), &env);
         Ok(())

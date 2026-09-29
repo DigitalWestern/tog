@@ -805,7 +805,7 @@ fn zstd_decompress(activity: &StoreActivity, input: &Path, output: &Path) -> io:
         .args(["-d", "-f", "-q", "-o"])
         .arg(output)
         .arg(input);
-    let status = crate::kernel::supervise::status(&mut command, activity)?;
+    let status = crate::kernel::supervise::local_status(&mut command, activity)?;
     if !status.success() {
         return Err(invalid_conda(format!(
             "zstd failed for {}",

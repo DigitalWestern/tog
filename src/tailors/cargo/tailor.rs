@@ -11,6 +11,7 @@ use crate::kernel::cyclonedx::{
 use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::objmeta::KindAdapter;
 use crate::kernel::platform::Platform;
+use crate::kernel::resolve::ResolutionDoor;
 use crate::kernel::toolchain::{Catalog, LegacyEvidence, Selected};
 use crate::kernel::ui;
 use crate::tailors::cargo::{self as cargo, inputs, rustfmt};
@@ -32,6 +33,23 @@ fn child_status_code(status: &std::process::ExitStatus) -> i32 {
 pub struct Cargo;
 
 impl Tailor for Cargo {
+    fn package_registry(&self) -> Option<crate::tailors::PackageRegistry> {
+        Some(super::edit::REGISTRY)
+    }
+
+    fn registry_exists(&self, name: &str) -> io::Result<Option<String>> {
+        super::edit::registry_exists(name)
+    }
+
+    fn edit_manifest(
+        &self,
+        _ctx: &crate::kernel::context::Context,
+        edit: &crate::tailors::ManifestEdit<'_>,
+        door: &mut crate::kernel::resolve::ResolutionDoor<'_>,
+    ) -> io::Result<crate::tailors::EditOutcome> {
+        super::edit::edit_manifest(edit, door)
+    }
+
     fn id(&self) -> &'static str {
         "cargo"
     }
@@ -57,12 +75,12 @@ impl Tailor for Cargo {
 
     fn prepare(
         &self,
-        ctx: &Context,
+        _ctx: &Context,
         project: &ProjectRoot,
         toolchain: &Selected,
-        _attribution: &mut crate::kernel::policy::Attribution,
+        door: &mut ResolutionDoor<'_>,
     ) -> io::Result<()> {
-        inputs::ensure_lock(ctx.platform, project, &ctx.store, &ctx.activity, toolchain)
+        inputs::ensure_lock(project, toolchain, door)
     }
 
     fn plan(
@@ -70,6 +88,7 @@ impl Tailor for Cargo {
         ctx: &Context,
         project: &ProjectRoot,
         toolchain: &Selected,
+        _door: &mut ResolutionDoor<'_>,
     ) -> io::Result<Option<String>> {
         let inputs = inputs::load_cargo_inputs(
             ctx.platform,

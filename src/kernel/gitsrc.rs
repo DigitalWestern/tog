@@ -258,6 +258,8 @@ fn configure_git(command: &mut Command, args: &[&str], cwd: Option<&Path>) {
     command.env("GIT_ASKPASS", "/bin/true");
 }
 
+// Reviewed site (tests/architecture.rs): tog's own git fetch: tog verifies what it brings back, so it is not a resolution door, and it needs the network, so it is no host-local helper either.
+#[allow(clippy::disallowed_methods)]
 fn run_git_with_activity(
     args: &[&str],
     cwd: Option<&Path>,
@@ -1372,7 +1374,7 @@ pub fn pack_checkout(
     gzip.args(["-n", "-9", "-c"])
         .arg(&uncompressed)
         .stdout(fs::File::create(&archive)?);
-    let gzip_status = crate::kernel::supervise::status(&mut gzip, activity)?;
+    let gzip_status = crate::kernel::supervise::local_status(&mut gzip, activity)?;
     let _ = fs::remove_file(&uncompressed);
     if !gzip_status.success() {
         return Err(err(format!(

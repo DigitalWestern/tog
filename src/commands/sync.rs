@@ -8,6 +8,7 @@ use crate::kernel::context::{self, Context};
 use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::platform::Platform;
 use crate::kernel::policy;
+use crate::kernel::resolve::{DoorKind, ResolutionDoor};
 use crate::kernel::store;
 use crate::tailors::{self, SyncRequest, Tailor};
 use std::io;
@@ -383,7 +384,14 @@ pub(crate) fn sync_preflighted(
         // all; a project with no dependency lock fails inside the tailor,
         // which is the one place that knows which file is missing.
         if !frozen {
-            tailor.prepare(ctx, project, selected, &mut attribution)?;
+            let mut door = ResolutionDoor::open(
+                &ctx.store,
+                &ctx.activity,
+                ctx.platform,
+                DoorKind::MissingLock,
+                &mut attribution,
+            )?;
+            tailor.prepare(ctx, project, selected, &mut door)?;
         }
         let request = SyncRequest {
             fresh,
@@ -1089,8 +1097,9 @@ mod tests {
             ctx: &Context,
             project: &ProjectRoot,
             toolchain: &crate::kernel::toolchain::Selected,
+            door: &mut ResolutionDoor<'_>,
         ) -> io::Result<Option<String>> {
-            Self::real().plan(ctx, project, toolchain)
+            Self::real().plan(ctx, project, toolchain, door)
         }
         fn sync(
             &self,
@@ -1365,6 +1374,7 @@ mod tests {
             _ctx: &Context,
             _project: &ProjectRoot,
             _toolchain: &crate::kernel::toolchain::Selected,
+            _door: &mut ResolutionDoor<'_>,
         ) -> io::Result<Option<String>> {
             Ok(None)
         }

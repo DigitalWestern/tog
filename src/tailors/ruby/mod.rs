@@ -9,6 +9,7 @@
 //! env vars, so every tog-controlled invocation scrubs BUNDLE_*/RUBY*
 //! preload vars and sets BUNDLE_IGNORE_CONFIG=1.
 
+pub mod edit;
 mod gem_home;
 mod native;
 pub mod objects;
@@ -21,7 +22,8 @@ use crate::kernel::fetch::{
 };
 use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::platform::Platform;
-use crate::kernel::sandbox::{force_env, BuildSpec, HostView};
+use crate::kernel::resolve::{DelegateReport, DelegateSpec, ResolutionDoor};
+use crate::kernel::sandbox::{BuildSpec, HostView};
 use crate::kernel::store::Store;
 use crate::kernel::toolchain::document::Shipped;
 use crate::kernel::toolchain::{ArtifactRow, Catalog, LegacyEvidence, Selected};
@@ -37,7 +39,6 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 // Homebrew portable-ruby: relocatable, bundler included; the ruby Homebrew
 // itself ships on. The catalog holds every portable build of the ruby-lang
@@ -462,14 +463,14 @@ pub fn run_env(
 /// Run a store Ruby tool for a delegated edit (`tog add` and friends):
 /// same environment as planning, failure carries the tool's stderr.
 pub(crate) fn run_checked(
-    activity: &StoreActivity,
+    door: &mut ResolutionDoor<'_>,
     ruby_obj: &Path,
     cwd: &Path,
     gem_home: &Path,
     args: &[&str],
 ) -> io::Result<()> {
     crate::kernel::ui::trace(&format!("run: {} (in {})", args.join(" "), cwd.display()));
-    let out = run_ruby_edit(activity, ruby_obj, cwd, gem_home, args)?;
+    let out = run_ruby_edit(door, ruby_obj, cwd, gem_home, args)?;
     if crate::kernel::ui::verbose() {
         eprint!("{}", String::from_utf8_lossy(&out.stdout));
     }
@@ -484,49 +485,75 @@ pub(crate) fn run_checked(
 }
 
 fn run_ruby(
-    activity: &StoreActivity,
+    door: &mut ResolutionDoor<'_>,
     ruby_obj: &Path,
     cwd: &Path,
     gem_home: &Path,
     args: &[&str],
-) -> io::Result<std::process::Output> {
-    run_ruby_with_env(activity, ruby_obj, cwd, args, forced_env(cwd, gem_home))
+) -> io::Result<DelegateReport> {
+    run_ruby_with_env(door, ruby_obj, cwd, args, forced_env(cwd, gem_home))
 }
 
 fn run_ruby_edit(
-    activity: &StoreActivity,
+    door: &mut ResolutionDoor<'_>,
     ruby_obj: &Path,
     cwd: &Path,
     gem_home: &Path,
     args: &[&str],
-) -> io::Result<std::process::Output> {
+) -> io::Result<DelegateReport> {
     let mut env = forced_env(cwd, gem_home);
     if let Some((_, value)) = env.iter_mut().find(|(key, _)| key == "BUNDLE_FROZEN") {
         *value = "false".to_string();
     }
-    run_ruby_with_env(activity, ruby_obj, cwd, args, env)
+    run_ruby_with_env(door, ruby_obj, cwd, args, env)
 }
 
 fn run_ruby_with_env(
-    activity: &StoreActivity,
+    door: &mut ResolutionDoor<'_>,
     ruby_obj: &Path,
     cwd: &Path,
     args: &[&str],
     environment: Vec<(String, String)>,
+) -> io::Result<DelegateReport> {
+    door.run(ruby_tool_spec(ruby_obj, cwd, args, &environment))
+        .map_err(|e| io::Error::new(e.kind(), format!("run store ruby {args:?}: {e}")))
+}
+
+/// The helper's `spec` mode over a `.gem` tog already verified: it reads
+/// the embedded gemspec and needs no network, so it runs as a host-local
+/// helper rather than through the door.
+fn read_gem_spec(
+    activity: &StoreActivity,
+    ruby_obj: &Path,
+    cwd: &Path,
+    gem_home: &Path,
+    args: &[&str],
 ) -> io::Result<std::process::Output> {
-    let mut cmd = Command::new(ruby_obj.join(format!("bin/{}", args[0])));
-    cmd.args(&args[1..]).current_dir(cwd);
+    let mut cmd = ruby_tool_spec(ruby_obj, cwd, args, &forced_env(cwd, gem_home)).command();
+    crate::kernel::supervise::local_output(&mut cmd, activity)
+        .map_err(|e| io::Error::new(e.kind(), format!("run store ruby {args:?}: {e}")))
+}
+
+/// The store Ruby tool `args[0]` with tog's forced environment, its output
+/// captured.
+fn ruby_tool_spec(
+    ruby_obj: &Path,
+    cwd: &Path,
+    args: &[&str],
+    environment: &[(String, String)],
+) -> DelegateSpec {
+    let mut spec = DelegateSpec::new(ruby_obj.join(format!("bin/{}", args[0])));
+    spec.args(&args[1..]).lock_root(cwd);
     // Ruby FIRST on PATH: a gem executable named ruby/gem must never shadow.
     let path = format!(
         "{}:{}",
         ruby_obj.join("bin").display(),
         std::env::var("PATH").unwrap_or_default()
     );
-    cmd.env("PATH", path);
-    force_env(&mut cmd, ENV_REMOVE_PREFIXES, ENV_REMOVE, &environment);
-    cmd.stdin(std::process::Stdio::null());
-    crate::kernel::supervise::output(&mut cmd, activity)
-        .map_err(|e| io::Error::new(e.kind(), format!("run store ruby {args:?}: {e}")))
+    spec.env("PATH", path);
+    spec.force_env(ENV_REMOVE_PREFIXES, ENV_REMOVE, environment);
+    spec.capture();
+    spec
 }
 
 /// Helper executed BY the pinned Ruby: parses the lock with Bundler's own
@@ -819,8 +846,7 @@ pub fn require_lock(project: &ProjectRoot) -> io::Result<()> {
 /// `prepare`: Gemfile.lock, resolved by the store bundler when there is
 /// none. The one place the Ruby tailor writes project inputs.
 pub fn generate_lock(
-    store: &Store,
-    activity: &StoreActivity,
+    door: &mut ResolutionDoor<'_>,
     project: &ProjectRoot,
     ruby_obj: &Path,
 ) -> io::Result<()> {
@@ -828,9 +854,9 @@ pub fn generate_lock(
         return Err(err("Gemfile not found"));
     }
     ui::note("no Gemfile.lock; resolving with the store bundler...");
-    let scratch = store.stage_with_activity(activity)?;
+    let scratch = door.store().stage_with_activity(door.lease())?;
     let out = run_ruby(
-        activity,
+        door,
         ruby_obj,
         project.path(),
         &scratch,
@@ -854,12 +880,12 @@ pub fn generate_lock(
 /// descriptor; its path is only the store Ruby's working directory and
 /// arguments.
 pub fn plan_ruby(
-    store: &Store,
-    activity: &StoreActivity,
+    door: &mut ResolutionDoor<'_>,
     project: &ProjectRoot,
     ruby_obj: &Path,
     selected: &Selected,
 ) -> io::Result<(RubyPlan, String)> {
+    let (store, activity) = (door.store(), door.lease());
     let project_dir = project.path();
     if !project.is_input_file(Path::new("Gemfile")) {
         return Err(err("Gemfile not found"));
@@ -881,7 +907,7 @@ pub fn plan_ruby(
     // Gate 1: Gemfile/lock equivalence + ruby directive. EVALS THE GEMFILE
     // (delegated resolver trust) — exit status only, stdout untrusted.
     let out = run_ruby(
-        activity,
+        door,
         ruby_obj,
         project_dir,
         &scratch,
@@ -905,7 +931,7 @@ pub fn plan_ruby(
     }
     // Gate 2: LOCK-ONLY closure derivation (never evaluates the Gemfile).
     let out = run_ruby(
-        activity,
+        door,
         ruby_obj,
         project_dir,
         &scratch,
@@ -1074,7 +1100,7 @@ fn verify_gem(
     let url = gem_url(g);
     let lease = download_verified_held(store, activity, &url, &g.sha256)
         .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", g.full_name)))?;
-    let out = run_ruby(
+    let out = read_gem_spec(
         activity,
         ruby_obj,
         scratch,
@@ -1422,6 +1448,7 @@ mod tests {
     use super::*;
     use crate::kernel::testutil::TempDir;
     use std::os::unix::fs::{symlink, PermissionsExt};
+    use std::process::Command;
 
     #[test]
     fn ruby_pins_cover_supported_platforms() {

@@ -6,11 +6,10 @@
 //! exact artifact URL selected from their own file list; they still enter the
 //! ordinary Python `Plan` and realization path.
 
-use crate::kernel::activity::StoreActivity;
 use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::platform::Platform;
+use crate::kernel::resolve::ResolutionDoor;
 use crate::kernel::sandbox::BuildSpec;
-use crate::kernel::store::Store;
 use crate::kernel::types::{ArtifactKind, LockedPackage};
 use crate::tailors::python::build;
 use crate::tailors::python::pypi;
@@ -138,12 +137,11 @@ impl Manifest {
     /// that keys the cache walks `project`, not its pathname.
     pub fn prepare_setup(
         &mut self,
-        platform: Platform,
         project: &ProjectRoot,
-        store: &Store,
-        activity: &StoreActivity,
         selected: &crate::kernel::toolchain::Selected,
+        door: &mut ResolutionDoor<'_>,
     ) -> io::Result<()> {
+        let (store, activity, platform) = (door.store(), door.lease(), door.platform());
         let dir = project.path();
         let python_version = selected.version("cpython")?;
         if !self.setup || self.setup_cfg {
@@ -178,7 +176,7 @@ impl Manifest {
             }
         }
 
-        let build_env = build::ensure_build_environment(store, activity, platform, selected)
+        let build_env = build::ensure_build_environment(door, selected)
             .map_err(|error| unreadable(&dir.join("setup.py"), error))?;
         let cpython = crate::tailors::python::realize_runtime(store, activity, platform, selected)
             .map_err(|error| unreadable(&dir.join("setup.py"), error))?;
@@ -413,6 +411,7 @@ fn no_manifest() -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::kernel::store::Store;
     use crate::kernel::testutil::TempDir;
 
     fn temp_project(name: &str) -> TempDir {
@@ -462,11 +461,14 @@ mod tests {
         let activity = &lease.1;
         let error = manifest
             .prepare_setup(
-                platform,
                 &project,
-                &store,
-                activity,
                 &crate::tailors::python::shipped_selection(python_version).unwrap(),
+                &mut crate::kernel::testutil::DoorScope::new().door(
+                    &store,
+                    activity,
+                    platform,
+                    crate::kernel::resolve::DoorKind::Planner,
+                ),
             )
             .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);

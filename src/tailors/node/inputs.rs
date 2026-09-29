@@ -4,8 +4,7 @@
 use crate::comforter::InputRecord;
 use crate::kernel::fsroot::{Entry, ProjectRoot};
 use crate::kernel::platform::Platform;
-use crate::kernel::store;
-use crate::kernel::supervise;
+use crate::kernel::resolve::{DelegateSpec, ResolutionDoor};
 use crate::kernel::toolchain::Selected;
 use crate::kernel::ui;
 use crate::tailors::node;
@@ -18,12 +17,12 @@ use std::path::Path;
 /// the uv flow for Python. Resolution is the ecosystem's job; realization
 /// is tog's. The project is read through the held descriptor; npm itself
 /// runs in `project.path()`.
+///
+/// npm runs through `door`, a missing-lock door.
 pub fn ensure_npm_lock(
-    platform: Platform,
     project: &ProjectRoot,
-    store: &store::Store,
-    activity: &crate::kernel::activity::StoreActivity,
     selected: &Selected,
+    door: &mut ResolutionDoor<'_>,
 ) -> io::Result<()> {
     if !input_exists(project, "package.json")
         || input_exists(project, "package-lock.json")
@@ -47,26 +46,26 @@ pub fn ensure_npm_lock(
     // tog. npm-cli's shebang is `env node`, so the store bin leads PATH.
     // The npm that writes this lock is the one bundled in the Node the
     // project's toolchain selection names.
-    let node = node::realize_runtime(store, activity, platform, selected)?;
+    let node = node::realize_runtime(door.store(), door.lease(), door.platform(), selected)?;
     let path = format!(
         "{}:{}",
         node.join("bin").display(),
         std::env::var("PATH").unwrap_or_default()
     );
-    let mut command = std::process::Command::new(node.join("bin/npm"));
-    command.args(["install", "--package-lock-only", "--ignore-scripts"]);
+    let mut spec = DelegateSpec::new(node.join("bin/npm"));
+    spec.args(["install", "--package-lock-only", "--ignore-scripts"]);
     if !ui::verbose() {
-        command.arg("--silent");
+        spec.arg("--silent");
     }
-    command.current_dir(dir).env("PATH", path);
-    ui::trace_command(&command);
-    let status = supervise::status(&mut command, activity).map_err(|e| {
+    spec.lock_root(dir).env("PATH", path);
+    spec.trace();
+    let report = door.run(spec).map_err(|e| {
         io::Error::new(
             e.kind(),
             format!("run store npm ({}/bin/npm): {e}", node.display()),
         )
     })?;
-    if !status.success() {
+    if !report.status.success() {
         return Err(io::Error::other("npm install --package-lock-only failed"));
     }
     if let Some(other) = bun_lock {

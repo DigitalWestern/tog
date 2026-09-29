@@ -4,6 +4,7 @@
 use crate::kernel::activity::StoreActivity;
 use crate::kernel::fetch::{download_verified_held, Digest};
 use crate::kernel::platform::Platform;
+use crate::kernel::resolve::{DelegateSpec, DoorKind, ResolutionDoor};
 use crate::kernel::sandbox::Sandbox;
 use crate::kernel::store::Store;
 use crate::kernel::toolchain::Selected;
@@ -13,7 +14,6 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 pub(crate) const BUILD_TOOLCHAIN: &[(&str, &str, &str, &str, &str)] = &[
     (
@@ -390,14 +390,13 @@ pub(crate) fn local_rust_sdist_for_test(store: &Store, name: &str) -> LockedPack
 /// performs only archive inspection plus deterministic input planning; the
 /// actual wheel build still happens in `build_sdist_wheel_at_depth`.
 pub(crate) fn plan_sdist_identity_input(
-    store: &Store,
-    activity: &StoreActivity,
-    platform: Platform,
+    door: &mut ResolutionDoor<'_>,
     pkg: &LockedPackage,
     selected: &Selected,
     rust: Option<&Selected>,
     runtime_plan: Option<&Plan>,
 ) -> io::Result<SdistIdentityPlan> {
+    let (store, activity, platform) = (door.store(), door.lease(), door.platform());
     let python = crate::tailors::python::cpython_identity_input(selected, platform)?;
     // One lease for the whole plan: the archive children, the staged work
     // directory and the Cargo run all borrow it.
@@ -419,20 +418,12 @@ pub(crate) fn plan_sdist_identity_input(
     let build_plan = if fast_requirements {
         build_toolchain_plan(selected.version("cpython")?)
     } else {
-        build_requires::resolve_build_plan(
-            store,
-            activity,
-            platform,
-            selected,
-            &info.build_requires,
-            runtime_plan,
-        )?
+        build_requires::resolve_build_plan(door, selected, &info.build_requires, runtime_plan)?
     };
     // Planning the nested environment may inspect more sdists and acquire
     // the same GC lock.
     drop(sdist);
-    let build_env_id =
-        super::env::planned_env_object_id(store, activity, platform, &build_plan, selected, rust)?;
+    let build_env_id = super::env::planned_env_object_id(door, &build_plan, selected, rust)?;
     let native_libs_id =
         native_libs_identity_id(store, platform, info.native_build, fast_requirements)?;
     let identity = if info.rust_build {
@@ -443,9 +434,7 @@ pub(crate) fn plan_sdist_identity_input(
                 build_requires::extract_sdist_for(activity, &sdist, &work.join("source"), &info)?;
             drop(sdist);
             let rust = rust_plan_inputs(
-                store,
-                activity,
-                platform,
+                door,
                 rust,
                 sdist_rust_default(selected),
                 &pkg.sha256,
@@ -495,10 +484,14 @@ pub(crate) fn sdist_identity_input(
     let activity = &store
         .activity(crate::kernel::activity::ActivityMode::Shared)
         .unwrap();
-    Ok(
-        plan_sdist_identity_input(store, activity, platform, pkg, selected, None, runtime_plan)?
-            .input,
-    )
+    let mut scope = crate::kernel::testutil::DoorScope::new();
+    let mut door = scope.door(
+        store,
+        activity,
+        platform,
+        crate::kernel::resolve::DoorKind::Planner,
+    );
+    Ok(plan_sdist_identity_input(&mut door, pkg, selected, None, runtime_plan)?.input)
 }
 
 fn stderr_tail(path: &Path) -> Option<String> {
@@ -531,7 +524,7 @@ fn generated_cargo_lock_path(source: &Path, manifest: &Path) -> PathBuf {
 }
 
 fn generate_cargo_lock(
-    activity: &crate::kernel::activity::StoreActivity,
+    door: &mut ResolutionDoor<'_>,
     rust_obj: &Path,
     manifest: &Path,
     source: &Path,
@@ -540,22 +533,23 @@ fn generate_cargo_lock(
     fs::create_dir_all(cargo_home)?;
     let cargo = rust_obj.join("bin/cargo");
     let path_var = format!("{}:/usr/bin:/bin", rust_obj.join("bin").display());
-    let mut command = Command::new(&cargo);
-    command
-        .args(["generate-lockfile", "--manifest-path"])
+    let mut spec = DelegateSpec::new(&cargo);
+    spec.args(["generate-lockfile", "--manifest-path"])
         .arg(manifest)
-        .current_dir(source)
+        .lock_root(source)
         .env("CARGO_HOME", cargo_home)
         .env("PATH", path_var)
         .env_remove("RUSTUP_HOME")
         .env_remove("RUSTUP_TOOLCHAIN");
-    let status = crate::kernel::supervise::status(&mut command, activity).map_err(|e| {
+    // The sdist ships no Cargo.lock: this is its missing-lock door, whatever
+    // the planning door it runs under.
+    let report = door.reopen(DoorKind::MissingLock).run(spec).map_err(|e| {
         io::Error::new(
             e.kind(),
             format!("run store cargo to generate Cargo.lock: {e}"),
         )
     })?;
-    if !status.success() {
+    if !report.status.success() {
         return Err(io::Error::other(
             "store cargo generate-lockfile failed for the sdist",
         ));
@@ -603,9 +597,7 @@ fn sdist_rust_default(selected: &Selected) -> Option<&str> {
 
 #[allow(clippy::too_many_arguments)]
 fn rust_plan_inputs(
-    store: &Store,
-    activity: &crate::kernel::activity::StoreActivity,
-    platform: Platform,
+    door: &mut ResolutionDoor<'_>,
     project_rust: Option<&Selected>,
     sdist_default: Option<&str>,
     sdist_sha256: &str,
@@ -620,6 +612,7 @@ fn rust_plan_inputs(
         )
     })?;
     let manifest = source.join(manifest_rel);
+    let (store, activity, platform) = (door.store(), door.lease(), door.platform());
     let rust = match project_rust {
         // The project's lock decides the compiler, as it does for a cargo
         // project; the sdist's channel is not read, because the lock already
@@ -673,7 +666,7 @@ fn rust_plan_inputs(
             store, activity, platform, &rust, &extras,
         )?;
         let plan_home = work.join("cargo-plan-home");
-        let lock = generate_cargo_lock(activity, &rust_obj, &manifest, source, &plan_home)?;
+        let lock = generate_cargo_lock(door, &rust_obj, &manifest, source, &plan_home)?;
         let text = fs::read_to_string(lock)?;
         fs::create_dir_all(generated_path.parent().expect("cache parent"))?;
         fs::write(&generated_path, &text)?;
@@ -825,38 +818,25 @@ fn run_sdist_build(
 /// Build the wheel for an sdist without a runtime numpy constraint. Normal
 /// project realization calls the depth-aware form with its complete Plan.
 pub fn build_sdist_wheel(
-    store: &Store,
-    activity: &StoreActivity,
-    platform: Platform,
+    door: &mut ResolutionDoor<'_>,
     pkg: &LockedPackage,
     selected: &Selected,
 ) -> io::Result<PathBuf> {
     crate::tailors::install_kinds();
-    build_sdist_wheel_at_depth(store, activity, platform, pkg, selected, None, None, 0)
+    build_sdist_wheel_at_depth(door, pkg, selected, None, None, 0)
 }
 
 /// Public runtime-aware entry point for callers that are building one sdist
 /// outside a complete environment realization (for example, an integration
 /// test). Normal project sync supplies this automatically from its Plan.
 pub fn build_sdist_wheel_with_runtime_plan(
-    store: &Store,
-    activity: &StoreActivity,
-    platform: Platform,
+    door: &mut ResolutionDoor<'_>,
     pkg: &LockedPackage,
     selected: &Selected,
     runtime_plan: &Plan,
 ) -> io::Result<PathBuf> {
     crate::tailors::install_kinds();
-    build_sdist_wheel_at_depth(
-        store,
-        activity,
-        platform,
-        pkg,
-        selected,
-        None,
-        Some(runtime_plan),
-        0,
-    )
+    build_sdist_wheel_at_depth(door, pkg, selected, None, Some(runtime_plan), 0)
 }
 
 /// Turn a git dependency into an ordinary sdist package: realize the commit,
@@ -926,15 +906,14 @@ pub(crate) fn git_sdist_package(
 }
 
 pub(crate) fn build_sdist_wheel_at_depth(
-    store: &Store,
-    activity: &StoreActivity,
-    platform: Platform,
+    door: &mut ResolutionDoor<'_>,
     pkg: &LockedPackage,
     selected: &Selected,
     rust: Option<&Selected>,
     runtime_plan: Option<&Plan>,
     depth: usize,
 ) -> io::Result<PathBuf> {
+    let (store, activity, platform) = (door.store(), door.lease(), door.platform());
     crate::tailors::install_kinds();
     admit_sdist_build(platform, pkg, depth)?;
     let python = crate::tailors::python::cpython_identity_input(selected, platform)?;
@@ -960,27 +939,12 @@ pub(crate) fn build_sdist_wheel_at_depth(
     let build_plan = if fast_requirements {
         build_toolchain_plan(selected.version("cpython")?)
     } else {
-        build_requires::resolve_build_plan(
-            store,
-            activity,
-            platform,
-            selected,
-            &info.build_requires,
-            runtime_plan,
-        )?
+        build_requires::resolve_build_plan(door, selected, &info.build_requires, runtime_plan)?
     };
     // The nested build environment may fetch its own artifacts. Do not hold
     // this sdist's cache lease while it acquires the same GC lock.
     drop(sdist);
-    let build_env = super::env::realize_env_at_depth(
-        store,
-        activity,
-        platform,
-        &build_plan,
-        selected,
-        rust,
-        depth,
-    )?;
+    let build_env = super::env::realize_env_at_depth(door, &build_plan, selected, rust, depth)?;
     // Native library identity is pure. Realization is deferred until after
     // the wheel cache lookup, so planning never downloads the libset.
     let native_libs_id =
@@ -1009,9 +973,7 @@ pub(crate) fn build_sdist_wheel_at_depth(
     drop(sdist);
     let rust_inputs = if let Some(source) = &source {
         Some(rust_plan_inputs(
-            store,
-            activity,
-            platform,
+            door,
             rust,
             sdist_rust_default(selected),
             &pkg.sha256,
@@ -1218,9 +1180,12 @@ pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
             .unwrap();
         let native_pkg = local_native_sdist_for_test(&store, "matrix-native");
         let planned = plan_sdist_identity_input(
-            &store,
-            activity,
-            platform,
+            &mut crate::kernel::testutil::DoorScope::new().door(
+                &store,
+                activity,
+                platform,
+                crate::kernel::resolve::DoorKind::Planner,
+            ),
             &native_pkg,
             &selected,
             None,
@@ -1234,9 +1199,19 @@ pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
             .activity(crate::kernel::activity::ActivityMode::Shared)
             .unwrap();
         let rust_pkg = local_rust_sdist_for_test(&store, "matrix-rust-darwin");
-        let planned =
-            plan_sdist_identity_input(&store, activity, platform, &rust_pkg, &selected, None, None)
-                .expect("Darwin Rust sdist identity plan");
+        let planned = plan_sdist_identity_input(
+            &mut crate::kernel::testutil::DoorScope::new().door(
+                &store,
+                activity,
+                platform,
+                crate::kernel::resolve::DoorKind::Planner,
+            ),
+            &rust_pkg,
+            &selected,
+            None,
+            None,
+        )
+        .expect("Darwin Rust sdist identity plan");
         // Cargo.toml makes info.rust_build true, so plan_sdist_identity_input
         // takes the isolated-build path even though Darwin has no native-libs pin.
         assert_eq!(planned.identity.inputs["schema"], "sdist-build/4");
@@ -1339,16 +1314,12 @@ fn find_wheel(dir: &Path) -> io::Result<PathBuf> {
 /// Realize the pinned setuptools/pip/wheel environment used by sandboxed
 /// metadata probes such as `setup.py egg_info`.
 pub fn ensure_build_environment(
-    store: &Store,
-    activity: &StoreActivity,
-    platform: Platform,
+    door: &mut ResolutionDoor<'_>,
     selected: &Selected,
 ) -> io::Result<PathBuf> {
     crate::tailors::install_kinds();
     super::env::realize_env_for(
-        store,
-        activity,
-        platform,
+        door,
         &build_toolchain_plan(selected.version("cpython")?),
         selected,
     )
@@ -1375,9 +1346,20 @@ mod tests {
         let python =
             crate::tailors::python::shipped_selection("3.12.14").expect("shipped CPython release");
         let plan = |rust: Option<&crate::kernel::toolchain::Selected>| {
-            super::plan_sdist_identity_input(&store, activity, platform, &pkg, &python, rust, None)
-                .expect("Rust sdist identity plan")
-                .identity
+            super::plan_sdist_identity_input(
+                &mut crate::kernel::testutil::DoorScope::new().door(
+                    &store,
+                    activity,
+                    platform,
+                    crate::kernel::resolve::DoorKind::Planner,
+                ),
+                &pkg,
+                &python,
+                rust,
+                None,
+            )
+            .expect("Rust sdist identity plan")
+            .identity
         };
         let rust_id = |selected: &crate::kernel::toolchain::Selected| {
             crate::kernel::provider::rust::runtime_object_id(platform, selected).unwrap()
@@ -1404,9 +1386,12 @@ mod tests {
                 .helpers
                 .insert("rust".into(), version.to_string());
             super::plan_sdist_identity_input(
-                &store,
-                activity,
-                platform,
+                &mut crate::kernel::testutil::DoorScope::new().door(
+                    &store,
+                    activity,
+                    platform,
+                    crate::kernel::resolve::DoorKind::Planner,
+                ),
                 &pkg,
                 &locked_python,
                 None,
@@ -1432,7 +1417,16 @@ mod tests {
         pinless.source = crate::kernel::toolchain::Source::Lock;
         assert!(pinless.helpers.is_empty());
         let pinless = super::plan_sdist_identity_input(
-            &store, activity, platform, &pkg, &pinless, None, None,
+            &mut crate::kernel::testutil::DoorScope::new().door(
+                &store,
+                activity,
+                platform,
+                crate::kernel::resolve::DoorKind::Planner,
+            ),
+            &pkg,
+            &pinless,
+            None,
+            None,
         )
         .expect("Rust sdist identity plan")
         .identity;
@@ -1509,9 +1503,12 @@ mod tests {
             let selected = crate::tailors::python::shipped_selection("3.12.14")
                 .expect("shipped CPython release");
             let planned_first = super::plan_sdist_identity_input(
-                &first_store,
-                first_store_activity,
-                platform,
+                &mut crate::kernel::testutil::DoorScope::new().door(
+                    &first_store,
+                    first_store_activity,
+                    platform,
+                    crate::kernel::resolve::DoorKind::Planner,
+                ),
                 &first,
                 &selected,
                 None,
@@ -1519,9 +1516,12 @@ mod tests {
             )
             .expect("first native sdist plan");
             let planned_again = super::plan_sdist_identity_input(
-                &first_store,
-                first_store_activity,
-                platform,
+                &mut crate::kernel::testutil::DoorScope::new().door(
+                    &first_store,
+                    first_store_activity,
+                    platform,
+                    crate::kernel::resolve::DoorKind::Planner,
+                ),
                 &first,
                 &selected,
                 None,
@@ -1534,9 +1534,12 @@ mod tests {
             // addressed, so only the archive-derived input is expected to
             // agree across two different stores.
             let planned_elsewhere = super::plan_sdist_identity_input(
-                &second_store,
-                second_store_activity,
-                platform,
+                &mut crate::kernel::testutil::DoorScope::new().door(
+                    &second_store,
+                    second_store_activity,
+                    platform,
+                    crate::kernel::resolve::DoorKind::Planner,
+                ),
                 &second,
                 &selected,
                 None,
@@ -1597,9 +1600,12 @@ mod tests {
             .unwrap();
         let pkg = local_native_sdist_for_test(&store, "darwin-native");
         let planned = plan_sdist_identity_input(
-            &store,
-            activity,
-            Platform::Aarch64AppleDarwin,
+            &mut crate::kernel::testutil::DoorScope::new().door(
+                &store,
+                activity,
+                Platform::Aarch64AppleDarwin,
+                crate::kernel::resolve::DoorKind::Planner,
+            ),
             &pkg,
             &crate::tailors::python::shipped_selection("3.12.14").unwrap(),
             None,
@@ -1787,11 +1793,14 @@ mod tests {
         let lease = crate::kernel::testutil::detached_lease();
         let activity = &lease.1;
         let error = build_sdist_wheel_at_depth(
-            &Store {
-                root: PathBuf::from("/does/not/matter"),
-            },
-            activity,
-            Platform::Aarch64AppleDarwin,
+            &mut crate::kernel::testutil::DoorScope::new().door(
+                &Store {
+                    root: PathBuf::from("/does/not/matter"),
+                },
+                activity,
+                Platform::Aarch64AppleDarwin,
+                crate::kernel::resolve::DoorKind::Planner,
+            ),
             &pkg,
             &crate::tailors::python::shipped_selection("3.12.14").unwrap(),
             None,
@@ -1827,11 +1836,14 @@ mod tests {
         let lease = crate::kernel::testutil::detached_lease();
         let activity = &lease.1;
         let error = build_sdist_wheel_at_depth(
-            &Store {
-                root: PathBuf::from("/does/not/matter"),
-            },
-            activity,
-            foreign,
+            &mut crate::kernel::testutil::DoorScope::new().door(
+                &Store {
+                    root: PathBuf::from("/does/not/matter"),
+                },
+                activity,
+                foreign,
+                crate::kernel::resolve::DoorKind::Planner,
+            ),
             &pkg,
             &crate::tailors::python::shipped_selection("3.12.14").unwrap(),
             None,

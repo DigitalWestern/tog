@@ -203,7 +203,7 @@ fn list_names(
 ) -> io::Result<Vec<String>> {
     let mut command = list_command(archive, compression);
     let output = match activity {
-        Some(activity) => crate::kernel::supervise::output(&mut command, activity),
+        Some(activity) => crate::kernel::supervise::local_output(&mut command, activity),
         None => command.output(),
     }
     .map_err(|e| io::Error::new(e.kind(), format!("list {}: {e}", archive.display())))?;
@@ -1405,7 +1405,7 @@ pub(crate) fn pack_ustar_with_activity(
         .arg(work)
         .arg("-T")
         .arg(list);
-    let status = crate::kernel::supervise::status(&mut tar, activity)?;
+    let status = crate::kernel::supervise::local_status(&mut tar, activity)?;
     if !status.success() {
         let _ = std::fs::remove_file(uncompressed);
         return Err(err(format!(
@@ -1468,7 +1468,7 @@ fn status_for(
     activity: Option<&StoreActivity>,
 ) -> io::Result<std::process::ExitStatus> {
     match activity {
-        Some(activity) => crate::kernel::supervise::status(command, activity),
+        Some(activity) => crate::kernel::supervise::local_status(command, activity),
         None => command.status(),
     }
 }

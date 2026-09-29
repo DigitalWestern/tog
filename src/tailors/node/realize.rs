@@ -782,7 +782,7 @@ fn apply_verified_patch(
         .args(["-p1", "--batch", "--forward"])
         .current_dir(dest)
         .stdin(snapshot_file);
-    let status = crate::kernel::supervise::status(&mut command, activity).map_err(|e| {
+    let status = crate::kernel::supervise::local_status(&mut command, activity).map_err(|e| {
         io::Error::new(
             e.kind(),
             format!(

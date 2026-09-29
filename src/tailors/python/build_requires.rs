@@ -5,7 +5,7 @@
 
 use crate::kernel::activity::StoreActivity;
 use crate::kernel::platform::Platform;
-use crate::kernel::store::Store;
+use crate::kernel::resolve::ResolutionDoor;
 use crate::kernel::types::Plan;
 use crate::tailors::python::pyselect;
 use std::fs::{self, File};
@@ -385,13 +385,12 @@ pub(crate) fn lock_cache_key(
 }
 
 pub(crate) fn resolve_build_plan(
-    store: &Store,
-    activity: &StoreActivity,
-    platform: Platform,
+    door: &mut ResolutionDoor<'_>,
     selected: &crate::kernel::toolchain::Selected,
     requires: &[String],
     runtime_plan: Option<&Plan>,
 ) -> io::Result<Plan> {
+    let (store, platform) = (door.store(), door.platform());
     let python_version = selected.version("cpython")?;
     let numpy = numpy_constraint(runtime_plan);
     let key = lock_cache_key(platform, python_version, requires, numpy.as_deref());
@@ -404,9 +403,7 @@ pub(crate) fn resolve_build_plan(
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             let text = requires_resolution_text(requires);
             let lock = crate::tailors::python::pypi::lock_requirement_text_with_uv(
-                store,
-                activity,
-                platform,
+                door,
                 &text,
                 selected,
                 numpy.as_deref(),

@@ -5,7 +5,7 @@
 use crate::comforter::status::canonical_symlink_target;
 use crate::kernel::activity::StoreActivity;
 use crate::kernel::platform::Platform;
-use crate::kernel::policy::Attribution;
+use crate::kernel::resolve::{DelegateSpec, ResolutionDoor};
 use crate::kernel::store::Store;
 use crate::kernel::toolchain::Selected;
 use crate::kernel::ui;
@@ -18,7 +18,6 @@ use std::fs;
 use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 pub struct NodeTool;
 
@@ -162,16 +161,14 @@ impl RegistryTool for NodeTool {
 
     fn realize(
         &self,
-        store: &Store,
-        activity: &StoreActivity,
-        platform: Platform,
+        door: &mut ResolutionDoor<'_>,
         root: &Path,
         package: &str,
         version: Option<&str>,
         toolchain: &Selected,
         helpers: &std::collections::BTreeMap<String, Selected>,
-        attribution: &mut Attribution,
     ) -> io::Result<()> {
+        let (store, activity, platform) = (door.store(), door.lease(), door.platform());
         fs::create_dir_all(root)?;
         let manifest = serde_json::json!({
             "name": "tog-x",
@@ -191,12 +188,12 @@ impl RegistryTool for NodeTool {
             version.unwrap_or("latest")
         ));
         let node_obj = node::realize_runtime(store, activity, platform, toolchain)?;
-        let mut command = Command::new(node_obj.join("bin/npm"));
-        command.args(["install", "--package-lock-only", "--ignore-scripts"]);
+        let mut spec = DelegateSpec::new(node_obj.join("bin/npm"));
+        spec.args(["install", "--package-lock-only", "--ignore-scripts"]);
         if !ui::verbose() {
-            command.arg("--silent");
+            spec.arg("--silent");
         }
-        command.current_dir(root).env(
+        spec.lock_root(root).env(
             "PATH",
             format!(
                 "{}:{}",
@@ -204,8 +201,8 @@ impl RegistryTool for NodeTool {
                 std::env::var("PATH").unwrap_or_default()
             ),
         );
-        ui::trace_command(&command);
-        let status = crate::kernel::supervise::status(&mut command, activity)?;
+        spec.trace();
+        let status = door.run(spec)?.status;
         if !status.success() {
             return Err(io::Error::other(format!(
                 "could not resolve '{package}' from npm (npm exit {status})"
@@ -237,7 +234,7 @@ impl RegistryTool for NodeTool {
             &plan,
             &[],
             false,
-            attribution,
+            door.attribution(),
         )?;
         ui::synced(&format!("x {package}"), &env);
         Ok(())

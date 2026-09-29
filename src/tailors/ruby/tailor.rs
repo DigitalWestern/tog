@@ -10,6 +10,7 @@ use crate::kernel::cyclonedx::{
 use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::objmeta::KindAdapter;
 use crate::kernel::platform::Platform;
+use crate::kernel::resolve::{DoorKind, ResolutionDoor};
 use crate::kernel::sandbox;
 use crate::kernel::toolchain::{Catalog, LegacyEvidence, Selected};
 use crate::kernel::ui;
@@ -23,6 +24,23 @@ use std::process::Command;
 pub struct Ruby;
 
 impl Tailor for Ruby {
+    fn package_registry(&self) -> Option<crate::tailors::PackageRegistry> {
+        Some(super::edit::REGISTRY)
+    }
+
+    fn registry_exists(&self, name: &str) -> io::Result<Option<String>> {
+        super::edit::registry_exists(name)
+    }
+
+    fn edit_manifest(
+        &self,
+        _ctx: &crate::kernel::context::Context,
+        edit: &crate::tailors::ManifestEdit<'_>,
+        door: &mut crate::kernel::resolve::ResolutionDoor<'_>,
+    ) -> io::Result<crate::tailors::EditOutcome> {
+        super::edit::edit_manifest(edit, door)
+    }
+
     fn id(&self) -> &'static str {
         "ruby"
     }
@@ -40,13 +58,13 @@ impl Tailor for Ruby {
         ctx: &Context,
         project: &ProjectRoot,
         toolchain: &Selected,
-        _attribution: &mut crate::kernel::policy::Attribution,
+        door: &mut ResolutionDoor<'_>,
     ) -> io::Result<()> {
         if ruby::require_lock(project).is_ok() {
             return Ok(());
         }
         let ruby_obj = ruby::realize_runtime(&ctx.store, &ctx.activity, ctx.platform, toolchain)?;
-        ruby::generate_lock(&ctx.store, &ctx.activity, project, &ruby_obj)
+        ruby::generate_lock(door, project, &ruby_obj)
     }
 
     fn plan(
@@ -54,11 +72,12 @@ impl Tailor for Ruby {
         ctx: &Context,
         project: &ProjectRoot,
         toolchain: &Selected,
+        door: &mut ResolutionDoor<'_>,
     ) -> io::Result<Option<String>> {
         let activity = &ctx.activity;
         ruby::require_lock(project)?;
         let ruby_obj = ruby::realize_runtime(&ctx.store, activity, ctx.platform, toolchain)?;
-        let (plan, _) = ruby::plan_ruby(&ctx.store, activity, project, &ruby_obj, toolchain)?;
+        let (plan, _) = ruby::plan_ruby(door, project, &ruby_obj, toolchain)?;
         Ok(Some(serde_json::to_string_pretty(&plan)?))
     }
 
@@ -75,7 +94,12 @@ impl Tailor for Ruby {
         let store = &ctx.store;
         ruby::require_lock(project)?;
         let ruby_obj = ruby::realize_runtime(store, activity, platform, toolchain)?;
-        let (plan, lock_sha256) = ruby::plan_ruby(store, activity, project, &ruby_obj, toolchain)?;
+        let (plan, lock_sha256) = ruby::plan_ruby(
+            &mut ResolutionDoor::open(store, activity, platform, DoorKind::Planner, attribution)?,
+            project,
+            &ruby_obj,
+            toolchain,
+        )?;
         let gems = ruby::realize_gems(store, activity, platform, &plan, &ruby_obj, toolchain)?;
         ruby::project_ruby_env(
             activity,

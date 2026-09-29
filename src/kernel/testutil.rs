@@ -81,3 +81,39 @@ pub(crate) fn detached_lease() -> (TempDir, crate::kernel::activity::StoreActivi
     .unwrap();
     (temp, activity)
 }
+
+/// The scope a test's resolution doors record into, for a test that calls a
+/// planner or realizer directly. It holds the attribution test lock, the
+/// last one in the whole-crate order (see `policy::attribution_test_lock`),
+/// and its frame is discarded when it drops.
+pub(crate) struct DoorScope {
+    attribution: crate::kernel::policy::Attribution,
+    _guard: std::sync::MutexGuard<'static, ()>,
+}
+
+impl DoorScope {
+    pub(crate) fn new() -> Self {
+        let guard = crate::kernel::policy::attribution_test_lock();
+        Self {
+            attribution: crate::kernel::policy::Attribution::open("test").unwrap(),
+            _guard: guard,
+        }
+    }
+
+    pub(crate) fn door<'a>(
+        &'a mut self,
+        store: &'a crate::kernel::store::Store,
+        activity: &'a crate::kernel::activity::StoreActivity,
+        platform: crate::kernel::platform::Platform,
+        kind: crate::kernel::resolve::DoorKind,
+    ) -> crate::kernel::resolve::ResolutionDoor<'a> {
+        crate::kernel::resolve::ResolutionDoor::open(
+            store,
+            activity,
+            platform,
+            kind,
+            &mut self.attribution,
+        )
+        .unwrap()
+    }
+}

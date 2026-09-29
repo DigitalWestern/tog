@@ -16,16 +16,16 @@ use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::rc::Rc;
 
-use sha2::{Digest, Sha224, Sha256, Sha512};
+use sha2::{Digest, Sha256};
 
 use crate::comforter;
 use crate::commands::inspect;
-use crate::commands::shared::{registry_tool, registry_tools};
+use crate::commands::shared::{registry_tool, registry_tools, CachedTool};
 use crate::kernel::activity::StoreActivity;
 use crate::kernel::context::Context;
-use crate::kernel::fetch;
 use crate::kernel::platform::Platform;
 use crate::kernel::policy;
+use crate::kernel::resolve::{DoorKind, ResolutionDoor};
 use crate::kernel::store::{self, RootEntry, Store};
 use crate::kernel::toolchain::runtime::Selected;
 use crate::kernel::ui;
@@ -802,48 +802,6 @@ fn validate_package(ecosystem: &str, package: &str) -> io::Result<()> {
 
 fn validate_version(version: &str) -> io::Result<()> {
     validate_text("version", version)
-}
-
-/// Whether `version` is the exact release syntax accepted for a delegated
-/// package-manager tool: MAJOR.MINOR.PATCH with an optional prerelease.
-/// Build metadata is deliberately excluded because Corepack's hash suffix is
-/// handled separately by the package-manager field parser.
-pub(crate) fn is_exact_version(version: &str) -> bool {
-    fn decimal_component(value: &str) -> bool {
-        !value.is_empty()
-            && (value.len() == 1 || !value.starts_with('0'))
-            && value.bytes().all(|byte| byte.is_ascii_digit())
-    }
-
-    let (release, prerelease) = version
-        .split_once('-')
-        .map_or((version, None), |(a, b)| (a, Some(b)));
-    let components: Vec<&str> = release.split('.').collect();
-    if components.len() != 3 || !components.iter().all(|part| decimal_component(part)) {
-        return false;
-    }
-    let Some(prerelease) = prerelease else {
-        return true;
-    };
-    !prerelease.is_empty()
-        && prerelease.split('.').all(|identifier| {
-            !identifier.is_empty()
-                && identifier
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-                && (!identifier.bytes().all(|byte| byte.is_ascii_digit())
-                    || identifier.len() == 1
-                    || !identifier.starts_with('0'))
-        })
-}
-
-fn validate_exact_version(version: &str) -> io::Result<()> {
-    if !is_exact_version(version) {
-        return Err(other(format!(
-            "x: node tool version must be an exact MAJOR.MINOR.PATCH release (a prerelease suffix is allowed), found {version:?}"
-        )));
-    }
-    Ok(())
 }
 
 fn validate_from_bin(bin: &str) -> io::Result<()> {
@@ -1935,17 +1893,9 @@ pub fn launch(
                 helper_objects.as_slice(),
             )),
         )?;
-        tool.realize(
-            &store,
-            activity,
-            platform,
-            &root,
-            package,
-            version,
-            &toolchain,
-            &helpers,
-            &mut attribution,
-        )?;
+        let mut door =
+            ResolutionDoor::open(&store, activity, platform, DoorKind::X, &mut attribution)?;
+        tool.realize(&mut door, &root, package, version, &toolchain, &helpers)?;
         attribution.finish(true)?;
         write_x_request_for_store(
             &root,
@@ -1999,10 +1949,8 @@ pub fn launch(
         command.env(key, value);
     }
     ui::trace_command(&command);
-    let status = crate::kernel::supervise::child_status(crate::kernel::supervise::status(
-        &mut command,
-        activity,
-    ))?;
+    let status =
+        crate::kernel::supervise::child_status(run_installed_tool(&mut command, activity))?;
     use std::os::unix::process::ExitStatusExt;
     Ok(status
         .code()
@@ -2010,207 +1958,73 @@ pub fn launch(
         .unwrap_or(1))
 }
 
-/// Where a delegate's Node tool lives. It is the same directory `tog x`
-/// would use for the same package, so the two share one environment rather
-/// than realizing it twice; both therefore key on the same fields.
-fn node_cache_root(
-    store: &Store,
-    platform: Platform,
-    package: &str,
-    version: Option<&str>,
-    toolchain: &Selected,
-    runtime_object: &str,
-    helper_objects: &[(String, String)],
-) -> io::Result<PathBuf> {
-    Ok(home()?.join(".tog/x").join(x_root_name(
-        store,
-        platform,
-        "node",
-        package,
-        version,
-        toolchain,
-        runtime_object,
-        helper_objects,
-    )?))
-}
-
-/// The digest algorithms a Corepack `packageManager` hash suffix may name.
-/// Corepack has written `+sha224.`, `+sha256.` and (currently) `+sha512.`;
-/// the suffix is always lower-case hex, never base64 SRI.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CorepackAlgo {
-    Sha224,
-    Sha256,
-    Sha512,
-}
-
-impl CorepackAlgo {
-    /// Named verbatim by every refusal that rejects an algorithm.
-    pub(crate) const SUPPORTED: &'static str = "sha224, sha256, sha512";
-
-    pub(crate) fn parse(name: &str) -> Option<Self> {
-        match name {
-            "sha224" => Some(Self::Sha224),
-            "sha256" => Some(Self::Sha256),
-            "sha512" => Some(Self::Sha512),
-            _ => None,
-        }
-    }
-
-    pub(crate) fn name(self) -> &'static str {
-        match self {
-            Self::Sha224 => "sha224",
-            Self::Sha256 => "sha256",
-            Self::Sha512 => "sha512",
-        }
-    }
-
-    /// Width of the hex digest the suffix must carry.
-    pub(crate) fn hex_len(self) -> usize {
-        match self {
-            Self::Sha224 => 56,
-            Self::Sha256 => 64,
-            Self::Sha512 => 128,
-        }
-    }
-
-    fn hex_digest(self, bytes: &[u8]) -> String {
-        match self {
-            Self::Sha224 => hex::encode(Sha224::digest(bytes)),
-            Self::Sha256 => hex::encode(Sha256::digest(bytes)),
-            Self::Sha512 => hex::encode(Sha512::digest(bytes)),
-        }
-    }
-}
-
-/// A parsed Corepack hash suffix: the algorithm plus its lower-case hex.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct CorepackHash {
-    pub(crate) algo: CorepackAlgo,
-    pub(crate) hex: String,
-}
-
-/// Realize a Node package whose executable is needed by another delegate.
-/// This is the same registered `~/.tog/x/` environment used by
-/// `tog x`, so a delegate's second invocation is a normal cache hit.
-pub(crate) fn realize_node_tool(
-    store: &Store,
+/// Run the executable `tog x` installed, with the user's arguments. The
+/// tool is the user's program (`tog x cowsay`, or a package that ships a
+/// `cargo` wrapper), not a resolution tog starts, so neither the door nor
+/// the host-local tripwire applies to it.
+// Reviewed site (tests/architecture.rs): the user's own program, which may be any tool.
+#[allow(clippy::disallowed_methods)]
+fn run_installed_tool(
+    command: &mut Command,
     activity: &StoreActivity,
-    platform: Platform,
+) -> io::Result<std::process::ExitStatus> {
+    crate::kernel::supervise::status(command, activity)
+}
+
+/// Realize `package@version` from `ecosystem`'s registry tool for another
+/// command (a dependency edit's pinned pnpm), in the same registered
+/// `~/.tog/x/` environment `tog x` would use for it from `project`: both
+/// key on the same fields, so the two share one environment rather than
+/// realizing it twice. The resolver runs through `door`.
+pub(crate) fn realize_cached_tool(
     project: &Path,
+    ecosystem: &str,
     package: &str,
     version: &str,
-    corepack_hash: Option<&CorepackHash>,
-    attribution: &mut policy::Attribution,
-) -> io::Result<(PathBuf, fs::File, bool)> {
-    validate_exact_version(version)?;
-    store.require_activity(activity, "node tool")?;
-    let tool = registry_tool("node")?;
-    let toolchain = x_toolchain(platform, project, "node")?;
+    door: &mut ResolutionDoor<'_>,
+) -> io::Result<CachedTool> {
+    let (store, activity, platform) = (door.store(), door.lease(), door.platform());
+    store.require_activity(activity, &format!("{ecosystem} tool"))?;
+    let tool = registry_tool(ecosystem)?;
+    let toolchain = x_toolchain(platform, project, ecosystem)?;
     let runtime_object = tool.runtime_object_id(platform, &toolchain)?;
-    let (helpers, helper_objects) = x_helpers(platform, project, "node")?;
-    let root = node_cache_root(
+    let (helpers, helper_objects) = x_helpers(platform, project, ecosystem)?;
+    let root = home()?.join(".tog/x").join(x_root_name(
         store,
         platform,
+        ecosystem,
         package,
         Some(version),
         &toolchain,
         &runtime_object,
         &helper_objects,
-    )?;
+    )?);
     // Take the same shared lifecycle lock `tog x` takes, and hand it back
     // to the caller. `tog x --clean` removes a cached root under an
     // exclusive lock, so without this a cleanup running alongside a
     // dependency edit could delete the delegate's environment out from under
     // it. The caller holds the lock for as long as it uses the root.
-    let x_lock = acquire_x_root(&root)?;
+    let lock = acquire_x_root(&root)?;
     let executable = tool.bin_dir(&root).join(default_bin(package));
     if executable.is_file() {
-        check_cached_projection(store, activity, &root, "node")?;
-        if let Some(expected) = corepack_hash {
-            verify_corepack_hash(store, activity, &root, package, version, expected)?;
-        }
-        return Ok((root, x_lock, false));
+        check_cached_projection(store, activity, &root, ecosystem)?;
+        return Ok(CachedTool {
+            root,
+            lock,
+            realized: false,
+        });
     }
-    tool.realize(
-        store,
-        activity,
-        platform,
-        &root,
-        package,
-        Some(version),
-        &toolchain,
-        &helpers,
-        attribution,
-    )?;
+    tool.realize(door, &root, package, Some(version), &toolchain, &helpers)?;
     if !executable.is_file() {
         return Err(other(format!(
             "'{package}@{version}' installed but provides no '{package}' executable"
         )));
     }
-    if let Some(expected) = corepack_hash {
-        verify_corepack_hash(store, activity, &root, package, version, expected)?;
-    }
-    Ok((root, x_lock, true))
-}
-
-fn verify_corepack_hash(
-    store: &Store,
-    activity: &StoreActivity,
-    root: &Path,
-    package: &str,
-    version: &str,
-    expected: &CorepackHash,
-) -> io::Result<()> {
-    let algo = expected.algo;
-    let name = algo.name();
-    if expected.hex.len() != algo.hex_len()
-        || !expected.hex.bytes().all(|byte| byte.is_ascii_hexdigit())
-    {
-        return Err(other(format!(
-            "x: packageManager has a malformed {name} hash for {package}@{version}"
-        )));
-    }
-    let closure = comforter::read_closure(root, "node")?;
-    let packages = closure["packages"].as_array().ok_or_else(|| {
-        other(format!(
-            "x: cannot verify packageManager {name} for {package}@{version}: realized node closure has no package list; hash verification is not supported yet; remove the suffix or use a pnpm package whose tarball is in the verified cache"
-        ))
-    })?;
-    let pnpm = packages.iter().find(|entry| {
-        entry["path"].as_str() == Some("node_modules/pnpm")
-            && entry["version"].as_str() == Some(version)
-    });
-    let Some(pnpm) = pnpm else {
-        return Err(other(format!(
-            "x: cannot verify packageManager {name} for {package}@{version}: realized node closure has no reachable pnpm artifact; hash verification is not supported yet; remove the suffix or use a pnpm package whose tarball is in the verified cache"
-        )));
-    };
-    let integrity = pnpm["integrity"].as_str().ok_or_else(|| {
-        other(format!(
-            "x: cannot verify packageManager {name} for {package}@{version}: pnpm artifact has no integrity and no reachable cache path; hash verification is not supported yet; remove the suffix or use a pnpm package whose tarball is in the verified cache"
-        ))
-    })?;
-    let digest = fetch::Digest::from_sri(integrity).map_err(|error| {
-        other(format!(
-            "x: cannot verify packageManager {name} for {package}@{version}: pnpm artifact integrity is invalid ({error}); hash verification is not supported yet; remove the suffix or use a pnpm package whose tarball is in the verified cache"
-        ))
-    })?;
-    let cache_path = store.cache_path(digest.algo(), digest.hex());
-    let bytes = fetch::read_cache_verified_digest(store, activity, &digest).map_err(|error| {
-        other(format!(
-            "x: cannot verify packageManager {name} for {package}@{version}: verified pnpm artifact cache {} is not reachable ({error}); hash verification is not supported yet; remove the suffix or use a pnpm package whose tarball is in the verified cache",
-            cache_path.display()
-        ))
-    })?;
-    let actual = algo.hex_digest(&bytes);
-    if actual != expected.hex.to_ascii_lowercase() {
-        return Err(other(format!(
-            "x: Corepack {name} mismatch for {package}@{version}: packageManager declares {}, cached pnpm tarball has {actual}; nothing runs",
-            expected.hex
-        )));
-    }
-    Ok(())
+    Ok(CachedTool {
+        root,
+        lock,
+        realized: true,
+    })
 }
 
 #[cfg(test)]
@@ -3118,26 +2932,5 @@ mod tests {
         let unknown = base.join("mystery");
         fs::create_dir_all(unknown.join(".tog")).unwrap();
         assert_eq!(candidate_ecosystem(&unknown), None);
-    }
-
-    #[test]
-    fn exact_node_tool_versions_are_full_releases() {
-        assert!(is_exact_version("9.1.2"));
-        assert!(is_exact_version("9.1.2-rc.1"));
-        assert!(is_exact_version("9.12.3-beta.0"));
-        for version in [
-            "9",
-            "9.x",
-            "^9.1.0",
-            "latest",
-            "9.01.2",
-            "9.1.2+build",
-            "9.12.3-beta.01",
-        ] {
-            assert!(
-                !is_exact_version(version),
-                "accepted floating version {version}"
-            );
-        }
     }
 }

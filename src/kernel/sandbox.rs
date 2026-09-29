@@ -80,6 +80,24 @@ pub fn force_env(
     remove: &[&str],
     set: &[(String, String)],
 ) {
+    for (key, value) in forced_env_edits(remove_prefixes, remove, set) {
+        match value {
+            Some(value) => cmd.env(key, value),
+            None => cmd.env_remove(key),
+        };
+    }
+}
+
+/// The edits [`force_env`] makes, in order: `None` removes an inherited
+/// variable, `Some` sets one. A resolution door's spec applies the same
+/// edits (`kernel::resolve::DelegateSpec::force_env`), so a tool run
+/// through the door sees exactly the environment a `Command` would.
+pub fn forced_env_edits(
+    remove_prefixes: &[&str],
+    remove: &[&str],
+    set: &[(String, String)],
+) -> Vec<(OsString, Option<OsString>)> {
+    let mut edits = Vec::new();
     for (key, _) in std::env::vars_os() {
         let name = key.to_string_lossy().into_owned();
         // `str::get` rather than `name[..len]`: the index is a byte offset
@@ -92,12 +110,13 @@ pub fn force_env(
                 .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
         });
         if has_prefix || remove.contains(&name.as_str()) {
-            cmd.env_remove(&key);
+            edits.push((key, None));
         }
     }
     for (k, v) in set {
-        cmd.env(k, v);
+        edits.push((OsString::from(k), Some(OsString::from(v))));
     }
+    edits
 }
 
 pub fn run_build_spec(spec: &BuildSpec) -> io::Result<()> {
@@ -464,7 +483,7 @@ impl Sandbox<'_> {
             command.env(k, v);
         }
         let (status, stderr) =
-            crate::kernel::supervise::status_with_stderr(&mut command, activity)?;
+            crate::kernel::supervise::local_status_with_stderr(&mut command, activity)?;
         if let Some(SandboxFailureKind::Setup) = classify_sandbox_failure(&status, &stderr) {
             return Err(sandbox_failure_error(
                 SandboxFailureKind::Setup,
@@ -520,7 +539,7 @@ impl Sandbox<'_> {
                 .stdout(std::process::Stdio::inherit())
                 .stderr(std::process::Stdio::piped());
             let (status, stderr) =
-                crate::kernel::supervise::status_with_stderr(&mut command, activity)?;
+                crate::kernel::supervise::local_status_with_stderr(&mut command, activity)?;
             if let Some(SandboxFailureKind::Setup) = classify_sandbox_failure(&status, &stderr) {
                 return Err(sandbox_failure_error(
                     SandboxFailureKind::Setup,
@@ -1146,7 +1165,7 @@ fn bwrap_preflight_with_activity(activity: Option<&StoreActivity>) -> io::Result
             .stderr(std::process::Stdio::piped());
         let probe_output = match activity {
             Some(activity) => {
-                let output = crate::kernel::supervise::output(&mut probe_command, activity)
+                let output = crate::kernel::supervise::local_output(&mut probe_command, activity)
                     .map_err(|error| error.to_string())?;
                 (output.status, output.stderr)
             }
@@ -1176,7 +1195,7 @@ fn bwrap_preflight_with_activity(activity: Option<&StoreActivity>) -> io::Result
 }
 
 fn supervise_output_status(command: &mut Command, activity: &StoreActivity) -> bool {
-    crate::kernel::supervise::output(command, activity)
+    crate::kernel::supervise::local_output(command, activity)
         .map(|output| output.status.success())
         .unwrap_or(false)
 }

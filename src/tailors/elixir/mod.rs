@@ -10,16 +10,19 @@
 //! native deps (make/rebar3 ports) write INTO their source trees, so the
 //! deps projection is a writable clonefile copy, recorded unattested.
 
+pub mod edit;
 mod hextar;
 pub mod objects;
 pub mod tailor;
+mod tool;
 
 use crate::kernel::activity::StoreActivity;
 use crate::kernel::archive::{extract_with_activity_and_options, Compression, ExtractOptions};
 use crate::kernel::fetch::{download_toolchain_artifact_held, download_verified_held, Digest};
 use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::platform::Platform;
-use crate::kernel::sandbox::{force_env, BuildSpec};
+use crate::kernel::resolve::ResolutionDoor;
+use crate::kernel::sandbox::BuildSpec;
 use crate::kernel::store::Store;
 use crate::kernel::toolchain::document::Shipped;
 #[cfg(test)]
@@ -34,6 +37,8 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+pub(crate) use tool::run_checked;
+use tool::{run_hexmark, run_mix};
 
 // Linux relocation recipe revision: an identity input of the Linux toolchain
 // object and of the Linux BEAM fingerprint. Bump it whenever the Install
@@ -729,7 +734,7 @@ fn run_installer_spec_for(activity: &StoreActivity, spec: &BuildSpec) -> io::Res
     for (key, value) in &spec.env {
         command.env(key, value);
     }
-    let output = crate::kernel::supervise::output(&mut command, activity)
+    let output = crate::kernel::supervise::local_output(&mut command, activity)
         .map_err(|e| io::Error::new(e.kind(), format!("spawn {program}: {e}")))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -939,12 +944,7 @@ fn probe_otp_runtime(activity: &StoreActivity, otp_root: &Path, scratch: &Path) 
         .args([
             "-noshell",
             "-eval",
-            "ok = crypto:start(), \
-             32 = byte_size(crypto:hash(sha256, <<\"tog\">>)), \
-             {ok, _} = application:ensure_all_started(ssl), \
-             true = is_list(ssl:versions()), \
-             io:format(\"~s~n~s~n\", [erlang:system_info(otp_release), code:root_dir()]), \
-             halt(0).",
+            crate::kernel::resolve::tripwire::OTP_RUNTIME_PROBE,
         ])
         .current_dir(scratch)
         .env_clear()
@@ -953,7 +953,7 @@ fn probe_otp_runtime(activity: &StoreActivity, otp_root: &Path, scratch: &Path) 
         .env("TMPDIR", scratch)
         .env("LANG", "C")
         .stdin(std::process::Stdio::null());
-    let output = crate::kernel::supervise::output(&mut command, activity)
+    let output = crate::kernel::supervise::local_output(&mut command, activity)
         .map_err(|e| io::Error::new(e.kind(), format!("spawn staged OTP erl: {e}")))?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     if !output.status.success() {
@@ -1117,7 +1117,7 @@ pub fn realize_runtime(
             .arg(&elixir_zip)
             .args(["-d"])
             .arg(staged.join("elixir"));
-        let st = crate::kernel::supervise::status(&mut command, activity)?;
+        let st = crate::kernel::supervise::local_status(&mut command, activity)?;
         if !st.success() || !staged.join("elixir/bin/mix").is_file() {
             return Err(err("Elixir extraction failed or has unexpected layout"));
         }
@@ -1130,7 +1130,7 @@ pub fn realize_runtime(
             .arg(&hex_ez)
             .args(["-d"])
             .arg(staged.join(format!("archives/hex-{}", spec.hex_version)));
-        let st = crate::kernel::supervise::status(&mut command, activity)?;
+        let st = crate::kernel::supervise::local_status(&mut command, activity)?;
         if !st.success() {
             return Err(err("Hex archive extraction failed"));
         }
@@ -1238,53 +1238,6 @@ fn beam_path(beam_obj: &Path) -> String {
         beam_obj.join("elixir/bin").display(),
         beam_obj.join("otp/bin").display()
     )
-}
-
-/// Run the store mix for a delegated edit (`tog update`).
-pub(crate) fn run_checked(
-    activity: &StoreActivity,
-    beam_obj: &Path,
-    cwd: &Path,
-    scratch: &Path,
-    offline: bool,
-    args: &[&str],
-) -> io::Result<()> {
-    crate::kernel::ui::trace(&format!("run: {} (in {})", args.join(" "), cwd.display()));
-    let out = run_mix(activity, beam_obj, cwd, scratch, offline, args)?;
-    if crate::kernel::ui::verbose() {
-        eprint!("{}", String::from_utf8_lossy(&out.stdout));
-    }
-    if !out.status.success() {
-        return Err(io::Error::other(format!(
-            "store {} failed: {}",
-            args.join(" "),
-            String::from_utf8_lossy(&out.stderr).trim()
-        )));
-    }
-    Ok(())
-}
-
-fn run_mix(
-    activity: &StoreActivity,
-    beam_obj: &Path,
-    cwd: &Path,
-    scratch: &Path,
-    offline: bool,
-    args: &[&str],
-) -> io::Result<std::process::Output> {
-    let mut cmd = Command::new(beam_obj.join("elixir/bin").join(args[0]));
-    cmd.args(&args[1..]).current_dir(cwd);
-    cmd.env("PATH", beam_path(beam_obj));
-    cmd.env("HOME", scratch);
-    cmd.env("TMPDIR", scratch);
-    let mut set = forced_env(beam_obj, &scratch.join("deps"), scratch);
-    if !offline {
-        set.retain(|(k, _)| k != "HEX_OFFLINE");
-    }
-    force_env(&mut cmd, ENV_REMOVE_PREFIXES, ENV_REMOVE, &set);
-    cmd.stdin(std::process::Stdio::null());
-    crate::kernel::supervise::output(&mut cmd, activity)
-        .map_err(|e| io::Error::new(e.kind(), format!("run store mix {args:?}: {e}")))
 }
 
 /// Helper executed BY the pinned Elixir. Mode "lock": strict-grammar AST
@@ -1451,8 +1404,7 @@ pub fn require_lock(project: &ProjectRoot) -> io::Result<()> {
 /// network, unsandboxed) when there is none. The one place the Elixir
 /// tailor writes project inputs.
 pub fn generate_lock(
-    store: &Store,
-    activity: &StoreActivity,
+    door: &mut ResolutionDoor<'_>,
     project: &ProjectRoot,
     beam_obj: &Path,
 ) -> io::Result<()> {
@@ -1460,9 +1412,9 @@ pub fn generate_lock(
         return Err(err("mix.exs not found"));
     }
     ui::note("no mix.lock; resolving with the store mix (network, unsandboxed)...");
-    let scratch = store.stage_with_activity(activity)?;
+    let scratch = door.store().stage_with_activity(door.lease())?;
     let out = run_mix(
-        activity,
+        door,
         beam_obj,
         project.path(),
         &scratch,
@@ -1601,12 +1553,12 @@ fn record_check_locked(
 /// eval). The project is read through the held descriptor; mix itself
 /// still runs in `project.path()`.
 pub fn plan_elixir(
-    store: &Store,
-    activity: &StoreActivity,
+    door: &mut ResolutionDoor<'_>,
     project: &ProjectRoot,
     beam_obj: &Path,
     selected: &Selected,
 ) -> io::Result<(ElixirPlan, String)> {
+    let (store, activity) = (door.store(), door.lease());
     if !project.is_input_file(Path::new("mix.exs")) {
         return Err(err("mix.exs not found"));
     }
@@ -1628,7 +1580,7 @@ pub fn plan_elixir(
         let planner_home = store.root.join("planner-hexhome");
         fs::create_dir_all(&planner_home)?;
         let out = run_mix(
-            activity,
+            door,
             beam_obj,
             project_dir,
             &planner_home,
@@ -1659,7 +1611,7 @@ pub fn plan_elixir(
     let lock_copy = scratch.join("mix.lock");
     fs::write(&lock_copy, &lock)?;
     let out = run_mix(
-        activity,
+        door,
         beam_obj,
         project_dir,
         &scratch,
@@ -1738,12 +1690,10 @@ pub fn realize_deps(
             .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", d.app)))?;
         let dep_dir = hextar::unpack_verified(activity, &tar, &scratch, &staged, d)?;
         // .hex marker via the pinned toolchain (ETF binary).
-        let out = run_mix(
+        let out = run_hexmark(
             activity,
             beam_obj,
             &scratch,
-            &scratch,
-            true,
             &[
                 "elixir",
                 helper.to_str().unwrap(),

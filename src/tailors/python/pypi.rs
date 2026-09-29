@@ -2,9 +2,8 @@
 //! requirement to one exact PyPI artifact (wheel preferred, sdist
 //! fallback), cutting the plan (Plan) the kernel realizes.
 
-use crate::kernel::activity::StoreActivity;
 use crate::kernel::platform::Platform;
-use crate::kernel::store::Store;
+use crate::kernel::resolve::{DelegateSpec, DoorKind, ResolutionDoor};
 use crate::kernel::types::{ArtifactKind, LockedPackage, Plan};
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
 use std::ffi::CStr;
@@ -791,13 +790,12 @@ pub fn plan_python(
 /// persistence; this is deliberately just the uv invocation. Build-requirement
 /// resolution uses it; project locking runs uv in the project directory.
 pub(crate) fn lock_requirement_text_with_uv(
-    store: &Store,
-    activity: &StoreActivity,
-    platform: Platform,
+    door: &mut ResolutionDoor<'_>,
     requirements_text: &str,
     selected: &crate::kernel::toolchain::Selected,
     constraints: Option<&str>,
 ) -> io::Result<String> {
+    let (store, activity, platform) = (door.store(), door.lease(), door.platform());
     let python_version = selected.version("cpython")?;
     let uv = crate::tailors::python::realize_uv(store, activity, platform, selected)?.join("uv");
     // One lease covers the scratch directory and the uv child.
@@ -810,8 +808,8 @@ pub(crate) fn lock_requirement_text_with_uv(
         if let Some(constraints) = constraints {
             fs::write(&constraints_path, format!("{constraints}\n"))?;
         }
-        let mut command = Command::new(&uv);
-        command.args([
+        let mut spec = DelegateSpec::new(&uv);
+        spec.args([
             "pip",
             "compile",
             "--generate-hashes",
@@ -822,7 +820,7 @@ pub(crate) fn lock_requirement_text_with_uv(
             "--no-build",
         ]);
         if constraints.is_some() {
-            command.args([
+            spec.args([
                 "-c",
                 constraints_path.to_str().ok_or_else(|| {
                     io::Error::new(io::ErrorKind::InvalidData, "constraints path is not UTF-8")
@@ -830,8 +828,8 @@ pub(crate) fn lock_requirement_text_with_uv(
             ]);
         }
         let uv_output = {
-            command.arg(&input).args(["-o"]).arg(&output);
-            crate::kernel::supervise::output(&mut command, activity).map_err(|e| {
+            spec.arg(&input).args(["-o"]).arg(&output).capture();
+            door.reopen(DoorKind::Planner).run(spec).map_err(|e| {
                 io::Error::new(e.kind(), format!("run store uv ({}): {e}", uv.display()))
             })?
         };
