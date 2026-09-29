@@ -818,6 +818,21 @@ mod door {
         );
     }
 
+    /// The namespace's pid 1 is the non-dumpable relay: the tool cannot
+    /// open its memory for writing (a bwrap init there was unfiltered and
+    /// dumpable), and a `SIGSTOP` from inside does not stop it.
+    #[test]
+    fn linux_door_tool_cannot_write_or_stop_the_namespace_init() {
+        let Some(door) = door("linux_door_tool_cannot_write_or_stop_the_namespace_init") else {
+            return;
+        };
+        let stdout = door.stdout_of(&["pid1"]);
+        let lines: Vec<&str> = stdout.lines().collect();
+        assert!(lines[0].starts_with("pid1 mem fd=-1 "), "{stdout}");
+        assert_ne!(lines[1], "pid1 state=T", "{stdout}");
+        assert!(lines[1].starts_with("pid1 state="), "{stdout}");
+    }
+
     /// A setsid, double-forked child rewrites a declared output in a loop
     /// after the tool exits. What is published equals the immutable copy,
     /// and it does not change afterwards.

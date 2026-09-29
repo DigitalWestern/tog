@@ -24,6 +24,7 @@
 #include <fcntl.h>
 #include <netdb.h>
 #include <netinet/in.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -142,6 +143,27 @@ static int ptrace_parent(void) {
     return 0;
 }
 
+/* The namespace's pid 1 must be the relay: not writable through
+ * /proc/1/mem, and not stoppable from inside. */
+static int pid1(void) {
+    int fd = open("/proc/1/mem", O_RDWR);
+    printf("pid1 mem fd=%d errno=%d\n", fd, fd < 0 ? errno : 0);
+    kill(1, SIGSTOP);
+    usleep(100000);
+    char state = '?';
+    FILE *stat = fopen("/proc/1/stat", "r");
+    if (stat) {
+        char line[512];
+        if (fgets(line, sizeof line, stat)) {
+            char *close = strrchr(line, ')');
+            if (close && close[1] == ' ') state = close[2];
+        }
+        fclose(stat);
+    }
+    printf("pid1 state=%c\n", state);
+    return 0;
+}
+
 static int daemonize(const char *path, const char *seconds) {
     pid_t first = fork();
     if (first < 0) { printf("fork errno=%d\n", errno); return 1; }
@@ -223,6 +245,7 @@ int main(int argc, char **argv) {
     if (!strcmp(cmd, "io_uring")) return io_uring();
     if (!strcmp(cmd, "int80")) return int80();
     if (!strcmp(cmd, "ptrace-parent")) return ptrace_parent();
+    if (!strcmp(cmd, "pid1")) return pid1();
     if (!strcmp(cmd, "daemon") && argc == 4) return daemonize(argv[2], argv[3]);
     if (!strcmp(cmd, "read") && argc == 3) return read_first(argv[2]);
     if (!strcmp(cmd, "family") && argc == 3) return family(argv[2]);

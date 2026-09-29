@@ -479,8 +479,8 @@ mod linux {
     /// stuck in uninterruptible sleep can take a moment to die.
     const QUIESCE_ROUNDS: usize = 500;
 
-    /// Kill every process in the namespace except its init (pid 1, which
-    /// bubblewrap runs) and the relay, until none is left alive. Zombies are
+    /// Kill every process in the namespace except the relay (its pid 1,
+    /// through bubblewrap's `--as-pid-1`), until none is left alive. Zombies are
     /// dead already and are not counted.
     fn quiesce() -> io::Result<usize> {
         let me = std::process::id() as i32;
@@ -488,7 +488,7 @@ mod linux {
         for _ in 0..QUIESCE_ROUNDS {
             let mut alive = 0;
             for pid in namespace_pids()? {
-                if pid == 1 || pid == me || is_zombie(pid) {
+                if pid == me || is_zombie(pid) {
                     continue;
                 }
                 alive += 1;

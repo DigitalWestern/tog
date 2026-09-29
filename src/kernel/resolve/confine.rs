@@ -1006,6 +1006,11 @@ fn proxy_args(
         "--unshare-user",
         "--unshare-net",
         "--unshare-pid",
+        // The relay is the namespace's pid 1, not a bwrap init: that init
+        // would be an unfiltered, dumpable process the tool could write
+        // through /proc/1/mem. As init the relay also ignores SIGSTOP and
+        // SIGKILL sent from inside, and its exit ends every process left.
+        "--as-pid-1",
         "--unshare-ipc",
         "--unshare-uts",
         "--hostname",

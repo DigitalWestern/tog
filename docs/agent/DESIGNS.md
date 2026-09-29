@@ -1436,8 +1436,12 @@ Two measures close that window, on both platforms:
    - *Linux:* the tool runs in bwrap's PID namespace. When the tool
      exits, the relay sends `SIGKILL` to every other process in the
      namespace (it enumerates `/proc` inside the namespace) and exits.
-     bwrap's init then exits, which kills anything left, and the door
-     waits for bwrap to be reaped. No process of the tree survives, and
+     The relay is the namespace's pid 1 (bubblewrap's `--as-pid-1`), so
+     its exit kills anything left, and the door waits for bwrap to be
+     reaped. A bubblewrap init as pid 1 would be an unfiltered, dumpable
+     process the tool could write through `/proc/1/mem`. The relay is
+     non-dumpable, and as init it ignores `SIGSTOP` and `SIGKILL` sent
+     from inside, so the tool can neither take it over nor stall it. No process of the tree survives, and
      none can escape a PID namespace. The container backend gets the same
      result by removing the container.
    - *macOS:* there is no PID namespace, and children stay in tog's
