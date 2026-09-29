@@ -1627,9 +1627,13 @@ data). The sidecar names the ledger, and nothing names the sidecar:
   `{class, method, url, status, sha256, claimed, verified, freshness}`
   (`freshness` is `live` or `last-good`; see "Offline behavior").
   Duplicates are removed by exact equality, and the set is sorted by each
-  entry's complete canonical bytes. The same fetches therefore produce the
-  same bytes whatever order they arrived in and however often they were
-  retried.
+  entry's complete canonical bytes. The set describes outcomes, not
+  attempts: a failed attempt at a method and URL that the session also
+  answered is left out (its row stays in diagnostics), and `sha256` is
+  recorded only for bytes the tool could use (a 2xx body or a claimed
+  artifact), never for an error body, whose request ids and dates differ
+  run to run. The same fetches therefore produce the same bytes whatever
+  order they arrived in and however often they were retried.
 - **Diagnostics** hold what varies by machine or run: cache disposition
   (hit, miss, revalidated), arrival order, retry and duplicate counts,
   byte counts, the isolation engine, the platform, tool store object
@@ -2994,6 +2998,11 @@ the flexible option:
   hit and a miss give the same portable entry. `freshness` is absent only
   when nothing was served. A malformed request has no method or URL, so
   it is noted in diagnostics only.
+- **The ledger records outcomes.** A `failed` entry (a 504 for an
+  unreachable upstream, a 502, an interrupted stream) is dropped from the
+  portable set when the same method and URL is answered in the session,
+  in either order, and counted in `superseded`. A 4xx or 5xx entry has
+  no `sha256`, so two 404s with different request ids are one entry.
 - **Unauthenticated requests are diagnostics only.** A `CONNECT`,
   absolute-form request, or mirror request without this session's token
   gets its 407 or 403 and a diagnostics row, counted in

@@ -141,6 +141,11 @@ struct Inner {
     stale: BTreeMap<String, u64>,
     /// Endpoints whose stale refusal was already reported.
     stale_refused: BTreeSet<String>,
+    /// Every (method, url) that was answered (something was served).
+    answered: HashSet<(String, String)>,
+    /// Failed portable entries per (method, url), taken out of the ledger
+    /// when the same request is answered.
+    failed: HashMap<(String, String), Vec<Entry>>,
     /// The texts already in `facts.refusals` and `facts.hard_failures`.
     refusal_texts: HashSet<String>,
     failure_texts: HashSet<String>,
@@ -298,13 +303,36 @@ impl State {
             Some(previous) if previous != &entry => inner.diagnostics.retries += 1,
             _ => {}
         }
-        inner.last.insert(key, entry.clone());
-        let fresh = inner
-            .ledger
-            .as_mut()
-            .is_some_and(|ledger| ledger.insert(entry));
-        if !fresh {
-            inner.diagnostics.duplicates += 1;
+        inner.last.insert(key.clone(), entry.clone());
+        // The portable set describes outcomes: a failed attempt at a
+        // request the session also answered was transient, so it stays
+        // in diagnostics only, whichever order the two arrived in.
+        let failed = diag.disposition == "failed";
+        if failed && inner.answered.contains(&key) {
+            inner.diagnostics.superseded += 1;
+        } else {
+            let fresh = inner
+                .ledger
+                .as_mut()
+                .is_some_and(|ledger| ledger.insert(entry.clone()));
+            if !fresh {
+                inner.diagnostics.duplicates += 1;
+            } else if failed {
+                inner
+                    .failed
+                    .entry(key.clone())
+                    .or_default()
+                    .push(entry.clone());
+            }
+        }
+        if entry.freshness.is_some() && inner.answered.insert(key.clone()) {
+            let superseded = inner.failed.remove(&key).unwrap_or_default();
+            if let Some(ledger) = inner.ledger.as_mut() {
+                for failure in &superseded {
+                    ledger.remove(failure);
+                }
+            }
+            inner.diagnostics.superseded += superseded.len() as u64;
         }
         inner.diagnostics.bytes += diag.bytes;
         push_row(&mut inner.diagnostics, diag);

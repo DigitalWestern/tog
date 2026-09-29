@@ -110,12 +110,16 @@ impl Record {
     }
 
     fn into_parts(self) -> (Entry, DiagRequest) {
+        // A digest only of bytes the tool could use: a 2xx body or a
+        // claimed artifact. Error bodies carry request ids and dates, so
+        // their digest would differ run to run for the same outcome.
+        let usable = (200..300).contains(&self.status) || self.claimed.is_some();
         let entry = Entry {
             class: self.class.clone(),
             method: self.method.clone(),
             url: self.url.clone(),
             status: self.status,
-            sha256: self.sha256,
+            sha256: self.sha256.filter(|_| usable),
             claimed: self.claimed,
             verified: self.verified,
             freshness: self.freshness,
@@ -1265,6 +1269,56 @@ mod tests {
             .map(|r| r.disposition.as_str())
             .collect();
         assert_eq!(dispositions, ["last-good", "last-good", "miss", "failed"]);
+    }
+
+    #[test]
+    fn the_ledger_describes_outcomes_not_attempts() {
+        let harness = Harness::new("mirror-outcomes");
+        let (session, address) = harness.session();
+        assert_eq!(fetch(&address, "/meta/pkg.json").status, 200);
+        // A transient failure, then the answer.
+        harness.upstream.set("/index/pkg", Behavior::Drop);
+        assert_eq!(fetch(&address, "/index/pkg").status, 504);
+        harness
+            .upstream
+            .set("/index/pkg", Behavior::Reply(Reply::new(200, b"pkg index")));
+        assert_eq!(fetch(&address, "/index/pkg").status, 200);
+        // The answer, then a failure: the same outcome in either order.
+        assert_eq!(fetch(&address, "/art/free-pkg-1.0.tgz").status, 200);
+        harness
+            .upstream
+            .set("/art/free-pkg-1.0.tgz", Behavior::Drop);
+        assert_eq!(fetch(&address, "/art/free-pkg-1.0.tgz").status, 504);
+        // Two 404 bodies that differ only by a request id.
+        for id in ["1", "2"] {
+            let body = format!("not found; request id {id}");
+            harness.upstream.set(
+                "/art/gone-1.0.tgz",
+                Behavior::Reply(Reply::new(404, body.as_bytes())),
+            );
+            assert_eq!(fetch(&address, "/art/gone-1.0.tgz").status, 404);
+        }
+        let report = session.finish();
+        let statuses = |path: &str| -> Vec<u16> {
+            entries_for(&report, &harness.upstream_url(path))
+                .iter()
+                .map(|entry| entry.status)
+                .collect()
+        };
+        assert_eq!(statuses("/index/pkg"), [200]);
+        assert_eq!(statuses("/art/free-pkg-1.0.tgz"), [200]);
+        let gone = entries_for(&report, &harness.upstream_url("/art/gone-1.0.tgz"));
+        assert_eq!(gone.len(), 1, "{gone:#?}");
+        assert_eq!((gone[0].status, gone[0].sha256.as_deref()), (404, None));
+        assert_eq!(report.diagnostics.superseded, 2);
+        assert_eq!(report.diagnostics.requests.len(), 7);
+        let failed = report
+            .diagnostics
+            .requests
+            .iter()
+            .filter(|row| row.disposition == "failed")
+            .count();
+        assert_eq!(failed, 2, "the failed attempts stay in diagnostics");
     }
 
     #[test]
