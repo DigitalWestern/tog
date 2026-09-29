@@ -1274,16 +1274,21 @@ pub fn project_go_env(
     refs.object_path(&store, activity, &go_obj)?;
     refs.object_path(&store, activity, &modcache_obj)?;
     // The planner doors' ledgers: evidence of what planning fetched, kept
-    // as long as this closure is.
+    // as long as this closure is. The body names them too, so a root
+    // rebuilt from the closure alone (`tog gc --register`) keeps them.
+    let mut ledger_refs = Vec::new();
     for objects in ledgers {
-        refs.object_id(&store, activity, &objects.ledger)?;
-        refs.object_id(&store, activity, &objects.diagnostics)?;
+        for id in [&objects.ledger, &objects.diagnostics] {
+            refs.object_id(&store, activity, id)?;
+            ledger_refs.push(object_ref(&store.object_path(id))?);
+        }
     }
     let mut body = serde_json::json!({
         "go_object": object_ref(&go_obj.canonicalize()?)?,
         "modcache_object": object_ref(&modcache_obj.canonicalize()?)?,
         "go_sum_sha256": gosum_sha256,
         "plan": plan,
+        "resolution_ledgers": ledger_refs,
     });
     // The Go object is this ecosystem's runtime: the record names the bundle
     // it came from and refers to it directly, so a later catalog refresh
@@ -1790,6 +1795,116 @@ mod tests {
         let reimported = crate::kernel::store::reimport_root_for_test(&store, &project).unwrap();
         assert_eq!(reimported.objects, record.objects);
         assert_eq!(reimported.projections, record.projections);
+    }
+
+    /// A planner door's ledger is rooted the moment it is committed, and
+    /// the closure sync publishes names it, so a root rebuilt from that
+    /// closure alone still keeps it.
+    #[test]
+    fn ledger_is_rooted_from_commit_and_retained_through_closure_refs() {
+        use crate::kernel::resolve::ledger::{self, Diagnostics, Entry, PortableLedger};
+        let _store_env = crate::kernel::store::STORE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _attribution_lock = crate::kernel::policy::attribution_test_lock();
+        let temp = TempDir::new();
+        let store_root = temp.0.join("store");
+        for sub in ["objects", "meta", "cache/sha256", "tmp", "roots"] {
+            fs::create_dir_all(store_root.join(sub)).unwrap();
+        }
+        let store = Store {
+            root: store_root.canonicalize().unwrap(),
+        };
+        let lease = store
+            .activity(crate::kernel::activity::ActivityMode::Shared)
+            .unwrap();
+        let activity = &lease;
+        let selected = selection();
+        let go_id = {
+            let row = runtime_row(Platform::host().unwrap(), &selected).unwrap();
+            runtime_identity(Platform::host().unwrap(), &row.version, row.digest.hex()).object_id()
+        };
+        let modcache_id = "0000000000000000000000000000000000000000-modcache-0".to_string();
+        for id in [&go_id, &modcache_id] {
+            let object = store.object_path(id);
+            fs::create_dir_all(&object).unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = fs::metadata(&object).unwrap().permissions();
+            permissions.set_mode(permissions.mode() & !0o222);
+            fs::set_permissions(&object, permissions).unwrap();
+            fs::write(
+                store.root.join("meta").join(format!("{id}.json")),
+                serde_json::to_vec_pretty(&serde_json::json!({
+                    "id": id,
+                    "identity": {"kind": "go", "name": "go", "version": "0", "inputs": {}},
+                    "created": 0,
+                    "exceptions": [],
+                    "refs": []
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        }
+        let project = temp.0.join("project");
+        fs::create_dir_all(&project).unwrap();
+        let root = crate::kernel::fsroot::ProjectRoot::open(&project).unwrap();
+        let mut portable = PortableLedger::new("go", "planner").unwrap();
+        portable.insert(Entry {
+            class: "index".into(),
+            method: "GET".into(),
+            url: "https://proxy.golang.org/golang.org/x/sync/@v/list".into(),
+            status: 200,
+            sha256: Some("ab".repeat(32)),
+            claimed: None,
+            verified: false,
+            freshness: None,
+        });
+        let objects = ledger::commit(&store, activity, &portable, &Diagnostics::default()).unwrap();
+        let ids = std::collections::BTreeSet::from([
+            objects.ledger.clone(),
+            objects.diagnostics.clone(),
+        ]);
+        ledger::root(&store, activity, &root, &objects).unwrap();
+        let rooted = {
+            let lock = store.project_lock_in(&root).unwrap();
+            store.rooted_objects_locked(activity, &root, &lock).unwrap()
+        };
+        assert_eq!(rooted, ids, "the commit's root");
+
+        let plan = GoPlan {
+            go_version: GO_VERSION.into(),
+            module: "example.com/m".into(),
+            modules: Vec::new(),
+        };
+        let mut attribution = crate::kernel::policy::Attribution::open("go").unwrap();
+        project_go_env(
+            activity,
+            &root,
+            &store.object_path(&go_id),
+            &store.object_path(&modcache_id),
+            &plan,
+            "sum",
+            &selected,
+            std::slice::from_ref(&objects),
+            &mut attribution,
+        )
+        .unwrap();
+        attribution.finish(true).unwrap();
+        let closure = crate::comforter::read_closure(&project, "go").unwrap();
+        let named: std::collections::BTreeSet<String> = closure["resolution_ledgers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| entry["id"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(named, ids);
+
+        // The record lost: `gc --register` rebuilds it from the closure.
+        drop(lease);
+        let reimported = crate::kernel::store::reimport_root_for_test(&store, &project).unwrap();
+        for id in &ids {
+            assert!(reimported.objects.contains(id), "{id}: {reimported:?}");
+        }
     }
 
     #[test]
