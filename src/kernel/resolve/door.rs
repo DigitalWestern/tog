@@ -108,6 +108,9 @@ pub struct ConfinedSpec<'a> {
     pub extra_roots: Vec<PathBuf>,
     /// Store objects the tool runs from, bound read-only.
     pub store_reads: Vec<PathBuf>,
+    /// Tog-owned persistent caches under the store, bound read-write and
+    /// never snapshotted (see `ConfinedRun::cache_roots`).
+    pub cache_roots: Vec<PathBuf>,
     pub routes: Vec<Route>,
     pub network: Network,
     /// `None` passes the spec's arguments with the forced ones appended
@@ -136,6 +139,7 @@ impl<'a> ConfinedSpec<'a> {
             exclude: Vec::new(),
             extra_roots: Vec::new(),
             store_reads: Vec::new(),
+            cache_roots: Vec::new(),
             routes: Vec::new(),
             network: Network::Online,
             wire: None,
@@ -358,6 +362,7 @@ fn run_tool(
             cwd: &snapshot.lock_root().real,
             env: &invocation.env,
             read_roots: &confined.store_reads,
+            cache_roots: &confined.cache_roots,
             stdout: match spec.stdio {
                 DelegateStdio::Inherit => Stdout::Inherit,
                 DelegateStdio::Capture => Stdout::Capture,

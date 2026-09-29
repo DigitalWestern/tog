@@ -1,7 +1,10 @@
 //! `tog add` / `remove` / `update` for Go (`Tailor::edit_manifest`): the
-//! store go's `go get` edits go.mod and go.sum.
+//! store go's `go get` edits go.mod and go.sum, confined through the edit
+//! door, which publishes them with the signed resolution record.
 
-use crate::kernel::resolve::ResolutionDoor;
+use super::{GoPublish, GoRun};
+use crate::kernel::fsroot::ProjectRoot;
+use crate::kernel::resolve::{record, ResolutionDoor};
 use crate::tailors::edit::{
     other, registry_latest, EditOutcome, EditVerb, ManifestEdit, PackageRegistry,
 };
@@ -42,13 +45,8 @@ pub(crate) fn edit_manifest(
             "--dev has no meaning in Go (one dependency set per module)",
         ));
     }
-    let go_obj = super::realize_runtime(
-        door.store(),
-        door.lease(),
-        door.platform(),
-        &edit.host.toolchain(project, "go")?,
-    )?;
-    let scratch = door.store().stage_with_activity(door.lease())?;
+    let selected = edit.host.toolchain(project, "go")?;
+    let go_obj = super::realize_runtime(door.store(), door.lease(), door.platform(), &selected)?;
     let args: Vec<String> = match edit.verb {
         EditVerb::Add => std::iter::once("get".to_string())
             .chain(texts.iter().cloned())
@@ -66,9 +64,29 @@ pub(crate) fn edit_manifest(
         }
     };
     let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    let result = super::run_checked(door, &go_obj, project, &scratch, false, &refs);
-    let _ = crate::kernel::store::remove_tree(&scratch);
-    result?;
+    crate::kernel::ui::trace(&format!(
+        "run: go {} (in {})",
+        refs.join(" "),
+        project.display()
+    ));
+    // go.mod, go.sum and the signed record are published together by the
+    // edit door's transaction, or not at all.
+    let root = ProjectRoot::open(project)?;
+    let spec =
+        crate::tailors::record_spec(&super::tailor::Go, &root, super::go_tool(&selected)?, &refs)?;
+    let modcache = super::gate_cache(door.store())?;
+    super::run_go_checked(
+        door,
+        GoRun {
+            go_obj: &go_obj,
+            lock_root: project,
+            modcache: &modcache,
+            args: &refs,
+            publish: GoPublish::Project {
+                receipt: Some(record::producer(spec, Default::default())),
+            },
+        },
+    )?;
     Ok(EditOutcome {
         files: vec!["go.mod".to_string(), "go.sum".to_string()],
         sync_root: project.to_path_buf(),

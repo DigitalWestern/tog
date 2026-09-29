@@ -3176,15 +3176,15 @@ fn attest_refuses_an_ecosystem_without_a_resolution_door() {
     let home = TempDir::boundary("cli-attest-unsupported");
     let project = TempDir::boundary("cli-attest-unsupported-project");
     std::fs::write(
-        project.0.join("go.mod"),
-        "module example.com/p\n\ngo 1.22\n",
+        project.0.join("Cargo.toml"),
+        "[package]\nname = \"p\"\nversion = \"0.1.0\"\n",
     )
     .unwrap();
-    let out = tog(&project.0, &home.0, &["attest", "go"]);
+    let out = tog(&project.0, &home.0, &["attest", "cargo"]);
     assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
     let stderr = text(&out.stderr);
     assert!(
-        stderr.contains("tog attest does not support go"),
+        stderr.contains("tog attest does not support cargo"),
         "{stderr}"
     );
     let out = tog(&project.0, &home.0, &["attest"]);

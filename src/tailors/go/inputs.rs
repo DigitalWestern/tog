@@ -3,6 +3,7 @@
 
 use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::platform::Platform;
+use crate::kernel::resolve::ledger::LedgerObjects;
 use crate::kernel::resolve::ResolutionDoor;
 use crate::kernel::store;
 use crate::kernel::toolchain::Selected;
@@ -14,6 +15,9 @@ pub struct GoInputs {
     pub go_obj: PathBuf,
     pub plan: go::GoPlan,
     pub gosum_sha256: String,
+    /// The ledgers this call's planner doors committed and rooted, for the
+    /// references of the closure the sync publishes.
+    pub ledgers: Vec<LedgerObjects>,
 }
 
 /// `toolchain` is the project's selection, and it is the only thing that
@@ -32,13 +36,14 @@ pub fn load_go_inputs(
     let (store, activity, platform) = (door.store(), door.lease(), door.platform());
     let go_version = toolchain.version("go")?;
     let go_obj = go::realize_runtime(store, activity, platform, toolchain)?;
-    let mut plan = go::plan_go(door, project, &go_obj, go_version, true)?;
+    let mut ledgers = Vec::new();
+    let mut plan = go::plan_go(door, project, &go_obj, go_version, true, &mut ledgers)?;
     // A cached plan can name artifacts this store never downloaded. When the
     // module cache object is missing too, plan again, which fetches them;
     // when the object is present, nothing is fetched, so an offline warm
     // sync stays offline.
     if !modcache_realizable(store, activity, platform, toolchain, &plan)? {
-        plan = go::plan_go(door, project, &go_obj, go_version, false)?;
+        plan = go::plan_go(door, project, &go_obj, go_version, false, &mut ledgers)?;
     }
     // An absent go.sum digests as the empty string; an unreadable one is
     // an error, never a digest of nothing.
@@ -48,6 +53,7 @@ pub fn load_go_inputs(
         go_obj,
         plan,
         gosum_sha256: hex::encode(Sha256::digest(gosum.as_bytes())),
+        ledgers,
     })
 }
 

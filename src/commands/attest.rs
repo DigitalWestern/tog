@@ -3,10 +3,11 @@
 //!
 //! Attesting runs each ecosystem's own lock check through a verification
 //! door (`Tailor::attest_lock`). A check that leaves the lock and manifest
-//! byte-unchanged returns a record, which this command signs with the
-//! process key and writes to `.tog/resolution/<ecosystem>.json`, or with
-//! `--record-out` to a path outside the checkout. Every ecosystem is checked
-//! before anything is written, so a failure leaves no partial set.
+//! byte-unchanged yields a record signed with the process key, which the
+//! door publishes as `.tog/resolution/<ecosystem>.json` through its
+//! transaction, one ecosystem at a time. With `--record-out` the checkout
+//! is left unchanged and every record is written outside it only after
+//! every check passed.
 //!
 //! The ledger transfers never run a tool. `--ledger-export` writes the
 //! portable bytes of the ledger the committed record names, from the local
@@ -24,6 +25,7 @@ use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::platform::Platform;
 use crate::kernel::policy;
 use crate::kernel::resolve::record::{self, Judgment, ResolutionRecord};
+use crate::kernel::resolve::{transaction, DoorKind, ResolutionDoor};
 use crate::kernel::ui;
 use crate::tailors::{self, Tailor};
 use std::fs;
@@ -122,12 +124,36 @@ fn attest(
     // one, so the lock is read the way `--frozen` reads it.
     let (_, toolchain) = preflight_sync(platform, project, Mode::Frozen, scope)?;
     let ctx = Context::open(platform, true)?;
+    // An interrupted publication is finished or undone before any check
+    // reads the lock it was replacing.
+    transaction::recover_project(&ctx.store, &ctx.activity, project.path())?;
     project.check_still_named()?;
-    let key = crate::comforter::signing_key();
+    if crate::comforter::signing_key().is_none() {
+        ui::warning(
+            "resolution records written unsigned: TOG_SIGNING_KEY is not set, so no sync \
+             will attest them",
+            "export TOG_SIGNING_KEY=<key file your machine policy trusts>",
+        );
+    }
     let mut records = Vec::new();
     for tailor in &targets {
         let selected = toolchain.get(tailor.lock_ecosystem())?;
-        let record = tailor.attest_lock(&ctx, project, selected)?;
+        // The door records its run's exceptions (a tier's
+        // `unconfined-resolution`) into this scope, and the record carries
+        // them; attesting publishes no closure, so the scope is discarded.
+        let mut attribution = policy::Attribution::open(tailor.id())?;
+        let checked = ResolutionDoor::open(
+            &ctx.store,
+            &ctx.activity,
+            platform,
+            DoorKind::Attest,
+            &mut attribution,
+        )
+        .and_then(|mut door| {
+            tailor.attest_lock(&ctx, project, selected, &mut door, record_out.is_none())
+        });
+        attribution.discard();
+        let (record, bytes) = checked?;
         if record.ecosystem != tailor.id() {
             return Err(io::Error::other(format!(
                 "the {} lock check returned a {} record",
@@ -135,45 +161,48 @@ fn attest(
                 record.ecosystem
             )));
         }
-        let envelope = record.envelope(key.as_deref())?;
-        records.push((record, record::envelope_bytes(&envelope)?));
+        if record_out.is_none() {
+            ui::note(&format!(
+                "attest: {} {} record ({} {}) written to {}",
+                record.ecosystem,
+                record.door,
+                record.tool.name,
+                record.tool.version,
+                project
+                    .path()
+                    .join(record::receipt_path(&record.ecosystem))
+                    .display()
+            ));
+        }
+        records.push((record, bytes));
     }
-    if key.is_none() {
-        ui::warning(
-            "resolution records written unsigned: TOG_SIGNING_KEY is not set, so no sync \
-             will attest them",
-            "export TOG_SIGNING_KEY=<key file your machine policy trusts>",
-        );
-    }
-    for (record, bytes) in &records {
-        let written = write_record(project, record, bytes, record_out, named.len() == 1)?;
-        ui::note(&format!(
-            "attest: {} {} record ({} {}) written to {}",
-            record.ecosystem,
-            record.door,
-            record.tool.name,
-            record.tool.version,
-            written.display()
-        ));
+    // `--record-out` writes only after every check passed, so a failure
+    // leaves no partial set outside the checkout.
+    if let Some(out) = record_out {
+        for (record, bytes) in &records {
+            let written = write_record(record, bytes, out, named.len() == 1)?;
+            ui::note(&format!(
+                "attest: {} {} record ({} {}) written to {}",
+                record.ecosystem,
+                record.door,
+                record.tool.name,
+                record.tool.version,
+                written.display()
+            ));
+        }
     }
     Ok(())
 }
 
-/// Write one signed record: into the project as its receipt, or under
-/// `record_out` (the path itself when exactly one ecosystem was named,
-/// else `<record_out>/<ecosystem>.json`). Returns where it went.
+/// Write one signed record for `--record-out`: to `out` itself when
+/// exactly one ecosystem was named, else to `<out>/<ecosystem>.json`.
+/// Returns where it went.
 fn write_record(
-    project: &ProjectRoot,
     record: &ResolutionRecord,
     bytes: &[u8],
-    record_out: Option<&Path>,
+    out: &Path,
     one_named: bool,
 ) -> io::Result<PathBuf> {
-    let Some(out) = record_out else {
-        let receipt = record::receipt_path(&record.ecosystem);
-        project.write_file(&receipt, bytes)?;
-        return Ok(project.path().join(receipt));
-    };
     let path = if one_named {
         out.to_path_buf()
     } else {
