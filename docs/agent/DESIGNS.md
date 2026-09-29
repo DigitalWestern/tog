@@ -3011,7 +3011,9 @@ the flexible option:
 - **The ledger records outcomes.** A `failed` entry (a 504 for an
   unreachable upstream, a 502, an interrupted stream) is dropped from the
   portable set when the same method and URL is answered in the session,
-  in either order, and counted in `superseded`. A 4xx or 5xx entry has
+  in either order, and counted in `superseded`. "Answered" means
+  something was served, a 404 included: that is the registry's outcome.
+  A digest mismatch is never superseded: it is evidence of tampering. A 4xx or 5xx entry has
   no `sha256`, so two 404s with different request ids are one entry.
 - **Unauthenticated requests are diagnostics only.** A `CONNECT`,
   absolute-form request, or mirror request without this session's token

@@ -1159,6 +1159,13 @@ mod tests {
             0,
             "no partial file"
         );
+        // Upstream then sends the published bytes: the mismatch is still
+        // evidence, so the later answer does not supersede it.
+        harness.upstream.set(
+            "/art/claimed-bad-1.0.tgz",
+            Behavior::Reply(Reply::new(200, b"what the registry published")),
+        );
+        assert_eq!(fetch(&address, "/art/claimed-bad-1.0.tgz").status, 200);
 
         // Control: bytes that match are cached, and served from the cache
         // the second time without contacting upstream.
@@ -1183,7 +1190,12 @@ mod tests {
         let failure = report.facts.failure().unwrap();
         assert!(failure.contains(&format!("sha256:{claimed}")), "{failure}");
         assert!(failure.contains(&sha256(&bad)), "{failure}");
-        let entry = &entries_for(&report, &harness.upstream_url("/art/claimed-bad-1.0.tgz"))[0];
+        let bad_entries = entries_for(&report, &harness.upstream_url("/art/claimed-bad-1.0.tgz"));
+        assert_eq!(bad_entries.len(), 2, "{bad_entries:#?}");
+        let entry = bad_entries
+            .iter()
+            .find(|entry| entry.status == 502)
+            .unwrap();
         assert_eq!((entry.status, entry.verified), (502, false));
         assert_eq!(
             entry.claimed.as_deref(),
@@ -1313,7 +1325,11 @@ mod tests {
         }
         harness.upstream.set(
             "/index/pkg",
-            Behavior::Reply(Reply::new(200, b"varies").header("Vary", "Accept, *")),
+            Behavior::Reply(
+                Reply::new(200, b"varies")
+                    .header("ETag", "\"v1\"")
+                    .header("Vary", "Accept, *"),
+            ),
         );
         for _ in 0..2 {
             assert_eq!(fetch(&address, "/index/pkg").status, 200);

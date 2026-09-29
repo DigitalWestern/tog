@@ -306,8 +306,11 @@ impl State {
         inner.last.insert(key.clone(), entry.clone());
         // The portable set describes outcomes: a failed attempt at a
         // request the session also answered was transient, so it stays
-        // in diagnostics only, whichever order the two arrived in.
-        let failed = diag.disposition == "failed";
+        // in diagnostics only, whichever order the two arrived in. A
+        // digest mismatch (a claim and the received digest) is evidence of
+        // tampering and stays.
+        let mismatch = entry.claimed.is_some() && entry.sha256.is_some() && !entry.verified;
+        let failed = diag.disposition == "failed" && !mismatch;
         if failed && inner.answered.contains(&key) {
             inner.diagnostics.superseded += 1;
         } else {
