@@ -1,9 +1,11 @@
 //! The proxy's metadata cache: `<store>/resolve/meta/<key>`, one file per
 //! response, the last good copy of every metadata document a tool fetched.
 //!
-//! The key is `sha256(method, url, normalized Accept)`, because one URL can
-//! serve different documents by `Accept` (npm's abbreviated and full
-//! packuments). Each file is a one-line JSON header (the URL, the
+//! The key is `sha256(method, url, credentials, every forwarded request
+//! header normalized)`, because one URL can serve different documents by
+//! what the request asked for (npm's abbreviated and full packuments, by
+//! `Accept`). A response whose `Vary` names a header the key does not
+//! cover is not cached. Each file is a one-line JSON header (the URL, the
 //! validators `ETag` and `Last-Modified`, the kept response headers, and
 //! the body's sha256) followed by the body, written to a temporary name and
 //! renamed, so a reader sees a whole entry or none. A body that no longer
@@ -36,26 +38,67 @@ pub const KEPT_HEADERS: &[&str] = &[
     "expires",
 ];
 
-/// The cache key of one request. `credentials` is the identity of the
-/// endpoint credentials the response may have been fetched with (see
-/// `Route::credential_identity`, empty when there are none), so a response
-/// fetched with a credential is never served to a configuration without
-/// that same credential.
-pub fn key(method: &str, url: &str, accept: Option<&str>, credentials: &str) -> String {
+/// Request headers the proxy sends upstream with a value of its own that
+/// the key does not hold. A response that varies on one of them cannot be
+/// reused for the next request.
+const UNKEYED_UPSTREAM_HEADERS: &[&str] = &["if-none-match", "if-modified-since"];
+
+/// The cache key of one request. `forwarded` is every tool header sent
+/// upstream, as (name, value); absent ones are part of the key by their
+/// absence. `credentials` is the identity of the endpoint credentials the
+/// response may have been fetched with (see `Route::credential_identity`,
+/// empty when there are none), so a response fetched with a credential is
+/// never served to a configuration without that same credential.
+pub fn key(method: &str, url: &str, forwarded: &[(&str, &str)], credentials: &str) -> String {
+    let mut fields: Vec<(String, String)> = forwarded
+        .iter()
+        .map(|(name, value)| {
+            let name = name.to_ascii_lowercase();
+            let value = normalize_field(&name, value);
+            (name, value)
+        })
+        .collect();
+    fields.sort();
     let mut hasher = Sha256::new();
-    for part in [method, url, &normalize_accept(accept), credentials] {
+    for part in [method, url, credentials] {
         hasher.update(part.as_bytes());
+        hasher.update([0u8]);
+    }
+    for (name, value) in &fields {
+        hasher.update(name.as_bytes());
+        hasher.update([b':']);
+        hasher.update(value.as_bytes());
         hasher.update([0u8]);
     }
     hex::encode(hasher.finalize())
 }
 
-/// `Accept` without the spelling differences that do not change what is
-/// asked for: whitespace around items and parameters, and letter case.
-/// Order is kept, since it can carry preference.
-pub fn normalize_accept(accept: Option<&str>) -> String {
-    accept
-        .unwrap_or_default()
+/// Whether a response with `vary` (the `Vary` header, if any) may be
+/// cached under a [`key`]. The upstream request is a function of the key
+/// except for the proxy's own conditional headers, so only `*` or one of
+/// those makes a response unfit for reuse. A header the proxy never sends
+/// is absent every time, which is the same request.
+pub fn vary_is_keyed(vary: Option<&str>) -> bool {
+    vary.unwrap_or_default().split(',').all(|name| {
+        let name = name.trim().to_ascii_lowercase();
+        name != "*" && !UNKEYED_UPSTREAM_HEADERS.contains(&name.as_str())
+    })
+}
+
+/// A forwarded value without the spelling differences that do not change
+/// what is asked for. List-valued, case-insensitive fields (`Accept`,
+/// `Accept-Language`, `Content-Type`) lose whitespace around items and
+/// parameters and letter case, keeping order, since it can carry
+/// preference. Other fields lose only surrounding whitespace.
+fn normalize_field(name: &str, value: &str) -> String {
+    match name {
+        "accept" | "accept-language" | "content-type" => normalize_list(value),
+        _ => value.trim().to_string(),
+    }
+}
+
+fn normalize_list(value: &str) -> String {
+    value
         .split(',')
         .map(|item| {
             item.split(';')
@@ -252,17 +295,72 @@ pub fn read_capped(reader: &mut dyn Read, cap: u64) -> io::Result<Vec<u8>> {
 mod tests {
     use super::*;
 
+    /// The key of a request whose only forwarded header is `accept`.
+    fn key_accept(method: &str, url: &str, accept: Option<&str>, credentials: &str) -> String {
+        let forwarded: Vec<(&str, &str)> =
+            accept.map(|value| ("Accept", value)).into_iter().collect();
+        key(method, url, &forwarded, credentials)
+    }
+
+    #[test]
+    fn metadata_cache_key_covers_every_forwarded_header() {
+        let url = "https://registry.test/pkg";
+        let base = key("GET", url, &[("Accept", "a/b")], "");
+        for (name, value) in [
+            ("User-Agent", "npm/10"),
+            ("Accept-Language", "de"),
+            ("Content-Type", "x/y"),
+            ("Git-Protocol", "version=2"),
+        ] {
+            let with = key("GET", url, &[("Accept", "a/b"), (name, value)], "");
+            assert_ne!(base, with, "{name}");
+        }
+        // Normalized: header order, name case, and list spelling do not
+        // change the key; a different user agent does.
+        assert_eq!(
+            key(
+                "GET",
+                url,
+                &[("Accept", "A/B"), ("User-Agent", " npm/10 ")],
+                ""
+            ),
+            key(
+                "GET",
+                url,
+                &[("user-agent", "npm/10"), ("accept", "a/b")],
+                ""
+            )
+        );
+        assert_ne!(
+            key("GET", url, &[("User-Agent", "npm/10")], ""),
+            key("GET", url, &[("User-Agent", "npm/11")], "")
+        );
+    }
+
+    #[test]
+    fn a_response_varying_on_an_unkeyed_header_is_not_cacheable() {
+        assert!(vary_is_keyed(None));
+        assert!(vary_is_keyed(Some("Accept, Accept-Encoding, User-Agent")));
+        assert!(
+            vary_is_keyed(Some("Cookie")),
+            "never sent, so always absent"
+        );
+        assert!(!vary_is_keyed(Some("*")));
+        assert!(!vary_is_keyed(Some("Accept, If-None-Match")));
+        assert!(!vary_is_keyed(Some("if-modified-since")));
+    }
+
     #[test]
     fn metadata_cache_key_includes_accept() {
         let url = "https://registry.test/pkg";
-        let full = key("GET", url, Some("application/json"), "");
-        let abbreviated = key("GET", url, Some("application/vnd.npm.install-v1+json"), "");
+        let full = key_accept("GET", url, Some("application/json"), "");
+        let abbreviated = key_accept("GET", url, Some("application/vnd.npm.install-v1+json"), "");
         assert_ne!(full, abbreviated);
-        assert_ne!(full, key("GET", url, None, ""));
-        assert_ne!(full, key("HEAD", url, Some("application/json"), ""));
+        assert_ne!(full, key_accept("GET", url, None, ""));
+        assert_ne!(full, key_accept("HEAD", url, Some("application/json"), ""));
         assert_ne!(
             full,
-            key(
+            key_accept(
                 "GET",
                 "https://registry.test/pkg2",
                 Some("application/json"),
@@ -271,20 +369,23 @@ mod tests {
         );
         // A credentialed configuration never shares an anonymous key, nor
         // another credential's.
-        assert_ne!(full, key("GET", url, Some("application/json"), "cred-a"));
         assert_ne!(
-            key("GET", url, Some("application/json"), "cred-a"),
-            key("GET", url, Some("application/json"), "cred-b")
+            full,
+            key_accept("GET", url, Some("application/json"), "cred-a")
+        );
+        assert_ne!(
+            key_accept("GET", url, Some("application/json"), "cred-a"),
+            key_accept("GET", url, Some("application/json"), "cred-b")
         );
         // Spelling differences that ask for the same thing share a key.
         assert_eq!(
-            key(
+            key_accept(
                 "GET",
                 url,
                 Some("application/vnd.pypi.simple.v1+json; q=0.9, text/html"),
                 ""
             ),
-            key(
+            key_accept(
                 "GET",
                 url,
                 Some("Application/Vnd.PyPI.Simple.V1+JSON;q=0.9,text/html"),
@@ -293,8 +394,8 @@ mod tests {
         );
         // Order is preference, so it is kept.
         assert_ne!(
-            key("GET", url, Some("a/b, c/d"), ""),
-            key("GET", url, Some("c/d, a/b"), "")
+            key_accept("GET", url, Some("a/b, c/d"), ""),
+            key_accept("GET", url, Some("c/d, a/b"), "")
         );
     }
 
@@ -309,7 +410,7 @@ mod tests {
         ];
         let entry = Cached::new("https://registry.test/a", &headers, b"{\"a\":1}".to_vec());
         assert_eq!(entry.headers.len(), 2, "only kept headers are stored");
-        let k = key("GET", "https://registry.test/a", None, "");
+        let k = key("GET", "https://registry.test/a", &[], "");
         cache.save(&k, &entry).unwrap();
         assert_eq!(cache.load(&k).unwrap(), Some(entry.clone()));
         assert_eq!(cache.load(&"0".repeat(64)).unwrap(), None);
@@ -327,8 +428,8 @@ mod tests {
         let (_temp, store, _activity) = crate::kernel::resolve::testing::scratch_store("sweep");
         let cache = MetaCache::open(&store).unwrap();
         let (old, fresh) = (
-            key("GET", "https://r.test/old", None, ""),
-            key("GET", "https://r.test/new", None, ""),
+            key("GET", "https://r.test/old", &[], ""),
+            key("GET", "https://r.test/new", &[], ""),
         );
         cache
             .save(

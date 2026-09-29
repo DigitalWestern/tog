@@ -347,7 +347,7 @@ impl Exchange<'_> {
     /// Serve `url`, which the route resolved and checked.
     pub(crate) fn serve(&self, url: &Url, out: &mut dyn Write) -> io::Result<()> {
         // One value per forwarded header: the metadata cache keys on the
-        // `Accept` it reads, so upstream must see exactly that one.
+        // forwarded headers it reads, so upstream must see exactly those.
         if let Some(name) = FORWARDED_REQUEST_HEADERS
             .iter()
             .find(|name| self.request.count(name) > 1)
@@ -483,10 +483,17 @@ impl Exchange<'_> {
 
     fn metadata(&self, url: &Url, class: RequestClass, out: &mut dyn Write) -> io::Result<()> {
         let mut record = Record::new(class.as_str(), self.method, self.redacted(url));
+        let forwarded: Vec<(&str, &str)> = self
+            .request
+            .iter()
+            .filter(|(name, _)| {
+                FORWARDED_REQUEST_HEADERS.contains(&name.to_ascii_lowercase().as_str())
+            })
+            .collect();
         let key = cache::key(
             self.method,
             url.as_str(),
-            self.request.get("accept"),
+            &forwarded,
             &self.route.credential_identity(),
         );
         let cached = self.state.meta.load(&key).unwrap_or_else(|error| {
@@ -555,7 +562,14 @@ impl Exchange<'_> {
             Err(error) => return self.last_good(url, cached, record, error.to_string(), out),
         };
         let fresh = Cached::new(url.as_str(), &response.headers, body);
-        if status == 200 {
+        let vary = response
+            .headers
+            .iter()
+            .filter(|(name, _)| name.eq_ignore_ascii_case("vary"))
+            .map(|(_, value)| value.as_str())
+            .collect::<Vec<_>>()
+            .join(",");
+        if status == 200 && cache::vary_is_keyed(Some(&vary)) {
             if let Err(error) = self.state.meta.save(&key, &fresh) {
                 record.detail = Some(format!("metadata cache not written: {error}"));
             }
@@ -1277,6 +1291,36 @@ mod tests {
             .map(|r| r.disposition.as_str())
             .collect();
         assert_eq!(dispositions, ["last-good", "last-good", "miss", "failed"]);
+    }
+
+    #[test]
+    fn the_metadata_cache_keys_forwarded_headers_and_honors_vary() {
+        let harness = Harness::new("mirror-vary");
+        let (session, address) = harness.session();
+        let path = mirror(&address, "/meta/pkg.json");
+        for agent in ["tool/1", "tool/1", "tool/2"] {
+            let answer = get(&address, &path, &format!("User-Agent: {agent}\r\n"));
+            assert_eq!(answer.status, 200);
+        }
+        harness.upstream.set(
+            "/index/pkg",
+            Behavior::Reply(Reply::new(200, b"varies").header("Vary", "Accept, *")),
+        );
+        for _ in 0..2 {
+            assert_eq!(fetch(&address, "/index/pkg").status, 200);
+        }
+        let report = session.finish();
+        let dispositions: Vec<_> = report
+            .diagnostics
+            .requests
+            .iter()
+            .map(|r| r.disposition.as_str())
+            .collect();
+        assert_eq!(
+            dispositions,
+            ["miss", "revalidated", "miss", "miss", "miss"],
+            "another User-Agent is another key, and Vary: * is never cached"
+        );
     }
 
     #[test]

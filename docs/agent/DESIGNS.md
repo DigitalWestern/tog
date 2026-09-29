@@ -2621,8 +2621,12 @@ there before (if any) still describes them.
   Resolution fetches few artifacts (cargo, npm, and Bundler lock without
   downloading), so buffering costs little.
 - **Metadata cache** (`<store>/resolve/meta/`, keyed by
-  `sha256(method, url, normalized Accept)`, because npm's abbreviated and
-  full packuments share a URL): each response is stored with its ETag or
+  `sha256(method, url, credential identity, every forwarded request header
+  normalized)`, because npm's abbreviated and full packuments share a URL
+  and differ only by `Accept`, and any forwarded header may change the
+  answer): a response whose `Vary` is `*` or names one of the proxy's own
+  conditional headers is not cached, since the key cannot tell its
+  variants apart. Each response is stored with its ETag or
   Last-Modified and its sha256. Online, every metadata request
   revalidates with a conditional GET, which is a 304 when nothing changed.
   It is a cache under the store's GC rules (age-based sweep). Losing it
