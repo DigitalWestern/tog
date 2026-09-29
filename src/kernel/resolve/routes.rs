@@ -173,9 +173,21 @@ impl Endpoint {
     }
 
     /// Attach an `Authorization` value to requests for this origin only.
-    pub fn with_authorization(mut self, value: &str) -> Endpoint {
+    /// The value must be a valid header value (visible ASCII, space, and
+    /// tab): the error names neither the value nor the bad byte, and a
+    /// value never reaches a client that would echo it back.
+    pub fn with_authorization(mut self, value: &str) -> io::Result<Endpoint> {
+        if value.trim().is_empty() || !super::http::is_field_value(value) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "the credential for {} is not a valid header value",
+                    self.origin()
+                ),
+            ));
+        }
         self.authorization = Some(value.to_string());
-        self
+        Ok(self)
     }
 
     pub fn host(&self) -> &str {
@@ -300,6 +312,14 @@ pub trait RegistryProtocol: Sync {
     /// `url`, so an unclaimed one is `weak-integrity`.
     fn expects_claim(&self, _url: &Url) -> bool {
         false
+    }
+
+    /// The largest request body this route reads, checked only after the
+    /// token, route, and method were admitted from the head. Registry
+    /// reads send none; a route that needs one (git `upload-pack`) raises
+    /// it deliberately.
+    fn request_body_cap(&self) -> u64 {
+        0
     }
 
     /// Query keys that identify content, kept by redaction; every other
@@ -636,6 +656,28 @@ mod tests {
             let error = check_route_path(bad).unwrap_err();
             assert!(error.contains(why), "{bad}: {error}");
         }
+    }
+
+    #[test]
+    fn endpoint_credentials_must_be_valid_header_values() {
+        for bad in [
+            "",
+            "   ",
+            "Bearer s3cret\r\nX: y",
+            "Bearer s3cr\u{e9}t",
+            "Bearer s3cret\0",
+        ] {
+            let error = Endpoint::https("pypi.org")
+                .unwrap()
+                .with_authorization(bad)
+                .unwrap_err();
+            assert!(!error.to_string().contains("s3cr"), "{error}");
+        }
+        let good = Endpoint::https("pypi.org")
+            .unwrap()
+            .with_authorization("Basic dG9nOnRvZw==\t")
+            .unwrap();
+        assert!(format!("{good:?}").contains("…") && !format!("{good:?}").contains("dG9n"));
     }
 
     #[test]

@@ -17,8 +17,11 @@ use std::io::{self, BufRead, BufReader, Read, Write};
 
 /// The request line plus every header line, CRLFs included.
 pub const MAX_HEAD: usize = 64 * 1024;
-/// A tool's request body (a git `upload-pack` negotiation is the largest
-/// one a resolver sends). Larger bodies are refused, not truncated.
+/// The absolute cap on a request body (a git `upload-pack` negotiation is
+/// the largest one a resolver sends) and on a buffered metadata response.
+/// The proxy reads a tool's body only after the head was admitted, under
+/// the route's own, much smaller cap. Larger bodies are refused, not
+/// truncated.
 pub const MAX_BODY: u64 = 64 << 20;
 
 /// The header fields of one message, in the order they arrived. Names
@@ -82,6 +85,20 @@ pub struct Request {
     /// HTTP/1.0 closes after one exchange unless it asked otherwise; an
     /// HTTP/1.1 client keeps the connection unless it sent `close`.
     pub keep_alive: bool,
+    /// An HTTP/1.0 client, which cannot read a chunked response.
+    pub http10: bool,
+}
+
+/// A request head whose body has not been read yet: the proxy decides from
+/// the head (token, route, method) how large a body it will read at all.
+#[derive(Debug)]
+pub struct Head {
+    pub method: String,
+    pub target: String,
+    pub headers: Headers,
+    pub keep_alive: bool,
+    pub http10: bool,
+    framing: Framing,
 }
 
 /// Why a request could not be read.
@@ -108,7 +125,7 @@ impl fmt::Display for ParseError {
                 write!(f, "request head over {} KiB", MAX_HEAD / 1024)
             }
             ParseError::TooLarge { head: false } => {
-                write!(f, "request body over {} MiB", MAX_BODY >> 20)
+                write!(f, "request body over the cap for this request")
             }
             ParseError::Io(error) => write!(f, "reading the request failed: {error}"),
         }
@@ -188,6 +205,15 @@ fn parse_request_line(line: &[u8]) -> Result<(String, String, bool), ParseError>
     Ok((method.to_string(), target.to_string(), http10))
 }
 
+/// Whether `value` is a header value this proxy forwards: visible ASCII,
+/// space, and tab only. Bytes >= 0x80 are legal on the wire in theory but
+/// no registry needs them, and the upstream client refuses them.
+pub fn is_field_value(value: &str) -> bool {
+    value
+        .bytes()
+        .all(|b| b == b' ' || b == b'\t' || (0x21..=0x7e).contains(&b))
+}
+
 /// Parse one header line. obs-fold, whitespace before the colon, and
 /// control characters in the value are refused.
 fn parse_header(line: &[u8]) -> Result<(String, String), ParseError> {
@@ -213,6 +239,7 @@ fn parse_header(line: &[u8]) -> Result<(String, String), ParseError> {
 }
 
 /// How the body of a request is framed.
+#[derive(Debug)]
 enum Framing {
     None,
     Length(u64),
@@ -267,6 +294,11 @@ fn framing(headers: &Headers, http10: bool) -> Result<Framing, ParseError> {
 /// Only bytes already buffered count as pipelined: the check never waits on
 /// the socket for more.
 pub fn read_request<R: Read>(reader: &mut BufReader<R>) -> Result<Request, ParseError> {
+    read_head(reader)?.read_body(reader, MAX_BODY)
+}
+
+/// Read a request head, leaving its body unread.
+pub fn read_head<R: Read>(reader: &mut BufReader<R>) -> Result<Head, ParseError> {
     let mut budget = MAX_HEAD;
     let mut line = Vec::new();
     read_head_line(reader, &mut line, &mut budget)?;
@@ -287,16 +319,7 @@ pub fn read_request<R: Read>(reader: &mut BufReader<R>) -> Result<Request, Parse
     if !http10 && headers.count("host") != 1 {
         return Err(malformed("an HTTP/1.1 request needs exactly one Host"));
     }
-    let body = match framing(&headers, http10)? {
-        Framing::None => Vec::new(),
-        Framing::Length(length) => read_sized(reader, length)?,
-        Framing::Chunked => read_chunked(reader)?,
-    };
-    if !reader.buffer().is_empty() {
-        return Err(malformed(
-            "a second request arrived before the first was answered (pipelining)",
-        ));
-    }
+    let framing = framing(&headers, http10)?;
     let connection = headers.get("connection").unwrap_or_default().to_string();
     let has = |option: &str| {
         connection
@@ -308,17 +331,48 @@ pub fn read_request<R: Read>(reader: &mut BufReader<R>) -> Result<Request, Parse
     } else {
         !has("close")
     };
-    Ok(Request {
+    Ok(Head {
         method,
         target,
         headers,
-        body,
         keep_alive,
+        http10,
+        framing,
     })
 }
 
-fn read_sized(reader: &mut impl Read, length: u64) -> Result<Vec<u8>, ParseError> {
-    if length > MAX_BODY {
+impl Head {
+    /// Read the body, refusing one over `cap` bytes before reading it (a
+    /// declared length) or as soon as it passes the cap (chunked).
+    pub fn read_body<R: Read>(
+        self,
+        reader: &mut BufReader<R>,
+        cap: u64,
+    ) -> Result<Request, ParseError> {
+        let cap = cap.min(MAX_BODY);
+        let body = match self.framing {
+            Framing::None => Vec::new(),
+            Framing::Length(length) => read_sized(reader, length, cap)?,
+            Framing::Chunked => read_chunked(reader, cap)?,
+        };
+        if !reader.buffer().is_empty() {
+            return Err(malformed(
+                "a second request arrived before the first was answered (pipelining)",
+            ));
+        }
+        Ok(Request {
+            method: self.method,
+            target: self.target,
+            headers: self.headers,
+            body,
+            keep_alive: self.keep_alive,
+            http10: self.http10,
+        })
+    }
+}
+
+fn read_sized(reader: &mut impl Read, length: u64, cap: u64) -> Result<Vec<u8>, ParseError> {
+    if length > cap {
         return Err(ParseError::TooLarge { head: false });
     }
     let mut body = Vec::with_capacity(length.min(1 << 20) as usize);
@@ -334,7 +388,7 @@ fn read_sized(reader: &mut impl Read, length: u64) -> Result<Vec<u8>, ParseError
 
 /// Decode a chunked body. Chunk extensions are ignored; trailer fields are
 /// read and dropped, and count against the head budget.
-fn read_chunked(reader: &mut impl BufRead) -> Result<Vec<u8>, ParseError> {
+fn read_chunked(reader: &mut impl BufRead, cap: u64) -> Result<Vec<u8>, ParseError> {
     let mut body = Vec::new();
     let mut budget = MAX_HEAD;
     let mut line = Vec::new();
@@ -358,7 +412,7 @@ fn read_chunked(reader: &mut impl BufRead) -> Result<Vec<u8>, ParseError> {
         }
         // A 16-hex-digit size would overflow a plain sum.
         let total = (body.len() as u64).checked_add(size);
-        if total.is_none_or(|total| total > MAX_BODY) {
+        if total.is_none_or(|total| total > cap) {
             return Err(ParseError::TooLarge { head: false });
         }
         let before = body.len();

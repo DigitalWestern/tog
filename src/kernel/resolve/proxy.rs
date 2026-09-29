@@ -594,7 +594,13 @@ fn serve_connection<S: Stream>(stream: S, context: &Context) {
         }
         first = false;
         reader.get_mut().deadline = Instant::now() + context.shared.request_timeout;
-        let request = match http::read_request(&mut reader) {
+        // The body is read only once the head is admitted, and only up to
+        // what the route accepts: an unauthenticated request cannot make
+        // the proxy buffer anything.
+        let request = match http::read_head(&mut reader).and_then(|head| {
+            let cap = body_cap(context, &head);
+            head.read_body(&mut reader, cap)
+        }) {
             Ok(request) => request,
             Err(ParseError::Closed | ParseError::Io(_)) => return,
             Err(error) => {
@@ -624,6 +630,36 @@ fn serve_connection<S: Stream>(stream: S, context: &Context) {
         }
     }
 }
+
+/// A mirror target's parts: token, route id, and the route path (with a
+/// leading `/`), plus everything after the token for display.
+fn mirror_parts(target: &str) -> (&str, &str, String, &str) {
+    let after = &target[1..];
+    let (token, rest) = after.split_once('/').unwrap_or((after, ""));
+    let (route_id, path) = match rest.split_once('/') {
+        Some((route_id, path)) => (route_id, format!("/{path}")),
+        None => (rest, "/".to_string()),
+    };
+    (token, route_id, path, rest)
+}
+
+/// How many body bytes the proxy will read for `head`: the route's cap for
+/// a mirror request with this session's token, a known route, and a method
+/// it serves, and nothing for anything else (every other request is
+/// refused from its head).
+fn body_cap(context: &Context, head: &http::Head) -> u64 {
+    if !head.target.starts_with('/') || !MIRROR_METHODS.contains(&head.method.as_str()) {
+        return 0;
+    }
+    let (token, route_id, _, _) = mirror_parts(&head.target);
+    match context.state.route(route_id) {
+        Some(route) if context.state.token_matches(token) => route.protocol.request_body_cap(),
+        _ => 0,
+    }
+}
+
+/// The methods registry routes serve.
+const MIRROR_METHODS: &[&str] = &["GET", "HEAD"];
 
 /// Serve one request. `Ok(true)`: the connection may carry another.
 fn dispatch(context: &Context, request: &Request, out: &mut dyn Write) -> io::Result<bool> {
@@ -794,12 +830,7 @@ fn absolute_form(context: &Context, request: &Request, out: &mut dyn Write) -> i
 /// `/<token>/<route>/<path>`: a registry-mirror request.
 fn mirror_request(context: &Context, request: &Request, out: &mut dyn Write) -> io::Result<bool> {
     let state = &*context.state;
-    let after = &request.target[1..];
-    let (token, rest) = after.split_once('/').unwrap_or((after, ""));
-    let (route_id, path) = match rest.split_once('/') {
-        Some((route_id, path)) => (route_id, format!("/{path}")),
-        None => (rest, "/".to_string()),
-    };
+    let (token, route_id, path, rest) = mirror_parts(&request.target);
     let route = state.route(route_id);
     let keys = route.map_or(&[][..], |route| route.protocol.content_query_keys());
     // The token never enters the ledger, right or wrong.
@@ -823,7 +854,7 @@ fn mirror_request(context: &Context, request: &Request, out: &mut dyn Write) -> 
         )?;
         return Ok(true);
     };
-    if request.method != "GET" && request.method != "HEAD" {
+    if !MIRROR_METHODS.contains(&request.method.as_str()) {
         let mut allow = Headers::new();
         allow.set("Allow", "GET, HEAD");
         let reason = format!("{} is not served by registry routes", request.method);
@@ -1279,7 +1310,8 @@ mod tests {
             &crate::kernel::resolve::routes::testing::TEST_PROTOCOL,
             vec![
                 Endpoint::for_test("registry.test", port)
-                    .with_authorization("Bearer endpoint-credential"),
+                    .with_authorization("Bearer endpoint-credential")
+                    .unwrap(),
                 Endpoint::for_test("other.test", port),
             ],
         )
@@ -1749,5 +1781,48 @@ mod tests {
         assert!(report.ledger.is_empty());
         assert!(report.diagnostics.requests.is_empty());
         assert_eq!(report.facts, Default::default());
+    }
+
+    #[test]
+    fn bodies_are_read_only_after_the_head_is_admitted() {
+        let harness = Harness::new("proxy-body-cap");
+        let (session, address) = harness.session();
+        let started = Instant::now();
+        // A wrong token declaring 60 MB, with no body sent: refused from
+        // the head at once, not after waiting for (or buffering) the body.
+        let wrong = send(
+            &address,
+            "GET /0000/fixture/meta/pkg.json HTTP/1.1\r\nHost: x\r\nContent-Length: 60000000\r\n",
+        );
+        assert_eq!(wrong.status, 413, "{}", wrong.text());
+        let tunnel = send(
+            &address,
+            "CONNECT pypi.org:443 HTTP/1.1\r\nHost: x\r\nContent-Length: 100\r\n",
+        );
+        assert_eq!(tunnel.status, 413);
+        assert!(
+            started.elapsed() < Duration::from_millis(900),
+            "{:?}",
+            started.elapsed()
+        );
+        // With the token, a registry route still reads no body at all:
+        // declared, or chunked.
+        let path = mirror(&address, "/meta/pkg.json");
+        let admitted = send(
+            &address,
+            &format!("GET {path} HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\n"),
+        );
+        assert_eq!(admitted.status, 413);
+        let mut stream = TcpStream::connect(address.address).unwrap();
+        write!(
+            stream,
+            "GET {path} HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n"
+        )
+        .unwrap();
+        let mut raw = String::new();
+        let _ = stream.read_to_string(&mut raw);
+        assert!(raw.starts_with("HTTP/1.1 413 "), "{raw}");
+        assert!(harness.upstream.seen().is_empty());
+        session.finish();
     }
 }

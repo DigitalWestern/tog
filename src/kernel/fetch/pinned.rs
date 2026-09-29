@@ -94,12 +94,17 @@ pub enum PinnedError {
     /// DNS, connect, TLS, a timeout, or a reset: the upstream was not
     /// reachable as asked.
     Transport(String),
+    /// The request itself could not be sent (a header value the client
+    /// refuses). Never a transport failure, and the message is fixed: the
+    /// client's own text echoes the whole header line, credential included.
+    Invalid(&'static str),
 }
 
 impl fmt::Display for PinnedError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             PinnedError::Refused(why) | PinnedError::Transport(why) => f.write_str(why),
+            PinnedError::Invalid(why) => f.write_str(why),
         }
     }
 }
@@ -187,6 +192,14 @@ impl PinnedClient {
 /// A resolver refusal travels as the source of ureq's DNS error; anything
 /// else is a transport failure, described without ureq's URL prefix.
 fn classify(transport: &ureq::Transport) -> PinnedError {
+    if matches!(
+        transport.kind(),
+        ureq::ErrorKind::BadHeader | ureq::ErrorKind::InvalidUrl | ureq::ErrorKind::UnknownScheme
+    ) {
+        return PinnedError::Invalid(
+            "the upstream request is not valid HTTP (a header or the URL)",
+        );
+    }
     let mut source = std::error::Error::source(transport);
     while let Some(error) = source {
         if let Some(io_error) = error.downcast_ref::<io::Error>() {
@@ -206,4 +219,42 @@ fn classify(transport: &ureq::Transport) -> PinnedError {
         None => kind,
     };
     PinnedError::Transport(detail)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Refuses every lookup: a test that must never connect.
+    struct Nowhere;
+
+    impl PinnedResolve for Nowhere {
+        fn resolve(&self, host: &str, _port: u16) -> io::Result<Vec<SocketAddr>> {
+            Err(ResolveRefusal(format!("{host} must not be looked up")).into_io())
+        }
+    }
+
+    #[test]
+    fn a_bad_header_is_invalid_with_a_fixed_message_never_transport() {
+        let client = PinnedClient::new(PinnedConfig {
+            roots: webpki_roots(),
+            resolver: Arc::new(Nowhere),
+            connect_timeout: Duration::from_secs(1),
+            io_timeout: Duration::from_secs(1),
+        })
+        .unwrap();
+        for value in ["Bearer s3cret\u{e9}", "Bearer s3cret\nX-Injected: 1"] {
+            let error = client
+                .send(&PinnedRequest {
+                    method: "GET",
+                    url: "https://registry.example/x",
+                    headers: &[("Authorization".into(), value.into())],
+                    body: None,
+                })
+                .err()
+                .unwrap();
+            assert!(matches!(error, PinnedError::Invalid(_)), "{error:?}");
+            assert!(!error.to_string().contains("s3cret"), "{error}");
+        }
+    }
 }

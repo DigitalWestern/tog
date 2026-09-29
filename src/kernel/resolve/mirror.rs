@@ -180,6 +180,9 @@ enum Failure {
     Address(String),
     /// A redirect left the permitted set, or there were too many.
     Redirect(String),
+    /// The request could not be sent as built: never "unreachable", so
+    /// never last-good.
+    Invalid(&'static str),
 }
 
 struct Fetched {
@@ -319,6 +322,24 @@ impl Exchange<'_> {
                 false,
             );
         }
+        // A value the upstream client would refuse must not look like an
+        // unreachable registry (which serves last-good): refuse it here.
+        if let Some((name, _)) = self.request.iter().find(|(name, value)| {
+            FORWARDED_REQUEST_HEADERS.contains(&name.to_ascii_lowercase().as_str())
+                && !http::is_field_value(value)
+        }) {
+            let record = Record::new("refused", self.method, self.redacted(url));
+            let reason = format!("{name} holds bytes outside visible ASCII");
+            return refuse(
+                self.state,
+                out,
+                record,
+                400,
+                &reason,
+                &Headers::new(),
+                false,
+            );
+        }
         let class = self.route.protocol.classify(url);
         if class == RequestClass::Artifact {
             return self.artifact(url, out);
@@ -367,6 +388,7 @@ impl Exchange<'_> {
                 Ok(response) => response,
                 Err(PinnedError::Refused(why)) => return Err((Failure::Address(why), hops)),
                 Err(PinnedError::Transport(why)) => return Err((Failure::Transport(why), hops)),
+                Err(PinnedError::Invalid(why)) => return Err((Failure::Invalid(why), hops)),
             };
             let redirect = matches!(response.status, 301 | 302 | 303 | 307 | 308);
             let Some(location) = response.header("location").filter(|_| redirect) else {
@@ -410,6 +432,7 @@ impl Exchange<'_> {
                 self.refuse(out, record, 403, &why)
             }
             Failure::Redirect(why) => self.refuse(out, record, 403, &why),
+            Failure::Invalid(why) => self.fail(out, record, 400, why.to_string()),
             Failure::Transport(why) => {
                 self.fail(out, record, 504, format!("upstream unreachable: {why}"))
             }
@@ -965,7 +988,8 @@ mod tests {
             &TEST_PROTOCOL,
             vec![
                 Endpoint::for_test("registry.test", port)
-                    .with_authorization("Bearer registry-only"),
+                    .with_authorization("Bearer registry-only")
+                    .unwrap(),
                 Endpoint::for_test("other.test", port),
             ],
         )
@@ -1506,7 +1530,7 @@ mod tests {
         let open = |credential: Option<&str>| {
             let mut registry = Endpoint::for_test("registry.test", port);
             if let Some(credential) = credential {
-                registry = registry.with_authorization(credential);
+                registry = registry.with_authorization(credential).unwrap();
             }
             let mut config = harness.config(Policy::default(), Mode::Online);
             config.routes = vec![Route::new(
@@ -1538,5 +1562,29 @@ mod tests {
             fixture("meta/pkg.json")
         );
         session.finish();
+    }
+
+    #[test]
+    fn a_non_ascii_forwarded_header_is_a_400_never_a_stale_resolution() {
+        let harness = Harness::new("mirror-non-ascii");
+        warm(&harness, &["/meta/pkg.json"]);
+        let seen = harness.upstream.seen().len();
+        let (session, address) = harness.session();
+        let answer = get(
+            &address,
+            &mirror(&address, "/meta/pkg.json"),
+            "User-Agent: tool/1.0 caf\u{e9}\r\n",
+        );
+        assert_eq!(answer.status, 400, "{}", answer.text());
+        assert_eq!(
+            harness.upstream.seen().len(),
+            seen,
+            "nothing was sent upstream"
+        );
+        let report = session.finish();
+        assert!(
+            report.facts.exceptions.is_empty(),
+            "no stale-resolution was forged"
+        );
     }
 }
