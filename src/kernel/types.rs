@@ -45,16 +45,17 @@ impl Identity {
     }
 }
 
+/// The readable label in an object id. The hash already makes the id
+/// unique, so the label may lose detail: a `.` right after another `.`
+/// becomes `-`, because `is_object_id` (rightly) refuses any `..`, and an
+/// id it refuses could be published but never dropped.
 fn sanitize(s: &str) -> String {
-    s.chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '.' || c == '_' {
-                c
-            } else {
-                '-'
-            }
-        })
-        .collect()
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        let keep = c.is_ascii_alphanumeric() || c == '_' || (c == '.' && !out.ends_with('.'));
+        out.push(if keep { c } else { '-' });
+    }
+    out
 }
 
 /// One fully-locked dependency chosen by a planner.
@@ -87,4 +88,41 @@ pub struct Plan {
     pub ecosystem: String, // "python"
     pub python_version: String,
     pub packages: Vec<LockedPackage>,
+}
+
+#[cfg(test)]
+mod object_id_tests {
+    use super::*;
+
+    fn id(name: &str, version: &str) -> String {
+        Identity {
+            kind: "wheel-env".into(),
+            name: name.into(),
+            version: version.into(),
+            inputs: BTreeMap::new(),
+        }
+        .object_id()
+    }
+
+    /// Every id tog publishes must pass `is_object_id`, or `tog gc
+    /// --drop-object` refuses it and the store's sweep wedges on it.
+    #[test]
+    fn names_and_versions_with_dot_runs_still_give_droppable_ids() {
+        for (name, version, label) in [
+            ("a..b", "1.0", "a.-b-1.0"),
+            ("x", "1...0", "x-1.-.0"),
+            ("..", "..", ".--.-"),
+            ("my pkg/../x", "1.0", "my-pkg-.--x-1.0"),
+            ("numpy", "2.1.0", "numpy-2.1.0"),
+        ] {
+            let id = id(name, version);
+            assert_eq!(&id[41..], label, "{name} {version}");
+            assert!(crate::kernel::store::is_object_id(&id), "{id}");
+        }
+    }
+
+    #[test]
+    fn the_label_does_not_decide_uniqueness() {
+        assert_ne!(id("a..b", "1"), id("a.-b", "1"));
+    }
 }

@@ -1083,15 +1083,25 @@ fn valid_root_key(value: &str) -> Result<String, UsageError> {
 /// the CLI layer may not reach into it (ARCHITECTURE.md, layering rule 1);
 /// `store::is_object_id` remains the authority, and the kernel re-checks
 /// every id it is given.
+///
+/// A label with `..` is accepted when the prefix is 40 lowercase hex, the
+/// shape of `store::is_legacy_object_id`: stores written before `sanitize`
+/// split dot runs hold such ids, and this is the only command that removes
+/// them. The label still cannot hold `/` or NUL, so it cannot traverse.
 fn valid_object_id(value: &str) -> Result<String, UsageError> {
     let bytes = value.as_bytes();
-    let well_formed = bytes.len() > 41
-        && bytes[..40].iter().all(u8::is_ascii_hexdigit)
-        && bytes[40] == b'-'
-        && !value.contains("..")
-        && bytes[41..]
+    let label_ok = |bytes: &[u8]| {
+        bytes
             .iter()
-            .all(|b| b.is_ascii_alphanumeric() || *b == b'.' || *b == b'_' || *b == b'-');
+            .all(|b| b.is_ascii_alphanumeric() || *b == b'.' || *b == b'_' || *b == b'-')
+    };
+    let well_formed = bytes.len() > 41
+        && bytes[40] == b'-'
+        && label_ok(&bytes[41..])
+        && ((bytes[..40].iter().all(u8::is_ascii_hexdigit) && !value.contains(".."))
+            || bytes[..40]
+                .iter()
+                .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')));
     if well_formed {
         Ok(value.to_string())
     } else {
@@ -2471,13 +2481,28 @@ mod tests {
             message(&["gc", "--drop-object="]),
             "--drop-object expects a store object id (<40 hex>-<name>-<version>), got ''"
         );
-        let traversal = format!("{}-../escape", "a".repeat(40));
+        for refused in [
+            format!("{}-../escape", "a".repeat(40)),
+            format!("{}-a..b-1", "A".repeat(40)),
+            format!("{}-a..b-1", "a".repeat(39)),
+            format!("{}g-a..b-1", "a".repeat(39)),
+        ] {
+            assert_eq!(
+                message(&["gc", "--drop-object", &refused]),
+                format!(
+                    "--drop-object expects a store object id (<40 hex>-<name>-<version>), got \
+                     '{refused}'"
+                )
+            );
+        }
+        // A store written before `sanitize` split dot runs holds this shape.
+        let legacy = format!("{}-a..b-1", "a".repeat(40));
         assert_eq!(
-            message(&["gc", "--drop-object", &traversal]),
-            format!(
-                "--drop-object expects a store object id (<40 hex>-<name>-<version>), got \
-                 '{traversal}'"
-            )
+            command(&["gc", "--drop-object", &legacy]),
+            Command::Gc(GcArgs {
+                drop_objects: vec![legacy.clone()],
+                ..GcArgs::default()
+            })
         );
         assert_eq!(message(&["gc", "--keep-days"]), "--keep-days needs <n>");
         assert_eq!(
