@@ -1860,10 +1860,8 @@ mod tests {
             freshness: None,
         });
         let objects = ledger::commit(&store, activity, &portable, &Diagnostics::default()).unwrap();
-        let ids = std::collections::BTreeSet::from([
-            objects.ledger.clone(),
-            objects.diagnostics.clone(),
-        ]);
+        let ids =
+            std::collections::BTreeSet::from([objects.ledger.clone(), objects.diagnostics.clone()]);
         ledger::root(&store, activity, &root, &objects).unwrap();
         let rooted = {
             let lock = store.project_lock_in(&root).unwrap();

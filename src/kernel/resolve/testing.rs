@@ -156,51 +156,8 @@ impl Reach {
     }
 }
 
-/// `TOG_SANDBOX_TESTS=required` (any non-empty value) turns a skip into
-/// a panic, so CI cannot report a skipped check as passed.
 #[cfg(test)]
-pub(crate) fn skip_or_panic(test: &str, reason: impl std::fmt::Display) {
-    if matches!(std::env::var_os("TOG_SANDBOX_TESTS"), Some(value) if !value.is_empty()) {
-        panic!("required Linux sandbox test {test} unavailable: {reason}");
-    }
-    eprintln!("skip {test}: {reason}");
-}
-
-/// The tog binary cargo built beside this test binary, which the
-/// sandbox binds as the relay; `None` (after a skip) when the host
-/// cannot run a confined door.
-#[cfg(test)]
-pub(crate) fn relay(test: &str) -> Option<std::path::PathBuf> {
-    if !matches!(
-        crate::kernel::platform::Platform::host(),
-        Ok(crate::kernel::platform::Platform::X86_64UnknownLinuxGnu)
-    ) {
-        skip_or_panic(test, "not a supported Linux host");
-        return None;
-    }
-    if let Err(error) = crate::kernel::sandbox::bwrap_preflight_with_activity(None) {
-        skip_or_panic(test, format!("bubblewrap preflight failed: {error}"));
-        return None;
-    }
-    let exe = std::env::current_exe().unwrap();
-    let tog = exe
-        .parent()
-        .and_then(std::path::Path::parent)
-        .map(|dir| dir.join("tog"));
-    match tog {
-        Some(tog) if tog.is_file() => Some(tog),
-        _ => {
-            skip_or_panic(
-                test,
-                format!(
-                    "no tog binary beside {} (run `cargo test`, which builds it)",
-                    exe.display()
-                ),
-            );
-            None
-        }
-    }
-}
+pub(crate) use host::relay;
 
 /// A scratch store, a fixture upstream serving the kernel registry, and a
 /// proxy that trusts only the fixture's CA.
@@ -431,4 +388,54 @@ fn dechunk(mut raw: &[u8]) -> Vec<u8> {
 pub(crate) fn proxy_authorization(token: &str) -> String {
     let encoded = crate::kernel::dirhash::base64_encode(format!("tog:{token}").as_bytes());
     format!("Proxy-Authorization: Basic {encoded}\r\n")
+}
+
+/// The sandbox-host checks. A module of its own, last in the file, so the
+/// architecture test reads it as test code: a skip message is for whoever
+/// ran the suite.
+#[cfg(test)]
+mod host {
+    /// `TOG_SANDBOX_TESTS=required` (any non-empty value) turns a skip into
+    /// a panic, so CI cannot report a skipped check as passed.
+    fn skip_or_panic(test: &str, reason: impl std::fmt::Display) {
+        if matches!(std::env::var_os("TOG_SANDBOX_TESTS"), Some(value) if !value.is_empty()) {
+            panic!("required Linux sandbox test {test} unavailable: {reason}");
+        }
+        eprintln!("skip {test}: {reason}");
+    }
+
+    /// The tog binary cargo built beside this test binary, which the
+    /// sandbox binds as the relay; `None` (after a skip) when the host
+    /// cannot run a confined door.
+    pub(crate) fn relay(test: &str) -> Option<std::path::PathBuf> {
+        if !matches!(
+            crate::kernel::platform::Platform::host(),
+            Ok(crate::kernel::platform::Platform::X86_64UnknownLinuxGnu)
+        ) {
+            skip_or_panic(test, "not a supported Linux host");
+            return None;
+        }
+        if let Err(error) = crate::kernel::sandbox::bwrap_preflight_with_activity(None) {
+            skip_or_panic(test, format!("bubblewrap preflight failed: {error}"));
+            return None;
+        }
+        let exe = std::env::current_exe().unwrap();
+        let tog = exe
+            .parent()
+            .and_then(std::path::Path::parent)
+            .map(|dir| dir.join("tog"));
+        match tog {
+            Some(tog) if tog.is_file() => Some(tog),
+            _ => {
+                skip_or_panic(
+                    test,
+                    format!(
+                        "no tog binary beside {} (run `cargo test`, which builds it)",
+                        exe.display()
+                    ),
+                );
+                None
+            }
+        }
+    }
 }
