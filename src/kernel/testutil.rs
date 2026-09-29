@@ -69,6 +69,40 @@ impl Drop for TempDir {
     }
 }
 
+/// An executable script at `relative` under `root` that exits 0: a store
+/// program a test can point a command at, which the host-local tripwire
+/// resolves like the real one.
+pub(crate) fn store_program(root: &std::path::Path, relative: &str) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let path = root.join(relative);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    path
+}
+
+/// Every command `build` makes with one of its own environment edits
+/// undone, named by the variable: a variable it sets removed, one it
+/// removes set. A host-local form must refuse each.
+pub(crate) fn loosened(build: impl Fn() -> Command) -> Vec<(String, Command)> {
+    let edits: Vec<(std::ffi::OsString, bool)> = build()
+        .get_envs()
+        .map(|(key, value)| (key.to_os_string(), value.is_some()))
+        .collect();
+    edits
+        .into_iter()
+        .map(|(key, set)| {
+            let mut command = build();
+            if set {
+                command.env_remove(&key);
+            } else {
+                command.env(&key, "loosened");
+            }
+            (key.to_string_lossy().into_owned(), command)
+        })
+        .collect()
+}
+
 /// A lease on an empty scratch store, for a test whose code under test takes
 /// the caller's activity token but must return before touching any store.
 /// The directory is removed when the `TempDir` drops.

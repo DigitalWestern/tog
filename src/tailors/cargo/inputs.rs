@@ -14,6 +14,24 @@ use crate::tailors::cargo;
 use std::io;
 use std::path::{Path, PathBuf};
 
+/// The workspace lookup `locate_cargo_root` runs: the store Cargo, offline,
+/// with rustup's toolchain selection removed.
+fn locate_command(rust_obj: &Path, cwd: &Path) -> std::process::Command {
+    let mut command = std::process::Command::new(rust_obj.join("bin/cargo"));
+    command
+        .args([
+            "locate-project",
+            "--workspace",
+            "--message-format",
+            "plain",
+            "--offline",
+        ])
+        .current_dir(cwd)
+        .env_remove("RUSTUP_HOME")
+        .env_remove("RUSTUP_TOOLCHAIN");
+    command
+}
+
 /// Implicit detection for sync/plan: cargo joins the party only when the
 /// invocation dir is itself a Cargo package (workspace members included).
 /// Without this gate, running tog in any project nested under an
@@ -38,18 +56,7 @@ pub fn locate_cargo_root(
     cwd: &Path,
     activity: &StoreActivity,
 ) -> io::Result<PathBuf> {
-    let mut command = std::process::Command::new(rust_obj.join("bin/cargo"));
-    command
-        .args([
-            "locate-project",
-            "--workspace",
-            "--message-format",
-            "plain",
-            "--offline",
-        ])
-        .current_dir(cwd)
-        .env_remove("RUSTUP_HOME")
-        .env_remove("RUSTUP_TOOLCHAIN");
+    let mut command = locate_command(rust_obj, cwd);
     ui::trace_command(&command);
     let out = supervise::local_output(&mut command, activity)
         .map_err(|e| io::Error::new(e.kind(), format!("run store cargo locate-project: {e}")))?;
@@ -228,6 +235,31 @@ mod tests {
         assert!(!is_cargo_here(&open(&nested)));
         std::fs::write(nested.join("Cargo.lock"), "version = 4\n").unwrap();
         assert!(is_cargo_here(&open(&nested)));
+    }
+
+    /// The workspace lookup passes the host-local tripwire as built, and
+    /// loosening anything its offline form pins is refused: a Cargo outside
+    /// the store, or rustup's toolchain selection left in.
+    #[test]
+    fn the_workspace_lookup_passes_the_tripwire_only_as_built() {
+        use crate::kernel::resolve::tripwire::refusal;
+        let store = TempDir::named("cargo-tripwire");
+        let rust_obj = store.0.join("objects/rust");
+        crate::kernel::testutil::store_program(&store.0, "objects/rust/bin/cargo");
+        let command = locate_command(&rust_obj, &store.0);
+        assert!(
+            refusal(&command, &store.0).is_none(),
+            "{:?}",
+            refusal(&command, &store.0)
+        );
+        let host = TempDir::named("cargo-tripwire-host");
+        crate::kernel::testutil::store_program(&host.0, "bin/cargo");
+        assert!(refusal(&locate_command(&host.0, &store.0), &store.0).is_some());
+        let loosened = crate::kernel::testutil::loosened(|| locate_command(&rust_obj, &store.0));
+        assert_eq!(loosened.len(), 2, "RUSTUP_HOME and RUSTUP_TOOLCHAIN");
+        for (key, command) in &loosened {
+            assert!(refusal(command, &store.0).is_some(), "loosened {key}");
+        }
     }
 
     #[test]

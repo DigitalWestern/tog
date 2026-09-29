@@ -1447,20 +1447,29 @@ mod tests {
     #[test]
     fn the_gem_spec_read_passes_the_tripwire_only_as_built() {
         use crate::kernel::resolve::tripwire::refusal;
-        let scratch = TempDir::named("ruby-tripwire");
-        let helper = scratch.0.join("helper.rb");
+        let store = TempDir::named("ruby-tripwire");
+        let refused = |command: &Command| refusal(command, &store.0);
+        crate::kernel::testutil::store_program(&store.0, "objects/ruby/bin/ruby");
+        let ruby = store.0.join("objects/ruby");
+        let scratch = store.0.join("tmp/stage-scratch");
+        fs::create_dir_all(&scratch).unwrap();
+        let helper = scratch.join("helper.rb");
         fs::write(&helper, HELPER).unwrap();
-        let ruby = Path::new("/nonexistent/tog-test/ruby");
-        let args = ["ruby", helper.to_str().unwrap(), "spec", "/cache/x.gem"];
-        let build = || {
-            ruby_tool_spec(ruby, &scratch.0, &args, &forced_env(&scratch.0, &scratch.0)).command()
-        };
+        let gem = store.0.join("cache/sha256/x.gem");
+        let args = [
+            "ruby",
+            helper.to_str().unwrap(),
+            "spec",
+            gem.to_str().unwrap(),
+        ];
+        let build =
+            || ruby_tool_spec(&ruby, &scratch, &args, &forced_env(&scratch, &scratch)).command();
         let command = build();
-        assert!(refusal(&command).is_none(), "{:?}", refusal(&command));
+        assert!(refused(&command).is_none(), "{:?}", refused(&command));
         for (key, value) in [("RUBYOPT", "-r/tmp/evil"), ("RUBYLIB", "/tmp")] {
             let mut command = build();
             command.env(key, value);
-            assert!(refusal(&command).is_some(), "{key}");
+            assert!(refused(&command).is_some(), "{key}");
         }
     }
 

@@ -2051,10 +2051,14 @@ mod tests {
     #[test]
     fn hexmark_and_the_otp_probe_pass_the_tripwire_only_as_built() {
         use crate::kernel::resolve::tripwire::refusal;
-        let scratch = TempDir::named("elixir-tripwire");
-        let helper = scratch.0.join("helper.exs");
+        let store = TempDir::named("elixir-tripwire");
+        let refused = |command: &Command| refusal(command, &store.0);
+        crate::kernel::testutil::store_program(&store.0, "objects/beam/elixir/bin/elixir");
+        let beam = store.0.join("objects/beam");
+        let scratch = store.0.join("tmp/stage-scratch");
+        fs::create_dir_all(&scratch).unwrap();
+        let helper = scratch.join("helper.exs");
         fs::write(&helper, HELPER).unwrap();
-        let beam = Path::new("/nonexistent/tog-test/beam");
         let args = [
             "elixir",
             helper.to_str().unwrap(),
@@ -2066,17 +2070,19 @@ mod tests {
             "outer",
             "mix",
         ];
-        let mut hexmark = tool::mix_spec(beam, &scratch.0, &scratch.0, true, &args).command();
-        assert!(refusal(&hexmark).is_none(), "{:?}", refusal(&hexmark));
+        let mut hexmark = tool::mix_spec(&beam, &scratch, &scratch, true, &args).command();
+        assert!(refused(&hexmark).is_none(), "{:?}", refused(&hexmark));
         hexmark.env("ELIXIR_ERL_OPTIONS", "-eval halt()");
-        assert!(refusal(&hexmark).is_some());
-        let online = tool::mix_spec(beam, &scratch.0, &scratch.0, false, &args).command();
-        assert!(refusal(&online).is_some(), "hexmark without HEX_OFFLINE");
+        assert!(refused(&hexmark).is_some());
+        let online = tool::mix_spec(&beam, &scratch, &scratch, false, &args).command();
+        assert!(refused(&online).is_some(), "hexmark without HEX_OFFLINE");
 
-        let mut probe = tool::otp_probe_command(Path::new("/nonexistent/tog-test/otp"), &scratch.0);
-        assert!(refusal(&probe).is_none(), "{:?}", refusal(&probe));
+        crate::kernel::testutil::store_program(&store.0, "tmp/stage-otp/otp/bin/erl");
+        let otp = store.0.join("tmp/stage-otp/otp");
+        let mut probe = tool::otp_probe_command(&otp, &scratch);
+        assert!(refused(&probe).is_none(), "{:?}", refused(&probe));
         probe.env("ERL_AFLAGS", "-eval 'halt(3).'");
-        assert!(refusal(&probe).is_some());
+        assert!(refused(&probe).is_some());
     }
 
     /// A `hex-deps` record names the BEAM object only by fingerprint. The

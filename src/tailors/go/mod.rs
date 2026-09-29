@@ -2100,21 +2100,51 @@ mod tests {
     #[test]
     fn the_offline_extraction_passes_the_tripwire_only_as_built() {
         use crate::kernel::resolve::tripwire::refusal;
+        let store = TempDir::named("go-tripwire");
+        crate::kernel::testutil::store_program(&store.0, "objects/go/bin/go");
+        let go_obj = store.0.join("objects/go");
+        let cwd = store.0.join("tmp/stage-cwd");
+        fs::create_dir_all(&cwd).unwrap();
         let build = || {
             tool::offline_command(
-                Path::new("/nonexistent/tog-test/go"),
-                Path::new("/tmp"),
-                Path::new("/nonexistent/tog-test/modcache"),
+                &go_obj,
+                &cwd,
+                &store.0.join("tmp/stage-modcache"),
                 &["mod", "download", "example.com/m@v1.0.0"],
             )
         };
         let command = build();
-        assert!(refusal(&command).is_none(), "{:?}", refusal(&command));
+        let refused = |command: &std::process::Command| refusal(command, &store.0);
+        assert!(refused(&command).is_none(), "{:?}", refused(&command));
         for (key, value) in [("GONOPROXY", "*"), ("GOVCS", "*:all"), ("GOFLAGS", "-x")] {
             let mut command = build();
             command.env(key, value);
-            assert!(refusal(&command).is_some(), "{key}");
+            assert!(refused(&command).is_some(), "{key}");
         }
+        let loosened = crate::kernel::testutil::loosened(build);
+        let keys: Vec<&str> = loosened.iter().map(|(key, _)| key.as_str()).collect();
+        for key in [
+            "GOROOT",
+            "GOMODCACHE",
+            "GOPROXY",
+            "GOCACHEPROG",
+            "HOME",
+            "XDG_CONFIG_HOME",
+        ] {
+            assert!(keys.contains(&key), "{key} is not forced: {keys:?}");
+        }
+        for (key, command) in &loosened {
+            assert!(refused(command).is_some(), "loosened {key}");
+        }
+        let host = TempDir::named("go-tripwire-host");
+        crate::kernel::testutil::store_program(&host.0, "go/bin/go");
+        let shim = tool::offline_command(
+            &host.0.join("go"),
+            &cwd,
+            &store.0.join("tmp/stage-modcache"),
+            &["mod", "download", "example.com/m@v1.0.0"],
+        );
+        assert!(refused(&shim).is_some(), "a go outside the store");
     }
 
     #[test]

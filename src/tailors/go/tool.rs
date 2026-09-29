@@ -70,8 +70,9 @@ pub(super) fn run_go(
 
 /// The command `run_go_offline` starts. With the proxy off nothing should
 /// fetch; `GOVCS` and `GOAUTH` close the remaining ways a module could (a
-/// version-control fetch, an auth helper), and the host-local tripwire
-/// requires them.
+/// version-control fetch, an auth helper), `HOME` in `cwd` and no
+/// `XDG_CONFIG_HOME` keep the user's Go configuration out, and the
+/// host-local tripwire requires all of them.
 pub(super) fn offline_command(
     go_obj: &Path,
     cwd: &Path,
@@ -79,7 +80,10 @@ pub(super) fn offline_command(
     args: &[&str],
 ) -> std::process::Command {
     let mut spec = go_spec(go_obj, cwd, modcache, true, args);
-    spec.env("GOVCS", "*:off").env("GOAUTH", "off");
+    spec.env("GOVCS", "*:off")
+        .env("GOAUTH", "off")
+        .env("HOME", cwd)
+        .env_remove("XDG_CONFIG_HOME");
     spec.command()
 }
 

@@ -979,7 +979,7 @@ pub fn output(command: &mut Command, activity: &StoreActivity) -> io::Result<Out
 // Reviewed site (tests/architecture.rs): the supervisor itself: a helper that passed the tripwire.
 #[allow(clippy::disallowed_methods)]
 pub fn local_status(command: &mut Command, activity: &StoreActivity) -> io::Result<ExitStatus> {
-    refuse_resolver(command)?;
+    refuse_resolver(command, activity)?;
     status(command, activity)
 }
 
@@ -991,7 +991,7 @@ pub fn local_status_with_stderr(
     command: &mut Command,
     activity: &StoreActivity,
 ) -> io::Result<(ExitStatus, Vec<u8>)> {
-    refuse_resolver(command)?;
+    refuse_resolver(command, activity)?;
     status_with_stderr(command, activity)
 }
 
@@ -1000,12 +1000,12 @@ pub fn local_status_with_stderr(
 // Reviewed site (tests/architecture.rs): the supervisor itself: a helper that passed the tripwire.
 #[allow(clippy::disallowed_methods)]
 pub fn local_output(command: &mut Command, activity: &StoreActivity) -> io::Result<Output> {
-    refuse_resolver(command)?;
+    refuse_resolver(command, activity)?;
     output(command, activity)
 }
 
-fn refuse_resolver(command: &Command) -> io::Result<()> {
-    match crate::kernel::resolve::tripwire::refusal(command) {
+fn refuse_resolver(command: &Command, activity: &StoreActivity) -> io::Result<()> {
+    match crate::kernel::resolve::tripwire::refusal(command, activity.root()) {
         Some(error) => Err(error),
         None => Ok(()),
     }
@@ -1017,6 +1017,7 @@ mod tests {
     use crate::kernel::activity::ActivityMode;
     use crate::kernel::store::Store;
     use crate::kernel::testutil::TempDir;
+    use std::path::Path;
     use std::sync::Mutex;
 
     static TEST_SESSION: Mutex<()> = Mutex::new(());
@@ -1089,12 +1090,32 @@ mod tests {
             assert!(message.contains("npm"), "{message}");
             assert!(message.contains("kernel::resolve"), "{message}");
         }
-        let mut offline = Command::new("/nonexistent/tog-test/bin/cargo");
-        offline.args(["locate-project", "--offline"]);
-        assert_eq!(
-            local_output(&mut offline, &activity).unwrap_err().kind(),
-            io::ErrorKind::NotFound
+        // The offline workspace lookup runs, but only as the store's own
+        // Cargo: the same argv from a host cargo is refused unspawned.
+        let lookup = |program: &Path| {
+            let mut command = Command::new(program);
+            command
+                .args([
+                    "locate-project",
+                    "--workspace",
+                    "--message-format",
+                    "plain",
+                    "--offline",
+                ])
+                .env_remove("RUSTUP_HOME")
+                .env_remove("RUSTUP_TOOLCHAIN");
+            command
+        };
+        let host = local_output(
+            &mut lookup(Path::new("/nonexistent/tog-test/bin/cargo")),
+            &activity,
         );
+        assert_eq!(host.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+        let cargo = crate::kernel::testutil::store_program(&store.root, "objects/rust/bin/cargo");
+        assert!(local_output(&mut lookup(&cargo), &activity)
+            .unwrap()
+            .status
+            .success());
         let mut helper = Command::new("/bin/sh");
         helper.args(["-c", "exit 3"]);
         assert_eq!(

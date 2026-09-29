@@ -1543,7 +1543,9 @@ fn every_public_supervise_spawn_is_fenced() {
     let mut unfenced = Vec::new();
     for (name, body) in &spawners {
         let fenced = match name.strip_prefix("local_") {
-            Some(_) => body.trim_start().starts_with("refuse_resolver(command)?;"),
+            Some(_) => body
+                .trim_start()
+                .starts_with("refuse_resolver(command, activity)?;"),
             None => {
                 clippy.contains(&format!("path = \"tog::kernel::supervise::{name}\""))
                     && names.contains(&format!("local_{name}").as_str())
@@ -1556,7 +1558,7 @@ fn every_public_supervise_spawn_is_fenced() {
     assert!(
         unfenced.is_empty(),
         "public supervise spawn functions outside the resolution fence: {unfenced:?}. \
-         A `local_*` form must start with `refuse_resolver(command)?;`; any other \
+         A `local_*` form must start with `refuse_resolver(command, activity)?;`; any other \
          must be listed in clippy.toml's disallowed-methods and have a `local_*` form"
     );
 }

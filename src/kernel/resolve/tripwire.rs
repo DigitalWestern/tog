@@ -19,7 +19,7 @@
 use sha2::{Digest, Sha256};
 use std::ffi::{OsStr, OsString};
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
 /// The file names of every dependency tool tog runs. `git` is here because
@@ -54,15 +54,84 @@ pub const ELIXIR_HELPER_SHA256: &str =
     "aab9cac87d2f2ae4dc292d033ee35910d687dfdd897073d0f601509db9aef40f";
 
 /// What a form sees of one invocation: the arguments after the program,
-/// its working directory, and its explicit environment edits (`None` is a
-/// removed variable).
+/// its working directory, its explicit environment edits (`None` is a
+/// removed variable), the file it would execute and the store it runs for
+/// (both canonical, `None` when they do not resolve).
 struct Invocation<'a> {
     args: Vec<&'a OsStr>,
     cwd: Option<&'a Path>,
     env: Vec<(&'a OsStr, Option<&'a OsStr>)>,
+    program: Option<PathBuf>,
+    store: Option<PathBuf>,
 }
 
 impl Invocation<'_> {
+    /// The command's own edit of `key`: `Some(None)` when it removes the
+    /// variable, `None` when it leaves the inherited value alone.
+    fn edit(&self, key: &str) -> Option<Option<&OsStr>> {
+        self.env
+            .iter()
+            .find(|(name, _)| *name == key)
+            .map(|(_, value)| *value)
+    }
+
+    /// Whether the command itself sets `key` to exactly `value`, whatever
+    /// tog's own environment holds.
+    fn set_to(&self, key: &str, value: &str) -> bool {
+        self.edit(key) == Some(Some(OsStr::new(value)))
+    }
+
+    /// Whether the command itself removes `key`.
+    fn removed(&self, key: &str) -> bool {
+        self.edit(key) == Some(None)
+    }
+
+    /// Whether `path` names something inside the store: absolute, with no
+    /// `..`, and under the store root once the part of it that exists is
+    /// resolved (so a symlink out of the store does not count). The part
+    /// that does not exist yet is a directory the child will create.
+    fn under_store(&self, path: &Path) -> bool {
+        let Some(store) = self.store.as_deref() else {
+            return false;
+        };
+        if !path.is_absolute() || path.components().any(|part| part == Component::ParentDir) {
+            return false;
+        }
+        let mut existing = path;
+        let mut tail = Vec::new();
+        loop {
+            if let Ok(real) = existing.canonicalize() {
+                let full = tail.iter().rev().fold(real, |full, part| full.join(part));
+                return full.starts_with(store) && full != store;
+            }
+            match (existing.parent(), existing.file_name()) {
+                (Some(parent), Some(name)) => {
+                    tail.push(name);
+                    existing = parent;
+                }
+                _ => return false,
+            }
+        }
+    }
+
+    /// Whether the command itself sets `key` to a path inside the store.
+    fn set_under_store(&self, key: &str) -> bool {
+        matches!(self.edit(key), Some(Some(value)) if self.under_store(Path::new(value)))
+    }
+
+    /// Whether the program is a store file: a realized object or a staged
+    /// one, never a tool found on the host (a version-manager shim, a
+    /// rustup proxy).
+    fn program_in_store(&self) -> bool {
+        let (Some(program), Some(store)) = (self.program.as_deref(), self.store.as_deref()) else {
+            return false;
+        };
+        self.under_store(program)
+            && program.strip_prefix(store).is_ok_and(|inside| {
+                matches!(inside.components().next(), Some(Component::Normal(top)) if top == "objects" || top == "tmp")
+            })
+    }
+
     /// The value the child sees for `key`: the command's own edit, or else
     /// tog's environment, which the child inherits. `Command::env_clear`
     /// is not visible here, so a form that needs a variable gone requires
@@ -152,7 +221,7 @@ const GO_OFFLINE_PINNED: &[(&str, &str)] = &[
     ("GOAUTH", "off"),
 ];
 
-/// Go variables that must be unset or empty: each can route a module around
+/// Go variables that must be removed: each can route a module around
 /// `GOPROXY=off` (`GONOPROXY`, `GOPRIVATE`), relax verification
 /// (`GONOSUMDB`, `GOINSECURE`), add flags (`GOFLAGS`), or run a program
 /// (`GOCACHEPROG`).
@@ -165,35 +234,80 @@ const GO_OFFLINE_UNSET: &[&str] = &[
     "GOCACHEPROG",
 ];
 
+/// The Cargo tailor's workspace lookup, argument for argument.
+const CARGO_LOCATE_PROJECT: &[&str] = &[
+    "locate-project",
+    "--workspace",
+    "--message-format",
+    "plain",
+    "--offline",
+];
+
+/// `cargo locate-project` as the Cargo tailor builds it: the store Cargo
+/// with rustup's toolchain selection removed.
+fn cargo_locate_project(run: &Invocation) -> bool {
+    run.args.len() == CARGO_LOCATE_PROJECT.len()
+        && CARGO_LOCATE_PROJECT
+            .iter()
+            .enumerate()
+            .all(|(index, expected)| run.arg(index) == Some(*expected))
+        && run.program_in_store()
+        && run.removed("RUSTUP_HOME")
+        && run.removed("RUSTUP_TOOLCHAIN")
+}
+
+/// `go mod download` of module versions as the Go tailor builds it. Every
+/// variable is the command's own edit, never tog's inherited one: pinned
+/// ones set, the rest removed rather than emptied (Go reads an empty value
+/// as unset and falls back to `$GOROOT/go.env`), and `GOROOT` the store
+/// toolchain the program belongs to, so that fallback is the store's file.
+/// `HOME` in the store and `XDG_CONFIG_HOME` removed keep the user's Go
+/// configuration (telemetry upload among it) out.
+fn go_mod_download(run: &Invocation) -> bool {
+    let goroot_is_the_programs = || {
+        let Some(Some(goroot)) = run.edit("GOROOT") else {
+            return false;
+        };
+        let toolchain = run
+            .program
+            .as_deref()
+            .and_then(Path::parent)
+            .and_then(Path::parent);
+        toolchain.is_some() && Path::new(goroot).canonicalize().ok().as_deref() == toolchain
+    };
+    run.arg(0) == Some("mod")
+        && run.arg(1) == Some("download")
+        && run.args.len() > 2
+        && run.no_options_from(2)
+        && run
+            .args
+            .iter()
+            .skip(2)
+            .all(|arg| arg.to_string_lossy().contains('@'))
+        && run.program_in_store()
+        && goroot_is_the_programs()
+        && GO_OFFLINE_PINNED
+            .iter()
+            .all(|(key, value)| run.set_to(key, value))
+        && GO_OFFLINE_UNSET.iter().all(|key| run.removed(key))
+        && run.set_under_store("GOMODCACHE")
+        && run.set_under_store("HOME")
+        && run.removed("XDG_CONFIG_HOME")
+}
+
 const OFFLINE_FORMS: &[OfflineForm] = &[
-    // `cargo locate-project --offline` reads the workspace layout and is
-    // forbidden the network.
+    // The Cargo tailor's workspace lookup: the store Cargo (a rustup proxy
+    // could install a toolchain the project names), forbidden the network.
     OfflineForm {
         program: "cargo",
-        matches: |run| {
-            run.arg(0) == Some("locate-project") && run.args.contains(&OsStr::new("--offline"))
-        },
+        matches: cargo_locate_project,
     },
     // The Go tailor's module extraction: `go mod download path@version...`
-    // from a module cache tog staged, with the complete offline
-    // environment.
+    // by the store Go from a module cache tog staged, with the complete
+    // offline environment.
     OfflineForm {
         program: "go",
-        matches: |run| {
-            run.arg(0) == Some("mod")
-                && run.arg(1) == Some("download")
-                && run.args.len() > 2
-                && run.no_options_from(2)
-                && run
-                    .args
-                    .iter()
-                    .skip(2)
-                    .all(|arg| arg.to_string_lossy().contains('@'))
-                && GO_OFFLINE_PINNED
-                    .iter()
-                    .all(|(key, value)| run.is(key, value))
-                && GO_OFFLINE_UNSET.iter().all(|key| run.unset(key))
-        },
+        matches: go_mod_download,
     },
     // The Elixir helper's `hexmark` mode: writes a verified dependency's
     // .hex marker, with HEX_OFFLINE=1 and no Erlang or Elixir option
@@ -270,20 +384,24 @@ fn resolved_program(command: &Command, run: &Invocation) -> Option<PathBuf> {
         .and_then(|found| found.canonicalize().ok())
 }
 
-/// The refusal for `command`, when it starts a resolver outside every
-/// offline form; `None` when a host-local helper may run it.
-pub(crate) fn refusal(command: &Command) -> Option<io::Error> {
-    let run = Invocation {
+/// The refusal for `command`, run for the store at `store_root`, when it
+/// starts a resolver outside every offline form; `None` when a host-local
+/// helper may run it.
+pub(crate) fn refusal(command: &Command, store_root: &Path) -> Option<io::Error> {
+    let mut run = Invocation {
         args: command.get_args().collect(),
         cwd: command.get_current_dir(),
         env: command.get_envs().collect(),
+        program: None,
+        store: store_root.canonicalize().ok(),
     };
+    run.program = resolved_program(command, &run);
     let supplied = Path::new(command.get_program())
         .file_name()
         .unwrap_or_else(|| command.get_program());
     let mut names: Vec<&'static str> = Vec::new();
     names.extend(resolver_named(supplied));
-    if let Some(resolved) = resolved_program(command, &run) {
+    if let Some(resolved) = run.program.as_deref() {
         if let Some(name) = resolved.file_name().and_then(resolver_named) {
             if !names.contains(&name) {
                 names.push(name);
@@ -317,6 +435,60 @@ pub(crate) fn refusal(command: &Command) -> Option<io::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::kernel::testutil::{store_program, TempDir};
+
+    /// A scratch store holding a program at each path a test starts, so a
+    /// form's store pin is met and only the property under test differs.
+    struct Fixture(TempDir);
+
+    impl Fixture {
+        fn new(label: &str) -> Self {
+            Self(TempDir::named(label))
+        }
+
+        /// `relative` inside the store, created as an executable script.
+        fn program(&self, relative: &str) -> String {
+            let path = store_program(&self.0 .0, relative);
+            path.to_str().unwrap().to_string()
+        }
+
+        /// `relative` inside the store, not created.
+        fn path(&self, relative: &str) -> String {
+            self.0 .0.join(relative).to_str().unwrap().to_string()
+        }
+
+        fn refusal(&self, command: &Command) -> Option<io::Error> {
+            refusal(command, &self.0 .0)
+        }
+
+        fn admits(&self, command: &Command) {
+            if let Some(error) = self.refusal(command) {
+                panic!("refused {command:?}: {error}");
+            }
+        }
+
+        fn refused(&self, command: &Command) {
+            let error = self.refusal(command).unwrap_or_else(|| {
+                panic!(
+                    "admitted {:?} {:?} {:?}",
+                    command.get_program(),
+                    command.get_args().collect::<Vec<_>>(),
+                    command.get_envs().collect::<Vec<_>>()
+                )
+            });
+            assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+            assert!(error.to_string().contains("kernel::resolve"), "{error}");
+        }
+
+        /// The Cargo tailor's workspace lookup, as it builds it.
+        fn cargo_lookup(&self, program: &str) -> Command {
+            let mut command = command(program, CARGO_LOCATE_PROJECT, &[]);
+            command
+                .env_remove("RUSTUP_HOME")
+                .env_remove("RUSTUP_TOOLCHAIN");
+            command
+        }
+    }
 
     fn command(program: &str, args: &[&str], env: &[(&str, &str)]) -> Command {
         let mut command = Command::new(program);
@@ -442,39 +614,41 @@ mod tests {
                 &[],
             ),
         ];
+        // Each row is started from a real file in the store, so none is
+        // refused only for running a host tool.
+        let fixture = Fixture::new("tripwire-census");
         for (program, args, env) in census {
+            let program = fixture.program(
+                &program
+                    .replacen("/s/", "objects/", 1)
+                    .replacen("/x/", "tmp/", 1),
+            );
             assert!(
-                refusal(&command(program, args, env)).is_some(),
+                fixture.refusal(&command(&program, args, env)).is_some(),
                 "census tool could start as a host-local helper: {program} {args:?} {env:?}"
             );
         }
     }
 
-    /// The complete offline environment the Go extraction sets: every
-    /// pinned variable set and every other one removed.
-    fn go_offline(args: &[&str]) -> Command {
-        go_offline_at("/s/go/bin/go", args)
-    }
-
-    fn go_offline_at(program: &str, args: &[&str]) -> Command {
+    /// The complete offline environment the Go extraction sets, for the
+    /// store Go at `program`: every pinned variable set, every other one
+    /// removed, the Go root and the module cache in the store.
+    fn go_offline_at(fixture: &Fixture, program: &str, args: &[&str]) -> Command {
         let mut command = command(program, args, GO_OFFLINE_PINNED);
         for key in GO_OFFLINE_UNSET {
             command.env_remove(key);
         }
+        let goroot = Path::new(program).parent().unwrap().parent().unwrap();
+        command
+            .env("GOROOT", goroot)
+            .env("GOMODCACHE", fixture.path("tmp/stage-modcache"))
+            .env("HOME", fixture.path("tmp/stage-cwd"))
+            .env_remove("XDG_CONFIG_HOME");
         command
     }
 
-    fn refused(command: &Command) {
-        let error = refusal(command).unwrap_or_else(|| {
-            panic!(
-                "admitted {:?} {:?} {:?}",
-                command.get_program(),
-                command.get_args().collect::<Vec<_>>(),
-                command.get_envs().collect::<Vec<_>>()
-            )
-        });
-        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
-        assert!(error.to_string().contains("kernel::resolve"), "{error}");
+    fn go_offline(fixture: &Fixture, args: &[&str]) -> Command {
+        go_offline_at(fixture, &fixture.program("objects/go/bin/go"), args)
     }
 
     /// Each offline form lets its own helper through and nothing near it:
@@ -483,37 +657,82 @@ mod tests {
     /// are admitted by those tailors' tests over the real call sites.
     #[test]
     fn offline_forms_admit_only_their_own_argv() {
-        let admitted = [
-            command(
-                "/s/rust/bin/cargo",
-                &[
-                    "locate-project",
-                    "--workspace",
-                    "--message-format",
-                    "plain",
-                    "--offline",
-                ],
-                &[],
-            ),
-            go_offline(&["mod", "download", "a@v1", "b@v2"]),
-            command("/usr/bin/tar", &["-xf", "a.tar"], &[]),
-            command("/bin/cp", &["-a", "a", "b"], &[]),
-        ];
-        for command in &admitted {
-            assert!(refusal(command).is_none(), "{command:?}");
-        }
+        let fixture = Fixture::new("tripwire-forms");
+        let cargo = fixture.program("objects/rust/bin/cargo");
+        fixture.admits(&fixture.cargo_lookup(&cargo));
+        fixture.admits(&go_offline(&fixture, &["mod", "download", "a@v1", "b@v2"]));
+        fixture.admits(&command("/usr/bin/tar", &["-xf", "a.tar"], &[]));
+        fixture.admits(&command("/bin/cp", &["-a", "a", "b"], &[]));
+        let go = fixture.program("objects/go/bin/go");
+        let erl = fixture.program("tmp/stage/otp/bin/erl");
+        let ruby = fixture.program("objects/ruby/bin/ruby");
         for command in [
-            command("/s/rust/bin/cargo", &["locate-project", "--workspace"], &[]),
-            command("/s/go/bin/go", &["mod", "download", "a@v1"], &[]),
-            command("/s/otp/bin/erl", &["-noshell", "-eval", "halt(0)."], &[]),
-            command("/s/ruby/bin/ruby", &["-e", "spec"], &[]),
+            command(&cargo, &["locate-project", "--workspace"], &[]),
+            command(&go, &["mod", "download", "a@v1"], &[]),
+            command(&erl, &["-noshell", "-eval", "halt(0)."], &[]),
+            command(&ruby, &["-e", "spec"], &[]),
             command("git", &["fetch"], &[]),
             command("npx", &["cowsay"], &[]),
         ] {
-            refused(&command);
+            fixture.refused(&command);
         }
         for form in OFFLINE_FORMS {
             assert!(RESOLVERS.contains(&form.program), "{}", form.program);
+        }
+    }
+
+    /// The workspace lookup runs only as the tailor builds it: the store
+    /// Cargo, the exact argv, and rustup's toolchain selection removed. A
+    /// host `cargo` is a rustup proxy that can install whatever toolchain
+    /// the project names.
+    #[test]
+    fn cargo_form_requires_the_store_cargo_as_built() {
+        let fixture = Fixture::new("tripwire-cargo");
+        let cargo = fixture.program("objects/rust/bin/cargo");
+        fixture.admits(&fixture.cargo_lookup(&cargo));
+        let outside = Fixture::new("tripwire-cargo-host");
+        let host = outside.program("bin/cargo");
+        fixture.refused(&fixture.cargo_lookup(&host));
+        fixture.refused(&fixture.cargo_lookup("/nonexistent/tog-test/bin/cargo"));
+        let mut on_path = fixture.cargo_lookup("cargo");
+        on_path.env("PATH", Path::new(&host).parent().unwrap());
+        fixture.refused(&on_path);
+        for key in ["RUSTUP_HOME", "RUSTUP_TOOLCHAIN"] {
+            let mut inherited = command(&cargo, CARGO_LOCATE_PROJECT, &[]);
+            let other = if key == "RUSTUP_HOME" {
+                "RUSTUP_TOOLCHAIN"
+            } else {
+                "RUSTUP_HOME"
+            };
+            inherited.env_remove(other);
+            fixture.refused(&inherited);
+            let mut pinned = fixture.cargo_lookup(&cargo);
+            pinned.env(key, "nightly");
+            fixture.refused(&pinned);
+        }
+        for args in [
+            &["locate-project", "--workspace", "--offline"][..],
+            &[
+                "locate-project",
+                "--workspace",
+                "--message-format",
+                "plain",
+                "--offline",
+                "-Zunstable-options",
+            ],
+            &[
+                "locate-project",
+                "--offline",
+                "--message-format",
+                "plain",
+                "--workspace",
+            ],
+        ] {
+            let mut command = command(&cargo, args, &[]);
+            command
+                .env_remove("RUSTUP_HOME")
+                .env_remove("RUSTUP_TOOLCHAIN");
+            fixture.refused(&command);
         }
     }
 
@@ -522,10 +741,13 @@ mod tests {
     /// add flags or run a program pinned or gone.
     #[test]
     fn go_offline_form_requires_the_invocation_and_the_whole_environment() {
-        refused(&go_offline(&["run", "/tmp/arbitrary.go"]));
-        refused(&go_offline(&["mod", "download"]));
-        refused(&go_offline(&["mod", "download", "-x", "a@v1"]));
-        refused(&go_offline(&["mod", "download", "all"]));
+        let fixture = Fixture::new("tripwire-go");
+        let go = fixture.program("objects/go/bin/go");
+        fixture.admits(&go_offline(&fixture, &["mod", "download", "a@v1"]));
+        fixture.refused(&go_offline(&fixture, &["run", "/tmp/arbitrary.go"]));
+        fixture.refused(&go_offline(&fixture, &["mod", "download"]));
+        fixture.refused(&go_offline(&fixture, &["mod", "download", "-x", "a@v1"]));
+        fixture.refused(&go_offline(&fixture, &["mod", "download", "all"]));
         for (key, value) in [
             ("GONOPROXY", "*"),
             ("GOPRIVATE", "*"),
@@ -536,21 +758,57 @@ mod tests {
             ("GOVCS", "*:all"),
             ("GOPROXY", "https://proxy.golang.org"),
         ] {
-            let mut command = go_offline(&["mod", "download", "a@v1"]);
+            let mut command = go_offline(&fixture, &["mod", "download", "a@v1"]);
             command.env(key, value);
-            refused(&command);
+            fixture.refused(&command);
         }
-        for key in ["GOVCS", "GOAUTH", "GOTOOLCHAIN"] {
-            let mut command = go_offline(&["mod", "download", "a@v1"]);
+        for key in [
+            "GOVCS",
+            "GOAUTH",
+            "GOTOOLCHAIN",
+            "GOROOT",
+            "GOMODCACHE",
+            "HOME",
+        ] {
+            let mut command = go_offline(&fixture, &["mod", "download", "a@v1"]);
             command.env_remove(key);
-            refused(&command);
+            fixture.refused(&command);
         }
+        // Emptied is not removed: Go falls back to `$GOROOT/go.env`.
+        for key in GO_OFFLINE_UNSET {
+            let mut command = go_offline(&fixture, &["mod", "download", "a@v1"]);
+            command.env(key, "");
+            fixture.refused(&command);
+        }
+        // The Go root, the module cache and the home outside the store, or
+        // a Go root that is another toolchain than the program's.
+        let other = fixture.program("objects/go2/bin/go");
+        let other_root = Path::new(&other).parent().unwrap().parent().unwrap();
+        for (key, value) in [
+            ("GOROOT", Path::new("/usr/lib/go")),
+            ("GOROOT", other_root),
+            ("GOMODCACHE", Path::new("/tmp/modcache")),
+            ("HOME", Path::new("/tmp")),
+            ("XDG_CONFIG_HOME", Path::new("/tmp")),
+        ] {
+            let mut command = go_offline(&fixture, &["mod", "download", "a@v1"]);
+            command.env(key, value);
+            fixture.refused(&command);
+        }
+        // A host `go` (a version-manager shim, say) with the whole
+        // environment is still refused.
+        let outside = Fixture::new("tripwire-go-host");
+        fixture.refused(&go_offline_at(
+            &fixture,
+            &outside.program("go/bin/go"),
+            &["mod", "download", "a@v1"],
+        ));
         let only_proxy_off = command(
-            "/s/go/bin/go",
+            &go,
             &["mod", "download", "a@v1"],
             &[("GOPROXY", "off"), ("GOSUMDB", "off")],
         );
-        refused(&only_proxy_off);
+        fixture.refused(&only_proxy_off);
     }
 
     /// The Ruby and Elixir forms run the tailors' helper and nothing else:
@@ -558,52 +816,28 @@ mod tests {
     /// an option variable in the environment is refused.
     #[test]
     fn helper_forms_are_bound_to_the_trusted_helper() {
-        let scratch = crate::kernel::testutil::TempDir::named("tripwire-helpers");
-        let impostor_rb = scratch.0.join("helper.rb");
-        let impostor_exs = scratch.0.join("helper.exs");
-        std::fs::write(&impostor_rb, "puts 'not the helper'\n").unwrap();
-        std::fs::write(&impostor_exs, "IO.puts(\"not the helper\")\n").unwrap();
-        let rb = impostor_rb.to_str().unwrap();
-        let exs = impostor_exs.to_str().unwrap();
-        refused(&command(
-            "/s/ruby/bin/ruby",
-            &["-eputs('x')", "spec", "unused"],
-            &[],
-        ));
-        refused(&command(
-            "/s/ruby/bin/ruby",
-            &[rb, "spec", "/cache/x.gem"],
-            &[],
-        ));
-        refused(&command(
-            "/s/ruby/bin/ruby",
-            &["-I/tmp", "spec", "/cache/x.gem"],
-            &[],
-        ));
-        refused(&command(
-            "/s/beam/elixir/bin/elixir",
-            &[
-                "/tmp/arbitrary.exs",
-                "hexmark",
-                "/d",
-                "x",
-                "1",
-                "i",
-                "o",
-                "mix",
-            ],
-            &[("HEX_OFFLINE", "1")],
-        ));
-        refused(&command(
-            "/s/beam/elixir/bin/elixir",
-            &[exs, "hexmark", "/d", "x", "1", "i", "o", "mix"],
-            &[("HEX_OFFLINE", "1")],
-        ));
-        refused(&command(
-            "/s/beam/elixir/bin/elixir",
-            &["--eval", "hexmark", "/d", "x", "1", "i", "o", "mix"],
-            &[("HEX_OFFLINE", "1")],
-        ));
+        let fixture = Fixture::new("tripwire-helpers");
+        let rb = fixture.path("tmp/stage/helper.rb");
+        let exs = fixture.path("tmp/stage/helper.exs");
+        std::fs::create_dir_all(fixture.path("tmp/stage")).unwrap();
+        std::fs::write(&rb, "puts 'not the helper'\n").unwrap();
+        std::fs::write(&exs, "IO.puts(\"not the helper\")\n").unwrap();
+        let ruby = fixture.program("objects/ruby/bin/ruby");
+        let elixir = fixture.program("objects/beam/elixir/bin/elixir");
+        let gem = fixture.path("cache/x.gem");
+        fixture.refused(&command(&ruby, &["-eputs('x')", "spec", &gem], &[]));
+        fixture.refused(&command(&ruby, &[&rb, "spec", &gem], &[]));
+        fixture.refused(&command(&ruby, &["-I/tmp", "spec", &gem], &[]));
+        let hexmark = |script: &str| {
+            command(
+                &elixir,
+                &[script, "hexmark", "/d", "x", "1", "i", "o", "mix"],
+                &[("HEX_OFFLINE", "1")],
+            )
+        };
+        fixture.refused(&hexmark("/tmp/arbitrary.exs"));
+        fixture.refused(&hexmark(&exs));
+        fixture.refused(&hexmark("--eval"));
     }
 
     /// The probe's argv alone is not enough: an `ERL_*` variable can carry
@@ -611,19 +845,21 @@ mod tests {
     /// sees.
     #[test]
     fn erl_probe_requires_the_erlang_option_variables_gone() {
+        let fixture = Fixture::new("tripwire-erl");
+        let erl = fixture.program("tmp/stage/otp/bin/erl");
         let probe = ["-noshell", "-eval", OTP_RUNTIME_PROBE];
-        let mut clean = command("/s/otp/bin/erl", &probe, &[]);
-        for (key, _) in std::env::vars_os() {
-            clean.env_remove(key);
-        }
-        assert!(refusal(&clean).is_none(), "{clean:?}");
-        for key in ["ERL_AFLAGS", "ERL_FLAGS", "ERL_ZFLAGS", "ERL_LIBS"] {
-            let mut command = command("/s/otp/bin/erl", &probe, &[]);
+        let clean = || {
+            let mut command = command(&erl, &probe, &[]);
             for (key, _) in std::env::vars_os() {
                 command.env_remove(key);
             }
+            command
+        };
+        fixture.admits(&clean());
+        for key in ["ERL_AFLAGS", "ERL_FLAGS", "ERL_ZFLAGS", "ERL_LIBS"] {
+            let mut command = clean();
             command.env(key, "-eval 'os:cmd(\"curl example.com\")'");
-            refused(&command);
+            fixture.refused(&command);
         }
     }
 
@@ -635,32 +871,31 @@ mod tests {
     #[test]
     fn aliases_and_case_do_not_hide_a_resolver() {
         use std::os::unix::fs::symlink;
-        let scratch = crate::kernel::testutil::TempDir::named("tripwire-alias");
-        let bin = scratch.0.join("bin");
-        std::fs::create_dir_all(&bin).unwrap();
-        let git = bin.join("git");
-        std::fs::write(&git, "#!/bin/sh\n").unwrap();
+        let fixture = Fixture::new("tripwire-alias");
+        let git = fixture.program("objects/tools/bin/git");
+        let bin = Path::new(&git).parent().unwrap().to_path_buf();
         symlink(&git, bin.join("fetcher")).unwrap();
         symlink(&git, bin.join("go")).unwrap();
         let fetcher = bin.join("fetcher");
-        refused(&command(fetcher.to_str().unwrap(), &["fetch"], &[]));
-        refused(&command("GIT", &["fetch"], &[]));
-        refused(&command("/usr/bin/Git", &["fetch"], &[]));
-        refused(&command(
+        fixture.refused(&command(fetcher.to_str().unwrap(), &["fetch"], &[]));
+        fixture.refused(&command("GIT", &["fetch"], &[]));
+        fixture.refused(&command("/usr/bin/Git", &["fetch"], &[]));
+        fixture.refused(&command(
             "fetcher",
             &["fetch"],
             &[("PATH", bin.to_str().unwrap())],
         ));
         let mut relative = command("bin/fetcher", &["fetch"], &[]);
-        relative.current_dir(&scratch.0);
-        refused(&relative);
+        relative.current_dir(bin.parent().unwrap());
+        fixture.refused(&relative);
         // `go` that is really `git`: the go form does not cover git.
         let disguised = go_offline_at(
+            &fixture,
             bin.join("go").to_str().unwrap(),
             &["mod", "download", "a@v1"],
         );
-        refused(&disguised);
+        fixture.refused(&disguised);
         // A helper that resolves to no resolver still runs.
-        assert!(refusal(&command("/bin/cp", &["-a", "a", "b"], &[])).is_none());
+        fixture.admits(&command("/bin/cp", &["-a", "a", "b"], &[]));
     }
 }
