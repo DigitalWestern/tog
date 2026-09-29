@@ -644,6 +644,80 @@ mod door {
         );
     }
 
+    /// The socket filter is an allow-list: AF_VSOCK, which reaches the
+    /// host across a network namespace, and every family but inet, inet6
+    /// and route netlink are refused.
+    #[test]
+    fn linux_door_refuses_vsock_and_every_family_but_inet() {
+        let Some(door) = door("linux_door_refuses_vsock_and_every_family_but_inet") else {
+            return;
+        };
+        let refused = format!("errno={}", libc::EAFNOSUPPORT);
+        assert_eq!(
+            door.stdout_of(&["vsock", "1", "9999"]).trim(),
+            format!("vsock socket {refused}")
+        );
+        for family in ["3", "4", "5", "9", "17", "38", "44", "45"] {
+            assert_eq!(
+                door.stdout_of(&["family", family]).trim(),
+                format!("family {refused}"),
+                "family {family}"
+            );
+        }
+        assert_eq!(door.stdout_of(&["family", "2"]).trim(), "family ok");
+        assert_eq!(door.stdout_of(&["family", "10"]).trim(), "family ok");
+    }
+
+    #[test]
+    fn linux_door_tool_cannot_use_keyrings() {
+        let Some(door) = door("linux_door_tool_cannot_use_keyrings") else {
+            return;
+        };
+        let eperm = libc::EPERM;
+        assert_eq!(
+            door.stdout_of(&["keyring"]).trim(),
+            format!("keyring session={eperm} user={eperm} add={eperm} request={eperm}")
+        );
+    }
+
+    /// The sandbox root is read-only once the binds are in place: the tool
+    /// cannot move /run/tog aside and plant another socket, or create
+    /// /etc/ld.so.preload, and it still reaches the proxy. The snapshot,
+    /// scratch and /tmp stay writable.
+    #[test]
+    fn linux_door_root_is_read_only_and_the_proxy_cannot_be_redirected() {
+        let Some(door) = door("linux_door_root_is_read_only_and_the_proxy_cannot_be_redirected")
+        else {
+            return;
+        };
+        let snapshot = door.snapshot();
+        let script = "mv /run/tog /run/moved 2>/dev/null && echo moved || echo no-move\n\
+             ln -s /tmp/other.sock /run/tog/p2 2>/dev/null && echo linked || echo no-link\n\
+             echo x > /etc/ld.so.preload 2>/dev/null && echo preload || echo no-preload\n\
+             mkdir /planted 2>/dev/null && echo mkdir || echo no-mkdir\n\
+             echo x > /tmp/scratch && echo tmp-ok\n\
+             echo x > written.txt && echo project-ok\n\
+             \"$1\" tcp 127.0.0.1 8119";
+        let outcome = door
+            .run(&snapshot, &door.shell_argv(script), SocketScan::Full)
+            .unwrap();
+        let stdout = String::from_utf8(outcome.stdout).unwrap();
+        let lines: Vec<&str> = stdout.lines().collect();
+        assert_eq!(
+            lines,
+            [
+                "no-move",
+                "no-link",
+                "no-preload",
+                "no-mkdir",
+                "tmp-ok",
+                "project-ok",
+                &format!("tcp ok {PROXY_REPLY}"),
+            ],
+            "{stdout}"
+        );
+    }
+
     #[test]
     fn linux_door_socketpair_still_works() {
         let Some(door) = door("linux_door_socketpair_still_works") else {

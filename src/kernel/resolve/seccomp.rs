@@ -9,9 +9,16 @@
 //!   table (a 32-bit `int 0x80` on x86-64, where `socket` has another
 //!   number and `socketcall` multiplexes it) kills the process, and so does
 //!   a syscall number with the x32 bit set.
-//! - `socket(AF_UNIX, ...)` fails with `EAFNOSUPPORT`. `socketpair` stays
-//!   allowed: child-process pipes use it, and a pair cannot reach a named
-//!   socket.
+//! - `socket` is an allow-list: `AF_INET` and `AF_INET6` (the network
+//!   namespace holds only loopback and the relay), and `AF_NETLINK` with
+//!   `NETLINK_ROUTE` only (glibc's `getaddrinfo` and Go read interface
+//!   addresses through it, and it sees only the sandbox's namespace).
+//!   Every other family fails with `EAFNOSUPPORT`: `AF_UNIX`, `AF_VSOCK`
+//!   (which reaches the host across a network namespace), and any family
+//!   a later kernel adds. `socketpair` is allowed for `AF_UNIX` only:
+//!   child-process pipes use it, and a pair cannot reach a named socket.
+//! - `add_key`, `request_key` and `keyctl` fail with `EPERM`, so the tool
+//!   cannot read a key from this user's keyrings.
 //! - `io_uring_setup`, `io_uring_enter` and `io_uring_register` fail with
 //!   `EPERM`: a ring submits socket operations the filter never sees.
 //! - `ptrace`, `process_vm_readv`, `process_vm_writev` and `pidfd_getfd`
@@ -54,7 +61,13 @@ const DATA_NR: u32 = 0;
 const DATA_ARCH: u32 = 4;
 const DATA_ARG0_LOW: u32 = 16;
 
+const DATA_ARG2_LOW: u32 = 32;
+
 const AF_UNIX: u32 = 1;
+const AF_INET: u32 = 2;
+const AF_INET6: u32 = 10;
+const AF_NETLINK: u32 = 16;
+const NETLINK_ROUTE: u32 = 0;
 const EPERM: u32 = 1;
 const EAFNOSUPPORT: u32 = 97;
 
@@ -94,6 +107,10 @@ pub enum Arch {
 #[derive(Clone, Copy, Debug)]
 pub struct Numbers {
     pub socket: u32,
+    pub socketpair: u32,
+    pub add_key: u32,
+    pub request_key: u32,
+    pub keyctl: u32,
     pub execve: u32,
     pub execveat: u32,
     pub ptrace: u32,
@@ -129,6 +146,10 @@ impl Arch {
         match self {
             Arch::X86_64 => Numbers {
                 socket: 41,
+                socketpair: 53,
+                add_key: 248,
+                request_key: 249,
+                keyctl: 250,
                 execve: 59,
                 execveat: 322,
                 ptrace: 101,
@@ -141,6 +162,10 @@ impl Arch {
             },
             Arch::Aarch64 => Numbers {
                 socket: 198,
+                socketpair: 199,
+                add_key: 217,
+                request_key: 218,
+                keyctl: 219,
                 execve: 221,
                 execveat: 281,
                 ptrace: 117,
@@ -158,8 +183,9 @@ impl Arch {
 /// The filter program for `arch`. Order matters and is fixed: the arch
 /// check first (before any number is read, since numbers mean nothing in
 /// another table), then the x32 bit on x86-64, then one equality test per
-/// named syscall, then `socket`'s domain check, which reloads the
-/// accumulator and so must come last. Everything else is allowed.
+/// named syscall, then the `socket` and `socketpair` argument checks,
+/// which reload the accumulator and so must come last. Everything else is
+/// allowed.
 pub fn program(arch: Arch) -> Vec<Insn> {
     let n = arch.numbers();
     let mut program = vec![
@@ -181,17 +207,35 @@ pub fn program(arch: Arch) -> Vec<Insn> {
         (n.process_vm_readv, denied),
         (n.process_vm_writev, denied),
         (n.pidfd_getfd, denied),
+        (n.add_key, denied),
+        (n.request_key, denied),
+        (n.keyctl, denied),
         (n.execve, RET_USER_NOTIF),
         (n.execveat, RET_USER_NOTIF),
     ] {
         program.push(jump(BPF_JMP_JEQ_K, number, 0, 1));
         program.push(stmt(BPF_RET_K, action));
     }
-    program.push(jump(BPF_JMP_JEQ_K, n.socket, 0, 3));
+    let refused = RET_ERRNO | EAFNOSUPPORT;
+    // Relative jumps: `socket` goes to its domain check three ahead,
+    // `socketpair` to its own check eleven ahead.
+    program.push(jump(BPF_JMP_JEQ_K, n.socket, 2, 0));
+    program.push(jump(BPF_JMP_JEQ_K, n.socketpair, 9, 0));
+    program.push(stmt(BPF_RET_K, RET_ALLOW));
+    // socket(domain, type, protocol)
+    program.push(stmt(BPF_LD_W_ABS, DATA_ARG0_LOW));
+    program.push(jump(BPF_JMP_JEQ_K, AF_INET, 5, 0));
+    program.push(jump(BPF_JMP_JEQ_K, AF_INET6, 4, 0));
+    program.push(jump(BPF_JMP_JEQ_K, AF_NETLINK, 0, 2));
+    program.push(stmt(BPF_LD_W_ABS, DATA_ARG2_LOW));
+    program.push(jump(BPF_JMP_JEQ_K, NETLINK_ROUTE, 1, 0));
+    program.push(stmt(BPF_RET_K, refused));
+    program.push(stmt(BPF_RET_K, RET_ALLOW));
+    // socketpair(domain, ...)
     program.push(stmt(BPF_LD_W_ABS, DATA_ARG0_LOW));
     program.push(jump(BPF_JMP_JEQ_K, AF_UNIX, 0, 1));
-    program.push(stmt(BPF_RET_K, RET_ERRNO | EAFNOSUPPORT));
     program.push(stmt(BPF_RET_K, RET_ALLOW));
+    program.push(stmt(BPF_RET_K, refused));
     program
 }
 
@@ -411,7 +455,12 @@ mod tests {
     /// against a synthetic `seccomp_data`. Pins the program's logic for
     /// both architectures without installing anything.
     fn run(program: &[Insn], nr: u32, arch: u32, arg0: u64) -> u32 {
+        run_with(program, nr, arch, arg0, 0)
+    }
+
+    fn run_with(program: &[Insn], nr: u32, arch: u32, arg0: u64, arg2: u64) -> u32 {
         let mut data = [0u8; 64];
+        data[32..40].copy_from_slice(&arg2.to_le_bytes());
         data[0..4].copy_from_slice(&nr.to_le_bytes());
         data[4..8].copy_from_slice(&arch.to_le_bytes());
         data[16..24].copy_from_slice(&arg0.to_le_bytes());
@@ -445,8 +494,6 @@ mod tests {
         }
     }
 
-    const AF_INET: u64 = 2;
-
     fn check_arch(arch: Arch) {
         let program = program(arch);
         let native = arch.audit_arch();
@@ -466,8 +513,63 @@ mod tests {
             run(&program, n.socket, native, (7u64 << 32) | AF_UNIX as u64),
             RET_ERRNO | EAFNOSUPPORT
         );
-        assert_eq!(run(&program, n.socket, native, AF_INET), RET_ALLOW);
+        assert_eq!(run(&program, n.socket, native, AF_INET as u64), RET_ALLOW);
+        assert_eq!(run(&program, n.socket, native, AF_INET6 as u64), RET_ALLOW);
+        // Every other family is refused, AF_VSOCK (40) first among them,
+        // and any family a later kernel adds.
+        for family in [
+            0u64,
+            3,
+            4,
+            5,
+            9,
+            17,
+            29,
+            38,
+            40,
+            44,
+            45,
+            46,
+            200,
+            u32::MAX as u64,
+        ] {
+            assert_eq!(
+                run(&program, n.socket, native, family),
+                RET_ERRNO | EAFNOSUPPORT,
+                "family {family}"
+            );
+        }
+        let netlink = AF_NETLINK as u64;
+        assert_eq!(
+            run_with(&program, n.socket, native, netlink, NETLINK_ROUTE as u64),
+            RET_ALLOW
+        );
+        for protocol in [
+            2u64, /* USERSOCK */
+            4,    /* SOCK_DIAG */
+            9,    /* AUDIT */
+            15,   /* KOBJECT_UEVENT */
+        ] {
+            assert_eq!(
+                run_with(&program, n.socket, native, netlink, protocol),
+                RET_ERRNO | EAFNOSUPPORT,
+                "netlink protocol {protocol}"
+            );
+        }
+        assert_eq!(
+            run(&program, n.socketpair, native, AF_UNIX as u64),
+            RET_ALLOW
+        );
+        for family in [AF_INET as u64, 40] {
+            assert_eq!(
+                run(&program, n.socketpair, native, family),
+                RET_ERRNO | EAFNOSUPPORT
+            );
+        }
         for number in [
+            n.add_key,
+            n.request_key,
+            n.keyctl,
             n.io_uring_setup,
             n.io_uring_enter,
             n.io_uring_register,
@@ -519,6 +621,10 @@ mod tests {
     fn the_native_numbers_are_the_libc_numbers() {
         let n = Arch::native().numbers();
         assert_eq!(n.socket as libc::c_long, libc::SYS_socket);
+        assert_eq!(n.socketpair as libc::c_long, libc::SYS_socketpair);
+        assert_eq!(n.add_key as libc::c_long, libc::SYS_add_key);
+        assert_eq!(n.request_key as libc::c_long, libc::SYS_request_key);
+        assert_eq!(n.keyctl as libc::c_long, libc::SYS_keyctl);
         assert_eq!(n.execve as libc::c_long, libc::SYS_execve);
         assert_eq!(n.execveat as libc::c_long, libc::SYS_execveat);
         assert_eq!(n.ptrace as libc::c_long, libc::SYS_ptrace);
@@ -544,7 +650,7 @@ mod tests {
     /// is the kernel's verdict on the same program the relay installs.
     #[cfg(target_os = "linux")]
     #[test]
-    fn the_installed_filter_refuses_unix_sockets_and_io_uring_but_not_pairs() {
+    fn the_installed_filter_allows_only_inet_and_route_sockets_and_refuses_keyrings() {
         let compiled = Compiled::native();
         // SAFETY: the child runs only async-signal-safe syscalls and exits
         // with _exit; the parent waits for it.
@@ -574,6 +680,28 @@ mod tests {
                     let inet = libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0);
                     if inet < 0 {
                         return 14;
+                    }
+                    let vsock = libc::socket(libc::AF_VSOCK, libc::SOCK_STREAM, 0);
+                    if vsock >= 0 || *libc::__errno_location() != libc::EAFNOSUPPORT {
+                        return 15;
+                    }
+                    let route = libc::socket(libc::AF_NETLINK, libc::SOCK_RAW, libc::NETLINK_ROUTE);
+                    if route < 0 {
+                        return 16;
+                    }
+                    let audit = libc::socket(libc::AF_NETLINK, libc::SOCK_RAW, libc::NETLINK_AUDIT);
+                    if audit >= 0 || *libc::__errno_location() != libc::EAFNOSUPPORT {
+                        return 17;
+                    }
+                    if libc::syscall(
+                        libc::SYS_keyctl,
+                        0,  /* KEYCTL_GET_KEYRING_ID */
+                        -3, /* session */
+                        0,
+                    ) >= 0
+                        || *libc::__errno_location() != libc::EPERM
+                    {
+                        return 18;
                     }
                     0
                 })();

@@ -13,6 +13,10 @@
  *   daemon <path> <seconds>  double-fork a setsid child that rewrites
  *                            <path> every 10 ms, then exit at once
  *   read <path>              print the file's first line
+ *   family <n>               socket(<n>, SOCK_STREAM, 0) for any family
+ *   vsock <cid> <port>       socket(AF_VSOCK) + connect
+ *   keyring                  keyctl, add_key and request_key on the
+ *                            session and user keyrings
  */
 #define _GNU_SOURCE
 #include <arpa/inet.h>
@@ -29,6 +33,7 @@
 #include <sys/types.h>
 #include <sys/uio.h>
 #include <sys/un.h>
+#include <linux/vm_sockets.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -168,6 +173,44 @@ static int read_first(const char *path) {
     return 0;
 }
 
+static int family(const char *number) {
+    int fd = socket(atoi(number), SOCK_STREAM, 0);
+    if (fd < 0) printf("family errno=%d\n", errno);
+    else printf("family ok\n");
+    return 0;
+}
+
+static int vsock(const char *cid, const char *port) {
+    int fd = socket(AF_VSOCK, SOCK_STREAM, 0);
+    if (fd < 0) { printf("vsock socket errno=%d\n", errno); return 0; }
+    struct sockaddr_vm addr = {0};
+    addr.svm_family = AF_VSOCK;
+    addr.svm_cid = (unsigned)atoi(cid);
+    addr.svm_port = (unsigned)atoi(port);
+    if (connect(fd, (struct sockaddr *)&addr, sizeof addr) != 0) {
+        printf("vsock connect errno=%d\n", errno);
+        return 0;
+    }
+    printf("vsock connected\n");
+    return 0;
+}
+
+static int keyring(void) {
+    /* KEYCTL_GET_KEYRING_ID = 0; KEY_SPEC_SESSION_KEYRING = -3,
+       KEY_SPEC_USER_KEYRING = -4. */
+    long session = syscall(SYS_keyctl, 0, -3, 0);
+    int session_errno = session < 0 ? errno : 0;
+    long user = syscall(SYS_keyctl, 0, -4, 0);
+    int user_errno = user < 0 ? errno : 0;
+    long added = syscall(SYS_add_key, "user", "tog-probe", "x", 1, -3);
+    int added_errno = added < 0 ? errno : 0;
+    long requested = syscall(SYS_request_key, "user", "tog-probe", NULL, 0);
+    int requested_errno = requested < 0 ? errno : 0;
+    printf("keyring session=%d user=%d add=%d request=%d\n", session_errno, user_errno,
+           added_errno, requested_errno);
+    return 0;
+}
+
 int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IOLBF, 0);
     if (argc < 2) return 2;
@@ -182,6 +225,9 @@ int main(int argc, char **argv) {
     if (!strcmp(cmd, "ptrace-parent")) return ptrace_parent();
     if (!strcmp(cmd, "daemon") && argc == 4) return daemonize(argv[2], argv[3]);
     if (!strcmp(cmd, "read") && argc == 3) return read_first(argv[2]);
+    if (!strcmp(cmd, "family") && argc == 3) return family(argv[2]);
+    if (!strcmp(cmd, "vsock") && argc == 4) return vsock(argv[2], argv[3]);
+    if (!strcmp(cmd, "keyring")) return keyring();
     fprintf(stderr, "door_probe: unknown command %s\n", cmd);
     return 2;
 }

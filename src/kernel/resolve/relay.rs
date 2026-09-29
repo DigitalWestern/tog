@@ -7,10 +7,13 @@
 //!
 //! 1. It makes itself non-dumpable, so nothing of the same user can trace
 //!    it or read its memory and borrow its unfiltered sockets.
-//! 2. It listens on the fixed loopback address inside the namespace and,
-//!    for each accepted TCP connection, connects the bound Unix socket (the
-//!    proxy) and copies bytes both ways until either side closes.
-//! 3. It starts the tool with the door's seccomp filter installed in the
+//! 2. It opens the bound Unix socket (the proxy) as an `O_PATH` descriptor
+//!    before the tool starts, listens on the fixed loopback address inside
+//!    the namespace and, for each accepted TCP connection, connects the
+//!    proxy through that descriptor and copies bytes both ways until either
+//!    side closes.
+//! 3. It starts the tool in a fresh anonymous session keyring, with the
+//!    door's seccomp filter installed in the
 //!    child before `exec`, receives the filter's notification listener over
 //!    a socket pair, and answers every `execve` notification while
 //!    recording it in the exec log.
@@ -256,8 +259,8 @@ mod linux {
                 format!("{VERB}: listen on {}: {error}", args.listen),
             )
         })?;
-        let socket = args.socket.clone();
-        std::thread::spawn(move || accept_loop(listener, &socket));
+        let proxy = ProxySocket::hold(&args.socket)?;
+        std::thread::spawn(move || accept_loop(listener, &proxy));
         let status = run_tool(&args.argv, log)?;
         log.write(&RelayRecord::Tool(status));
         let killed = quiesce()?;
@@ -265,10 +268,45 @@ mod linux {
         Ok(status.exit_code())
     }
 
-    fn accept_loop(listener: TcpListener, socket: &Path) {
+    /// The proxy's socket, held open (`O_PATH`) from before the tool
+    /// starts. Every connection goes through the held descriptor, so a
+    /// tool that renamed `/run/tog` or planted a symlink there could not
+    /// steer the unfiltered relay at another socket.
+    pub(super) struct ProxySocket {
+        _held: OwnedFd,
+        via: String,
+    }
+
+    impl ProxySocket {
+        pub(super) fn hold(path: &Path) -> io::Result<ProxySocket> {
+            use std::os::unix::fs::{FileTypeExt, OpenOptionsExt};
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+                .open(path)
+                .map_err(|error| {
+                    io::Error::new(error.kind(), format!("{VERB}: {}: {error}", path.display()))
+                })?;
+            if !file.metadata()?.file_type().is_socket() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("{VERB}: {} is not the proxy's socket", path.display()),
+                ));
+            }
+            let held = OwnedFd::from(file);
+            let via = format!("/proc/self/fd/{}", held.as_raw_fd());
+            Ok(ProxySocket { _held: held, via })
+        }
+
+        pub(super) fn connect(&self) -> io::Result<UnixStream> {
+            UnixStream::connect(&self.via)
+        }
+    }
+
+    fn accept_loop(listener: TcpListener, proxy: &ProxySocket) {
         for client in listener.incoming() {
             let Ok(client) = client else { continue };
-            match UnixStream::connect(socket) {
+            match proxy.connect() {
                 Ok(upstream) => splice(client, upstream),
                 // The tool sees its connection closed, which is what a
                 // proxy that is gone looks like.
@@ -330,9 +368,21 @@ mod linux {
         // environment is exactly what the door set.
         command.args(&argv[1..]).env_remove("PWD");
         // SAFETY: the closure makes only async-signal-safe syscalls
-        // (prctl, seccomp, sendmsg, close) on data prepared before fork.
+        // (keyctl, prctl, seccomp, sendmsg, close) on data prepared before
+        // fork.
         unsafe {
             command.pre_exec(move || {
+                // A fresh anonymous session keyring: the tool does not
+                // possess the one tog was started with. The filter then
+                // refuses every keyring call.
+                if libc::syscall(
+                    libc::SYS_keyctl,
+                    libc::KEYCTL_JOIN_SESSION_KEYRING,
+                    std::ptr::null::<libc::c_char>(),
+                ) < 0
+                {
+                    return Err(io::Error::last_os_error());
+                }
                 let listener = filter.install()?;
                 let sent = send_fd(channel, listener);
                 libc::close(listener);
@@ -497,6 +547,34 @@ mod linux {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        /// Connections go to the socket held when the relay started, even
+        /// after its path is renamed away and a symlink to another socket
+        /// takes its place.
+        #[test]
+        fn the_proxy_socket_is_the_one_held_at_start() {
+            let dir = crate::kernel::testutil::TempDir::named("relay-held");
+            // A short path: sun_path is 108 bytes.
+            let short = std::path::PathBuf::from(format!("/tmp/tog-held-{}", std::process::id()));
+            let _ = std::fs::remove_file(&short);
+            std::os::unix::fs::symlink(&dir.0, &short).unwrap();
+            let real = std::os::unix::net::UnixListener::bind(short.join("p.sock")).unwrap();
+            let other = std::os::unix::net::UnixListener::bind(short.join("o.sock")).unwrap();
+            let held = ProxySocket::hold(&short.join("p.sock")).unwrap();
+            std::fs::rename(short.join("p.sock"), short.join("moved.sock")).unwrap();
+            std::os::unix::fs::symlink(short.join("o.sock"), short.join("p.sock")).unwrap();
+            let mut stream = held.connect().unwrap();
+            stream.write_all(b"x").unwrap();
+            real.set_nonblocking(true).unwrap();
+            other.set_nonblocking(true).unwrap();
+            assert!(real.accept().is_ok(), "the held socket got the connection");
+            assert!(other.accept().is_err(), "the planted one did not");
+            assert!(
+                ProxySocket::hold(&short.join("p.sock")).is_err(),
+                "a symlink is refused"
+            );
+            std::fs::remove_file(&short).unwrap();
+        }
 
         /// The tool runs under the real filter with the real notification
         /// path, outside any sandbox: every exec it makes is logged, the

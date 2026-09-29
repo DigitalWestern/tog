@@ -798,7 +798,7 @@ pub fn confined_run(
     let tier = choose_tier(&offers, &missing, run.unconfined_denied, run.tool, run.why)?;
     let bwrap = sandbox::bwrap_preflight_with_activity(Some(activity))?;
     let mounts = Mounts::check(store, activity, run)?;
-    let args = proxy_args(run, &mounts)?;
+    let args = proxy_args(run, &mounts, bwrap_disables_userns(bwrap, activity))?;
     let (reader, writer) = pipe()?;
     let log = std::thread::spawn(move || read_log(reader));
     let mut command = sandbox::bwrap_command(bwrap)?;
@@ -817,6 +817,23 @@ pub fn confined_run(
         outcome.stderr = stderr;
     }
     Ok(outcome)
+}
+
+/// Whether the installed bubblewrap has `--disable-userns` (0.8 and
+/// later): its help text names the flag. Probed once per process; a probe
+/// that fails is a bubblewrap without it.
+fn bwrap_disables_userns(bwrap: &Path, activity: &StoreActivity) -> bool {
+    static SUPPORTED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *SUPPORTED.get_or_init(|| {
+        let mut command = std::process::Command::new(bwrap);
+        command.arg("--help");
+        crate::kernel::supervise::local_output(&mut command, activity)
+            .map(|output| {
+                String::from_utf8_lossy(&output.stdout).contains("--disable-userns")
+                    || String::from_utf8_lossy(&output.stderr).contains("--disable-userns")
+            })
+            .unwrap_or(false)
+    })
 }
 
 /// Start the bubblewrap command of a confined run: exit status, stderr
@@ -972,7 +989,11 @@ impl Mounts {
 }
 
 /// The bubblewrap argv of a `Proxy` run.
-fn proxy_args(run: &ConfinedRun<'_>, mounts: &Mounts) -> io::Result<Vec<OsString>> {
+fn proxy_args(
+    run: &ConfinedRun<'_>,
+    mounts: &Mounts,
+    disable_userns: bool,
+) -> io::Result<Vec<OsString>> {
     let mut args: Vec<OsString> = [
         "--unshare-user",
         "--unshare-net",
@@ -1014,6 +1035,18 @@ fn proxy_args(run: &ConfinedRun<'_>, mounts: &Mounts) -> io::Result<Vec<OsString
     args.push("--ro-bind".into());
     args.push(mounts.executable.clone().into_os_string());
     args.push(relay::TOG_EXECUTABLE.into());
+    // Every bind is in place: the root tmpfs (with /run/tog, /etc's
+    // mount points, and the directories bubblewrap made for the binds) goes
+    // read-only, so the tool can neither move /run/tog aside nor create a
+    // file like /etc/ld.so.preload. The snapshot, scratch, /tmp and /dev are
+    // mounts of their own and stay writable.
+    args.push("--remount-ro".into());
+    args.push("/".into());
+    if disable_userns {
+        // The tool cannot make a user namespace of its own, which would
+        // give it back the capabilities bubblewrap dropped.
+        args.push("--disable-userns".into());
+    }
     for (key, value) in door_env(run, &mounts.scratch)? {
         args.push("--setenv".into());
         args.push(key);

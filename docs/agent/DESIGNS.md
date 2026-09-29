@@ -1259,13 +1259,22 @@ socket:
    sandbox starts) read-only at `/run/tog/tog`.
 3. The sandbox's first process is `tog __resolution-relay
    /run/tog/proxy.sock 127.0.0.1:8119 -- <tool argv>`, a hidden
-   subcommand. It listens on the fixed port inside the private namespace,
-   connects the Unix socket once per accepted TCP connection and splices
-   the two, spawns the tool (with the seccomp filter below installed in
+   subcommand. It opens `/run/tog/proxy.sock` as an `O_PATH` descriptor
+   before the tool starts, listens on the fixed port inside the private
+   namespace, connects the socket through that descriptor
+   (`/proc/self/fd/<n>`) once per accepted TCP connection and splices
+   the two, so nothing the tool does to the path afterwards redirects the
+   unfiltered relay, spawns the tool (with the seccomp filter below installed in
    the child before `exec`), and exits with the tool's status. The fixed
    port keeps every proxy URL identical from run to run.
    `--die-with-parent` and the PID namespace end every descendant when the
-   relay exits, so nothing outlives the door on Linux.
+   relay exits, so nothing outlives the door on Linux. After the last
+   bind, `--remount-ro /` makes the sandbox's root tmpfs read-only (so the
+   tool cannot rename `/run/tog` or create `/etc/ld.so.preload`); the
+   snapshot, scratch, `/tmp`, and `/dev` are mounts of their own and stay
+   writable. `--disable-userns` is added when the installed bubblewrap
+   has it (0.8 and later, probed from its help text), so the tool cannot
+   make a user namespace of its own.
 4. No DNS exists in the namespace (`/etc/resolv.conf` is not bound, and no
    resolver is reachable). The tool never needs one because every proxy
    URL uses a literal IP.
@@ -1345,12 +1354,23 @@ Three layers close it on Linux:
    (Fedora ships `/usr/share/empty.sshd` as root-owned 0711); every other
    scan error refuses. `/run/tog` holds only tog's own socket, and `/tmp`
    and `/dev` are fresh.
-3. **A seccomp filter denies creating Unix sockets.** The relay installs
+3. **A seccomp filter allows only network sockets.** The relay installs
    a filter in the tool's process before `exec`, inherited by every
-   descendant: `socket(AF_UNIX, ...)` fails with `EAFNOSUPPORT`.
-   `socketpair(2)` stays allowed, because libuv (Node) and Python's
-   asyncio use it for child-process pipes, and a socketpair cannot reach
-   a named socket. This layer covers a socket that appears in a mounted
+   descendant. `socket(2)` is an allow-list: `AF_INET` and `AF_INET6`
+   (the namespace holds only loopback and the relay), and `AF_NETLINK`
+   with protocol `NETLINK_ROUTE` only, which glibc's `getaddrinfo`
+   (`AI_ADDRCONFIG`) and Go's interface listing read and which sees only
+   the sandbox's own namespace. Every other family fails with
+   `EAFNOSUPPORT`: `AF_UNIX`, and also `AF_VSOCK`, which reaches the
+   host (CID 1) straight across a network namespace, and any family a
+   later kernel adds. A deny-list of families would have missed vsock
+   and would miss the next one. `socketpair(2)` is allowed for
+   `AF_UNIX` only, because libuv (Node) and Python's asyncio use it for
+   child-process pipes, and a socketpair cannot reach a named socket.
+   The filter also refuses `add_key`, `request_key`, and `keyctl`
+   (`EPERM`), and the relay moves the tool into a fresh anonymous
+   session keyring before installing it, so no key in this user's
+   keyrings is readable. This layer covers a socket that appears in a mounted
    root **after** the scan: it cannot be connected to, because nothing in
    the tree can create the socket to connect with. The relay is outside
    the filter (it installs it in the child), so the proxy bridge keeps
