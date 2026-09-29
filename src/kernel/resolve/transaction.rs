@@ -11,11 +11,15 @@
 //!    `tog gc` cannot collect it while a publication may still need it, and
 //!    its sha256 becomes the pre-run digest. A target that does not exist
 //!    is recorded as `absent`.
-//! 2. **Journal.** Before the first project write, a journal at
-//!    `.tog/resolution/.journal-<ecosystem>.json` lists every target: its
-//!    temporary name, pre-run digest, new digest and state. The file and its
-//!    directory are fsynced. The journal's presence means "publication may
-//!    be incomplete".
+//!    A journal at `.tog/journal/<ecosystem>.json` (under `.tog/`, which
+//!    projects do not commit, and outside `.tog/resolution/`, which they
+//!    do) names the originals object before it is rooted, so a process
+//!    killed while the tool runs leaves nothing rooted that recovery cannot
+//!    find and release.
+//! 2. **Journal.** Before the first project write, the journal lists every
+//!    target: its temporary name, pre-run digest, new digest and state. The
+//!    file and its directory are fsynced. The journal's presence means
+//!    "publication may be incomplete".
 //! 3. **Swap, then compare.** Each target's new bytes go to a temporary
 //!    beside it, which is atomically exchanged with the target
 //!    (`renameat2(RENAME_EXCHANGE)`). The temporary now holds exactly what
@@ -29,7 +33,15 @@
 //!    the originals are released.
 //!
 //! Any failure during step 3 undoes every target in reverse, and recovery
-//! after a crash does the same from the journal alone. Both decide by
+//! after a crash does the same from the journal. Recovery trusts a journal
+//! only in the directory it was asked about (never an ancestor), only when
+//! the originals object it names is in this store and rooted to this
+//! project with an identity that lists exactly its targets and pre-run
+//! digests, and only for temporaries named the way this module names them.
+//! Anything else is refused with the journal's path, and nothing is
+//! touched. Every holder of a project's journal also holds an `flock` on
+//! the project directory itself, so two tog processes using different
+//! stores cannot undo each other's publication. Both decide by
 //! content: a target at its new digest is restored (by exchanging the
 //! displaced original back, or from the originals object), a target at its
 //! pre-run digest is left alone, and a target at any third digest was
@@ -52,13 +64,22 @@ use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
-/// The project directory holding receipts and journals.
+mod recovery;
+
+use recovery::{
+    finish_committed, is_journal_name, lock_project_dir, narrate, recover_locked, release, undo,
+};
+pub use recovery::{has_pending_journal, recover_project};
+
+/// The project directory holding receipts.
 pub const RESOLUTION_DIR: &str = ".tog/resolution";
+/// The project directory holding publication journals: under `.tog/`, but
+/// not under `.tog/resolution/`, which projects commit.
+pub const JOURNAL_DIR: &str = ".tog/journal";
 const JOURNAL_SCHEMA: &str = "resolution-journal/1";
 const ORIGINALS_KIND: &str = "resolution-originals";
 const ORIGINALS_SCHEMA: &str = "resolution-originals/1";
 const ABSENT: &str = "absent";
-const RECEIPT_MODE: u32 = 0o644;
 
 /// The receipt a door publishes for `ecosystem`, relative to the lock root.
 pub fn receipt_path(ecosystem: &str) -> PathBuf {
@@ -66,7 +87,7 @@ pub fn receipt_path(ecosystem: &str) -> PathBuf {
 }
 
 fn journal_name(ecosystem: &str) -> String {
-    format!(".journal-{ecosystem}.json")
+    format!("{ecosystem}.json")
 }
 
 /// What `Transaction::hold` holds.
@@ -78,6 +99,18 @@ pub struct HoldSpec<'a> {
     pub outputs: &'a [PathBuf],
     /// Hold (and later replace) the receipt as the last target.
     pub receipt: bool,
+}
+
+/// How a publication ended when it did not fail.
+#[derive(Debug)]
+pub enum Published {
+    /// Published, and every temporary, the journal and the originals'
+    /// root are gone.
+    Clean,
+    /// Published (the journal says committed), but cleaning up after it
+    /// failed. The journal stays and the next recovery finishes; nothing
+    /// published is taken back.
+    CleanupPending(io::Error),
 }
 
 #[derive(Clone, Debug)]
@@ -102,9 +135,14 @@ pub struct Transaction<'a> {
     activity: &'a StoreActivity,
     root: ProjectRoot,
     lock: fs::File,
+    /// The `flock` on the project directory, held for the whole run.
+    _dir_lock: fs::File,
     ecosystem: String,
     targets: Vec<Held>,
-    originals: Option<String>,
+    /// The originals object, named in the journal before it is rooted.
+    originals: String,
+    /// `.tog` and `.tog/journal`, when this transaction created them.
+    created_at_hold: Vec<String>,
     finished: bool,
 }
 
@@ -176,16 +214,19 @@ impl<'a> Transaction<'a> {
         if spec.receipt {
             relatives.push((receipt_path(spec.ecosystem), true));
         }
+        let dir_lock = lock_project_dir(&root)?;
         recover_locked(store, activity, &root, &project_lock)?;
         let mut transaction = Transaction {
             store,
             activity,
             root,
             lock: project_lock,
+            _dir_lock: dir_lock,
             ecosystem: spec.ecosystem.to_string(),
             targets: Vec::new(),
-            originals: None,
-            finished: false,
+            originals: String::new(),
+            created_at_hold: Vec::new(),
+            finished: true,
         };
         let copies = transaction.read_originals(relatives)?;
         transaction.commit_originals(copies)?;
@@ -237,20 +278,38 @@ impl<'a> Transaction<'a> {
         Ok(copies)
     }
 
-    /// Commit the originals as one store object and root it for this
-    /// project. Nothing to commit when every target is absent.
+    /// Commit the originals as one store object (even when every target
+    /// is absent: recovery trusts a journal only through it) and root it
+    /// for this project. The `held` journal naming it is written first,
+    /// so a process killed at any later point leaves a journal recovery
+    /// finds.
     fn commit_originals(&mut self, copies: Vec<Vec<u8>>) -> io::Result<()> {
-        if copies.is_empty() {
-            return Ok(());
+        let mut targets = Vec::new();
+        for held in &self.targets {
+            targets.push((
+                path_text(&held.relative)?.to_string(),
+                held.original.as_ref().map(|original| original.sha256),
+            ));
         }
+        let run = hex::encode(crate::kernel::fsroot::urandom_bytes(16)?);
+        let identity = originals_identity(&self.ecosystem, &run, &targets);
+        self.originals = identity.object_id();
+        // From here on, dropping the transaction releases what it holds
+        // (each step of the release tolerates what never happened).
+        self.finished = false;
+        self.created_at_hold = create_missing_dirs(&self.root, Path::new(JOURNAL_DIR))?
+            .iter()
+            .map(|dir| path_text(dir).map(str::to_string))
+            .collect::<io::Result<_>>()?;
+        write_journal(
+            &self.journal_dir()?,
+            &self.journal(JournalState::Held, Vec::new()),
+        )?;
         let stage = self.store.stage_with_activity(self.activity)?;
-        let identity = match self.write_originals(&stage, copies) {
-            Ok(identity) => identity,
-            Err(error) => {
-                let _ = store::remove_tree(&stage);
-                return Err(error);
-            }
-        };
+        if let Err(error) = self.write_originals(&stage, copies) {
+            let _ = store::remove_tree(&stage);
+            return Err(error);
+        }
         self.store.commit_with_activity_and_deps(
             self.activity,
             &identity,
@@ -258,21 +317,18 @@ impl<'a> Transaction<'a> {
             &[],
             &ObjectDeps::new(),
         )?;
-        let id = identity.object_id();
         self.store.register_root_parts_with_project_lock(
             self.activity,
             &self.root,
-            BTreeSet::from([id.clone()]),
+            BTreeSet::from([self.originals.clone()]),
             BTreeSet::new(),
             &self.lock,
         )?;
-        self.originals = Some(id);
         Ok(())
     }
 
-    fn write_originals(&self, stage: &Path, copies: Vec<Vec<u8>>) -> io::Result<Identity> {
+    fn write_originals(&self, stage: &Path, copies: Vec<Vec<u8>>) -> io::Result<()> {
         let mut copies = copies.into_iter();
-        let mut targets = Vec::new();
         for held in &self.targets {
             if let Some(original) = &held.original {
                 let bytes = copies.next().expect("one copy per present target");
@@ -283,52 +339,74 @@ impl<'a> Transaction<'a> {
                 file.write_all(&bytes)?;
                 file.sync_all()?;
             }
-            targets.push((
-                path_text(&held.relative)?.to_string(),
-                held.original.as_ref().map(|original| original.sha256),
-            ));
         }
-        let run = hex::encode(crate::kernel::fsroot::urandom_bytes(16)?);
-        Ok(originals_identity(&self.ecosystem, &run, &targets))
+        Ok(())
+    }
+
+    fn journal(&self, state: JournalState, targets: Vec<JournalTarget>) -> Journal {
+        Journal {
+            schema: JOURNAL_SCHEMA.to_string(),
+            ecosystem: self.ecosystem.clone(),
+            state,
+            originals: self.originals.clone(),
+            created_dirs: self.created_at_hold.clone(),
+            targets,
+        }
+    }
+
+    fn journal_dir(&self) -> io::Result<ProjectRoot> {
+        self.root.subdir(Path::new(JOURNAL_DIR))?.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("{} vanished", self.root.path().join(JOURNAL_DIR).display()),
+            )
+        })
     }
 
     /// Publish: replace each held target that has a new version (the
     /// outputs the tool changed, then `receipt`), all or nothing. A held
     /// output the tool left alone must still hold its pre-run bytes.
-    pub fn publish(mut self, outputs: &Outputs, receipt: Option<&[u8]>) -> io::Result<()> {
+    ///
+    /// Once the journal says committed the publication has happened, so a
+    /// failure while cleaning up after it is not an error: it comes back
+    /// as [`Published::CleanupPending`], the journal stays (committed), and
+    /// the next recovery finishes the cleanup.
+    pub fn publish(mut self, outputs: &Outputs, receipt: Option<&[u8]>) -> io::Result<Published> {
         let plan = self.plan(outputs, receipt)?;
-        let created_dirs = self.prepare_dirs(&plan)?;
-        let mut journal = Journal {
-            schema: JOURNAL_SCHEMA.to_string(),
-            ecosystem: self.ecosystem.clone(),
-            state: JournalState::Publishing,
-            originals: self.originals.clone(),
-            created_dirs: created_dirs
-                .iter()
-                .map(|dir| path_text(dir).map(str::to_string))
-                .collect::<io::Result<_>>()?,
-            targets: plan.iter().map(|entry| entry.journal.clone()).collect(),
-        };
-        let resolution = self.resolution_dir()?;
+        let mut created = self.created_at_hold.clone();
+        for dir in self.prepare_dirs(&plan)? {
+            created.push(path_text(&dir)?.to_string());
+        }
+        let mut journal = self.journal(
+            JournalState::Publishing,
+            plan.iter().map(|entry| entry.journal.clone()).collect(),
+        );
+        journal.created_dirs = created;
+        let journals = self.journal_dir()?;
         let outcome = (|| {
-            write_journal(&resolution, &journal)?;
+            write_journal(&journals, &journal)?;
             fault(FaultPoint::Journaled)?;
             for (index, entry) in plan.iter().enumerate() {
                 self.swap(entry, index)?;
                 journal.targets[index].state = TargetState::Swapped;
-                write_journal(&resolution, &journal)?;
+                write_journal(&journals, &journal)?;
                 fault(FaultPoint::Marked(index))?;
             }
             self.verify_unpublished(&plan)?;
             fault(FaultPoint::Verified)?;
             journal.state = JournalState::Committed;
-            write_journal(&resolution, &journal)?;
+            write_journal(&journals, &journal)?;
             fault(FaultPoint::Committed)
         })();
         match outcome {
             Ok(()) => {
                 self.finished = true;
-                finish_committed(self.store, self.activity, &self.root, &self.lock, &journal)
+                match finish_committed(self.store, self.activity, &self.root, &self.lock, &journal)
+                {
+                    Ok(()) => Ok(Published::Clean),
+                    Err(error) if is_crash(&error) => Err(error),
+                    Err(error) => Ok(Published::CleanupPending(error)),
+                }
             }
             Err(error) if is_crash(&error) => {
                 // A simulated process death: nothing more runs.
@@ -339,10 +417,10 @@ impl<'a> Transaction<'a> {
                 let undone = undo(self.store, &self.root, &journal);
                 match undone {
                     Ok(notes) => {
-                        remove_journal(&resolution, &self.ecosystem)?;
-                        remove_created_tog_dirs(&self.root, &journal)?;
                         self.finished = true;
-                        self.release()?;
+                        remove_journal(&journals, &self.ecosystem)?;
+                        remove_created_dirs(&self.root, &journal)?;
+                        release(self.store, self.activity, &self.root, &self.lock, &journal)?;
                         narrate(self.root.path(), &notes, "undone");
                         Err(error)
                     }
@@ -354,9 +432,13 @@ impl<'a> Transaction<'a> {
                             error.kind(),
                             format!(
                                 "{error}; undoing the partial publication also failed \
-                                 ({undo_error}), so the journal in {} was kept and the next \
+                                 ({undo_error}), so the journal {} was kept and the next \
                                  tog command in this project will finish undoing it",
-                                self.root.path().join(RESOLUTION_DIR).display()
+                                self.root
+                                    .path()
+                                    .join(JOURNAL_DIR)
+                                    .join(journal_name(&self.ecosystem))
+                                    .display()
                             ),
                         ))
                     }
@@ -366,22 +448,19 @@ impl<'a> Transaction<'a> {
     }
 
     /// Give up before publishing: nothing in the project was touched, so
-    /// only the originals are released.
+    /// the held journal and the originals' root are released.
     pub fn abandon(mut self) -> io::Result<()> {
         self.finished = true;
         self.release()
     }
 
     fn release(&self) -> io::Result<()> {
-        let Some(id) = &self.originals else {
-            return Ok(());
-        };
-        self.store.unroot_objects_locked(
-            self.activity,
-            &self.root,
-            &BTreeSet::from([id.clone()]),
-            &self.lock,
-        )
+        let journal = self.journal(JournalState::Held, Vec::new());
+        if let Some(journals) = self.root.subdir(Path::new(JOURNAL_DIR))? {
+            remove_journal(&journals, &self.ecosystem)?;
+        }
+        remove_created_dirs(&self.root, &journal)?;
+        release(self.store, self.activity, &self.root, &self.lock, &journal)
     }
 
     fn plan(&self, outputs: &Outputs, receipt: Option<&[u8]>) -> io::Result<Vec<Planned>> {
@@ -399,21 +478,24 @@ impl<'a> Transaction<'a> {
         }
         let mut plan = Vec::new();
         for (index, held) in self.targets.iter().enumerate() {
-            let (bytes, mode) = if held.receipt {
+            let bytes = if held.receipt {
                 match receipt {
-                    Some(bytes) => (bytes.to_vec(), RECEIPT_MODE),
+                    Some(bytes) => bytes.to_vec(),
                     None => continue,
                 }
             } else {
                 match outputs.get(&held.relative) {
-                    Some(file) => (outputs.contents(file)?, file.mode),
+                    Some(file) => outputs.contents(file)?,
                     None => continue,
                 }
             };
+            // A replaced file keeps its own mode; a created one gets the
+            // ordinary file mode under this process's umask, never whatever
+            // bits the tool left on its copy.
             let mode = held
                 .original
                 .as_ref()
-                .map_or(mode, |original| original.mode);
+                .map_or_else(new_file_mode, |original| original.mode);
             let temp = temp_beside(&held.relative)?;
             plan.push(Planned {
                 target: index,
@@ -443,41 +525,19 @@ impl<'a> Transaction<'a> {
         Ok(plan)
     }
 
-    /// Create `.tog/resolution` and every missing parent of a planned
-    /// target, returning the directories created (outermost first).
+    /// Create every missing parent of a planned target (`.tog/resolution`
+    /// for the receipt), returning the directories created (outermost
+    /// first).
     fn prepare_dirs(&self, plan: &[Planned]) -> io::Result<Vec<PathBuf>> {
-        let mut wanted: Vec<PathBuf> = vec![PathBuf::from(RESOLUTION_DIR)];
+        let mut created = Vec::new();
         for entry in plan {
             if let Some(parent) = self.targets[entry.target].relative.parent() {
                 if !parent.as_os_str().is_empty() {
-                    wanted.push(parent.to_path_buf());
-                }
-            }
-        }
-        let mut created = Vec::new();
-        for dir in wanted {
-            let mut prefix = PathBuf::new();
-            for component in dir.components() {
-                prefix.push(component);
-                if self.root.subdir(&prefix)?.is_none() {
-                    self.root.create_dir_all(&prefix)?;
-                    created.push(prefix.clone());
+                    created.extend(create_missing_dirs(&self.root, parent)?);
                 }
             }
         }
         Ok(created)
-    }
-
-    fn resolution_dir(&self) -> io::Result<ProjectRoot> {
-        self.root.subdir(Path::new(RESOLUTION_DIR))?.ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::NotFound,
-                format!(
-                    "{} vanished",
-                    self.root.path().join(RESOLUTION_DIR).display()
-                ),
-            )
-        })
     }
 
     /// Step 3 for one target: temporary, exchange (or no-replace create),
@@ -594,6 +654,9 @@ struct Planned {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 enum JournalState {
+    /// The targets are held and the originals named; nothing in the
+    /// project has been touched.
+    Held,
     Publishing,
     Committed,
 }
@@ -624,7 +687,8 @@ struct Journal {
     schema: String,
     ecosystem: String,
     state: JournalState,
-    originals: Option<String>,
+    /// The originals object's id.
+    originals: String,
     created_dirs: Vec<String>,
     targets: Vec<JournalTarget>,
 }
@@ -642,366 +706,136 @@ pub enum Restored {
     LeftEdited(PathBuf),
 }
 
-/// Is there an interrupted publication journal in `dir` or any ancestor?
-/// Store-free and cheap: a command calls this first and opens the store
-/// only when recovery has work to do.
-pub fn has_pending_journal(dir: &Path) -> bool {
-    dir.ancestors()
-        .any(|ancestor| !journals_in(ancestor).is_empty())
-}
-
-fn journals_in(dir: &Path) -> Vec<String> {
-    let Ok(entries) = fs::read_dir(dir.join(RESOLUTION_DIR)) else {
-        return Vec::new();
-    };
-    entries
-        .filter_map(|entry| entry.ok())
-        .filter_map(|entry| entry.file_name().into_string().ok())
-        .filter(|name| is_journal_name(name))
-        .collect()
-}
-
-fn is_journal_name(name: &str) -> bool {
-    name.strip_prefix(".journal-")
-        .and_then(|rest| rest.strip_suffix(".json"))
-        .is_some_and(|eco| check_ecosystem(eco).is_ok())
-}
-
-/// Recover every interrupted resolution publication for the project at
-/// `dir` or the workspace above it. Every tog command that writes a project
-/// runs this before anything else. Takes the project lock itself.
-pub fn recover_project(
-    store: &Store,
-    activity: &StoreActivity,
-    dir: &Path,
-) -> io::Result<Vec<Restored>> {
-    let mut all = Vec::new();
-    for ancestor in dir.ancestors() {
-        if journals_in(ancestor).is_empty() {
-            continue;
-        }
-        let root = ProjectRoot::open(ancestor)?;
-        let lock = store.project_lock_in(&root)?;
-        let notes = recover_locked(store, activity, &root, &lock)?;
-        narrate(root.path(), &notes, "recovered");
-        all.extend(notes);
-    }
-    Ok(all)
-}
-
-fn recover_locked(
-    store: &Store,
-    activity: &StoreActivity,
-    root: &ProjectRoot,
-    lock: &fs::File,
-) -> io::Result<Vec<Restored>> {
-    let Some(resolution) = root.subdir(Path::new(RESOLUTION_DIR))? else {
-        return Ok(Vec::new());
-    };
-    let mut notes = Vec::new();
-    let mut names = store::read_dir_names_at(resolution.as_raw_fd())?;
-    names.sort();
-    for name in names {
-        let Some(name) = name.to_str() else { continue };
-        if is_journal_temp(name) {
-            unlink_at(resolution.as_raw_fd(), OsStr::new(name))?;
-            continue;
-        }
-        if !is_journal_name(name) {
-            continue;
-        }
-        let journal = read_journal(&resolution, name)?;
-        match journal.state {
-            JournalState::Committed => {
-                finish_committed(store, activity, root, lock, &journal)?;
-            }
-            JournalState::Publishing => {
-                notes.extend(undo(store, root, &journal)?);
-                remove_journal(&resolution, &journal.ecosystem)?;
-                remove_created_tog_dirs(root, &journal)?;
-                release(store, activity, root, lock, &journal)?;
-            }
-        }
-    }
-    Ok(notes)
-}
-
-fn narrate(project: &Path, notes: &[Restored], verb: &str) {
-    let mut restored = Vec::new();
-    let mut edited = Vec::new();
-    for note in notes {
-        match note {
-            Restored::Restored(path) | Restored::Removed(path) => {
-                restored.push(path.display().to_string())
-            }
-            Restored::LeftEdited(path) => edited.push(path.display().to_string()),
-            Restored::Unchanged(_) => {}
-        }
-    }
-    if !restored.is_empty() {
-        ui::note(&format!(
-            "{verb} an unfinished resolution publication in {}: put back {}",
-            project.display(),
-            snapshot::listing(&restored)
-        ));
-    }
-    if !edited.is_empty() {
-        ui::warning(
-            &format!(
-                "an unfinished resolution publication in {} found files edited since it \
-                 started, and left them as they are: {}",
-                project.display(),
-                snapshot::listing(&edited)
-            ),
-            "check those files, then run the command again",
-        );
-    }
-}
-
-/// A committed journal: the targets are published; delete the displaced
-/// temporaries and the journal, then release the originals.
-fn finish_committed(
-    store: &Store,
-    activity: &StoreActivity,
-    root: &ProjectRoot,
-    lock: &fs::File,
-    journal: &Journal,
-) -> io::Result<()> {
-    for target in &journal.targets {
-        let temp = PathBuf::from(&target.temp);
-        check_target(&temp)?;
-        if let Ok((dir, name)) = parent_of(root, &temp) {
-            unlink_at(dir.as_raw_fd(), &name)?;
-        }
-    }
-    fault(FaultPoint::TempsRemoved)?;
-    let resolution = root
-        .subdir(Path::new(RESOLUTION_DIR))?
-        .ok_or_else(|| io::Error::other("the resolution directory vanished"))?;
-    remove_journal(&resolution, &journal.ecosystem)?;
-    release(store, activity, root, lock, journal)
-}
-
-fn release(
-    store: &Store,
-    activity: &StoreActivity,
-    root: &ProjectRoot,
-    lock: &fs::File,
-    journal: &Journal,
-) -> io::Result<()> {
-    match &journal.originals {
-        Some(id) => {
-            store.unroot_objects_locked(activity, root, &BTreeSet::from([id.clone()]), lock)
-        }
-        None => Ok(()),
-    }
-}
-
-/// Undo every target of an unfinished journal, last first, then remove the
-/// directories it created if they are empty. Decides by content alone.
-fn undo(store: &Store, root: &ProjectRoot, journal: &Journal) -> io::Result<Vec<Restored>> {
-    let mut notes = Vec::new();
-    for target in journal.targets.iter().rev() {
-        notes.push(undo_target(store, root, journal, target)?);
-    }
-    for dir in journal.created_dirs.iter().rev() {
-        let dir = PathBuf::from(dir);
-        check_target(&dir)?;
-        if dir == Path::new(RESOLUTION_DIR) || dir == Path::new(".tog") {
-            // They hold the journal; `remove_created_tog_dirs` takes them
-            // once it is gone.
-            continue;
-        }
-        if let Ok((parent, name)) = parent_of(root, &dir) {
-            remove_empty_dir(parent.as_raw_fd(), &name)?;
-        }
-    }
-    Ok(notes)
-}
-
-fn undo_target(
-    store: &Store,
-    root: &ProjectRoot,
-    journal: &Journal,
-    target: &JournalTarget,
-) -> io::Result<Restored> {
-    let relative = PathBuf::from(&target.target);
-    let temp_path = PathBuf::from(&target.temp);
-    check_target(&relative)?;
-    check_target(&temp_path)?;
-    if temp_path.parent() != relative.parent() {
-        return Err(journal_error(
-            journal,
-            "a temporary is not beside its target",
-        ));
-    }
-    let shown = root.path().join(&relative);
-    let Ok((dir, name)) = parent_of(root, &relative) else {
-        // Its directory is gone: nothing of ours can be in it.
-        return Ok(Restored::Unchanged(shown));
-    };
-    let temp = file_name(&temp_path);
-    let new = Current::File(parse_digest(journal, &target.new)?);
-    let original = match target.original.as_str() {
-        ABSENT => Current::Absent,
-        digest => Current::File(parse_digest(journal, digest)?),
-    };
-    let now = current_at(dir.as_raw_fd(), &name)?;
-    let note = if now == new {
-        match original {
-            Current::Absent => {
-                unlink_at(dir.as_raw_fd(), &name)?;
-                Restored::Removed(shown)
-            }
-            _ if matches!(current_at(dir.as_raw_fd(), temp)?, Current::File(_)) => {
-                // The temporary holds exactly what the swap displaced.
-                exchange(dir.as_raw_fd(), temp, &name)?;
-                Restored::Restored(shown)
-            }
-            _ => {
-                // No displaced file to put back, or something that is not
-                // one (a symlink planted after a crash): restore from the
-                // stored copy. A directory there fails the unlink, and the
-                // journal is kept.
-                let bytes = original_bytes(store, journal, target)?;
-                let mode = target_mode(dir.as_raw_fd(), &name)?;
-                unlink_at(dir.as_raw_fd(), temp)?;
-                write_temp(dir.as_raw_fd(), temp, &bytes, mode)?;
-                rename_replace(dir.as_raw_fd(), temp, &name)?;
-                Restored::Restored(shown)
-            }
-        }
-    } else if now == original {
-        Restored::Unchanged(shown)
-    } else {
-        Restored::LeftEdited(shown)
-    };
-    // Whatever is left at the temporary is never the only copy of anything
-    // the user wrote: after the branch above it holds the new bytes or an
-    // unswapped temporary.
-    unlink_at(dir.as_raw_fd(), temp)?;
-    store::fsync_directory(dir.as_raw_fd())?;
-    Ok(note)
-}
-
-fn original_bytes(store: &Store, journal: &Journal, target: &JournalTarget) -> io::Result<Vec<u8>> {
-    let (Some(id), Some(copy)) = (&journal.originals, &target.copy) else {
-        return Err(journal_error(
-            journal,
-            "a present original has no stored copy",
-        ));
-    };
-    if !store::is_object_id(id) || copy.is_empty() || !copy.bytes().all(|b| b.is_ascii_digit()) {
-        return Err(journal_error(
-            journal,
-            "the originals reference is malformed",
-        ));
-    }
-    let path = store.object_path(id).join(copy);
-    let bytes = fs::read(&path).map_err(|error| {
-        io::Error::new(
-            error.kind(),
-            format!(
-                "the pre-run copy of {} at {} cannot be read ({error}); the journal was kept",
-                target.target,
-                path.display()
-            ),
-        )
-    })?;
-    if hex::encode(Sha256::digest(&bytes)) != target.original {
-        return Err(journal_error(
-            journal,
-            "a stored original does not match its digest",
-        ));
-    }
-    Ok(bytes)
-}
-
-/// After the journal of an undone publication is deleted: remove
-/// `.tog/resolution` and `.tog` if that publication created them and they
-/// are now empty.
-fn remove_created_tog_dirs(root: &ProjectRoot, journal: &Journal) -> io::Result<()> {
-    for dir in [RESOLUTION_DIR, ".tog"] {
-        if !journal.created_dirs.iter().any(|created| created == dir) {
-            continue;
-        }
-        if let Ok((parent, name)) = parent_of(root, Path::new(dir)) {
+/// Remove the directories `journal` says its transaction created, deepest
+/// first, each only if it is empty.
+fn remove_created_dirs(root: &ProjectRoot, journal: &Journal) -> io::Result<()> {
+    let mut dirs: Vec<&String> = journal.created_dirs.iter().collect();
+    dirs.sort_by_key(|dir| std::cmp::Reverse(Path::new(dir.as_str()).components().count()));
+    for dir in dirs {
+        let dir = Path::new(dir.as_str());
+        check_target(dir)?;
+        if let Ok((parent, name)) = parent_of(root, dir) {
             remove_empty_dir(parent.as_raw_fd(), &name)?;
         }
     }
     Ok(())
 }
 
+/// Create `relative` and its missing parents through the held root,
+/// returning those created (outermost first).
+fn create_missing_dirs(root: &ProjectRoot, relative: &Path) -> io::Result<Vec<PathBuf>> {
+    let mut created = Vec::new();
+    let mut prefix = PathBuf::new();
+    for component in relative.components() {
+        prefix.push(component);
+        if root.subdir(&prefix)?.is_none() {
+            root.create_dir_all(&prefix)?;
+            created.push(prefix.clone());
+        }
+    }
+    Ok(created)
+}
+
 fn journal_error(journal: &Journal, detail: &str) -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidData,
         format!(
-            "the {} resolution journal cannot be recovered: {detail}; inspect the files it \
-             names, then delete it",
+            "the {} resolution journal in {JOURNAL_DIR} cannot be recovered: {detail}; \
+             inspect the files it names, then delete it",
             journal.ecosystem
         ),
     )
 }
 
-fn parse_digest(journal: &Journal, text: &str) -> io::Result<[u8; 32]> {
+fn parse_digest(text: &str) -> Option<[u8; 32]> {
     hex::decode(text)
         .ok()
         .and_then(|bytes| <[u8; 32]>::try_from(bytes).ok())
-        .ok_or_else(|| journal_error(journal, "a digest is malformed"))
 }
 
-fn read_journal(resolution: &ProjectRoot, name: &str) -> io::Result<Journal> {
-    let shown = resolution.path().join(name);
-    let bytes = resolution.read_file(Path::new(name))?.ok_or_else(|| {
+/// Read one journal. A journal that does not parse is refused with its
+/// exact path; it blocks only the commands that write this project.
+fn read_journal(journals: &ProjectRoot, name: &str) -> io::Result<Journal> {
+    let shown = journals.path().join(name);
+    let refused = |why: String| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "the resolution journal {} is {why}, so tog will not act on it. If no tog \
+                 command was interrupted in this project, delete {}; otherwise inspect the \
+                 files it names first",
+                shown.display(),
+                shown.display()
+            ),
+        )
+    };
+    let bytes = journals
+        .read_file(Path::new(name))
+        .map_err(|error| refused(format!("unreadable ({error})")))?;
+    let bytes = bytes.ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::NotFound,
             format!("{} vanished", shown.display()),
         )
     })?;
-    let journal: Journal = serde_json::from_slice(&bytes).map_err(|error| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!(
-                "the resolution journal {} is unreadable ({error}); inspect the files it \
-                 names, then delete it",
-                shown.display()
-            ),
-        )
-    })?;
+    let journal: Journal =
+        serde_json::from_slice(&bytes).map_err(|error| refused(format!("malformed ({error})")))?;
     if journal.schema != JOURNAL_SCHEMA || journal_name(&journal.ecosystem) != name {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!(
-                "the resolution journal {} is not a {JOURNAL_SCHEMA} journal for its name; \
-                 inspect it, then delete it",
-                shown.display()
-            ),
-        ));
+        return Err(refused(format!(
+            "not a {JOURNAL_SCHEMA} journal for its name"
+        )));
     }
     Ok(journal)
 }
 
+/// `.<ecosystem>.json.<16 hex>.tmp`, as `write_journal` names its
+/// temporaries.
 fn is_journal_temp(name: &str) -> bool {
-    name.starts_with(".journal-") && name.ends_with(".tmp")
+    name.strip_prefix('.')
+        .and_then(|rest| rest.strip_suffix(".tmp"))
+        .and_then(|rest| rest.rsplit_once('.'))
+        .is_some_and(|(journal, hex)| {
+            is_journal_name(journal)
+                && hex.len() == 16
+                && hex
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        })
 }
 
 /// Replace the journal atomically: temporary, fsync, rename, fsync the
 /// directory.
-fn write_journal(resolution: &ProjectRoot, journal: &Journal) -> io::Result<()> {
+fn write_journal(journals: &ProjectRoot, journal: &Journal) -> io::Result<()> {
     let bytes = serde_json::to_vec_pretty(journal).map_err(io::Error::other)?;
     let name = journal_name(&journal.ecosystem);
     let temp = format!(
-        "{name}.{}.tmp",
+        ".{name}.{}.tmp",
         hex::encode(crate::kernel::fsroot::urandom_bytes(8)?)
     );
-    write_temp(resolution.as_raw_fd(), OsStr::new(&temp), &bytes, 0o644)?;
-    rename_replace(resolution.as_raw_fd(), OsStr::new(&temp), OsStr::new(&name))?;
-    store::fsync_directory(resolution.as_raw_fd())
+    write_temp(journals.as_raw_fd(), OsStr::new(&temp), &bytes, 0o644)?;
+    rename_replace(journals.as_raw_fd(), OsStr::new(&temp), OsStr::new(&name))?;
+    store::fsync_directory(journals.as_raw_fd())
 }
 
-fn remove_journal(resolution: &ProjectRoot, ecosystem: &str) -> io::Result<()> {
-    unlink_at(resolution.as_raw_fd(), OsStr::new(&journal_name(ecosystem)))?;
-    store::fsync_directory(resolution.as_raw_fd())
+fn remove_journal(journals: &ProjectRoot, ecosystem: &str) -> io::Result<()> {
+    unlink_at(journals.as_raw_fd(), OsStr::new(&journal_name(ecosystem)))?;
+    store::fsync_directory(journals.as_raw_fd())
+}
+
+/// The mode of a file a publication creates: 0644 under this process's
+/// umask, read from `/proc/self/status` (setting the umask to read it
+/// would race other threads). Without it, 0644.
+fn new_file_mode() -> u32 {
+    let umask = fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|status| {
+            status.lines().find_map(|line| {
+                line.strip_prefix("Umask:")
+                    .and_then(|value| u32::from_str_radix(value.trim(), 8).ok())
+            })
+        })
+        .unwrap_or(0o022);
+    0o644 & !umask
 }
 
 fn check_ecosystem(ecosystem: &str) -> io::Result<()> {
@@ -1408,6 +1242,16 @@ mod tests {
         ]
     }
 
+    fn crash_at(at: FaultPoint) -> impl FnMut(FaultPoint) -> Fault + 'static {
+        move |point| {
+            if point == at {
+                Fault::Crash
+            } else {
+                Fault::Continue
+            }
+        }
+    }
+
     fn set_hook(hook: impl FnMut(FaultPoint) -> Fault + 'static) {
         FAULTS.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
     }
@@ -1422,7 +1266,7 @@ mod tests {
         fx: &Fixture,
         between: impl FnOnce(&Path),
         hook: impl FnMut(FaultPoint) -> Fault + 'static,
-    ) -> io::Result<()> {
+    ) -> io::Result<Published> {
         let activity = fx.store.activity(ActivityMode::Shared).unwrap();
         let root = ProjectRoot::open(&fx.project).unwrap();
         let outputs_declared = declared();
@@ -1448,6 +1292,13 @@ mod tests {
         let staged = snapshot.lock_root().staged.clone();
         fs::write(staged.join("package.json"), NEW_MANIFEST)?;
         fs::write(staged.join("package-lock.json"), NEW_LOCK)?;
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(
+                staged.join("package-lock.json"),
+                fs::Permissions::from_mode(0o777),
+            )?;
+        }
         let changes = snapshot.diff()?;
         let classified = snapshot.classify(&changes, &outputs_declared, &[])?;
         let outputs = Outputs::copy(&fx.store, &activity, &snapshot, &classified.outputs, &[])?;
@@ -1943,8 +1794,9 @@ mod tests {
         fs::remove_file(object.join("0")).unwrap();
         let activity = fx.store.activity(ActivityMode::Shared).unwrap();
         let error = recover_project(&fx.store, &activity, &fx.project).unwrap_err();
-        assert!(error.to_string().contains("journal was kept"), "{error}");
+        assert!(error.to_string().contains("nothing was changed"), "{error}");
         assert!(has_pending_journal(&fx.project));
+        assert_eq!(read(&fx, "package.json").as_deref(), Some(NEW_MANIFEST));
     }
 
     #[test]
@@ -1971,24 +1823,279 @@ mod tests {
         assert!(error.to_string().contains("symlink"), "{error}");
     }
 
+    /// A journal in a parent directory is never acted on from a project
+    /// below it: recovery looks only at the project it was asked about.
     #[test]
-    fn a_journal_found_in_a_parent_is_recovered_from_a_member() {
+    fn a_journal_in_a_parent_is_not_recovered_from_a_member() {
         let fx = fixture("member", true);
         fs::create_dir_all(fx.project.join("member")).unwrap();
-        let _ = run_door(
+        let _ = run_door(&fx, |_| {}, crash_at(FaultPoint::Marked(1)));
+        assert!(!has_pending_journal(&fx.project.join("member")));
+        let activity = fx.store.activity(ActivityMode::Shared).unwrap();
+        let notes = recover_project(&fx.store, &activity, &fx.project.join("member")).unwrap();
+        assert!(notes.is_empty(), "{notes:?}");
+        assert_eq!(read(&fx, "package.json").as_deref(), Some(NEW_MANIFEST));
+        assert!(has_pending_journal(&fx.project));
+    }
+
+    fn journal_path(fx: &Fixture) -> PathBuf {
+        fx.project.join(JOURNAL_DIR).join("npm.json")
+    }
+
+    fn edit_journal(fx: &Fixture, edit: impl FnOnce(&mut serde_json::Value)) {
+        let path = journal_path(fx);
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        edit(&mut value);
+        fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+    }
+
+    fn recover_err(fx: &Fixture) -> io::Error {
+        let activity = fx.store.activity(ActivityMode::Shared).unwrap();
+        recover_project(&fx.store, &activity, &fx.project).unwrap_err()
+    }
+
+    /// The journal lives under `.tog/journal/`, never in
+    /// `.tog/resolution/`, which projects commit.
+    #[test]
+    fn the_journal_is_outside_the_committed_resolution_directory() {
+        let fx = fixture("journal-place", true);
+        let _ = run_door(&fx, |_| {}, crash_at(FaultPoint::Marked(0)));
+        assert!(journal_path(&fx).is_file());
+        for entry in fs::read_dir(fx.project.join(RESOLUTION_DIR)).unwrap() {
+            let name = entry.unwrap().file_name().into_string().unwrap();
+            assert!(!name.contains("journal"), "{name}");
+        }
+    }
+
+    /// A committed journal whose temporary names another file is refused:
+    /// the file is not deleted.
+    #[test]
+    fn a_journal_naming_a_foreign_temporary_is_refused_and_deletes_nothing() {
+        let fx = fixture("forged-temp", true);
+        let _ = run_door(&fx, |_| {}, crash_at(FaultPoint::Committed));
+        fs::write(fx.project.join("victim.txt"), b"mine\n").unwrap();
+        for forged in [
+            "victim.txt",
+            "../victim.txt",
+            ".victim.txt.tog-0123456789abcdef.tmp",
+        ] {
+            edit_journal(&fx, |journal| {
+                journal["targets"][0]["temp"] = forged.into();
+            });
+            let error = recover_err(&fx);
+            assert!(
+                error.to_string().contains("nothing was changed"),
+                "{forged}: {error}"
+            );
+            assert!(
+                error.to_string().contains(".tog/journal/npm.json"),
+                "{error}"
+            );
+            assert_eq!(read(&fx, "victim.txt").as_deref(), Some(&b"mine\n"[..]));
+        }
+        edit_journal(&fx, |journal| {
+            journal["targets"][0]["target"] = "../victim.txt".into();
+        });
+        assert!(recover_err(&fx).to_string().contains("nothing was changed"));
+        assert_eq!(read(&fx, "victim.txt").as_deref(), Some(&b"mine\n"[..]));
+    }
+
+    /// A journal whose originals object is not in this store, or not
+    /// rooted to this project, or does not list the journal's targets, is
+    /// refused and nothing is touched. That covers a journal planted in a
+    /// project, copied from another one, or left by a run with another
+    /// store.
+    #[test]
+    fn a_journal_without_matching_rooted_originals_is_refused() {
+        let fx = fixture("forged-originals", true);
+        let _ = run_door(&fx, |_| {}, crash_at(FaultPoint::Marked(1)));
+        let good: serde_json::Value =
+            serde_json::from_slice(&fs::read(journal_path(&fx)).unwrap()).unwrap();
+        let cases: Vec<Box<dyn Fn(&mut serde_json::Value)>> = vec![
+            Box::new(|journal| journal["originals"] = format!("{}-npm-1", "a".repeat(40)).into()),
+            Box::new(|journal| journal["targets"][0]["original"] = "0".repeat(64).into()),
+            Box::new(|journal| journal["targets"][1]["target"] = "other.json".into()),
+        ];
+        for edit in cases {
+            let mut journal = good.clone();
+            edit(&mut journal);
+            fs::write(journal_path(&fx), serde_json::to_vec(&journal).unwrap()).unwrap();
+            let error = recover_err(&fx);
+            assert!(error.to_string().contains("nothing was changed"), "{error}");
+            assert_eq!(read(&fx, "package.json").as_deref(), Some(NEW_MANIFEST));
+        }
+        // Rooted to another project only: copy this project's journal there.
+        let other = fixture("forged-elsewhere", true);
+        fs::create_dir_all(other.project.join(JOURNAL_DIR)).unwrap();
+        fs::write(journal_path(&other), serde_json::to_vec(&good).unwrap()).unwrap();
+        let other = Fixture {
+            store: fx.store.clone(),
+            project: other.project.clone(),
+            _temp: other._temp,
+        };
+        let error = recover_err(&other);
+        assert!(
+            error.to_string().contains("not rooted to this project"),
+            "{error}"
+        );
+        assert_eq!(read(&other, "package.json").as_deref(), Some(OLD_MANIFEST));
+        // The real journal still recovers.
+        fs::write(journal_path(&fx), serde_json::to_vec(&good).unwrap()).unwrap();
+        recover(&fx);
+        assert_original(&fx, Some(OLD_RECEIPT));
+    }
+
+    #[test]
+    fn a_malformed_journal_is_refused_naming_its_path() {
+        let fx = fixture("malformed", true);
+        fs::create_dir_all(fx.project.join(JOURNAL_DIR)).unwrap();
+        fs::write(journal_path(&fx), b"{not json").unwrap();
+        let error = recover_err(&fx);
+        let text = error.to_string();
+        assert!(
+            text.contains(&journal_path(&fx).display().to_string()),
+            "{text}"
+        );
+        assert!(text.contains("delete"), "{text}");
+        assert_eq!(read(&fx, "package.json").as_deref(), Some(OLD_MANIFEST));
+    }
+
+    /// A target that passed the compare (`swapped`) is restored from the
+    /// stored copy when its temporary no longer holds the pre-run bytes,
+    /// so a planted temporary is never exchanged in.
+    #[test]
+    fn a_planted_temporary_for_a_swapped_target_is_never_exchanged_in() {
+        let fx = fixture("planted-bytes", true);
+        let _ = run_door(&fx, |_| {}, crash_at(FaultPoint::Marked(0)));
+        let temp = fs::read_dir(&fx.project)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| path.to_string_lossy().ends_with(".tmp"))
+            .unwrap();
+        fs::write(&temp, b"planted\n").unwrap();
+        recover(&fx);
+        assert_original(&fx, Some(OLD_RECEIPT));
+    }
+
+    /// Cleanup failing after the commit point is not a failed publication:
+    /// the outputs and receipt stay, the journal stays committed, and
+    /// recovery finishes.
+    #[test]
+    fn a_cleanup_failure_after_commit_is_published_with_cleanup_pending() {
+        let fx = fixture("cleanup-pending", true);
+        let published = run_door(
             &fx,
             |_| {},
             |point| {
-                if point == FaultPoint::Marked(1) {
-                    Fault::Crash
+                if point == FaultPoint::TempsRemoved {
+                    Fault::Fail
                 } else {
                     Fault::Continue
                 }
             },
+        )
+        .unwrap();
+        assert!(
+            matches!(published, Published::CleanupPending(_)),
+            "{published:?}"
         );
-        assert!(has_pending_journal(&fx.project.join("member")));
+        assert_eq!(read(&fx, "package-lock.json").as_deref(), Some(NEW_LOCK));
+        assert!(has_pending_journal(&fx.project));
+        assert_eq!(rooted_originals(&fx).len(), 1);
+        recover(&fx);
+        assert_published(&fx);
+    }
+
+    /// A process killed while the tool ran (after hold, before publish)
+    /// leaves a `held` journal; recovery releases the originals it names.
+    #[test]
+    fn originals_held_by_a_killed_run_are_released_by_recovery() {
+        let fx = fixture("killed-run", true);
         let activity = fx.store.activity(ActivityMode::Shared).unwrap();
-        recover_project(&fx.store, &activity, &fx.project.join("member")).unwrap();
+        let declared = declared();
+        let tx = Transaction::hold(
+            &fx.store,
+            &activity,
+            ProjectRoot::open(&fx.project).unwrap(),
+            &HoldSpec {
+                ecosystem: "npm",
+                outputs: &declared,
+                receipt: true,
+            },
+        )
+        .unwrap();
+        // What a killed process leaves: nothing released, locks closed.
+        let mut tx = tx;
+        tx.finished = true;
+        drop(tx);
+        assert_eq!(rooted_originals(&fx).len(), 1);
+        assert!(has_pending_journal(&fx.project));
+        drop(activity);
+        recover(&fx);
         assert_original(&fx, Some(OLD_RECEIPT));
+        assert!(!fx.project.join(JOURNAL_DIR).exists());
+    }
+
+    /// The project directory's own lock is held from hold to publish, so a
+    /// tog using another store cannot recover (or publish) meanwhile.
+    #[test]
+    fn a_transaction_holds_the_project_directory_lock() {
+        let fx = fixture("dir-lock", true);
+        let activity = fx.store.activity(ActivityMode::Shared).unwrap();
+        let declared = declared();
+        let tx = Transaction::hold(
+            &fx.store,
+            &activity,
+            ProjectRoot::open(&fx.project).unwrap(),
+            &HoldSpec {
+                ecosystem: "npm",
+                outputs: &declared,
+                receipt: true,
+            },
+        )
+        .unwrap();
+        let dir = fs::File::open(&fx.project).unwrap();
+        assert!(
+            dir.try_lock().is_err(),
+            "the project directory is not locked"
+        );
+        tx.abandon().unwrap();
+        assert!(dir.try_lock().is_ok());
+    }
+
+    /// A run with another store finds this store's journal and refuses it,
+    /// rather than undoing a publication it knows nothing about.
+    #[test]
+    fn recovery_with_another_store_refuses_the_journal() {
+        let fx = fixture("two-stores", true);
+        let _ = run_door(&fx, |_| {}, crash_at(FaultPoint::Marked(1)));
+        let other = fixture("two-stores-other", false);
+        let elsewhere = Fixture {
+            store: other.store.clone(),
+            project: fx.project.clone(),
+            _temp: other._temp,
+        };
+        let error = recover_err(&elsewhere);
+        assert!(error.to_string().contains("not in this store"), "{error}");
+        assert_eq!(read(&fx, "package-lock.json").as_deref(), Some(NEW_LOCK));
+        recover(&fx);
+        assert_original(&fx, Some(OLD_RECEIPT));
+    }
+
+    /// A file the publication creates gets the ordinary file mode, not the
+    /// bits the tool left on it.
+    #[test]
+    fn a_created_output_gets_the_ordinary_file_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let fx = fixture("created-mode", true);
+        run_door(&fx, |_| {}, |_| Fault::Continue).unwrap();
+        let mode = fs::metadata(fx.project.join("package-lock.json"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, new_file_mode());
+        assert_eq!(mode & 0o111, 0);
     }
 }

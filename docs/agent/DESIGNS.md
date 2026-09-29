@@ -2567,7 +2567,15 @@ Contract 1 needs enforcement, not review alone:
    record from here until the journal is gone, and released afterwards.
    A crash between deleting the journal and releasing the root leaves the
    object protected until the next `tog gc --register`, never the
-   reverse. The whole transaction holds the project lock.
+   reverse. The object is committed even when every target is absent,
+   because recovery trusts a journal only through it. Before the object
+   is rooted, a `held` journal (step 7's file, with no targets yet) names
+   its id, so a tog killed while the tool runs leaves a journal that
+   recovery finds and whose originals it releases; nothing rooted is
+   ever left without one. The whole transaction holds the store's
+   project lock and an `flock` on the project directory itself: the
+   store's lock is per store, the journal is per project, and two tog
+   processes with different `TOG_STORE`s must not undo each other.
 3. **Snapshot** the lock root and extra roots (socket-free), with the
    baseline manifest. Scan store and system roots for sockets.
 4. **Run** the tool (probe first for uv) in its tier, through the proxy.
@@ -2581,8 +2589,11 @@ Contract 1 needs enforcement, not review alone:
    staged directory plus rename, as for every object), and register them
    in the project's root record. Build the record from the output copy's
    digests and sign it.
-7. **Journal.** Write `.tog/resolution/.journal-<ecosystem>.json` through
+7. **Journal.** Write `.tog/journal/<ecosystem>.json` through
    the held descriptor, with `fsync` of the file and the directory. It
+   lives under `.tog/` (which projects ignore) and outside
+   `.tog/resolution/` (which projects commit, PR 10), so a journal is
+   never committed, pushed, or cloned into another checkout. It
    lists, per target (each output, then the record), the target name,
    the temporary name, the original copy's store path and pre-run digest
    (or "absent"), the new digest, and a state (`pending`). The journal's
@@ -2613,7 +2624,10 @@ Contract 1 needs enforcement, not review alone:
    at step 2.
 9. **Commit point.** When the record has been swapped, mark the journal
    `committed`, `fsync`, delete the displaced temporaries, and delete the
-   journal. The resolution is now published.
+   journal. The resolution is now published. A failure while cleaning up
+   after this point is not a failed door: the outputs, the receipt, and
+   the ledger's roots stay, tog warns, and the committed journal is left
+   for the next recovery to finish.
 10. **On any failure before step 8**, nothing has touched the project:
     remove the temporaries and unroot the ledger and sidecar for `tog gc`.
     **On failure during step 8**, undo every `swapped` target in reverse
@@ -2622,11 +2636,30 @@ Contract 1 needs enforcement, not review alone:
     as it was.
 
 **Recovery** (at the start of any writing command, after a crash, and at
-the start of every transaction): recovery looks for journals in the
-command's directory and each ancestor, since the lock root can be a
-workspace root above it. A
-`committed` journal only needs its temporaries and itself deleted. Any
-other journal is rolled back target by target. A target whose current
+the start of every transaction): recovery looks for journals only in the
+lock root it is operating on: the command's project directory, and in a
+transaction the lock root it holds (a workspace root's journal is
+recovered by the next transaction there). It never walks to ancestors: a
+journal planted in a parent directory must not steer a command in a
+project below it. It takes the store's project lock and the project
+directory's `flock`. A journal is acted on only when it describes a
+publication tog made in this project with this store: its originals
+object is in the active store, is rooted to this project, and its
+identity lists exactly the journal's targets and pre-run digests; every
+target is a project path of the kind a transaction holds (relative, no
+`..`, no `.tog/` state but the receipt, reached through the held
+descriptor without following a symlink); and every temporary is named
+exactly `.<target name>.tog-<16 hex>.tmp` beside its target. Anything
+else, and a journal that does not parse, is refused with the journal's
+path and what to do, and nothing is touched; it blocks only commands
+that write that project. A `held` journal only releases its originals. A
+`committed` journal only needs its temporaries and itself deleted, and a
+temporary is deleted only while it still holds its target's pre-run
+bytes. Any other journal is rolled back target by target. A displaced
+temporary is exchanged back only for a target whose swap was in flight
+(`pending`, where it may hold a user's edit the swap displaced) or whose
+temporary still holds the pre-run bytes; otherwise the stored copy is
+used. A target whose current
 digest is the journal's new digest is restored from its original copy
 (or removed if it was absent). A target at its pre-run digest is left
 alone. A target at a third digest was edited after the crash, so it is
@@ -3267,7 +3300,8 @@ doors" section with the census as a covered/not-covered table (WP5's
 `add`/`remove`/`update` row, "Delegated planning runs unsandboxed", the
 audit paragraph's "does not cover the doors" sentence, and the .NET
 restore row. CLI.md documents `tog attest`, the new notes, and the new
-errors. The README `.gitignore` stanza gains `!**/.tog/resolution/`.
+errors. The README `.gitignore` stanza gains `!**/.tog/resolution/`
+(receipts only: journals live in `.tog/journal/`, which stays ignored).
 FOLLOW-UPS "Delegated-tool doors" is deleted and #68 closed.
 
 Each PR from 3 on runs its ecosystem's `--ignored` tests on the Mac

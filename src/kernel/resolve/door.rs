@@ -19,7 +19,7 @@ use super::relay::{self, ToolStatus};
 use super::routes::{Permitted, ProxyAddress, Route};
 use super::session::{Fact, Intercept, Mode as Network, SessionConfig, SessionReport};
 use super::snapshot::{EntryState, PathGlob, Snapshot, SnapshotSpec};
-use super::transaction::{HoldSpec, Transaction};
+use super::transaction::{HoldSpec, Published, Transaction};
 use super::{DelegateReport, DelegateSpec, DelegateStdio, DoorKind, ResolutionDoor};
 use crate::kernel::activity::StoreActivity;
 use crate::kernel::fsroot::ProjectRoot;
@@ -576,14 +576,25 @@ fn publish_project(
         Ok(bytes) => bytes.flatten(),
         Err(error) => return Err(unroot_after(store, activity, &tx, &added, error)),
     };
-    if let Err(error) = tx.publish(outputs, bytes.as_deref()) {
-        // The transaction undid itself and released its lock; take it
-        // again to take the ledger back.
-        let lock = store.project_lock_in(again)?;
-        store.unroot_objects_locked(activity, again, &added, &lock)?;
-        return Err(error);
+    match tx.publish(outputs, bytes.as_deref()) {
+        Ok(Published::Clean) => Ok(()),
+        // Published: the receipt names this ledger, so its roots stay. The
+        // next recovery in this project finishes the cleanup.
+        Ok(Published::CleanupPending(error)) => {
+            crate::kernel::ui::warning(
+                &format!("the resolution was published, but cleaning up after it failed: {error}"),
+                "the next tog command in this project finishes the cleanup",
+            );
+            Ok(())
+        }
+        Err(error) => {
+            // The transaction undid itself and released its lock; take it
+            // again to take the ledger back.
+            let lock = store.project_lock_in(again)?;
+            store.unroot_objects_locked(activity, again, &added, &lock)?;
+            Err(error)
+        }
     }
-    Ok(())
 }
 
 /// Take back the ledger ids this run rooted, then report `error`. The
@@ -840,6 +851,9 @@ get() {
         policy: Policy,
         adjust: impl FnOnce(&mut ConfinedSpec<'_>),
     ) -> Outcome {
+        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let _serial = policy::attribution_test_lock();
         RELAY_FOR_TEST.with(|slot| *slot.borrow_mut() = relay);
         SKIP_SCAN_FOR_TEST.with(|skip| skip.set(true));
@@ -1240,6 +1254,38 @@ get() {
         assert!(!fx.project.join(".tog").exists());
         ledger::read_portable(&fx.harness.store, &objects.ledger).unwrap();
         assert!(rooted(&fx).is_empty(), "{:?}", rooted(&fx));
+    }
+
+    /// A cleanup failure after the commit point keeps what was published:
+    /// the door succeeds and the ledger the receipt names stays rooted.
+    #[test]
+    fn a_cleanup_failure_after_commit_keeps_the_ledger_rooted() {
+        use crate::kernel::resolve::transaction::{Fault, FaultPoint, FAULTS};
+        let Some(relay) = relay("a_cleanup_failure_after_commit_keeps_the_ledger_rooted") else {
+            return;
+        };
+        let fx = fixture("door-cleanup");
+        FAULTS.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(|point| {
+                if point == FaultPoint::TempsRemoved {
+                    Fault::Fail
+                } else {
+                    Fault::Continue
+                }
+            }))
+        });
+        let outcome = run_door(
+            &fx,
+            Some(relay),
+            "echo new > deps.lock\n",
+            Policy::default(),
+            |_| {},
+        );
+        FAULTS.with(|slot| *slot.borrow_mut() = None);
+        let objects = outcome.result.unwrap().ledger.unwrap();
+        assert_eq!(fs::read(fx.project.join("deps.lock")).unwrap(), b"new\n");
+        let rooted = rooted(&fx);
+        assert!(rooted.contains(&objects.ledger) && rooted.contains(&objects.diagnostics));
     }
 
     #[test]
