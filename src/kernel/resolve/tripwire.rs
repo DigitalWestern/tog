@@ -13,8 +13,15 @@
 //!
 //! A program counts as a resolver by the name it is started under
 //! (case-insensitively, since macOS file systems are) and by the file that
-//! name resolves to, so a symlink or copy under another name does not hide
-//! one.
+//! name resolves to, so a symlink or a `PATH` entry under another name does
+//! not hide one. A copy or a hard link under another name does: the check
+//! reads names, not file contents. It catches a call site written the wrong
+//! way by mistake; it is not a sandbox against code that means to hide a
+//! resolver.
+//!
+//! `RESOLVERS` names programs, not wrappers. `sh -c`, `env`, `bwrap` and
+//! `sandbox-exec` pass by design (a `tog run` script is `sh -c`), so a
+//! resolver started through one is not seen.
 
 use sha2::{Digest, Sha256};
 use std::ffi::{OsStr, OsString};
@@ -22,11 +29,16 @@ use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
-/// The file names of every dependency tool tog runs. `git` is here because
-/// a resolver can reach it (npm and cargo git dependencies); tog's own
-/// verified git fetches go through `kernel::gitsrc`, not a `local_*` call.
+/// The file names of every dependency tool tog runs, and of the programs
+/// that can fetch or install one. `git` is here because a resolver can
+/// reach it (npm and cargo git dependencies); tog's own verified git
+/// fetches go through `kernel::gitsrc`, not a `local_*` call. `rustup`,
+/// `uvx`, `corepack`, `node`, `yarn`, `rebar3`, `pip`, `pip3`, `bundler`
+/// and `iex` can each download or run project code, and no host-local
+/// helper runs any of them, so they are refused outright.
 pub const RESOLVERS: &[&str] = &[
-    "uv", "npm", "npx", "pnpm", "cargo", "go", "bundle", "gem", "ruby", "mix", "elixir", "erl",
+    "uv", "uvx", "pip", "pip3", "npm", "npx", "pnpm", "yarn", "corepack", "node", "cargo",
+    "rustup", "go", "bundle", "bundler", "gem", "ruby", "mix", "elixir", "iex", "erl", "rebar3",
     "dotnet", "git",
 ];
 
@@ -491,8 +503,8 @@ fn resolver_named(name: &OsStr) -> Option<&'static str> {
 
 /// The file `command` would execute, resolved the way `execvp` does: a
 /// program with a `/` is a path (relative to the command's directory), and
-/// a bare name is looked up on the child's `PATH`. `None` when nothing
-/// resolves.
+/// a bare name is looked up on the child's `PATH`, skipping entries that
+/// are not executable files. `None` when nothing resolves.
 fn resolved_program(command: &Command, run: &Invocation) -> Option<PathBuf> {
     let program = Path::new(command.get_program());
     let base = run
@@ -505,8 +517,16 @@ fn resolved_program(command: &Command, run: &Invocation) -> Option<PathBuf> {
     let path = run.effective("PATH")?;
     std::env::split_paths(&path)
         .map(|dir| base.join(dir).join(program))
-        .find(|candidate| candidate.is_file())
+        .find(|candidate| is_executable_file(candidate))
         .and_then(|found| found.canonicalize().ok())
+}
+
+/// Whether `path` is a regular file with an execute bit, the files
+/// `execvp` would run from a `PATH` search.
+fn is_executable_file(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path)
+        .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
 }
 
 /// The refusal for `command`, run for the store at `store_root`, when it
@@ -801,6 +821,15 @@ mod tests {
         ] {
             fixture.refused(&command);
         }
+        // Tools that fetch or install a resolver, refused by name wherever
+        // they live.
+        for name in [
+            "rustup", "uvx", "corepack", "node", "yarn", "rebar3", "pip", "pip3", "bundler", "iex",
+        ] {
+            let program = fixture.program(&format!("objects/tools/bin/{name}"));
+            fixture.refused(&command(&program, &["--version"], &[]));
+            fixture.refused(&command(name, &["--version"], &[]));
+        }
         for form in OFFLINE_FORMS {
             assert!(RESOLVERS.contains(&form.program), "{}", form.program);
         }
@@ -1072,5 +1101,46 @@ mod tests {
         fixture.refused(&disguised);
         // A helper that resolves to no resolver still runs.
         fixture.admits(&command("/bin/cp", &["-a", "a", "b"], &[]));
+    }
+
+    /// A `PATH` search skips what `execvp` skips: a non-executable file
+    /// earlier on `PATH` does not stand in for the resolver after it.
+    #[cfg(unix)]
+    #[test]
+    fn path_lookup_skips_files_that_are_not_executable() {
+        use std::os::unix::fs::symlink;
+        let fixture = Fixture::new("tripwire-exec-bit");
+        let git = fixture.program("objects/tools/bin/git");
+        let plain = fixture.path("tmp/plain");
+        let linked = fixture.path("tmp/linked");
+        std::fs::create_dir_all(&plain).unwrap();
+        std::fs::create_dir_all(&linked).unwrap();
+        std::fs::write(Path::new(&plain).join("fetcher"), "not a program\n").unwrap();
+        symlink(&git, Path::new(&linked).join("fetcher")).unwrap();
+        let path = format!("{plain}:{linked}");
+        fixture.refused(&command("fetcher", &["fetch"], &[("PATH", &path)]));
+    }
+
+    /// A known limit: a copy or a hard link of a resolver under another
+    /// name is a different file name with no link to follow, so the
+    /// tripwire does not see it. It catches a call site written the wrong
+    /// way by mistake, not code that means to hide a resolver.
+    #[cfg(unix)]
+    #[test]
+    fn a_copy_or_hard_link_under_another_name_is_not_seen() {
+        let fixture = Fixture::new("tripwire-copy");
+        let git = fixture.program("objects/tools/bin/git");
+        let bin = Path::new(&git).parent().unwrap();
+        std::fs::copy(&git, bin.join("copied")).unwrap();
+        std::fs::hard_link(&git, bin.join("linked")).unwrap();
+        for name in ["copied", "linked"] {
+            let program = bin.join(name);
+            assert!(
+                fixture
+                    .refusal(&command(program.to_str().unwrap(), &["fetch"], &[]))
+                    .is_none(),
+                "{name}: if this is refused, the limit is gone; update the module doc"
+            );
+        }
     }
 }
