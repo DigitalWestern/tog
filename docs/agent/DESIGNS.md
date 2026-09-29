@@ -2401,20 +2401,45 @@ Contract 1 needs enforcement, not review alone:
   invocation matches a row of a small reviewed table of offline forms. A
   program is a resolver when the name it is started under, compared
   case-insensitively, or the file that name resolves to (through a
-  symlink, or the child's `PATH` for a bare name) is in `RESOLVERS`
-  (`uv`, `npm`, `npx`, `pnpm`, `cargo`, `go`, `bundle`, `gem`, `ruby`,
-  `mix`, `elixir`, `erl`, `dotnet`, `git`). A form binds the exact argv
-  shape of its one call site, and the environment the child will really
-  see, meaning the command's explicit edits over tog's own environment:
-  `cargo locate-project ... --offline`; `go mod download path@version...`
-  with `GOPROXY`, `GOSUMDB`, `GOTOOLCHAIN`, `GOENV`, `GOWORK`, `GOVCS` and
-  `GOAUTH` pinned off or local, and `GOFLAGS`, `GONOPROXY`, `GOPRIVATE`,
-  `GONOSUMDB`, `GOINSECURE` and `GOCACHEPROG` absent; the Ruby helper's
-  `spec` mode and the Elixir helper's `hexmark` mode, each with its
-  helper script checked by sha256 against the digest the tailor's test
-  pins, no option argument, and no interpreter option variable
-  (`RUBYOPT`, `RUBYLIB`, `ERL_*`, `ELIXIR_*`); the staged-OTP `erl`
-  probe, with every `ERL_*` variable gone. `tar` never matches. Helpers that evaluate project files without needing the
+  symlink, or the child's `PATH` for a bare name, skipping files without
+  an execute bit) is in `RESOLVERS` (`uv`, `uvx`, `pip`, `pip3`, `npm`,
+  `npx`, `pnpm`, `yarn`, `corepack`, `node`, `cargo`, `rustup`, `go`,
+  `bundle`, `bundler`, `gem`, `ruby`, `mix`, `elixir`, `iex`, `erl`,
+  `rebar3`, `dotnet`, `git`). `RESOLVERS` names programs, not wrappers:
+  `sh -c`, `env`, `bwrap` and `sandbox-exec` pass by design (a `tog run`
+  script is `sh -c`). `rustup`, `uvx`, `corepack`, `node`, `yarn`,
+  `rebar3`, `pip`, `bundler` and `iex` are listed although no call site
+  runs them as a helper, because each can fetch or run project code and
+  no legitimate `local_*` caller starts one, so refusing them costs
+  nothing. A copy or hard link under another name is not seen: the check
+  reads names, and it catches call sites written the wrong way, not code
+  hiding a resolver. A form binds the exact argv shape of its one call
+  site, the program to a file in the store (a realized or staged object,
+  never a host shim or rustup proxy), and the environment the child will
+  really see, meaning the command's explicit edits over tog's own
+  environment. The Ruby and Elixir forms check the tailors' own scrub
+  lists, which live in the tripwire and which the tailors alias. The
+  forms: `cargo locate-project --workspace --message-format plain
+  --offline` with `RUSTUP_HOME` and `RUSTUP_TOOLCHAIN` removed; `go mod
+  download path@version...` with `GOROOT` the program's own toolchain,
+  `GOPROXY`, `GOSUMDB`, `GOTOOLCHAIN`, `GOENV`, `GOWORK`, `GOVCS` and
+  `GOAUTH` set off or local by the command, `GOFLAGS`, `GONOPROXY`,
+  `GOPRIVATE`, `GONOSUMDB`, `GOINSECURE` and `GOCACHEPROG` removed rather
+  than emptied (an empty value falls back to `$GOROOT/go.env`),
+  `GOMODCACHE` and `HOME` in the store and `XDG_CONFIG_HOME` removed; the
+  Ruby helper's `spec` mode and the Elixir helper's `hexmark` mode, each
+  with its helper script checked by sha256 against the digest the
+  tailor's test pins, no option argument, the file it reads or writes in
+  the store, only the forced variables of the scrubbed family (so no
+  `RUBYOPT`, `RUBYLIB`, `ERL_*`, `ELIXIR_*`, `ERTS_BIN`, other `MIX_*` or
+  `HEX_*`), their path variables (`GEM_HOME`, `GEM_PATH`, `MIX_HOME`,
+  ...) and `HOME` in the store, and `PATH` confined to the store plus
+  `/usr/bin` and `/bin` for Elixir (its script starts `erl` by name) or
+  led by the store Ruby; the staged-OTP `erl` probe, with an environment
+  the command empties itself and then gives only `PATH`, `HOME`, `TMPDIR`
+  and `LANG`, so no `ERL_*` variable or user `.erlang` (through `HOME` or
+  `XDG_CONFIG_HOME`) reaches it. Each tailor's test undoes every forced
+  edit one at a time and expects a refusal. `tar` never matches. Helpers that evaluate project files without needing the
   network (the Ruby gate-1 and gate-2 helpers, the Elixir `mix.lock`
   parser) go through a door with no routes, which means full network
   denial. The door calls the unrestricted primitive. So do tog's own
@@ -2434,7 +2459,8 @@ Contract 1 needs enforcement, not review alone:
   each with its reason. That is three kernel sites and two command sites,
   not an allow-list row per tailor. Any spawn primitive added to `supervise` later joins the
   list in the same PR, and the named test
-  `every_public_supervise_spawn_is_fenced` fails if a `pub fn` in
+  `every_public_supervise_spawn_is_fenced` fails if a non-private function
+  (`pub`, `pub(crate)`, `pub(super)`, `pub(in ...)`) in
   `kernel::supervise` that takes a `Command` is neither a `local_*`
   function nor on the `disallowed-methods` list.
 - **Named test.** `every_resolver_invocation_goes_through_the_door` runs
