@@ -460,6 +460,11 @@ pub fn check_route_path(path_and_query: &str) -> Result<(), String> {
     // The path is not echoed (its query may hold a secret); the caller
     // names the request with its redacted URL.
     let refuse = |why: &str| Err(format!("mirror path refused: {why}"));
+    // A fragment never belongs in a request target; a `#` here is either
+    // a confused client or an attempt to make two parsers disagree.
+    if path_and_query.contains('#') {
+        return refuse("a # (fragments are not sent to a server)");
+    }
     let (path, query) = match path_and_query.split_once('?') {
         Some((path, query)) => (path, Some(query)),
         None => (path_and_query, None),
@@ -482,6 +487,14 @@ pub fn check_route_path(path_and_query: &str) -> Result<(), String> {
     for encoded in ["%2f", "%5c", "%00"] {
         if lower.contains(encoded) {
             return refuse("a percent-encoded /, \\, or NUL");
+        }
+    }
+    // `%25` is an encoded `%`. Followed by the escape of `.`, `/`, `\`,
+    // NUL, or `%`, it decodes in two passes to a character the checks
+    // above refuse, so a server that decodes twice would see it.
+    for encoded in ["%252e", "%252f", "%255c", "%2500", "%2525"] {
+        if lower.contains(encoded) {
+            return refuse("a double percent-encoding");
         }
     }
     let segments: Vec<&str> = path[1..].split('/').collect();
@@ -634,6 +647,8 @@ mod tests {
             "/a/b.json?format=json&x=%2F",
             "/a%20b/c",
             "/dir/",
+            "/a%25b",
+            "/a%2541",
         ] {
             assert_eq!(check_route_path(good), Ok(()), "{good}");
         }
@@ -652,6 +667,13 @@ mod tests {
             ("/a//b", "empty segment"),
             ("/a%zz", "malformed"),
             ("/a%2", "malformed"),
+            ("/a#b", "a #"),
+            ("/a?x=1#frag", "a #"),
+            ("/a/%252e%252e/b", "double"),
+            ("/a%252Fb", "double"),
+            ("/a%255cb", "double"),
+            ("/a%2500", "double"),
+            ("/a%2525", "double"),
         ] {
             let error = check_route_path(bad).unwrap_err();
             assert!(error.contains(why), "{bad}: {error}");
