@@ -68,6 +68,21 @@ pub(super) fn run_go(
         .map_err(|e| io::Error::new(e.kind(), format!("run store go {args:?}: {e}")))
 }
 
+/// The command `run_go_offline` starts. With the proxy off nothing should
+/// fetch; `GOVCS` and `GOAUTH` close the remaining ways a module could (a
+/// version-control fetch, an auth helper), and the host-local tripwire
+/// requires them.
+pub(super) fn offline_command(
+    go_obj: &Path,
+    cwd: &Path,
+    modcache: &Path,
+    args: &[&str],
+) -> std::process::Command {
+    let mut spec = go_spec(go_obj, cwd, modcache, true, args);
+    spec.env("GOVCS", "*:off").env("GOAUTH", "off");
+    spec.command()
+}
+
 /// The store go with the module proxy off (`GOPROXY=off`): an extraction
 /// from a module cache tog staged, a host-local helper.
 pub(super) fn run_go_offline(
@@ -77,7 +92,7 @@ pub(super) fn run_go_offline(
     modcache: &Path,
     args: &[&str],
 ) -> io::Result<std::process::Output> {
-    let mut cmd = go_spec(go_obj, cwd, modcache, true, args).command();
+    let mut cmd = offline_command(go_obj, cwd, modcache, args);
     crate::kernel::supervise::local_output(&mut cmd, activity)
         .map_err(|e| io::Error::new(e.kind(), format!("run store go {args:?}: {e}")))
 }

@@ -862,9 +862,10 @@ ledger. "Runs code" is what the tool executes besides itself.
 Not doors: tog's own downloads (`kernel::fetch`, `kernel::gitsrc`, the
 `Tailor::registry_exists` check `tog add` makes) are tog code with tog
 verification. Host-local helpers (`tar`, `getconf`, `id`,
-`cargo locate-project --offline`, `go` with `GOPROXY=off`, the Elixir
-helper's `hexmark` mode, the staged-OTP `erl` probe, the Ruby helper's
-`spec` read of a verified `.gem`) need no network. A planner row that needs
+`cargo locate-project --offline`, the Go module extraction
+`go mod download path@version...` with the full offline environment, the
+Elixir helper's `hexmark` mode, the staged-OTP `erl` probe, the Ruby
+helper's `spec` read of a verified `.gem`) need no network. A planner row that needs
 no network (Ruby gate 1, confirmed by PR 0, and the Elixir lock parser)
 still goes through the door with **no routes**, which means full network
 denial. That also closes the LIMITATIONS row "Delegated planning runs
@@ -2396,12 +2397,24 @@ Contract 1 needs enforcement, not review alone:
   `local_status_with_stderr`, and `local_output` for host-local helpers,
   one for each of today's three spawn primitives (`status`,
   `status_with_stderr`, and `output`, `src/kernel/supervise.rs`). Their contract is "this child
-  needs no network". They refuse to spawn a program whose file name is in
-  `RESOLVERS` (`uv`, `npm`, `npx`, `pnpm`, `cargo`, `go`, `bundle`, `gem`,
-  `ruby`, `mix`, `elixir`, `erl`, `dotnet`, `git`) unless the argv matches
-  a row of a small reviewed table of offline forms
-  (`cargo locate-project ... --offline`, `go` with `GOPROXY=off`; `tar`
-  never matches). Helpers that evaluate project files without needing the
+  needs no network". They refuse to spawn a resolver unless the whole
+  invocation matches a row of a small reviewed table of offline forms. A
+  program is a resolver when the name it is started under, compared
+  case-insensitively, or the file that name resolves to (through a
+  symlink, or the child's `PATH` for a bare name) is in `RESOLVERS`
+  (`uv`, `npm`, `npx`, `pnpm`, `cargo`, `go`, `bundle`, `gem`, `ruby`,
+  `mix`, `elixir`, `erl`, `dotnet`, `git`). A form binds the exact argv
+  shape of its one call site, and the environment the child will really
+  see, meaning the command's explicit edits over tog's own environment:
+  `cargo locate-project ... --offline`; `go mod download path@version...`
+  with `GOPROXY`, `GOSUMDB`, `GOTOOLCHAIN`, `GOENV`, `GOWORK`, `GOVCS` and
+  `GOAUTH` pinned off or local, and `GOFLAGS`, `GONOPROXY`, `GOPRIVATE`,
+  `GONOSUMDB`, `GOINSECURE` and `GOCACHEPROG` absent; the Ruby helper's
+  `spec` mode and the Elixir helper's `hexmark` mode, each with its
+  helper script checked by sha256 against the digest the tailor's test
+  pins, no option argument, and no interpreter option variable
+  (`RUBYOPT`, `RUBYLIB`, `ERL_*`, `ELIXIR_*`); the staged-OTP `erl`
+  probe, with every `ERL_*` variable gone. `tar` never matches. Helpers that evaluate project files without needing the
   network (the Ruby gate-1 and gate-2 helpers, the Elixir `mix.lock`
   parser) go through a door with no routes, which means full network
   denial. The door calls the unrestricted primitive. So do tog's own

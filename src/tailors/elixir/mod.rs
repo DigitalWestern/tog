@@ -939,20 +939,7 @@ fn verify_otp_install(otp_root: &Path, final_root: &Path, layout: &OtpLayout) ->
 /// that disqualified the Ubuntu build) and that the launcher resolves its
 /// root. The launcher self-locates from $0, so this works from staging.
 fn probe_otp_runtime(activity: &StoreActivity, otp_root: &Path, scratch: &Path) -> io::Result<()> {
-    let mut command = Command::new(otp_root.join("bin/erl"));
-    command
-        .args([
-            "-noshell",
-            "-eval",
-            crate::kernel::resolve::tripwire::OTP_RUNTIME_PROBE,
-        ])
-        .current_dir(scratch)
-        .env_clear()
-        .env("PATH", "/usr/bin:/bin")
-        .env("HOME", scratch)
-        .env("TMPDIR", scratch)
-        .env("LANG", "C")
-        .stdin(std::process::Stdio::null());
+    let mut command = tool::otp_probe_command(otp_root, scratch);
     let output = crate::kernel::supervise::local_output(&mut command, activity)
         .map_err(|e| io::Error::new(e.kind(), format!("spawn staged OTP erl: {e}")))?;
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -2045,6 +2032,51 @@ mod tests {
             expected.dedup();
             assert_eq!(recovered_cache(identity), expected);
         }
+    }
+
+    /// The host-local tripwire admits this helper by content: the digest
+    /// it holds is the digest of the text written here, so an edit to the
+    /// helper is also an edit to the reviewed table.
+    #[test]
+    fn the_tripwire_pins_this_helper() {
+        use sha2::Digest as _;
+        assert_eq!(
+            hex::encode(sha2::Sha256::digest(HELPER.as_bytes())),
+            crate::kernel::resolve::tripwire::ELIXIR_HELPER_SHA256
+        );
+    }
+
+    /// The real host-local call sites pass the tripwire, and an Erlang or
+    /// Elixir option variable added to either is refused.
+    #[test]
+    fn hexmark_and_the_otp_probe_pass_the_tripwire_only_as_built() {
+        use crate::kernel::resolve::tripwire::refusal;
+        let scratch = TempDir::named("elixir-tripwire");
+        let helper = scratch.0.join("helper.exs");
+        fs::write(&helper, HELPER).unwrap();
+        let beam = Path::new("/nonexistent/tog-test/beam");
+        let args = [
+            "elixir",
+            helper.to_str().unwrap(),
+            "hexmark",
+            "/stage/dep",
+            "jason",
+            "1.4.4",
+            "inner",
+            "outer",
+            "mix",
+        ];
+        let mut hexmark = tool::mix_spec(beam, &scratch.0, &scratch.0, true, &args).command();
+        assert!(refusal(&hexmark).is_none(), "{:?}", refusal(&hexmark));
+        hexmark.env("ELIXIR_ERL_OPTIONS", "-eval halt()");
+        assert!(refusal(&hexmark).is_some());
+        let online = tool::mix_spec(beam, &scratch.0, &scratch.0, false, &args).command();
+        assert!(refusal(&online).is_some(), "hexmark without HEX_OFFLINE");
+
+        let mut probe = tool::otp_probe_command(Path::new("/nonexistent/tog-test/otp"), &scratch.0);
+        assert!(refusal(&probe).is_none(), "{:?}", refusal(&probe));
+        probe.env("ERL_AFLAGS", "-eval 'halt(3).'");
+        assert!(refusal(&probe).is_some());
     }
 
     /// A `hex-deps` record names the BEAM object only by fingerprint. The

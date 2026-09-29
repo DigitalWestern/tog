@@ -2094,6 +2094,29 @@ mod tests {
         );
     }
 
+    /// The module extraction's real command passes the host-local
+    /// tripwire, and loosening any variable the offline form pins is
+    /// refused.
+    #[test]
+    fn the_offline_extraction_passes_the_tripwire_only_as_built() {
+        use crate::kernel::resolve::tripwire::refusal;
+        let build = || {
+            tool::offline_command(
+                Path::new("/nonexistent/tog-test/go"),
+                Path::new("/tmp"),
+                Path::new("/nonexistent/tog-test/modcache"),
+                &["mod", "download", "example.com/m@v1.0.0"],
+            )
+        };
+        let command = build();
+        assert!(refusal(&command).is_none(), "{:?}", refusal(&command));
+        for (key, value) in [("GONOPROXY", "*"), ("GOVCS", "*:all"), ("GOFLAGS", "-x")] {
+            let mut command = build();
+            command.env(key, value);
+            assert!(refusal(&command).is_some(), "{key}");
+        }
+    }
+
     #[test]
     fn go_environment_policy_is_forced_and_pinned() {
         let go_obj = Path::new("/store/objects/linux-go");

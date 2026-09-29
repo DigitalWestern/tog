@@ -6,6 +6,7 @@ use crate::kernel::activity::StoreActivity;
 use crate::kernel::resolve::{DelegateReport, DelegateSpec, ResolutionDoor};
 use std::io;
 use std::path::Path;
+use std::process::Command;
 
 /// Run the store mix for a delegated edit (`tog update`).
 pub(crate) fn run_checked(
@@ -78,4 +79,31 @@ pub(super) fn run_hexmark(
     let mut cmd = mix_spec(beam_obj, scratch, scratch, true, args).command();
     crate::kernel::supervise::local_output(&mut cmd, activity)
         .map_err(|e| io::Error::new(e.kind(), format!("run store mix {args:?}: {e}")))
+}
+
+/// The command `probe_otp_runtime` starts: the staged `erl` evaluating the
+/// reviewed probe in an empty environment.
+pub(super) fn otp_probe_command(otp_root: &Path, scratch: &Path) -> Command {
+    let mut command = Command::new(otp_root.join("bin/erl"));
+    command
+        .args([
+            "-noshell",
+            "-eval",
+            crate::kernel::resolve::tripwire::OTP_RUNTIME_PROBE,
+        ])
+        .current_dir(scratch);
+    // Every inherited variable removed by name rather than `env_clear`:
+    // the same empty environment, but the removals stay visible to the
+    // host-local tripwire, which requires no `ERL_*` variable reach the
+    // probe.
+    for (key, _) in std::env::vars_os() {
+        command.env_remove(key);
+    }
+    command
+        .env("PATH", "/usr/bin:/bin")
+        .env("HOME", scratch)
+        .env("TMPDIR", scratch)
+        .env("LANG", "C")
+        .stdin(std::process::Stdio::null());
+    command
 }

@@ -1430,6 +1430,40 @@ mod tests {
         }
     }
 
+    /// The host-local tripwire admits this helper by content: the digest
+    /// it holds is the digest of the text written here, so an edit to the
+    /// helper is also an edit to the reviewed table.
+    #[test]
+    fn the_tripwire_pins_this_helper() {
+        use sha2::Digest as _;
+        assert_eq!(
+            hex::encode(sha2::Sha256::digest(HELPER.as_bytes())),
+            crate::kernel::resolve::tripwire::RUBY_HELPER_SHA256
+        );
+    }
+
+    /// The real `spec` call site passes the tripwire, and an interpreter
+    /// option variable added to it is refused.
+    #[test]
+    fn the_gem_spec_read_passes_the_tripwire_only_as_built() {
+        use crate::kernel::resolve::tripwire::refusal;
+        let scratch = TempDir::named("ruby-tripwire");
+        let helper = scratch.0.join("helper.rb");
+        fs::write(&helper, HELPER).unwrap();
+        let ruby = Path::new("/nonexistent/tog-test/ruby");
+        let args = ["ruby", helper.to_str().unwrap(), "spec", "/cache/x.gem"];
+        let build = || {
+            ruby_tool_spec(ruby, &scratch.0, &args, &forced_env(&scratch.0, &scratch.0)).command()
+        };
+        let command = build();
+        assert!(refusal(&command).is_none(), "{:?}", refusal(&command));
+        for (key, value) in [("RUBYOPT", "-r/tmp/evil"), ("RUBYLIB", "/tmp")] {
+            let mut command = build();
+            command.env(key, value);
+            assert!(refusal(&command).is_some(), "{key}");
+        }
+    }
+
     fn recovered_cache(identity: crate::kernel::types::Identity) -> Vec<String> {
         match crate::kernel::objmeta::adapt_identity_for_test(identity, Vec::new()) {
             crate::kernel::objmeta::Adaptation::Proven(deps) => {
