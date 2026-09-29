@@ -496,10 +496,19 @@ impl Exchange<'_> {
             &forwarded,
             &self.route.credential_identity(),
         );
-        let cached = self.state.meta.load(&key).unwrap_or_else(|error| {
-            record.detail = Some(format!("metadata cache unreadable: {error}"));
+        // A query key the protocol does not name as content is not part of
+        // what the document is (a cache buster, a tracking value), and each
+        // new value would be a new file: such URLs are served, not cached.
+        let keys = self.route.protocol.content_query_keys();
+        let cacheable = url.query_pairs().all(|(name, _)| keys.contains(&&*name));
+        let cached = if cacheable {
+            self.state.meta.load(&key).unwrap_or_else(|error| {
+                record.detail = Some(format!("metadata cache unreadable: {error}"));
+                None
+            })
+        } else {
             None
-        });
+        };
         if self.state.config.mode == Mode::Offline {
             return self.last_good(url, cached, record, "offline".into(), out);
         }
@@ -569,7 +578,7 @@ impl Exchange<'_> {
             .map(|(_, value)| value.as_str())
             .collect::<Vec<_>>()
             .join(",");
-        if status == 200 && cache::vary_is_keyed(Some(&vary)) {
+        if status == 200 && cacheable && cache::vary_is_keyed(Some(&vary)) {
             if let Err(error) = self.state.meta.save(&key, &fresh) {
                 record.detail = Some(format!("metadata cache not written: {error}"));
             }
@@ -1321,6 +1330,30 @@ mod tests {
             ["miss", "revalidated", "miss", "miss", "miss"],
             "another User-Agent is another key, and Vary: * is never cached"
         );
+    }
+
+    #[test]
+    fn metadata_with_a_non_content_query_key_is_never_cached() {
+        let harness = Harness::new("mirror-query");
+        let (session, address) = harness.session();
+        for index in 0..3 {
+            harness.upstream.set(
+                &format!("/meta/pkg.json?bust={index}"),
+                Behavior::Reply(Reply::new(200, b"{}")),
+            );
+            let path = format!("/meta/pkg.json?bust={index}");
+            assert_eq!(fetch(&address, &path).status, 200);
+        }
+        harness.upstream.set(
+            "/meta/pkg.json?format=json",
+            Behavior::Reply(Reply::new(200, b"{}")),
+        );
+        assert_eq!(fetch(&address, "/meta/pkg.json?format=json").status, 200);
+        session.finish();
+        let files = fs::read_dir(harness.store.root.join("resolve/meta"))
+            .unwrap()
+            .count();
+        assert_eq!(files, 1, "only the content-keyed URL is cached");
     }
 
     #[test]

@@ -2626,7 +2626,11 @@ there before (if any) still describes them.
   and differ only by `Accept`, and any forwarded header may change the
   answer): a response whose `Vary` is `*` or names one of the proxy's own
   conditional headers is not cached, since the key cannot tell its
-  variants apart. Each response is stored with its ETag or
+  variants apart. Nor is a URL with a query key the protocol does not
+  name as content (`content_query_keys`): such keys are cache busters or
+  tracking values, so every new value would be one more file, and a
+  tool could grow the store without bound. Those URLs are served live,
+  with no last-good copy. Each response is stored with its ETag or
   Last-Modified and its sha256. Online, every metadata request
   revalidates with a conditional GET, which is a 304 when nothing changed.
   It is a cache under the store's GC rules (age-based sweep). Losing it
