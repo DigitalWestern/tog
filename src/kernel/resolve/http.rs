@@ -534,6 +534,42 @@ pub fn write_sized_head(
     out.write_all(framing.as_bytes())
 }
 
+/// Write the answer to a `HEAD` whose body tog never read: `length` is the
+/// upstream's `Content-Length`, sent when known and omitted otherwise.
+pub fn write_head_only(
+    out: &mut impl Write,
+    status: u16,
+    headers: &Headers,
+    length: Option<u64>,
+    keep_alive: bool,
+) -> io::Result<()> {
+    write_head(out, status, headers)?;
+    let mut framing = String::new();
+    if let Some(length) = length.filter(|_| status != 304 && status != 204) {
+        framing.push_str(&format!("Content-Length: {length}\r\n"));
+    }
+    if !keep_alive {
+        framing.push_str("Connection: close\r\n");
+    }
+    framing.push_str("\r\n");
+    out.write_all(framing.as_bytes())?;
+    out.flush()
+}
+
+/// The one well-formed `Content-Length` in `headers`, or `None` when there
+/// is none, more than one, or it is not a decimal number.
+pub fn content_length(headers: &[(String, String)]) -> Option<u64> {
+    let mut values = headers
+        .iter()
+        .filter(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+        .map(|(_, value)| value.trim());
+    let value = values.next()?;
+    if values.next().is_some() || value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    value.parse().ok()
+}
+
 /// A response body of unknown length. An HTTP/1.1 client gets chunked
 /// framing: each `chunk` is one chunk, and `finish` writes the terminating
 /// one. An HTTP/1.0 client does not know chunked framing, so it gets the

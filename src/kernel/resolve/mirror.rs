@@ -419,7 +419,10 @@ impl Exchange<'_> {
         let mut method = method.to_string();
         let mut hops = Vec::new();
         for _ in 0..=MAX_REDIRECTS {
-            let headers = self.upstream_headers(&url, extra);
+            // `extra` (a cached copy's validators) goes to the requested URL
+            // only: another location's 304 would answer for a different
+            // document than the one cached.
+            let headers = self.upstream_headers(&url, if hops.is_empty() { extra } else { &[] });
             let sent = self.client.send(&PinnedRequest {
                 method: &method,
                 url: url.as_str(),
@@ -535,7 +538,10 @@ impl Exchange<'_> {
         record.hops = hops;
         let status = response.status;
         if status == 304 {
-            return match cached {
+            // Only the requested URL got the validators, so a 304 after a
+            // redirect validates nothing: never serve the cached body for it.
+            let validated = if record.hops.is_empty() { cached } else { None };
+            return match validated {
                 Some(cached) => {
                     record.served = Some(200);
                     self.serve_metadata(
@@ -920,13 +926,14 @@ impl Exchange<'_> {
         let mut out = Out(out);
         if self.head_only() {
             record.commit(self.state);
-            return http::write_response(
+            // The upstream's HEAD has no body to measure: pass its length
+            // on, or send none, never the empty body's zero.
+            return http::write_head_only(
                 &mut out,
                 response.status,
                 &headers,
-                &[],
+                http::content_length(&response.headers),
                 self.keep_alive,
-                true,
             );
         }
         let mut body = http::StreamedBody::start(
@@ -1680,6 +1687,73 @@ mod tests {
         );
     }
 
+    /// A cached document's validators go only to the URL it was cached
+    /// under. When that URL now redirects elsewhere, the new location gets
+    /// no validators, and a 304 from it (even one it sends unasked) never
+    /// makes the proxy serve the old body.
+    #[test]
+    fn a_redirected_304_never_validates_the_cached_body() {
+        let harness = Harness::new("mirror-redirect-304");
+        let port = harness.upstream.port();
+        let config = || {
+            let mut config = harness.config(Policy::default(), Mode::Online);
+            config.routes = vec![Route::new(
+                &TEST_PROTOCOL,
+                vec![
+                    Endpoint::for_test("registry.test", port),
+                    Endpoint::for_test("other.test", port),
+                ],
+            )
+            .unwrap()];
+            config
+        };
+        let tagged =
+            |body: &'static [u8]| Behavior::Reply(Reply::new(200, body).header("ETag", "\"same\""));
+        harness.upstream.set(
+            "/meta/moving",
+            redirect(&format!("https://other.test:{port}/meta/first")),
+        );
+        harness.upstream.set("/meta/first", tagged(b"first"));
+        let (session, address) = harness.open(config());
+        assert_eq!(fetch(&address, "/meta/moving").body, b"first");
+        session.finish();
+
+        // The same URL now lands on another document with the same ETag.
+        harness.upstream.set(
+            "/meta/moving",
+            redirect(&format!("https://other.test:{port}/meta/second")),
+        );
+        harness.upstream.set("/meta/second", tagged(b"second"));
+        let before = harness.upstream.seen().len();
+        let (session, address) = harness.open(config());
+        let answer = fetch(&address, "/meta/moving");
+        assert_eq!(answer.body, b"second", "{}", answer.text());
+        let seen = harness.upstream.seen();
+        assert_eq!(
+            seen[before].headers.get("if-none-match"),
+            Some("\"same\""),
+            "the cached URL itself is revalidated"
+        );
+        assert_eq!(
+            seen[before + 1].headers.get("if-none-match"),
+            None,
+            "the redirect target gets no validator"
+        );
+        session.finish();
+
+        // A target that answers 304 unasked is not taken as validation.
+        harness.upstream.set(
+            "/meta/second",
+            Behavior::Reply(Reply::new(304, b"").header("ETag", "\"same\"")),
+        );
+        let (session, address) = harness.open(config());
+        let answer = fetch(&address, "/meta/moving");
+        assert_ne!(answer.body, b"first");
+        assert_ne!(answer.body, b"second");
+        assert_ne!(answer.status, 200, "{}", answer.text());
+        session.finish();
+    }
+
     #[test]
     fn head_requests_send_no_body_and_claimed_heads_are_verified_first() {
         let harness = Harness::new("mirror-head");
@@ -1701,6 +1775,16 @@ mod tests {
             Some(length.as_str())
         );
         assert!(artifact.body.is_empty());
+        // An unclaimed artifact is not fetched for a HEAD, and its length
+        // is the upstream's, not the zero of the body tog never read.
+        let unclaimed = head("/art/free-pkg-1.0.tgz");
+        assert_eq!(unclaimed.status, 200);
+        let length = fixture("art/free-pkg-1.0.tgz").len().to_string();
+        assert_eq!(
+            unclaimed.headers.get("content-length"),
+            Some(length.as_str())
+        );
+        assert!(unclaimed.body.is_empty());
         let methods: Vec<(String, String)> = harness
             .upstream
             .seen()
@@ -1713,6 +1797,7 @@ mod tests {
                 ("HEAD".to_string(), "/meta/pkg.json".to_string()),
                 ("GET".to_string(), "/meta/pkg.json".to_string()),
                 ("GET".to_string(), "/art/claimed-pkg-1.0.tgz".to_string()),
+                ("HEAD".to_string(), "/art/free-pkg-1.0.tgz".to_string()),
             ],
             "a claimed artifact is fetched whole and verified even for a HEAD"
         );
