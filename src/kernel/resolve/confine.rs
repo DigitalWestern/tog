@@ -488,6 +488,14 @@ pub const SYSTEM_READ_ROOTS: &[&str] = &[
     "/usr",
     "/etc",
     "/opt",
+    // Top-level entries the sandbox binds (as directories, or as symlinks
+    // into /usr that the path's resolved spelling catches too).
+    "/bin",
+    "/sbin",
+    "/lib",
+    "/lib32",
+    "/lib64",
+    "/libx32",
     "/private/etc",
     "/Library",
     "/System",
@@ -1516,6 +1524,12 @@ mod tests {
             "/private/etc/key",
             "/Library/tog/key",
             "/System/key",
+            "/bin/tog.key",
+            "/sbin/tog.key",
+            "/lib/tog.key",
+            "/lib32/tog.key",
+            "/lib64/tog.key",
+            "/libx32/tog.key",
         ] {
             let error = refuse_key_under_system_root(Path::new(path)).unwrap_err();
             assert!(
@@ -1526,6 +1540,12 @@ mod tests {
         let temp = TempDir::named("keygen-root");
         assert!(refuse_key_under_system_root(&temp.0.join("signing.key")).is_ok());
         assert!(refuse_key_under_system_root(Path::new("/usrlocal/key")).is_ok());
+        assert!(refuse_key_under_system_root(Path::new("/library/key")).is_ok());
+        // A symlink to a system root is refused by what it resolves to.
+        let link = temp.0.join("into-usr");
+        std::os::unix::fs::symlink("/usr/share", &link).unwrap();
+        let error = refuse_key_under_system_root(&link.join("tog.key")).unwrap_err();
+        assert!(error.to_string().contains("/usr"), "{error}");
     }
 
     /// A socket anywhere in a store read root refuses the door, and a

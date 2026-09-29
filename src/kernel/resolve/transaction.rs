@@ -825,7 +825,7 @@ fn remove_journal(journals: &ProjectRoot, ecosystem: &str) -> io::Result<()> {
 /// The mode of a file a publication creates: 0644 under this process's
 /// umask, read from `/proc/self/status` (setting the umask to read it
 /// would race other threads). Without it, 0644.
-fn new_file_mode() -> u32 {
+pub(crate) fn new_file_mode() -> u32 {
     let umask = fs::read_to_string("/proc/self/status")
         .ok()
         .and_then(|status| {

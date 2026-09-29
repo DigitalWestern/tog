@@ -210,6 +210,12 @@ pub(super) fn run(
         }
         Target::Detached => (None, None),
     };
+    // A detached door writes back through the descriptor opened now, so a
+    // lock root renamed or replaced while the tool runs is not written.
+    let detached = match hold {
+        Some(_) => None,
+        None => Some(ProjectRoot::open(&lock_root)?),
+    };
     let snapshot = Snapshot::build(
         store,
         activity,
@@ -261,7 +267,13 @@ pub(super) fn run(
         Some((tx, again)) => {
             publish_project(store, activity, tx, &again, &outputs, &publish, receipt)?
         }
-        None => write_back(&lock_root, &outputs)?,
+        None => write_back(
+            detached
+                .as_ref()
+                .expect("a detached door holds its lock root"),
+            &snapshot,
+            &outputs,
+        )?,
     }
     Ok(report(status, ran.outcome, Some(objects)))
 }
@@ -616,13 +628,19 @@ fn unroot_after(
 }
 
 /// A detached door's outputs, written back into its lock root.
-fn write_back(lock_root: &Path, outputs: &Outputs) -> io::Result<()> {
-    let root = ProjectRoot::open(lock_root)?;
+/// A replaced file keeps its pre-run mode; a created one gets the ordinary
+/// file mode, never the bits the tool left.
+fn write_back(root: &ProjectRoot, snapshot: &Snapshot, outputs: &Outputs) -> io::Result<()> {
     for file in outputs.files() {
+        let real = snapshot.lock_root().real.join(&file.relative);
+        let mode = match snapshot.baseline(&real) {
+            Some(EntryState::File { mode, .. }) => *mode & 0o777,
+            _ => super::transaction::new_file_mode(),
+        };
         root.write_file_mode(
             &file.relative,
             &outputs.contents(file)?,
-            file.mode as libc::mode_t,
+            mode as libc::mode_t,
         )?;
     }
     Ok(())
@@ -1254,6 +1272,45 @@ get() {
         assert!(!fx.project.join(".tog").exists());
         ledger::read_portable(&fx.harness.store, &objects.ledger).unwrap();
         assert!(rooted(&fx).is_empty(), "{:?}", rooted(&fx));
+    }
+
+    /// A detached door writes back through the lock root it opened at the
+    /// start: a directory swapped in at that path while the tool ran gets
+    /// nothing, and a created output gets the ordinary file mode.
+    #[test]
+    fn detached_write_back_uses_the_lock_root_held_from_the_start() {
+        let Some(relay) = relay("detached_write_back_uses_the_lock_root_held_from_the_start")
+        else {
+            return;
+        };
+        let fx = fixture("door-detached-held");
+        let moved = fx.project.with_file_name("moved");
+        let (project, moved_to) = (fx.project.clone(), moved.clone());
+        let outcome = run_door(
+            &fx,
+            Some(relay),
+            "echo made > new.lock; chmod 0777 new.lock\n",
+            Policy::default(),
+            move |confined| {
+                confined.target = Target::Detached;
+                let wire = confined.wire.take().unwrap();
+                confined.wire = Some(Box::new(move |w: &Wire<'_>| {
+                    fs::rename(&project, &moved_to).unwrap();
+                    fs::create_dir(&project).unwrap();
+                    wire(w)
+                }));
+            },
+        );
+        outcome.result.unwrap();
+        assert!(!fx.project.join("new.lock").exists());
+        assert_eq!(fs::read(moved.join("new.lock")).unwrap(), b"made\n");
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(moved.join("new.lock"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, crate::kernel::resolve::transaction::new_file_mode());
     }
 
     /// A cleanup failure after the commit point keeps what was published:
