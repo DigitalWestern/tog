@@ -707,6 +707,7 @@ mod marker_tests {
         assert!(!eval("extra == '01'", LINUX, Some("1")));
         assert!(eval("extra != '01'", LINUX, Some("1")));
         assert!(eval("'1' == extra", LINUX, Some("1")));
+        assert!(!eval("'01' == extra", LINUX, Some("1")));
         assert!(!eval("extra == '018446744073709551616'", LINUX, Some("1")));
         for op in ["<", "<=", ">", ">=", "~=", "==="] {
             let marker = format!("extra {op} '1'");
