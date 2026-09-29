@@ -288,8 +288,23 @@ impl ResolutionRecord {
             return Err(format!("{path:?} is both an output and an input"));
         }
         self.validate_ledger()?;
-        if Isolation::parse(&self.isolation).is_none() {
+        let Some(isolation) = Isolation::parse(&self.isolation) else {
             return Err(format!("isolation {:?} is not a tier", self.isolation));
+        };
+        // A run without the network fence always records the fact, so a
+        // policy that denies it sees it; a record claiming the tier without
+        // the finding is not one a door wrote.
+        if isolation == Isolation::Isolated
+            && !self
+                .exceptions
+                .iter()
+                .any(|exception| exception.kind == policy::UNCONFINED_RESOLUTION)
+        {
+            return Err(format!(
+                "isolation is {:?} but no {} exception is recorded",
+                self.isolation,
+                policy::UNCONFINED_RESOLUTION
+            ));
         }
         if let Some(exception) = self
             .exceptions
@@ -1004,7 +1019,7 @@ mod tests {
             outputs: BTreeMap::from([("test.lock".into(), sha256_hex(b"lock"))]),
             inputs: BTreeMap::from([("test.toml".into(), sha256_hex(b"manifest"))]),
             ledger: LedgerSummary::of(&portable().identity().object_id(), &portable()),
-            isolation: Isolation::Isolated,
+            isolation: Isolation::Confined,
             exceptions: Vec::new(),
         }
     }
@@ -1043,7 +1058,7 @@ mod tests {
     }
 
     #[test]
-    fn record_signature_uses_bare_hex_key_and_verifies() {
+    fn record_signature_key_is_bare_hex_and_verifies_with_kernel_signing() {
         let signer = key("record-bare-hex");
         let envelope = ResolutionRecord::new(facts())
             .unwrap()
@@ -1072,7 +1087,7 @@ mod tests {
     }
 
     #[test]
-    fn record_holds_no_timestamp_port_platform_or_engine() {
+    fn record_body_has_no_timestamps_port_platform_or_engine() {
         let envelope = ResolutionRecord::new(facts())
             .unwrap()
             .envelope(None)
@@ -1178,6 +1193,10 @@ mod tests {
             (
                 "tool name or version is empty",
                 Box::new(|facts| facts.tool.version.clear()),
+            ),
+            (
+                "no unconfined-resolution exception is recorded",
+                Box::new(|facts| facts.isolation = Isolation::Isolated),
             ),
             (
                 "exception kind",

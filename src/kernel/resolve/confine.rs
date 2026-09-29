@@ -319,6 +319,7 @@ const FORCED: &[ForcedRow] = &[
             "GONOSUMDB",
             "GOPRIVATE",
             "GONOPROXY",
+            "GOINSECURE",
             "CC",
             "CXX",
             "GOCACHEPROG",

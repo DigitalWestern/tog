@@ -871,7 +871,9 @@ refused by name.
 - `--record-out <path>` writes the record outside the checkout instead: to
   `<path>` itself when one ecosystem is named, else `<path>/<ecosystem>.json`.
   The checkout is left unchanged, so a CI job can upload the file as an
-  artifact for `--resolution-record`.
+  artifact for `--resolution-record`. It needs `TOG_SIGNING_KEY` and
+  refuses without it, before running anything: an unsigned artifact would
+  never attest.
 - `--ledger-export <ecosystem> <file>` writes the portable ledger the
   committed record names, from the local store. It runs no tool.
 - `--ledger-import <file>` stores a portable ledger on this machine and

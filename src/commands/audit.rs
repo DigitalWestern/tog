@@ -492,6 +492,31 @@ fn resolution_exceptions(closure: &ClosureFile) -> io::Result<Vec<Exception>> {
     }
 }
 
+/// Whether `closure` belongs to an ecosystem whose lock the resolution
+/// join covers, one of whose lock files exists in `dir`, and yet carries
+/// neither a joined record nor an `unrecorded-resolution` exception. A
+/// closure written since the join always has one of the two, so this one
+/// was written before it: "no evidence" must not pass as "attested".
+fn lacks_resolution_evidence(dir: &Path, closure: &ClosureFile) -> io::Result<bool> {
+    if closure.body.get("resolution").is_some() {
+        return Ok(false);
+    }
+    let Some(tailor) = tailors::by_id(&closure.ecosystem) else {
+        return Ok(false);
+    };
+    let project = crate::kernel::fsroot::ProjectRoot::open(dir)?;
+    let Some(files) = tailors::resolution_files(tailor, &project)? else {
+        return Ok(false);
+    };
+    if !files.outputs.iter().any(|output| dir.join(output).exists()) {
+        return Ok(false);
+    }
+    let recorded = recorded_exceptions(closure)?.unwrap_or_default();
+    Ok(!recorded
+        .iter()
+        .any(|exception| policy::canonical_kind(&exception.kind) == "unrecorded-resolution"))
+}
+
 /// Judge every closure file against `policy`, each from its own record:
 /// signature first, then shape, then freshness and exceptions. `sources`
 /// are the policies behind `policy`, cited when a key is excluded.
@@ -552,6 +577,13 @@ pub fn evaluate(
                     ));
                 }
             }
+        }
+        if !matches!(freshness, Freshness::Stale(_)) && lacks_resolution_evidence(dir, closure)? {
+            freshness = Freshness::Outdated(format!(
+                "no resolution record and no unrecorded-resolution exception (the closure predates \
+                 the resolution join); run '{}' once under a trusted key, then commit",
+                refresh(&closure.ecosystem)
+            ));
         }
         // A retired kind is not judged against the policy: the record is
         // older than what retired it, and a fresh sync replaces it.
@@ -3121,6 +3153,38 @@ mod tests {
         )];
         let verdicts = judge(&temp.0, &company(), &closures);
         assert!(!verdicts[0].passes());
+    }
+
+    /// A closure of an ecosystem the join covers, written before the join
+    /// existed, carries neither a record nor `unrecorded-resolution`: that
+    /// is missing evidence, not attestation. Either one clears it, and an
+    /// ecosystem the join does not cover never needs one.
+    #[test]
+    fn a_joined_ecosystem_closure_without_resolution_evidence_is_outdated() {
+        let temp = TempDir::named("audit-no-evidence");
+        let dir = &temp.0;
+        let go = |body: Value| write_closure(dir, "go", "go", Some(host().triple()), body);
+        // No lock file yet: nothing for a record to cover.
+        assert!(!lacks_resolution_evidence(dir, &go(json!({"exceptions": []}))).unwrap());
+        fs::write(dir.join("go.mod"), "module example.com/m\n\ngo 1.22\n").unwrap();
+        fs::write(dir.join("go.sum"), "").unwrap();
+        assert!(lacks_resolution_evidence(dir, &go(json!({"exceptions": []}))).unwrap());
+        assert!(lacks_resolution_evidence(dir, &go(json!({}))).unwrap());
+        let unrecorded = exception(policy::UNRECORDED_RESOLUTION, "go.sum");
+        assert!(!lacks_resolution_evidence(dir, &go(json!({"exceptions": [unrecorded]}))).unwrap());
+        assert!(!lacks_resolution_evidence(
+            dir,
+            &go(json!({"exceptions": [], "resolution": resolution(&[])}))
+        )
+        .unwrap());
+        let python = write_closure(
+            dir,
+            "python",
+            "python",
+            Some(host().triple()),
+            json!({"exceptions": []}),
+        );
+        assert!(!lacks_resolution_evidence(dir, &python).unwrap());
     }
 
     #[test]

@@ -111,6 +111,17 @@ fn attest(
     record_out: Option<&Path>,
 ) -> io::Result<()> {
     crate::comforter::init_signing()?;
+    if record_out.is_some() && crate::comforter::signing_key().is_none() {
+        // The CI flow hands this file to a later sync, which attests only a
+        // signed record: an unsigned one would be written, uploaded, and
+        // then never count.
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "--record-out writes a record for another machine's sync, which attests only a \
+             signed one, and TOG_SIGNING_KEY is not set; export TOG_SIGNING_KEY=<key file the \
+             sync's machine policy trusts>",
+        ));
+    }
     let present = tailors::detected_in(project)?;
     if present.is_empty() {
         return Err(no_inputs());

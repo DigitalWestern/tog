@@ -3231,6 +3231,16 @@ fn attest_and_resolution_record_usage_errors_exit_2() {
         );
         assert!(out.stdout.is_empty(), "{args:?}");
     }
+    // An unsigned artifact would never attest, so `--record-out` refuses
+    // without a key before it looks at the project.
+    let out = tog(&home.0, &home.0, &["attest", "--record-out", "r.json"]);
+    assert_ne!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stderr).contains("TOG_SIGNING_KEY is not set"),
+        "{}",
+        text(&out.stderr)
+    );
+    assert!(!home.0.join("r.json").exists());
     let out = tog(&home.0, &home.0, &["help", "attest"]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     let stdout = text(&out.stdout);
