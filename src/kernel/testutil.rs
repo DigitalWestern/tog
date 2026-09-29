@@ -100,6 +100,14 @@ pub(crate) fn loosened(build: impl Fn() -> Command) -> Vec<(String, Command)> {
             }
             (key.to_string_lossy().into_owned(), command)
         })
+        .chain(std::iter::once({
+            // A variable no form admits: a caller adding one (a loader
+            // preload, a tool setting outside the checked families) must be
+            // refused as surely as one loosening a forced value.
+            let mut command = build();
+            command.env("LD_PRELOAD", "/tmp/loosened.so");
+            ("+LD_PRELOAD".to_string(), command)
+        }))
         .collect()
 }
 

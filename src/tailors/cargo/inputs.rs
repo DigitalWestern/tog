@@ -256,7 +256,11 @@ mod tests {
         crate::kernel::testutil::store_program(&host.0, "bin/cargo");
         assert!(refusal(&locate_command(&host.0, &store.0), &store.0).is_some());
         let loosened = crate::kernel::testutil::loosened(|| locate_command(&rust_obj, &store.0));
-        assert_eq!(loosened.len(), 2, "RUSTUP_HOME and RUSTUP_TOOLCHAIN");
+        assert_eq!(
+            loosened.len(),
+            3,
+            "RUSTUP_HOME, RUSTUP_TOOLCHAIN, and an added LD_PRELOAD"
+        );
         for (key, command) in &loosened {
             assert!(refusal(command, &store.0).is_some(), "loosened {key}");
         }

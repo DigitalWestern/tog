@@ -124,6 +124,10 @@ struct Invocation<'a> {
     cwd: Option<&'a Path>,
     env: Vec<(&'a OsStr, Option<&'a OsStr>)>,
     program: Option<PathBuf>,
+    /// Whether the command names its program by an absolute path. A bare
+    /// name is resolved here through tog's `PATH`, which an `env_clear`ed
+    /// child does not use, so no form admits one.
+    absolute: bool,
     store: Option<PathBuf>,
 }
 
@@ -183,16 +187,24 @@ impl Invocation<'_> {
             if !value.to_string_lossy().contains(':') && self.under_store(Path::new(value)))
     }
 
-    /// Whether the program is a store file: a realized object or a staged
-    /// one, never a tool found on the host (a version-manager shim, a
-    /// rustup proxy).
+    /// Whether the program is a realized store object, named by absolute
+    /// path: never a tool found on the host (a version-manager shim, a
+    /// rustup proxy), and never a staged file under `<store>/tmp`, where
+    /// unpacked packages and in-flight downloads also land.
     fn program_in_store(&self) -> bool {
+        self.program_under_store(&["objects"])
+    }
+
+    /// Whether the program is a store file under one of the top-level
+    /// store directories `tops`, named by absolute path.
+    fn program_under_store(&self, tops: &[&str]) -> bool {
         let (Some(program), Some(store)) = (self.program.as_deref(), self.store.as_deref()) else {
             return false;
         };
-        self.under_store(program)
+        self.absolute
+            && self.under_store(program)
             && program.strip_prefix(store).is_ok_and(|inside| {
-                matches!(inside.components().next(), Some(Component::Normal(top)) if top == "objects" || top == "tmp")
+                matches!(inside.components().next(), Some(Component::Normal(top)) if tops.iter().any(|allowed| top == *allowed))
             })
     }
 
@@ -244,16 +256,24 @@ impl Invocation<'_> {
             .all(|(name, value)| value.is_none() || allowed.iter().any(|key| *name == *key))
     }
 
-    /// Whether the command itself sets `PATH`, and every entry is in the
-    /// store or is `/usr/bin` or `/bin`: no version-manager shim or user
-    /// directory can answer for a program the child starts by name.
+    /// Whether the command itself sets `PATH`, every entry is in the store
+    /// or is `/usr/bin` or `/bin`, and every store entry comes before the
+    /// system ones: no version-manager shim or user directory can answer
+    /// for a program the child starts by name, and no host program can
+    /// shadow a store one.
     fn path_confined(&self) -> bool {
-        match self.edit("PATH") {
-            Some(Some(path)) => std::env::split_paths(path).all(|dir| {
-                dir == Path::new("/usr/bin") || dir == Path::new("/bin") || self.under_store(&dir)
-            }),
-            _ => false,
-        }
+        let Some(Some(path)) = self.edit("PATH") else {
+            return false;
+        };
+        let mut system_seen = false;
+        std::env::split_paths(path).all(|dir| {
+            if dir == Path::new("/usr/bin") || dir == Path::new("/bin") {
+                system_seen = true;
+                true
+            } else {
+                !system_seen && self.under_store(&dir)
+            }
+        })
     }
 
     /// Argument `index` as text, when it is valid UTF-8.
@@ -270,13 +290,16 @@ impl Invocation<'_> {
     }
 
     /// Whether argument `index` is an absolute path to a regular file named
-    /// `name` whose content has sha256 `expected`: the tog-owned helper,
-    /// whatever directory it was staged in.
+    /// `name` inside the store whose content has sha256 `expected`: the
+    /// tog-owned helper, in a directory only tog writes.
     fn is_helper(&self, index: usize, name: &str, expected: &str) -> bool {
         let Some(path) = self.args.get(index).map(Path::new) else {
             return false;
         };
-        if !path.is_absolute() || path.file_name() != Some(OsStr::new(name)) {
+        if !path.is_absolute()
+            || path.file_name() != Some(OsStr::new(name))
+            || !self.under_store(path)
+        {
             return false;
         }
         match std::fs::read(path) {
@@ -319,6 +342,47 @@ const GO_OFFLINE_UNSET: &[&str] = &[
     "GOCACHEPROG",
 ];
 
+/// What each form's command may set itself, beyond what it removes. A
+/// form admits no other variable, so a caller cannot add `LD_PRELOAD`,
+/// `LD_LIBRARY_PATH`, or a tool setting outside the checked families.
+const GO_OFFLINE_SETS: &[&str] = &[
+    "GOAUTH",
+    "GOENV",
+    "GOMODCACHE",
+    "GOPROXY",
+    "GOROOT",
+    "GOSUMDB",
+    "GOTOOLCHAIN",
+    "GOVCS",
+    "GOWORK",
+    "HOME",
+];
+const ELIXIR_HEXMARK_SETS: &[&str] = &[
+    "HEX_HOME",
+    "HEX_OFFLINE",
+    "HOME",
+    "MIX_ARCHIVES",
+    "MIX_DEPS_PATH",
+    "MIX_HOME",
+    "MIX_REBAR3",
+    "MIX_TARGET",
+    "PATH",
+    "TMPDIR",
+];
+const RUBY_SPEC_SETS: &[&str] = &[
+    "BUNDLE_AUTO_INSTALL",
+    "BUNDLE_DISABLE_SHARED_GEMS",
+    "BUNDLE_DISABLE_VERSION_CHECK",
+    "BUNDLE_FROZEN",
+    "BUNDLE_GEMFILE",
+    "BUNDLE_IGNORE_CONFIG",
+    "GEMRC",
+    "GEM_HOME",
+    "GEM_PATH",
+    "HOME",
+    "PATH",
+];
+
 /// The Cargo tailor's workspace lookup, argument for argument.
 const CARGO_LOCATE_PROJECT: &[&str] = &[
     "locate-project",
@@ -337,6 +401,7 @@ fn cargo_locate_project(run: &Invocation) -> bool {
             .enumerate()
             .all(|(index, expected)| run.arg(index) == Some(*expected))
         && run.program_in_store()
+        && run.sets_only(&[])
         && run.removed("RUSTUP_HOME")
         && run.removed("RUSTUP_TOOLCHAIN")
 }
@@ -370,6 +435,7 @@ fn go_mod_download(run: &Invocation) -> bool {
             .skip(2)
             .all(|arg| arg.to_string_lossy().contains('@'))
         && run.program_in_store()
+        && run.sets_only(GO_OFFLINE_SETS)
         && goroot_is_the_programs()
         && GO_OFFLINE_PINNED
             .iter()
@@ -394,6 +460,7 @@ fn elixir_hexmark(run: &Invocation) -> bool {
         && run.no_options_from(1)
         && run.under_store(Path::new(run.args[2]))
         && run.program_in_store()
+        && run.sets_only(ELIXIR_HEXMARK_SETS)
         && run.family_clean(ELIXIR_ENV_REMOVE_PREFIXES, ELIXIR_ENV_REMOVE, ELIXIR_FORCED)
         && run.set_to("HEX_OFFLINE", "1")
         && run.set_to("MIX_TARGET", "host")
@@ -417,7 +484,9 @@ fn otp_probe(run: &Invocation) -> bool {
         && run.arg(0) == Some("-noshell")
         && run.arg(1) == Some("-eval")
         && run.arg(2) == Some(OTP_RUNTIME_PROBE)
-        && run.program_in_store()
+        // The one form that runs a staged program: the OTP release being
+        // checked before it becomes an object.
+        && run.program_under_store(&["tmp"])
         && run.fully_cleared()
         && run.sets_only(&["PATH", "HOME", "TMPDIR", "LANG"])
         && run.path_confined()
@@ -448,7 +517,13 @@ fn ruby_spec(run: &Invocation) -> bool {
         && run.no_options_from(1)
         && run.under_store(Path::new(run.args[2]))
         && run.program_in_store()
+        && run.sets_only(RUBY_SPEC_SETS)
         && run.family_clean(RUBY_ENV_REMOVE_PREFIXES, RUBY_ENV_REMOVE, RUBY_FORCED)
+        && run.set_to("BUNDLE_IGNORE_CONFIG", "1")
+        && run.set_to("BUNDLE_AUTO_INSTALL", "false")
+        && run.set_to("BUNDLE_DISABLE_SHARED_GEMS", "true")
+        && run.set_to("BUNDLE_DISABLE_VERSION_CHECK", "true")
+        && (run.set_to("BUNDLE_FROZEN", "true") || run.set_to("BUNDLE_FROZEN", "false"))
         && RUBY_FORCED
             .iter()
             .all(|key| matches!(run.edit(key), Some(Some(_))))
@@ -538,6 +613,7 @@ pub(crate) fn refusal(command: &Command, store_root: &Path) -> Option<io::Error>
         cwd: command.get_current_dir(),
         env: command.get_envs().collect(),
         program: None,
+        absolute: Path::new(command.get_program()).is_absolute(),
         store: store_root.canonicalize().ok(),
     };
     run.program = resolved_program(command, &run);
@@ -992,6 +1068,100 @@ mod tests {
         fixture.refused(&hexmark("/tmp/arbitrary.exs"));
         fixture.refused(&hexmark(&exs));
         fixture.refused(&hexmark("--eval"));
+    }
+
+    /// A form admits its program only as the realized store object, named
+    /// by absolute path: not a bare name tog's own `PATH` happens to
+    /// resolve to it (an `env_clear`ed child searches libc's default path
+    /// instead), and not a file staged under `<store>/tmp`, where unpacked
+    /// packages land. Only the OTP probe runs a staged program.
+    #[test]
+    fn forms_admit_only_an_absolute_realized_program() {
+        let fixture = Fixture::new("tripwire-program");
+        let cargo = fixture.program("objects/rust/bin/cargo");
+        fixture.admits(&fixture.cargo_lookup(&cargo));
+        let staged = fixture.program("tmp/unpacked/bin/cargo");
+        fixture.refused(&fixture.cargo_lookup(&staged));
+        let bin = Path::new(&cargo).parent().unwrap();
+        let mut bare = fixture.cargo_lookup("cargo");
+        bare.env("PATH", bin);
+        fixture.refused(&bare);
+        let go = fixture.program("tmp/unpacked/go/bin/go");
+        fixture.refused(&go_offline_at(&fixture, &go, &["mod", "download", "m@v1"]));
+    }
+
+    /// A form admits only the variables its call site sets: an added
+    /// loader preload, library path, or unrelated tool setting is refused.
+    #[test]
+    fn forms_refuse_a_variable_their_call_site_does_not_set() {
+        let fixture = Fixture::new("tripwire-extra-env");
+        let cargo = fixture.program("objects/rust/bin/cargo");
+        let go_args = ["mod", "download", "example.com/m@v1.0.0"];
+        fixture.admits(&go_offline(&fixture, &go_args));
+        for (key, value) in [
+            ("LD_PRELOAD", "/tmp/x.so"),
+            ("LD_LIBRARY_PATH", "/tmp"),
+            ("CARGO_HOME", "/tmp"),
+        ] {
+            let mut lookup = fixture.cargo_lookup(&cargo);
+            lookup.env(key, value);
+            fixture.refused(&lookup);
+            let mut download = go_offline(&fixture, &go_args);
+            download.env(key, value);
+            fixture.refused(&download);
+        }
+    }
+
+    /// A confined `PATH` lists the store first: a host `/usr/bin` ahead of
+    /// the store would let a host program shadow the store one the child
+    /// starts by name.
+    #[test]
+    fn a_confined_path_puts_the_store_first() {
+        let fixture = Fixture::new("tripwire-path-order");
+        let store_bin = fixture.path("objects/beam/bin");
+        let confined = |path: &str| {
+            Invocation {
+                args: Vec::new(),
+                cwd: None,
+                env: vec![(OsStr::new("PATH"), Some(OsStr::new(path)))],
+                program: None,
+                absolute: true,
+                store: fixture.0 .0.canonicalize().ok(),
+            }
+            .path_confined()
+        };
+        std::fs::create_dir_all(&store_bin).unwrap();
+        assert!(confined(&format!("{store_bin}:/usr/bin:/bin")));
+        assert!(!confined(&format!("/usr/bin:{store_bin}")));
+        assert!(!confined(&format!("{store_bin}:/opt/shims")));
+    }
+
+    /// The helper must be a file in the store, not a copy with the right
+    /// content in a directory another user could swap it in.
+    #[test]
+    fn a_helper_outside_the_store_is_refused() {
+        let fixture = Fixture::new("tripwire-helper-place");
+        let outside = TempDir::named("tripwire-helper-outside");
+        let script = outside.0.join("helper.rb");
+        std::fs::write(&script, b"anything").unwrap();
+        let run = Invocation {
+            args: vec![script.as_os_str()],
+            cwd: None,
+            env: Vec::new(),
+            program: None,
+            absolute: true,
+            store: fixture.0 .0.canonicalize().ok(),
+        };
+        let digest = hex::encode(Sha256::digest(b"anything"));
+        assert!(!run.is_helper(0, "helper.rb", &digest));
+        let inside = fixture.path("tmp/stage/helper.rb");
+        std::fs::create_dir_all(fixture.path("tmp/stage")).unwrap();
+        std::fs::write(&inside, b"anything").unwrap();
+        let run = Invocation {
+            args: vec![OsStr::new(&inside)],
+            ..run
+        };
+        assert!(run.is_helper(0, "helper.rb", &digest));
     }
 
     /// The probe's argv alone is not enough: an `ERL_*` variable can carry

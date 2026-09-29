@@ -96,7 +96,19 @@ pub(super) fn run_go_offline(
     modcache: &Path,
     args: &[&str],
 ) -> io::Result<std::process::Output> {
+    telemetry_off(cwd)?;
     let mut cmd = offline_command(go_obj, cwd, modcache, args);
     crate::kernel::supervise::local_output(&mut cmd, activity)
         .map_err(|e| io::Error::new(e.kind(), format!("run store go {args:?}: {e}")))
+}
+
+/// Turn Go telemetry off for a run whose `HOME` is `home` (with no
+/// `XDG_CONFIG_HOME`, Go's config directory is `home/.config`). A fresh
+/// `HOME` has no mode file, and Go would otherwise start its telemetry
+/// child on every run, which can outlive the run and write into a
+/// directory tog is about to remove.
+fn telemetry_off(home: &Path) -> io::Result<()> {
+    let dir = home.join(".config/go/telemetry");
+    std::fs::create_dir_all(&dir)?;
+    std::fs::write(dir.join("mode"), "off\n")
 }

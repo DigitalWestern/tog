@@ -2414,10 +2414,15 @@ Contract 1 needs enforcement, not review alone:
   nothing. A copy or hard link under another name is not seen: the check
   reads names, and it catches call sites written the wrong way, not code
   hiding a resolver. A form binds the exact argv shape of its one call
-  site, the program to a file in the store (a realized or staged object,
-  never a host shim or rustup proxy), and the environment the child will
+  site, the program to a realized store object named by absolute path
+  (never a host shim or rustup proxy, never a bare name tog's own `PATH`
+  resolves while an `env_clear`ed child searches libc's default, and
+  never a file under `<store>/tmp`, where unpacked packages land; the OTP
+  probe alone runs a staged program), and the environment the child will
   really see, meaning the command's explicit edits over tog's own
-  environment. The Ruby and Elixir forms check the tailors' own scrub
+  environment. Each form also lists every variable its call site sets
+  and admits no other, so a caller cannot add `LD_PRELOAD`,
+  `LD_LIBRARY_PATH` or a tool setting outside the checked families. The Ruby and Elixir forms check the tailors' own scrub
   lists, which live in the tripwire and which the tailors alias. The
   forms: `cargo locate-project --workspace --message-format plain
   --offline` with `RUSTUP_HOME` and `RUSTUP_TOOLCHAIN` removed; `go mod
@@ -2433,9 +2438,11 @@ Contract 1 needs enforcement, not review alone:
   the store, only the forced variables of the scrubbed family (so no
   `RUBYOPT`, `RUBYLIB`, `ERL_*`, `ELIXIR_*`, `ERTS_BIN`, other `MIX_*` or
   `HEX_*`), their path variables (`GEM_HOME`, `GEM_PATH`, `MIX_HOME`,
-  ...) and `HOME` in the store, and `PATH` confined to the store plus
-  `/usr/bin` and `/bin` for Elixir (its script starts `erl` by name) or
-  led by the store Ruby; the staged-OTP `erl` probe, with an environment
+  ...) and `HOME` in the store, the helper script itself in the store,
+  Bundler's booleans pinned to the values the Ruby tailor forces, and
+  `PATH` confined to the store followed by `/usr/bin` and `/bin` for
+  Elixir (its script starts `erl` by name, so no host `erl` may come
+  first) or led by the store Ruby; the staged-OTP `erl` probe, with an environment
   the command empties itself and then gives only `PATH`, `HOME`, `TMPDIR`
   and `LANG`, so no `ERL_*` variable or user `.erlang` (through `HOME` or
   `XDG_CONFIG_HOME`) reaches it. Each tailor's test undoes every forced
