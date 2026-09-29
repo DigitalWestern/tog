@@ -170,13 +170,6 @@ Nothing queued; the next item comes from "Open work" below.
   - #301 acceptance.sh: steps 9 and 9b re-run two ignored suites the heavy workflow already runs, one multi-threaded.
   - #302 acceptance.sh: step 13 carries its own copy of the closure signing format.
   - #307 archive: a tarball with macOS AppleDouble (`._name`) members is refused on macOS but extracted on Linux. The extraction carries `--no-mac-metadata`; the listing carries no restore flag (bsdtar documents them for other modes). On the Mac, try `/usr/bin/tar --no-mac-metadata -tf` on such a tarball: if it accepts the flag and prints the `._` members, add it to `TAR_LIST_FLAGS` and close.
-- **`deps` as a `Tailor` method (#61).** `src/commands/deps.rs` still names
-  tailors directly. A `Tailor::edit_manifest` method with an "unsupported"
-  default would make it registry-driven, the way `Tailor::registry_tool`
-  did for `x`. It is its own design review: deps edits user manifests.
-  The signature, carrying the resolution door, is in `docs/agent/DESIGNS.md`
-  §6; it ships as resolution proxy PR 1 (#198), which also moves the
-  Corepack/pnpm path (#169).
 - **GC loose ends from #162.** Three small `src/kernel/store/roots.rs`
   fixes: a case-mismatched `gc --dry-run --forget` key previews fewer
   deletions on macOS (#163); the root/2 importer calls a path inside this
