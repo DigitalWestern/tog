@@ -263,6 +263,24 @@ impl Store {
         self.root.join("cache").join(algo).join(hex)
     }
 
+    /// The object ids `project`'s root record holds now (empty without a
+    /// record). A producer that may have to take back what it roots reads
+    /// this first, so it never unroots an id someone else rooted before.
+    pub(crate) fn rooted_objects_locked(
+        &self,
+        activity: &StoreActivity,
+        project: &crate::kernel::fsroot::ProjectRoot,
+        _project_lock: &fs::File,
+    ) -> io::Result<BTreeSet<String>> {
+        self.require_activity(activity, "root read")?;
+        let key = roots::root_key(project.path());
+        Ok(self
+            .read_root_entry_strict(&key)?
+            .and_then(|entry| entry.record)
+            .map(|record| record.objects)
+            .unwrap_or_default())
+    }
+
     /// Drop `ids` from the project's root record, so `tog gc` may collect
     /// them. The only caller is a resolution transaction releasing the
     /// original copies it rooted for the life of its journal; every other

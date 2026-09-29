@@ -647,6 +647,12 @@ fn current() -> &'static Policy {
     })
 }
 
+/// A copy of the process policy, for a component that holds its own (a
+/// resolution proxy session reads it from other threads).
+pub fn effective() -> Policy {
+    current().clone()
+}
+
 /// Is the policy chain in force strict? Strictness refuses every exception
 /// kind, and it also refuses to create a file a reviewer has not seen: the
 /// toolchain lock is written by an ordinary sync, never by a strict one.

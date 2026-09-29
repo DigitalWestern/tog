@@ -93,6 +93,10 @@ pub struct Missing {
 /// Every engine this build of tog can try, probed: what is usable and
 /// what is not.
 pub fn probe_tiers(activity: &StoreActivity) -> (Vec<TierOffer>, Vec<Missing>) {
+    #[cfg(test)]
+    if let Some(tiers) = TIERS_FOR_TEST.with(|tiers| tiers.borrow().clone()) {
+        return tiers;
+    }
     let mut offers = Vec::new();
     let mut missing = Vec::new();
     match sandbox::bwrap_preflight_with_activity(Some(activity)) {
@@ -107,6 +111,14 @@ pub fn probe_tiers(activity: &StoreActivity) -> (Vec<TierOffer>, Vec<Missing>) {
         }),
     }
     (offers, missing)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// What `probe_tiers` reports on this thread instead of probing, for
+    /// the door's tier tests. The run itself still uses bubblewrap.
+    pub(crate) static TIERS_FOR_TEST: std::cell::RefCell<Option<(Vec<TierOffer>, Vec<Missing>)>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 /// The isolation rule: the strongest offer wins; a fenced one always
@@ -756,6 +768,9 @@ pub struct ConfinedOutcome {
     pub killed: usize,
     /// The tool's standard output, with `Stdout::Capture`.
     pub stdout: Vec<u8>,
+    /// The tool's standard error, with `Stdout::Capture` (with `Inherit`
+    /// the user saw it as it was written).
+    pub stderr: Vec<u8>,
 }
 
 /// The running tog executable, resolved before any sandbox starts.
@@ -797,7 +812,11 @@ pub fn confined_run(
         .map_err(|_| io::Error::other("the exec log reader panicked"))?;
     let (status, stderr, stdout) = result?;
     let records = relay::parse_log(&log?)?;
-    outcome(tier, status, &stderr, stdout, records)
+    let mut outcome = outcome(tier, status, &stderr, stdout, records)?;
+    if run.stdout == Stdout::Capture {
+        outcome.stderr = stderr;
+    }
+    Ok(outcome)
 }
 
 /// Start the bubblewrap command of a confined run: exit status, stderr
@@ -846,6 +865,7 @@ fn outcome(
             execs,
             killed,
             stdout,
+            stderr: Vec::new(),
         }),
         _ if stderr.starts_with(b"bwrap:") => Err(io::Error::new(
             io::ErrorKind::Unsupported,
