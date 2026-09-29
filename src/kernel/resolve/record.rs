@@ -25,35 +25,31 @@
 //! 4. check that every path is one the tailor lists, that every existing
 //!    listed file is covered, and that every digest matches the disk.
 
+use super::door::{PublishFacts, ReceiptProducer};
+use super::ledger::{self, Diagnostics, LedgerObjects, PortableLedger};
+use super::{redact, DoorKind};
 use crate::kernel::activity::StoreActivity;
 use crate::kernel::fsroot::{Entry, ProjectRoot};
 use crate::kernel::policy::{self, Exception};
 use crate::kernel::signing::{self, KeySet, PublicKey, SigningKey, Verification};
-use crate::kernel::store::{self, ObjectDeps, Store};
-use crate::kernel::types::Identity;
+use crate::kernel::store::{self, Store};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
+use std::rc::Rc;
+use std::sync::Arc;
 
 /// The one record schema this tog reads and writes.
 pub const SCHEMA: &str = "resolution/1";
 const SCHEMA_PREFIX: &str = "resolution/";
-/// Where the committed receipt of one ecosystem lives, under the project.
-pub const RECEIPT_DIR: &str = ".tog/resolution";
-/// The store object kind of a ledger, its version, and the one file its
-/// object directory holds.
-pub const LEDGER_KIND: &str = "resolution-ledger";
-pub const LEDGER_VERSION: &str = "1";
-pub const LEDGER_FILE: &str = "portable.json";
+/// The version segment of every ledger object id (`PortableLedger::identity`).
+const LEDGER_ID_VERSION: &str = "1";
 
-/// The receipt path of `ecosystem`, relative to the project.
-pub fn receipt_path(ecosystem: &str) -> PathBuf {
-    Path::new(RECEIPT_DIR).join(format!("{ecosystem}.json"))
-}
+pub use super::transaction::{receipt_path, RESOLUTION_DIR};
 
 /// The committed receipt's bytes, read with the strict no-follow walk
 /// (`ProjectRoot::read_file`): the receipt is tog state under `.tog`, so a
@@ -132,7 +128,7 @@ pub struct Tool {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LedgerSummary {
-    /// The ledger's store object id (`ledger_identity`).
+    /// The ledger's store object id (`PortableLedger::identity`).
     pub object: String,
     /// sha256 of the ledger's portable bytes.
     pub portable_sha256: String,
@@ -309,7 +305,7 @@ impl ResolutionRecord {
         let ledger = &self.ledger;
         // The id is `ledger_identity`'s: the hash, then the ecosystem and
         // the ledger version, as `Identity::object_id` spells them.
-        let suffix = format!("-{}-{LEDGER_VERSION}", id_word(&self.ecosystem));
+        let suffix = format!("-{}-{LEDGER_ID_VERSION}", id_word(&self.ecosystem));
         if !store::is_object_id(&ledger.object) || !ledger.object.ends_with(&suffix) {
             return Err(format!(
                 "ledger object {:?} is not a {} ledger id",
@@ -740,26 +736,171 @@ pub fn parse_unverified(bytes: &[u8], ecosystem: &str) -> Result<ResolutionRecor
     parse_typed(&envelope, ecosystem).map_err(|finding| finding.describe())
 }
 
+/// What a tailor tells a door about the record its run leaves.
+pub struct RecordSpec {
+    pub tool: Tool,
+    /// The command as it ran; the producer redacts it.
+    pub command: Vec<String>,
+    /// The tailor's resolution files, which the record's paths must be.
+    pub files: ResolutionFiles,
+    /// The process signing key. `None` writes the record unsigned, which no
+    /// sync attests.
+    pub key: Option<Arc<SigningKey>>,
+    /// A lock check (`tog attest`): the run must leave every output
+    /// byte-unchanged, or nothing is published.
+    pub require_unchanged: bool,
+    /// Publish the record as the project's receipt. `false` (`tog attest
+    /// --record-out`) leaves the held receipt as it was, and the record
+    /// goes only to the slot.
+    pub publish_receipt: bool,
+}
+
+/// Where a producer leaves the record it signed, and its bytes.
+pub type RecordSlot = Rc<RefCell<Option<(ResolutionRecord, Vec<u8>)>>>;
+
+/// The receipt producer for a door run: build the record from what the run
+/// established, sign it, and hand it to the transaction and to `slot`.
+pub fn producer<'a>(spec: RecordSpec, slot: RecordSlot) -> ReceiptProducer<'a> {
+    Box::new(move |facts: &PublishFacts<'_>| {
+        let record = ResolutionRecord::from_publish(facts, &spec)?;
+        let bytes = envelope_bytes(&record.envelope(spec.key.as_deref())?)?;
+        let receipt = spec.publish_receipt.then(|| bytes.clone());
+        *slot.borrow_mut() = Some((record, bytes));
+        Ok(receipt)
+    })
+}
+
+impl ResolutionRecord {
+    /// The record of one confined run. Outputs the run changed carry their
+    /// new digests; listed outputs it left alone carry their pre-run ones,
+    /// since the record vouches for the whole pair. Inputs carry their
+    /// pre-run digests.
+    pub fn from_publish(facts: &PublishFacts<'_>, spec: &RecordSpec) -> io::Result<Self> {
+        let bad = |why: String| io::Error::new(io::ErrorKind::InvalidInput, why);
+        let door = match facts.door {
+            DoorKind::Edit => RecordDoor::Edit,
+            DoorKind::MissingLock => RecordDoor::MissingLock,
+            DoorKind::Attest => RecordDoor::Attest,
+            other => {
+                return Err(bad(format!(
+                    "a {} door leaves no resolution record",
+                    other.as_str()
+                )))
+            }
+        };
+        let (listed_outputs, _) = spec.files.keys()?;
+        let mut changed = BTreeMap::new();
+        for file in facts.outputs {
+            let key =
+                record_path(&file.relative).ok_or_else(|| not_a_record_path(&file.relative))?;
+            if !listed_outputs.contains(&key) {
+                return Err(bad(format!(
+                    "the {} door published {key}, which its tailor does not list as a \
+                     resolution output",
+                    facts.ecosystem
+                )));
+            }
+            changed.insert(key, hex::encode(file.sha256));
+        }
+        if spec.require_unchanged && !changed.is_empty() {
+            let names: Vec<&str> = changed.keys().map(String::as_str).collect();
+            return Err(io::Error::other(format!(
+                "{}'s lock check would change {}; the committed files are not what {} accepts, \
+                 so nothing is attested (run `tog` to bring them up to date)",
+                spec.tool.name,
+                names.join(", "),
+                spec.tool.name
+            )));
+        }
+        let pre_run = |paths: &[PathBuf]| -> io::Result<BTreeMap<String, String>> {
+            let mut digests = BTreeMap::new();
+            for path in paths {
+                let key = record_path(path).ok_or_else(|| not_a_record_path(path))?;
+                if let Some(digest) = facts.input_digest(Path::new(&key)) {
+                    digests.insert(key, hex::encode(digest));
+                }
+            }
+            Ok(digests)
+        };
+        let mut outputs = pre_run(&spec.files.outputs)?;
+        outputs.extend(changed);
+        if facts.portable.sha256() != facts.ledger_sha256 {
+            return Err(io::Error::other(
+                "the run's portable ledger does not hash to the digest it was committed under",
+            ));
+        }
+        let isolation = Isolation::parse(facts.isolation).ok_or_else(|| {
+            bad(format!(
+                "isolation tier {:?} has no record spelling",
+                facts.isolation
+            ))
+        })?;
+        ResolutionRecord::new(RecordFacts {
+            ecosystem: facts.ecosystem.to_string(),
+            door,
+            tool: spec.tool.clone(),
+            command: redact::command(&spec.command, &[]),
+            outputs,
+            inputs: pre_run(&spec.files.inputs)?,
+            ledger: LedgerSummary::of(&facts.ledger.ledger, facts.portable),
+            isolation,
+            exceptions: facts
+                .exceptions
+                .iter()
+                .map(|fact| Exception {
+                    kind: fact.kind.to_string(),
+                    subject: fact.subject.clone(),
+                    detail: fact.detail.clone(),
+                })
+                .collect(),
+        })
+    }
+}
+
 /// sha256 of a ledger's portable bytes: the record's `portable_sha256`.
 pub fn portable_sha256(portable: &[u8]) -> String {
     sha256_hex(portable)
 }
 
-/// The store identity of a ledger: a pure function of its portable bytes,
-/// so two machines holding the same portable ledger compute the same id.
-pub fn ledger_identity(ecosystem: &str, portable: &[u8]) -> Identity {
-    Identity {
-        kind: LEDGER_KIND.to_string(),
-        name: ecosystem.to_string(),
-        version: LEDGER_VERSION.to_string(),
-        inputs: BTreeMap::from([("portable".to_string(), portable_sha256(portable))]),
+impl LedgerSummary {
+    /// What a record says about `ledger`, committed as `object`: the
+    /// distinct upstream origins its entries reached, how many entries it
+    /// holds, and how many of them were refused.
+    pub fn of(object: &str, ledger: &PortableLedger) -> Self {
+        let endpoints: BTreeSet<String> = ledger
+            .entries()
+            .filter_map(|entry| url::Url::parse(&entry.url).ok())
+            .filter_map(|url| {
+                let host = url.host_str()?.to_string();
+                Some(match url.port() {
+                    Some(port) => format!("{host}:{port}"),
+                    None => host,
+                })
+            })
+            .collect();
+        LedgerSummary {
+            object: object.to_string(),
+            portable_sha256: ledger.sha256(),
+            endpoints: endpoints.into_iter().collect(),
+            entries: ledger.len() as u64,
+            refused: ledger
+                .entries()
+                .filter(|entry| entry.class == "refused")
+                .count() as u64,
+        }
     }
 }
 
-/// Do these portable bytes hash to exactly the ledger `record` names?
+/// Do these portable bytes parse as a canonical ledger for the record's
+/// ecosystem that hashes to exactly the digest and object id the record
+/// names?
 pub fn describes_ledger(record: &ResolutionRecord, portable: &[u8]) -> bool {
-    record.ledger.portable_sha256 == portable_sha256(portable)
-        && record.ledger.object == ledger_identity(&record.ecosystem, portable).object_id()
+    let Ok(ledger) = PortableLedger::parse(portable) else {
+        return false;
+    };
+    ledger.ecosystem() == record.ecosystem
+        && record.ledger.portable_sha256 == portable_sha256(portable)
+        && record.ledger.object == ledger.identity().object_id()
 }
 
 /// Is the ledger object `id` complete in the active store? A malformed id is
@@ -784,22 +925,20 @@ pub fn read_ledger(
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
             format!(
-                "the {} ledger {id} is not in the store at {}; export it on the machine that ran the resolution",
+                "the {} ledger {id} is not in the store at {}; export it on the machine that \
+                 ran the resolution",
                 record.ecosystem,
                 store.root.display()
             ),
         ));
     }
-    let path = store.object_path(id).join(LEDGER_FILE);
-    let bytes = fs::read(&path).map_err(|error| {
-        io::Error::new(error.kind(), format!("read {}: {error}", path.display()))
-    })?;
+    let bytes = ledger::read_portable(store, id)?;
     if !describes_ledger(record, &bytes) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!(
-                "{} does not hash to the ledger the {} record names; the store object is damaged",
-                path.display(),
+                "the ledger {id} in the store is not the one the {} record names; the store \
+                 object is damaged",
                 record.ecosystem
             ),
         ));
@@ -807,27 +946,33 @@ pub fn read_ledger(
     Ok(bytes)
 }
 
-/// Commit portable ledger bytes for `ecosystem` as a store object and
-/// return its id. The identity is checked against the object-kind table
-/// first, so a tog without the `resolution-ledger` row refuses cleanly
-/// instead of committing an object GC could not certify.
+/// Commit portable ledger bytes that `record` names, as imported from
+/// another machine: the portable object, plus a sidecar that says only that
+/// it was imported (the run's diagnostics never leave the machine that ran
+/// it). Bytes the record does not name exactly are refused before anything
+/// is written.
 pub fn commit_ledger(
     store: &Store,
     activity: &StoreActivity,
-    ecosystem: &str,
+    record: &ResolutionRecord,
     portable: &[u8],
-) -> io::Result<String> {
-    let identity = ledger_identity(ecosystem, portable);
-    crate::kernel::objmeta::check_identity_grammar(&identity).map_err(|reason| {
-        io::Error::new(
-            io::ErrorKind::Unsupported,
-            format!("this tog cannot store a resolution ledger: {reason}"),
-        )
-    })?;
-    let staged = store.stage_with_activity(activity)?;
-    fs::write(staged.join(LEDGER_FILE), portable)?;
-    store.commit_with_activity_and_deps(activity, &identity, &staged, &[], &ObjectDeps::new())?;
-    Ok(identity.object_id())
+) -> io::Result<LedgerObjects> {
+    if !describes_ledger(record, portable) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "these bytes are not the {} ledger the record names (sha256 {})",
+                record.ecosystem,
+                portable_sha256(portable)
+            ),
+        ));
+    }
+    let ledger = PortableLedger::parse(portable)?;
+    let mut diagnostics = Diagnostics::default();
+    diagnostics
+        .extra
+        .insert("imported".to_string(), Value::Bool(true));
+    ledger::commit(store, activity, &ledger, &diagnostics)
 }
 
 #[cfg(test)]
@@ -836,6 +981,7 @@ mod tests {
     use crate::kernel::activity::ActivityMode;
     use crate::kernel::testutil::TempDir;
     use serde_json::json;
+    use std::fs;
 
     const ECO: &str = "resolvetest";
 
@@ -857,16 +1003,32 @@ mod tests {
             command: vec!["lock".into()],
             outputs: BTreeMap::from([("test.lock".into(), sha256_hex(b"lock"))]),
             inputs: BTreeMap::from([("test.toml".into(), sha256_hex(b"manifest"))]),
-            ledger: LedgerSummary {
-                object: ledger_identity(ECO, b"portable").object_id(),
-                portable_sha256: portable_sha256(b"portable"),
-                endpoints: vec!["registry.example".into()],
-                entries: 2,
-                refused: 1,
-            },
+            ledger: LedgerSummary::of(&portable().identity().object_id(), &portable()),
             isolation: Isolation::Isolated,
             exceptions: Vec::new(),
         }
+    }
+
+    fn entry(class: &str, url: &str) -> ledger::Entry {
+        ledger::Entry {
+            class: class.into(),
+            method: "GET".into(),
+            url: url.into(),
+            status: if class == "refused" { 403 } else { 200 },
+            sha256: None,
+            claimed: None,
+            verified: false,
+            freshness: None,
+        }
+    }
+
+    /// Two fetches from one registry and a refused request elsewhere.
+    fn portable() -> PortableLedger {
+        let mut ledger = PortableLedger::new(ECO, "missing-lock").unwrap();
+        ledger.insert(entry("metadata", "https://registry.example/a"));
+        ledger.insert(entry("artifact", "https://registry.example/a.tgz"));
+        ledger.insert(entry("refused", "https://evil.example:8443/x"));
+        ledger
     }
 
     fn store(label: &str) -> (TempDir, Store) {
@@ -1002,7 +1164,12 @@ mod tests {
             ),
             (
                 "is not a resolvetest ledger id",
-                Box::new(|facts| facts.ledger.object = ledger_identity("go", b"p").object_id()),
+                Box::new(|facts| {
+                    facts.ledger.object = PortableLedger::new("go", "edit")
+                        .unwrap()
+                        .identity()
+                        .object_id()
+                }),
             ),
             (
                 "refused more requests",
@@ -1083,31 +1250,37 @@ mod tests {
     }
 
     #[test]
-    fn ledger_identity_is_a_pure_function_of_portable_bytes() {
-        let first = ledger_identity(ECO, b"portable");
+    fn ledger_summary_counts_endpoints_entries_and_refusals() {
+        let ledger = portable();
+        let summary = LedgerSummary::of("id", &ledger);
         assert_eq!(
-            first.object_id(),
-            ledger_identity(ECO, b"portable").object_id()
+            summary.endpoints,
+            vec![
+                "evil.example:8443".to_string(),
+                "registry.example".to_string()
+            ]
         );
-        assert_eq!(first.kind, LEDGER_KIND);
-        assert_eq!(first.name, ECO);
-        assert_eq!(first.version, "1");
-        assert_eq!(
-            first.inputs,
-            BTreeMap::from([("portable".to_string(), portable_sha256(b"portable"))])
-        );
-        assert!(first.object_id().ends_with("-resolvetest-1"));
-        assert_ne!(
-            first.object_id(),
-            ledger_identity(ECO, b"other").object_id()
-        );
+        assert_eq!((summary.entries, summary.refused), (3, 1));
+        assert_eq!(summary.portable_sha256, portable_sha256(&ledger.bytes()));
+        let identity = ledger.identity();
+        assert_eq!(identity.version, LEDGER_ID_VERSION);
+        assert!(identity.object_id().ends_with("-resolvetest-1"));
+        assert_eq!(identity.object_id(), portable().identity().object_id());
     }
 
     #[test]
     fn describes_ledger_rejects_mismatched_bytes() {
         let record = ResolutionRecord::new(facts()).unwrap();
-        assert!(describes_ledger(&record, b"portable"));
-        assert!(!describes_ledger(&record, b"portable\n"));
+        let bytes = portable().bytes();
+        assert!(describes_ledger(&record, &bytes));
+        let mut noncanonical = bytes.clone();
+        noncanonical.push(b'\n');
+        assert!(!describes_ledger(&record, &noncanonical));
+        let mut other = portable();
+        other.insert(entry("metadata", "https://registry.example/b"));
+        assert!(!describes_ledger(&record, &other.bytes()));
+        let elsewhere = PortableLedger::new("go", "missing-lock").unwrap();
+        assert!(!describes_ledger(&record, &elsewhere.bytes()));
     }
 
     #[test]
@@ -1123,28 +1296,23 @@ mod tests {
 
     #[test]
     fn ledger_export_import_round_trips_and_rejects_mismatched_bytes() {
-        let (_temp, store) = store("record-ledger-round-trip");
-        let activity = store.activity(ActivityMode::Shared).unwrap();
-        let identity = ledger_identity(ECO, b"portable");
-        if let Err(reason) = crate::kernel::objmeta::check_identity_grammar(&identity) {
-            // No object-kind row for ledgers yet: the import refuses before
-            // it stages anything.
-            let error = commit_ledger(&store, &activity, ECO, b"portable").unwrap_err();
-            assert_eq!(error.kind(), io::ErrorKind::Unsupported);
-            assert!(error.to_string().contains(&reason), "{error}");
-            assert!(!ledger_present(&store, &activity, &identity.object_id()).unwrap());
-            return;
-        }
-        let id = commit_ledger(&store, &activity, ECO, b"portable").unwrap();
-        assert_eq!(id, identity.object_id());
+        let (_temp, store, activity) = super::super::testing::scratch_store("record-ledger-trip");
         let record = ResolutionRecord::new(facts()).unwrap();
-        assert_eq!(
-            read_ledger(&store, &activity, &record).unwrap(),
-            b"portable"
-        );
-        let mut other = facts();
-        other.ledger.portable_sha256 = portable_sha256(b"different");
-        let mismatched = ResolutionRecord::new(other).unwrap();
+        let mut other = portable();
+        other.insert(entry("metadata", "https://registry.example/b"));
+        let error = commit_ledger(&store, &activity, &record, &other.bytes()).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(!ledger_present(&store, &activity, &other.identity().object_id()).unwrap());
+        let objects = commit_ledger(&store, &activity, &record, &portable().bytes()).unwrap();
+        assert_eq!(objects.ledger, record.ledger.object);
+        let exported = read_ledger(&store, &activity, &record).unwrap();
+        assert_eq!(exported, portable().bytes());
+        // Importing the exported bytes again is a cache hit on the same id.
+        let again = commit_ledger(&store, &activity, &record, &exported).unwrap();
+        assert_eq!(again.ledger, objects.ledger);
+        let mut wrong = facts();
+        wrong.ledger.portable_sha256 = portable_sha256(b"different");
+        let mismatched = ResolutionRecord::new(wrong).unwrap();
         let error = read_ledger(&store, &activity, &mismatched).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
     }
@@ -1153,7 +1321,7 @@ mod tests {
     fn a_symlinked_receipt_is_an_error_not_a_record() {
         let temp = TempDir::named("record-receipt-symlink");
         fs::write(temp.0.join("elsewhere.json"), "{}").unwrap();
-        fs::create_dir_all(temp.0.join(RECEIPT_DIR)).unwrap();
+        fs::create_dir_all(temp.0.join(RESOLUTION_DIR)).unwrap();
         std::os::unix::fs::symlink(
             temp.0.join("elsewhere.json"),
             temp.0.join(receipt_path(ECO)),

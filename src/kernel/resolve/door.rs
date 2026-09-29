@@ -12,7 +12,7 @@
 //! it was; the ledger this run rooted is taken back.
 
 use super::confine::{self, ConfinedOutcome, ConfinedRun, ForcedInputs, SocketScan, Stdout};
-use super::ledger::{self, Diagnostics, LedgerObjects};
+use super::ledger::{self, Diagnostics, LedgerObjects, PortableLedger};
 use super::outputs::{Forbidden, OutputFile, Outputs};
 use super::proxy::Proxy;
 use super::relay::{self, ToolStatus};
@@ -154,6 +154,8 @@ pub struct PublishFacts<'f> {
     /// The accepted outputs, with their digests.
     pub outputs: &'f [OutputFile],
     pub ledger: &'f LedgerObjects,
+    /// The portable ledger itself, for the record's summary of it.
+    pub portable: &'f PortableLedger,
     /// The sha256 of the portable ledger's bytes.
     pub ledger_sha256: &'f str,
     /// `confined` or `isolated`, and the engine.
@@ -257,6 +259,7 @@ pub(super) fn run(
         door: door.kind,
         outputs: outputs.files(),
         ledger: &objects,
+        portable: &ran.session.ledger,
         ledger_sha256: &ledger_sha256,
         isolation: ran.outcome.tier.isolation(),
         engine: ran.outcome.tier.engine.name(),

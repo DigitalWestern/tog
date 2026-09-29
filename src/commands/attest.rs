@@ -26,7 +26,6 @@ use crate::kernel::policy;
 use crate::kernel::resolve::record::{self, Judgment, ResolutionRecord};
 use crate::kernel::ui;
 use crate::tailors::{self, Tailor};
-use std::collections::BTreeSet;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -273,17 +272,11 @@ fn import_ledger(platform: Platform, project: &ProjectRoot, file: &Path) -> io::
         ));
     };
     let ctx = Context::open(platform, false)?;
-    let id = record::commit_ledger(&ctx.store, &ctx.activity, &record.ecosystem, &portable)?;
+    let objects = record::commit_ledger(&ctx.store, &ctx.activity, &record, &portable)?;
     // Root it under the project now; the next closure write retains it
     // through the closure's references.
-    let lock = ctx.store.project_lock_in(project)?;
-    ctx.store.register_root_parts_with_project_lock(
-        &ctx.activity,
-        project,
-        BTreeSet::from([id.clone()]),
-        BTreeSet::new(),
-        &lock,
-    )?;
+    crate::kernel::resolve::ledger::root(&ctx.store, &ctx.activity, project, &objects)?;
+    let id = objects.ledger;
     ui::note(&format!(
         "attest: stored the {} ledger {id} and rooted it under {}",
         record.ecosystem,

@@ -414,8 +414,7 @@ mod tests {
         Attribution, Exception, Signing, StrictSource, GIT_DEPENDENCY, UNCONFINED_RESOLUTION,
     };
     use crate::kernel::resolve::record::{
-        file_digests, ledger_identity, Isolation, LedgerSummary, RecordDoor, RecordFacts,
-        ResolutionRecord, Tool,
+        file_digests, Isolation, LedgerSummary, RecordDoor, RecordFacts, ResolutionRecord, Tool,
     };
     use crate::kernel::signing::{self, SigningKey};
     use crate::kernel::testutil::TempDir;
@@ -483,13 +482,18 @@ mod tests {
     }
 
     fn ledger(portable: &[u8]) -> LedgerSummary {
-        LedgerSummary {
-            object: ledger_identity(ECO, portable).object_id(),
-            portable_sha256: record::portable_sha256(portable),
-            endpoints: vec!["registry.example".into()],
-            entries: 3,
-            refused: 0,
-        }
+        let mut ledger = crate::kernel::resolve::ledger::PortableLedger::new(ECO, "edit").unwrap();
+        ledger.insert(crate::kernel::resolve::ledger::Entry {
+            class: "metadata".into(),
+            method: "GET".into(),
+            url: "https://registry.example/left-pad".into(),
+            status: 200,
+            sha256: Some(record::sha256_hex(portable)),
+            claimed: None,
+            verified: false,
+            freshness: None,
+        });
+        LedgerSummary::of(&ledger.identity().object_id(), &ledger)
     }
 
     /// The record a door run in `dir` would write, describing the files as
@@ -533,7 +537,7 @@ mod tests {
         fs::write(dir.join(record::receipt_path(ECO)), bytes).unwrap();
     }
 
-    const RECEIPT_DIR_FOR_TESTS: &str = record::RECEIPT_DIR;
+    const RECEIPT_DIR_FOR_TESTS: &str = record::RESOLUTION_DIR;
 
     fn supplied(origin: &Path, bytes: Vec<u8>) -> SuppliedRecord {
         SuppliedRecord {
@@ -1064,7 +1068,7 @@ mod tests {
             signed(&record_for(&temp.0, vec![]), Some(ci_key())),
         )
         .unwrap();
-        fs::create_dir_all(temp.0.join(record::RECEIPT_DIR)).unwrap();
+        fs::create_dir_all(temp.0.join(record::RESOLUTION_DIR)).unwrap();
         std::os::unix::fs::symlink(&elsewhere, temp.0.join(record::receipt_path(ECO))).unwrap();
         let (result, _) = run_join(&trusting(&[ci_key()]), &temp.0, &[]);
         let error = result.unwrap_err();
@@ -1248,7 +1252,7 @@ mod tests {
             closure["body"]["resolution"],
             serde_json::from_slice::<Value>(&bytes).unwrap()
         );
-        assert!(!temp.0.join(record::RECEIPT_DIR).exists());
+        assert!(!temp.0.join(record::RESOLUTION_DIR).exists());
     }
 
     #[test]
