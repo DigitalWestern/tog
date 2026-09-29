@@ -71,13 +71,16 @@ Nothing queued; the next item comes from "Open work" below.
   workaround is `SUPERVISION_TEST_LOCK` plus `--test-threads=1` for
   `--ignored` targets. Design: `docs/agent/DESIGNS.md` §5 "Per-operation
   signal sessions" (#57); implementation follows its review.
-- **The resolution proxy (#68).** Delegated tools (`add`/`remove`/`update`,
-  missing-lock generation, `tog x`) run unsandboxed with network today.
-  Design: `docs/agent/DESIGNS.md` §6 (#196). PR 0, the measured evidence,
-  shipped in #209; its macOS Mach allow-list waits on one run of
-  `tools/proxy_spike/macos_mach.sh` on a Mac. The rest, in order: #198 (PR 1,
-  the door type), #199, #200, #201 (PR 3b), #202, #203, #204, #205, #206,
-  #207, #208 (PR 10, remove `Legacy`). Found by PR 0 and slotted into those:
+- **The resolution proxy (#68).** Design: `docs/agent/DESIGNS.md` §6
+  (#196). PR 0, the measured evidence, shipped in #209. PRs 1 to 4 (#198
+  the door type, #199 the proxy core, #200 confinement and the transaction,
+  #202 Go end to end, attestation, and the join) are built on Linux: Go
+  resolves confined through the proxy and every other delegated tool still
+  runs through the door's unsandboxed `Legacy` mode. Still open, in order:
+  #201 (PR 3b, the container backend and `tog-isolate`), #203, #204, #205,
+  #206, #207, #208 (PR 10, remove `Legacy`). The macOS door (Seatbelt rules,
+  Mach allow-list from one run of `tools/proxy_spike/macos_mach.sh` on a
+  Mac, tree freeze) is not built. Found by PR 0 and slotted into those:
   #210 (uv ignores `UV_PYTHON`), #211 (`bundle add` installs), #212 (npm
   notifier and audit requests).
 - **Test-suite audit of 2026-09-27 (#351).** Nine reviewers, one per
