@@ -53,6 +53,33 @@ pub const RUBY_HELPER_SHA256: &str =
 pub const ELIXIR_HELPER_SHA256: &str =
     "aab9cac87d2f2ae4dc292d033ee35910d687dfdd897073d0f601509db9aef40f";
 
+/// The Elixir tailor's environment scrub, which it uses for every BEAM run:
+/// every variable with one of these prefixes (compared case-insensitively)
+/// or names is removed, then the forced ones are set. They live here so the
+/// `hexmark` form checks exactly what the tailor removes.
+pub const ELIXIR_ENV_REMOVE_PREFIXES: &[&str] = &["MIX_", "HEX_", "REBAR_", "ERL_", "ELIXIR_"];
+pub const ELIXIR_ENV_REMOVE: &[&str] =
+    &["ERTS_BIN", "RUN_ERL_PIPE", "RUN_ERL_LOG", "ERLC_USE_SERVER"];
+
+/// Every variable the Elixir tailor forces after the scrub (its test holds
+/// it to the tailor's list), and the ones among them that name a path.
+pub const ELIXIR_FORCED: &[&str] = &[
+    "MIX_DEPS_PATH",
+    "MIX_ARCHIVES",
+    "MIX_REBAR3",
+    "MIX_HOME",
+    "HEX_HOME",
+    "HEX_OFFLINE",
+    "MIX_TARGET",
+];
+const ELIXIR_FORCED_PATHS: &[&str] = &[
+    "MIX_DEPS_PATH",
+    "MIX_ARCHIVES",
+    "MIX_REBAR3",
+    "MIX_HOME",
+    "HEX_HOME",
+];
+
 /// What a form sees of one invocation: the arguments after the program,
 /// its working directory, its explicit environment edits (`None` is a
 /// removed variable), the file it would execute and the store it runs for
@@ -144,31 +171,57 @@ impl Invocation<'_> {
         }
     }
 
-    /// Whether the child sees `key` set to exactly `value`.
-    fn is(&self, key: &str, value: &str) -> bool {
-        self.effective(key).as_deref() == Some(OsStr::new(value))
-    }
-
     /// Whether the child sees `key` unset or empty.
     fn unset(&self, key: &str) -> bool {
         self.effective(key).is_none_or(|value| value.is_empty())
     }
 
-    /// Whether the child sees no variable whose name starts with `prefix`
-    /// (compared case-insensitively).
-    fn none_with_prefix(&self, prefix: &str) -> bool {
-        let matches = |name: &OsStr| {
-            name.to_string_lossy()
-                .get(..prefix.len())
-                .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
+    /// Whether the child sees no variable of a scrubbed family (a name
+    /// with one of `prefixes`, compared case-insensitively, or one of
+    /// `names`) except the `forced` ones the command itself sets: each
+    /// inherited one is edited by the command, and every one it sets is
+    /// forced.
+    fn family_clean(&self, prefixes: &[&str], names: &[&str], forced: &[&str]) -> bool {
+        let in_family = |name: &OsStr| {
+            let name = name.to_string_lossy();
+            names.contains(&name.as_ref())
+                || prefixes.iter().any(|prefix| {
+                    name.get(..prefix.len())
+                        .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
+                })
         };
-        let explicit = self
-            .env
+        let sets_only_forced = self.env.iter().all(|(name, value)| {
+            !in_family(name) || value.is_none() || forced.iter().any(|key| *name == *key)
+        });
+        let inherits_none = std::env::vars_os().all(|(name, _)| {
+            !in_family(&name) || self.env.iter().any(|(edited, _)| *edited == name)
+        });
+        sets_only_forced && inherits_none
+    }
+
+    /// Whether the command itself edits every variable tog has, so the
+    /// child inherits nothing.
+    fn fully_cleared(&self) -> bool {
+        std::env::vars_os().all(|(name, _)| self.env.iter().any(|(edited, _)| *edited == name))
+    }
+
+    /// Whether every variable the command itself sets is one of `allowed`.
+    fn sets_only(&self, allowed: &[&str]) -> bool {
+        self.env
             .iter()
-            .any(|(name, value)| matches(name) && value.is_some());
-        let inherited = std::env::vars_os()
-            .any(|(name, _)| matches(&name) && !self.env.iter().any(|(edited, _)| *edited == name));
-        !explicit && !inherited
+            .all(|(name, value)| value.is_none() || allowed.iter().any(|key| *name == *key))
+    }
+
+    /// Whether the command itself sets `PATH`, and every entry is in the
+    /// store or is `/usr/bin` or `/bin`: no version-manager shim or user
+    /// directory can answer for a program the child starts by name.
+    fn path_confined(&self) -> bool {
+        match self.edit("PATH") {
+            Some(Some(path)) => std::env::split_paths(path).all(|dir| {
+                dir == Path::new("/usr/bin") || dir == Path::new("/bin") || self.under_store(&dir)
+            }),
+            _ => false,
+        }
     }
 
     /// Argument `index` as text, when it is valid UTF-8.
@@ -295,6 +348,52 @@ fn go_mod_download(run: &Invocation) -> bool {
         && run.removed("XDG_CONFIG_HOME")
 }
 
+/// The Elixir helper's `hexmark` mode as the Elixir tailor builds it: the
+/// store `elixir` running the pinned helper over a dependency in the store.
+/// The scrubbed family carries only the forced variables (no `ERL_*`,
+/// `ELIXIR_*` or `ERTS_BIN` to add code or pick another `erl`), with
+/// `HEX_OFFLINE=1`; `PATH` holds only the store and `/usr/bin`, `/bin`
+/// (the `elixir` script starts `erl` by name); and `HOME` in the store with
+/// `XDG_CONFIG_HOME` removed keeps a user `.erlang` from running.
+fn elixir_hexmark(run: &Invocation) -> bool {
+    run.args.len() == 8
+        && run.is_helper(0, "helper.exs", ELIXIR_HELPER_SHA256)
+        && run.arg(1) == Some("hexmark")
+        && run.no_options_from(1)
+        && run.under_store(Path::new(run.args[2]))
+        && run.program_in_store()
+        && run.family_clean(ELIXIR_ENV_REMOVE_PREFIXES, ELIXIR_ENV_REMOVE, ELIXIR_FORCED)
+        && run.set_to("HEX_OFFLINE", "1")
+        && run.set_to("MIX_TARGET", "host")
+        && ELIXIR_FORCED_PATHS
+            .iter()
+            .all(|key| run.set_under_store(key))
+        && run.path_confined()
+        && run.set_under_store("HOME")
+        && run.set_under_store("TMPDIR")
+        && run.removed("XDG_CONFIG_HOME")
+}
+
+/// The staged-OTP probe as the Elixir tailor builds it: the staged `erl`
+/// evaluating exactly the reviewed expression, in an environment the
+/// command empties itself and then gives only `PATH` (store and `/usr/bin`,
+/// `/bin`), `HOME` and `TMPDIR` in the store, and `LANG=C`. No `ERL_*`
+/// variable can add an `-eval`, and no `XDG_CONFIG_HOME` or user `HOME`
+/// can supply a `.erlang` boot file.
+fn otp_probe(run: &Invocation) -> bool {
+    run.args.len() == 3
+        && run.arg(0) == Some("-noshell")
+        && run.arg(1) == Some("-eval")
+        && run.arg(2) == Some(OTP_RUNTIME_PROBE)
+        && run.program_in_store()
+        && run.fully_cleared()
+        && run.sets_only(&["PATH", "HOME", "TMPDIR", "LANG"])
+        && run.path_confined()
+        && run.set_under_store("HOME")
+        && run.set_under_store("TMPDIR")
+        && run.set_to("LANG", "C")
+}
+
 const OFFLINE_FORMS: &[OfflineForm] = &[
     // The Cargo tailor's workspace lookup: the store Cargo (a rustup proxy
     // could install a toolchain the project names), forbidden the network.
@@ -310,33 +409,15 @@ const OFFLINE_FORMS: &[OfflineForm] = &[
         matches: go_mod_download,
     },
     // The Elixir helper's `hexmark` mode: writes a verified dependency's
-    // .hex marker, with HEX_OFFLINE=1 and no Erlang or Elixir option
-    // variables for the VM to pick up.
+    // .hex marker.
     OfflineForm {
         program: "elixir",
-        matches: |run| {
-            run.args.len() == 8
-                && run.is_helper(0, "helper.exs", ELIXIR_HELPER_SHA256)
-                && run.arg(1) == Some("hexmark")
-                && run.no_options_from(1)
-                && run.is("HEX_OFFLINE", "1")
-                && run.none_with_prefix("ERL_")
-                && run.none_with_prefix("ELIXIR_")
-        },
+        matches: elixir_hexmark,
     },
-    // The staged-OTP probe: loads crypto and ssl and prints two lines, with
-    // no `ERL_*` variable (`ERL_AFLAGS`, `ERL_FLAGS`, `ERL_ZFLAGS`,
-    // `ERL_LIBS`) able to add code or an `-eval` of its own.
+    // The staged-OTP probe: loads crypto and ssl and prints two lines.
     OfflineForm {
         program: "erl",
-        matches: |run| {
-            run.args.len() == 3
-                && run.arg(0) == Some("-noshell")
-                && run.arg(1) == Some("-eval")
-                && run.arg(2) == Some(OTP_RUNTIME_PROBE)
-                && run.none_with_prefix("ERL_")
-                && run.none_with_prefix("ELIXIR_")
-        },
+        matches: otp_probe,
     },
     // The Ruby helper's `spec` mode: reads the gemspec of a .gem tog
     // already verified, with no interpreter option variables.
@@ -847,12 +928,18 @@ mod tests {
     fn erl_probe_requires_the_erlang_option_variables_gone() {
         let fixture = Fixture::new("tripwire-erl");
         let erl = fixture.program("tmp/stage/otp/bin/erl");
+        let home = fixture.path("tmp/stage");
         let probe = ["-noshell", "-eval", OTP_RUNTIME_PROBE];
         let clean = || {
             let mut command = command(&erl, &probe, &[]);
             for (key, _) in std::env::vars_os() {
                 command.env_remove(key);
             }
+            command
+                .env("PATH", "/usr/bin:/bin")
+                .env("HOME", &home)
+                .env("TMPDIR", &home)
+                .env("LANG", "C");
             command
         };
         fixture.admits(&clean());
@@ -861,6 +948,50 @@ mod tests {
             command.env(key, "-eval 'os:cmd(\"curl example.com\")'");
             fixture.refused(&command);
         }
+        // A user `.erlang` through `HOME` or `XDG_CONFIG_HOME`, and an
+        // `erl` found through a user directory on `PATH`.
+        for (key, value) in [
+            ("HOME", "/home/someone"),
+            ("XDG_CONFIG_HOME", "/home/someone/.config"),
+            ("PATH", "/home/someone/.asdf/shims:/usr/bin:/bin"),
+            ("PATH", ":/usr/bin"),
+        ] {
+            let mut command = clean();
+            command.env(key, value);
+            fixture.refused(&command);
+        }
+        // One inherited variable left in place: the probe must inherit
+        // nothing.
+        let kept = std::env::vars_os().map(|(key, _)| key).find(|key| {
+            !["PATH", "HOME", "TMPDIR", "LANG"]
+                .iter()
+                .any(|set| key == set)
+        });
+        if let Some(kept) = kept {
+            let mut command = command(&erl, &probe, &[]);
+            for (key, _) in std::env::vars_os().filter(|(key, _)| *key != kept) {
+                command.env_remove(key);
+            }
+            command
+                .env("PATH", "/usr/bin:/bin")
+                .env("HOME", &home)
+                .env("TMPDIR", &home)
+                .env("LANG", "C");
+            fixture.refused(&command);
+        }
+        // The same probe from an `erl` outside the store.
+        let outside = Fixture::new("tripwire-erl-host");
+        let mut host = clean();
+        let mut moved = Command::new(outside.program("otp/bin/erl"));
+        moved.args(host.get_args());
+        for (key, value) in host.get_envs() {
+            match value {
+                Some(value) => moved.env(key, value),
+                None => moved.env_remove(key),
+            };
+        }
+        host = moved;
+        fixture.refused(&host);
     }
 
     /// A resolver is recognized by the name it is started under, in any

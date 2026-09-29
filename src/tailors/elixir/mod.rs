@@ -1141,11 +1141,11 @@ pub fn realize_runtime(
     result
 }
 
-/// The forced environment for every tog-controlled mix/elixir run:
-/// ERL_LIBS-class vars inject code paths or emulator args before Mix's own
-/// controls apply.
-const ENV_REMOVE_PREFIXES: &[&str] = &["MIX_", "HEX_", "REBAR_", "ERL_", "ELIXIR_"];
-const ENV_REMOVE: &[&str] = &["ERTS_BIN", "RUN_ERL_PIPE", "RUN_ERL_LOG", "ERLC_USE_SERVER"];
+/// The forced environment for every tog-controlled mix/elixir run: ERL_LIBS-
+/// class vars inject code paths or emulator args before Mix's own controls
+/// apply. The lists live with the host-local tripwire, which checks by them.
+const ENV_REMOVE_PREFIXES: &[&str] = crate::kernel::resolve::tripwire::ELIXIR_ENV_REMOVE_PREFIXES;
+const ENV_REMOVE: &[&str] = crate::kernel::resolve::tripwire::ELIXIR_ENV_REMOVE;
 
 fn forced_env(beam_obj: &Path, deps_path: &Path, scratch_home: &Path) -> Vec<(String, String)> {
     vec![
@@ -2051,38 +2051,101 @@ mod tests {
     #[test]
     fn hexmark_and_the_otp_probe_pass_the_tripwire_only_as_built() {
         use crate::kernel::resolve::tripwire::refusal;
+        use crate::kernel::testutil::{loosened, store_program};
         let store = TempDir::named("elixir-tripwire");
         let refused = |command: &Command| refusal(command, &store.0);
-        crate::kernel::testutil::store_program(&store.0, "objects/beam/elixir/bin/elixir");
+        store_program(&store.0, "objects/beam/elixir/bin/elixir");
         let beam = store.0.join("objects/beam");
         let scratch = store.0.join("tmp/stage-scratch");
         fs::create_dir_all(&scratch).unwrap();
         let helper = scratch.join("helper.exs");
         fs::write(&helper, HELPER).unwrap();
-        let args = [
-            "elixir",
-            helper.to_str().unwrap(),
-            "hexmark",
-            "/stage/dep",
-            "jason",
-            "1.4.4",
-            "inner",
-            "outer",
-            "mix",
-        ];
-        let mut hexmark = tool::mix_spec(&beam, &scratch, &scratch, true, &args).command();
-        assert!(refused(&hexmark).is_none(), "{:?}", refused(&hexmark));
-        hexmark.env("ELIXIR_ERL_OPTIONS", "-eval halt()");
-        assert!(refused(&hexmark).is_some());
-        let online = tool::mix_spec(&beam, &scratch, &scratch, false, &args).command();
+        let dep = scratch.join("deps/jason");
+        let args = |dep: &Path| {
+            [
+                "elixir",
+                helper.to_str().unwrap(),
+                "hexmark",
+                dep.to_str().unwrap(),
+                "jason",
+                "1.4.4",
+                "inner",
+                "outer",
+                "mix",
+            ]
+            .map(str::to_string)
+        };
+        let build_at = |beam: &Path, dep: &Path| {
+            let args = args(dep);
+            let args: Vec<&str> = args.iter().map(String::as_str).collect();
+            tool::hexmark_command(beam, &scratch, &args)
+        };
+        let build = || build_at(&beam, &dep);
+        assert!(refused(&build()).is_none(), "{:?}", refused(&build()));
+        for (key, value) in [
+            ("ELIXIR_ERL_OPTIONS", "-eval halt()"),
+            ("ERL_AFLAGS", "-eval halt()"),
+            ("ERTS_BIN", "/tmp/erts/"),
+            ("MIX_EXS", "/tmp/mix.exs"),
+            ("HEX_MIRROR", "https://example.com"),
+        ] {
+            let mut command = build();
+            command.env(key, value);
+            assert!(refused(&command).is_some(), "{key}");
+        }
+        let loosened_hexmark = loosened(build);
+        let keys: Vec<&str> = loosened_hexmark
+            .iter()
+            .map(|(key, _)| key.as_str())
+            .collect();
+        for key in [
+            "PATH",
+            "HOME",
+            "TMPDIR",
+            "XDG_CONFIG_HOME",
+            "HEX_OFFLINE",
+            "MIX_HOME",
+        ] {
+            assert!(keys.contains(&key), "{key} is not forced: {keys:?}");
+        }
+        for (key, command) in &loosened_hexmark {
+            assert!(refused(command).is_some(), "loosened {key}");
+        }
+        let online = {
+            let args = args(&dep);
+            let args: Vec<&str> = args.iter().map(String::as_str).collect();
+            tool::mix_spec(&beam, &scratch, &scratch, false, &args).command()
+        };
         assert!(refused(&online).is_some(), "hexmark without HEX_OFFLINE");
+        assert!(
+            refused(&build_at(&beam, Path::new("/tmp/dep"))).is_some(),
+            "a dependency outside the store"
+        );
+        let host = TempDir::named("elixir-tripwire-host");
+        store_program(&host.0, "beam/elixir/bin/elixir");
+        assert!(
+            refused(&build_at(&host.0.join("beam"), &dep)).is_some(),
+            "an elixir outside the store"
+        );
 
-        crate::kernel::testutil::store_program(&store.0, "tmp/stage-otp/otp/bin/erl");
+        store_program(&store.0, "tmp/stage-otp/otp/bin/erl");
         let otp = store.0.join("tmp/stage-otp/otp");
-        let mut probe = tool::otp_probe_command(&otp, &scratch);
-        assert!(refused(&probe).is_none(), "{:?}", refused(&probe));
-        probe.env("ERL_AFLAGS", "-eval 'halt(3).'");
-        assert!(refused(&probe).is_some());
+        let probe = || tool::otp_probe_command(&otp, &scratch);
+        assert!(refused(&probe()).is_none(), "{:?}", refused(&probe()));
+        for (key, value) in [
+            ("ERL_AFLAGS", "-eval 'halt(3).'"),
+            ("XDG_CONFIG_HOME", "/tmp"),
+        ] {
+            let mut command = probe();
+            command.env(key, value);
+            assert!(refused(&command).is_some(), "{key}");
+        }
+        for (key, command) in &loosened(probe) {
+            assert!(refused(command).is_some(), "loosened {key}");
+        }
+        store_program(&host.0, "otp/bin/erl");
+        let host_probe = tool::otp_probe_command(&host.0.join("otp"), &scratch);
+        assert!(refused(&host_probe).is_some(), "an erl outside the store");
     }
 
     /// A `hex-deps` record names the BEAM object only by fingerprint. The
@@ -2731,7 +2794,13 @@ exit 0
             assert!(ENV_REMOVE_PREFIXES.contains(&p), "{p}");
         }
         let env = forced_env(Path::new("/b"), Path::new("/d"), Path::new("/s"));
-        let keys: Vec<&str> = env.iter().map(|(k, _)| k.as_str()).collect();
+        let mut keys: Vec<&str> = env.iter().map(|(k, _)| k.as_str()).collect();
+        // The host-local tripwire checks the hexmark run against its own
+        // copy of this list.
+        let mut checked = crate::kernel::resolve::tripwire::ELIXIR_FORCED.to_vec();
+        keys.sort_unstable();
+        checked.sort_unstable();
+        assert_eq!(keys, checked);
         for k in [
             "MIX_DEPS_PATH",
             "MIX_ARCHIVES",

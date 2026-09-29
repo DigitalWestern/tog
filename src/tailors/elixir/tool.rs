@@ -76,9 +76,17 @@ pub(super) fn run_hexmark(
     scratch: &Path,
     args: &[&str],
 ) -> io::Result<std::process::Output> {
-    let mut cmd = mix_spec(beam_obj, scratch, scratch, true, args).command();
+    let mut cmd = hexmark_command(beam_obj, scratch, args);
     crate::kernel::supervise::local_output(&mut cmd, activity)
         .map_err(|e| io::Error::new(e.kind(), format!("run store mix {args:?}: {e}")))
+}
+
+/// The command `run_hexmark` starts: the offline mix environment, with no
+/// `XDG_CONFIG_HOME` through which a user `.erlang` could run.
+pub(super) fn hexmark_command(beam_obj: &Path, scratch: &Path, args: &[&str]) -> Command {
+    let mut command = mix_spec(beam_obj, scratch, scratch, true, args).command();
+    command.env_remove("XDG_CONFIG_HOME");
+    command
 }
 
 /// The command `probe_otp_runtime` starts: the staged `erl` evaluating the
@@ -94,8 +102,7 @@ pub(super) fn otp_probe_command(otp_root: &Path, scratch: &Path) -> Command {
         .current_dir(scratch);
     // Every inherited variable removed by name rather than `env_clear`:
     // the same empty environment, but the removals stay visible to the
-    // host-local tripwire, which requires no `ERL_*` variable reach the
-    // probe.
+    // host-local tripwire, which requires the probe inherit nothing.
     for (key, _) in std::env::vars_os() {
         command.env_remove(key);
     }
