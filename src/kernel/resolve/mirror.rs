@@ -300,6 +300,24 @@ impl Exchange<'_> {
 
     /// Serve `url`, which the route resolved and checked.
     pub(crate) fn serve(&self, url: &Url, out: &mut dyn Write) -> io::Result<()> {
+        // One value per forwarded header: the metadata cache keys on the
+        // `Accept` it reads, so upstream must see exactly that one.
+        if let Some(name) = FORWARDED_REQUEST_HEADERS
+            .iter()
+            .find(|name| self.request.count(name) > 1)
+        {
+            let record = Record::new("refused", self.method, self.redacted(url));
+            let reason = format!("the request repeats {name}, which is forwarded only once");
+            return refuse(
+                self.state,
+                out,
+                record,
+                400,
+                &reason,
+                &Headers::new(),
+                false,
+            );
+        }
         let class = self.route.protocol.classify(url);
         if class == RequestClass::Artifact {
             return self.artifact(url, out);
@@ -399,7 +417,12 @@ impl Exchange<'_> {
 
     fn metadata(&self, url: &Url, class: RequestClass, out: &mut dyn Write) -> io::Result<()> {
         let mut record = Record::new(class.as_str(), self.method, self.redacted(url));
-        let key = cache::key(self.method, url.as_str(), self.request.get("accept"));
+        let key = cache::key(
+            self.method,
+            url.as_str(),
+            self.request.get("accept"),
+            &self.route.credential_identity(),
+        );
         let cached = self.state.meta.load(&key).unwrap_or_else(|error| {
             record.detail = Some(format!("metadata cache unreadable: {error}"));
             None
@@ -1448,6 +1471,69 @@ mod tests {
                 ("GET".to_string(), "/art/claimed-pkg-1.0.tgz".to_string()),
             ],
             "a claimed artifact is fetched whole and verified even for a HEAD"
+        );
+        session.finish();
+    }
+
+    #[test]
+    fn a_repeated_accept_is_refused_so_the_cache_key_matches_upstream() {
+        let harness = Harness::new("mirror-accept");
+        let (session, address) = harness.session();
+        let answer = get(
+            &address,
+            &mirror(&address, "/meta/pkg.json"),
+            "Accept: application/json\r\nAccept: application/vnd.npm.install-v1+json\r\n",
+        );
+        assert_eq!(answer.status, 400, "{}", answer.text());
+        assert!(
+            answer.text().contains("repeats accept"),
+            "{}",
+            answer.text()
+        );
+        assert!(
+            harness.upstream.seen().is_empty(),
+            "nothing was fetched or cached"
+        );
+        session.finish();
+    }
+
+    #[test]
+    fn credentialed_metadata_is_never_served_to_another_credential_configuration() {
+        let harness = Harness::new("mirror-cred-cache");
+        let port = harness.upstream.port();
+        let open = |credential: Option<&str>| {
+            let mut registry = Endpoint::for_test("registry.test", port);
+            if let Some(credential) = credential {
+                registry = registry.with_authorization(credential);
+            }
+            let mut config = harness.config(Policy::default(), Mode::Online);
+            config.routes = vec![Route::new(
+                &TEST_PROTOCOL,
+                vec![registry, Endpoint::for_test("other.test", port)],
+            )
+            .unwrap()];
+            harness.open(config)
+        };
+        let (session, address) = open(Some("Bearer private"));
+        assert_eq!(fetch(&address, "/meta/pkg.json").status, 200);
+        session.finish();
+        harness.upstream.set("/meta/pkg.json", Behavior::Drop);
+        for credential in [None, Some("Bearer someone-else")] {
+            let (session, address) = open(credential);
+            let answer = fetch(&address, "/meta/pkg.json");
+            assert_eq!(
+                answer.status,
+                504,
+                "{credential:?} got a copy: {}",
+                answer.text()
+            );
+            session.finish();
+        }
+        // Control: the same credentials find their own last-good copy.
+        let (session, address) = open(Some("Bearer private"));
+        assert_eq!(
+            fetch(&address, "/meta/pkg.json").body,
+            fixture("meta/pkg.json")
         );
         session.finish();
     }

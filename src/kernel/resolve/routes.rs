@@ -388,6 +388,32 @@ impl Route {
         Ok(upstream)
     }
 
+    /// The identity of this route's endpoint credentials: empty when no
+    /// endpoint carries one, otherwise a sha256 over every (origin,
+    /// credential) pair. Caches keyed by URL include it, so a response
+    /// fetched with a credential is only ever served under the same
+    /// credentials. The value itself never leaves this hash.
+    pub(crate) fn credential_identity(&self) -> String {
+        use sha2::{Digest as _, Sha256};
+        let mut pairs: Vec<(String, &str)> = self
+            .endpoints
+            .iter()
+            .filter_map(|endpoint| Some((endpoint.origin(), endpoint.authorization()?)))
+            .collect();
+        if pairs.is_empty() {
+            return String::new();
+        }
+        pairs.sort();
+        let mut hasher = Sha256::new();
+        for (origin, credential) in pairs {
+            hasher.update(origin.as_bytes());
+            hasher.update([0u8]);
+            hasher.update(credential.as_bytes());
+            hasher.update([0u8]);
+        }
+        hex::encode(hasher.finalize())
+    }
+
     /// The endpoint serving `url`, for its credential.
     pub(crate) fn endpoint_for(&self, url: &Url) -> Option<&Endpoint> {
         self.endpoints.iter().find(|endpoint| endpoint.serves(url))

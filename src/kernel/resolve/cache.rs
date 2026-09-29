@@ -36,10 +36,14 @@ pub const KEPT_HEADERS: &[&str] = &[
     "expires",
 ];
 
-/// The cache key of one request.
-pub fn key(method: &str, url: &str, accept: Option<&str>) -> String {
+/// The cache key of one request. `credentials` is the identity of the
+/// endpoint credentials the response may have been fetched with (see
+/// `Route::credential_identity`, empty when there are none), so a response
+/// fetched with a credential is never served to a configuration without
+/// that same credential.
+pub fn key(method: &str, url: &str, accept: Option<&str>, credentials: &str) -> String {
     let mut hasher = Sha256::new();
-    for part in [method, url, &normalize_accept(accept)] {
+    for part in [method, url, &normalize_accept(accept), credentials] {
         hasher.update(part.as_bytes());
         hasher.update([0u8]);
     }
@@ -251,36 +255,46 @@ mod tests {
     #[test]
     fn metadata_cache_key_includes_accept() {
         let url = "https://registry.test/pkg";
-        let full = key("GET", url, Some("application/json"));
-        let abbreviated = key("GET", url, Some("application/vnd.npm.install-v1+json"));
+        let full = key("GET", url, Some("application/json"), "");
+        let abbreviated = key("GET", url, Some("application/vnd.npm.install-v1+json"), "");
         assert_ne!(full, abbreviated);
-        assert_ne!(full, key("GET", url, None));
-        assert_ne!(full, key("HEAD", url, Some("application/json")));
+        assert_ne!(full, key("GET", url, None, ""));
+        assert_ne!(full, key("HEAD", url, Some("application/json"), ""));
         assert_ne!(
             full,
             key(
                 "GET",
                 "https://registry.test/pkg2",
-                Some("application/json")
+                Some("application/json"),
+                ""
             )
+        );
+        // A credentialed configuration never shares an anonymous key, nor
+        // another credential's.
+        assert_ne!(full, key("GET", url, Some("application/json"), "cred-a"));
+        assert_ne!(
+            key("GET", url, Some("application/json"), "cred-a"),
+            key("GET", url, Some("application/json"), "cred-b")
         );
         // Spelling differences that ask for the same thing share a key.
         assert_eq!(
             key(
                 "GET",
                 url,
-                Some("application/vnd.pypi.simple.v1+json; q=0.9, text/html")
+                Some("application/vnd.pypi.simple.v1+json; q=0.9, text/html"),
+                ""
             ),
             key(
                 "GET",
                 url,
-                Some("Application/Vnd.PyPI.Simple.V1+JSON;q=0.9,text/html")
+                Some("Application/Vnd.PyPI.Simple.V1+JSON;q=0.9,text/html"),
+                ""
             )
         );
         // Order is preference, so it is kept.
         assert_ne!(
-            key("GET", url, Some("a/b, c/d")),
-            key("GET", url, Some("c/d, a/b"))
+            key("GET", url, Some("a/b, c/d"), ""),
+            key("GET", url, Some("c/d, a/b"), "")
         );
     }
 
@@ -295,7 +309,7 @@ mod tests {
         ];
         let entry = Cached::new("https://registry.test/a", &headers, b"{\"a\":1}".to_vec());
         assert_eq!(entry.headers.len(), 2, "only kept headers are stored");
-        let k = key("GET", "https://registry.test/a", None);
+        let k = key("GET", "https://registry.test/a", None, "");
         cache.save(&k, &entry).unwrap();
         assert_eq!(cache.load(&k).unwrap(), Some(entry.clone()));
         assert_eq!(cache.load(&"0".repeat(64)).unwrap(), None);
@@ -313,8 +327,8 @@ mod tests {
         let (_temp, store, _activity) = crate::kernel::resolve::testing::scratch_store("sweep");
         let cache = MetaCache::open(&store).unwrap();
         let (old, fresh) = (
-            key("GET", "https://r.test/old", None),
-            key("GET", "https://r.test/new", None),
+            key("GET", "https://r.test/old", None, ""),
+            key("GET", "https://r.test/new", None, ""),
         );
         cache
             .save(
