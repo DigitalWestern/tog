@@ -100,10 +100,7 @@ impl Facts {
             return Some(failure.clone());
         }
         if let Some(refusal) = self.refusals.first() {
-            return Some(match &self.first_stale_refused {
-                Some(url) => format!("{refusal} (first refused: {url})"),
-                None => refusal.clone(),
-            });
+            return Some(refusal.clone());
         }
         self.first_offline_miss
             .as_ref()
@@ -419,17 +416,25 @@ impl State {
 
     /// Whether last-good may be served for `endpoint`. When
     /// `stale-resolution` is denied it may not: the refusal is recorded
-    /// once per endpoint, and the first refused URL is kept.
-    pub(crate) fn stale_allowed(&self, endpoint: &str, url: &str) -> Result<(), String> {
+    /// once per endpoint, naming the first refused URL, why its upstream
+    /// fetch failed (`why`), and the host to retry.
+    pub(crate) fn stale_allowed(&self, endpoint: &str, url: &str, why: &str) -> Result<(), String> {
         let policy = &self.config.policy;
         if !policy::denied(policy, policy::STALE_RESOLUTION) {
             return Ok(());
         }
+        let host = Url::parse(endpoint)
+            .ok()
+            .and_then(|parsed| parsed.host_str().map(str::to_string))
+            .unwrap_or_else(|| endpoint.to_string());
         let text = policy::refusal(
             policy,
             policy::STALE_RESOLUTION,
             endpoint,
-            "the registry is unreachable and only a last-good copy of its metadata is cached",
+            &format!(
+                "{url} could not be fetched ({why}) and the last-good copy from the cache was \
+                 not used; retry when {host} is reachable"
+            ),
         );
         let mut inner = self.inner();
         if inner.closed {
