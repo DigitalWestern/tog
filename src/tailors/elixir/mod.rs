@@ -2117,6 +2117,24 @@ mod tests {
             tool::mix_spec(&beam, &scratch, &scratch, false, &args).command()
         };
         assert!(refused(&online).is_some(), "hexmark without HEX_OFFLINE");
+        // Another mode, an option word, or another script at the helper's
+        // path, each in the environment as built.
+        let (helper_arg, dep_arg) = (helper.to_str().unwrap(), dep.to_str().unwrap());
+        for argv in [
+            [
+                "elixir", helper_arg, "lock", dep_arg, "jason", "1.4.4", "inner", "outer", "mix",
+            ],
+            [
+                "elixir", helper_arg, "hexmark", dep_arg, "-e", "1.4.4", "inner", "outer", "mix",
+            ],
+        ] {
+            let command = tool::hexmark_command(&beam, &scratch, &argv);
+            assert!(refused(&command).is_some(), "{argv:?}");
+        }
+        fs::write(&helper, "IO.puts(:not_the_helper)\n").unwrap();
+        assert!(refused(&build()).is_some(), "an impostor helper.exs");
+        fs::write(&helper, HELPER).unwrap();
+        assert!(refused(&build()).is_none());
         assert!(
             refused(&build_at(&beam, Path::new("/tmp/dep"))).is_some(),
             "a dependency outside the store"

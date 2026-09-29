@@ -1495,6 +1495,20 @@ mod tests {
             command.env(key, value);
             assert!(refused(&command).is_some(), "{key}");
         }
+        // Another mode, or another script at the helper's path, each in
+        // the environment as built.
+        let (helper_arg, gem_arg) = (helper.to_str().unwrap(), gem.to_str().unwrap());
+        for argv in [
+            ["ruby", helper_arg, "check", gem_arg],
+            ["ruby", helper_arg, "-rx", gem_arg],
+        ] {
+            let command = gem_spec_command(&ruby, &scratch, &scratch, &argv);
+            assert!(refused(&command).is_some(), "{argv:?}");
+        }
+        fs::write(&helper, "puts 'not the helper'\n").unwrap();
+        assert!(refused(&build()).is_some(), "an impostor helper.rb");
+        fs::write(&helper, HELPER).unwrap();
+        assert!(refused(&build()).is_none());
         let mut appended = build();
         appended.env("GEM_PATH", format!("{}:/tmp/gems", scratch.display()));
         assert!(refused(&appended).is_some(), "GEM_PATH with a second entry");
