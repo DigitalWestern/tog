@@ -1192,7 +1192,23 @@ get() {
              disown\n\
              echo good > deps.lock\n";
         let outcome = run_door(&fx, Some(relay), script, Policy::default(), |_| {});
-        outcome.result.unwrap();
+        let objects = outcome.result.unwrap().ledger.unwrap();
+        // The sleeping subshell was alive when the tool exited, so the
+        // relay must have killed it before the door went on.
+        let sidecar = fs::read(
+            fx.harness
+                .store
+                .root
+                .join("objects")
+                .join(&objects.diagnostics)
+                .join(ledger::DIAGNOSTICS_FILE),
+        )
+        .unwrap();
+        let sidecar: serde_json::Value = serde_json::from_slice(&sidecar).unwrap();
+        assert!(
+            sidecar["extra"]["killed"].as_u64().unwrap() >= 1,
+            "{sidecar}"
+        );
         std::thread::sleep(std::time::Duration::from_secs(2));
         assert_eq!(fs::read(fx.project.join("deps.lock")).unwrap(), b"good\n");
         assert_eq!(
@@ -1200,6 +1216,30 @@ get() {
             PACKAGE_JSON
         );
         assert!(!fx.project.join("new.lock").exists());
+    }
+
+    #[test]
+    fn detached_door_writes_back_and_leaves_the_ledger_unrooted() {
+        let Some(relay) = relay("detached_door_writes_back_and_leaves_the_ledger_unrooted") else {
+            return;
+        };
+        let fx = fixture("door-detached");
+        let outcome = run_door(
+            &fx,
+            Some(relay),
+            "get art/free-pkg-1.0.tgz > new.lock\n",
+            Policy::default(),
+            |confined| confined.target = Target::Detached,
+        );
+        let objects = outcome.result.unwrap().ledger.unwrap();
+        assert_eq!(
+            fs::read(fx.project.join("new.lock")).unwrap(),
+            b"HTTP/1.1 200 OK\n"
+        );
+        assert_eq!(fs::read(fx.project.join("deps.lock")).unwrap(), OLD_LOCK);
+        assert!(!fx.project.join(".tog").exists());
+        ledger::read_portable(&fx.harness.store, &objects.ledger).unwrap();
+        assert!(rooted(&fx).is_empty(), "{:?}", rooted(&fx));
     }
 
     #[test]
