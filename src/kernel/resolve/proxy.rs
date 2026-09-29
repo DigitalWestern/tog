@@ -37,8 +37,10 @@ use super::ssrf::{Lookup, SystemLookup, ValidatingResolver};
 use crate::kernel::fetch::pinned::{self, PinnedClient, PinnedConfig};
 use crate::kernel::policy;
 use std::collections::{HashMap, VecDeque};
+use std::io::BufRead;
 use std::io::{self, BufReader, Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
+use std::os::fd::AsRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -59,8 +61,13 @@ pub struct ProxyConfig {
     pub connect_timeout: Duration,
     /// Bounds each upstream read and write.
     pub io_timeout: Duration,
-    /// How long a tool connection may sit idle between requests.
+    /// How long a kept-alive tool connection may sit idle between
+    /// requests. It is closed sooner when the pool is full.
     pub idle_timeout: Duration,
+    /// How long a tool has to send one whole request (head and body) once
+    /// it has started, and to start the first one on a new connection. A
+    /// client trickling bytes cannot hold a worker past it.
+    pub request_timeout: Duration,
     /// Tests only: see [`ValidatingResolver`].
     #[cfg(test)]
     pub(crate) allow_loopback: bool,
@@ -77,7 +84,8 @@ impl ProxyConfig {
             workers: 64,
             connect_timeout: Duration::from_secs(15),
             io_timeout: Duration::from_secs(60),
-            idle_timeout: Duration::from_secs(120),
+            idle_timeout: Duration::from_secs(60),
+            request_timeout: Duration::from_secs(30),
             #[cfg(test)]
             allow_loopback: false,
             #[cfg(test)]
@@ -95,6 +103,9 @@ struct Shared {
     client: PinnedClient,
     pool: Arc<Pool>,
     idle_timeout: Duration,
+    request_timeout: Duration,
+    /// Bounds each write to a tool.
+    write_timeout: Duration,
     drain_timeout: Duration,
 }
 
@@ -139,6 +150,8 @@ impl Proxy {
                 client,
                 pool: Arc::new(Pool::new(config.workers)),
                 idle_timeout: config.idle_timeout,
+                request_timeout: config.request_timeout,
+                write_timeout: config.io_timeout,
                 drain_timeout: config.connect_timeout + config.io_timeout * 2,
             }),
         })
@@ -171,14 +184,9 @@ pub struct Session {
 
 struct Listening {
     stop: Arc<AtomicBool>,
-    wake: Wake,
+    /// A Unix socket's path, removed when the session stops.
+    unix_path: Option<PathBuf>,
     thread: Option<JoinHandle<()>>,
-}
-
-/// How to wake an accept loop blocked in `accept`: connect to it.
-enum Wake {
-    Tcp(SocketAddr),
-    Unix(PathBuf),
 }
 
 impl Session {
@@ -199,7 +207,7 @@ impl Session {
         let bound = listener.local_addr()?;
         let address = ProxyAddress::new(bound, self.state.token());
         self.state.note_port(bound.port());
-        self.start(listener, Wake::Tcp(bound), address.clone())?;
+        self.start(listener, None, address.clone())?;
         Ok(address)
     }
 
@@ -209,16 +217,19 @@ impl Session {
     pub fn listen_unix(&mut self, path: &Path, advertised: SocketAddr) -> io::Result<ProxyAddress> {
         let listener = UnixListener::bind(path)?;
         let address = ProxyAddress::new(advertised, self.state.token());
-        self.start(listener, Wake::Unix(path.to_path_buf()), address.clone())?;
+        self.start(listener, Some(path.to_path_buf()), address.clone())?;
         Ok(address)
     }
 
     fn start<L: Accept>(
         &mut self,
         listener: L,
-        wake: Wake,
+        unix_path: Option<PathBuf>,
         address: ProxyAddress,
     ) -> io::Result<()> {
+        // Nonblocking, so the accept loop polls with a timeout and sees
+        // `stop` without anyone having to connect to wake it.
+        listener.set_nonblocking(true)?;
         let stop = Arc::new(AtomicBool::new(false));
         let context = Context {
             state: self.state.clone(),
@@ -234,7 +245,7 @@ impl Session {
         };
         self.listeners.push(Listening {
             stop,
-            wake,
+            unix_path,
             thread: Some(thread),
         });
         self.addresses.push(address);
@@ -255,21 +266,21 @@ impl Session {
             listening.stop.store(true, Ordering::SeqCst);
         }
         self.shared.pool.wake_waiters();
+        // Joining the accept loops closes the listeners (each loop owns
+        // its listener) and guarantees no connection registers after the
+        // sweep below.
         for listening in &mut self.listeners {
-            match &listening.wake {
-                Wake::Tcp(address) => {
-                    drop(TcpStream::connect_timeout(address, Duration::from_secs(1)))
-                }
-                Wake::Unix(path) => drop(UnixStream::connect(path)),
-            }
             if let Some(thread) = listening.thread.take() {
                 let _ = thread.join();
             }
-            if let Wake::Unix(path) = &listening.wake {
+            if let Some(path) = &listening.unix_path {
                 let _ = std::fs::remove_file(path);
             }
         }
         self.live.close_all(self.shared.drain_timeout);
+        // Anything still running past the drain records nothing: the
+        // report is taken, and the state refuses further facts.
+        self.state.close();
     }
 }
 
@@ -289,28 +300,63 @@ struct Context {
 }
 
 /// A listener the accept loop can drive.
-trait Accept: Send + 'static {
-    type Stream: Read + Write + Send + 'static;
+trait Accept: AsRawFd + Send + 'static {
+    type Stream: Stream;
     fn accept_one(&self) -> io::Result<Self::Stream>;
+    fn set_nonblocking(&self, nonblocking: bool) -> io::Result<()>;
     fn handle(stream: &Self::Stream) -> io::Result<Conn>;
-    fn set_idle(stream: &Self::Stream, idle: Duration) -> io::Result<()>;
+}
+
+/// A tool connection.
+trait Stream: Read + Write + Send + 'static {
+    fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()>;
+    fn set_write_timeout(&self, timeout: Option<Duration>) -> io::Result<()>;
+    fn set_nonblocking(&self, nonblocking: bool) -> io::Result<()>;
+}
+
+impl Stream for TcpStream {
+    fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+        TcpStream::set_read_timeout(self, timeout)
+    }
+
+    fn set_write_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+        TcpStream::set_write_timeout(self, timeout)
+    }
+
+    fn set_nonblocking(&self, nonblocking: bool) -> io::Result<()> {
+        TcpStream::set_nonblocking(self, nonblocking)
+    }
+}
+
+impl Stream for UnixStream {
+    fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+        UnixStream::set_read_timeout(self, timeout)
+    }
+
+    fn set_write_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+        UnixStream::set_write_timeout(self, timeout)
+    }
+
+    fn set_nonblocking(&self, nonblocking: bool) -> io::Result<()> {
+        UnixStream::set_nonblocking(self, nonblocking)
+    }
 }
 
 impl Accept for TcpListener {
     type Stream = TcpStream;
 
     fn accept_one(&self) -> io::Result<TcpStream> {
-        self.accept().map(|(stream, _)| stream)
+        let (stream, _) = self.accept()?;
+        stream.set_nodelay(true)?;
+        Ok(stream)
+    }
+
+    fn set_nonblocking(&self, nonblocking: bool) -> io::Result<()> {
+        TcpListener::set_nonblocking(self, nonblocking)
     }
 
     fn handle(stream: &TcpStream) -> io::Result<Conn> {
         stream.try_clone().map(Conn::Tcp)
-    }
-
-    fn set_idle(stream: &TcpStream, idle: Duration) -> io::Result<()> {
-        stream.set_read_timeout(Some(idle))?;
-        stream.set_write_timeout(Some(idle))?;
-        stream.set_nodelay(true)
     }
 }
 
@@ -321,13 +367,12 @@ impl Accept for UnixListener {
         self.accept().map(|(stream, _)| stream)
     }
 
-    fn handle(stream: &UnixStream) -> io::Result<Conn> {
-        stream.try_clone().map(Conn::Unix)
+    fn set_nonblocking(&self, nonblocking: bool) -> io::Result<()> {
+        UnixListener::set_nonblocking(self, nonblocking)
     }
 
-    fn set_idle(stream: &UnixStream, idle: Duration) -> io::Result<()> {
-        stream.set_read_timeout(Some(idle))?;
-        stream.set_write_timeout(Some(idle))
+    fn handle(stream: &UnixStream) -> io::Result<Conn> {
+        stream.try_clone().map(Conn::Unix)
     }
 }
 
@@ -392,6 +437,33 @@ impl Live {
     }
 }
 
+/// A live connection's registration, removed when the serving job ends,
+/// panic or not.
+struct Registered {
+    live: Arc<Live>,
+    id: u64,
+}
+
+impl Drop for Registered {
+    fn drop(&mut self) {
+        self.live.unregister(self.id);
+    }
+}
+
+/// Whether `listener` has a connection to accept within `wait`.
+fn readable(listener: &impl AsRawFd, wait: Duration) -> bool {
+    let mut poll = libc::pollfd {
+        fd: listener.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // SAFETY: one valid pollfd for a descriptor this thread owns.
+    let ready = unsafe { libc::poll(&mut poll, 1, wait.as_millis() as libc::c_int) };
+    ready > 0
+}
+
+const ACCEPT_POLL: Duration = Duration::from_millis(100);
+
 fn accept_loop<L: Accept>(listener: L, stop: &AtomicBool, context: &Context) {
     let pool = &context.shared.pool;
     loop {
@@ -400,38 +472,128 @@ fn accept_loop<L: Accept>(listener: L, stop: &AtomicBool, context: &Context) {
         let Some(permit) = pool.acquire(stop) else {
             return;
         };
-        let accepted = listener.accept_one();
-        if stop.load(Ordering::SeqCst) {
-            return;
-        }
-        let stream = match accepted {
-            Ok(stream) => stream,
-            Err(_) => {
-                // Out of descriptors, or an aborted handshake: back off
-                // rather than spin.
-                std::thread::sleep(Duration::from_millis(20));
+        let stream = loop {
+            if stop.load(Ordering::SeqCst) {
+                return;
+            }
+            if !readable(&listener, ACCEPT_POLL) {
                 continue;
             }
+            match listener.accept_one() {
+                Ok(stream) => break stream,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+                // Out of descriptors, or an aborted handshake: back off
+                // rather than spin.
+                Err(_) => std::thread::sleep(Duration::from_millis(20)),
+            }
         };
-        let Ok(handle) = L::handle(&stream) else {
+        let shared = &context.shared;
+        // BSD sockets inherit the listener's nonblocking flag.
+        let configured = stream
+            .set_nonblocking(false)
+            .and_then(|()| stream.set_write_timeout(Some(shared.write_timeout)));
+        let Ok(handle) = configured.and_then(|()| L::handle(&stream)) else {
             continue;
         };
-        if L::set_idle(&stream, context.shared.idle_timeout).is_err() {
-            continue;
-        }
-        let id = context.live.register(handle);
+        let registered = Registered {
+            live: context.live.clone(),
+            id: context.live.register(handle),
+        };
         let context = context.clone();
         pool.submit(permit, move || {
+            let _registered = registered;
             serve_connection(stream, &context);
-            context.live.unregister(id);
         });
     }
 }
 
-/// Answer requests on one connection until it closes.
-fn serve_connection<S: Read + Write>(stream: S, context: &Context) {
-    let mut reader = BufReader::new(stream);
+/// A tool connection whose reads end at a deadline, however slowly the
+/// bytes arrive.
+struct Timed<S> {
+    inner: S,
+    deadline: Instant,
+}
+
+impl<S: Stream> Read for Timed<S> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let left = self.deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "request deadline passed",
+            ));
+        }
+        self.inner.set_read_timeout(Some(left))?;
+        self.inner.read(buf)
+    }
+}
+
+impl<S: Stream> Write for Timed<S> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.inner.write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+/// How often an idle connection checks whether it should give its worker
+/// back.
+const IDLE_POLL: Duration = Duration::from_millis(100);
+
+/// Wait for the next request to start. `false`: close the connection, the
+/// client is gone, too slow, or idle while other connections wait for a
+/// worker.
+fn next_request_starts<S: Stream>(
+    reader: &mut BufReader<Timed<S>>,
+    context: &Context,
+    first: bool,
+) -> bool {
+    let shared = &context.shared;
+    let patience = if first {
+        shared.request_timeout
+    } else {
+        shared.idle_timeout
+    };
+    let started = Instant::now();
     loop {
+        if context.state.is_closed() {
+            return false;
+        }
+        reader.get_mut().deadline = Instant::now() + IDLE_POLL;
+        match reader.fill_buf() {
+            Ok(buffered) => return !buffered.is_empty(),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) =>
+            {
+                // A kept-alive connection gives its worker back as soon as
+                // another connection is waiting for one.
+                if started.elapsed() >= patience || (!first && shared.pool.saturated()) {
+                    return false;
+                }
+            }
+            Err(_) => return false,
+        }
+    }
+}
+
+/// Answer requests on one connection until it closes.
+fn serve_connection<S: Stream>(stream: S, context: &Context) {
+    let mut reader = BufReader::new(Timed {
+        inner: stream,
+        deadline: Instant::now(),
+    });
+    let mut first = true;
+    loop {
+        if !next_request_starts(&mut reader, context, first) {
+            return;
+        }
+        first = false;
+        reader.get_mut().deadline = Instant::now() + context.shared.request_timeout;
         let request = match http::read_request(&mut reader) {
             Ok(request) => request,
             Err(ParseError::Closed | ParseError::Io(_)) => return,
@@ -713,6 +875,8 @@ struct Pool {
 #[derive(Default)]
 struct PoolState {
     in_use: usize,
+    /// Accept loops waiting for a slot.
+    waiting: usize,
     jobs: VecDeque<Job>,
     spawned: usize,
     idle: usize,
@@ -753,12 +917,29 @@ impl Pool {
                 state.in_use += 1;
                 return Some(Permit(self.clone()));
             }
+            state.waiting += 1;
             state = self
                 .freed
                 .wait_timeout(state, Duration::from_millis(200))
                 .unwrap_or_else(|error| error.into_inner())
                 .0;
+            state.waiting -= 1;
         }
+    }
+
+    #[cfg(test)]
+    fn try_acquire_for_test(self: &Arc<Self>) -> Option<Permit> {
+        let mut state = self.lock();
+        (state.in_use < self.max).then(|| {
+            state.in_use += 1;
+            Permit(self.clone())
+        })
+    }
+
+    /// Every slot is taken and an accept loop is waiting for one.
+    fn saturated(&self) -> bool {
+        let state = self.lock();
+        state.in_use >= self.max && state.waiting > 0
     }
 
     fn wake_waiters(&self) {
@@ -1403,5 +1584,170 @@ mod tests {
             everything.contains("evil.example:443"),
             "the host is still named"
         );
+    }
+
+    /// Read one keep-alive response: the head, then `Content-Length` bytes.
+    fn read_kept_alive(stream: &mut TcpStream) -> u16 {
+        let mut head = Vec::new();
+        let mut byte = [0u8; 1];
+        while !head.ends_with(b"\r\n\r\n") {
+            stream.read_exact(&mut byte).unwrap();
+            head.push(byte[0]);
+        }
+        let head = String::from_utf8(head).unwrap();
+        let length: usize = head
+            .lines()
+            .find_map(|line| line.strip_prefix("Content-Length: "))
+            .unwrap()
+            .parse()
+            .unwrap();
+        stream.read_exact(&mut vec![0u8; length]).unwrap();
+        head[9..12].parse().unwrap()
+    }
+
+    /// How long until the proxy closes `stream`, feeding it `trickle`
+    /// every 100 ms meanwhile.
+    fn time_to_close(mut stream: TcpStream, trickle: &[u8]) -> Duration {
+        let started = Instant::now();
+        stream
+            .set_read_timeout(Some(Duration::from_millis(100)))
+            .unwrap();
+        let mut buf = [0u8; 256];
+        while started.elapsed() < Duration::from_secs(10) {
+            let _ = stream.write_all(trickle);
+            match stream.read(&mut buf) {
+                Ok(_) => return started.elapsed(),
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+                Err(error) if error.kind() == io::ErrorKind::TimedOut => {}
+                Err(_) => return started.elapsed(),
+            }
+        }
+        panic!("the proxy never closed the connection");
+    }
+
+    #[test]
+    fn a_slow_or_silent_client_cannot_hold_a_worker() {
+        let harness = Harness::new("proxy-slowloris");
+        let (session, address) = harness.session();
+        // Silent: never sends a byte. Trickling: one byte per 100 ms, a
+        // head that would never finish. Both lose their worker at the
+        // 1 s request timeout, not the idle one or never.
+        let silent = TcpStream::connect(address.address).unwrap();
+        let mut trickling = TcpStream::connect(address.address).unwrap();
+        trickling.write_all(b"GET /").unwrap();
+        for (stream, trickle) in [(silent, &b""[..]), (trickling, &b"a"[..])] {
+            let waited = time_to_close(stream, trickle);
+            assert!(waited < Duration::from_secs(3), "{waited:?}");
+        }
+        session.finish();
+    }
+
+    #[test]
+    fn idle_kept_alive_connections_yield_their_worker_to_waiting_ones() {
+        let harness = Harness::with(
+            "proxy-yield",
+            Reach {
+                workers: 2,
+                ..Reach::loopback()
+            },
+        );
+        let (session, address) = harness.session();
+        let request = format!(
+            "GET {} HTTP/1.1\r\nHost: x\r\n\r\n",
+            mirror(&address, "/local/supported")
+        );
+        let mut kept = Vec::new();
+        for _ in 0..2 {
+            let mut stream = TcpStream::connect(address.address).unwrap();
+            stream.write_all(request.as_bytes()).unwrap();
+            assert_eq!(read_kept_alive(&mut stream), 200);
+            kept.push(stream);
+        }
+        // Both workers now hold idle keep-alive connections; a third
+        // connection is answered well before their 2 s idle timeout.
+        let started = Instant::now();
+        let third = get(&address, &mirror(&address, "/local/supported"), "");
+        assert_eq!(third.status, 200);
+        assert!(
+            started.elapsed() < Duration::from_millis(1500),
+            "{:?}",
+            started.elapsed()
+        );
+        session.finish();
+    }
+
+    #[test]
+    fn a_panicking_job_returns_its_slot_and_its_registration() {
+        let pool = Arc::new(Pool::new(1));
+        let stop = AtomicBool::new(false);
+        let live = Arc::new(Live::default());
+        let (a, _b) = std::os::unix::net::UnixStream::pair().unwrap();
+        let registered = Registered {
+            live: live.clone(),
+            id: live.register(Conn::Unix(a)),
+        };
+        let permit = pool.acquire(&stop).unwrap();
+        pool.submit(permit, move || {
+            let _registered = registered;
+            panic!("a connection handler bug");
+        });
+        let started = Instant::now();
+        let again = loop {
+            if let Some(permit) = pool.try_acquire_for_test() {
+                break permit;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "the slot leaked"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        drop(again);
+        assert!(live.lock().is_empty(), "the registration leaked");
+        // The pool thread survived the panic and runs the next job.
+        let (sender, receiver) = std::sync::mpsc::channel();
+        pool.submit(pool.acquire(&stop).unwrap(), move || {
+            sender.send(()).unwrap()
+        });
+        receiver.recv_timeout(Duration::from_secs(5)).unwrap();
+    }
+
+    #[test]
+    fn nothing_is_recorded_after_a_session_finishes() {
+        let harness = Harness::new("proxy-closed");
+        let state = State::new(harness.config(Policy::default(), Mode::Online)).unwrap();
+        state.close();
+        state.record(
+            Entry {
+                class: "metadata".into(),
+                method: "GET".into(),
+                url: "https://registry.test/late".into(),
+                status: 200,
+                sha256: None,
+                claimed: None,
+                verified: false,
+                freshness: None,
+            },
+            crate::kernel::resolve::ledger::DiagRequest {
+                seq: 0,
+                class: "metadata".into(),
+                method: "GET".into(),
+                url: "https://registry.test/late".into(),
+                status: 200,
+                served_status: 200,
+                disposition: "miss".into(),
+                bytes: 1,
+                hops: Vec::new(),
+                detail: None,
+            },
+        );
+        assert!(state
+            .check(policy::UNATTESTED_INDEX, "late", "late")
+            .is_err());
+        state.hard_failure("late".into());
+        let report = state.take_report();
+        assert!(report.ledger.is_empty());
+        assert!(report.diagnostics.requests.is_empty());
+        assert_eq!(report.facts, Default::default());
     }
 }

@@ -137,6 +137,8 @@ struct Inner {
     /// Endpoints whose stale refusal was already reported.
     stale_refused: BTreeSet<String>,
     seq: u64,
+    /// The session finished: nothing more is recorded or allowed.
+    closed: bool,
 }
 
 /// A claim, ordered so the strongest algorithm sorts last.
@@ -261,6 +263,16 @@ impl State {
         self.inner.lock().unwrap_or_else(|error| error.into_inner())
     }
 
+    /// Stop recording. A connection still running after its session
+    /// finished changes nothing, and its policy checks refuse.
+    pub(crate) fn close(&self) {
+        self.inner().closed = true;
+    }
+
+    pub(crate) fn is_closed(&self) -> bool {
+        self.inner().closed
+    }
+
     /// Record one request: its portable entry and its diagnostics row.
     pub(crate) fn record(&self, mut entry: Entry, mut diag: DiagRequest) {
         entry.url = self.clean(&entry.url);
@@ -268,6 +280,9 @@ impl State {
         diag.detail = diag.detail.map(|detail| self.clean(&detail));
         diag.hops = diag.hops.iter().map(|hop| self.clean(hop)).collect();
         let mut inner = self.inner();
+        if inner.closed {
+            return;
+        }
         inner.seq += 1;
         diag.seq = inner.seq;
         let key = (entry.method.clone(), entry.url.clone());
@@ -304,6 +319,9 @@ impl State {
     ) -> Result<(), String> {
         let (subject, detail) = (&self.clean(subject), &self.clean(detail));
         let mut inner = self.inner();
+        if inner.closed {
+            return Err("the proxy session has finished".into());
+        }
         if policy::denied(&self.config.policy, kind) {
             let text = policy::refusal(&self.config.policy, kind, subject, detail);
             if !inner.facts.refusals.contains(&text) {
@@ -324,7 +342,10 @@ impl State {
     /// portable evidence.
     pub(crate) fn note_refusal(&self, text: String) {
         let text = self.clean(&text);
-        self.inner().diagnostics.refusals.push(text);
+        let mut inner = self.inner();
+        if !inner.closed {
+            inner.diagnostics.refusals.push(text);
+        }
     }
 
     pub(crate) fn note_port(&self, port: u16) {
@@ -334,7 +355,7 @@ impl State {
     pub(crate) fn hard_failure(&self, text: String) {
         let text = self.clean(&text);
         let mut inner = self.inner();
-        if !inner.facts.hard_failures.contains(&text) {
+        if !inner.closed && !inner.facts.hard_failures.contains(&text) {
             inner.facts.hard_failures.push(text);
         }
     }
@@ -342,7 +363,7 @@ impl State {
     pub(crate) fn offline_miss(&self, url: &str) {
         let url = self.clean(url);
         let mut inner = self.inner();
-        if inner.facts.first_offline_miss.is_none() {
+        if !inner.closed && inner.facts.first_offline_miss.is_none() {
             inner.facts.first_offline_miss = Some(url);
         }
     }
@@ -362,6 +383,9 @@ impl State {
             "the registry is unreachable and only a last-good copy of its metadata is cached",
         );
         let mut inner = self.inner();
+        if inner.closed {
+            return Err(text);
+        }
         if inner.stale_refused.insert(endpoint.to_string()) {
             inner.facts.refusals.push(text.clone());
         }
@@ -373,7 +397,10 @@ impl State {
 
     /// Count one last-good response for `endpoint`.
     pub(crate) fn stale_served(&self, endpoint: &str) {
-        *self.inner().stale.entry(endpoint.to_string()).or_default() += 1;
+        let mut inner = self.inner();
+        if !inner.closed {
+            *inner.stale.entry(endpoint.to_string()).or_default() += 1;
+        }
     }
 
     pub(crate) fn add_claims(&self, claims: Vec<(Url, Claim)>) {

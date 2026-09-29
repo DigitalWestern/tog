@@ -117,6 +117,8 @@ pub(crate) struct Reach {
     pub allow_loopback: bool,
     /// Land every validated address on the fixture listener.
     pub redirect_to_fixture: bool,
+    /// Connection threads in the proxy's pool.
+    pub workers: usize,
 }
 
 #[cfg(test)]
@@ -128,6 +130,7 @@ impl Reach {
             lookup: Arc::new(Answers::new(|_, _| vec!["127.0.0.1".parse().unwrap()])),
             allow_loopback: true,
             redirect_to_fixture: false,
+            workers: 8,
         }
     }
 
@@ -141,6 +144,7 @@ impl Reach {
             lookup: Arc::new(Answers::new(answer)),
             allow_loopback: false,
             redirect_to_fixture: true,
+            workers: 8,
         }
     }
 }
@@ -182,10 +186,11 @@ impl Harness {
         let proxy = Proxy::new(ProxyConfig {
             roots: ca.roots(),
             lookup: reach.lookup.clone(),
-            workers: 8,
+            workers: reach.workers,
             connect_timeout: Duration::from_secs(2),
             io_timeout: Duration::from_secs(2),
             idle_timeout: Duration::from_secs(2),
+            request_timeout: Duration::from_secs(1),
             allow_loopback: reach.allow_loopback,
             connect_to,
         })
