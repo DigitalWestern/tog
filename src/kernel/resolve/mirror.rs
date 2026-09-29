@@ -263,6 +263,9 @@ pub(crate) struct Exchange<'a> {
     pub method: &'a str,
     pub request: &'a Headers,
     pub keep_alive: bool,
+    /// The tool spoke HTTP/1.0: a body of unknown length ends with the
+    /// connection, and the connection closes after every response.
+    pub http10: bool,
 }
 
 impl Exchange<'_> {
@@ -903,8 +906,13 @@ impl Exchange<'_> {
                 true,
             );
         }
-        let mut body =
-            http::ChunkedBody::start(&mut out, response.status, &headers, self.keep_alive)?;
+        let mut body = http::StreamedBody::start(
+            &mut out,
+            response.status,
+            &headers,
+            self.keep_alive,
+            self.http10,
+        )?;
         let (streamed, sha) = stream_hashed(&mut response.body, &mut body);
         record.bytes = streamed.as_ref().map_or(0, |total| *total);
         match streamed {
@@ -931,7 +939,7 @@ impl Exchange<'_> {
 /// cap. Returns the byte count (or the error) and the sha256 so far.
 fn stream_hashed<W: Write>(
     reader: &mut dyn Read,
-    body: &mut http::ChunkedBody<'_, W>,
+    body: &mut http::StreamedBody<'_, W>,
 ) -> (io::Result<u64>, String) {
     let mut sha = Sha256::new();
     let mut buf = vec![0u8; 64 * 1024];
@@ -1269,6 +1277,34 @@ mod tests {
             .map(|r| r.disposition.as_str())
             .collect();
         assert_eq!(dispositions, ["last-good", "last-good", "miss", "failed"]);
+    }
+
+    #[test]
+    fn http10_clients_get_a_close_delimited_stream() {
+        use std::io::{Read as _, Write as _};
+        let harness = Harness::new("mirror-http10");
+        let (session, address) = harness.session();
+        assert_eq!(fetch(&address, "/meta/pkg.json").status, 200);
+        let mut stream = std::net::TcpStream::connect(address.address).unwrap();
+        // Well under the harness's idle timeout: the proxy must close the
+        // connection itself, even though the client asked to keep it.
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_millis(1500)))
+            .unwrap();
+        let path = mirror(&address, "/art/free-pkg-1.0.tgz");
+        write!(
+            stream,
+            "GET {path} HTTP/1.0\r\nConnection: keep-alive\r\n\r\n"
+        )
+        .unwrap();
+        let mut raw = Vec::new();
+        stream.read_to_end(&mut raw).unwrap();
+        let end = raw.windows(4).position(|w| w == b"\r\n\r\n").unwrap();
+        let head = String::from_utf8_lossy(&raw[..end]).to_ascii_lowercase();
+        assert!(!head.contains("transfer-encoding"), "{head}");
+        assert!(head.contains("connection: close"), "{head}");
+        assert_eq!(&raw[end + 4..], fixture("art/free-pkg-1.0.tgz").as_slice());
+        session.finish();
     }
 
     #[test]

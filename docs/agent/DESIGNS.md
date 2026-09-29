@@ -2986,7 +2986,9 @@ the flexible option:
 - **Mirror routes serve `GET` and `HEAD` only** (405 otherwise). A claimed
   artifact is fetched whole and verified even for a `HEAD`.
 - **Unclaimed artifacts are not cached**, online or offline: nothing
-  vouches for them. Offline they are an `offline-miss`.
+  vouches for them. Offline they are an `offline-miss`. They stream
+  chunked to an HTTP/1.1 tool and close-delimited to an HTTP/1.0 one,
+  whose connection then ends after each mirror response.
 - **The IANA table is the union** of the list above and every registry
   row whose "Globally Reachable" is not `True` (registry date
   2025-10-09, CSVs in `tests/fixtures/proxy/iana/`). That adds

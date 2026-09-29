@@ -534,33 +534,48 @@ pub fn write_sized_head(
     out.write_all(framing.as_bytes())
 }
 
-/// A response body of unknown length, sent with chunked framing. Each
-/// `write` is one chunk; `finish` writes the terminating chunk.
-pub struct ChunkedBody<'a, W: Write> {
+/// A response body of unknown length. An HTTP/1.1 client gets chunked
+/// framing: each `chunk` is one chunk, and `finish` writes the terminating
+/// one. An HTTP/1.0 client does not know chunked framing, so it gets the
+/// bytes as they are and the end of the body is the connection closing:
+/// the caller must close it after `finish`.
+pub struct StreamedBody<'a, W: Write> {
     out: &'a mut W,
+    chunked: bool,
 }
 
-impl<'a, W: Write> ChunkedBody<'a, W> {
-    /// Write the head and start a chunked body.
+impl<'a, W: Write> StreamedBody<'a, W> {
+    /// Write the head and start the body. `http10` selects close-delimited
+    /// framing, which always sends `Connection: close`.
     pub fn start(
         out: &'a mut W,
         status: u16,
         headers: &Headers,
         keep_alive: bool,
+        http10: bool,
     ) -> io::Result<Self> {
         write_head(out, status, headers)?;
-        let mut framing = String::from("Transfer-Encoding: chunked\r\n");
-        if !keep_alive {
+        let mut framing = String::new();
+        if !http10 {
+            framing.push_str("Transfer-Encoding: chunked\r\n");
+        }
+        if !keep_alive || http10 {
             framing.push_str("Connection: close\r\n");
         }
         framing.push_str("\r\n");
         out.write_all(framing.as_bytes())?;
-        Ok(Self { out })
+        Ok(Self {
+            out,
+            chunked: !http10,
+        })
     }
 
     pub fn chunk(&mut self, bytes: &[u8]) -> io::Result<()> {
         if bytes.is_empty() {
             return Ok(());
+        }
+        if !self.chunked {
+            return self.out.write_all(bytes);
         }
         write!(self.out, "{:x}\r\n", bytes.len())?;
         self.out.write_all(bytes)?;
@@ -568,7 +583,9 @@ impl<'a, W: Write> ChunkedBody<'a, W> {
     }
 
     pub fn finish(self) -> io::Result<()> {
-        self.out.write_all(b"0\r\n\r\n")?;
+        if self.chunked {
+            self.out.write_all(b"0\r\n\r\n")?;
+        }
         self.out.flush()
     }
 }
@@ -723,13 +740,22 @@ mod tests {
             "HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\nContent-Length: 4\r\nConnection: close\r\n\r\ngone"
         );
         let mut out = Vec::new();
-        let mut body = ChunkedBody::start(&mut out, 200, &Headers::new(), true).unwrap();
+        let mut body = StreamedBody::start(&mut out, 200, &Headers::new(), true, false).unwrap();
         body.chunk(b"hello").unwrap();
         body.chunk(b"").unwrap();
         body.finish().unwrap();
         assert_eq!(
             String::from_utf8(out).unwrap(),
             "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n"
+        );
+        // HTTP/1.0 has no chunked framing: raw bytes, ended by the close.
+        let mut out = Vec::new();
+        let mut body = StreamedBody::start(&mut out, 200, &Headers::new(), true, true).unwrap();
+        body.chunk(b"hello").unwrap();
+        body.finish().unwrap();
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nhello"
         );
     }
 }

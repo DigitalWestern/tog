@@ -935,13 +935,16 @@ fn mirror_request(context: &Context, request: &Request, out: &mut dyn Write) -> 
         address: &context.address,
         method: &request.method,
         request: &request.headers,
-        keep_alive: request.keep_alive,
+        // A streamed body is delimited by the close for HTTP/1.0, so an
+        // HTTP/1.0 connection ends after each mirror response.
+        keep_alive: request.keep_alive && !request.http10,
+        http10: request.http10,
     };
     match upstream {
         Upstream::Local(answer) => exchange.local(answer, out)?,
         Upstream::Fetch(url) => exchange.serve(&url, out)?,
     }
-    Ok(true)
+    Ok(!request.http10)
 }
 
 type Job = Box<dyn FnOnce() + Send>;
