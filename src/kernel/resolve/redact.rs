@@ -118,9 +118,13 @@ fn embedded_urls(text: &str) -> String {
     let mut rest = text;
     while let Some(at) = rest.find("://") {
         // The scheme runs back from `://` over scheme characters.
+        // The boundary character may be multi-byte (a Unicode space), so
+        // step past it by its own length, not by one byte.
         let scheme_start = rest[..at]
-            .rfind(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.')))
-            .map_or(0, |i| i + 1);
+            .char_indices()
+            .rev()
+            .find(|(_, c)| !(c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.')))
+            .map_or(0, |(i, c)| i + c.len_utf8());
         let end = rest[at..]
             .find(char::is_whitespace)
             .map_or(rest.len(), |i| at + i);
@@ -407,5 +411,88 @@ mod tests {
             "npm install //registry.npmjs.org/:_authToken=REDACTED --password=REDACTED -u \
              REDACTED --config http.extraHeader=REDACTED --proxy=http://REDACTED"
         );
+    }
+
+    #[test]
+    fn a_unicode_space_before_a_url_is_a_boundary_not_a_crash() {
+        for space in ["\u{a0}", "\u{3000}", "\u{2003}", "\u{85}", "é"] {
+            let operand = format!("dep{space}https://u:p@host.example/x?token=t");
+            let got = command(&[operand], &[]);
+            assert_eq!(
+                got,
+                [format!("dep{space}https://host.example/x?token=REDACTED")]
+            );
+        }
+    }
+
+    /// Property-style: random operands built from URL fragments, secret
+    /// shapes, and mixed Unicode and whitespace never panic the redactor,
+    /// and never keep a password that sat in userinfo.
+    #[test]
+    fn the_redactor_never_panics_on_mixed_unicode_and_whitespace() {
+        const PIECES: &[&str] = &[
+            "https://",
+            "http://",
+            "git+ssh://",
+            "://",
+            "u:hunter2@",
+            "@",
+            "/",
+            "?",
+            "#",
+            "=",
+            "&",
+            ":",
+            "-",
+            "--",
+            "-u",
+            "token",
+            "auth",
+            "a",
+            "Z9",
+            "%2F",
+            "%",
+            " ",
+            "\t",
+            "\u{a0}",
+            "\u{3000}",
+            "\u{2028}",
+            "\u{85}",
+            "é",
+            "ß",
+            "漢字",
+            "🦀",
+            "\u{200b}",
+            "\u{feff}",
+            "sha256=00ff",
+            "=https://x@y/",
+            "\n",
+            "\r",
+        ];
+        // xorshift: deterministic, so a failure reproduces.
+        let mut state: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for _ in 0..20_000 {
+            let operands: Vec<String> = (0..1 + next() % 4)
+                .map(|_| {
+                    (0..next() % 12)
+                        .map(|_| PIECES[(next() % PIECES.len() as u64) as usize])
+                        .collect()
+                })
+                .collect();
+            let redacted = command(&operands, &["hunter2"]);
+            assert!(
+                redacted.iter().all(|operand| !operand.contains("hunter2")),
+                "{operands:?}"
+            );
+            for operand in &operands {
+                let _ = url(operand, &["format"]);
+            }
+        }
     }
 }
