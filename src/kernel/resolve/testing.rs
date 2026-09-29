@@ -119,6 +119,9 @@ pub(crate) struct Reach {
     pub redirect_to_fixture: bool,
     /// Connection threads in the proxy's pool.
     pub workers: usize,
+    /// The slowest a tool may read a response (bytes/s).
+    pub min_response_rate: u64,
+    pub request_timeout: Duration,
 }
 
 #[cfg(test)]
@@ -131,6 +134,8 @@ impl Reach {
             allow_loopback: true,
             redirect_to_fixture: false,
             workers: 8,
+            min_response_rate: 16 * 1024,
+            request_timeout: Duration::from_secs(1),
         }
     }
 
@@ -145,6 +150,8 @@ impl Reach {
             allow_loopback: false,
             redirect_to_fixture: true,
             workers: 8,
+            min_response_rate: 16 * 1024,
+            request_timeout: Duration::from_secs(1),
         }
     }
 }
@@ -190,7 +197,8 @@ impl Harness {
             connect_timeout: Duration::from_secs(2),
             io_timeout: Duration::from_secs(2),
             idle_timeout: Duration::from_secs(2),
-            request_timeout: Duration::from_secs(1),
+            request_timeout: reach.request_timeout,
+            min_response_rate: reach.min_response_rate,
             allow_loopback: reach.allow_loopback,
             connect_to,
         })

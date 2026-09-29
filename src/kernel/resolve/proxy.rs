@@ -68,6 +68,10 @@ pub struct ProxyConfig {
     /// it has started, and to start the first one on a new connection. A
     /// client trickling bytes cannot hold a worker past it.
     pub request_timeout: Duration,
+    /// The slowest a tool may read a response once the first `io_timeout`
+    /// has passed (bytes per second), so a tool reading one byte a minute
+    /// cannot hold a worker forever.
+    pub min_response_rate: u64,
     /// Tests only: see [`ValidatingResolver`].
     #[cfg(test)]
     pub(crate) allow_loopback: bool,
@@ -86,6 +90,7 @@ impl ProxyConfig {
             io_timeout: Duration::from_secs(60),
             idle_timeout: Duration::from_secs(60),
             request_timeout: Duration::from_secs(30),
+            min_response_rate: 16 * 1024,
             #[cfg(test)]
             allow_loopback: false,
             #[cfg(test)]
@@ -106,6 +111,8 @@ struct Shared {
     request_timeout: Duration,
     /// Bounds each write to a tool.
     write_timeout: Duration,
+    response_grace: Duration,
+    min_response_rate: u64,
     drain_timeout: Duration,
 }
 
@@ -152,6 +159,8 @@ impl Proxy {
                 idle_timeout: config.idle_timeout,
                 request_timeout: config.request_timeout,
                 write_timeout: config.io_timeout,
+                response_grace: config.io_timeout,
+                min_response_rate: config.min_response_rate,
                 drain_timeout: config.connect_timeout + config.io_timeout * 2,
             }),
         })
@@ -508,10 +517,30 @@ fn accept_loop<L: Accept>(listener: L, stop: &AtomicBool, context: &Context) {
 }
 
 /// A tool connection whose reads end at a deadline, however slowly the
-/// bytes arrive.
+/// bytes arrive, and whose responses must keep a minimum rate, however
+/// slowly the tool reads.
 struct Timed<S> {
     inner: S,
     deadline: Instant,
+    /// When the current response started, and what it has written since.
+    response_start: Instant,
+    written: u64,
+    /// Time allowed before the rate applies, and the rate (bytes/s).
+    grace: Duration,
+    min_rate: u64,
+}
+
+impl<S> Timed<S> {
+    fn start_response(&mut self) {
+        self.response_start = Instant::now();
+        self.written = 0;
+    }
+
+    /// When the response written so far must have been written by.
+    fn write_deadline(&self) -> Instant {
+        let earned = Duration::from_secs_f64(self.written as f64 / self.min_rate.max(1) as f64);
+        self.response_start + self.grace + earned
+    }
 }
 
 impl<S: Stream> Read for Timed<S> {
@@ -530,7 +559,19 @@ impl<S: Stream> Read for Timed<S> {
 
 impl<S: Stream> Write for Timed<S> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.inner.write(buf)
+        let left = self
+            .write_deadline()
+            .saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "the tool reads the response too slowly",
+            ));
+        }
+        self.inner.set_write_timeout(Some(left))?;
+        let n = self.inner.write(buf)?;
+        self.written += n as u64;
+        Ok(n)
     }
 
     fn flush(&mut self) -> io::Result<()> {
@@ -541,6 +582,10 @@ impl<S: Stream> Write for Timed<S> {
 /// How often an idle connection checks whether it should give its worker
 /// back.
 const IDLE_POLL: Duration = Duration::from_millis(100);
+
+/// How long a new connection may stay silent while other connections wait
+/// for a worker.
+const FIRST_REQUEST_GRACE: Duration = Duration::from_millis(500);
 
 /// Wait for the next request to start. `false`: close the connection, the
 /// client is gone, too slow, or idle while other connections wait for a
@@ -572,7 +617,11 @@ fn next_request_starts<S: Stream>(
             {
                 // A kept-alive connection gives its worker back as soon as
                 // another connection is waiting for one.
-                if started.elapsed() >= patience || (!first && shared.pool.saturated()) {
+                // A fresh connection gets a short grace to send its first
+                // bytes before it yields too, so silent connections cannot
+                // hold every worker for the whole request timeout.
+                let yields = !first || started.elapsed() >= FIRST_REQUEST_GRACE;
+                if started.elapsed() >= patience || (yields && shared.pool.saturated()) {
                     return false;
                 }
             }
@@ -586,6 +635,10 @@ fn serve_connection<S: Stream>(stream: S, context: &Context) {
     let mut reader = BufReader::new(Timed {
         inner: stream,
         deadline: Instant::now(),
+        response_start: Instant::now(),
+        written: 0,
+        grace: context.shared.response_grace,
+        min_rate: context.shared.min_response_rate,
     });
     let mut first = true;
     loop {
@@ -624,6 +677,7 @@ fn serve_connection<S: Stream>(stream: S, context: &Context) {
                 return;
             }
         };
+        reader.get_mut().start_response();
         match dispatch(context, &request, reader.get_mut()) {
             Ok(true) if request.keep_alive => {}
             _ => return,
@@ -1824,5 +1878,93 @@ mod tests {
         assert!(raw.starts_with("HTTP/1.1 413 "), "{raw}");
         assert!(harness.upstream.seen().is_empty());
         session.finish();
+    }
+
+    #[test]
+    fn silent_new_connections_yield_their_worker_under_saturation() {
+        let harness = Harness::with(
+            "proxy-silent-yield",
+            Reach {
+                workers: 1,
+                request_timeout: Duration::from_secs(10),
+                ..Reach::loopback()
+            },
+        );
+        let (session, address) = harness.session();
+        let _silent = TcpStream::connect(address.address).unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+        let started = Instant::now();
+        let answer = get(&address, &mirror(&address, "/local/supported"), "");
+        assert_eq!(answer.status, 200);
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "{:?}",
+            started.elapsed()
+        );
+        session.finish();
+    }
+
+    #[test]
+    fn a_tool_reading_too_slowly_loses_its_worker() {
+        use crate::kernel::testutil::upstream::{Behavior, Reply};
+        let harness = Harness::with(
+            "proxy-slow-reader",
+            Reach {
+                workers: 1,
+                min_response_rate: 1 << 30,
+                ..Reach::loopback()
+            },
+        );
+        harness.upstream.set(
+            "/art/huge.tgz",
+            Behavior::Reply(Reply::new(200, &vec![7u8; 48 << 20])),
+        );
+        let (session, address) = harness.session();
+        let mut stalled = TcpStream::connect(address.address).unwrap();
+        write!(
+            stalled,
+            "GET {} HTTP/1.1\r\nHost: x\r\n\r\n",
+            mirror(&address, "/art/huge.tgz")
+        )
+        .unwrap();
+        // The tool reads 64 KiB every 100 ms: steady progress, so a
+        // per-write timeout never fires, but far below the minimum rate.
+        // Past the grace (the 2 s I/O timeout) the worker is released for
+        // the next tool.
+        let stop = Arc::new(AtomicBool::new(false));
+        let trickle = {
+            let stop = stop.clone();
+            let mut reader = stalled.try_clone().unwrap();
+            std::thread::spawn(move || {
+                let mut buf = vec![0u8; 64 * 1024];
+                while !stop.load(Ordering::SeqCst) {
+                    if matches!(reader.read(&mut buf), Ok(0) | Err(_)) {
+                        return;
+                    }
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+            })
+        };
+        let started = Instant::now();
+        let answer = get(&address, &mirror(&address, "/local/supported"), "");
+        assert_eq!(answer.status, 200);
+        assert!(
+            started.elapsed() < Duration::from_secs(8),
+            "{:?}",
+            started.elapsed()
+        );
+        stop.store(true, Ordering::SeqCst);
+        let _ = trickle.join();
+        drop(stalled);
+        let report = session.finish();
+        assert!(
+            report
+                .diagnostics
+                .requests
+                .iter()
+                .any(|r| r.disposition == "failed"),
+            "{:?}",
+            report.diagnostics.requests
+        );
     }
 }
