@@ -657,7 +657,9 @@ mod drop_tests {
     }
 
     /// A record that is a symlink or a directory is one drop refuses, so
-    /// the advice must not send the operator to `--drop-object`.
+    /// the advice must not send the operator to `--drop-object` alone. It
+    /// removes the record first, then drops the object that removal leaves
+    /// behind, and following it unwedges the sweep.
     #[test]
     fn a_record_drop_would_refuse_is_not_advised_as_a_drop() {
         let temp = TempStore::new("drop-advice");
@@ -682,13 +684,30 @@ mod drop_tests {
             );
             assert!(
                 text.contains(&format!(
-                    "Delete meta/{file} by hand, or restore the file from a backup."
+                    "Delete meta/{file} by hand, then drop the object it leaves behind with \
+                     `tog gc --drop-object {id}`, or restore the file from a backup."
                 )),
                 "{shape}: {text}"
             );
+            assert!(!text.contains("Drop it with"), "{shape}: {text}");
+            let activity = store.activity(ActivityMode::Exclusive).unwrap();
+            let mut automatic = Vec::new();
+            super::super::migrate::migrate_metadata_locked(
+                &store,
+                &activity,
+                true,
+                &mut automatic,
+                true,
+            )
+            .unwrap();
+            drop(activity);
+            let automatic = String::from_utf8(automatic).unwrap();
             assert!(
-                !text.contains(&format!("--drop-object {id}")),
-                "{shape}: {text}"
+                automatic.contains(&format!(
+                    "{} && tog gc --drop-object {id}",
+                    super::super::migrate::remove_record_line(&store, &file)
+                )),
+                "{shape}: {automatic}"
             );
             assert_eq!(
                 super::super::migrate::remove_record_line(&store, &file),
@@ -705,6 +724,26 @@ mod drop_tests {
                 fs::remove_dir(&record).unwrap();
             }
         }
+
+        // The record is gone: the sweep refuses the object it left, the
+        // advised drop takes it, and the sweep runs.
+        assert!(sweep(&store).0.is_err());
+        let (count, text) = exclusive(&store, std::slice::from_ref(&id), false);
+        assert_eq!(count.unwrap(), 1, "{text}");
+        let (report, text) = sweep(&store);
+        report.unwrap_or_else(|error| panic!("{error}: {text}"));
+
+        // With no object left behind, removing the record is the whole fix.
+        fs::create_dir(&record).unwrap();
+        let (result, text) = sweep(&store);
+        assert!(result.is_err(), "{text}");
+        assert!(
+            text.contains(&format!(
+                "Delete meta/{file} by hand, or restore the file from a backup."
+            )),
+            "{text}"
+        );
+        fs::remove_dir(&record).unwrap();
     }
 
     /// The passing control: a wedged object and its record both go, and a

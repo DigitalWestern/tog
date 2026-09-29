@@ -277,8 +277,9 @@ impl Environment<'_> {
                 "a comparison needs one marker variable and one quoted value".into(),
             ));
         }
-        if matches!(left, Operand::Variable("extra")) || matches!(right, Operand::Variable("extra"))
-        {
+        let extra = matches!(left, Operand::Variable("extra"))
+            || matches!(right, Operand::Variable("extra"));
+        if extra {
             // PEP 685: extras compare by their normalized names.
             left_value = normalized_extra(&left_value);
             right_value = normalized_extra(&right_value);
@@ -286,6 +287,16 @@ impl Environment<'_> {
         match op {
             "in" => return Ok(right_value.contains(left_value.as_str())),
             "not in" => return Ok(!right_value.contains(left_value.as_str())),
+            // An extra is a name, never a version: `extra == '01'` does not
+            // match the extra `1`. `packaging` compares them as versions
+            // here; uv, which writes the lock, compares names.
+            "==" if extra => return Ok(left_value == right_value),
+            "!=" if extra => return Ok(left_value != right_value),
+            _ if extra => {
+                return Err(unsupported(format!(
+                    "`{op}` cannot compare extra names; use `==`, `!=`, `in` or `not in`"
+                )))
+            }
             _ => {}
         }
         let as_versions =
@@ -598,7 +609,6 @@ mod marker_tests {
             ("sys_platform <= 'linux'", "linux"),
             ("sys_platform > 'linux'", "linux"),
             ("sys_platform >= 'linux'", "linux"),
-            ("extra > 'a'", "a"),
             ("python_version >= 'three'", "three"),
             ("python_version >= '3.8,<4'", "3.8,<4"),
             ("python_version >= '3.8 <4'", "3.8 <4"),
@@ -690,11 +700,21 @@ mod marker_tests {
         assert!(eval("extra == 'ος'", LINUX, Some("ΟΣ")));
         assert!(eval("'v3.12.14' === python_full_version", LINUX, None));
         assert!(!eval("'v3.12.15' === python_full_version", LINUX, None));
-        assert_eq!(
-            refused("extra == '018446744073709551616'"),
-            "environment marker: invalid PEP 440 specifier `==018446744073709551616`: numeric version segment is too large"
-        );
-        // `1` and `01` are the same version.
-        assert!(eval("extra == '01'", LINUX, Some("1")));
+        // Extras are names, not versions, as uv compares them: `01` is not
+        // the extra `1`, and a number past u64 is just a name.
+        assert!(!eval("extra == '01'", LINUX, Some("1")));
+        assert!(eval("extra != '01'", LINUX, Some("1")));
+        assert!(eval("'1' == extra", LINUX, Some("1")));
+        assert!(!eval("extra == '018446744073709551616'", LINUX, Some("1")));
+        for op in ["<", "<=", ">", ">=", "~=", "==="] {
+            let marker = format!("extra {op} '1'");
+            assert_eq!(
+                refused(&marker),
+                format!(
+                    "unsupported environment marker `{marker}`: `{op}` cannot compare extra \
+                     names; use `==`, `!=`, `in` or `not in`"
+                ),
+            );
+        }
     }
 }

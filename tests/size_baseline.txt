@@ -20,7 +20,7 @@ fn 182 src/commands/deps.rs::node
 fn 174 src/commands/mod.rs::dispatch
 fn 191 src/commands/x.rs::clean
 fn 166 src/kernel/archive.rs::read_entries
-fn 208 src/kernel/gc/migrate.rs::migrate_metadata_locked
+fn 172 src/kernel/gc/migrate.rs::migrate_metadata_locked
 fn 169 src/kernel/gc/plan.rs::plan
 fn 151 src/kernel/gitsrc.rs::ensure_git_source
 fn 164 src/kernel/provider/crates.rs::realize_vendor_inner
