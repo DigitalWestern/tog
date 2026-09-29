@@ -441,9 +441,24 @@ mod door {
             argv: &[OsString],
             scan: SocketScan,
         ) -> std::io::Result<ConfinedOutcome> {
+            self.run_with_env(snapshot, argv, scan, &[])
+        }
+
+        /// `run`, with `extra` added to the tool's environment.
+        fn run_with_env(
+            &self,
+            snapshot: &Snapshot,
+            argv: &[OsString],
+            scan: SocketScan,
+            extra: &[(&str, &str)],
+        ) -> std::io::Result<ConfinedOutcome> {
             let _one = DOOR.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             let activity = self.store.activity(ActivityMode::Shared).unwrap();
-            let env = [(OsString::from("PATH"), OsString::from("/usr/bin:/bin"))];
+            let env: Vec<(OsString, OsString)> = [("PATH", "/usr/bin:/bin")]
+                .iter()
+                .chain(extra)
+                .map(|(key, value)| (OsString::from(key), OsString::from(value)))
+                .collect();
             confined_run(
                 &self.store,
                 &activity,
@@ -816,6 +831,37 @@ mod door {
             format!("vm rc=-1 errno={}", libc::EPERM),
             "{stdout}"
         );
+    }
+
+    /// The tool's environment reaches the tool and not the relay, which
+    /// runs without the filter: a loader variable the door passes on must
+    /// not act on the relay's own startup. glibc's loader writes
+    /// `LD_DEBUG_OUTPUT.<pid>` for every process that received the pair;
+    /// the relay is pid 1.
+    #[test]
+    fn linux_door_tool_environment_never_reaches_the_relay() {
+        let Some(door) = door("linux_door_tool_environment_never_reaches_the_relay") else {
+            return;
+        };
+        let snapshot = door.snapshot();
+        let outcome = door
+            .run_with_env(
+                &snapshot,
+                &door.shell_argv("for f in /tmp/ld.*; do echo \"$f\"; done"),
+                SocketScan::Full,
+                &[("LD_DEBUG", "files"), ("LD_DEBUG_OUTPUT", "/tmp/ld")],
+            )
+            .unwrap();
+        assert_eq!(outcome.status, ToolStatus::Code(0));
+        let stdout = String::from_utf8(outcome.stdout).unwrap();
+        let files: Vec<&str> = stdout.lines().collect();
+        assert!(
+            files
+                .iter()
+                .any(|file| file.starts_with("/tmp/ld.") && *file != "/tmp/ld.*"),
+            "the tool did not get its environment: {stdout}"
+        );
+        assert!(!files.contains(&"/tmp/ld.1"), "the relay got it: {stdout}");
     }
 
     /// The namespace's pid 1 is the non-dumpable relay: the tool cannot

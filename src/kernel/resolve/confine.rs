@@ -29,7 +29,7 @@ use crate::kernel::sandbox;
 use crate::kernel::store::{self, Store};
 use std::ffi::{OsStr, OsString};
 use std::fs;
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
@@ -807,14 +807,29 @@ pub fn confined_run(
     let bwrap = sandbox::bwrap_preflight_with_activity(Some(activity))?;
     let mounts = Mounts::check(store, activity, run)?;
     let args = proxy_args(run, &mounts, bwrap_disables_userns(bwrap, activity))?;
+    let env = relay::encode_env(&door_env(run, &mounts.scratch)?);
     let (reader, writer) = pipe()?;
+    let (env_reader, env_writer) = pipe()?;
     let log = std::thread::spawn(move || read_log(reader));
+    // A thread, because an environment larger than the pipe's buffer
+    // would otherwise block before bubblewrap starts reading it.
+    let sent = std::thread::spawn(move || fs::File::from(env_writer).write_all(&env));
     let mut command = sandbox::bwrap_command(bwrap)?;
     command.args(&args);
-    pass_as_fd3(&mut command, writer.as_raw_fd());
+    pass_fds(
+        &mut command,
+        [
+            (writer.as_raw_fd(), relay::EXEC_LOG_FD),
+            (env_reader.as_raw_fd(), relay::ENV_FD),
+        ],
+    );
     let result = start_confined(&mut command, activity, run.stdout);
     drop(command);
     drop(writer);
+    drop(env_reader);
+    // The relay reads the whole environment before it starts the tool, so
+    // a write that failed means the tool never ran: the relay reported it.
+    let _ = sent.join();
     let log = log
         .join()
         .map_err(|_| io::Error::other("the exec log reader panicked"))?;
@@ -1060,11 +1075,10 @@ fn proxy_args(
         // give it back the capabilities bubblewrap dropped.
         args.push("--disable-userns".into());
     }
-    for (key, value) in door_env(run, &mounts.scratch)? {
-        args.push("--setenv".into());
-        args.push(key);
-        args.push(value);
-    }
+    // No --setenv: bubblewrap's --clearenv leaves the relay an empty
+    // environment, and the tool's arrives on ENV_FD. The relay runs
+    // without the filter, so nothing meant for the tool (a loader variable
+    // like LD_PRELOAD above all) may reach its own startup.
     args.push("--chdir".into());
     args.push(mounts.cwd.clone().into_os_string());
     for part in [
@@ -1072,6 +1086,8 @@ fn proxy_args(
         relay::VERB,
         "--exec-log-fd",
         "3",
+        "--env-fd",
+        "4",
         relay::PROXY_SOCKET,
         relay::LISTEN_ADDRESS,
         "--",
@@ -1122,21 +1138,31 @@ fn pipe() -> io::Result<(OwnedFd, OwnedFd)> {
     Ok((OwnedFd::from(reader), OwnedFd::from(writer)))
 }
 
-/// Hand `fd` to bubblewrap as descriptor 3 (the relay's exec log). This
-/// runs after `bwrap_command` marked every inherited descriptor
-/// close-on-exec, so 3 is the only one that survives.
-fn pass_as_fd3(command: &mut std::process::Command, fd: RawFd) {
+/// Hand each `(source, target)` descriptor to bubblewrap at `target`
+/// (the relay's exec log at 3, the tool's environment at 4). This runs
+/// after `bwrap_command` marked every inherited descriptor close-on-exec,
+/// so the targets are the only ones that survive. Each source is first
+/// copied above the targets, so a source that happens to be numbered like
+/// another target is not overwritten before it is moved.
+fn pass_fds<const N: usize>(command: &mut std::process::Command, fds: [(RawFd, RawFd); N]) {
     use std::os::unix::process::CommandExt;
-    // SAFETY: the closure calls only dup2/fcntl, which are
-    // async-signal-safe and allocate nothing.
+    // SAFETY: the closure calls only fcntl/dup2/close, which are
+    // async-signal-safe, on an array copied into it before fork.
     unsafe {
         command.pre_exec(move || {
-            if fd == relay::EXEC_LOG_FD {
-                if libc::fcntl(fd, libc::F_SETFD, 0) != 0 {
+            let mut high = [0; N];
+            for (slot, (source, _)) in high.iter_mut().zip(fds) {
+                *slot = libc::fcntl(source, libc::F_DUPFD_CLOEXEC, 10);
+                if *slot < 0 {
                     return Err(io::Error::last_os_error());
                 }
-            } else if libc::dup2(fd, relay::EXEC_LOG_FD) < 0 {
-                return Err(io::Error::last_os_error());
+            }
+            for (copy, (_, target)) in high.into_iter().zip(fds) {
+                // dup2 leaves the new descriptor without close-on-exec.
+                if libc::dup2(copy, target) < 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                libc::close(copy);
             }
             Ok(())
         });

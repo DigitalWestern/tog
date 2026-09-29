@@ -45,6 +45,13 @@ pub const TOG_EXECUTABLE: &str = "/run/tog/tog";
 pub const VERB: &str = "__resolution-relay";
 /// The descriptor number the exec log arrives on inside the sandbox.
 pub const EXEC_LOG_FD: i32 = 3;
+/// The descriptor number the tool's environment arrives on inside the
+/// sandbox. bubblewrap starts the relay with an empty environment, so
+/// nothing meant for the tool (a loader variable above all) reaches the
+/// relay, which runs without the filter.
+pub const ENV_FD: i32 = 4;
+/// The tool's environment is small; more than this is not one.
+pub const ENV_CAP: u64 = 16 * 1024 * 1024;
 
 /// What the relay was asked to do, parsed from its command line.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -52,6 +59,9 @@ pub struct RelayArgs {
     pub socket: PathBuf,
     pub listen: SocketAddr,
     pub exec_log_fd: Option<i32>,
+    /// Where the tool's environment arrives. Without it the tool starts
+    /// with an empty environment: the relay's own is never passed on.
+    pub env_fd: Option<i32>,
     pub argv: Vec<OsString>,
 }
 
@@ -124,6 +134,7 @@ pub fn parse_args(
     socket: &str,
     listen: &str,
     exec_log_fd: Option<i32>,
+    env_fd: Option<i32>,
     argv: &[String],
 ) -> io::Result<RelayArgs> {
     let invalid = |message: String| io::Error::new(io::ErrorKind::InvalidInput, message);
@@ -143,12 +154,67 @@ pub fn parse_args(
             "{VERB}: the exec log cannot be a standard descriptor"
         )));
     }
+    if matches!(env_fd, Some(fd) if fd < 3 || Some(fd) == exec_log_fd) {
+        return Err(invalid(format!(
+            "{VERB}: the environment descriptor must be its own, not a standard one"
+        )));
+    }
     Ok(RelayArgs {
         socket: PathBuf::from(socket),
         listen,
         exec_log_fd,
+        env_fd,
         argv: argv.iter().map(OsString::from).collect(),
     })
+}
+
+/// The tool's environment as the door sends it: `KEY=VALUE` records, each
+/// ended by a NUL byte. Bytes pass through unchanged, so a value need not
+/// be UTF-8.
+pub fn encode_env(env: &[(OsString, OsString)]) -> Vec<u8> {
+    use std::os::unix::ffi::OsStrExt;
+    let mut bytes = Vec::new();
+    for (key, value) in env {
+        bytes.extend_from_slice(key.as_bytes());
+        bytes.push(b'=');
+        bytes.extend_from_slice(value.as_bytes());
+        bytes.push(0);
+    }
+    bytes
+}
+
+/// Read back what `encode_env` wrote. A record without `=`, with an empty
+/// name, or not ended by NUL means something other than the door wrote it.
+pub fn decode_env(bytes: &[u8]) -> io::Result<Vec<(OsString, OsString)>> {
+    use std::os::unix::ffi::OsStrExt;
+    let malformed = || {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{VERB}: the tool's environment arrived malformed"),
+        )
+    };
+    let Some(body) = bytes.strip_suffix(&[0]) else {
+        return if bytes.is_empty() {
+            Ok(Vec::new())
+        } else {
+            Err(malformed())
+        };
+    };
+    body.split(|byte| *byte == 0)
+        .map(|record| {
+            let at = record
+                .iter()
+                .position(|byte| *byte == b'=')
+                .ok_or_else(malformed)?;
+            if at == 0 {
+                return Err(malformed());
+            }
+            Ok((
+                std::ffi::OsStr::from_bytes(&record[..at]).to_owned(),
+                std::ffi::OsStr::from_bytes(&record[at + 1..]).to_owned(),
+            ))
+        })
+        .collect()
 }
 
 /// Parse an exec log. A line that does not parse is an error: the pipe is
@@ -259,13 +325,48 @@ mod linux {
                 format!("{VERB}: listen on {}: {error}", args.listen),
             )
         })?;
+        let env = match args.env_fd {
+            Some(fd) => read_env(fd)?,
+            None => Vec::new(),
+        };
         let proxy = ProxySocket::hold(&args.socket)?;
         std::thread::spawn(move || accept_loop(listener, &proxy));
-        let status = run_tool(&args.argv, log)?;
+        let status = run_tool(&args.argv, &env, log)?;
         log.write(&RelayRecord::Tool(status));
         let killed = quiesce()?;
         log.write(&RelayRecord::Quiesced { killed });
         Ok(status.exit_code())
+    }
+
+    /// Read the tool's environment from the descriptor the door handed
+    /// over, and close it.
+    fn read_env(fd: i32) -> io::Result<Vec<(OsString, OsString)>> {
+        use std::io::Read as _;
+        let adopt_error = |error: io::Error| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{VERB}: environment descriptor {fd}: {error}"),
+            )
+        };
+        // SAFETY: fcntl on an integer descriptor; a bad one fails with
+        // EBADF, reported below.
+        if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } != 0 {
+            return Err(adopt_error(io::Error::last_os_error()));
+        }
+        // SAFETY: the descriptor was handed to this process for the relay
+        // alone; ownership moves into the File, which closes it.
+        let file = unsafe { File::from_raw_fd(fd) };
+        let mut bytes = Vec::new();
+        file.take(ENV_CAP + 1)
+            .read_to_end(&mut bytes)
+            .map_err(adopt_error)?;
+        if bytes.len() as u64 > ENV_CAP {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("{VERB}: the tool's environment is too large"),
+            ));
+        }
+        decode_env(&bytes)
     }
 
     /// The proxy's socket, held open (`O_PATH`) from before the tool
@@ -335,7 +436,11 @@ mod linux {
     /// Start the tool under the filter and wait for it. The notification
     /// thread starts first: the tool's own `execve` is a notification, and
     /// `spawn` does not return until that exec has happened.
-    fn run_tool(argv: &[OsString], log: &RelayLog) -> io::Result<ToolStatus> {
+    fn run_tool(
+        argv: &[OsString],
+        env: &[(OsString, OsString)],
+        log: &RelayLog,
+    ) -> io::Result<ToolStatus> {
         let (ours, theirs) = UnixStream::pair()?;
         let first = argv[0].to_string_lossy().into_owned();
         let sink = log.clone();
@@ -346,7 +451,7 @@ mod linux {
                 });
             }
         });
-        let mut child = spawn_tool(argv, Compiled::native(), theirs.as_raw_fd())?;
+        let mut child = spawn_tool(argv, env, Compiled::native(), theirs.as_raw_fd())?;
         drop(theirs);
         let status = child.wait()?;
         Ok(match (status.code(), status.signal()) {
@@ -360,13 +465,17 @@ mod linux {
     #[allow(clippy::disallowed_methods)]
     fn spawn_tool(
         argv: &[OsString],
+        env: &[(OsString, OsString)],
         filter: Compiled,
         channel: RawFd,
     ) -> io::Result<std::process::Child> {
         let mut command = std::process::Command::new(&argv[0]);
-        // bubblewrap adds PWD while processing --chdir; the tool's
-        // environment is exactly what the door set.
-        command.args(&argv[1..]).env_remove("PWD");
+        // The tool's environment is exactly what the door sent; the
+        // relay's own (bubblewrap's PWD) is not passed on.
+        command
+            .args(&argv[1..])
+            .env_clear()
+            .envs(env.iter().map(|(key, value)| (key, value)));
         // SAFETY: the closure makes only async-signal-safe syscalls
         // (keyctl, prctl, seccomp, sendmsg, close) on data prepared before
         // fork.
@@ -592,12 +701,15 @@ mod linux {
             let argv: Vec<OsString> = [
                 "/bin/sh",
                 "-c",
-                "/usr/bin/true && /usr/bin/env true && exit 3",
+                // The tool sees the environment it was sent and nothing
+                // of the relay's own (this test process has a HOME).
+                "/usr/bin/true && /usr/bin/env true && [ \"$MARK\" = sent ] && [ -z \"$HOME\" ] && exit 3",
             ]
             .iter()
             .map(OsString::from)
             .collect();
-            let status = run_tool(&argv, &log).unwrap();
+            let env = [(OsString::from("MARK"), OsString::from("sent"))];
+            let status = run_tool(&argv, &env, &log).unwrap();
             assert_eq!(status, ToolStatus::Code(3));
             drop(log);
             drop(writer);
@@ -634,17 +746,48 @@ mod tests {
     #[test]
     fn relay_arguments_are_checked() {
         let argv = vec!["/bin/true".to_string()];
-        let parsed = parse_args("/run/tog/proxy.sock", LISTEN_ADDRESS, Some(3), &argv).unwrap();
+        let parsed = parse_args(
+            "/run/tog/proxy.sock",
+            LISTEN_ADDRESS,
+            Some(3),
+            Some(4),
+            &argv,
+        )
+        .unwrap();
         assert_eq!(parsed.listen, LISTEN_ADDRESS.parse().unwrap());
         assert_eq!(parsed.argv, vec![OsString::from("/bin/true")]);
-        for (listen, fd, argv, reason) in [
-            ("0.0.0.0:8119", None, &argv[..], "not a loopback"),
-            ("localhost:8119", None, &argv[..], "not an address"),
-            (LISTEN_ADDRESS, Some(2), &argv[..], "standard descriptor"),
-            (LISTEN_ADDRESS, None, &[][..], "no tool"),
+        for (listen, fd, env_fd, argv, reason) in [
+            ("0.0.0.0:8119", None, None, &argv[..], "not a loopback"),
+            ("localhost:8119", None, None, &argv[..], "not an address"),
+            (
+                LISTEN_ADDRESS,
+                Some(2),
+                None,
+                &argv[..],
+                "standard descriptor",
+            ),
+            (LISTEN_ADDRESS, None, Some(1), &argv[..], "standard one"),
+            (LISTEN_ADDRESS, Some(3), Some(3), &argv[..], "its own"),
+            (LISTEN_ADDRESS, None, None, &[][..], "no tool"),
         ] {
-            let error = parse_args("/s", listen, fd, argv).unwrap_err();
+            let error = parse_args("/s", listen, fd, env_fd, argv).unwrap_err();
             assert!(error.to_string().contains(reason), "{error}");
+        }
+    }
+
+    #[test]
+    fn the_environment_round_trips_bytes_and_refuses_a_foreign_record() {
+        use std::os::unix::ffi::OsStringExt;
+        let env = vec![
+            (OsString::from("HOME"), OsString::from("/scratch/home")),
+            (OsString::from("EMPTY"), OsString::new()),
+            (OsString::from("EQ"), OsString::from("a=b")),
+            (OsString::from("RAW"), OsString::from_vec(vec![0xff, b'x'])),
+        ];
+        assert_eq!(decode_env(&encode_env(&env)).unwrap(), env);
+        assert_eq!(decode_env(b"").unwrap(), Vec::new());
+        for bad in [&b"NOEQUALS\0"[..], b"=value\0", b"KEY=unterminated"] {
+            assert!(decode_env(bad).is_err(), "{bad:?}");
         }
     }
 

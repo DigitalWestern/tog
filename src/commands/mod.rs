@@ -120,6 +120,7 @@ pub fn relay(invocation: cli::RelayInvocation) -> i32 {
         &invocation.socket,
         &invocation.listen,
         invocation.exec_log_fd,
+        invocation.env_fd,
         &invocation.argv,
     )
     .and_then(relay::run);

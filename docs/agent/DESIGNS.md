@@ -1785,8 +1785,14 @@ filter) receives each notification, reads the program path from the
 notifying process, appends `{pid, parent, path}` to the diagnostics, and
 lets the call continue. The log travels to the door on a pipe the door
 passes to bubblewrap as descriptor 3 (`tog __resolution-relay
---exec-log-fd 3 /run/tog/proxy.sock 127.0.0.1:8119 -- <argv>`), never
-through a file in the sandbox, so the tool cannot read or rewrite it.
+--exec-log-fd 3 --env-fd 4 /run/tog/proxy.sock 127.0.0.1:8119 --
+<argv>`), never through a file in the sandbox, so the tool cannot read
+or rewrite it. The tool's environment travels the other way on
+descriptor 4 (NUL-ended `KEY=VALUE` records), and bubblewrap gets no
+`--setenv`: the relay starts with the empty environment `--clearenv`
+leaves and hands the tool exactly the records it read. The relay runs
+without the filter, so a variable meant for the tool (`LD_PRELOAD`,
+`LD_AUDIT`, `GLIBC_TUNABLES`) must never reach the relay's own loader.
 The same pipe carries the tool's exit status and the relay's
 quiescence result (how many processes it killed), and the door treats a
 log without both as a failed run. This makes the kernel, not the tool, report every

@@ -282,12 +282,13 @@ pub enum Parsed {
     },
 }
 
-/// `__resolution-relay [--exec-log-fd <n>] <socket> <address> -- <tool>...`
+/// `__resolution-relay [--exec-log-fd <n>] [--env-fd <n>] <socket> <address> -- <tool>...`
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RelayInvocation {
     pub socket: String,
     pub listen: String,
     pub exec_log_fd: Option<i32>,
+    pub env_fd: Option<i32>,
     pub argv: Vec<String>,
 }
 

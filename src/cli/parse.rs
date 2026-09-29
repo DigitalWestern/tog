@@ -1401,28 +1401,39 @@ pub(super) const GLOBAL_FLAGS: &[&str] = &[
     "--version",
 ];
 
-/// `__resolution-relay [--exec-log-fd <n>] <socket> <address> -- <tool>...`.
+/// `__resolution-relay [--exec-log-fd <n>] [--env-fd <n>] <socket> <address> -- <tool>...`.
 /// Everything after `--` is the tool's, untouched.
 fn parse_relay(args: &[String]) -> Result<super::RelayInvocation, UsageError> {
     let usage = || {
         UsageError::new(
-            format!("usage: tog {RELAY_VERB} [--exec-log-fd <n>] <socket> <address> -- <tool>..."),
+            format!(
+                "usage: tog {RELAY_VERB} [--exec-log-fd <n>] [--env-fd <n>] <socket> <address> -- <tool>..."
+            ),
             None,
         )
     };
     let split = args.iter().position(|arg| arg == "--").ok_or_else(usage)?;
     let (own, tool) = (&args[..split], &args[split + 1..]);
-    let (exec_log_fd, positional) = match own {
-        [flag, fd, rest @ ..] if flag == "--exec-log-fd" => {
-            (Some(fd.parse::<i32>().map_err(|_| usage())?), rest)
+    let (mut exec_log_fd, mut env_fd, mut positional) = (None, None, own);
+    loop {
+        match positional {
+            [flag, fd, rest @ ..] if flag == "--exec-log-fd" && exec_log_fd.is_none() => {
+                exec_log_fd = Some(fd.parse::<i32>().map_err(|_| usage())?);
+                positional = rest;
+            }
+            [flag, fd, rest @ ..] if flag == "--env-fd" && env_fd.is_none() => {
+                env_fd = Some(fd.parse::<i32>().map_err(|_| usage())?);
+                positional = rest;
+            }
+            _ => break,
         }
-        rest => (None, rest),
-    };
+    }
     match (positional, tool.is_empty()) {
         ([socket, listen], false) => Ok(super::RelayInvocation {
             socket: socket.clone(),
             listen: listen.clone(),
             exec_log_fd,
+            env_fd,
             argv: tool.to_vec(),
         }),
         _ => Err(usage()),
@@ -2896,6 +2907,8 @@ mod tests {
             "__resolution-relay",
             "--exec-log-fd",
             "3",
+            "--env-fd",
+            "4",
             "/run/tog/proxy.sock",
             "127.0.0.1:8119",
             "--",
@@ -2911,6 +2924,7 @@ mod tests {
                 socket: "/run/tog/proxy.sock".into(),
                 listen: "127.0.0.1:8119".into(),
                 exec_log_fd: Some(3),
+                env_fd: Some(4),
                 argv: vec!["/store/npm".into(), "--frozen".into()],
             }
         );
@@ -2923,6 +2937,17 @@ mod tests {
                 "__resolution-relay",
                 "--exec-log-fd",
                 "x",
+                "/s",
+                "127.0.0.1:1",
+                "--",
+                "tool",
+            ],
+            &[
+                "__resolution-relay",
+                "--env-fd",
+                "4",
+                "--env-fd",
+                "5",
                 "/s",
                 "127.0.0.1:1",
                 "--",
