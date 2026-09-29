@@ -352,7 +352,9 @@ fn read_chunked(reader: &mut impl BufRead) -> Result<Vec<u8>, ParseError> {
         if size == 0 {
             break;
         }
-        if body.len() as u64 + size > MAX_BODY {
+        // A 16-hex-digit size would overflow a plain sum.
+        let total = (body.len() as u64).checked_add(size);
+        if total.is_none_or(|total| total > MAX_BODY) {
             return Err(ParseError::TooLarge { head: false });
         }
         let before = body.len();
@@ -604,6 +606,21 @@ mod tests {
             parse(huge.as_bytes()),
             Err(ParseError::TooLarge { head: false })
         ));
+
+        // A chunk size near u64::MAX, after a first chunk, must be refused
+        // as too large, not wrap the running total (or panic in debug).
+        for size in ["ffffffffffffffff", "fffffffffffffffe", "8000000000000000"] {
+            let request = format!(
+                "POST /a HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n{size}\r\n"
+            );
+            assert!(
+                matches!(
+                    parse(request.as_bytes()),
+                    Err(ParseError::TooLarge { head: false })
+                ),
+                "{size}"
+            );
+        }
 
         // Control: the unambiguous forms parse.
         let chunked = parse(

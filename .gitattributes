@@ -1,0 +1,3 @@
+# The IANA special-purpose registries, byte-identical to the downloads
+# (CRLF line ends included). No EOL conversion, no whitespace checks.
+tests/fixtures/proxy/iana/*.csv -text -whitespace
