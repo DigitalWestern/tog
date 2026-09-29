@@ -12,6 +12,14 @@
 //! write access to the mount, so a read-only bind exposes a socket too. The
 //! system directories bubblewrap binds (`/usr`, `/etc` entries) are trusted
 //! and not scanned, and a socket created after the scan is not caught.
+//!
+//! A third network mode, `Proxy`, runs a resolution tool with its network
+//! fenced to tog's recording proxy. It lives in `kernel::resolve::confine`
+//! and reuses the pieces here (the bubblewrap preflight and command, the
+//! system root mirror, the `/etc` entries). It differs from builds in
+//! three ways: every mounted root is scanned for sockets, system roots
+//! included; the project is a staged snapshot bound at its real path; and
+//! a seccomp filter in the tool's process refuses to create Unix sockets.
 
 use crate::kernel::activity::StoreActivity;
 use crate::kernel::platform::Platform;
@@ -678,17 +686,7 @@ impl Sandbox<'_> {
             }
         };
 
-        for item in [
-            "/etc/ld.so.cache",
-            "/etc/ld.so.conf",
-            "/etc/ld.so.conf.d",
-            "/etc/alternatives",
-            "/etc/localtime",
-            "/etc/passwd",
-            "/etc/group",
-            "/etc/nsswitch.conf",
-            "/etc/hosts",
-        ] {
+        for item in HOST_ETC_ENTRIES {
             if Path::new(item).exists() {
                 push_bind(&mut args, "--ro-bind", item, item);
             }
@@ -767,6 +765,22 @@ impl Sandbox<'_> {
         })
     }
 }
+
+/// The host `/etc` entries every Linux sandbox binds read-only when they
+/// exist: the dynamic loader's configuration, the user and group names a
+/// program may look up, the time zone, and the static host table. Name
+/// service goes no further: `/etc/resolv.conf` is never bound.
+pub(crate) const HOST_ETC_ENTRIES: [&str; 9] = [
+    "/etc/ld.so.cache",
+    "/etc/ld.so.conf",
+    "/etc/ld.so.conf.d",
+    "/etc/alternatives",
+    "/etc/localtime",
+    "/etc/passwd",
+    "/etc/group",
+    "/etc/nsswitch.conf",
+    "/etc/hosts",
+];
 
 /// bubblewrap refuses a command line (its `--args` data included) of more
 /// than this many arguments ("Exceeded maximum number of arguments").
@@ -853,7 +867,7 @@ const PROBE_TARGET: &str = "/usr/bin/true";
 /// Only the probe's own target gets that explanation. bwrap prints the
 /// same line when a build spec names a binary that is not in the closure,
 /// and blaming the host for that would send the user to the wrong place.
-fn explained_bwrap_stderr(stderr: &str) -> String {
+pub(crate) fn explained_bwrap_stderr(stderr: &str) -> String {
     let raw = stderr.trim_end();
     if !raw.contains("execvp") || !raw.contains("No such file or directory") {
         return raw.to_string();
@@ -1022,7 +1036,7 @@ fn mark_fds_cloexec_with_fcntl(fds: &[RawFd]) -> io::Result<()> {
     Ok(())
 }
 
-fn bwrap_command(path: &Path) -> io::Result<Command> {
+pub(crate) fn bwrap_command(path: &Path) -> io::Result<Command> {
     // Only the Linux block below mutates `command`; without the attribute macOS
     // builds warn about an unused `mut`.
     #[allow(unused_mut)]
@@ -1113,7 +1127,9 @@ fn bwrap_preflight() -> io::Result<&'static Path> {
 
 // Reviewed site (tests/architecture.rs): `None` arm of `Option<&StoreActivity>`: no store is involved.
 #[allow(clippy::disallowed_methods)]
-fn bwrap_preflight_with_activity(activity: Option<&StoreActivity>) -> io::Result<&'static Path> {
+pub(crate) fn bwrap_preflight_with_activity(
+    activity: Option<&StoreActivity>,
+) -> io::Result<&'static Path> {
     static PREFLIGHT: OnceLock<Result<PathBuf, String>> = OnceLock::new();
     match PREFLIGHT.get_or_init(|| {
         let Some(path) = find_bwrap() else {
@@ -1231,7 +1247,8 @@ fn find_bwrap() -> Option<PathBuf> {
 /// The top-level entries a dynamically linked program may reach outside
 /// `/usr`: `/bin/sh` shebangs, and the ELF interpreter path
 /// (`/lib64/ld-linux-x86-64.so.2`) baked into every x86_64 binary.
-const SYSTEM_ROOT_ENTRIES: [&str; 6] = ["bin", "sbin", "lib", "lib64", "lib32", "libx32"];
+pub(crate) const SYSTEM_ROOT_ENTRIES: [&str; 6] =
+    ["bin", "sbin", "lib", "lib64", "lib32", "libx32"];
 
 /// The system runtime every sandbox gets: a read-only `/usr`, then each
 /// top-level entry in `SYSTEM_ROOT_ENTRIES` recreated the way `host_root`
@@ -1253,7 +1270,7 @@ const SYSTEM_ROOT_ENTRIES: [&str; 6] = ["bin", "sbin", "lib", "lib64", "lib32", 
 /// other error reading the host layout fails setup too.
 ///
 /// `host_root` is `/` in production; tests pass a fake host layout.
-fn system_root_args(host_root: &Path) -> io::Result<Vec<OsString>> {
+pub(crate) fn system_root_args(host_root: &Path) -> io::Result<Vec<OsString>> {
     let mut bound = vec![PathBuf::from("/usr")];
     let mut entries = Vec::new();
     for name in SYSTEM_ROOT_ENTRIES {
@@ -1383,19 +1400,19 @@ pub(crate) fn push_arg(args: &mut Vec<OsString>, value: impl Into<OsString>) {
     args.push(value.into());
 }
 
-fn push_bind(args: &mut Vec<OsString>, flag: &str, source: &str, destination: &str) {
+pub(crate) fn push_bind(args: &mut Vec<OsString>, flag: &str, source: &str, destination: &str) {
     push_arg(args, flag);
     push_arg(args, source);
     push_arg(args, destination);
 }
 
-fn push_bind_path(args: &mut Vec<OsString>, flag: &str, path: &Path) {
+pub(crate) fn push_bind_path(args: &mut Vec<OsString>, flag: &str, path: &Path) {
     push_arg(args, flag);
     args.push(path.as_os_str().to_os_string());
     args.push(path.as_os_str().to_os_string());
 }
 
-fn push_setenv(args: &mut Vec<OsString>, key: &str, value: impl AsRef<OsStr>) {
+pub(crate) fn push_setenv(args: &mut Vec<OsString>, key: &str, value: impl AsRef<OsStr>) {
     push_arg(args, "--setenv");
     push_arg(args, key);
     args.push(value.as_ref().to_os_string());

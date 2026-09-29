@@ -264,6 +264,10 @@ pub struct Invocation {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Parsed {
     Run(Invocation),
+    /// The hidden `__resolution-relay`: the first process inside the
+    /// resolution door's sandbox. tog starts it; nobody types it, so it is
+    /// never listed, completed, or suggested, and it takes no global option.
+    Relay(RelayInvocation),
     /// Print to stdout and exit 0 (help, version).
     Print(String),
     /// `tog` with no command: `sync` inside a project, usage outside.
@@ -276,6 +280,15 @@ pub enum Parsed {
         args: Vec<String>,
         message: String,
     },
+}
+
+/// `__resolution-relay [--exec-log-fd <n>] <socket> <address> -- <tool>...`
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelayInvocation {
+    pub socket: String,
+    pub listen: String,
+    pub exec_log_fd: Option<i32>,
+    pub argv: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

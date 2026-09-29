@@ -60,6 +60,15 @@ pub struct ProjectRoot {
     path: PathBuf,
 }
 
+/// The held directory, for a caller that must issue a descriptor-relative
+/// call this type has no method for (the resolution transaction's
+/// `renameat2(RENAME_EXCHANGE)`). The descriptor stays owned here.
+impl AsRawFd for ProjectRoot {
+    fn as_raw_fd(&self) -> RawFd {
+        self.dir.as_raw_fd()
+    }
+}
+
 impl ProjectRoot {
     /// Canonicalize `project_dir`, then open that path from `/` one
     /// component at a time with O_NOFOLLOW, so an ancestor swapped for a

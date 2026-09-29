@@ -262,6 +262,37 @@ impl Store {
     pub fn cache_path(&self, algo: &str, hex: &str) -> PathBuf {
         self.root.join("cache").join(algo).join(hex)
     }
+
+    /// Drop `ids` from the project's root record, so `tog gc` may collect
+    /// them. The only caller is a resolution transaction releasing the
+    /// original copies it rooted for the life of its journal; every other
+    /// producer only adds. Ids the record does not hold are ignored, and a
+    /// project with no record is left without one. The record may end up
+    /// with no objects: an empty root protects nothing and is still a valid
+    /// record of the project.
+    pub(crate) fn unroot_objects_locked(
+        &self,
+        activity: &StoreActivity,
+        project: &crate::kernel::fsroot::ProjectRoot,
+        ids: &BTreeSet<String>,
+        _project_lock: &fs::File,
+    ) -> io::Result<()> {
+        self.require_activity(activity, "root release")?;
+        let key = roots::root_key(project.path());
+        let Some(mut record) = self
+            .read_root_entry_strict(&key)?
+            .and_then(|entry| entry.record)
+        else {
+            return Ok(());
+        };
+        let before = record.objects.len();
+        record.objects.retain(|id| !ids.contains(id));
+        if record.objects.len() == before {
+            return Ok(());
+        }
+        record.updated = fsops::unix_secs();
+        self.register_root_record_locked(record).map(|_| ())
+    }
 }
 
 /// Test support for producer tests: drop `project`'s root record and rebuild

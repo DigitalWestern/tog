@@ -587,21 +587,46 @@ pub struct KindAdapter {
 /// The kernel's own kinds: sources realized by the kernel, not a tailor.
 /// The resolution proxy's ledger kinds live beside their producer
 /// (`resolve::ledger::KINDS`) and are chained in by `registered_kinds`.
-static KERNEL_KINDS: &[KindAdapter] = &[KindAdapter {
-    kind: "git-source",
-    schema: Some("git-source/2"),
-    superseded_by: None,
-    live_required: &["schema", "url", "commit"],
-    live_optional: &[],
-    legacy_only: &[],
-    live_contract: None,
-    grammar: Grammar {
-        required: &["schema", "url", "commit"],
-        optional: &[],
-        groups: &[],
+static KERNEL_KINDS: &[KindAdapter] = &[
+    KindAdapter {
+        kind: "git-source",
+        schema: Some("git-source/2"),
+        superseded_by: None,
+        live_required: &["schema", "url", "commit"],
+        live_optional: &[],
+        legacy_only: &[],
+        live_contract: None,
+        grammar: Grammar {
+            required: &["schema", "url", "commit"],
+            optional: &[],
+            groups: &[],
+        },
+        adapt: no_dependencies,
     },
-    adapt: no_dependencies,
-}];
+    KindAdapter {
+        // The project files a resolution transaction may replace, copied
+        // before the run so a failed or interrupted publication can restore
+        // them. `run` makes each transaction's copy its own object; each
+        // `target:<i>` names a project-relative path and its `digest:<i>` the
+        // sha256 of its bytes, or `absent`.
+        kind: "resolution-originals",
+        schema: Some("resolution-originals/1"),
+        superseded_by: None,
+        live_required: &["schema", "run"],
+        live_optional: &["target:", "digest:"],
+        legacy_only: &[],
+        live_contract: None,
+        grammar: Grammar {
+            required: &["schema", "run"],
+            optional: &[],
+            groups: &[
+                ("target:", Some(&["digest:"])),
+                ("digest:", Some(&["target:"])),
+            ],
+        },
+        adapt: no_dependencies,
+    },
+];
 
 /// Synthetic objects are useful to kernel and comforter unit tests, but an
 /// arbitrary kind must never pass the live publication check. Keep their
@@ -2337,6 +2362,16 @@ mod tests {
     }
 
     #[test]
+    fn adapter_resolution_originals_1_has_no_dependencies() {
+        let (objects, cache) = proven(
+            crate::kernel::resolve::transaction::live_identity_for_test(),
+            vec![],
+        );
+        assert!(objects.is_empty(), "originals are copies of project files");
+        assert!(cache.is_empty());
+    }
+
+    #[test]
     fn adapter_native_libs_recovers_the_pinned_manifest_digests() {
         let platform = crate::kernel::platform::Platform::X86_64UnknownLinuxGnu;
         let manifest = crate::kernel::provider::nativelibs::manifest_sha256(platform).unwrap();
@@ -3014,7 +3049,10 @@ mod tests {
         let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        let mut cases = vec![crate::kernel::gitsrc::live_identity_for_test()];
+        let mut cases = vec![
+            crate::kernel::gitsrc::live_identity_for_test(),
+            crate::kernel::resolve::transaction::live_identity_for_test(),
+        ];
         cases.extend(crate::kernel::resolve::ledger::live_identities_for_test());
         cases.extend(crate::tailors::live_identity_cases(platform));
         cases

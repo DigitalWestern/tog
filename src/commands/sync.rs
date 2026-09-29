@@ -8,6 +8,7 @@ use crate::kernel::context::{self, Context};
 use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::platform::Platform;
 use crate::kernel::policy;
+use crate::kernel::resolve;
 use crate::kernel::resolve::{DoorKind, ResolutionDoor};
 use crate::kernel::store;
 use crate::tailors::{self, SyncRequest, Tailor};
@@ -127,6 +128,10 @@ pub(crate) fn run_in_mode(
     stop_after_lock: bool,
 ) -> io::Result<()> {
     let dir = context::project_dir();
+    // An interrupted resolution publication is undone before anything
+    // reads the project. Its originals are in the store, so opening the
+    // store early leaves no trace a refusal would have avoided.
+    let early = recover_resolution(platform, &dir)?;
     // The one descriptor this whole sync reads and writes the project
     // through, from preflight to the last closure.
     let project = ProjectRoot::open(&dir)?;
@@ -135,7 +140,10 @@ pub(crate) fn run_in_mode(
     // directory was renamed or replaced meanwhile, the pathname no longer
     // names the project preflight checked: refuse now rather than at
     // publication, before any work is done for it.
-    let ctx = Context::open(platform, true)?;
+    let ctx = match early {
+        Some(ctx) => ctx,
+        None => Context::open(platform, true)?,
+    };
     project.check_still_named()?;
     if stop_after_lock {
         if present.is_empty() {
@@ -170,6 +178,17 @@ pub(crate) fn run_in_mode(
     sync_preflighted(&ctx, &project, &present, &mut toolchain, fresh, &mode)
 }
 
+/// Undo an interrupted resolution publication for `dir`, if there is one,
+/// returning the context opened to do it.
+fn recover_resolution(platform: Platform, dir: &Path) -> io::Result<Option<Context>> {
+    if !resolve::transaction::has_pending_journal(dir) {
+        return Ok(None);
+    }
+    let ctx = Context::open(platform, true)?;
+    resolve::transaction::recover_project(&ctx.store, &ctx.activity, dir)?;
+    Ok(Some(ctx))
+}
+
 /// Sync with a context the caller already opened (`add`/`remove`/`update`
 /// after their manifest edit).
 pub fn run(ctx: &Context, fresh: bool) -> io::Result<()> {
@@ -180,6 +199,9 @@ pub fn run(ctx: &Context, fresh: bool) -> io::Result<()> {
 /// found by walking up, which is not always the process cwd.
 fn run_in(ctx: &Context, dir: &Path, fresh: bool, frozen: bool) -> io::Result<()> {
     let mode = if frozen { Mode::Frozen } else { Mode::Writable };
+    if resolve::transaction::has_pending_journal(dir) {
+        resolve::transaction::recover_project(&ctx.store, &ctx.activity, dir)?;
+    }
     let project = ProjectRoot::open(dir)?;
     let (present, mut toolchain) = preflight(ctx.platform, &project, mode.clone(), Scope::All)?;
     sync_preflighted(ctx, &project, &present, &mut toolchain, fresh, &mode)

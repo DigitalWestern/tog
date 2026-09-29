@@ -291,3 +291,516 @@ fn bwrap_contract() {
     assert!(writable.join("allowed").exists());
     assert!(!forbidden.join("forbidden").exists());
 }
+
+/// The resolution door's Linux confinement, end to end: bubblewrap in the
+/// `Proxy` network mode, the relay (the real `tog` binary), the seccomp
+/// filter, the socket scan, quiescence, and publication. The "tool" is a C
+/// probe compiled with the host's cc; the "proxy" is a stub Unix listener
+/// that answers every connection with one line.
+#[cfg(target_os = "linux")]
+mod door {
+    use super::*;
+    use std::ffi::OsString;
+    use std::io::Write as _;
+    use std::os::unix::net::UnixListener;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+    use tog::kernel::activity::ActivityMode;
+    use tog::kernel::fsroot::ProjectRoot;
+    use tog::kernel::resolve::confine::{
+        confined_run, ConfinedOutcome, ConfinedRun, SocketScan, Stdout,
+    };
+    use tog::kernel::resolve::outputs::Outputs;
+    use tog::kernel::resolve::relay::ToolStatus;
+    use tog::kernel::resolve::snapshot::{Snapshot, SnapshotSpec};
+    use tog::kernel::resolve::transaction::{HoldSpec, Transaction};
+
+    /// One supervised child per process at a time.
+    static DOOR: Mutex<()> = Mutex::new(());
+
+    const PROXY_REPLY: &str = "PROXY-OK";
+
+    struct Door {
+        temp: TempDir,
+        store: Store,
+        project: PathBuf,
+        tools: PathBuf,
+        probe: PathBuf,
+        proxy: PathBuf,
+        connections: Arc<AtomicUsize>,
+    }
+
+    fn door(test: &str) -> Option<Door> {
+        if !matches!(Platform::host(), Ok(Platform::X86_64UnknownLinuxGnu)) {
+            skip_or_panic(test, "not a supported Linux host");
+            return None;
+        }
+        if let Err(error) = tog::kernel::sandbox::probe(Platform::X86_64UnknownLinuxGnu) {
+            skip_or_panic(test, format!("bubblewrap preflight failed: {error}"));
+            return None;
+        }
+        let temp = TempDir::new("door");
+        let root = temp.path().join("store");
+        for sub in [
+            "objects",
+            "meta",
+            "tmp",
+            "roots",
+            "root-locks",
+            "records",
+            "forests",
+            "backups",
+        ] {
+            std::fs::create_dir_all(root.join(sub)).unwrap();
+        }
+        let tools = temp.path().join("tools");
+        std::fs::create_dir_all(&tools).unwrap();
+        let probe = tools.join("door_probe");
+        let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/door_probe.c");
+        let compiled = std::process::Command::new("/usr/bin/cc")
+            .arg("-O1")
+            .arg("-o")
+            .arg(&probe)
+            .arg(&source)
+            .output();
+        match compiled {
+            Ok(output) if output.status.success() => {}
+            Ok(output) => {
+                skip_or_panic(
+                    test,
+                    format!("cc failed: {}", String::from_utf8_lossy(&output.stderr)),
+                );
+                return None;
+            }
+            Err(error) => {
+                skip_or_panic(test, format!("no C compiler at /usr/bin/cc: {error}"));
+                return None;
+            }
+        }
+        let project = temp.path().join("project");
+        std::fs::create_dir_all(project.join(".git/hooks")).unwrap();
+        std::fs::write(project.join("package.json"), b"{\"dependencies\":{}}\n").unwrap();
+        std::fs::write(project.join(".git/HEAD"), b"ref: refs/heads/main\n").unwrap();
+        let proxy = temp.path().join("p.sock");
+        let listener = UnixListener::bind(&proxy).unwrap();
+        let connections = Arc::new(AtomicUsize::new(0));
+        let counter = connections.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                counter.fetch_add(1, Ordering::SeqCst);
+                let _ = stream.write_all(format!("{PROXY_REPLY}\n").as_bytes());
+            }
+        });
+        Some(Door {
+            store: Store {
+                root: root.canonicalize().unwrap(),
+            },
+            project: project.canonicalize().unwrap(),
+            tools: tools.canonicalize().unwrap(),
+            probe,
+            proxy,
+            connections,
+            temp,
+        })
+    }
+
+    impl Door {
+        fn snapshot(&self) -> Snapshot {
+            let activity = self.store.activity(ActivityMode::Shared).unwrap();
+            Snapshot::build(
+                &self.store,
+                &activity,
+                &SnapshotSpec {
+                    lock_root: &self.project,
+                    extra_roots: &[],
+                    exclude: &[],
+                },
+            )
+            .unwrap()
+        }
+
+        fn probe_argv(&self, args: &[&str]) -> Vec<OsString> {
+            std::iter::once(self.probe.clone().into_os_string())
+                .chain(args.iter().map(OsString::from))
+                .collect()
+        }
+
+        fn shell_argv(&self, script: &str) -> Vec<OsString> {
+            ["/bin/sh", "-c", script, "sh", self.probe.to_str().unwrap()]
+                .iter()
+                .map(OsString::from)
+                .collect()
+        }
+
+        fn run(
+            &self,
+            snapshot: &Snapshot,
+            argv: &[OsString],
+            scan: SocketScan,
+        ) -> std::io::Result<ConfinedOutcome> {
+            let _one = DOOR.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            let activity = self.store.activity(ActivityMode::Shared).unwrap();
+            let env = [(OsString::from("PATH"), OsString::from("/usr/bin:/bin"))];
+            confined_run(
+                &self.store,
+                &activity,
+                &ConfinedRun {
+                    tool: "the door probe",
+                    why: "runs whatever the test tells it to",
+                    unconfined_denied: true,
+                    snapshot,
+                    proxy_socket: &self.proxy,
+                    executable: Path::new(env!("CARGO_BIN_EXE_tog")),
+                    argv,
+                    cwd: &snapshot.lock_root().real,
+                    env: &env,
+                    read_roots: std::slice::from_ref(&self.tools),
+                    stdout: Stdout::Capture,
+                    socket_scan: scan,
+                },
+            )
+        }
+
+        fn stdout_of(&self, args: &[&str]) -> String {
+            let snapshot = self.snapshot();
+            let outcome = self
+                .run(&snapshot, &self.probe_argv(args), SocketScan::Full)
+                .unwrap();
+            assert_eq!(outcome.status, ToolStatus::Code(0), "{args:?}");
+            String::from_utf8(outcome.stdout).unwrap()
+        }
+    }
+
+    #[test]
+    fn linux_door_reaches_only_the_proxy() {
+        let Some(door) = door("linux_door_reaches_only_the_proxy") else {
+            return;
+        };
+        let snapshot = door.snapshot();
+        let outcome = door
+            .run(
+                &snapshot,
+                &door.shell_argv(
+                    "\"$1\" tcp 127.0.0.1 8119; \"$1\" tcp 1.1.1.1 443; \"$1\" tcp 10.0.0.1 80",
+                ),
+                SocketScan::Full,
+            )
+            .unwrap();
+        let stdout = String::from_utf8(outcome.stdout).unwrap();
+        let lines: Vec<&str> = stdout.lines().collect();
+        assert_eq!(lines[0], format!("tcp ok {PROXY_REPLY}"), "{stdout}");
+        let unreachable = format!("tcp connect errno={}", libc::ENETUNREACH);
+        assert_eq!(lines[1], unreachable, "{stdout}");
+        assert_eq!(lines[2], unreachable, "{stdout}");
+        assert_eq!(door.connections.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn linux_door_has_no_dns() {
+        let Some(door) = door("linux_door_has_no_dns") else {
+            return;
+        };
+        let stdout = door.stdout_of(&["dns", "example.com"]);
+        assert!(stdout.starts_with("dns fail"), "{stdout}");
+        let stdout = door.stdout_of(&["read", "/etc/resolv.conf"]);
+        assert_eq!(stdout.trim(), format!("read errno={}", libc::ENOENT));
+    }
+
+    #[test]
+    fn linux_door_does_not_mount_the_real_project() {
+        let Some(door) = door("linux_door_does_not_mount_the_real_project") else {
+            return;
+        };
+        let snapshot = door.snapshot();
+        std::fs::write(door.project.join("after.txt"), b"only on the host\n").unwrap();
+        let outcome = door
+            .run(
+                &snapshot,
+                &door.shell_argv("echo tool > written.txt; \"$1\" read after.txt"),
+                SocketScan::Full,
+            )
+            .unwrap();
+        let stdout = String::from_utf8(outcome.stdout).unwrap();
+        assert_eq!(stdout.trim(), format!("read errno={}", libc::ENOENT));
+        assert!(!door.project.join("written.txt").exists());
+        assert!(snapshot.lock_root().staged.join("written.txt").exists());
+    }
+
+    /// The probe double-forks a setsid child that keeps rewriting a file
+    /// and exits at once. By the time the door returns, the child is dead:
+    /// the relay killed it, and the file stops changing.
+    #[test]
+    fn linux_door_descendants_die_with_the_relay() {
+        let Some(door) = door("linux_door_descendants_die_with_the_relay") else {
+            return;
+        };
+        let snapshot = door.snapshot();
+        let target = snapshot.lock_root().real.join("package-lock.json");
+        let outcome = door
+            .run(
+                &snapshot,
+                &door.shell_argv(&format!(
+                    "\"$1\" daemon {} 30; /usr/bin/sleep 0.3",
+                    target.display()
+                )),
+                SocketScan::Full,
+            )
+            .unwrap();
+        assert_eq!(outcome.status, ToolStatus::Code(0));
+        assert!(outcome.killed >= 1, "nothing was left to kill: {outcome:?}");
+        let staged = snapshot.lock_root().staged.join("package-lock.json");
+        let first = std::fs::read(&staged).unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(
+            std::fs::read(&staged).unwrap(),
+            first,
+            "a descendant kept writing"
+        );
+    }
+
+    #[test]
+    fn linux_tree_is_killed_before_validation() {
+        let Some(door) = door("linux_tree_is_killed_before_validation") else {
+            return;
+        };
+        let snapshot = door.snapshot();
+        let target = snapshot.lock_root().real.join("package.json");
+        door.run(
+            &snapshot,
+            &door.shell_argv(&format!("\"$1\" daemon {} 30", target.display())),
+            SocketScan::Full,
+        )
+        .unwrap();
+        let before = snapshot.diff().unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(
+            snapshot.diff().unwrap(),
+            before,
+            "the stage changed after the door"
+        );
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn linux_door_cannot_connect_to_a_socket_in_a_read_root() {
+        let Some(door) = door("linux_door_cannot_connect_to_a_socket_in_a_read_root") else {
+            return;
+        };
+        let socket = door.tools.join("agent.sock");
+        let _listener = UnixListener::bind(&socket).unwrap();
+        let snapshot = door.snapshot();
+        let argv = door.probe_argv(&["unix", socket.to_str().unwrap()]);
+        let refused = door.run(&snapshot, &argv, SocketScan::Full).unwrap_err();
+        assert!(refused.to_string().contains("agent.sock"), "{refused}");
+        // Unscanned, the seccomp filter alone keeps it unreachable.
+        let outcome = door
+            .run(&snapshot, &argv, SocketScan::SkippedForTest)
+            .unwrap();
+        let stdout = String::from_utf8(outcome.stdout).unwrap();
+        assert_eq!(
+            stdout.trim(),
+            format!("unix socket errno={}", libc::EAFNOSUPPORT)
+        );
+    }
+
+    #[test]
+    fn linux_door_cannot_connect_to_a_socket_created_after_preflight() {
+        let Some(door) = door("linux_door_cannot_connect_to_a_socket_created_after_preflight")
+        else {
+            return;
+        };
+        let socket = door.tools.join("late.sock");
+        let snapshot = door.snapshot();
+        // The socket appears only once the tool is running, so the scan
+        // before it passed.
+        let started = snapshot.lock_root().staged.join("started");
+        let host_side = socket.clone();
+        let creator = std::thread::spawn(move || {
+            while !started.exists() {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let listener = UnixListener::bind(&host_side).unwrap();
+            std::thread::sleep(Duration::from_secs(3));
+            drop(listener);
+        });
+        let outcome = door
+            .run(
+                &snapshot,
+                &door.shell_argv(&format!(
+                    ": > started; \"$1\" wait-unix {}",
+                    socket.display()
+                )),
+                SocketScan::Full,
+            )
+            .unwrap();
+        creator.join().unwrap();
+        let stdout = String::from_utf8(outcome.stdout).unwrap();
+        assert_eq!(
+            stdout.trim(),
+            format!("unix socket errno={}", libc::EAFNOSUPPORT)
+        );
+    }
+
+    #[test]
+    fn linux_door_socketpair_still_works() {
+        let Some(door) = door("linux_door_socketpair_still_works") else {
+            return;
+        };
+        assert_eq!(door.stdout_of(&["socketpair"]).trim(), "socketpair ok");
+    }
+
+    #[test]
+    fn linux_door_exec_log_records_every_exec() {
+        let Some(door) = door("linux_door_exec_log_records_every_exec") else {
+            return;
+        };
+        let snapshot = door.snapshot();
+        let outcome = door
+            .run(
+                &snapshot,
+                &door.shell_argv("/usr/bin/true && /usr/bin/env true && \"$1\" socketpair"),
+                SocketScan::Full,
+            )
+            .unwrap();
+        let paths: Vec<String> = outcome
+            .execs
+            .iter()
+            .filter_map(|exec| exec.path.clone())
+            .collect();
+        assert_eq!(
+            paths.first().map(String::as_str),
+            Some("/bin/sh"),
+            "{paths:?}"
+        );
+        for expected in [
+            "/usr/bin/true",
+            "/usr/bin/env",
+            door.probe.to_str().unwrap(),
+        ] {
+            assert!(
+                paths.iter().any(|path| path == expected),
+                "{expected}: {paths:?}"
+            );
+        }
+        // env execs `true` through PATH.
+        assert!(
+            paths.iter().filter(|path| path.ends_with("/true")).count() >= 2,
+            "{paths:?}"
+        );
+    }
+
+    #[test]
+    fn linux_door_filter_kills_a_foreign_syscall_arch() {
+        let Some(door) = door("linux_door_filter_kills_a_foreign_syscall_arch") else {
+            return;
+        };
+        if !cfg!(target_arch = "x86_64") {
+            eprintln!("skip linux_door_filter_kills_a_foreign_syscall_arch: int $0x80 is x86 only");
+            return;
+        }
+        let snapshot = door.snapshot();
+        let outcome = door
+            .run(&snapshot, &door.probe_argv(&["int80"]), SocketScan::Full)
+            .unwrap();
+        assert_eq!(
+            outcome.status,
+            ToolStatus::Signal(libc::SIGSYS),
+            "{outcome:?}"
+        );
+        assert!(!String::from_utf8_lossy(&outcome.stdout).contains("survived"));
+    }
+
+    #[test]
+    fn linux_door_denies_io_uring_setup() {
+        let Some(door) = door("linux_door_denies_io_uring_setup") else {
+            return;
+        };
+        assert_eq!(
+            door.stdout_of(&["io_uring"]).trim(),
+            format!("io_uring errno={}", libc::EPERM)
+        );
+    }
+
+    #[test]
+    fn linux_door_tool_cannot_ptrace_or_read_the_relay() {
+        let Some(door) = door("linux_door_tool_cannot_ptrace_or_read_the_relay") else {
+            return;
+        };
+        let stdout = door.stdout_of(&["ptrace-parent"]);
+        let lines: Vec<&str> = stdout.lines().collect();
+        assert_eq!(
+            lines[0],
+            format!("ptrace rc=-1 errno={}", libc::EPERM),
+            "{stdout}"
+        );
+        assert!(lines[1].starts_with("mem fd=-1 "), "{stdout}");
+        assert_eq!(
+            lines[2],
+            format!("vm rc=-1 errno={}", libc::EPERM),
+            "{stdout}"
+        );
+    }
+
+    /// A setsid, double-forked child rewrites a declared output in a loop
+    /// after the tool exits. What is published equals the immutable copy,
+    /// and it does not change afterwards.
+    #[test]
+    fn descendant_writes_during_publication_do_not_reach_the_project() {
+        let Some(door) = door("descendant_writes_during_publication_do_not_reach_the_project")
+        else {
+            return;
+        };
+        let activity = door.store.activity(ActivityMode::Shared).unwrap();
+        let declared = vec![
+            PathBuf::from("package.json"),
+            PathBuf::from("package-lock.json"),
+        ];
+        let transaction = Transaction::hold(
+            &door.store,
+            &activity,
+            ProjectRoot::open(&door.project).unwrap(),
+            &HoldSpec {
+                ecosystem: "npm",
+                outputs: &declared,
+                receipt: true,
+            },
+        )
+        .unwrap();
+        let snapshot = door.snapshot();
+        let lock = snapshot.lock_root().real.join("package-lock.json");
+        let outcome = door
+            .run(
+                &snapshot,
+                &door.shell_argv(&format!(
+                    "echo '{{\"lockfileVersion\":3}}' > package-lock.json; \"$1\" daemon {} 10",
+                    lock.display()
+                )),
+                SocketScan::Full,
+            )
+            .unwrap();
+        assert_eq!(outcome.status, ToolStatus::Code(0));
+        let changes = snapshot.diff().unwrap();
+        let classified = snapshot.classify(&changes, &declared, &[]).unwrap();
+        let outputs =
+            Outputs::copy(&door.store, &activity, &snapshot, &classified.outputs, &[]).unwrap();
+        let copy = outputs
+            .contents(outputs.get(Path::new("package-lock.json")).unwrap())
+            .unwrap();
+        transaction.publish(&outputs, Some(b"receipt\n")).unwrap();
+        let published = std::fs::read(door.project.join("package-lock.json")).unwrap();
+        assert_eq!(published, copy);
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(
+            std::fs::read(door.project.join("package-lock.json")).unwrap(),
+            copy
+        );
+        assert_eq!(
+            std::fs::read(door.project.join(".tog/resolution/npm.json")).unwrap(),
+            b"receipt\n"
+        );
+        drop(door.temp);
+    }
+}

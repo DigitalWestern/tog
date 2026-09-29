@@ -1451,6 +1451,9 @@ const RAW_CHILD_SITES: &[(&str, &str, usize)] = &[
     ("src/commands/selfupdate.rs", "smoke_test", 1),
     ("src/tailors/dotnet/mod.rs", "invoking_uid", 1),
     ("src/tailors/python/pypi.rs", "detect_host_glibc", 1),
+    // The resolution relay starts the tool inside the resolution sandbox,
+    // where no store is mounted writable and there is no lease to borrow.
+    ("src/kernel/resolve/relay.rs", "spawn_tool", 1),
 ];
 
 /// The functions allowed to take an activity lease (`.activity(`,

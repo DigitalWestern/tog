@@ -22,17 +22,23 @@
 //! promise, and records every request in a ledger.
 
 pub mod cache;
+pub mod confine;
 pub mod http;
 pub mod iana;
 pub mod ledger;
 pub mod mirror;
+pub mod outputs;
 pub mod proxy;
 pub mod redact;
+pub mod relay;
 pub mod routes;
+pub mod seccomp;
 pub mod session;
+pub mod snapshot;
 pub mod ssrf;
 #[cfg(test)]
 pub(crate) mod testing;
+pub mod transaction;
 pub(crate) mod tripwire;
 
 use crate::kernel::activity::StoreActivity;

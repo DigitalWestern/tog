@@ -1186,9 +1186,16 @@ extra read of data already in the page cache.
 The tool runs on the snapshot:
 
 - **Linux:** bwrap binds each snapshot tree **at the real path** (`--bind
-  <stage>/root <lock_root>`, and likewise for each extra root), so every
-  absolute and relative path the tool sees is the real one, and the real
-  project is not mounted at all.
+  <stage>/tree<lock_root> <lock_root>`, and likewise for each extra root),
+  so every absolute and relative path the tool sees is the real one, and
+  the real project is not mounted at all. The stage mirrors absolute
+  paths under `tree/` (a root at `/p/app` is staged at
+  `<stage>/tree/p/app`), which keeps every extra root at its real position
+  relative to the lock root for both engines; a root inside another is
+  staged once. The stage also holds `scratch/`, the tool's HOME, TMPDIR
+  and cache directory, which is never diffed or published. A read root
+  that overlaps a snapshot root is refused, since binding it would mount
+  part of the real project.
 - **macOS:** Seatbelt cannot remap paths, so the tool runs at the stage
   path. Relative paths still resolve, because extra roots sit at the same
   relative position. The output checks (below) fail the door if a
@@ -1210,7 +1217,10 @@ classified by the spec:
   for publication, but only if it is a **regular file**. A declared output
   that is now a symlink, a directory, a FIFO, or any other type fails the
   door, naming the path. So does any declared output whose parent
-  directory inside the stage became a symlink,
+  directory inside the stage became a symlink, and a declared output the
+  tool deleted (publication only ever writes; it never deletes a project
+  file). A declared output that did not exist and still does not is
+  simply nothing to publish,
 - **declared scratch** (per tool: .NET `obj/`, uv's `.venv` if created):
   discarded,
 - anything else, **including a new `.git`, a changed `.git/hooks/*`, or any
@@ -1325,9 +1335,16 @@ Three layers close it on Linux:
    before mounting, and a socket anywhere in them refuses the door, naming
    the path. (Today's sandbox scans writable roots only; see
    `src/kernel/sandbox.rs` module docs. The door scans every root.) Store
-   object scans are cached per object id in the object's metadata, since
-   objects are immutable. `/run/tog` holds only tog's own socket, and
-   `/tmp` and `/dev` are fresh.
+   object scans are cached per object id, since objects are immutable. The
+   cache is a store record (`records/socket-scan/`), not the object's
+   metadata: metadata is written once at commit and validated against the
+   kind grammar, so it cannot take a fact learned later. Only a clean scan
+   is recorded. The system roots are scanned once per process. A
+   directory in them owned by another user that this user cannot list is
+   skipped, because the tool runs as this user and cannot list it either
+   (Fedora ships `/usr/share/empty.sshd` as root-owned 0711); every other
+   scan error refuses. `/run/tog` holds only tog's own socket, and `/tmp`
+   and `/dev` are fresh.
 3. **A seccomp filter denies creating Unix sockets.** The relay installs
    a filter in the tool's process before `exec`, inherited by every
    descendant: `socket(AF_UNIX, ...)` fails with `EAFNOSUPPORT`.
@@ -1347,8 +1364,10 @@ Three layers close it on Linux:
      syscall table (32-bit `int 0x80` on x86-64, where the `socket`
      number differs and `socketcall(2)` multiplexes it) and create the
      socket under a number the filter does not match. On x86-64 the
-     filter also refuses syscall numbers with the x32 bit
-     (`__X32_SYSCALL_BIT`) set.
+     filter also kills a process that issues a syscall number with the x32
+     bit (`__X32_SYSCALL_BIT`) set, the same `SECCOMP_RET_KILL_PROCESS` as
+     a foreign architecture: an x32 call is another syscall table, not an
+     ordinary failure a tool should see as an errno.
    - **`io_uring_setup` is denied** (`EPERM`), along with
      `io_uring_enter` and `io_uring_register`. An io_uring ring submits
      socket and connect operations that never pass through the seccomp
@@ -1364,8 +1383,11 @@ Three layers close it on Linux:
      cannot be traced or have its memory opened by an unprivileged
      process of the same user. The exec log's user-notification listener
      lives in the relay too, so this also protects the log. The filter
-     additionally denies `ptrace`, `process_vm_readv`, and
-     `process_vm_writev` to the tool tree.
+     additionally denies `ptrace`, `process_vm_readv`,
+     `process_vm_writev`, and `pidfd_getfd` (`EPERM`) to the tool tree.
+     `pidfd_getfd` would copy a descriptor out of another process under
+     the same ptrace check; it is denied outright so the rule does not
+     rest on dumpability alone.
 
 Tools that need named Unix-socket IPC among their own processes are
 configured not to: .NET gets `DOTNET_EnableDiagnostics=0`, no build
@@ -1567,9 +1589,15 @@ would misread: a key file can exist with the variable unset in this
 shell and set in the next.) The key is protected by the tiers instead:
 the door profile denies reads of the path `TOG_SIGNING_KEY` names, and
 of the default path `tog keygen` suggests, on both platforms, and the
-`isolated` tier puts it across a UID boundary. `tog keygen` refuses a
-path under the sandbox's system read roots (`/usr`, `/etc`, `/opt`,
-`/private/etc`, `/Library`, `/System`), which every tier can read.
+`isolated` tier puts it across a UID boundary. On Linux there is no
+per-path read deny inside a bind mount, so "denies reads" means the door
+refuses to start when either key path lies under anything it would
+mount: a system root, a read root, a snapshot root (the snapshot would
+copy the key into the stage), the stage, or the tog executable. Both
+the path as given and its resolved spelling are compared. `tog keygen`
+refuses a path under the sandbox's system read roots (`/usr`, `/etc`,
+`/opt`, `/private/etc`, `/Library`, `/System`), which every tier can
+read.
 
 The failure message names the tool, why it needs isolation, and each
 missing capability with its fix. For example: "tog add runs Bundler,
@@ -1577,7 +1605,9 @@ which evaluates the Gemfile, so it needs isolation. bubblewrap cannot
 create a user namespace here (AppArmor restrict_unprivileged_userns=1),
 no container engine is reachable (podman/docker not found), and the
 isolation helper is not installed (see `tog doctor --isolation`). Enable
-one of them." A sync that needs a missing-lock door fails the same way.
+one of them." Until PR 3b ships those backends, the message names the
+native sandbox's real failure and says this build has no other isolation
+backend, rather than pointing at a command that does not exist yet. A sync that needs a missing-lock door fails the same way.
 
 `unconfined-resolution` keeps its meaning, "the ledger may be missing
 traffic because the network was not fenced", and it is recorded for the
@@ -1729,7 +1759,13 @@ ledger test fails if a known secret shape survives.
 `SECCOMP_RET_USER_NOTIF` for `execve`/`execveat`. The relay (outside the
 filter) receives each notification, reads the program path from the
 notifying process, appends `{pid, parent, path}` to the diagnostics, and
-lets the call continue. This makes the kernel, not the tool, report every
+lets the call continue. The log travels to the door on a pipe the door
+passes to bubblewrap as descriptor 3 (`tog __resolution-relay
+--exec-log-fd 3 /run/tog/proxy.sock 127.0.0.1:8119 -- <argv>`), never
+through a file in the sandbox, so the tool cannot read or rewrite it.
+The same pipe carries the tool's exit status and the relay's
+quiescence result (how many processes it killed), and the door treats a
+log without both as a failed run. This makes the kernel, not the tool, report every
 program the tool tree executed. It is diagnostics, and it cross-checks the
 build probe (below). macOS has no equivalent without Endpoint Security
 entitlements (Apple-granted; not available to tog) or disabling SIP for
@@ -2504,7 +2540,14 @@ Contract 1 needs enforcement, not review alone:
    descriptor, copy its bytes into an immutable store stage (the
    **original copy**), and record their sha256 as the pre-run digest. A
    target that does not exist is recorded as `absent`, which step 8
-   enforces with a no-replace create.
+   enforces with a no-replace create. The original copies are one store
+   object of the kernel kind `resolution-originals/1` (inputs: `schema`,
+   a random `run` nonce so each transaction's copy is its own object, and
+   `target:<i>`/`digest:<i>` per target), rooted in the project's root
+   record from here until the journal is gone, and released afterwards.
+   A crash between deleting the journal and releasing the root leaves the
+   object protected until the next `tog gc --register`, never the
+   reverse. The whole transaction holds the project lock.
 3. **Snapshot** the lock root and extra roots (socket-free), with the
    baseline manifest. Scan store and system roots for sockets.
 4. **Run** the tool (probe first for uv) in its tier, through the proxy.
@@ -2558,7 +2601,10 @@ Contract 1 needs enforcement, not review alone:
     created file), then delete the journal. The project is byte-for-byte
     as it was.
 
-**Recovery** (at the start of any writing command, after a crash): a
+**Recovery** (at the start of any writing command, after a crash, and at
+the start of every transaction): recovery looks for journals in the
+command's directory and each ancestor, since the lock root can be a
+workspace root above it. A
 `committed` journal only needs its temporaries and itself deleted. Any
 other journal is rolled back target by target. A target whose current
 digest is the journal's new digest is restored from its original copy
