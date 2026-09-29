@@ -1498,10 +1498,13 @@ mod tests {
             fs::create_dir_all(object.join("lib/deep")).unwrap();
             fs::write(object.join("lib/file"), b"x").unwrap();
         }
+        // A short symlink to the directory keeps the bind path under
+        // SUN_LEN whatever the temp dir, and the socket lands in place.
         let short = PathBuf::from(format!("/tmp/tog-scan-{}", std::process::id()));
         let _ = fs::remove_file(&short);
-        let _listener = std::os::unix::net::UnixListener::bind(&short).unwrap();
-        fs::rename(&short, dirty.join("lib/deep/agent.sock")).unwrap();
+        std::os::unix::fs::symlink(dirty.join("lib/deep"), &short).unwrap();
+        let _listener = std::os::unix::net::UnixListener::bind(short.join("agent.sock")).unwrap();
+        fs::remove_file(&short).unwrap();
 
         let error = scan_read_root(&store, &activity, &dirty).unwrap_err();
         assert!(error.to_string().contains("agent.sock"), "{error}");

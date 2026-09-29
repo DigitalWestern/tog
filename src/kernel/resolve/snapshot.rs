@@ -958,10 +958,14 @@ mod tests {
         let fifo = CString::new(dir.join("pipe").as_os_str().as_bytes()).unwrap();
         // SAFETY: a NUL-terminated path in a directory this test owns.
         assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o644) }, 0);
+        // A short symlink to `.git` keeps the bind path under SUN_LEN
+        // whatever the temp dir, and the socket lands in place.
         let short = PathBuf::from(format!("/tmp/tog-snapsock-{}", std::process::id()));
         let _ = fs::remove_file(&short);
-        let _listener = std::os::unix::net::UnixListener::bind(&short).unwrap();
-        fs::rename(&short, dir.join(".git/fsmonitor--daemon.ipc")).unwrap();
+        symlink(dir.join(".git"), &short).unwrap();
+        let _listener =
+            std::os::unix::net::UnixListener::bind(short.join("fsmonitor--daemon.ipc")).unwrap();
+        fs::remove_file(&short).unwrap();
 
         let snapshot = build(&store, &dir, &[]);
         assert_eq!(
