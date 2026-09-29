@@ -77,6 +77,9 @@ pub struct Report {
     pub stages: usize,
     pub forests: usize,
     pub backups: usize,
+    /// Resolution-proxy metadata cache entries unused for the retention
+    /// window (and sidecar index entries whose sidecar is gone).
+    pub resolve_metadata: usize,
 }
 
 /// Sweep the store, and its forest and backup projections when
@@ -145,11 +148,41 @@ pub fn collect_with_activity<W: Write>(
     let snapshot = read(store, activity, &options, &upgrades, out)?;
     let validated = validate(&snapshot, &options)?;
     let plan = plan(&validated, &options)?;
+    let window = keep_age(options.keep_days);
     if options.dry_run {
         report_plan(&plan, out)?;
-        return Ok(plan.report());
+        let mut report = plan.report();
+        sweep_resolve_cache(store, window, true, &mut report, out)?;
+        return Ok(report);
     }
-    execute(&plan, &snapshot, store, activity, out)
+    let mut report = execute(&plan, &snapshot, store, activity, out)?;
+    sweep_resolve_cache(store, window, false, &mut report, out)?;
+    Ok(report)
+}
+
+/// The resolution proxy's metadata cache is a cache: entries unused for the
+/// retention window go, and losing one costs only a refetch. It runs after
+/// the object sweep, so the sidecar index loses the entries whose sidecar
+/// that sweep removed.
+fn sweep_resolve_cache<W: Write>(
+    store: &Store,
+    window: Duration,
+    dry_run: bool,
+    report: &mut Report,
+    out: &mut W,
+) -> io::Result<()> {
+    let swept = crate::kernel::resolve::cache::sweep(store, window, dry_run)?;
+    if swept.entries > 0 {
+        let verb = if dry_run { "would remove" } else { "removed" };
+        writeln!(
+            out,
+            "{verb} {} resolution metadata cache entries",
+            swept.entries
+        )?;
+    }
+    report.resolve_metadata += swept.entries + swept.index_entries;
+    report.freed_bytes += swept.bytes;
+    Ok(())
 }
 
 fn mtime_of(stat: &libc::stat) -> SystemTime {

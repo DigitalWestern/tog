@@ -585,6 +585,8 @@ pub struct KindAdapter {
 }
 
 /// The kernel's own kinds: sources realized by the kernel, not a tailor.
+/// The resolution proxy's ledger kinds live beside their producer
+/// (`resolve::ledger::KINDS`) and are chained in by `registered_kinds`.
 static KERNEL_KINDS: &[KindAdapter] = &[KindAdapter {
     kind: "git-source",
     schema: Some("git-source/2"),
@@ -635,7 +637,10 @@ fn no_dependencies(_record: &Record, _index: &MetaIndex) -> Result<ObjectDeps, S
 /// which fails closed: gc refuses to sweep a store whose records it cannot
 /// read, exactly as for an unknown kind.
 fn registered_kinds() -> impl Iterator<Item = &'static KindAdapter> {
-    let rows = KERNEL_KINDS.iter().chain(installed_kinds().iter().copied());
+    let rows = KERNEL_KINDS
+        .iter()
+        .chain(crate::kernel::resolve::ledger::KINDS)
+        .chain(installed_kinds().iter().copied());
     #[cfg(test)]
     {
         rows.chain(TEST_KINDS.iter())
@@ -3010,6 +3015,7 @@ mod tests {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let mut cases = vec![crate::kernel::gitsrc::live_identity_for_test()];
+        cases.extend(crate::kernel::resolve::ledger::live_identities_for_test());
         cases.extend(crate::tailors::live_identity_cases(platform));
         cases
     }

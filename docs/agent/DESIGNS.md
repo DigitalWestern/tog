@@ -2301,11 +2301,14 @@ pub struct DelegateSpec<'s> {
 }
 
 /// Implemented in tailor folders; the kernel never names an ecosystem.
+/// (As built in PR 2: `src/kernel/resolve/routes.rs`.)
 pub trait RegistryProtocol: Sync {
     fn route_id(&self) -> &'static str;                       // "go", "rubygems", "hex", "nuget"
-    fn upstream(&self, endpoint: &Endpoint, path: &str) -> io::Result<Url>; // grammar-checked
+    // grammar-checked by the kernel first; the answer's origin must be one of `endpoints`
+    fn upstream(&self, endpoints: &[Endpoint], path: &str) -> io::Result<Upstream>; // Fetch(Url) | Local(LocalAnswer)
     fn classify(&self, url: &Url) -> RequestClass;            // index | metadata | artifact | sumdb
     fn claims(&self, url: &Url, body: &[u8]) -> Vec<(Url, Claim)>; // digests this metadata promises
+    fn expects_claim(&self, _url: &Url) -> bool { false }     // unclaimed such artifact = weak-integrity
     fn content_query_keys(&self) -> &'static [&'static str] { &[] } // kept by redaction
     fn rewrite(&self, _url: &Url, body: Vec<u8>, _base: &ProxyAddress) -> io::Result<Vec<u8>> { Ok(body) }
 }
@@ -2941,6 +2944,68 @@ artifact-cache integration, redirect rules, offline mode, and the
 last-good path with its `freshness` marking and the per-session switch
 that turns last-good into 504 when `stale-resolution` is denied. Kernel unit
 tests against the fixture upstream. No tool uses it yet.
+
+**PR 2 as built (2026-09-29).** Decisions made while building it, each
+the flexible option:
+
+- **Routes carry several endpoints.** `upstream` takes the route's
+  endpoint list and returns `Upstream::Fetch(url)` or
+  `Upstream::Local(answer)`, so one route covers Go's proxy plus its
+  checksum database, or Rubygems' index plus its main host, and a
+  protocol can answer a request itself (Go's `/sumdb/<name>/supported`).
+  The kernel checks the answer's origin against the route's endpoints and
+  refuses userinfo. `expects_claim` lets a protocol say an unclaimed
+  artifact is `weak-integrity`.
+- **Listeners are per session.** `Session::listen_tcp` and
+  `Session::listen_unix(path, advertised)` bind listeners owned by one
+  session, so a request with a wrong token is still recorded in the
+  ledger of the session it reached, and a token from another session is
+  just a wrong token. The advertised address (what rewritten responses
+  point at) is separate from the bind address, for the relay.
+- **Header allowlists both ways, not a strip list.** Upstream gets only
+  `Accept`, `Accept-Language`, `User-Agent`, `Content-Type`, and
+  `Git-Protocol`, plus the endpoint's own credential on its own origin.
+  The tool's conditional headers and `Accept-Encoding` are dropped too,
+  since the proxy revalidates its own copy and the client decodes. The
+  tool gets only `Content-Type`, `ETag`, `Last-Modified`,
+  `Cache-Control`, `Content-Disposition`, `Expires`, and `Vary`. This
+  covers the three headers named above and fails closed on the rest.
+- **Redirects are followed inside the proxy**, up to 10 hops. Each hop
+  must be https on a permitted host, is resolved and validated again,
+  and carries a credential only when its origin is that credential's
+  endpoint. A refused hop is a 403 and a ledger `refused` entry, with no
+  policy fact (Hex's `builds.hex.pm` hop must not fail the door).
+- **A refused address is a hard failure** as well as a 403: something
+  tried to reach a non-global address.
+- **Mirror routes serve `GET` and `HEAD` only** (405 otherwise). A claimed
+  artifact is fetched whole and verified even for a `HEAD`.
+- **Unclaimed artifacts are not cached**, online or offline: nothing
+  vouches for them. Offline they are an `offline-miss`.
+- **The IANA table is the union** of the list above and every registry
+  row whose "Globally Reachable" is not `True` (registry date
+  2025-10-09, CSVs in `tests/fixtures/proxy/iana/`). That adds
+  `100:0:0:1::/64` and keeps AS112 and AMT refused although the registry
+  marks them globally reachable: no registry lives there.
+- **Ledger classes** are the protocol classes plus `local`, `refused`,
+  and `offline-miss`. A revalidated response is recorded as the 200 it
+  served, and the cache disposition goes only to diagnostics, so a cache
+  hit and a miss give the same portable entry. `freshness` is absent only
+  when nothing was served. A malformed request has no method or URL, so
+  it is noted in diagnostics only.
+- **Policy facts.** A refused `CONNECT` or plain-`http` request records
+  `unattested-index`; port 9418 or a `git://` URL records
+  `git-dependency` ("git:// is unauthenticated; use https://"). A SHA-1
+  claim, or no claim where `expects_claim` says one is published, records
+  `weak-integrity`. Each is a refusal when denied. `stale-resolution` is
+  collected per endpoint (subject the origin, detail the count).
+- **The upstream client lives in `kernel::fetch::pinned`**, so every
+  `ureq` use stays under `kernel::fetch`. It takes a root set (webpki in
+  production, the fixture CA in tests) and pins rustls's ring provider.
+  `rcgen` is a dev-dependency until interception needs it at run time.
+- **The metadata cache** stores one file per key (a JSON header line,
+  then the body), written by rename and verified by sha256 on read. `tog
+  gc` sweeps entries unused for `keep_days`, and the sidecar index
+  entries whose sidecar is gone.
 
 **PR 3: confinement and the transaction.** The staged snapshot and diff,
 tree quiescence on both platforms, the immutable output copy, the

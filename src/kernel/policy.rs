@@ -51,6 +51,10 @@ pub const EXTERNAL_TOOLCHAIN: &str = "external-toolchain";
 /// was rebuilt against the machine's whole `/usr`, so the object depends on
 /// which development packages the building host has installed.
 pub const HOST_BUILD_INPUTS: &str = "host-build-inputs";
+/// The resolution proxy served registry metadata from its last good copy
+/// because the registry was unreachable (a transport failure or offline
+/// mode). The subject is the endpoint; the detail counts the responses.
+pub const STALE_RESOLUTION: &str = "stale-resolution";
 
 pub const KINDS: &[&str] = &[
     REQUIREMENT_SKIPPED,
@@ -68,6 +72,7 @@ pub const KINDS: &[&str] = &[
     BUILT_FROM_SOURCE,
     EXTERNAL_TOOLCHAIN,
     HOST_BUILD_INPUTS,
+    STALE_RESOLUTION,
 ];
 
 /// Kinds were spelled with two separators until the names were unified on
