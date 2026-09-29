@@ -713,3 +713,508 @@ thread_local! {
     /// Skip the host socket scan, which the confine tests cover.
     pub(crate) static SKIP_SCAN_FOR_TEST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::kernel::platform::Platform;
+    use crate::kernel::policy::Attribution;
+    use crate::kernel::resolve::confine::{Engine, Missing, TierOffer, TIERS_FOR_TEST};
+    use crate::kernel::resolve::testing::Harness;
+    use crate::kernel::testutil::TempDir;
+    use std::collections::BTreeMap;
+
+    /// `TOG_SANDBOX_TESTS=required` (any non-empty value) turns a skip into
+    /// a panic, so CI cannot report a skipped check as passed.
+    fn skip_or_panic(test: &str, reason: impl std::fmt::Display) {
+        if matches!(std::env::var_os("TOG_SANDBOX_TESTS"), Some(value) if !value.is_empty()) {
+            panic!("required Linux sandbox test {test} unavailable: {reason}");
+        }
+        eprintln!("skip {test}: {reason}");
+    }
+
+    /// The tog binary cargo built beside this test binary, which the
+    /// sandbox binds as the relay; `None` (after a skip) when the host
+    /// cannot run a confined door.
+    fn relay(test: &str) -> Option<PathBuf> {
+        if !matches!(Platform::host(), Ok(Platform::X86_64UnknownLinuxGnu)) {
+            skip_or_panic(test, "not a supported Linux host");
+            return None;
+        }
+        if let Err(error) = crate::kernel::sandbox::bwrap_preflight_with_activity(None) {
+            skip_or_panic(test, format!("bubblewrap preflight failed: {error}"));
+            return None;
+        }
+        let exe = std::env::current_exe().unwrap();
+        let tog = exe
+            .parent()
+            .and_then(Path::parent)
+            .map(|dir| dir.join("tog"));
+        match tog {
+            Some(tog) if tog.is_file() => Some(tog),
+            _ => {
+                skip_or_panic(
+                    test,
+                    format!(
+                        "no tog binary beside {} (run `cargo test`, which builds it)",
+                        exe.display()
+                    ),
+                );
+                None
+            }
+        }
+    }
+
+    struct Fixture {
+        harness: Harness,
+        project: PathBuf,
+        _temp: TempDir,
+    }
+
+    const PACKAGE_JSON: &[u8] = b"{\"dependencies\":{}}\n";
+    const OLD_LOCK: &[u8] = b"old\n";
+
+    fn fixture(label: &str) -> Fixture {
+        let harness = Harness::new(label);
+        let temp = TempDir::named(label);
+        let project = temp.0.join("project");
+        fs::create_dir_all(&project).unwrap();
+        fs::write(project.join("package.json"), PACKAGE_JSON).unwrap();
+        fs::write(project.join("deps.lock"), OLD_LOCK).unwrap();
+        Fixture {
+            harness,
+            project: project.canonicalize().unwrap(),
+            _temp: temp,
+        }
+    }
+
+    /// Every file under `dir` with its bytes.
+    fn tree(dir: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+        let mut files = BTreeMap::new();
+        let mut pending = vec![dir.to_path_buf()];
+        while let Some(next) = pending.pop() {
+            for entry in fs::read_dir(&next).unwrap() {
+                let path = entry.unwrap().path();
+                let kind = fs::symlink_metadata(&path).unwrap().file_type();
+                if kind.is_dir() {
+                    pending.push(path);
+                } else {
+                    let relative = path.strip_prefix(dir).unwrap().to_path_buf();
+                    files.insert(relative, fs::read(&path).unwrap_or_default());
+                }
+            }
+        }
+        files
+    }
+
+    /// A bash prelude: `get <route path>` prints the status line of one
+    /// mirror request through the relay; `$BASE` is the route base and
+    /// `$AUTH` the proxy credentials.
+    const PRELUDE: &str = r#"set -u
+path="${BASE#http://127.0.0.1:8119}"
+send() {
+    exec 3<>/dev/tcp/127.0.0.1/8119 || exit 90
+    # "$(...)" dropped the request's final newline.
+    printf '%s\n' "$1" >&3
+    IFS= read -r line <&3
+    cat <&3 >/dev/null
+    exec 3<&-
+    printf '%s\n' "${line%$'\r'}"
+}
+get() {
+    send "$(printf 'GET %s%s HTTP/1.1\r\nHost: 127.0.0.1:8119\r\nConnection: close\r\n\r\n' "$path" "$1")"
+}
+"#;
+
+    struct Outcome {
+        result: io::Result<DelegateReport>,
+        recorded: Vec<policy::Exception>,
+    }
+
+    /// Run `script` (after the prelude) through a confined door on the
+    /// fixture project, with `deps.lock` and `new.lock` declared.
+    fn run_door(
+        fx: &Fixture,
+        relay: Option<PathBuf>,
+        script: &str,
+        policy: Policy,
+        adjust: impl FnOnce(&mut ConfinedSpec<'_>),
+    ) -> Outcome {
+        let _serial = policy::attribution_test_lock();
+        RELAY_FOR_TEST.with(|slot| *slot.borrow_mut() = relay);
+        SKIP_SCAN_FOR_TEST.with(|skip| skip.set(true));
+        let mut attribution = Attribution::open("fixture").unwrap();
+        let store = &fx.harness.store;
+        let activity = &fx.harness.activity;
+        let mut door = ResolutionDoor::open(
+            store,
+            activity,
+            Platform::X86_64UnknownLinuxGnu,
+            DoorKind::Edit,
+            &mut attribution,
+        )
+        .unwrap();
+        let mut spec = DelegateSpec::new("/usr/bin/bash");
+        spec.args(["-c", &format!("{PRELUDE}{script}"), "tool"])
+            .lock_root(&fx.project)
+            .env("PATH", "/usr/bin:/bin")
+            .capture();
+        let mut confined = ConfinedSpec::new("fixture", "git", "runs a test script");
+        confined.name = "the test tool";
+        confined.outputs = vec![PathBuf::from("deps.lock"), PathBuf::from("new.lock")];
+        confined.routes = vec![fx.harness.route()];
+        confined.permitted = fx.harness.permitted();
+        confined.proxy = Some(&fx.harness.proxy);
+        confined.policy = Some(policy);
+        confined.wire = Some(Box::new(|wire: &Wire<'_>| {
+            let auth = crate::kernel::dirhash::base64_encode(
+                format!("tog:{}", wire.address.token()).as_bytes(),
+            );
+            Ok(Wiring {
+                args: with_forced(wire.args, wire.forced_args),
+                env: vec![
+                    ("BASE".into(), wire.address.route_base("fixture").into()),
+                    ("AUTH".into(), auth.into()),
+                ],
+                ..Wiring::default()
+            })
+        }));
+        adjust(&mut confined);
+        let result = door.run_confined(spec, confined);
+        let recorded = attribution.recorded();
+        attribution.discard();
+        Outcome { result, recorded }
+    }
+
+    fn deny(kinds: &[&str]) -> Policy {
+        Policy {
+            deny: kinds.iter().map(|kind| kind.to_string()).collect(),
+            ..Policy::default()
+        }
+    }
+
+    fn rooted(fx: &Fixture) -> BTreeSet<String> {
+        let root = ProjectRoot::open(&fx.project).unwrap();
+        let lock = fx.harness.store.project_lock_in(&root).unwrap();
+        fx.harness
+            .store
+            .rooted_objects_locked(&fx.harness.activity, &root, &lock)
+            .unwrap()
+    }
+
+    fn assert_untouched(fx: &Fixture, before: &BTreeMap<PathBuf, Vec<u8>>) {
+        assert_eq!(&tree(&fx.project), before, "the project changed");
+        assert!(rooted(fx).is_empty(), "{:?}", rooted(fx));
+    }
+
+    #[test]
+    fn confined_door_publishes_a_fetched_output_and_roots_its_ledger() {
+        let Some(relay) = relay("confined_door_publishes_a_fetched_output_and_roots_its_ledger")
+        else {
+            return;
+        };
+        let fx = fixture("door-e2e");
+        let before = tree(&fx.project);
+        let outcome = run_door(
+            &fx,
+            Some(relay),
+            "get art/free-pkg-1.0.tgz > deps.lock\n",
+            Policy::default(),
+            |confined| {
+                confined.target = Target::Project {
+                    receipt: Some(Box::new(|facts: &PublishFacts<'_>| {
+                        let lock = &facts.outputs[0];
+                        let manifest = facts.input_digest(Path::new("package.json")).unwrap();
+                        Ok(Some(
+                            format!(
+                                "{} {} {} {}\n",
+                                facts.ledger.ledger,
+                                hex::encode(lock.sha256),
+                                hex::encode(manifest),
+                                facts.isolation
+                            )
+                            .into_bytes(),
+                        ))
+                    })),
+                };
+            },
+        );
+        let report = outcome.result.unwrap();
+        assert!(
+            report.status.success(),
+            "{}",
+            String::from_utf8_lossy(&report.stderr)
+        );
+        let objects = report.ledger.unwrap();
+        let lock = fs::read(fx.project.join("deps.lock")).unwrap();
+        assert_eq!(lock, b"HTTP/1.1 200 OK\n");
+        let receipt = fs::read_to_string(fx.project.join(".tog/resolution/fixture.json")).unwrap();
+        use sha2::Digest as _;
+        assert_eq!(
+            receipt,
+            format!(
+                "{} {} {} confined\n",
+                objects.ledger,
+                hex::encode(sha2::Sha256::digest(&lock)),
+                hex::encode(sha2::Sha256::digest(PACKAGE_JSON)),
+            )
+        );
+        let store = &fx.harness.store;
+        let portable =
+            String::from_utf8(ledger::read_portable(store, &objects.ledger).unwrap()).unwrap();
+        assert!(portable.contains("free-pkg-1.0.tgz"), "{portable}");
+        let rooted = rooted(&fx);
+        assert!(rooted.contains(&objects.ledger) && rooted.contains(&objects.diagnostics));
+        assert_eq!(rooted.len(), 2, "the originals are released: {rooted:?}");
+        let mut after = tree(&fx.project);
+        after.remove(Path::new("deps.lock"));
+        after.remove(Path::new(".tog/resolution/fixture.json"));
+        let mut expected = before;
+        expected.remove(Path::new("deps.lock"));
+        assert_eq!(after, expected, "only the output and the receipt changed");
+        assert!(outcome.recorded.is_empty(), "{:?}", outcome.recorded);
+    }
+
+    #[test]
+    fn denied_kind_fails_the_door_even_when_the_tool_exits_zero() {
+        let Some(relay) = relay("denied_kind_fails_the_door_even_when_the_tool_exits_zero") else {
+            return;
+        };
+        let fx = fixture("door-denied");
+        let before = tree(&fx.project);
+        let outcome = run_door(
+            &fx,
+            Some(relay),
+            "get meta/pkg.json > /dev/null; get art/weak-pkg-1.0.tgz > deps.lock; exit 0\n",
+            deny(&[policy::WEAK_INTEGRITY]),
+            |_| {},
+        );
+        let error = outcome.result.unwrap_err();
+        assert!(error.to_string().contains("weak-integrity"), "{error}");
+        assert!(outcome.recorded.is_empty(), "{:?}", outcome.recorded);
+        assert_untouched(&fx, &before);
+    }
+
+    #[test]
+    fn ledger_only_exceptions_are_recorded_on_the_owner_thread() {
+        let Some(relay) = relay("ledger_only_exceptions_are_recorded_on_the_owner_thread") else {
+            return;
+        };
+        let fx = fixture("door-recorded");
+        let script = "get meta/pkg.json > /dev/null\n\
+             get art/weak-pkg-1.0.tgz > deps.lock\n\
+             send \"$(printf 'CONNECT github.com:9418 HTTP/1.1\\r\\nHost: github.com:9418\\r\\n\
+             Proxy-Authorization: Basic %s\\r\\n\\r\\n' \"$AUTH\")\" >> deps.lock\n";
+        let outcome = run_door(&fx, Some(relay), script, Policy::default(), |_| {});
+        let report = outcome.result.unwrap();
+        assert!(
+            report.status.success(),
+            "{}",
+            String::from_utf8_lossy(&report.stderr)
+        );
+        let kinds: BTreeSet<&str> = outcome.recorded.iter().map(|e| e.kind.as_str()).collect();
+        assert_eq!(
+            kinds,
+            BTreeSet::from([policy::WEAK_INTEGRITY, policy::GIT_DEPENDENCY]),
+            "{:?}",
+            outcome.recorded
+        );
+        let weak = outcome
+            .recorded
+            .iter()
+            .find(|e| e.kind == policy::WEAK_INTEGRITY)
+            .unwrap();
+        assert_eq!(
+            weak.subject,
+            fx.harness.upstream_url("/art/weak-pkg-1.0.tgz")
+        );
+        assert_eq!(
+            fs::read(fx.project.join("deps.lock")).unwrap(),
+            b"HTTP/1.1 200 OK\nHTTP/1.1 403 Forbidden\n"
+        );
+    }
+
+    #[test]
+    fn output_containing_the_token_fails() {
+        let Some(relay) = relay("output_containing_the_token_fails") else {
+            return;
+        };
+        let fx = fixture("door-token");
+        let before = tree(&fx.project);
+        let outcome = run_door(
+            &fx,
+            Some(relay),
+            "printf 'registry=%s\\n' \"$BASE\" > new.lock\n",
+            Policy::default(),
+            |_| {},
+        );
+        let error = outcome.result.unwrap_err();
+        assert!(
+            error.to_string().contains("the proxy session token"),
+            "{error}"
+        );
+        assert!(error.to_string().contains("new.lock"), "{error}");
+        assert_untouched(&fx, &before);
+    }
+
+    #[test]
+    fn unconfined_resolution_is_refused_when_denied_and_recorded_otherwise() {
+        let Some(relay) =
+            relay("unconfined_resolution_is_refused_when_denied_and_recorded_otherwise")
+        else {
+            return;
+        };
+        let fx = fixture("door-unconfined");
+        let before = tree(&fx.project);
+        let unfenced = TierOffer {
+            engine: Engine::Bubblewrap,
+            fenced: false,
+        };
+        TIERS_FOR_TEST.with(|tiers| *tiers.borrow_mut() = Some((vec![unfenced], Vec::new())));
+        let refused = run_door(
+            &fx,
+            Some(relay.clone()),
+            "echo ran > deps.lock\n",
+            deny(&[policy::UNCONFINED_RESOLUTION]),
+            |_| {},
+        );
+        let error = refused.result.unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Unsupported, "{error}");
+        assert!(
+            error.to_string().contains("unconfined-resolution"),
+            "{error}"
+        );
+        assert_untouched(&fx, &before);
+
+        // The run itself still uses bubblewrap: the override only changes
+        // what the tier probe reports.
+        let recorded = run_door(
+            &fx,
+            Some(relay),
+            "echo ran > deps.lock\n",
+            Policy::default(),
+            |_| {},
+        );
+        TIERS_FOR_TEST.with(|tiers| *tiers.borrow_mut() = None);
+        recorded.result.unwrap();
+        assert_eq!(fs::read(fx.project.join("deps.lock")).unwrap(), b"ran\n");
+        let kinds: Vec<&str> = recorded.recorded.iter().map(|e| e.kind.as_str()).collect();
+        assert_eq!(kinds, [policy::UNCONFINED_RESOLUTION]);
+        assert_eq!(recorded.recorded[0].subject, "the test tool");
+    }
+
+    #[test]
+    fn no_tool_runs_unisolated_when_no_tier_is_available() {
+        let fx = fixture("door-no-tier");
+        let before = tree(&fx.project);
+        let marker = fx._temp.0.join("ran");
+        TIERS_FOR_TEST.with(|tiers| {
+            *tiers.borrow_mut() = Some((
+                Vec::new(),
+                vec![Missing {
+                    capability: "bubblewrap",
+                    reason: "not installed".into(),
+                    fix: "install bubblewrap".into(),
+                }],
+            ))
+        });
+        let outcome = run_door(
+            &fx,
+            None,
+            &format!("touch {}\n", marker.display()),
+            Policy::default(),
+            |_| {},
+        );
+        TIERS_FOR_TEST.with(|tiers| *tiers.borrow_mut() = None);
+        let error = outcome.result.unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Unsupported, "{error}");
+        let text = error.to_string();
+        assert!(text.contains("the test tool runs a test script"), "{text}");
+        assert!(
+            text.contains("bubblewrap: not installed (fix: install bubblewrap)"),
+            "{text}"
+        );
+        assert!(!marker.exists(), "the tool ran");
+        assert_untouched(&fx, &before);
+        let leftovers: Vec<_> = fs::read_dir(fx.harness.store.root.join("tmp"))
+            .unwrap()
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "nothing was snapshotted: {leftovers:?}"
+        );
+    }
+
+    fn commit_failure_restores_every_output(label: &str, file: &'static str) {
+        let Some(relay) = relay(label) else {
+            return;
+        };
+        let fx = fixture(label);
+        let before = tree(&fx.project);
+        ledger::COMMIT_FAULT.with(|fault| fault.set(Some(file)));
+        let outcome = run_door(
+            &fx,
+            Some(relay),
+            "echo new > deps.lock; echo created > new.lock\n",
+            Policy::default(),
+            |_| {},
+        );
+        ledger::COMMIT_FAULT.with(|fault| fault.set(None));
+        let error = outcome.result.unwrap_err();
+        assert!(error.to_string().contains(file), "{error}");
+        assert_untouched(&fx, &before);
+    }
+
+    #[test]
+    fn ledger_commit_failure_restores_every_output() {
+        commit_failure_restores_every_output(
+            "ledger_commit_failure_restores_every_output",
+            ledger::PORTABLE_FILE,
+        );
+    }
+
+    #[test]
+    fn sidecar_commit_failure_restores_every_output() {
+        commit_failure_restores_every_output(
+            "sidecar_commit_failure_restores_every_output",
+            ledger::DIAGNOSTICS_FILE,
+        );
+    }
+
+    #[test]
+    fn descendant_writes_during_publication_do_not_reach_the_project() {
+        let Some(relay) = relay("descendant_writes_during_publication_do_not_reach_the_project")
+        else {
+            return;
+        };
+        let fx = fixture("door-descendant");
+        let script = "( sleep 1; echo late > deps.lock; echo late > package.json ) &\n\
+             disown\n\
+             echo good > deps.lock\n";
+        let outcome = run_door(&fx, Some(relay), script, Policy::default(), |_| {});
+        outcome.result.unwrap();
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        assert_eq!(fs::read(fx.project.join("deps.lock")).unwrap(), b"good\n");
+        assert_eq!(
+            fs::read(fx.project.join("package.json")).unwrap(),
+            PACKAGE_JSON
+        );
+        assert!(!fx.project.join("new.lock").exists());
+    }
+
+    #[test]
+    fn forced_arguments_go_before_a_separator() {
+        let args: Vec<OsString> = ["install", "--", "pkg"]
+            .iter()
+            .map(OsString::from)
+            .collect();
+        let forced: Vec<OsString> = ["--ignore-scripts"].iter().map(OsString::from).collect();
+        assert_eq!(
+            with_forced(&args, &forced),
+            ["install", "--ignore-scripts", "--", "pkg"]
+                .iter()
+                .map(OsString::from)
+                .collect::<Vec<_>>()
+        );
+    }
+}

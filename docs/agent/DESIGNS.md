@@ -3104,6 +3104,74 @@ transaction tests. On the Mac: the Seatbelt rules, the deny-by-default
 Mach profile with the per-tool allow-lists from PR 0, and the same
 deny-by-default Mach rule for the **build** profile (known gap 1).
 
+**PR 3 door integration as built (Linux, 2026-09-29).** Decisions made
+wiring the transaction into `ResolutionDoor`, each the flexible option:
+
+- **Confined is chosen per call, not per door.** `ResolutionDoor::run`
+  stays `Legacy` for every existing site. `run_confined(spec, confined)`
+  takes PR 1's `DelegateSpec` (program, args, lock root, variables,
+  stdio) plus a `door::ConfinedSpec` holding everything else: ecosystem,
+  forced-settings row, display name and why, `ForcedInputs`, outputs,
+  scratch, excludes, extra roots, store reads, routes, online/offline,
+  the wiring callback, the target, and three seams (proxy, permitted
+  set, policy) that default to the process's own. Each ecosystem PR
+  moves its site by calling `run_confined`; no site had to change here.
+  The confined environment starts empty: only the spec's set variables,
+  then the wiring's, then the forced ones.
+- **Wiring.** The callback gets the session address, the scratch
+  directory, the spec's args, and the tool's forced args, and returns
+  the full argument list, variables, config files (scratch-relative,
+  created `0600`, never following a symlink), and extra git settings.
+  The door refuses a wiring that dropped a forced argument and applies
+  the forced variables last, so the tool's grammar stays in the tailor
+  and the guarantee stays in the kernel. Without a callback the forced
+  args are appended before the first `--`.
+- **Targets.** `Target::Project { receipt }` runs the transaction;
+  `receipt` is an optional producer called after the ledger is committed
+  and rooted, with the accepted outputs and digests, the ledger id and
+  sha256, the isolation and engine, the recorded exceptions, and each
+  input's pre-run digest from the snapshot baseline. With no producer
+  there is no receipt target. Signing belongs to the producer.
+  `Target::Detached` (planner, `tog x`, an unpacked sdist) holds nothing
+  and writes accepted outputs back into its tog-owned lock root one file
+  at a time; its ledger is committed but not rooted, and the caller
+  roots the ids `DelegateReport::ledger` returns before its lease ends.
+- **Order of checks.** A session failure (hard failure, policy refusal,
+  offline miss) is an error even when the tool exited 0, and is checked
+  before the tool's status because it says more. A tool that exits
+  nonzero is then a report, as in `Legacy`: nothing published, no ledger
+  kept. Then the diff, then the output copy, whose forbidden strings are
+  the session token and the relay address the tool saw.
+- **Exceptions are recorded after the checks and before the ledger
+  commit**, on the door's thread (the attribution's owner), so a denied
+  kind fails the door before anything is written. The tier's
+  `unconfined-resolution` has the tool's display name as its subject.
+- **Only the ledger ids this run added are taken back.** Committing the
+  same portable evidence again is a cache hit on an id an earlier run
+  may already have rooted; unrooting it would orphan that run's record.
+  The door reads the root record under the held project lock first.
+- **The session directory** is `tog-door-<16 hex>`, `0700`, under the
+  first of `$XDG_RUNTIME_DIR`, the temp dir, and `/tmp` whose socket
+  path fits `sun_path`, and is removed once the session finishes.
+- **Preflight order.** The tier, the signing-key check, and the forced
+  settings are refused before anything is held, since they touch no
+  project state. Recovery then runs inside `Transaction::hold`, under the
+  project lock. `tog add`/`remove`/`update` also recover at their start,
+  right after the policy loads, as `tog sync` does.
+- **Diagnostics** gain `isolation`, the exec log (`execs`), and the
+  count of processes quiescence killed; `tools` lists the store objects
+  the tool ran from.
+- **Tests.** The door's tests live in `kernel::resolve::door::tests`,
+  in-crate so they can use the fixture upstream and the ledger's
+  commit-fault hook. They bind the `tog` binary cargo built beside the
+  test binary as the relay, and skip unless `TOG_SANDBOX_TESTS` is set
+  (then a missing sandbox or binary fails them). The tier override
+  changes only what the probe reports; the run itself is still
+  bubblewrap. `npm_forced_settings_never_run_the_project_git_or_script_shell`
+  and `cargo_forced_settings_never_run_project_wrappers_or_credential_providers`
+  move to the npm and cargo PRs: they need the store Node, npm, and Rust
+  objects that only those tailors provide.
+
 **PR 3b: the other isolation backends.** The Linux container backend
 (podman/docker, the pinned minimal image, `--network none`, the same
 relay and seccomp filter) and the Linux `tog-isolate` helper (per-run UID

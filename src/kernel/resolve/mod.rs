@@ -10,11 +10,13 @@
 //! everywhere but the reviewed kernel sites. So a new resolver call site
 //! cannot bypass the door by accident.
 //!
-//! Today the door has one mode, `Legacy`: it runs exactly the command the
-//! call site describes, unsandboxed, in the environment the site builds on
-//! top of tog's own, with no snapshot, and records nothing. What the door
-//! adds now is the single place: the confined, proxied mode replaces
-//! `Legacy` here without touching a call site's shape.
+//! The door has two modes. [`ResolutionDoor::run`] is `Legacy`: it runs
+//! exactly the command the call site describes, unsandboxed, in the
+//! environment the site builds on top of tog's own, with no snapshot, and
+//! records nothing. [`ResolutionDoor::run_confined`] runs it isolated on a
+//! snapshot, through a proxy session, and publishes its declared outputs
+//! all or nothing ([`door`]). A call site moves from one to the other by
+//! adding a [`door::ConfinedSpec`]; its `DelegateSpec` keeps its shape.
 //!
 //! The resolution proxy lives beside the door: the only network path of a
 //! delegated dependency tool. It forwards only to permitted registries,
