@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use super::spec::{
     canonical_name, help, inputs, listed, spec, toolchain_aliases, toolchain_section, usage,
-    HELP_TOPICS, LS_WORDS, SHELL_WORDS, TOOLCHAIN_WORDS, X_REGISTRIES,
+    HELP_TOPICS, LS_WORDS, SHELL_WORDS, TOOLCHAIN_WORDS,
 };
 use super::{
     Command, GcArgs, Invocation, Options, Parsed, Shell, Spec, SyncFlags, ToolchainUpdate,
@@ -51,6 +51,21 @@ pub fn parse(args: &[String]) -> Result<Parsed, UsageError> {
             index += used;
             continue;
         }
+        // The bare form's one value-taking flag: the value travels with
+        // it, so `tog --resolution-record ci/ --frozen` reads like `tog
+        // sync --resolution-record ci/ --frozen`.
+        if arg == RESOLUTION_RECORD {
+            let value = separate_value(args, index, arg, Some("sync"), RECORD_PATH)?;
+            setup.push(arg.to_string());
+            setup.push(value.to_string());
+            index += 2;
+            continue;
+        }
+        if arg.starts_with("--resolution-record=") {
+            setup.push(arg.to_string());
+            index += 1;
+            continue;
+        }
         if SETUP_FLAGS.contains(&arg) {
             setup.push(arg.to_string());
             index += 1;
@@ -67,6 +82,7 @@ pub fn parse(args: &[String]) -> Result<Parsed, UsageError> {
                 "--frozen",
                 "--fresh",
                 "--strict",
+                RESOLUTION_RECORD,
             ];
             return Err(UsageError::new(
                 with_suggestion(
@@ -92,22 +108,7 @@ pub fn parse(args: &[String]) -> Result<Parsed, UsageError> {
     };
     let name = canonical_name(word);
     if name != "sync" {
-        // `--fresh` stays bare-only: rebuilding before every command is
-        // never what someone means. `--frozen` and `--strict` are global
-        // and move into the options, where they govern the verb's sync.
-        if let Some(flag) = setup.iter().find(|flag| *flag == "--fresh") {
-            return Err(UsageError::new(
-                format!("{flag} belongs to the bare 'tog'; run 'tog {flag}' on its own"),
-                None,
-            ));
-        }
-        for flag in setup.drain(..) {
-            match flag.as_str() {
-                "--frozen" => options.sync.frozen = true,
-                "--strict" => options.sync.strict = true,
-                _ => unreachable!("setup holds only the three setup flags"),
-            }
-        }
+        setup_flags_to_options(&mut setup, &mut options, word)?;
     }
     let mut rest = args[index + 1..].to_vec();
     if name == "sync" {
@@ -134,12 +135,13 @@ pub fn parse(args: &[String]) -> Result<Parsed, UsageError> {
         "env" => parse_env(rest)?,
         "sbom" => parse_sbom(rest)?,
         "add" | "remove" | "update" => parse_deps(rest, name)?,
-        "x" => parse_x(rest)?,
+        "x" => super::x::parse_x(rest)?,
         "status" => parse_json_only(rest, "status")?.map(|json| Command::Status { json }),
         "audit" => parse_audit(rest)?,
         "ls" => parse_ls(rest)?,
         "doctor" => parse_json_only(rest, "doctor")?.map(|json| Command::Doctor { json }),
         "keygen" => parse_keygen(rest)?,
+        "attest" => super::attest::parse_attest(rest)?,
         "gc" => parse_gc(rest)?,
         "store" => parse_store(rest)?,
         "completions" => parse_completions(rest)?,
@@ -166,6 +168,50 @@ pub fn parse(args: &[String]) -> Result<Parsed, UsageError> {
         options.sync,
     )?;
     Ok(Parsed::Run(Invocation { options, command }))
+}
+
+/// The bare form's flags typed before another verb. `--fresh` stays
+/// bare-only: rebuilding before every command is never what someone means.
+/// `--frozen` and `--strict` are global and move into the options, where
+/// they govern the verb's sync. `--resolution-record` is refused: only the
+/// bare sync reads supplied records. `word` is the verb as typed.
+fn setup_flags_to_options(
+    setup: &mut Vec<String>,
+    options: &mut Options,
+    word: &str,
+) -> Result<(), UsageError> {
+    // `--fresh` stays bare-only: rebuilding before every command is
+    // never what someone means. `--frozen` and `--strict` are global
+    // and move into the options, where they govern the verb's sync.
+    if let Some(flag) = setup.iter().find(|flag| *flag == "--fresh") {
+        return Err(UsageError::new(
+            format!("{flag} belongs to the bare 'tog'; run 'tog {flag}' on its own"),
+            None,
+        ));
+    }
+    // Supplied records are evidence for the bare sync's join; another
+    // verb's sync never reads them, so accepting one there would
+    // promise a check that does not happen.
+    if setup
+        .iter()
+        .any(|flag| flag == RESOLUTION_RECORD || flag.starts_with("--resolution-record="))
+    {
+        return Err(UsageError::new(
+            format!(
+                "{RESOLUTION_RECORD} belongs to the bare 'tog'; run 'tog {RESOLUTION_RECORD} \
+                 <path>' on its own, then 'tog {word}'"
+            ),
+            None,
+        ));
+    }
+    for flag in setup.drain(..) {
+        match flag.as_str() {
+            "--frozen" => options.sync.frozen = true,
+            "--strict" => options.sync.strict = true,
+            _ => unreachable!("setup holds only the three setup flags"),
+        }
+    }
+    Ok(())
 }
 
 /// `--frozen` and `--strict` promise something about a sync, so a verb
@@ -204,6 +250,15 @@ fn refuse_unused_sync_flags(
                 "--frozen checks the lock without writing it, and '{name}' exists to \
                  write it; run 'tog {name}' without --frozen"
             ),
+            Some(name),
+        ));
+    }
+    // `attest` writes a record, and its lock check proves the lock is what
+    // the tool accepts; `--frozen`, which only checks, has nothing to add.
+    if sync.frozen && name == "attest" {
+        return Err(UsageError::new(
+            "--frozen checks the lock without writing anything, and 'attest' exists to \
+             write a signed record for it; run 'tog attest' without --frozen",
             Some(name),
         ));
     }
@@ -264,14 +319,28 @@ fn global_flag(
     }
 }
 
+/// What one of a command's options takes in the arguments after it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ValueSlot {
+    /// A list (`--register <dir>...`): every word up to the next long
+    /// option.
+    list: bool,
+    /// How many values otherwise: one per `<placeholder>`, so
+    /// `--ledger-export <ecosystem> <file>` holds two.
+    values: usize,
+}
+
 /// Does this command's option take a value in the following argument(s)?
-/// `Some(true)` for a list (`--register <dir>...`), `Some(false)` for a
-/// single value (`--policy <file>`), `None` for a plain switch. Read from
-/// the command table, so the answer cannot drift from the help text.
-fn value_slot(spec: &Spec, arg: &str) -> Option<bool> {
+/// `None` for a plain switch. Read from the command table, so the answer
+/// cannot drift from the help text.
+fn value_slot(spec: &Spec, arg: &str) -> Option<ValueSlot> {
     spec.options.iter().find_map(|(flag, _)| {
-        (flag.contains('<') && option_spellings(flag).any(|spelling| spelling == arg))
-            .then(|| flag.ends_with("..."))
+        (flag.contains('<') && option_spellings(flag).any(|spelling| spelling == arg)).then(|| {
+            ValueSlot {
+                list: flag.ends_with("..."),
+                values: flag.matches('<').count(),
+            }
+        })
     })
 }
 
@@ -322,11 +391,11 @@ fn take_global_flags(
             index += 1;
             continue;
         }
-        if let Some(list) = value_slot(spec, arg) {
+        if let Some(ValueSlot { list, values }) = value_slot(spec, arg) {
             rest.push(args[index].clone());
             index += 1;
             let mut taken = 0;
-            while index < args.len() && (list || taken == 0) {
+            while index < args.len() && (list || taken < values) {
                 let value = args[index].as_str();
                 // A list ends where the command's own parser ends it: at
                 // the next long option, so `gc --register /p --no-color`
@@ -381,8 +450,23 @@ fn help_topic(topic: Option<&str>) -> Result<String, UsageError> {
 /// verb's copy of them lives too.
 fn parse_sync(args: &[String], options: &mut Options) -> Result<Option<Command>, UsageError> {
     let mut fresh = false;
-    for arg in args {
+    let mut records = Vec::new();
+    let mut index = 0;
+    while let Some(arg) = args.get(index) {
+        index += 1;
         match arg.as_str() {
+            RESOLUTION_RECORD => {
+                let value = separate_value(args, index - 1, arg, Some("sync"), RECORD_PATH)?;
+                records.push(PathBuf::from(value));
+                index += 1;
+            }
+            _ if arg.starts_with("--resolution-record=") => {
+                records.push(non_empty(
+                    &arg["--resolution-record=".len()..],
+                    RESOLUTION_RECORD,
+                    Some("sync"),
+                )?);
+            }
             "--fresh" => fresh = true,
             "--strict" => options.sync.strict = true,
             "--frozen" => options.sync.frozen = true,
@@ -409,8 +493,12 @@ fn parse_sync(args: &[String], options: &mut Options) -> Result<Option<Command>,
             }
         }
     }
-    Ok(Some(Command::Sync { fresh }))
+    Ok(Some(Command::Sync { fresh, records }))
 }
+
+/// The bare form's value-taking flag, and what its value must be.
+const RESOLUTION_RECORD: &str = "--resolution-record";
+const RECORD_PATH: &str = "a record file or a directory of records";
 
 /// `tog install requests` is the first thing a pip or npm user types, and
 /// `install` is a hidden alias of the bare `tog`, which takes no package.
@@ -717,193 +805,6 @@ fn validate_dependency_arg(name: &'static str, arg: &str) -> Result<(), UsageErr
     }
     crate::commands::deps::validate_spec(arg)
         .map_err(|error| UsageError::new(format!("{name}: {error}"), Some(name)))
-}
-
-fn parse_x(args: &[String]) -> Result<Option<Command>, UsageError> {
-    let mut ecosystem = None;
-    let mut from = None;
-    let mut clean = false;
-    let mut index = 0;
-    while let Some(arg) = args.get(index).map(String::as_str) {
-        match arg {
-            "-h" | "--help" => return Ok(None),
-            "--clean" => clean = true,
-            _ if x_registry_flag(arg).is_some() => {
-                ecosystem = x_registry_flag(arg).map(str::to_string);
-            }
-            "--from" => {
-                let value = separate_value(args, index, arg, Some("x"), "a package name")?;
-                validate_x_package(value)?;
-                from = Some(value.to_string());
-                index += 1;
-            }
-            _ if arg.starts_with("--from=") => {
-                let value = non_empty(&arg["--from=".len()..], "--from", Some("x"))?
-                    .to_string_lossy()
-                    .into_owned();
-                validate_x_package(&value)?;
-                from = Some(value);
-            }
-            "--" => {
-                index += 1;
-                break;
-            }
-            _ if arg.starts_with('-') && arg.len() > 1 => return Err(reject("x", arg)),
-            _ => break,
-        }
-        index += 1;
-    }
-    let Some(tool) = args.get(index) else {
-        if clean {
-            if from.is_some() {
-                return Err(UsageError::new(
-                    "x: --clean --from requires a tool name",
-                    Some("x"),
-                ));
-            }
-            return Ok(Some(Command::XClean {
-                ecosystem,
-                from,
-                tool: None,
-            }));
-        }
-        return Err(UsageError::new(
-            "x: no tool given (e.g. 'tog x ruff check .', 'tog x npm:prettier --write .')",
-            Some("x"),
-        ));
-    };
-    let mut tool = tool.clone();
-    if let Some((id, rest)) = X_REGISTRIES.iter().find_map(|(id, word)| {
-        let rest = tool.strip_prefix(word)?.strip_prefix(':')?;
-        Some((*id, rest.to_string()))
-    }) {
-        ecosystem = Some(id.to_string());
-        tool = rest;
-    }
-    if clean && args.get(index + 1).is_some() {
-        return Err(UsageError::new(
-            format!("x --clean: unexpected argument '{}'", args[index + 1]),
-            Some("x"),
-        ));
-    }
-    if tool.is_empty() {
-        return Err(UsageError::new("x: empty tool name", Some("x")));
-    }
-    if from.is_some() {
-        let (bin, _) = split_x_version(&tool);
-        validate_x_bin(bin)?;
-    } else {
-        // Without --from the tool is also the package name, so npm scoped
-        // names such as @scope/cli legitimately contain one slash.
-        validate_x_text("tool", &tool, true)?;
-    }
-    validate_x_version_pair(from.as_deref(), &tool)?;
-    if clean {
-        return Ok(Some(Command::XClean {
-            ecosystem,
-            from,
-            tool: Some(tool),
-        }));
-    }
-    Ok(Some(Command::X {
-        ecosystem,
-        from,
-        tool,
-        args: args[index + 1..].to_vec(),
-    }))
-}
-
-/// The tailor id an `x` registry flag selects: `--<word>` or `--<id>` of an
-/// `X_REGISTRIES` row.
-fn x_registry_flag(arg: &str) -> Option<&'static str> {
-    let name = arg.strip_prefix("--")?;
-    X_REGISTRIES
-        .iter()
-        .find(|(id, word)| name == *id || name == *word)
-        .map(|(id, _)| *id)
-}
-
-fn split_x_version(value: &str) -> (&str, Option<&str>) {
-    match value.rfind('@') {
-        Some(0) | None => (value, None),
-        Some(index) => (&value[..index], Some(&value[index + 1..])),
-    }
-}
-
-fn validate_x_version_pair(from: Option<&str>, tool: &str) -> Result<(), UsageError> {
-    let (_, tool_version) = split_x_version(tool);
-    let from_version = from.and_then(|value| split_x_version(value).1);
-    for version in [from_version, tool_version].into_iter().flatten() {
-        if version.is_empty()
-            || version
-                .bytes()
-                .any(|byte| matches!(byte, b'\r' | b'\n' | 0))
-            || version.chars().any(char::is_whitespace)
-            || version.starts_with('-')
-        {
-            return Err(UsageError::new("x: invalid version", Some("x")));
-        }
-    }
-    if let (Some(from), Some(tool)) = (from_version, tool_version) {
-        if from != tool {
-            return Err(UsageError::new(
-                "x: --from package version conflicts with the tool version; specify only one or use the same version",
-                Some("x"),
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn validate_x_text(label: &str, value: &str, allow_slash: bool) -> Result<(), UsageError> {
-    if value.is_empty()
-        || value.bytes().any(|byte| matches!(byte, b'\r' | b'\n' | 0))
-        || value.chars().any(char::is_whitespace)
-        || value.starts_with('-')
-        || (!allow_slash && (value.contains('/') || value.contains('\\')))
-    {
-        return Err(UsageError::new(
-            format!("x: invalid {label} '{value}'"),
-            Some("x"),
-        ));
-    }
-    Ok(())
-}
-
-fn validate_x_package(value: &str) -> Result<(), UsageError> {
-    // A scoped npm package contains one slash, but a filesystem path must
-    // never be accepted as a package name. Version text is checked by
-    // `validate_x_version_pair`; these checks keep argv errors at exit 2.
-    validate_x_text("package", value, true)?;
-    if value.starts_with('/')
-        || value.starts_with("./")
-        || value.starts_with("../")
-        || value.contains("/../")
-        || value.ends_with("/..")
-        || value.contains('\\')
-    {
-        return Err(UsageError::new(
-            format!("x: invalid package '{value}'"),
-            Some("x"),
-        ));
-    }
-    Ok(())
-}
-
-fn validate_x_bin(value: &str) -> Result<(), UsageError> {
-    if value.is_empty()
-        || value == "."
-        || value == ".."
-        || !value
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || ".-_".contains(ch))
-    {
-        return Err(UsageError::new(
-            "x: --from requires a single safe executable name",
-            Some("x"),
-        ));
-    }
-    Ok(())
 }
 
 fn parse_keygen(args: &[String]) -> Result<Option<Command>, UsageError> {
@@ -1220,7 +1121,7 @@ fn parse_completions(args: &[String]) -> Result<Option<Command>, UsageError> {
 /// start with `-`, so `tog sbom -o --json` is the mistyped flag it looks like
 /// rather than a file named `--json`. A value that really does start with a
 /// dash is given inline instead, as `--output=-x`.
-fn separate_value<'a>(
+pub(super) fn separate_value<'a>(
     args: &'a [String],
     index: usize,
     flag: &str,
@@ -1236,7 +1137,7 @@ fn separate_value<'a>(
 /// The inline `--flag=value` half of the same rule: the `=` already says
 /// where the value begins, so only an empty one is refused here. What the
 /// value may contain is each flag's own business.
-fn non_empty(
+pub(super) fn non_empty(
     value: &str,
     flag: &str,
     command: Option<&'static str>,
@@ -1248,7 +1149,7 @@ fn non_empty(
 }
 
 /// Unknown option or stray positional for a command with a fixed option set.
-fn reject(name: &'static str, arg: &str) -> UsageError {
+pub(super) fn reject(name: &'static str, arg: &str) -> UsageError {
     let spec = spec(name).expect("known command");
     let message = if arg.starts_with('-') {
         with_suggestion(
@@ -1275,7 +1176,7 @@ fn flag_name(arg: &str) -> &str {
     arg.split('=').next().unwrap_or(arg)
 }
 
-fn with_suggestion<'a>(
+pub(super) fn with_suggestion<'a>(
     message: String,
     word: &str,
     candidates: impl Iterator<Item = &'a str>,
@@ -1368,20 +1269,31 @@ pub(super) fn help_words() -> Vec<&'static str> {
 }
 
 /// The bare `tog`'s own flags; see `Group::Bare`.
-pub(super) const SETUP_FLAGS: &[&str] = &["--frozen", "--fresh", "--strict"];
+pub(super) const SETUP_FLAGS: &[&str] = &["--frozen", "--fresh", "--strict", RESOLUTION_RECORD];
 
 /// Does this verb take `--frozen` and `--strict`? The verbs that sync (the
 /// bare form, `run`, `build`, `env`, `fmt` as a script, and `add`,
 /// `remove`, `update` after their edit), `plan`, whose lock generation
-/// `--frozen` skips, and `x`, which judges under the policy `--strict`
-/// tightens (it refuses `--frozen`, having no lock to check). Every other
+/// `--frozen` skips, and `x` and `attest`, which judge their resolution
+/// under the policy `--strict` tightens (both refuse `--frozen`: `x` has no
+/// lock to check, and `attest` exists to write a record). Every other
 /// verb, and the two sub-forms `update --self` and `x --clean`, never syncs
 /// and refuses both. The parser, the help footers and the completions all
 /// ask here, so none of them can disagree.
 pub(super) fn takes_sync_flags(verb: &str) -> bool {
     matches!(
         verb,
-        "sync" | "fmt" | "run" | "build" | "env" | "plan" | "x" | "add" | "remove" | "update"
+        "sync"
+            | "fmt"
+            | "run"
+            | "build"
+            | "env"
+            | "plan"
+            | "x"
+            | "add"
+            | "remove"
+            | "update"
+            | "attest"
     )
 }
 
@@ -1443,7 +1355,7 @@ fn parse_relay(args: &[String]) -> Result<super::RelayInvocation, UsageError> {
 #[cfg(test)]
 mod tests {
     use super::super::render_usage_error;
-    use super::super::spec::COMMANDS;
+    use super::super::spec::{COMMANDS, X_REGISTRIES};
     use super::*;
 
     fn argv(words: &[&str]) -> Vec<String> {
@@ -1587,30 +1499,57 @@ mod tests {
 
     #[test]
     fn sync_flags_and_aliases() {
-        let plain = Command::Sync { fresh: false };
+        let plain = Command::Sync {
+            fresh: false,
+            records: Vec::new(),
+        };
         assert_eq!(command(&["sync"]), plain);
         assert_eq!(command(&["install"]), plain);
         assert_eq!(command(&["i"]), plain);
         assert_eq!(
             flagged(&["install", "--strict", "--fresh"]),
-            (Command::Sync { fresh: true }, sync_flags(false, true))
+            (
+                Command::Sync {
+                    fresh: true,
+                    records: Vec::new()
+                },
+                sync_flags(false, true)
+            )
         );
         // `--frozen` is the same flag under every alias, because the
         // alias is resolved before the command's own grammar runs.
         for word in ["sync", "install", "i"] {
             assert_eq!(
                 flagged(&[word, "--frozen"]),
-                (Command::Sync { fresh: false }, sync_flags(true, false)),
+                (
+                    Command::Sync {
+                        fresh: false,
+                        records: Vec::new()
+                    },
+                    sync_flags(true, false)
+                ),
                 "{word}"
             );
         }
         assert_eq!(
             flagged(&["sync", "--strict"]),
-            (Command::Sync { fresh: false }, sync_flags(false, true))
+            (
+                Command::Sync {
+                    fresh: false,
+                    records: Vec::new()
+                },
+                sync_flags(false, true)
+            )
         );
         assert_eq!(
             flagged(&["install", "--frozen"]),
-            (Command::Sync { fresh: false }, sync_flags(true, false))
+            (
+                Command::Sync {
+                    fresh: false,
+                    records: Vec::new()
+                },
+                sync_flags(true, false)
+            )
         );
         assert_eq!(
             message(&["sync", "--fersh"]),
@@ -1650,17 +1589,35 @@ mod tests {
     fn the_bare_form_takes_the_setup_flags() {
         assert_eq!(
             flagged(&["--frozen"]),
-            (Command::Sync { fresh: false }, sync_flags(true, false))
+            (
+                Command::Sync {
+                    fresh: false,
+                    records: Vec::new()
+                },
+                sync_flags(true, false)
+            )
         );
         let invocation = run(&["-q", "--strict", "-C", "/tmp", "--fresh"]);
-        assert_eq!(invocation.command, Command::Sync { fresh: true });
+        assert_eq!(
+            invocation.command,
+            Command::Sync {
+                fresh: true,
+                records: Vec::new()
+            }
+        );
         assert_eq!(invocation.options.sync, sync_flags(false, true));
         assert!(invocation.options.quiet);
         assert_eq!(invocation.options.directory, Some(PathBuf::from("/tmp")));
         // Ahead of a hidden alias the flags join its own.
         assert_eq!(
             flagged(&["--frozen", "install", "--strict"]),
-            (Command::Sync { fresh: false }, sync_flags(true, true))
+            (
+                Command::Sync {
+                    fresh: false,
+                    records: Vec::new()
+                },
+                sync_flags(true, true)
+            )
         );
         assert_eq!(
             printed(&["--frozen", "--help"]),
@@ -2774,7 +2731,10 @@ mod tests {
         assert!(run(&["sync", "-q"]).options.quiet);
         assert_eq!(
             command(&["sync", "-q", "--fresh"]),
-            Command::Sync { fresh: true }
+            Command::Sync {
+                fresh: true,
+                records: Vec::new()
+            }
         );
         assert!(run(&["ls", "-v"]).options.verbose);
         assert_eq!(

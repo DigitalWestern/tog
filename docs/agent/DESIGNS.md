@@ -1991,7 +1991,12 @@ project, and each fails (or, for npm and Bundler, which exit 0 either way,
 rewrites the lock, so the byte diff is the check) when the manifest has
 drifted. Go needs both commands: after an edit that removes a module,
 `go mod tidy -diff` is what catches the stale `go.sum` lines.
-Tailors without a lock check refuse `attest` with the reason. Run on CI
+Tailors without a lock check refuse `attest` with the reason. With no
+ecosystem named, `tog attest` covers every detected ecosystem whose tailor
+declares resolution outputs, and refuses when there is none. It is
+all-or-nothing: every check runs before any record is written, so one
+failing ecosystem leaves no partial set. It reads `tog-toolchain.toml` as
+`--frozen` does and never writes it. Run on CI
 with the signing key, this converts a repository in one command. It is
 also the remedy the `unrecorded-resolution` refusal prints.
 
@@ -2010,7 +2015,21 @@ PR that introduces the join, onward strict has these outcomes:
   <ecosystem>`. Or rerun without --strict." The reason is the join's
   (`missing`, `unsigned`, `untrusted-key`, `stale-inputs`, and so on),
   so a developer whose record is merely stale is told to run
-  `tog attest` and not to make a new key.
+  `tog attest` and not to make a new key. As built, the text refines the
+  quote in three ways, because the literal version gave wrong advice in
+  cases the quote did not cover. It names every existing listed output
+  (`` `go.mod`, `go.sum` have none ``), since a record covers the lock and
+  the manifest together. When the committed record authenticated (a
+  trusted signature that is stale, incomplete or malformed), the steps
+  are only "run `tog attest <ecosystem>` with `TOG_SIGNING_KEY` set to a
+  key your machine policy trusts": the key already exists. And the last
+  sentence follows what denied the kind, as every other refusal does: the
+  flag ("rerun without --strict"), `unset TOG_STRICT`, the policy file
+  that set `strict = true`, or, when a deny list named
+  `unrecorded-resolution` (the company template), "remove
+  'unrecorded-resolution' from the deny list in `<file>`". Supplied
+  records' reasons are appended to the recorded detail as
+  `; supplied <path>: <reason>`, after the committed record's.
 - **Last-good metadata is refused.** `stale-resolution` is denied, so the
   proxy answers 504 where it would have served last-good, and the door
   fails with: "`tog --strict` refuses stale metadata: `<url>` could not
@@ -2430,23 +2449,26 @@ fn edit_manifest(
 }
 
 /// `tog attest`: run this ecosystem's lock-consistency check through
-/// `door`. The default refuses.
-fn attest_lock(&self, ctx: &Context, dir: &Path, toolchain: &Selected,
-               door: &mut ResolutionDoor<'_>) -> io::Result<()> {
+/// `door` and return the record the door built. The default refuses.
+/// The command, not the tailor, signs and writes the record, so every
+/// ecosystem is checked before anything is written and `--record-out`
+/// needs no tailor support.
+fn attest_lock(&self, ctx: &Context, project: &ProjectRoot, toolchain: &Selected,
+               door: &mut ResolutionDoor<'_>) -> io::Result<ResolutionRecord> {
     Err(unsupported(self.id(), "attest"))
 }
 
 /// The project files a door of this ecosystem produces, relative to the
 /// closure's project directory. The join requires the record's `outputs`
 /// to cover every one of them that exists.
-fn resolution_outputs(&self, _dir: &Path) -> io::Result<Vec<PathBuf>> { Ok(Vec::new()) }
+fn resolution_outputs(&self, _project: &ProjectRoot) -> io::Result<Vec<PathBuf>> { Ok(Vec::new()) }
 
 /// The project files the tool reads to resolve but never writes (other
 /// workspace members' manifests, tool config such as `.npmrc` or
 /// `.cargo/config.toml`), relative to the closure's project directory.
 /// The door records their digests in `inputs`, and the join requires
 /// every one that exists to be covered and unchanged.
-fn resolution_inputs(&self, _dir: &Path) -> io::Result<Vec<PathBuf>> { Ok(Vec::new()) }
+fn resolution_inputs(&self, _project: &ProjectRoot) -> io::Result<Vec<PathBuf>> { Ok(Vec::new()) }
 ```
 
 `Tailor::prepare` changes the same way: its `attribution` parameter

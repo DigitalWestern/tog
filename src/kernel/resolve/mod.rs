@@ -32,6 +32,7 @@ pub mod ledger;
 pub mod mirror;
 pub mod outputs;
 pub mod proxy;
+pub mod record;
 pub mod redact;
 pub mod relay;
 pub mod routes;

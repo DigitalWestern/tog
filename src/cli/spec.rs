@@ -140,6 +140,17 @@ const fn toolchain_words<const N: usize>() -> [&'static str; N] {
     out
 }
 
+const fn id_words<const N: usize>() -> [&'static str; N] {
+    let mut out = [""; N];
+    let mut i = 0;
+    while i < N {
+        out[i] = ECOSYSTEM_WORDS[i].id;
+        i += 1;
+    }
+    out
+}
+
+const ID_ARRAY: [&str; ECOSYSTEM_WORDS.len()] = id_words();
 const LS_ARRAY: [&str; ls_count()] = ls_words();
 const BUILD_ARRAY: [&str; build_count()] = build_words();
 const TOOLCHAIN_ARRAY: [&str; ECOSYSTEM_WORDS.len()] = toolchain_words();
@@ -152,6 +163,8 @@ const TOOLCHAIN_ARRAY: [&str; ECOSYSTEM_WORDS.len()] = toolchain_words();
 pub const LS_WORDS: &[&str] = &LS_ARRAY;
 pub const BUILD_WORDS: &[&str] = &BUILD_ARRAY;
 pub const SHELL_WORDS: &[&str] = &["bash", "zsh", "fish"];
+/// Every tailor id, in registry order: what `tog attest` names.
+pub const ECOSYSTEM_IDS: &[&str] = &ID_ARRAY;
 
 /// What `tog update --toolchain` lists as an ecosystem: the
 /// `[toolchain.<name>]` section keys.
@@ -188,7 +201,7 @@ pub const COMMANDS: &[Spec] = &[
         name: "sync",
         group: Group::Bare,
         summary: "set up the environment(s) from the lockfiles",
-        usage: "tog [--frozen] [--fresh] [--strict]",
+        usage: "tog [--frozen] [--fresh] [--strict] [--resolution-record <path>]...",
         description: "\
 Discovers every ecosystem present in the current directory, realizes each
 locked plan into the immutable store, and projects it into the project
@@ -215,15 +228,38 @@ succeeds; validation failure exits before any write.
 Policy exceptions (unattested inputs, failed install scripts, ...) are
 recorded in .tog/closures/*.json and summarized at the end; --strict, a
 TOG_STRICT=1 environment, or a .tog/policy.toml deny list refuses
-them instead.",
+them instead.
+
+RESOLUTION RECORDS: a lock that a tog resolution door wrote carries a
+signed receipt, .tog/resolution/<ecosystem>.json. The sync copies a
+receipt into the closure when a key in the machine policy's [signing]
+list signed it and it still matches the lock and manifests on disk;
+otherwise it records unrecorded-resolution, which --strict and the
+company policy refuse ('tog attest' makes a receipt). --resolution-record
+<path> adds records from a file or a directory of them (a CI artifact from
+'tog attest --record-out'); they are checked the same way and never
+written into the project.",
         examples: &[
             ("tog", "set up this project, then show the command list"),
             ("tog --frozen", "CI: check the locks are current without writing them"),
             ("tog --fresh", "rebuild .venv / node_modules from scratch"),
+            (
+                "tog --strict --frozen --resolution-record records/",
+                "CI gate: every lock needs a record a trusted key signed",
+            ),
         ],
         options: &[
             ("--fresh", "rebuild the projection, dropping project-local caches"),
-            ("--strict", "refuse every policy exception (same as TOG_STRICT=1)"),
+            (
+                "--strict",
+                "refuse every policy exception, including a lock without a signed resolution \
+                 record (same as TOG_STRICT=1)",
+            ),
+            (
+                "--resolution-record <path>",
+                "also judge the signed resolution records in <path> (a file or a directory; \
+                 repeatable); never written into the project",
+            ),
             (
                 "--frozen",
                 "validate tog-toolchain.toml and the dependency locks without writing either; fail if missing or stale",
@@ -717,6 +753,57 @@ runs untrusted project code must not hold one.",
         words: &[],
     },
     Spec {
+        name: "attest",
+        group: Group::Maintain,
+        summary: "sign a resolution record for each lock (for --strict)",
+        usage: "tog attest [<ecosystem>...] [--record-out <path>]\n  \
+                tog attest --ledger-export <ecosystem> <file>\n  \
+                tog attest --ledger-import <file>",
+        description: "\
+Runs each ecosystem's own lock check (go mod tidy -diff, uv lock --locked,
+npm install --package-lock-only, ...) through a confined resolution door,
+and when the lock and manifest come out byte-unchanged writes the signed
+receipt .tog/resolution/<ecosystem>.json, signed with TOG_SIGNING_KEY. A
+sync joins a receipt into the closure when a key in the machine policy's
+[signing] list signed it; a lock without one records unrecorded-resolution,
+which --strict and the company policy refuse. With no ecosystem named, every
+ecosystem found here is attested, and nothing is written unless all pass. An
+ecosystem without a lock check through the door is refused with the reason.
+--record-out writes the records to <path> instead (a file when one
+ecosystem is named, else a directory of <ecosystem>.json) and leaves the
+checkout unchanged: the CI artifact 'tog --resolution-record' reads.
+--ledger-export writes the portable ledger the committed record names (it
+must be in the local store); --ledger-import stores one only when an
+attesting record here names exactly those bytes.",
+        examples: &[
+            ("tog attest", "sign a receipt for every lock here"),
+            (
+                "tog attest go --record-out go.json",
+                "CI: write the record as an artifact, not into the checkout",
+            ),
+            (
+                "tog attest --ledger-export go ledger.json",
+                "hand the evidence behind a record to another machine",
+            ),
+        ],
+        options: &[
+            (
+                "--record-out <path>",
+                "write the signed records to <path> and leave the checkout unchanged",
+            ),
+            (
+                "--ledger-export <ecosystem> <file>",
+                "write the portable ledger the committed record names to <file>",
+            ),
+            (
+                "--ledger-import <file>",
+                "store a ledger exported elsewhere, when an attesting record names it",
+            ),
+            HELP_OPTION,
+        ],
+        words: ECOSYSTEM_IDS,
+    },
+    Spec {
         name: "completions",
         group: Group::Maintain,
         summary: "print a shell completion script (bash | zsh | fish)",
@@ -754,7 +841,7 @@ ENVIRONMENT:
   TOG_STORE           store root (default ~/.tog/store)
   TOG_STRICT=1        refuse every policy exception, like 'tog --strict'
   TOG_POLICY          policy file used instead of ~/.tog/policy.toml
-  TOG_SIGNING_KEY     key file; build, add, remove, update, sync, fmt sign it
+  TOG_SIGNING_KEY     key file that signs closures and resolution records
   NO_COLOR            plain output, like --no-color
 ";
 
@@ -935,7 +1022,7 @@ fn global_option_note(name: &str) -> &'static str {
         }
         "sync" => {
             "Global options (-C, -q, -v, --no-color) go anywhere on the line, and so\n\
-             do this command's own --frozen, --fresh and --strict.\n"
+             do this command's own --frozen, --fresh, --strict and --resolution-record.\n"
         }
         "fmt" => {
             "Global options (-C, -q, -v, --no-color, --frozen, --strict) go before the\n\
@@ -949,6 +1036,10 @@ fn global_option_note(name: &str) -> &'static str {
         "add" | "remove" | "update" => {
             "Global options (-C, -q, -v, --no-color, --strict) work before or after\n\
              the command. --frozen is refused: this command writes the lock.\n"
+        }
+        "attest" => {
+            "Global options (-C, -q, -v, --no-color, --strict) work before or after\n\
+             the command. --frozen is refused: this command writes a record.\n"
         }
         _ => {
             "Global options (-C, -q, -v, --no-color, --frozen, --strict) work before or\n\

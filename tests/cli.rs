@@ -3136,6 +3136,8 @@ fn a_bad_signing_key_fails_every_closure_writer_before_the_store_is_touched() {
             &["fmt", "--eco", "rust", "--check"],
             &["build"],
             &["add", "py:six", "--no-sync"],
+            &["attest"],
+            &["x", "py:ruff", "--version"],
         ] {
             let out = tog_env(&project.0, &home.0, args, &[("TOG_SIGNING_KEY", key)]);
             assert_eq!(
@@ -3164,4 +3166,102 @@ fn a_bad_signing_key_fails_every_closure_writer_before_the_store_is_touched() {
             );
         }
     }
+}
+
+/// `tog attest` refuses offline, before any tool or store, what it cannot
+/// sign: an ecosystem with no lock a resolution door produces, or a project
+/// with none at all.
+#[test]
+fn attest_refuses_an_ecosystem_without_a_resolution_door() {
+    let home = TempDir::boundary("cli-attest-unsupported");
+    let project = TempDir::boundary("cli-attest-unsupported-project");
+    std::fs::write(
+        project.0.join("go.mod"),
+        "module example.com/p\n\ngo 1.22\n",
+    )
+    .unwrap();
+    let out = tog(&project.0, &home.0, &["attest", "go"]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    let stderr = text(&out.stderr);
+    assert!(
+        stderr.contains("tog attest does not support go"),
+        "{stderr}"
+    );
+    let out = tog(&project.0, &home.0, &["attest"]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stderr).contains("nothing to attest"),
+        "{}",
+        text(&out.stderr)
+    );
+    let out = tog(&project.0, &home.0, &["attest", "node"]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stderr).contains("no node project"),
+        "{}",
+        text(&out.stderr)
+    );
+    assert!(!home.0.join("store").exists());
+    assert!(!project.0.join(".tog/closures").exists());
+    assert!(!project.0.join(".tog/resolution").exists());
+}
+
+#[test]
+fn attest_and_resolution_record_usage_errors_exit_2() {
+    let home = TempDir::boundary("cli-attest-usage");
+    for args in [
+        &["attest", "--frozen"][..],
+        &[
+            "attest",
+            "--ledger-import",
+            "l.json",
+            "--record-out",
+            "r.json",
+        ],
+        &["attest", "golang"],
+        &["status", "--resolution-record", "r.json"],
+        &["--resolution-record", "r.json", "status"],
+    ] {
+        let out = tog(&home.0, &home.0, args);
+        assert_eq!(
+            out.status.code(),
+            Some(2),
+            "{args:?}: {}",
+            text(&out.stderr)
+        );
+        assert!(out.stdout.is_empty(), "{args:?}");
+    }
+    let out = tog(&home.0, &home.0, &["help", "attest"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let stdout = text(&out.stdout);
+    for needle in ["--record-out", "--ledger-export", "--ledger-import"] {
+        assert!(stdout.contains(needle), "{needle}: {stdout}");
+    }
+}
+
+/// A supplied record that cannot be read fails the sync before anything
+/// is resolved, and names the path.
+#[test]
+fn unreadable_resolution_record_fails_the_sync() {
+    let home = TempDir::boundary("cli-record-missing");
+    let project = TempDir::boundary("cli-record-missing-project");
+    std::fs::write(
+        project.0.join("go.mod"),
+        "module example.com/p\n\ngo 1.22\n",
+    )
+    .unwrap();
+    let out = tog(
+        &project.0,
+        &home.0,
+        &["--resolution-record", "/nonexistent/go.json"],
+    );
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stderr).contains("/nonexistent/go.json"),
+        "{}",
+        text(&out.stderr)
+    );
+    assert!(!home.0.join("store").exists());
+    assert!(!project.0.join(".tog/closures").exists());
+    assert!(!project.0.join(".tog/resolution").exists());
 }

@@ -30,9 +30,11 @@
 //!
 //! Exit status contract: 0 success, 1 the command failed, 2 usage error.
 
+mod attest;
 mod completions;
 mod parse;
 mod spec;
+mod x;
 
 pub use self::completions::completions;
 pub use self::parse::{option_spellings, parse, suggest};
@@ -70,6 +72,11 @@ pub enum Command {
     /// `--frozen` and `--strict` travel beside it in `SyncFlags`.
     Sync {
         fresh: bool,
+        /// `--resolution-record <path>`, in command-line order: signed
+        /// resolution records (a file each, or a directory of them) the
+        /// resolution join considers before the committed receipts. Never
+        /// written into the project.
+        records: Vec<PathBuf>,
     },
     /// `fmt` syncs when it is a package.json script delegated to `run`, so
     /// it takes `SyncFlags` ahead of the tool's own arguments.
@@ -164,6 +171,15 @@ pub enum Command {
     Keygen {
         path: PathBuf,
     },
+    /// `attest [<ecosystem>...] [--record-out <path>]`: sign a resolution
+    /// record for each lock through its ecosystem's lock check, or, with
+    /// `ledger`, move a ledger's portable evidence in or out of the store.
+    /// `ecosystems` empty means every detected ecosystem.
+    Attest {
+        ecosystems: Vec<String>,
+        record_out: Option<PathBuf>,
+        ledger: Option<LedgerTransfer>,
+    },
     Gc(GcArgs),
     StorePath,
     StoreRoots,
@@ -186,6 +202,17 @@ impl Command {
                 | Command::Plan { json: true }
         )
     }
+}
+
+/// `tog attest --ledger-export` and `--ledger-import`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LedgerTransfer {
+    /// Write the portable bytes of the ledger the committed `ecosystem`
+    /// record names to `file`.
+    Export { ecosystem: String, file: PathBuf },
+    /// Store the portable ledger in `file` when an attesting record here
+    /// names it.
+    Import { file: PathBuf },
 }
 
 /// Which toolchains `update --toolchain` re-selects.

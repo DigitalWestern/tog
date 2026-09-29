@@ -2,6 +2,7 @@
 //! is the only layer that knows about every tailor *and* the kernel; the
 //! binary parses arguments and calls `resolve` then `dispatch`.
 
+pub(crate) mod attest;
 pub(crate) mod audit;
 pub(crate) mod build;
 pub(crate) mod completions;
@@ -64,7 +65,10 @@ pub fn resolve(pending: Pending) -> io::Result<cli::Command> {
             let cwd = project_dir();
             if !inspect::detected(&cwd)?.is_empty() {
                 ui::trace("no command given inside a project: running sync");
-                return Ok(cli::Command::Sync { fresh: false });
+                return Ok(cli::Command::Sync {
+                    fresh: false,
+                    records: Vec::new(),
+                });
             }
             // Nothing to sync, so the whole invocation is the help: it goes
             // to stdout and exits 0, because someone who typed `tog` alone
@@ -133,6 +137,20 @@ pub fn relay(invocation: cli::RelayInvocation) -> i32 {
     }
 }
 
+/// Hand the kernel and the closure writer what the tailors know, before any
+/// verb runs: every object-kind row, and each ecosystem's resolution files
+/// for the resolution join. `x` roots are no project and no door records
+/// them, so `x` joins nothing.
+fn install_tailor_tables(command: &cli::Command) {
+    crate::tailors::install_kinds();
+    if !matches!(
+        command,
+        cli::Command::X { .. } | cli::Command::XClean { .. }
+    ) {
+        crate::tailors::install_resolution_files();
+    }
+}
+
 /// Dispatch one parsed command to the verb's file. `sync` holds `--frozen`
 /// and `--strict`; the parser has already refused them for a verb that
 /// never syncs. `--frozen` is handed to the verbs that skip lock writes.
@@ -141,12 +159,11 @@ pub fn relay(invocation: cli::RelayInvocation) -> i32 {
 pub fn dispatch(command: cli::Command, sync: cli::SyncFlags) -> io::Result<i32> {
     use cli::Command::*;
     crate::kernel::policy::request_strict(sync.strict);
-    crate::tailors::install_kinds();
-    // Maintenance commands do not need host-platform validation. In
-    // particular, GC must remain usable when inspecting a copied store on a
-    // host that cannot realize its objects. The admission gate (`audit`) is
-    // read-only over the project's records: no store open (that would create
-    // the store tree), no lease, no realization, no network.
+    install_tailor_tables(&command);
+    // Maintenance commands need no host-platform validation here: GC must
+    // stay usable on a copied store from a host that cannot realize its
+    // objects, `attest` checks the host itself, and `audit` is read-only (no
+    // store open, no lease, no realization, no network).
     match command {
         Gc(args) => return gc::run(&args).map(|_| 0),
         XClean {
@@ -167,6 +184,7 @@ pub fn dispatch(command: cli::Command, sync: cli::SyncFlags) -> io::Result<i32> 
         Audit { ref policy, json } => return audit::run(policy.as_deref(), json),
         Doctor { json } => return doctor::run(json),
         Keygen { ref path } => return keygen::run(path),
+        attest @ Attest { .. } => return attest::run(attest),
         Ls {
             ref ecosystem,
             json,
@@ -192,8 +210,8 @@ pub fn dispatch(command: cli::Command, sync: cli::SyncFlags) -> io::Result<i32> 
     }
     // `sync` preflights (policy, pins, root registrability) before opening
     // the store, so a refused request touches nothing.
-    if let Sync { fresh } = command {
-        return sync::run_command(platform, fresh, sync.frozen).map(|_| 0);
+    if let Sync { fresh, records } = &command {
+        return sync::run_command(platform, *fresh, sync.frozen, records).map(|_| 0);
     }
     // `update --toolchain` refuses a stale or unresolvable project the same
     // way sync does, before the store is opened, and then syncs.
@@ -216,14 +234,13 @@ pub fn dispatch(command: cli::Command, sync: cli::SyncFlags) -> io::Result<i32> 
             | Update { .. }
             | X { .. }
     );
-    // Every verb that can rewrite a closure (build realizes and republishes
-    // the project's environment; add/remove/update sync after their edit)
-    // loads the signing key first, so a bad key fails before the store is
-    // opened or a manifest is touched, and no closure is ever written
-    // unsigned under a configured key.
+    // A verb that can rewrite a closure or run a resolution door (build,
+    // add/remove/update, x) loads the signing key first: a bad key fails
+    // before the store is opened or a manifest touched, and no closure is
+    // ever written unsigned under a configured key.
     if matches!(
         &command,
-        Build { .. } | Add { .. } | Remove { .. } | Update { .. }
+        Build { .. } | Add { .. } | Remove { .. } | Update { .. } | X { .. }
     ) {
         crate::comforter::init_signing()?;
     }
@@ -305,6 +322,7 @@ pub fn dispatch(command: cli::Command, sync: cli::SyncFlags) -> io::Result<i32> 
         | Completions { .. }
         | Doctor { .. }
         | Keygen { .. }
+        | Attest { .. }
         | Ls { .. }
         | Audit { .. }
         | SelfUpdate => {

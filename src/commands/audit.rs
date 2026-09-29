@@ -46,6 +46,11 @@
 //!   A kind tog retired (`policy::retired_kind`) is known, and old: the
 //!   record predates the change that retired it, so the closure is
 //!   `outdated` with that reason and the fix, a fresh sync.
+//! - A closure that joined a resolution record carries it as
+//!   `body.resolution`. The join already recorded the record's exceptions
+//!   into `body.exceptions`; the gate judges the record's own list as well,
+//!   so a hand-made body that dropped one from `exceptions` is still judged
+//!   on it, and a kind this binary does not know is `unknown` either way.
 
 use crate::cli;
 use crate::commands::inspect::{self, ClosureFile, State};
@@ -459,6 +464,34 @@ fn recorded_exceptions(closure: &ClosureFile) -> io::Result<Option<Vec<Exception
     }
 }
 
+/// The exceptions of the resolution record the closure joined, or none. A
+/// `resolution` field that is not a record object, or whose exception list
+/// does not parse, is refused like a malformed exception record.
+fn resolution_exceptions(closure: &ClosureFile) -> io::Result<Vec<Exception>> {
+    let malformed = |what: String| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "{:?}: malformed resolution record: {what}; run '{}'",
+                closure.path.to_string_lossy(),
+                refresh(&closure.ecosystem)
+            ),
+        )
+    };
+    let Some(resolution) = closure.body.get("resolution") else {
+        return Ok(Vec::new());
+    };
+    let Some(record) = resolution.as_object() else {
+        return Err(malformed("not a JSON object".into()));
+    };
+    match record.get("exceptions") {
+        None => Err(malformed("no exception list".into())),
+        Some(list) => {
+            serde_json::from_value(list.clone()).map_err(|error| malformed(error.to_string()))
+        }
+    }
+}
+
 /// Judge every closure file against `policy`, each from its own record:
 /// signature first, then shape, then freshness and exceptions. `sources`
 /// are the policies behind `policy`, cited when a key is excluded.
@@ -487,8 +520,14 @@ pub fn evaluate(
         let mut unknown = Vec::new();
         let mut permitted = BTreeMap::new();
         let mut retired = None;
+        let joined = resolution_exceptions(closure)?;
         match recorded_exceptions(closure)? {
-            Some(exceptions) => {
+            Some(mut exceptions) => {
+                for exception in joined {
+                    if !exceptions.contains(&exception) {
+                        exceptions.push(exception);
+                    }
+                }
                 for mut exception in exceptions {
                     // A record written before the kind names were unified
                     // on the hyphen is judged, counted, and printed under
@@ -2390,6 +2429,7 @@ mod tests {
             policy::LOCK_DISAGREEMENT,
             policy::ARTIFACT_NOT_PROVISIONED,
             policy::EXTERNAL_TOOLCHAIN,
+            policy::UNRECORDED_RESOLUTION,
             policy::UNCONFINED_RESOLUTION,
         ]
         .iter()
@@ -3005,5 +3045,153 @@ mod tests {
         let present = inspect::detected(dir).unwrap();
         let error = evaluate(host(), dir, &permissive(), &[], &[renamed], &present).unwrap_err();
         assert!(!error.to_string().contains('\u{1b}'), "{error:?}");
+    }
+
+    /// The joined resolution record, as `write_closure` places it in a
+    /// closure body: signed on its own, and covered again by the closure
+    /// signature. Audit reads only its exception list.
+    fn resolution(exceptions: &[Exception]) -> Value {
+        json!({
+            "schema": "resolution/1",
+            "ecosystem": "python",
+            "door": "edit",
+            "tool": {"name": "uv", "version": "0.9.0"},
+            "command": ["add", "six"],
+            "outputs": {"uv.lock": "0".repeat(64)},
+            "inputs": {"pyproject.toml": "1".repeat(64)},
+            "ledger": {
+                "object": format!("{}-python-1", "2".repeat(40)),
+                "portable_sha256": "3".repeat(64),
+                "endpoints": ["pypi.org"],
+                "entries": 1,
+                "refused": 0,
+            },
+            "isolation": "confined",
+            "exceptions": exceptions,
+            "signature": {"alg": "ed25519", "key": "4".repeat(64), "sig": "5".repeat(128)},
+        })
+    }
+
+    fn with_resolution(dir: &Path, body_exceptions: &[Exception], joined: Value) -> ClosureFile {
+        let mut body = python_body(dir);
+        body["exceptions"] = serde_json::to_value(body_exceptions).unwrap();
+        body["resolution"] = joined;
+        write_closure(dir, "python", "python", Some(host().triple()), body)
+    }
+
+    fn company() -> Policy {
+        let template = policy::parse_file(
+            Path::new("docs/human/policy-company.toml"),
+            include_str!("../../docs/human/policy-company.toml"),
+        )
+        .unwrap();
+        Policy {
+            signing: trusting(&[test_key()]),
+            ..template
+        }
+    }
+
+    #[test]
+    fn audit_denies_unconfined_resolution_under_company_policy() {
+        let temp = python_project("audit-unconfined");
+        let finding = exception(policy::UNCONFINED_RESOLUTION, "uv");
+        let closures = [with_resolution(
+            &temp.0,
+            &[],
+            resolution(std::slice::from_ref(&finding)),
+        )];
+        let verdicts = judge(&temp.0, &company(), &closures);
+        assert!(!verdicts[0].passes());
+        assert_eq!(
+            verdicts[0].denied.as_deref().unwrap(),
+            vec![finding.clone()]
+        );
+        // The same finding recorded by the sync and by the record counts once.
+        let closures = [with_resolution(
+            &temp.0,
+            std::slice::from_ref(&finding),
+            resolution(std::slice::from_ref(&finding)),
+        )];
+        let verdicts = judge(&temp.0, &company(), &closures);
+        assert_eq!(verdicts[0].denied.as_deref().unwrap(), vec![finding]);
+        // Unrecorded locks are denied by the same template.
+        let closures = [with_exceptions(
+            &temp.0,
+            &[exception(policy::UNRECORDED_RESOLUTION, "uv.lock")],
+        )];
+        let verdicts = judge(&temp.0, &company(), &closures);
+        assert!(!verdicts[0].passes());
+    }
+
+    #[test]
+    fn audit_fails_closed_on_an_unknown_resolution_kind() {
+        let temp = python_project("audit-resolution-unknown");
+        let closures = [with_resolution(
+            &temp.0,
+            &[],
+            resolution(&[exception("kind-from-a-newer-tog", "uv")]),
+        )];
+        let verdicts = judge(&temp.0, &permissive(), &closures);
+        assert!(!verdicts[0].passes());
+        assert_eq!(
+            verdicts[0].unknown.as_deref().unwrap(),
+            vec![exception("kind-from-a-newer-tog", "uv")]
+        );
+        for broken in [json!("not a record"), json!({"schema": "resolution/1"})] {
+            let closures = [with_resolution(&temp.0, &[], broken)];
+            let present = inspect::detected(&temp.0).unwrap();
+            let error =
+                evaluate(host(), &temp.0, &permissive(), &[], &closures, &present).unwrap_err();
+            assert!(
+                error.to_string().contains("malformed resolution record"),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn closure_readers_accept_the_resolution_field() {
+        let temp = python_project("audit-readers");
+        let dir = &temp.0;
+        let plain = with_exceptions(dir, &[]);
+        let plain_state = inspect::closure_state(host(), dir, &plain).unwrap();
+        let store_dir = TempDir::named("audit-readers-store");
+        let store = crate::kernel::store::Store {
+            root: store_dir.0.clone(),
+        };
+        let plain_root = format!("{:?}", store.root_record_from_project(dir));
+        let plain_sbom = format!("{:?}", crate::commands::sbom::generate(dir));
+        let joined = with_resolution(
+            dir,
+            &[],
+            resolution(&[exception(policy::UNCONFINED_RESOLUTION, "uv")]),
+        );
+        assert_eq!(joined.body["resolution"]["door"], "edit");
+        assert_eq!(inspect::closures(dir).unwrap().len(), 1);
+        assert_eq!(
+            inspect::closure_state(host(), dir, &joined).unwrap(),
+            plain_state
+        );
+        inspect::status(host(), dir).unwrap();
+        inspect::ls(dir, None, false, true).unwrap();
+        inspect::ls(dir, None, true, false).unwrap();
+        assert_eq!(
+            format!("{:?}", crate::commands::sbom::generate(dir)),
+            plain_sbom
+        );
+        assert_eq!(
+            format!("{:?}", store.root_record_from_project(dir)),
+            plain_root
+        );
+        let verdicts = judge(dir, &permissive(), &[joined]);
+        assert!(verdicts[0].passes(), "{:?}", verdicts[0]);
+        assert_eq!(
+            verdicts[0]
+                .permitted
+                .as_ref()
+                .unwrap()
+                .get(policy::UNCONFINED_RESOLUTION),
+            Some(&1)
+        );
     }
 }

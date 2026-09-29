@@ -109,7 +109,17 @@ fn preflight_detected(
 /// ecosystem before the store is opened. A refused request (an unpinned
 /// patch, a path no root record can hold) must leave no trace: no store
 /// tree created, no maintenance sweep, no lease taken.
-pub fn run_command(platform: Platform, fresh: bool, frozen: bool) -> io::Result<()> {
+///
+/// `records` are the `--resolution-record` paths: read now, so a
+/// bad path fails before anything is realized, and judged by every closure
+/// write's resolution join as evidence beside the committed receipts.
+pub fn run_command(
+    platform: Platform,
+    fresh: bool,
+    frozen: bool,
+    records: &[PathBuf],
+) -> io::Result<()> {
+    crate::comforter::join::supply_records(records)?;
     let mode = if frozen { Mode::Frozen } else { Mode::Writable };
     run_in_mode(platform, fresh, mode, false)
 }
