@@ -57,12 +57,13 @@ use crate::commands::inspect::{self, ClosureFile, State};
 use crate::commands::shared::project_dir;
 use crate::kernel::platform::Platform;
 use crate::kernel::policy::{self, Exception, Policy, PolicySource, SourceOrigin};
+use crate::kernel::resolve::record;
 use crate::kernel::signing::{self, KeySet, PublicKey, Verification};
 use crate::kernel::toolchain::lock::LOCK_PATH;
 use crate::kernel::ui;
 use crate::tailors;
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::path::Path;
 
@@ -492,6 +493,84 @@ fn resolution_exceptions(closure: &ClosureFile) -> io::Result<Vec<Exception>> {
     }
 }
 
+/// Why the resolution record `closure` joined no longer describes the files
+/// in `dir`, or `None` when it still does (or there is no record). The
+/// record's signed digests are compared with the files it names, whatever
+/// they are; a resolution file of the closure's ecosystem that exists now
+/// but that the record never named is a change too. The toolchain-input
+/// freshness check sees only go.mod's `go` and `toolchain` directives and
+/// go.sum, so a dependency added to go.mod alone is caught here.
+fn resolution_staleness(dir: &Path, closure: &ClosureFile) -> io::Result<Option<String>> {
+    let malformed = |what: String| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "{:?}: malformed resolution record: {what}; run '{}'",
+                closure.path.to_string_lossy(),
+                refresh(&closure.ecosystem)
+            ),
+        )
+    };
+    let Some(resolution) = closure.body.get("resolution") else {
+        return Ok(None);
+    };
+    let digests = |field: &str| -> io::Result<BTreeMap<String, String>> {
+        let value = resolution
+            .get(field)
+            .ok_or_else(|| malformed(format!("no {field} map")))?;
+        let map: BTreeMap<String, String> = serde_json::from_value(value.clone())
+            .map_err(|error| malformed(format!("{field}: {error}")))?;
+        for (path, digest) in &map {
+            if record::record_path(Path::new(path)).as_deref() != Some(path.as_str()) {
+                return Err(malformed(format!("{field} names {path:?}")));
+            }
+            if !record::is_sha256_hex(digest) {
+                return Err(malformed(format!(
+                    "{field} digest for {path} is not a sha256"
+                )));
+            }
+        }
+        Ok(map)
+    };
+    let mut named = digests("outputs")?;
+    named.extend(digests("inputs")?);
+    let project = crate::kernel::fsroot::ProjectRoot::open(dir)?;
+    let mut changed = BTreeSet::new();
+    for (path, digest) in &named {
+        let current = if project.is_input_file(Path::new(path)) {
+            project
+                .read_input(Path::new(path))?
+                .map(|bytes| record::sha256_hex(&bytes))
+        } else {
+            None
+        };
+        if current.as_deref() != Some(digest.as_str()) {
+            changed.insert(path.clone());
+        }
+    }
+    let files = match tailors::by_id(&closure.ecosystem) {
+        Some(tailor) => tailors::resolution_files(tailor, &project)?,
+        None => None,
+    };
+    if let Some(files) = files {
+        let mut listed = files.outputs;
+        listed.extend(files.inputs);
+        for path in record::file_digests(&project, &listed)?.into_keys() {
+            if !named.contains_key(&path) {
+                changed.insert(path);
+            }
+        }
+    }
+    if changed.is_empty() {
+        return Ok(None);
+    }
+    let changed: Vec<String> = changed.into_iter().collect();
+    Ok(Some(format!(
+        "{} changed since the last sync (the resolution record describes another version)",
+        changed.join(", ")
+    )))
+}
+
 /// Whether `closure` belongs to an ecosystem whose lock the resolution
 /// join covers, one of whose lock files exists in `dir`, and yet carries
 /// neither a joined record nor an `unrecorded-resolution` exception. A
@@ -541,6 +620,11 @@ pub fn evaluate(
             continue;
         }
         let mut freshness = freshness(platform, dir, closure, present)?;
+        if !matches!(freshness, Freshness::Stale(_)) {
+            if let Some(why) = resolution_staleness(dir, closure)? {
+                freshness = Freshness::Stale(why);
+            }
+        }
         let mut denied = Vec::new();
         let mut unknown = Vec::new();
         let mut permitted = BTreeMap::new();
@@ -3081,16 +3165,21 @@ mod tests {
 
     /// The joined resolution record, as `write_closure` places it in a
     /// closure body: signed on its own, and covered again by the closure
-    /// signature. Audit reads only its exception list.
-    fn resolution(exceptions: &[Exception]) -> Value {
+    /// signature. Audit reads its exception list and compares its digests
+    /// with the files in `dir`, which it describes as they are now.
+    fn resolution(dir: &Path, exceptions: &[Exception]) -> Value {
+        let digest = |name: &str| match fs::read(dir.join(name)) {
+            Ok(bytes) => record::sha256_hex(&bytes),
+            Err(_) => "0".repeat(64),
+        };
         json!({
             "schema": "resolution/1",
             "ecosystem": "python",
             "door": "edit",
             "tool": {"name": "uv", "version": "0.9.0"},
             "command": ["add", "six"],
-            "outputs": {"uv.lock": "0".repeat(64)},
-            "inputs": {"pyproject.toml": "1".repeat(64)},
+            "outputs": {"requirements.txt": digest("requirements.txt")},
+            "inputs": {},
             "ledger": {
                 "object": format!("{}-python-1", "2".repeat(40)),
                 "portable_sha256": "3".repeat(64),
@@ -3130,7 +3219,7 @@ mod tests {
         let closures = [with_resolution(
             &temp.0,
             &[],
-            resolution(std::slice::from_ref(&finding)),
+            resolution(&temp.0, std::slice::from_ref(&finding)),
         )];
         let verdicts = judge(&temp.0, &company(), &closures);
         assert!(!verdicts[0].passes());
@@ -3142,7 +3231,7 @@ mod tests {
         let closures = [with_resolution(
             &temp.0,
             std::slice::from_ref(&finding),
-            resolution(std::slice::from_ref(&finding)),
+            resolution(&temp.0, std::slice::from_ref(&finding)),
         )];
         let verdicts = judge(&temp.0, &company(), &closures);
         assert_eq!(verdicts[0].denied.as_deref().unwrap(), vec![finding]);
@@ -3174,7 +3263,7 @@ mod tests {
         assert!(!lacks_resolution_evidence(dir, &go(json!({"exceptions": [unrecorded]}))).unwrap());
         assert!(!lacks_resolution_evidence(
             dir,
-            &go(json!({"exceptions": [], "resolution": resolution(&[])}))
+            &go(json!({"exceptions": [], "resolution": resolution(dir, &[])}))
         )
         .unwrap());
         let python = write_closure(
@@ -3187,13 +3276,111 @@ mod tests {
         assert!(!lacks_resolution_evidence(dir, &python).unwrap());
     }
 
+    /// A Go record over `dir`'s go.mod and go.sum as they are now.
+    fn go_resolution(dir: &Path) -> Value {
+        let mut outputs = serde_json::Map::new();
+        for name in ["go.mod", "go.sum"] {
+            if let Ok(bytes) = fs::read(dir.join(name)) {
+                outputs.insert(name.into(), json!(record::sha256_hex(&bytes)));
+            }
+        }
+        let mut joined = resolution(dir, &[]);
+        joined["ecosystem"] = json!("go");
+        joined["outputs"] = Value::Object(outputs);
+        joined
+    }
+
+    /// The record a Go closure joined is compared with go.mod and go.sum:
+    /// a dependency added to go.mod alone (same `go` directive, same
+    /// go.sum) is invisible to the toolchain-input check, and stale here.
+    #[test]
+    fn a_joined_record_that_no_longer_describes_the_lock_is_stale() {
+        let temp = TempDir::named("audit-record-stale");
+        let dir = &temp.0;
+        fs::write(dir.join("go.mod"), "module example.com/m\n\ngo 1.22\n").unwrap();
+        fs::write(dir.join("go.sum"), "").unwrap();
+        let go = |joined: Value| {
+            write_closure(
+                dir,
+                "go",
+                "go",
+                Some(host().triple()),
+                json!({"exceptions": [], "resolution": joined}),
+            )
+        };
+        let closure = go(go_resolution(dir));
+        assert_eq!(resolution_staleness(dir, &closure).unwrap(), None);
+        fs::write(
+            dir.join("go.mod"),
+            "module example.com/m\n\ngo 1.22\n\nrequire golang.org/x/text v0.14.0\n",
+        )
+        .unwrap();
+        let why = resolution_staleness(dir, &closure).unwrap().unwrap();
+        assert!(
+            why.starts_with("go.mod changed since the last sync"),
+            "{why}"
+        );
+        // A lock file the record never named is a change too.
+        fs::remove_file(dir.join("go.sum")).unwrap();
+        let closure = go(go_resolution(dir));
+        assert_eq!(resolution_staleness(dir, &closure).unwrap(), None);
+        fs::write(dir.join("go.sum"), "golang.org/x/text v0.14.0 h1:x=\n").unwrap();
+        let why = resolution_staleness(dir, &closure).unwrap().unwrap();
+        assert!(why.starts_with("go.sum changed"), "{why}");
+        // A record whose digests cannot be read is malformed, not skipped.
+        let mut broken = go_resolution(dir);
+        broken["outputs"] = json!({"go.mod": "not a digest"});
+        let error = resolution_staleness(dir, &go(broken)).unwrap_err();
+        assert!(
+            error.to_string().contains("malformed resolution record"),
+            "{error}"
+        );
+    }
+
+    /// Through the whole gate: a current closure whose joined record names
+    /// a file its own freshness check never reads turns stale, with the
+    /// refresh hint, once that file changes.
+    #[test]
+    fn audit_reports_a_stale_joined_record_with_the_refresh_hint() {
+        let temp = python_project("audit-record-hint");
+        let dir = &temp.0;
+        fs::write(dir.join("extra.lock"), "one\n").unwrap();
+        let mut joined = resolution(dir, &[]);
+        joined["outputs"]["extra.lock"] = json!(record::sha256_hex(b"one\n"));
+        let closures = [with_resolution(dir, &[], joined)];
+        let verdicts = judge(dir, &permissive(), &closures);
+        assert_eq!(verdicts[0].freshness, Freshness::Current);
+        fs::write(dir.join("extra.lock"), "two\n").unwrap();
+        let verdicts = judge(dir, &permissive(), &closures);
+        let Freshness::Stale(why) = &verdicts[0].freshness else {
+            panic!("{:?}", verdicts[0].freshness);
+        };
+        assert!(
+            why.starts_with("extra.lock changed since the last sync"),
+            "{why}"
+        );
+        assert!(!verdicts[0].passes());
+        let report = Report {
+            policy: permissive(),
+            sources: Vec::new(),
+            verdicts,
+            missing: Vec::new(),
+        };
+        let text = render(dir, &report, false).unwrap();
+        assert!(
+            text.contains("extra.lock changed since the last sync"),
+            "{text}"
+        );
+        assert!(text.contains("run 'tog', then audit again"), "{text}");
+    }
+
     #[test]
     fn audit_fails_closed_on_an_unknown_resolution_kind() {
         let temp = python_project("audit-resolution-unknown");
         let closures = [with_resolution(
             &temp.0,
             &[],
-            resolution(&[exception("kind-from-a-newer-tog", "uv")]),
+            resolution(&temp.0, &[exception("kind-from-a-newer-tog", "uv")]),
         )];
         let verdicts = judge(&temp.0, &permissive(), &closures);
         assert!(!verdicts[0].passes());
@@ -3228,7 +3415,7 @@ mod tests {
         let joined = with_resolution(
             dir,
             &[],
-            resolution(&[exception(policy::UNCONFINED_RESOLUTION, "uv")]),
+            resolution(dir, &[exception(policy::UNCONFINED_RESOLUTION, "uv")]),
         );
         assert_eq!(joined.body["resolution"]["door"], "edit");
         assert_eq!(inspect::closures(dir).unwrap().len(), 1);
