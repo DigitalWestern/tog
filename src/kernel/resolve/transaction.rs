@@ -29,16 +29,23 @@
 //!    fails. An absent target is created with `RENAME_NOREPLACE`, which
 //!    fails if anything appeared meanwhile.
 //! 4. **Commit.** Once the receipt is in place, the journal is marked
-//!    committed, the displaced temporaries and the journal are deleted, and
-//!    the originals are released.
+//!    committed and the displaced temporaries are deleted.
+//! 5. **Finish.** The project's files are now final, so the journal is
+//!    marked finished, the originals are released, and only then are the
+//!    journal and the directories the transaction created deleted. A
+//!    release that fails leaves the finished journal, and the next
+//!    recovery releases again. A held journal (nothing was published) goes
+//!    the same way without being rewritten.
 //!
-//! Any failure during step 3 undoes every target in reverse, and recovery
-//! after a crash does the same from the journal. Recovery trusts a journal
-//! only in the directory it was asked about (never an ancestor), only when
-//! the originals object it names is in this store and rooted to this
-//! project with an identity that lists exactly its targets and pre-run
-//! digests, and only for temporaries named the way this module names them.
-//! Anything else is refused with the journal's path, and nothing is
+//! Any failure during step 3 undoes every target in reverse, then
+//! finishes, and recovery after a crash does the same from the journal.
+//! Recovery trusts a journal only in the directory it was asked about
+//! (never an ancestor), only when the originals object it names is in this
+//! store and rooted to this project with an identity that lists exactly its
+//! targets and pre-run digests, and only for temporaries named the way this
+//! module names them. A held or finished journal touches no target, so its
+//! originals need only be of the right kind, or gone (never committed, or
+//! collected after the release that preceded a crash). Anything else is refused with the journal's path, and nothing is
 //! touched. Every holder of a project's journal also holds an `flock` on
 //! the project directory itself, so two tog processes using different
 //! stores cannot undo each other's publication. Both decide by
@@ -67,7 +74,7 @@ use std::path::{Path, PathBuf};
 mod recovery;
 
 use recovery::{
-    finish_committed, is_journal_name, lock_project_dir, narrate, recover_locked, release, undo,
+    finish, finish_committed, is_journal_name, lock_project_dir, narrate, recover_locked, undo,
 };
 pub use recovery::{has_pending_journal, recover_project};
 
@@ -107,9 +114,9 @@ pub enum Published {
     /// Published, and every temporary, the journal and the originals'
     /// root are gone.
     Clean,
-    /// Published (the journal says committed), but cleaning up after it
-    /// failed. The journal stays and the next recovery finishes; nothing
-    /// published is taken back.
+    /// Published (the journal says committed or finished), but cleaning up
+    /// after it failed. The journal stays and the next recovery finishes;
+    /// nothing published is taken back.
     CleanupPending(io::Error),
 }
 
@@ -369,8 +376,9 @@ impl<'a> Transaction<'a> {
     ///
     /// Once the journal says committed the publication has happened, so a
     /// failure while cleaning up after it is not an error: it comes back
-    /// as [`Published::CleanupPending`], the journal stays (committed), and
-    /// the next recovery finishes the cleanup.
+    /// as [`Published::CleanupPending`], the journal stays (committed, or
+    /// finished once the temporaries are gone), and the next recovery
+    /// finishes the cleanup.
     pub fn publish(mut self, outputs: &Outputs, receipt: Option<&[u8]>) -> io::Result<Published> {
         let plan = self.plan(outputs, receipt)?;
         let mut created = self.created_at_hold.clone();
@@ -418,11 +426,25 @@ impl<'a> Transaction<'a> {
                 match undone {
                     Ok(notes) => {
                         self.finished = true;
-                        remove_journal(&journals, &self.ecosystem)?;
-                        remove_created_dirs(&self.root, &journal)?;
-                        release(self.store, self.activity, &self.root, &self.lock, &journal)?;
                         narrate(self.root.path(), &notes, "undone");
-                        Err(error)
+                        match finish(self.store, self.activity, &self.root, &self.lock, &journal) {
+                            Ok(()) => Err(error),
+                            Err(cleanup) if is_crash(&cleanup) => Err(cleanup),
+                            Err(cleanup) => Err(io::Error::new(
+                                error.kind(),
+                                format!(
+                                    "{error}; the partial publication was undone, but \
+                                     cleaning up after it failed ({cleanup}), so the journal \
+                                     {} was kept and the next tog command in this project \
+                                     will finish it",
+                                    self.root
+                                        .path()
+                                        .join(JOURNAL_DIR)
+                                        .join(journal_name(&self.ecosystem))
+                                        .display()
+                                ),
+                            )),
+                        }
                     }
                     Err(undo_error) => {
                         // The journal stays, and so does the originals'
@@ -456,11 +478,7 @@ impl<'a> Transaction<'a> {
 
     fn release(&self) -> io::Result<()> {
         let journal = self.journal(JournalState::Held, Vec::new());
-        if let Some(journals) = self.root.subdir(Path::new(JOURNAL_DIR))? {
-            remove_journal(&journals, &self.ecosystem)?;
-        }
-        remove_created_dirs(&self.root, &journal)?;
-        release(self.store, self.activity, &self.root, &self.lock, &journal)
+        finish(self.store, self.activity, &self.root, &self.lock, &journal)
     }
 
     fn plan(&self, outputs: &Outputs, receipt: Option<&[u8]>) -> io::Result<Vec<Planned>> {
@@ -655,10 +673,20 @@ struct Planned {
 #[serde(rename_all = "lowercase")]
 enum JournalState {
     /// The targets are held and the originals named; nothing in the
-    /// project has been touched.
+    /// project has been touched. Recovery releases the originals.
     Held,
+    /// Targets are being swapped. Recovery undoes every target, then
+    /// finishes.
     Publishing,
+    /// Every target is published; displaced temporaries may remain.
+    /// Recovery deletes them, then finishes.
     Committed,
+    /// The project's files are final (published or undone) and the
+    /// temporaries are gone: only the originals' root and the journal
+    /// remain. Recovery releases the originals, then deletes the journal.
+    /// Trusted without its originals rooted, since the release may have
+    /// happened just before a crash.
+    Finished,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1143,6 +1171,10 @@ pub enum FaultPoint {
     Verified,
     Committed,
     TempsRemoved,
+    /// In `finish`, before the originals are released.
+    Releasing,
+    /// In `finish`, after the release and before the journal is deleted.
+    Released,
 }
 
 #[cfg(test)]
@@ -2002,9 +2034,222 @@ mod tests {
         );
         assert_eq!(read(&fx, "package-lock.json").as_deref(), Some(NEW_LOCK));
         assert!(has_pending_journal(&fx.project));
+        // It failed before the finished journal was written, so the
+        // committed one stands.
+        assert_eq!(journal_state(&fx).as_deref(), Some("committed"));
         assert_eq!(rooted_originals(&fx).len(), 1);
         recover(&fx);
         assert_published(&fx);
+    }
+
+    fn journal_state(fx: &Fixture) -> Option<String> {
+        let bytes = fs::read(journal_path(fx)).ok()?;
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        value["state"].as_str().map(str::to_string)
+    }
+
+    fn fail_at(at: FaultPoint) -> impl FnMut(FaultPoint) -> Fault + 'static {
+        move |point| {
+            if point == at {
+                Fault::Fail
+            } else {
+                Fault::Continue
+            }
+        }
+    }
+
+    /// Recovery with `hook` installed, returning its result.
+    fn recover_with(
+        fx: &Fixture,
+        hook: impl FnMut(FaultPoint) -> Fault + 'static,
+    ) -> io::Result<Vec<Restored>> {
+        let activity = fx.store.activity(ActivityMode::Shared).unwrap();
+        set_hook(hook);
+        let result = recover_project(&fx.store, &activity, &fx.project);
+        clear_hook();
+        result
+    }
+
+    /// A publication that fails at the swap of the lock file (target 1),
+    /// with `then` answering every later fault point.
+    fn fail_then(then: impl Fn(FaultPoint) -> Fault + 'static) -> impl FnMut(FaultPoint) -> Fault {
+        move |point| {
+            if point == FaultPoint::Marked(1) {
+                Fault::Fail
+            } else {
+                then(point)
+            }
+        }
+    }
+
+    /// `tog gc` collecting an unrooted originals object.
+    fn collect_originals(fx: &Fixture, id: &str) {
+        store::remove_tree(&fx.store.object_path(id)).unwrap();
+        let _ = fs::remove_file(fx.store.root.join("meta").join(format!("{id}.json")));
+        assert!(fx.store.published_identity(id).unwrap().is_none());
+    }
+
+    fn journal_originals(fx: &Fixture) -> String {
+        let value: serde_json::Value =
+            serde_json::from_slice(&fs::read(journal_path(fx)).unwrap()).unwrap();
+        value["originals"].as_str().unwrap().to_string()
+    }
+
+    /// Releasing the originals fails after commit: the journal survives as
+    /// finished with the originals still rooted, so the next recovery
+    /// releases them rather than leaving them rooted for good.
+    #[test]
+    fn a_failed_release_after_commit_is_retried_by_recovery() {
+        let fx = fixture("release-fails", true);
+        let published = run_door(&fx, |_| {}, fail_at(FaultPoint::Releasing)).unwrap();
+        assert!(
+            matches!(published, Published::CleanupPending(_)),
+            "{published:?}"
+        );
+        assert_eq!(read(&fx, "package-lock.json").as_deref(), Some(NEW_LOCK));
+        assert_eq!(journal_state(&fx).as_deref(), Some("finished"));
+        assert_eq!(rooted_originals(&fx).len(), 1);
+        // Recovery's own release can fail too; the journal still stays.
+        recover_with(&fx, fail_at(FaultPoint::Releasing)).unwrap_err();
+        assert_eq!(journal_state(&fx).as_deref(), Some("finished"));
+        assert_eq!(rooted_originals(&fx).len(), 1);
+        recover(&fx);
+        assert_published(&fx);
+    }
+
+    /// Killed after the release and before the journal was deleted: the
+    /// finished journal is trusted without its originals rooted, even
+    /// once `tog gc` has collected them, and recovery deletes it.
+    #[test]
+    fn a_crash_after_the_release_is_finished_by_recovery() {
+        for collected in [false, true] {
+            let fx = fixture("released-crash", true);
+            let error = run_door(&fx, |_| {}, crash_at(FaultPoint::Released)).unwrap_err();
+            assert!(is_crash(&error), "{error}");
+            assert_eq!(journal_state(&fx).as_deref(), Some("finished"));
+            assert!(rooted_originals(&fx).is_empty());
+            if collected {
+                collect_originals(&fx, &journal_originals(&fx));
+            }
+            recover(&fx);
+            assert_published(&fx);
+            assert!(!fx.project.join(JOURNAL_DIR).exists(), "{collected}");
+        }
+    }
+
+    /// The same two failures on the rollback path: the undone project
+    /// stays undone, and recovery releases and deletes the journal.
+    #[test]
+    fn a_failed_or_interrupted_release_after_an_undo_is_finished_by_recovery() {
+        let fx = fixture("undo-release-fails", true);
+        let error = run_door(
+            &fx,
+            |_| {},
+            fail_then(|point| {
+                if point == FaultPoint::Releasing {
+                    Fault::Fail
+                } else {
+                    Fault::Continue
+                }
+            }),
+        )
+        .unwrap_err();
+        let text = error.to_string();
+        assert!(text.contains("injected failure at Marked(1)"), "{text}");
+        assert!(text.contains("cleaning up after it failed"), "{text}");
+        assert_eq!(journal_state(&fx).as_deref(), Some("finished"));
+        assert_eq!(rooted_originals(&fx).len(), 1);
+        assert_eq!(read(&fx, "package.json").as_deref(), Some(OLD_MANIFEST));
+        recover(&fx);
+        assert_original(&fx, Some(OLD_RECEIPT));
+
+        let fx = fixture("undo-released-crash", true);
+        let error = run_door(
+            &fx,
+            |_| {},
+            fail_then(|point| {
+                if point == FaultPoint::Released {
+                    Fault::Crash
+                } else {
+                    Fault::Continue
+                }
+            }),
+        )
+        .unwrap_err();
+        assert!(is_crash(&error), "{error}");
+        assert_eq!(journal_state(&fx).as_deref(), Some("finished"));
+        assert!(rooted_originals(&fx).is_empty());
+        recover(&fx);
+        assert_original(&fx, Some(OLD_RECEIPT));
+    }
+
+    /// Recovery of a crashed publication whose own release fails keeps a
+    /// finished journal (never an untrusted one), and the next finishes.
+    #[test]
+    fn recovery_whose_release_fails_or_crashes_is_finished_next_time() {
+        for (point, committed) in [
+            (FaultPoint::Committed, true),
+            (FaultPoint::Marked(1), false),
+        ] {
+            for fault in [Fault::Fail, Fault::Crash] {
+                let fx = fixture("recovery-release", true);
+                let _ = run_door(&fx, |_| {}, crash_at(point));
+                let at = if fault == Fault::Fail {
+                    FaultPoint::Releasing
+                } else {
+                    FaultPoint::Released
+                };
+                recover_with(&fx, move |p| if p == at { fault } else { Fault::Continue })
+                    .unwrap_err();
+                assert_eq!(
+                    journal_state(&fx).as_deref(),
+                    Some("finished"),
+                    "{point:?} {fault:?}"
+                );
+                recover(&fx);
+                if committed {
+                    assert_published(&fx);
+                } else {
+                    assert_original(&fx, Some(OLD_RECEIPT));
+                }
+            }
+        }
+    }
+
+    /// Abandoning a hold whose release fails, or is interrupted after it,
+    /// leaves the held journal, which the next recovery finishes.
+    #[test]
+    fn a_failed_or_interrupted_release_of_a_hold_is_finished_by_recovery() {
+        for (at, fault) in [
+            (FaultPoint::Releasing, Fault::Fail),
+            (FaultPoint::Released, Fault::Crash),
+        ] {
+            let fx = fixture("hold-release", true);
+            let activity = fx.store.activity(ActivityMode::Shared).unwrap();
+            let declared = declared();
+            let tx = Transaction::hold(
+                &fx.store,
+                &activity,
+                ProjectRoot::open(&fx.project).unwrap(),
+                &HoldSpec {
+                    ecosystem: "npm",
+                    outputs: &declared,
+                    receipt: true,
+                },
+            )
+            .unwrap();
+            set_hook(move |p| if p == at { fault } else { Fault::Continue });
+            let result = tx.abandon();
+            clear_hook();
+            result.unwrap_err();
+            assert_eq!(journal_state(&fx).as_deref(), Some("held"), "{at:?}");
+            let rooted = if fault == Fault::Fail { 1 } else { 0 };
+            assert_eq!(rooted_originals(&fx).len(), rooted, "{at:?}");
+            drop(activity);
+            recover(&fx);
+            assert_original(&fx, Some(OLD_RECEIPT));
+            assert!(!fx.project.join(JOURNAL_DIR).exists(), "{at:?}");
+        }
     }
 
     /// A process killed while the tool ran (after hold, before publish)

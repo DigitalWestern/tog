@@ -83,19 +83,15 @@ pub(super) fn recover_locked(
         check_journal(store, activity, root, lock, &journal)
             .map_err(|detail| untrusted_journal(&shown, &detail))?;
         match journal.state {
-            JournalState::Held => {
-                remove_journal(&journals, &journal.ecosystem)?;
-                remove_created_dirs(root, &journal)?;
-                release(store, activity, root, lock, &journal)?;
+            JournalState::Held | JournalState::Finished => {
+                finish(store, activity, root, lock, &journal)?;
             }
             JournalState::Committed => {
                 finish_committed(store, activity, root, lock, &journal)?;
             }
             JournalState::Publishing => {
                 notes.extend(undo(store, root, &journal)?);
-                remove_journal(&journals, &journal.ecosystem)?;
-                remove_created_dirs(root, &journal)?;
-                release(store, activity, root, lock, &journal)?;
+                finish(store, activity, root, lock, &journal)?;
             }
         }
     }
@@ -139,9 +135,11 @@ fn check_journal(
         .map_err(|error| error.to_string())?;
     let Some(identity) = identity else {
         return match journal.state {
-            // Killed before the originals were committed: nothing was
-            // rooted and nothing in the project was touched.
-            JournalState::Held => Ok(()),
+            // Held: killed before the originals were committed, so nothing
+            // was rooted and nothing in the project was touched. Finished:
+            // killed after the originals were released, and `tog gc` has
+            // collected them since. Either way only the journal is left.
+            JournalState::Held | JournalState::Finished => Ok(()),
             _ => Err(format!(
                 "its originals object {} is not in this store ({})",
                 journal.originals,
@@ -155,7 +153,9 @@ fn check_journal(
             journal.originals, journal.ecosystem
         ));
     }
-    if journal.state == JournalState::Held {
+    // Neither state touches a target again, and a finished journal's
+    // originals may already be unrooted.
+    if matches!(journal.state, JournalState::Held | JournalState::Finished) {
         return Ok(());
     }
     let rooted = store
@@ -288,8 +288,7 @@ pub(super) fn narrate(project: &Path, notes: &[Restored], verb: &str) {
 
 /// A committed journal: the targets are published. Delete each displaced
 /// temporary that still holds exactly its target's pre-run bytes (anything
-/// else there is left alone and reported), then the journal, then release
-/// the originals.
+/// else there is left alone and reported), then `finish`.
 pub(super) fn finish_committed(
     store: &Store,
     activity: &StoreActivity,
@@ -323,11 +322,45 @@ pub(super) fn finish_committed(
         );
     }
     fault(FaultPoint::TempsRemoved)?;
-    if let Some(journals) = root.subdir(Path::new(JOURNAL_DIR))? {
-        remove_journal(&journals, &journal.ecosystem)?;
+    finish(store, activity, root, lock, journal)
+}
+
+/// The last steps of every transaction and every recovery, once the
+/// project's files are final (untouched, published, or undone): release
+/// the originals, then delete the journal, then the directories the
+/// transaction created (`.tog/journal` cannot go while the journal is in
+/// it).
+///
+/// The journal goes last so that a failed release is retried: the next
+/// recovery finds the journal and releases again. A `publishing` or
+/// `committed` journal is trusted only while its originals are rooted, so
+/// it is first rewritten as `finished`, which is trusted without them; a
+/// crash between the release and the journal's removal then leaves a
+/// journal the next recovery finishes instead of refusing. If that
+/// rewrite fails, the old journal stays and recovery repeats the step it
+/// names, which finds nothing left to do in the project.
+pub(super) fn finish(
+    store: &Store,
+    activity: &StoreActivity,
+    root: &ProjectRoot,
+    lock: &fs::File,
+    journal: &Journal,
+) -> io::Result<()> {
+    let journals = root.subdir(Path::new(JOURNAL_DIR))?;
+    if let (JournalState::Publishing | JournalState::Committed, Some(journals)) =
+        (journal.state, &journals)
+    {
+        let mut finished = journal.clone();
+        finished.state = JournalState::Finished;
+        write_journal(journals, &finished)?;
     }
-    remove_created_dirs(root, journal)?;
-    release(store, activity, root, lock, journal)
+    fault(FaultPoint::Releasing)?;
+    release(store, activity, root, lock, journal)?;
+    fault(FaultPoint::Released)?;
+    if let Some(journals) = &journals {
+        remove_journal(journals, &journal.ecosystem)?;
+    }
+    remove_created_dirs(root, journal)
 }
 
 pub(super) fn release(

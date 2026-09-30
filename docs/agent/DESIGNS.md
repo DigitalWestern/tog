@@ -2579,10 +2579,13 @@ Contract 1 needs enforcement, not review alone:
    object of the kernel kind `resolution-originals/1` (inputs: `schema`,
    a random `run` nonce so each transaction's copy is its own object, and
    `target:<i>`/`digest:<i>` per target), rooted in the project's root
-   record from here until the journal is gone, and released afterwards.
-   A crash between deleting the journal and releasing the root leaves the
-   object protected until the next `tog gc --register`, never the
-   reverse. The object is committed even when every target is absent,
+   record from here until the project's files are final, and released
+   just before the journal is deleted. The journal goes last, so a
+   release that fails (or a crash before it) leaves a journal the next
+   recovery finishes by releasing again. A `publishing` or `committed`
+   journal is first rewritten as `finished`, which recovery trusts
+   without the originals rooted, so a crash between the release and the
+   journal's deletion does not leave a journal recovery refuses. The object is committed even when every target is absent,
    because recovery trusts a journal only through it. Before the object
    is rooted, a `held` journal (step 7's file, with no targets yet) names
    its id, so a tog killed while the tool runs leaves a journal that
@@ -2638,16 +2641,17 @@ Contract 1 needs enforcement, not review alone:
    inside a successful transaction, and only if it is still the one held
    at step 2.
 9. **Commit point.** When the record has been swapped, mark the journal
-   `committed`, `fsync`, delete the displaced temporaries, and delete the
-   journal. The resolution is now published. A failure while cleaning up
+   `committed`, `fsync`, delete the displaced temporaries, mark it
+   `finished`, release the original copies, and delete the journal. The resolution is now published. A failure while cleaning up
    after this point is not a failed door: the outputs, the receipt, and
-   the ledger's roots stay, tog warns, and the committed journal is left
-   for the next recovery to finish.
+   the ledger's roots stay, tog warns, and the committed (or finished)
+   journal is left for the next recovery to finish.
 10. **On any failure before step 8**, nothing has touched the project:
     remove the temporaries and unroot the ledger and sidecar for `tog gc`.
     **On failure during step 8**, undo every `swapped` target in reverse
     order, by exchanging the displaced original back (or removing a
-    created file), then delete the journal. The project is byte-for-byte
+    created file), then mark the journal `finished`, release the original
+    copies, and delete the journal. The project is byte-for-byte
     as it was.
 
 **Recovery** (at the start of any writing command, after a crash, and at
@@ -2667,7 +2671,10 @@ descriptor without following a symlink); and every temporary is named
 exactly `.<target name>.tog-<16 hex>.tmp` beside its target. Anything
 else, and a journal that does not parse, is refused with the journal's
 path and what to do, and nothing is touched; it blocks only commands
-that write that project. A `held` journal only releases its originals. A
+that write that project. A `held` or `finished` journal only releases
+its originals and is deleted; neither is checked against rooted
+originals (a `held` one's may never have been committed, a `finished`
+one's were released just before a crash and may since be collected). A
 `committed` journal only needs its temporaries and itself deleted, and a
 temporary is deleted only while it still holds its target's pre-run
 bytes. Any other journal is rolled back target by target. A displaced
@@ -2678,7 +2685,8 @@ used. A target whose current
 digest is the journal's new digest is restored from its original copy
 (or removed if it was absent). A target at its pre-run digest is left
 alone. A target at a third digest was edited after the crash, so it is
-left alone and reported. Then the journal is deleted. A crash therefore
+left alone and reported. Then the journal is marked `finished`, the
+originals are released, and the journal is deleted. A crash therefore
 never leaves a new lock that the next sync accepts silently: after
 recovery the project is back at its originals, and the receipt that was
 there before (if any) still describes them.
