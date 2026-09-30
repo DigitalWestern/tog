@@ -2674,7 +2674,12 @@ path and what to do, and nothing is touched; it blocks only commands
 that write that project. A `held` or `finished` journal only releases
 its originals and is deleted; neither is checked against rooted
 originals (a `held` one's may never have been committed, a `finished`
-one's were released just before a crash and may since be collected). A
+one's were released just before a crash and may since be collected).
+When their originals are not in the store, the journal must name that
+store (its canonical root, recorded in every journal) as the one that
+wrote it; otherwise it belongs to another store, whose root still holds
+its originals, and is refused. A held journal written before journals
+named their store is trusted as before. A
 `committed` journal only needs its temporaries and itself deleted, and a
 temporary is deleted only while it still holds its target's pre-run
 bytes. Any other journal is rolled back target by target. A displaced

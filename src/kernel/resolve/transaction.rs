@@ -45,7 +45,9 @@
 //! targets and pre-run digests, and only for temporaries named the way this
 //! module names them. A held or finished journal touches no target, so its
 //! originals need only be of the right kind, or gone (never committed, or
-//! collected after the release that preceded a crash). Anything else is refused with the journal's path, and nothing is
+//! collected after the release that preceded a crash), and when they are
+//! gone the journal must name this store as the one that wrote it.
+//! Anything else is refused with the journal's path, and nothing is
 //! touched. Every holder of a project's journal also holds an `flock` on
 //! the project directory itself, so two tog processes using different
 //! stores cannot undo each other's publication. Both decide by
@@ -356,6 +358,7 @@ impl<'a> Transaction<'a> {
             ecosystem: self.ecosystem.clone(),
             state,
             originals: self.originals.clone(),
+            store: Some(store_name(self.store)),
             created_dirs: self.created_at_hold.clone(),
             targets,
         }
@@ -717,6 +720,13 @@ struct Journal {
     state: JournalState,
     /// The originals object's id.
     originals: String,
+    /// The store that wrote the journal: its canonical root. Recovery
+    /// trusts a held or finished journal whose originals are not in the
+    /// store only when it names that store, so another store's journal is
+    /// refused rather than consumed while its originals stay rooted there.
+    /// Absent in a journal written before the field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    store: Option<String>,
     created_dirs: Vec<String>,
     targets: Vec<JournalTarget>,
 }
@@ -762,6 +772,11 @@ fn create_missing_dirs(root: &ProjectRoot, relative: &Path) -> io::Result<Vec<Pa
         }
     }
     Ok(created)
+}
+
+/// How a journal names the store that wrote it.
+fn store_name(store: &Store) -> String {
+    store.root.to_string_lossy().into_owned()
 }
 
 fn journal_error(journal: &Journal, detail: &str) -> io::Error {
@@ -2135,6 +2150,102 @@ mod tests {
             assert_published(&fx);
             assert!(!fx.project.join(JOURNAL_DIR).exists(), "{collected}");
         }
+    }
+
+    /// A finished journal is trusted without rooted originals, but not
+    /// blindly: originals of another kind or ecosystem, or a created
+    /// directory outside what a transaction creates, are refused and
+    /// nothing is touched.
+    #[test]
+    fn a_forged_finished_journal_is_refused() {
+        let fx = fixture("forged-finished", true);
+        let _ = run_door(&fx, |_| {}, crash_at(FaultPoint::Released));
+        assert_eq!(journal_state(&fx).as_deref(), Some("finished"));
+        let good: serde_json::Value =
+            serde_json::from_slice(&fs::read(journal_path(&fx)).unwrap()).unwrap();
+        let activity = fx.store.activity(ActivityMode::Shared).unwrap();
+        crate::kernel::objmeta::register_test_kinds();
+        let mut foreign = Vec::new();
+        for identity in [
+            Identity {
+                kind: "test".into(),
+                name: "npm".into(),
+                version: "1".into(),
+                inputs: Default::default(),
+            },
+            originals_identity("cargo", &"1".repeat(32), &[]),
+        ] {
+            let staged = fx.store.stage_with_activity(&activity).unwrap();
+            fx.store
+                .commit_with_activity_and_deps(
+                    &activity,
+                    &identity,
+                    &staged,
+                    &[],
+                    &ObjectDeps::new(),
+                )
+                .unwrap();
+            foreign.push(identity.object_id());
+        }
+        drop(activity);
+        fs::create_dir_all(fx.project.join("elsewhere")).unwrap();
+        let mut cases: Vec<(serde_json::Value, &str)> = Vec::new();
+        for id in &foreign {
+            let mut journal = good.clone();
+            journal["originals"] = id.as_str().into();
+            cases.push((journal, "is not a npm originals object"));
+        }
+        let mut journal = good.clone();
+        journal["created_dirs"] = serde_json::json!(["elsewhere"]);
+        cases.push((journal, "as a directory it created"));
+        for (journal, expected) in cases {
+            fs::write(journal_path(&fx), serde_json::to_vec(&journal).unwrap()).unwrap();
+            let error = recover_err(&fx).to_string();
+            assert!(error.contains("nothing was changed"), "{error}");
+            assert!(error.contains(expected), "{error}");
+            assert!(journal_path(&fx).is_file());
+            assert!(fx.project.join("elsewhere").is_dir());
+        }
+        fs::write(journal_path(&fx), serde_json::to_vec(&good).unwrap()).unwrap();
+        recover(&fx);
+        assert_published(&fx);
+    }
+
+    /// A finished or held journal whose originals are not in the store
+    /// recovering it is consumed only by the store that wrote it: another
+    /// store refuses it (its originals are still rooted in the first), and
+    /// the first then finishes it. A held journal written before journals
+    /// named their store is still trusted.
+    #[test]
+    fn another_stores_finished_or_held_journal_is_refused() {
+        let fx = fixture("finished-two-stores", true);
+        let _ = run_door(&fx, |_| {}, crash_at(FaultPoint::Released));
+        assert_eq!(journal_state(&fx).as_deref(), Some("finished"));
+        let other = fixture("finished-two-stores-other", false);
+        let elsewhere = Fixture {
+            store: other.store.clone(),
+            project: fx.project.clone(),
+            _temp: other._temp,
+        };
+        for state in ["finished", "held"] {
+            edit_journal(&fx, |journal| journal["state"] = state.into());
+            let error = recover_err(&elsewhere).to_string();
+            assert!(error.contains("not in this store"), "{state}: {error}");
+            assert!(error.contains("TOG_STORE"), "{state}: {error}");
+            assert!(journal_path(&fx).is_file(), "{state}");
+        }
+        // A finished journal naming no store is refused too.
+        edit_journal(&fx, |journal| {
+            journal["state"] = "finished".into();
+            journal.as_object_mut().unwrap().remove("store");
+        });
+        assert!(recover_err(&elsewhere)
+            .to_string()
+            .contains("not in this store"));
+        // An old held journal, which names no store, is trusted as before.
+        edit_journal(&fx, |journal| journal["state"] = "held".into());
+        recover(&elsewhere);
+        assert!(!has_pending_journal(&fx.project));
     }
 
     /// The same two failures on the rollback path: the undone project

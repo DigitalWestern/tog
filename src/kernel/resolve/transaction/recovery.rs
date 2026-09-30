@@ -134,12 +134,21 @@ fn check_journal(
         .published_identity(&journal.originals)
         .map_err(|error| error.to_string())?;
     let Some(identity) = identity else {
-        return match journal.state {
-            // Held: killed before the originals were committed, so nothing
-            // was rooted and nothing in the project was touched. Finished:
-            // killed after the originals were released, and `tog gc` has
-            // collected them since. Either way only the journal is left.
-            JournalState::Held | JournalState::Finished => Ok(()),
+        // Held: killed before the originals were committed, so nothing was
+        // rooted and nothing in the project was touched. Finished: killed
+        // after the originals were released, and `tog gc` has collected
+        // them since. Either way only the journal is left, but only if this
+        // store wrote it: another store's journal still has its originals
+        // rooted there. A held journal from before journals named their
+        // store is trusted as it always was.
+        let ours = journal
+            .store
+            .as_deref()
+            .map(|name| name == store_name(store));
+        return match (journal.state, ours) {
+            (JournalState::Held, None | Some(true)) | (JournalState::Finished, Some(true)) => {
+                Ok(())
+            }
             _ => Err(format!(
                 "its originals object {} is not in this store ({})",
                 journal.originals,
