@@ -1998,7 +1998,11 @@ all-or-nothing: every check runs before any record is written, so one
 failing ecosystem leaves no partial set. The receipts are then published
 together under the project lock, each only while its lock still has the
 digests its record signed; if one fails to publish, the receipts already
-published by that run are put back as they were. It reads `tog-toolchain.toml` as
+published by that run are put back as they were. All-or-nothing holds for
+failures, not for process death: each receipt is its own transaction, so
+a run killed between two publications leaves some receipts new and some
+old. Each one is still a valid record of its own lock, so a later sync
+judges every one correctly, and rerunning `tog attest` completes the set. It reads `tog-toolchain.toml` as
 `--frozen` does and never writes it. Run on CI
 with the signing key, this converts a repository in one command. It is
 also the remedy the `unrecorded-resolution` refusal prints.

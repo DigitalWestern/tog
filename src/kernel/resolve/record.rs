@@ -41,6 +41,7 @@ use sha2::{Digest, Sha256};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
+use std::os::fd::AsRawFd;
 use std::path::{Component, Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -1013,7 +1014,21 @@ pub fn publish_receipts(
     receipts: &[(ResolutionRecord, Vec<u8>)],
 ) -> io::Result<()> {
     store.require_activity(activity, "receipt publication")?;
-    let lock = store.project_lock_in(project)?;
+    let lock = locked_and_recovered(store, activity, project)?;
+    // Whether this call creates the receipt directory (and `.tog`), so
+    // putting back a receipt that did not exist also removes them.
+    let created = [
+        Path::new(".tog"),
+        Path::new(RESOLUTION_DIR),
+        Path::new(super::transaction::JOURNAL_DIR),
+    ]
+    .into_iter()
+    .filter_map(|dir| match project.subdir(dir) {
+        Ok(Some(_)) => None,
+        Ok(None) => Some(Ok(dir.to_path_buf())),
+        Err(error) => Some(Err(error)),
+    })
+    .collect::<io::Result<Vec<PathBuf>>>()?;
     let mut priors = Vec::new();
     for (record, _) in receipts {
         check_still_described(project, record)?;
@@ -1039,6 +1054,14 @@ pub fn publish_receipts(
             }
         }
         if left.is_empty() {
+            if let Err(undo) = remove_created_dirs(project, &created) {
+                left.push(format!(
+                    "{} ({undo})",
+                    project.path().join(RESOLUTION_DIR).display()
+                ));
+            }
+        }
+        if left.is_empty() {
             return Err(io::Error::new(
                 error.kind(),
                 format!(
@@ -1058,6 +1081,86 @@ pub fn publish_receipts(
         ));
     }
     Ok(())
+}
+
+/// The project lock, taken with no interrupted publication pending: the
+/// priors this call reads, and would put back on failure, are then the
+/// committed receipts, never bytes a crashed earlier run left half
+/// published. Recovery takes the project lock itself, so it runs before the
+/// lock is taken here; a journal another process leaves in between is
+/// recovered on the next round.
+fn locked_and_recovered(
+    store: &Store,
+    activity: &StoreActivity,
+    project: &ProjectRoot,
+) -> io::Result<std::fs::File> {
+    for _ in 0..3 {
+        super::transaction::recover_project(store, activity, project.path())?;
+        let lock = store.project_lock_in(project)?;
+        if !super::transaction::has_pending_journal(project.path()) {
+            return Ok(lock);
+        }
+    }
+    Err(io::Error::other(format!(
+        "{} keeps showing an interrupted resolution publication while tog attest waits to \
+         publish; wait for the other tog command in this project to finish, then run `tog \
+         attest` again",
+        project
+            .path()
+            .join(super::transaction::JOURNAL_DIR)
+            .display()
+    )))
+}
+
+/// Remove, innermost first, the directories in `created` that are empty.
+/// A directory holding anything is left as it is.
+fn remove_created_dirs(project: &ProjectRoot, created: &[PathBuf]) -> io::Result<()> {
+    let _dir_lock = lock_project_dir(project)?;
+    for dir in created.iter().rev() {
+        let parent = dir.parent().unwrap_or(Path::new(""));
+        let holder = if parent.as_os_str().is_empty() {
+            project.try_clone()?
+        } else {
+            match project.subdir(parent)? {
+                Some(holder) => holder,
+                None => continue,
+            }
+        };
+        let name = std::ffi::CString::new(
+            dir.file_name()
+                .expect("a created directory has a name")
+                .as_encoded_bytes(),
+        )
+        .map_err(io::Error::other)?;
+        // SAFETY: `holder` is an open directory descriptor and `name` a
+        // NUL-terminated single component; AT_REMOVEDIR removes only an
+        // empty directory.
+        if unsafe { libc::unlinkat(holder.as_raw_fd(), name.as_ptr(), libc::AT_REMOVEDIR) } != 0 {
+            let error = io::Error::last_os_error();
+            if !matches!(
+                error.raw_os_error(),
+                Some(libc::ENOENT) | Some(libc::ENOTEMPTY) | Some(libc::EEXIST)
+            ) {
+                return Err(error);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The `flock` a resolution transaction holds on the project directory
+/// itself, so a tog process using another store cannot publish or recover
+/// here meanwhile. Taken only while no transaction of this process is
+/// held: a second one from this process would wait forever.
+fn lock_project_dir(project: &ProjectRoot) -> io::Result<std::fs::File> {
+    let file = store::open_file_at(
+        project.as_raw_fd(),
+        b".",
+        libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+        0,
+    )?;
+    file.lock()?;
+    Ok(file)
 }
 
 /// Refuse a record whose files no longer read the way it signed them.
@@ -1147,6 +1250,10 @@ fn restore_receipt(
     prior: &Option<Vec<u8>>,
 ) -> io::Result<()> {
     let Some(bytes) = prior else {
+        // No transaction can delete a target, so the new receipt is
+        // removed under the two locks a transaction holds: the project
+        // lock (held by the caller) and the project directory's.
+        let _dir_lock = lock_project_dir(project)?;
         return project.remove_file(&receipt_path(ecosystem));
     };
     let transaction = Transaction::hold_locked(

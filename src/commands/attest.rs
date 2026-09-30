@@ -10,7 +10,10 @@
 //! all or nothing, under the project lock, and only while each lock still
 //! reads as its record signed it), or with `--record-out` outside the
 //! checkout, which is then left unchanged. A failed check therefore leaves
-//! no receipt behind, whichever ecosystem it was.
+//! no receipt behind, whichever ecosystem it was, and a failed publication
+//! puts back the receipts it already wrote. A process killed between two
+//! publications can leave a partial set; each receipt in it still attests
+//! its own lock, and rerunning `tog attest` completes it.
 //!
 //! The ledger transfers never run a tool. `--ledger-export` writes the
 //! portable bytes of the ledger the committed record names, from the local
@@ -484,34 +487,53 @@ mod tests {
     }
 
     /// Publishing the second receipt fails after the first was published:
-    /// the first is put back as it was, a prior receipt restored byte for
-    /// byte and a new one removed.
+    /// the first is put back as it was. With no prior receipt the new one
+    /// is removed, and so are the directories this run created.
     #[test]
-    fn a_failed_publication_puts_back_every_receipt_already_published() {
+    fn a_failed_publication_removes_a_new_receipt_and_its_directories() {
         let _serial = SERIAL
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let fx = fixture("rollback");
+        let fx = fixture("rollback-absent");
         *FAIL_PUBLISH_FOR_TEST.lock().unwrap() = Some("beta".into());
-        let absent = attest_both(&fx, |dir| Ok(checked(dir, "beta")));
-        fs::create_dir_all(fx.dir.join(record::RESOLUTION_DIR)).unwrap();
-        fs::write(
-            fx.dir.join(record::receipt_path("alpha")),
-            b"the prior receipt",
-        )
-        .unwrap();
-        let present = attest_both(&fx, |dir| Ok(checked(dir, "beta")));
+        let result = attest_both(&fx, |dir| Ok(checked(dir, "beta")));
         *FAIL_PUBLISH_FOR_TEST.lock().unwrap() = None;
-        let error = absent.unwrap_err().to_string();
+        let error = result.unwrap_err().to_string();
         assert!(error.contains("simulated failure"), "{error}");
         assert!(error.contains("no receipt was published"), "{error}");
-        let error = present.unwrap_err().to_string();
+        assert_eq!(receipt(&fx.dir, "alpha"), None);
+        assert!(!fx.dir.join(record::RESOLUTION_DIR).exists());
+        assert!(!fx.dir.join(".tog").exists());
+    }
+
+    /// With a prior receipt, the first is restored byte for byte and with
+    /// its own mode.
+    #[test]
+    fn a_failed_publication_restores_a_prior_receipt_and_its_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let _serial = SERIAL
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let fx = fixture("rollback-prior");
+        let prior = fx.dir.join(record::receipt_path("alpha"));
+        fs::create_dir_all(fx.dir.join(record::RESOLUTION_DIR)).unwrap();
+        fs::write(&prior, b"the prior receipt").unwrap();
+        fs::set_permissions(&prior, fs::Permissions::from_mode(0o640)).unwrap();
+        *FAIL_PUBLISH_FOR_TEST.lock().unwrap() = Some("beta".into());
+        let result = attest_both(&fx, |dir| Ok(checked(dir, "beta")));
+        *FAIL_PUBLISH_FOR_TEST.lock().unwrap() = None;
+        let error = result.unwrap_err().to_string();
         assert!(error.contains("no receipt was published"), "{error}");
         assert_eq!(
             receipt(&fx.dir, "alpha").as_deref(),
             Some(&b"the prior receipt"[..])
         );
+        assert_eq!(
+            fs::metadata(&prior).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
         assert_eq!(receipt(&fx.dir, "beta"), None);
+        assert!(fx.dir.join(record::RESOLUTION_DIR).is_dir());
         assert!(!fx.dir.join(".tog/journal/alpha.json").exists());
         assert!(!fx.dir.join(".tog/journal/beta.json").exists());
     }

@@ -2679,6 +2679,52 @@ mod tests {
         assert!(!store.root.exists(), "a cache hit touched the store");
     }
 
+    /// The basis a closure records is what the plan read, which is the
+    /// resolution files on disk as a record would digest them: both on a
+    /// cache hit and with go.sum absent.
+    #[test]
+    fn the_plan_basis_is_the_lock_as_read() {
+        let (_lease_store, activity) = crate::kernel::testutil::detached_lease();
+        let temp = TempDir::new();
+        let project = temp.0.join("proj");
+        let (gomod, gosum, plan) = plan_fixture(&project);
+        write_plan_cache(
+            &project,
+            &expected_input_hash(&project, &gomod, &gosum),
+            &plan,
+        );
+        let store = Store {
+            root: temp.0.join("absent-store"),
+        };
+        let root = ProjectRoot::open(&project).unwrap();
+        let planned = plan_go_read(
+            &mut crate::kernel::testutil::DoorScope::new().door(
+                &store,
+                &activity,
+                crate::kernel::platform::Platform::host().unwrap(),
+                crate::kernel::resolve::DoorKind::Planner,
+            ),
+            &root,
+            Path::new("/nonexistent/go"),
+            "1.27.0",
+            true,
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(planned.plan.modules, plan.modules);
+        let listed = [PathBuf::from("go.mod"), PathBuf::from("go.sum")];
+        let on_disk = crate::kernel::resolve::record::file_digests(&root, &listed).unwrap();
+        assert_eq!(on_disk.len(), 2);
+        assert_eq!(inputs::basis_of(&planned), on_disk);
+        let without_sum = Planned {
+            gosum: None,
+            ..planned
+        };
+        fs::remove_file(project.join("go.sum")).unwrap();
+        let on_disk = crate::kernel::resolve::record::file_digests(&root, &listed).unwrap();
+        assert_eq!(inputs::basis_of(&without_sum), on_disk);
+    }
+
     /// The plan is made with the toolchain the selection handed in, never
     /// with the one go.mod's `go`/`toolchain` directives would have picked.
     /// go.mod here asks for a Go this project is not being planned with, and

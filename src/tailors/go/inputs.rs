@@ -53,11 +53,7 @@ pub fn load_go_inputs(
     // empty string in `gosum_sha256` (what `status` compares) and is left
     // out of the basis (as a resolution record leaves it out).
     use crate::kernel::resolve::record::sha256_hex;
-    let mut resolution_basis = crate::comforter::join::Digests::new();
-    resolution_basis.insert("go.mod".into(), sha256_hex(planned.gomod.as_bytes()));
-    if let Some(gosum) = &planned.gosum {
-        resolution_basis.insert("go.sum".into(), sha256_hex(gosum.as_bytes()));
-    }
+    let resolution_basis = basis_of(&planned);
     let gosum = planned.gosum.as_deref().unwrap_or_default();
     Ok(GoInputs {
         go_obj,
@@ -66,6 +62,18 @@ pub fn load_go_inputs(
         resolution_basis,
         ledgers,
     })
+}
+
+/// The closure's `resolution_basis`: go.mod and go.sum by the digests of
+/// the bytes `planned` was built from (go.sum left out when it was absent).
+pub(super) fn basis_of(planned: &go::Planned) -> crate::comforter::join::Digests {
+    use crate::kernel::resolve::record::sha256_hex;
+    let mut basis = crate::comforter::join::Digests::new();
+    basis.insert("go.mod".into(), sha256_hex(planned.gomod.as_bytes()));
+    if let Some(gosum) = &planned.gosum {
+        basis.insert("go.sum".into(), sha256_hex(gosum.as_bytes()));
+    }
+    basis
 }
 
 /// Whether this store can realize `plan`'s module cache from what it holds:
