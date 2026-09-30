@@ -7,6 +7,8 @@
  *   wait-unix <path>         wait up to 10 s for <path>, then as `unix`
  *   dns <host>               getaddrinfo
  *   socketpair               socketpair(AF_UNIX) and a round trip
+ *   socketpair-seqpacket     the same with SOCK_SEQPACKET
+ *   socketpair-dgram         the same with SOCK_DGRAM
  *   io_uring                 io_uring_setup
  *   int80                    the i386 socket syscall through int $0x80
  *   ptrace-parent            ptrace, /proc/<ppid>/mem, process_vm_readv
@@ -84,9 +86,9 @@ static int dns(const char *host) {
     return 0;
 }
 
-static int pair(void) {
+static int pair(int type) {
     int fds[2];
-    if (socketpair(AF_UNIX, SOCK_STREAM, 0, fds) != 0) {
+    if (socketpair(AF_UNIX, type, 0, fds) != 0) {
         printf("socketpair errno=%d\n", errno);
         return 0;
     }
@@ -241,7 +243,9 @@ int main(int argc, char **argv) {
     if (!strcmp(cmd, "unix") && argc == 3) return unix_connect(argv[2]);
     if (!strcmp(cmd, "wait-unix") && argc == 3) return wait_unix(argv[2]);
     if (!strcmp(cmd, "dns") && argc == 3) return dns(argv[2]);
-    if (!strcmp(cmd, "socketpair")) return pair();
+    if (!strcmp(cmd, "socketpair")) return pair(SOCK_STREAM);
+    if (!strcmp(cmd, "socketpair-seqpacket")) return pair(SOCK_SEQPACKET);
+    if (!strcmp(cmd, "socketpair-dgram")) return pair(SOCK_DGRAM);
     if (!strcmp(cmd, "io_uring")) return io_uring();
     if (!strcmp(cmd, "int80")) return int80();
     if (!strcmp(cmd, "ptrace-parent")) return ptrace_parent();

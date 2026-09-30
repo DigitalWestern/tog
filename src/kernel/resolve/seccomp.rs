@@ -15,8 +15,13 @@
 //!   addresses through it, and it sees only the sandbox's namespace).
 //!   Every other family fails with `EAFNOSUPPORT`: `AF_UNIX`, `AF_VSOCK`
 //!   (which reaches the host across a network namespace), and any family
-//!   a later kernel adds. `socketpair` is allowed for `AF_UNIX` only:
-//!   child-process pipes use it, and a pair cannot reach a named socket.
+//!   a later kernel adds. `socketpair` is allowed for `AF_UNIX` stream
+//!   and seqpacket pairs only (child-process pipes use them): a connected
+//!   stream or seqpacket socket cannot be pointed anywhere else (the kernel
+//!   answers `EISCONN` or `EOPNOTSUPP`). A datagram pair is refused with
+//!   `EAFNOSUPPORT`, because `connect` or a `sendto` with an address
+//!   re-aims a datagram socket at any filesystem-named datagram socket
+//!   visible in the read-only root, such as systemd's journal socket.
 //! - `add_key`, `request_key` and `keyctl` fail with `EPERM`, so the tool
 //!   cannot read a key from this user's keyrings.
 //! - `io_uring_setup`, `io_uring_enter` and `io_uring_register` fail with
@@ -47,6 +52,8 @@ const BPF_LD_W_ABS: u16 = 0x20;
 const BPF_JMP_JEQ_K: u16 = 0x05 | 0x10;
 const BPF_JMP_JGE_K: u16 = 0x05 | 0x30;
 const BPF_RET_K: u16 = 0x06;
+/// `BPF_ALU | BPF_AND | BPF_K` (0x04 | 0x50 | 0x00).
+const BPF_ALU_AND_K: u16 = 0x04 | 0x50;
 
 // Filter return values (linux/seccomp.h).
 const RET_KILL_PROCESS: u32 = 0x8000_0000;
@@ -60,7 +67,7 @@ const RET_ERRNO: u32 = 0x0005_0000;
 const DATA_NR: u32 = 0;
 const DATA_ARCH: u32 = 4;
 const DATA_ARG0_LOW: u32 = 16;
-
+const DATA_ARG1_LOW: u32 = 24;
 const DATA_ARG2_LOW: u32 = 32;
 
 const AF_UNIX: u32 = 1;
@@ -68,6 +75,11 @@ const AF_INET: u32 = 2;
 const AF_INET6: u32 = 10;
 const AF_NETLINK: u32 = 16;
 const NETLINK_ROUTE: u32 = 0;
+/// `SOCK_TYPE_MASK`: a socket type argument's low bits name the type; the
+/// bits above carry `SOCK_NONBLOCK` and `SOCK_CLOEXEC`.
+const SOCK_TYPE_MASK: u32 = 0xf;
+const SOCK_STREAM: u32 = 1;
+const SOCK_SEQPACKET: u32 = 5;
 const EPERM: u32 = 1;
 const EAFNOSUPPORT: u32 = 97;
 
@@ -217,8 +229,9 @@ pub fn program(arch: Arch) -> Vec<Insn> {
         program.push(stmt(BPF_RET_K, action));
     }
     let refused = RET_ERRNO | EAFNOSUPPORT;
-    // Relative jumps: `socket` goes to its domain check three ahead,
-    // `socketpair` to its own check eleven ahead.
+    // Relative jumps (counted from the next instruction): `socket` goes
+    // two past it, to its domain check; `socketpair` nine past it, over
+    // the allow and the eight instructions of the socket check, to its own.
     program.push(jump(BPF_JMP_JEQ_K, n.socket, 2, 0));
     program.push(jump(BPF_JMP_JEQ_K, n.socketpair, 9, 0));
     program.push(stmt(BPF_RET_K, RET_ALLOW));
@@ -231,11 +244,17 @@ pub fn program(arch: Arch) -> Vec<Insn> {
     program.push(jump(BPF_JMP_JEQ_K, NETLINK_ROUTE, 1, 0));
     program.push(stmt(BPF_RET_K, refused));
     program.push(stmt(BPF_RET_K, RET_ALLOW));
-    // socketpair(domain, ...)
+    // socketpair(domain, type, ...): AF_UNIX stream or seqpacket only.
+    // A datagram pair (and SOCK_RAW, which AF_UNIX treats as datagram)
+    // could be re-aimed at a named socket.
     program.push(stmt(BPF_LD_W_ABS, DATA_ARG0_LOW));
-    program.push(jump(BPF_JMP_JEQ_K, AF_UNIX, 0, 1));
-    program.push(stmt(BPF_RET_K, RET_ALLOW));
+    program.push(jump(BPF_JMP_JEQ_K, AF_UNIX, 0, 4));
+    program.push(stmt(BPF_LD_W_ABS, DATA_ARG1_LOW));
+    program.push(stmt(BPF_ALU_AND_K, SOCK_TYPE_MASK));
+    program.push(jump(BPF_JMP_JEQ_K, SOCK_STREAM, 2, 0));
+    program.push(jump(BPF_JMP_JEQ_K, SOCK_SEQPACKET, 1, 0));
     program.push(stmt(BPF_RET_K, refused));
+    program.push(stmt(BPF_RET_K, RET_ALLOW));
     program
 }
 
@@ -455,11 +474,13 @@ mod tests {
     /// against a synthetic `seccomp_data`. Pins the program's logic for
     /// both architectures without installing anything.
     fn run(program: &[Insn], nr: u32, arch: u32, arg0: u64) -> u32 {
-        run_with(program, nr, arch, arg0, 0)
+        run_with(program, nr, arch, [arg0, 0, 0])
     }
 
-    fn run_with(program: &[Insn], nr: u32, arch: u32, arg0: u64, arg2: u64) -> u32 {
+    fn run_with(program: &[Insn], nr: u32, arch: u32, args: [u64; 3]) -> u32 {
+        let [arg0, arg1, arg2] = args;
         let mut data = [0u8; 64];
+        data[24..32].copy_from_slice(&arg1.to_le_bytes());
         data[32..40].copy_from_slice(&arg2.to_le_bytes());
         data[0..4].copy_from_slice(&nr.to_le_bytes());
         data[4..8].copy_from_slice(&arch.to_le_bytes());
@@ -487,6 +508,10 @@ mod tests {
                     } else {
                         insn.jf as usize
                     };
+                }
+                BPF_ALU_AND_K => {
+                    accumulator &= insn.k;
+                    pc += 1;
                 }
                 BPF_RET_K => return insn.k,
                 other => panic!("unexpected opcode {other:#x}"),
@@ -541,7 +566,12 @@ mod tests {
         }
         let netlink = AF_NETLINK as u64;
         assert_eq!(
-            run_with(&program, n.socket, native, netlink, NETLINK_ROUTE as u64),
+            run_with(
+                &program,
+                n.socket,
+                native,
+                [netlink, 0, NETLINK_ROUTE as u64]
+            ),
             RET_ALLOW
         );
         for protocol in [
@@ -551,20 +581,57 @@ mod tests {
             15,   /* KOBJECT_UEVENT */
         ] {
             assert_eq!(
-                run_with(&program, n.socket, native, netlink, protocol),
+                run_with(&program, n.socket, native, [netlink, 0, protocol]),
                 RET_ERRNO | EAFNOSUPPORT,
                 "netlink protocol {protocol}"
             );
         }
-        assert_eq!(
-            run(&program, n.socketpair, native, AF_UNIX as u64),
-            RET_ALLOW
-        );
-        for family in [AF_INET as u64, 40] {
+        let unix = AF_UNIX as u64;
+        let (nonblock, cloexec) = (0o4000u64, 0o2000000u64);
+        let stream = SOCK_STREAM as u64;
+        let seqpacket = SOCK_SEQPACKET as u64;
+        let dgram = 2u64;
+        for kind in [
+            stream,
+            seqpacket,
+            stream | cloexec | nonblock,
+            seqpacket | cloexec,
+        ] {
             assert_eq!(
-                run(&program, n.socketpair, native, family),
-                RET_ERRNO | EAFNOSUPPORT
+                run_with(&program, n.socketpair, native, [unix, kind, 0]),
+                RET_ALLOW,
+                "socketpair type {kind:#x}"
             );
+        }
+        // A datagram pair could be re-aimed at a named socket; SOCK_RAW (3)
+        // is a datagram socket to AF_UNIX, SOCK_RDM (4) is refused too, and
+        // high garbage does not turn a datagram type into an allowed one.
+        for kind in [
+            0u64,
+            dgram,
+            dgram | cloexec,
+            dgram | cloexec | nonblock,
+            3,
+            4,
+            6,
+            10,
+            0xf,
+            (7u64 << 32) | dgram,
+        ] {
+            assert_eq!(
+                run_with(&program, n.socketpair, native, [unix, kind, 0]),
+                RET_ERRNO | EAFNOSUPPORT,
+                "socketpair type {kind:#x}"
+            );
+        }
+        for family in [AF_INET as u64, AF_INET6 as u64, 40] {
+            for kind in [stream, seqpacket, dgram] {
+                assert_eq!(
+                    run_with(&program, n.socketpair, native, [family, kind, 0]),
+                    RET_ERRNO | EAFNOSUPPORT,
+                    "socketpair family {family} type {kind}"
+                );
+            }
         }
         for number in [
             n.add_key,
@@ -671,6 +738,25 @@ mod tests {
                     if libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, pair.as_mut_ptr()) != 0
                     {
                         return 12;
+                    }
+                    let dgram =
+                        libc::socketpair(libc::AF_UNIX, libc::SOCK_DGRAM, 0, pair.as_mut_ptr());
+                    if dgram == 0 || *libc::__errno_location() != libc::EAFNOSUPPORT {
+                        return 19;
+                    }
+                    if libc::socketpair(
+                        libc::AF_UNIX,
+                        libc::SOCK_STREAM | libc::SOCK_CLOEXEC,
+                        0,
+                        pair.as_mut_ptr(),
+                    ) != 0
+                    {
+                        return 20;
+                    }
+                    if libc::socketpair(libc::AF_UNIX, libc::SOCK_SEQPACKET, 0, pair.as_mut_ptr())
+                        != 0
+                    {
+                        return 21;
                     }
                     if libc::syscall(libc::SYS_io_uring_setup, 1, std::ptr::null_mut::<u8>()) >= 0
                         || *libc::__errno_location() != libc::EPERM

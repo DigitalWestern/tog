@@ -1365,8 +1365,13 @@ Three layers close it on Linux:
    host (CID 1) straight across a network namespace, and any family a
    later kernel adds. A deny-list of families would have missed vsock
    and would miss the next one. `socketpair(2)` is allowed for
-   `AF_UNIX` only, because libuv (Node) and Python's asyncio use it for
-   child-process pipes, and a socketpair cannot reach a named socket.
+   `AF_UNIX` stream and seqpacket pairs only, because libuv (Node) and
+   Python's asyncio use them for child-process pipes, and a connected
+   stream or seqpacket socket cannot be pointed at anything else. A
+   datagram pair (`SOCK_DGRAM`, and `SOCK_RAW`, which `AF_UNIX` treats
+   as datagram) fails with `EAFNOSUPPORT`: `connect` or a `sendto` with
+   an address re-aims a datagram socket at any named datagram socket in
+   a mounted root, such as `/run/systemd/journal/socket`.
    The filter also refuses `add_key`, `request_key`, and `keyctl`
    (`EPERM`), and the relay moves the tool into a fresh anonymous
    session keyring before installing it, so no key in this user's
@@ -2924,7 +2929,9 @@ Sandbox tests (`tests/sandbox_deny.rs`, extended, not a new file, per §4):
 - `linux_door_cannot_connect_to_a_socket_created_after_preflight` (the
   host creates a listening socket in a mounted root after the scan: the
   tool's `socket(AF_UNIX)` fails with `EAFNOSUPPORT`)
-- `linux_door_socketpair_still_works` (Node spawns a child with pipes)
+- `linux_door_socketpair_still_works` (Node spawns a child with pipes;
+  stream and seqpacket pairs work, a datagram pair fails with
+  `EAFNOSUPPORT`)
 - `linux_door_exec_log_records_every_exec`
 - `linux_door_filter_kills_a_foreign_syscall_arch` (an `int 0x80`
   `socketcall` from the 32-bit table, and an x32-bit syscall number)

@@ -739,6 +739,15 @@ mod door {
             return;
         };
         assert_eq!(door.stdout_of(&["socketpair"]).trim(), "socketpair ok");
+        assert_eq!(
+            door.stdout_of(&["socketpair-seqpacket"]).trim(),
+            "socketpair ok"
+        );
+        // A datagram pair could be re-aimed at a named socket in the root.
+        assert_eq!(
+            door.stdout_of(&["socketpair-dgram"]).trim(),
+            format!("socketpair errno={}", libc::EAFNOSUPPORT)
+        );
     }
 
     #[test]
