@@ -31,7 +31,8 @@
 //!   another platform, or whose inputs are no longer found here is reported
 //!   `stale`, and so is one whose toolchain lock is missing, has no section
 //!   for the ecosystem, has stale rows, or names a different bundle than
-//!   the one the closure was built from; one that predates input, platform,
+//!   the one the closure was built from, or whose joined resolution record
+//!   no longer describes the lock files on disk; one that predates input, platform,
 //!   toolchain, or exception recording is reported `outdated`. Neither
 //!   passes.
 //! - Every ecosystem detected in the directory must have its primary
@@ -57,13 +58,12 @@ use crate::commands::inspect::{self, ClosureFile, State};
 use crate::commands::shared::project_dir;
 use crate::kernel::platform::Platform;
 use crate::kernel::policy::{self, Exception, Policy, PolicySource, SourceOrigin};
-use crate::kernel::resolve::record;
 use crate::kernel::signing::{self, KeySet, PublicKey, Verification};
 use crate::kernel::toolchain::lock::LOCK_PATH;
 use crate::kernel::ui;
 use crate::tailors;
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::io;
 use std::path::Path;
 
@@ -493,84 +493,6 @@ fn resolution_exceptions(closure: &ClosureFile) -> io::Result<Vec<Exception>> {
     }
 }
 
-/// Why the resolution record `closure` joined no longer describes the files
-/// in `dir`, or `None` when it still does (or there is no record). The
-/// record's signed digests are compared with the files it names, whatever
-/// they are; a resolution file of the closure's ecosystem that exists now
-/// but that the record never named is a change too. The toolchain-input
-/// freshness check sees only go.mod's `go` and `toolchain` directives and
-/// go.sum, so a dependency added to go.mod alone is caught here.
-fn resolution_staleness(dir: &Path, closure: &ClosureFile) -> io::Result<Option<String>> {
-    let malformed = |what: String| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!(
-                "{:?}: malformed resolution record: {what}; run '{}'",
-                closure.path.to_string_lossy(),
-                refresh(&closure.ecosystem)
-            ),
-        )
-    };
-    let Some(resolution) = closure.body.get("resolution") else {
-        return Ok(None);
-    };
-    let digests = |field: &str| -> io::Result<BTreeMap<String, String>> {
-        let value = resolution
-            .get(field)
-            .ok_or_else(|| malformed(format!("no {field} map")))?;
-        let map: BTreeMap<String, String> = serde_json::from_value(value.clone())
-            .map_err(|error| malformed(format!("{field}: {error}")))?;
-        for (path, digest) in &map {
-            if record::record_path(Path::new(path)).as_deref() != Some(path.as_str()) {
-                return Err(malformed(format!("{field} names {path:?}")));
-            }
-            if !record::is_sha256_hex(digest) {
-                return Err(malformed(format!(
-                    "{field} digest for {path} is not a sha256"
-                )));
-            }
-        }
-        Ok(map)
-    };
-    let mut named = digests("outputs")?;
-    named.extend(digests("inputs")?);
-    let project = crate::kernel::fsroot::ProjectRoot::open(dir)?;
-    let mut changed = BTreeSet::new();
-    for (path, digest) in &named {
-        let current = if project.is_input_file(Path::new(path)) {
-            project
-                .read_input(Path::new(path))?
-                .map(|bytes| record::sha256_hex(&bytes))
-        } else {
-            None
-        };
-        if current.as_deref() != Some(digest.as_str()) {
-            changed.insert(path.clone());
-        }
-    }
-    let files = match tailors::by_id(&closure.ecosystem) {
-        Some(tailor) => tailors::resolution_files(tailor, &project)?,
-        None => None,
-    };
-    if let Some(files) = files {
-        let mut listed = files.outputs;
-        listed.extend(files.inputs);
-        for path in record::file_digests(&project, &listed)?.into_keys() {
-            if !named.contains_key(&path) {
-                changed.insert(path);
-            }
-        }
-    }
-    if changed.is_empty() {
-        return Ok(None);
-    }
-    let changed: Vec<String> = changed.into_iter().collect();
-    Ok(Some(format!(
-        "{} changed since the last sync (the resolution record describes another version)",
-        changed.join(", ")
-    )))
-}
-
 /// Whether `closure` belongs to an ecosystem whose lock the resolution
 /// join covers, one of whose lock files exists in `dir`, and yet carries
 /// neither a joined record nor an `unrecorded-resolution` exception. A
@@ -620,11 +542,6 @@ pub fn evaluate(
             continue;
         }
         let mut freshness = freshness(platform, dir, closure, present)?;
-        if !matches!(freshness, Freshness::Stale(_)) {
-            if let Some(why) = resolution_staleness(dir, closure)? {
-                freshness = Freshness::Stale(why);
-            }
-        }
         let mut denied = Vec::new();
         let mut unknown = Vec::new();
         let mut permitted = BTreeMap::new();
@@ -1108,6 +1025,7 @@ mod tests {
     use crate::kernel::policy::{
         GIT_DEPENDENCY, INSTALL_SCRIPT_FAILED, SKIPPED_OPTIONAL, WEAK_INTEGRITY,
     };
+    use crate::kernel::resolve::record;
     use crate::kernel::signing::SigningKey;
     use crate::kernel::testutil::TempDir;
     use crate::tailors::cargo::rustfmt;
@@ -3309,32 +3227,33 @@ mod tests {
             )
         };
         let closure = go(go_resolution(dir));
-        assert_eq!(resolution_staleness(dir, &closure).unwrap(), None);
+        assert_eq!(inspect::resolution_state(dir, &closure), None);
         fs::write(
             dir.join("go.mod"),
             "module example.com/m\n\ngo 1.22\n\nrequire golang.org/x/text v0.14.0\n",
         )
         .unwrap();
-        let why = resolution_staleness(dir, &closure).unwrap().unwrap();
-        assert!(
-            why.starts_with("go.mod changed since the last sync"),
-            "{why}"
+        assert_eq!(
+            inspect::resolution_state(dir, &closure),
+            Some(State::Changed(vec!["go.mod".into()]))
         );
         // A lock file the record never named is a change too.
         fs::remove_file(dir.join("go.sum")).unwrap();
         let closure = go(go_resolution(dir));
-        assert_eq!(resolution_staleness(dir, &closure).unwrap(), None);
+        assert_eq!(inspect::resolution_state(dir, &closure), None);
         fs::write(dir.join("go.sum"), "golang.org/x/text v0.14.0 h1:x=\n").unwrap();
-        let why = resolution_staleness(dir, &closure).unwrap().unwrap();
-        assert!(why.starts_with("go.sum changed"), "{why}");
-        // A record whose digests cannot be read is malformed, not skipped.
+        assert_eq!(
+            inspect::resolution_state(dir, &closure),
+            Some(State::Changed(vec!["go.sum".into()]))
+        );
+        // A record whose digests cannot be read is unchecked for this
+        // closure alone, not an error for the whole audit.
         let mut broken = go_resolution(dir);
         broken["outputs"] = json!({"go.mod": "not a digest"});
-        let error = resolution_staleness(dir, &go(broken)).unwrap_err();
-        assert!(
-            error.to_string().contains("malformed resolution record"),
-            "{error}"
-        );
+        let Some(State::Unchecked(why)) = inspect::resolution_state(dir, &go(broken)) else {
+            panic!("a malformed record is unchecked");
+        };
+        assert!(why.contains("malformed resolution record"), "{why}");
     }
 
     /// Through the whole gate: a current closure whose joined record names
@@ -3372,6 +3291,47 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("run 'tog', then audit again"), "{text}");
+        // `tog status` reads the same check and agrees.
+        assert_eq!(
+            inspect::locked_closure_state(host(), dir, &closures[0]).unwrap(),
+            State::Changed(vec!["extra.lock".into()])
+        );
+    }
+
+    /// A stale record does not replace an `outdated` verdict and its hint,
+    /// and a record that cannot be compared is one closure's verdict, not
+    /// an error for the whole audit.
+    #[test]
+    fn a_stale_record_keeps_an_outdated_verdict_and_a_broken_one_is_per_closure() {
+        let temp = python_project("audit-record-precedence");
+        let dir = &temp.0;
+        fs::write(dir.join("extra.lock"), "one\n").unwrap();
+        let mut joined = resolution(dir, &[]);
+        joined["outputs"]["extra.lock"] = json!(record::sha256_hex(b"two\n"));
+        let mut body = python_body(dir);
+        body["exceptions"] = json!([]);
+        body["resolution"] = joined;
+        let closures = [write_closure(dir, "python", "python", None, body.clone())];
+        let verdicts = judge(dir, &permissive(), &closures);
+        let Freshness::Outdated(why) = &verdicts[0].freshness else {
+            panic!("{:?}", verdicts[0].freshness);
+        };
+        assert!(why.contains("records no platform"), "{why}");
+        assert!(why.contains("run 'tog' once"), "{why}");
+        body["resolution"]["outputs"] = json!({"extra.lock": "not a digest"});
+        let closures = [write_closure(
+            dir,
+            "python",
+            "python",
+            Some(host().triple()),
+            body,
+        )];
+        let verdicts = judge(dir, &permissive(), &closures);
+        let Freshness::Outdated(why) = &verdicts[0].freshness else {
+            panic!("{:?}", verdicts[0].freshness);
+        };
+        assert!(why.contains("malformed resolution record"), "{why}");
+        assert!(!verdicts[0].passes());
     }
 
     #[test]
