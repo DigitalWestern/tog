@@ -15,6 +15,9 @@ pub struct GoInputs {
     pub go_obj: PathBuf,
     pub plan: go::GoPlan,
     pub gosum_sha256: String,
+    /// go.mod and go.sum as the plan read them, by digest: the closure's
+    /// `resolution_basis`.
+    pub resolution_basis: crate::comforter::join::Digests,
     /// The ledgers this call's planner doors committed and rooted, for the
     /// references of the closure the sync publishes.
     pub ledgers: Vec<LedgerObjects>,
@@ -37,22 +40,30 @@ pub fn load_go_inputs(
     let go_version = toolchain.version("go")?;
     let go_obj = go::realize_runtime(store, activity, platform, toolchain)?;
     let mut ledgers = Vec::new();
-    let mut plan = go::plan_go(door, project, &go_obj, go_version, true, &mut ledgers)?;
+    let mut planned = go::plan_go_read(door, project, &go_obj, go_version, true, &mut ledgers)?;
     // A cached plan can name artifacts this store never downloaded. When the
     // module cache object is missing too, plan again, which fetches them;
     // when the object is present, nothing is fetched, so an offline warm
     // sync stays offline.
-    if !modcache_realizable(store, activity, platform, toolchain, &plan)? {
-        plan = go::plan_go(door, project, &go_obj, go_version, false, &mut ledgers)?;
+    if !modcache_realizable(store, activity, platform, toolchain, &planned.plan)? {
+        planned = go::plan_go_read(door, project, &go_obj, go_version, false, &mut ledgers)?;
     }
-    // An absent go.sum digests as the empty string; an unreadable one is
-    // an error, never a digest of nothing.
-    let gosum = go::read_gosum(project)?.unwrap_or_default();
-    use sha2::{Digest, Sha256};
+    // Every digest comes from the bytes the plan read, never from a second
+    // read that could see a newer lock. An absent go.sum digests as the
+    // empty string in `gosum_sha256` (what `status` compares) and is left
+    // out of the basis (as a resolution record leaves it out).
+    use crate::kernel::resolve::record::sha256_hex;
+    let mut resolution_basis = crate::comforter::join::Digests::new();
+    resolution_basis.insert("go.mod".into(), sha256_hex(planned.gomod.as_bytes()));
+    if let Some(gosum) = &planned.gosum {
+        resolution_basis.insert("go.sum".into(), sha256_hex(gosum.as_bytes()));
+    }
+    let gosum = planned.gosum.as_deref().unwrap_or_default();
     Ok(GoInputs {
         go_obj,
-        plan,
-        gosum_sha256: hex::encode(Sha256::digest(gosum.as_bytes())),
+        plan: planned.plan,
+        gosum_sha256: sha256_hex(gosum.as_bytes()),
+        resolution_basis,
         ledgers,
     })
 }

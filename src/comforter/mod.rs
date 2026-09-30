@@ -348,6 +348,21 @@ fn write_closure_inner(
     attribution: &mut crate::kernel::policy::Attribution,
 ) -> io::Result<()> {
     store.require_activity(activity, "closure publication")?;
+    // Keep the per-project transaction lock from before the checks below
+    // through both durable root publication and the visible closure rename.
+    // Every writer of this project's resolution files (a door's
+    // transaction) holds the same lock while it publishes, so what the
+    // recheck and the resolution join read cannot change before the closure
+    // is visible, and a second producer cannot observe a root from one
+    // generation paired with a closure from another. A caller that already
+    // holds the lock supplies it: a second `project_lock_in` from this
+    // process would wait on it forever.
+    let owned_project_lock = if explicit_refs.is_some() && supplied_project_lock.is_none() {
+        Some(store.project_lock_in(project)?)
+    } else {
+        None
+    };
+    let project_lock = supplied_project_lock.or(owned_project_lock.as_ref());
     // The one place every project write passes through: prove the lock and
     // the toolchain source inputs still read the way this command resolved
     // them before anything of this sync becomes visible.
@@ -370,8 +385,10 @@ fn write_closure_inner(
     Store::check_registrable_in(project)?;
     // The resolution join records into the attribution before it is
     // claimed, and adds a present ledger to the references before the root
-    // is registered. It writes nothing, so a refusal here leaves the
-    // checkout exactly as it was.
+    // is registered. It runs under the project lock, and it binds the
+    // joined record to the resolution files the producer's plan read. It
+    // writes nothing, so a refusal here leaves the checkout exactly as it
+    // was.
     join::join_for_closure(
         project,
         ecosystem,
@@ -380,15 +397,6 @@ fn write_closure_inner(
         activity,
         explicit_refs.as_mut(),
     )?;
-    // Keep the per-project transaction lock through both durable root
-    // publication and the visible closure rename. A second producer cannot
-    // observe a root from one generation paired with a closure from another.
-    let owned_project_lock = if explicit_refs.is_some() && supplied_project_lock.is_none() {
-        Some(store.project_lock_in(project)?)
-    } else {
-        None
-    };
-    let project_lock = supplied_project_lock.or(owned_project_lock.as_ref());
 
     // Hold the project directory open and publish through it. Every
     // component of `.tog/closures/<ecosystem>.json` is walked with

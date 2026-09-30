@@ -929,17 +929,43 @@ pub fn plan_go(
     use_cache: bool,
     ledgers: &mut Vec<LedgerObjects>,
 ) -> io::Result<GoPlan> {
+    plan_go_read(door, project, go_obj, go_version, use_cache, ledgers).map(|planned| planned.plan)
+}
+
+/// A plan and the exact go.mod and go.sum it was built from (`gosum` is
+/// `None` when go.sum was absent): the closure records their digests, so
+/// the resolution join binds a record to this generation of the lock.
+pub struct Planned {
+    pub plan: GoPlan,
+    pub gomod: String,
+    pub gosum: Option<String>,
+}
+
+/// `plan_go`, returning what the plan read.
+pub fn plan_go_read(
+    door: &mut ResolutionDoor<'_>,
+    project: &ProjectRoot,
+    go_obj: &Path,
+    go_version: &str,
+    use_cache: bool,
+    ledgers: &mut Vec<LedgerObjects>,
+) -> io::Result<Planned> {
     reject_workspaces(project)?;
     let gomod =
         read_gomod(project).map_err(|e| io::Error::new(e.kind(), format!("go.mod: {e}")))?;
-    let gosum = read_gosum(project)?.unwrap_or_default();
+    let gosum_read = read_gosum(project)?;
+    let gosum = gosum_read.clone().unwrap_or_default();
     reject_local_replaces(&gomod)?;
 
     let src_digest = source_digest(project)?;
     let input_hash = plan_cache_key(go_version, &gomod, &gosum, &src_digest);
     if use_cache {
         if let Some(plan) = cached_plan(project, &input_hash, &gosum)? {
-            return Ok(plan);
+            return Ok(Planned {
+                plan,
+                gomod,
+                gosum: gosum_read,
+            });
         }
     }
 
@@ -984,8 +1010,8 @@ pub fn plan_go(
     // the gate and now, or the cache key would lie about the plan's inputs.
     let now_mod =
         read_gomod(project).map_err(|e| io::Error::new(e.kind(), format!("go.mod: {e}")))?;
-    let now_sum = read_gosum(project)?.unwrap_or_default();
-    if now_mod != gomod || now_sum != gosum {
+    let now_sum = read_gosum(project)?;
+    if now_mod != gomod || now_sum != gosum_read {
         return Err(err("go.mod/go.sum changed while planning; re-run 'tog'"));
     }
     project.write_file(
@@ -995,7 +1021,11 @@ pub fn plan_go(
             "plan": plan,
         }))?,
     )?;
-    Ok(plan)
+    Ok(Planned {
+        plan,
+        gomod,
+        gosum: gosum_read,
+    })
 }
 
 /// Digest of the project's .go sources (the tidy gate's third input).
@@ -1253,6 +1283,7 @@ pub fn project_go_env(
     modcache_obj: &Path,
     plan: &GoPlan,
     gosum_sha256: &str,
+    resolution_basis: &crate::comforter::join::Digests,
     toolchain: &Selected,
     ledgers: &[LedgerObjects],
     attribution: &mut crate::kernel::policy::Attribution,
@@ -1290,6 +1321,10 @@ pub fn project_go_env(
         "plan": plan,
         "resolution_ledgers": ledger_refs,
     });
+    // What the plan read, so the resolution join binds a record to this
+    // generation of go.mod and go.sum.
+    body[crate::comforter::join::BASIS_FIELD] =
+        crate::comforter::join::basis_value(resolution_basis);
     // The Go object is this ecosystem's runtime: the record names the bundle
     // it came from and refers to it directly, so a later catalog refresh
     // cannot re-pair these modules with another toolchain.
@@ -1694,6 +1729,7 @@ mod tests {
             &store.object_path(&modcache_id),
             &plan,
             "sum",
+            &Default::default(),
             &selected,
             &[],
             &mut attribution,
@@ -1774,6 +1810,7 @@ mod tests {
             &store.object_path(&modcache_id),
             &plan,
             "sum",
+            &Default::default(),
             &selected,
             &[],
             &mut attribution,
@@ -1882,6 +1919,7 @@ mod tests {
             &store.object_path(&modcache_id),
             &plan,
             "sum",
+            &Default::default(),
             &selected,
             std::slice::from_ref(&objects),
             &mut attribution,

@@ -25,6 +25,7 @@ use crate::kernel::signing::KeySet;
 use crate::kernel::store::Store;
 use crate::kernel::ui;
 use serde_json::Value;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -236,10 +237,18 @@ pub(crate) fn join_for_closure(
     let Some(files) = lookup(ecosystem, project)? else {
         return Ok(());
     };
+    let basis = read_basis(object, ecosystem)?;
     let supplied = supplied_for(ecosystem);
     let joined = match policy_for_test() {
-        Some(policy) => join(&policy, project, ecosystem, &supplied, &files)?,
-        None => join(&policy::effective(), project, ecosystem, &supplied, &files)?,
+        Some(policy) => join(&policy, project, ecosystem, &supplied, &files, &basis)?,
+        None => join(
+            &policy::effective(),
+            project,
+            ecosystem,
+            &supplied,
+            &files,
+            &basis,
+        )?,
     };
     let Some(attested) = joined else {
         return Ok(());
@@ -258,18 +267,136 @@ pub(crate) fn join_for_closure(
     Ok(())
 }
 
-/// The join proper, with the policy passed in. Returns the attested record
-/// after recording its exceptions, or `None` after recording
-/// `unrecorded-resolution`; `Err` on a hard failure, an I/O error, or a
-/// refusal by the policy. Nothing is recorded unless every candidate was
-/// judged without a hard failure.
+/// The closure-body field in which a producer names the resolution files
+/// its plan read: each file's record path mapped to the sha256 of the exact
+/// bytes the plan was built from (a file that did not exist is omitted).
+/// Every producer of an ecosystem with resolution files sets it; the join
+/// binds the record it joins to these digests, not only to the files on
+/// disk, so a closure never carries a record for a lock generation other
+/// than the one it was planned from.
+pub const BASIS_FIELD: &str = "resolution_basis";
+
+/// Record path to sha256: what a plan read, or what is on disk now.
+pub type Digests = BTreeMap<String, String>;
+
+/// The `resolution_basis` value for a closure body.
+pub fn basis_value(digests: &Digests) -> Value {
+    serde_json::to_value(digests).expect("a string map serializes")
+}
+
+/// The producer's `resolution_basis`. A closure of an ecosystem with
+/// resolution files that lacks one is a producer bug: without it the join
+/// cannot tell which lock generation the closure was planned from.
+fn read_basis(object: &serde_json::Map<String, Value>, ecosystem: &str) -> io::Result<Digests> {
+    let refuse = |why: &str| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "the {ecosystem} closure {why}, so the resolution join cannot bind a record \
+                 to the lock files its plan read; this is a tog bug"
+            ),
+        )
+    };
+    let value = object
+        .get(BASIS_FIELD)
+        .ok_or_else(|| refuse(&format!("names no `{BASIS_FIELD}`")))?;
+    let digests: Digests = serde_json::from_value(value.clone()).map_err(|_| {
+        refuse(&format!(
+            "has a `{BASIS_FIELD}` that is not a path-to-digest map"
+        ))
+    })?;
+    if let Some((path, _)) = digests.iter().find(|(path, digest)| {
+        record::record_path(Path::new(path)).as_deref() != Some(path.as_str())
+            || !record::is_sha256_hex(digest)
+    }) {
+        return Err(refuse(&format!(
+            "has a `{BASIS_FIELD}` entry for {path:?} that is not a record path and a sha256"
+        )));
+    }
+    Ok(digests)
+}
+
+/// Refuse a closure whose plan read resolution files that no longer read
+/// that way. The closure writer holds the project lock, which every door
+/// holds while it publishes, so the files cannot change again before the
+/// closure is visible; a difference here means another command (or an
+/// editor) changed them after this sync planned, and whatever record now
+/// sits beside them describes a lock the closure was not built from.
+fn check_basis(
+    project: &ProjectRoot,
+    ecosystem: &str,
+    files: &ResolutionFiles,
+    basis: &Digests,
+) -> io::Result<()> {
+    let mut listed = files.outputs.clone();
+    listed.extend(files.inputs.iter().cloned());
+    let current = record::file_digests(project, &listed)?;
+    let changed = differing(basis, &current);
+    if changed.is_empty() {
+        return Ok(());
+    }
+    Err(io::Error::other(format!(
+        "{} changed in {} after this {ecosystem} sync planned from {}; another tog command or \
+         an editor wrote {} meanwhile, so nothing was published; run `tog` again",
+        changed.join(", "),
+        project.path().display(),
+        if changed.len() == 1 { "it" } else { "them" },
+        if changed.len() == 1 { "it" } else { "them" },
+    )))
+}
+
+/// The paths whose digests differ between `left` and `right`, including a
+/// path only one of them names.
+fn differing(left: &Digests, right: &Digests) -> Vec<String> {
+    let paths: BTreeSet<&String> = left.keys().chain(right.keys()).collect();
+    paths
+        .into_iter()
+        .filter(|path| left.get(*path) != right.get(*path))
+        .cloned()
+        .collect()
+}
+
+/// The record's own digests must be the plan's: every file the record
+/// names at the version the plan read, and every file the plan read named
+/// by the record. `judge` already compared the record with the disk, and
+/// `check_basis` the disk with the plan, so this holds unless one of those
+/// changes meaning; it is checked here so the binding never depends on it.
+fn check_record_basis(
+    origin: &str,
+    ecosystem: &str,
+    record: &record::ResolutionRecord,
+    basis: &Digests,
+) -> io::Result<()> {
+    let mut named = record.outputs.clone();
+    named.extend(record.inputs.clone());
+    let changed = differing(basis, &named);
+    if changed.is_empty() {
+        return Ok(());
+    }
+    Err(io::Error::other(format!(
+        "{origin}: the {ecosystem} resolution record describes {} at a different version than \
+         this sync planned from; another tog command changed the lock meanwhile, so nothing was \
+         published; run `tog` again",
+        changed.join(", ")
+    )))
+}
+
+/// The join proper, with the policy passed in. `basis` is what the
+/// closure's plan read (`BASIS_FIELD`): the files must still read that way,
+/// and a joined record must describe exactly them. Returns the attested
+/// record after recording its exceptions, or `None` after recording
+/// `unrecorded-resolution`; `Err` on a hard failure, an I/O error, a lock
+/// that changed since the plan, or a refusal by the policy. Nothing is
+/// recorded unless every candidate was judged without a hard failure.
 pub(crate) fn join(
     policy: &Policy,
     project: &ProjectRoot,
     ecosystem: &str,
     supplied: &[SuppliedRecord],
     files: &ResolutionFiles,
+    basis: &Digests,
 ) -> io::Result<Option<Attested>> {
+    check_basis(project, ecosystem, files, basis)?;
     let locks = files.existing_outputs(project)?;
     // Nothing a door would produce exists here, so there is no lock to
     // vouch for and nothing to find.
@@ -290,17 +417,20 @@ pub(crate) fn join(
         )?;
         judged.push((Some(candidate.origin.clone()), judgment));
     }
+    let receipt_origin = project
+        .path()
+        .join(record::receipt_path(ecosystem))
+        .display()
+        .to_string();
     let committed = match record::read_receipt(project, ecosystem)? {
-        Some(bytes) => {
-            let origin = project
-                .path()
-                .join(record::receipt_path(ecosystem))
-                .display()
-                .to_string();
-            Some(record::judge(
-                &origin, &bytes, ecosystem, &trusted, files, project,
-            )?)
-        }
+        Some(bytes) => Some(record::judge(
+            &receipt_origin,
+            &bytes,
+            ecosystem,
+            &trusted,
+            files,
+            project,
+        )?),
         None => None,
     };
     judged.extend(committed.map(|judgment| (None, judgment)));
@@ -308,6 +438,11 @@ pub(crate) fn join(
     for (origin, judgment) in judged {
         match judgment {
             Judgment::Attests(attested) => {
+                let shown = origin
+                    .as_ref()
+                    .map(|origin| origin.display().to_string())
+                    .unwrap_or_else(|| receipt_origin.clone());
+                check_record_basis(&shown, ecosystem, &attested.record, basis)?;
                 let subject = locks.join(", ");
                 for exception in attested.record.exceptions() {
                     policy::record_with(
@@ -555,10 +690,31 @@ mod tests {
         supplied: &[SuppliedRecord],
     ) -> (io::Result<Option<Attested>>, Vec<Exception>) {
         let attribution = Attribution::open(ECO).unwrap();
-        let result = join(policy, &open(dir), ECO, supplied, &files());
+        let result = join(
+            policy,
+            &open(dir),
+            ECO,
+            supplied,
+            &files(),
+            &disk_basis(dir),
+        );
         let recorded = attribution.recorded();
         attribution.discard();
         (result, recorded)
+    }
+
+    /// The basis a plan reading `dir` now would record: every listed
+    /// resolution file as it is on disk.
+    fn disk_basis(dir: &Path) -> Digests {
+        let mut listed = files().outputs;
+        listed.extend(files().inputs);
+        file_digests(&open(dir), &listed).unwrap()
+    }
+
+    /// A producer's closure body, planned from `dir` as it is now.
+    fn planned_body(dir: &Path, mut body: Value) -> Value {
+        body[BASIS_FIELD] = basis_value(&disk_basis(dir));
+        body
     }
 
     fn unrecorded(recorded: &[Exception]) -> &Exception {
@@ -1134,14 +1290,21 @@ mod tests {
         (activity, refs)
     }
 
-    /// Publish a `resolvetest` closure for `dir` through the real writer.
+    /// Publish a `resolvetest` closure for `dir` through the real writer,
+    /// planned from the files as they are now.
     fn publish(dir: &Path, store: &Store) -> io::Result<Value> {
+        let body = planned_body(dir, json!({"resolution": "a producer may not set this"}));
+        publish_planned(dir, store, body)
+    }
+
+    /// Publish `body`, planned earlier, for `dir` through the real writer.
+    fn publish_planned(dir: &Path, store: &Store, body: Value) -> io::Result<Value> {
         let (activity, refs) = tool_refs(store);
         let mut attribution = Attribution::open(ECO).unwrap();
         let result = crate::comforter::write_closure(
             &open(dir),
             ECO,
-            json!({"resolution": "a producer may not set this"}),
+            body,
             store,
             &activity,
             refs,
@@ -1272,7 +1435,7 @@ mod tests {
         crate::comforter::write_closure(
             &open(&temp.0),
             ECO,
-            json!({}),
+            planned_body(&temp.0, json!({})),
             &store,
             &activity,
             refs,
@@ -1297,5 +1460,143 @@ mod tests {
         let exceptions = &closure["body"]["exceptions"];
         assert_eq!(exceptions[0]["kind"], UNRECORDED_RESOLUTION, "{exceptions}");
         assert_eq!(exceptions[0]["detail"], "missing");
+    }
+
+    /// Race one: the lock changed after the sync planned and before its
+    /// closure was written. The closure would describe the old lock; it is
+    /// refused, with a rerun hint, instead of recorded as unrecorded or
+    /// joined to anything.
+    #[test]
+    fn a_lock_changed_after_planning_fails_the_sync_and_publishes_nothing() {
+        let temp = project("join-race-edit");
+        commit_receipt(
+            &temp.0,
+            &signed(&record_for(&temp.0, vec![]), Some(ci_key())),
+        );
+        let _writer = Writer::new(trusting(&[ci_key()]), Vec::new());
+        let (_store_dir, store) = test_store("join-race-edit");
+        let planned = planned_body(&temp.0, json!({}));
+        // A concurrent `tog add` publishes a new lock between the plan and
+        // the closure write.
+        fs::write(temp.0.join("test.lock"), "left-pad 1.3.1 sha256:cd\n").unwrap();
+        let error = publish_planned(&temp.0, &store, planned).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("test.lock changed"), "{message}");
+        assert!(message.contains("run `tog` again"), "{message}");
+        assert!(!temp.0.join(".tog/closures").exists());
+        assert!(root_objects(&store, &temp.0).is_empty());
+    }
+
+    /// Race two: another command published a new lock and its matching,
+    /// trusted receipt after this sync planned. The receipt attests the
+    /// files on disk, but not the plan this closure was built from, so it
+    /// is never joined to it.
+    #[test]
+    fn a_record_published_after_planning_is_never_joined_to_the_old_plan() {
+        let temp = project("join-race-receipt");
+        let _writer = Writer::new(trusting(&[ci_key()]), Vec::new());
+        let (_store_dir, store) = test_store("join-race-receipt");
+        let planned = planned_body(&temp.0, json!({}));
+        fs::write(
+            temp.0.join("test.toml"),
+            "[deps]\nleft-pad = \"1\"\nextra = \"2\"\n",
+        )
+        .unwrap();
+        fs::write(temp.0.join("test.lock"), "left-pad 1.3.0\nextra 2.0.0\n").unwrap();
+        let fresh = signed(&record_for(&temp.0, vec![]), Some(ci_key()));
+        commit_receipt(&temp.0, &fresh);
+        let error = publish_planned(&temp.0, &store, planned).unwrap_err();
+        let message = error.to_string();
+        assert!(
+            message.contains("test.lock, test.toml changed"),
+            "{message}"
+        );
+        assert!(!temp.0.join(".tog/closures").exists());
+        // The same record joins a closure planned from the new lock.
+        let closure = publish(&temp.0, &store).unwrap();
+        assert_eq!(
+            closure["body"]["resolution"],
+            serde_json::from_slice::<Value>(&fresh).unwrap()
+        );
+        assert_eq!(
+            closure["body"][BASIS_FIELD],
+            basis_value(&disk_basis(&temp.0))
+        );
+    }
+
+    /// The record itself is bound to the plan, not only through the disk:
+    /// a record describing any file at another version than the plan read
+    /// is refused even when `judge` would let it through.
+    #[test]
+    fn a_record_that_differs_from_the_plan_is_refused() {
+        let temp = project("join-record-basis");
+        let record = record_for(&temp.0, vec![]);
+        let basis = disk_basis(&temp.0);
+        check_record_basis("r", ECO, &record, &basis).unwrap();
+        let mut older = basis.clone();
+        older.insert("test.lock".into(), "0".repeat(64));
+        let error = check_record_basis("r", ECO, &record, &older).unwrap_err();
+        assert!(error.to_string().contains("test.lock"), "{error}");
+        let mut wider = basis;
+        wider.insert(".testrc".into(), "1".repeat(64));
+        assert!(check_record_basis("r", ECO, &record, &wider).is_err());
+    }
+
+    #[test]
+    fn a_closure_without_its_plan_basis_is_refused() {
+        let temp = project("join-no-basis");
+        let _writer = Writer::new(trusting(&[ci_key()]), Vec::new());
+        let (_store_dir, store) = test_store("join-no-basis");
+        let error = publish_planned(&temp.0, &store, json!({})).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{error}");
+        assert!(error.to_string().contains(BASIS_FIELD), "{error}");
+        let error = publish_planned(
+            &temp.0,
+            &store,
+            json!({BASIS_FIELD: {"../x": "0".repeat(64)}}),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{error}");
+        assert!(!temp.0.join(".tog/closures").exists());
+    }
+
+    /// The join runs under the project lock that every door's transaction
+    /// takes to publish, so no writer can change the lock between the join
+    /// and the closure becoming visible.
+    #[test]
+    fn the_join_runs_under_the_project_lock() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let temp = project("join-locked");
+        let _writer = Writer::new(trusting(&[ci_key()]), Vec::new());
+        let (_store_dir, store) = test_store("join-locked");
+        let root = store.root.clone();
+        let blocked = Arc::new(AtomicBool::new(false));
+        let waiter: Arc<Mutex<Option<std::thread::JoinHandle<()>>>> = Arc::default();
+        let (seen, handle) = (blocked.clone(), waiter.clone());
+        set_resolution_files_for_test(Some(Arc::new(
+            move |ecosystem: &str, project: &ProjectRoot| {
+                if ecosystem == ECO {
+                    let (sender, receiver) = std::sync::mpsc::channel();
+                    let store = Store { root: root.clone() };
+                    let project = project.try_clone()?;
+                    *handle.lock().unwrap() = Some(std::thread::spawn(move || {
+                        let lock = store.project_lock_in(&project).unwrap();
+                        let _ = sender.send(());
+                        drop(lock);
+                    }));
+                    let timed_out = receiver
+                        .recv_timeout(std::time::Duration::from_millis(300))
+                        .is_err();
+                    seen.store(timed_out, Ordering::SeqCst);
+                }
+                Ok((ecosystem == ECO).then(files))
+            },
+        )));
+        publish(&temp.0, &store).unwrap();
+        waiter.lock().unwrap().take().unwrap().join().unwrap();
+        assert!(
+            blocked.load(Ordering::SeqCst),
+            "another writer took the project lock while the join ran"
+        );
     }
 }
