@@ -1995,7 +1995,10 @@ Tailors without a lock check refuse `attest` with the reason. With no
 ecosystem named, `tog attest` covers every detected ecosystem whose tailor
 declares resolution outputs, and refuses when there is none. It is
 all-or-nothing: every check runs before any record is written, so one
-failing ecosystem leaves no partial set. It reads `tog-toolchain.toml` as
+failing ecosystem leaves no partial set. The receipts are then published
+together under the project lock, each only while its lock still has the
+digests its record signed; if one fails to publish, the receipts already
+published by that run are put back as they were. It reads `tog-toolchain.toml` as
 `--frozen` does and never writes it. Run on CI
 with the signing key, this converts a repository in one command. It is
 also the remedy the `unrecorded-resolution` refusal prints.

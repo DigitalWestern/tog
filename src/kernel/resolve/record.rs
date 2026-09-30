@@ -27,6 +27,8 @@
 
 use super::door::{PublishFacts, ReceiptProducer};
 use super::ledger::{self, Diagnostics, LedgerObjects, PortableLedger};
+use super::outputs::Outputs;
+use super::transaction::{HoldSpec, Published, Transaction};
 use super::{redact, DoorKind};
 use crate::kernel::activity::StoreActivity;
 use crate::kernel::fsroot::{Entry, ProjectRoot};
@@ -989,6 +991,196 @@ pub fn commit_ledger(
         .insert("imported".to_string(), Value::Bool(true));
     ledger::commit(store, activity, &ledger, &diagnostics)
 }
+
+/// Publish checked records as the project's receipts, all or nothing:
+/// `tog attest`'s second phase, run only after every ecosystem's lock check
+/// passed without publishing anything.
+///
+/// The project lock (the one every door's transaction holds to publish) is
+/// held throughout. Under it, every record is first compared with the
+/// files it names: a lock that changed after its check is refused before
+/// any receipt is written. Then each receipt is published through its own
+/// resolution transaction, which holds the record's outputs and publishes
+/// only while they still hold the digests the record signed. If publishing
+/// one fails, every receipt already published in this call is put back as
+/// it was (the prior receipt's bytes restored, or the new one removed when
+/// there was none), so the checkout ends as it began; if putting one back
+/// fails too, the error names both failures and the receipt left behind.
+pub fn publish_receipts(
+    store: &Store,
+    activity: &StoreActivity,
+    project: &ProjectRoot,
+    receipts: &[(ResolutionRecord, Vec<u8>)],
+) -> io::Result<()> {
+    store.require_activity(activity, "receipt publication")?;
+    let lock = store.project_lock_in(project)?;
+    let mut priors = Vec::new();
+    for (record, _) in receipts {
+        check_still_described(project, record)?;
+        priors.push(read_receipt(project, &record.ecosystem)?);
+    }
+    for (index, (record, bytes)) in receipts.iter().enumerate() {
+        let published = publish_receipt(store, activity, project, &lock, record, bytes);
+        let Err(error) = published else {
+            continue;
+        };
+        let mut left = Vec::new();
+        for ((earlier, _), prior) in receipts[..index].iter().zip(&priors).rev() {
+            if let Err(undo) =
+                restore_receipt(store, activity, project, &lock, &earlier.ecosystem, prior)
+            {
+                left.push(format!(
+                    "{} ({undo})",
+                    project
+                        .path()
+                        .join(receipt_path(&earlier.ecosystem))
+                        .display()
+                ));
+            }
+        }
+        if left.is_empty() {
+            return Err(io::Error::new(
+                error.kind(),
+                format!(
+                    "{error}; no receipt was published (every one already written by this \
+                     command was put back)"
+                ),
+            ));
+        }
+        return Err(io::Error::new(
+            error.kind(),
+            format!(
+                "{error}; putting back the receipts this command had already published also \
+                 failed, so these now hold a new record while another ecosystem's did not \
+                 publish: {}; restore them from version control or run `tog attest` again",
+                left.join(", ")
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// Refuse a record whose files no longer read the way it signed them.
+fn check_still_described(project: &ProjectRoot, record: &ResolutionRecord) -> io::Result<()> {
+    let mut named = record.outputs.clone();
+    named.extend(record.inputs.clone());
+    let paths: Vec<PathBuf> = named.keys().map(PathBuf::from).collect();
+    let current = file_digests(project, &paths)?;
+    let changed: Vec<&str> = named
+        .iter()
+        .filter(|(path, digest)| current.get(*path) != Some(*digest))
+        .map(|(path, _)| path.as_str())
+        .collect();
+    if changed.is_empty() {
+        return Ok(());
+    }
+    Err(io::Error::other(format!(
+        "{} changed in {} after tog attest checked the {} lock; no receipt was published; run \
+         `tog attest` again",
+        changed.join(", "),
+        project.path().display(),
+        record.ecosystem
+    )))
+}
+
+/// Publish one receipt through a resolution transaction that holds the
+/// record's outputs, unchanged, beside it.
+fn publish_receipt(
+    store: &Store,
+    activity: &StoreActivity,
+    project: &ProjectRoot,
+    lock: &std::fs::File,
+    record: &ResolutionRecord,
+    bytes: &[u8],
+) -> io::Result<()> {
+    #[cfg(test)]
+    if FAIL_PUBLISH_FOR_TEST
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .as_deref()
+        == Some(record.ecosystem.as_str())
+    {
+        return Err(io::Error::other(format!(
+            "simulated failure publishing the {} receipt",
+            record.ecosystem
+        )));
+    }
+    let outputs: Vec<PathBuf> = record.outputs.keys().map(PathBuf::from).collect();
+    let transaction = Transaction::hold_locked(
+        store,
+        activity,
+        project.try_clone()?,
+        lock.try_clone()?,
+        &HoldSpec {
+            ecosystem: &record.ecosystem,
+            outputs: &outputs,
+            receipt: true,
+        },
+    )?;
+    for (path, digest) in &record.outputs {
+        let held = transaction
+            .original_digest(Path::new(path))
+            .map(hex::encode);
+        if held.as_deref() != Some(digest.as_str()) {
+            transaction.abandon()?;
+            return Err(io::Error::other(format!(
+                "{} changed in {} after tog attest checked the {} lock; no receipt was \
+                 published; run `tog attest` again",
+                path,
+                project.path().display(),
+                record.ecosystem
+            )));
+        }
+    }
+    finish(transaction.publish(&Outputs::none(store, activity)?, Some(bytes))?);
+    Ok(())
+}
+
+/// Put a receipt back as it was before this command: `prior`'s bytes, or
+/// no receipt at all.
+fn restore_receipt(
+    store: &Store,
+    activity: &StoreActivity,
+    project: &ProjectRoot,
+    lock: &std::fs::File,
+    ecosystem: &str,
+    prior: &Option<Vec<u8>>,
+) -> io::Result<()> {
+    let Some(bytes) = prior else {
+        return project.remove_file(&receipt_path(ecosystem));
+    };
+    let transaction = Transaction::hold_locked(
+        store,
+        activity,
+        project.try_clone()?,
+        lock.try_clone()?,
+        &HoldSpec {
+            ecosystem,
+            outputs: &[],
+            receipt: true,
+        },
+    )?;
+    finish(transaction.publish(&Outputs::none(store, activity)?, Some(bytes))?);
+    Ok(())
+}
+
+/// A publication whose cleanup failed has still published; the next
+/// recovery finishes the cleanup, so it is a warning, not a failure (as
+/// the door reports it).
+fn finish(published: Published) {
+    if let Published::CleanupPending(error) = published {
+        crate::kernel::ui::warning(
+            &format!("the receipt was published, but cleaning up after it failed: {error}"),
+            "the next tog command in this project finishes the cleanup",
+        );
+    }
+}
+
+/// The ecosystem whose receipt `publish_receipts` fails to publish, for
+/// the rollback tests.
+#[cfg(test)]
+pub(crate) static FAIL_PUBLISH_FOR_TEST: std::sync::Mutex<Option<String>> =
+    std::sync::Mutex::new(None);
 
 #[cfg(test)]
 mod tests {

@@ -513,17 +513,16 @@ pub trait Tailor: Sync {
 
     /// `tog attest`: run this ecosystem's lock check through `door` (an
     /// attest door) in `project`. A check that leaves the lock and manifest
-    /// byte-unchanged yields the signed record and its bytes, published as
-    /// the project's receipt when `publish_receipt` is true (otherwise, for
-    /// `--record-out`, the held receipt is left as it was). A check that
-    /// fails or would change the lock publishes nothing and is an error.
+    /// byte-unchanged yields the signed record and its bytes; a check that
+    /// fails or would change the lock is an error. Either way the check
+    /// publishes nothing: `tog attest` publishes every ecosystem's record
+    /// together (`record::publish_receipts`) only after all checks passed.
     fn attest_lock(
         &self,
         _ctx: &Context,
         _project: &ProjectRoot,
         _toolchain: &Selected,
         _door: &mut ResolutionDoor<'_>,
-        _publish_receipt: bool,
     ) -> io::Result<(crate::kernel::resolve::record::ResolutionRecord, Vec<u8>)> {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
@@ -554,8 +553,8 @@ pub fn resolution_files(
 
 /// The record a door run of `tailor` leaves in `project`: the tailor's
 /// resolution files, the process signing key (`None` writes it unsigned),
-/// and the tool with the arguments it ran with. The caller sets
-/// `require_unchanged` and `publish_receipt` for `tog attest`.
+/// and the tool with the arguments it ran with. `tog attest`'s check sets
+/// `require_unchanged` and clears `publish_receipt`.
 pub fn record_spec(
     tailor: &dyn Tailor,
     project: &ProjectRoot,

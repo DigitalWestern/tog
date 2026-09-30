@@ -135,16 +135,9 @@ impl Tailor for Go {
         project: &ProjectRoot,
         toolchain: &Selected,
         door: &mut ResolutionDoor<'_>,
-        publish_receipt: bool,
     ) -> io::Result<(crate::kernel::resolve::record::ResolutionRecord, Vec<u8>)> {
         let go_obj = go::realize_runtime(&ctx.store, &ctx.activity, ctx.platform, toolchain)?;
-        go::attest_project(
-            door,
-            project,
-            &go_obj,
-            go::go_tool(toolchain)?,
-            publish_receipt,
-        )
+        go::attest_project(door, project, &go_obj, go::go_tool(toolchain)?)
     }
 
     fn builds(&self) -> bool {

@@ -107,14 +107,14 @@ pub fn tidy_project(
 /// the next step rather than hidden), then `go mod tidy -diff` in the project
 /// through `door`'s transaction with the record's producer. The record
 /// carries the tidy check's ledger; the download's is rooted under the
-/// project beside it. A pair go would change, or a check that fails,
-/// publishes nothing.
+/// project beside it. The check publishes nothing, not even the receipt:
+/// `tog attest` publishes every record only once every check passed. A
+/// pair go would change, or a check that fails, is an error.
 pub fn attest_project(
     door: &mut ResolutionDoor<'_>,
     project: &ProjectRoot,
     go_obj: &Path,
     tool: record::Tool,
-    publish_receipt: bool,
 ) -> io::Result<(record::ResolutionRecord, Vec<u8>)> {
     reject_workspaces(project)?;
     let gomod =
@@ -145,7 +145,7 @@ pub fn attest_project(
     let args = ["mod", "tidy", "-diff"];
     let mut spec = crate::tailors::record_spec(&tailor::Go, project, tool, &args)?;
     spec.require_unchanged = true;
-    spec.publish_receipt = publish_receipt;
+    spec.publish_receipt = false;
     let slot = record::RecordSlot::default();
     let report = run_go(
         door,
