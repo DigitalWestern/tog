@@ -74,6 +74,33 @@ struct Probe {
     build: String,
 }
 
+/// A fresh private directory for one version probe, under the temp root:
+/// the probe runs before any store is open. The name is random and the
+/// directory is created exclusively with mode 0700, so two probes never
+/// share one and a directory (or symlink) someone else put at the name is
+/// refused, never adopted; a taken name draws another.
+fn probe_scratch() -> io::Result<PathBuf> {
+    use std::os::unix::fs::DirBuilderExt;
+    const ATTEMPTS: usize = 8;
+    let root = std::env::temp_dir();
+    let mut taken = None;
+    for _ in 0..ATTEMPTS {
+        let random = crate::kernel::fsroot::urandom_bytes(16)?;
+        let scratch = root.join(format!("tog-rust-path-probe-{}", hex::encode(random)));
+        match fs::DirBuilder::new().mode(0o700).create(&scratch) {
+            Ok(()) => return Ok(scratch),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => taken = Some(error),
+            Err(error) => {
+                return Err(io::Error::new(
+                    error.kind(),
+                    format!("create the probe directory {}: {error}", scratch.display()),
+                ))
+            }
+        }
+    }
+    Err(taken.unwrap_or_else(|| io::Error::other("no probe directory name was tried")))
+}
+
 /// Run one of the tree's own binaries for its version output, in the build
 /// sandbox: the tree read-only, a scratch directory as the only writable
 /// place (its home, temp and working directory), no network and a scrubbed
@@ -82,18 +109,7 @@ struct Probe {
 /// needs no store lease and runs the same while a lock is being written as
 /// during a sync.
 fn version_output(platform: Platform, tree: &Path, binary: &str, flag: &str) -> io::Result<String> {
-    // The sequence keeps two probes in one process apart when the clock
-    // does not: macOS's ticks in microseconds.
-    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let scratch = std::env::temp_dir().join(format!(
-        "tog-rust-path-probe-{}-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |elapsed| elapsed.as_nanos()),
-        SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    ));
-    fs::create_dir_all(&scratch)?;
+    let scratch = probe_scratch()?;
     let answer = scratch.join("version.txt");
     let program = tree.join("bin").join(binary);
     let (program_arg, answer_arg) = (program.display().to_string(), answer.display().to_string());
@@ -1313,6 +1329,18 @@ mod tests {
             "the import holds the locked bytes"
         );
         drop(activity);
+    }
+
+    /// Each probe gets its own directory, private to this user.
+    #[test]
+    fn probe_scratch_directories_are_private_and_distinct() {
+        let (first, second) = (probe_scratch().unwrap(), probe_scratch().unwrap());
+        assert_ne!(first, second);
+        for scratch in [&first, &second] {
+            let mode = fs::symlink_metadata(scratch).unwrap().permissions().mode();
+            assert_eq!(mode & 0o7777, 0o700, "{}", scratch.display());
+            fs::remove_dir(scratch).unwrap();
+        }
     }
 
     #[test]

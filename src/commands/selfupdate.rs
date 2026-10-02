@@ -151,8 +151,18 @@ impl Release {
 /// Read the latest release. The only network request `doctor` makes.
 pub fn latest() -> io::Result<Release> {
     let url = manifest_url();
-    let text = fetch::fetch_text_within(&url, Some(LOOKUP_TIMEOUT))?;
+    let text = fetch::fetch_text_within(&url, Some(LOOKUP_TIMEOUT)).map_err(no_release_yet)?;
     Release::parse(&text)
+}
+
+/// A 404 on the release manifest means no release has been published.
+/// `kernel::fetch` explains a 404 as a yanked package or a stale lockfile,
+/// which is wrong here: nothing was yanked and no lockfile is involved.
+fn no_release_yet(error: io::Error) -> io::Error {
+    match fetch::http_status(&error) {
+        Some(404) => io::Error::new(io::ErrorKind::NotFound, "no release is published yet"),
+        _ => error,
+    }
 }
 
 /// The `version` row of `tog doctor`: this build, and whether a newer
@@ -506,6 +516,22 @@ mod tests {
         assert!(Version::parse("latest").is_none());
         assert!(Version::parse("v0.10.0") > Version::parse("v0.9.9"));
         assert_eq!(Version::running().unwrap().to_string(), cli::VERSION);
+    }
+
+    /// A 404 on the manifest says no release exists; it never repeats the
+    /// package-download explanation. Every other failure passes through.
+    #[test]
+    fn a_missing_manifest_says_no_release_is_published() {
+        let error = no_release_yet(fetch::status_failure(404));
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+        assert_eq!(error.to_string(), "no release is published yet");
+        let throttled = fetch::status_failure(429);
+        let text = throttled.to_string();
+        assert_eq!(no_release_yet(throttled).to_string(), text);
+        assert_eq!(
+            no_release_yet(io::Error::other("offline")).to_string(),
+            "offline"
+        );
     }
 
     #[test]

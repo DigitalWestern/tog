@@ -64,7 +64,7 @@ sandbox and native builds need them; the
 
 ```
 $ tog doctor
-ok    version      tog 0.1.0 (7688cfd 2026-09-21); newer release not checked (fetch https://api.github.com/repos/DigitalWestern/tog/releases/latest: the server does not have this artifact (404); the index may have yanked it, or the lockfile names a version that is gone)
+ok    version      tog 0.1.0 (7688cfd 2026-09-21); newer release not checked (no release is published yet)
 ok    platform     x86_64-unknown-linux-gnu
 ok    store        /tmp/tog-demo/store (0 objects, 0 cached artifacts)
 ok    disk         12.1 GiB free under the store

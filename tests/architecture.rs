@@ -515,7 +515,8 @@ const BASELINE_HEADER: &str = "\
 
 /// Rough function lengths: a `fn` at indentation ≤ 4 runs to its matching
 /// brace, with strings, chars, and comments blanked so their braces do not
-/// count.
+/// count. A function under `#[cfg(test)]` is test code wherever it sits in
+/// the file, so it is measured (to step over its body) and left out.
 fn function_lengths(text: &str) -> Vec<(String, usize)> {
     let clean = blank_literals(text);
     let lines: Vec<&str> = clean.lines().collect();
@@ -550,10 +551,36 @@ fn function_lengths(text: &str) -> Vec<(String, usize)> {
             }
             j += 1;
         }
-        out.push((name, j - i + 1));
+        if !test_only(&lines[..i]) {
+            out.push((name, j - i + 1));
+        }
         i = j + 1;
     }
     out
+}
+
+/// Whether the item starting after `above` carries `#[cfg(test)]`: one of
+/// the attribute lines directly over it says so. Doc comments are already
+/// blank here, so blank lines between attributes are stepped over.
+fn test_only(above: &[&str]) -> bool {
+    above
+        .iter()
+        .rev()
+        .map(|line| line.trim())
+        .take_while(|line| line.is_empty() || line.starts_with("#["))
+        .any(|line| line == "#[cfg(test)]")
+}
+
+#[test]
+fn function_lengths_leave_out_test_only_functions() {
+    let text = "fn kept() {\n    a();\n}\n\n\
+        #[cfg(test)]\npub(crate) fn dropped() {\n    b();\n    c();\n}\n\n\
+        /// Docs.\n#[cfg(test)]\n#[allow(dead_code)]\nfn also_dropped() {}\n\n\
+        #[cfg(unix)]\nfn also_kept() {}\n";
+    assert_eq!(
+        function_lengths(text),
+        vec![("kept".to_string(), 3), ("also_kept".to_string(), 1)]
+    );
 }
 
 fn fn_name(line: &str) -> Option<String> {
