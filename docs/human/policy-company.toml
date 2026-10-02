@@ -112,6 +112,16 @@ deny = [
 #                                    on every builder may add this kind to
 #                                    the list above and provide the library
 #                                    another way.
+#   stale-resolution                 a dependency tool's registry was
+#                                    unreachable, so tog's resolution proxy
+#                                    answered its metadata requests from the
+#                                    last good copy. A stale resolution
+#                                    produces an older lock, not a less
+#                                    honest one, since every artifact is
+#                                    still verified. Teams that require every
+#                                    lock to reflect the registry at the time
+#                                    of locking may add this kind to the list
+#                                    above.
 
 # Closure signing. `tog audit` accepts only records signed by a key in
 # the machine policy's [signing] table; a project or --policy copy of this

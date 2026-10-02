@@ -88,7 +88,7 @@ pub(super) fn algo_name(a: Algo) -> &'static str {
 }
 
 /// Minimal RFC 4648 base64 (standard alphabet, optional padding).
-fn base64_decode(s: &str) -> Option<Vec<u8>> {
+pub(crate) fn base64_decode(s: &str) -> Option<Vec<u8>> {
     let val = |c: u8| -> Option<u32> {
         match c {
             b'A'..=b'Z' => Some((c - b'A') as u32),

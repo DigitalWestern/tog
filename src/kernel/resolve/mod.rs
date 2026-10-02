@@ -15,7 +15,24 @@
 //! top of tog's own, with no snapshot, and records nothing. What the door
 //! adds now is the single place: the confined, proxied mode replaces
 //! `Legacy` here without touching a call site's shape.
+//!
+//! The resolution proxy lives beside the door: the only network path of a
+//! delegated dependency tool. It forwards only to permitted registries,
+//! connects only to addresses it validated, verifies what registries
+//! promise, and records every request in a ledger.
 
+pub mod cache;
+pub mod http;
+pub mod iana;
+pub mod ledger;
+pub mod mirror;
+pub mod proxy;
+pub mod redact;
+pub mod routes;
+pub mod session;
+pub mod ssrf;
+#[cfg(test)]
+pub(crate) mod testing;
 pub(crate) mod tripwire;
 
 use crate::kernel::activity::StoreActivity;

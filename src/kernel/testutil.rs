@@ -5,6 +5,8 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+pub(crate) mod upstream;
+
 /// Create fixture archives from the declared tree, without host metadata.
 pub(crate) fn tar_create() -> Command {
     let mut command = Command::new("/usr/bin/tar");

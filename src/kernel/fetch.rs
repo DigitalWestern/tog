@@ -17,6 +17,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::{ffi::OsStr, ops::Deref};
 
+pub mod pinned;
+
 /// A verified cache path with the GC lock held until the caller drops it.
 /// Keeping this lease alive across extraction closes the verify-to-use race:
 /// GC cannot unlink the artifact while an extractor is still consuming it.
@@ -770,6 +772,57 @@ fn remove_dot_segments(path: &str) -> String {
     format!("/{}", out.join("/"))
 }
 
+/// Downloaded bytes that did not hash to the digest naming them. It rides
+/// inside the `InvalidData` error a verified download returns, so a caller
+/// that must report both digests (the resolution proxy) can read them
+/// without parsing the message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HashMismatch {
+    pub url: String,
+    pub expected: Digest,
+    /// The hex digest of the bytes received, under the expected algorithm.
+    pub got: String,
+}
+
+impl std::fmt::Display for HashMismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "hash mismatch for {}\n  expected {} {}\n  got      {}",
+            self.url,
+            self.expected.algo(),
+            self.expected.hex(),
+            self.got
+        )
+    }
+}
+
+impl std::error::Error for HashMismatch {}
+
+impl HashMismatch {
+    /// The mismatch inside `error`, if that is what it is.
+    pub fn of(error: &io::Error) -> Option<&HashMismatch> {
+        error.get_ref()?.downcast_ref::<HashMismatch>()
+    }
+}
+
+/// Stream `reader` into the verified artifact cache under `digest`, with
+/// no progress narration: the resolution proxy's upstream fetches run
+/// while a tool owns the terminal. A cache hit is served without reading
+/// `reader`. A mismatch is an `InvalidData` error carrying [`HashMismatch`]
+/// and leaves nothing behind.
+pub(crate) fn cache_from_reader(
+    store: &Store,
+    activity: &StoreActivity,
+    url: &str,
+    digest: &Digest,
+    open: impl FnOnce() -> io::Result<Box<dyn Read>>,
+) -> io::Result<CacheLease> {
+    cache_or_download_narrated(store, activity, url, digest, false, || {
+        open().map(|reader| (reader, None))
+    })
+}
+
 /// A verified cache entry for `digest`, fetched through `open` only when
 /// the cache does not already hold good bytes.
 fn cache_or_download(
@@ -777,6 +830,17 @@ fn cache_or_download(
     activity: &StoreActivity,
     url: &str,
     digest: &Digest,
+    open: impl FnOnce() -> io::Result<(Box<dyn Read>, Option<u64>)>,
+) -> io::Result<CacheLease> {
+    cache_or_download_narrated(store, activity, url, digest, true, open)
+}
+
+fn cache_or_download_narrated(
+    store: &Store,
+    activity: &StoreActivity,
+    url: &str,
+    digest: &Digest,
+    narrate: bool,
     open: impl FnOnce() -> io::Result<(Box<dyn Read>, Option<u64>)>,
 ) -> io::Result<CacheLease> {
     store.require_activity(activity, "a verified download")?;
@@ -823,7 +887,8 @@ fn cache_or_download(
     // A first sync moves hundreds of MB. Narrate it, so the wait has a
     // visible cause. Inert off a terminal and under --quiet, and erased
     // when the download ends.
-    let mut progress = crate::kernel::ui::Progress::start(artifact_name(url), declared);
+    let mut progress =
+        narrate.then(|| crate::kernel::ui::Progress::start(artifact_name(url), declared));
 
     // Cap the stream so a hostile server can't fill the disk before the
     // hash check fails. 8 GiB covers every real artifact class we handle.
@@ -842,7 +907,9 @@ fn cache_or_download(
             Err(e) => break Err(e),
         };
         total += n as u64;
-        progress.advance(n as u64);
+        if let Some(progress) = progress.as_mut() {
+            progress.advance(n as u64);
+        }
         if total > MAX_ARTIFACT {
             break Err(io::Error::other(format!(
                 "{url}: exceeds the {} GiB artifact cap; refusing",
@@ -875,27 +942,38 @@ fn cache_or_download(
         let _ = fs::remove_file(&tmp);
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            format!(
-                "hash mismatch for {url}\n  expected {} {}\n  got      {got}",
-                digest.algo(),
-                digest.hex()
-            ),
+            HashMismatch {
+                url: url.to_string(),
+                expected: digest.clone(),
+                got,
+            },
         ));
     }
-    // Publish read-only, atomically.
+    publish_read_only(&tmp, &dest)?;
+    Ok(CacheLease {
+        path: dest,
+        _activity: activity,
+        _gc_lock: gc_lock,
+    })
+}
+
+/// Publish a verified download at `dest`, read-only and atomically. A
+/// concurrent publisher that got there first wins; its bytes were verified
+/// under the same digest.
+fn publish_read_only(tmp: &Path, dest: &Path) -> io::Result<()> {
     {
         use std::os::unix::fs::PermissionsExt;
-        let mut perms = fs::metadata(&tmp)
+        let mut perms = fs::metadata(tmp)
             .map_err(|e| io::Error::new(e.kind(), format!("stat dl tmp: {e}")))?
             .permissions();
         perms.set_mode(0o444);
-        fs::set_permissions(&tmp, perms)
+        fs::set_permissions(tmp, perms)
             .map_err(|e| io::Error::new(e.kind(), format!("chmod dl tmp: {e}")))?;
     }
-    match fs::rename(&tmp, &dest) {
+    match fs::rename(tmp, dest) {
         Ok(()) => {}
         Err(_) if dest.is_file() => {
-            let _ = fs::remove_file(&tmp);
+            let _ = fs::remove_file(tmp);
         }
         Err(e) => {
             return Err(io::Error::new(
@@ -904,12 +982,7 @@ fn cache_or_download(
             ))
         }
     }
-    store::touch_path(&dest)?;
-    Ok(CacheLease {
-        path: dest,
-        _activity: activity,
-        _gc_lock: gc_lock,
-    })
+    store::touch_path(dest)
 }
 
 #[cfg(test)]

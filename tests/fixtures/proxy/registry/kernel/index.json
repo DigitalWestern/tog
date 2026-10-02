@@ -1,0 +1,86 @@
+[
+  {
+    "url": "https://registry.test/art/claimed-pkg-1.0.tgz",
+    "status": 200,
+    "file": "art/claimed-pkg-1.0.tgz",
+    "sha256": "96cd350e86fbeebb8962ea214da1b659959bef150ae2820de6b06e5862704e4c",
+    "headers": {
+      "Content-Type": "application/octet-stream"
+    }
+  },
+  {
+    "url": "https://registry.test/art/claimed-bad-1.0.tgz",
+    "status": 200,
+    "file": "art/claimed-bad-1.0.tgz",
+    "sha256": "494fa48aebf4cda13911aaa3b8dea189c262457baed0d3c3b998a742dd1bb633",
+    "headers": {
+      "Content-Type": "application/octet-stream"
+    }
+  },
+  {
+    "url": "https://registry.test/art/free-pkg-1.0.tgz",
+    "status": 200,
+    "file": "art/free-pkg-1.0.tgz",
+    "sha256": "572a86b592ab9392c1811fe510ab3b35290ca6997051290fad6a9c36a8bedcef",
+    "headers": {
+      "Content-Type": "application/octet-stream"
+    }
+  },
+  {
+    "url": "https://registry.test/art/weak-pkg-1.0.tgz",
+    "status": 200,
+    "file": "art/weak-pkg-1.0.tgz",
+    "sha256": "97e8876f1a963311282095e019fac85b3b488a1e2693a3a5218aa0e30411a016",
+    "headers": {
+      "Content-Type": "application/octet-stream"
+    }
+  },
+  {
+    "url": "https://registry.test/art/strong-pkg-1.0.tgz",
+    "status": 200,
+    "file": "art/strong-pkg-1.0.tgz",
+    "sha256": "e4e709d131189657407368a0d158e3a38b09c55bbe19c9c94b60d4f3984773f3",
+    "headers": {
+      "Content-Type": "application/octet-stream"
+    }
+  },
+  {
+    "url": "https://registry.test/meta/pkg.json",
+    "status": 200,
+    "file": "meta/pkg.json",
+    "sha256": "ad8d40dd6867f5f4cb2532f158a9a566217fbf39ae24d308625c24809fe8d66e",
+    "headers": {
+      "Content-Type": "application/json",
+      "ETag": "\"pkg-v1\"",
+      "Set-Cookie": "session=upstream-secret"
+    }
+  },
+  {
+    "url": "https://registry.test/meta/rewritten.json",
+    "status": 200,
+    "file": "meta/rewritten.json",
+    "sha256": "04fad56bb0718d098f0903deb085588ebb69022d8a867dd87b27e43e4d953657",
+    "headers": {
+      "Content-Type": "application/json"
+    }
+  },
+  {
+    "url": "https://registry.test/index/pkg",
+    "status": 200,
+    "file": "index/pkg",
+    "sha256": "5717e7c840171019a4eeab5b79a7f894a4986eaff93d04ec5b12c9a189f594bf",
+    "headers": {
+      "Content-Type": "text/plain",
+      "Last-Modified": "Tue, 01 Sep 2026 00:00:00 GMT"
+    }
+  },
+  {
+    "url": "https://registry.test/sumdb/lookup/pkg@1.0",
+    "status": 200,
+    "file": "sumdb/lookup-pkg-1.0",
+    "sha256": "d99595a709a480c36454a390bd7879f3ffd9556e3b794e0f62add237164abaf4",
+    "headers": {
+      "Content-Type": "text/plain"
+    }
+  }
+]

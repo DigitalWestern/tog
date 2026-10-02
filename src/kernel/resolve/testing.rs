@@ -1,0 +1,381 @@
+//! Test-only helpers for the resolution proxy. The module is declared under
+//! `cfg(test)`, and each item carries its own `cfg(test)` too, because the
+//! architecture scans read one file at a time and cannot see the gate on
+//! the `mod` line.
+
+#[cfg(test)]
+use crate::kernel::activity::{ActivityMode, StoreActivity};
+#[cfg(test)]
+use crate::kernel::store::Store;
+#[cfg(test)]
+use crate::kernel::testutil::TempDir;
+
+/// A scratch store with every namespace `Store::open` makes, and a shared
+/// lease on it. Everything is removed when the `TempDir` drops.
+#[cfg(test)]
+pub(crate) fn scratch_store(label: &str) -> (TempDir, Store, StoreActivity) {
+    let temp = TempDir::named(label);
+    let root = temp.0.clone();
+    for sub in [
+        "objects",
+        "meta",
+        "cache/sha1",
+        "cache/sha256",
+        "cache/sha512",
+        "tmp",
+        "roots",
+        "records",
+        "root-locks",
+    ] {
+        std::fs::create_dir_all(root.join(sub)).unwrap();
+    }
+    let activity = StoreActivity::acquire(&root, ActivityMode::Shared).unwrap();
+    (temp, Store { root }, activity)
+}
+
+#[cfg(test)]
+use super::http::Headers;
+#[cfg(test)]
+use super::proxy::{Proxy, ProxyConfig, Session};
+#[cfg(test)]
+use super::routes::testing::TEST_PROTOCOL;
+#[cfg(test)]
+use super::routes::{Endpoint, Permitted, ProxyAddress, Route};
+#[cfg(test)]
+use super::session::{Intercept, Mode, SessionConfig};
+#[cfg(test)]
+use super::ssrf::Lookup;
+#[cfg(test)]
+use crate::kernel::policy::Policy;
+#[cfg(test)]
+use crate::kernel::testutil::upstream::{FixtureCa, FixtureUpstream};
+#[cfg(test)]
+use std::io::{self, Read, Write};
+#[cfg(test)]
+use std::net::{IpAddr, SocketAddr, TcpStream};
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
+#[cfg(test)]
+use std::sync::Arc;
+#[cfg(test)]
+use std::time::Duration;
+
+/// A globally routable address (TEST-NET would be refused) the SSRF tests
+/// answer lookups with; `connect_to` lands it on the fixture listener.
+#[cfg(test)]
+pub(crate) const TEST_ORIGIN_PUBLIC: &str = "93.184.216.34";
+
+/// The hosts the fixture upstream's certificate names. The first two are
+/// the fixture route's endpoints; `third.test` is on the certificate but in
+/// no permitted set, for redirect tests.
+#[cfg(test)]
+pub(crate) const FIXTURE_HOSTS: &[&str] = &["registry.test", "other.test", "third.test"];
+
+/// A name lookup that answers from a function of (call number, host) and
+/// counts its calls.
+#[cfg(test)]
+pub(crate) struct Answers {
+    pub calls: AtomicUsize,
+    hosts: std::sync::Mutex<Vec<String>>,
+    answer: Box<dyn Fn(usize, &str) -> Vec<IpAddr> + Send + Sync>,
+}
+
+#[cfg(test)]
+impl Answers {
+    pub(crate) fn new(answer: impl Fn(usize, &str) -> Vec<IpAddr> + Send + Sync + 'static) -> Self {
+        Self {
+            calls: AtomicUsize::new(0),
+            hosts: std::sync::Mutex::new(Vec::new()),
+            answer: Box::new(answer),
+        }
+    }
+
+    pub(crate) fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+
+    /// Every host looked up, in order.
+    pub(crate) fn hosts(&self) -> Vec<String> {
+        self.hosts.lock().unwrap().clone()
+    }
+}
+
+#[cfg(test)]
+impl Lookup for Answers {
+    fn lookup(&self, host: &str, _port: u16) -> io::Result<Vec<IpAddr>> {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        self.hosts.lock().unwrap().push(host.to_string());
+        Ok((self.answer)(call, host))
+    }
+}
+
+/// How a harness proxy reaches the fixture.
+#[cfg(test)]
+pub(crate) struct Reach {
+    pub lookup: Arc<Answers>,
+    /// The loopback exception. Off in the SSRF tests.
+    pub allow_loopback: bool,
+    /// Land every validated address on the fixture listener.
+    pub redirect_to_fixture: bool,
+    /// Connection threads in the proxy's pool.
+    pub workers: usize,
+    /// The slowest a tool may read a response (bytes/s).
+    pub min_response_rate: u64,
+    pub request_timeout: Duration,
+}
+
+#[cfg(test)]
+impl Reach {
+    /// Every fixture host is `127.0.0.1`, reachable through the test-only
+    /// loopback exception.
+    pub(crate) fn loopback() -> Self {
+        Self {
+            lookup: Arc::new(Answers::new(|_, _| vec!["127.0.0.1".parse().unwrap()])),
+            allow_loopback: true,
+            redirect_to_fixture: false,
+            workers: 8,
+            min_response_rate: 16 * 1024,
+            request_timeout: Duration::from_secs(1),
+        }
+    }
+
+    /// The SSRF setting: the loopback exception off, `answer` deciding
+    /// what each lookup returns, and every validated address landing on
+    /// the fixture listener.
+    pub(crate) fn public(
+        answer: impl Fn(usize, &str) -> Vec<IpAddr> + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            lookup: Arc::new(Answers::new(answer)),
+            allow_loopback: false,
+            redirect_to_fixture: true,
+            workers: 8,
+            min_response_rate: 16 * 1024,
+            request_timeout: Duration::from_secs(1),
+        }
+    }
+}
+
+/// A scratch store, a fixture upstream serving the kernel registry, and a
+/// proxy that trusts only the fixture's CA.
+#[cfg(test)]
+pub(crate) struct Harness {
+    pub store: Store,
+    pub activity: StoreActivity,
+    pub upstream: FixtureUpstream,
+    pub proxy: Proxy,
+    pub lookup: Arc<Answers>,
+    _ca: FixtureCa,
+    _temp: TempDir,
+}
+
+#[cfg(test)]
+impl Harness {
+    pub(crate) fn new(label: &str) -> Self {
+        Self::with(label, Reach::loopback())
+    }
+
+    pub(crate) fn with(label: &str, reach: Reach) -> Self {
+        let (temp, store, activity) = scratch_store(label);
+        let ca = FixtureCa::new();
+        let upstream = FixtureUpstream::start(&ca, FIXTURE_HOSTS);
+        upstream.load_registry(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/proxy/registry/kernel"),
+        );
+        let fixture = upstream.address();
+        let connect_to: Option<Arc<dyn Fn(SocketAddr) -> SocketAddr + Send + Sync>> =
+            if reach.redirect_to_fixture {
+                Some(Arc::new(move |_| fixture))
+            } else {
+                None
+            };
+        let proxy = Proxy::new(ProxyConfig {
+            roots: ca.roots(),
+            lookup: reach.lookup.clone(),
+            workers: reach.workers,
+            connect_timeout: Duration::from_secs(2),
+            io_timeout: Duration::from_secs(2),
+            idle_timeout: Duration::from_secs(2),
+            request_timeout: reach.request_timeout,
+            min_response_rate: reach.min_response_rate,
+            allow_loopback: reach.allow_loopback,
+            connect_to,
+        })
+        .unwrap();
+        Self {
+            store,
+            activity,
+            upstream,
+            proxy,
+            lookup: reach.lookup,
+            _ca: ca,
+            _temp: temp,
+        }
+    }
+
+    /// The fixture route: `registry.test` and `other.test` on the fixture
+    /// port, both permitted.
+    pub(crate) fn route(&self) -> Route {
+        let port = self.upstream.port();
+        Route::new(
+            &TEST_PROTOCOL,
+            vec![
+                Endpoint::for_test("registry.test", port),
+                Endpoint::for_test("other.test", port),
+            ],
+        )
+        .unwrap()
+    }
+
+    pub(crate) fn permitted(&self) -> Permitted {
+        let port = self.upstream.port();
+        Permitted::compiled()
+            .with_origin("registry.test", port)
+            .with_origin("other.test", port)
+    }
+
+    pub(crate) fn config(&self, policy: Policy, mode: Mode) -> SessionConfig {
+        SessionConfig {
+            ecosystem: "fixture".into(),
+            door: "edit".into(),
+            routes: vec![self.route()],
+            intercept: Intercept::RefuseVisibly,
+            policy,
+            mode,
+            store: self.store.clone(),
+            activity: self.activity.clone(),
+            permitted: self.permitted(),
+        }
+    }
+
+    pub(crate) fn open(&self, config: SessionConfig) -> (Session, ProxyAddress) {
+        let mut session = self.proxy.open_session(config).unwrap();
+        let address = session.listen_tcp("127.0.0.1:0".parse().unwrap()).unwrap();
+        (session, address)
+    }
+
+    /// A session with the fixture route, an empty policy, online.
+    pub(crate) fn session(&self) -> (Session, ProxyAddress) {
+        self.open(self.config(Policy::default(), Mode::Online))
+    }
+
+    /// The upstream URL of a fixture path, as the ledger records it.
+    pub(crate) fn upstream_url(&self, path: &str) -> String {
+        format!("https://registry.test:{}{path}", self.upstream.port())
+    }
+}
+
+/// The mirror path of a fixture route path.
+#[cfg(test)]
+pub(crate) fn mirror(address: &ProxyAddress, path: &str) -> String {
+    format!("/{}/fixture{path}", address.token())
+}
+
+/// A response as a tool reads it.
+#[cfg(test)]
+#[derive(Debug)]
+pub(crate) struct Response {
+    pub status: u16,
+    pub headers: Headers,
+    pub body: Vec<u8>,
+}
+
+#[cfg(test)]
+impl Response {
+    pub(crate) fn text(&self) -> String {
+        String::from_utf8_lossy(&self.body).into_owned()
+    }
+}
+
+/// Send `head` (a request head without its final blank line; `Connection:
+/// close` is added) and read the whole answer.
+#[cfg(test)]
+pub(crate) fn send(address: &ProxyAddress, head: &str) -> Response {
+    let mut stream = TcpStream::connect(address.address).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    write!(stream, "{head}Connection: close\r\n\r\n").unwrap();
+    let mut raw = Vec::new();
+    stream.read_to_end(&mut raw).unwrap();
+    parse_response(&raw)
+}
+
+/// `GET <path>` with `extra` header lines (each ending in CRLF).
+#[cfg(test)]
+pub(crate) fn get(address: &ProxyAddress, path: &str, extra: &str) -> Response {
+    send(
+        address,
+        &format!(
+            "GET {path} HTTP/1.1\r\nHost: {}\r\n{extra}",
+            address.address
+        ),
+    )
+}
+
+#[cfg(test)]
+fn parse_response(raw: &[u8]) -> Response {
+    let end = raw
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .unwrap_or_else(|| panic!("no response head in {:?}", String::from_utf8_lossy(raw)));
+    let head = std::str::from_utf8(&raw[..end]).unwrap();
+    let mut lines = head.split("\r\n");
+    let status = lines
+        .next()
+        .unwrap()
+        .split(' ')
+        .nth(1)
+        .unwrap()
+        .parse()
+        .unwrap();
+    let mut headers = Headers::new();
+    for line in lines {
+        let (name, value) = line.split_once(':').unwrap();
+        headers.push(name.trim(), value.trim());
+    }
+    let rest = &raw[end + 4..];
+    let body = if headers
+        .get("transfer-encoding")
+        .is_some_and(|value| value.eq_ignore_ascii_case("chunked"))
+    {
+        dechunk(rest)
+    } else {
+        let length = headers
+            .get("content-length")
+            .map_or(rest.len(), |value| value.parse().unwrap());
+        rest[..length.min(rest.len())].to_vec()
+    };
+    Response {
+        status,
+        headers,
+        body,
+    }
+}
+
+#[cfg(test)]
+fn dechunk(mut raw: &[u8]) -> Vec<u8> {
+    let mut body = Vec::new();
+    loop {
+        let line_end = raw
+            .windows(2)
+            .position(|w| w == b"\r\n")
+            .expect("chunk size line");
+        let size =
+            usize::from_str_radix(std::str::from_utf8(&raw[..line_end]).unwrap(), 16).unwrap();
+        raw = &raw[line_end + 2..];
+        if size == 0 {
+            return body;
+        }
+        body.extend_from_slice(&raw[..size]);
+        raw = &raw[size + 2..];
+    }
+}
+
+/// `Proxy-Authorization` carrying `token`.
+#[cfg(test)]
+pub(crate) fn proxy_authorization(token: &str) -> String {
+    let encoded = crate::kernel::dirhash::base64_encode(format!("tog:{token}").as_bytes());
+    format!("Proxy-Authorization: Basic {encoded}\r\n")
+}

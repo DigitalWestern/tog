@@ -785,8 +785,10 @@ When this section is fully built:
 3. The proxy forwards only to **permitted endpoints**. It connects only to
    the exact address it validated (never loopback, private, or link-local)
    and never forwards a credential the tool sent.
-4. Every request the proxy answers or refuses becomes a **ledger entry**
-   with credentials redacted. The ledger is a store object with its own
+4. Every request of the tool's session that the proxy answers or refuses
+   becomes a **ledger entry** with credentials redacted. A request
+   without the session token is not the tool's session, so it is a
+   diagnostics entry only. The ledger is a store object with its own
    identity and kind contract, kept alive by the closure that joins it.
 5. Policy is applied **per request, in real time**, with the same
    `policy::Policy` the rest of the run uses. A denied kind is a refused
@@ -891,7 +893,7 @@ The proxy speaks two dialects on one listener:
   inside, and fetches each one upstream itself over real TLS. Requests
   inside an authenticated tunnel carry no token and need none (standard
   clients never add proxy credentials to inner requests). A `CONNECT`
-  without a valid token gets `407` and a ledger entry.
+  without a valid token gets `407` and a diagnostics entry.
 - **Registry mirror** (plain HTTP). The tool's registry base URL is set to
   a proxy route (`http://127.0.0.1:<port>/<token>/<route>/`). The token in
   the path authenticates every request. The proxy maps the route to its
@@ -1625,9 +1627,13 @@ data). The sidecar names the ledger, and nothing names the sidecar:
   `{class, method, url, status, sha256, claimed, verified, freshness}`
   (`freshness` is `live` or `last-good`; see "Offline behavior").
   Duplicates are removed by exact equality, and the set is sorted by each
-  entry's complete canonical bytes. The same fetches therefore produce the
-  same bytes whatever order they arrived in and however often they were
-  retried.
+  entry's complete canonical bytes. The set describes outcomes, not
+  attempts: a failed attempt at a method and URL that the session also
+  answered is left out (its row stays in diagnostics), and `sha256` is
+  recorded only for bytes the tool could use (a 2xx body or a claimed
+  artifact), never for an error body, whose request ids and dates differ
+  run to run. The same fetches therefore produce the same bytes whatever
+  order they arrived in and however often they were retried.
 - **Diagnostics** hold what varies by machine or run: cache disposition
   (hit, miss, revalidated), arrival order, retry and duplicate counts,
   byte counts, the isolation engine, the platform, tool store object
@@ -2301,11 +2307,14 @@ pub struct DelegateSpec<'s> {
 }
 
 /// Implemented in tailor folders; the kernel never names an ecosystem.
+/// (As built in PR 2: `src/kernel/resolve/routes.rs`.)
 pub trait RegistryProtocol: Sync {
     fn route_id(&self) -> &'static str;                       // "go", "rubygems", "hex", "nuget"
-    fn upstream(&self, endpoint: &Endpoint, path: &str) -> io::Result<Url>; // grammar-checked
+    // grammar-checked by the kernel first; the answer's origin must be one of `endpoints`
+    fn upstream(&self, endpoints: &[Endpoint], path: &str) -> io::Result<Upstream>; // Fetch(Url) | Local(LocalAnswer)
     fn classify(&self, url: &Url) -> RequestClass;            // index | metadata | artifact | sumdb
     fn claims(&self, url: &Url, body: &[u8]) -> Vec<(Url, Claim)>; // digests this metadata promises
+    fn expects_claim(&self, _url: &Url) -> bool { false }     // unclaimed such artifact = weak-integrity
     fn content_query_keys(&self) -> &'static [&'static str] { &[] } // kept by redaction
     fn rewrite(&self, _url: &Url, body: Vec<u8>, _base: &ProxyAddress) -> io::Result<Vec<u8>> { Ok(body) }
 }
@@ -2572,7 +2581,7 @@ there before (if any) still describes them.
 | A descendant outlives the tool | the tree is stopped before validation; contents are read only from the immutable output copy |
 | Socket found in a mounted root at preflight | door refuses, naming the path |
 | Request matches no route and is not interceptable | 403 with a tog body, ledger `refused`; the door fails if the refusal was a policy denial, even when the tool exits 0 (npm tolerates failed optional fetches) |
-| `CONNECT` or mirror request without the session token | 407/403, ledger entry; never forwarded |
+| `CONNECT` or mirror request without the session token | 407/403, diagnostics entry (capped, counted); never forwarded. Not a ledger entry: the portable ledger is signed evidence of the tool's traffic, and a request without the token is not the tool's session (anything on the machine can send one) |
 | Upstream bytes do not match the claimed digest | 502 to the tool, nothing cached, the door fails with both digests named; no stale fallback |
 | Redirect to a non-permitted origin | refused; credentials never follow a redirect to another origin |
 | Any resolved upstream address is not globally routable (IANA special-purpose registries) | refused (SSRF rule) |
@@ -2612,8 +2621,16 @@ there before (if any) still describes them.
   Resolution fetches few artifacts (cargo, npm, and Bundler lock without
   downloading), so buffering costs little.
 - **Metadata cache** (`<store>/resolve/meta/`, keyed by
-  `sha256(method, url, normalized Accept)`, because npm's abbreviated and
-  full packuments share a URL): each response is stored with its ETag or
+  `sha256(method, url, credential identity, every forwarded request header
+  normalized)`, because npm's abbreviated and full packuments share a URL
+  and differ only by `Accept`, and any forwarded header may change the
+  answer): a response whose `Vary` is `*` or names one of the proxy's own
+  conditional headers is not cached, since the key cannot tell its
+  variants apart. Nor is a URL with a query key the protocol does not
+  name as content (`content_query_keys`): such keys are cache busters or
+  tracking values, so every new value would be one more file, and a
+  tool could grow the store without bound. Those URLs are served live,
+  with no last-good copy. Each response is stored with its ETag or
   Last-Modified and its sha256. Online, every metadata request
   revalidates with a conditional GET, which is a 304 when nothing changed.
   It is a cache under the store's GC rules (age-based sweep). Losing it
@@ -2941,6 +2958,87 @@ artifact-cache integration, redirect rules, offline mode, and the
 last-good path with its `freshness` marking and the per-session switch
 that turns last-good into 504 when `stale-resolution` is denied. Kernel unit
 tests against the fixture upstream. No tool uses it yet.
+
+**PR 2 as built (2026-09-29).** Decisions made while building it, each
+the flexible option:
+
+- **Routes carry several endpoints.** `upstream` takes the route's
+  endpoint list and returns `Upstream::Fetch(url)` or
+  `Upstream::Local(answer)`, so one route covers Go's proxy plus its
+  checksum database, or Rubygems' index plus its main host, and a
+  protocol can answer a request itself (Go's `/sumdb/<name>/supported`).
+  The kernel checks the answer's origin against the route's endpoints and
+  refuses userinfo. `expects_claim` lets a protocol say an unclaimed
+  artifact is `weak-integrity`.
+- **Listeners are per session.** `Session::listen_tcp` and
+  `Session::listen_unix(path, advertised)` bind listeners owned by one
+  session, so a request with a wrong token is still recorded in the
+  diagnostics of the session it reached, and a token from another session is
+  just a wrong token. The advertised address (what rewritten responses
+  point at) is separate from the bind address, for the relay.
+- **Header allowlists both ways, not a strip list.** Upstream gets only
+  `Accept`, `Accept-Language`, `User-Agent`, `Content-Type`, and
+  `Git-Protocol`, plus the endpoint's own credential on its own origin.
+  The tool's conditional headers and `Accept-Encoding` are dropped too,
+  since the proxy revalidates its own copy and the client decodes. The
+  tool gets only `Content-Type`, `ETag`, `Last-Modified`,
+  `Cache-Control`, `Content-Disposition`, `Expires`, and `Vary`. This
+  covers the three headers named above and fails closed on the rest.
+- **Redirects are followed inside the proxy**, up to 10 hops. Each hop
+  must be https on a permitted host, is resolved and validated again,
+  and carries a credential only when its origin is that credential's
+  endpoint. A refused hop is a 403 and a ledger `refused` entry, with no
+  policy fact (Hex's `builds.hex.pm` hop must not fail the door).
+- **A refused address is a hard failure** as well as a 403: something
+  tried to reach a non-global address.
+- **Mirror routes serve `GET` and `HEAD` only** (405 otherwise). A claimed
+  artifact is fetched whole and verified even for a `HEAD`.
+- **Unclaimed artifacts are not cached**, online or offline: nothing
+  vouches for them. Offline they are an `offline-miss`. They stream
+  chunked to an HTTP/1.1 tool and close-delimited to an HTTP/1.0 one,
+  whose connection then ends after each mirror response.
+- **The IANA table is the union** of the list above and every registry
+  row whose "Globally Reachable" is not `True` (registry date
+  2025-10-09, CSVs in `tests/fixtures/proxy/iana/`). That adds
+  `100:0:0:1::/64` and keeps AS112 and AMT refused although the registry
+  marks them globally reachable: no registry lives there.
+- **Ledger classes** are the protocol classes plus `local`, `refused`,
+  and `offline-miss`. A revalidated response is recorded as the 200 it
+  served, and the cache disposition goes only to diagnostics, so a cache
+  hit and a miss give the same portable entry. `freshness` is absent only
+  when nothing was served. A malformed request has no method or URL, so
+  it is noted in diagnostics only.
+- **The ledger records outcomes.** A `failed` entry (a 504 for an
+  unreachable upstream, a 502, an interrupted stream) is dropped from the
+  portable set when the same method and URL is answered in the session,
+  in either order, and counted in `superseded`. "Answered" means
+  something was served, a 404 included: that is the registry's outcome.
+  A digest mismatch is never superseded: it is evidence of tampering. A 4xx or 5xx entry has
+  no `sha256`, so two 404s with different request ids are one entry.
+- **Unauthenticated requests are diagnostics only.** A `CONNECT`,
+  absolute-form request, or mirror request without this session's token
+  gets its 407 or 403 and a diagnostics row, counted in
+  `unauthenticated`, with its URL and reason cut to 512 bytes. It never
+  enters the portable ledger, which is signed evidence of the tool's
+  traffic: anything on the machine that can reach the port could
+  otherwise write its own method and URL into a signed record. It does
+  not fail the door. Every diagnostics list keeps at most 10,000 rows
+  per session and counts the rest (`requests_dropped`,
+  `refusals_dropped`).
+- **Policy facts.** A refused `CONNECT` or plain-`http` request records
+  `unattested-index`; port 9418 or a `git://` URL records
+  `git-dependency` ("git:// is unauthenticated; use https://"). A SHA-1
+  claim, or no claim where `expects_claim` says one is published, records
+  `weak-integrity`. Each is a refusal when denied. `stale-resolution` is
+  collected per endpoint (subject the origin, detail the count).
+- **The upstream client lives in `kernel::fetch::pinned`**, so every
+  `ureq` use stays under `kernel::fetch`. It takes a root set (webpki in
+  production, the fixture CA in tests) and pins rustls's ring provider.
+  `rcgen` is a dev-dependency until interception needs it at run time.
+- **The metadata cache** stores one file per key (a JSON header line,
+  then the body), written by rename and verified by sha256 on read. `tog
+  gc` sweeps entries unused for `keep_days`, and the sidecar index
+  entries whose sidecar is gone.
 
 **PR 3: confinement and the transaction.** The staged snapshot and diff,
 tree quiescence on both platforms, the immutable output copy, the
