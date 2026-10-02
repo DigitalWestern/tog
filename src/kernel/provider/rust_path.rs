@@ -80,9 +80,21 @@ struct Probe {
 /// share one and a directory (or symlink) someone else put at the name is
 /// refused, never adopted; a taken name draws another.
 fn probe_scratch() -> io::Result<PathBuf> {
+    probe_scratch_under(&std::env::temp_dir())
+}
+
+/// [`probe_scratch`] under `root`. A temp root that does not exist yet
+/// (`TMPDIR` naming a directory nobody has made) is created first, as any
+/// shared temp root would be; only the probe's own directory is private.
+fn probe_scratch_under(root: &Path) -> io::Result<PathBuf> {
     use std::os::unix::fs::DirBuilderExt;
     const ATTEMPTS: usize = 8;
-    let root = std::env::temp_dir();
+    fs::create_dir_all(root).map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!("create the temp directory {}: {error}", root.display()),
+        )
+    })?;
     let mut taken = None;
     for _ in 0..ATTEMPTS {
         let random = crate::kernel::fsroot::urandom_bytes(16)?;
@@ -1341,6 +1353,18 @@ mod tests {
             assert_eq!(mode & 0o7777, 0o700, "{}", scratch.display());
             fs::remove_dir(scratch).unwrap();
         }
+    }
+
+    /// A temp root that does not exist yet is created, and the probe
+    /// directory inside it is still private.
+    #[test]
+    fn probe_scratch_creates_a_missing_temp_root() {
+        let dir = temp("probe-root");
+        let root = dir.0.join("not/made/yet");
+        let scratch = probe_scratch_under(&root).unwrap();
+        assert_eq!(scratch.parent(), Some(root.as_path()));
+        let mode = fs::symlink_metadata(&scratch).unwrap().permissions().mode();
+        assert_eq!(mode & 0o7777, 0o700, "{}", scratch.display());
     }
 
     #[test]
