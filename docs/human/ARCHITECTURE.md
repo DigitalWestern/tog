@@ -536,10 +536,14 @@ canonical bytes of the whole record (`src/kernel/signing.rs`: the parsed
 value minus its top-level `signature`, serialized compact with keys in byte
 order). Trust is the machine policy's `[signing] trusted` list; project and
 `--policy` files can only intersect with it (`policy::merge`), so a working
-tree can never vouch for itself. `audit` verifies each file's signature over
-the complete envelope it read before believing any field: `bad-signature`,
-`untrusted`, and unsigned `outdated` records are not evaluated further, and a
-detected ecosystem with no primary closure is `missing`. Store identity is
+tree can never vouch for itself. Under a policy with a `[signing]` table,
+`audit` verifies each file's signature over the complete envelope it read
+before believing any field: `bad-signature`, `untrusted`, and unsigned
+`outdated` records are not evaluated further. Without one it judges every
+record on its contents and reports signatures as not checked (`--signed`
+refuses to run that way); a signature that fails to verify is
+`bad-signature` either way. A detected ecosystem with no primary closure is
+`missing`. Store identity is
 untouched: the signature lives in the envelope, not in any object's inputs.
 `tog keygen` creates keys; the developer loop (`run`, `ls`, `status`, ...)
 accepts unsigned records.
@@ -766,7 +770,7 @@ every tailor and the kernel):
     sync.rs  plan.rs  build.rs  run.rs  fmt.rs  gc.rs  store.rs  completions.rs
     doctor.rs  ls.rs  status.rs   thin verbs over inspect.rs
     inspect.rs      status / ls / doctor: read-only views over closures + store
-    audit.rs        tog audit: signed closure records judged against a policy
+    audit.rs        tog audit: closure records judged against a policy, signatures checked under [signing]
     keygen.rs       tog keygen: a closure-signing key and its policy table
     deps.rs         add / remove / update, delegated to each ecosystem's tool
     sbom.rs         CycloneDX 1.5 JSON from the closure envelopes

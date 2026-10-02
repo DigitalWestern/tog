@@ -587,11 +587,13 @@ fn parse_json_only(args: &[String], name: &'static str) -> Result<Option<bool>, 
 
 fn parse_audit(args: &[String]) -> Result<Option<Command>, UsageError> {
     let mut policy = None;
+    let mut signed = false;
     let mut json = false;
     let mut index = 0;
     while let Some(arg) = args.get(index).map(String::as_str) {
         match arg {
             "--json" => json = true,
+            "--signed" => signed = true,
             "-h" | "--help" => return Ok(None),
             // A mistyped flag (`--policy --json`) is a usage error, not a
             // file name; a policy file whose name starts with a dash is
@@ -612,7 +614,11 @@ fn parse_audit(args: &[String]) -> Result<Option<Command>, UsageError> {
         }
         index += 1;
     }
-    Ok(Some(Command::Audit { policy, json }))
+    Ok(Some(Command::Audit {
+        policy,
+        signed,
+        json,
+    }))
 }
 
 fn parse_ls(args: &[String]) -> Result<Option<Command>, UsageError> {
@@ -1942,6 +1948,7 @@ mod tests {
             command(&["audit"]),
             Command::Audit {
                 policy: None,
+                signed: false,
                 json: false
             }
         );
@@ -1949,6 +1956,7 @@ mod tests {
             command(&["audit", "--policy", "company.toml", "--json"]),
             Command::Audit {
                 policy: Some("company.toml".into()),
+                signed: false,
                 json: true
             }
         );
@@ -1956,6 +1964,15 @@ mod tests {
             command(&["audit", "--policy=company.toml"]),
             Command::Audit {
                 policy: Some("company.toml".into()),
+                signed: false,
+                json: false
+            }
+        );
+        assert_eq!(
+            command(&["audit", "--signed"]),
+            Command::Audit {
+                policy: None,
+                signed: true,
                 json: false
             }
         );
@@ -1974,6 +1991,7 @@ mod tests {
             command(&["audit", "--policy=--json"]),
             Command::Audit {
                 policy: Some("--json".into()),
+                signed: false,
                 json: false
             }
         );

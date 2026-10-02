@@ -153,10 +153,12 @@ pub enum Command {
     Status {
         json: bool,
     },
-    /// `audit [--policy <file>] [--json]`: judge the recorded closures
-    /// against the policy chain unioned with `policy`.
+    /// `audit [--policy <file>] [--signed] [--json]`: judge the recorded
+    /// closures against the policy chain unioned with `policy`. `signed`
+    /// refuses to run unless the machine policy trusts signing keys.
     Audit {
         policy: Option<PathBuf>,
+        signed: bool,
         json: bool,
     },
     Ls {

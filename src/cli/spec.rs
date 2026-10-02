@@ -544,9 +544,11 @@ status 1 on any fail.",
 For every ecosystem found here: 'synced' when the last sync's inputs are
 byte-identical to the files on disk and the projection is in place;
 otherwise which file changed, that the projection is missing, or that the
-closure was synced on another platform. Offline and read-only. Exit status
-0 only when everything is synced, so CI can use it as a 'did you commit the
-lock' gate.",
+closure was synced on another platform. Under each row, the policy
+exceptions that sync recorded (kind and subject): what it allowed and
+cannot vouch for; 'tog audit' judges them. Offline and read-only. Exit
+status 0 only when everything is synced, so CI can use it as a 'did you
+commit the lock' gate.",
         examples: &[
             ("tog status", "is the environment current with the lock?"),
             ("tog status --json", "machine-readable, for a CI step"),
@@ -580,15 +582,18 @@ cargo, go, ruby, elixir, dotnet; plus rustfmt, the toolchain-only closure
         name: "audit",
         group: Group::Inspect,
         summary: "would the synced environments pass a policy? (CI gate)",
-        usage: "tog audit [--policy <file>] [--json]",
+        usage: "tog audit [--policy <file>] [--signed] [--json]",
         description: "\
-Reads the closure records every sync committed to .tog/closures/*.json,
-verifies each record's signature against the [signing] trusted keys in the
-machine policy (TOG_POLICY or ~/.tog/policy.toml; a project
-.tog/policy.toml or --policy <file> can only drop keys, never add one),
-and judges the exceptions it records against the policy chain merged with
---policy <file>. Merging only tightens: the file can add denials but never
-loosen what the machine or project policy says. Per closure, the first that
+Reads the closure records every sync committed to .tog/closures/*.json and
+judges the exceptions they record against the policy chain (TOG_POLICY or
+~/.tog/policy.toml, every ancestor's .tog/policy.toml, TOG_STRICT) merged
+with --policy <file>. Merging only tightens: the file can add denials but
+never loosen what the machine or project policy says. When the machine
+policy has a [signing] table, each record's signature is verified against
+its trusted keys first (a project .tog/policy.toml or --policy <file> can
+only drop keys, never add one); without one, signatures are not checked,
+the report says so, and --signed makes that a usage error (exit 2) for a
+CI job that must never run unconfigured. Per closure, the first that
 applies: bad-signature (tampered or malformed; find out who changed it),
 untrusted (signed by a key the trusted set does not contain), outdated
 (unsigned, or predates input, platform, or exception recording; run
@@ -601,15 +606,18 @@ ecosystem with no closure is missing. The rustfmt closure 'tog fmt'
 writes is stale when this binary would record that run differently now;
 rerun 'tog fmt'. Only clean passes. Offline, read-only, no store
 access, no sandbox needed. Exit status 0 when every closure is clean and
-none is missing, 1 otherwise, 2 when no trusted key is configured.
-'tog keygen' creates a signing key; set TOG_SIGNING_KEY where sync
-runs. A company deny list to start from ships as docs/human/policy-company.toml.",
+none is missing, 1 otherwise, 2 for an unreadable --policy file or
+--signed with no trusted key configured. 'tog keygen' creates a signing
+key; set TOG_SIGNING_KEY where sync runs. A company deny list to start
+from ships as docs/human/policy-company.toml.",
         examples: &[
-            ("tog audit", "the CI gate for a pipeline"),
+            ("tog audit", "does this environment pass my policy?"),
+            ("tog audit --signed", "the CI gate: signatures checked, or exit 2"),
             ("tog audit --policy docs/human/policy-company.toml", "add a company deny list"),
         ],
         options: &[
             ("--policy <file>", "also deny what this policy file denies"),
+            ("--signed", "exit 2 unless the machine policy trusts signing keys"),
             JSON_OPTION,
             HELP_OPTION,
         ],
@@ -741,8 +749,9 @@ Writes a new Ed25519 signing key to <path> (created exclusively, mode 0600;
 an existing file or symlink is refused, never overwritten) and prints the
 public key on stdout as the [signing] policy table to paste into the
 machine policy. Set TOG_SIGNING_KEY=<path> where 'tog' and
-'tog fmt' run so every closure they write is signed; 'tog audit'
-accepts only records signed by a key the machine policy trusts. Keep the
+'tog fmt' run so every closure they write is signed; once the machine
+policy trusts a key, 'tog audit' accepts only records signed by one it
+trusts (until then it judges records without checking signatures). Keep the
 key outside the checkout, the store, and any sandbox read root; a job that
 runs untrusted project code must not hold one.",
         examples: &[

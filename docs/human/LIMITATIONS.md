@@ -15,7 +15,10 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
 - **`tog fmt` is Rust-only**; other ecosystems fail clearly (the locked Rust release's
   rustfmt, or a local toolchain's own, no
   `Cargo.lock`; `status` ignores the rustfmt closure).
-- **`tog audit` judges signed records only.** A pass proves that every closure file in
+- **`tog audit` vouches for who wrote a record only under a `[signing]` policy.** Without
+  a `[signing]` table in the machine policy it judges records on their contents, says that
+  signatures were not checked, and `--signed` refuses to run. With one, a pass proves that
+  every closure file in
   the working tree carries a valid signature from a key the machine policy trusts, that
   every detected ecosystem has its primary closure, that each record is current for the
   inputs on disk (and that the `rustfmt` record names the rustfmt this binary pins), and

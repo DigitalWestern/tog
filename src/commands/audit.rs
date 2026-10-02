@@ -943,11 +943,13 @@ pub fn render(dir: &Path, report: &Report, json: bool) -> io::Result<String> {
 
 /// The text report's line for a run with no `[signing]` table: what was
 /// not checked, and the one command that turns the check on.
-pub const SIGNATURES_NOT_CHECKED: &str = "signatures: not checked (no [signing] table in the machine policy; \
+pub const SIGNATURES_NOT_CHECKED: &str =
+    "signatures: not checked (no [signing] table in the machine policy; \
 'tog keygen <path>' prints one to paste into ~/.tog/policy.toml)";
 
-/// The gate is misconfigured: an unreadable `--policy` file. The command
-/// has already started and, under
+/// The gate is misconfigured: an unreadable `--policy` file, or `--signed`
+/// with no trusted set at machine scope. The command has already started
+/// and, under
 /// `--json`, already promised that stdout is the document and a failure is
 /// a JSON object, so the promise holds here too; only the exit status says
 /// "operator mistake" (2) rather than "denied" (1).
@@ -959,10 +961,20 @@ fn misconfigured(message: &str, json: bool) {
     }
 }
 
+/// The words `--signed` refuses with: the table to add, where, and the
+/// command that prints it.
+pub const NO_TRUSTED_KEYS: &str = "no trusted signing keys configured: add a [signing] table with \
+trusted = [\"ed25519:<64 hex>\"] to the machine policy (TOG_POLICY, or ~/.tog/policy.toml); a project \
+or --policy list can only narrow it. 'tog keygen <path>' prints the table to paste";
+
 /// The command: judge the recorded closures against the policy chain plus
-/// an optional `--policy` file. Needs the host platform only to tell a
-/// foreign-platform closure from a current one, as `status` does.
-pub fn run(policy: Option<&Path>, json: bool) -> io::Result<i32> {
+/// an optional `--policy` file. `signed` is the CI form: it refuses to run
+/// (exit 2, before any record is read) unless the machine policy trusts
+/// signing keys, so a gate whose policy file lost its `[signing]` table
+/// fails loudly instead of passing with signatures unchecked. Needs the
+/// host platform only to tell a foreign-platform closure from a current
+/// one, as `status` does.
+pub fn run(policy: Option<&Path>, signed: bool, json: bool) -> io::Result<i32> {
     let platform = Platform::host()?;
     let dir = project_dir();
     // A --policy file that cannot be read or parsed is an operator
@@ -979,6 +991,10 @@ pub fn run(policy: Option<&Path>, json: bool) -> io::Result<i32> {
     };
     let (policy, sources) =
         effective_policy(&dir, extra.as_ref().map(|(path, extra)| (*path, extra)))?;
+    if signed && trusted_keys(&policy).is_none() {
+        misconfigured(&format!("audit --signed: {NO_TRUSTED_KEYS}"), json);
+        return Ok(cli::EXIT_USAGE);
+    }
     let report = audit_under(platform, &dir, policy, sources)?;
     let trusted = match trusted_keys(&report.policy) {
         Some(trusted) => format!("trusted=[{}]", key_list(trusted)),

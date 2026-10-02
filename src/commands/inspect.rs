@@ -12,8 +12,8 @@ use sha2::{Digest, Sha256};
 
 pub use crate::comforter::status::{sha256_file, string, State};
 use crate::kernel::fsroot::ProjectRoot;
-use crate::kernel::policy::{self, Exception};
 use crate::kernel::platform::Platform;
+use crate::kernel::policy::{self, Exception};
 use crate::kernel::sandbox;
 use crate::kernel::store::Store;
 use crate::kernel::toolchain::input;
@@ -770,7 +770,11 @@ fn printable(text: &str) -> String {
 fn verdict(rows: &[EcosystemStatus]) -> String {
     let synced = rows.iter().filter(|row| row.is_synced()).count();
     if synced == rows.len() {
-        return format!("\n{synced} of {} synced.\n{}", rows.len(), exceptions_line(rows));
+        return format!(
+            "\n{synced} of {} synced.\n{}",
+            rows.len(),
+            exceptions_line(rows)
+        );
     }
     let mut counts: Vec<(&str, usize)> = Vec::new();
     for row in rows.iter().filter(|row| !row.is_synced()) {
