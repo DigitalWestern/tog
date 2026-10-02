@@ -151,8 +151,24 @@ impl Release {
 /// Read the latest release. The only network request `doctor` makes.
 pub fn latest() -> io::Result<Release> {
     let url = manifest_url();
-    let text = fetch::fetch_text_within(&url, Some(LOOKUP_TIMEOUT))?;
+    let text = fetch::fetch_text_within(&url, Some(LOOKUP_TIMEOUT))
+        .map_err(|error| no_release_found(&url, error))?;
     Release::parse(&text)
+}
+
+/// A 404 on the release manifest means the server shows no release there:
+/// none is published, or the repository is private and this request is
+/// anonymous. `kernel::fetch` explains a 404 as a yanked package or a
+/// stale lockfile, which is wrong here: nothing was yanked and no lockfile
+/// is involved.
+fn no_release_found(url: &str, error: io::Error) -> io::Error {
+    match fetch::http_status(&error) {
+        Some(404) => io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("no published release at {url}; the server answered 404"),
+        ),
+        _ => error,
+    }
 }
 
 /// The `version` row of `tog doctor`: this build, and whether a newer
@@ -506,6 +522,27 @@ mod tests {
         assert!(Version::parse("latest").is_none());
         assert!(Version::parse("v0.10.0") > Version::parse("v0.9.9"));
         assert_eq!(Version::running().unwrap().to_string(), cli::VERSION);
+    }
+
+    /// A 404 on the manifest names the URL and says no release is there;
+    /// it never repeats the package-download explanation. Every other
+    /// failure passes through.
+    #[test]
+    fn a_missing_manifest_says_no_release_is_published() {
+        let url = "https://example.invalid/releases/latest";
+        let error = no_release_found(url, fetch::status_failure(404));
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+        assert_eq!(
+            error.to_string(),
+            format!("no published release at {url}; the server answered 404")
+        );
+        let throttled = fetch::status_failure(429);
+        let text = throttled.to_string();
+        assert_eq!(no_release_found(url, throttled).to_string(), text);
+        assert_eq!(
+            no_release_found(url, io::Error::other("offline")).to_string(),
+            "offline"
+        );
     }
 
     #[test]

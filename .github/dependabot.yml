@@ -1,0 +1,14 @@
+# Every `uses:` in .github/workflows is pinned to a commit SHA, and a pin
+# never moves on its own. Dependabot rewrites the SHA and its version
+# comment together. One grouped pull request a week, so the updates cost
+# one CI run and not one per action.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns:
+          - "*"

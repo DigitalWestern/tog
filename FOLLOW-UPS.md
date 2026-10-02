@@ -159,22 +159,17 @@ Nothing queued; the next item comes from "Open work" below.
   - #267 tests: non-tog children in npm_scripts and deps_e2e inherit the developer's environment.
   - #272 pnpm freshness: a new workspace member without an importer passes, and overrides match by name only.
   - #277 gc: run homes under `<store>/run-homes` are never reclaimed.
-  - #278 rust_path: the version probe's scratch directory is created with `create_dir_all`.
   - #279 node: run refusal misses npm abbreviations and nested installs, and refuses bare `bun`.
   - #283 dotnet: block `OutDir` and `PublishDir`, and parse the lock once per sync.
   - #285 pnpm lock reader: four edge cases (trailing colon, parentheses in paths, unquoted `@` keys, a third document) not yet confirmed against js-yaml.
   - #287 store records: no gc for `records/`, orphaned `tmp/record-*` temporaries, Elixir check-locked hash blind spots.
   - #289 interrupt: the bwrap preflight misreports Ctrl-C as "bwrap unavailable", and an interrupted sync exits 1 rather than 130.
-  - #294 size ratchet: the function heuristic counts `#[cfg(test)]` functions outside `mod tests` as production code.
   - #295 tests: four sandbox tests fail instead of skipping when bubblewrap is missing.
-  - #296 ci: add a Dependabot updater for the SHA-pinned actions.
   - #297 python: two PEP 440 grammars; hoist `pep440.rs` into the kernel.
-  - #298 doctor: the version row shows a package-download message when no release exists.
   - #300 heavy: the Elixir end-to-end test cannot run on ubuntu-22.04 (OTP needs glibc 2.43).
   - #301 acceptance.sh: steps 9 and 9b re-run two ignored suites the heavy workflow already runs, one multi-threaded.
   - #302 acceptance.sh: step 13 carries its own copy of the closure signing format.
   - #307 archive: a tarball with macOS AppleDouble (`._name`) members is refused on macOS but extracted on Linux. The extraction carries `--no-mac-metadata`; the listing carries no restore flag (bsdtar documents them for other modes). On the Mac, try `/usr/bin/tar --no-mac-metadata -tf` on such a tarball: if it accepts the flag and prints the `._` members, add it to `TAR_LIST_FLAGS` and close.
-  - #308 tests: python fixture tarballs are packed with raw `/usr/bin/tar`, not `tar_create`.
 - **`deps` as a `Tailor` method (#61).** `src/commands/deps.rs` still names
   tailors directly. A `Tailor::edit_manifest` method with an "unsupported"
   default would make it registry-driven, the way `Tailor::registry_tool`

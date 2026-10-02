@@ -743,7 +743,6 @@ mod tests {
     use super::*;
     use crate::kernel::testutil::TempDir;
     use std::io::Write;
-    use std::process::Command;
 
     fn temp_dir(label: &str) -> TempDir {
         TempDir::named(&format!("build-requires-{label}"))
@@ -757,7 +756,7 @@ mod tests {
         }
         match format {
             ArchiveKind::TarGz => {
-                let status = Command::new("/usr/bin/tar")
+                let status = crate::kernel::testutil::tar_create()
                     .args(["-czf"])
                     .arg(path)
                     .args(["-C"])
@@ -851,7 +850,7 @@ build-backend = "hatchling.build"
         )
         .unwrap();
         let archive = dir.0.join("malicious.tar.gz");
-        let status = Command::new("/usr/bin/tar")
+        let status = crate::kernel::testutil::tar_create()
             .args(["-czf"])
             .arg(&archive)
             .args(["-C"])
@@ -887,7 +886,7 @@ build-backend = "hatchling.build"
         )
         .unwrap();
         let path = dir.0.join("dot-prefix.tar.gz");
-        let status = Command::new("/usr/bin/tar")
+        let status = crate::kernel::testutil::tar_create()
             .args(["-czf"])
             .arg(&path)
             .args(["-C"])
@@ -920,7 +919,7 @@ build-backend = "hatchling.build"
         let _ = fs::remove_file(&outside);
         symlink(&outside, root.join("Cargo.lock")).unwrap();
         let path = dir.0.join("symlink-escape.tar.gz");
-        let status = Command::new("/usr/bin/tar")
+        let status = crate::kernel::testutil::tar_create()
             .args(["-czf"])
             .arg(&path)
             .args(["-C"])
@@ -1157,7 +1156,7 @@ mod link_guard_tests {
         symlink("b", staged.join("a")).unwrap();
         symlink("a", staged.join("b")).unwrap();
         let path = dir.0.join("example-1.0.tar.gz");
-        let status = std::process::Command::new("/usr/bin/tar")
+        let status = crate::kernel::testutil::tar_create()
             .arg("-czf")
             .arg(&path)
             .arg("-C")

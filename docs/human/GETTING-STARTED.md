@@ -64,7 +64,7 @@ sandbox and native builds need them; the
 
 ```
 $ tog doctor
-ok    version      tog 0.1.0 (7688cfd 2026-09-21); newer release not checked (fetch https://api.github.com/repos/DigitalWestern/tog/releases/latest: the server does not have this artifact (404); the index may have yanked it, or the lockfile names a version that is gone)
+ok    version      tog 0.1.0 (7688cfd 2026-09-21); newer release not checked (no published release at https://api.github.com/repos/DigitalWestern/tog/releases/latest; the server answered 404)
 ok    platform     x86_64-unknown-linux-gnu
 ok    store        /tmp/tog-demo/store (0 objects, 0 cached artifacts)
 ok    disk         12.1 GiB free under the store
@@ -77,8 +77,8 @@ ok    project      python found; not synced yet: python (run 'tog')
 
 Nine rows, exit 0 when none says `fail`. The first row is the build you
 are running and whether a newer release exists (`warn`, with `tog update
---self` as the fix; `not checked` when offline or, as here, while no
-release is tagged and GitHub answers 404). This is the command to run
+--self` as the fix; `not checked` when offline or, as here, while GitHub
+answers 404: no release is tagged, or the repository is private). This is the command to run
 before you file a bug and the output to paste into it. The `store` row
 answers "where does all this go": one directory per machine, shared by every
 project on it, created the first time something needs it.

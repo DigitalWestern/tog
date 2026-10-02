@@ -315,7 +315,48 @@ fn network_cause(error: &ureq::Error) -> String {
 }
 
 fn network_error(verb: &str, url: &str, error: ureq::Error) -> io::Error {
-    io::Error::other(format!("{verb} {url}: {}", network_cause(&error)))
+    let message = format!("{verb} {url}: {}", network_cause(&error));
+    match error {
+        ureq::Error::Status(code, _) => io::Error::other(StatusFailure { code, message }),
+        ureq::Error::Transport(_) => io::Error::other(message),
+    }
+}
+
+/// A request the server answered with an error status. It prints as the
+/// same sentence as every other network failure and keeps the status code,
+/// so the one caller for whom a 404 means something else (the release
+/// lookup: no release is there) can ask with [`http_status`].
+#[derive(Debug)]
+struct StatusFailure {
+    code: u16,
+    message: String,
+}
+
+impl std::fmt::Display for StatusFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for StatusFailure {}
+
+/// A fetch error for `code`, as a real request would return it.
+#[cfg(test)]
+pub(crate) fn status_failure(code: u16) -> io::Error {
+    let response = ureq::Response::new(code, "status", "").unwrap();
+    network_error(
+        "fetch",
+        "https://example.invalid/x",
+        ureq::Error::Status(code, response),
+    )
+}
+
+/// The HTTP status behind a fetch error, when the server answered with one.
+pub fn http_status(error: &io::Error) -> Option<u16> {
+    error
+        .get_ref()?
+        .downcast_ref::<StatusFailure>()
+        .map(|failure| failure.code)
 }
 
 /// The artifact's name for progress narration: the last path segment of
@@ -888,6 +929,22 @@ mod tests {
         assert!(d.hex().starts_with("9b71d224bd62f378"));
         assert!(Digest::from_sri("md5-abc").is_err());
         assert!(Digest::from_sri("nodash").is_err());
+    }
+
+    /// A status failure keeps its code behind the same sentence; anything
+    /// else has no status to report.
+    #[test]
+    fn a_status_failure_keeps_its_code() {
+        let missing = status_failure(404);
+        assert_eq!(http_status(&missing), Some(404));
+        assert_eq!(
+            missing.to_string(),
+            format!("fetch https://example.invalid/x: {}", status_cause(404))
+        );
+        assert_eq!(http_status(&status_failure(503)), Some(503));
+        assert_eq!(http_status(&io::Error::other("offline")), None);
+        let absent = fs::File::open("/nonexistent/tog-fetch-test").unwrap_err();
+        assert_eq!(http_status(&absent), None);
     }
 
     /// The five user-facing network texts, and the one word a person

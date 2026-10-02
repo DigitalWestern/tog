@@ -880,7 +880,7 @@ mod tests {
         .unwrap();
         fs::write(root.join("binding.gyp"), "{}").unwrap();
         let archive = store.root.join(format!("{name}-1.0.tar.gz"));
-        let status = std::process::Command::new("/usr/bin/tar")
+        let status = crate::kernel::testutil::tar_create()
             .args(["-czf"])
             .arg(&archive)
             .args(["-C"])
