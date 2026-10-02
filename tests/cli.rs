@@ -516,11 +516,11 @@ fn json_commands_report_failure_as_json_on_stderr() {
     let value: serde_json::Value = serde_json::from_slice(&out.stderr).unwrap();
     assert!(value["error"].as_str().is_some(), "{value}");
 
-    // `audit` reports a misconfigured gate itself, and keeps exit 2 so CI
-    // can tell an operator mistake from a denied build; under --json that
-    // report is a JSON object like any other failure.
+    // `audit --signed` reports a misconfigured gate itself, and keeps exit
+    // 2 so CI can tell an operator mistake from a denied build; under
+    // --json that report is a JSON object like any other failure.
     std::fs::create_dir_all(project.0.join(".tog/closures")).unwrap();
-    let out = tog(&project.0, &home.0, &["audit", "--json"]);
+    let out = tog(&project.0, &home.0, &["audit", "--signed", "--json"]);
     assert_eq!(out.status.code(), Some(2), "{}", text(&out.stderr));
     assert!(out.stdout.is_empty(), "{}", text(&out.stdout));
     let value: serde_json::Value = serde_json::from_slice(&out.stderr)
@@ -532,7 +532,7 @@ fn json_commands_report_failure_as_json_on_stderr() {
         "{value}"
     );
     // The same failure without --json is still the prose usage error.
-    let out = tog(&project.0, &home.0, &["audit"]);
+    let out = tog(&project.0, &home.0, &["audit", "--signed"]);
     assert_eq!(out.status.code(), Some(2));
     assert!(
         text(&out.stderr).starts_with("tog: error: audit: "),

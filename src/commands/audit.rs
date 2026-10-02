@@ -1006,7 +1006,10 @@ pub fn run(command: cli::Command) -> io::Result<i32> {
     let (policy, sources) =
         effective_policy(&dir, extra.as_ref().map(|(path, extra)| (*path, extra)))?;
     if signed && trusted_keys(&policy).is_none() {
-        misconfigured(&format!("audit --signed: {NO_TRUSTED_KEYS}"), json);
+        misconfigured(
+            &format!("audit: {NO_TRUSTED_KEYS} (--signed asked for the check)"),
+            json,
+        );
         return Ok(cli::EXIT_USAGE);
     }
     let report = audit_under(platform, &dir, policy, sources)?;
