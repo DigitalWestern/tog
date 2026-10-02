@@ -18,7 +18,15 @@ fn version_text() -> String {
     format!("{}\n", super::version_line())
 }
 
+/// The hidden verb the resolution door's sandbox starts first. Matched only
+/// as the very first argument, before any global option, so no spelling a
+/// person types reaches it by accident.
+const RELAY_VERB: &str = "__resolution-relay";
+
 pub fn parse(args: &[String]) -> Result<Parsed, UsageError> {
+    if args.first().map(String::as_str) == Some(RELAY_VERB) {
+        return parse_relay(&args[1..]).map(Parsed::Relay);
+    }
     let mut options = Options::default();
     // `--frozen`, `--fresh` and `--strict` belong to the bare `tog`, so
     // they are read here, ahead of any verb. Past a verb other than the
@@ -1392,6 +1400,45 @@ pub(super) const GLOBAL_FLAGS: &[&str] = &[
     "-V",
     "--version",
 ];
+
+/// `__resolution-relay [--exec-log-fd <n>] [--env-fd <n>] <socket> <address> -- <tool>...`.
+/// Everything after `--` is the tool's, untouched.
+fn parse_relay(args: &[String]) -> Result<super::RelayInvocation, UsageError> {
+    let usage = || {
+        UsageError::new(
+            format!(
+                "usage: tog {RELAY_VERB} [--exec-log-fd <n>] [--env-fd <n>] <socket> <address> -- <tool>..."
+            ),
+            None,
+        )
+    };
+    let split = args.iter().position(|arg| arg == "--").ok_or_else(usage)?;
+    let (own, tool) = (&args[..split], &args[split + 1..]);
+    let (mut exec_log_fd, mut env_fd, mut positional) = (None, None, own);
+    loop {
+        match positional {
+            [flag, fd, rest @ ..] if flag == "--exec-log-fd" && exec_log_fd.is_none() => {
+                exec_log_fd = Some(fd.parse::<i32>().map_err(|_| usage())?);
+                positional = rest;
+            }
+            [flag, fd, rest @ ..] if flag == "--env-fd" && env_fd.is_none() => {
+                env_fd = Some(fd.parse::<i32>().map_err(|_| usage())?);
+                positional = rest;
+            }
+            _ => break,
+        }
+    }
+    match (positional, tool.is_empty()) {
+        ([socket, listen], false) => Ok(super::RelayInvocation {
+            socket: socket.clone(),
+            listen: listen.clone(),
+            exec_log_fd,
+            env_fd,
+            argv: tool.to_vec(),
+        }),
+        _ => Err(usage()),
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -2851,5 +2898,76 @@ mod tests {
         assert_eq!(edit_distance("kitten", "sitting"), 3);
         assert_eq!(edit_distance("snyc", "sync"), 1);
         assert_eq!(edit_distance("ab", "ba"), 1);
+    }
+
+    #[test]
+    fn the_resolution_relay_parses_only_its_own_grammar() {
+        let args = |list: &[&str]| list.iter().map(|arg| arg.to_string()).collect::<Vec<_>>();
+        let parsed = parse(&args(&[
+            "__resolution-relay",
+            "--exec-log-fd",
+            "3",
+            "--env-fd",
+            "4",
+            "/run/tog/proxy.sock",
+            "127.0.0.1:8119",
+            "--",
+            "/store/npm",
+            "--frozen",
+        ]));
+        let Ok(Parsed::Relay(relay)) = parsed else {
+            panic!("the relay verb did not parse as the relay");
+        };
+        assert_eq!(
+            relay,
+            super::super::RelayInvocation {
+                socket: "/run/tog/proxy.sock".into(),
+                listen: "127.0.0.1:8119".into(),
+                exec_log_fd: Some(3),
+                env_fd: Some(4),
+                argv: vec!["/store/npm".into(), "--frozen".into()],
+            }
+        );
+        for bad in [
+            &["__resolution-relay"][..],
+            &["__resolution-relay", "/s", "127.0.0.1:1"],
+            &["__resolution-relay", "/s", "127.0.0.1:1", "--"],
+            &["__resolution-relay", "/s", "--", "tool"],
+            &[
+                "__resolution-relay",
+                "--exec-log-fd",
+                "x",
+                "/s",
+                "127.0.0.1:1",
+                "--",
+                "tool",
+            ],
+            &[
+                "__resolution-relay",
+                "--env-fd",
+                "4",
+                "--env-fd",
+                "5",
+                "/s",
+                "127.0.0.1:1",
+                "--",
+                "tool",
+            ],
+        ] {
+            assert!(parse(&args(bad)).is_err(), "{bad:?}");
+        }
+        // Only as the very first word: behind a global option it is an
+        // ordinary unknown word.
+        assert!(!matches!(
+            parse(&args(&[
+                "-q",
+                "__resolution-relay",
+                "/s",
+                "127.0.0.1:1",
+                "--",
+                "t"
+            ])),
+            Ok(Parsed::Relay(_))
+        ));
     }
 }

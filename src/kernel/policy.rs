@@ -55,6 +55,9 @@ pub const HOST_BUILD_INPUTS: &str = "host-build-inputs";
 /// because the registry was unreachable (a transport failure or offline
 /// mode). The subject is the endpoint; the detail counts the responses.
 pub const STALE_RESOLUTION: &str = "stale-resolution";
+/// A resolution tool ran without its network fenced to tog's proxy (the
+/// `isolated` tier), so the ledger may be missing traffic the tool sent.
+pub const UNCONFINED_RESOLUTION: &str = "unconfined-resolution";
 
 pub const KINDS: &[&str] = &[
     REQUIREMENT_SKIPPED,
@@ -73,6 +76,7 @@ pub const KINDS: &[&str] = &[
     EXTERNAL_TOOLCHAIN,
     HOST_BUILD_INPUTS,
     STALE_RESOLUTION,
+    UNCONFINED_RESOLUTION,
 ];
 
 /// Kinds were spelled with two separators until the names were unified on
@@ -641,6 +645,12 @@ fn current() -> &'static Policy {
         apply_requested_strictness(&mut policy, &mut Vec::new(), requested_strict());
         policy
     })
+}
+
+/// A copy of the process policy, for a component that holds its own (a
+/// resolution proxy session reads it from other threads).
+pub fn effective() -> Policy {
+    current().clone()
 }
 
 /// Is the policy chain in force strict? Strictness refuses every exception

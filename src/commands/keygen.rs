@@ -11,6 +11,9 @@ use std::io;
 use std::path::Path;
 
 pub fn run(path: &Path) -> io::Result<i32> {
+    // Every sandbox, resolution doors included, can read the system
+    // directories; a key there is readable by the code tog runs.
+    crate::kernel::resolve::confine::refuse_key_under_system_root(path)?;
     let public = signing::generate(path)?;
     ui::note(&format!(
         "keygen: wrote {} (mode 0600). Keep it outside the checkout, the store, and any sandbox read root; set TOG_SIGNING_KEY={} where 'tog' runs",
@@ -31,6 +34,13 @@ mod tests {
     use super::*;
     use crate::kernel::policy;
     use crate::kernel::testutil::TempDir;
+
+    #[test]
+    fn keygen_refuses_a_path_under_a_system_read_root() {
+        let error = run(Path::new("/etc/tog/signing.key")).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert!(!Path::new("/etc/tog/signing.key").exists());
+    }
 
     #[test]
     fn the_printed_snippet_is_a_policy_that_trusts_the_key() {

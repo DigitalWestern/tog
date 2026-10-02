@@ -509,6 +509,11 @@ pub fn run(ctx: &Context, request: Request, no_sync: bool) -> io::Result<()> {
     // would fix the process policy without the policy files, and their
     // deny entries would not apply to the edit or the sync after it.
     policy::init(&cwd)?;
+    // An interrupted resolution publication is undone before the edit
+    // reads the manifest or the lock it left half-written.
+    if crate::kernel::resolve::transaction::has_pending_journal(&cwd) {
+        crate::kernel::resolve::transaction::recover_project(&ctx.store, &ctx.activity, &cwd)?;
+    }
     let mut edit_attribution = edit_attribution()?;
     let outcome = edit(ctx, &cwd, request, &mut edit_attribution)?;
     for line in &outcome.lines {

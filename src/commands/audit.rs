@@ -2390,6 +2390,7 @@ mod tests {
             policy::LOCK_DISAGREEMENT,
             policy::ARTIFACT_NOT_PROVISIONED,
             policy::EXTERNAL_TOOLCHAIN,
+            policy::UNCONFINED_RESOLUTION,
         ]
         .iter()
         .map(|kind| kind.to_string())

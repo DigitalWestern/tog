@@ -110,6 +110,29 @@ pub fn resolve(pending: Pending) -> io::Result<cli::Command> {
     }
 }
 
+/// Run the hidden resolution relay and return its exit status: the tool's,
+/// or 128 + the signal that ended it. It runs inside the resolution
+/// sandbox, so it loads no policy, opens no store, and prints nothing that
+/// is not the tool's except a failure of its own.
+pub fn relay(invocation: cli::RelayInvocation) -> i32 {
+    use crate::kernel::resolve::relay;
+    let result = relay::parse_args(
+        &invocation.socket,
+        &invocation.listen,
+        invocation.exec_log_fd,
+        invocation.env_fd,
+        &invocation.argv,
+    )
+    .and_then(relay::run);
+    match result {
+        Ok(code) => code,
+        Err(error) => {
+            crate::kernel::ui::error(&error.to_string());
+            cli::EXIT_FAILURE
+        }
+    }
+}
+
 /// Dispatch one parsed command to the verb's file. `sync` holds `--frozen`
 /// and `--strict`; the parser has already refused them for a verb that
 /// never syncs. `--frozen` is handed to the verbs that skip lock writes.

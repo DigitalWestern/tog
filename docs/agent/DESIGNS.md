@@ -1186,9 +1186,16 @@ extra read of data already in the page cache.
 The tool runs on the snapshot:
 
 - **Linux:** bwrap binds each snapshot tree **at the real path** (`--bind
-  <stage>/root <lock_root>`, and likewise for each extra root), so every
-  absolute and relative path the tool sees is the real one, and the real
-  project is not mounted at all.
+  <stage>/tree<lock_root> <lock_root>`, and likewise for each extra root),
+  so every absolute and relative path the tool sees is the real one, and
+  the real project is not mounted at all. The stage mirrors absolute
+  paths under `tree/` (a root at `/p/app` is staged at
+  `<stage>/tree/p/app`), which keeps every extra root at its real position
+  relative to the lock root for both engines; a root inside another is
+  staged once. The stage also holds `scratch/`, the tool's HOME, TMPDIR
+  and cache directory, which is never diffed or published. A read root
+  that overlaps a snapshot root is refused, since binding it would mount
+  part of the real project.
 - **macOS:** Seatbelt cannot remap paths, so the tool runs at the stage
   path. Relative paths still resolve, because extra roots sit at the same
   relative position. The output checks (below) fail the door if a
@@ -1210,7 +1217,10 @@ classified by the spec:
   for publication, but only if it is a **regular file**. A declared output
   that is now a symlink, a directory, a FIFO, or any other type fails the
   door, naming the path. So does any declared output whose parent
-  directory inside the stage became a symlink,
+  directory inside the stage became a symlink, and a declared output the
+  tool deleted (publication only ever writes; it never deletes a project
+  file). A declared output that did not exist and still does not is
+  simply nothing to publish,
 - **declared scratch** (per tool: .NET `obj/`, uv's `.venv` if created):
   discarded,
 - anything else, **including a new `.git`, a changed `.git/hooks/*`, or any
@@ -1249,13 +1259,22 @@ socket:
    sandbox starts) read-only at `/run/tog/tog`.
 3. The sandbox's first process is `tog __resolution-relay
    /run/tog/proxy.sock 127.0.0.1:8119 -- <tool argv>`, a hidden
-   subcommand. It listens on the fixed port inside the private namespace,
-   connects the Unix socket once per accepted TCP connection and splices
-   the two, spawns the tool (with the seccomp filter below installed in
+   subcommand. It opens `/run/tog/proxy.sock` as an `O_PATH` descriptor
+   before the tool starts, listens on the fixed port inside the private
+   namespace, connects the socket through that descriptor
+   (`/proc/self/fd/<n>`) once per accepted TCP connection and splices
+   the two, so nothing the tool does to the path afterwards redirects the
+   unfiltered relay, spawns the tool (with the seccomp filter below installed in
    the child before `exec`), and exits with the tool's status. The fixed
    port keeps every proxy URL identical from run to run.
    `--die-with-parent` and the PID namespace end every descendant when the
-   relay exits, so nothing outlives the door on Linux.
+   relay exits, so nothing outlives the door on Linux. After the last
+   bind, `--remount-ro /` makes the sandbox's root tmpfs read-only (so the
+   tool cannot rename `/run/tog` or create `/etc/ld.so.preload`); the
+   snapshot, scratch, `/tmp`, and `/dev` are mounts of their own and stay
+   writable. `--disable-userns` is added when the installed bubblewrap
+   has it (0.8 and later, probed from its help text), so the tool cannot
+   make a user namespace of its own.
 4. No DNS exists in the namespace (`/etc/resolv.conf` is not bound, and no
    resolver is reachable). The tool never needs one because every proxy
    URL uses a literal IP.
@@ -1325,15 +1344,38 @@ Three layers close it on Linux:
    before mounting, and a socket anywhere in them refuses the door, naming
    the path. (Today's sandbox scans writable roots only; see
    `src/kernel/sandbox.rs` module docs. The door scans every root.) Store
-   object scans are cached per object id in the object's metadata, since
-   objects are immutable. `/run/tog` holds only tog's own socket, and
-   `/tmp` and `/dev` are fresh.
-3. **A seccomp filter denies creating Unix sockets.** The relay installs
+   object scans are cached per object id, since objects are immutable. The
+   cache is a store record (`records/socket-scan/`), not the object's
+   metadata: metadata is written once at commit and validated against the
+   kind grammar, so it cannot take a fact learned later. Only a clean scan
+   is recorded. The system roots are scanned once per process. A
+   directory in them owned by another user that this user cannot list is
+   skipped, because the tool runs as this user and cannot list it either
+   (Fedora ships `/usr/share/empty.sshd` as root-owned 0711); every other
+   scan error refuses. `/run/tog` holds only tog's own socket, and `/tmp`
+   and `/dev` are fresh.
+3. **A seccomp filter allows only network sockets.** The relay installs
    a filter in the tool's process before `exec`, inherited by every
-   descendant: `socket(AF_UNIX, ...)` fails with `EAFNOSUPPORT`.
-   `socketpair(2)` stays allowed, because libuv (Node) and Python's
-   asyncio use it for child-process pipes, and a socketpair cannot reach
-   a named socket. This layer covers a socket that appears in a mounted
+   descendant. `socket(2)` is an allow-list: `AF_INET` and `AF_INET6`
+   (the namespace holds only loopback and the relay), and `AF_NETLINK`
+   with protocol `NETLINK_ROUTE` only, which glibc's `getaddrinfo`
+   (`AI_ADDRCONFIG`) and Go's interface listing read and which sees only
+   the sandbox's own namespace. Every other family fails with
+   `EAFNOSUPPORT`: `AF_UNIX`, and also `AF_VSOCK`, which reaches the
+   host (CID 1) straight across a network namespace, and any family a
+   later kernel adds. A deny-list of families would have missed vsock
+   and would miss the next one. `socketpair(2)` is allowed for
+   `AF_UNIX` stream and seqpacket pairs only, because libuv (Node) and
+   Python's asyncio use them for child-process pipes, and a connected
+   stream or seqpacket socket cannot be pointed at anything else. A
+   datagram pair (`SOCK_DGRAM`, and `SOCK_RAW`, which `AF_UNIX` treats
+   as datagram) fails with `EAFNOSUPPORT`: `connect` or a `sendto` with
+   an address re-aims a datagram socket at any named datagram socket in
+   a mounted root, such as `/run/systemd/journal/socket`.
+   The filter also refuses `add_key`, `request_key`, and `keyctl`
+   (`EPERM`), and the relay moves the tool into a fresh anonymous
+   session keyring before installing it, so no key in this user's
+   keyrings is readable. This layer covers a socket that appears in a mounted
    root **after** the scan: it cannot be connected to, because nothing in
    the tree can create the socket to connect with. The relay is outside
    the filter (it installs it in the child), so the proxy bridge keeps
@@ -1347,8 +1389,10 @@ Three layers close it on Linux:
      syscall table (32-bit `int 0x80` on x86-64, where the `socket`
      number differs and `socketcall(2)` multiplexes it) and create the
      socket under a number the filter does not match. On x86-64 the
-     filter also refuses syscall numbers with the x32 bit
-     (`__X32_SYSCALL_BIT`) set.
+     filter also kills a process that issues a syscall number with the x32
+     bit (`__X32_SYSCALL_BIT`) set, the same `SECCOMP_RET_KILL_PROCESS` as
+     a foreign architecture: an x32 call is another syscall table, not an
+     ordinary failure a tool should see as an errno.
    - **`io_uring_setup` is denied** (`EPERM`), along with
      `io_uring_enter` and `io_uring_register`. An io_uring ring submits
      socket and connect operations that never pass through the seccomp
@@ -1364,8 +1408,11 @@ Three layers close it on Linux:
      cannot be traced or have its memory opened by an unprivileged
      process of the same user. The exec log's user-notification listener
      lives in the relay too, so this also protects the log. The filter
-     additionally denies `ptrace`, `process_vm_readv`, and
-     `process_vm_writev` to the tool tree.
+     additionally denies `ptrace`, `process_vm_readv`,
+     `process_vm_writev`, and `pidfd_getfd` (`EPERM`) to the tool tree.
+     `pidfd_getfd` would copy a descriptor out of another process under
+     the same ptrace check; it is denied outright so the rule does not
+     rest on dumpability alone.
 
 Tools that need named Unix-socket IPC among their own processes are
 configured not to: .NET gets `DOTNET_EnableDiagnostics=0`, no build
@@ -1394,8 +1441,12 @@ Two measures close that window, on both platforms:
    - *Linux:* the tool runs in bwrap's PID namespace. When the tool
      exits, the relay sends `SIGKILL` to every other process in the
      namespace (it enumerates `/proc` inside the namespace) and exits.
-     bwrap's init then exits, which kills anything left, and the door
-     waits for bwrap to be reaped. No process of the tree survives, and
+     The relay is the namespace's pid 1 (bubblewrap's `--as-pid-1`), so
+     its exit kills anything left, and the door waits for bwrap to be
+     reaped. A bubblewrap init as pid 1 would be an unfiltered, dumpable
+     process the tool could write through `/proc/1/mem`. The relay is
+     non-dumpable, and as init it ignores `SIGSTOP` and `SIGKILL` sent
+     from inside, so the tool can neither take it over nor stall it. No process of the tree survives, and
      none can escape a PID namespace. The container backend gets the same
      result by removing the container.
    - *macOS:* there is no PID namespace, and children stay in tog's
@@ -1567,9 +1618,15 @@ would misread: a key file can exist with the variable unset in this
 shell and set in the next.) The key is protected by the tiers instead:
 the door profile denies reads of the path `TOG_SIGNING_KEY` names, and
 of the default path `tog keygen` suggests, on both platforms, and the
-`isolated` tier puts it across a UID boundary. `tog keygen` refuses a
-path under the sandbox's system read roots (`/usr`, `/etc`, `/opt`,
-`/private/etc`, `/Library`, `/System`), which every tier can read.
+`isolated` tier puts it across a UID boundary. On Linux there is no
+per-path read deny inside a bind mount, so "denies reads" means the door
+refuses to start when either key path lies under anything it would
+mount: a system root, a read root, a snapshot root (the snapshot would
+copy the key into the stage), the stage, or the tog executable. Both
+the path as given and its resolved spelling are compared. `tog keygen`
+refuses a path under the sandbox's system read roots (`/usr`, `/etc`,
+`/opt`, `/private/etc`, `/Library`, `/System`), which every tier can
+read.
 
 The failure message names the tool, why it needs isolation, and each
 missing capability with its fix. For example: "tog add runs Bundler,
@@ -1577,7 +1634,9 @@ which evaluates the Gemfile, so it needs isolation. bubblewrap cannot
 create a user namespace here (AppArmor restrict_unprivileged_userns=1),
 no container engine is reachable (podman/docker not found), and the
 isolation helper is not installed (see `tog doctor --isolation`). Enable
-one of them." A sync that needs a missing-lock door fails the same way.
+one of them." Until PR 3b ships those backends, the message names the
+native sandbox's real failure and says this build has no other isolation
+backend, rather than pointing at a command that does not exist yet. A sync that needs a missing-lock door fails the same way.
 
 `unconfined-resolution` keeps its meaning, "the ledger may be missing
 traffic because the network was not fenced", and it is recorded for the
@@ -1729,7 +1788,19 @@ ledger test fails if a known secret shape survives.
 `SECCOMP_RET_USER_NOTIF` for `execve`/`execveat`. The relay (outside the
 filter) receives each notification, reads the program path from the
 notifying process, appends `{pid, parent, path}` to the diagnostics, and
-lets the call continue. This makes the kernel, not the tool, report every
+lets the call continue. The log travels to the door on a pipe the door
+passes to bubblewrap as descriptor 3 (`tog __resolution-relay
+--exec-log-fd 3 --env-fd 4 /run/tog/proxy.sock 127.0.0.1:8119 --
+<argv>`), never through a file in the sandbox, so the tool cannot read
+or rewrite it. The tool's environment travels the other way on
+descriptor 4 (NUL-ended `KEY=VALUE` records), and bubblewrap gets no
+`--setenv`: the relay starts with the empty environment `--clearenv`
+leaves and hands the tool exactly the records it read. The relay runs
+without the filter, so a variable meant for the tool (`LD_PRELOAD`,
+`LD_AUDIT`, `GLIBC_TUNABLES`) must never reach the relay's own loader.
+The same pipe carries the tool's exit status and the relay's
+quiescence result (how many processes it killed), and the door treats a
+log without both as a failed run. This makes the kernel, not the tool, report every
 program the tool tree executed. It is diagnostics, and it cross-checks the
 build probe (below). macOS has no equivalent without Endpoint Security
 entitlements (Apple-granted; not available to tog) or disabling SIP for
@@ -2504,7 +2575,25 @@ Contract 1 needs enforcement, not review alone:
    descriptor, copy its bytes into an immutable store stage (the
    **original copy**), and record their sha256 as the pre-run digest. A
    target that does not exist is recorded as `absent`, which step 8
-   enforces with a no-replace create.
+   enforces with a no-replace create. The original copies are one store
+   object of the kernel kind `resolution-originals/1` (inputs: `schema`,
+   a random `run` nonce so each transaction's copy is its own object, and
+   `target:<i>`/`digest:<i>` per target), rooted in the project's root
+   record from here until the project's files are final, and released
+   just before the journal is deleted. The journal goes last, so a
+   release that fails (or a crash before it) leaves a journal the next
+   recovery finishes by releasing again. A `publishing` or `committed`
+   journal is first rewritten as `finished`, which recovery trusts
+   without the originals rooted, so a crash between the release and the
+   journal's deletion does not leave a journal recovery refuses. The object is committed even when every target is absent,
+   because recovery trusts a journal only through it. Before the object
+   is rooted, a `held` journal (step 7's file, with no targets yet) names
+   its id, so a tog killed while the tool runs leaves a journal that
+   recovery finds and whose originals it releases; nothing rooted is
+   ever left without one. The whole transaction holds the store's
+   project lock and an `flock` on the project directory itself: the
+   store's lock is per store, the journal is per project, and two tog
+   processes with different `TOG_STORE`s must not undo each other.
 3. **Snapshot** the lock root and extra roots (socket-free), with the
    baseline manifest. Scan store and system roots for sockets.
 4. **Run** the tool (probe first for uv) in its tier, through the proxy.
@@ -2518,8 +2607,11 @@ Contract 1 needs enforcement, not review alone:
    staged directory plus rename, as for every object), and register them
    in the project's root record. Build the record from the output copy's
    digests and sign it.
-7. **Journal.** Write `.tog/resolution/.journal-<ecosystem>.json` through
+7. **Journal.** Write `.tog/journal/<ecosystem>.json` through
    the held descriptor, with `fsync` of the file and the directory. It
+   lives under `.tog/` (which projects ignore) and outside
+   `.tog/resolution/` (which projects commit, PR 10), so a journal is
+   never committed, pushed, or cloned into another checkout. It
    lists, per target (each output, then the record), the target name,
    the temporary name, the original copy's store path and pre-run digest
    (or "absent"), the new digest, and a state (`pending`). The journal's
@@ -2549,22 +2641,57 @@ Contract 1 needs enforcement, not review alone:
    inside a successful transaction, and only if it is still the one held
    at step 2.
 9. **Commit point.** When the record has been swapped, mark the journal
-   `committed`, `fsync`, delete the displaced temporaries, and delete the
-   journal. The resolution is now published.
+   `committed`, `fsync`, delete the displaced temporaries, mark it
+   `finished`, release the original copies, and delete the journal. The resolution is now published. A failure while cleaning up
+   after this point is not a failed door: the outputs, the receipt, and
+   the ledger's roots stay, tog warns, and the committed (or finished)
+   journal is left for the next recovery to finish.
 10. **On any failure before step 8**, nothing has touched the project:
     remove the temporaries and unroot the ledger and sidecar for `tog gc`.
     **On failure during step 8**, undo every `swapped` target in reverse
     order, by exchanging the displaced original back (or removing a
-    created file), then delete the journal. The project is byte-for-byte
+    created file), then mark the journal `finished`, release the original
+    copies, and delete the journal. The project is byte-for-byte
     as it was.
 
-**Recovery** (at the start of any writing command, after a crash): a
-`committed` journal only needs its temporaries and itself deleted. Any
-other journal is rolled back target by target. A target whose current
+**Recovery** (at the start of any writing command, after a crash, and at
+the start of every transaction): recovery looks for journals only in the
+lock root it is operating on: the command's project directory, and in a
+transaction the lock root it holds (a workspace root's journal is
+recovered by the next transaction there). It never walks to ancestors: a
+journal planted in a parent directory must not steer a command in a
+project below it. It takes the store's project lock and the project
+directory's `flock`. A journal is acted on only when it describes a
+publication tog made in this project with this store: its originals
+object is in the active store, is rooted to this project, and its
+identity lists exactly the journal's targets and pre-run digests; every
+target is a project path of the kind a transaction holds (relative, no
+`..`, no `.tog/` state but the receipt, reached through the held
+descriptor without following a symlink); and every temporary is named
+exactly `.<target name>.tog-<16 hex>.tmp` beside its target. Anything
+else, and a journal that does not parse, is refused with the journal's
+path and what to do, and nothing is touched; it blocks only commands
+that write that project. A `held` or `finished` journal only releases
+its originals and is deleted; neither is checked against rooted
+originals (a `held` one's may never have been committed, a `finished`
+one's were released just before a crash and may since be collected).
+When their originals are not in the store, the journal must name that
+store (its canonical root, recorded in every journal) as the one that
+wrote it; otherwise it belongs to another store, whose root still holds
+its originals, and is refused. A held journal written before journals
+named their store is trusted as before. A
+`committed` journal only needs its temporaries and itself deleted, and a
+temporary is deleted only while it still holds its target's pre-run
+bytes. Any other journal is rolled back target by target. A displaced
+temporary is exchanged back only for a target whose swap was in flight
+(`pending`, where it may hold a user's edit the swap displaced) or whose
+temporary still holds the pre-run bytes; otherwise the stored copy is
+used. A target whose current
 digest is the journal's new digest is restored from its original copy
 (or removed if it was absent). A target at its pre-run digest is left
 alone. A target at a third digest was edited after the crash, so it is
-left alone and reported. Then the journal is deleted. A crash therefore
+left alone and reported. Then the journal is marked `finished`, the
+originals are released, and the journal is deleted. A crash therefore
 never leaves a new lock that the next sync accepts silently: after
 recovery the project is back at its originals, and the receipt that was
 there before (if any) still describes them.
@@ -2815,7 +2942,9 @@ Sandbox tests (`tests/sandbox_deny.rs`, extended, not a new file, per §4):
 - `linux_door_cannot_connect_to_a_socket_created_after_preflight` (the
   host creates a listening socket in a mounted root after the scan: the
   tool's `socket(AF_UNIX)` fails with `EAFNOSUPPORT`)
-- `linux_door_socketpair_still_works` (Node spawns a child with pipes)
+- `linux_door_socketpair_still_works` (Node spawns a child with pipes;
+  stream and seqpacket pairs work, a datagram pair fails with
+  `EAFNOSUPPORT`)
 - `linux_door_exec_log_records_every_exec`
 - `linux_door_filter_kills_a_foreign_syscall_arch` (an `int 0x80`
   `socketcall` from the 32-bit table, and an x32-bit syscall number)
@@ -3058,6 +3187,74 @@ transaction tests. On the Mac: the Seatbelt rules, the deny-by-default
 Mach profile with the per-tool allow-lists from PR 0, and the same
 deny-by-default Mach rule for the **build** profile (known gap 1).
 
+**PR 3 door integration as built (Linux, 2026-09-29).** Decisions made
+wiring the transaction into `ResolutionDoor`, each the flexible option:
+
+- **Confined is chosen per call, not per door.** `ResolutionDoor::run`
+  stays `Legacy` for every existing site. `run_confined(spec, confined)`
+  takes PR 1's `DelegateSpec` (program, args, lock root, variables,
+  stdio) plus a `door::ConfinedSpec` holding everything else: ecosystem,
+  forced-settings row, display name and why, `ForcedInputs`, outputs,
+  scratch, excludes, extra roots, store reads, routes, online/offline,
+  the wiring callback, the target, and three seams (proxy, permitted
+  set, policy) that default to the process's own. Each ecosystem PR
+  moves its site by calling `run_confined`; no site had to change here.
+  The confined environment starts empty: only the spec's set variables,
+  then the wiring's, then the forced ones.
+- **Wiring.** The callback gets the session address, the scratch
+  directory, the spec's args, and the tool's forced args, and returns
+  the full argument list, variables, config files (scratch-relative,
+  created `0600`, never following a symlink), and extra git settings.
+  The door refuses a wiring that dropped a forced argument and applies
+  the forced variables last, so the tool's grammar stays in the tailor
+  and the guarantee stays in the kernel. Without a callback the forced
+  args are appended before the first `--`.
+- **Targets.** `Target::Project { receipt }` runs the transaction;
+  `receipt` is an optional producer called after the ledger is committed
+  and rooted, with the accepted outputs and digests, the ledger id and
+  sha256, the isolation and engine, the recorded exceptions, and each
+  input's pre-run digest from the snapshot baseline. With no producer
+  there is no receipt target. Signing belongs to the producer.
+  `Target::Detached` (planner, `tog x`, an unpacked sdist) holds nothing
+  and writes accepted outputs back into its tog-owned lock root one file
+  at a time; its ledger is committed but not rooted, and the caller
+  roots the ids `DelegateReport::ledger` returns before its lease ends.
+- **Order of checks.** A session failure (hard failure, policy refusal,
+  offline miss) is an error even when the tool exited 0, and is checked
+  before the tool's status because it says more. A tool that exits
+  nonzero is then a report, as in `Legacy`: nothing published, no ledger
+  kept. Then the diff, then the output copy, whose forbidden strings are
+  the session token and the relay address the tool saw.
+- **Exceptions are recorded after the checks and before the ledger
+  commit**, on the door's thread (the attribution's owner), so a denied
+  kind fails the door before anything is written. The tier's
+  `unconfined-resolution` has the tool's display name as its subject.
+- **Only the ledger ids this run added are taken back.** Committing the
+  same portable evidence again is a cache hit on an id an earlier run
+  may already have rooted; unrooting it would orphan that run's record.
+  The door reads the root record under the held project lock first.
+- **The session directory** is `tog-door-<16 hex>`, `0700`, under the
+  first of `$XDG_RUNTIME_DIR`, the temp dir, and `/tmp` whose socket
+  path fits `sun_path`, and is removed once the session finishes.
+- **Preflight order.** The tier, the signing-key check, and the forced
+  settings are refused before anything is held, since they touch no
+  project state. Recovery then runs inside `Transaction::hold`, under the
+  project lock. `tog add`/`remove`/`update` also recover at their start,
+  right after the policy loads, as `tog sync` does.
+- **Diagnostics** gain `isolation`, the exec log (`execs`), and the
+  count of processes quiescence killed; `tools` lists the store objects
+  the tool ran from.
+- **Tests.** The door's tests live in `kernel::resolve::door::tests`,
+  in-crate so they can use the fixture upstream and the ledger's
+  commit-fault hook. They bind the `tog` binary cargo built beside the
+  test binary as the relay, and skip unless `TOG_SANDBOX_TESTS` is set
+  (then a missing sandbox or binary fails them). The tier override
+  changes only what the probe reports; the run itself is still
+  bubblewrap. `npm_forced_settings_never_run_the_project_git_or_script_shell`
+  and `cargo_forced_settings_never_run_project_wrappers_or_credential_providers`
+  move to the npm and cargo PRs: they need the store Node, npm, and Rust
+  objects that only those tailors provide.
+
 **PR 3b: the other isolation backends.** The Linux container backend
 (podman/docker, the pinned minimal image, `--network none`, the same
 relay and seccomp filter) and the Linux `tog-isolate` helper (per-run UID
@@ -3133,7 +3330,8 @@ doors" section with the census as a covered/not-covered table (WP5's
 `add`/`remove`/`update` row, "Delegated planning runs unsandboxed", the
 audit paragraph's "does not cover the doors" sentence, and the .NET
 restore row. CLI.md documents `tog attest`, the new notes, and the new
-errors. The README `.gitignore` stanza gains `!**/.tog/resolution/`.
+errors. The README `.gitignore` stanza gains `!**/.tog/resolution/`
+(receipts only: journals live in `.tog/journal/`, which stays ignored).
 FOLLOW-UPS "Delegated-tool doors" is deleted and #68 closed.
 
 Each PR from 3 on runs its ecosystem's `--ignored` tests on the Mac

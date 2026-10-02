@@ -297,6 +297,14 @@ pub struct LedgerObjects {
     pub diagnostics: String,
 }
 
+#[cfg(test)]
+thread_local! {
+    /// The file (`PORTABLE_FILE` or `DIAGNOSTICS_FILE`) whose commit fails on
+    /// this thread, for the door's failure tests.
+    pub(crate) static COMMIT_FAULT: std::cell::Cell<Option<&'static str>> =
+        const { std::cell::Cell::new(None) };
+}
+
 /// Write one file into a fresh stage and commit it under `identity`.
 fn commit_file(
     store: &Store,
@@ -306,6 +314,12 @@ fn commit_file(
     bytes: &[u8],
     deps: &ObjectDeps,
 ) -> io::Result<String> {
+    #[cfg(test)]
+    if COMMIT_FAULT.with(|fault| fault.get() == Some(file)) {
+        return Err(io::Error::other(format!(
+            "injected commit failure for {file}"
+        )));
+    }
     let staged = store.stage_with_activity(activity)?;
     let written = fs::write(staged.join(file), bytes);
     if let Err(error) = written {

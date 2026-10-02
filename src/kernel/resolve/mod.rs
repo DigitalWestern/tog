@@ -10,11 +10,13 @@
 //! everywhere but the reviewed kernel sites. So a new resolver call site
 //! cannot bypass the door by accident.
 //!
-//! Today the door has one mode, `Legacy`: it runs exactly the command the
-//! call site describes, unsandboxed, in the environment the site builds on
-//! top of tog's own, with no snapshot, and records nothing. What the door
-//! adds now is the single place: the confined, proxied mode replaces
-//! `Legacy` here without touching a call site's shape.
+//! The door has two modes. [`ResolutionDoor::run`] is `Legacy`: it runs
+//! exactly the command the call site describes, unsandboxed, in the
+//! environment the site builds on top of tog's own, with no snapshot, and
+//! records nothing. [`ResolutionDoor::run_confined`] runs it isolated on a
+//! snapshot, through a proxy session, and publishes its declared outputs
+//! all or nothing ([`door`]). A call site moves from one to the other by
+//! adding a [`door::ConfinedSpec`]; its `DelegateSpec` keeps its shape.
 //!
 //! The resolution proxy lives beside the door: the only network path of a
 //! delegated dependency tool. It forwards only to permitted registries,
@@ -22,17 +24,24 @@
 //! promise, and records every request in a ledger.
 
 pub mod cache;
+pub mod confine;
+pub mod door;
 pub mod http;
 pub mod iana;
 pub mod ledger;
 pub mod mirror;
+pub mod outputs;
 pub mod proxy;
 pub mod redact;
+pub mod relay;
 pub mod routes;
+pub mod seccomp;
 pub mod session;
+pub mod snapshot;
 pub mod ssrf;
 #[cfg(test)]
 pub(crate) mod testing;
+pub mod transaction;
 pub(crate) mod tripwire;
 
 use crate::kernel::activity::StoreActivity;
@@ -61,6 +70,19 @@ pub enum DoorKind {
     X,
     /// `tog attest`: an ecosystem's lock-consistency check.
     Attest,
+}
+
+impl DoorKind {
+    /// The name the ledger records.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DoorKind::Edit => "edit",
+            DoorKind::MissingLock => "missing-lock",
+            DoorKind::Planner => "planner",
+            DoorKind::X => "x",
+            DoorKind::Attest => "attest",
+        }
+    }
 }
 
 /// How the door runs the tool. `Legacy` is today's behavior, kept exactly
@@ -129,6 +151,21 @@ impl<'a> ResolutionDoor<'a> {
         }
     }
 
+    /// Run one tool invocation confined: isolated against a snapshot of
+    /// its lock root, reaching the network only through a proxy session,
+    /// its declared outputs published all or nothing (see [`door`]). A
+    /// tool that exits nonzero is a report, as with [`Self::run`], and
+    /// nothing is published. A policy refusal, an offline miss, an
+    /// undeclared write, a secret in an output, or a denied exception is
+    /// an error, even when the tool exited 0.
+    pub fn run_confined(
+        &mut self,
+        spec: DelegateSpec,
+        confined: door::ConfinedSpec<'_>,
+    ) -> io::Result<DelegateReport> {
+        door::run(self, spec, confined)
+    }
+
     // Reviewed site (tests/architecture.rs): the door: every census tool starts here.
     #[allow(clippy::disallowed_methods)]
     fn run_legacy(&mut self, spec: &DelegateSpec) -> io::Result<DelegateReport> {
@@ -140,6 +177,7 @@ impl<'a> ResolutionDoor<'a> {
                     status,
                     stdout: Vec::new(),
                     stderr: Vec::new(),
+                    ledger: None,
                 })
             }
             DelegateStdio::Capture => {
@@ -148,6 +186,7 @@ impl<'a> ResolutionDoor<'a> {
                     status: output.status,
                     stdout: output.stdout,
                     stderr: output.stderr,
+                    ledger: None,
                 })
             }
         }
@@ -321,6 +360,11 @@ pub struct DelegateReport {
     pub stdout: Vec<u8>,
     /// Empty unless the spec captured its output.
     pub stderr: Vec<u8>,
+    /// The ledger and its sidecar a confined run committed. A project run
+    /// rooted them in the project's record; a detached run's caller roots
+    /// them itself before its store lease ends. `None` for `Legacy` and
+    /// for a tool that failed.
+    pub ledger: Option<ledger::LedgerObjects>,
 }
 
 /// For a caller that parses a captured run the way it parsed a
