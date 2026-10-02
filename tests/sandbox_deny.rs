@@ -108,6 +108,7 @@ fn network_access_during_build_fails() {
     let activity = &store
         .activity(tog::kernel::activity::ActivityMode::Shared)
         .unwrap();
+    let mut attribution = tog::kernel::policy::Attribution::open("python").unwrap();
     let python = python::shipped_selection("3.12.14").unwrap();
     let platform = Platform::host().unwrap();
 
@@ -119,8 +120,19 @@ fn network_access_during_build_fails() {
         ),
         "\"connectrecord\"",
     );
-    let wheel = build::build_sdist_wheel(&store, activity, platform, &recorder, &python)
-        .expect("the recorder sdist must build: the build toolchain works offline");
+    let wheel = build::build_sdist_wheel(
+        &mut tog::kernel::resolve::ResolutionDoor::open(
+            &store,
+            activity,
+            platform,
+            tog::kernel::resolve::DoorKind::Planner,
+            &mut attribution,
+        )
+        .unwrap(),
+        &recorder,
+        &python,
+    )
+    .expect("the recorder sdist must build: the build toolchain works offline");
     let mut archive = zip::ZipArchive::new(std::fs::File::open(&wheel).unwrap()).unwrap();
     let mut recorded = String::new();
     std::io::Read::read_to_string(
@@ -142,8 +154,19 @@ fn network_access_during_build_fails() {
         &format!("{CONNECT_PROBE}assert outcome == \"connected\", outcome\n"),
         "",
     );
-    let err = build::build_sdist_wheel(&store, activity, platform, &probe, &python)
-        .expect_err("build reaching the network must fail");
+    let err = build::build_sdist_wheel(
+        &mut tog::kernel::resolve::ResolutionDoor::open(
+            &store,
+            activity,
+            platform,
+            tog::kernel::resolve::DoorKind::Planner,
+            &mut attribution,
+        )
+        .unwrap(),
+        &probe,
+        &python,
+    )
+    .expect_err("build reaching the network must fail");
     let msg = err.to_string();
     // A sandbox that failed to set up (Unsupported) is not evidence of
     // denial: the build must have run and exited non-zero inside it.

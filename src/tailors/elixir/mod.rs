@@ -10,16 +10,19 @@
 //! native deps (make/rebar3 ports) write INTO their source trees, so the
 //! deps projection is a writable clonefile copy, recorded unattested.
 
+pub mod edit;
 mod hextar;
 pub mod objects;
 pub mod tailor;
+mod tool;
 
 use crate::kernel::activity::StoreActivity;
 use crate::kernel::archive::{extract_with_activity_and_options, Compression, ExtractOptions};
 use crate::kernel::fetch::{download_toolchain_artifact_held, download_verified_held, Digest};
 use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::platform::Platform;
-use crate::kernel::sandbox::{force_env, BuildSpec};
+use crate::kernel::resolve::ResolutionDoor;
+use crate::kernel::sandbox::BuildSpec;
 use crate::kernel::store::Store;
 use crate::kernel::toolchain::document::Shipped;
 #[cfg(test)]
@@ -34,6 +37,8 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+pub(crate) use tool::run_checked;
+use tool::{run_hexmark, run_mix};
 
 // Linux relocation recipe revision: an identity input of the Linux toolchain
 // object and of the Linux BEAM fingerprint. Bump it whenever the Install
@@ -729,7 +734,7 @@ fn run_installer_spec_for(activity: &StoreActivity, spec: &BuildSpec) -> io::Res
     for (key, value) in &spec.env {
         command.env(key, value);
     }
-    let output = crate::kernel::supervise::output(&mut command, activity)
+    let output = crate::kernel::supervise::local_output(&mut command, activity)
         .map_err(|e| io::Error::new(e.kind(), format!("spawn {program}: {e}")))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -934,26 +939,8 @@ fn verify_otp_install(otp_root: &Path, final_root: &Path, layout: &OtpLayout) ->
 /// that disqualified the Ubuntu build) and that the launcher resolves its
 /// root. The launcher self-locates from $0, so this works from staging.
 fn probe_otp_runtime(activity: &StoreActivity, otp_root: &Path, scratch: &Path) -> io::Result<()> {
-    let mut command = Command::new(otp_root.join("bin/erl"));
-    command
-        .args([
-            "-noshell",
-            "-eval",
-            "ok = crypto:start(), \
-             32 = byte_size(crypto:hash(sha256, <<\"tog\">>)), \
-             {ok, _} = application:ensure_all_started(ssl), \
-             true = is_list(ssl:versions()), \
-             io:format(\"~s~n~s~n\", [erlang:system_info(otp_release), code:root_dir()]), \
-             halt(0).",
-        ])
-        .current_dir(scratch)
-        .env_clear()
-        .env("PATH", "/usr/bin:/bin")
-        .env("HOME", scratch)
-        .env("TMPDIR", scratch)
-        .env("LANG", "C")
-        .stdin(std::process::Stdio::null());
-    let output = crate::kernel::supervise::output(&mut command, activity)
+    let mut command = tool::otp_probe_command(otp_root, scratch);
+    let output = crate::kernel::supervise::local_output(&mut command, activity)
         .map_err(|e| io::Error::new(e.kind(), format!("spawn staged OTP erl: {e}")))?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     if !output.status.success() {
@@ -1117,7 +1104,7 @@ pub fn realize_runtime(
             .arg(&elixir_zip)
             .args(["-d"])
             .arg(staged.join("elixir"));
-        let st = crate::kernel::supervise::status(&mut command, activity)?;
+        let st = crate::kernel::supervise::local_status(&mut command, activity)?;
         if !st.success() || !staged.join("elixir/bin/mix").is_file() {
             return Err(err("Elixir extraction failed or has unexpected layout"));
         }
@@ -1130,7 +1117,7 @@ pub fn realize_runtime(
             .arg(&hex_ez)
             .args(["-d"])
             .arg(staged.join(format!("archives/hex-{}", spec.hex_version)));
-        let st = crate::kernel::supervise::status(&mut command, activity)?;
+        let st = crate::kernel::supervise::local_status(&mut command, activity)?;
         if !st.success() {
             return Err(err("Hex archive extraction failed"));
         }
@@ -1154,11 +1141,11 @@ pub fn realize_runtime(
     result
 }
 
-/// The forced environment for every tog-controlled mix/elixir run:
-/// ERL_LIBS-class vars inject code paths or emulator args before Mix's own
-/// controls apply.
-const ENV_REMOVE_PREFIXES: &[&str] = &["MIX_", "HEX_", "REBAR_", "ERL_", "ELIXIR_"];
-const ENV_REMOVE: &[&str] = &["ERTS_BIN", "RUN_ERL_PIPE", "RUN_ERL_LOG", "ERLC_USE_SERVER"];
+/// The forced environment for every tog-controlled mix/elixir run: ERL_LIBS-
+/// class vars inject code paths or emulator args before Mix's own controls
+/// apply. The lists live with the host-local tripwire, which checks by them.
+const ENV_REMOVE_PREFIXES: &[&str] = crate::kernel::resolve::tripwire::ELIXIR_ENV_REMOVE_PREFIXES;
+const ENV_REMOVE: &[&str] = crate::kernel::resolve::tripwire::ELIXIR_ENV_REMOVE;
 
 fn forced_env(beam_obj: &Path, deps_path: &Path, scratch_home: &Path) -> Vec<(String, String)> {
     vec![
@@ -1238,53 +1225,6 @@ fn beam_path(beam_obj: &Path) -> String {
         beam_obj.join("elixir/bin").display(),
         beam_obj.join("otp/bin").display()
     )
-}
-
-/// Run the store mix for a delegated edit (`tog update`).
-pub(crate) fn run_checked(
-    activity: &StoreActivity,
-    beam_obj: &Path,
-    cwd: &Path,
-    scratch: &Path,
-    offline: bool,
-    args: &[&str],
-) -> io::Result<()> {
-    crate::kernel::ui::trace(&format!("run: {} (in {})", args.join(" "), cwd.display()));
-    let out = run_mix(activity, beam_obj, cwd, scratch, offline, args)?;
-    if crate::kernel::ui::verbose() {
-        eprint!("{}", String::from_utf8_lossy(&out.stdout));
-    }
-    if !out.status.success() {
-        return Err(io::Error::other(format!(
-            "store {} failed: {}",
-            args.join(" "),
-            String::from_utf8_lossy(&out.stderr).trim()
-        )));
-    }
-    Ok(())
-}
-
-fn run_mix(
-    activity: &StoreActivity,
-    beam_obj: &Path,
-    cwd: &Path,
-    scratch: &Path,
-    offline: bool,
-    args: &[&str],
-) -> io::Result<std::process::Output> {
-    let mut cmd = Command::new(beam_obj.join("elixir/bin").join(args[0]));
-    cmd.args(&args[1..]).current_dir(cwd);
-    cmd.env("PATH", beam_path(beam_obj));
-    cmd.env("HOME", scratch);
-    cmd.env("TMPDIR", scratch);
-    let mut set = forced_env(beam_obj, &scratch.join("deps"), scratch);
-    if !offline {
-        set.retain(|(k, _)| k != "HEX_OFFLINE");
-    }
-    force_env(&mut cmd, ENV_REMOVE_PREFIXES, ENV_REMOVE, &set);
-    cmd.stdin(std::process::Stdio::null());
-    crate::kernel::supervise::output(&mut cmd, activity)
-        .map_err(|e| io::Error::new(e.kind(), format!("run store mix {args:?}: {e}")))
 }
 
 /// Helper executed BY the pinned Elixir. Mode "lock": strict-grammar AST
@@ -1451,8 +1391,7 @@ pub fn require_lock(project: &ProjectRoot) -> io::Result<()> {
 /// network, unsandboxed) when there is none. The one place the Elixir
 /// tailor writes project inputs.
 pub fn generate_lock(
-    store: &Store,
-    activity: &StoreActivity,
+    door: &mut ResolutionDoor<'_>,
     project: &ProjectRoot,
     beam_obj: &Path,
 ) -> io::Result<()> {
@@ -1460,9 +1399,9 @@ pub fn generate_lock(
         return Err(err("mix.exs not found"));
     }
     ui::note("no mix.lock; resolving with the store mix (network, unsandboxed)...");
-    let scratch = store.stage_with_activity(activity)?;
+    let scratch = door.store().stage_with_activity(door.lease())?;
     let out = run_mix(
-        activity,
+        door,
         beam_obj,
         project.path(),
         &scratch,
@@ -1601,12 +1540,12 @@ fn record_check_locked(
 /// eval). The project is read through the held descriptor; mix itself
 /// still runs in `project.path()`.
 pub fn plan_elixir(
-    store: &Store,
-    activity: &StoreActivity,
+    door: &mut ResolutionDoor<'_>,
     project: &ProjectRoot,
     beam_obj: &Path,
     selected: &Selected,
 ) -> io::Result<(ElixirPlan, String)> {
+    let (store, activity) = (door.store(), door.lease());
     if !project.is_input_file(Path::new("mix.exs")) {
         return Err(err("mix.exs not found"));
     }
@@ -1628,7 +1567,7 @@ pub fn plan_elixir(
         let planner_home = store.root.join("planner-hexhome");
         fs::create_dir_all(&planner_home)?;
         let out = run_mix(
-            activity,
+            door,
             beam_obj,
             project_dir,
             &planner_home,
@@ -1659,7 +1598,7 @@ pub fn plan_elixir(
     let lock_copy = scratch.join("mix.lock");
     fs::write(&lock_copy, &lock)?;
     let out = run_mix(
-        activity,
+        door,
         beam_obj,
         project_dir,
         &scratch,
@@ -1738,12 +1677,10 @@ pub fn realize_deps(
             .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", d.app)))?;
         let dep_dir = hextar::unpack_verified(activity, &tar, &scratch, &staged, d)?;
         // .hex marker via the pinned toolchain (ETF binary).
-        let out = run_mix(
+        let out = run_hexmark(
             activity,
             beam_obj,
             &scratch,
-            &scratch,
-            true,
             &[
                 "elixir",
                 helper.to_str().unwrap(),
@@ -2095,6 +2032,138 @@ mod tests {
             expected.dedup();
             assert_eq!(recovered_cache(identity), expected);
         }
+    }
+
+    /// The host-local tripwire admits this helper by content: the digest
+    /// it holds is the digest of the text written here, so an edit to the
+    /// helper is also an edit to the reviewed table.
+    #[test]
+    fn the_tripwire_pins_this_helper() {
+        use sha2::Digest as _;
+        assert_eq!(
+            hex::encode(sha2::Sha256::digest(HELPER.as_bytes())),
+            crate::kernel::resolve::tripwire::ELIXIR_HELPER_SHA256
+        );
+    }
+
+    /// The real host-local call sites pass the tripwire, and an Erlang or
+    /// Elixir option variable added to either is refused.
+    #[test]
+    fn hexmark_and_the_otp_probe_pass_the_tripwire_only_as_built() {
+        use crate::kernel::resolve::tripwire::refusal;
+        use crate::kernel::testutil::{loosened, store_program};
+        let store = TempDir::named("elixir-tripwire");
+        let refused = |command: &Command| refusal(command, &store.0);
+        store_program(&store.0, "objects/beam/elixir/bin/elixir");
+        let beam = store.0.join("objects/beam");
+        let scratch = store.0.join("tmp/stage-scratch");
+        fs::create_dir_all(&scratch).unwrap();
+        let helper = scratch.join("helper.exs");
+        fs::write(&helper, HELPER).unwrap();
+        let dep = scratch.join("deps/jason");
+        let args = |dep: &Path| {
+            [
+                "elixir",
+                helper.to_str().unwrap(),
+                "hexmark",
+                dep.to_str().unwrap(),
+                "jason",
+                "1.4.4",
+                "inner",
+                "outer",
+                "mix",
+            ]
+            .map(str::to_string)
+        };
+        let build_at = |beam: &Path, dep: &Path| {
+            let args = args(dep);
+            let args: Vec<&str> = args.iter().map(String::as_str).collect();
+            tool::hexmark_command(beam, &scratch, &args)
+        };
+        let build = || build_at(&beam, &dep);
+        assert!(refused(&build()).is_none(), "{:?}", refused(&build()));
+        for (key, value) in [
+            ("ELIXIR_ERL_OPTIONS", "-eval halt()"),
+            ("ERL_AFLAGS", "-eval halt()"),
+            ("ERTS_BIN", "/tmp/erts/"),
+            ("MIX_EXS", "/tmp/mix.exs"),
+            ("HEX_MIRROR", "https://example.com"),
+        ] {
+            let mut command = build();
+            command.env(key, value);
+            assert!(refused(&command).is_some(), "{key}");
+        }
+        let loosened_hexmark = loosened(build);
+        let keys: Vec<&str> = loosened_hexmark
+            .iter()
+            .map(|(key, _)| key.as_str())
+            .collect();
+        for key in [
+            "PATH",
+            "HOME",
+            "TMPDIR",
+            "XDG_CONFIG_HOME",
+            "HEX_OFFLINE",
+            "MIX_HOME",
+        ] {
+            assert!(keys.contains(&key), "{key} is not forced: {keys:?}");
+        }
+        for (key, command) in &loosened_hexmark {
+            assert!(refused(command).is_some(), "loosened {key}");
+        }
+        let online = {
+            let args = args(&dep);
+            let args: Vec<&str> = args.iter().map(String::as_str).collect();
+            tool::mix_spec(&beam, &scratch, &scratch, false, &args).command()
+        };
+        assert!(refused(&online).is_some(), "hexmark without HEX_OFFLINE");
+        // Another mode, an option word, or another script at the helper's
+        // path, each in the environment as built.
+        let (helper_arg, dep_arg) = (helper.to_str().unwrap(), dep.to_str().unwrap());
+        for argv in [
+            [
+                "elixir", helper_arg, "lock", dep_arg, "jason", "1.4.4", "inner", "outer", "mix",
+            ],
+            [
+                "elixir", helper_arg, "hexmark", dep_arg, "-e", "1.4.4", "inner", "outer", "mix",
+            ],
+        ] {
+            let command = tool::hexmark_command(&beam, &scratch, &argv);
+            assert!(refused(&command).is_some(), "{argv:?}");
+        }
+        fs::write(&helper, "IO.puts(:not_the_helper)\n").unwrap();
+        assert!(refused(&build()).is_some(), "an impostor helper.exs");
+        fs::write(&helper, HELPER).unwrap();
+        assert!(refused(&build()).is_none());
+        assert!(
+            refused(&build_at(&beam, Path::new("/tmp/dep"))).is_some(),
+            "a dependency outside the store"
+        );
+        let host = TempDir::named("elixir-tripwire-host");
+        store_program(&host.0, "beam/elixir/bin/elixir");
+        assert!(
+            refused(&build_at(&host.0.join("beam"), &dep)).is_some(),
+            "an elixir outside the store"
+        );
+
+        store_program(&store.0, "tmp/stage-otp/otp/bin/erl");
+        let otp = store.0.join("tmp/stage-otp/otp");
+        let probe = || tool::otp_probe_command(&otp, &scratch);
+        assert!(refused(&probe()).is_none(), "{:?}", refused(&probe()));
+        for (key, value) in [
+            ("ERL_AFLAGS", "-eval 'halt(3).'"),
+            ("XDG_CONFIG_HOME", "/tmp"),
+        ] {
+            let mut command = probe();
+            command.env(key, value);
+            assert!(refused(&command).is_some(), "{key}");
+        }
+        for (key, command) in &loosened(probe) {
+            assert!(refused(command).is_some(), "loosened {key}");
+        }
+        store_program(&host.0, "otp/bin/erl");
+        let host_probe = tool::otp_probe_command(&host.0.join("otp"), &scratch);
+        assert!(refused(&host_probe).is_some(), "an erl outside the store");
     }
 
     /// A `hex-deps` record names the BEAM object only by fingerprint. The
@@ -2743,7 +2812,13 @@ exit 0
             assert!(ENV_REMOVE_PREFIXES.contains(&p), "{p}");
         }
         let env = forced_env(Path::new("/b"), Path::new("/d"), Path::new("/s"));
-        let keys: Vec<&str> = env.iter().map(|(k, _)| k.as_str()).collect();
+        let mut keys: Vec<&str> = env.iter().map(|(k, _)| k.as_str()).collect();
+        // The host-local tripwire checks the hexmark run against its own
+        // copy of this list.
+        let mut checked = crate::kernel::resolve::tripwire::ELIXIR_FORCED.to_vec();
+        keys.sort_unstable();
+        checked.sort_unstable();
+        assert_eq!(keys, checked);
         for k in [
             "MIX_DEPS_PATH",
             "MIX_ARCHIVES",

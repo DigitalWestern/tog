@@ -1504,6 +1504,93 @@ fn store_children_borrow_the_callers_lease() {
     );
 }
 
+/// Every non-private `kernel::supervise` function (`pub`, `pub(crate)`,
+/// `pub(super)`, `pub(in ...)`) that starts a `Command` is
+/// fenced. Either it is a `local_*` form whose first statement is the
+/// resolver tripwire, so a dependency tool is refused before anything
+/// spawns, or it is an unrestricted primitive that clippy refuses outside
+/// the reviewed sites (`disallowed-methods` in `clippy.toml`) and that has
+/// a `local_*` form beside it. A new spawn function that is neither would
+/// let a resolver start outside `kernel::resolve`'s door unseen.
+#[test]
+fn every_public_supervise_spawn_is_fenced() {
+    let root = repo();
+    let supervise = fs::read_to_string(root.join("src/kernel/supervise.rs")).unwrap();
+    let clippy = fs::read_to_string(root.join("clippy.toml")).unwrap();
+    // The scan's own control: every visibility wider than private counts.
+    let sample = "\npub fn a(c: &mut Command) {\n}\n\npub(crate) fn b(c: &mut Command) {\n}\n\
+                  \npub(super) fn c(c: &mut Command) {\n}\n\npub(in crate::kernel) fn d(c: &mut Command) {\n}\n\
+                  \nfn private(c: &mut Command) {\n}\n";
+    let sampled: Vec<String> = visible_command_fns(sample)
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect();
+    assert_eq!(sampled, ["a", "b", "c", "d"]);
+    let spawners = visible_command_fns(&supervise);
+    let names: Vec<&str> = spawners.iter().map(|(name, _)| name.as_str()).collect();
+    // Positive control: the scan sees today's three primitives, so a
+    // renamed or reformatted file fails here instead of passing with
+    // nothing to check.
+    for primitive in ["status", "status_with_stderr", "output"] {
+        assert!(
+            names.contains(&primitive),
+            "the supervise scan no longer sees `{primitive}` (found {names:?}); it is passing vacuously"
+        );
+    }
+    let mut unfenced = Vec::new();
+    for (name, body) in &spawners {
+        let fenced = match name.strip_prefix("local_") {
+            Some(_) => body
+                .trim_start()
+                .starts_with("refuse_resolver(command, activity)?;"),
+            None => {
+                clippy.contains(&format!("path = \"tog::kernel::supervise::{name}\""))
+                    && names.contains(&format!("local_{name}").as_str())
+            }
+        };
+        if !fenced {
+            unfenced.push(name.as_str());
+        }
+    }
+    assert!(
+        unfenced.is_empty(),
+        "non-private supervise spawn functions outside the resolution fence: {unfenced:?}. \
+         A `local_*` form must start with `refuse_resolver(command, activity)?;`; any other \
+         must be listed in clippy.toml's disallowed-methods and have a `local_*` form"
+    );
+}
+
+/// The name and body of every non-private top-level function in `text`
+/// (`pub`, `pub(crate)`, `pub(super)`, `pub(in ...)`) whose signature
+/// mentions `Command`.
+fn visible_command_fns(text: &str) -> Vec<(String, String)> {
+    let mut found = Vec::new();
+    for (index, _) in text.match_indices("\npub") {
+        let rest = &text[index + "\npub".len()..];
+        let rest = match rest.strip_prefix('(') {
+            Some(inner) => match inner.find(')') {
+                Some(close) => &inner[close + 1..],
+                None => continue,
+            },
+            None => rest,
+        };
+        let Some(rest) = rest.strip_prefix(" fn ") else {
+            continue;
+        };
+        let name: String = rest
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .collect();
+        let open = rest.find('{').unwrap();
+        if !rest[..open].contains("Command") {
+            continue;
+        }
+        let body = &rest[open + 1..open + rest[open..].find("\n}\n").unwrap()];
+        found.push((name, body.to_string()));
+    }
+    found
+}
+
 /// The functions of `text` with a site `hit` finds, one entry per site.
 fn fixture_owners(text: &str, hit: fn(&[(Token, String)], usize, &Names) -> bool) -> Vec<String> {
     let tokens = production_tokens(text);
@@ -1616,36 +1703,7 @@ fn literal_sites(relative: &str, text: &str, words: &[String]) -> Vec<LiteralSit
 /// the fix that removes a literal also removes its row, and a new literal
 /// fails even in a listed function, including a different name swapped in
 /// for a listed one.
-const TAILOR_NAMING_DEBT: &[(&str, &str, &str, usize)] = &[
-    // #61: add/remove/update are per-ecosystem code in the command until
-    // `Tailor::edit_manifest` exists; `Eco` is its hand-written table.
-    ("src/commands/deps.rs", "cargo_delegate", "bin/cargo", 1),
-    ("src/commands/deps.rs", "cargo_delegate", "cargo", 1),
-    ("src/commands/deps.rs", "elixir_delegate", "elixir", 1),
-    ("src/commands/deps.rs", "go_delegate", "go", 1),
-    ("src/commands/deps.rs", "go_delegate", "go.mod", 1),
-    ("src/commands/deps.rs", "go_delegate", "go.sum", 1),
-    ("src/commands/deps.rs", "name", "cargo", 1),
-    ("src/commands/deps.rs", "name", "dotnet", 1),
-    ("src/commands/deps.rs", "name", "elixir", 1),
-    ("src/commands/deps.rs", "name", "go", 1),
-    ("src/commands/deps.rs", "name", "node", 1),
-    ("src/commands/deps.rs", "name", "python", 1),
-    ("src/commands/deps.rs", "name", "ruby", 1),
-    ("src/commands/deps.rs", "node", "bin/npm", 1),
-    ("src/commands/deps.rs", "node", "node", 3),
-    ("src/commands/deps.rs", "prefix", "cargo", 1),
-    ("src/commands/deps.rs", "prefix", "go", 1),
-    ("src/commands/deps.rs", "prefix", "npm", 1),
-    ("src/commands/deps.rs", "prefix", "py", 1),
-    ("src/commands/deps.rs", "registry", "npm", 1),
-    ("src/commands/deps.rs", "ruby_delegate", "ruby", 1),
-    ("src/commands/deps.rs", "uv_command", "python", 1),
-    // #169: the Corepack/pnpm delegate path `deps` uses to realize pnpm.
-    ("src/commands/x.rs", "node_cache_root", "node", 1),
-    ("src/commands/x.rs", "realize_node_tool", "node", 4),
-    ("src/commands/x.rs", "verify_corepack_hash", "node", 1),
-];
+const TAILOR_NAMING_DEBT: &[(&str, &str, &str, usize)] = &[];
 
 /// A command reaches an ecosystem through the `Tailor` trait and the
 /// registry, never by spelling its name: a `"python"` or `"npm"` literal

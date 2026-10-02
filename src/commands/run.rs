@@ -153,7 +153,7 @@ pub fn run(ctx: &Context, cmd: &[String], frozen: bool) -> io::Result<i32> {
             }
             step.env("npm_package_json", package_json_path);
             step.env("INIT_CWD", &cwd);
-            let status = match supervise::status(&mut step, activity) {
+            let status = match supervise::local_status(&mut step, activity) {
                 Ok(status) => status,
                 // An interrupt ends the chain: the step's own exit code
                 // when it failed, the signal's when it survived.
@@ -176,8 +176,21 @@ pub fn run(ctx: &Context, cmd: &[String], frozen: bool) -> io::Result<i32> {
         }
         return Ok(0);
     }
-    let status = supervise::child_status(supervise::status(&mut command, activity))?;
+    let status = supervise::child_status(run_users_command(&mut command, activity))?;
     Ok(child_status_code(&status))
+}
+
+/// Run the command the user typed after `tog run`, which may itself be a
+/// dependency tool (`tog run cargo build`, `tog run npm test`): it is the
+/// user's program in the user's projection, not a resolution tog starts,
+/// so neither the door nor the host-local tripwire applies to it.
+// Reviewed site (tests/architecture.rs): the user's own program, which may be any tool.
+#[allow(clippy::disallowed_methods)]
+fn run_users_command(
+    command: &mut std::process::Command,
+    activity: &crate::kernel::activity::StoreActivity,
+) -> io::Result<std::process::ExitStatus> {
+    supervise::status(command, activity)
 }
 
 #[cfg(test)]

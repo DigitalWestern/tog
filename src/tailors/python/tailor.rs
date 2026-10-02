@@ -9,6 +9,7 @@ use crate::kernel::cyclonedx::{
 use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::objmeta::KindAdapter;
 use crate::kernel::platform::Platform;
+use crate::kernel::resolve::{DoorKind, ResolutionDoor};
 use crate::kernel::toolchain::{Catalog, LegacyEvidence, Selected};
 use crate::kernel::ui;
 use crate::tailors::python::{self as python, inputs, manifest, pyselect};
@@ -21,6 +22,23 @@ use std::process::Command;
 pub struct Python;
 
 impl Tailor for Python {
+    fn package_registry(&self) -> Option<crate::tailors::PackageRegistry> {
+        Some(super::edit::REGISTRY)
+    }
+
+    fn registry_exists(&self, name: &str) -> io::Result<Option<String>> {
+        super::edit::registry_exists(name)
+    }
+
+    fn edit_manifest(
+        &self,
+        _ctx: &crate::kernel::context::Context,
+        edit: &crate::tailors::ManifestEdit<'_>,
+        door: &mut crate::kernel::resolve::ResolutionDoor<'_>,
+    ) -> io::Result<crate::tailors::EditOutcome> {
+        super::edit::edit_manifest(edit, door)
+    }
+
     fn id(&self) -> &'static str {
         "python"
     }
@@ -84,12 +102,12 @@ impl Tailor for Python {
 
     fn plan(
         &self,
-        ctx: &Context,
+        _ctx: &Context,
         project: &ProjectRoot,
         selected: &Selected,
+        door: &mut ResolutionDoor<'_>,
     ) -> io::Result<Option<String>> {
-        let (plan, _selection, _inputs) =
-            inputs::read_plan(ctx.platform, project, &ctx.store, &ctx.activity, selected)?;
+        let (plan, _selection, _inputs) = inputs::read_plan(project, selected, door)?;
         Ok(Some(serde_json::to_string_pretty(&plan)?))
     }
 
@@ -106,20 +124,17 @@ impl Tailor for Python {
         // The interpreter and the resolver this sync uses are the rows the
         // project's toolchain selection names, not the pin table.
         let selected = request.toolchain;
-        let (plan, selection, inputs) =
-            inputs::read_plan(platform, project, store, &ctx.activity, selected)?;
+        // Planning and realization run their resolvers (a missing
+        // requirements lock, an sdist's build requirements or Rust lock)
+        // through one door on this sync's scope.
+        let mut door =
+            ResolutionDoor::open(store, activity, platform, DoorKind::Planner, attribution)?;
+        let (plan, selection, inputs) = inputs::read_plan(project, selected, &mut door)?;
         let runtime = python::realize_runtime(store, activity, platform, selected)?;
         // An sdist with a Rust extension builds on the Rust this project's
         // lock names when the project has one, not on the shipped pin.
         let helpers = request.helpers(self)?;
-        let env = super::env::realize_env_with(
-            store,
-            activity,
-            platform,
-            &plan,
-            selected,
-            helpers.get("rust"),
-        )?;
+        let env = super::env::realize_env_with(&mut door, &plan, selected, helpers.get("rust"))?;
         // The `.venv` projection and the closure are published through the
         // held project descriptor.
         super::env::project_env_with_inputs(

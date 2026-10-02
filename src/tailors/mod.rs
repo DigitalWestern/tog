@@ -10,6 +10,7 @@
 
 pub mod cargo;
 pub mod dotnet;
+pub mod edit;
 pub mod elixir;
 pub mod go;
 pub mod node;
@@ -21,12 +22,17 @@ use crate::kernel::context::Context;
 use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::objmeta::KindAdapter;
 use crate::kernel::platform::Platform;
+use crate::kernel::resolve::ResolutionDoor;
 use crate::kernel::toolchain::{Catalog, LegacyEvidence, Selected};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+pub use edit::{
+    CachedTool, DepSpec, EditHost, EditOutcome, EditVerb, ManifestEdit, PackageRegistry,
+};
 
 /// One row of `tog ls`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -207,12 +213,15 @@ pub trait Tailor: Sync {
     /// a tailor writes project inputs. Runs for detected ecosystems only,
     /// before that ecosystem plans, and never under `--frozen`; a plan that
     /// then finds no lock refuses with [`missing_lock`].
+    ///
+    /// The tool runs only through `door`, a missing-lock door on the
+    /// ecosystem's own scope.
     fn prepare(
         &self,
         _ctx: &Context,
         _project: &ProjectRoot,
         _toolchain: &Selected,
-        _attribution: &mut crate::kernel::policy::Attribution,
+        _door: &mut ResolutionDoor<'_>,
     ) -> io::Result<()> {
         Ok(())
     }
@@ -221,11 +230,14 @@ pub trait Tailor: Sync {
     /// realizing anything. `None` when, after `prepare`, there is nothing of
     /// this ecosystem to plan (the text is produced here, not a `Value`, so
     /// each plan's key order stays exactly what its producer serializes).
+    /// A planner that asks the ecosystem's tool (a consistency gate, a lock
+    /// parser) runs it through `door`, a planner door.
     fn plan(
         &self,
         ctx: &Context,
         project: &ProjectRoot,
         toolchain: &Selected,
+        door: &mut ResolutionDoor<'_>,
     ) -> io::Result<Option<String>>;
 
     /// A sync: plan, realize, project, and narrate with
@@ -422,6 +434,44 @@ pub trait Tailor: Sync {
         Err(unsupported(self.id(), "fmt"))
     }
 
+    /// `tog add`: the ecosystem's public package registry, the `prefix:`
+    /// that names it on the command line, and its name in messages. `None`
+    /// for an ecosystem `add` cannot choose.
+    fn package_registry(&self) -> Option<PackageRegistry> {
+        None
+    }
+
+    /// Whether a package name's shape alone says it belongs here
+    /// (`@scope/name` is npm's), so `tog add` needs no lookup to choose.
+    fn claims_package_name(&self, _name: &str) -> bool {
+        false
+    }
+
+    /// Whether this ecosystem's public registry knows `name`: `Some(latest
+    /// version)` when it does, `None` when it does not.
+    fn registry_exists(&self, _name: &str) -> io::Result<Option<String>> {
+        Err(unsupported(self.id(), "add"))
+    }
+
+    /// Where the sync after a dependency edit made in `project` runs: the
+    /// project itself, or the root whose lock the edit writes.
+    fn edit_root(&self, project: &Path) -> io::Result<PathBuf> {
+        Ok(project.to_path_buf())
+    }
+
+    /// `tog add` / `remove` / `update` for this ecosystem: edit the manifest
+    /// and lock with the ecosystem's pinned tool, run through `door`. A
+    /// tailor that cannot make an edit refuses with the exact command to
+    /// run; the default refuses.
+    fn edit_manifest(
+        &self,
+        _ctx: &Context,
+        _edit: &ManifestEdit<'_>,
+        _door: &mut ResolutionDoor<'_>,
+    ) -> io::Result<EditOutcome> {
+        Err(unsupported(self.id(), "add, remove, and update"))
+    }
+
     /// `tog x`: how this ecosystem runs a tool straight from its public
     /// registry, when it can.
     fn registry_tool(&self) -> io::Result<&'static dyn RegistryTool> {
@@ -528,19 +578,16 @@ pub trait RegistryTool: Sync {
 
     /// Resolve `package` (exactly `version`, or the registry's latest),
     /// realize it on `toolchain` and the `helpers` it builds with, and
-    /// project it into `root`.
-    #[allow(clippy::too_many_arguments)]
+    /// project it into `root`. The resolver runs through `door`, an `x`
+    /// door whose scope the projection claims.
     fn realize(
         &self,
-        store: &crate::kernel::store::Store,
-        activity: &crate::kernel::activity::StoreActivity,
-        platform: Platform,
+        door: &mut ResolutionDoor<'_>,
         root: &Path,
         package: &str,
         version: Option<&str>,
         toolchain: &Selected,
         helpers: &BTreeMap<String, Selected>,
-        attribution: &mut crate::kernel::policy::Attribution,
     ) -> io::Result<()>;
 
     /// What an executable launched from a realized `root` runs with.

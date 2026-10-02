@@ -12,9 +12,11 @@
 //! the same go.sum ledger a fresh plan is: every cached module's zip and
 //! go.mod lines must be in the current go.sum, or the cache is refused.
 
+pub mod edit;
 pub mod inputs;
 pub mod objects;
 pub mod tailor;
+mod tool;
 
 use crate::kernel::activity::StoreActivity;
 use crate::kernel::archive::Compression;
@@ -24,6 +26,7 @@ use crate::kernel::fetch::{
 };
 use crate::kernel::fsroot::{Entry, ProjectRoot};
 use crate::kernel::platform::{no_pin, Platform};
+use crate::kernel::resolve::ResolutionDoor;
 use crate::kernel::sandbox::BuildSpec;
 use crate::kernel::store::Store;
 use crate::kernel::toolchain::document::Shipped;
@@ -38,7 +41,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+pub(crate) use tool::run_checked;
+use tool::{run_go, run_go_offline};
 
 /// The shipped Go catalog: every go.dev release of the supported Go lines,
 /// with its default, generated and verified by `tools/catalog.py go`.
@@ -432,55 +436,6 @@ pub fn go_env(go_obj: &Path, modcache: &Path, offline: bool) -> Vec<(String, Str
     env
 }
 
-/// Run the store Go for a delegated edit (`tog add` and friends).
-pub(crate) fn run_checked(
-    activity: &StoreActivity,
-    go_obj: &Path,
-    cwd: &Path,
-    modcache: &Path,
-    offline: bool,
-    args: &[&str],
-) -> io::Result<()> {
-    crate::kernel::ui::trace(&format!(
-        "run: go {} (in {})",
-        args.join(" "),
-        cwd.display()
-    ));
-    let out = run_go(activity, go_obj, cwd, modcache, offline, args)?;
-    if crate::kernel::ui::verbose() {
-        eprint!("{}", String::from_utf8_lossy(&out.stdout));
-    }
-    if !out.status.success() {
-        return Err(io::Error::other(format!(
-            "store go {} failed: {}",
-            args.join(" "),
-            String::from_utf8_lossy(&out.stderr).trim()
-        )));
-    }
-    Ok(())
-}
-
-fn run_go(
-    activity: &StoreActivity,
-    go_obj: &Path,
-    cwd: &Path,
-    modcache: &Path,
-    offline: bool,
-    args: &[&str],
-) -> io::Result<std::process::Output> {
-    let mut cmd = Command::new(go_obj.join("bin/go"));
-    cmd.args(args).current_dir(cwd);
-    for (k, v) in go_env(go_obj, modcache, offline) {
-        if v.is_empty() {
-            cmd.env_remove(&k);
-        } else {
-            cmd.env(&k, &v);
-        }
-    }
-    crate::kernel::supervise::output(&mut cmd, activity)
-        .map_err(|e| io::Error::new(e.kind(), format!("run store go {args:?}: {e}")))
-}
-
 /// The Go version this project uses, answered the way sync answers it:
 /// the `[toolchain.go]` section of `tog-toolchain.toml` when there is a
 /// lock, otherwise the release a Go closure written before the lock existed
@@ -758,13 +713,13 @@ fn cached_plan(project: &ProjectRoot, input_hash: &str, gosum: &str) -> io::Resu
 /// planner scratch (resolver-trust only; never feeds objects); go itself
 /// runs in `project.path()`.
 fn is_tidy(
-    activity: &StoreActivity,
+    door: &mut ResolutionDoor<'_>,
     go_obj: &Path,
     project: &ProjectRoot,
     gate_cache: &Path,
 ) -> io::Result<bool> {
     let out = run_go(
-        activity,
+        door,
         go_obj,
         project.path(),
         gate_cache,
@@ -786,8 +741,7 @@ fn gate_cache(store: &Store) -> io::Result<PathBuf> {
 /// generate-lockfile`. The one place the Go tailor writes project inputs;
 /// a plan that finds the pair untidy refuses instead.
 pub fn tidy_project(
-    store: &Store,
-    activity: &StoreActivity,
+    door: &mut ResolutionDoor<'_>,
     project: &ProjectRoot,
     go_obj: &Path,
 ) -> io::Result<()> {
@@ -795,13 +749,13 @@ pub fn tidy_project(
     let gomod =
         read_gomod(project).map_err(|e| io::Error::new(e.kind(), format!("go.mod: {e}")))?;
     reject_local_replaces(&gomod)?;
-    let gate_cache = gate_cache(store)?;
-    if is_tidy(activity, go_obj, project, &gate_cache)? {
+    let gate_cache = gate_cache(door.store())?;
+    if is_tidy(door, go_obj, project, &gate_cache)? {
         return Ok(());
     }
     ui::note("go.mod/go.sum need updating; resolving with the store go mod tidy...");
     let out = run_go(
-        activity,
+        door,
         go_obj,
         project.path(),
         &gate_cache,
@@ -849,7 +803,7 @@ pub(crate) fn read_gosum(project: &ProjectRoot) -> io::Result<Option<String>> {
 /// planner scratch — warm downloads; trust is irrelevant because every
 /// artifact is re-verified by `closure_from_download`.
 fn download_closure(
-    activity: &StoreActivity,
+    door: &mut ResolutionDoor<'_>,
     go_obj: &Path,
     work: &Path,
     gate_cache: &Path,
@@ -863,13 +817,14 @@ fn download_closure(
     }
     ui::note("computing Go module closure with the store toolchain...");
     run_go(
-        activity,
+        door,
         go_obj,
         work,
         gate_cache,
         false,
         &["mod", "download", "-json", "all"],
     )
+    .map(Into::into)
 }
 
 /// Verify the JSON stream of `go mod download` into plan rows. Ledger
@@ -1055,8 +1010,7 @@ fn verified_module(
 /// `use_cache` false the plan cache is skipped and the closure downloaded
 /// again, which puts every artifact it names in this store's cache.
 pub fn plan_go(
-    store: &Store,
-    activity: &StoreActivity,
+    door: &mut ResolutionDoor<'_>,
     project: &ProjectRoot,
     go_obj: &Path,
     go_version: &str,
@@ -1076,15 +1030,16 @@ pub fn plan_go(
         }
     }
 
+    let (store, activity) = (door.store(), door.lease());
     let gate_cache = gate_cache(store)?;
-    if !is_tidy(activity, go_obj, project, &gate_cache)? {
+    if !is_tidy(door, go_obj, project, &gate_cache)? {
         return Err(untidy(project));
     }
     let module = module_path(&gomod)?;
 
     let scratch = store.stage_with_activity(activity)?;
     let work = scratch.join("plan");
-    let out = download_closure(activity, go_obj, &work, &gate_cache, &gomod, &gosum)?;
+    let out = download_closure(door, go_obj, &work, &gate_cache, &gomod, &gosum)?;
     let result = closure_from_download(store, activity, &out, &gosum);
     let _ = crate::kernel::store::remove_tree(&scratch);
     let mut modules = result?;
@@ -1335,7 +1290,7 @@ pub fn realize_modcache(
                 .map(|m| format!("{}@{}", m.path, m.version)),
         );
         let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-        let out = run_go(activity, go_obj, &scratch, &staged, true, &arg_refs)?;
+        let out = run_go_offline(activity, go_obj, &scratch, &staged, &arg_refs)?;
         let _ = crate::kernel::store::remove_tree(&scratch);
         if !out.status.success() {
             return Err(err(format!(
@@ -2139,6 +2094,59 @@ mod tests {
         );
     }
 
+    /// The module extraction's real command passes the host-local
+    /// tripwire, and loosening any variable the offline form pins is
+    /// refused.
+    #[test]
+    fn the_offline_extraction_passes_the_tripwire_only_as_built() {
+        use crate::kernel::resolve::tripwire::refusal;
+        let store = TempDir::named("go-tripwire");
+        crate::kernel::testutil::store_program(&store.0, "objects/go/bin/go");
+        let go_obj = store.0.join("objects/go");
+        let cwd = store.0.join("tmp/stage-cwd");
+        fs::create_dir_all(&cwd).unwrap();
+        let build = || {
+            tool::offline_command(
+                &go_obj,
+                &cwd,
+                &store.0.join("tmp/stage-modcache"),
+                &["mod", "download", "example.com/m@v1.0.0"],
+            )
+        };
+        let command = build();
+        let refused = |command: &std::process::Command| refusal(command, &store.0);
+        assert!(refused(&command).is_none(), "{:?}", refused(&command));
+        for (key, value) in [("GONOPROXY", "*"), ("GOVCS", "*:all"), ("GOFLAGS", "-x")] {
+            let mut command = build();
+            command.env(key, value);
+            assert!(refused(&command).is_some(), "{key}");
+        }
+        let loosened = crate::kernel::testutil::loosened(build);
+        let keys: Vec<&str> = loosened.iter().map(|(key, _)| key.as_str()).collect();
+        for key in [
+            "GOROOT",
+            "GOMODCACHE",
+            "GOPROXY",
+            "GOCACHEPROG",
+            "HOME",
+            "XDG_CONFIG_HOME",
+        ] {
+            assert!(keys.contains(&key), "{key} is not forced: {keys:?}");
+        }
+        for (key, command) in &loosened {
+            assert!(refused(command).is_some(), "loosened {key}");
+        }
+        let host = TempDir::named("go-tripwire-host");
+        crate::kernel::testutil::store_program(&host.0, "go/bin/go");
+        let shim = tool::offline_command(
+            &host.0.join("go"),
+            &cwd,
+            &store.0.join("tmp/stage-modcache"),
+            &["mod", "download", "example.com/m@v1.0.0"],
+        );
+        assert!(refused(&shim).is_some(), "a go outside the store");
+    }
+
     #[test]
     fn go_environment_policy_is_forced_and_pinned() {
         let go_obj = Path::new("/store/objects/linux-go");
@@ -2563,8 +2571,12 @@ mod tests {
             root: temp.0.join("absent-store"),
         };
         let got = plan_go(
-            &store,
-            &activity,
+            &mut crate::kernel::testutil::DoorScope::new().door(
+                &store,
+                &activity,
+                crate::kernel::platform::Platform::host().unwrap(),
+                crate::kernel::resolve::DoorKind::Planner,
+            ),
             &ProjectRoot::open(&project).unwrap(),
             Path::new("/nonexistent/go"),
             "1.27.0",
@@ -2619,8 +2631,12 @@ mod tests {
             root: temp.0.join("absent-store"),
         };
         let got = plan_go(
-            &store,
-            &activity,
+            &mut crate::kernel::testutil::DoorScope::new().door(
+                &store,
+                &activity,
+                crate::kernel::platform::Platform::host().unwrap(),
+                crate::kernel::resolve::DoorKind::Planner,
+            ),
             &ProjectRoot::open(&project).unwrap(),
             Path::new("/nonexistent/go"),
             "1.27.0",
@@ -2635,8 +2651,12 @@ mod tests {
         // which creates its module cache in the store before running the
         // (absent) go; that directory is the proof the cache was skipped.
         plan_go(
-            &store,
-            &activity,
+            &mut crate::kernel::testutil::DoorScope::new().door(
+                &store,
+                &activity,
+                crate::kernel::platform::Platform::host().unwrap(),
+                crate::kernel::resolve::DoorKind::Planner,
+            ),
             &ProjectRoot::open(&project).unwrap(),
             Path::new("/nonexistent/go"),
             "1.28.0",
@@ -2694,8 +2714,12 @@ mod tests {
             root: temp.0.join("absent-store"),
         };
         let e = plan_go(
-            &store,
-            &activity,
+            &mut crate::kernel::testutil::DoorScope::new().door(
+                &store,
+                &activity,
+                crate::kernel::platform::Platform::host().unwrap(),
+                crate::kernel::resolve::DoorKind::Planner,
+            ),
             &ProjectRoot::open(&project).unwrap(),
             Path::new("/nonexistent/go"),
             "1.27.0",
@@ -2790,8 +2814,12 @@ mod tests {
             root: temp.0.join("absent-store"),
         };
         let e = plan_go(
-            &store,
-            &activity,
+            &mut crate::kernel::testutil::DoorScope::new().door(
+                &store,
+                &activity,
+                crate::kernel::platform::Platform::host().unwrap(),
+                crate::kernel::resolve::DoorKind::Planner,
+            ),
             &ProjectRoot::open(&project).unwrap(),
             Path::new("/nonexistent/go"),
             "1.27.0",
@@ -2825,8 +2853,12 @@ mod tests {
             root: temp.0.join("absent-store"),
         };
         let e = plan_go(
-            &store,
-            &activity,
+            &mut crate::kernel::testutil::DoorScope::new().door(
+                &store,
+                &activity,
+                crate::kernel::platform::Platform::host().unwrap(),
+                crate::kernel::resolve::DoorKind::Planner,
+            ),
             &ProjectRoot::open(&project).unwrap(),
             Path::new("/nonexistent/go"),
             "1.27.0",
@@ -2856,8 +2888,12 @@ mod tests {
             root: temp.0.join("absent-store"),
         };
         let e = plan_go(
-            &store,
-            &activity,
+            &mut crate::kernel::testutil::DoorScope::new().door(
+                &store,
+                &activity,
+                crate::kernel::platform::Platform::host().unwrap(),
+                crate::kernel::resolve::DoorKind::Planner,
+            ),
             &ProjectRoot::open(&project).unwrap(),
             Path::new("/nonexistent/go"),
             "1.27.0",
@@ -2897,8 +2933,12 @@ mod tests {
         let gate_cache = store.root.join("planner-modcache");
         let plan_now = || {
             plan_go(
-                &store,
-                &activity,
+                &mut crate::kernel::testutil::DoorScope::new().door(
+                    &store,
+                    &activity,
+                    crate::kernel::platform::Platform::host().unwrap(),
+                    crate::kernel::resolve::DoorKind::Planner,
+                ),
                 &ProjectRoot::open(&project).unwrap(),
                 Path::new("/nonexistent/go"),
                 "1.27.0",
@@ -2959,8 +2999,12 @@ mod tests {
             root: temp.0.join("absent-store"),
         };
         let got = plan_go(
-            &store,
-            &activity,
+            &mut crate::kernel::testutil::DoorScope::new().door(
+                &store,
+                &activity,
+                crate::kernel::platform::Platform::host().unwrap(),
+                crate::kernel::resolve::DoorKind::Planner,
+            ),
             &root,
             Path::new("/nonexistent/go"),
             "1.27.0",

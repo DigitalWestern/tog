@@ -11,6 +11,7 @@ use crate::kernel::cyclonedx::{
 use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::objmeta::KindAdapter;
 use crate::kernel::platform::Platform;
+use crate::kernel::resolve::{DoorKind, ResolutionDoor};
 use crate::kernel::toolchain::{Catalog, LegacyEvidence, Selected};
 use crate::kernel::ui;
 use crate::tailors::go::{self as go, inputs};
@@ -24,6 +25,27 @@ use std::process::Command;
 pub struct Go;
 
 impl Tailor for Go {
+    fn package_registry(&self) -> Option<crate::tailors::PackageRegistry> {
+        Some(super::edit::REGISTRY)
+    }
+
+    fn registry_exists(&self, name: &str) -> io::Result<Option<String>> {
+        super::edit::registry_exists(name)
+    }
+
+    fn claims_package_name(&self, name: &str) -> bool {
+        super::edit::claims_package_name(name)
+    }
+
+    fn edit_manifest(
+        &self,
+        _ctx: &crate::kernel::context::Context,
+        edit: &crate::tailors::ManifestEdit<'_>,
+        door: &mut crate::kernel::resolve::ResolutionDoor<'_>,
+    ) -> io::Result<crate::tailors::EditOutcome> {
+        super::edit::edit_manifest(edit, door)
+    }
+
     fn id(&self) -> &'static str {
         "go"
     }
@@ -41,20 +63,20 @@ impl Tailor for Go {
         ctx: &Context,
         project: &ProjectRoot,
         toolchain: &Selected,
-        _attribution: &mut crate::kernel::policy::Attribution,
+        door: &mut ResolutionDoor<'_>,
     ) -> io::Result<()> {
         let go_obj = go::realize_runtime(&ctx.store, &ctx.activity, ctx.platform, toolchain)?;
-        go::tidy_project(&ctx.store, &ctx.activity, project, &go_obj)
+        go::tidy_project(door, project, &go_obj)
     }
 
     fn plan(
         &self,
-        ctx: &Context,
+        _ctx: &Context,
         project: &ProjectRoot,
         toolchain: &Selected,
+        door: &mut ResolutionDoor<'_>,
     ) -> io::Result<Option<String>> {
-        let inputs =
-            inputs::load_go_inputs(ctx.platform, project, &ctx.store, &ctx.activity, toolchain)?;
+        let inputs = inputs::load_go_inputs(project, toolchain, door)?;
         Ok(Some(serde_json::to_string_pretty(&inputs.plan)?))
     }
 
@@ -69,7 +91,11 @@ impl Tailor for Go {
         let toolchain = request.toolchain;
         let platform = ctx.platform;
         let store = &ctx.store;
-        let inputs = inputs::load_go_inputs(platform, project, store, &ctx.activity, toolchain)?;
+        let inputs = inputs::load_go_inputs(
+            project,
+            toolchain,
+            &mut ResolutionDoor::open(store, activity, platform, DoorKind::Planner, attribution)?,
+        )?;
         let modcache = go::realize_modcache(
             store,
             &ctx.activity,
@@ -124,7 +150,11 @@ impl Tailor for Go {
         let platform = ctx.platform;
         let store = &ctx.store;
         let project = ProjectRoot::open(root)?;
-        let inputs = inputs::load_go_inputs(platform, &project, store, &ctx.activity, toolchain)?;
+        let inputs = inputs::load_go_inputs(
+            &project,
+            toolchain,
+            &mut ResolutionDoor::open(store, activity, platform, DoorKind::Planner, attribution)?,
+        )?;
         let modcache = go::realize_modcache(
             store,
             &ctx.activity,

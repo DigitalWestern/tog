@@ -10,6 +10,7 @@ use crate::kernel::cyclonedx::{
 use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::objmeta::KindAdapter;
 use crate::kernel::platform::Platform;
+use crate::kernel::resolve::ResolutionDoor;
 use crate::kernel::sandbox;
 use crate::kernel::toolchain::{Catalog, LegacyEvidence, Selected};
 use crate::kernel::ui;
@@ -23,6 +24,27 @@ use std::process::Command;
 pub struct Dotnet;
 
 impl Tailor for Dotnet {
+    fn package_registry(&self) -> Option<crate::tailors::PackageRegistry> {
+        Some(super::edit::REGISTRY)
+    }
+
+    fn registry_exists(&self, name: &str) -> io::Result<Option<String>> {
+        super::edit::registry_exists(name)
+    }
+
+    fn claims_package_name(&self, name: &str) -> bool {
+        super::edit::claims_package_name(name)
+    }
+
+    fn edit_manifest(
+        &self,
+        _ctx: &crate::kernel::context::Context,
+        edit: &crate::tailors::ManifestEdit<'_>,
+        _door: &mut crate::kernel::resolve::ResolutionDoor<'_>,
+    ) -> io::Result<crate::tailors::EditOutcome> {
+        super::edit::edit_manifest(edit)
+    }
+
     fn id(&self) -> &'static str {
         "dotnet"
     }
@@ -41,13 +63,13 @@ impl Tailor for Dotnet {
         ctx: &Context,
         project: &ProjectRoot,
         toolchain: &Selected,
-        _attribution: &mut crate::kernel::policy::Attribution,
+        door: &mut ResolutionDoor<'_>,
     ) -> io::Result<()> {
         if dotnet::require_lock(project).is_ok() {
             return Ok(());
         }
         let sdk = dotnet::realize_runtime(&ctx.store, &ctx.activity, ctx.platform, toolchain)?;
-        dotnet::generate_lock(&ctx.store, &ctx.activity, project, &sdk, toolchain)
+        dotnet::generate_lock(door, project, &sdk, toolchain)
     }
 
     fn plan(
@@ -55,6 +77,7 @@ impl Tailor for Dotnet {
         _ctx: &Context,
         project: &ProjectRoot,
         toolchain: &Selected,
+        _door: &mut ResolutionDoor<'_>,
     ) -> io::Result<Option<String>> {
         // The plan is read from the lock alone: no SDK is realized.
         let (plan, _) = dotnet::plan_dotnet(project, toolchain)?;

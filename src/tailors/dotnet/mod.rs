@@ -10,6 +10,7 @@
 //! lock (not project obj/) is the only durable authority: every sandboxed
 //! build re-restores offline into scratch and builds --no-restore.
 
+pub mod edit;
 pub mod objects;
 pub mod tailor;
 
@@ -18,7 +19,8 @@ use crate::kernel::archive::{Compression, ExtractOptions};
 use crate::kernel::fetch::{cache_insert, download_toolchain_artifact_held, Digest};
 use crate::kernel::fsroot::{Entry, ProjectRoot};
 use crate::kernel::platform::Platform;
-use crate::kernel::sandbox::{force_env, BuildSpec};
+use crate::kernel::resolve::{DelegateReport, DelegateSpec, ResolutionDoor};
+use crate::kernel::sandbox::BuildSpec;
 use crate::kernel::store::Store;
 use crate::kernel::toolchain::document::Shipped;
 use crate::kernel::toolchain::{ArtifactRow, Catalog, LegacyEvidence, Selected};
@@ -1079,8 +1081,7 @@ pub fn require_lock(project: &ProjectRoot) -> io::Result<()> {
 /// is none. The one place the .NET tailor writes project inputs. The
 /// restore child runs in the project's path.
 pub fn generate_lock(
-    store: &Store,
-    activity: &StoreActivity,
+    door: &mut ResolutionDoor<'_>,
     project: &ProjectRoot,
     sdk_obj: &Path,
     selected: &Selected,
@@ -1088,7 +1089,7 @@ pub fn generate_lock(
     let sdk_version = selected.version("dotnet-sdk")?.to_string();
     preflight(project, &sdk_version)?;
     ui::note("no packages.lock.json; resolving with the store SDK...");
-    let scratch = store.stage_with_activity(activity)?;
+    let scratch = door.store().stage_with_activity(door.lease())?;
     let config = scratch.join("nuget.config");
     fs::write(
         &config,
@@ -1099,7 +1100,7 @@ pub fn generate_lock(
     let config = config.canonicalize()?;
     let config_arg = config.to_string_lossy().into_owned();
     let out = run_dotnet(
-        activity,
+        door,
         sdk_obj,
         project.path(),
         &scratch.join("pkgs"),
@@ -1148,31 +1149,30 @@ pub fn plan_dotnet(project: &ProjectRoot, selected: &Selected) -> io::Result<(Do
 }
 
 fn run_dotnet(
-    activity: &StoreActivity,
+    door: &mut ResolutionDoor<'_>,
     sdk_obj: &Path,
     cwd: &Path,
     packages: &Path,
     scratch: &Path,
     args: &[&str],
-) -> io::Result<std::process::Output> {
+) -> io::Result<DelegateReport> {
     // Host-only resolver path: currently used for missing-lock delegation;
     // SDK probing does not use this helper. Realization uses run_build_spec.
     fs::create_dir_all(packages)?;
     fs::create_dir_all(scratch)?;
     let home = scratch.join("home");
     prepare_scratch(scratch)?;
-    let mut cmd = Command::new(sdk_obj.join("dotnet"));
-    cmd.args(args).current_dir(cwd).env_clear();
-    cmd.env("PATH", format!("{}:/usr/bin:/bin", sdk_obj.display()));
-    cmd.env("TMPDIR", scratch).env("HOME", &home);
-    force_env(
-        &mut cmd,
+    let mut spec = DelegateSpec::new(sdk_obj.join("dotnet"));
+    spec.args(args).lock_root(cwd).env_clear();
+    spec.env("PATH", format!("{}:/usr/bin:/bin", sdk_obj.display()));
+    spec.env("TMPDIR", scratch).env("HOME", &home);
+    spec.force_env(
         ENV_REMOVE_PREFIXES,
         ENV_REMOVE,
         &forced_env(sdk_obj, packages, scratch),
     );
-    cmd.stdin(std::process::Stdio::null());
-    crate::kernel::supervise::output(&mut cmd, activity)
+    spec.capture();
+    door.run(spec)
         .map_err(|e| io::Error::new(e.kind(), format!("run store dotnet {args:?}: {e}")))
 }
 

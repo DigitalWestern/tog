@@ -69,6 +69,48 @@ impl Drop for TempDir {
     }
 }
 
+/// An executable script at `relative` under `root` that exits 0: a store
+/// program a test can point a command at, which the host-local tripwire
+/// resolves like the real one.
+pub(crate) fn store_program(root: &std::path::Path, relative: &str) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let path = root.join(relative);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    path
+}
+
+/// Every command `build` makes with one of its own environment edits
+/// undone, named by the variable: a variable it sets removed, one it
+/// removes set. A host-local form must refuse each.
+pub(crate) fn loosened(build: impl Fn() -> Command) -> Vec<(String, Command)> {
+    let edits: Vec<(std::ffi::OsString, bool)> = build()
+        .get_envs()
+        .map(|(key, value)| (key.to_os_string(), value.is_some()))
+        .collect();
+    edits
+        .into_iter()
+        .map(|(key, set)| {
+            let mut command = build();
+            if set {
+                command.env_remove(&key);
+            } else {
+                command.env(&key, "loosened");
+            }
+            (key.to_string_lossy().into_owned(), command)
+        })
+        .chain(std::iter::once({
+            // A variable no form admits: a caller adding one (a loader
+            // preload, a tool setting outside the checked families) must be
+            // refused as surely as one loosening a forced value.
+            let mut command = build();
+            command.env("LD_PRELOAD", "/tmp/loosened.so");
+            ("+LD_PRELOAD".to_string(), command)
+        }))
+        .collect()
+}
+
 /// A lease on an empty scratch store, for a test whose code under test takes
 /// the caller's activity token but must return before touching any store.
 /// The directory is removed when the `TempDir` drops.
@@ -80,4 +122,40 @@ pub(crate) fn detached_lease() -> (TempDir, crate::kernel::activity::StoreActivi
     )
     .unwrap();
     (temp, activity)
+}
+
+/// The scope a test's resolution doors record into, for a test that calls a
+/// planner or realizer directly. It holds the attribution test lock, the
+/// last one in the whole-crate order (see `policy::attribution_test_lock`),
+/// and its frame is discarded when it drops.
+pub(crate) struct DoorScope {
+    attribution: crate::kernel::policy::Attribution,
+    _guard: std::sync::MutexGuard<'static, ()>,
+}
+
+impl DoorScope {
+    pub(crate) fn new() -> Self {
+        let guard = crate::kernel::policy::attribution_test_lock();
+        Self {
+            attribution: crate::kernel::policy::Attribution::open("test").unwrap(),
+            _guard: guard,
+        }
+    }
+
+    pub(crate) fn door<'a>(
+        &'a mut self,
+        store: &'a crate::kernel::store::Store,
+        activity: &'a crate::kernel::activity::StoreActivity,
+        platform: crate::kernel::platform::Platform,
+        kind: crate::kernel::resolve::DoorKind,
+    ) -> crate::kernel::resolve::ResolutionDoor<'a> {
+        crate::kernel::resolve::ResolutionDoor::open(
+            store,
+            activity,
+            platform,
+            kind,
+            &mut self.attribution,
+        )
+        .unwrap()
+    }
 }

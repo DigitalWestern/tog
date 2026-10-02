@@ -6,6 +6,7 @@ use crate::commands::shared::{ecosystem_inputs_in, no_inputs};
 use crate::kernel::context::Context;
 use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::policy;
+use crate::kernel::resolve::{DoorKind, ResolutionDoor};
 use crate::tailors;
 use std::io;
 
@@ -34,9 +35,24 @@ pub fn run(ctx: &Context, frozen: bool) -> io::Result<()> {
         // all; a project with no dependency lock fails inside the tailor,
         // which is the one place that knows which file is missing.
         if !frozen {
-            tailor.prepare(ctx, &root, selected, &mut attribution)?;
+            let mut door = ResolutionDoor::open(
+                &ctx.store,
+                &ctx.activity,
+                ctx.platform,
+                DoorKind::MissingLock,
+                &mut attribution,
+            )?;
+            tailor.prepare(ctx, &root, selected, &mut door)?;
         }
-        if let Some(text) = tailor.plan(ctx, &root, selected)? {
+        let mut door = ResolutionDoor::open(
+            &ctx.store,
+            &ctx.activity,
+            ctx.platform,
+            DoorKind::Planner,
+            &mut attribution,
+        )?;
+        let text = tailor.plan(ctx, &root, selected, &mut door)?;
+        if let Some(text) = text {
             println!("{text}");
             any = true;
         }

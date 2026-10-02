@@ -17,6 +17,7 @@ pub mod objmeta;
 pub mod platform;
 pub mod policy;
 pub mod provider;
+pub mod resolve;
 pub mod sandbox;
 pub mod semver;
 pub mod signing;

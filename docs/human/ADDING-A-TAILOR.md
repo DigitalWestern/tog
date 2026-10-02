@@ -77,9 +77,12 @@ step:
   whether it builds, extra closures). The `ls`, `build` and
   `update --toolchain` words are derived from it; the grammar may not name
   a tailor, so it mirrors the registry, and a parser test compares them.
-- `src/commands/deps.rs`: `Eco` if the ecosystem supports
-  `add`/`remove`/`update` (a `Tailor::edit_manifest` method is the
-  planned replacement; see FOLLOW-UPS.md).
+- `add`/`remove`/`update`, only if the ecosystem has a public package
+  registry: `Tailor::package_registry` (the `prefix:` and the registry's
+  name), `Tailor::registry_exists`, and `Tailor::edit_manifest`, usually in
+  the tailor's own `edit.rs`. The edit's tool runs through the
+  `ResolutionDoor` it is given. `claims_package_name` and `edit_root` are
+  optional. Nothing in `src/commands/deps.rs` changes.
 - `tog x`, only if the ecosystem implements `Tailor::registry_tool`: a
   `(id, spelling)` row in `X_REGISTRIES` (`src/cli/spec.rs`), which the
   parser reads for the `--<word>`/`--<id>` flags and the `<word>:` prefix,

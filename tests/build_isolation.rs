@@ -118,7 +118,7 @@ fn pure_python_flit_sdist_uses_isolated_build_env() {
         .activity(tog::kernel::activity::ActivityMode::Shared)
         .unwrap();
     let _attribution_guard = attribution_guard();
-    let attribution = tog::kernel::policy::Attribution::open("python").unwrap();
+    let mut attribution = tog::kernel::policy::Attribution::open("python").unwrap();
     let pkg = package(
         "tomli-w",
         "1.2.0",
@@ -127,9 +127,14 @@ fn pure_python_flit_sdist_uses_isolated_build_env() {
         "2dd14fac5a47c27be9cd4c976af5a12d87fb1f0b4512f81d69cce3b35ae25021",
     );
     let wheel = build::build_sdist_wheel(
-        &store,
-        activity,
-        Platform::host().unwrap(),
+        &mut tog::kernel::resolve::ResolutionDoor::open(
+            &store,
+            activity,
+            Platform::host().unwrap(),
+            tog::kernel::resolve::DoorKind::Planner,
+            &mut attribution,
+        )
+        .unwrap(),
         &pkg,
         &python::shipped_selection("3.12.14").unwrap(),
     )
@@ -162,7 +167,7 @@ fn insightface_sdist_builds_with_runtime_numpy_constraint() {
         .activity(tog::kernel::activity::ActivityMode::Shared)
         .unwrap();
     let _attribution_guard = attribution_guard();
-    let attribution = tog::kernel::policy::Attribution::open("python").unwrap();
+    let mut attribution = tog::kernel::policy::Attribution::open("python").unwrap();
     let pkg = package(
         "insightface",
         "0.7.3",
@@ -171,9 +176,14 @@ fn insightface_sdist_builds_with_runtime_numpy_constraint() {
         "f191f719612ebb37018f41936814500544cd0f86e6fcd676c023f354c668ddf7",
     );
     let wheel = build::build_sdist_wheel_with_runtime_plan(
-        &store,
-        activity,
-        Platform::host().unwrap(),
+        &mut tog::kernel::resolve::ResolutionDoor::open(
+            &store,
+            activity,
+            Platform::host().unwrap(),
+            tog::kernel::resolve::DoorKind::Planner,
+            &mut attribution,
+        )
+        .unwrap(),
         &pkg,
         &python::shipped_selection("3.12.14").unwrap(),
         &runtime_numpy(),
@@ -211,7 +221,7 @@ fn fastuuid_rust_sdist_builds_offline_after_vendoring() {
         .activity(tog::kernel::activity::ActivityMode::Shared)
         .unwrap();
     let _attribution_guard = attribution_guard();
-    let attribution = tog::kernel::policy::Attribution::open("python").unwrap();
+    let mut attribution = tog::kernel::policy::Attribution::open("python").unwrap();
     let fastuuid = package(
         "fastuuid",
         "0.14.0",
@@ -220,9 +230,14 @@ fn fastuuid_rust_sdist_builds_offline_after_vendoring() {
         "178947fc2f995b38497a74172adee64fdeb8b7ec18f2a5934d037641ba265d26",
     );
     let wheel = build::build_sdist_wheel(
-        &store,
-        activity,
-        Platform::host().unwrap(),
+        &mut tog::kernel::resolve::ResolutionDoor::open(
+            &store,
+            activity,
+            Platform::host().unwrap(),
+            tog::kernel::resolve::DoorKind::Planner,
+            &mut attribution,
+        )
+        .unwrap(),
         &fastuuid,
         &python::shipped_selection("3.12.14").unwrap(),
     )

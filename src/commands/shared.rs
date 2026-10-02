@@ -8,11 +8,27 @@ use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::platform::Platform;
 use crate::kernel::store::Store;
 use crate::kernel::toolchain::{lock, runtime, Selected};
-use crate::tailors::{RegistryTool, Tailor};
+use crate::tailors::RegistryTool;
 use std::io;
 use std::path::{Path, PathBuf};
 
 pub(crate) use crate::kernel::context::project_dir;
+pub(crate) use crate::tailors::{
+    CachedTool, DepSpec, EditHost, EditVerb, ManifestEdit, PackageRegistry, Tailor,
+};
+
+/// The ecosystems `tog add` can choose, in registry order, each with the
+/// public registry it names (`Tailor::package_registry`).
+pub(crate) fn edit_tailors() -> Vec<(&'static dyn Tailor, PackageRegistry)> {
+    crate::tailors::registry()
+        .iter()
+        .filter_map(|tailor| {
+            tailor
+                .package_registry()
+                .map(|registry| (*tailor, registry))
+        })
+        .collect()
+}
 
 /// Nearest ancestor that is a tog projection: every tailor writes
 /// `.tog/closures/<eco>.json`, so that directory is the proof. A plain

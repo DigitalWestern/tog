@@ -31,6 +31,7 @@ fn realize_env_and_run_python() {
     let activity = &store
         .activity(tog::kernel::activity::ActivityMode::Shared)
         .unwrap();
+    let mut attribution = tog::kernel::policy::Attribution::open("python").unwrap();
     let plan = Plan {
         ecosystem: "python".into(),
         python_version: "3.12.14".into(),
@@ -45,9 +46,18 @@ fn realize_env_and_run_python() {
         }],
     };
 
-    let env =
-        tog::tailors::python::env::realize_env(&store, activity, Platform::host().unwrap(), &plan)
-            .expect("realize");
+    let env = tog::tailors::python::env::realize_env(
+        &mut tog::kernel::resolve::ResolutionDoor::open(
+            &store,
+            activity,
+            Platform::host().unwrap(),
+            tog::kernel::resolve::DoorKind::Planner,
+            &mut attribution,
+        )
+        .unwrap(),
+        &plan,
+    )
+    .expect("realize");
     assert!(env.join("bin/python").exists());
     assert!(env.join("pyvenv.cfg").is_file());
 
@@ -67,9 +77,18 @@ fn realize_env_and_run_python() {
     assert_eq!(stdout.trim(), "1.17.0 3.12.14");
 
     // Idempotent: same plan, same object.
-    let env2 =
-        tog::tailors::python::env::realize_env(&store, activity, Platform::host().unwrap(), &plan)
-            .expect("realize again");
+    let env2 = tog::tailors::python::env::realize_env(
+        &mut tog::kernel::resolve::ResolutionDoor::open(
+            &store,
+            activity,
+            Platform::host().unwrap(),
+            tog::kernel::resolve::DoorKind::Planner,
+            &mut attribution,
+        )
+        .unwrap(),
+        &plan,
+    )
+    .expect("realize again");
     assert_eq!(env, env2);
 }
 

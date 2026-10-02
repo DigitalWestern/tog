@@ -17,6 +17,8 @@
 //! hostile lockfile is a network capability. There is no registry
 //! allowlist yet.
 
+pub(crate) mod corepack;
+pub mod edit;
 pub mod freshness;
 pub mod inputs;
 pub mod lock_import;

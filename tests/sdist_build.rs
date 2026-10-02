@@ -18,6 +18,7 @@ fn docopt_sdist_builds_in_sandbox() {
     let activity = &store
         .activity(tog::kernel::activity::ActivityMode::Shared)
         .unwrap();
+    let mut attribution = tog::kernel::policy::Attribution::open("python").unwrap();
     let pkg = LockedPackage {
         name: "docopt".into(),
         version: "0.6.2".into(),
@@ -28,9 +29,14 @@ fn docopt_sdist_builds_in_sandbox() {
         git: None,
     };
     let wheel = build::build_sdist_wheel(
-        &store,
-        activity,
-        Platform::host().unwrap(),
+        &mut tog::kernel::resolve::ResolutionDoor::open(
+            &store,
+            activity,
+            Platform::host().unwrap(),
+            tog::kernel::resolve::DoorKind::Planner,
+            &mut attribution,
+        )
+        .unwrap(),
         &pkg,
         &python::shipped_selection("3.12.14").unwrap(),
     )

@@ -574,11 +574,11 @@ pub fn clone_tree_with_activity(
     let clone = if platform.is_macos() {
         let mut command = std::process::Command::new("/bin/cp");
         command.args(["-Rc"]).arg(src).arg(dest);
-        crate::kernel::supervise::status(&mut command, activity)?
+        crate::kernel::supervise::local_status(&mut command, activity)?
     } else {
         let mut command = std::process::Command::new("/bin/cp");
         command.args(["-a", "--reflink=auto"]).arg(src).arg(dest);
-        crate::kernel::supervise::status(&mut command, activity)?
+        crate::kernel::supervise::local_status(&mut command, activity)?
     };
     if !clone.success() {
         if dest.exists() {
@@ -586,7 +586,7 @@ pub fn clone_tree_with_activity(
         }
         let mut plain = std::process::Command::new("/bin/cp");
         plain.arg("-R").arg(src).arg(dest);
-        let plain_status = crate::kernel::supervise::status(&mut plain, activity)?;
+        let plain_status = crate::kernel::supervise::local_status(&mut plain, activity)?;
         if !plain_status.success() {
             return Err(io::Error::other("cloning projected tree failed"));
         }

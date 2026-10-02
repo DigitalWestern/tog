@@ -268,7 +268,7 @@ fn python_git_dependency_builds_a_wheel_from_its_commit() {
     let activity = &store
         .activity(tog::kernel::activity::ActivityMode::Shared)
         .unwrap();
-    let _attribution = policy::Attribution::open("python").expect("test attribution");
+    let mut attribution = policy::Attribution::open("python").expect("test attribution");
 
     let requirement = format!("gitdep @ {url}@{commit}");
     let reqs = tog::tailors::python::pypi::parse_requirements(&requirement).expect("parse");
@@ -290,8 +290,18 @@ fn python_git_dependency_builds_a_wheel_from_its_commit() {
         python_version: "3.12.14".into(),
         packages,
     };
-    let env =
-        tog::tailors::python::env::realize_env(&store, activity, platform, &plan).expect("realize");
+    let env = tog::tailors::python::env::realize_env(
+        &mut tog::kernel::resolve::ResolutionDoor::open(
+            &store,
+            activity,
+            platform,
+            tog::kernel::resolve::DoorKind::Planner,
+            &mut attribution,
+        )
+        .unwrap(),
+        &plan,
+    )
+    .expect("realize");
     let site = env.join("lib/python3.12/site-packages/gitdep/__init__.py");
     assert_eq!(
         std::fs::read_to_string(&site).unwrap(),
@@ -317,7 +327,17 @@ fn python_git_dependency_builds_a_wheel_from_its_commit() {
         use std::os::unix::fs::PermissionsExt;
         let readable = std::fs::metadata(&wheel).unwrap().permissions();
         std::fs::set_permissions(&wheel, std::fs::Permissions::from_mode(0o000)).unwrap();
-        let again = tog::tailors::python::env::realize_env(&store, activity, platform, &plan);
+        let again = tog::tailors::python::env::realize_env(
+            &mut tog::kernel::resolve::ResolutionDoor::open(
+                &store,
+                activity,
+                platform,
+                tog::kernel::resolve::DoorKind::Planner,
+                &mut attribution,
+            )
+            .unwrap(),
+            &plan,
+        );
         std::fs::set_permissions(&wheel, readable).unwrap();
         assert_eq!(again.expect("second realize was not a cache hit"), env);
     }

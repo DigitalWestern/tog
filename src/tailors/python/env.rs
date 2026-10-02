@@ -12,8 +12,7 @@ use crate::comforter::{
 use crate::kernel::activity::StoreActivity;
 use crate::kernel::fetch::download_verified_held;
 use crate::kernel::fsroot::ProjectRoot;
-use crate::kernel::platform::Platform;
-use crate::kernel::store::Store;
+use crate::kernel::resolve::ResolutionDoor;
 use crate::kernel::toolchain::Selected;
 use crate::kernel::types::{ArtifactKind, Identity, Plan};
 use crate::tailors::python;
@@ -32,14 +31,12 @@ use std::path::{Path, PathBuf};
 /// shipped catalog release for the plan's interpreter. `x` outside a
 /// project and tests use this; a project sync uses `realize_env_with`
 /// (reached directly, or through `realize_env_for`).
-pub fn realize_env(
-    store: &Store,
-    activity: &StoreActivity,
-    platform: Platform,
-    plan: &Plan,
-) -> io::Result<PathBuf> {
+///
+/// An sdist whose build requirements or Rust lock tog must resolve runs its
+/// resolver through `door`, as every realization below does.
+pub fn realize_env(door: &mut ResolutionDoor<'_>, plan: &Plan) -> io::Result<PathBuf> {
     let shipped = python::shipped_selection(&plan.python_version)?;
-    realize_env_for(store, activity, platform, plan, &shipped)
+    realize_env_for(door, plan, &shipped)
 }
 
 /// Realize the environment for `plan` with the toolchain the project's
@@ -47,28 +44,24 @@ pub fn realize_env(
 /// venv shape in a staging dir, commits atomically. Cache hit if the
 /// identical env already exists.
 pub fn realize_env_for(
-    store: &Store,
-    activity: &StoreActivity,
-    platform: Platform,
+    door: &mut ResolutionDoor<'_>,
     plan: &Plan,
     selected: &Selected,
 ) -> io::Result<PathBuf> {
-    realize_env_with(store, activity, platform, plan, selected, None)
+    realize_env_with(door, plan, selected, None)
 }
 
 /// [`realize_env_for`], building any sdist with a Rust extension on `rust`:
 /// the Rust the project's own toolchain lock names, when it has one. `None`
 /// keeps the shipped Rust the sdist's toolchain file resolves to.
 pub fn realize_env_with(
-    store: &Store,
-    activity: &StoreActivity,
-    platform: Platform,
+    door: &mut ResolutionDoor<'_>,
     plan: &Plan,
     selected: &Selected,
     rust: Option<&Selected>,
 ) -> io::Result<PathBuf> {
     crate::tailors::install_kinds();
-    realize_env_at_depth(store, activity, platform, plan, selected, rust, 0)
+    realize_env_at_depth(door, plan, selected, rust, 0)
 }
 
 /// A plan and the toolchain realizing it must name one CPython. They are
@@ -177,17 +170,13 @@ fn package_digest_of_plan(
 /// realization. `cpython_id` is pure during planning and is the realized
 /// interpreter object's id during execution; every other input is shared.
 pub(super) fn environment_identity(
-    store: &Store,
-    activity: &StoreActivity,
-    platform: Platform,
+    door: &mut ResolutionDoor<'_>,
     plan: &Plan,
     cpython_id: &str,
     selected: &Selected,
     rust: Option<&Selected>,
 ) -> io::Result<Identity> {
-    environment_identity_inner(
-        store, activity, platform, plan, cpython_id, selected, rust, None,
-    )
+    environment_identity_inner(door, plan, cpython_id, selected, rust, None)
 }
 
 /// The exact producer drift `python-env/3` exists to catch: the plan names
@@ -195,30 +184,17 @@ pub(super) fn environment_identity(
 /// package digest is still taken over the whole plan. Only tests build this.
 #[cfg(test)]
 pub(super) fn environment_identity_skipping_input(
-    store: &Store,
-    activity: &StoreActivity,
-    platform: Platform,
+    door: &mut ResolutionDoor<'_>,
     plan: &Plan,
     cpython_id: &str,
     selected: &Selected,
     skip_package: &str,
 ) -> io::Result<Identity> {
-    environment_identity_inner(
-        store,
-        activity,
-        platform,
-        plan,
-        cpython_id,
-        selected,
-        None,
-        Some(skip_package),
-    )
+    environment_identity_inner(door, plan, cpython_id, selected, None, Some(skip_package))
 }
 
 fn environment_identity_inner(
-    store: &Store,
-    activity: &StoreActivity,
-    platform: Platform,
+    door: &mut ResolutionDoor<'_>,
     plan: &Plan,
     cpython_id: &str,
     selected: &Selected,
@@ -227,6 +203,7 @@ fn environment_identity_inner(
     // passes `None`, and only `environment_identity_skipping_input` does not.
     skip_package: Option<&str>,
 ) -> io::Result<Identity> {
+    let (store, activity, platform) = (door.store(), door.lease(), door.platform());
     agreeing(plan, selected)?;
     let packages = canonical_packages(plan)?;
     let mut inputs = BTreeMap::new();
@@ -257,9 +234,7 @@ fn environment_identity_inner(
                     *p
                 };
                 let sdist = crate::tailors::python::build::plan_sdist_identity_input(
-                    store,
-                    activity,
-                    platform,
+                    door,
                     p,
                     selected,
                     rust,
@@ -321,32 +296,26 @@ fn environment_identity_inner(
 /// planning uses this so an isolated sdist can commit its isolated-build identity
 /// into the parent before the parent cache lookup.
 pub(crate) fn planned_env_object_id(
-    store: &Store,
-    activity: &StoreActivity,
-    platform: Platform,
+    door: &mut ResolutionDoor<'_>,
     plan: &Plan,
     selected: &Selected,
     rust: Option<&Selected>,
 ) -> io::Result<String> {
-    let cpython_id = crate::tailors::python::cpython_object_id(selected, platform)?;
-    Ok(
-        environment_identity(store, activity, platform, plan, &cpython_id, selected, rust)?
-            .object_id(),
-    )
+    let cpython_id = crate::tailors::python::cpython_object_id(selected, door.platform())?;
+    Ok(environment_identity(door, plan, &cpython_id, selected, rust)?.object_id())
 }
 
 /// Internal realization entry point used by sdist build environments. The
 /// depth is carried through nested build-requirement sdists so a malicious or
 /// pathological chain cannot recurse forever.
 pub(crate) fn realize_env_at_depth(
-    store: &Store,
-    activity: &StoreActivity,
-    platform: Platform,
+    door: &mut ResolutionDoor<'_>,
     plan: &Plan,
     selected: &Selected,
     rust: Option<&Selected>,
     sdist_depth: usize,
 ) -> io::Result<PathBuf> {
+    let (store, activity, platform) = (door.store(), door.lease(), door.platform());
     crate::tailors::install_kinds();
     crate::kernel::platform::require_host(platform, "Python environment")?;
     agreeing(plan, selected)?;
@@ -360,8 +329,7 @@ pub(crate) fn realize_env_at_depth(
         .unwrap()
         .to_string_lossy()
         .into_owned();
-    let identity =
-        environment_identity(store, activity, platform, plan, &cpython_id, selected, rust)?;
+    let identity = environment_identity(door, plan, &cpython_id, selected, rust)?;
     let id = identity.object_id();
     if store.has_with_activity(activity, &id)? {
         crate::kernel::policy::check_cached_with_activity(store, activity, &id)?;
@@ -396,9 +364,7 @@ pub(crate) fn realize_env_at_depth(
                     p
                 };
                 crate::tailors::python::build::build_sdist_wheel_at_depth(
-                    store,
-                    activity,
-                    platform,
+                    door,
                     source,
                     selected,
                     rust,
@@ -677,6 +643,8 @@ pub(super) fn project_env_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::kernel::platform::Platform;
+    use crate::kernel::store::Store;
     use crate::kernel::testutil::TempDir;
 
     /// What sync writes: the bundle it planned from and the interpreter
@@ -975,9 +943,12 @@ mod tests {
         ] {
             let cpython = python::object_id_for(platform, "3.12.14").unwrap();
             let empty = environment_identity(
-                &store,
-                activity,
-                platform,
+                &mut crate::kernel::testutil::DoorScope::new().door(
+                    &store,
+                    activity,
+                    platform,
+                    crate::kernel::resolve::DoorKind::Planner,
+                ),
                 &empty_plan,
                 &cpython,
                 &selected_3_12(),
@@ -985,9 +956,12 @@ mod tests {
             )
             .unwrap();
             let wheel = environment_identity(
-                &store,
-                activity,
-                platform,
+                &mut crate::kernel::testutil::DoorScope::new().door(
+                    &store,
+                    activity,
+                    platform,
+                    crate::kernel::resolve::DoorKind::Planner,
+                ),
                 &wheel_plan,
                 &cpython,
                 &selected_3_12(),
@@ -1067,9 +1041,12 @@ mod tests {
         for platform in Platform::ALL.iter().copied() {
             let cpython = python::object_id_for(platform, "3.12.14").unwrap();
             let empty = environment_identity(
-                &store,
-                activity,
-                platform,
+                &mut crate::kernel::testutil::DoorScope::new().door(
+                    &store,
+                    activity,
+                    platform,
+                    crate::kernel::resolve::DoorKind::Planner,
+                ),
                 &empty_plan,
                 &cpython,
                 &selected_3_12(),
@@ -1077,9 +1054,12 @@ mod tests {
             )
             .unwrap();
             let one = environment_identity(
-                &store,
-                activity,
-                platform,
+                &mut crate::kernel::testutil::DoorScope::new().door(
+                    &store,
+                    activity,
+                    platform,
+                    crate::kernel::resolve::DoorKind::Planner,
+                ),
                 &one_wheel_plan,
                 &cpython,
                 &selected_3_12(),
@@ -1094,9 +1074,12 @@ mod tests {
                 (&two_wheel_plan, "second-example"),
             ] {
                 let drifted = environment_identity_skipping_input(
-                    &store,
-                    activity,
-                    platform,
+                    &mut crate::kernel::testutil::DoorScope::new().door(
+                        &store,
+                        activity,
+                        platform,
+                        crate::kernel::resolve::DoorKind::Planner,
+                    ),
                     plan,
                     &cpython,
                     &selected_3_12(),
@@ -1155,9 +1138,12 @@ mod tests {
         ] {
             let cpython = python::object_id_for(platform, "3.12.14").unwrap();
             let identity = environment_identity(
-                &store,
-                activity,
-                platform,
+                &mut crate::kernel::testutil::DoorScope::new().door(
+                    &store,
+                    activity,
+                    platform,
+                    crate::kernel::resolve::DoorKind::Planner,
+                ),
                 &plan,
                 &cpython,
                 &selected_3_12(),
@@ -1184,9 +1170,12 @@ mod tests {
             if platform == Platform::host().unwrap() {
                 assert_eq!(
                     planned_env_object_id(
-                        &store,
-                        activity,
-                        platform,
+                        &mut crate::kernel::testutil::DoorScope::new().door(
+                            &store,
+                            activity,
+                            platform,
+                            crate::kernel::resolve::DoorKind::Planner
+                        ),
                         &plan,
                         &selected_3_12(),
                         None
@@ -1216,9 +1205,12 @@ mod tests {
         };
         let key = cached_build_plan(&store, "setuptools~=83.1", &"a".repeat(64));
         let first = planned_env_object_id(
-            &store,
-            activity,
-            Platform::host().unwrap(),
+            &mut crate::kernel::testutil::DoorScope::new().door(
+                &store,
+                activity,
+                Platform::host().unwrap(),
+                crate::kernel::resolve::DoorKind::Planner,
+            ),
             &plan,
             &selected_3_12(),
             None,
@@ -1226,9 +1218,12 @@ mod tests {
         .unwrap();
         cached_build_plan(&store, "setuptools~=83.1", &"b".repeat(64));
         let second = planned_env_object_id(
-            &store,
-            activity,
-            Platform::host().unwrap(),
+            &mut crate::kernel::testutil::DoorScope::new().door(
+                &store,
+                activity,
+                Platform::host().unwrap(),
+                crate::kernel::resolve::DoorKind::Planner,
+            ),
             &plan,
             &selected_3_12(),
             None,
@@ -1265,9 +1260,18 @@ mod tests {
             python_version: "3.12.14".into(),
             packages: vec![native],
         };
-        let planned =
-            planned_env_object_id(&store, activity, platform, &plan, &selected_3_12(), None)
-                .unwrap();
+        let planned = planned_env_object_id(
+            &mut crate::kernel::testutil::DoorScope::new().door(
+                &store,
+                activity,
+                platform,
+                crate::kernel::resolve::DoorKind::Planner,
+            ),
+            &plan,
+            &selected_3_12(),
+            None,
+        )
+        .unwrap();
 
         // Seed the store the way a previous sync would have left it: the
         // selected CPython under the id realization will look it up by,
@@ -1295,9 +1299,12 @@ mod tests {
             .to_string_lossy()
             .into_owned();
         let realized = environment_identity(
-            &store,
-            activity,
-            platform,
+            &mut crate::kernel::testutil::DoorScope::new().door(
+                &store,
+                activity,
+                platform,
+                crate::kernel::resolve::DoorKind::Planner,
+            ),
             &plan,
             &cpython_id,
             &selected_3_12(),
@@ -1314,9 +1321,19 @@ mod tests {
             )
             .unwrap();
         assert_eq!(published, store.object_path(&planned));
-        let got =
-            realize_env_at_depth(&store, activity, platform, &plan, &selected_3_12(), None, 0)
-                .unwrap();
+        let got = realize_env_at_depth(
+            &mut crate::kernel::testutil::DoorScope::new().door(
+                &store,
+                activity,
+                platform,
+                crate::kernel::resolve::DoorKind::Planner,
+            ),
+            &plan,
+            &selected_3_12(),
+            None,
+            0,
+        )
+        .unwrap();
         assert_eq!(got, store.object_path(&planned));
         if matches!(platform, Platform::X86_64UnknownLinuxGnu) {
             let native_id =

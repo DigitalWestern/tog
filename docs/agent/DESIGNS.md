@@ -839,29 +839,33 @@ ledger. "Runs code" is what the tool executes besides itself.
 | `tailors/python/inputs.rs` (requirements lock) | `uv pip compile --generate-hashes` | yes | sdist builds for metadata | missing-lock |
 | `tailors/python/pypi.rs` (build requirements) | `uv pip compile --no-build` | yes | no | planner |
 | `tailors/python/build.rs` `generate_cargo_lock` | `cargo generate-lockfile --manifest-path` for an sdist's Rust extension that ships no `Cargo.lock` (cached by sdist sha256 and Rust id) | yes | no | missing-lock (dependency) |
-| `commands/deps.rs` `python_uv` | `uv add` / `remove` / `lock` | yes | sdist and project builds | edit |
-| `commands/deps.rs` `uv_compile` | `uv pip compile` (requirements.in edits) | yes | sdist builds | edit |
+| `tailors/python/edit.rs` `python_uv` | `uv add` / `remove` / `lock` | yes | sdist and project builds | edit |
+| `tailors/python/edit.rs` `uv_compile` | `uv pip compile` (requirements.in edits) | yes | sdist builds | edit |
 | `tailors/python/registry_tool.rs` | `uv pip compile` for `tog x` | yes | sdist builds | x |
 | `tailors/node/inputs.rs` | `npm install --package-lock-only --ignore-scripts` | yes | no | missing-lock |
-| `commands/deps.rs` `node` | npm `install`/`uninstall`/`update --package-lock-only` | yes | no | edit |
-| `commands/deps.rs` `node` | pinned pnpm edit (scripts off) | yes | no | edit |
+| `tailors/node/edit.rs` `npm_edit` | npm `install`/`uninstall`/`update --package-lock-only` | yes | no | edit |
+| `tailors/node/edit.rs` `pnpm_edit` | pinned pnpm edit (scripts off) | yes | no | edit |
 | `tailors/node/registry_tool.rs` | npm lock-only for `tog x` (also realizes pnpm for edits) | yes | no | x |
 | `tailors/cargo/inputs.rs` `ensure_cargo_lock` | `cargo generate-lockfile` | yes | no | missing-lock |
-| `commands/deps.rs` `cargo_delegate` | `cargo add` / `remove` / `update` | yes | no | edit |
+| `tailors/cargo/edit.rs` `edit_manifest` | `cargo add` / `remove` / `update` | yes | no | edit |
 | `tailors/go/mod.rs` | `go mod tidy -diff`, `go mod tidy`, `go mod download -json all` | yes | no | planner / missing-lock |
-| `commands/deps.rs` `go_delegate` | `go get` | yes | no | edit |
+| `tailors/go/edit.rs` `edit_manifest` | `go get` | yes | no | edit |
 | `tailors/ruby/mod.rs` `plan_ruby` | `bundle lock` | yes | Gemfile eval | missing-lock |
 | `tailors/ruby/mod.rs` `plan_ruby` gate 1 | Bundler helper | none (PR 0 confirmed) | Gemfile eval | planner |
-| `commands/deps.rs` `ruby_delegate` | `bundle add` / `remove` / `update` | yes | Gemfile eval | edit |
+| `tailors/ruby/mod.rs` `plan_ruby` gate 2 | Bundler helper `plan` (reads `Gemfile.lock` only) | none expected (lock-only read; not in the PR 0 census) | no | planner |
+| `tailors/ruby/edit.rs` `edit_manifest` | `bundle add` / `remove` / `update` | yes | Gemfile eval | edit |
 | `tailors/elixir/mod.rs` `plan_elixir` | `mix deps.get`, `mix deps.get --check-locked` | yes | mix.exs eval (git deps' too) | missing-lock / planner |
 | `tailors/elixir/mod.rs` lock helper | `elixir` AST parse of `mix.lock` | no | no (never evaluates) | planner (no routes) |
-| `commands/deps.rs` `elixir_delegate` | `mix deps.update` | yes | mix.exs eval | edit |
+| `tailors/elixir/edit.rs` `edit_manifest` | `mix deps.update` | yes | mix.exs eval | edit |
 | `tailors/dotnet/mod.rs` `plan_dotnet` | `dotnet restore --use-lock-file` | yes | MSBuild eval | missing-lock |
 
 Not doors: tog's own downloads (`kernel::fetch`, `kernel::gitsrc`, the
-`registry_lookup` existence check in `deps`) are tog code with tog
+`Tailor::registry_exists` check `tog add` makes) are tog code with tog
 verification. Host-local helpers (`tar`, `getconf`, `id`,
-`cargo locate-project --offline`) need no network. A planner row that needs
+`cargo locate-project --offline`, the Go module extraction
+`go mod download path@version...` with the full offline environment, the
+Elixir helper's `hexmark` mode, the staged-OTP `erl` probe, the Ruby
+helper's `spec` read of a verified `.gem`) need no network. A planner row that needs
 no network (Ruby gate 1, confirmed by PR 0, and the Elixir lock parser)
 still goes through the door with **no routes**, which means full network
 denial. That also closes the LIMITATIONS row "Delegated planning runs
@@ -2321,7 +2325,8 @@ pub struct ManifestEdit<'a> {
     pub project: &'a Path,
     pub specs: &'a [DepSpec],        // { name, text }, already validated by commands::deps::validate_spec
     pub dev: bool,
-    pub toolchain: &'a Selected,
+    pub host: &'a dyn EditHost,      // toolchain() and the `tog x` cache (cached_tool()), asked
+                                     // only once a tool will run, so a refusal never selects one
 }
 
 pub struct EditOutcome {
@@ -2392,27 +2397,77 @@ Contract 1 needs enforcement, not review alone:
   `local_status_with_stderr`, and `local_output` for host-local helpers,
   one for each of today's three spawn primitives (`status`,
   `status_with_stderr`, and `output`, `src/kernel/supervise.rs`). Their contract is "this child
-  needs no network". They refuse to spawn a program whose file name is in
-  `RESOLVERS` (`uv`, `npm`, `npx`, `pnpm`, `cargo`, `go`, `bundle`, `gem`,
-  `ruby`, `mix`, `elixir`, `erl`, `dotnet`, `git`) unless the argv matches
-  a row of a small reviewed table of offline forms
-  (`cargo locate-project ... --offline`, `go` with `GOPROXY=off`; `tar`
-  never matches). Helpers that evaluate project files without needing the
-  network (the Ruby gate-1 helper, the Elixir `mix.lock` parser) go
-  through a door with no routes, which means full network denial. The
-  door calls the unrestricted primitive, and so do `sandbox` builds.
-  Every other supervise caller moves to `local_*`. That includes
+  needs no network". They refuse to spawn a resolver unless the whole
+  invocation matches a row of a small reviewed table of offline forms. A
+  program is a resolver when the name it is started under, compared
+  case-insensitively, or the file that name resolves to (through a
+  symlink, or the child's `PATH` for a bare name, skipping files without
+  an execute bit) is in `RESOLVERS` (`uv`, `uvx`, `pip`, `pip3`, `npm`,
+  `npx`, `pnpm`, `yarn`, `corepack`, `node`, `cargo`, `rustup`, `go`,
+  `bundle`, `bundler`, `gem`, `ruby`, `mix`, `elixir`, `iex`, `erl`,
+  `rebar3`, `dotnet`, `git`). `RESOLVERS` names programs, not wrappers:
+  `sh -c`, `env`, `bwrap` and `sandbox-exec` pass by design (a `tog run`
+  script is `sh -c`). `rustup`, `uvx`, `corepack`, `node`, `yarn`,
+  `rebar3`, `pip`, `bundler` and `iex` are listed although no call site
+  runs them as a helper, because each can fetch or run project code and
+  no legitimate `local_*` caller starts one, so refusing them costs
+  nothing. A copy or hard link under another name is not seen: the check
+  reads names, and it catches call sites written the wrong way, not code
+  hiding a resolver. A form binds the exact argv shape of its one call
+  site, the program to a realized store object named by absolute path
+  (never a host shim or rustup proxy, never a bare name tog's own `PATH`
+  resolves while an `env_clear`ed child searches libc's default, and
+  never a file under `<store>/tmp`, where unpacked packages land; the OTP
+  probe alone runs a staged program), and the environment the child will
+  really see, meaning the command's explicit edits over tog's own
+  environment. Each form also lists every variable its call site sets
+  and admits no other, so a caller cannot add `LD_PRELOAD`,
+  `LD_LIBRARY_PATH` or a tool setting outside the checked families. The Ruby and Elixir forms check the tailors' own scrub
+  lists, which live in the tripwire and which the tailors alias. The
+  forms: `cargo locate-project --workspace --message-format plain
+  --offline` with `RUSTUP_HOME` and `RUSTUP_TOOLCHAIN` removed; `go mod
+  download path@version...` with `GOROOT` the program's own toolchain,
+  `GOPROXY`, `GOSUMDB`, `GOTOOLCHAIN`, `GOENV`, `GOWORK`, `GOVCS` and
+  `GOAUTH` set off or local by the command, `GOFLAGS`, `GONOPROXY`,
+  `GOPRIVATE`, `GONOSUMDB`, `GOINSECURE` and `GOCACHEPROG` removed rather
+  than emptied (an empty value falls back to `$GOROOT/go.env`),
+  `GOMODCACHE` and `HOME` in the store and `XDG_CONFIG_HOME` removed; the
+  Ruby helper's `spec` mode and the Elixir helper's `hexmark` mode, each
+  with its helper script checked by sha256 against the digest the
+  tailor's test pins, no option argument, the file it reads or writes in
+  the store, only the forced variables of the scrubbed family (so no
+  `RUBYOPT`, `RUBYLIB`, `ERL_*`, `ELIXIR_*`, `ERTS_BIN`, other `MIX_*` or
+  `HEX_*`), their path variables (`GEM_HOME`, `GEM_PATH`, `MIX_HOME`,
+  ...) and `HOME` in the store, the helper script itself in the store,
+  Bundler's booleans pinned to the values the Ruby tailor forces, and
+  `PATH` confined to the store followed by `/usr/bin` and `/bin` for
+  Elixir (its script starts `erl` by name, so no host `erl` may come
+  first) or led by the store Ruby; the staged-OTP `erl` probe, with an environment
+  the command empties itself and then gives only `PATH`, `HOME`, `TMPDIR`
+  and `LANG`, so no `ERL_*` variable or user `.erlang` (through `HOME` or
+  `XDG_CONFIG_HOME`) reaches it. Each tailor's test undoes every forced
+  edit one at a time and expects a refusal. `tar` never matches. Helpers that evaluate project files without needing the
+  network (the Ruby gate-1 and gate-2 helpers, the Elixir `mix.lock`
+  parser) go through a door with no routes, which means full network
+  denial. The door calls the unrestricted primitive. So do tog's own
+  verified git fetches (`kernel::gitsrc`), and the two commands that run
+  the user's own program rather than a resolution (`tog run`'s command
+  and `tog x`'s installed tool). `sandbox` builds use `local_*`: their
+  child is `bwrap` or `sandbox-exec`, never a resolver. Every other
+  supervise caller moves to `local_*`. That includes
   `tailors/python/build.rs`: its sdist `cargo generate-lockfile` becomes a
   door in PR 1 (`Legacy`) and a proxied door in PR 5. It is not an
   offline-form exemption.
 - **Compile-time.** `clippy.toml` adds `tog::kernel::supervise::status`,
   `tog::kernel::supervise::status_with_stderr`, and
   `tog::kernel::supervise::output` to `disallowed-methods`, allowed only in
-  `kernel::resolve`, `kernel::sandbox`, and `kernel::supervise` itself,
-  each with its reason. That is three kernel sites, not an allow-list row
-  per tailor. Any spawn primitive added to `supervise` later joins the
+  `kernel::resolve`, `kernel::gitsrc`, and `kernel::supervise` itself, and
+  in the user-program launchers of `commands/run.rs` and `commands/x.rs`,
+  each with its reason. That is three kernel sites and two command sites,
+  not an allow-list row per tailor. Any spawn primitive added to `supervise` later joins the
   list in the same PR, and the named test
-  `every_public_supervise_spawn_is_fenced` fails if a `pub fn` in
+  `every_public_supervise_spawn_is_fenced` fails if a non-private function
+  (`pub`, `pub(crate)`, `pub(super)`, `pub(in ...)`) in
   `kernel::supervise` that takes a `Command` is neither a `local_*`
   function nor on the `disallowed-methods` list.
 - **Named test.** `every_resolver_invocation_goes_through_the_door` runs

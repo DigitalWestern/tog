@@ -2,6 +2,7 @@
 //! the pinned Rust toolchain and Cargo.lock vendoring that live in
 //! `kernel::provider::{rust, crates}`.
 
+pub mod edit;
 pub mod inputs;
 pub mod objects;
 pub mod rustfmt;

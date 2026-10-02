@@ -3,12 +3,10 @@
 //! the project-local plan cache.
 
 use crate::comforter;
-use crate::kernel::activity::StoreActivity;
 use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::platform::Platform;
 use crate::kernel::policy;
-use crate::kernel::store;
-use crate::kernel::supervise;
+use crate::kernel::resolve::{DelegateSpec, DoorKind, ResolutionDoor};
 use crate::kernel::toolchain::Selected;
 use crate::kernel::types;
 use crate::kernel::ui;
@@ -97,13 +95,11 @@ pub fn python_input_records(
 /// The project is read, and `.tog` written, through the held descriptor;
 /// its path only names files to uv and to the messages.
 pub fn read_plan(
-    platform: Platform,
     project: &ProjectRoot,
-    store: &store::Store,
-    activity: &StoreActivity,
     selected: &Selected,
+    door: &mut ResolutionDoor<'_>,
 ) -> io::Result<PythonPlan> {
-    let dir = project.path();
+    let (dir, platform) = (project.path(), door.platform());
     // The interpreter is decided: it is the one this project's toolchain
     // selection names. Planning reads the manifest with it and checks it
     // against every declared constraint; nothing here reselects, so a
@@ -113,7 +109,7 @@ pub fn read_plan(
     let mut selection = pyselect::locked(platform, version, &manifest.python)?;
     if manifest.requires_setup() {
         let dynamic_dependencies = manifest.dynamic_dependencies;
-        if let Err(error) = manifest.prepare_setup(platform, project, store, activity, selected) {
+        if let Err(error) = manifest.prepare_setup(project, selected, door) {
             // Every ordinary failure in here is already `InvalidData`
             // (`unreadable` in the manifest layer hardcodes it, and it
             // wraps the sandboxed egg_info probe), so the kind cannot
@@ -243,10 +239,8 @@ pub fn read_plan(
                      re-locking for this platform with uv into requirements.lock.txt"
                 ));
                 let text = locked_requirements(
-                    platform,
+                    door,
                     project,
-                    store,
-                    activity,
                     &input,
                     &resolver_source,
                     selected,
@@ -268,10 +262,8 @@ pub fn read_plan(
         }
     } else {
         locked_requirements(
-            platform,
+            door,
             project,
-            store,
-            activity,
             &input,
             &resolver_source,
             selected,
@@ -384,12 +376,11 @@ pub fn is_fully_pinned(text: &str) -> bool {
 /// requirements.lock.txt and regenerated when the source input changes.
 /// uv runs in the project by path; the lock it writes is read back through
 /// the held descriptor.
-#[allow(clippy::too_many_arguments)]
+///
+/// uv runs through a missing-lock door on `door`'s scope.
 pub fn locked_requirements(
-    platform: Platform,
+    door: &mut ResolutionDoor<'_>,
     project: &ProjectRoot,
-    store: &store::Store,
-    activity: &StoreActivity,
     input: &str,
     source: &str,
     selected: &Selected,
@@ -423,20 +414,19 @@ pub fn locked_requirements(
         "{input} is not hash-pinned; resolving with the store uv..."
     ));
     // Store-pinned uv, not host uv: a bare machine needs only tog.
-    let uv = python::realize_uv(store, activity, platform, selected)?.join("uv");
+    let uv = python::realize_uv(door.store(), door.lease(), door.platform(), selected)?.join("uv");
     let compile_input = compile_path.and_then(|path| path.to_str()).unwrap_or(input);
-    let mut command = std::process::Command::new(&uv);
-    command.args(["pip", "compile", compile_input, "--generate-hashes"]);
+    let mut spec = DelegateSpec::new(&uv);
+    spec.args(["pip", "compile", compile_input, "--generate-hashes"]);
     if !ui::verbose() {
-        command.arg("--quiet");
+        spec.arg("--quiet");
     }
-    command
-        .args(["--python-version", pyver])
+    spec.args(["--python-version", pyver])
         // Manifest index directives and ambient pip/uv index variables are
         // never trusted. Resolution is explicitly public PyPI only.
         .args(["--index-url", "https://pypi.org/simple"])
         .args(["-o", "requirements.lock.txt"])
-        .current_dir(dir)
+        .lock_root(dir)
         .env_remove("UV_INDEX_URL")
         .env_remove("UV_DEFAULT_INDEX")
         .env_remove("UV_EXTRA_INDEX_URL")
@@ -444,9 +434,12 @@ pub fn locked_requirements(
         .env_remove("PIP_EXTRA_INDEX_URL")
         .env_remove("PIP_TRUSTED_HOST")
         .env_remove("PIP_FIND_LINKS");
-    ui::trace_command(&command);
-    let status = supervise::status(&mut command, activity)
-        .map_err(|e| io::Error::new(e.kind(), format!("run store uv ({}): {e}", uv.display())))?;
+    spec.trace();
+    let status = door
+        .reopen(DoorKind::MissingLock)
+        .run(spec)
+        .map_err(|e| io::Error::new(e.kind(), format!("run store uv ({}): {e}", uv.display())))?
+        .status;
     if !status.success() {
         return Err(io::Error::other("uv pip compile failed"));
     }
@@ -480,6 +473,9 @@ pub fn lock_source_hash(pyver: &str, source: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::kernel::activity::StoreActivity;
+    use crate::kernel::store;
+    use crate::kernel::supervise;
 
     /// A lease on `store` itself, for the case that runs a child against it.
     /// The other cases use a store that is absent or not a directory on
@@ -578,11 +574,14 @@ mod tests {
         };
         let root = ProjectRoot::open(&project).unwrap();
         let e = read_plan(
-            Platform::host().unwrap(),
             &root,
-            &store,
-            &crate::kernel::testutil::detached_lease().1,
             &selected(),
+            &mut crate::kernel::testutil::DoorScope::new().door(
+                &store,
+                &crate::kernel::testutil::detached_lease().1,
+                Platform::host().unwrap(),
+                crate::kernel::resolve::DoorKind::Planner,
+            ),
         )
         .unwrap_err()
         .to_string();
@@ -651,11 +650,14 @@ mod tests {
 
         let project = ProjectRoot::open(&project_dir).unwrap();
         let error = read_plan(
-            Platform::host().unwrap(),
             &project,
-            &store,
-            &test_activity(&store),
             &selected(),
+            &mut crate::kernel::testutil::DoorScope::new().door(
+                &store,
+                &test_activity(&store),
+                Platform::host().unwrap(),
+                crate::kernel::resolve::DoorKind::Planner,
+            ),
         )
         .unwrap_err()
         .to_string();
@@ -726,11 +728,14 @@ mod tests {
             .unwrap();
 
         let (planned, selection, inputs) = read_plan(
-            platform,
             &project,
-            &store,
-            &crate::kernel::testutil::detached_lease().1,
             &selected(),
+            &mut crate::kernel::testutil::DoorScope::new().door(
+                &store,
+                &crate::kernel::testutil::detached_lease().1,
+                platform,
+                crate::kernel::resolve::DoorKind::Planner,
+            ),
         )
         .unwrap();
         assert_eq!(planned.python_version, version);
@@ -765,11 +770,14 @@ mod tests {
 
         let project = ProjectRoot::open(&project_dir).unwrap();
         let error = read_plan(
-            Platform::host().unwrap(),
             &project,
-            &store,
-            &crate::kernel::testutil::detached_lease().1,
             &selected(),
+            &mut crate::kernel::testutil::DoorScope::new().door(
+                &store,
+                &crate::kernel::testutil::detached_lease().1,
+                Platform::host().unwrap(),
+                crate::kernel::resolve::DoorKind::Planner,
+            ),
         )
         .unwrap_err()
         .to_string();

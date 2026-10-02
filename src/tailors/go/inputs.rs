@@ -3,6 +3,7 @@
 
 use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::platform::Platform;
+use crate::kernel::resolve::ResolutionDoor;
 use crate::kernel::store;
 use crate::kernel::toolchain::Selected;
 use crate::tailors::go;
@@ -21,22 +22,23 @@ pub struct GoInputs {
 /// answered by selection; reading them again here could only disagree with
 /// the lock this run is honoring. The project is read through the held
 /// descriptor `project`.
+///
+/// The planning tool runs through `door`, a planner door.
 pub fn load_go_inputs(
-    platform: Platform,
     project: &ProjectRoot,
-    store: &store::Store,
-    activity: &crate::kernel::activity::StoreActivity,
     toolchain: &Selected,
+    door: &mut ResolutionDoor<'_>,
 ) -> io::Result<GoInputs> {
+    let (store, activity, platform) = (door.store(), door.lease(), door.platform());
     let go_version = toolchain.version("go")?;
     let go_obj = go::realize_runtime(store, activity, platform, toolchain)?;
-    let mut plan = go::plan_go(store, activity, project, &go_obj, go_version, true)?;
+    let mut plan = go::plan_go(door, project, &go_obj, go_version, true)?;
     // A cached plan can name artifacts this store never downloaded. When the
     // module cache object is missing too, plan again, which fetches them;
     // when the object is present, nothing is fetched, so an offline warm
     // sync stays offline.
     if !modcache_realizable(store, activity, platform, toolchain, &plan)? {
-        plan = go::plan_go(store, activity, project, &go_obj, go_version, false)?;
+        plan = go::plan_go(door, project, &go_obj, go_version, false)?;
     }
     // An absent go.sum digests as the empty string; an unreadable one is
     // an error, never a digest of nothing.

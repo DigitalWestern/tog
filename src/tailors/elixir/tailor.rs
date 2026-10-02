@@ -11,6 +11,7 @@ use crate::kernel::cyclonedx::{
 use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::objmeta::KindAdapter;
 use crate::kernel::platform::Platform;
+use crate::kernel::resolve::{DoorKind, ResolutionDoor};
 use crate::kernel::sandbox;
 use crate::kernel::toolchain::{Catalog, LegacyEvidence, Selected};
 use crate::kernel::ui;
@@ -24,6 +25,23 @@ use std::process::Command;
 pub struct Elixir;
 
 impl Tailor for Elixir {
+    fn package_registry(&self) -> Option<crate::tailors::PackageRegistry> {
+        Some(super::edit::REGISTRY)
+    }
+
+    fn registry_exists(&self, name: &str) -> io::Result<Option<String>> {
+        super::edit::registry_exists(name)
+    }
+
+    fn edit_manifest(
+        &self,
+        _ctx: &crate::kernel::context::Context,
+        edit: &crate::tailors::ManifestEdit<'_>,
+        door: &mut crate::kernel::resolve::ResolutionDoor<'_>,
+    ) -> io::Result<crate::tailors::EditOutcome> {
+        super::edit::edit_manifest(edit, door)
+    }
+
     fn id(&self) -> &'static str {
         "elixir"
     }
@@ -41,13 +59,13 @@ impl Tailor for Elixir {
         ctx: &Context,
         project: &ProjectRoot,
         toolchain: &Selected,
-        _attribution: &mut crate::kernel::policy::Attribution,
+        door: &mut ResolutionDoor<'_>,
     ) -> io::Result<()> {
         if elixir::require_lock(project).is_ok() {
             return Ok(());
         }
         let beam = elixir::realize_runtime(&ctx.store, &ctx.activity, ctx.platform, toolchain)?;
-        elixir::generate_lock(&ctx.store, &ctx.activity, project, &beam)
+        elixir::generate_lock(door, project, &beam)
     }
 
     fn plan(
@@ -55,11 +73,12 @@ impl Tailor for Elixir {
         ctx: &Context,
         project: &ProjectRoot,
         toolchain: &Selected,
+        door: &mut ResolutionDoor<'_>,
     ) -> io::Result<Option<String>> {
         let activity = &ctx.activity;
         elixir::require_lock(project)?;
         let beam = elixir::realize_runtime(&ctx.store, activity, ctx.platform, toolchain)?;
-        let (plan, _) = elixir::plan_elixir(&ctx.store, activity, project, &beam, toolchain)?;
+        let (plan, _) = elixir::plan_elixir(door, project, &beam, toolchain)?;
         Ok(Some(serde_json::to_string_pretty(&plan)?))
     }
 
@@ -78,7 +97,12 @@ impl Tailor for Elixir {
         let store = &ctx.store;
         elixir::require_lock(project)?;
         let beam = elixir::realize_runtime(store, activity, platform, toolchain)?;
-        let (plan, lock_sha256) = elixir::plan_elixir(store, activity, project, &beam, toolchain)?;
+        let (plan, lock_sha256) = elixir::plan_elixir(
+            &mut ResolutionDoor::open(store, activity, platform, DoorKind::Planner, attribution)?,
+            project,
+            &beam,
+            toolchain,
+        )?;
         let deps = elixir::realize_deps(store, activity, platform, &plan, &beam, toolchain)?;
         // Projection writes only the store forest and the closure, which is
         // published through the descriptor this sync holds.
@@ -130,7 +154,12 @@ impl Tailor for Elixir {
         let platform = ctx.platform;
         let store = &ctx.store;
         let beam = elixir::realize_runtime(store, activity, platform, toolchain)?;
-        let (plan, lock_sha256) = elixir::plan_elixir(store, activity, &project, &beam, toolchain)?;
+        let (plan, lock_sha256) = elixir::plan_elixir(
+            &mut ResolutionDoor::open(store, activity, platform, DoorKind::Planner, attribution)?,
+            &project,
+            &beam,
+            toolchain,
+        )?;
         let deps = elixir::realize_deps(store, activity, platform, &plan, &beam, toolchain)?;
         let projection = elixir::project_elixir_env(
             activity,
