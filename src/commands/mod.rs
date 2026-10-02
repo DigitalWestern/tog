@@ -181,11 +181,7 @@ pub fn dispatch(command: cli::Command, sync: cli::SyncFlags) -> io::Result<i32> 
         StoreRoots => return store::roots().map(|_| 0),
         StorePath => return store::path(),
         Completions { shell } => return completions::run(shell),
-        Audit {
-            ref policy,
-            signed,
-            json,
-        } => return audit::run(policy.as_deref(), signed, json),
+        audit @ Audit { .. } => return audit::run(audit),
         Doctor { json } => return doctor::run(json),
         Keygen { ref path } => return keygen::run(path),
         attest @ Attest { .. } => return attest::run(attest),

@@ -2009,7 +2009,9 @@ mod tests {
             message(&["audit", "python"]),
             "audit: unexpected argument 'python'"
         );
-        assert!(printed(&["audit", "-h"]).contains("tog audit [--policy <file>] [--json]"));
+        assert!(
+            printed(&["audit", "-h"]).contains("tog audit [--policy <file>] [--signed] [--json]")
+        );
         assert_eq!(
             command(&["doctor", "--json"]),
             Command::Doctor { json: true }

@@ -2435,8 +2435,10 @@ fn status_lists_the_exceptions_a_sync_recorded() {
     let stdout = text(&out.stdout);
     assert_eq!(out.status.code(), Some(0), "{stdout}{}", text(&out.stderr));
     assert!(stdout.contains("python  synced"), "{stdout}");
+    // The whole line, newline included: an escaped control character in
+    // the subject must not swallow the line break after it.
     assert!(
-        stdout.contains("exception   git-dependency  left-pad"),
+        stdout.contains("python  synced      (cpython 3.12.14; 0 packages)\n          exception   git-dependency  left-pad\n"),
         "{stdout}"
     );
     assert!(stdout.contains("1 of 1 synced."), "{stdout}");

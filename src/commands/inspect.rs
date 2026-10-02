@@ -739,9 +739,10 @@ pub fn render_status(dir: &Path, rows: &[EcosystemStatus], json: bool) -> io::Re
         out.push_str(&format!("{:width$}  {line}\n", row.ecosystem));
         for exception in &row.exceptions {
             out.push_str(&printable(&format!(
-                "{:width$}    exception   {}  {}\n",
+                "{:width$}    exception   {}  {}",
                 "", exception.kind, exception.subject
             )));
+            out.push('\n');
         }
     }
     out.push_str(&verdict(rows));

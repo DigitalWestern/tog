@@ -835,20 +835,7 @@ pub fn render(dir: &Path, report: &Report, json: bool) -> io::Result<String> {
         .max()
         .unwrap_or(0);
     let key = under_key(report.signatures_checked);
-    let mut out = String::new();
-    // Policy provenance is a report result on stdout. Keep it before the
-    // verdicts, and do not suppress it with `--quiet`.
-    for source in &report.sources {
-        out.push_str(&source_line(source));
-        out.push('\n');
-    }
-    // What this report did not do is a result too, printed where the
-    // verdicts are read, so a `clean` line is never mistaken for a trust
-    // claim.
-    if !report.signatures_checked {
-        out.push_str(SIGNATURES_NOT_CHECKED);
-        out.push('\n');
-    }
+    let mut out = preamble(report);
     for verdict in &report.verdicts {
         let record = &verdict.record_sha256[..16];
         let word = verdict.word();
@@ -941,6 +928,24 @@ pub fn render(dir: &Path, report: &Report, json: bool) -> io::Result<String> {
     Ok(out)
 }
 
+/// What the text report says before any verdict: policy provenance (a
+/// report result on stdout, kept ahead of the verdicts and never
+/// suppressed by `--quiet`), and what this report did not do, printed where
+/// the verdicts are read so a `clean` line is never mistaken for a trust
+/// claim.
+fn preamble(report: &Report) -> String {
+    let mut out = String::new();
+    for source in &report.sources {
+        out.push_str(&source_line(source));
+        out.push('\n');
+    }
+    if !report.signatures_checked {
+        out.push_str(SIGNATURES_NOT_CHECKED);
+        out.push('\n');
+    }
+    out
+}
+
 /// The text report's line for a run with no `[signing]` table: what was
 /// not checked, and the one command that turns the check on.
 pub const SIGNATURES_NOT_CHECKED: &str =
@@ -974,7 +979,16 @@ or --policy list can only narrow it. 'tog keygen <path>' prints the table to pas
 /// fails loudly instead of passing with signatures unchecked. Needs the
 /// host platform only to tell a foreign-platform closure from a current
 /// one, as `status` does.
-pub fn run(policy: Option<&Path>, signed: bool, json: bool) -> io::Result<i32> {
+pub fn run(command: cli::Command) -> io::Result<i32> {
+    let cli::Command::Audit {
+        policy,
+        signed,
+        json,
+    } = command
+    else {
+        unreachable!("dispatch hands audit only its own command");
+    };
+    let policy = policy.as_deref();
     let platform = Platform::host()?;
     let dir = project_dir();
     // A --policy file that cannot be read or parsed is an operator
