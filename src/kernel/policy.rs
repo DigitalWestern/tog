@@ -58,6 +58,13 @@ pub const STALE_RESOLUTION: &str = "stale-resolution";
 /// A resolution tool ran without its network fenced to tog's proxy (the
 /// `isolated` tier), so the ledger may be missing traffic the tool sent.
 pub const UNCONFINED_RESOLUTION: &str = "unconfined-resolution";
+/// A lock has no attesting resolution record at closure time: it did not
+/// come from a tog resolution door whose signed receipt a trusted key vouches
+/// for, or the receipt no longer matches the files on disk.
+pub const UNRECORDED_RESOLUTION: &str = "unrecorded-resolution";
+/// Resolution could not complete without building a third-party source
+/// distribution, and the build was allowed.
+pub const RESOLUTION_BUILD: &str = "resolution-build";
 
 pub const KINDS: &[&str] = &[
     REQUIREMENT_SKIPPED,
@@ -77,6 +84,8 @@ pub const KINDS: &[&str] = &[
     HOST_BUILD_INPUTS,
     STALE_RESOLUTION,
     UNCONFINED_RESOLUTION,
+    UNRECORDED_RESOLUTION,
+    RESOLUTION_BUILD,
 ];
 
 /// Kinds were spelled with two separators until the names were unified on
@@ -171,6 +180,18 @@ pub enum StrictSource {
 }
 
 impl StrictSource {
+    /// The literal edit that turns this strictness off, as a clause that
+    /// can follow "Or": `rerun without --strict`.
+    pub fn lift(&self) -> String {
+        match self {
+            StrictSource::Flag => "rerun without --strict".into(),
+            StrictSource::Env => "unset TOG_STRICT".into(),
+            StrictSource::File(path) => {
+                format!("set 'strict = false' in {}", path.display())
+            }
+        }
+    }
+
     /// The knob, and the literal edit that turns it off.
     fn fix(&self) -> String {
         match self {
@@ -697,6 +718,22 @@ pub fn refusal(policy: &Policy, kind: &str, subject: &str, detail: &str) -> Stri
 }
 
 pub fn record_with(policy: &Policy, kind: &str, subject: &str, detail: &str) -> io::Result<()> {
+    record_with_fix(policy, kind, subject, detail, None)
+}
+
+/// `record_with`, with the kind's own way out in place of the generic one
+/// when `policy` refuses it: `fix` replaces the text after the last `;` of
+/// `refusal`. A kind whose refusal has a better remedy than "allow the
+/// kind" (`unrecorded-resolution`: make the record) passes it here; the
+/// text should still end by naming the knob that refused, which
+/// `StrictSource::lift` and `deny_source` spell.
+pub fn record_with_fix(
+    policy: &Policy,
+    kind: &str,
+    subject: &str,
+    detail: &str,
+    fix: Option<&str>,
+) -> io::Result<()> {
     with_frames(|frames| {
         let Some(frame) = frames.last_mut() else {
             return Err(io::Error::other(
@@ -713,10 +750,14 @@ pub fn record_with(policy: &Policy, kind: &str, subject: &str, detail: &str) -> 
             )));
         }
         if denied(policy, kind) {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                refusal(policy, kind, subject, detail),
-            ));
+            let message = match fix {
+                Some(fix) => format!(
+                    "policy denies {}: {subject}: {detail}; {fix}",
+                    canonical_kind(kind)
+                ),
+                None => refusal(policy, kind, subject, detail),
+            };
+            return Err(io::Error::new(io::ErrorKind::PermissionDenied, message));
         }
         let kind = canonical_kind(kind);
         // The record itself is progress: what to do about it depends on
@@ -734,6 +775,14 @@ pub fn record_with(policy: &Policy, kind: &str, subject: &str, detail: &str) -> 
 
 pub fn record(kind: &str, subject: &str, detail: &str) -> io::Result<()> {
     record_with(current(), kind, subject, detail)
+}
+
+/// The policy file whose deny list names `kind`, when a file did.
+pub fn deny_source<'a>(policy: &'a Policy, kind: &str) -> Option<&'a Path> {
+    policy
+        .deny_sources
+        .get(canonical_kind(kind))
+        .map(PathBuf::as_path)
 }
 
 fn format_exception_list(exceptions: &[Exception]) -> String {
@@ -873,7 +922,17 @@ impl Attribution {
                 )));
             }
             frame.claimed = true;
-            Ok(std::mem::take(&mut frame.exceptions))
+            // The same fact can reach a frame twice: a tailor records a
+            // lock fact during sync, and an attested resolution record that
+            // carries it is joined into the same frame. An exact duplicate
+            // says nothing new, so the closure keeps the first.
+            let mut claimed: Vec<Exception> = Vec::new();
+            for exception in std::mem::take(&mut frame.exceptions) {
+                if !claimed.contains(&exception) {
+                    claimed.push(exception);
+                }
+            }
+            Ok(claimed)
         })
     }
 
@@ -1280,6 +1339,79 @@ deny = ["git-dependency"]"#,
         }
         assert!(pending().is_empty());
         Attribution::open("node").unwrap().discard();
+    }
+
+    #[test]
+    fn attribution_claim_removes_exact_duplicates() {
+        let _guard = attribution_test_lock();
+        let mut attribution = Attribution::open("go").unwrap();
+        let open = Policy::default();
+        // The sync and the joined record both report the same fact; a
+        // different detail is a different finding and stays.
+        record_with(&open, GIT_DEPENDENCY, "left-pad", "from git").unwrap();
+        record_with(&open, UNCONFINED_RESOLUTION, "go", "host").unwrap();
+        record_with(&open, GIT_DEPENDENCY, "left-pad", "from git").unwrap();
+        record_with(&open, GIT_DEPENDENCY, "left-pad", "another detail").unwrap();
+        let claimed = attribution.claim("go").unwrap();
+        let spelled: Vec<(&str, &str)> = claimed
+            .iter()
+            .map(|exception| (exception.kind.as_str(), exception.detail.as_str()))
+            .collect();
+        assert_eq!(
+            spelled,
+            vec![
+                (GIT_DEPENDENCY, "from git"),
+                (UNCONFINED_RESOLUTION, "host"),
+                (GIT_DEPENDENCY, "another detail"),
+            ]
+        );
+        attribution.mark_published().unwrap();
+        attribution.finish(true).unwrap();
+    }
+
+    #[test]
+    fn a_denied_kind_with_a_fix_names_the_fix_after_the_finding() {
+        let _guard = attribution_test_lock();
+        let attribution = Attribution::open("go").unwrap();
+        let policy = Policy {
+            deny: BTreeSet::from([UNRECORDED_RESOLUTION.to_string()]),
+            ..Policy::default()
+        };
+        let error = record_with_fix(
+            &policy,
+            UNRECORDED_RESOLUTION,
+            "go.sum",
+            "missing",
+            Some("run `tog attest go`"),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(
+            error.to_string(),
+            "policy denies unrecorded-resolution: go.sum: missing; run `tog attest go`"
+        );
+        assert!(attribution.recorded().is_empty());
+        // A permitted kind records and ignores the fix.
+        record_with_fix(
+            &Policy::default(),
+            UNRECORDED_RESOLUTION,
+            "go.sum",
+            "missing",
+            Some("x"),
+        )
+        .unwrap();
+        assert_eq!(attribution.recorded().len(), 1);
+        attribution.discard();
+    }
+
+    #[test]
+    fn the_strict_lift_names_where_strict_came_from() {
+        assert_eq!(StrictSource::Flag.lift(), "rerun without --strict");
+        assert_eq!(StrictSource::Env.lift(), "unset TOG_STRICT");
+        assert_eq!(
+            StrictSource::File(PathBuf::from("/etc/tog/policy.toml")).lift(),
+            "set 'strict = false' in /etc/tog/policy.toml"
+        );
     }
 
     #[test]

@@ -3,6 +3,7 @@
 
 use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::platform::Platform;
+use crate::kernel::resolve::ledger::LedgerObjects;
 use crate::kernel::resolve::ResolutionDoor;
 use crate::kernel::store;
 use crate::kernel::toolchain::Selected;
@@ -14,6 +15,12 @@ pub struct GoInputs {
     pub go_obj: PathBuf,
     pub plan: go::GoPlan,
     pub gosum_sha256: String,
+    /// go.mod and go.sum as the plan read them, by digest: the closure's
+    /// `resolution_basis`.
+    pub resolution_basis: crate::comforter::join::Digests,
+    /// The ledgers this call's planner doors committed and rooted, for the
+    /// references of the closure the sync publishes.
+    pub ledgers: Vec<LedgerObjects>,
 }
 
 /// `toolchain` is the project's selection, and it is the only thing that
@@ -32,23 +39,41 @@ pub fn load_go_inputs(
     let (store, activity, platform) = (door.store(), door.lease(), door.platform());
     let go_version = toolchain.version("go")?;
     let go_obj = go::realize_runtime(store, activity, platform, toolchain)?;
-    let mut plan = go::plan_go(door, project, &go_obj, go_version, true)?;
+    let mut ledgers = Vec::new();
+    let mut planned = go::plan_go_read(door, project, &go_obj, go_version, true, &mut ledgers)?;
     // A cached plan can name artifacts this store never downloaded. When the
     // module cache object is missing too, plan again, which fetches them;
     // when the object is present, nothing is fetched, so an offline warm
     // sync stays offline.
-    if !modcache_realizable(store, activity, platform, toolchain, &plan)? {
-        plan = go::plan_go(door, project, &go_obj, go_version, false)?;
+    if !modcache_realizable(store, activity, platform, toolchain, &planned.plan)? {
+        planned = go::plan_go_read(door, project, &go_obj, go_version, false, &mut ledgers)?;
     }
-    // An absent go.sum digests as the empty string; an unreadable one is
-    // an error, never a digest of nothing.
-    let gosum = go::read_gosum(project)?.unwrap_or_default();
-    use sha2::{Digest, Sha256};
+    // Every digest comes from the bytes the plan read, never from a second
+    // read that could see a newer lock. An absent go.sum digests as the
+    // empty string in `gosum_sha256` (what `status` compares) and is left
+    // out of the basis (as a resolution record leaves it out).
+    use crate::kernel::resolve::record::sha256_hex;
+    let resolution_basis = basis_of(&planned);
+    let gosum = planned.gosum.as_deref().unwrap_or_default();
     Ok(GoInputs {
         go_obj,
-        plan,
-        gosum_sha256: hex::encode(Sha256::digest(gosum.as_bytes())),
+        plan: planned.plan,
+        gosum_sha256: sha256_hex(gosum.as_bytes()),
+        resolution_basis,
+        ledgers,
     })
+}
+
+/// The closure's `resolution_basis`: go.mod and go.sum by the digests of
+/// the bytes `planned` was built from (go.sum left out when it was absent).
+pub(super) fn basis_of(planned: &go::Planned) -> crate::comforter::join::Digests {
+    use crate::kernel::resolve::record::sha256_hex;
+    let mut basis = crate::comforter::join::Digests::new();
+    basis.insert("go.mod".into(), sha256_hex(planned.gomod.as_bytes()));
+    if let Some(gosum) = &planned.gosum {
+        basis.insert("go.sum".into(), sha256_hex(gosum.as_bytes()));
+    }
+    basis
 }
 
 /// Whether this store can realize `plan`'s module cache from what it holds:

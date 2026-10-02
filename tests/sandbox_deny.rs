@@ -473,6 +473,7 @@ mod door {
                     cwd: &snapshot.lock_root().real,
                     env: &env,
                     read_roots: std::slice::from_ref(&self.tools),
+                    cache_roots: &[],
                     stdout: Stdout::Capture,
                     socket_scan: scan,
                 },

@@ -1058,8 +1058,12 @@ fn cargo_add_update_remove_roundtrip() {
 #[ignore]
 fn go_add_update_remove_roundtrip() {
     let temp = scratch("go");
-    let project = &temp.0;
-    let store = project.join("store");
+    // The project is its own directory beside home and the store: Go runs
+    // confined, and the door refuses a project that contains the signing
+    // key under home.
+    let project = &temp.0.join("project");
+    std::fs::create_dir_all(project).unwrap();
+    let store = temp.0.join("store");
     std::fs::write(
         project.join("go.mod"),
         "module example.com/deps-e2e\n\ngo 1.24\n",

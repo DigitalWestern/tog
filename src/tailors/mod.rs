@@ -493,6 +493,104 @@ pub trait Tailor: Sync {
     fn default_helper(&self, _helper: &str) -> io::Result<Option<Selected>> {
         Ok(None)
     }
+
+    /// The files a resolution door of this ecosystem produces in
+    /// `project` (its lock and manifest), relative to the project. A
+    /// non-empty list declares a resolvable lock: every closure of this
+    /// ecosystem then needs an attesting resolution record, or records
+    /// `unrecorded-resolution`. Empty means no join at all.
+    fn resolution_outputs(&self, _project: &ProjectRoot) -> io::Result<Vec<PathBuf>> {
+        Ok(Vec::new())
+    }
+
+    /// The files a resolution door's tool reads in `project` but does not
+    /// write (other workspace members' manifests, the tool's
+    /// configuration), relative to the project. A record must name each one
+    /// that exists, by digest.
+    fn resolution_inputs(&self, _project: &ProjectRoot) -> io::Result<Vec<PathBuf>> {
+        Ok(Vec::new())
+    }
+
+    /// `tog attest`: run this ecosystem's lock check through `door` (an
+    /// attest door) in `project`. A check that leaves the lock and manifest
+    /// byte-unchanged yields the signed record and its bytes; a check that
+    /// fails or would change the lock is an error. Either way the check
+    /// publishes nothing: `tog attest` publishes every ecosystem's record
+    /// together (`record::publish_receipts`) only after all checks passed.
+    fn attest_lock(
+        &self,
+        _ctx: &Context,
+        _project: &ProjectRoot,
+        _toolchain: &Selected,
+        _door: &mut ResolutionDoor<'_>,
+    ) -> io::Result<(crate::kernel::resolve::record::ResolutionRecord, Vec<u8>)> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!(
+                "tog attest does not support {}: it has no lock check that runs through a \
+                 resolution door",
+                self.id()
+            ),
+        ))
+    }
+}
+
+/// The resolution files `tailor` names in `project`, or `None` when it
+/// declares no resolvable lock.
+pub fn resolution_files(
+    tailor: &dyn Tailor,
+    project: &ProjectRoot,
+) -> io::Result<Option<crate::kernel::resolve::record::ResolutionFiles>> {
+    let outputs = tailor.resolution_outputs(project)?;
+    if outputs.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(crate::kernel::resolve::record::ResolutionFiles {
+        outputs,
+        inputs: tailor.resolution_inputs(project)?,
+    }))
+}
+
+/// The record a door run of `tailor` leaves in `project`: the tailor's
+/// resolution files, the process signing key (`None` writes it unsigned),
+/// and the tool with the arguments it ran with. `tog attest`'s check sets
+/// `require_unchanged` and clears `publish_receipt`.
+pub fn record_spec(
+    tailor: &dyn Tailor,
+    project: &ProjectRoot,
+    tool: crate::kernel::resolve::record::Tool,
+    args: &[&str],
+) -> io::Result<crate::kernel::resolve::record::RecordSpec> {
+    let files = resolution_files(tailor, project)?.ok_or_else(|| {
+        io::Error::other(format!(
+            "{} declares no resolution outputs, so its door has no record to write",
+            tailor.id()
+        ))
+    })?;
+    let mut command = vec![tool.name.clone()];
+    command.extend(args.iter().map(|arg| arg.to_string()));
+    Ok(crate::kernel::resolve::record::RecordSpec {
+        tool,
+        command,
+        files,
+        key: crate::comforter::signing_key(),
+        require_unchanged: false,
+        publish_receipt: true,
+    })
+}
+
+/// Hand the closure writer's resolution join every tailor's resolution
+/// files, looked up by the closure's ecosystem. Only a closure named for a
+/// tailor's own id joins: `rustfmt` is a Cargo closure with no lock of its
+/// own. `commands::dispatch` calls this before a verb that can write a
+/// project closure. Idempotent.
+pub fn install_resolution_files() {
+    crate::comforter::join::install_resolution_files(std::sync::Arc::new(
+        |ecosystem: &str, project: &ProjectRoot| match by_id(ecosystem) {
+            Some(tailor) => resolution_files(tailor, project),
+            None => Ok(None),
+        },
+    ));
 }
 
 /// What `tog x` asks of an ecosystem that installs tools from a public

@@ -66,7 +66,7 @@ impl Tailor for Go {
         door: &mut ResolutionDoor<'_>,
     ) -> io::Result<()> {
         let go_obj = go::realize_runtime(&ctx.store, &ctx.activity, ctx.platform, toolchain)?;
-        go::tidy_project(door, project, &go_obj)
+        go::tidy_project(door, project, &go_obj, go::go_tool(toolchain)?)
     }
 
     fn plan(
@@ -112,11 +112,32 @@ impl Tailor for Go {
             &modcache,
             &inputs.plan,
             &inputs.gosum_sha256,
+            &inputs.resolution_basis,
             toolchain,
+            &inputs.ledgers,
             attribution,
         )?;
         ui::synced("go modcache", &modcache);
         Ok(true)
+    }
+
+    /// go.mod and go.sum: what `go mod tidy` and `go get` write. Go reads no
+    /// other resolution input: `GOWORK=off` and `GOENV=off` are forced,
+    /// workspaces and local replaces are refused, and module sources come
+    /// only from the proxy.
+    fn resolution_outputs(&self, _project: &ProjectRoot) -> io::Result<Vec<PathBuf>> {
+        Ok(vec![PathBuf::from("go.mod"), PathBuf::from("go.sum")])
+    }
+
+    fn attest_lock(
+        &self,
+        ctx: &Context,
+        project: &ProjectRoot,
+        toolchain: &Selected,
+        door: &mut ResolutionDoor<'_>,
+    ) -> io::Result<(crate::kernel::resolve::record::ResolutionRecord, Vec<u8>)> {
+        let go_obj = go::realize_runtime(&ctx.store, &ctx.activity, ctx.platform, toolchain)?;
+        go::attest_project(door, project, &go_obj, go::go_tool(toolchain)?)
     }
 
     fn builds(&self) -> bool {
@@ -170,7 +191,9 @@ impl Tailor for Go {
             &modcache,
             &inputs.plan,
             &inputs.gosum_sha256,
+            &inputs.resolution_basis,
             toolchain,
+            &inputs.ledgers,
             attribution,
         )?;
         go::build_sandboxed(

@@ -12,7 +12,7 @@
 //! it was; the ledger this run rooted is taken back.
 
 use super::confine::{self, ConfinedOutcome, ConfinedRun, ForcedInputs, SocketScan, Stdout};
-use super::ledger::{self, Diagnostics, LedgerObjects};
+use super::ledger::{self, Diagnostics, LedgerObjects, PortableLedger};
 use super::outputs::{Forbidden, OutputFile, Outputs};
 use super::proxy::Proxy;
 use super::relay::{self, ToolStatus};
@@ -108,6 +108,9 @@ pub struct ConfinedSpec<'a> {
     pub extra_roots: Vec<PathBuf>,
     /// Store objects the tool runs from, bound read-only.
     pub store_reads: Vec<PathBuf>,
+    /// Tog-owned persistent caches under the store, bound read-write and
+    /// never snapshotted (see `ConfinedRun::cache_roots`).
+    pub cache_roots: Vec<PathBuf>,
     pub routes: Vec<Route>,
     pub network: Network,
     /// `None` passes the spec's arguments with the forced ones appended
@@ -136,6 +139,7 @@ impl<'a> ConfinedSpec<'a> {
             exclude: Vec::new(),
             extra_roots: Vec::new(),
             store_reads: Vec::new(),
+            cache_roots: Vec::new(),
             routes: Vec::new(),
             network: Network::Online,
             wire: None,
@@ -154,6 +158,8 @@ pub struct PublishFacts<'f> {
     /// The accepted outputs, with their digests.
     pub outputs: &'f [OutputFile],
     pub ledger: &'f LedgerObjects,
+    /// The portable ledger itself, for the record's summary of it.
+    pub portable: &'f PortableLedger,
     /// The sha256 of the portable ledger's bytes.
     pub ledger_sha256: &'f str,
     /// `confined` or `isolated`, and the engine.
@@ -257,6 +263,7 @@ pub(super) fn run(
         door: door.kind,
         outputs: outputs.files(),
         ledger: &objects,
+        portable: &ran.session.ledger,
         ledger_sha256: &ledger_sha256,
         isolation: ran.outcome.tier.isolation(),
         engine: ran.outcome.tier.engine.name(),
@@ -355,6 +362,7 @@ fn run_tool(
             cwd: &snapshot.lock_root().real,
             env: &invocation.env,
             read_roots: &confined.store_reads,
+            cache_roots: &confined.cache_roots,
             stdout: match spec.stdio {
                 DelegateStdio::Inherit => Stdout::Inherit,
                 DelegateStdio::Capture => Stdout::Capture,
@@ -749,50 +757,9 @@ mod tests {
     use crate::kernel::platform::Platform;
     use crate::kernel::policy::Attribution;
     use crate::kernel::resolve::confine::{Engine, Missing, TierOffer, TIERS_FOR_TEST};
-    use crate::kernel::resolve::testing::Harness;
+    use crate::kernel::resolve::testing::{relay, Harness};
     use crate::kernel::testutil::TempDir;
     use std::collections::BTreeMap;
-
-    /// `TOG_SANDBOX_TESTS=required` (any non-empty value) turns a skip into
-    /// a panic, so CI cannot report a skipped check as passed.
-    fn skip_or_panic(test: &str, reason: impl std::fmt::Display) {
-        if matches!(std::env::var_os("TOG_SANDBOX_TESTS"), Some(value) if !value.is_empty()) {
-            panic!("required Linux sandbox test {test} unavailable: {reason}");
-        }
-        eprintln!("skip {test}: {reason}");
-    }
-
-    /// The tog binary cargo built beside this test binary, which the
-    /// sandbox binds as the relay; `None` (after a skip) when the host
-    /// cannot run a confined door.
-    fn relay(test: &str) -> Option<PathBuf> {
-        if !matches!(Platform::host(), Ok(Platform::X86_64UnknownLinuxGnu)) {
-            skip_or_panic(test, "not a supported Linux host");
-            return None;
-        }
-        if let Err(error) = crate::kernel::sandbox::bwrap_preflight_with_activity(None) {
-            skip_or_panic(test, format!("bubblewrap preflight failed: {error}"));
-            return None;
-        }
-        let exe = std::env::current_exe().unwrap();
-        let tog = exe
-            .parent()
-            .and_then(Path::parent)
-            .map(|dir| dir.join("tog"));
-        match tog {
-            Some(tog) if tog.is_file() => Some(tog),
-            _ => {
-                skip_or_panic(
-                    test,
-                    format!(
-                        "no tog binary beside {} (run `cargo test`, which builds it)",
-                        exe.display()
-                    ),
-                );
-                None
-            }
-        }
-    }
 
     struct Fixture {
         harness: Harness,
@@ -869,6 +836,18 @@ get() {
         policy: Policy,
         adjust: impl FnOnce(&mut ConfinedSpec<'_>),
     ) -> Outcome {
+        run_door_as(fx, relay, DoorKind::Edit, script, policy, adjust)
+    }
+
+    /// `run_door` through a door of `kind`.
+    fn run_door_as(
+        fx: &Fixture,
+        relay: Option<PathBuf>,
+        kind: DoorKind,
+        script: &str,
+        policy: Policy,
+        adjust: impl FnOnce(&mut ConfinedSpec<'_>),
+    ) -> Outcome {
         let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
@@ -882,7 +861,7 @@ get() {
             store,
             activity,
             Platform::X86_64UnknownLinuxGnu,
-            DoorKind::Edit,
+            kind,
             &mut attribution,
         )
         .unwrap();
@@ -1359,5 +1338,261 @@ get() {
                 .map(OsString::from)
                 .collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn strict_refuses_the_isolated_tier_before_the_tool_starts() {
+        // No engine here is unfenced yet, so the probe is told there is
+        // only an isolated (unfenced) tier; the refusal is the tier rule's.
+        let fx = fixture("door-strict-isolated");
+        let before = tree(&fx.project);
+        let marker = fx._temp.0.join("ran");
+        let isolated = TierOffer {
+            engine: Engine::Bubblewrap,
+            fenced: false,
+        };
+        TIERS_FOR_TEST.with(|tiers| *tiers.borrow_mut() = Some((vec![isolated], Vec::new())));
+        let strict = Policy {
+            strict: true,
+            ..Policy::default()
+        };
+        let outcome = run_door(
+            &fx,
+            None,
+            &format!("touch {}\n", marker.display()),
+            strict,
+            |_| {},
+        );
+        TIERS_FOR_TEST.with(|tiers| *tiers.borrow_mut() = None);
+        let error = outcome.result.unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Unsupported, "{error}");
+        let text = error.to_string();
+        assert!(text.contains("the test tool runs a test script"), "{text}");
+        assert!(text.contains("unconfined-resolution"), "{text}");
+        assert!(!marker.exists(), "the tool ran");
+        assert!(outcome.recorded.is_empty(), "{:?}", outcome.recorded);
+        assert_untouched(&fx, &before);
+        let leftovers: Vec<_> = fs::read_dir(fx.harness.store.root.join("tmp"))
+            .unwrap()
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "nothing was snapshotted: {leftovers:?}"
+        );
+    }
+
+    fn record_key() -> std::sync::Arc<crate::kernel::signing::SigningKey> {
+        static KEY: std::sync::OnceLock<std::sync::Arc<crate::kernel::signing::SigningKey>> =
+            std::sync::OnceLock::new();
+        KEY.get_or_init(|| {
+            let temp = TempDir::named("door-record-key");
+            let path = temp.0.join("key");
+            crate::kernel::signing::generate(&path).unwrap();
+            std::sync::Arc::new(crate::kernel::signing::SigningKey::load(&path).unwrap())
+        })
+        .clone()
+    }
+
+    fn record_files() -> super::super::record::ResolutionFiles {
+        super::super::record::ResolutionFiles {
+            outputs: vec![PathBuf::from("deps.lock")],
+            inputs: vec![PathBuf::from("package.json")],
+        }
+    }
+
+    fn record_spec(
+        require_unchanged: bool,
+        publish_receipt: bool,
+    ) -> super::super::record::RecordSpec {
+        super::super::record::RecordSpec {
+            tool: super::super::record::Tool {
+                name: "testpm".into(),
+                version: "1.0.0".into(),
+            },
+            command: vec!["testpm".into(), "lock".into()],
+            files: record_files(),
+            key: Some(record_key()),
+            require_unchanged,
+            publish_receipt,
+        }
+    }
+
+    /// Judge `bytes` as this fixture's record, trusting the test key.
+    fn judged(fx: &Fixture, bytes: &[u8]) -> super::super::record::ResolutionRecord {
+        use super::super::record::{judge, Judgment};
+        let trusted = BTreeSet::from([record_key().public_key()]);
+        let project = ProjectRoot::open(&fx.project).unwrap();
+        match judge(
+            "receipt",
+            bytes,
+            "fixture",
+            &trusted,
+            &record_files(),
+            &project,
+        )
+        .unwrap()
+        {
+            Judgment::Attests(attested) => attested.record,
+            Judgment::Unrecorded(finding) => panic!("does not attest: {}", finding.describe()),
+        }
+    }
+
+    fn receipt(fx: &Fixture) -> Option<Vec<u8>> {
+        fs::read(fx.project.join(".tog/resolution/fixture.json")).ok()
+    }
+
+    fn sha256_hex(bytes: &[u8]) -> String {
+        use sha2::Digest as _;
+        hex::encode(sha2::Sha256::digest(bytes))
+    }
+
+    #[test]
+    fn stale_receipt_is_replaced_only_by_a_successful_transaction() {
+        let Some(relay) = relay("stale_receipt_is_replaced_only_by_a_successful_transaction")
+        else {
+            return;
+        };
+        use super::super::record::{producer, RecordSlot};
+        let fx = fixture("door-stale-receipt");
+        fs::create_dir_all(fx.project.join(".tog/resolution")).unwrap();
+        fs::write(fx.project.join(".tog/resolution/fixture.json"), b"stale\n").unwrap();
+        let before = tree(&fx.project);
+
+        // The tool fails: nothing is published, the stale receipt stays.
+        let slot = RecordSlot::default();
+        let failed = run_door(
+            &fx,
+            Some(relay.clone()),
+            "echo new > deps.lock; exit 3\n",
+            Policy::default(),
+            |confined| {
+                confined.target = Target::Project {
+                    receipt: Some(producer(record_spec(false, true), slot.clone())),
+                };
+            },
+        );
+        assert!(!failed.result.unwrap().status.success());
+        assert!(slot.borrow().is_none());
+        assert_untouched(&fx, &before);
+
+        // The producer refuses (its tailor does not list the lock): the
+        // transaction is undone, the stale receipt stays.
+        let mut unlisted = record_spec(false, true);
+        unlisted.files.outputs = vec![PathBuf::from("other.lock")];
+        let refused = run_door(
+            &fx,
+            Some(relay.clone()),
+            "echo new > deps.lock\n",
+            Policy::default(),
+            |confined| {
+                confined.target = Target::Project {
+                    receipt: Some(producer(unlisted, RecordSlot::default())),
+                };
+            },
+        );
+        let error = refused.result.unwrap_err();
+        assert!(error.to_string().contains("does not list"), "{error}");
+        assert_untouched(&fx, &before);
+
+        // A successful transaction replaces it with the signed record.
+        let slot = RecordSlot::default();
+        let published = run_door(
+            &fx,
+            Some(relay),
+            "echo new > deps.lock\n",
+            Policy::default(),
+            |confined| {
+                confined.target = Target::Project {
+                    receipt: Some(producer(record_spec(false, true), slot.clone())),
+                };
+            },
+        );
+        let report = published.result.unwrap();
+        assert!(report.status.success());
+        let bytes = receipt(&fx).unwrap();
+        assert_eq!(Some(&bytes), slot.borrow().as_ref().map(|(_, bytes)| bytes));
+        let record = judged(&fx, &bytes);
+        assert_eq!(record.door, "edit");
+        assert_eq!(record.outputs["deps.lock"], sha256_hex(b"new\n"));
+        assert_eq!(record.inputs["package.json"], sha256_hex(PACKAGE_JSON));
+        assert_eq!(record.ledger.object, report.ledger.unwrap().ledger);
+    }
+
+    #[test]
+    fn tog_attest_signs_an_unchanged_lock_and_refuses_a_changed_one() {
+        let Some(relay) = relay("tog_attest_signs_an_unchanged_lock_and_refuses_a_changed_one")
+        else {
+            return;
+        };
+        use super::super::record::{producer, RecordSlot};
+        let fx = fixture("door-attest");
+        let slot = RecordSlot::default();
+        let signed = run_door_as(
+            &fx,
+            Some(relay.clone()),
+            DoorKind::Attest,
+            "true\n",
+            Policy::default(),
+            |confined| {
+                confined.target = Target::Project {
+                    receipt: Some(producer(record_spec(true, true), slot.clone())),
+                };
+            },
+        );
+        assert!(signed.result.unwrap().status.success());
+        let bytes = receipt(&fx).unwrap();
+        assert_eq!(Some(&bytes), slot.borrow().as_ref().map(|(_, bytes)| bytes));
+        let record = judged(&fx, &bytes);
+        assert_eq!(record.door, "attest");
+        assert_eq!(record.outputs["deps.lock"], sha256_hex(OLD_LOCK));
+
+        let before = tree(&fx.project);
+        let refused = run_door_as(
+            &fx,
+            Some(relay),
+            DoorKind::Attest,
+            "echo changed > deps.lock\n",
+            Policy::default(),
+            |confined| {
+                confined.target = Target::Project {
+                    receipt: Some(producer(record_spec(true, true), RecordSlot::default())),
+                };
+            },
+        );
+        let error = refused.result.unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("lock check would change deps.lock"),
+            "{error}"
+        );
+        assert_eq!(tree(&fx.project), before, "the lock and receipt stay");
+    }
+
+    #[test]
+    fn attest_record_out_leaves_the_checkout_unchanged() {
+        let Some(relay) = relay("attest_record_out_leaves_the_checkout_unchanged") else {
+            return;
+        };
+        use super::super::record::{producer, RecordSlot};
+        let fx = fixture("door-record-out");
+        let before = tree(&fx.project);
+        let slot = RecordSlot::default();
+        let outcome = run_door_as(
+            &fx,
+            Some(relay),
+            DoorKind::Attest,
+            "true\n",
+            Policy::default(),
+            |confined| {
+                confined.target = Target::Project {
+                    receipt: Some(producer(record_spec(true, false), slot.clone())),
+                };
+            },
+        );
+        assert!(outcome.result.unwrap().status.success());
+        assert_eq!(tree(&fx.project), before, "the checkout changed");
+        let (_, bytes) = slot.borrow_mut().take().expect("the record");
+        assert_eq!(judged(&fx, &bytes).door, "attest");
     }
 }

@@ -71,6 +71,16 @@ deny = [
     # channel so the compiler is a pinned, verified release.
     "external-toolchain",
 
+    # A lock (and its manifest) has no signed resolution record that a key in
+    # the machine policy's [signing] list vouches for, or the record no longer
+    # matches the files: the lock did not come through a tog resolution door,
+    # where the resolving tool runs confined and every fetch is checked and
+    # written to a ledger. Denied: a lock must come through a door on a
+    # machine whose key the gate trusts. Existing locks are converted with
+    # `tog attest` (on CI with the signing key, or on a laptop whose key is in
+    # the [signing] list), which is also what the refusal names.
+    "unrecorded-resolution",
+
     # A resolution tool (npm, cargo, uv, ...) ran isolated but without its
     # network fenced to tog's recording proxy, because this machine could
     # not give it a network namespace. The resolution ledger may therefore
@@ -119,16 +129,18 @@ deny = [
 #                                    on every builder may add this kind to
 #                                    the list above and provide the library
 #                                    another way.
-#   stale-resolution                 a dependency tool's registry was
-#                                    unreachable, so tog's resolution proxy
-#                                    answered its metadata requests from the
-#                                    last good copy. A stale resolution
-#                                    produces an older lock, not a less
-#                                    honest one, since every artifact is
-#                                    still verified. Teams that require every
-#                                    lock to reflect the registry at the time
-#                                    of locking may add this kind to the list
-#                                    above.
+#   resolution-build                 resolution needed a third-party source
+#                                    distribution built to read its metadata,
+#                                    and the build was allowed. It ran
+#                                    confined, and the lock it produced is
+#                                    verified at sync like any other lock.
+#   stale-resolution                 resolution metadata came from tog's
+#                                    last-good cache because the registry was
+#                                    unreachable. That gives an older lock,
+#                                    not a less honest one: every artifact is
+#                                    still verified. A team that must never
+#                                    resolve against old metadata may add
+#                                    this kind to the list above.
 
 # Closure signing. `tog audit` accepts only records signed by a key in
 # the machine policy's [signing] table; a project or --policy copy of this

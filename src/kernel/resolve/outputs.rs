@@ -74,6 +74,20 @@ impl Drop for Outputs {
 }
 
 impl Outputs {
+    /// No outputs: for a publication that replaces only the receipt (`tog
+    /// attest`, whose lock check changed nothing), while its held outputs
+    /// must still read as they did.
+    pub fn none(store: &Store, activity: &StoreActivity) -> io::Result<Outputs> {
+        store.require_activity(activity, "resolution output copy")?;
+        let dir = snapshot::create_private_dir(&store.root.join("tmp"), "resolve-out")?;
+        let dir_fd = open_dir(&dir)?;
+        Ok(Outputs {
+            dir,
+            dir_fd,
+            files: Vec::new(),
+        })
+    }
+
     /// Copy `relatives` (outputs relative to the lock root, as classified)
     /// out of the snapshot's stage.
     pub fn copy(

@@ -41,6 +41,7 @@ MAINTAIN:
   gc           collect unreferenced store objects and cached artifacts
   store        'store path', 'store roots'
   keygen       create a closure-signing key and print its public key
+  attest       sign a resolution record for each lock (for --strict)
   completions  print a shell completion script (bash | zsh | fish)
   help         show help for a command
   version      print the version
@@ -55,8 +56,8 @@ the tool's own arguments):
   -q, --quiet            errors and results only
   -v, --verbose          every decision and subprocess command line
       --no-color         plain output (also: NO_COLOR, or a non-tty stderr)
-      --frozen           CI: the implicit sync checks the locks are current
-                         without writing them
+      --frozen           CI: the implicit sync checks the locks instead of
+                         writing them
       --strict           the implicit sync refuses every policy exception
                          (same as TOG_STRICT=1)
   -h, --help             this help ('tog help <command>' for one command)
@@ -66,7 +67,7 @@ ENVIRONMENT:
   TOG_STORE           store root (default ~/.tog/store)
   TOG_STRICT=1        refuse every policy exception, like 'tog --strict'
   TOG_POLICY          policy file used instead of ~/.tog/policy.toml
-  TOG_SIGNING_KEY     key file; every command that writes a closure signs it
+  TOG_SIGNING_KEY     key file that signs closures and resolution records
   NO_COLOR            plain output, like --no-color
 
 Exit status: 0 success, 1 failure, 2 usage error; 'run', 'x' and 'fmt' pass
@@ -280,6 +281,50 @@ note that `--strict` fails the sync, so it is a setting to sync *under*, not
 a way to clear exceptions already recorded. Closures are written unsigned
 unless `TOG_SIGNING_KEY` is set; sync says so once per store, and on every
 sync only where the policy chain declares a `[signing]` table.
+
+**Resolution records.** A lock written by a delegated tool (`go mod tidy`,
+`uv lock`, and so on) through a resolution door carries a signed receipt in
+`.tog/resolution/<ecosystem>.json`: the tool and command that ran, the
+isolation tier it ran in, the sha256 of every output (the lock and the
+manifest it rewrote) and every input it read, a summary of the ledger of
+what it fetched, and the exceptions that run recorded. Commit it beside the
+lock. Every sync joins it to the closure it writes: the record attests when
+its signature is from a key the machine policy trusts, it covers every
+listed file that exists, and every digest matches the disk. An attesting
+record is copied into the closure as `body.resolution` and its exceptions
+are judged like the sync's own. Anything else (no record, unsigned, an
+untrusted key, a bad signature, a malformed record, a new file it does not
+cover, or a lock or manifest edited since) records `unrecorded-resolution`
+with that reason, and the stale receipt is left as it is. A record from a
+newer tog, with a schema, isolation tier or exception kind this binary cannot
+read, fails the sync outright under every policy: upgrade tog.
+
+`--strict` and `TOG_STRICT=1` deny `unrecorded-resolution` like every other
+kind, so a strict sync requires every such lock to carry an attesting
+record, and so does the company template's deny list. The refusal says what
+to do:
+
+```
+tog: error: policy denies unrecorded-resolution: go.mod, go.sum: missing; `tog --strict`
+requires every lock to carry a signed resolution record. `go.mod`, `go.sum` have none
+(`missing`). To create one: run `tog keygen <path>`, set `TOG_SIGNING_KEY=<path>`, add the
+printed public key to the `[signing] trusted` list in your machine policy (`TOG_POLICY`,
+else `~/.tog/policy.toml`), then run `tog attest go`. Or rerun without --strict.
+```
+
+When the record is signed by a trusted key but stale or incomplete, the
+steps are only `run tog attest <eco> with TOG_SIGNING_KEY set`. The last
+sentence follows what made the kind denied: the flag, `unset TOG_STRICT`,
+the file that set `strict = true`, or the file whose deny list names it.
+
+`--resolution-record <path>` (repeatable, bare form only) also judges
+records that are not committed: a file, or a directory whose `*.json`
+files are read in name order. This is how a CI job consumes a record
+another job signed as an artifact (`tog --strict --frozen
+--resolution-record records/`) without anyone committing it. Supplied
+records are judged first, then the committed one, and the first that
+attests wins; a supplied record is never written into the project. A path
+that cannot be read, or a file that is not a record, fails the sync.
 
 **add / remove / update** edit the manifest and lock with the ecosystem's own
 pinned tool (uv, npm, pnpm, cargo, go, bundler, mix), then sync. `--no-sync`
@@ -548,7 +593,9 @@ Signing: `tog keygen <path>` writes an Ed25519 key file (mode 0600,
 never overwriting an existing file or symlink) and prints the `[signing]`
 table that trusts it; the private seed is never printed. With
 `TOG_SIGNING_KEY=<path>` set, every command that writes a closure
-(`sync`, `fmt`, `build`, `add`, `remove`, `update`) signs it. The key is
+(`sync`, `fmt`, `build`, `add`, `remove`, `update`) signs it, and `attest`
+and the edit verbs sign the resolution records they write (`x` loads it too,
+so a bad key fails there the same way). The key is
 loaded once, before the store is opened or a manifest is edited; a configured key (including an empty path) that is
 missing, malformed, not a regular file, or readable by group or other fails
 the command, never silently downgrades to unsigned. Unset, the record is
@@ -807,6 +854,36 @@ concurrent sync cannot lose one. Sharp edges:
   It takes `--dry-run` and nothing else.
 - `--project` also collects old unused project forests and backups; legacy
   sibling-home forests are never swept and are reported as skipped.
+
+**attest** `[<ecosystem>...]` gives existing locks a signed resolution
+record without changing them. For each named ecosystem (all detected ones
+that have a resolution door when none is named) it runs the ecosystem's own
+lock check through a verification door, and when the check leaves the lock
+and manifest byte-for-byte unchanged it signs the record with
+`TOG_SIGNING_KEY` and writes `.tog/resolution/<ecosystem>.json`. A check that
+would change the lock fails with nothing written; every ecosystem is checked
+before any record is written. With `TOG_SIGNING_KEY` unset it warns and
+writes the record unsigned, which no sync will attest. It reads
+`tog-toolchain.toml` the way `--frozen` does and never writes it, and it
+refuses `--frozen` (exit 2). An ecosystem with no resolution door is
+refused by name.
+
+- `--record-out <path>` writes the record outside the checkout instead: to
+  `<path>` itself when one ecosystem is named, else `<path>/<ecosystem>.json`.
+  The checkout is left unchanged, so a CI job can upload the file as an
+  artifact for `--resolution-record`. It needs `TOG_SIGNING_KEY` and
+  refuses without it, before running anything: an unsigned artifact would
+  never attest.
+- `--ledger-export <ecosystem> <file>` writes the portable ledger the
+  committed record names, from the local store. It runs no tool.
+- `--ledger-import <file>` stores a portable ledger on this machine and
+  roots it under the project, but only when an attesting committed record
+  names exactly those bytes. The ledger's store id is a function of the
+  bytes alone (kind `resolution-ledger`, the ecosystem, version `1`, and the
+  sha256 of the bytes), so every machine computes the same one.
+
+The ledger flags take no ecosystem word and no `--record-out`, and one run
+moves one ledger.
 
 **keygen** `<path>` creates a closure-signing key (see **audit** above) and
 prints the `[signing]` table to paste into the machine policy.

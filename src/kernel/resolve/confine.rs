@@ -319,6 +319,7 @@ const FORCED: &[ForcedRow] = &[
             "GONOSUMDB",
             "GOPRIVATE",
             "GONOPROXY",
+            "GOINSECURE",
             "CC",
             "CXX",
             "GOCACHEPROG",
@@ -753,6 +754,10 @@ pub struct ConfinedRun<'a> {
     pub env: &'a [(OsString, OsString)],
     /// Store objects (the tool, its runtime) bound read-only at their paths.
     pub read_roots: &'a [PathBuf],
+    /// Tog-owned persistent caches under the store root, bound read-write
+    /// at their paths and neither snapshotted nor diffed (Go's planner
+    /// module cache). What the tool writes there is never a project output.
+    pub cache_roots: &'a [PathBuf],
     pub stdout: Stdout,
     pub socket_scan: SocketScan,
 }
@@ -921,6 +926,7 @@ fn outcome(
 /// The checked, canonical mounts of one run.
 struct Mounts {
     read_roots: Vec<PathBuf>,
+    cache_roots: Vec<PathBuf>,
     proxy_socket: PathBuf,
     executable: PathBuf,
     scratch: PathBuf,
@@ -953,6 +959,7 @@ impl Mounts {
             }
             read_roots.push(real);
         }
+        let cache_roots = check_cache_roots(store, run.cache_roots, &snapshot_roots, &read_roots)?;
         let proxy_socket = fs::canonicalize(run.proxy_socket)?;
         if !fs::symlink_metadata(&proxy_socket)?.file_type().is_socket() {
             return Err(io::Error::new(
@@ -990,6 +997,7 @@ impl Mounts {
         // Every tree the tool can read, for the signing-key rule.
         let mut bound: Vec<PathBuf> = system_roots();
         bound.extend(read_roots.iter().cloned());
+        bound.extend(cache_roots.iter().cloned());
         bound.extend(snapshot_roots.iter().cloned());
         bound.push(run.snapshot.stage().to_path_buf());
         bound.push(executable.clone());
@@ -1000,15 +1008,66 @@ impl Mounts {
             for root in &read_roots {
                 scan_read_root(store, activity, root)?;
             }
+            for root in &cache_roots {
+                if let Some(socket) = find_socket(root)? {
+                    return Err(socket_error(root, &socket));
+                }
+            }
         }
         Ok(Mounts {
             read_roots,
+            cache_roots,
             proxy_socket,
             executable,
             scratch,
             cwd,
         })
     }
+}
+
+/// The cache roots of a run, canonical. Each must be a real directory under
+/// the store root, named by its canonical path (no symlink anywhere on it),
+/// and apart from the snapshot, the read roots and each other: a writable
+/// bind over any of them would let the tool write where the diff or the
+/// read-only rule is supposed to see.
+fn check_cache_roots(
+    store: &Store,
+    roots: &[PathBuf],
+    snapshot_roots: &[PathBuf],
+    read_roots: &[PathBuf],
+) -> io::Result<Vec<PathBuf>> {
+    let refuse = |root: &Path, why: &str| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("the cache root {} {why}", root.display()),
+        )
+    };
+    let store_root = fs::canonicalize(&store.root)?;
+    let mut checked: Vec<PathBuf> = Vec::new();
+    for root in roots {
+        let real = fs::canonicalize(root)?;
+        if real != *root {
+            return Err(refuse(root, "is not a canonical path"));
+        }
+        if !fs::symlink_metadata(&real)?.is_dir() {
+            return Err(refuse(root, "is not a directory"));
+        }
+        if real == store_root || !real.starts_with(&store_root) {
+            return Err(refuse(root, "is not a tog-owned directory under the store"));
+        }
+        let overlaps = |other: &PathBuf| real.starts_with(other) || other.starts_with(&real);
+        if snapshot_roots.iter().any(overlaps)
+            || read_roots.iter().any(overlaps)
+            || checked.iter().any(overlaps)
+        {
+            return Err(refuse(
+                root,
+                "overlaps the project snapshot, a read-only root, or another cache root",
+            ));
+        }
+        checked.push(real);
+    }
+    Ok(checked)
 }
 
 /// The bubblewrap argv of a `Proxy` run.
@@ -1050,6 +1109,9 @@ fn proxy_args(
     }
     for root in &mounts.read_roots {
         sandbox::push_bind_path(&mut args, "--ro-bind", root);
+    }
+    for root in &mounts.cache_roots {
+        sandbox::push_bind_path(&mut args, "--bind", root);
     }
     for root in run.snapshot.roots() {
         args.push("--bind".into());

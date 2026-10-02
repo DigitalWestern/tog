@@ -327,7 +327,95 @@ pub fn locked_closure_state(
             state = verdict;
         }
     }
+    if state == State::Synced {
+        if let Some(verdict) = resolution_state(dir, closure) {
+            state = verdict;
+        }
+    }
     Ok(state)
+}
+
+/// Whether the resolution record `closure` joined still describes the
+/// files in `dir`: `None` when it does (or there is no record), else
+/// `Changed` naming each file whose digest differs from the record's
+/// signed one, plus any resolution file of the ecosystem that exists now
+/// but that the record never named. The toolchain-input rows see only
+/// go.mod's `go` and `toolchain` directives and go.sum, so a dependency
+/// added to go.mod alone shows here. A record whose digest maps do not
+/// parse, or a file that cannot be read to compare, is `Unchecked` for
+/// this closure alone, never an error for the whole command.
+pub fn resolution_state(dir: &Path, closure: &ClosureFile) -> Option<State> {
+    let resolution = closure.body.get("resolution")?;
+    match resolution_changes(dir, &closure.ecosystem, resolution) {
+        Ok(changed) if changed.is_empty() => None,
+        Ok(changed) => Some(State::Changed(changed)),
+        Err(why) => Some(State::Unchecked(format!(
+            "the resolution record cannot be compared with the lock: {why}; run 'tog'"
+        ))),
+    }
+}
+
+fn resolution_changes(
+    dir: &Path,
+    ecosystem: &str,
+    resolution: &Value,
+) -> Result<Vec<String>, String> {
+    use crate::kernel::resolve::record;
+    use std::collections::{BTreeMap, BTreeSet};
+    let digests = |field: &str| -> Result<BTreeMap<String, String>, String> {
+        let value = resolution
+            .get(field)
+            .ok_or_else(|| format!("malformed resolution record: no {field} map"))?;
+        let map: BTreeMap<String, String> = serde_json::from_value(value.clone())
+            .map_err(|error| format!("malformed resolution record: {field}: {error}"))?;
+        for (path, digest) in &map {
+            if record::record_path(Path::new(path)).as_deref() != Some(path.as_str()) {
+                return Err(format!(
+                    "malformed resolution record: {field} names {path:?}"
+                ));
+            }
+            if !record::is_sha256_hex(digest) {
+                return Err(format!(
+                    "malformed resolution record: {field} digest for {path} is not a sha256"
+                ));
+            }
+        }
+        Ok(map)
+    };
+    let mut named = digests("outputs")?;
+    named.extend(digests("inputs")?);
+    let project = ProjectRoot::open(dir).map_err(|error| error.to_string())?;
+    let mut changed = BTreeSet::new();
+    for (path, digest) in &named {
+        let current = if project.is_input_file(Path::new(path)) {
+            project
+                .read_input(Path::new(path))
+                .map_err(|error| format!("read {path}: {error}"))?
+                .map(|bytes| record::sha256_hex(&bytes))
+        } else {
+            None
+        };
+        if current.as_deref() != Some(digest.as_str()) {
+            changed.insert(path.clone());
+        }
+    }
+    let files = match tailors::by_id(ecosystem) {
+        Some(tailor) => {
+            tailors::resolution_files(tailor, &project).map_err(|error| error.to_string())?
+        }
+        None => None,
+    };
+    if let Some(files) = files {
+        let mut listed = files.outputs;
+        listed.extend(files.inputs);
+        let present = record::file_digests(&project, &listed).map_err(|error| error.to_string())?;
+        for path in present.into_keys() {
+            if !named.contains_key(&path) {
+                changed.insert(path);
+            }
+        }
+    }
+    Ok(changed.into_iter().collect())
 }
 
 /// Whether the helper toolchains a closure recorded (`Tailor::helpers`,
@@ -1322,6 +1410,45 @@ mod tests {
             resynced["toolchain"]["helpers"][helper] = default;
             assert_eq!(helper_state(dir, ecosystem, &resynced).unwrap(), None);
         }
+    }
+
+    /// A Go closure that joined a resolution record: a dependency added to
+    /// go.mod alone (same `go` directive, same go.sum) leaves every other
+    /// status check synced, and the record's digest shows the change.
+    #[test]
+    fn status_reports_a_go_lock_its_resolution_record_no_longer_describes() {
+        let temp = TempDir::named("status-record");
+        let platform = Platform::host().unwrap();
+        let dir = &temp.0;
+        fs::write(dir.join("go.mod"), "module x\n").unwrap();
+        fs::write(dir.join("go.sum"), "sum\n").unwrap();
+        let digest = |name: &str| sha256_file(&dir.join(name)).unwrap();
+        write_closure(
+            dir,
+            "go",
+            platform.triple(),
+            json!({"go_sum_sha256": digest("go.sum"),
+                   "plan": {"go_version": "1.27.0", "modules": []},
+                   "resolution": {"outputs": {"go.mod": digest("go.mod"), "go.sum": digest("go.sum")},
+                                  "inputs": {}}}),
+        );
+        let go_row = |rows: &[EcosystemStatus]| {
+            rows.iter()
+                .find(|row| row.ecosystem == "go")
+                .unwrap()
+                .state
+                .clone()
+        };
+        assert_eq!(go_row(&status(platform, dir).unwrap()), State::Synced);
+        fs::write(
+            dir.join("go.mod"),
+            "module x\n\nrequire example.com/y v1.0.0\n",
+        )
+        .unwrap();
+        assert_eq!(
+            go_row(&status(platform, dir).unwrap()),
+            State::Changed(vec!["go.mod".into()])
+        );
     }
 
     #[test]

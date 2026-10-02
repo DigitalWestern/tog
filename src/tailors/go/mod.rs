@@ -15,6 +15,10 @@
 pub mod edit;
 pub mod inputs;
 pub mod objects;
+pub mod registry;
+mod resolve;
+pub(crate) use resolve::{attest_project, gate_cache, go_tool, tidy_project};
+use resolve::{download_closure, is_tidy};
 pub mod tailor;
 mod tool;
 
@@ -26,6 +30,7 @@ use crate::kernel::fetch::{
 };
 use crate::kernel::fsroot::{Entry, ProjectRoot};
 use crate::kernel::platform::{no_pin, Platform};
+use crate::kernel::resolve::ledger::LedgerObjects;
 use crate::kernel::resolve::ResolutionDoor;
 use crate::kernel::sandbox::BuildSpec;
 use crate::kernel::store::Store;
@@ -41,8 +46,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-pub(crate) use tool::run_checked;
-use tool::{run_go, run_go_offline};
+use tool::run_go_offline;
+pub(crate) use tool::{run_go_checked, GoPublish, GoRun};
 
 /// The shipped Go catalog: every go.dev release of the supported Go lines,
 /// with its default, generated and verified by `tools/catalog.py go`.
@@ -707,70 +712,6 @@ fn cached_plan(project: &ProjectRoot, input_hash: &str, gosum: &str) -> io::Resu
     Ok(None)
 }
 
-/// Consistency gate: the tidy -diff first pass is non-mutating (prints a
-/// diff, exit nonzero when go.mod/go.sum need changes). Needs the source
-/// tree, so it runs in the real project. Its module cache is a persistent
-/// planner scratch (resolver-trust only; never feeds objects); go itself
-/// runs in `project.path()`.
-fn is_tidy(
-    door: &mut ResolutionDoor<'_>,
-    go_obj: &Path,
-    project: &ProjectRoot,
-    gate_cache: &Path,
-) -> io::Result<bool> {
-    let out = run_go(
-        door,
-        go_obj,
-        project.path(),
-        gate_cache,
-        false,
-        &["mod", "tidy", "-diff"],
-    )?;
-    Ok(out.status.success())
-}
-
-/// The planner's module cache for the tidy gate, under the store root.
-fn gate_cache(store: &Store) -> io::Result<PathBuf> {
-    let gate_cache = store.root.join("planner-modcache");
-    fs::create_dir_all(&gate_cache)?;
-    Ok(gate_cache)
-}
-
-/// `prepare`: go.mod and go.sum brought up to date by the store `go mod
-/// tidy` when the tidy gate fails, the same delegated mutation as `cargo
-/// generate-lockfile`. The one place the Go tailor writes project inputs;
-/// a plan that finds the pair untidy refuses instead.
-pub fn tidy_project(
-    door: &mut ResolutionDoor<'_>,
-    project: &ProjectRoot,
-    go_obj: &Path,
-) -> io::Result<()> {
-    reject_workspaces(project)?;
-    let gomod =
-        read_gomod(project).map_err(|e| io::Error::new(e.kind(), format!("go.mod: {e}")))?;
-    reject_local_replaces(&gomod)?;
-    let gate_cache = gate_cache(door.store())?;
-    if is_tidy(door, go_obj, project, &gate_cache)? {
-        return Ok(());
-    }
-    ui::note("go.mod/go.sum need updating; resolving with the store go mod tidy...");
-    let out = run_go(
-        door,
-        go_obj,
-        project.path(),
-        &gate_cache,
-        false,
-        &["mod", "tidy"],
-    )?;
-    if !out.status.success() {
-        return Err(err(format!(
-            "store go mod tidy failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        )));
-    }
-    Ok(())
-}
-
 /// The refusal for a go.mod/go.sum pair the tidy gate rejects at planning
 /// time: `prepare` would have tidied it, and the command layer skips
 /// `prepare` under `--frozen`.
@@ -796,35 +737,6 @@ fn read_gomod(project: &ProjectRoot) -> io::Result<String> {
 /// closure the build cannot use.
 pub(crate) fn read_gosum(project: &ProjectRoot) -> io::Result<Option<String>> {
     project.read_input_string(Path::new("go.sum"))
-}
-
-/// Run the closure download in a DISPOSABLE copy of the manifest (go mod
-/// download may rewrite go.mod/go.sum). The module cache is the persistent
-/// planner scratch — warm downloads; trust is irrelevant because every
-/// artifact is re-verified by `closure_from_download`.
-fn download_closure(
-    door: &mut ResolutionDoor<'_>,
-    go_obj: &Path,
-    work: &Path,
-    gate_cache: &Path,
-    gomod: &str,
-    gosum: &str,
-) -> io::Result<std::process::Output> {
-    fs::create_dir_all(work)?;
-    fs::write(work.join("go.mod"), gomod)?;
-    if !gosum.is_empty() {
-        fs::write(work.join("go.sum"), gosum)?;
-    }
-    ui::note("computing Go module closure with the store toolchain...");
-    run_go(
-        door,
-        go_obj,
-        work,
-        gate_cache,
-        false,
-        &["mod", "download", "-json", "all"],
-    )
-    .map(Into::into)
 }
 
 /// Verify the JSON stream of `go mod download` into plan rows. Ledger
@@ -1015,31 +927,74 @@ pub fn plan_go(
     go_obj: &Path,
     go_version: &str,
     use_cache: bool,
+    ledgers: &mut Vec<LedgerObjects>,
 ) -> io::Result<GoPlan> {
+    plan_go_read(door, project, go_obj, go_version, use_cache, ledgers).map(|planned| planned.plan)
+}
+
+/// A plan and the exact go.mod and go.sum it was built from (`gosum` is
+/// `None` when go.sum was absent): the closure records their digests, so
+/// the resolution join binds a record to this generation of the lock.
+pub struct Planned {
+    pub plan: GoPlan,
+    pub gomod: String,
+    pub gosum: Option<String>,
+}
+
+/// `plan_go`, returning what the plan read.
+pub fn plan_go_read(
+    door: &mut ResolutionDoor<'_>,
+    project: &ProjectRoot,
+    go_obj: &Path,
+    go_version: &str,
+    use_cache: bool,
+    ledgers: &mut Vec<LedgerObjects>,
+) -> io::Result<Planned> {
     reject_workspaces(project)?;
     let gomod =
         read_gomod(project).map_err(|e| io::Error::new(e.kind(), format!("go.mod: {e}")))?;
-    let gosum = read_gosum(project)?.unwrap_or_default();
+    let gosum_read = read_gosum(project)?;
+    let gosum = gosum_read.clone().unwrap_or_default();
     reject_local_replaces(&gomod)?;
 
     let src_digest = source_digest(project)?;
     let input_hash = plan_cache_key(go_version, &gomod, &gosum, &src_digest);
     if use_cache {
         if let Some(plan) = cached_plan(project, &input_hash, &gosum)? {
-            return Ok(plan);
+            return Ok(Planned {
+                plan,
+                gomod,
+                gosum: gosum_read,
+            });
         }
     }
 
     let (store, activity) = (door.store(), door.lease());
     let gate_cache = gate_cache(store)?;
-    if !is_tidy(door, go_obj, project, &gate_cache)? {
+    if !is_tidy(door, go_obj, project, &gate_cache, ledgers)? {
         return Err(untidy(project));
     }
     let module = module_path(&gomod)?;
 
     let scratch = store.stage_with_activity(activity)?;
     let work = scratch.join("plan");
-    let out = download_closure(door, go_obj, &work, &gate_cache, &gomod, &gosum)?;
+    let out = download_closure(
+        door,
+        project,
+        go_obj,
+        &work,
+        &gate_cache,
+        &gomod,
+        &gosum,
+        ledgers,
+    );
+    let out = match out {
+        Ok(out) => out,
+        Err(error) => {
+            let _ = crate::kernel::store::remove_tree(&scratch);
+            return Err(error);
+        }
+    };
     let result = closure_from_download(store, activity, &out, &gosum);
     let _ = crate::kernel::store::remove_tree(&scratch);
     let mut modules = result?;
@@ -1055,8 +1010,8 @@ pub fn plan_go(
     // the gate and now, or the cache key would lie about the plan's inputs.
     let now_mod =
         read_gomod(project).map_err(|e| io::Error::new(e.kind(), format!("go.mod: {e}")))?;
-    let now_sum = read_gosum(project)?.unwrap_or_default();
-    if now_mod != gomod || now_sum != gosum {
+    let now_sum = read_gosum(project)?;
+    if now_mod != gomod || now_sum != gosum_read {
         return Err(err("go.mod/go.sum changed while planning; re-run 'tog'"));
     }
     project.write_file(
@@ -1066,7 +1021,11 @@ pub fn plan_go(
             "plan": plan,
         }))?,
     )?;
-    Ok(plan)
+    Ok(Planned {
+        plan,
+        gomod,
+        gosum: gosum_read,
+    })
 }
 
 /// Digest of the project's .go sources (the tidy gate's third input).
@@ -1324,7 +1283,9 @@ pub fn project_go_env(
     modcache_obj: &Path,
     plan: &GoPlan,
     gosum_sha256: &str,
+    resolution_basis: &crate::comforter::join::Digests,
     toolchain: &Selected,
+    ledgers: &[LedgerObjects],
     attribution: &mut crate::kernel::policy::Attribution,
 ) -> io::Result<()> {
     let go_obj = go_obj.canonicalize()?;
@@ -1343,12 +1304,27 @@ pub fn project_go_env(
     // reference is what keeps it alive across a GC.
     refs.object_path(&store, activity, &go_obj)?;
     refs.object_path(&store, activity, &modcache_obj)?;
+    // The planner doors' ledgers: evidence of what planning fetched, kept
+    // as long as this closure is. The body names them too, so a root
+    // rebuilt from the closure alone (`tog gc --register`) keeps them.
+    let mut ledger_refs = Vec::new();
+    for objects in ledgers {
+        for id in [&objects.ledger, &objects.diagnostics] {
+            refs.object_id(&store, activity, id)?;
+            ledger_refs.push(object_ref(&store.object_path(id))?);
+        }
+    }
     let mut body = serde_json::json!({
         "go_object": object_ref(&go_obj.canonicalize()?)?,
         "modcache_object": object_ref(&modcache_obj.canonicalize()?)?,
         "go_sum_sha256": gosum_sha256,
         "plan": plan,
+        "resolution_ledgers": ledger_refs,
     });
+    // What the plan read, so the resolution join binds a record to this
+    // generation of go.mod and go.sum.
+    body[crate::comforter::join::BASIS_FIELD] =
+        crate::comforter::join::basis_value(resolution_basis);
     // The Go object is this ecosystem's runtime: the record names the bundle
     // it came from and refers to it directly, so a later catalog refresh
     // cannot re-pair these modules with another toolchain.
@@ -1753,7 +1729,9 @@ mod tests {
             &store.object_path(&modcache_id),
             &plan,
             "sum",
+            &Default::default(),
             &selected,
+            &[],
             &mut attribution,
         )
         .unwrap();
@@ -1832,7 +1810,9 @@ mod tests {
             &store.object_path(&modcache_id),
             &plan,
             "sum",
+            &Default::default(),
             &selected,
+            &[],
             &mut attribution,
         )
         .unwrap();
@@ -1852,6 +1832,115 @@ mod tests {
         let reimported = crate::kernel::store::reimport_root_for_test(&store, &project).unwrap();
         assert_eq!(reimported.objects, record.objects);
         assert_eq!(reimported.projections, record.projections);
+    }
+
+    /// A planner door's ledger is rooted the moment it is committed, and
+    /// the closure sync publishes names it, so a root rebuilt from that
+    /// closure alone still keeps it.
+    #[test]
+    fn ledger_is_rooted_from_commit_and_retained_through_closure_refs() {
+        use crate::kernel::resolve::ledger::{self, Diagnostics, Entry, PortableLedger};
+        let _store_env = crate::kernel::store::STORE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _attribution_lock = crate::kernel::policy::attribution_test_lock();
+        let temp = TempDir::new();
+        let store_root = temp.0.join("store");
+        for sub in ["objects", "meta", "cache/sha256", "tmp", "roots"] {
+            fs::create_dir_all(store_root.join(sub)).unwrap();
+        }
+        let store = Store {
+            root: store_root.canonicalize().unwrap(),
+        };
+        let lease = store
+            .activity(crate::kernel::activity::ActivityMode::Shared)
+            .unwrap();
+        let activity = &lease;
+        let selected = selection();
+        let go_id = {
+            let row = runtime_row(Platform::host().unwrap(), &selected).unwrap();
+            runtime_identity(Platform::host().unwrap(), &row.version, row.digest.hex()).object_id()
+        };
+        let modcache_id = "0000000000000000000000000000000000000000-modcache-0".to_string();
+        for id in [&go_id, &modcache_id] {
+            let object = store.object_path(id);
+            fs::create_dir_all(&object).unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = fs::metadata(&object).unwrap().permissions();
+            permissions.set_mode(permissions.mode() & !0o222);
+            fs::set_permissions(&object, permissions).unwrap();
+            fs::write(
+                store.root.join("meta").join(format!("{id}.json")),
+                serde_json::to_vec_pretty(&serde_json::json!({
+                    "id": id,
+                    "identity": {"kind": "go", "name": "go", "version": "0", "inputs": {}},
+                    "created": 0,
+                    "exceptions": [],
+                    "refs": []
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        }
+        let project = temp.0.join("project");
+        fs::create_dir_all(&project).unwrap();
+        let root = crate::kernel::fsroot::ProjectRoot::open(&project).unwrap();
+        let mut portable = PortableLedger::new("go", "planner").unwrap();
+        portable.insert(Entry {
+            class: "index".into(),
+            method: "GET".into(),
+            url: "https://proxy.golang.org/golang.org/x/sync/@v/list".into(),
+            status: 200,
+            sha256: Some("ab".repeat(32)),
+            claimed: None,
+            verified: false,
+            freshness: None,
+        });
+        let objects = ledger::commit(&store, activity, &portable, &Diagnostics::default()).unwrap();
+        let ids =
+            std::collections::BTreeSet::from([objects.ledger.clone(), objects.diagnostics.clone()]);
+        ledger::root(&store, activity, &root, &objects).unwrap();
+        let rooted = {
+            let lock = store.project_lock_in(&root).unwrap();
+            store.rooted_objects_locked(activity, &root, &lock).unwrap()
+        };
+        assert_eq!(rooted, ids, "the commit's root");
+
+        let plan = GoPlan {
+            go_version: GO_VERSION.into(),
+            module: "example.com/m".into(),
+            modules: Vec::new(),
+        };
+        let mut attribution = crate::kernel::policy::Attribution::open("go").unwrap();
+        project_go_env(
+            activity,
+            &root,
+            &store.object_path(&go_id),
+            &store.object_path(&modcache_id),
+            &plan,
+            "sum",
+            &Default::default(),
+            &selected,
+            std::slice::from_ref(&objects),
+            &mut attribution,
+        )
+        .unwrap();
+        attribution.finish(true).unwrap();
+        let closure = crate::comforter::read_closure(&project, "go").unwrap();
+        let named: std::collections::BTreeSet<String> = closure["resolution_ledgers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| entry["id"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(named, ids);
+
+        // The record lost: `gc --register` rebuilds it from the closure.
+        drop(lease);
+        let reimported = crate::kernel::store::reimport_root_for_test(&store, &project).unwrap();
+        for id in &ids {
+            assert!(reimported.objects.contains(id), "{id}: {reimported:?}");
+        }
     }
 
     #[test]
@@ -2581,12 +2670,59 @@ mod tests {
             Path::new("/nonexistent/go"),
             "1.27.0",
             true,
+            &mut Vec::new(),
         )
         .unwrap();
         assert_eq!(got.go_version, "1.27.0");
         assert_eq!(got.module, "example.com/m");
         assert_eq!(got.modules, plan.modules);
         assert!(!store.root.exists(), "a cache hit touched the store");
+    }
+
+    /// The basis a closure records is what the plan read, which is the
+    /// resolution files on disk as a record would digest them: both on a
+    /// cache hit and with go.sum absent.
+    #[test]
+    fn the_plan_basis_is_the_lock_as_read() {
+        let (_lease_store, activity) = crate::kernel::testutil::detached_lease();
+        let temp = TempDir::new();
+        let project = temp.0.join("proj");
+        let (gomod, gosum, plan) = plan_fixture(&project);
+        write_plan_cache(
+            &project,
+            &expected_input_hash(&project, &gomod, &gosum),
+            &plan,
+        );
+        let store = Store {
+            root: temp.0.join("absent-store"),
+        };
+        let root = ProjectRoot::open(&project).unwrap();
+        let planned = plan_go_read(
+            &mut crate::kernel::testutil::DoorScope::new().door(
+                &store,
+                &activity,
+                crate::kernel::platform::Platform::host().unwrap(),
+                crate::kernel::resolve::DoorKind::Planner,
+            ),
+            &root,
+            Path::new("/nonexistent/go"),
+            "1.27.0",
+            true,
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(planned.plan.modules, plan.modules);
+        let listed = [PathBuf::from("go.mod"), PathBuf::from("go.sum")];
+        let on_disk = crate::kernel::resolve::record::file_digests(&root, &listed).unwrap();
+        assert_eq!(on_disk.len(), 2);
+        assert_eq!(inputs::basis_of(&planned), on_disk);
+        let without_sum = Planned {
+            gosum: None,
+            ..planned
+        };
+        fs::remove_file(project.join("go.sum")).unwrap();
+        let on_disk = crate::kernel::resolve::record::file_digests(&root, &listed).unwrap();
+        assert_eq!(inputs::basis_of(&without_sum), on_disk);
     }
 
     /// The plan is made with the toolchain the selection handed in, never
@@ -2641,6 +2777,7 @@ mod tests {
             Path::new("/nonexistent/go"),
             "1.27.0",
             true,
+            &mut Vec::new(),
         )
         .unwrap();
         assert_eq!(got.go_version, "1.27.0");
@@ -2661,6 +2798,7 @@ mod tests {
             Path::new("/nonexistent/go"),
             "1.28.0",
             true,
+            &mut Vec::new(),
         )
         .unwrap_err();
         assert!(
@@ -2724,6 +2862,7 @@ mod tests {
             Path::new("/nonexistent/go"),
             "1.27.0",
             true,
+            &mut Vec::new(),
         )
         .unwrap_err()
         .to_string();
@@ -2824,6 +2963,7 @@ mod tests {
             Path::new("/nonexistent/go"),
             "1.27.0",
             true,
+            &mut Vec::new(),
         )
         .unwrap_err();
         assert_eq!(e.kind(), io::ErrorKind::PermissionDenied, "{e}");
@@ -2863,6 +3003,7 @@ mod tests {
             Path::new("/nonexistent/go"),
             "1.27.0",
             true,
+            &mut Vec::new(),
         )
         .unwrap_err()
         .to_string();
@@ -2898,6 +3039,7 @@ mod tests {
             Path::new("/nonexistent/go"),
             "1.27.0",
             true,
+            &mut Vec::new(),
         )
         .unwrap_err()
         .to_string();
@@ -2943,6 +3085,7 @@ mod tests {
                 Path::new("/nonexistent/go"),
                 "1.27.0",
                 true,
+                &mut Vec::new(),
             )
         };
         // Unchanged sources: the cached plan is served.
@@ -3009,6 +3152,7 @@ mod tests {
             Path::new("/nonexistent/go"),
             "1.27.0",
             true,
+            &mut Vec::new(),
         )
         .unwrap();
         assert_eq!(got.module, "example.com/m");

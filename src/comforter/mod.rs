@@ -6,6 +6,7 @@
 //! first and renames the visible `.tog/closures/<ecosystem>.json` after,
 //! so a crash can only over-retain. Realization itself lives in each tailor.
 
+pub mod join;
 pub mod status;
 pub mod toolchain;
 
@@ -342,11 +343,26 @@ fn write_closure_inner(
     mut body: serde_json::Value,
     store: &Store,
     activity: &crate::kernel::activity::StoreActivity,
-    explicit_refs: Option<ClosureRefs>,
+    mut explicit_refs: Option<ClosureRefs>,
     supplied_project_lock: Option<&fs::File>,
     attribution: &mut crate::kernel::policy::Attribution,
 ) -> io::Result<()> {
     store.require_activity(activity, "closure publication")?;
+    // Keep the per-project transaction lock from before the checks below
+    // through both durable root publication and the visible closure rename.
+    // Every writer of this project's resolution files (a door's
+    // transaction) holds the same lock while it publishes, so what the
+    // recheck and the resolution join read cannot change before the closure
+    // is visible, and a second producer cannot observe a root from one
+    // generation paired with a closure from another. A caller that already
+    // holds the lock supplies it: a second `project_lock_in` from this
+    // process would wait on it forever.
+    let owned_project_lock = if explicit_refs.is_some() && supplied_project_lock.is_none() {
+        Some(store.project_lock_in(project)?)
+    } else {
+        None
+    };
+    let project_lock = supplied_project_lock.or(owned_project_lock.as_ref());
     // The one place every project write passes through: prove the lock and
     // the toolchain source inputs still read the way this command resolved
     // them before anything of this sync becomes visible.
@@ -367,15 +383,20 @@ fn write_closure_inner(
     // Writing closures for a project that cannot be registered would leave
     // provenance behind for a project no root record can protect.
     Store::check_registrable_in(project)?;
-    // Keep the per-project transaction lock through both durable root
-    // publication and the visible closure rename. A second producer cannot
-    // observe a root from one generation paired with a closure from another.
-    let owned_project_lock = if explicit_refs.is_some() && supplied_project_lock.is_none() {
-        Some(store.project_lock_in(project)?)
-    } else {
-        None
-    };
-    let project_lock = supplied_project_lock.or(owned_project_lock.as_ref());
+    // The resolution join records into the attribution before it is
+    // claimed, and adds a present ledger to the references before the root
+    // is registered. It runs under the project lock, and it binds the
+    // joined record to the resolution files the producer's plan read. It
+    // writes nothing, so a refusal here leaves the checkout exactly as it
+    // was.
+    join::join_for_closure(
+        project,
+        ecosystem,
+        &mut body,
+        store,
+        activity,
+        explicit_refs.as_mut(),
+    )?;
 
     // Hold the project directory open and publish through it. Every
     // component of `.tog/closures/<ecosystem>.json` is walked with
@@ -400,35 +421,7 @@ fn write_closure_inner(
     // time; readers must not assume the body's object ids are valid for
     // the current host. Additive field, schema unchanged.
     let platform = Platform::host()?.triple();
-    // Refuse a tampered destination here, before the root record is written,
-    // so a refused publication never leaves a root behind for a closure that
-    // was never published. `write_file` checks again at rename time; this is
-    // the early, actionable copy of the same rule.
-    match project.entry(&closure_path)? {
-        Entry::Absent | Entry::Regular => {}
-        Entry::Symlink => {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "{} is a symlink; remove it and run 'tog' again",
-                    project.path().join(&closure_path).display()
-                ),
-            ))
-        }
-        kind => {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "{} is a {} where the closure belongs; remove it and run 'tog' again",
-                    project.path().join(&closure_path).display(),
-                    match kind {
-                        Entry::Directory => "directory",
-                        _ => "special file",
-                    }
-                ),
-            ))
-        }
-    }
+    check_closure_destination(project, &closure_path)?;
     // Protect the complete object set before publishing the visible closure.
     // The compatibility writer below is retained only for old synthetic
     // callers whose placeholder paths predate full object ids; real producer
@@ -477,6 +470,39 @@ fn write_closure_inner(
         store.register_root_with_activity(activity, &project_dir)?;
     }
     attribution.mark_published()?;
+    Ok(())
+}
+
+/// Refuse a tampered destination before the root record is written, so a
+/// refused publication never leaves a root behind for a closure that was
+/// never published. `write_file` checks again at rename time; this is the
+/// early, actionable copy of the same rule.
+fn check_closure_destination(project: &ProjectRoot, closure_path: &Path) -> io::Result<()> {
+    match project.entry(closure_path)? {
+        Entry::Absent | Entry::Regular => {}
+        Entry::Symlink => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "{} is a symlink; remove it and run 'tog' again",
+                    project.path().join(closure_path).display()
+                ),
+            ))
+        }
+        kind => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "{} is a {} where the closure belongs; remove it and run 'tog' again",
+                    project.path().join(closure_path).display(),
+                    match kind {
+                        Entry::Directory => "directory",
+                        _ => "special file",
+                    }
+                ),
+            ))
+        }
+    }
     Ok(())
 }
 

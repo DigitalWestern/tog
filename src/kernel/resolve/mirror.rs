@@ -606,7 +606,7 @@ impl Exchange<'_> {
         let endpoint = url.origin().ascii_serialization();
         match cached {
             Some(cached) => {
-                if let Err(refusal) = self.state.stale_allowed(&endpoint, &record.url) {
+                if let Err(refusal) = self.state.stale_allowed(&endpoint, &record.url, &why) {
                     record.served = Some(504);
                     return self.refuse(out, record, 504, &refusal);
                 }
@@ -1527,6 +1527,43 @@ mod tests {
         assert_eq!(
             (entry.class.as_str(), entry.status, entry.freshness),
             ("refused", 504, None)
+        );
+    }
+
+    /// Under `--strict` the door's failure is the refusal of the first
+    /// last-good answer: the URL, why its fetch failed, and the host to
+    /// retry, then how to lift strictness.
+    #[test]
+    fn strict_last_good_fetch_fails_naming_the_url_and_reason() {
+        let harness = Harness::new("mirror-stale-strict");
+        warm(&harness, &["/meta/pkg.json"]);
+        harness
+            .upstream
+            .set("/meta/pkg.json", Behavior::Reply(Reply::new(503, b"down")));
+        let strict = Policy {
+            strict: true,
+            strict_source: Some(policy::StrictSource::Flag),
+            ..Policy::default()
+        };
+        let (session, address) = harness.open(harness.config(strict, Mode::Online));
+        assert_eq!(fetch(&address, "/meta/pkg.json").status, 504);
+        let failure = session.finish().facts.failure().unwrap();
+        let url = harness.upstream_url("/meta/pkg.json");
+        let port = harness.upstream.port();
+        assert!(
+            failure.starts_with(&format!(
+                "policy denies stale-resolution: https://registry.test:{port}: {url} could not \
+                 be fetched ("
+            )),
+            "{failure}"
+        );
+        assert!(
+            failure.ends_with(
+                "(upstream answered 503) and the last-good copy from the cache was not used; \
+                 retry when registry.test is reachable; --strict refuses every exception kind; \
+                 rerun without --strict"
+            ),
+            "{failure}"
         );
     }
 

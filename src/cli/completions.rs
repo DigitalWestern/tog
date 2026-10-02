@@ -97,7 +97,7 @@ fn zsh_completions() -> String {
             zsh_quote(spec.summary)
         ));
     }
-    out.push_str("        'help:show help for a command'\n        'version:print the version'\n    )\n    local curcontext=\"$curcontext\" state line\n    _arguments -C \\\n        '(-C --directory)'{-C,--directory}'[run as if started in <dir>]:directory:_files -/' \\\n        '(-q --quiet)'{-q,--quiet}'[no narration]' \\\n        '(-v --verbose)'{-v,--verbose}'[show every decision and subprocess]' \\\n        '--no-color[plain output]' \\\n        '(-h --help)'{-h,--help}'[print help]' \\\n        '(-V --version)'{-V,--version}'[print the version]' \\\n        '--frozen[CI: check the locks are current without writing them]' \\\n        '--fresh[rebuild .venv / node_modules from scratch]' \\\n        '--strict[refuse every policy exception]' \\\n        '1: :->command' \\\n        '*:: :->args'\n    case $state in\n        command)\n            _describe -t commands 'tog command' commands\n            _tog_scripts\n            ;;\n        args)\n            case $words[1] in\n");
+    out.push_str("        'help:show help for a command'\n        'version:print the version'\n    )\n    local curcontext=\"$curcontext\" state line\n    _arguments -C \\\n        '(-C --directory)'{-C,--directory}'[run as if started in <dir>]:directory:_files -/' \\\n        '(-q --quiet)'{-q,--quiet}'[no narration]' \\\n        '(-v --verbose)'{-v,--verbose}'[show every decision and subprocess]' \\\n        '--no-color[plain output]' \\\n        '(-h --help)'{-h,--help}'[print help]' \\\n        '(-V --version)'{-V,--version}'[print the version]' \\\n        '--frozen[CI: check the locks are current without writing them]' \\\n        '--fresh[rebuild .venv / node_modules from scratch]' \\\n        '--strict[refuse every policy exception]' \\\n        '*--resolution-record[also judge these signed resolution records]:path:_files' \\\n        '1: :->command' \\\n        '*:: :->args'\n    case $state in\n        command)\n            _describe -t commands 'tog command' commands\n            _tog_scripts\n            ;;\n        args)\n            case $words[1] in\n");
     for spec in listed() {
         let pattern = spec.name;
         if spec.name == "run" {
@@ -161,6 +161,12 @@ fn fish_completions() -> String {
             false,
         ),
         ("", "strict", "refuse every policy exception", false),
+        (
+            "",
+            "resolution-record",
+            "also judge these signed resolution records",
+            true,
+        ),
     ];
     for (short, long, description, takes_value) in globals {
         let mut line = String::from("complete -c tog -n '__fish_use_subcommand'");
@@ -168,8 +174,10 @@ fn fish_completions() -> String {
             line.push_str(&format!(" -s {short}"));
         }
         line.push_str(&format!(" -l {long}"));
-        if *takes_value {
+        if *takes_value && *long == "directory" {
             line.push_str(" -r -a '(__fish_complete_directories)'");
+        } else if *takes_value {
+            line.push_str(" -r -F");
         }
         line.push_str(&format!(" -d '{}'\n", fish_quote(description)));
         out.push_str(&line);
@@ -356,7 +364,7 @@ mod tests {
         let fish = completions(Shell::Fish);
         let refusals = listed().flat_map(|spec| {
             let flags: &[&str] = match spec.name {
-                "add" | "remove" | "update" | "x" => &["frozen"],
+                "add" | "remove" | "update" | "x" | "attest" => &["frozen"],
                 name if !takes_sync_flags(name) => &["frozen", "strict"],
                 _ => &[],
             };

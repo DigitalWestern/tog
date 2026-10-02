@@ -11,6 +11,31 @@ mod common;
 
 use common::{assert_ok, copy_tree, fixture, snapshot, text, tog, tog_at, TempDir};
 
+/// The closure's `resolution_basis` names go.mod and go.sum (when present)
+/// by the digests of the files on disk: what the plan read.
+fn assert_basis_matches_disk(project: &std::path::Path, step: &str) {
+    use sha2::{Digest, Sha256};
+    let closure: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(project.join(".tog/closures/go.json")).unwrap(),
+    )
+    .unwrap();
+    let mut expected = serde_json::Map::new();
+    for name in ["go.mod", "go.sum"] {
+        if let Ok(bytes) = std::fs::read(project.join(name)) {
+            expected.insert(
+                name.into(),
+                serde_json::json!(hex::encode(Sha256::digest(bytes))),
+            );
+        }
+    }
+    assert!(expected.contains_key("go.mod"));
+    assert_eq!(
+        closure["body"]["resolution_basis"],
+        serde_json::Value::Object(expected),
+        "{step}"
+    );
+}
+
 #[test]
 #[ignore]
 fn go_sync_build_and_rebuild_offline() {
@@ -20,7 +45,12 @@ fn go_sync_build_and_rebuild_offline() {
     let home = temp.path();
 
     assert_ok(tog(&project, home, &["sync"]), "sync");
+    // A fresh plan: the closure's basis is go.mod and go.sum as on disk.
+    assert_basis_matches_disk(&project, "sync");
     assert_ok(tog(&project, home, &["build"]), "build");
+    // The build reuses the cached plan and writes the closure again.
+    assert!(project.join(".tog/go-plan.json").is_file());
+    assert_basis_matches_disk(&project, "build");
     let hello = project.join("hello");
     assert!(hello.is_file(), "staged binary moved into project");
     let out = Command::new(&hello)
@@ -221,7 +251,9 @@ fn go_sync_into_a_second_store_replans_a_cached_plan() {
     };
     let first = sync("store-1");
     assert!(project.join(".tog/go-plan.json").is_file());
+    assert_basis_matches_disk(&project, "first store");
     let second = sync("store-2");
+    assert_basis_matches_disk(&project, "second store");
     let object = |out: &str| {
         out.lines()
             .find(|line| line.starts_with("synced: go modcache"))

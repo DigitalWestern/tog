@@ -73,7 +73,7 @@ CLASSES = [
 COMPANY_DENY = {
     "install-script-failed", "weak-integrity", "unattested-mutable-state",
     "unattested-index", "git-dependency", "lock-disagreement",
-    "artifact-not-provisioned",
+    "artifact-not-provisioned", "unrecorded-resolution", "unconfined-resolution",
     "unattested_index", "lock_disagreement", "artifact_not_provisioned",
 }
 
