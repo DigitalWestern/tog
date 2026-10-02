@@ -151,16 +151,22 @@ impl Release {
 /// Read the latest release. The only network request `doctor` makes.
 pub fn latest() -> io::Result<Release> {
     let url = manifest_url();
-    let text = fetch::fetch_text_within(&url, Some(LOOKUP_TIMEOUT)).map_err(no_release_yet)?;
+    let text = fetch::fetch_text_within(&url, Some(LOOKUP_TIMEOUT))
+        .map_err(|error| no_release_found(&url, error))?;
     Release::parse(&text)
 }
 
-/// A 404 on the release manifest means no release has been published.
-/// `kernel::fetch` explains a 404 as a yanked package or a stale lockfile,
-/// which is wrong here: nothing was yanked and no lockfile is involved.
-fn no_release_yet(error: io::Error) -> io::Error {
+/// A 404 on the release manifest means the server shows no release there:
+/// none is published, or the repository is private and this request is
+/// anonymous. `kernel::fetch` explains a 404 as a yanked package or a
+/// stale lockfile, which is wrong here: nothing was yanked and no lockfile
+/// is involved.
+fn no_release_found(url: &str, error: io::Error) -> io::Error {
     match fetch::http_status(&error) {
-        Some(404) => io::Error::new(io::ErrorKind::NotFound, "no release is published yet"),
+        Some(404) => io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("no published release at {url}; the server answered 404"),
+        ),
         _ => error,
     }
 }
@@ -518,18 +524,23 @@ mod tests {
         assert_eq!(Version::running().unwrap().to_string(), cli::VERSION);
     }
 
-    /// A 404 on the manifest says no release exists; it never repeats the
-    /// package-download explanation. Every other failure passes through.
+    /// A 404 on the manifest names the URL and says no release is there;
+    /// it never repeats the package-download explanation. Every other
+    /// failure passes through.
     #[test]
     fn a_missing_manifest_says_no_release_is_published() {
-        let error = no_release_yet(fetch::status_failure(404));
+        let url = "https://example.invalid/releases/latest";
+        let error = no_release_found(url, fetch::status_failure(404));
         assert_eq!(error.kind(), io::ErrorKind::NotFound);
-        assert_eq!(error.to_string(), "no release is published yet");
+        assert_eq!(
+            error.to_string(),
+            format!("no published release at {url}; the server answered 404")
+        );
         let throttled = fetch::status_failure(429);
         let text = throttled.to_string();
-        assert_eq!(no_release_yet(throttled).to_string(), text);
+        assert_eq!(no_release_found(url, throttled).to_string(), text);
         assert_eq!(
-            no_release_yet(io::Error::other("offline")).to_string(),
+            no_release_found(url, io::Error::other("offline")).to_string(),
             "offline"
         );
     }

@@ -325,7 +325,7 @@ fn network_error(verb: &str, url: &str, error: ureq::Error) -> io::Error {
 /// A request the server answered with an error status. It prints as the
 /// same sentence as every other network failure and keeps the status code,
 /// so the one caller for whom a 404 means something else (the release
-/// lookup: no release exists yet) can ask with [`http_status`].
+/// lookup: no release is there) can ask with [`http_status`].
 #[derive(Debug)]
 struct StatusFailure {
     code: u16,
@@ -931,8 +931,6 @@ mod tests {
         assert!(Digest::from_sri("nodash").is_err());
     }
 
-    /// The five user-facing network texts, and the one word a person
-    /// stranded on a plane looks for.
     /// A status failure keeps its code behind the same sentence; anything
     /// else has no status to report.
     #[test]
@@ -949,6 +947,8 @@ mod tests {
         assert_eq!(http_status(&absent), None);
     }
 
+    /// The five user-facing network texts, and the one word a person
+    /// stranded on a plane looks for.
     #[test]
     fn network_failures_say_what_went_wrong_not_what_ureq_saw() {
         let offline = transport_cause_with(

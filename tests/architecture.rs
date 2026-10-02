@@ -516,7 +516,9 @@ const BASELINE_HEADER: &str = "\
 /// Rough function lengths: a `fn` at indentation ≤ 4 runs to its matching
 /// brace, with strings, chars, and comments blanked so their braces do not
 /// count. A function under `#[cfg(test)]` is test code wherever it sits in
-/// the file, so it is measured (to step over its body) and left out.
+/// the file, so it is measured (to step over its body) and left out of the
+/// function budget. The file budget still counts its lines: `non_test`
+/// cuts only at `mod tests`.
 fn function_lengths(text: &str) -> Vec<(String, usize)> {
     let clean = blank_literals(text);
     let lines: Vec<&str> = clean.lines().collect();
