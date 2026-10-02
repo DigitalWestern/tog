@@ -12,6 +12,7 @@ use sha2::{Digest, Sha256};
 
 pub use crate::comforter::status::{sha256_file, string, State};
 use crate::kernel::fsroot::ProjectRoot;
+use crate::kernel::policy::{self, Exception};
 use crate::kernel::platform::Platform;
 use crate::kernel::sandbox;
 use crate::kernel::store::Store;
@@ -236,6 +237,87 @@ pub fn ls(dir: &Path, filter: Option<&str>, json: bool, verbose: bool) -> io::Re
     Ok(out)
 }
 
+/// The command that rewrites a closure: `tog fmt` for the rustfmt
+/// record, which a sync never touches, and the bare `tog` for every other.
+pub fn refresh(ecosystem: &str) -> &'static str {
+    if ecosystem == "rustfmt" {
+        "tog fmt"
+    } else {
+        "tog"
+    }
+}
+
+/// The recorded exceptions, or `None` when the closure carries no exception
+/// record at all (absence is not evidence of a clean sync).
+pub fn recorded_exceptions(closure: &ClosureFile) -> io::Result<Option<Vec<Exception>>> {
+    match closure.body.get("exceptions") {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => serde_json::from_value(value.clone())
+            .map(Some)
+            .map_err(|error| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "{:?}: malformed exception record: {error}; run '{}'",
+                        closure.path.to_string_lossy(),
+                        refresh(&closure.ecosystem)
+                    ),
+                )
+            }),
+    }
+}
+
+/// The exceptions of the resolution record the closure joined, or none. A
+/// `resolution` field that is not a record object, or whose exception list
+/// does not parse, is refused like a malformed exception record.
+pub fn resolution_exceptions(closure: &ClosureFile) -> io::Result<Vec<Exception>> {
+    let malformed = |what: String| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "{:?}: malformed resolution record: {what}; run '{}'",
+                closure.path.to_string_lossy(),
+                refresh(&closure.ecosystem)
+            ),
+        )
+    };
+    let Some(resolution) = closure.body.get("resolution") else {
+        return Ok(Vec::new());
+    };
+    let Some(record) = resolution.as_object() else {
+        return Err(malformed("not a JSON object".into()));
+    };
+    match record.get("exceptions") {
+        None => Err(malformed("no exception list".into())),
+        Some(list) => {
+            serde_json::from_value(list.clone()).map_err(|error| malformed(error.to_string()))
+        }
+    }
+}
+
+/// Every exception the closure carries: the recorded list, then whatever
+/// the joined resolution record adds that the list does not already name,
+/// each kind spelled the one way this binary judges and prints
+/// (`policy::canonical_kind`). `None` when the closure has no exception
+/// record at all, which `audit` treats as outdated and `status` as
+/// nothing to show.
+pub fn exceptions(closure: &ClosureFile) -> io::Result<Option<Vec<Exception>>> {
+    let Some(recorded) = recorded_exceptions(closure)? else {
+        return Ok(None);
+    };
+    let canonical = |mut exception: Exception| {
+        exception.kind = policy::canonical_kind(&exception.kind).to_string();
+        exception
+    };
+    let mut exceptions: Vec<Exception> = recorded.into_iter().map(canonical).collect();
+    for exception in resolution_exceptions(closure)?.into_iter().map(canonical) {
+        if !exceptions.contains(&exception) {
+            exceptions.push(exception);
+        }
+    }
+    Ok(Some(exceptions))
+}
+
 // ---------------------------------------------------------------------------
 // status
 
@@ -245,6 +327,10 @@ pub struct EcosystemStatus {
     pub state: State,
     /// Toolchain and package count, for the synced line.
     pub summary: String,
+    /// What the sync that wrote this closure allowed and could not vouch
+    /// for, as recorded (`inspect::exceptions`). Shown under the row and
+    /// in `--json`; never part of the state, which is about freshness.
+    pub exceptions: Vec<Exception>,
 }
 
 impl EcosystemStatus {
@@ -281,6 +367,7 @@ pub fn status(platform: Platform, dir: &Path) -> io::Result<Vec<EcosystemStatus>
                 ecosystem: ecosystem.into(),
                 state: State::NotSynced,
                 summary: String::new(),
+                exceptions: Vec::new(),
             });
             continue;
         };
@@ -288,6 +375,7 @@ pub fn status(platform: Platform, dir: &Path) -> io::Result<Vec<EcosystemStatus>
             ecosystem: ecosystem.into(),
             state: locked_closure_state(platform, dir, closure)?,
             summary: summary(closure),
+            exceptions: exceptions(closure)?.unwrap_or_default(),
         });
     }
     Ok(rows)
@@ -617,6 +705,7 @@ pub fn render_status(dir: &Path, rows: &[EcosystemStatus], json: bool) -> io::Re
                     "state": row.word(),
                     "detail": detail,
                     "summary": row.summary,
+                    "exceptions": row.exceptions,
                 })
             }).collect::<Vec<_>>(),
         });
@@ -648,9 +737,30 @@ pub fn render_status(dir: &Path, rows: &[EcosystemStatus], json: bool) -> io::Re
             State::Unchecked(why) => format!("unchecked   {why}"),
         };
         out.push_str(&format!("{:width$}  {line}\n", row.ecosystem));
+        for exception in &row.exceptions {
+            out.push_str(&printable(&format!(
+                "{:width$}    exception   {}  {}\n",
+                "", exception.kind, exception.subject
+            )));
+        }
     }
     out.push_str(&verdict(rows));
     Ok(out)
+}
+
+/// A status line as the text report prints it: control characters (an
+/// exception subject comes from the record) are escaped so a record cannot
+/// rewrite the terminal lines above it. Ordinary text prints unchanged.
+fn printable(text: &str) -> String {
+    text.chars()
+        .map(|c| {
+            if c.is_control() {
+                c.escape_debug().to_string()
+            } else {
+                c.to_string()
+            }
+        })
+        .collect()
 }
 
 /// The last line (or three) of `tog status`: what the rows add up to, and
@@ -660,7 +770,7 @@ pub fn render_status(dir: &Path, rows: &[EcosystemStatus], json: bool) -> io::Re
 fn verdict(rows: &[EcosystemStatus]) -> String {
     let synced = rows.iter().filter(|row| row.is_synced()).count();
     if synced == rows.len() {
-        return format!("\n{synced} of {} synced.\n", rows.len());
+        return format!("\n{synced} of {} synced.\n{}", rows.len(), exceptions_line(rows));
     }
     let mut counts: Vec<(&str, usize)> = Vec::new();
     for row in rows.iter().filter(|row| !row.is_synced()) {
@@ -688,7 +798,22 @@ fn verdict(rows: &[EcosystemStatus]) -> String {
         );
     }
     out.push_str("Exit status is 0 only when every ecosystem is synced.\n");
+    out.push_str(&exceptions_line(rows));
     out
+}
+
+/// After the verdict: how many exceptions the rows listed, and the one
+/// command that judges them. An exception is not a failure here, so the
+/// line is absent when there is none.
+fn exceptions_line(rows: &[EcosystemStatus]) -> String {
+    let total: usize = rows.iter().map(|row| row.exceptions.len()).sum();
+    if total == 0 {
+        return String::new();
+    }
+    format!(
+        "{total} policy exception(s) recorded: what a sync allowed that it cannot vouch for;\n\
+         'tog audit' says whether your policy permits them.\n"
+    )
 }
 
 // ---------------------------------------------------------------------------
