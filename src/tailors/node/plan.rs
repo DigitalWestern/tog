@@ -227,46 +227,29 @@ pub(super) fn npm_list_compatible(values: &[&str], ours: &str) -> bool {
     matched || negated == values.len()
 }
 
-/// Darwin semantics from before Linux support, kept byte-for-byte: only array
-/// restrictions count, and any negated entry makes positives irrelevant.
-/// (A shared correction to npm's semantics is a separate decision.)
-pub(super) fn darwin_list_compatible(entry: &serde_json::Value, field: &str, ours: &str) -> bool {
-    match entry[field].as_array() {
-        None => true,
-        Some(list) => {
-            let allowed: Vec<&str> = list.iter().filter_map(|v| v.as_str()).collect();
-            let negated: Vec<&str> = allowed.iter().filter_map(|s| s.strip_prefix('!')).collect();
-            if !negated.is_empty() {
-                !negated.contains(&ours)
-            } else {
-                allowed.is_empty() || allowed.contains(&ours)
-            }
-        }
-    }
-}
-
-pub(super) fn platform_list_compatible(
+/// The first of a lock entry's `libc`, `os` and `cpu` restriction lists that
+/// excludes `platform`, by field name; `None` when the host is supported.
+/// An absent list is an empty one, which excludes nothing.
+///
+/// This is the one platform filter: package-lock.json, pnpm-lock.yaml and
+/// both hosts read restrictions through it, with npm's list semantics, which
+/// pnpm shares. `libc` is judged on Linux only, as npm and pnpm judge it.
+pub(super) fn unsupported_restriction(
     platform: Platform,
-    entry: &serde_json::Value,
-    field: &str,
-    ours: &str,
-) -> bool {
-    if platform.is_macos() {
-        return darwin_list_compatible(entry, field, ours);
+    os: &[&str],
+    cpu: &[&str],
+    libc: &[&str],
+) -> Option<&'static str> {
+    if !platform.is_macos() && !npm_list_compatible(libc, LINUX_LIBC) {
+        return Some("libc");
     }
-    restriction_values(entry, field)
-        .map(|values| npm_list_compatible(&values, ours))
-        .unwrap_or(true)
-}
-
-/// `libc` restrictions only apply on Linux; Darwin keeps ignoring the field.
-pub(super) fn libc_compatible(platform: Platform, entry: &serde_json::Value) -> bool {
-    if platform.is_macos() {
-        return true;
+    if !npm_list_compatible(os, platform.npm_os()) {
+        return Some("os");
     }
-    restriction_values(entry, "libc")
-        .map(|values| npm_list_compatible(&values, LINUX_LIBC))
-        .unwrap_or(true)
+    if !npm_list_compatible(cpu, platform.npm_cpu()) {
+        return Some("cpu");
+    }
+    None
 }
 
 /// A `link: true` lock entry: a symlink into the project's own source. The
@@ -290,36 +273,32 @@ fn lock_link_entry(path: &str, entry: &serde_json::Value) -> io::Result<NpmLink>
 
 /// Platform filtering: lock entries carry os/cpu/libc restrictions.
 /// Incompatible optional deps are skipped (npm does the same), which is what
-/// `Ok(false)` means; incompatible required deps are an error. Linux uses
-/// npm's list semantics (deny a matching exclusion, then require a matching
-/// positive when positives exist), while Darwin keeps its established
-/// behavior.
+/// `Ok(false)` means; incompatible required deps are an error, as they are
+/// for npm itself (`EBADPLATFORM`).
 fn entry_platform_compatible(
     platform: Platform,
     entry: &serde_json::Value,
     path: &str,
 ) -> io::Result<bool> {
-    let os_ok = platform_list_compatible(platform, entry, "os", platform.npm_os());
-    let cpu_ok = platform_list_compatible(platform, entry, "cpu", platform.npm_cpu());
-    let libc_ok = libc_compatible(platform, entry);
-    if os_ok && cpu_ok && libc_ok {
+    let values = |field: &str| restriction_values(entry, field).unwrap_or_default();
+    let Some(field) =
+        unsupported_restriction(platform, &values("os"), &values("cpu"), &values("libc"))
+    else {
         return Ok(true);
-    }
+    };
     if entry["optional"].as_bool() == Some(true) {
         return Ok(false);
     }
-    let restriction = if !libc_ok {
+    let restriction = if field == "libc" {
         format!(
-            "libc restriction {:?} is incompatible with host {LINUX_LIBC}",
+            "libc restriction {} is incompatible with host {LINUX_LIBC}",
             entry["libc"]
         )
-    } else if !os_ok {
-        format!("os restriction {:?} is incompatible", entry["os"])
     } else {
-        format!("cpu restriction {:?} is incompatible", entry["cpu"])
+        format!("{field} restriction {} is incompatible", entry[field])
     };
     Err(err(format!(
-        "{path}: required dependency does not support host {} ({}; npm {}/{})",
+        "{path}: required dependency does not support host {} ({}; npm {}/{}); npm refuses this lock here too (EBADPLATFORM), so make the dependency optional or drop it",
         platform.triple(),
         restriction,
         platform.npm_os(),
@@ -445,6 +424,7 @@ fn npm_package_from_entry(
         patch: None,
         git,
         optional: entry["optional"].as_bool() == Some(true),
+        foreign_platform: false,
     }
 }
 

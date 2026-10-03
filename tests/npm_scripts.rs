@@ -91,6 +91,7 @@ fn plan_for(tarball: &std::path::Path, sri: &str) -> NpmPlan {
             patch: None,
             git: None,
             optional: false,
+            foreign_platform: false,
         }],
         links: vec![],
         workspaces: vec![],

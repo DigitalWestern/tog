@@ -1371,6 +1371,7 @@ fn plan_pnpm_with_recorder(
         },
         "pnpm-lock.yaml",
         node_version,
+        record,
     )
 }
 

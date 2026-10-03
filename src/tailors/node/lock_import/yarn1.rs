@@ -646,7 +646,13 @@ pub fn plan_yarn(
             .collect(),
         local_link_deps: BTreeMap::new(),
     };
-    build_plan(platform, graph, "yarn.lock", node_version)
+    build_plan(
+        platform,
+        graph,
+        "yarn.lock",
+        node_version,
+        &mut crate::kernel::policy::record,
+    )
 }
 
 /// The lock entry a manifest's direct dependency names. yarn.lock keys each

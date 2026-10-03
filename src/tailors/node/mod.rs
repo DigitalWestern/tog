@@ -460,6 +460,10 @@ pub struct NpmPackage {
     /// Install-script failures are kept by default; strict policy makes them
     /// fatal for both optional and required packages.
     pub optional: bool,
+    /// A required package whose os/cpu/libc excludes this host, placed
+    /// anyway because pnpm places it (recorded as `foreign-platform-package`).
+    /// Its files are extracted; its install scripts never run.
+    pub foreign_platform: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -900,6 +904,7 @@ pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
         patch: None,
         git: None,
         optional: false,
+        foreign_platform: false,
     };
     let package_plan = NpmPlan {
         packages: vec![package.clone()],
@@ -915,6 +920,7 @@ pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
         patch: None,
         git: None,
         optional: false,
+        foreign_platform: false,
     };
     let multi_package_plan = NpmPlan {
         packages: vec![package, second_package],
@@ -1004,6 +1010,7 @@ pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
         patch: None,
         git: None,
         optional: false,
+        foreign_platform: false,
     };
     let electron_plan = NpmPlan {
         packages: vec![electron],
@@ -1250,6 +1257,7 @@ mod tests {
             patch: None,
             git: None,
             optional: false,
+            foreign_platform: false,
         };
         let artifact = DeclaredArtifact {
             url: "https://artifacts.example.invalid/tool.tar.gz".into(),
@@ -1362,6 +1370,7 @@ mod tests {
             patch: None,
             git: None,
             optional: false,
+            foreign_platform: false,
         };
         let artifact = DeclaredArtifact {
             url: "https://artifacts.example.invalid/tool.tar.gz".into(),
@@ -1482,6 +1491,7 @@ mod tests {
                     patch: Some(patch),
                     git: None,
                     optional: false,
+                    foreign_platform: false,
                 }],
                 links: Vec::new(),
                 workspaces: Vec::new(),
@@ -1652,6 +1662,7 @@ mod tests {
                 patch: None,
                 git: None,
                 optional: false,
+                foreign_platform: false,
             }],
             links: Vec::new(),
             workspaces: Vec::new(),
@@ -1759,6 +1770,7 @@ mod tests {
             patch: None,
             git: None,
             optional: false,
+            foreign_platform: false,
         };
         let plan = NpmPlan {
             node_version: "24.20.0".into(),
@@ -1824,6 +1836,7 @@ mod tests {
                 integrity: TEST_SRI.into(),
                 bin: Vec::new(),
                 optional: false,
+                foreign_platform: false,
                 patch: None,
                 git: None,
             }],
@@ -1903,6 +1916,7 @@ mod tests {
                 integrity: TEST_SRI.into(),
                 bin: Vec::new(),
                 optional: false,
+                foreign_platform: false,
                 patch: None,
                 git: None,
             }],
@@ -1974,6 +1988,7 @@ mod tests {
                 integrity: TEST_SRI.into(),
                 bin: Vec::new(),
                 optional: false,
+                foreign_platform: false,
                 patch: None,
                 git: None,
             }],
@@ -2276,6 +2291,7 @@ mod tests {
                 patch: None,
                 git: None,
                 optional: false,
+                foreign_platform: false,
             }],
             links: Vec::new(),
             workspaces: Vec::new(),
@@ -2321,6 +2337,7 @@ mod tests {
             patch: None,
             git: None,
             optional: false,
+            foreign_platform: false,
         };
         let plan = NpmPlan {
             node_version: "24.20.0".into(),
@@ -2563,6 +2580,7 @@ mod tests {
                 patch: None,
                 git: None,
                 optional: false,
+                foreign_platform: false,
             }],
             links: Vec::new(),
             workspaces: Vec::new(),
@@ -2662,6 +2680,7 @@ mod tests {
             patch: None,
             git: None,
             optional: false,
+            foreign_platform: false,
         };
         let first = NpmPlan {
             node_version: "24.20.0".into(),
@@ -2961,17 +2980,22 @@ mod tests {
     }
 
     #[test]
-    fn darwin_restriction_semantics_are_unchanged_by_the_linux_selector() {
-        // Darwin behavior predating the Linux selector, preserved verbatim:
-        // array-only, and any negated entry makes positives irrelevant.
+    fn darwin_restriction_lists_follow_npm_semantics_too() {
+        // One filter for both hosts: npm's checkList does not depend on the
+        // platform it runs on, so neither does tog's.
         let cases = [
             (r#"["darwin"]"#, true),
             (r#"["linux"]"#, false),
             (r#"["!linux"]"#, true),
             (r#"["!darwin"]"#, false),
-            (r#"["linux","!win32"]"#, true), // negation present: positives ignored
+            // a positive exists and does not match, whatever is negated
+            (r#"["linux","!win32"]"#, false),
+            (r#"["darwin","!win32"]"#, true),
+            (r#"["any"]"#, true),
             (r#"["any","!darwin"]"#, false),
-            (r#""linux""#, true), // string form is not an array: ignored
+            // the bare string form is a one-element list
+            (r#""linux""#, false),
+            (r#""darwin""#, true),
         ];
         for (restriction, compatible) in cases {
             let l = lock(&format!(
@@ -2979,11 +3003,27 @@ mod tests {
             ));
             restriction_verdict(Platform::Aarch64AppleDarwin, &l, "os", compatible);
         }
-        // Darwin ignores libc entirely.
+        // `libc` restricts Linux only, as it does for npm.
         let l = lock(&format!(
             r#""node_modules/restricted":{{"version":"1","libc":["musl"],"resolved":"https://r/restricted.tgz","integrity":"{TEST_SRI}"}}"#
         ));
         assert!(plan_npm(Platform::Aarch64AppleDarwin, &l).is_ok());
+    }
+
+    /// npm refuses a required package this host cannot run, so tog does, and
+    /// the refusal says so: for a package-lock the fix is in the manifest.
+    #[test]
+    fn a_required_foreign_package_in_a_package_lock_is_refused_as_npm_refuses_it() {
+        let l = lock(&format!(
+            r#""node_modules/required":{{"version":"1","os":["darwin"],"resolved":"https://r/required.tgz","integrity":"{TEST_SRI}"}}"#
+        ));
+        let error = plan_npm(Platform::X86_64UnknownLinuxGnu, &l)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            error,
+            "node_modules/required: required dependency does not support host x86_64-unknown-linux-gnu (os restriction [\"darwin\"] is incompatible; npm linux/x64); npm refuses this lock here too (EBADPLATFORM), so make the dependency optional or drop it"
+        );
     }
 
     #[test]
@@ -3183,6 +3223,7 @@ mod tests {
             integrity: TEST_SRI.into(),
             bin: Vec::new(),
             optional: false,
+            foreign_platform: false,
             patch: None,
             git: None,
         });
