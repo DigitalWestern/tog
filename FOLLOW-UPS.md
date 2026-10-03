@@ -105,7 +105,6 @@ After the proxy: the test-suite audit (#351) and then the quality review
   theme, one issue and one PR (or one per file block) each:
   - #348 tests: security and integrity checks with no offline test.
   - #349 product and CI problems found by the audit.
-  - #350 tests: duplicate and trivial tests to delete or merge, and ignored tests to promote.
   - #355 store: a path inside a local object is treated as foreign during closure import (from the #354 review).
   - #359 elixir: Hex metadata cross-check matches substrings, not the top-level app/version (from the #358 review).
   - #367 tests: the artifact size caps in kernel::fetch (8 GiB artifact, 256 MiB text) have no test (from the #363 review).
@@ -114,6 +113,8 @@ After the proxy: the test-suite audit (#351) and then the quality review
   - #373 sandbox: host-socket scan leftovers (from the #372 review).
   - #375 store: metadata readers and record writer leftovers (from the #374 review).
   - #377 catalog: uv GitHub digest unchecked, uv .sha256 parse, Node signer not pinned (from the #348 Tooling review).
+  - #410 ci: eight test files skip sandboxed tests silently because the main test step doesn't require the sandbox (from the #400 review).
+  - #411 tests: an objmeta socket test fails under a long TMPDIR, path over SUN_LEN (found during #400).
   - #380 python markers: platform_release/platform_version, extras `in` versus uv, and documented divergences from packaging (from the #348 Python markers block).
   - #382 node: credentials in lockfile URLs beyond tarballs, mutable-mode hoisting, bin case collisions (from the #348 Lockfile shapes block).
   - #387 gc: `--drop-object` recovery leftovers: the sweep's refusal names no fix, rooted objects, the advice's shell line untested (from the #384 review).
