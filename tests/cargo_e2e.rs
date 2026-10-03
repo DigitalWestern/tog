@@ -12,7 +12,8 @@ use tog::kernel::platform::Platform;
 mod common;
 
 use common::{
-    assert_frozen_never_writes_the_lock, assert_ok, command, copy_tree, fixture, tog, TempDir,
+    add_git_dependency, assert_frozen_never_writes_the_lock, assert_ok, command, copy_tree,
+    fixture, tog, TempDir,
 };
 
 /// The binary with a private `TMPDIR` and `HOME` under `tmp`, and the
@@ -34,83 +35,6 @@ fn default_rust() -> String {
         .unwrap()
         .version("rustc")
         .unwrap()
-        .to_string()
-}
-
-/// A local git repository holding one library crate, and the Cargo project
-/// at `project` made to depend on it at its commit. A git dependency is a
-/// `git-dependency` exception the Cargo sync records, which is what the
-/// attribution tests trace.
-fn add_git_dependency(root: &Path, project: &Path) -> String {
-    let repo = root.join("gitdep-repo");
-    std::fs::create_dir_all(repo.join("src")).unwrap();
-    let git = |args: &[&str]| {
-        let output = Command::new("git")
-            .args(args)
-            .current_dir(&repo)
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "git {args:?}: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        String::from_utf8(output.stdout).unwrap().trim().to_string()
-    };
-    git(&["init", "-q", "-b", "main"]);
-    git(&["config", "user.email", "t@example.invalid"]);
-    git(&["config", "user.name", "t"]);
-    std::fs::write(
-        repo.join("Cargo.toml"),
-        "[package]\nname = \"gitdep\"\nversion = \"1.0.0\"\nedition = \"2021\"\n",
-    )
-    .unwrap();
-    std::fs::write(repo.join("src/lib.rs"), "pub fn value() -> u32 { 7 }\n").unwrap();
-    git(&["add", "-A"]);
-    git(&["commit", "-qm", "one"]);
-    let commit = git(&["rev-parse", "HEAD"]);
-    let url = format!("file://{}", repo.display());
-
-    let manifest = std::fs::read_to_string(project.join("Cargo.toml")).unwrap();
-    let manifest = if manifest.contains("[dependencies]\n") {
-        manifest.replace(
-            "[dependencies]\n",
-            &format!("[dependencies]\ngitdep = {{ git = \"{url}\", rev = \"{commit}\" }}\n"),
-        )
-    } else {
-        format!("{manifest}\n[dependencies]\ngitdep = {{ git = \"{url}\", rev = \"{commit}\" }}\n")
-    };
-    std::fs::write(project.join("Cargo.toml"), manifest).unwrap();
-    let lock = std::fs::read_to_string(project.join("Cargo.lock")).unwrap();
-    let package = |name: &str| format!("[[package]]\nname = \"{name}\"\n");
-    let root_name = manifest_name(project);
-    let mut lock = lock;
-    let root_entry = package(&root_name);
-    let at = lock.find(&root_entry).unwrap() + root_entry.len();
-    let rest = &lock[at..];
-    let version_end = rest.find('\n').unwrap() + 1;
-    let insert = at + version_end;
-    if lock[insert..].starts_with("dependencies = [\n") {
-        let list = insert + "dependencies = [\n".len();
-        lock.insert_str(list, " \"gitdep\",\n");
-    } else {
-        lock.insert_str(insert, "dependencies = [\n \"gitdep\",\n]\n");
-    }
-    lock.push_str(&format!(
-        "\n[[package]]\nname = \"gitdep\"\nversion = \"1.0.0\"\nsource = \"git+{url}?rev={commit}#{commit}\"\n"
-    ));
-    std::fs::write(project.join("Cargo.lock"), lock).unwrap();
-    url
-}
-
-fn manifest_name(project: &Path) -> String {
-    let manifest = std::fs::read_to_string(project.join("Cargo.toml")).unwrap();
-    let line = manifest
-        .lines()
-        .find(|line| line.starts_with("name = "))
-        .unwrap();
-    line.trim_start_matches("name = ")
-        .trim_matches('"')
         .to_string()
 }
 
