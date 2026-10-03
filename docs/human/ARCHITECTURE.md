@@ -56,8 +56,11 @@ Stolen from Nix, minus the interface.
   whose peer is the package the repository develops): Node resolves a
   package's dependencies from the package's real path, a store object can
   hold no link into a project, so only a copy inside the projection can
-  reach the project's own source. The closure lists those packages as
-  `workspace_dependents`, each with an `unattested-mutable-state` exception.
+  reach the project's own source. pnpm and npm locks say which packages
+  those are; a `yarn.lock` records no peer dependencies, so for Yarn the
+  realized packages' own manifests are read. The closure lists the packages
+  as `workspace_dependents`, each with an `unattested-mutable-state`
+  exception.
 
 Per design review: **Plan → Realize → Project**. The tailor (adapter) turns
 manifests and lockfiles into a typed `Plan`. The kernel realizes it: verify

@@ -473,11 +473,12 @@ fn node_env_identity_inner(
             .insert(
                 format!("pkg:{}", p.path),
                 format!(
-                    "{}:{}@{}:{patch_identity}:bin[{}]",
+                    "{}:{}@{}:{patch_identity}:bin[{}]{}",
                     content,
                     p.name,
                     p.version,
-                    bins.join(",")
+                    bins.join(","),
+                    p.scripts_identity()
                 ),
             )
             .is_some()

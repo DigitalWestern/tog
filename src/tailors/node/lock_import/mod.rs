@@ -680,10 +680,15 @@ fn check_links_inside_packages(
     needs_workspace: &BTreeSet<String>,
 ) -> io::Result<()> {
     for (path, link) in links {
-        let host = occupied.iter().find_map(|(package, entry)| {
-            (matches!(entry, Occupied::Package { .. }) && path.starts_with(&format!("{package}/")))
-                .then_some(package)
-        });
+        // The nearest enclosing package owns the directory the link is in.
+        let host = occupied
+            .iter()
+            .filter(|(package, entry)| {
+                matches!(entry, Occupied::Package { .. })
+                    && path.starts_with(&format!("{package}/"))
+            })
+            .map(|(package, _)| package)
+            .max_by_key(|package| package.len());
         if let Some(package) = host.filter(|package| !needs_workspace.contains(*package)) {
             return Err(err(format!(
                 "link {path} -> {} would be planted inside the package {package}, which is store content; tog cannot project a local package nested under a registry package that does not depend on it",
@@ -1992,6 +1997,73 @@ snapshots:
         assert_eq!(
             link_pairs(&plan),
             [("node_modules/plugin/node_modules/core", "packages/core")]
+        );
+    }
+
+    /// The dependent is itself nested: the root holds another version of it
+    /// and of `core`. The link belongs to the nearest enclosing package, the
+    /// nested dependent, which is the one marked, not the package above it.
+    #[test]
+    fn a_nested_dependent_owns_the_link_planted_inside_it() {
+        let dir = project();
+        fs::create_dir_all(dir.0.join("packages/core")).unwrap();
+        let lock = format!(
+            r#"lockfileVersion: '9.0'
+importers:
+  .:
+    dependencies:
+      a:
+        specifier: 1.0.0
+        version: 1.0.0(core@packages+core)
+      core:
+        specifier: 3.0.0
+        version: 3.0.0
+      plugin:
+        specifier: 1.0.0
+        version: 1.0.0
+  packages/core: {{}}
+packages:
+  a@1.0.0:
+    resolution: {{integrity: {SRI}}}
+  core@3.0.0:
+    resolution: {{integrity: {SRI}}}
+  plugin@1.0.0:
+    resolution: {{integrity: {SRI}}}
+  plugin@2.0.0:
+    resolution: {{integrity: {SRI}}}
+snapshots:
+  a@1.0.0(core@packages+core):
+    dependencies:
+      plugin: 2.0.0(core@packages+core)
+  core@3.0.0: {{}}
+  plugin@1.0.0: {{}}
+  plugin@2.0.0(core@packages+core):
+    dependencies:
+      core: link:packages/core
+"#
+        );
+        let plan = plan_pnpm(
+            Platform::X86_64UnknownLinuxGnu,
+            &lock,
+            &held(&dir.0),
+            node_version(),
+        )
+        .unwrap();
+        assert_eq!(
+            workspace_flags(&plan),
+            [
+                ("node_modules/a", false),
+                ("node_modules/a/node_modules/plugin", true),
+                ("node_modules/core", false),
+                ("node_modules/plugin", false),
+            ]
+        );
+        assert_eq!(
+            link_pairs(&plan),
+            [(
+                "node_modules/a/node_modules/plugin/node_modules/core",
+                "packages/core"
+            )]
         );
     }
 

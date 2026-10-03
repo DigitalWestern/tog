@@ -233,7 +233,9 @@ pub(super) fn npm_list_compatible(values: &[&str], ours: &str) -> bool {
 ///
 /// This is the one platform filter: package-lock.json, pnpm-lock.yaml and
 /// both hosts read restrictions through it, with npm's list semantics, which
-/// pnpm shares. `libc` is judged on Linux only, as npm and pnpm judge it.
+/// pnpm shares. `libc` is judged on Linux only: tog's Linux is glibc, and
+/// on macOS the field is ignored (npm itself refuses any `libc` list there,
+/// a case no lock for a macOS package has been seen to carry).
 pub(super) fn unsupported_restriction(
     platform: Platform,
     os: &[&str],
@@ -252,40 +254,42 @@ pub(super) fn unsupported_restriction(
     None
 }
 
-/// Whether one of this lock entry's dependencies is a workspace package:
-/// the name, looked up the way Node looks it up from the package's
-/// directory (each enclosing `node_modules`, nearest first), first meets a
-/// `link: true` entry. An optional peer nothing installed meets no entry.
-fn entry_needs_workspace(
-    packages: &serde_json::Map<String, serde_json::Value>,
+/// Whether Node, resolving `name` from the package directory `path`, first
+/// meets a workspace link: each enclosing `node_modules`, nearest first.
+/// `placed` answers for one project-relative path: `Some(true)` for a link,
+/// `Some(false)` for anything else that is really there, `None` for nothing.
+pub(super) fn resolves_to_workspace_link(
+    placed: &impl Fn(&str) -> Option<bool>,
     path: &str,
-    entry: &serde_json::Value,
+    name: &str,
 ) -> bool {
+    let mut dir = path;
+    loop {
+        // Node never looks inside a directory named node_modules for
+        // another node_modules.
+        if dir != "node_modules" && !dir.ends_with("/node_modules") {
+            let candidate = if dir.is_empty() {
+                format!("node_modules/{name}")
+            } else {
+                format!("{dir}/node_modules/{name}")
+            };
+            if let Some(link) = placed(&candidate) {
+                return link;
+            }
+        }
+        if dir.is_empty() {
+            return false;
+        }
+        dir = dir.rsplit_once('/').map_or("", |(parent, _)| parent);
+    }
+}
+
+/// The names a manifest or lock entry may resolve at run time.
+pub(super) fn dependency_names(entry: &serde_json::Value) -> impl Iterator<Item = &String> {
     ["dependencies", "optionalDependencies", "peerDependencies"]
         .iter()
         .filter_map(|field| entry[*field].as_object())
         .flat_map(|names| names.keys())
-        .any(|name| {
-            let mut dir = path;
-            loop {
-                // Node never looks inside a directory named node_modules
-                // for another node_modules.
-                if !dir.ends_with("node_modules") {
-                    let candidate = if dir.is_empty() {
-                        format!("node_modules/{name}")
-                    } else {
-                        format!("{dir}/node_modules/{name}")
-                    };
-                    if let Some(found) = packages.get(&candidate) {
-                        return found["link"].as_bool() == Some(true);
-                    }
-                }
-                if dir.is_empty() {
-                    return false;
-                }
-                dir = dir.rsplit_once('/').map_or("", |(parent, _)| parent);
-            }
-        })
 }
 
 /// A `link: true` lock entry: a symlink into the project's own source. The
@@ -465,6 +469,44 @@ fn npm_package_from_entry(
     }
 }
 
+/// Mark each package one of whose dependencies is a workspace package. A
+/// package-lock names no edges between placements, so the walk Node makes
+/// decides, over what this plan really places: a lock entry left out for
+/// this platform is not there to stop the walk.
+fn mark_workspace_dependents(
+    lock: &serde_json::Map<String, serde_json::Value>,
+    packages: &mut [NpmPackage],
+    links: &[NpmLink],
+    bundled: &[&str],
+) {
+    let mut placed: std::collections::BTreeMap<&str, bool> = links
+        .iter()
+        .map(|link| (link.path.as_str(), true))
+        .collect();
+    placed.extend(bundled.iter().map(|path| (*path, false)));
+    let paths: Vec<String> = packages.iter().map(|p| p.path.clone()).collect();
+    placed.extend(paths.iter().map(|path| (path.as_str(), false)));
+    let placed = |path: &str| placed.get(path).copied();
+    for package in packages {
+        package.needs_workspace = dependency_names(&lock[package.path.as_str()])
+            .any(|name| resolves_to_workspace_link(&placed, &package.path, name));
+    }
+}
+
+impl NpmPackage {
+    /// What this package adds to its environment-identity input for its
+    /// install scripts. A foreign-platform package's are not run, which
+    /// changes the tree a package with scripts leaves behind; the marker is
+    /// added only for such a package, so every other identity stands.
+    pub(super) fn scripts_identity(&self) -> &'static str {
+        if self.foreign_platform {
+            ":scripts[not-run]"
+        } else {
+            ""
+        }
+    }
+}
+
 /// The packages whose install scripts may run, in the order they run:
 /// deepest first, so nested deps build before their dependents. A package
 /// this host cannot run is files only, because its scripts would build or
@@ -594,10 +636,11 @@ fn plan_npm_recording(
             }
         };
         let integrity = entry_integrity(path, entry, &pinned_git, record)?;
-        let mut package = npm_package_from_entry(path, entry, resolved, pinned_git, integrity);
-        package.needs_workspace = entry_needs_workspace(packages, path, entry);
-        out.push(package);
+        out.push(npm_package_from_entry(
+            path, entry, resolved, pinned_git, integrity,
+        ));
     }
+    mark_workspace_dependents(packages, &mut out, &links, &bundled);
     out.sort_by(|a, b| a.path.cmp(&b.path));
     links.sort_by(|a, b| a.path.cmp(&b.path));
     refuse_case_colliding_paths(

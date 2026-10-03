@@ -366,18 +366,74 @@ struct ForestPaths {
 
 /// The registry packages that depend on a workspace package, by lock path.
 /// One is enough to make the projection a clone.
-fn workspace_dependents(plan: &NpmPlan) -> Vec<&str> {
+///
+/// pnpm and npm plans carry the answer. A yarn.lock records neither peer
+/// dependencies nor an edge to a workspace package, so for a Yarn plan with
+/// workspace links the answer is read from each realized package's own
+/// manifest, walked over the plan's placements the way Node walks them.
+fn workspace_dependents(plan: &NpmPlan, env_obj: &Path) -> Vec<String> {
+    let from_manifests = plan.lock_source == "yarn.lock" && !plan.links.is_empty();
+    let placed = |path: &str| {
+        if plan.links.iter().any(|link| link.path == path) {
+            Some(true)
+        } else {
+            env_package_path(env_obj, path)
+                .symlink_metadata()
+                .is_ok()
+                .then_some(false)
+        }
+    };
     plan.packages
         .iter()
-        .filter(|package| package.needs_workspace)
-        .map(|package| package.path.as_str())
+        .filter(|package| {
+            package.needs_workspace
+                || from_manifests && manifest_needs_workspace(&placed, env_obj, &package.path)
+        })
+        .map(|package| package.path.clone())
         .collect()
 }
 
-/// Whether this projection is a writable clone rather than a forest of
-/// links, with the exception each reason for one records: declared-mutable
-/// packages, and registry packages that depend on a workspace package.
-fn record_cloned_projection(plan: &NpmPlan, mutable: &[String]) -> io::Result<bool> {
+/// Whether the realized package at `path` names, in its own manifest, a
+/// dependency that Node resolves to a workspace link.
+fn manifest_needs_workspace(
+    placed: &impl Fn(&str) -> Option<bool>,
+    env_obj: &Path,
+    path: &str,
+) -> bool {
+    let manifest = env_package_path(env_obj, path).join("package.json");
+    let Some(manifest) = fs::read_to_string(manifest)
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+    else {
+        return false;
+    };
+    let needs_workspace =
+        |name: &String| super::plan::resolves_to_workspace_link(placed, path, name);
+    let names: Vec<&String> = super::plan::dependency_names(&manifest).collect();
+    names.into_iter().any(needs_workspace)
+}
+
+/// Why a projection is a writable clone rather than a forest of links:
+/// declared-mutable packages, and registry packages that depend on a
+/// workspace package. Neither means a forest.
+struct CloneReasons<'a> {
+    mutable: &'a [String],
+    dependents: Vec<String>,
+}
+
+impl CloneReasons<'_> {
+    fn cloned(&self) -> bool {
+        !self.mutable.is_empty() || !self.dependents.is_empty()
+    }
+}
+
+/// The reasons this projection is a clone, each recorded as the exception
+/// it is.
+fn record_clone_reasons<'a>(
+    plan: &NpmPlan,
+    env_obj: &Path,
+    mutable: &'a [String],
+) -> io::Result<CloneReasons<'a>> {
     if !mutable.is_empty() {
         crate::kernel::policy::record(
             crate::kernel::policy::UNATTESTED_MUTABLE_STATE,
@@ -385,7 +441,7 @@ fn record_cloned_projection(plan: &NpmPlan, mutable: &[String]) -> io::Result<bo
             "mutable package projection is unattested",
         )?;
     }
-    let dependents = workspace_dependents(plan);
+    let dependents = workspace_dependents(plan, env_obj);
     for dependent in &dependents {
         crate::kernel::policy::record(
             crate::kernel::policy::UNATTESTED_MUTABLE_STATE,
@@ -393,7 +449,10 @@ fn record_cloned_projection(plan: &NpmPlan, mutable: &[String]) -> io::Result<bo
             "depends on a workspace package, which Node only finds from a real path inside the project, so node_modules is projected as a writable copy that tog does not attest",
         )?;
     }
-    Ok(!mutable.is_empty() || !dependents.is_empty())
+    Ok(CloneReasons {
+        mutable,
+        dependents,
+    })
 }
 
 /// Projection id: env object + mutable declarations + layout schema.
@@ -407,14 +466,17 @@ fn forest_paths(
     env_obj: &Path,
     store: &Store,
     plan: &NpmPlan,
-    mutable: &[String],
+    reasons: &CloneReasons,
     workspaces: &[String],
 ) -> io::Result<ForestPaths> {
     use sha2::{Digest as _, Sha256};
+    let CloneReasons {
+        mutable,
+        dependents,
+    } = reasons;
     // A plan whose packages need a workspace package is a clone, not a
     // forest of links, so it must never share a directory with one. The key
     // is extended only for such a plan: every other projection keeps its id.
-    let dependents = workspace_dependents(plan);
     let dependent_key = if dependents.is_empty() {
         String::new()
     } else {
@@ -587,19 +649,19 @@ fn link_workspace_sources(
         if let Some(parent) = link.parent() {
             fs::create_dir_all(parent)?;
         }
+        let target = relative_path(
+            link.parent()
+                .ok_or_else(|| err("workspace link has no parent"))?,
+            &project_dir.join(&l.target),
+        )?;
         match link.symlink_metadata() {
-            Err(_) => {
-                let target = relative_path(
-                    link.parent()
-                        .ok_or_else(|| err("workspace link has no parent"))?,
-                    &project_dir.join(&l.target),
-                )?;
-                std::os::unix::fs::symlink(target, &link)?;
-            }
-            Ok(metadata) if metadata.file_type().is_symlink() => {}
-            // A cloned package can ship a directory of its own where the
-            // lock puts the link (a bundled copy). Leaving it would hand the
-            // package that copy instead of the workspace package, silently.
+            Err(_) => std::os::unix::fs::symlink(target, &link)?,
+            // The link an earlier sync planted here.
+            Ok(_) if fs::read_link(&link).is_ok_and(|existing| existing == target) => {}
+            // A cloned package can ship something of its own where the lock
+            // puts the link (a bundled copy, or a symlink to one). Leaving
+            // it would hand the package that copy instead of the workspace
+            // package, silently.
             Ok(_) => {
                 return Err(err(format!(
                     "workspace link {} cannot be planted: the package it sits in already ships {}",
@@ -665,11 +727,14 @@ fn node_closure_body(
     backup_paths: &[PathBuf],
     plan: &NpmPlan,
     workspaces: &[String],
-    mutable: &[String],
+    reasons: &CloneReasons,
     inputs: &[crate::comforter::InputRecord],
 ) -> serde_json::Value {
-    let dependents = workspace_dependents(plan);
-    let cloned = !mutable.is_empty() || !dependents.is_empty();
+    let cloned = reasons.cloned();
+    let CloneReasons {
+        mutable,
+        dependents,
+    } = reasons;
     // Mutable declarations expand to every matching physical lockfile path.
     let mutable_paths: Vec<&str> = plan
         .packages
@@ -729,7 +794,7 @@ pub fn project_node_env_recorded(
     helpers: &serde_json::Value,
     attribution: &mut crate::kernel::policy::Attribution,
 ) -> io::Result<()> {
-    let cloned = record_cloned_projection(plan, mutable)?;
+    let reasons = record_clone_reasons(plan, env_obj, mutable)?;
     let project_dir = project.path();
     let nm = Path::new("node_modules");
     let workspaces = workspace_set(plan);
@@ -759,7 +824,7 @@ pub fn project_node_env_recorded(
     let (backup_paths, pending_backups) =
         reserve_projection_backups(project, nm, &store, home, &previous_workspaces, &workspaces)?;
 
-    let paths = forest_paths(project, &env_obj, &store, plan, mutable, &workspaces)?;
+    let paths = forest_paths(project, &env_obj, &store, plan, &reasons, &workspaces)?;
     let ForestPaths {
         proj_dir, forest, ..
     } = &paths;
@@ -816,7 +881,7 @@ pub fn project_node_env_recorded(
         &env_obj,
         &paths,
         &workspaces,
-        cloned,
+        reasons.cloned(),
         fresh,
     )?;
     link_workspace_sources(project_dir, plan, proj_dir, forest)?;
@@ -849,7 +914,7 @@ pub fn project_node_env_recorded(
         &backup_paths,
         plan,
         &workspaces,
-        mutable,
+        &reasons,
         inputs,
     );
     if let Some(record) = runtime_record {

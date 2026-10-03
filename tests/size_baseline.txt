@@ -10,7 +10,7 @@ file 1594 src/kernel/store/roots.rs
 file 1927 src/tailors/dotnet/mod.rs
 file 2013 src/tailors/elixir/mod.rs
 file 1776 src/tailors/node/lock_import/pnpm.rs
-file 1671 src/tailors/node/realize.rs
+file 1672 src/tailors/node/realize.rs
 fn 176 src/comforter/toolchain.rs::resolve
 fn 163 src/commands/audit.rs::render
 fn 174 src/commands/mod.rs::dispatch
