@@ -510,7 +510,22 @@ fn normalize_roots(lock_root: &Path, extra: &[PathBuf]) -> io::Result<(Vec<PathB
     let lock = canonical(lock_root)?;
     let mut all = vec![lock.clone()];
     for root in extra {
-        all.push(canonical(root)?);
+        // An extra root arrives as the canonical path its caller checked
+        // (the cargo door's path-dependency bound): one that resolves
+        // elsewhere now was swapped after that check.
+        let real = canonical(root)?;
+        if root.is_absolute() && real != *root {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!(
+                    "the extra read root {} now resolves to {}; it changed after it was \
+                     checked, so it is not snapshotted",
+                    root.display(),
+                    real.display()
+                ),
+            ));
+        }
+        all.push(real);
     }
     all.sort();
     all.dedup();
@@ -603,6 +618,37 @@ fn open_dir(path: &Path) -> io::Result<fs::File> {
         .map_err(|error| io::Error::new(error.kind(), format!("open {}: {error}", path.display())))
 }
 
+/// Open the directory the canonical `path` names one component at a time
+/// from `/`, following no symlink anywhere on the way. A root checked by its
+/// canonical path that a concurrent writer then swapped for a symlink
+/// (itself or any directory above it) fails to open rather than lead to
+/// where the symlink points.
+fn open_dir_no_symlinks(path: &Path) -> io::Result<fs::File> {
+    let context = |error: io::Error| {
+        io::Error::new(
+            error.kind(),
+            format!(
+                "open {} without following a symlink: {error}",
+                path.display()
+            ),
+        )
+    };
+    if !path.is_absolute() {
+        return Err(context(io::Error::from(io::ErrorKind::InvalidInput)));
+    }
+    let mut dir = open_dir(Path::new("/")).map_err(context)?;
+    for component in path.components() {
+        match component {
+            Component::RootDir => {}
+            Component::Normal(name) => {
+                dir = open_dir_at(dir.as_raw_fd(), name.as_bytes()).map_err(context)?;
+            }
+            _ => return Err(context(io::Error::from(io::ErrorKind::InvalidInput))),
+        }
+    }
+    Ok(dir)
+}
+
 fn open_dir_at(dirfd: RawFd, name: &[u8]) -> io::Result<fs::File> {
     store::open_file_at(dirfd, name, DIR_FLAGS, 0)
 }
@@ -633,7 +679,7 @@ impl Walk<'_> {
 
     /// Copy `real` into `staged` (which must not exist yet).
     fn copy_root(&mut self, real: &Path, staged: &Path) -> io::Result<()> {
-        let source = open_dir(real)?;
+        let source = open_dir_no_symlinks(real)?;
         let mode = store::fd_stat(source.as_raw_fd())?.st_mode as u32 & 0o777;
         let parent = open_dir(staged.parent().expect("staged root has a parent"))?;
         let name = staged.file_name().expect("staged root has a name");
@@ -1252,6 +1298,66 @@ mod tests {
             .classify(&changes, &[PathBuf::from("Cargo.toml")], &[])
             .unwrap_err();
         assert!(error.to_string().contains("lib/Cargo.toml"), "{error}");
+    }
+
+    /// An extra root is checked by its canonical path (the cargo door's
+    /// path-dependency bound) and then handed to the snapshot. A writer
+    /// that swaps it, or a directory above it, for a symlink to somewhere
+    /// else in between gets a refusal, never a copy of the elsewhere: the
+    /// root must still be its own canonical path, and it is opened without
+    /// following a symlink at any component.
+    #[test]
+    fn an_extra_root_swapped_for_a_symlink_after_its_check_is_refused() {
+        let temp = TempDir::named("snapshot-swap");
+        let store = temp_store(&temp);
+        let dir = project(&temp);
+        let activity = store.activity(ActivityMode::Shared).unwrap();
+        let outside = temp.0.join("secret");
+        fs::create_dir_all(outside.join("lib")).unwrap();
+        fs::write(outside.join("lib/key"), b"secret").unwrap();
+        let build = |root: &Path| {
+            Snapshot::build(
+                &store,
+                &activity,
+                &SnapshotSpec {
+                    lock_root: &dir,
+                    extra_roots: &[root.to_path_buf()],
+                    exclude: &[],
+                },
+            )
+        };
+
+        // The root itself.
+        let lib = temp.0.join("lib");
+        fs::create_dir_all(&lib).unwrap();
+        let checked = lib.canonicalize().unwrap();
+        fs::rename(&lib, temp.0.join("lib-was")).unwrap();
+        symlink(outside.join("lib"), &lib).unwrap();
+        let error = build(&checked).map(drop).unwrap_err();
+        assert!(
+            error.to_string().contains("changed after it was checked"),
+            "{error}"
+        );
+
+        // A directory above it.
+        let parent = temp.0.join("libs");
+        fs::create_dir_all(parent.join("lib")).unwrap();
+        let checked = parent.join("lib").canonicalize().unwrap();
+        fs::rename(&parent, temp.0.join("libs-was")).unwrap();
+        symlink(&outside, &parent).unwrap();
+        let error = build(&checked).map(drop).unwrap_err();
+        assert!(
+            error.to_string().contains("changed after it was checked"),
+            "{error}"
+        );
+
+        // Opened by component, so a swap after that check fails too.
+        let error = open_dir_no_symlinks(&checked).unwrap_err();
+        assert!(
+            error.to_string().contains("without following a symlink"),
+            "{error}"
+        );
+        open_dir_no_symlinks(&outside.canonicalize().unwrap().join("lib")).unwrap();
     }
 
     #[test]
