@@ -227,8 +227,31 @@ fn serve(
             let why = format!("{} is not served by registry routes", request.method);
             return refuse(out, shown, 405, &why, keep_alive);
         }
+        // The route's own grammar still decides what it serves: a path its
+        // protocol refuses, or maps to another endpoint, is refused here
+        // as it would be on the mirror.
+        let upstream = match route.resolve(&request.target) {
+            Ok(upstream) => upstream,
+            Err(why) => return refuse(out, shown, 403, &why, keep_alive),
+        };
+        let mapped = match &upstream {
+            Upstream::Fetch(mapped) => mapped,
+            Upstream::Local(answer) => &answer.url,
+        };
+        if *mapped != url {
+            let why = format!(
+                "route {} serves this path from {}, not from {}",
+                route.protocol.route_id(),
+                redact::url(mapped.as_str(), &[]),
+                target.origin
+            );
+            return refuse(out, shown, 403, &why, keep_alive);
+        }
         let exchange = exchange(context, route, &state.config.permitted, request);
-        exchange.serve(&url, out)?;
+        match upstream {
+            Upstream::Local(answer) => exchange.local(answer, out)?,
+            Upstream::Fetch(url) => exchange.serve(&url, out)?,
+        }
         return Ok(!request.http10);
     }
     let only = Permitted::only(url.host_str().unwrap_or(target.host), target.port);
@@ -362,7 +385,7 @@ fn git_fetch(url: &Url, method: &str) -> Option<Result<String, String>> {
 }
 
 /// Git's smart HTTP, as served through a tunnel: streamed, never cached,
-/// its `service` query kept in the ledger, and an `upload-pack`
+/// its `service` query named as content, and an `upload-pack`
 /// negotiation body read up to the absolute cap.
 struct GitFetch;
 
@@ -389,6 +412,9 @@ impl RegistryProtocol for GitFetch {
         http::MAX_BODY
     }
 
+    /// Honored where the exchange redacts (the URL a refusal shows), but
+    /// `State::record` still redacts every query value on its way into
+    /// the ledger, so the ledger reads `service=REDACTED` (a follow-up).
     fn content_query_keys(&self) -> &'static [&'static str] {
         &["service"]
     }

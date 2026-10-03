@@ -5,6 +5,7 @@
 pub mod edit;
 pub mod inputs;
 pub mod objects;
+pub mod resolve;
 pub mod rustfmt;
 pub mod tailor;
 

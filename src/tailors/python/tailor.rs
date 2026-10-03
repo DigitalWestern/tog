@@ -126,6 +126,12 @@ impl Tailor for Python {
         // lock names when the project has one, not on the shipped pin.
         let helpers = request.helpers(self)?;
         let env = super::env::realize_env_with(&mut door, &plan, selected, helpers.get("rust"))?;
+        // An sdist's generated Cargo.lock ran through a Detached door with
+        // no project at hand; its ledger is evidence of this sync's
+        // planning, rooted here so GC keeps it.
+        for objects in door.take_kept_ledgers() {
+            crate::kernel::resolve::ledger::root(store, activity, project, &objects)?;
+        }
         // The `.venv` projection and the closure are published through the
         // held project descriptor.
         super::env::project_env_with_inputs(

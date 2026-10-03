@@ -50,6 +50,30 @@ impl Tailor for Cargo {
         super::edit::edit_manifest(edit, door)
     }
 
+    fn resolution_outputs(&self, project: &ProjectRoot) -> io::Result<Vec<PathBuf>> {
+        super::resolve::resolution_outputs(project)
+    }
+
+    fn resolution_inputs(&self, project: &ProjectRoot) -> io::Result<Vec<PathBuf>> {
+        super::resolve::resolution_inputs(project)
+    }
+
+    /// `cargo metadata --locked` at the workspace root, on the Rust the
+    /// selection names with its components and targets.
+    fn attest_lock(
+        &self,
+        ctx: &Context,
+        project: &ProjectRoot,
+        toolchain: &Selected,
+        door: &mut ResolutionDoor<'_>,
+    ) -> io::Result<(crate::kernel::resolve::record::ResolutionRecord, Vec<u8>)> {
+        let extras = cargo::project_extras_in(project)?;
+        let rust_obj =
+            cargo::realize_toolchain(&ctx.store, &ctx.activity, ctx.platform, toolchain, &extras)?;
+        let root = inputs::locate_cargo_root(&rust_obj, project.path(), &ctx.activity)?;
+        super::resolve::attest_project(door, project, &rust_obj, &root, toolchain)
+    }
+
     fn id(&self) -> &'static str {
         "cargo"
     }

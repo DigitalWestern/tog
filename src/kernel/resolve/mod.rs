@@ -50,12 +50,15 @@ pub(crate) mod tripwire;
 use crate::kernel::activity::StoreActivity;
 use crate::kernel::platform::Platform;
 use crate::kernel::policy::Attribution;
+use crate::kernel::resolve::ledger::LedgerObjects;
 use crate::kernel::store::Store;
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
+use std::rc::Rc;
 
 /// Why a door runs a tool. Each census row has one; later the ledger
 /// records it.
@@ -107,6 +110,10 @@ pub struct ResolutionDoor<'a> {
     kind: DoorKind,
     attribution: &'a mut Attribution,
     mode: Mode,
+    /// Ledgers of Detached runs made with no project at hand (an sdist's
+    /// Cargo.lock), shared with every reopened door, for whoever opened
+    /// this one to root under its project ([`Self::take_kept_ledgers`]).
+    kept: Rc<RefCell<Vec<LedgerObjects>>>,
 }
 
 impl<'a> ResolutionDoor<'a> {
@@ -126,6 +133,7 @@ impl<'a> ResolutionDoor<'a> {
             kind,
             attribution,
             mode: Mode::Legacy,
+            kept: Rc::default(),
         })
     }
 
@@ -141,7 +149,21 @@ impl<'a> ResolutionDoor<'a> {
             kind,
             attribution: &mut *self.attribution,
             mode: self.mode,
+            kept: Rc::clone(&self.kept),
         }
+    }
+
+    /// Keep the ledger of a Detached run that has no project to root it
+    /// under, for the caller that opened this door.
+    pub fn keep_ledger(&self, objects: LedgerObjects) {
+        self.kept.borrow_mut().push(objects);
+    }
+
+    /// The ledgers kept so far (by this door or a reopened one), handed
+    /// over once: the caller roots them under its project before its
+    /// store lease ends, or GC may collect them.
+    pub fn take_kept_ledgers(&self) -> Vec<LedgerObjects> {
+        std::mem::take(&mut *self.kept.borrow_mut())
     }
 
     /// Run one tool invocation and report how it ended. A tool that exits

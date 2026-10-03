@@ -5,7 +5,7 @@
 use crate::kernel::activity::StoreActivity;
 use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::platform::Platform;
-use crate::kernel::resolve::{DelegateSpec, ResolutionDoor};
+use crate::kernel::resolve::ResolutionDoor;
 use crate::kernel::store;
 use crate::kernel::supervise;
 use crate::kernel::toolchain::Selected;
@@ -136,7 +136,7 @@ fn locate_workspace(
 /// selection names when there is none. The one place the Cargo tailor
 /// writes project inputs.
 ///
-/// Cargo runs through `door`, a missing-lock door.
+/// Cargo runs confined through `door`, a missing-lock door.
 pub fn ensure_lock(
     project: &ProjectRoot,
     toolchain: &Selected,
@@ -153,7 +153,7 @@ pub fn ensure_lock(
     if read_cargo_lock(&workspace)?.is_some() {
         return Ok(());
     }
-    ensure_cargo_lock(&root, &rust_obj, door)?;
+    ensure_cargo_lock(&workspace, &rust_obj, toolchain, door)?;
     if read_cargo_lock(&workspace)?.is_none() {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
@@ -185,37 +185,28 @@ fn read_cargo_lock(workspace: &ProjectRoot) -> io::Result<Option<String>> {
     workspace.read_input_string(Path::new("Cargo.lock"))
 }
 
+/// `cargo generate-lockfile` at the workspace root, confined through
+/// `door` (a missing-lock door): the lock and its signed resolution record
+/// are published together.
 pub fn ensure_cargo_lock(
-    root: &Path,
+    workspace: &ProjectRoot,
     rust_obj: &Path,
+    toolchain: &Selected,
     door: &mut ResolutionDoor<'_>,
 ) -> io::Result<()> {
     ui::note(
         "no Cargo.lock; generating it with the store Rust toolchain \
-         (network allowed, unsandboxed)...",
+         (confined, through the resolution proxy)...",
     );
-    let mut spec = DelegateSpec::new(rust_obj.join("bin/cargo"));
-    spec.arg("generate-lockfile")
-        .lock_root(root)
-        .env("CARGO_NET_OFFLINE", "false")
-        .env_remove("RUSTUP_HOME")
-        .env_remove("RUSTUP_TOOLCHAIN");
-    spec.trace();
-    let report = door.run(spec).map_err(|e| {
+    super::resolve::generate_lock(door, workspace, rust_obj, toolchain).map_err(|e| {
         io::Error::new(
             e.kind(),
             format!(
-                "could not run store Cargo to generate Cargo.lock: {e}; \
-                     run `tog` after fixing the project or network"
+                "could not generate Cargo.lock: {e}; \
+                 run `tog` after fixing the project or network"
             ),
         )
-    })?;
-    if !report.status.success() {
-        return Err(io::Error::other(
-            "store Cargo generate-lockfile failed; check the project manifest and network",
-        ));
-    }
-    Ok(())
+    })
 }
 
 #[cfg(test)]

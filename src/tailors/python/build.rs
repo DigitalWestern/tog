@@ -4,7 +4,7 @@
 use crate::kernel::activity::StoreActivity;
 use crate::kernel::fetch::{download_verified_held, Digest};
 use crate::kernel::platform::Platform;
-use crate::kernel::resolve::{DelegateSpec, DoorKind, ResolutionDoor};
+use crate::kernel::resolve::{DoorKind, ResolutionDoor};
 use crate::kernel::sandbox::Sandbox;
 use crate::kernel::store::Store;
 use crate::kernel::toolchain::Selected;
@@ -440,7 +440,6 @@ pub(crate) fn plan_sdist_identity_input(
                 &pkg.sha256,
                 &source,
                 &info,
-                &work,
             )?;
             Ok(isolated_sdist_identity_from_ids(
                 platform,
@@ -523,38 +522,54 @@ fn generated_cargo_lock_path(source: &Path, manifest: &Path) -> PathBuf {
         .join("Cargo.lock")
 }
 
+/// `cargo generate-lockfile` for an sdist that ships no `Cargo.lock`,
+/// confined through the door with the unpacked source as its tog-owned
+/// lock root (Detached): the lock is written back there, and the run's
+/// ledger is kept on `door` for the sync that opened it to root under its
+/// project. `manifest_rel` is the sdist's `Cargo.toml`, relative to
+/// `source`.
 fn generate_cargo_lock(
     door: &mut ResolutionDoor<'_>,
     rust_obj: &Path,
-    manifest: &Path,
+    manifest_rel: &Path,
     source: &Path,
-    cargo_home: &Path,
 ) -> io::Result<PathBuf> {
-    fs::create_dir_all(cargo_home)?;
-    let cargo = rust_obj.join("bin/cargo");
-    let path_var = format!("{}:/usr/bin:/bin", rust_obj.join("bin").display());
-    let mut spec = DelegateSpec::new(&cargo);
-    spec.args(["generate-lockfile", "--manifest-path"])
-        .arg(manifest)
-        .lock_root(source)
-        .env("CARGO_HOME", cargo_home)
-        .env("PATH", path_var)
-        .env_remove("RUSTUP_HOME")
-        .env_remove("RUSTUP_TOOLCHAIN");
+    use crate::kernel::provider::cargo_door::{run_cargo, CargoPublish, CargoRun};
+    let manifest_arg = manifest_rel.to_string_lossy().into_owned();
+    let args = [
+        "generate-lockfile",
+        "--manifest-path",
+        manifest_arg.as_str(),
+    ];
+    // cargo writes the lock beside the workspace root's manifest: the
+    // sdist's manifest directory, or the source root above it.
+    let mut outputs = vec![generated_cargo_lock_path(Path::new(""), manifest_rel)];
+    if !outputs.contains(&PathBuf::from("Cargo.lock")) {
+        outputs.push(PathBuf::from("Cargo.lock"));
+    }
     // The sdist ships no Cargo.lock: this is its missing-lock door, whatever
     // the planning door it runs under.
-    let report = door.reopen(DoorKind::MissingLock).run(spec).map_err(|e| {
-        io::Error::new(
-            e.kind(),
-            format!("run store cargo to generate Cargo.lock: {e}"),
-        )
-    })?;
-    if !report.status.success() {
-        return Err(io::Error::other(
-            "store cargo generate-lockfile failed for the sdist",
-        ));
+    let mut missing_lock = door.reopen(DoorKind::MissingLock);
+    let report = run_cargo(
+        &mut missing_lock,
+        CargoRun {
+            rust_obj,
+            lock_root: source,
+            args: &args,
+            publish: CargoPublish::Detached { outputs },
+        },
+    )
+    .map_err(|e| io::Error::new(e.kind(), format!("generate the sdist's Cargo.lock: {e}")))?;
+    if let Some(objects) = report.ledger.clone() {
+        missing_lock.keep_ledger(objects);
     }
-    cargo_lock_for(source, manifest).ok_or_else(|| {
+    if !report.status.success() {
+        return Err(io::Error::other(format!(
+            "store cargo generate-lockfile failed for the sdist: {}",
+            String::from_utf8_lossy(&report.stderr).trim()
+        )));
+    }
+    cargo_lock_for(source, &source.join(manifest_rel)).ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidData,
             "store cargo generated no Cargo.lock next to the sdist manifest",
@@ -594,7 +609,6 @@ fn sdist_rust_default(selected: &Selected) -> Option<&str> {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn rust_plan_inputs(
     door: &mut ResolutionDoor<'_>,
     project_rust: Option<&Selected>,
@@ -602,7 +616,6 @@ fn rust_plan_inputs(
     sdist_sha256: &str,
     source: &Path,
     info: &ArchiveInfo,
-    work: &Path,
 ) -> io::Result<RustPlanInputs> {
     let manifest_rel = info.cargo_manifest.as_ref().ok_or_else(|| {
         io::Error::new(
@@ -664,8 +677,7 @@ fn rust_plan_inputs(
         let rust_obj = crate::kernel::provider::rust::realize_toolchain(
             store, activity, platform, &rust, &extras,
         )?;
-        let plan_home = work.join("cargo-plan-home");
-        let lock = generate_cargo_lock(door, &rust_obj, &manifest, source, &plan_home)?;
+        let lock = generate_cargo_lock(door, &rust_obj, manifest_rel, source)?;
         let text = fs::read_to_string(lock)?;
         fs::create_dir_all(generated_path.parent().expect("cache parent"))?;
         fs::write(&generated_path, &text)?;
@@ -978,7 +990,6 @@ pub(crate) fn build_sdist_wheel_at_depth(
             &pkg.sha256,
             source,
             &info,
-            &work,
         )?)
     } else {
         None
