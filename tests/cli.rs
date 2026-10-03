@@ -341,8 +341,9 @@ fn fmt_is_named_and_typos_are_usage_errors() {
     }
 }
 
-/// `tog ls` prints a `rustfmt` row for the closure `tog fmt` writes,
-/// so `tog ls rustfmt` must be a legal filter rather than a usage error.
+/// `tog ls` accepts exactly the ecosystem names it can print. `tog fmt`
+/// writes no closure, so a `rustfmt.json` an older tog left is not listed
+/// and `rustfmt` is not a filter word.
 #[test]
 fn ls_accepts_every_ecosystem_name_it_can_print() {
     let home = TempDir::boundary("cli-ls-words-home");
@@ -356,7 +357,6 @@ fn ls_accepts_every_ecosystem_name_it_can_print() {
                     "rustfmt_object":{"path":"/store/objects/f","id":"f"}}}"#,
     )
     .unwrap();
-    // A second closure, so the filter has something to leave out.
     std::fs::write(
         project.0.join(".tog/closures/python.json"),
         r#"{"schema":"closure/1","ecosystem":"python","projected_at":0,
@@ -365,43 +365,35 @@ fn ls_accepts_every_ecosystem_name_it_can_print() {
                                          "filename":"six-1.17.0-py2.py3-none-any.whl"}]}}}"#,
     )
     .unwrap();
-    let everything = text(&tog(&project.0, &home.0, &["ls"]).stdout);
+    let out = tog(&project.0, &home.0, &["ls"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let everything = text(&out.stdout);
     assert!(
-        everything.contains("rustfmt 1.96.1") && everything.contains("six  1.17.0"),
+        everything.contains("six  1.17.0") && !everything.contains("rustfmt"),
         "{everything}"
     );
-
-    let out = tog(&project.0, &home.0, &["ls", "rustfmt"]);
-    assert_eq!(
-        out.status.code(),
-        Some(0),
-        "stdout:\n{}\nstderr:\n{}",
-        text(&out.stdout),
-        text(&out.stderr)
-    );
-    let filtered = text(&out.stdout);
-    assert!(filtered.contains("rustfmt 1.96.1"), "{filtered}");
-    assert!(
-        !filtered.contains("six") && !filtered.contains("python"),
-        "the rustfmt filter listed another closure:\n{filtered}"
-    );
+    let out = tog(&project.0, &home.0, &["ls", "python"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(text(&out.stdout).contains("six  1.17.0"));
 
     // The help text names the same set the parser accepts.
     let help = tog(&project.0, &home.0, &["ls", "-h"]);
     assert_eq!(help.status.code(), Some(0));
     assert!(
-        text(&help.stdout).contains("rustfmt"),
+        !text(&help.stdout).contains("rustfmt"),
         "{}",
         text(&help.stdout)
     );
 
-    let out = tog(&project.0, &home.0, &["ls", "npm"]);
-    assert_eq!(out.status.code(), Some(2));
-    assert!(
-        text(&out.stderr).contains("unknown ecosystem 'npm'"),
-        "{}",
-        text(&out.stderr)
-    );
+    for word in ["npm", "rustfmt"] {
+        let out = tog(&project.0, &home.0, &["ls", word]);
+        assert_eq!(out.status.code(), Some(2));
+        assert!(
+            text(&out.stderr).contains(&format!("unknown ecosystem '{word}'")),
+            "{}",
+            text(&out.stderr)
+        );
+    }
 }
 
 /// A global option is the same option wherever it is typed. `tog ls -v` in
@@ -411,15 +403,6 @@ fn global_options_work_after_the_command() {
     let home = TempDir::boundary("cli-globals-home");
     let project = TempDir::boundary("cli-globals-project");
     std::fs::create_dir_all(project.0.join(".tog/closures")).unwrap();
-    std::fs::write(
-        project.0.join(".tog/closures/rustfmt.json"),
-        r#"{"schema":"closure/1","ecosystem":"rustfmt","projected_at":0,
-            "body":{"rust_version":"1.96.1",
-                    "rust_object":{"path":"/store/objects/r","id":"r"},
-                    "rustfmt_object":{"path":"/store/objects/f","id":"f"}}}"#,
-    )
-    .unwrap();
-
     std::fs::write(
         project.0.join(".tog/closures/python.json"),
         r#"{"schema":"closure/1","ecosystem":"python","projected_at":0,
@@ -434,7 +417,6 @@ fn global_options_work_after_the_command() {
     let out = tog(&project.0, &home.0, &["ls", "-v"]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     let verbose = text(&out.stdout);
-    assert!(verbose.contains("rustfmt"), "{verbose}");
     assert!(
         verbose.contains("six  1.17.0  six-1.17.0-py2.py3-none-any.whl"),
         "{verbose}"
@@ -2803,104 +2785,54 @@ fn audit_is_stale_when_the_toolchain_lock_does_not_describe_the_closure() {
     );
 }
 
-/// Write the `rustfmt` closure `tog fmt` would write for `project` with
-/// this binary's pins, after `edit` changes its body.
-fn write_rustfmt_closure(
-    home: &Path,
-    project: &Path,
-    edit: impl FnOnce(&mut serde_json::Value),
-) -> PathBuf {
+/// An older `tog fmt` left `.tog/closures/rustfmt.json` beside the
+/// project's closures. Nothing reads it any more: `audit`, `status`, and
+/// `ls` answer as they would without it, rather than reporting an orphaned
+/// or unknown record (`sbom` skips it too; its unit test covers that).
+#[test]
+fn a_leftover_rustfmt_record_is_ignored_by_every_reader() {
+    let home = TempDir::boundary("cli-leftover-fmt-home");
+    let project = TempDir::boundary("cli-leftover-fmt-project");
+    synced_python_closure_with_exception(&home.0, &project.0, "git-dependency");
     let platform = tog::kernel::platform::Platform::host().unwrap();
-    let mut body = tog::tailors::cargo::rustfmt::pinned_record(platform, project, "").unwrap();
-    body["exceptions"] = serde_json::json!([]);
-    edit(&mut body);
-    let closures = project.join(".tog/closures");
-    std::fs::create_dir_all(&closures).unwrap();
-    let path = closures.join("rustfmt.json");
     let mut envelope = serde_json::json!({
         "schema": "closure/1",
         "ecosystem": "rustfmt",
         "platform": platform.triple(),
         "projected_at": 1,
-        "body": body,
+        "body": {
+            "rust_version": "1.96.1",
+            "rust_object": {"path": "/store/objects/r", "id": "r"},
+            "rustfmt_object": {"path": "/store/objects/f", "id": "f"},
+            "exceptions": [],
+        },
     });
-    signing_key(home).sign(&mut envelope).unwrap();
-    std::fs::write(&path, serde_json::to_vec_pretty(&envelope).unwrap()).unwrap();
-    path
-}
-
-/// The `rustfmt` record passes audit only when it names the rustfmt this
-/// binary pins for the project; one made by another rustfmt is stale, and
-/// one from before the record carried inputs is outdated.
-#[test]
-fn audit_compares_the_rustfmt_record_to_its_pin() {
-    let home = TempDir::boundary("cli-audit-rustfmt-home");
-    let project = TempDir::boundary("cli-audit-rustfmt-project");
-    std::fs::write(project.0.join("Cargo.toml"), "[package]\nname = \"p\"\n").unwrap();
-    // A toolchain file naming rustfmt makes `sync` record an exception; the
-    // read-only audit must resolve the same pin without recording one.
+    signing_key(&home.0).sign(&mut envelope).unwrap();
     std::fs::write(
-        project.0.join("rust-toolchain.toml"),
-        "[toolchain]\nchannel = \"stable\"\ncomponents = [\"rustfmt\"]\n",
+        project.0.join(".tog/closures/rustfmt.json"),
+        serde_json::to_vec_pretty(&envelope).unwrap(),
     )
     .unwrap();
 
-    // The rustfmt record itself is clean; the report still fails because
-    // the Cargo project it belongs to has no cargo.json (never synced), and
-    // the optional rustfmt record is no substitute for it.
-    write_rustfmt_closure(&home.0, &project.0, |_| {});
-    let out = tog(&project.0, &home.0, &["audit"]);
-    assert_eq!(
-        out.status.code(),
-        Some(1),
-        "stdout:\n{}\nstderr:\n{}",
-        text(&out.stdout),
-        text(&out.stderr)
-    );
-    assert!(
-        text(&out.stdout).contains("rustfmt  clean")
-            && text(&out.stdout).contains("cargo    missing"),
-        "{}",
-        text(&out.stdout)
-    );
     let out = tog(&project.0, &home.0, &["audit", "--json"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(value["closures"][0]["verdict"], "clean");
-    assert_eq!(value["closures"][0]["passed"], true);
-    assert_eq!(value["closures"][0]["signature"]["state"], "trusted");
-    assert_eq!(value["missing"], serde_json::json!(["cargo"]));
-    assert_eq!(value["passed"], false);
+    assert_eq!(value["closures"].as_array().unwrap().len(), 1, "{value}");
+    assert_eq!(value["closures"][0]["ecosystem"], "python");
+    assert_eq!(value["missing"], serde_json::json!([]));
+    assert_eq!(value["passed"], true);
 
-    let older = format!("{}-rustfmt-1.95.0", "0".repeat(40));
-    write_rustfmt_closure(&home.0, &project.0, |body| {
-        body["inputs"]["rustfmt_object"] = serde_json::json!(older);
-        body["rustfmt_object"]["id"] = serde_json::json!(older);
-    });
-    let out = tog(&project.0, &home.0, &["audit"]);
-    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stdout));
-    assert!(
-        text(&out.stdout).contains("rustfmt  stale")
-            && text(&out.stdout).contains(&older)
-            && text(&out.stdout).contains("run 'tog fmt'"),
-        "{}",
-        text(&out.stdout)
-    );
-
-    write_rustfmt_closure(&home.0, &project.0, |body| {
-        body.as_object_mut().unwrap().remove("inputs");
-    });
-    let out = tog(&project.0, &home.0, &["audit", "--json"]);
-    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
-    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(value["passed"], false);
-    assert_eq!(value["closures"][0]["freshness"], "outdated");
-    assert!(
-        value["closures"][0]["freshness_detail"]
-            .as_str()
-            .unwrap()
-            .contains("tog fmt"),
-        "{value}"
-    );
+    for args in [&["status"][..], &["ls"]] {
+        let out = tog(&project.0, &home.0, args);
+        assert!(
+            !text(&out.stdout).contains("rustfmt") && !text(&out.stderr).contains("rustfmt"),
+            "{args:?}\nstdout:\n{}\nstderr:\n{}",
+            text(&out.stdout),
+            text(&out.stderr)
+        );
+    }
+    let out = tog(&project.0, &home.0, &["status"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stdout));
 }
 
 // APFS rejects non-UTF-8 filenames with EILSEQ. The filesystem case runs
@@ -2917,15 +2849,28 @@ fn audit_json_handles_non_utf8_project_and_closure_paths() {
         b'p', b'r', b'o', b'j', b'e', b'c', b't', b'-', 0xff,
     ]));
     std::fs::create_dir_all(&project).unwrap();
-    std::fs::write(project.join("Cargo.toml"), "[package]\nname = \"p\"\n").unwrap();
-    let closure = write_rustfmt_closure(&home.0, &project, |_| {});
+    // A signed python record whose inputs were never recorded: the gate
+    // reads and reports it (not current, so exit 1), which is all the path
+    // rendering below needs.
+    std::fs::write(project.join("requirements.txt"), "six==1.17.0\n").unwrap();
+    let closures = project.join(".tog/closures");
+    std::fs::create_dir_all(&closures).unwrap();
+    let closure = closures.join("python.json");
+    let mut envelope = serde_json::json!({
+        "schema": "closure/1",
+        "ecosystem": "python",
+        "platform": tog::kernel::platform::Platform::host().unwrap().triple(),
+        "projected_at": 1,
+        "body": {"plan": {"packages": []}, "exceptions": []},
+    });
+    signing_key(&home.0).sign(&mut envelope).unwrap();
+    std::fs::write(&closure, serde_json::to_vec_pretty(&envelope).unwrap()).unwrap();
 
     let out = tog(&project, &home.0, &["audit", "--json"]);
-    // Exit 1: the Cargo project has no cargo.json (see the pin test above).
     assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
     let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(value["closures"][0]["passed"], true);
-    assert_eq!(value["missing"], serde_json::json!(["cargo"]));
+    assert_eq!(value["closures"][0]["ecosystem"], "python");
+    assert_eq!(value["missing"], serde_json::json!([]));
     assert_eq!(value["project"], project.to_string_lossy().as_ref());
     assert_eq!(
         value["project_bytes"],
@@ -3275,15 +3220,15 @@ fn audit_is_an_offline_admission_gate_over_recorded_exceptions() {
     let path = synced_python_closure_with_exception(&home.0, &mismatch.0, "git-dependency");
     let body = std::fs::read_to_string(&path).unwrap().replacen(
         "\"ecosystem\": \"python\"",
-        "\"ecosystem\": \"rustfmt\"",
+        "\"ecosystem\": \"node\"",
         1,
     );
-    assert!(body.contains("\"ecosystem\": \"rustfmt\""), "{body}");
+    assert!(body.contains("\"ecosystem\": \"node\""), "{body}");
     std::fs::write(&path, body).unwrap();
     let out = tog(&mismatch.0, &home.0, &["audit"]);
     assert_eq!(out.status.code(), Some(1));
     assert!(
-        text(&out.stderr).contains(r#"claims ecosystem "rustfmt" but is named "python""#),
+        text(&out.stderr).contains(r#"claims ecosystem "node" but is named "python""#),
         "{}",
         text(&out.stderr)
     );
@@ -3377,38 +3322,21 @@ fn keygen_writes_a_private_key_and_prints_the_policy_table() {
     let project = TempDir::boundary("cli-keygen-project");
     std::fs::create_dir_all(home.0.join(".tog")).unwrap();
     std::fs::write(home.0.join(".tog/policy.toml"), &stdout).unwrap();
-    std::fs::write(project.0.join("Cargo.toml"), "[package]\nname = \"p\"\n").unwrap();
-    let platform = tog::kernel::platform::Platform::host().unwrap();
-    let mut body = tog::tailors::cargo::rustfmt::pinned_record(platform, &project.0, "").unwrap();
-    body["exceptions"] = serde_json::json!([]);
-    let mut envelope = serde_json::json!({
-        "schema": "closure/1",
-        "ecosystem": "rustfmt",
-        "platform": platform.triple(),
-        "projected_at": 1,
-        "body": body,
-    });
+    // The record is written under a scratch home (its own key and policy)
+    // and re-signed with the key keygen made.
+    let scratch = TempDir::boundary("cli-keygen-scratch");
+    let closure = synced_python_closure_with_exception(&scratch.0, &project.0, "git-dependency");
+    let mut envelope: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&closure).unwrap()).unwrap();
+    envelope.as_object_mut().unwrap().remove("signature");
     key.sign(&mut envelope).unwrap();
-    let closures = project.0.join(".tog/closures");
-    std::fs::create_dir_all(&closures).unwrap();
-    std::fs::write(
-        closures.join("rustfmt.json"),
-        serde_json::to_vec_pretty(&envelope).unwrap(),
-    )
-    .unwrap();
-    // cargo.json is required for the detected Cargo project: the optional
-    // rustfmt record alone is `missing` for cargo.
+    std::fs::write(&closure, serde_json::to_vec_pretty(&envelope).unwrap()).unwrap();
     let out = tog(&project.0, &home.0, &["audit", "--json"]);
-    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(value["closures"][0]["verdict"], "clean");
-    assert_eq!(value["missing"], serde_json::json!(["cargo"]));
-    let out = tog(&project.0, &home.0, &["audit"]);
-    assert!(
-        text(&out.stdout).contains("cargo    missing       no closure for the cargo inputs"),
-        "{}",
-        text(&out.stdout)
-    );
+    assert_eq!(value["closures"][0]["signature"]["state"], "trusted");
+    assert_eq!(value["missing"], serde_json::json!([]));
 }
 
 #[test]
@@ -3432,7 +3360,6 @@ fn a_bad_signing_key_fails_every_closure_writer_before_the_store_is_touched() {
     ] {
         for args in [
             &["sync"][..],
-            &["fmt", "--eco", "rust", "--check"],
             &["build"],
             &["add", "py:six", "--no-sync"],
             &["attest"],

@@ -57,7 +57,11 @@ pub fn generate(project_dir: &Path) -> io::Result<Value> {
         Ok(rd) => rd
             .filter_map(|e| e.ok())
             .filter_map(|e| e.file_name().to_str().map(String::from))
-            .filter(|n| n.ends_with(".json") && !n.starts_with('.'))
+            .filter(|n| {
+                n.ends_with(".json")
+                    && !n.starts_with('.')
+                    && !crate::kernel::store::is_retired_closure(Path::new(n))
+            })
             .map(|n| n.trim_end_matches(".json").to_string())
             .collect(),
         Err(_) => Vec::new(),
@@ -180,8 +184,8 @@ mod tests {
                 }],
             }),
         );
-        // The toolchain-only closure `tog fmt` writes: no packages, and
-        // an SBOM must survive it rather than fail the whole document.
+        // The record an older `tog fmt` left: not a closure any more, so it
+        // is skipped rather than failing the whole document.
         write(
             "rustfmt",
             json!({
@@ -199,8 +203,8 @@ mod tests {
             .unwrap()
             .starts_with("urn:uuid:"));
         let comps = doc["components"].as_array().unwrap();
-        // 1 pypi + 2 npm + 2 dependency environments + rust and rustfmt
-        assert_eq!(comps.len(), 7);
+        // 1 pypi + 2 npm + 2 dependency environments
+        assert_eq!(comps.len(), 5);
         let purls: Vec<&str> = comps.iter().filter_map(|c| c["purl"].as_str()).collect();
         assert!(purls.contains(&"pkg:pypi/flask-login@0.6.3"));
         assert!(purls.contains(&"pkg:npm/%40types/node@22.0.0"));
@@ -212,14 +216,14 @@ mod tests {
             .filter(|p| p["name"] == "tog:store-id")
             .filter_map(|p| p["value"].as_str())
             .collect();
-        // Closures are processed in name order: node, python, then rustfmt.
-        assert_eq!(ids, ["def456", "abc123", "rust789", "fmt012"]);
+        // Closures are processed in name order: node, then python.
+        assert_eq!(ids, ["def456", "abc123"]);
         let env_names: Vec<&str> = comps
             .iter()
             .filter(|c| c["type"] == "application")
             .filter_map(|c| c["name"].as_str())
             .collect();
-        assert_eq!(env_names, ["node-env", "python-env", "rust", "rustfmt"]);
+        assert_eq!(env_names, ["node-env", "python-env"]);
         let properties = doc["metadata"]["properties"].as_array().unwrap();
         assert!(properties.iter().any(|p| {
             p["name"] == "tog:exception:requirement-skipped"
@@ -229,80 +233,6 @@ mod tests {
             p["name"] == "tog:exception:install-script-failed"
                 && p["value"] == "node_modules/a: postinstall: network-denied"
         }));
-    }
-
-    /// A synced Rust project that has also been formatted has both closures;
-    /// they name the same Rust object, which belongs in the inventory once.
-    #[test]
-    fn rustfmt_closure_lists_the_shared_rust_object_once() {
-        let mut out = Vec::new();
-        eco_components(
-            "cargo",
-            &json!({
-                "rust_object": {"path": "/store/objects/rust789", "id": "rust789"},
-                "plan": {
-                    "rust_version": "1.96.1",
-                    "crates": [{"name": "itoa", "version": "1.0.11",
-                                "sha256": "bb".repeat(32)}],
-                },
-            }),
-            &mut out,
-        )
-        .unwrap();
-        eco_components(
-            "rustfmt",
-            &json!({
-                "rust_object": {"path": "/store/objects/rust789", "id": "rust789"},
-                "rustfmt_object": {"path": "/store/objects/fmt012", "id": "fmt012"},
-                "rust_version": "1.96.1",
-                "workspace_root": "/w",
-            }),
-            &mut out,
-        )
-        .unwrap();
-        let toolchains: Vec<(&str, &str)> = out
-            .iter()
-            .filter(|c| c["type"] == "application")
-            .map(|c| {
-                (
-                    c["name"].as_str().unwrap(),
-                    c["properties"][0]["value"].as_str().unwrap(),
-                )
-            })
-            .collect();
-        assert_eq!(
-            toolchains,
-            [("rust", "rust789"), ("rustfmt", "fmt012")],
-            "{out:?}"
-        );
-    }
-
-    /// A malformed fmt closure is an error, never a silently thinner SBOM.
-    #[test]
-    fn rustfmt_closure_requires_both_objects_and_the_version() {
-        for (body, missing) in [
-            (
-                json!({"rustfmt_object": {"id": "fmt012"}, "rust_version": "1.96.1"}),
-                "rust_object",
-            ),
-            (
-                json!({"rust_object": {"id": "rust789"}, "rust_version": "1.96.1"}),
-                "rustfmt_object",
-            ),
-            (
-                json!({"rust_object": {"id": "rust789"},
-                       "rustfmt_object": {"id": "fmt012"}}),
-                "rust_version",
-            ),
-        ] {
-            let mut out = Vec::new();
-            let error =
-                eco_components("rustfmt", &body, &mut out).expect_err(&format!("accepted {body}"));
-            assert!(
-                error.to_string().contains(&format!("'{missing}'")),
-                "{body}: {error}"
-            );
-        }
     }
 
     #[test]

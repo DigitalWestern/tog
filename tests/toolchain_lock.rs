@@ -1430,22 +1430,16 @@ fn a_local_toolchain_is_locked_by_content_and_fails_closed_when_it_changes() {
     let out = fixture.tog(&["sync"]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
 
-    // Now the tree's own formatter runs, and the import is the formatter
-    // object the rustfmt record names.
+    // Now the tree's own formatter runs, and `tog fmt` writes no record
+    // of it: the lock already names the tree.
     let out = fixture.tog(&["fmt", "--check"]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     assert_eq!(
         std::fs::read_to_string(fixture.dir().join("formatted.txt")).unwrap(),
         "--check\n"
     );
-    let record: serde_json::Value = serde_json::from_slice(
-        &std::fs::read(fixture.dir().join(".tog/closures/rustfmt.json")).unwrap(),
-    )
-    .unwrap();
-    let body = &record["body"];
-    assert_eq!(body["rustfmt_object"]["id"], body["rust_object"]["id"]);
-    assert_eq!(body["rust_version"], "1.97.0");
-    // And status reads the closure as current.
+    assert!(!fixture.dir().join(".tog/closures/rustfmt.json").exists());
+    // And status reads the cargo closure as current.
     let out = fixture.tog(&["status"]);
     let stdout = text(&out.stdout);
     assert_eq!(out.status.code(), Some(0), "{stdout}{}", text(&out.stderr));

@@ -459,9 +459,7 @@ pub(super) fn validate_rust_layout(staged: &Path, platform: Platform) -> io::Res
 ///
 /// This is the pre-lock answer, kept for the tests that pin how a file maps
 /// onto the catalog. No command resolves a project this way: a project's
-/// Rust is its lock's selection, `tog status` and `tog audit` ask through
-/// [`resolve_toolchain_quiet`] only when there is no lock, and the Python
-/// sdist build of a project whose lock names no Rust uses
+/// Rust is its lock's selection, and the Python sdist build of a project whose lock names no Rust uses
 /// [`resolve_toolchain_within_or`]: its tree is a store scratch directory
 /// that is nobody's tog project.
 /// Every entry point that is handed a [`Selected`] takes the version from it
@@ -504,8 +502,8 @@ pub fn resolve_toolchain_within_or(
     )
 }
 
-/// The version `resolve_toolchain` would choose, without its narration, so
-/// a read-only caller (`tog status`, `tog audit`) can ask.
+/// The version `resolve_toolchain` would choose, without its narration.
+#[cfg(test)]
 pub fn resolve_toolchain_quiet(platform: Platform, project_dir: &Path) -> io::Result<&'static str> {
     resolve_toolchain_with(
         platform,

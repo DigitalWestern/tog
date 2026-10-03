@@ -387,7 +387,8 @@ has proven a model for compiled tools. Cargo today stores vendored sources;
 **4b-5. `fmt` for the remaining ecosystems** under the WP1 contract: Python
 (ruff format via `x`), Go (gofmt is already in the toolchain), then the rest.
 Each keeps the WP1 rules: named command, script precedence, `--eco` escape
-hatch, own store object with a closure/GC reference, exit-status pass-through.
+hatch, own store object pinned by the lock's release row (no closure record,
+so nothing roots it between runs; #386), exit-status pass-through.
 
 **4b-6. One real project per fixture-only ecosystem** (Cargo, Go, Ruby,
 Elixir, .NET), recorded in `docs/agent/HITRATE.md`. Extend `tools/hitrate.py` to measure
@@ -1867,7 +1868,7 @@ key-file and policy syntax). The record has no timestamps, port, token,
 platform, isolation engine, or store object ids other than the ledger's,
 and the ledger id is itself portable (see "Store identity"). The key is
 `TOG_SIGNING_KEY`, the same key that signs closures. The door loads it at
-preflight, as `sync` and `fmt` do, and that loading extends to `add`,
+preflight, as `sync` does, and that loading extends to `add`,
 `remove`, `update`, `x`, and the new `tog attest`. When `TOG_SIGNING_KEY`
 is unset in the running process, the record has no `signature` field (the
 unsigned closure convention). Such a record is honest but unattested.

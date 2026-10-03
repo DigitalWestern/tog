@@ -65,7 +65,7 @@
 //!   on it, and a kind this binary does not know is `unknown` either way.
 
 use crate::cli;
-use crate::commands::inspect::{self, refresh, ClosureFile, State};
+use crate::commands::inspect::{self, ClosureFile, State};
 use crate::commands::shared::project_dir;
 use crate::kernel::platform::Platform;
 use crate::kernel::policy::{self, Exception, Policy, PolicySource, SourceOrigin};
@@ -353,9 +353,8 @@ fn check_shape(closure: &ClosureFile) -> io::Result<()> {
         io::Error::new(
             io::ErrorKind::InvalidData,
             format!(
-                "{:?}: {what}; the record is refused, not judged: run '{}'",
-                closure.path.to_string_lossy(),
-                refresh(&closure.ecosystem)
+                "{:?}: {what}; the record is refused, not judged: run 'tog'",
+                closure.path.to_string_lossy()
             ),
         )
     };
@@ -399,11 +398,8 @@ fn freshness(
     present: &[&str],
     key: &str,
 ) -> io::Result<Freshness> {
-    // A closure is judged against the inputs of the ecosystem that owns it:
-    // the `rustfmt` record `tog fmt` writes belongs to a Cargo project.
-    let owner = tailors::for_closure(&closure.ecosystem)
-        .map(|tailor| tailor.id())
-        .unwrap_or(closure.ecosystem.as_str());
+    // A closure is judged against the inputs of the ecosystem that owns it.
+    let owner = closure.ecosystem.as_str();
     if !present.contains(&owner) {
         return Ok(Freshness::Stale(format!(
             "no {owner} inputs found here; the closure is orphaned"
@@ -413,25 +409,12 @@ fn freshness(
         // Envelopes without a platform predate the Linux port; `status`
         // cannot tell whether such a record was made on this host.
         return Ok(Freshness::Outdated(format!(
-            "closure records no platform; run '{}' once{key}, then commit",
-            refresh(&closure.ecosystem)
+            "closure records no platform; run 'tog' once{key}, then commit"
         )));
     }
     Ok(freshness_from_state(inspect::locked_closure_state(
         platform, dir, closure,
     )?))
-}
-
-/// The command that rewrites a closure recording a retired kind: the one
-/// that wrote it. The retired table says why each kind is out of date, and
-/// the closure's writer is what drops it, so a `rustfmt` record names
-/// `tog fmt` and every ecosystem's closure names `tog sync`.
-fn rerecord(ecosystem: &str) -> &'static str {
-    if ecosystem == "rustfmt" {
-        "tog fmt"
-    } else {
-        "tog sync"
-    }
 }
 
 /// The `status` state of a record, as the gate reads it: only `Synced` is
@@ -553,8 +536,7 @@ pub fn evaluate(
             false => {
                 if !matches!(freshness, Freshness::Stale(_)) {
                     freshness = Freshness::Outdated(format!(
-                        "no exception record in this closure; run '{}' once{key}, then commit",
-                        refresh(&closure.ecosystem)
+                        "no exception record in this closure; run 'tog' once{key}, then commit"
                     ));
                 }
             }
@@ -562,8 +544,7 @@ pub fn evaluate(
         if !matches!(freshness, Freshness::Stale(_)) && lacks_resolution_evidence(dir, closure)? {
             freshness = Freshness::Outdated(format!(
                 "no resolution record and no unrecorded-resolution exception (the closure predates \
-                 the resolution join); run '{}' once{key}, then commit",
-                refresh(&closure.ecosystem)
+                 the resolution join); run 'tog' once{key}, then commit"
             ));
         }
         // A retired kind is not judged against the policy: the record is
@@ -571,8 +552,7 @@ pub fn evaluate(
         if let Some((why, kind)) = retired {
             if !matches!(freshness, Freshness::Stale(_)) {
                 freshness = Freshness::Outdated(format!(
-                    "{why} (it records the retired {kind} exception); run '{}'{key}, then commit",
-                    rerecord(&closure.ecosystem)
+                    "{why} (it records the retired {kind} exception); run 'tog sync'{key}, then commit"
                 ));
             }
         }
@@ -590,9 +570,8 @@ pub fn evaluate(
     Ok(verdicts)
 }
 
-/// The detected ecosystems with no primary closure file: each is a record
-/// the gate needs and cannot judge. The optional `rustfmt` record is not a
-/// substitute for `cargo.json`.
+/// The detected ecosystems with no closure file: each is a record the gate
+/// needs and cannot judge.
 pub fn missing_closures(closures: &[ClosureFile], present: &[&str]) -> Vec<String> {
     present
         .iter()
@@ -842,7 +821,7 @@ pub fn render(dir: &Path, report: &Report, json: bool) -> io::Result<String> {
     for verdict in &report.verdicts {
         let record = &verdict.record_sha256[..16];
         let word = verdict.word();
-        let refresh = refresh(&verdict.ecosystem);
+        let refresh = "tog";
         let line = match &verdict.signature {
             Signature::Bad { reason, .. } => format!(
                 "{word:<13} closure {record}: {reason}; find out who changed it, then regenerate with '{refresh}'{key} and commit (not evaluated)"
@@ -1049,7 +1028,6 @@ mod tests {
     use crate::kernel::resolve::record;
     use crate::kernel::signing::SigningKey;
     use crate::kernel::testutil::TempDir;
-    use crate::tailors::cargo::rustfmt;
     use std::collections::BTreeSet;
     use std::fs;
     #[cfg(unix)]
@@ -1163,14 +1141,6 @@ mod tests {
                 "sha256": inspect::sha256_file(&dir.join("requirements.txt")).unwrap(),
             }],
         })
-    }
-
-    /// The body `tog fmt` writes for `dir` with this binary's pins: a
-    /// current `rustfmt` record once `dir` holds Cargo inputs.
-    fn rustfmt_body(dir: &Path) -> Value {
-        let mut body = rustfmt::pinned_record(host(), dir, "").unwrap();
-        body["exceptions"] = json!([]);
-        body
     }
 
     /// Write `.tog/closures/<name>.json`, signed with the test key, and
@@ -1344,14 +1314,7 @@ mod tests {
     fn one_failing_closure_fails_the_whole_report() {
         let temp = python_project("mixed");
         let dir = &temp.0;
-        fs::write(dir.join("Cargo.toml"), "[package]\nname = \"mixed\"\n").unwrap();
-        let clean = write_closure(
-            dir,
-            "rustfmt",
-            "rustfmt",
-            Some(host().triple()),
-            rustfmt_body(dir),
-        );
+        let clean = with_exceptions(dir, &[]);
         let failing = with_exceptions(dir, &[exception(GIT_DEPENDENCY, "left-pad")]);
         let policy = deny(&[GIT_DEPENDENCY]);
         for closures in [
@@ -2177,248 +2140,18 @@ mod tests {
         assert!(matches!(verdicts[0].freshness, Freshness::Stale(_)));
     }
 
-    /// `tog fmt` projects nothing, so its record is compared with the
-    /// pins: current only when it names the rustfmt this binary would use
-    /// for the project, and judged on its exceptions like any other record.
-    #[test]
-    fn rustfmt_record_is_compared_with_its_pin() {
-        let temp = TempDir::named("rustfmt");
-        let dir = &temp.0;
-        fs::write(dir.join("Cargo.toml"), "[package]\nname = \"fmt\"\n").unwrap();
-        let write = |body: Value| {
-            [write_closure(
-                dir,
-                "rustfmt",
-                "rustfmt",
-                Some(host().triple()),
-                body,
-            )]
-        };
-
-        // Current: passes, and its exceptions are still judged.
-        let mut body = rustfmt_body(dir);
-        body["exceptions"] = json!([exception(policy::UNATTESTED_CARGO_LOCK, "Cargo.lock")]);
-        let closures = write(body.clone());
-        let verdicts = judge(dir, &permissive(), &closures);
-        assert_eq!(verdicts[0].freshness, Freshness::Current, "{verdicts:?}");
-        assert!(verdicts[0].passes());
-        let verdicts = judge(dir, &deny(&[policy::UNATTESTED_CARGO_LOCK]), &closures);
-        assert!(!verdicts[0].passes());
-
-        // Inputs carrying anything this binary would not write: stale.
-        let mut extra = body.clone();
-        extra["inputs"]["note"] = json!("hand-added");
-        let verdicts = judge(dir, &permissive(), &write(extra));
-        assert!(matches!(verdicts[0].freshness, Freshness::Stale(_)));
-
-        // A retired kind in a rustfmt record: `tog fmt` rewrites it, not a sync.
-        let mut retired = body.clone();
-        retired["exceptions"] = json!([exception("toolchain-component-unavailable", "rustfmt")]);
-        let verdicts = judge(dir, &permissive(), &write(retired));
-        assert!(
-            matches!(
-                verdicts[0].freshness,
-                Freshness::Outdated(ref why) if why.contains(
-                    "retired toolchain-component-unavailable exception); run 'tog fmt' under a trusted key"
-                )
-            ),
-            "{verdicts:?}"
-        );
-
-        // Made by another rustfmt version: stale, naming both objects.
-        let current = body["rustfmt_object"]["id"].as_str().unwrap().to_string();
-        let older = format!("{}-rustfmt-1.95.0", "0".repeat(40));
-        let mut stale = body.clone();
-        stale["inputs"]["rustfmt_object"] = json!(older);
-        stale["rustfmt_object"]["id"] = json!(older);
-        stale["rust_version"] = json!("1.95.0");
-        let verdicts = judge(dir, &permissive(), &write(stale));
-        let Freshness::Stale(why) = &verdicts[0].freshness else {
-            panic!("{verdicts:?}");
-        };
-        assert!(why.contains(&older) && why.contains(&current), "{why}");
-        assert!(!verdicts[0].passes());
-
-        // Same version, another component pin: the id differs, so stale.
-        let mut repinned = body.clone();
-        let other = format!("{}-rustfmt-1.96.1", "1".repeat(40));
-        repinned["inputs"]["rustfmt_object"] = json!(other);
-        let verdicts = judge(dir, &permissive(), &write(repinned));
-        assert!(matches!(verdicts[0].freshness, Freshness::Stale(_)));
-
-        // Inputs that match but a body naming another object: stale, so the
-        // object `ls`, `sbom`, and `gc` read is the one audited.
-        for (field, value) in [
-            ("rustfmt_object", json!({"id": "other-rustfmt"})),
-            ("rust_object", json!({"id": "other-rust"})),
-            ("rust_version", json!("1.95.0")),
-        ] {
-            let mut forged = body.clone();
-            forged[field] = value;
-            let verdicts = judge(dir, &permissive(), &write(forged));
-            assert!(
-                matches!(&verdicts[0].freshness, Freshness::Stale(why) if why.contains(field)),
-                "{field}: {verdicts:?}"
-            );
-        }
-
-        // No exception record: unchecked, and the fix is a new fmt run.
-        let mut bare = body.clone();
-        bare.as_object_mut().unwrap().remove("exceptions");
-        let verdicts = judge(dir, &permissive(), &write(bare));
-        assert!(
-            matches!(&verdicts[0].freshness, Freshness::Outdated(why) if why.contains("run 'tog fmt'")),
-            "{verdicts:?}"
-        );
-
-        // An inputs-free record from before inputs were recorded: unchecked.
-        let mut old = body.clone();
-        old.as_object_mut().unwrap().remove("inputs");
-        let verdicts = judge(dir, &permissive(), &write(old));
-        let report = Report {
-            policy: permissive(),
-            sources: Vec::new(),
-            verdicts,
-            missing: Vec::new(),
-            signatures_checked: true,
-        };
-        assert!(
-            matches!(&report.verdicts[0].freshness, Freshness::Outdated(why) if why.contains("tog fmt")),
-            "{:?}",
-            report.verdicts[0]
-        );
-        assert!(!report.passes());
-        let value: Value = serde_json::from_str(&render(dir, &report, true).unwrap()).unwrap();
-        assert_eq!(value["closures"][0]["freshness"], "outdated");
-
-        // A python-shaped record under the rustfmt name is compared the same
-        // way; the name alone buys nothing.
-        fs::write(dir.join("requirements.txt"), "six==1.17.0\n").unwrap();
-        let mut python = python_body(dir);
-        python["exceptions"] = json!([]);
-        let verdicts = judge(dir, &permissive(), &write(python));
-        assert!(matches!(verdicts[0].freshness, Freshness::Stale(_)));
-
-        // Components requested after the run change nothing a rustfmt run
-        // records: sync provisions them, so the record stays current, and
-        // what `fmt` records reads nothing but the pins.
-        fs::write(
-            dir.join("rust-toolchain.toml"),
-            "[toolchain]\nchannel = \"stable\"\ncomponents = [\"rustfmt\", \"clippy\"]\n",
-        )
-        .unwrap();
-        let verdicts = judge(dir, &permissive(), &write(body.clone()));
-        assert_eq!(verdicts[0].freshness, Freshness::Current, "{verdicts:?}");
-        assert!(rustfmt_body(dir)["inputs"]
-            .get("unavailable_components")
-            .is_none());
-        // A record from before, which carried the list empty, is what a run
-        // writes now.
-        let mut legacy = body.clone();
-        legacy["inputs"]["unavailable_components"] = json!([]);
-        let verdicts = judge(dir, &permissive(), &write(legacy));
-        assert_eq!(verdicts[0].freshness, Freshness::Current, "{verdicts:?}");
-        // One listing components tog did not ship is not: stale, and the
-        // fix names `tog fmt`.
-        let mut older = body.clone();
-        older["inputs"]["unavailable_components"] = json!(["rustfmt", "clippy"]);
-        let verdicts = judge(dir, &permissive(), &write(older));
-        let Freshness::Stale(why) = &verdicts[0].freshness else {
-            panic!("{verdicts:?}");
-        };
-        assert!(why.contains("clippy"), "{why}");
-        let report = Report {
-            policy: permissive(),
-            sources: Vec::new(),
-            verdicts,
-            missing: Vec::new(),
-            signatures_checked: true,
-        };
-        assert!(render(dir, &report, false)
-            .unwrap()
-            .contains("run 'tog fmt', then audit again"));
-        fs::remove_file(dir.join("rust-toolchain.toml")).unwrap();
-
-        // A run from a workspace member resolves the toolchain from there,
-        // and so does the audit of its record.
-        let member = dir.join("crates/member");
-        fs::create_dir_all(&member).unwrap();
-        let mut from_member = rustfmt::pinned_record(host(), dir, "crates/member").unwrap();
-        from_member["exceptions"] = json!([]);
-        let verdicts = judge(dir, &permissive(), &write(from_member.clone()));
-        assert_eq!(verdicts[0].freshness, Freshness::Current, "{verdicts:?}");
-        fs::write(
-            member.join("rust-toolchain.toml"),
-            "[toolchain]\nchannel = \"1.2\"\n",
-        )
-        .unwrap();
-        let verdicts = judge(dir, &permissive(), &write(from_member.clone()));
-        assert!(
-            matches!(&verdicts[0].freshness, Freshness::Stale(why) if why.contains("pins none")),
-            "{verdicts:?}"
-        );
-        fs::remove_dir_all(dir.join("crates")).unwrap();
-        let verdicts = judge(dir, &permissive(), &write(from_member));
-        assert!(matches!(verdicts[0].freshness, Freshness::Stale(_)));
-        // The lookup directory must be the exact spelling `fmt` records of a
-        // directory inside the workspace: no symlink out, no `..`, no `.`,
-        // no trailing separator.
-        let outside = TempDir::named("rustfmt-outside");
-        std::os::unix::fs::symlink(&outside.0, dir.join("link")).unwrap();
-        fs::create_dir_all(dir.join("inner")).unwrap();
-        for escape in [
-            json!("../"),
-            json!("/"),
-            json!("."),
-            json!("link"),
-            json!("inner/"),
-            json!("inner/../inner"),
-            json!(null),
-            json!(["x"]),
-        ] {
-            let mut escaped = body.clone();
-            escaped["inputs"]["resolved_from"] = escape.clone();
-            let verdicts = judge(dir, &permissive(), &write(escaped));
-            assert!(
-                matches!(&verdicts[0].freshness, Freshness::Stale(why) if why.contains("resolved_from")),
-                "{escape}: {verdicts:?}"
-            );
-        }
-
-        // A toolchain this binary pins no rustfmt for: stale, not an error.
-        fs::write(
-            dir.join("rust-toolchain.toml"),
-            "[toolchain]\nchannel = \"1.2\"\n",
-        )
-        .unwrap();
-        let verdicts = judge(dir, &permissive(), &write(body.clone()));
-        assert!(
-            matches!(&verdicts[0].freshness, Freshness::Stale(why) if why.contains("pins none")),
-            "{verdicts:?}"
-        );
-
-        // Without Cargo inputs the record is orphaned.
-        fs::remove_file(dir.join("rust-toolchain.toml")).unwrap();
-        fs::remove_file(dir.join("Cargo.toml")).unwrap();
-        let verdicts = judge(dir, &permissive(), &write(body));
-        assert!(
-            matches!(&verdicts[0].freshness, Freshness::Stale(why) if why.contains("no cargo inputs")),
-            "{verdicts:?}"
-        );
-    }
-
     #[test]
     fn closure_named_for_another_ecosystem_is_refused() {
         let temp = python_project("mismatch");
         let dir = &temp.0;
         let mut body = python_body(dir);
         body["exceptions"] = json!([]);
-        // Named python.json, claims rustfmt: `sync` would refuse to read it,
+        // Named python.json, claims node: `sync` would refuse to read it,
         // and the gate must not judge it under either name.
         let closures = [write_closure(
             dir,
             "python",
-            "rustfmt",
+            "node",
             Some(host().triple()),
             body,
         )];
@@ -2427,7 +2160,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("claims ecosystem \"rustfmt\" but is named \"python\""),
+                .contains("claims ecosystem \"node\" but is named \"python\""),
             "{error}"
         );
     }
@@ -3023,67 +2756,90 @@ mod tests {
 
     #[test]
     fn a_missing_primary_closure_fails_the_report() {
-        // A python + cargo project: the optional rustfmt record is no
-        // substitute for cargo.json, and a deleted python.json is missing
-        // however clean the records beside it are.
+        // A python + cargo project: a deleted closure is missing however
+        // clean the records beside it are.
         let temp = python_project("missing");
         let dir = &temp.0;
         fs::write(dir.join("Cargo.toml"), "[package]\nname = \"m\"\n").unwrap();
-        let rustfmt = write_closure(
-            dir,
-            "rustfmt",
-            "rustfmt",
-            Some(host().triple()),
-            rustfmt_body(dir),
-        );
         let python = with_exceptions(dir, &[]);
         let present = inspect::detected(dir).unwrap();
         assert_eq!(present, ["python", "cargo"]);
         assert_eq!(
-            missing_closures(&[rustfmt.clone(), python.clone()], &present),
+            missing_closures(std::slice::from_ref(&python), &present),
             vec!["cargo".to_string()]
         );
         assert_eq!(
-            missing_closures(std::slice::from_ref(&rustfmt), &present),
+            missing_closures(&[], &present),
             vec!["python".to_string(), "cargo".to_string()]
         );
         assert!(missing_closures(std::slice::from_ref(&python), &["python"]).is_empty());
-        let verdicts = judge(dir, &permissive(), &[rustfmt.clone(), python.clone()]);
+        let verdicts = judge(dir, &permissive(), std::slice::from_ref(&python));
         assert!(verdicts.iter().all(Verdict::passes), "{verdicts:?}");
         let report = Report {
             policy: permissive(),
             sources: Vec::new(),
             verdicts,
-            missing: missing_closures(&[rustfmt, python], &present),
+            missing: missing_closures(std::slice::from_ref(&python), &present),
             signatures_checked: true,
         };
         assert!(!report.passes());
         let text = render(dir, &report, false).unwrap();
         assert!(
-            text.contains("cargo    missing       no closure for the cargo inputs found here; run 'tog' under a trusted key, then commit\n"),
+            text.contains("cargo   missing       no closure for the cargo inputs found here; run 'tog' under a trusted key, then commit\n"),
             "{text}"
         );
         let value: Value = serde_json::from_str(&render(dir, &report, true).unwrap()).unwrap();
         assert_eq!(value["passed"], false);
         assert_eq!(value["missing"], json!(["cargo"]));
         assert_eq!(value["closures"][0]["passed"], true);
-        // Through the directory: delete the python record and audit.
+        // Through the directory.
         let _env = policy::test_env_lock();
         let _machine = MachinePolicy::trusting("missing-machine", &[test_key()]);
         let report = audit(host(), dir, None).unwrap();
         assert_eq!(report.missing, vec!["cargo".to_string()]);
-        fs::remove_file(dir.join(".tog/closures/python.json")).unwrap();
-        let report = audit(host(), dir, None).unwrap();
-        assert_eq!(
-            report.missing,
-            vec!["python".to_string(), "cargo".to_string()]
-        );
         assert_eq!(report.verdicts.len(), 1);
         assert!(report.verdicts[0].passes());
         assert!(!report.passes());
-        let value: Value = serde_json::from_str(&render(dir, &report, true).unwrap()).unwrap();
-        assert_eq!(value["passed"], false);
-        assert_eq!(value["missing"], json!(["python", "cargo"]));
+    }
+
+    /// An older `tog fmt` left `.tog/closures/rustfmt.json` at a Cargo
+    /// workspace root. It is not a closure any more: the audit neither
+    /// judges it (no orphaned or unknown verdict) nor counts it as the
+    /// cargo record, and with nothing else beside it nothing is synced.
+    #[test]
+    fn a_leftover_rustfmt_record_is_not_audited() {
+        let temp = python_project("leftover-fmt");
+        let dir = &temp.0;
+        let _python = with_exceptions(dir, &[]);
+        fs::write(
+            dir.join(".tog/closures/rustfmt.json"),
+            serde_json::to_vec_pretty(&json!({
+                "schema": "closure/1",
+                "ecosystem": "rustfmt",
+                "platform": host().triple(),
+                "projected_at": 1,
+                "body": {"rust_version": "1.96.1", "exceptions": []},
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let _env = policy::test_env_lock();
+        let _machine = MachinePolicy::trusting("leftover-rustfmt-machine", &[test_key()]);
+        let report = audit(host(), dir, None).unwrap();
+        assert_eq!(report.verdicts.len(), 1, "{:?}", report.verdicts);
+        assert_eq!(report.verdicts[0].ecosystem, "python");
+        assert!(report.missing.is_empty(), "{:?}", report.missing);
+        assert!(report.passes());
+        let rendered = render(dir, &report, false).unwrap();
+        assert!(!rendered.contains("rustfmt.json"), "{rendered}");
+        // A Cargo project with only the leftover: cargo is unsynced, and
+        // the leftover is not mistaken for its record.
+        fs::write(dir.join("Cargo.toml"), "[package]\nname = \"m\"\n").unwrap();
+        let report = audit(host(), dir, None).unwrap();
+        assert_eq!(report.missing, vec!["cargo".to_string()]);
+        fs::remove_file(dir.join(".tog/closures/python.json")).unwrap();
+        let error = audit(host(), dir, None).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::NotFound, "{error}");
     }
 
     #[test]

@@ -213,6 +213,14 @@ the store cargo with `--frozen`; user-supplied `--config` is rejected and
 later runs unsandboxed). Honest gap: `tog run cargo build` is
 offline-configured but not sandboxed; use `tog build`. `tog fmt`
 realizes a separate pinned `rustfmt` object linked against the Rust object.
+It writes no closure: the release row pins the rustfmt archive by sha256, so
+the formatter that runs is the pinned one by construction, and a record of
+it would prove nothing the lock does not. Nothing roots the object, so gc
+can reclaim it between runs. A `.tog/closures/rustfmt.json` an older tog
+wrote is a retired name (`store::RETIRED_CLOSURES`): every closure reader
+but gc's live-set walk skips it, and a `tog fmt` without `--check` deletes it
+once another closure sits beside it (a root over an empty closures
+directory stops every sweep, and forgetting it needs the exclusive lease).
 
 `targets`, `components` and `profile` in `rust-toolchain(.toml)` are lock
 rows (`toolchain.targets`, `toolchain.components`, `toolchain.profile`):
@@ -522,8 +530,8 @@ closures already record against the policy chain plus an optional
 `--policy` file (merged, so it can only tighten), refuses to pass a stale or
 outdated closure, and touches neither the store nor the network.
 
-Closure records are signed. With `TOG_SIGNING_KEY` set, `sync` and `fmt`
-load an Ed25519 key once at preflight and the one closure writer
+Closure records are signed. With `TOG_SIGNING_KEY` set, `sync`
+and the other closure writers load an Ed25519 key once at preflight and the one closure writer
 (`comforter::write_closure_inner`) signs every envelope it publishes over the
 canonical bytes of the whole record (`src/kernel/signing.rs`: the parsed
 value minus its top-level `signature`, serialized compact with keys in byte

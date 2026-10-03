@@ -87,9 +87,6 @@ pub fn run(
                 .expect("one ecosystem has a pinned formatter")
         }
     };
-    // The rustfmt record is signed like every closure; a configured key
-    // that cannot be loaded fails here, before the store is opened.
-    crate::comforter::init_signing()?;
     // Top of the formatter path, and deliberately not above the `--eco`
     // dispatch: a delegated package.json `fmt` script needs no formatter
     // pin. The tailor refuses a host with no pinned component here, before
@@ -113,11 +110,11 @@ pub fn run(
     let ctx = Context::open(platform, true)?;
     // The formatter rides in the same bundle as the toolchain, so it is
     // chosen by the same committed lock and never by a fresh selection.
-    // The record is written at the workspace root and `status`/`audit`
-    // judge it against the lock there, so that is the lock that decides:
-    // start from the nearest project at or above `cwd` (normally the root
-    // already), find the workspace root with it, and resolve again there
-    // when the root holds a lock of its own that was not the one read.
+    // A workspace is formatted as one, so the lock at its root decides,
+    // whichever member `tog fmt` runs from: start from the nearest project
+    // at or above `cwd` (normally the root already), find the workspace
+    // root with it, and resolve again there when the root holds a lock of
+    // its own that was not the one read.
     let resolve_at = |dir: &Path| -> io::Result<Selected> {
         let held = ProjectRoot::open(dir)?;
         project_toolchain::resolve(
@@ -137,12 +134,14 @@ pub fn run(
         .unwrap_or(&cwd_real)
         .to_path_buf();
     let first = resolve_at(&start)?;
-    // Locating the root realizes `first`, which can record exceptions (a
-    // local toolchain's `external-toolchain`). They are discarded: the
-    // record carries what the run below realizes, which records its own.
-    let locating = policy::Attribution::open("rustfmt")?;
+    // Realizing a toolchain can record policy exceptions (a local
+    // toolchain's `external-toolchain`), and a record needs an open frame.
+    // A kind the policy denies is refused as it is recorded, so the gate
+    // holds here as in a sync. A permitted one is printed when recorded,
+    // and `tog fmt` publishes no closure to carry it (a synced project's
+    // cargo closure records the same fact), so the frame is discarded.
+    let attribution = policy::Attribution::open("fmt")?;
     let root = formatter.fmt_root(&ctx, &cwd, &first)?;
-    locating.discard();
     let decides = if root.join(LOCK_PATH).symlink_metadata().is_ok() {
         root
     } else {
@@ -153,11 +152,7 @@ pub fn run(
     } else {
         resolve_at(&decides)?
     };
-    let mut attribution = policy::Attribution::open("rustfmt")?;
-    let status = formatter.fmt(&ctx, &cwd, check, args, &selected, &mut attribution)?;
-    attribution.finish(true)?;
-    if crate::comforter::signing_key().is_none() {
-        ui::note("fmt: rustfmt record unsigned; tog audit reports it outdated (set TOG_SIGNING_KEY to sign)");
-    }
+    let status = formatter.fmt(&ctx, &cwd, check, args, &selected)?;
+    attribution.discard();
     Ok(status)
 }

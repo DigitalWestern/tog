@@ -29,6 +29,31 @@ pub use objects::*;
 pub use projection::*;
 pub use roots::*;
 
+/// Closure file stems an older tog wrote that nothing reads any more.
+/// `tog fmt` used to leave `.tog/closures/rustfmt.json` at a Cargo
+/// workspace root; it now deletes one when it formats beside another
+/// closure, and until then every closure reader skips the name: the root
+/// importer, `status`, `ls`, `audit`, `sbom`, and the sync summary. gc's
+/// live-set walk alone still reads it, so the objects it names stay
+/// protected while it exists.
+pub const RETIRED_CLOSURES: &[&str] = &["rustfmt"];
+
+/// Whether `path` names a closure file a reader should import: `*.json`,
+/// and not a retired record.
+pub fn is_closure_file(path: &Path) -> bool {
+    path.extension().is_some_and(|ext| ext == "json") && !is_retired_closure(path)
+}
+
+/// Whether `path` (a closure file, or just its name) is a retired record:
+/// `<stem>.json` with a stem in `RETIRED_CLOSURES`.
+pub fn is_retired_closure(path: &Path) -> bool {
+    path.extension().is_some_and(|ext| ext == "json")
+        && path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .is_some_and(|stem| RETIRED_CLOSURES.contains(&stem))
+}
+
 /// Content/input-addressed immutable store (the closet).
 ///
 /// Layout:
@@ -1408,7 +1433,8 @@ mod tests {
     /// `projection_id` route, with no `forest_path`. Every object and
     /// projection lands in one record. Each producer's current closure is
     /// re-imported by its own `closure_refs_name_every_object_this_producer_created`
-    /// test; this one covers the legacy shapes and the cross-ecosystem union.
+    /// test; this one covers the legacy shapes and the cross-ecosystem union,
+    /// and that a retired record beside them imports nothing.
     #[test]
     fn register_imports_legacy_closure_bodies_of_every_ecosystem_together() {
         let temp = temp_store();
@@ -1429,7 +1455,9 @@ mod tests {
         let (ruby, gems) = (object("ruby"), object("gems"));
         let (beam, deps) = (object("beam"), object("deps"));
         let (sdk, packages) = (object("sdk"), object("packages"));
-        let rustfmt = object("rustfmt");
+        // A retired `rustfmt` record an older `tog fmt` left is skipped by
+        // the importer, so the object only it names is not in the record.
+        let rustfmt = named_object(&store, "rustfmt");
         let backup = store.root.join("backups/venv-backup");
         let deps_projection = store
             .root

@@ -25,8 +25,8 @@ pub(crate) use crate::kernel::provider::crates::{
     plan_git_sources, project_git_sources, tog_config_text_for,
 };
 pub use crate::kernel::provider::rust::{
-    preflight_platform, project_extras, project_extras_in, resolve_toolchain,
-    resolve_toolchain_quiet, runtime_object_id, rust_object_id, toolchain_catalog, Extras,
+    preflight_platform, project_extras, project_extras_in, resolve_toolchain, runtime_object_id,
+    rust_object_id, toolchain_catalog, Extras,
 };
 
 /// Realize the base Rust toolchain `selected` names; see
