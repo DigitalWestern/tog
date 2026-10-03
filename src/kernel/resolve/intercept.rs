@@ -761,6 +761,12 @@ mod tests {
                 &["github.com"],
                 "git",
             );
+            // The negotiation must arrive: an exchange that dropped the POST
+            // body gets 400 here, and ls-remote fails.
+            harness.upstream.require_body(
+                "/dtolnay/itoa/git-upload-pack",
+                &[b"command=ls-refs", b"symrefs"],
+            );
             let policy = if denied {
                 deny(policy::GIT_DEPENDENCY)
             } else {
@@ -797,7 +803,13 @@ mod tests {
                 assert!(report.facts.refusals[0].contains("https://github.com/dtolnay/itoa"));
                 continue;
             }
-            assert!(output.status.success(), "{stderr}");
+            let bodies: Vec<String> = harness
+                .upstream
+                .seen()
+                .iter()
+                .map(|seen| String::from_utf8_lossy(&seen.body).into_owned())
+                .collect();
+            assert!(output.status.success(), "{stderr}\n{bodies:?}");
             assert!(
                 String::from_utf8_lossy(&output.stdout).contains("\tHEAD"),
                 "{}",
@@ -842,6 +854,74 @@ mod tests {
              Content-Length: {}\r\n",
             body.len()
         )
+    }
+
+    fn gzip(bytes: &[u8]) -> Vec<u8> {
+        use flate2::{write::GzEncoder, Compression};
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(bytes).unwrap();
+        encoder.finish().unwrap()
+    }
+
+    /// A git negotiation reaches upstream byte for byte, gzip-encoded and
+    /// after a 307 to another `git-upload-pack` on the same host: the
+    /// fixture answers only a body holding the negotiation, the encoding
+    /// is forwarded, and the ledger entry names the hop it was served from.
+    #[test]
+    fn a_redirected_git_post_keeps_its_gzip_body() {
+        let harness = Harness::new("intercept-git-post");
+        let (session, address) = intercepting(&harness, Policy::default());
+        let authority = format!("third.test:{}", harness.upstream.port());
+        let negotiation = b"0014command=ls-refs\n0009peel\n0000".to_vec();
+        let body = gzip(&negotiation);
+        let (from, to) = ("/a/repo.git/git-upload-pack", "/b/repo.git/git-upload-pack");
+        harness.upstream.set(
+            from,
+            Behavior::Reply(Reply::new(307, b"").header("location", to)),
+        );
+        harness
+            .upstream
+            .set(to, Behavior::Reply(Reply::new(200, b"0000")));
+        harness.upstream.require_body(to, &[&body]);
+        let roots = harness.proxy.authority().roots();
+        let mut tunnel = open_tunnel(&address, &authority, "third.test", roots, &[]).unwrap();
+        let answer = tunnel_request(&mut tunnel, &post(&authority, from, &body, true), &body);
+        assert_eq!(answer.status, 200, "{}", answer.text());
+        drop(tunnel);
+        let report = session.finish();
+        let seen = harness.upstream.seen();
+        let at = |target: &str| {
+            seen.iter()
+                .find(|request| request.target == target)
+                .unwrap()
+        };
+        for target in [from, to] {
+            assert_eq!(at(target).method, "POST");
+            assert_eq!(at(target).body, body, "{target}");
+            assert_eq!(at(target).headers.get("content-encoding"), Some("gzip"));
+        }
+        let origin = format!("https://{authority}");
+        assert!(
+            entries(&report).iter().any(|entry| entry.class == "git"
+                && entry.url == format!("{origin}{from}")
+                && entry.redirected_to.as_deref() == Some(&format!("{origin}{to}"))
+                && entry.status == 200),
+            "{:?}",
+            entries(&report)
+        );
+
+        // The same POST with the negotiation dropped is not answered.
+        let harness = Harness::new("intercept-git-post-empty");
+        let (_session, address) = intercepting(&harness, Policy::default());
+        let authority = format!("third.test:{}", harness.upstream.port());
+        harness
+            .upstream
+            .set(from, Behavior::Reply(Reply::new(200, b"0000")));
+        harness.upstream.require_body(from, &[&body]);
+        let roots = harness.proxy.authority().roots();
+        let mut tunnel = open_tunnel(&address, &authority, "third.test", roots, &[]).unwrap();
+        let answer = tunnel_request(&mut tunnel, &post(&authority, from, b"", true), b"");
+        assert_eq!(answer.status, 400, "{}", answer.text());
     }
 
     /// A 307 from `git-upload-pack` to `git-receive-pack` would forward the
