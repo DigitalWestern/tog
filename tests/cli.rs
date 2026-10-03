@@ -2507,7 +2507,6 @@ fn status_lists_the_exceptions_a_sync_recorded() {
     // A joined resolution record's exceptions are listed even when the
     // closure has no top-level list of its own, and a resolution record
     // that cannot be read is this row's finding, not the whole report's.
-    let mut record = record;
     record["body"].as_object_mut().unwrap().remove("exceptions");
     record["body"]["resolution"] = serde_json::json!({
         "exceptions": [{"kind": "unrecorded-resolution", "subject": "uv.lock", "detail": "no door"}]
