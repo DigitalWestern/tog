@@ -66,24 +66,20 @@ pub fn realize_vendor(
     crate::kernel::provider::crates::realize_vendor(store, activity, plan)
 }
 
-/// A pre-lock cargo closure records the toolchain under `plan.rust_version`;
-/// a rustfmt closure records it at the top level. Both name the Rust object
-/// under `rust_object`: the three component archives and the recipe its
-/// identity names are the proof.
+/// A pre-lock cargo closure records the toolchain under `plan.rust_version`
+/// and names the Rust object under `rust_object`: the three component
+/// archives and the recipe its identity names are the proof.
 pub fn legacy_toolchain_evidence(
-    ecosystem: &str,
     platform: Option<Platform>,
     body: &serde_json::Value,
     store: Option<&crate::kernel::store::Store>,
 ) -> LegacyEvidence {
     use crate::comforter::toolchain::{self as project_toolchain, LegacyRuntime};
-    let pointer = if ecosystem == "rustfmt" {
-        "/rust_version"
-    } else {
-        "/plan/rust_version"
-    };
-    let mut evidence =
-        crate::comforter::legacy_toolchain_evidence(platform, body, &[("rustc", pointer)]);
+    let mut evidence = crate::comforter::legacy_toolchain_evidence(
+        platform,
+        body,
+        &[("rustc", "/plan/rust_version")],
+    );
     project_toolchain::prove_legacy_runtime(
         &mut evidence,
         store,
@@ -119,8 +115,7 @@ pub fn legacy_toolchain_evidence(
 }
 
 /// The Rust object a pre-lock sync from `selected` left for legacy seeding
-/// to read, and the body field that names it (cargo and rustfmt closures
-/// both use it).
+/// to read, and the body field that names it.
 #[cfg(test)]
 pub(crate) fn legacy_runtime_for_test(
     platform: Platform,

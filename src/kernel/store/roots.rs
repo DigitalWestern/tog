@@ -286,7 +286,7 @@ impl Store {
         files.sort();
         let mut imported_any = false;
         for path in files {
-            if !path.is_file() || path.extension().and_then(|s| s.to_str()) != Some("json") {
+            if !path.is_file() || !is_closure_file(&path) {
                 continue;
             }
             let value: serde_json::Value = serde_json::from_reader(fs::File::open(&path)?)
@@ -1221,7 +1221,7 @@ pub(super) fn validate_closure_envelope<'a>(
         .ok_or_else(|| invalid_root_import(path, "missing closure ecosystem".into()))?;
     if !matches!(
         ecosystem,
-        "python" | "node" | "cargo" | "go" | "ruby" | "elixir" | "dotnet" | "rustfmt"
+        "python" | "node" | "cargo" | "go" | "ruby" | "elixir" | "dotnet"
     ) {
         return Err(invalid_root_import(
             path,
@@ -1267,7 +1267,7 @@ pub(super) fn import_existing_project_closures(
     };
     for name in names {
         let relative = closures.join(&name);
-        if relative.extension().and_then(|s| s.to_str()) != Some("json") {
+        if !is_closure_file(&relative) {
             continue;
         }
         if project.entry(&relative)? == Entry::Directory {

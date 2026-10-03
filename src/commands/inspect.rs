@@ -105,10 +105,14 @@ pub fn closures_in(project: &ProjectRoot) -> io::Result<Vec<ClosureFile>> {
     Ok(out)
 }
 
-/// The ecosystem stem of a closure file name: `<stem>.json`, not hidden.
+/// The ecosystem stem of a closure file name: `<stem>.json`, not hidden,
+/// and not a retired record (`store::RETIRED_CLOSURES`), so a leftover never
+/// reads as an orphaned or unknown closure in listing, status, audit, or
+/// lock seeding.
 fn closure_stem(name: &str) -> Option<&str> {
-    name.strip_suffix(".json")
-        .filter(|stem| !stem.starts_with('.'))
+    name.strip_suffix(".json").filter(|stem| {
+        !stem.starts_with('.') && !crate::kernel::store::RETIRED_CLOSURES.contains(stem)
+    })
 }
 
 fn closure_file(name: &str, path: PathBuf, bytes: &[u8]) -> io::Result<ClosureFile> {
@@ -237,16 +241,6 @@ pub fn ls(dir: &Path, filter: Option<&str>, json: bool, verbose: bool) -> io::Re
     Ok(out)
 }
 
-/// The command that rewrites a closure: `tog fmt` for the rustfmt
-/// record, which a sync never touches, and the bare `tog` for every other.
-pub fn refresh(ecosystem: &str) -> &'static str {
-    if ecosystem == "rustfmt" {
-        "tog fmt"
-    } else {
-        "tog"
-    }
-}
-
 /// The recorded exceptions, or `None` when the closure carries no exception
 /// record at all (absence is not evidence of a clean sync).
 pub fn recorded_exceptions(closure: &ClosureFile) -> io::Result<Option<Vec<Exception>>> {
@@ -258,9 +252,8 @@ pub fn recorded_exceptions(closure: &ClosureFile) -> io::Result<Option<Vec<Excep
                 io::Error::new(
                     io::ErrorKind::InvalidData,
                     format!(
-                        "{:?}: malformed exception record: {error}; run '{}'",
-                        closure.path.to_string_lossy(),
-                        refresh(&closure.ecosystem)
+                        "{:?}: malformed exception record: {error}; run 'tog'",
+                        closure.path.to_string_lossy()
                     ),
                 )
             }),
@@ -275,9 +268,8 @@ pub fn resolution_exceptions(closure: &ClosureFile) -> io::Result<Vec<Exception>
         io::Error::new(
             io::ErrorKind::InvalidData,
             format!(
-                "{:?}: malformed resolution record: {what}; run '{}'",
-                closure.path.to_string_lossy(),
-                refresh(&closure.ecosystem)
+                "{:?}: malformed resolution record: {what}; run 'tog'",
+                closure.path.to_string_lossy()
             ),
         )
     };
@@ -433,10 +425,6 @@ pub fn status(platform: Platform, dir: &Path) -> io::Result<Vec<EcosystemStatus>
 /// but "run 'tog'" would only reach the refusal, and the lock's line names
 /// the verb that moves it. Otherwise the closure state decides, and only a
 /// `Synced` closure is downgraded to what the lock has to add.
-///
-/// The lock is consulted for primary closures only: a secondary record
-/// (cargo's `rustfmt`) is compared with its own pins, and the lock that
-/// governs its project is judged through the primary closure beside it.
 pub fn locked_closure_state(
     platform: Platform,
     dir: &Path,
@@ -1465,27 +1453,64 @@ mod tests {
         assert!(missing.contains("no python closure here"), "{missing}");
     }
 
+    /// An older `tog fmt` left `.tog/closures/rustfmt.json` at a Cargo
+    /// workspace root. It is not a closure any more: `status`, `ls`, and
+    /// everything else that reads closures skip it, so the workspace reads
+    /// exactly as it would without it.
     #[test]
-    fn listing_reads_rustfmt_closure_as_a_toolchain() {
-        let temp = TempDir::named("ls-rustfmt");
-        let host = Platform::host().unwrap().triple();
+    fn a_leftover_rustfmt_record_is_skipped() {
+        let temp = TempDir::named("leftover-rustfmt");
+        let platform = Platform::host().unwrap();
+        let host = platform.triple();
+        let dir = &temp.0;
+        fs::write(dir.join("Cargo.toml"), "[package]\nname='x'\n").unwrap();
+        fs::write(dir.join("Cargo.lock"), "version = 4\n").unwrap();
+        fs::create_dir_all(dir.join(".tog/cargo-home")).unwrap();
         write_closure(
-            &temp.0,
-            "rustfmt",
+            dir,
+            "cargo",
             host,
-            json!({
-                "rust_version": "1.96.1",
-                "rust_object": {"id": "rust-id"},
-                "rustfmt_object": {"id": "rustfmt-id"}
-            }),
+            json!({"cargo_lock_sha256": sha256_file(&dir.join("Cargo.lock")).unwrap(),
+                   "plan": {"rust_version": "1.96.1", "crates": []}}),
         );
-        let closures = closures(&temp.0).unwrap();
-        let row = listing(&closures[0]);
-        assert_eq!(row.toolchain, vec![("rustfmt".into(), "1.96.1".into())]);
-        assert!(row.packages.is_empty());
-        assert!(ls(&temp.0, None, false, false)
-            .unwrap()
-            .contains("rustfmt 1.96.1"));
+        fs::write(
+            dir.join(".tog/closures/rustfmt.json"),
+            serde_json::to_vec_pretty(&json!({
+                "schema": "closure/1",
+                "ecosystem": "rustfmt",
+                "platform": host,
+                "projected_at": 1,
+                "body": {"rust_version": "1.96.1", "rustfmt_object": {"id": "rustfmt-id"}},
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let read = closures(dir).unwrap();
+        assert_eq!(
+            read.iter()
+                .map(|c| c.ecosystem.as_str())
+                .collect::<Vec<_>>(),
+            ["cargo"]
+        );
+        let held = ProjectRoot::open(dir).unwrap();
+        assert_eq!(closures_in(&held).unwrap().len(), 1);
+        let rows = status(platform, dir).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].ecosystem, "cargo");
+        assert_eq!(rows[0].state, State::Synced);
+        let listed = ls(dir, None, false, false).unwrap();
+        assert!(!listed.contains("rustfmt"), "{listed}");
+        // The leftover alone is nothing synced.
+        fs::remove_file(dir.join(".tog/closures/cargo.json")).unwrap();
+        assert!(closures(dir).unwrap().is_empty());
+        assert_eq!(
+            rows_state(&status(platform, dir).unwrap()),
+            [State::NotSynced]
+        );
+    }
+
+    fn rows_state(rows: &[EcosystemStatus]) -> Vec<State> {
+        rows.iter().map(|row| row.state.clone()).collect()
     }
 
     /// Re-lock `lock_ecosystem` on a bundle whose first artifact row names

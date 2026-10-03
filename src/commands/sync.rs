@@ -585,7 +585,9 @@ fn exception_count(project: &ProjectRoot) -> usize {
     let mut total = 0;
     if let Ok(Some(names)) = project.read_dir(dir) {
         for name in names {
-            if !name.to_string_lossy().ends_with(".json") {
+            if !name.to_string_lossy().ends_with(".json")
+                || crate::kernel::store::is_retired_closure(Path::new(&name))
+            {
                 continue;
             }
             let bytes = match project.read_file(&dir.join(&name)) {

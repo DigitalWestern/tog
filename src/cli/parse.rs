@@ -2030,21 +2030,18 @@ mod tests {
                 json: true
             }
         );
-        // The row `tog fmt` makes `ls` print is a word `ls` accepts.
+        // `tog fmt` writes no closure, so `ls` has no row for it to filter.
         assert_eq!(
-            command(&["ls", "rustfmt"]),
-            Command::Ls {
-                ecosystem: Some("rustfmt".into()),
-                json: false
-            }
+            message(&["ls", "rustfmt"]),
+            "ls: unknown ecosystem 'rustfmt' (one of: python, node, cargo, go, ruby, elixir, dotnet)"
         );
         assert_eq!(
             message(&["ls", "npm"]),
-            "ls: unknown ecosystem 'npm' (one of: python, node, cargo, go, ruby, elixir, dotnet, rustfmt)"
+            "ls: unknown ecosystem 'npm' (one of: python, node, cargo, go, ruby, elixir, dotnet)"
         );
         assert_eq!(
             message(&["ls", "pyhton"]),
-            "ls: unknown ecosystem 'pyhton' (one of: python, node, cargo, go, ruby, elixir, dotnet, rustfmt); did you mean 'python'?"
+            "ls: unknown ecosystem 'pyhton' (one of: python, node, cargo, go, ruby, elixir, dotnet); did you mean 'python'?"
         );
         assert_eq!(
             message(&["ls", "node", "python"]),
@@ -2287,7 +2284,7 @@ mod tests {
 
     /// `ls`, `build` and `update --toolchain` read their words from
     /// `ECOSYSTEM_WORDS`, and each row is its tailor's: id and order, lock
-    /// ecosystem, whether it builds, and closures only it owns.
+    /// ecosystem, and whether it builds.
     #[test]
     fn ecosystem_words_are_the_registrys() {
         use super::super::spec::ECOSYSTEM_WORDS;
@@ -2298,18 +2295,10 @@ mod tests {
         for (row, tailor) in ECOSYSTEM_WORDS.iter().zip(registry) {
             assert_eq!(row.toolchain, tailor.lock_ecosystem(), "{}", row.id);
             assert_eq!(row.builds, tailor.builds(), "{}", row.id);
-            for closure in std::iter::once(row.id).chain(row.closures.iter().copied()) {
-                let owners: Vec<&str> = registry
-                    .iter()
-                    .filter(|other| other.owns_closure(closure))
-                    .map(|other| other.id())
-                    .collect();
-                assert_eq!(owners, [row.id], "closure {closure}");
-            }
         }
         assert_eq!(
             LS_WORDS,
-            ["python", "node", "cargo", "go", "ruby", "elixir", "dotnet", "rustfmt"]
+            ["python", "node", "cargo", "go", "ruby", "elixir", "dotnet"]
         );
         assert_eq!(
             super::super::spec::BUILD_WORDS,

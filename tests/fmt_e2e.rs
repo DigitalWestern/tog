@@ -10,12 +10,11 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Output;
 use std::time::{Duration, SystemTime};
 
 mod common;
 
-use common::{command, copy_tree, fixture, tog, tog_at, TempDir};
+use common::{copy_tree, fixture, tog, tog_at, TempDir};
 
 fn object_ids(store: &Path) -> Vec<String> {
     let mut ids = fs::read_dir(store.join("objects"))
@@ -43,34 +42,55 @@ fn default_rust() -> String {
         .to_string()
 }
 
+/// The store object of identity kind `kind`, read from the store's
+/// metadata: `tog fmt` writes no record naming the objects it ran.
+fn object_of_kind(store: &Path, kind: &str) -> String {
+    let ids: Vec<String> = fs::read_dir(store.join("meta"))
+        .unwrap()
+        .filter_map(|entry| {
+            let text = fs::read_to_string(entry.unwrap().path()).ok()?;
+            let meta: serde_json::Value = serde_json::from_str(&text).ok()?;
+            (meta["identity"]["kind"] == kind).then(|| meta["id"].as_str().unwrap().to_string())
+        })
+        .collect();
+    assert_eq!(ids.len(), 1, "expected one {kind} object, found {ids:?}");
+    ids.into_iter().next().unwrap()
+}
+
+/// A `rustfmt` closure as an older `tog fmt` wrote it.
+fn write_legacy_record(dir: &Path) -> PathBuf {
+    let closures = dir.join(".tog/closures");
+    fs::create_dir_all(&closures).unwrap();
+    let path = closures.join("rustfmt.json");
+    fs::write(
+        &path,
+        r#"{"schema":"closure/1","ecosystem":"rustfmt","projected_at":1,
+            "body":{"rust_version":"1.96.1","exceptions":[],
+                    "rust_object":{"path":"/store/objects/r","id":"r"},
+                    "rustfmt_object":{"path":"/store/objects/f","id":"f"}}}"#,
+    )
+    .unwrap();
+    path
+}
+
+/// `tog fmt` needs no lock and no sync, caches its formatter, and writes
+/// no closure: the lock pins the formatter, so there is nothing to record.
+/// A record an older tog left alone in a never-synced project stays (its
+/// deletion is covered by the unit tests, beside another closure). Nothing roots the formatter objects, so gc may reclaim them
+/// between runs and the next run fetches them again.
 #[test]
 #[ignore]
-fn fmt_is_lockless_cached_and_gc_rooted_until_forgotten() {
+fn fmt_is_lockless_cached_writes_no_record_and_roots_nothing() {
     let temp = TempDir::new("fmt-e2e");
     let project = temp.0.join("cargo-hello");
     copy_tree(&fixture("cargo-hello"), &project);
     fs::remove_file(project.join("Cargo.lock")).unwrap();
+    let legacy = write_legacy_record(&project);
     let store = temp.0.join("store");
-    // `fmt` signs the rustfmt record like every closure; a scratch HOME's
-    // machine policy trusts the key so the gate can judge it.
-    let key = temp.0.join("signing.key");
-    let public = tog::kernel::signing::generate(&key).unwrap();
     let home = temp.0.join("home");
-    fs::create_dir_all(home.join(".tog")).unwrap();
-    fs::write(
-        home.join(".tog/policy.toml"),
-        format!("[signing]\ntrusted = [\"{public}\"]\n"),
-    )
-    .unwrap();
-    let signed = |cwd: &Path, args: &[&str]| -> Output {
-        command(cwd, &home, &store)
-            .env("TOG_SIGNING_KEY", &key)
-            .args(args)
-            .output()
-            .unwrap()
-    };
+    fs::create_dir_all(&home).unwrap();
 
-    let first = signed(&project, &["fmt", "--check"]);
+    let first = tog_at(&project, &home, &store, &["fmt", "--check"]);
     assert_eq!(
         first.status.code(),
         Some(1),
@@ -84,7 +104,7 @@ fn fmt_is_lockless_cached_and_gc_rooted_until_forgotten() {
         String::from_utf8_lossy(&first.stderr)
     );
     assert!(!project.join("Cargo.lock").exists());
-    assert!(project.join(".tog/closures/rustfmt.json").is_file());
+    assert!(legacy.is_file(), "fmt --check changed the checkout");
     let metas = fs::read_dir(store.join("meta"))
         .unwrap()
         .map(|entry| fs::read_to_string(entry.unwrap().path()).unwrap())
@@ -92,46 +112,17 @@ fn fmt_is_lockless_cached_and_gc_rooted_until_forgotten() {
     assert!(
         metas
             .iter()
-            .any(|meta| meta.contains(r#""kind": "rustfmt""#)),
-        "rustfmt metadata was not published"
-    );
-    assert!(
-        metas
-            .iter()
             .all(|meta| !meta.contains(r#""kind": "cargo-vendor""#)),
         "fmt unexpectedly realized a Cargo vendor object"
     );
-    let closure: serde_json::Value =
-        serde_json::from_slice(&fs::read(project.join(".tog/closures/rustfmt.json")).unwrap())
-            .unwrap();
-    let rust_id = closure["body"]["rust_object"]["id"].as_str().unwrap();
-    let rustfmt_id = closure["body"]["rustfmt_object"]["id"].as_str().unwrap();
-    assert_eq!(
-        closure["body"]["inputs"]["rustfmt_object"], rustfmt_id,
-        "the fmt closure must record the rustfmt it ran as its input"
-    );
-    assert_eq!(
-        tog::kernel::signing::verify(&closure),
-        tog::kernel::signing::Verification::Valid(public),
-        "fmt must sign the rustfmt record with the configured key"
-    );
-    // The record names the pinned rustfmt and is signed by a trusted key,
-    // so the gate passes it; the report still fails because the Cargo
-    // project was never synced (no cargo.json), which is `missing`.
-    let audit = signed(&project, &["audit", "--json"]);
-    let report: serde_json::Value = serde_json::from_slice(&audit.stdout).unwrap_or_default();
+    let rust_id = object_of_kind(&store, "rust");
+    let rustfmt_id = object_of_kind(&store, "rustfmt");
     assert!(
-        audit.status.code() == Some(1)
-            && report["closures"][0]["verdict"] == "clean"
-            && report["closures"][0]["freshness"] == "current"
-            && report["closures"][0]["signature"]["state"] == "trusted"
-            && report["missing"] == serde_json::json!(["cargo"]),
-        "audit did not pass the fresh fmt record\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&audit.stdout),
-        String::from_utf8_lossy(&audit.stderr)
+        rust_id.ends_with(&format!("-rust-{}", default_rust())),
+        "{rust_id}"
     );
     let rustfmt_lib_link =
-        fs::read_link(store.join("objects").join(rustfmt_id).join("lib")).unwrap();
+        fs::read_link(store.join("objects").join(&rustfmt_id).join("lib")).unwrap();
     assert!(!rustfmt_lib_link.is_absolute());
     assert_eq!(rustfmt_lib_link, PathBuf::from(format!("../{rust_id}/lib")));
     let rustfmt_meta =
@@ -153,6 +144,15 @@ fn fmt_is_lockless_cached_and_gc_rooted_until_forgotten() {
         "fn main() {\n    println!(\"hello {}\", itoa::Buffer::new().format(128u64));\n}\n"
     );
     assert!(!project.join("Cargo.lock").exists());
+    // The run wrote no closure of its own. The legacy record is the
+    // project's only one, so it stays: an older tog registered a gc root
+    // for this project, and that root over an empty closures directory
+    // would stop every sweep.
+    let closures: Vec<_> = fs::read_dir(project.join(".tog/closures"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(closures, [std::ffi::OsString::from("rustfmt.json")]);
 
     let before = object_ids(&store);
     let warm = tog_at(&project, &home, &store, &["fmt", "--check"]);
@@ -163,56 +163,6 @@ fn fmt_is_lockless_cached_and_gc_rooted_until_forgotten() {
     );
     assert!(!String::from_utf8_lossy(&warm.stderr).contains("fetching rustfmt"));
     assert_eq!(object_ids(&store), before, "warm fmt created a new object");
-
-    let listed = tog_at(&project, &home, &store, &["ls"]);
-    assert!(listed.status.success());
-    assert!(
-        String::from_utf8_lossy(&listed.stdout).contains(&format!("rustfmt {}", default_rust()))
-    );
-    // `ls` prints a rustfmt row, so `ls rustfmt` must be a legal filter.
-    let listed_one = tog_at(&project, &home, &store, &["ls", "rustfmt"]);
-    assert!(
-        listed_one.status.success(),
-        "ls rustfmt failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&listed_one.stdout),
-        String::from_utf8_lossy(&listed_one.stderr)
-    );
-
-    // Every closure consumer must survive the package-free fmt closure:
-    // `sbom` reads every .tog/closures/*.json and fails the whole
-    // document on the first ecosystem it does not know.
-    let sbom = tog_at(&project, &home, &store, &["sbom"]);
-    assert!(
-        sbom.status.success(),
-        "sbom failed after fmt\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&sbom.stdout),
-        String::from_utf8_lossy(&sbom.stderr)
-    );
-    let doc: serde_json::Value = serde_json::from_slice(&sbom.stdout).unwrap();
-    let toolchains: Vec<(String, String)> = doc["components"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|component| component["type"] == "application")
-        .map(|component| {
-            (
-                component["name"].as_str().unwrap().to_string(),
-                component["properties"][0]["value"]
-                    .as_str()
-                    .unwrap()
-                    .to_string(),
-            )
-        })
-        .collect();
-    assert_eq!(
-        toolchains,
-        [
-            ("rust".to_string(), rust_id.to_string()),
-            ("rustfmt".to_string(), rustfmt_id.to_string()),
-        ],
-        "sbom did not inventory the fmt toolchain objects: {}",
-        String::from_utf8_lossy(&sbom.stdout)
-    );
 
     let help = tog_at(&project, &home, &store, &["fmt", "--", "--help"]);
     assert!(
@@ -245,37 +195,10 @@ fn fmt_is_lockless_cached_and_gc_rooted_until_forgotten() {
         "status 2 was tog's usage error, not the formatter's:\n{bad_tool_stderr}"
     );
 
-    // The fmt closure roots both objects: an aged sweep keeps them. A
-    // sweep that deletes nothing would pass that alone, so the same sweep
-    // has to reclaim something unrooted: a stale `store/tmp/stage-*`
-    // leftover, which is what an interrupted fmt run leaves behind.
-    for entry in fs::read_dir(store.join("objects")).unwrap() {
-        age(&entry.unwrap().path());
-    }
-    let leftover = store.join("tmp/stage-rustfmt-run-leftover");
-    fs::create_dir_all(&leftover).unwrap();
-    fs::write(leftover.join("scratch"), b"leftover").unwrap();
-    fs::File::open(&leftover)
-        .unwrap()
-        .set_modified(SystemTime::now() - Duration::from_secs(2 * 24 * 60 * 60))
-        .unwrap();
-    let gc = tog_at(&project, &home, &store, &["gc", "--keep-days", "0"]);
-    assert!(
-        gc.status.success(),
-        "gc failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&gc.stdout),
-        String::from_utf8_lossy(&gc.stderr)
-    );
-    assert!(store.join("objects").join(rust_id).is_dir());
-    assert!(store.join("objects").join(rustfmt_id).is_dir());
-    assert!(!leftover.exists(), "gc left the stale stage behind");
-
-    // Forgetting the project's root record unroots the objects: the next
-    // aged sweep reclaims both. A second registered project keeps the
+    // Nothing roots the formatter objects. A registered project keeps the
     // registry non-empty (an empty one makes the sweep refuse) and roots
-    // objects of its own, which the same sweep has to keep. A root record
-    // needs a closure naming a real store object, so the second project
-    // is a synced one.
+    // objects of its own, which the same aged sweep has to keep, along with
+    // reclaiming a stale `store/tmp/stage-*` an interrupted fmt left.
     let other = temp.0.join("other");
     fs::create_dir_all(&other).unwrap();
     fs::write(other.join("requirements.txt"), "six==1.17.0\n").unwrap();
@@ -291,56 +214,50 @@ fn fmt_is_lockless_cached_and_gc_rooted_until_forgotten() {
             .unwrap();
     let python_env = PathBuf::from(python_closure["body"]["env_object"].as_str().unwrap());
     assert!(python_env.is_dir(), "{}", python_env.display());
-    let roots = tog_at(&project, &home, &store, &["store", "roots"]);
-    let roots = String::from_utf8_lossy(&roots.stdout).into_owned();
-    let canonical = project.canonicalize().unwrap();
-    let key = roots
-        .lines()
-        .filter_map(|line| line.split_once("  "))
-        .find(|(_, path)| Path::new(path) == canonical)
-        .map(|(key, _)| key.to_string())
-        .unwrap_or_else(|| panic!("no root record for {}:\n{roots}", canonical.display()));
-    let forgotten = tog_at(
-        &project,
-        &home,
-        &store,
-        &["gc", "--forget", &key, "--keep-days", "0"],
-    );
-    assert!(
-        forgotten.status.success(),
-        "forget failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&forgotten.stdout),
-        String::from_utf8_lossy(&forgotten.stderr)
-    );
     for entry in fs::read_dir(store.join("objects")).unwrap() {
         age(&entry.unwrap().path());
     }
+    let leftover = store.join("tmp/stage-rustfmt-run-leftover");
+    fs::create_dir_all(&leftover).unwrap();
+    fs::write(leftover.join("scratch"), b"leftover").unwrap();
+    fs::File::open(&leftover)
+        .unwrap()
+        .set_modified(SystemTime::now() - Duration::from_secs(2 * 24 * 60 * 60))
+        .unwrap();
     let swept = tog_at(&project, &home, &store, &["gc", "--keep-days", "0"]);
     assert!(
         swept.status.success(),
-        "gc after forget failed\nstdout:\n{}\nstderr:\n{}",
+        "gc failed\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&swept.stdout),
         String::from_utf8_lossy(&swept.stderr)
     );
+    assert!(!leftover.exists(), "gc left the stale stage behind");
     assert!(
-        !store.join("objects").join(rustfmt_id).exists(),
+        !store.join("objects").join(&rustfmt_id).exists(),
         "gc kept the unrooted rustfmt object"
-    );
-    assert!(
-        !store.join("objects").join(rust_id).exists(),
-        "gc kept the unrooted rust object"
     );
     assert!(
         python_env.is_dir(),
         "gc swept the other project's rooted environment"
     );
+
+    // The next run realizes the formatter again (from the download cache
+    // when gc left the archive there) and formats as before.
+    let again = tog_at(&project, &home, &store, &["fmt", "--check"]);
+    assert!(
+        again.status.success(),
+        "fmt after gc failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&again.stdout),
+        String::from_utf8_lossy(&again.stderr)
+    );
+    assert!(store.join("objects").join(&rustfmt_id).is_dir());
 }
 
 /// Run from a workspace member, `tog fmt` formats with the Rust the
-/// workspace root's lock pins, the lock `audit` judges its record against,
-/// so the record it writes at the root is current, not stale. The root pins
-/// a release other than the catalog's default, which is what the member,
-/// having no lock or toolchain file of its own, would otherwise get.
+/// workspace root's lock pins. The root pins a release other than the
+/// catalog's default, which is what the member, having no lock or
+/// toolchain file of its own, would otherwise get. No record is written in
+/// either directory.
 #[test]
 #[ignore]
 fn fmt_from_a_workspace_member_uses_the_root_lock() {
@@ -370,25 +287,17 @@ fn fmt_from_a_workspace_member_uses_the_root_lock() {
         "pub fn one() -> u32 {\n    1\n}\n",
     )
     .unwrap();
+    let legacy = write_legacy_record(&root);
     let store = temp.0.join("store");
-    let key = temp.0.join("signing.key");
-    let public = tog::kernel::signing::generate(&key).unwrap();
     let home = temp.0.join("home");
-    fs::create_dir_all(home.join(".tog")).unwrap();
-    fs::write(
-        home.join(".tog/policy.toml"),
-        format!("[signing]\ntrusted = [\"{public}\"]\n"),
-    )
-    .unwrap();
-    let signed = |cwd: &Path, args: &[&str]| -> Output {
-        command(cwd, &home, &store)
-            .env("TOG_SIGNING_KEY", &key)
-            .args(args)
-            .output()
-            .unwrap()
-    };
+    fs::create_dir_all(&home).unwrap();
 
-    let locked = signed(&root, &["update", "--toolchain", "rust", "--no-sync"]);
+    let locked = tog_at(
+        &root,
+        &home,
+        &store,
+        &["update", "--toolchain", "rust", "--no-sync"],
+    );
     assert!(
         locked.status.success(),
         "update failed\nstderr:\n{}",
@@ -397,40 +306,20 @@ fn fmt_from_a_workspace_member_uses_the_root_lock() {
     let lock = fs::read_to_string(root.join("tog-toolchain.toml")).unwrap();
     assert!(lock.contains(&format!("version = \"{pinned}\"")), "{lock}");
 
-    let checked = signed(&member, &["fmt", "--check"]);
+    let formatted = tog_at(&member, &home, &store, &["fmt"]);
     assert!(
-        checked.status.success(),
-        "fmt --check from the member failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&checked.stdout),
-        String::from_utf8_lossy(&checked.stderr)
+        formatted.status.success(),
+        "fmt from the member failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&formatted.stdout),
+        String::from_utf8_lossy(&formatted.stderr)
     );
     assert!(!member.join("tog-toolchain.toml").exists());
     assert!(!member.join(".tog/closures/rustfmt.json").exists());
-    let closure: serde_json::Value =
-        serde_json::from_slice(&fs::read(root.join(".tog/closures/rustfmt.json")).unwrap())
-            .unwrap();
-    let rust_id = closure["body"]["rust_object"]["id"].as_str().unwrap();
+    assert!(legacy.is_file(), "a lone legacy record must stay");
+    let rust_id = object_of_kind(&store, "rust");
     assert!(
         rust_id.ends_with(&format!("-rust-{pinned}")),
         "fmt ran on {rust_id}, not the root lock's Rust {pinned}"
-    );
-
-    let audit = signed(&root, &["audit", "--json"]);
-    let report: serde_json::Value = serde_json::from_slice(&audit.stdout).unwrap_or_default();
-    let rustfmt = report["closures"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .find(|closure| closure["ecosystem"] == "rustfmt")
-        .cloned()
-        .unwrap_or_default();
-    assert!(
-        rustfmt["verdict"] == "clean"
-            && rustfmt["freshness"] == "current"
-            && rustfmt["signature"]["state"] == "trusted",
-        "audit did not judge the member-run record current\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&audit.stdout),
-        String::from_utf8_lossy(&audit.stderr)
     );
 }
 

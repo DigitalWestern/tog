@@ -382,8 +382,14 @@ diff can be reviewed before anything is realized.
 **fmt** runs the pinned rustfmt for a Rust workspace, discovered with the
 store Cargo and `--no-deps`, so a project that has never been synced needs
 no Cargo.lock or vendor object; `--check` passes rustfmt's status through.
-The run writes a toolchain-only `rustfmt` closure that `ls`/`sbom`/`gc` see,
-`audit` compares with the pin, and `status` ignores. A package.json script named `fmt` wins and runs as
+The formatter is the `rustfmt` row of the same Rust release the compiler
+comes from (the committed `tog-toolchain.toml` at the Cargo workspace root
+when there is one, so a member directory formats with the same one), and it
+is checked by sha256 like the compiler, so the run writes no record of it. A `.tog/closures/rustfmt.json` that an older tog
+wrote is deleted by a run without `--check` once another closure sits beside
+it (alone, it is what keeps the root the older tog registered readable, so
+it waits for the first sync); every reader but gc skips it. Nothing roots the formatter object, so `gc` can reclaim it between runs
+and the next run realizes it again. A package.json script named `fmt` wins and runs as
 `tog run fmt`; an explicit `--eco rust` bypasses the script.
 
 **run** executes a command with the PATH and ecosystem variables of the
@@ -609,7 +615,7 @@ Signing: `tog keygen <path>` writes an Ed25519 key file (mode 0600,
 never overwriting an existing file or symlink) and prints the `[signing]`
 table that trusts it; the private seed is never printed. With
 `TOG_SIGNING_KEY=<path>` set, every command that writes a closure
-(`sync`, `fmt`, `build`, `add`, `remove`, `update`) signs it, and `attest`
+(`sync`, `build`, `add`, `remove`, `update`) signs it, and `attest`
 and the edit verbs sign the resolution records they write (`x` loads it too,
 so a bad key fails there the same way). The key is
 loaded once, before the store is opened or a manifest is edited; a configured key (including an empty path) that is
@@ -671,8 +677,7 @@ the scopes that exclude it), `outdated` (no signature while signatures are
 checked, or a record from before inputs, platform, or the exception record
 were written; run `tog` once, under a trusted key when signatures are
 checked, then commit. A record carrying an exception kind tog has retired is outdated
-too, with the reason and the command that rewrites it (`run 'tog fmt'`
-for a `rustfmt` record, `run 'tog sync'` for the others): a closure recording
+too, with the reason and the command that rewrites it (`run 'tog sync'`): a closure recording
 `toolchain-component-unavailable` says `closure predates component
 provisioning`), `stale` (the same inputs-changed / projection-missing /
 other-platform checks `status` makes, made per closure file from that
@@ -684,19 +689,8 @@ evaluated further: freshness is not computed and no exception is judged,
 and the line says `(not evaluated)` rather than claiming anything about
 its contents. A detected ecosystem with no
 `.tog/closures/<ecosystem>.json` is listed as `missing` and fails the
-report; the optional `rustfmt` record is not a substitute for `cargo.json`.
-Only `clean` with nothing missing passes. The `rustfmt` closure is
-written at the Cargo workspace root, and `tog fmt` takes its toolchain
-from the lock there, the lock `status` and `audit` judge it by, so running
-it from a member directory writes the same record as running it at the
-root. It projects nothing, so its inputs are the rustfmt object
-it ran and the directory the toolchain file was looked up from (a record
-from an older tog may also carry `unavailable_components`: empty is still
-current, a non-empty list is `stale`). It is `stale`
-when any of those, or the Rust object and version beside them, is not what
-this binary would record for the same run now (including a toolchain with
-no pinned rustfmt), and `outdated` when it predates recording inputs;
-either way the fix is `tog fmt`. A closure file whose `ecosystem` field
+report. Only `clean` with nothing missing passes. A `rustfmt.json` left by
+an older `tog fmt` is not a closure and is not judged. A closure file whose `ecosystem` field
 disagrees with its name, or whose envelope is malformed (not `closure/1`,
 no ecosystem string, a non-object body), is refused with exit 1, not
 judged. No rebuild, no store access, no network, no sandbox: it works on a
@@ -754,7 +748,7 @@ TOG_STRICT`), or the file that set `strict = true`.
 **ls** reads `.tog/closures/*.json` (no store access): name, version, and
 toolchain per package, `-v` adds artifact and store object (and works in
 either position); the filter word is one of
-`python`, `node`, `cargo`, `go`, `ruby`, `elixir`, `dotnet`, `rustfmt`.
+`python`, `node`, `cargo`, `go`, `ruby`, `elixir`, `dotnet`.
 **plan** prints what a sync would realize, one JSON document per ecosystem.
 **sbom** emits CycloneDX 1.5 to stdout or `-o <file>`. **doctor** checks
 this build against the newest release (the first row, `warn` with `run 'tog

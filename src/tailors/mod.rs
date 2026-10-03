@@ -181,13 +181,6 @@ pub trait Tailor: Sync {
         self.id()
     }
 
-    /// Does this tailor own the closure file `.tog/closures/<name>.json`?
-    /// A tailor that writes a second closure kind (cargo's `rustfmt`)
-    /// overrides this.
-    fn owns_closure(&self, name: &str) -> bool {
-        name == self.id()
-    }
-
     /// Are this ecosystem's inputs present in the project directory itself?
     /// The one test `sync`, `plan`, `status`, `deps`, and `fmt` all use.
     fn detect(&self, project: &ProjectRoot) -> io::Result<bool>;
@@ -413,15 +406,15 @@ pub trait Tailor: Sync {
     }
 
     /// `tog fmt`: the root of the workspace `cwd` belongs to, found with
-    /// the toolchain `toolchain` names. The formatter's record is written
-    /// there and judged against the lock there, so `tog fmt` takes its
-    /// toolchain from that directory's lock when it has one.
+    /// the toolchain `toolchain` names. The workspace is formatted as one,
+    /// so `tog fmt` takes its toolchain from that directory's lock when it
+    /// has one, whichever member it was run from.
     fn fmt_root(&self, _ctx: &Context, cwd: &Path, _toolchain: &Selected) -> io::Result<PathBuf> {
         cwd.canonicalize()
     }
 
-    /// `tog fmt`: realize the formatter, record its closure, and run it
-    /// sandboxed over the workspace `cwd` belongs to.
+    /// `tog fmt`: realize the formatter the lock pins and run it sandboxed
+    /// over the workspace `cwd` belongs to. It writes no closure.
     fn fmt(
         &self,
         _ctx: &Context,
@@ -429,7 +422,6 @@ pub trait Tailor: Sync {
         _check: bool,
         _args: &[String],
         _toolchain: &Selected,
-        _attribution: &mut crate::kernel::policy::Attribution,
     ) -> io::Result<i32> {
         Err(unsupported(self.id(), "fmt"))
     }
@@ -580,9 +572,8 @@ pub fn record_spec(
 }
 
 /// Hand the closure writer's resolution join every tailor's resolution
-/// files, looked up by the closure's ecosystem. Only a closure named for a
-/// tailor's own id joins: `rustfmt` is a Cargo closure with no lock of its
-/// own. `commands::dispatch` calls this before a verb that can write a
+/// files, looked up by the closure's ecosystem, which is a tailor's own id.
+/// `commands::dispatch` calls this before a verb that can write a
 /// project closure. Idempotent.
 pub fn install_resolution_files() {
     crate::comforter::join::install_resolution_files(std::sync::Arc::new(
@@ -736,12 +727,10 @@ pub fn by_id(id: &str) -> Option<&'static dyn Tailor> {
     registry().iter().copied().find(|tailor| tailor.id() == id)
 }
 
-/// The tailor that wrote `.tog/closures/<name>.json`, if any.
+/// The tailor that wrote `.tog/closures/<name>.json`, if any: every
+/// closure is named for its tailor's id.
 pub fn for_closure(name: &str) -> Option<&'static dyn Tailor> {
-    registry()
-        .iter()
-        .copied()
-        .find(|tailor| tailor.owns_closure(name))
+    by_id(name)
 }
 
 /// Every tailor's object-kind rows, in registry order.
@@ -1558,15 +1547,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(seeded.component("cpython").unwrap().version, "3.11.16");
-        // A rustfmt closure records the version at the top level.
         let cargo = by_id("cargo").unwrap();
         let catalog = cargo.toolchain_catalog().unwrap();
-        let fmt = json!({"rust_version": "1.96.1"});
-        assert!(seed(
-            &catalog,
-            &cargo.legacy_toolchain_evidence("rustfmt", Some(LINUX), &fmt, None)
-        )
-        .is_ok());
         // A version the catalog never shipped is unrecoverable.
         let stranger = json!({"plan": {"rust_version": "1.0.0"}});
         let error = seed(

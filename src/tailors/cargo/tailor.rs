@@ -1,6 +1,6 @@
 //! The Cargo tailor's `Tailor` implementation: what `sync`, `plan`, `build`,
-//! `run`, `ls`, `status`, and `sbom` do for a Cargo workspace. It also owns
-//! the `rustfmt` closure that `tog fmt` writes.
+//! `run`, `ls`, `status`, and `sbom` do for a Cargo workspace, and the
+//! pinned formatter `tog fmt` runs.
 
 use crate::comforter;
 use crate::comforter::status::{lock_state, string, State};
@@ -59,10 +59,6 @@ impl Tailor for Cargo {
     /// same statement.
     fn lock_ecosystem(&self) -> &'static str {
         "rust"
-    }
-
-    fn owns_closure(&self, name: &str) -> bool {
-        name == "cargo" || name == "rustfmt"
     }
 
     fn detect(&self, project: &ProjectRoot) -> io::Result<bool> {
@@ -251,50 +247,40 @@ impl Tailor for Cargo {
 
     fn legacy_toolchain_evidence(
         &self,
-        ecosystem: &str,
+        _ecosystem: &str,
         platform: Option<Platform>,
         body: &Value,
         store: Option<&crate::kernel::store::Store>,
     ) -> LegacyEvidence {
-        cargo::legacy_toolchain_evidence(ecosystem, platform, body, store)
+        cargo::legacy_toolchain_evidence(platform, body, store)
     }
 
     fn listing(&self, ecosystem: &str, body: &Value) -> ClosureListing {
         let plan = &body["plan"];
         let empty = Vec::new();
         let mut out = ClosureListing::default();
-        match ecosystem {
-            "cargo" => {
-                out.toolchain
-                    .push(("rust".into(), string(&plan["rust_version"])));
-                for package in plan["crates"].as_array().unwrap_or(&empty) {
-                    out.packages.push(PackageRow {
-                        name: string(&package["name"]),
-                        version: string(&package["version"]),
-                        detail: string(&package["sha256"]),
-                    });
-                }
+        if ecosystem == "cargo" {
+            out.toolchain
+                .push(("rust".into(), string(&plan["rust_version"])));
+            for package in plan["crates"].as_array().unwrap_or(&empty) {
+                out.packages.push(PackageRow {
+                    name: string(&package["name"]),
+                    version: string(&package["version"]),
+                    detail: string(&package["sha256"]),
+                });
             }
-            "rustfmt" => {
-                let version = string(&body["rust_version"]);
-                out.toolchain.push(("rustfmt".into(), version));
-            }
-            _ => {}
         }
         out
     }
 
     fn closure_state(
         &self,
-        platform: Platform,
+        _platform: Platform,
         dir: &Path,
         ecosystem: &str,
         body: &Value,
     ) -> io::Result<State> {
         Ok(match ecosystem {
-            // `tog fmt` projects nothing: its record is current when it
-            // names the rustfmt this binary would use for the project now.
-            "rustfmt" => rustfmt::closure_state(platform, dir, body)?,
             "cargo" => {
                 if !dir.join(".tog/cargo-home").is_dir() {
                     State::ProjectionMissing(".tog/cargo-home".into())
@@ -307,48 +293,27 @@ impl Tailor for Cargo {
     }
 
     fn sbom_components(&self, eco: &str, body: &Value, out: &mut Vec<Value>) -> io::Result<()> {
-        let plan = body.get("plan").unwrap_or(body);
-        match eco {
-            "cargo" => {
-                for p in list(eco, plan, "crates")? {
-                    let (name, ver) = (required(eco, &p, "name")?, required(eco, &p, "version")?);
-                    let mut c = component(
-                        &name,
-                        &ver,
-                        format!("pkg:cargo/{}@{}", purl_encode(&name), purl_encode(&ver)),
-                        eco,
-                    );
-                    push_hash(&mut c, "SHA-256", &required(eco, &p, "sha256")?);
-                    out.push(c);
-                }
-                out.push(toolchain_component(
-                    body,
-                    "rust_object",
-                    "rust",
-                    &version_of(eco, plan, "rust_version")?,
-                )?);
-            }
-            // `tog fmt` writes a toolchain-only closure: no packages, but two
-            // store objects it pins and keeps live. Like every other arm it emits
-            // the toolchain it records (rustfmt, versioned by the resolved Rust
-            // version, the same pairing `tog ls` shows) plus the paired Rust
-            // object. Closures are visited in sorted name order, so a `cargo`
-            // closure naming the very same Rust object has already emitted it;
-            // listing it twice would inflate the inventory.
-            _ => {
-                let rust_version = version_of(eco, plan, "rust_version")?;
-                let rust = toolchain_component(body, "rust_object", "rust", &rust_version)?;
-                if !out.contains(&rust) {
-                    out.push(rust);
-                }
-                out.push(toolchain_component(
-                    body,
-                    "rustfmt_object",
-                    "rustfmt",
-                    &rust_version,
-                )?);
-            }
+        if eco != "cargo" {
+            return Ok(());
         }
+        let plan = body.get("plan").unwrap_or(body);
+        for p in list(eco, plan, "crates")? {
+            let (name, ver) = (required(eco, &p, "name")?, required(eco, &p, "version")?);
+            let mut c = component(
+                &name,
+                &ver,
+                format!("pkg:cargo/{}@{}", purl_encode(&name), purl_encode(&ver)),
+                eco,
+            );
+            push_hash(&mut c, "SHA-256", &required(eco, &p, "sha256")?);
+            out.push(c);
+        }
+        out.push(toolchain_component(
+            body,
+            "rust_object",
+            "rust",
+            &version_of(eco, plan, "rust_version")?,
+        )?);
         Ok(())
     }
 
@@ -392,70 +357,25 @@ impl Tailor for Cargo {
         check: bool,
         args: &[String],
         toolchain: &Selected,
-        attribution: &mut crate::kernel::policy::Attribution,
     ) -> io::Result<i32> {
         let platform = ctx.platform;
         let store = &ctx.store;
         let activity = &ctx.activity;
         // The formatter rides in the same release bundle as the compiler, so
         // one selection names both, and both are realized from its rows.
-        let rust_version = toolchain.version("rustc")?.to_string();
         let rust_object = cargo::realize_runtime(store, activity, platform, toolchain)?;
         let rustfmt_object =
             rustfmt::ensure_rustfmt(store, activity, platform, toolchain, &rust_object)?;
         let workspace_root =
             inputs::locate_cargo_root(&rust_object, cwd, activity)?.canonicalize()?;
-        let object_ref = |path: &Path| -> io::Result<serde_json::Value> {
-            let id = path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .ok_or_else(|| {
-                    io::Error::new(io::ErrorKind::InvalidData, "object path has no UTF-8 id")
-                })?;
-            Ok(serde_json::json!({
-                "path": path.display().to_string(),
-                "id": id,
-            }))
-        };
+        // An older `tog fmt` wrote a `rustfmt` closure here; nothing reads
+        // one any more, so a formatting run removes it (unless it is the
+        // only closure: see `remove_legacy_record`). `--check` changes
+        // no file: a CI check must not leave the checkout dirty.
+        if !check {
+            rustfmt::remove_legacy_record(&ProjectRoot::open(&workspace_root)?)?;
+        }
         let invocation_dir = cwd.canonicalize()?;
-        let resolved_from = invocation_dir
-            .strip_prefix(&workspace_root)
-            .map_err(|_| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "fmt ran outside the workspace root cargo located",
-                )
-            })?
-            .to_string_lossy()
-            .into_owned();
-        let rustfmt_ref = object_ref(&rustfmt_object)?;
-        let inputs = rustfmt::record_inputs(
-            rustfmt_ref["id"].as_str().unwrap_or_default(),
-            &resolved_from,
-        );
-        let mut refs = comforter::ClosureRefs::new();
-        refs.object_path(store, activity, &rust_object)?;
-        refs.object_path(store, activity, &rustfmt_object)?;
-        let mut body = serde_json::json!({
-            "rust_object": object_ref(&rust_object)?,
-            "rustfmt_object": rustfmt_ref,
-            "rust_version": rust_version,
-            "workspace_root": workspace_root.display().to_string(),
-            "inputs": inputs,
-        });
-        cargo::merge_record(
-            &mut body,
-            comforter::toolchain::closure_record(toolchain, &rust_object),
-        );
-        comforter::write_closure(
-            &ProjectRoot::open(&workspace_root)?,
-            "rustfmt",
-            body,
-            store,
-            activity,
-            refs,
-            attribution,
-        )?;
         let status = rustfmt::run_sandboxed(
             platform,
             &invocation_dir,

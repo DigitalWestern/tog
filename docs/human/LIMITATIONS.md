@@ -13,16 +13,16 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
 ## Kernel-wide
 
 - **`tog fmt` is Rust-only**; other ecosystems fail clearly (the locked Rust release's
-  rustfmt, or a local toolchain's own, no
-  `Cargo.lock`; `status` ignores the rustfmt closure).
+  rustfmt, or a local toolchain's own, no `Cargo.lock`). It writes no closure, so nothing
+  roots the rustfmt object: `tog gc` between two runs can reclaim it, and the next
+  `tog fmt` realizes it again (a download when gc also cleared the archive cache).
 - **`tog audit` vouches for who wrote a record only under a `[signing]` policy.** Without
   a `[signing]` table in the machine policy it judges records on their contents, says that
   signatures were not checked, and `--signed` refuses to run. With one, a pass proves that
   every closure file in
   the working tree carries a valid signature from a key the machine policy trusts, that
   every detected ecosystem has its primary closure, that each record is current for the
-  inputs on disk (and that the `rustfmt` record names the rustfmt this binary pins), and
-  that no recorded exception is denied or unknown. It reads `tog-toolchain.toml` the way
+  inputs on disk, and that no recorded exception is denied or unknown. It reads `tog-toolchain.toml` the way
   `status` does: a missing lock, a missing section, a stale lock row, or a record built from
   another bundle than the lock names is `stale`. It does not prove the signer's sync was
   honest or safe to run: it does not cover the doors that run unsandboxed with network
@@ -37,7 +37,7 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   old record whose recorded inputs still match passes. Any record the gate cannot believe or
   compare (no signature, no recorded inputs, no recorded platform, no exception record)
   fails as `outdated` rather than passing, so pre-signing projects need one `tog`
-  under a trusted key (and one `tog fmt` for a `rustfmt` record) before the gate is
+  under a trusted key before the gate is
   useful. An exception kind this binary does not know (a record written by a newer tog)
   fails as `unknown` rather than being permitted. Loud.
 - **GC is conservative around legacy state.** Store jobs hold a shared activity lease; GC

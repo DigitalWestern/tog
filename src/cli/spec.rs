@@ -20,9 +20,6 @@ pub struct EcosystemWords {
     pub toolchain: &'static str,
     /// `Tailor::builds`: whether `tog build <id>` names it.
     pub builds: bool,
-    /// The closures besides `<id>.json` the tailor writes
-    /// (`Tailor::owns_closure`), which `ls` prints and so accepts.
-    pub closures: &'static [&'static str],
 }
 
 /// One row per tailor, in registry order.
@@ -31,78 +28,38 @@ pub const ECOSYSTEM_WORDS: &[EcosystemWords] = &[
         id: "python",
         toolchain: "python",
         builds: false,
-        closures: &[],
     },
     EcosystemWords {
         id: "node",
         toolchain: "node",
         builds: false,
-        closures: &[],
     },
     EcosystemWords {
         id: "cargo",
         toolchain: "rust",
         builds: true,
-        closures: &["rustfmt"],
     },
     EcosystemWords {
         id: "go",
         toolchain: "go",
         builds: true,
-        closures: &[],
     },
     EcosystemWords {
         id: "ruby",
         toolchain: "ruby",
         builds: false,
-        closures: &[],
     },
     EcosystemWords {
         id: "elixir",
         toolchain: "elixir",
         builds: true,
-        closures: &[],
     },
     EcosystemWords {
         id: "dotnet",
         toolchain: "dotnet",
         builds: true,
-        closures: &[],
     },
 ];
-
-const fn ls_count() -> usize {
-    let mut count = 0;
-    let mut i = 0;
-    while i < ECOSYSTEM_WORDS.len() {
-        count += 1 + ECOSYSTEM_WORDS[i].closures.len();
-        i += 1;
-    }
-    count
-}
-
-const fn ls_words<const N: usize>() -> [&'static str; N] {
-    let mut out = [""; N];
-    let mut at = 0;
-    // Every id first, in registry order, then the extra closures.
-    let mut i = 0;
-    while i < ECOSYSTEM_WORDS.len() {
-        out[at] = ECOSYSTEM_WORDS[i].id;
-        at += 1;
-        i += 1;
-    }
-    i = 0;
-    while i < ECOSYSTEM_WORDS.len() {
-        let mut j = 0;
-        while j < ECOSYSTEM_WORDS[i].closures.len() {
-            out[at] = ECOSYSTEM_WORDS[i].closures[j];
-            at += 1;
-            j += 1;
-        }
-        i += 1;
-    }
-    out
-}
 
 const fn build_count() -> usize {
     let mut count = 0;
@@ -151,16 +108,13 @@ const fn id_words<const N: usize>() -> [&'static str; N] {
 }
 
 const ID_ARRAY: [&str; ECOSYSTEM_WORDS.len()] = id_words();
-const LS_ARRAY: [&str; ls_count()] = ls_words();
 const BUILD_ARRAY: [&str; build_count()] = build_words();
 const TOOLCHAIN_ARRAY: [&str; ECOSYSTEM_WORDS.len()] = toolchain_words();
 
-/// What `tog ls` accepts as a filter word. `ls` lists closures, not
-/// ecosystems: besides the ecosystems it prints a row for the
-/// toolchain-only `rustfmt` closure `tog fmt` writes, and every name `ls`
-/// can print must be a name it accepts. This is the `ls` vocabulary only;
-/// it never selects an ecosystem for sync, add, or build.
-pub const LS_WORDS: &[&str] = &LS_ARRAY;
+/// What `tog ls` accepts as a filter word: every closure is named for its
+/// tailor's id, so these are the ecosystem ids. This is the `ls`
+/// vocabulary only; it never selects an ecosystem for sync, add, or build.
+pub const LS_WORDS: &[&str] = &ID_ARRAY;
 pub const BUILD_WORDS: &[&str] = &BUILD_ARRAY;
 pub const SHELL_WORDS: &[&str] = &["bash", "zsh", "fish"];
 /// Every tailor id, in registry order: what `tog attest` names.
@@ -500,6 +454,9 @@ Runs the pinned rustfmt/cargo-fmt for a Rust workspace. The workspace is
 discovered with the store Cargo tool and Cargo metadata is read with
 --no-deps, so a project that has never been synced needs no Cargo.lock,
 dependency resolution, or vendor object. --check returns rustfmt's status.
+The formatter is the one the committed tog-toolchain.toml pins, and the
+run writes no record: a .tog/closures/rustfmt.json an older tog left is
+deleted by a run without --check once the project has another closure.
 A package.json script named fmt takes precedence and is run as
 'tog run fmt'. In a polyglot directory use --eco rust: an explicit --eco
 selects the ecosystem, so it formats Rust instead of running that script.
@@ -565,8 +522,7 @@ commit the lock' gate.",
 Name and version of every package in each synced closure, with the
 toolchain each runs on; -v adds the artifact and store object. Read from
 .tog/closures/*.json. Ecosystems: python, node,
-cargo, go, ruby, elixir, dotnet; plus rustfmt, the toolchain-only closure
-'tog fmt' writes.",
+cargo, go, ruby, elixir, dotnet.",
         examples: &[
             ("tog ls", "every package in every synced ecosystem"),
             ("tog ls python", "one ecosystem only"),
@@ -603,11 +559,9 @@ changed since the sync, the same check 'tog status' makes), denied
 (each denied exception's kind, subject, and detail, plus a count of
 permitted ones by kind), unknown (a kind this binary cannot judge), or
 clean. When signatures are checked, a record that is not trusted is not
-evaluated further. A detected
-ecosystem with no closure is missing. The rustfmt closure 'tog fmt'
-writes is stale when this binary would record that run differently now;
-rerun 'tog fmt'. Only clean passes. Offline, read-only, no store
-access, no sandbox needed. Exit status 0 when every closure is clean and
+evaluated further. A detected ecosystem with no closure is missing.
+Only clean passes. Offline, read-only, no store access, no sandbox
+needed. Exit status 0 when every closure is clean and
 none is missing, 1 otherwise, 2 for an unreadable --policy file or
 --signed with no trusted key configured. 'tog keygen' creates a signing
 key; set TOG_SIGNING_KEY where sync runs. A company deny list to start
