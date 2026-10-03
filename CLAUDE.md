@@ -42,6 +42,26 @@
   before it merges. Run `gh pr list --state open` first, so you do not
   duplicate a pull request another agent already opened.
 
+- When CI fails on a pull request, reproduce and fix it on this machine,
+  not in the cloud. You have permission to run any CI job locally,
+  including the slow ones. Read the failing job's log (`gh run view
+  <run-id> --log-failed`), run that job's commands from
+  `.github/workflows/` here, fix the code, and re-run them until they
+  pass. Then push once. Do not push a guess and wait for CI to tell you
+  whether it worked: that spends a full cloud run to learn what a local
+  run would have told you. The local equivalents:
+  - `test` (ci.yml): `cargo fmt --check`, `cargo clippy --locked
+    --all-targets -- -D warnings`, `cargo test --locked`,
+    `bash tests/install.sh`, `python3 tools/test_catalog.py`.
+  - `e2e` (heavy.yml): `cargo test --locked --no-fail-fast -- --ignored
+    --test-threads=1`, or only the failing suite with `--test <name>`,
+    then `bash tests/acceptance.sh`. Point `TMPDIR` at a directory under
+    `$HOME` first: these tests leave large stores behind and fill the
+    `/tmp` quota.
+  If a failure only happens on the runner (a different Ubuntu version,
+  AppArmor, the runner's disk) and cannot be reproduced here, say so in
+  the pull request. Then one push to test the fix in the cloud is fine.
+
 # About Ethan
 
 My name is Ethan. I work in finance at a private credit firm doing capital markets and origination, and software engineering is something I’ve taken up as a hobby on the side. I’ve built a number of smaller projects before this—mostly Python/data analysis, HTML/CSS, scripts, and other relatively straightforward projects—but Tog is my first large-scale backend/systems project. I am still very much a newcomer to Rust, systems programming, package managers, CI infrastructure, toolchains, dependency resolution, security, and many of the architectural concepts that appear throughout this codebase.
