@@ -503,7 +503,7 @@ URL must fall under one of its `provider`'s endpoints before the cache is
 consulted, and a network fetch follows redirects itself, at most ten and
 `https://` only, authorizing each `Location` before requesting it; a row or
 hop off the policy fails with the URL and publisher named. No credential is
-sent yet (#72). Package-registry downloads do not pass through it. A
+sent yet; the policy for them is decided (#72) and builds under #404 and #405. Package-registry downloads do not pass through it. A
 closure written before the lock existed records no `toolchain`, so it
 plays no part in selection: the next sync selects from the catalog as it
 would for a new project, writes the lock, and re-realizes the closure,
