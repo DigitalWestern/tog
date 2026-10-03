@@ -12,7 +12,7 @@ use crate::kernel::activity::StoreActivity;
 use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::platform::Platform;
 use crate::kernel::store::Store;
-use crate::kernel::toolchain::{LegacyEvidence, Selected};
+use crate::kernel::toolchain::Selected;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -64,74 +64,6 @@ pub fn realize_vendor(
 ) -> io::Result<PathBuf> {
     crate::tailors::install_kinds();
     crate::kernel::provider::crates::realize_vendor(store, activity, plan)
-}
-
-/// A pre-lock cargo closure records the toolchain under `plan.rust_version`;
-/// a rustfmt closure records it at the top level. Both name the Rust object
-/// under `rust_object`: the three component archives and the recipe its
-/// identity names are the proof.
-pub fn legacy_toolchain_evidence(
-    ecosystem: &str,
-    platform: Option<Platform>,
-    body: &serde_json::Value,
-    store: Option<&crate::kernel::store::Store>,
-) -> LegacyEvidence {
-    use crate::comforter::toolchain::{self as project_toolchain, LegacyRuntime};
-    let pointer = if ecosystem == "rustfmt" {
-        "/rust_version"
-    } else {
-        "/plan/rust_version"
-    };
-    let mut evidence =
-        crate::comforter::legacy_toolchain_evidence(platform, body, &[("rustc", pointer)]);
-    project_toolchain::prove_legacy_runtime(
-        &mut evidence,
-        store,
-        body,
-        LegacyRuntime {
-            pointer: "/rust_object",
-            via: &[],
-            kind: "rust",
-        },
-        |identity, evidence| {
-            project_toolchain::expect_legacy_version(
-                identity,
-                evidence,
-                "rustc",
-                &identity.version,
-            )?;
-            let recipe = project_toolchain::schema_recipe(identity)?;
-            crate::kernel::provider::rust::RUNTIME_COMPONENTS
-                .iter()
-                .map(|component| {
-                    project_toolchain::proved_from_identity(
-                        identity,
-                        component,
-                        &format!("{}_sha256", component.replace('-', "_")),
-                        "sha256",
-                        recipe,
-                    )
-                })
-                .collect()
-        },
-    );
-    evidence
-}
-
-/// The Rust object a pre-lock sync from `selected` left for legacy seeding
-/// to read, and the body field that names it (cargo and rustfmt closures
-/// both use it).
-#[cfg(test)]
-pub(crate) fn legacy_runtime_for_test(
-    platform: Platform,
-    selected: &Selected,
-    store: &Store,
-) -> (serde_json::Value, Vec<Identity>) {
-    let rust = identity_of(platform, &runtime_rows(platform, selected).unwrap());
-    let body = serde_json::json!({
-        "rust_object": crate::comforter::toolchain::object_ref_for_test(store, &rust.object_id()),
-    });
-    (body, vec![rust])
 }
 
 /// The `store/tmp` scratch name for a `cargo build`. The `stage-` prefix is
@@ -1587,9 +1519,9 @@ checksum = "{hash_b}"
         assert_eq!(closure["cargo_lock_sha256"], digest);
         assert_eq!(closure["plan"]["members"][0], "app");
         // The closure states the selection it was realized from and refers
-        // to the runtime object directly, so it needs no seeding from its
-        // plan the next time this project is resolved, and a GC keeps the
-        // toolchain alive by that reference.
+        // to the runtime object directly, so a status check can compare it
+        // with the lock, and a GC keeps the toolchain alive by that
+        // reference.
         let selected = selection();
         assert_eq!(closure["toolchain"]["bundle_id"], selected.bundle_id());
         assert_eq!(closure["toolchain"]["ecosystem"], "cargo");

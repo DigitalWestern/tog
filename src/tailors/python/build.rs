@@ -583,14 +583,13 @@ struct RustPlanInputs {
 
 /// The Rust an sdist with no channel of its own builds on under the Python
 /// selection `selected`: its section's pin; [`LEGACY_SDIST_RUST`] for a
-/// section written before pins, or a selection seeded from a closure
-/// written before the lock (those builds used it); `None` (the catalog's
-/// default, which is what a section written now pins) otherwise.
+/// section written before pins (those builds used it); `None` (the
+/// catalog's default, which is what a section written now pins) otherwise.
 fn sdist_rust_default(selected: &Selected) -> Option<&str> {
     use crate::kernel::toolchain::Source;
     match selected.helpers.get("rust") {
         Some(pin) => Some(pin),
-        None if matches!(selected.source, Source::Lock | Source::Seeded) => Some(LEGACY_SDIST_RUST),
+        None if matches!(selected.source, Source::Lock) => Some(LEGACY_SDIST_RUST),
         None => None,
     }
 }

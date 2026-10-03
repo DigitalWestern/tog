@@ -70,8 +70,8 @@ files. Manifests and dependency locks the user authors are read with
 `read_input`, which resolves from the descriptor but follows a symlink the
 project contains. tog's own state is walked one component at a time with
 `O_NOFOLLOW`, so a `.tog`, `.venv` parent or `cargo-home` swapped for a
-symlink is refused rather than followed: closures (read for toolchain
-seeding, the exception summary and root registration, and written),
+symlink is refused rather than followed: closures (read for the exception
+summary and root registration, and written),
 `.tog/policy.toml`, the plan and setup.py caches, the Python manifest
 snapshots and lock stamp, `.tog/cargo-home` (`tog-config.toml` and the 0755
 `cargo` shim), the `.venv` and `node_modules` links (`replace_symlink`,
@@ -410,8 +410,8 @@ to is pinned in the Python lock section instead (`Tailor::helper_pins`,
 written as `[toolchain.python.helpers] rust = "<version>"` when the section
 is written, the catalog's default at that moment), so a newer tog with a
 newer default does not change a locked project's wheel ids. A section from
-before the pin, and one seeded from a pre-lock closure, keep the Rust those
-builds used (`Tailor::legacy_helper_pins`: 1.96.1). A section may pin only
+before the pin keeps the Rust those builds used (1.96.1,
+`LEGACY_SDIST_RUST` in `tailors/python/build.rs`). A section may pin only
 the helpers its tailor declares (`Tailor::helpers`); any other name is
 refused on read, naming `tog update --toolchain <ecosystem>`. The section's
 `bundle_id` covers its pins (`Bundle::section_id`: the bundle's canonical
@@ -428,12 +428,18 @@ existed counts as `null`, which is what it was built on.
 Cached `tog x` environments key on `x/3`: store root, ecosystem, package
 request, platform, the primary runtime version, the selected `bundle_id`
 and the realized runtime object, so a changed bundle component gives a
-fresh environment and an `x/2` directory is never reused. A registry tool
+fresh environment. A registry tool
 that builds with helpers (npm's node-gyp Python) keys on `x/4` instead: the
 `x/3` fields plus `<helper>=<object id>` for each, decided as above for the
 project `x` runs in and written to the request record's `helpers`. `py:`
-tools have none and keep their `x/3` names; every `npm:` cache from before
-is a miss.
+tools have none and keep their `x/3` names. The key only names the
+directory. A run reuses it only when the request record it wrote there
+(`.tog/x.json`) says `ready`, so a directory left without one, as a tog
+before `x/4` left them, is realized again in place. Only the bare
+`tog x --clean` removes it, since nothing records what it was made for,
+and it does so under the store its closure's objects live in, so that
+store's root record goes with it. One whose store cannot be recovered is
+skipped. The pnpm cache a dependency edit uses follows the same rule.
 
 The catalog a lock is minted from
 (`src/kernel/toolchain/`). Each ecosystem's catalog is a checked-in,
@@ -497,24 +503,11 @@ URL must fall under one of its `provider`'s endpoints before the cache is
 consulted, and a network fetch follows redirects itself, at most ten and
 `https://` only, authorizing each `Location` before requesting it; a row or
 hop off the policy fails with the URL and publisher named. No credential is
-sent yet (#72). Package-registry downloads do not pass through it. `seed` chooses a bundle
-from a pre-lock closure's recorded platform and exact versions and refuses,
-naming `tog update --toolchain`, when either is missing, when the
-version is not in the catalog, or when the bundle is incomplete on the
-other platform: a closure realized on one platform is not evidence for the
-other. The closure's version strings are only a claim. Each tailor's
-`legacy_toolchain_evidence` also reads the runtime object the closure
-names (through its environment object for Python and Node) in the active
-store, located by `Store::existing` and read by `Store::published_identity`.
-The seeding lookup itself only reads: no lease, lock file, touch or created
-directory (the command around it, `status` and `doctor` included, may
-already have opened the store). An object the store
-holds proves the artifact rows its identity was built from
-(`comforter::toolchain::prove_legacy_runtime`), and those proofs decide
-between releases that share a version. An object the store lacks proves
-nothing: a unique version still seeds, and a tie refuses and says the
-object was missing. An object whose kind, platform or version contradicts
-the closure, or whose metadata does not hash to its id, refuses outright.
+sent yet (#72). Package-registry downloads do not pass through it. A
+closure written before the lock existed records no `toolchain`, so it
+plays no part in selection: the next sync selects from the catalog as it
+would for a new project, writes the lock, and re-realizes the closure,
+which `tog status` reports as needing a sync until then.
 
 ## Permissive by default, strict as a switch
 
@@ -806,7 +799,7 @@ and build inputs tailors share, so no tailor reaches into another):
     toolchain/      release-bundle catalog: mod.rs types + validation + bundle id,
                     document.rs the generated catalog files, select.rs version
                     requests and the global order, source.rs the typed
-                    endpoint policy, legacy.rs seeding from closures
+                    endpoint policy
     sandbox.rs      hermetic build sandbox (Seatbelt / bubblewrap)
     hostview.rs     HostView::RuntimeOnly on Linux: the host's runtime files
                     plus the C runtime's development files, nothing else
@@ -846,10 +839,10 @@ answers "tog x does not support <id>"; Python and Node return a
 `RegistryTool` (`registry_tool.rs` in each folder) that supplies the cache
 directory prefix (`py`, `npm`), the runtime object id in the cache key, the
 command-line word and message labels, the executable directory,
-resolve-realize-project for one package, the launch environment, whether a
-cached projection still points at its environment, and the packages a
-pre-record cache root was made for. `commands/x.rs` keeps the `~/.tog/x`
-directory, the `x/3`/`x/4` key, the lifecycle lock, gc root registration, and the
+resolve-realize-project for one package, the launch environment, and
+whether a cached projection still points at its environment.
+`commands/x.rs` keeps the `~/.tog/x` directory, the `x/3`/`x/4` key,
+the request record, the lifecycle lock, gc root registration, and the
 policy checks on a cached hit, and is ecosystem-neutral except for the
 Corepack `pnpm` delegate path, which is Node by definition. The grammar
 cannot ask the registry (the cli layer names no tailor), so

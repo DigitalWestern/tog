@@ -42,7 +42,7 @@ use crate::kernel::fetch::{
 use crate::kernel::platform::{no_pin, Platform};
 use crate::kernel::store::Store;
 use crate::kernel::toolchain::document::Shipped;
-use crate::kernel::toolchain::{ArtifactSpec, Catalog, LegacyEvidence, Selected};
+use crate::kernel::toolchain::{ArtifactSpec, Catalog, Selected};
 use crate::kernel::types::Identity;
 use std::collections::BTreeMap;
 use std::fs;
@@ -198,70 +198,6 @@ pub fn node_pin(platform: Platform) -> io::Result<&'static PinnedNode> {
 /// version for them, so they are not listed as components here.
 pub fn toolchain_catalog() -> io::Result<Catalog> {
     CATALOG.catalog()
-}
-
-/// A pre-lock Node closure records its runtime under `node_version`, and
-/// its environment object under `env_object`, whose `nodejs` input is the
-/// runtime object: the artifact that object was built from is the proof.
-pub fn legacy_toolchain_evidence(
-    platform: Option<Platform>,
-    body: &serde_json::Value,
-    store: Option<&crate::kernel::store::Store>,
-) -> LegacyEvidence {
-    use crate::comforter::toolchain::{self as project_toolchain, LegacyRuntime};
-    let mut evidence =
-        crate::comforter::legacy_toolchain_evidence(platform, body, &[("node", "/node_version")]);
-    project_toolchain::prove_legacy_runtime(
-        &mut evidence,
-        store,
-        body,
-        LegacyRuntime {
-            pointer: "/env_object",
-            via: &[("node-env", "nodejs")],
-            kind: "nodejs",
-        },
-        |identity, evidence| {
-            project_toolchain::expect_legacy_version(
-                identity,
-                evidence,
-                "node",
-                &identity.version,
-            )?;
-            // A Node identity carries no schema: its layout is the one the
-            // catalog names `nodejs/legacy`.
-            Ok(vec![project_toolchain::proved_from_identity(
-                identity,
-                "node",
-                "artifact_sha256",
-                "sha256",
-                NODE_RECIPE,
-            )?])
-        },
-    );
-    evidence
-}
-
-/// The objects a pre-lock Node sync from `selected` left for legacy seeding
-/// to read: the runtime the producer builds and an environment naming it,
-/// and the body field that names the environment.
-#[cfg(test)]
-pub(crate) fn legacy_runtime_for_test(
-    platform: Platform,
-    selected: &Selected,
-    store: &Store,
-) -> (serde_json::Value, Vec<Identity>) {
-    let node = node_identity_of(&node_row(selected, platform).unwrap(), platform);
-    let env = Identity {
-        kind: "node-env".into(),
-        name: "env".into(),
-        version: node.version.clone(),
-        inputs: BTreeMap::from([
-            ("schema".to_string(), "node-env/4".to_string()),
-            ("nodejs".to_string(), node.object_id()),
-        ]),
-    };
-    let body = serde_json::json!({"env_object": store.object_path(&env.object_id())});
-    (body, vec![node, env])
 }
 
 pub fn preflight(platform: Platform) -> io::Result<()> {

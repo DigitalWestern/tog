@@ -47,7 +47,7 @@ The toolchain lock shipped on Linux on 2026-09-21: exact selection, the
 shipped-table adapter and catalogs, the lock core, runtime propagation, and
 activation with `tog update --toolchain`. Its behavior is documented in
 `docs/human/ARCHITECTURE.md` "Toolchain lock" (file, staleness rule,
-selection order, catalogs, legacy seeding, `x/3` keys) and "Store
+selection order, catalogs, `x/3` keys) and "Store
 concurrency" (lock order), `docs/human/CLI.md` (`--frozen`, `tog update
 --toolchain`), and `docs/human/LIMITATIONS.md` (one toolchain per lock
 root). The full reviewed design, with its reasoning, is in git history:

@@ -79,32 +79,6 @@ pub fn closures(dir: &Path) -> io::Result<Vec<ClosureFile>> {
     Ok(out)
 }
 
-/// `closures`, read through a project the caller holds: sync seeds its
-/// toolchain from the closures of the directory it holds, not whatever the
-/// path names by then. Closures are tog's own state, so they are read with
-/// the strict no-follow walk: a symlinked `.tog`, `.tog/closures`, or
-/// closure file is refused rather than read through.
-pub fn closures_in(project: &ProjectRoot) -> io::Result<Vec<ClosureFile>> {
-    let mut out = Vec::new();
-    let closures = Path::new(".tog/closures");
-    let Some(names) = project.read_dir(closures)? else {
-        return Ok(out);
-    };
-    for name in names {
-        let name = name.to_string_lossy().into_owned();
-        if closure_stem(&name).is_none() {
-            continue;
-        }
-        let relative = closures.join(&name);
-        let Some(bytes) = project.read_file(&relative)? else {
-            continue;
-        };
-        out.push(closure_file(&name, project.path().join(&relative), &bytes)?);
-    }
-    out.sort_by_key(|closure| rank(&closure.ecosystem));
-    Ok(out)
-}
-
 /// The ecosystem stem of a closure file name: `<stem>.json`, not hidden.
 fn closure_stem(name: &str) -> Option<&str> {
     name.strip_suffix(".json")

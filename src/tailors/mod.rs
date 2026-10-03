@@ -23,7 +23,7 @@ use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::objmeta::KindAdapter;
 use crate::kernel::platform::Platform;
 use crate::kernel::resolve::ResolutionDoor;
-use crate::kernel::toolchain::{Catalog, LegacyEvidence, Selected};
+use crate::kernel::toolchain::{Catalog, Selected};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::io;
@@ -351,7 +351,7 @@ pub trait Tailor: Sync {
 
     /// The shipped toolchain catalog: this ecosystem's pin tables as release
     /// bundles (`kernel::toolchain`), the rows a toolchain lock is minted
-    /// from. Selection and legacy seeding read it; realization keeps reading
+    /// from. Selection reads it; realization keeps reading
     /// the pin tables, so no object identity changes.
     fn toolchain_catalog(&self) -> io::Result<Catalog>;
 
@@ -372,27 +372,6 @@ pub trait Tailor: Sync {
     fn helper_pins(&self) -> io::Result<BTreeMap<String, String>> {
         Ok(BTreeMap::new())
     }
-
-    /// The helper releases this ecosystem's builds used before lock
-    /// sections pinned them: what a section with no pin keeps.
-    fn legacy_helper_pins(&self) -> BTreeMap<String, String> {
-        BTreeMap::new()
-    }
-
-    /// What a closure of this ecosystem written before the toolchain lock
-    /// proves about its toolchain (`kernel::toolchain::seed`): `platform`
-    /// is the closure envelope's platform, `body` the closure body
-    /// `read_closure` returns, from which the exact recorded versions come.
-    /// `store` is the active store, opened read-only: the runtime object the
-    /// body names proves the artifacts it was built from only when that
-    /// store holds it (`comforter::toolchain::prove_legacy_runtime`).
-    fn legacy_toolchain_evidence(
-        &self,
-        ecosystem: &str,
-        platform: Option<Platform>,
-        body: &Value,
-        store: Option<&crate::kernel::store::Store>,
-    ) -> LegacyEvidence;
 
     /// The `--eco` word `tog fmt` accepts for this ecosystem, when it
     /// has a pinned formatter.
@@ -645,11 +624,6 @@ pub trait RegistryTool: Sync {
         env_path: &Path,
     ) -> io::Result<bool>;
 
-    /// The packages a cache root written before `x` recorded its request
-    /// was made for, read back from the manifest this tool generated in
-    /// it. `None` when `root` holds no such manifest.
-    fn legacy_packages(&self, root: &Path) -> Option<Vec<LegacyPackage>>;
-
     /// What `tog x --clean` adds to its summary when it removed at least
     /// one of this tool's environments.
     fn clean_note(&self) -> Option<&'static str> {
@@ -697,14 +671,6 @@ pub trait RegistryTool: Sync {
         root: &Path,
         toolchain: &Selected,
     ) -> io::Result<ToolEnv>;
-}
-
-/// One package a pre-record `x` cache root was made for
-/// (`RegistryTool::legacy_packages`).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LegacyPackage {
-    pub package: String,
-    pub version: Option<String>,
 }
 
 /// The environment a registry tool launches in (`RegistryTool::launch_env`).
@@ -807,8 +773,7 @@ pub fn detected_in(project: &ProjectRoot) -> io::Result<Vec<&'static dyn Tailor>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::kernel::toolchain::{qualified, seed, Request, SourcePolicy};
-    use serde_json::json;
+    use crate::kernel::toolchain::{qualified, Request, SourcePolicy};
 
     const DARWIN: Platform = Platform::Aarch64AppleDarwin;
     const LINUX: Platform = Platform::X86_64UnknownLinuxGnu;
@@ -1517,180 +1482,6 @@ mod tests {
         }
     }
 
-    /// A pre-lock closure body per ecosystem, shaped as the writers shape
-    /// it (the platform lives in the envelope, never in the body), recording
-    /// the versions of `bundle`.
-    fn legacy_body(id: &str, bundle: &crate::kernel::toolchain::Bundle) -> Value {
-        let version = |component: &str| bundle.component(component).unwrap().version.clone();
-        match id {
-            "python" => json!({"python": {"version": version("cpython")}, "plan": {}}),
-            "node" => json!({"node_version": version("node")}),
-            "cargo" => json!({"plan": {"rust_version": version("rustc")}}),
-            "go" => json!({"plan": {"go_version": version("go")}}),
-            "ruby" => json!({"plan": {"ruby_version": version("ruby")}}),
-            "elixir" => {
-                json!({"plan": {"otp_version": version("otp"), "elixir_version": version("elixir")}})
-            }
-            "dotnet" => json!({"plan": {"sdk_version": version("dotnet-sdk")}}),
-            other => panic!("no legacy body for {other}"),
-        }
-    }
-
-    #[test]
-    fn legacy_closures_seed_the_release_they_record_or_refuse() {
-        for tailor in registry() {
-            let catalog = tailor.toolchain_catalog().unwrap();
-            let newest = catalog.select(&Request::newest()).unwrap();
-            // Every release the catalog ships, the older ones included: a
-            // seed that ignored the record and returned the newest release
-            // passes for the newest alone.
-            let mut seeded_an_older_release = false;
-            for bundle in catalog.bundles() {
-                let body = legacy_body(tailor.id(), bundle);
-                assert!(body.get("platform").is_none());
-                let versions = bundle.primary_versions().unwrap();
-                // A re-published revision shares its versions with another
-                // release; the record cannot tell those apart.
-                let unique = catalog
-                    .bundles()
-                    .iter()
-                    .filter(|other| other.primary_versions().unwrap() == versions)
-                    .count()
-                    == 1;
-                for platform in Platform::ALL {
-                    let evidence =
-                        tailor.legacy_toolchain_evidence(tailor.id(), Some(*platform), &body, None);
-                    assert_eq!(evidence.platform, Some(*platform));
-                    let seeded = seed(&catalog, &evidence)
-                        .unwrap_or_else(|error| panic!("{}: {error}", tailor.id()));
-                    assert_eq!(
-                        seeded.primary_versions().unwrap(),
-                        versions,
-                        "{} {}",
-                        tailor.id(),
-                        bundle.release
-                    );
-                    if unique {
-                        assert_eq!(seeded.release, bundle.release, "{}", tailor.id());
-                    }
-                }
-                if unique && bundle.release != newest.release {
-                    seeded_an_older_release = true;
-                }
-            }
-            assert!(
-                seeded_an_older_release,
-                "{}: no older release was seeded",
-                tailor.id()
-            );
-            let body = legacy_body(tailor.id(), newest);
-            // No envelope platform: refuse, naming the update verb.
-            let evidence = tailor.legacy_toolchain_evidence(tailor.id(), None, &body, None);
-            let error = seed(&catalog, &evidence).unwrap_err();
-            assert!(
-                error.to_string().contains("records no platform"),
-                "{}: {error}",
-                tailor.id()
-            );
-            assert!(
-                error.to_string().contains("tog update --toolchain"),
-                "{}: {error}",
-                tailor.id()
-            );
-            // No recorded version: refuse rather than use the shipped default.
-            let bare = json!({"plan": {}});
-            let evidence = tailor.legacy_toolchain_evidence(tailor.id(), Some(LINUX), &bare, None);
-            let error = seed(&catalog, &evidence).unwrap_err();
-            assert!(
-                error.to_string().contains("records no"),
-                "{}: {error}",
-                tailor.id()
-            );
-        }
-        // Python's older closures record the version on the plan instead.
-        let python = by_id("python").unwrap();
-        let catalog = python.toolchain_catalog().unwrap();
-        let old = json!({"plan": {"python_version": "3.11.16"}});
-        let seeded = seed(
-            &catalog,
-            &python.legacy_toolchain_evidence("python", Some(DARWIN), &old, None),
-        )
-        .unwrap();
-        assert_eq!(seeded.component("cpython").unwrap().version, "3.11.16");
-        // A rustfmt closure records the version at the top level.
-        let cargo = by_id("cargo").unwrap();
-        let catalog = cargo.toolchain_catalog().unwrap();
-        let fmt = json!({"rust_version": "1.96.1"});
-        assert!(seed(
-            &catalog,
-            &cargo.legacy_toolchain_evidence("rustfmt", Some(LINUX), &fmt, None)
-        )
-        .is_ok());
-        // A version the catalog never shipped is unrecoverable.
-        let stranger = json!({"plan": {"rust_version": "1.0.0"}});
-        let error = seed(
-            &catalog,
-            &cargo.legacy_toolchain_evidence("cargo", Some(LINUX), &stranger, None),
-        )
-        .unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("no catalog release has rustc 1.0.0"),
-            "{error}"
-        );
-    }
-
-    /// The runtime object(s) a pre-lock sync of `id` from `selected` left in
-    /// `store`, and the closure body fields naming them.
-    fn legacy_runtime(
-        id: &str,
-        platform: Platform,
-        selected: &Selected,
-        store: &crate::kernel::store::Store,
-    ) -> (Value, Vec<crate::kernel::types::Identity>) {
-        match id {
-            "python" => python::legacy_runtime_for_test(platform, selected, store),
-            "node" => node::legacy_runtime_for_test(platform, selected, store),
-            "cargo" => cargo::legacy_runtime_for_test(platform, selected, store),
-            "go" => go::legacy_runtime_for_test(platform, selected, store),
-            "ruby" => ruby::legacy_runtime_for_test(platform, selected, store),
-            "elixir" => elixir::legacy_runtime_for_test(platform, selected, store),
-            "dotnet" => dotnet::legacy_runtime_for_test(platform, selected, store),
-            other => panic!("no legacy runtime for {other}"),
-        }
-    }
-
-    /// `bundle` rebuilt: the same versions under a second revision whose
-    /// every artifact digest differs, so only an artifact tells them apart.
-    fn rebuilt(bundle: &crate::kernel::toolchain::Bundle) -> crate::kernel::toolchain::Bundle {
-        use crate::kernel::digest::Digest;
-        let mut twin = bundle.clone();
-        twin.release = format!("{}-rebuilt", bundle.release);
-        twin.revision = Some(2);
-        for row in &mut twin.artifacts {
-            let hex: String = row
-                .digest
-                .hex()
-                .chars()
-                .map(|c| if c == '0' { '1' } else { '0' })
-                .collect();
-            row.digest = match row.digest.algo() {
-                "sha256" => Digest::sha256(&hex),
-                _ => Digest::sha512(&hex),
-            }
-            .unwrap();
-        }
-        twin
-    }
-
-    fn with_refs(mut body: Value, refs: &Value) -> Value {
-        for (key, value) in refs.as_object().unwrap() {
-            body[key] = value.clone();
-        }
-        body
-    }
-
     fn scratch_store(
         temp: &crate::kernel::testutil::TempDir,
         name: &str,
@@ -1702,304 +1493,6 @@ mod tests {
         crate::kernel::store::Store {
             root: root.canonicalize().unwrap(),
         }
-    }
-
-    /// #133: when two releases share the recorded version, the closure's
-    /// runtime object decides, read through the active store; an object the
-    /// store does not hold proves nothing, and one that contradicts the
-    /// closure refuses. Every tailor, both platforms.
-    #[test]
-    fn legacy_seeding_needs_the_store_object_when_versions_tie() {
-        use crate::comforter::toolchain::publish_for_test;
-        use crate::kernel::toolchain::Source;
-        let temp = crate::kernel::testutil::TempDir::new();
-        for tailor in registry() {
-            let id = tailor.id();
-            let shipped = tailor.toolchain_catalog().unwrap();
-            let mut first = shipped.select(&Request::newest()).unwrap().clone();
-            first.revision = Some(1);
-            let second = rebuilt(&first);
-            let catalog =
-                Catalog::new(shipped.ecosystem(), vec![first.clone(), second.clone()]).unwrap();
-            let selected = |bundle: &crate::kernel::toolchain::Bundle| Selected {
-                helpers: Default::default(),
-                ecosystem: tailor.lock_ecosystem().to_string(),
-                bundle: bundle.clone(),
-                lock_sha256: None,
-                source: Source::Shipped,
-            };
-            let versions = legacy_body(id, &first);
-            for platform in Platform::ALL.iter().copied() {
-                let other = *Platform::ALL.iter().find(|p| **p != platform).unwrap();
-                let store = scratch_store(&temp, &format!("{id}-{}", platform.triple()));
-                let evidence = |body: &Value, store: Option<&crate::kernel::store::Store>| {
-                    tailor.legacy_toolchain_evidence(id, Some(platform), body, store)
-                };
-                let seeds = |body: &Value, store| seed(&catalog, &evidence(body, store));
-
-                // Each release's own object proves that release.
-                for bundle in [&first, &second] {
-                    let (refs, objects) = legacy_runtime(id, platform, &selected(bundle), &store);
-                    for object in &objects {
-                        publish_for_test(&store, object);
-                    }
-                    let body = with_refs(versions.clone(), &refs);
-                    let proved = evidence(&body, Some(&store));
-                    assert!(proved.unproved.is_empty(), "{id}: {:?}", proved.unproved);
-                    assert!(!proved.artifacts.is_empty(), "{id}");
-                    let seeded = seed(&catalog, &proved)
-                        .unwrap_or_else(|error| panic!("{id} {platform:?}: {error}"));
-                    assert_eq!(seeded.release, bundle.release, "{id} {platform:?}");
-                }
-                let (refs, objects) = legacy_runtime(id, platform, &selected(&first), &store);
-                let body = with_refs(versions.clone(), &refs);
-
-                // Versions alone cannot choose, and the refusal says why no
-                // object proved anything.
-                let error = seeds(&body, None).unwrap_err().to_string();
-                assert!(error.contains("all have"), "{id}: {error}");
-                assert!(error.contains("there is no store"), "{id}: {error}");
-                let empty = scratch_store(&temp, &format!("{id}-{}-empty", platform.triple()));
-                let (absent, _) = legacy_runtime(id, platform, &selected(&first), &empty);
-                let error = seeds(&with_refs(versions.clone(), &absent), Some(&empty))
-                    .unwrap_err()
-                    .to_string();
-                assert!(error.contains("all have"), "{id}: {error}");
-                assert!(error.contains("is not in the store at"), "{id}: {error}");
-                assert!(error.contains("tog update --toolchain"), "{id}: {error}");
-                // A reference recorded in another store is not read there.
-                let error = seeds(&body, Some(&empty)).unwrap_err().to_string();
-                assert!(error.contains("all have"), "{id}: {error}");
-                assert!(error.contains("recorded in another store"), "{id}: {error}");
-
-                // An object of another kind under the reference refuses.
-                let stranger = crate::kernel::types::Identity {
-                    kind: "test".into(),
-                    name: "stranger".into(),
-                    version: "1".into(),
-                    inputs: Default::default(),
-                };
-                let stranger_id = publish_for_test(&store, &stranger);
-                let named = objects
-                    .iter()
-                    .map(|object| object.object_id())
-                    .find(|object| refs.to_string().contains(object.as_str()))
-                    .unwrap();
-                let swapped: Value =
-                    serde_json::from_str(&refs.to_string().replace(&named, &stranger_id)).unwrap();
-                let error = seeds(&with_refs(versions.clone(), &swapped), Some(&store))
-                    .unwrap_err()
-                    .to_string();
-                assert!(error.contains("is a test object"), "{id}: {error}");
-
-                // An object built for the other platform refuses.
-                let (foreign_refs, foreign) = legacy_runtime(id, other, &selected(&first), &store);
-                for object in &foreign {
-                    publish_for_test(&store, object);
-                }
-                let error = seeds(&with_refs(versions.clone(), &foreign_refs), Some(&store))
-                    .unwrap_err()
-                    .to_string();
-                assert!(error.contains("was built for"), "{id}: {error}");
-
-                // A version edited beside an untouched object refuses,
-                // whatever the catalog holds.
-                let mut edited = first.clone();
-                for component in &mut edited.components {
-                    if edited.primary.contains(&component.name) {
-                        component.version = "0.0.1".into();
-                    }
-                }
-                let error = seeds(&with_refs(legacy_body(id, &edited), &refs), Some(&store))
-                    .unwrap_err()
-                    .to_string();
-                assert!(error.contains("0.0.1 but its"), "{id}: {error}");
-            }
-        }
-    }
-
-    /// Once the store holds the object a closure names, an identity the
-    /// tailor cannot read as its own is a contradiction: it refuses even a
-    /// version only one release carries, where no proof would be needed.
-    #[test]
-    fn a_found_object_with_a_malformed_identity_refuses_a_unique_version() {
-        use crate::comforter::toolchain::{object_ref_for_test, publish_for_test};
-        use crate::kernel::toolchain::Source;
-        let temp = crate::kernel::testutil::TempDir::new();
-        let platform = LINUX;
-        type Mutate = fn(&mut crate::kernel::types::Identity);
-        let cases: [(&str, &str, usize, Mutate, &str); 7] = [
-            (
-                "python",
-                "/env_object",
-                1,
-                |env| {
-                    env.inputs
-                        .insert("cpython".into(), "not-an-object-id".into());
-                },
-                "names no well-formed cpython object id",
-            ),
-            (
-                "node",
-                "/env_object",
-                1,
-                |env| {
-                    env.inputs.remove("nodejs");
-                },
-                "names no well-formed nodejs object id",
-            ),
-            (
-                "go",
-                "/go_object",
-                0,
-                |go| {
-                    go.inputs.remove("artifact_sha256");
-                },
-                "records no artifact_sha256",
-            ),
-            (
-                "cargo",
-                "/rust_object",
-                0,
-                |rust| {
-                    rust.inputs.remove("cargo_sha256");
-                },
-                "records no cargo_sha256",
-            ),
-            (
-                "ruby",
-                "/ruby_object",
-                0,
-                |ruby| {
-                    ruby.inputs.remove("schema");
-                },
-                "records no recipe",
-            ),
-            (
-                "dotnet",
-                "/sdk_object",
-                0,
-                |sdk| {
-                    sdk.inputs.insert("artifact_sha512".into(), "zz".into());
-                },
-                "has a malformed artifact_sha512",
-            ),
-            (
-                "elixir",
-                "/beam_object",
-                0,
-                |beam| {
-                    beam.version = "29.0.5".into();
-                },
-                "records no OTP/Elixir pair",
-            ),
-        ];
-        for (id, pointer, index, mutate, why) in cases {
-            let tailor = by_id(id).unwrap();
-            let catalog = tailor.toolchain_catalog().unwrap();
-            let bundle = catalog.select(&Request::newest()).unwrap().clone();
-            let selected = Selected {
-                helpers: Default::default(),
-                ecosystem: tailor.lock_ecosystem().to_string(),
-                bundle: bundle.clone(),
-                lock_sha256: None,
-                source: Source::Shipped,
-            };
-            let store = scratch_store(&temp, id);
-            let (_, mut objects) = legacy_runtime(id, platform, &selected, &store);
-            mutate(&mut objects[index]);
-            for object in &objects {
-                publish_for_test(&store, object);
-            }
-            let named = objects[index].object_id();
-            let reference = if pointer == "/env_object" {
-                json!(store.object_path(&named))
-            } else {
-                object_ref_for_test(&store, &named)
-            };
-            let mut body = legacy_body(id, &bundle);
-            body[&pointer[1..]] = reference;
-            // Unmodified, the version alone seeds this catalog.
-            let bare = tailor.legacy_toolchain_evidence(id, Some(platform), &body, None);
-            assert!(seed(&catalog, &bare).is_ok(), "{id}");
-            let evidence =
-                tailor.legacy_toolchain_evidence(id, Some(platform), &body, Some(&store));
-            assert!(
-                evidence.unproved.is_empty(),
-                "{id}: {:?}",
-                evidence.unproved
-            );
-            let error = seed(&catalog, &evidence).unwrap_err().to_string();
-            assert!(error.contains(why), "{id}: {error}");
-            assert!(error.contains("tog update --toolchain"), "{id}: {error}");
-        }
-    }
-
-    /// A malformed reference contradicts the closure before any store is
-    /// consulted, so it refuses a uniquely versioned release with or
-    /// without a store; so does an `{id, path}` pair whose path names
-    /// another object than its id.
-    #[test]
-    fn a_malformed_reference_refuses_a_unique_version_with_or_without_a_store() {
-        use crate::comforter::toolchain::publish_for_test;
-        use crate::kernel::toolchain::Source;
-        let temp = crate::kernel::testutil::TempDir::new();
-        let store = scratch_store(&temp, "refs");
-        let go = by_id("go").unwrap();
-        let catalog = go.toolchain_catalog().unwrap();
-        let bundle = catalog.select(&Request::newest()).unwrap().clone();
-        let selected = Selected {
-            helpers: Default::default(),
-            ecosystem: "go".into(),
-            bundle: bundle.clone(),
-            lock_sha256: None,
-            source: Source::Shipped,
-        };
-        let (_, objects) = legacy_runtime("go", LINUX, &selected, &store);
-        let real = publish_for_test(&store, &objects[0]);
-        let mut other = objects[0].clone();
-        other.name = "go-other".into();
-        let other = publish_for_test(&store, &other);
-        let refusal = |body: &Value, store: Option<&crate::kernel::store::Store>| {
-            let evidence = go.legacy_toolchain_evidence("go", Some(LINUX), body, store);
-            seed(&catalog, &evidence).unwrap_err().to_string()
-        };
-        let with = |reference: Value| {
-            let mut body = legacy_body("go", &bundle);
-            body["go_object"] = reference;
-            body
-        };
-        // The version alone seeds this catalog.
-        let bare =
-            go.legacy_toolchain_evidence("go", Some(LINUX), &legacy_body("go", &bundle), None);
-        assert!(seed(&catalog, &bare).is_ok());
-        for reference in [
-            json!(42),
-            json!("relative/not-an-object"),
-            json!({"id": "not-an-id", "path": store.object_path("not-an-id")}),
-            json!({"id": real}),
-            json!({"id": real, "path": store.object_path(&other)}),
-        ] {
-            for store in [None, Some(&store)] {
-                let error = refusal(&with(reference.clone()), store);
-                assert!(
-                    error.contains("object reference is malformed"),
-                    "{reference}: {error}"
-                );
-            }
-        }
-        let error = refusal(
-            &with(json!({"id": real, "path": store.object_path(&other)})),
-            Some(&store),
-        );
-        assert!(
-            error.contains("is not the object its path names"),
-            "{error}"
-        );
-        // A null reference names nothing: the version alone still seeds.
-        let evidence =
-            go.legacy_toolchain_evidence("go", Some(LINUX), &with(Value::Null), Some(&store));
-        assert!(seed(&catalog, &evidence).is_ok());
     }
 
     #[test]

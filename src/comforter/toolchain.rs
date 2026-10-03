@@ -12,18 +12,13 @@
 //! inputs with old outputs.
 
 use crate::kernel::activity::StoreActivity;
-use crate::kernel::digest::Digest;
 use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::platform::Platform;
-use crate::kernel::store::{self, Store};
+use crate::kernel::store::Store;
 use crate::kernel::toolchain::input::{self, InputRow};
 use crate::kernel::toolchain::lock::{self, ToolchainLock};
-use crate::kernel::toolchain::{
-    seed, select_for, Bundle, Catalog, LegacyEvidence, ProvedArtifact, Selected, Source,
-};
-use crate::kernel::types::Identity;
+use crate::kernel::toolchain::{select_for, Bundle, Catalog, Selected, Source};
 use crate::kernel::ui;
-use crate::tailors::Tailor;
 use sha2::{Digest as _, Sha256};
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -66,9 +61,6 @@ pub struct EcosystemInput {
     pub lock_ecosystem: String,
     /// The shipped catalog selection reads.
     pub catalog: Catalog,
-    /// What a closure written before the lock existed proves, when there is
-    /// one.
-    pub legacy: Option<LegacyEvidence>,
     /// The local-toolchain reader of this ecosystem, when it has one
     /// (`toolchain.path` for Rust). It is consulted before the catalog.
     pub external: Option<ExternalToolchain>,
@@ -78,10 +70,6 @@ pub struct EcosystemInput {
     /// The helper releases a section written now pins (`rust` for a Python
     /// project's sdists), by helper lock ecosystem.
     pub helper_pins: BTreeMap<String, String>,
-    /// The helper releases this ecosystem's builds used before sections
-    /// pinned them: what a section with no pin, or a selection seeded from a
-    /// pre-lock closure, gets, so neither moves when the catalog does.
-    pub legacy_helper_pins: BTreeMap<String, String>,
 }
 
 impl EcosystemInput {
@@ -109,17 +97,6 @@ impl EcosystemInput {
             }
         }
         Ok(section.helpers().clone())
-    }
-
-    /// The helper pins a section written now records: the legacy ones when
-    /// the selection was seeded from a pre-lock closure (that closure's
-    /// builds used them), today's otherwise.
-    fn pins_to_write(&self, seeded: bool) -> &BTreeMap<String, String> {
-        if seeded {
-            &self.legacy_helper_pins
-        } else {
-            &self.helper_pins
-        }
     }
 }
 
@@ -166,26 +143,23 @@ fn rows_of<'a>(discovered: &'a [(String, Vec<InputRow>)], ecosystem: &str) -> &'
 
 /// The bundle a new or updated lock records for `ecosystem`: the local
 /// toolchain the rows name, when the entry has a reader for one
-/// ([`EcosystemInput::external`]) and it finds one; otherwise the pre-lock
-/// closure's seed when there is one, and the catalog's selection for the
-/// rows when not.
+/// ([`EcosystemInput::external`]) and it finds one; otherwise the
+/// catalog's selection for the rows. A closure written before the lock
+/// existed plays no part: it records no bundle, so it is stale against
+/// whatever lock this selection writes and the sync re-realizes it.
 fn choose(
     root: &ProjectRoot,
     platform: Platform,
     entry: &EcosystemInput,
     rows: &[InputRow],
-    seed_from_legacy: bool,
-) -> io::Result<(Bundle, bool)> {
+) -> io::Result<Bundle> {
     let ecosystem = entry.lock_ecosystem.as_str();
     if let Some(external) = entry.external {
         if let Some(bundle) = external(platform, root.path(), rows)? {
-            return Ok((bundle, false));
+            return Ok(bundle);
         }
     }
-    match (&entry.legacy, seed_from_legacy) {
-        (Some(evidence), true) => Ok((seed(&entry.catalog, evidence)?.clone(), true)),
-        _ => Ok((select_for(&entry.catalog, ecosystem, rows)?.clone(), false)),
-    }
+    Ok(select_for(&entry.catalog, ecosystem, rows)?.clone())
 }
 
 /// One selection read from a committed section, checked against the host.
@@ -213,307 +187,6 @@ fn from_section(
         lock_sha256,
         source,
     })
-}
-
-/// What one closure envelope proves about `tailor`'s toolchain, for
-/// `resolve` to seed a missing lock from. A closure that already records a
-/// `toolchain` body key was written by a lock-aware sync and needs no
-/// seeding; one for a foreign platform still yields evidence, carrying its
-/// own platform, because the seed refuses on that platform rather than
-/// guessing from the host.
-///
-/// `store` is the active store, opened read-only ([`Store::existing`]):
-/// the tailor proves artifacts from the runtime object the closure names
-/// only when that store holds it. `None` (no store yet) proves nothing.
-pub fn legacy_evidence(
-    tailor: &dyn Tailor,
-    envelope: &serde_json::Value,
-    store: Option<&Store>,
-) -> Option<LegacyEvidence> {
-    let body = &envelope["body"];
-    if !needs_seeding(envelope) {
-        return None;
-    }
-    let platform = envelope["platform"]
-        .as_str()
-        .and_then(Platform::from_triple);
-    Some(tailor.legacy_toolchain_evidence(tailor.id(), platform, body, store))
-}
-
-/// Whether `envelope` predates the toolchain lock, so [`legacy_evidence`]
-/// has something to say about it. Callers use this to leave the store
-/// unlooked-up when no closure needs it.
-pub fn needs_seeding(envelope: &serde_json::Value) -> bool {
-    envelope["body"].get("toolchain").is_none()
-}
-
-/// [`legacy_evidence`] for the closure `tailor` wrote in `project`, if any:
-/// what a read-only answer (`tog doctor`, `tog status`) passes `resolve`
-/// so it seeds exactly as the next sync would. This lookup itself only
-/// reads the store; the command around it may already hold it open. The
-/// closure is tog's own state, read through the held project with the
-/// strict no-follow walk.
-pub fn legacy_evidence_in(
-    project: &ProjectRoot,
-    tailor: &dyn Tailor,
-) -> io::Result<Option<LegacyEvidence>> {
-    let relative = PathBuf::from(format!(".tog/closures/{}.json", tailor.id()));
-    let path = project.path().join(&relative);
-    let Some(bytes) = project.read_file(&relative)? else {
-        return Ok(None);
-    };
-    let envelope: serde_json::Value = serde_json::from_slice(&bytes)
-        .map_err(|error| invalid(format!("{}: {error}; run 'tog'", path.display())))?;
-    if !needs_seeding(&envelope) {
-        return Ok(None);
-    }
-    let store = Store::existing()?;
-    Ok(legacy_evidence(tailor, &envelope, store.as_ref()))
-}
-
-/// Why a closure's runtime object proves no artifact.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ProofGap {
-    /// Nothing to read: the closure names no object, there is no store,
-    /// the reference was recorded in another store, or this store does not
-    /// hold the object. Seeding may still go on from the versions.
-    Unproved(String),
-    /// The reference is malformed, or the store holds the object and it
-    /// disagrees with the closure or cannot be read as the tailor's
-    /// identity (another kind, platform or version, a missing or malformed
-    /// digest, recipe or next-object input, unusable metadata). Seeding
-    /// refuses.
-    Contradicted(String),
-}
-
-/// Where a tailor's pre-lock closure names its runtime object.
-#[derive(Clone, Copy, Debug)]
-pub struct LegacyRuntime<'a> {
-    /// Body-relative JSON pointer of the reference: an `{id, path}` object
-    /// or a bare object path.
-    pub pointer: &'a str,
-    /// Objects between the reference and the runtime, in order: the kind
-    /// each one must be and the identity input naming the next (a Python
-    /// closure names its environment, whose `cpython` input is the
-    /// interpreter).
-    pub via: &'a [(&'a str, &'a str)],
-    /// The runtime object's identity kind.
-    pub kind: &'a str,
-}
-
-/// Prove the artifacts a pre-lock closure's runtime object was built from.
-/// The reference is only a name: the object must be a complete, published
-/// object of `runtime.kind` in `store` whose metadata identity hashes to
-/// that name, and whose platform, when it records one, is the closure's.
-/// `artifacts` reads that identity (checking the version the closure
-/// records against it) into proved rows; once the object is found, any
-/// field it lacks or spells wrong is a contradiction. Nothing here writes,
-/// leases or touches the store. The outcome lands in `evidence`: proved rows, or the
-/// gap `seed` refuses or explains with.
-pub fn prove_legacy_runtime(
-    evidence: &mut LegacyEvidence,
-    store: Option<&Store>,
-    body: &serde_json::Value,
-    runtime: LegacyRuntime<'_>,
-    artifacts: impl FnOnce(&Identity, &LegacyEvidence) -> Result<Vec<ProvedArtifact>, ProofGap>,
-) {
-    let outcome = legacy_runtime_identity(evidence, store, body, runtime)
-        .and_then(|identity| artifacts(&identity, evidence));
-    match outcome {
-        Ok(proved) => evidence.artifacts.extend(proved),
-        Err(ProofGap::Unproved(why)) => evidence.unproved.push(why),
-        Err(ProofGap::Contradicted(why)) => evidence.contradicted.push(why),
-    }
-}
-
-fn legacy_runtime_identity(
-    evidence: &LegacyEvidence,
-    store: Option<&Store>,
-    body: &serde_json::Value,
-    runtime: LegacyRuntime<'_>,
-) -> Result<Identity, ProofGap> {
-    let first_kind = runtime.via.first().map_or(runtime.kind, |(kind, _)| kind);
-    let reference = match body.pointer(runtime.pointer) {
-        None | Some(serde_json::Value::Null) => {
-            return Err(ProofGap::Unproved(format!(
-                "the closure names no {first_kind} object"
-            )))
-        }
-        Some(reference) => reference,
-    };
-    // The reference is validated before any store is consulted: a
-    // malformed one contradicts the closure whether or not a store exists.
-    let malformed = |why: String| {
-        ProofGap::Contradicted(format!(
-            "the closure's {first_kind} object reference is malformed: {why}"
-        ))
-    };
-    let path_id = |path: &Path| {
-        store::object_id_from_path(path).map_err(|error| malformed(error.to_string()))
-    };
-    let (id, path) = match reference {
-        serde_json::Value::String(path) => {
-            let path = PathBuf::from(path);
-            (path_id(&path)?, path)
-        }
-        serde_json::Value::Object(fields) => match (
-            fields.get("id").and_then(serde_json::Value::as_str),
-            fields.get("path").and_then(serde_json::Value::as_str),
-        ) {
-            (Some(id), Some(path)) => {
-                let path = PathBuf::from(path);
-                let named = path_id(&path)?;
-                if named != id {
-                    return Err(malformed(format!(
-                        "its id {id:?} is not the object its path names ({named})"
-                    )));
-                }
-                (named, path)
-            }
-            _ => return Err(malformed("it needs a string id and path".into())),
-        },
-        _ => {
-            return Err(malformed(
-                "it is neither an object path nor an {id, path} pair".into(),
-            ))
-        }
-    };
-    let Some(store) = store else {
-        return Err(ProofGap::Unproved(format!(
-            "there is no store to find the closure's {first_kind} object in"
-        )));
-    };
-    // The recorded path only has to name this store's object; it never
-    // decides what is read.
-    if path != store.object_path(&id) {
-        return Err(ProofGap::Unproved(format!(
-            "the closure's {first_kind} object {id} was recorded in another store, not {}",
-            store.root.display()
-        )));
-    }
-    let mut id = id;
-    let chain = runtime
-        .via
-        .iter()
-        .map(|(kind, input)| (*kind, Some(*input)))
-        .chain(std::iter::once((runtime.kind, None)));
-    let mut identity = None;
-    for (kind, next) in chain {
-        let found = store
-            .published_identity(&id)
-            .map_err(|error| {
-                ProofGap::Contradicted(format!(
-                    "the closure's {kind} object {id} has unusable store metadata: {error}"
-                ))
-            })?
-            .ok_or_else(|| {
-                ProofGap::Unproved(format!(
-                    "the closure's {kind} object {id} is not in the store at {}",
-                    store.root.display()
-                ))
-            })?;
-        if found.kind != kind {
-            return Err(ProofGap::Contradicted(format!(
-                "the closure's {kind} object {id} is a {} object",
-                found.kind
-            )));
-        }
-        if let (Some(recorded), Some(platform)) = (evidence.platform, found.inputs.get("platform"))
-        {
-            if platform != recorded.triple() {
-                return Err(ProofGap::Contradicted(format!(
-                    "the closure was realized on {} but its {kind} object {id} was built for {platform}",
-                    recorded.triple()
-                )));
-            }
-        }
-        match next {
-            Some(input) => {
-                id = found
-                    .inputs
-                    .get(input)
-                    .filter(|next| store::is_object_id(next))
-                    .cloned()
-                    .ok_or_else(|| {
-                        ProofGap::Contradicted(format!(
-                            "the closure's {kind} object {id} names no well-formed {input} object id"
-                        ))
-                    })?;
-            }
-            None => identity = Some(found),
-        }
-    }
-    Ok(identity.expect("the chain ends at the runtime object"))
-}
-
-/// The recorded `component` version must be the one `identity` was built
-/// as: an edited version string next to an untouched object contradicts it.
-pub fn expect_legacy_version(
-    identity: &Identity,
-    evidence: &LegacyEvidence,
-    component: &str,
-    built: &str,
-) -> Result<(), ProofGap> {
-    match evidence.version(component) {
-        Some(recorded) if recorded != built => Err(ProofGap::Contradicted(format!(
-            "the closure records {component} {recorded} but its {} object {} is {component} {built}",
-            identity.kind,
-            identity.object_id()
-        ))),
-        _ => Ok(()),
-    }
-}
-
-/// One proved row from a runtime identity: `component` was fetched as the
-/// artifact whose `algo` digest is the identity's `input`, and laid out
-/// under `recipe`.
-pub fn proved_from_identity(
-    identity: &Identity,
-    component: &str,
-    input: &str,
-    algo: &str,
-    recipe: &str,
-) -> Result<ProvedArtifact, ProofGap> {
-    let hex = identity.inputs.get(input).ok_or_else(|| {
-        ProofGap::Contradicted(format!(
-            "the closure's {} object {} records no {input}",
-            identity.kind,
-            identity.object_id()
-        ))
-    })?;
-    let digest = match algo {
-        "sha256" => Digest::sha256(hex),
-        "sha512" => Digest::sha512(hex),
-        other => unreachable!("no {other} artifact digests"),
-    }
-    .map_err(|error| {
-        ProofGap::Contradicted(format!(
-            "the closure's {} object {} has a malformed {input}: {error}",
-            identity.kind,
-            identity.object_id()
-        ))
-    })?;
-    Ok(ProvedArtifact {
-        component: component.to_string(),
-        recipe: recipe.to_string(),
-        digest,
-    })
-}
-
-/// The recipe an identity commits to in its `schema` input, for runtime
-/// kinds whose layout recipe is that input.
-pub fn schema_recipe(identity: &Identity) -> Result<&str, ProofGap> {
-    identity
-        .inputs
-        .get("schema")
-        .map(String::as_str)
-        .ok_or_else(|| {
-            ProofGap::Contradicted(format!(
-                "the closure's {} object {} records no recipe",
-                identity.kind,
-                identity.object_id()
-            ))
-        })
 }
 
 /// Which toolchain this project uses, and where the answer came from.
@@ -566,13 +239,13 @@ pub fn resolve(
                 }
                 continue;
             }
-            let (bundle, _) = choose(root, platform, entry, rows, false)?;
+            let bundle = choose(root, platform, entry, rows)?;
             next.set_ecosystem(ecosystem, &bundle, rows)?;
-            next.set_helpers(ecosystem, entry.pins_to_write(false))?;
+            next.set_helpers(ecosystem, &entry.helper_pins)?;
             entries.insert(
                 ecosystem.to_string(),
                 Selected {
-                    helpers: entry.pins_to_write(false).clone(),
+                    helpers: entry.helper_pins.clone(),
                     ecosystem: ecosystem.to_string(),
                     bundle,
                     lock_sha256: None,
@@ -634,25 +307,19 @@ pub fn resolve(
                 for entry in &inputs {
                     let ecosystem = entry.lock_ecosystem.as_str();
                     let rows = rows_of(&discovered, ecosystem);
-                    let (bundle, seeded) = choose(root, platform, entry, rows, true)?;
-                    let source = if seeded {
-                        Source::Seeded
-                    } else {
-                        Source::Shipped
-                    };
+                    let bundle = choose(root, platform, entry, rows)?;
                     entries.insert(
                         ecosystem.to_string(),
                         // No section is written, so none is pinned: the
                         // builds supply what such a section would pin (the
-                        // catalog's default, or the release a seeded
-                        // closure's builds used), and the id stays the
+                        // catalog's default), and the id stays the
                         // bundle's own, as it always was here.
                         Selected {
                             helpers: BTreeMap::new(),
                             ecosystem: ecosystem.to_string(),
                             bundle,
                             lock_sha256: None,
-                            source,
+                            source: Source::Shipped,
                         },
                     );
                 }
@@ -662,13 +329,13 @@ pub fn resolve(
                 for entry in &inputs {
                     let ecosystem = entry.lock_ecosystem.as_str();
                     let rows = rows_of(&discovered, ecosystem);
-                    let (bundle, seeded) = choose(root, platform, entry, rows, true)?;
+                    let bundle = choose(root, platform, entry, rows)?;
                     next.set_ecosystem(ecosystem, &bundle, rows)?;
-                    next.set_helpers(ecosystem, entry.pins_to_write(seeded))?;
+                    next.set_helpers(ecosystem, &entry.helper_pins)?;
                     entries.insert(
                         ecosystem.to_string(),
                         Selected {
-                            helpers: entry.pins_to_write(seeded).clone(),
+                            helpers: entry.helper_pins.clone(),
                             ecosystem: ecosystem.to_string(),
                             bundle,
                             lock_sha256: None,
@@ -920,31 +587,6 @@ pub(crate) fn guard_installed_for_test() -> bool {
         .is_some()
 }
 
-/// An `{id, path}` closure reference to `id` in `store`, as closure writers
-/// record one.
-#[cfg(test)]
-pub(crate) fn object_ref_for_test(store: &Store, id: &str) -> serde_json::Value {
-    serde_json::json!({"id": id, "path": store.object_path(id)})
-}
-
-/// Leave `identity` in `store` as a finished publication does: a read-only
-/// object root and a metadata record naming the identity. Returns its id.
-#[cfg(test)]
-pub(crate) fn publish_for_test(store: &Store, identity: &Identity) -> String {
-    use std::os::unix::fs::PermissionsExt;
-    let id = identity.object_id();
-    let path = store.object_path(&id);
-    std::fs::create_dir_all(&path).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o555)).unwrap();
-    std::fs::create_dir_all(store.root.join("meta")).unwrap();
-    std::fs::write(
-        store.root.join("meta").join(format!("{id}.json")),
-        serde_json::to_vec(&serde_json::json!({"identity": identity})).unwrap(),
-    )
-    .unwrap();
-    id
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -986,18 +628,18 @@ mod tests {
         crate::tailors::by_id(id).unwrap()
     }
 
-    /// The real wiring: the catalog and legacy evidence the command layer
+    /// The real wiring: the catalog, helper pins and local-toolchain reader the command layer
     /// would hand `resolve` for these tailors.
-    fn inputs_for(dir: &Path, ids: &[&str]) -> Vec<EcosystemInput> {
+    fn inputs_for(ids: &[&str]) -> Vec<EcosystemInput> {
         let tailors: Vec<&dyn Tailor> = ids.iter().map(|id| tailor(id)).collect();
-        crate::commands::shared::ecosystem_inputs(dir, &tailors).unwrap()
+        crate::commands::shared::ecosystem_inputs(&tailors).unwrap()
     }
 
-    fn resolve_python(root: &ProjectRoot, dir: &Path, mode: Mode) -> io::Result<ProjectToolchain> {
+    fn resolve_python(root: &ProjectRoot, mode: Mode) -> io::Result<ProjectToolchain> {
         resolve(
             root,
             Platform::host().unwrap(),
-            inputs_for(dir, &["python"]),
+            inputs_for(&["python"]),
             mode,
             false,
         )
@@ -1010,8 +652,8 @@ mod tests {
         let dir = project(&temp);
         let root = ProjectRoot::open(&dir).unwrap();
 
-        let mut first = resolve_python(&root, &dir, Mode::Writable).unwrap();
-        let second = resolve_python(&root, &dir, Mode::Writable).unwrap();
+        let mut first = resolve_python(&root, Mode::Writable).unwrap();
+        let second = resolve_python(&root, Mode::Writable).unwrap();
         let bytes = first.pending.as_ref().unwrap().canonical_bytes();
         assert_eq!(second.pending.as_ref().unwrap().canonical_bytes(), bytes);
         let created = first.get("python").unwrap();
@@ -1031,7 +673,7 @@ mod tests {
         assert_eq!(first.lock_bytes.as_deref(), Some(bytes.as_slice()));
         assert!(dir.join(INPUT_LOCK_PATH).is_file());
 
-        let mut third = resolve_python(&root, &dir, Mode::Writable).unwrap();
+        let mut third = resolve_python(&root, Mode::Writable).unwrap();
         let honored = third.get("python").unwrap();
         assert_eq!(honored.source, Source::Lock);
         assert_eq!(honored.bundle_id(), chosen);
@@ -1047,11 +689,11 @@ mod tests {
         let temp = TempDir::new();
         let dir = project(&temp);
         let root = ProjectRoot::open(&dir).unwrap();
-        let mut created = resolve_python(&root, &dir, Mode::Writable).unwrap();
+        let mut created = resolve_python(&root, Mode::Writable).unwrap();
         drop(commit(&root, &mut created, &Mode::Writable).unwrap());
 
         std::fs::write(dir.join(".python-version"), "3.13.15\n").unwrap();
-        let error = resolve_python(&root, &dir, Mode::Writable)
+        let error = resolve_python(&root, Mode::Writable)
             .unwrap_err()
             .to_string();
         assert!(error.contains("is stale for python"), "{error}");
@@ -1060,15 +702,15 @@ mod tests {
         assert!(error.contains("tog update --toolchain python"), "{error}");
         // A comment-only edit changes the digest and nothing else.
         std::fs::write(dir.join(".python-version"), "# pinned\n3.12.14\n").unwrap();
-        let fresh = resolve_python(&root, &dir, Mode::Writable).unwrap();
+        let fresh = resolve_python(&root, Mode::Writable).unwrap();
         assert_eq!(fresh.get("python").unwrap().source, Source::Lock);
     }
 
-    fn resolve_rust(root: &ProjectRoot, dir: &Path, mode: Mode) -> io::Result<ProjectToolchain> {
+    fn resolve_rust(root: &ProjectRoot, mode: Mode) -> io::Result<ProjectToolchain> {
         resolve(
             root,
             Platform::host().unwrap(),
-            inputs_for(dir, &["cargo"]),
+            inputs_for(&["cargo"]),
             mode,
             false,
         )
@@ -1099,7 +741,7 @@ mod tests {
         };
         let root = ProjectRoot::open(&dir).unwrap();
         toolchain("");
-        let mut created = resolve_rust(&root, &dir, Mode::Writable).unwrap();
+        let mut created = resolve_rust(&root, Mode::Writable).unwrap();
         drop(commit(&root, &mut created, &Mode::Writable).unwrap());
         let plain = std::fs::read_to_string(dir.join(LOCK_PATH)).unwrap();
         // Exactly the two channel rows a lock always recorded for Rust.
@@ -1108,9 +750,7 @@ mod tests {
         assert!(!plain.contains("toolchain.targets"), "{plain}");
 
         toolchain("components = [\"rustfmt\", \"clippy\"]\n");
-        let error = resolve_rust(&root, &dir, Mode::Writable)
-            .unwrap_err()
-            .to_string();
+        let error = resolve_rust(&root, Mode::Writable).unwrap_err().to_string();
         assert!(error.contains("is stale for rust"), "{error}");
         assert!(
             error.contains(
@@ -1121,7 +761,7 @@ mod tests {
         let mode = Mode::Update {
             only: Some("rust".into()),
         };
-        let mut updated = resolve_rust(&root, &dir, mode.clone()).unwrap();
+        let mut updated = resolve_rust(&root, mode.clone()).unwrap();
         drop(commit(&root, &mut updated, &mode).unwrap());
         let listed = std::fs::read_to_string(dir.join(LOCK_PATH)).unwrap();
         assert!(
@@ -1131,33 +771,27 @@ mod tests {
 
         // Reordering, duplicating, or reformatting the list is no edit.
         toolchain("components = [\n  \"clippy\",\n  \"rustfmt\",\n  \"clippy\",\n]\n");
-        let honored = resolve_rust(&root, &dir, Mode::Writable).unwrap();
+        let honored = resolve_rust(&root, Mode::Writable).unwrap();
         assert_eq!(honored.get("rust").unwrap().source, Source::Lock);
 
         // A target is a row of its own; dropping the components is stale too.
         toolchain(
             "components = [\"clippy\", \"rustfmt\"]\ntargets = [\"wasm32-unknown-unknown\"]\n",
         );
-        let error = resolve_rust(&root, &dir, Mode::Frozen)
-            .unwrap_err()
-            .to_string();
+        let error = resolve_rust(&root, Mode::Frozen).unwrap_err().to_string();
         assert!(
             error.contains("toolchain.targets: recorded absent, now wasm32-unknown-unknown"),
             "{error}"
         );
         // A profile is a row too.
         toolchain("components = [\"clippy\", \"rustfmt\"]\nprofile = \"default\"\n");
-        let error = resolve_rust(&root, &dir, Mode::Writable)
-            .unwrap_err()
-            .to_string();
+        let error = resolve_rust(&root, Mode::Writable).unwrap_err().to_string();
         assert!(
             error.contains("toolchain.profile: recorded absent, now default"),
             "{error}"
         );
         toolchain("");
-        let error = resolve_rust(&root, &dir, Mode::Writable)
-            .unwrap_err()
-            .to_string();
+        let error = resolve_rust(&root, Mode::Writable).unwrap_err().to_string();
         assert!(
             error.contains("toolchain.components: recorded clippy,rustfmt, now absent"),
             "{error}"
@@ -1180,7 +814,7 @@ mod tests {
             )
             .unwrap();
             for mode in [Mode::Writable, Mode::ReadOnly, mode.clone()] {
-                let error = resolve_rust(&root, &dir, mode).unwrap_err().to_string();
+                let error = resolve_rust(&root, mode).unwrap_err().to_string();
                 assert!(error.contains(words), "{error}");
             }
         }
@@ -1196,16 +830,14 @@ mod tests {
         let temp = TempDir::new();
         let dir = project(&temp);
         let root = ProjectRoot::open(&dir).unwrap();
-        let error = resolve_python(&root, &dir, Mode::Frozen)
-            .unwrap_err()
-            .to_string();
+        let error = resolve_python(&root, Mode::Frozen).unwrap_err().to_string();
         assert!(error.contains("--frozen never creates it"), "{error}");
         assert!(error.contains("commit the file"), "{error}");
 
         let error = resolve(
             &root,
             Platform::host().unwrap(),
-            inputs_for(&dir, &["python"]),
+            inputs_for(&["python"]),
             Mode::Writable,
             true,
         )
@@ -1216,148 +848,34 @@ mod tests {
         assert!(!dir.join(LOCK_PATH).exists());
 
         // Read-only consumers neither refuse nor write: they select.
-        let read_only = resolve_python(&root, &dir, Mode::ReadOnly).unwrap();
+        let read_only = resolve_python(&root, Mode::ReadOnly).unwrap();
         assert_eq!(read_only.get("python").unwrap().source, Source::Shipped);
         assert!(read_only.pending.is_none());
         assert!(!dir.join(LOCK_PATH).exists());
     }
 
-    /// Every path under `root` with its mtime: what a read-only caller must
-    /// leave exactly as it found it.
-    fn tree(root: &Path) -> Vec<(PathBuf, std::time::SystemTime)> {
-        let mut out = Vec::new();
-        let mut pending = vec![root.to_path_buf()];
-        while let Some(dir) = pending.pop() {
-            for entry in std::fs::read_dir(&dir).unwrap() {
-                let path = entry.unwrap().path();
-                let metadata = std::fs::symlink_metadata(&path).unwrap();
-                if metadata.is_dir() {
-                    pending.push(path.clone());
-                }
-                out.push((path, metadata.modified().unwrap()));
-            }
-        }
-        out.sort();
-        out
-    }
-
-    /// `legacy_evidence_in` (the seeding lookup `status` and `doctor` use)
-    /// proves the closure's Go object through the store `TOG_STORE` names
-    /// without itself taking a lease, a lock file, a touch or creating a
-    /// directory, and metadata that
-    /// does not describe the recorded id is a contradiction, not a proof.
+    /// A closure written before the lock existed (its body has no
+    /// `toolchain` key) plays no part in selection: the next sync selects
+    /// from the catalog exactly as it would for a fresh project, pins
+    /// today's helpers, and writes the lock. Read-only answers do the same
+    /// and write nothing. The old closure records no bundle, so it is stale
+    /// against that lock (`inspect::toolchain_lock_state`).
     #[test]
-    fn legacy_evidence_reads_the_active_store_and_writes_nothing() {
-        let _store_env = crate::kernel::store::STORE_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        struct Restore(Option<std::ffi::OsString>);
-        impl Drop for Restore {
-            fn drop(&mut self) {
-                match self.0.take() {
-                    Some(value) => std::env::set_var("TOG_STORE", value),
-                    None => std::env::remove_var("TOG_STORE"),
-                }
-            }
-        }
-        let _restore = Restore(std::env::var_os("TOG_STORE"));
-        let temp = TempDir::new();
-        let platform = Platform::host().unwrap();
-        let go = tailor("go");
-        let selected = crate::kernel::toolchain::shipped(&go.toolchain_catalog().unwrap()).unwrap();
-
-        let root = temp.0.join("store");
-        for sub in ["objects", "meta"] {
-            std::fs::create_dir_all(root.join(sub)).unwrap();
-        }
-        let store = Store {
-            root: root.canonicalize().unwrap(),
-        };
-        let (refs, objects) =
-            crate::tailors::go::legacy_runtime_for_test(platform, &selected, &store);
-        for object in &objects {
-            publish_for_test(&store, object);
-        }
-        let dir = temp.0.join("proj");
-        std::fs::create_dir_all(dir.join(".tog/closures")).unwrap();
-        let mut body = serde_json::json!({"plan": {"go_version": selected.version("go").unwrap()}});
-        body["go_object"] = refs["go_object"].clone();
-        std::fs::write(
-            dir.join(".tog/closures/go.json"),
-            serde_json::to_vec(&serde_json::json!({
-                "schema": "closure/1",
-                "ecosystem": "go",
-                "platform": platform.triple(),
-                "body": body,
-            }))
-            .unwrap(),
-        )
-        .unwrap();
-
-        std::env::set_var("TOG_STORE", &store.root);
-        let before = tree(&store.root);
-        let evidence = legacy_evidence_in(&ProjectRoot::open(&dir).unwrap(), go)
-            .unwrap()
-            .unwrap();
-        assert_eq!(tree(&store.root), before);
-        assert!(evidence.unproved.is_empty(), "{:?}", evidence.unproved);
-        assert!(
-            evidence.contradicted.is_empty(),
-            "{:?}",
-            evidence.contradicted
-        );
-        let row = selected.artifact(platform, "go").unwrap();
-        assert_eq!(
-            evidence.artifacts,
-            vec![ProvedArtifact {
-                component: "go".into(),
-                recipe: row.recipe,
-                digest: row.digest,
-            }]
-        );
-
-        // Metadata that hashes to another id describes some other object.
-        let id = objects[0].object_id();
-        let mut forged = objects[0].clone();
-        forged.version = "0.0.1".into();
-        std::fs::write(
-            store.root.join("meta").join(format!("{id}.json")),
-            serde_json::to_vec(&serde_json::json!({"identity": forged})).unwrap(),
-        )
-        .unwrap();
-        let evidence = legacy_evidence_in(&ProjectRoot::open(&dir).unwrap(), go)
-            .unwrap()
-            .unwrap();
-        assert!(evidence.artifacts.is_empty());
-        assert!(
-            evidence.contradicted[0].contains("has unusable store metadata"),
-            "{:?}",
-            evidence.contradicted
-        );
-
-        // No store yet: nothing proved, and nothing created.
-        let missing = temp.0.join("no-store");
-        std::env::set_var("TOG_STORE", &missing);
-        let evidence = legacy_evidence_in(&ProjectRoot::open(&dir).unwrap(), go)
-            .unwrap()
-            .unwrap();
-        assert!(evidence.artifacts.is_empty());
-        assert!(
-            evidence.unproved[0].contains("there is no store"),
-            "{:?}",
-            evidence.unproved
-        );
-        assert!(!missing.exists());
-    }
-
-    #[test]
-    fn a_pre_lock_closure_seeds_the_version_it_recorded() {
+    fn a_pre_lock_closure_is_ignored_and_the_catalog_answers() {
         let _serialized = serialized();
         let temp = TempDir::new();
         let dir = project(&temp);
-        // A project with no pin at all: without the closure this would take
-        // the newest shipped release.
+        // No pin at all, so the catalog's answer differs from the version
+        // the old closure recorded.
         std::fs::remove_file(dir.join(".python-version")).unwrap();
+        let root = ProjectRoot::open(&dir).unwrap();
+        let fresh = resolve_python(&root, Mode::Writable).unwrap();
+        let fresh_lock = fresh.pending.as_ref().unwrap().canonical_bytes();
+        assert_ne!(
+            fresh.get("python").unwrap().version("cpython").unwrap(),
+            "3.11.16"
+        );
+
         std::fs::create_dir_all(dir.join(".tog/closures")).unwrap();
         std::fs::write(
             dir.join(".tog/closures/python.json"),
@@ -1370,52 +888,30 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        let root = ProjectRoot::open(&dir).unwrap();
 
-        let shipped_newest = resolve(
-            &root,
-            Platform::host().unwrap(),
-            vec![EcosystemInput {
-                lock_ecosystem: "python".into(),
-                catalog: tailor("python").toolchain_catalog().unwrap(),
-                legacy: None,
-                external: None,
-                helper_pins: BTreeMap::new(),
-                legacy_helper_pins: BTreeMap::new(),
-                declared_helpers: Vec::new(),
-            }],
-            Mode::Writable,
-            false,
-        )
-        .unwrap();
+        let mut created = resolve_python(&root, Mode::Writable).unwrap();
+        let python = created.get("python").unwrap();
+        assert_eq!(python.source, Source::Created);
+        assert_eq!(python.bundle, fresh.get("python").unwrap().bundle);
         assert_ne!(
-            shipped_newest
-                .get("python")
-                .unwrap()
-                .version("cpython")
-                .unwrap(),
-            "3.11.16"
-        );
-
-        let mut seeded = resolve_python(&root, &dir, Mode::Writable).unwrap();
-        assert_eq!(
-            seeded.get("python").unwrap().version("cpython").unwrap(),
-            "3.11.16"
-        );
-        // The pre-lock closure's sdists built on the Rust tog shipped then,
-        // and the seeded section pins that one.
-        assert_eq!(
-            seeded.get("python").unwrap().helpers["rust"],
+            python.helpers["rust"],
             crate::tailors::python::build::LEGACY_SDIST_RUST
         );
-        drop(commit(&root, &mut seeded, &Mode::Writable).unwrap());
-        let text = std::fs::read_to_string(dir.join(LOCK_PATH)).unwrap();
-        assert!(text.contains("version = \"3.11.16\""), "{text}");
+        assert_eq!(
+            created.pending.as_ref().unwrap().canonical_bytes(),
+            fresh_lock
+        );
+        drop(commit(&root, &mut created, &Mode::Writable).unwrap());
+        assert_eq!(std::fs::read(dir.join(LOCK_PATH)).unwrap(), fresh_lock);
 
-        // Read-only seeding names the same release and writes nothing.
+        // Read-only: the shipped answer, no error, nothing written.
         std::fs::remove_file(dir.join(LOCK_PATH)).unwrap();
-        let read_only = resolve_python(&root, &dir, Mode::ReadOnly).unwrap();
-        assert_eq!(read_only.get("python").unwrap().source, Source::Seeded);
+        let read_only = resolve_python(&root, Mode::ReadOnly).unwrap();
+        let python = read_only.get("python").unwrap();
+        assert_eq!(python.source, Source::Shipped);
+        assert_eq!(python.bundle, fresh.get("python").unwrap().bundle);
+        assert!(read_only.pending.is_none());
+        assert!(!dir.join(LOCK_PATH).exists());
     }
 
     /// A Python section pins the Rust its sdists build on when it is
@@ -1436,14 +932,14 @@ mod tests {
         .to_string();
         let legacy = crate::tailors::python::build::LEGACY_SDIST_RUST;
         assert_ne!(default, legacy);
-        let mut created = resolve_python(&root, &dir, Mode::Writable).unwrap();
+        let mut created = resolve_python(&root, Mode::Writable).unwrap();
         assert_eq!(created.get("python").unwrap().helpers["rust"], default);
         drop(commit(&root, &mut created, &Mode::Writable).unwrap());
         let text = std::fs::read_to_string(dir.join(LOCK_PATH)).unwrap();
         let pin = format!("[toolchain.python.helpers]\nrust = \"{default}\"\n");
         assert!(text.contains(&pin), "{text}");
         for mode in [Mode::ReadOnly, Mode::Frozen, Mode::Writable] {
-            let honored = resolve_python(&root, &dir, mode).unwrap();
+            let honored = resolve_python(&root, mode).unwrap();
             let python = honored.get("python").unwrap();
             assert_eq!(python.source, Source::Lock);
             assert_eq!(python.helpers["rust"], default);
@@ -1462,7 +958,7 @@ mod tests {
         );
         std::fs::write(dir.join(LOCK_PATH), &old).unwrap();
         for mode in [Mode::ReadOnly, Mode::Frozen, Mode::Writable] {
-            let honored = resolve_python(&root, &dir, mode).unwrap();
+            let honored = resolve_python(&root, mode).unwrap();
             let python = honored.get("python").unwrap();
             // It pins nothing, so its id is the bundle's own, as before
             // pins; the sdist builds supply the legacy release.
@@ -1471,7 +967,7 @@ mod tests {
             assert!(honored.pending.is_none(), "an old lock was rewritten");
         }
         // An update pins today's default.
-        let updated = resolve_python(&root, &dir, Mode::Update { only: None }).unwrap();
+        let updated = resolve_python(&root, Mode::Update { only: None }).unwrap();
         assert_eq!(updated.get("python").unwrap().helpers["rust"], default);
         let written = updated.pending.as_ref().unwrap().canonical_bytes();
         assert!(String::from_utf8(written).unwrap().contains(&pin));
@@ -1486,7 +982,7 @@ mod tests {
         .unwrap();
         std::fs::write(dir.join(LOCK_PATH), odd.canonical_bytes()).unwrap();
         for mode in [Mode::ReadOnly, Mode::Frozen, Mode::Writable] {
-            let error = resolve_python(&root, &dir, mode).unwrap_err().to_string();
+            let error = resolve_python(&root, mode).unwrap_err().to_string();
             assert!(
                 error.contains(
                     "[toolchain.python.helpers] pins \"node\", which is not a helper \
@@ -1495,7 +991,7 @@ mod tests {
                 "{error}"
             );
         }
-        let repaired = resolve_python(&root, &dir, Mode::Update { only: None }).unwrap();
+        let repaired = resolve_python(&root, Mode::Update { only: None }).unwrap();
         assert_eq!(
             repaired.get("python").unwrap().helpers,
             BTreeMap::from([("rust".to_string(), default.clone())])
@@ -1508,13 +1004,13 @@ mod tests {
         let temp = TempDir::new();
         let dir = project(&temp);
         let root = ProjectRoot::open(&dir).unwrap();
-        let mut created = resolve_python(&root, &dir, Mode::Writable).unwrap();
+        let mut created = resolve_python(&root, Mode::Writable).unwrap();
         drop(commit(&root, &mut created, &Mode::Writable).unwrap());
         let before = std::fs::read(dir.join(LOCK_PATH)).unwrap();
 
         std::fs::write(dir.join(".python-version"), "3.13.15\n").unwrap();
         let mode = Mode::Update { only: None };
-        let mut updated = resolve_python(&root, &dir, mode.clone()).unwrap();
+        let mut updated = resolve_python(&root, mode.clone()).unwrap();
         let selection = updated.get("python").unwrap();
         assert_eq!(selection.source, Source::Updated);
         assert_eq!(selection.version("cpython").unwrap(), "3.13.15");
@@ -1522,7 +1018,7 @@ mod tests {
         let after = std::fs::read(dir.join(LOCK_PATH)).unwrap();
         assert_ne!(after, before);
         assert_eq!(
-            resolve_python(&root, &dir, Mode::Writable)
+            resolve_python(&root, Mode::Writable)
                 .unwrap()
                 .get("python")
                 .unwrap()
@@ -1535,7 +1031,7 @@ mod tests {
         let error = resolve(
             &root,
             Platform::host().unwrap(),
-            inputs_for(&dir, &["python"]),
+            inputs_for(&["python"]),
             Mode::Update {
                 only: Some("node".into()),
             },
@@ -1552,14 +1048,14 @@ mod tests {
         let temp = TempDir::new();
         let dir = project(&temp);
         let root = ProjectRoot::open(&dir).unwrap();
-        let mut created = resolve_python(&root, &dir, Mode::Writable).unwrap();
+        let mut created = resolve_python(&root, Mode::Writable).unwrap();
         drop(commit(&root, &mut created, &Mode::Writable).unwrap());
 
         std::fs::write(dir.join("package.json"), "{\"name\": \"p\"}\n").unwrap();
         let error = resolve(
             &root,
             Platform::host().unwrap(),
-            inputs_for(&dir, &["python", "node"]),
+            inputs_for(&["python", "node"]),
             Mode::Writable,
             false,
         )
@@ -1578,7 +1074,7 @@ mod tests {
         let mut updated = resolve(
             &root,
             Platform::host().unwrap(),
-            inputs_for(&dir, &["python", "node"]),
+            inputs_for(&["python", "node"]),
             mode.clone(),
             false,
         )
@@ -1597,7 +1093,7 @@ mod tests {
         let temp = TempDir::new();
         let dir = project(&temp);
         let root = ProjectRoot::open(&dir).unwrap();
-        let mut mine = resolve_python(&root, &dir, Mode::Writable).unwrap();
+        let mut mine = resolve_python(&root, Mode::Writable).unwrap();
 
         // Another sync published a lock for a different release in between.
         let catalog = tailor("python").toolchain_catalog().unwrap();
@@ -1628,7 +1124,7 @@ mod tests {
 
         // Byte-identical candidates are a cache hit, not a conflict.
         std::fs::remove_file(dir.join(LOCK_PATH)).unwrap();
-        let mut again = resolve_python(&root, &dir, Mode::Writable).unwrap();
+        let mut again = resolve_python(&root, Mode::Writable).unwrap();
         again.pending.as_ref().unwrap().publish_via(&root).unwrap();
         drop(commit(&root, &mut again, &Mode::Writable).unwrap());
     }
@@ -1639,7 +1135,7 @@ mod tests {
         let temp = TempDir::new();
         let dir = project(&temp);
         let root = ProjectRoot::open(&dir).unwrap();
-        let mut created = resolve_python(&root, &dir, Mode::Writable).unwrap();
+        let mut created = resolve_python(&root, Mode::Writable).unwrap();
         let guard = commit(&root, &mut created, &Mode::Writable).unwrap();
         recheck_before_publication().unwrap();
 
@@ -1674,7 +1170,7 @@ mod tests {
         let temp = TempDir::new();
         let dir = project(&temp);
         let root = ProjectRoot::open(&dir).unwrap();
-        let mut created = resolve_python(&root, &dir, Mode::Writable).unwrap();
+        let mut created = resolve_python(&root, Mode::Writable).unwrap();
         let guard = commit(&root, &mut created, &Mode::Writable).unwrap();
         drop(root);
         recheck_before_publication().unwrap();
@@ -1713,7 +1209,7 @@ mod tests {
         let temp = TempDir::new();
         let dir = project(&temp);
         let root = ProjectRoot::open(&dir).unwrap();
-        let resolved = resolve_python(&root, &dir, Mode::ReadOnly).unwrap();
+        let resolved = resolve_python(&root, Mode::ReadOnly).unwrap();
         let selected = resolved.get("python").unwrap();
         let object = Path::new("/store/objects/cpython-3.12.14-abc");
         let record = closure_record(selected, object);

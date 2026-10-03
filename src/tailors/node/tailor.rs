@@ -12,7 +12,7 @@ use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::objmeta::KindAdapter;
 use crate::kernel::platform::Platform;
 use crate::kernel::resolve::ResolutionDoor;
-use crate::kernel::toolchain::{Catalog, LegacyEvidence, Selected};
+use crate::kernel::toolchain::{Catalog, Selected};
 use crate::kernel::ui;
 use crate::tailors::node::{self as node, inputs};
 use crate::tailors::{ClosureListing, PackageRow, RegistryTool, SyncRequest, Tailor};
@@ -273,16 +273,6 @@ impl Tailor for Node {
 
     fn toolchain_catalog(&self) -> io::Result<Catalog> {
         node::toolchain_catalog()
-    }
-
-    fn legacy_toolchain_evidence(
-        &self,
-        _ecosystem: &str,
-        platform: Option<Platform>,
-        body: &Value,
-        store: Option<&crate::kernel::store::Store>,
-    ) -> LegacyEvidence {
-        node::legacy_toolchain_evidence(platform, body, store)
     }
 
     fn listing(&self, _ecosystem: &str, body: &Value) -> ClosureListing {
