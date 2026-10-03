@@ -7,7 +7,7 @@
 
 use crate::kernel::activity::StoreActivity;
 use crate::kernel::fetch::download_toolchain_artifact_held;
-use crate::kernel::fsroot::ProjectRoot;
+use crate::kernel::fsroot::{Entry, ProjectRoot};
 use crate::kernel::platform::{no_pin, Platform};
 use crate::kernel::sandbox::BuildSpec;
 use crate::kernel::store::Store;
@@ -118,7 +118,8 @@ const LEGACY_RECORD: &str = ".tog/closures/rustfmt.json";
 /// An absent record is fine; a symlink or directory in its place is refused
 /// rather than followed, like every other write under `.tog`.
 ///
-/// It stays when it is the project's only closure: the older `tog fmt`
+/// It stays when it is the project's only closure (a directory or symlink
+/// under a closure name is not one, since gc skips it too): the older `tog fmt`
 /// also registered a gc root for the project, and a root whose closures
 /// directory is empty stops every `tog gc` sweep. Forgetting that root needs
 /// the store's exclusive lease, which a formatter run does not take, so the
@@ -131,7 +132,9 @@ pub fn remove_legacy_record(project: &ProjectRoot) -> io::Result<()> {
     let legacy = Path::new(LEGACY_RECORD);
     let others = names.iter().any(|name| {
         let path = closures.join(name);
-        path != legacy && crate::kernel::store::is_closure_file(&path)
+        path != legacy
+            && crate::kernel::store::is_closure_file(&path)
+            && matches!(project.entry(&path), Ok(Entry::Regular))
     });
     if !others {
         return Ok(());
@@ -812,6 +815,38 @@ mod tests {
         std::os::unix::fs::symlink(&outside, &legacy).unwrap();
         assert!(remove_legacy_record(&held).is_err());
         assert!(outside.is_file());
+    }
+
+    /// A directory or symlink under a closure name is no closure (gc skips
+    /// it), so the legacy record beside one is still the only closure and
+    /// stays, and the project's root keeps sweeping.
+    #[test]
+    fn a_sibling_that_is_not_a_regular_file_keeps_the_legacy_record() {
+        super::super::tests::with_temp_store(|store, root| {
+            let project = root.join("project");
+            let closures = project.join(".tog/closures");
+            fs::create_dir_all(&closures).unwrap();
+            let legacy = closures.join("rustfmt.json");
+            fs::write(
+                &legacy,
+                br#"{"schema":"closure/1","ecosystem":"rustfmt","body":{}}"#,
+            )
+            .unwrap();
+            store.register_root(&project).unwrap();
+            let held = crate::kernel::fsroot::ProjectRoot::open(&project).unwrap();
+            fs::create_dir(closures.join("cargo.json")).unwrap();
+            remove_legacy_record(&held).unwrap();
+            assert!(legacy.is_file(), "a directory sibling counted as a closure");
+            fs::remove_dir(closures.join("cargo.json")).unwrap();
+            let outside = root.join("outside.json");
+            fs::write(&outside, b"{}").unwrap();
+            std::os::unix::fs::symlink(&outside, closures.join("cargo.json")).unwrap();
+            remove_legacy_record(&held).unwrap();
+            assert!(legacy.is_file(), "a symlink sibling counted as a closure");
+            let mut out = Vec::new();
+            crate::kernel::gc::collect(store, crate::kernel::gc::Options::default(), &mut out)
+                .unwrap();
+        });
     }
 
     /// A project an older `tog fmt` registered and never synced holds only
