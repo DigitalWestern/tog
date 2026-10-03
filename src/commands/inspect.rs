@@ -2236,6 +2236,16 @@ mod tests {
             .unwrap();
         assert!(last_check.ends_with(&detail("project").detail), "{text}");
 
+        // JSON carries every check, in the same order as the text.
+        let value: Value = serde_json::from_str(&render_doctor(&checks, true).unwrap()).unwrap();
+        let json_names: Vec<&str> = value["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|check| check["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(json_names, names);
+
         // The three level words are the ones CLI.md documents, lowercase.
         let failing = vec![
             check("platform", Level::Ok, "ok"),

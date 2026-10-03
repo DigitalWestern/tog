@@ -542,6 +542,11 @@ mod tests {
         let changed_lock = lock_source_hash("3.12", "six==1.17.0\n# changed");
         assert_ne!(lock, changed_lock); // source only
         assert_eq!(lock, lock_source_hash("3.12", source)); // same input
+                                                            // The default pin's full version is part of existing stamps.
+        assert_eq!(
+            lock_source_hash("3.12.14", "six==1.17.0\n"),
+            "2036e745694799536bfd9bee5ce7f4fbf3a1f621d96e8d54e632e4d0c2334c67"
+        );
         assert!(cached_lock_matches(&lock, "six==1.17.0\n", &lock));
         assert!(!cached_lock_matches(&changed_lock, "six==1.17.0\n", &lock));
         assert!(!cached_lock_matches(&lock, "", &lock));

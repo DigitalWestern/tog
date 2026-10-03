@@ -10,7 +10,7 @@ fixed commits, shallow-clones each, and runs `tog sync` (the bare form's hidden 
 so no help screen lands in the log) against a
 throwaway store with a 600 s cap. Each failure is classified by the
 `RULES` regexes in `tools/hitrate.py`. Raw results are dated CSVs under
-`tests/fixtures/`; they are historical records and are never rewritten. A
+`tools/hitrate/`; they are historical records and are never rewritten. A
 full 60-repo run takes about 95 minutes on the Linux box.
 
 **Three numbers per ecosystem**, all derived from one permissive run:

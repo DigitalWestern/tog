@@ -2279,6 +2279,10 @@ mod tests {
             dotnet_tmp_path(Platform::Aarch64AppleDarwin),
             PathBuf::from("/private/tmp/.dotnet")
         );
+        assert_eq!(
+            dotnet_tmp_path(Platform::X86_64UnknownLinuxGnu),
+            PathBuf::from("/tmp/.dotnet")
+        );
         let scratch = TempDir::named("dn-tmp");
         let base = scratch.0.clone();
         let uid = invoking_uid().unwrap();

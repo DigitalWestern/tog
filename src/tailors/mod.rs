@@ -853,7 +853,9 @@ mod tests {
             let temp = crate::kernel::testutil::TempDir::named(&format!("{tailor}-frozen"));
             std::fs::write(temp.0.join(manifest), text).unwrap();
             let project = ProjectRoot::open(&temp.0).unwrap();
-            let error = require_lock(&project).unwrap_err();
+            let Err(error) = require_lock(&project) else {
+                panic!("{tailor}: a missing {lock} was accepted");
+            };
             assert_eq!(error.kind(), io::ErrorKind::NotFound, "{tailor}");
             let message = error.to_string();
             assert!(

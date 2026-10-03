@@ -1850,4 +1850,17 @@ mod tests {
         assert_eq!(error.kind(), io::ErrorKind::Unsupported);
         assert!(error.to_string().contains("sandboxed build"));
     }
+
+    #[test]
+    fn linux_sdist_build_uses_host_compilers() {
+        assert_eq!(
+            sdist_build_env(Platform::X86_64UnknownLinuxGnu),
+            vec![
+                ("CC".into(), "gcc".into()),
+                ("CXX".into(), "g++".into()),
+                ("LDSHARED".into(), "gcc -shared".into()),
+            ]
+        );
+        assert!(sdist_build_env(Platform::Aarch64AppleDarwin).is_empty());
+    }
 }
