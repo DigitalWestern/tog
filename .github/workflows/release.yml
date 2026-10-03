@@ -1,4 +1,4 @@
-# Build the two supported platforms on a version tag and attach them to a
+# Build the released platforms on a version tag and attach them to a
 # GitHub Release. install.sh downloads exactly these asset names, so keep
 # them stable: tog-<triple>.tar.gz and tog-<triple>.tar.gz.sha256.
 #
@@ -31,8 +31,11 @@ jobs:
           # (22.04 = glibc 2.35). src/kernel/platform.rs owns the platform list.
           - os: ubuntu-22.04
             triple: x86_64-unknown-linux-gnu
-          - os: macos-14
-            triple: aarch64-apple-darwin
+          # macOS arm64 returns with the macOS gate (#66). Its suite fails on
+          # the hosted macos-14 runner today (sandbox, fsroot and node tests,
+          # run of 2026-09-25), and publish needs every leg green. Restore:
+          #   - os: macos-14
+          #     triple: aarch64-apple-darwin
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 

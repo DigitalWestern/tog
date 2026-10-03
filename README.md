@@ -69,7 +69,9 @@ is on, `tog doctor` names it.
 
 ## Install
 
-No release is tagged yet, so install from source. You need a Rust
+Releases start at `v0.1.0`, built for Linux x86_64 only (macOS arm64
+waits on #66). The repository is private, so the installer below cannot
+download a release yet: install from source. You need a Rust
 toolchain from [rustup](https://rustup.rs); `cargo install` puts the binary
 in `~/.cargo/bin`, which rustup already added to PATH:
 
@@ -86,13 +88,12 @@ both need your GitHub access. Do not `cargo install tog` from crates.io:
 that name belongs to an unrelated crate. To update a source install, pull
 and run `cargo install --path . --locked` again.
 
-### The one-line installer, once v0.1.0 is tagged
+### The one-line installer, once the repository is public
 
 Releases are built by
 [.github/workflows/release.yml](.github/workflows/release.yml) on a `v*`
-tag, and none has been pushed. Once `v0.1.0` is tagged, and the
-repository can be read without logging in (it is private now), this is one
-line on Linux x86_64 or macOS arm64. It downloads the release binary for
+tag. Once the repository can be read without logging in (it is private
+now), this is one line on Linux x86_64. It downloads the release binary for
 your machine, checks its sha256, puts it in `~/.local/bin`, adds that
 directory to PATH if it is not already there, and installs bash, zsh, and
 fish completions:
