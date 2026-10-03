@@ -1,7 +1,7 @@
 //! Acceptance: a build that attempts undeclared network access MUST fail.
 //!
 //! Heavy (realizes CPython + build toolchain on first run), so #[ignore]d;
-//! tests/acceptance.sh runs it with a shared TOG_STORE:
+//! the heavy workflow (.github/workflows/heavy.yml) runs it:
 //!     cargo test --test sandbox_deny -- --ignored
 
 // Tests spawn fixtures and take leases freely (see clippy.toml).

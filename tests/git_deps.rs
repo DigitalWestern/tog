@@ -1,8 +1,7 @@
-//! Git dependencies realized by commit. Heavy: realizes Node
-//! and a git source, so it is ignored by default.
-//!
-//! The fixture repository is local and served over `file://`, so this needs no
-//! network beyond the pinned Node toolchain.
+//! Git dependencies realized by commit. The fixture repositories are local
+//! and served over `file://`. The npm and Python cases also realize the
+//! pinned Node or CPython toolchain, which needs the network, so they are
+//! ignored by default; the rest run offline on every PR.
 
 // Tests spawn fixtures and take leases freely (see clippy.toml).
 #![allow(clippy::disallowed_methods)]
@@ -139,7 +138,6 @@ fn npm_git_dependency_is_realized_from_its_commit() {
 }
 
 #[test]
-#[ignore]
 fn an_unpinned_git_reference_is_refused() {
     let platform = Platform::host().expect("host platform");
     let root = TempDir::new("gitdep-unpinned");
@@ -361,7 +359,6 @@ fn cargo_fixture_repo(root: &Path) -> (String, String) {
 }
 
 #[test]
-#[ignore]
 fn cargo_git_dependency_is_vendored_from_its_commit() {
     let _attribution_guard = attribution_guard();
     let root = TempDir::new("gitdep-cargo");
