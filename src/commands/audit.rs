@@ -2666,6 +2666,75 @@ mod tests {
         );
     }
 
+    /// A closure with no top-level exception record is outdated whatever
+    /// the joined resolution record lists: the join always writes both, so
+    /// a body with only the joined list was edited, and nothing in it is
+    /// judged as permitted or denied.
+    #[test]
+    fn a_joined_list_without_a_recorded_one_is_outdated_and_not_judged() {
+        let temp = python_project("joined-only");
+        let dir = &temp.0;
+        let mut body = python_body(dir);
+        body.as_object_mut().unwrap().remove("exceptions");
+        body["resolution"] = json!({
+            "exceptions": [exception(GIT_DEPENDENCY, "left-pad"), exception("made-up-kind", "x")]
+        });
+        let closure = write_closure(dir, "python", "python", Some(host().triple()), body);
+        let _env = policy::test_env_lock();
+        let _machine = MachinePolicy::trusting("joined-only-machine", &[test_key()]);
+        let verdicts = judge(dir, &deny(&[GIT_DEPENDENCY]), &[closure]);
+        assert_eq!(verdicts[0].word(), "outdated");
+        assert!(matches!(
+            &verdicts[0].freshness,
+            Freshness::Outdated(why) if why.contains("no exception record")
+        ));
+        assert_eq!(verdicts[0].denied, Some(Vec::new()));
+        assert_eq!(verdicts[0].unknown, Some(Vec::new()));
+        assert!(!verdicts[0].passes());
+    }
+
+    /// Without a `[signing]` table the fix for a record with no platform
+    /// drops "under a trusted key", in the text and in the JSON.
+    #[test]
+    fn the_no_platform_fix_follows_the_signing_mode() {
+        let temp = python_project("no-platform-mode");
+        let dir = &temp.0;
+        let mut body = python_body(dir);
+        body["exceptions"] = json!([]);
+        let closure = write_closure(dir, "python", "python", None, body);
+        let unsigned = judge(dir, &Policy::default(), std::slice::from_ref(&closure));
+        assert_eq!(unsigned[0].word(), "outdated");
+        let Freshness::Outdated(why) = &unsigned[0].freshness else {
+            panic!("{:?}", unsigned[0].freshness);
+        };
+        assert_eq!(
+            why,
+            "closure records no platform; run 'tog' once, then commit"
+        );
+        let report = Report {
+            policy: Policy::default(),
+            sources: Vec::new(),
+            verdicts: unsigned,
+            missing: Vec::new(),
+            signatures_checked: false,
+        };
+        let text = render(dir, &report, false).unwrap();
+        assert!(!text.contains("trusted key"), "{text}");
+        let value: Value = serde_json::from_str(&render(dir, &report, true).unwrap()).unwrap();
+        assert!(!value["closures"][0]["freshness_detail"]
+            .as_str()
+            .unwrap()
+            .contains("trusted key"));
+        let signed = judge(dir, &permissive(), &[closure]);
+        let Freshness::Outdated(why) = &signed[0].freshness else {
+            panic!("{:?}", signed[0].freshness);
+        };
+        assert!(
+            why.ends_with("once under a trusted key, then commit"),
+            "{why}"
+        );
+    }
+
     #[test]
     fn an_unsigned_record_is_outdated_and_not_evaluated() {
         let temp = python_project("unsigned");

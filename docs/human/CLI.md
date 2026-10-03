@@ -653,12 +653,13 @@ lost its keys fails loudly instead of passing with signatures unchecked.
 Per closure it prints the ecosystem, the record (sha256 of the closure file
 bytes), and the first of these that applies: `bad-signature` (a signature
 is present and does not verify: tampered, malformed, or an unknown
-algorithm; find out who changed it, then regenerate under a trusted key),
-`untrusted` (verifies under a key the effective set does not contain; the
-line names the key and the scopes that exclude it), `outdated` (no
-signature, or a record from before inputs, platform, or the exception
-record were written; run `tog` once under a trusted key, then
-commit. A record carrying an exception kind tog has retired is outdated
+algorithm; find out who changed it, then regenerate, under a trusted key
+when signatures are checked), `untrusted` (signatures checked: verifies
+under a key the effective set does not contain; the line names the key and
+the scopes that exclude it), `outdated` (no signature while signatures are
+checked, or a record from before inputs, platform, or the exception record
+were written; run `tog` once, under a trusted key when signatures are
+checked, then commit. A record carrying an exception kind tog has retired is outdated
 too, with the reason and the command that rewrites it (`run 'tog fmt'`
 for a `rustfmt` record, `run 'tog sync'` for the others): a closure recording
 `toolchain-component-unavailable` says `closure predates component

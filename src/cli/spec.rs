@@ -602,7 +602,8 @@ are checked, then commit), stale (its inputs
 changed since the sync, the same check 'tog status' makes), denied
 (each denied exception's kind, subject, and detail, plus a count of
 permitted ones by kind), unknown (a kind this binary cannot judge), or
-clean. A record that is not trusted is not evaluated further. A detected
+clean. When signatures are checked, a record that is not trusted is not
+evaluated further. A detected
 ecosystem with no closure is missing. The rustfmt closure 'tog fmt'
 writes is stale when this binary would record that run differently now;
 rerun 'tog fmt'. Only clean passes. Offline, read-only, no store

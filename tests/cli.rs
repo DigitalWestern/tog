@@ -2505,8 +2505,7 @@ fn status_lists_the_exceptions_a_sync_recorded() {
     );
 
     // A joined resolution record's exceptions are listed even when the
-    // closure has no top-level list of its own, and a resolution record
-    // that cannot be read is this row's finding, not the whole report's.
+    // closure has no top-level list of its own.
     record["body"].as_object_mut().unwrap().remove("exceptions");
     record["body"]["resolution"] = serde_json::json!({
         "exceptions": [{"kind": "unrecorded-resolution", "subject": "uv.lock", "detail": "no door"}]
@@ -2518,16 +2517,32 @@ fn status_lists_the_exceptions_a_sync_recorded() {
         value["ecosystems"][0]["exceptions"][0]["kind"],
         "unrecorded-resolution"
     );
-    record["body"]["resolution"] = serde_json::json!("broken");
+
+    // An exception list that cannot be read is this row's finding, not the
+    // whole report's: the row was synced on every other check, so it is
+    // `unchecked` with the reason, and the ecosystem beside it still
+    // reports. A row that already names a fix keeps it.
+    record["body"].as_object_mut().unwrap().remove("resolution");
+    record["body"]["exceptions"] = serde_json::json!("nope");
     std::fs::write(&closure, serde_json::to_vec_pretty(&record).unwrap()).unwrap();
+    std::fs::write(project.0.join("package.json"), "{}\n").unwrap();
     let out = tog(&project.0, &home.0, &["status"]);
     let stdout = text(&out.stdout);
     assert_eq!(out.status.code(), Some(1), "{stdout}{}", text(&out.stderr));
     assert!(
-        stdout.contains("python  unchecked   ") && stdout.contains("malformed resolution record"),
+        stdout.contains("python  unchecked   ") && stdout.contains("malformed exception record"),
         "{stdout}"
     );
-    assert!(stdout.contains("0 of 1 synced; 1 unchecked."), "{stdout}");
+    assert!(stdout.contains("node    not synced"), "{stdout}");
+    assert!(
+        stdout.contains("0 of 2 synced; 1 unchecked, 1 not-synced."),
+        "{stdout}"
+    );
+    std::fs::remove_file(project.0.join(".venv")).unwrap();
+    let out = tog(&project.0, &home.0, &["status", "--json"]);
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(value["ecosystems"][0]["state"], "projection-missing");
+    assert_eq!(value["ecosystems"][0]["exceptions"], serde_json::json!([]));
 }
 
 /// `policy::load` unions silently, so the merged deny set alone cannot say
