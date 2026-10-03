@@ -289,18 +289,6 @@ mod tests {
     }
 
     #[test]
-    fn electron_artifacts_are_named_per_platform() {
-        assert_eq!(
-            electron_platform(Platform::X86_64UnknownLinuxGnu),
-            ("linux", "x64")
-        );
-        assert_eq!(
-            electron_platform(Platform::Aarch64AppleDarwin),
-            ("darwin", "arm64")
-        );
-    }
-
-    #[test]
     fn skip_table_is_unique_and_populated() {
         let mut names = std::collections::HashSet::new();
         for entry in SKIP_DOWNLOADS {

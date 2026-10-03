@@ -261,25 +261,6 @@ mod tests {
     const NPM_STALE: &str = "package.json dependencies disagree with package-lock.json; \
                              regenerate the lock (npm install --package-lock-only)";
 
-    /// The lock-freshness refusal is printed to the user verbatim, so it has
-    /// to read as one sentence: no run of spaces left behind by re-wrapping
-    /// the `format!`.
-    #[test]
-    fn the_lock_freshness_refusal_reads_as_one_sentence() {
-        let package = r#"{"dependencies":{"is-odd":"^3.0.0"}}"#;
-        let stale = r#"{"packages":{"":{"dependencies":{"is-odd":"^2.0.0"}}}}"#;
-        let error = message(npm(stale, &[root(package)]));
-        assert_eq!(
-            error,
-            "package.json dependencies disagree with package-lock.json; \
-             regenerate the lock (npm install --package-lock-only)"
-        );
-        assert!(!error.contains("  "), "{error}");
-
-        let fresh = r#"{"packages":{"":{"dependencies":{"is-odd":"^3.0.0"}}}}"#;
-        npm(fresh, &[root(package)]).unwrap();
-    }
-
     #[test]
     fn npm_refuses_an_added_changed_or_removed_dependency() {
         let lock = r#"{"packages":{"":{"dependencies":{"a":"^1.0.0","b":"2.0.0"}}}}"#;

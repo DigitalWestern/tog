@@ -2111,8 +2111,10 @@ mod tests {
         }
     }
 
+    /// In a bare directory with a fresh store, `doctor` leaves no write
+    /// probe behind and reports that there is no project.
     #[test]
-    fn doctor_reports_host_and_project() {
+    fn doctor_cleans_up_its_probe_and_finds_no_project_in_a_bare_dir() {
         // Process-global test state follows env -> supervision -> store ->
         // attribution (see the comment on `commands::sync`'s
         // failed_tailor_sync test). `doctor`'s policy check reads
@@ -2130,39 +2132,19 @@ mod tests {
             Some(value) => std::env::set_var("TOG_STORE", value),
             None => std::env::remove_var("TOG_STORE"),
         }
-        let names: Vec<&str> = checks.iter().map(|check| check.name).collect();
-        for expected in [
-            "platform",
-            "store",
-            "disk",
-            "toolchains",
-            "sandbox",
-            "c-toolchain",
-            "policy",
-            "project",
-        ] {
-            assert!(names.contains(&expected), "{names:?} lacks {expected}");
-        }
-        let store_check = checks.iter().find(|check| check.name == "store").unwrap();
-        assert_eq!(store_check.level, Level::Ok, "{}", store_check.detail);
-        assert!(store_check.detail.contains("0 objects"));
         assert!(fs::read_dir(store.join("tmp"))
             .unwrap()
             .flatten()
             .all(|entry| !entry.file_name().to_string_lossy().starts_with(".doctor-")));
         let project = checks.iter().find(|check| check.name == "project").unwrap();
         assert!(project.detail.contains("no project in"));
-        let text = render_doctor(&checks, false).unwrap();
-        assert!(text.contains("  platform  "));
-        let value: Value = serde_json::from_str(&render_doctor(&checks, true).unwrap()).unwrap();
-        assert!(value["checks"].as_array().unwrap().len() >= 8);
     }
+
     /// Characterization: `doctor`'s value is the order and the wording of
-    /// what it prints, so pin both. `doctor_reports_host_and_project` only
-    /// checks that each expected check name is somewhere in the list.
+    /// what it prints, so pin both.
     #[test]
     fn doctor_check_order_and_wording_are_fixed() {
-        // Same env -> store order as `doctor_reports_host_and_project`.
+        // Same env -> store order as the bare-dir test above.
         let _env = crate::kernel::policy::test_env_lock();
         let _lock = crate::kernel::store::STORE_ENV_LOCK
             .lock()

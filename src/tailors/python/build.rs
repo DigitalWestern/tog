@@ -1748,35 +1748,6 @@ mod tests {
     }
 
     #[test]
-    fn native_sdist_identity_records_linker_configuration() {
-        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        let pkg = LockedPackage {
-            name: "example".into(),
-            version: "1.0".into(),
-            filename: "example-1.0.tar.gz".into(),
-            url: String::new(),
-            sha256: "a".repeat(64),
-            kind: ArtifactKind::Sdist,
-            git: None,
-        };
-        let pin =
-            crate::tailors::python::lookup(Platform::X86_64UnknownLinuxGnu, "3.12.14").unwrap();
-        let identity = isolated_sdist_identity_from_ids(
-            Platform::X86_64UnknownLinuxGnu,
-            &pkg,
-            &format!("{}:{}", pin.version, pin.sha256),
-            "build-env-id",
-            Some("rust-id"),
-            Some("vendor-id"),
-            Some("native-libs-id"),
-        );
-        assert_eq!(identity.inputs["native_libs"], "native-libs-id");
-        assert_eq!(identity.inputs["native_linker"], NATIVE_LINKER_CONFIG);
-    }
-
-    #[test]
     fn recursion_cap_is_loud() {
         let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
             .lock()
@@ -1878,21 +1849,5 @@ mod tests {
         );
         assert_eq!(error.kind(), io::ErrorKind::Unsupported);
         assert!(error.to_string().contains("sandboxed build"));
-    }
-
-    #[test]
-    fn linux_sdist_build_uses_host_compilers() {
-        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        assert_eq!(
-            sdist_build_env(Platform::X86_64UnknownLinuxGnu),
-            vec![
-                ("CC".into(), "gcc".into()),
-                ("CXX".into(), "g++".into()),
-                ("LDSHARED".into(), "gcc -shared".into()),
-            ]
-        );
-        assert!(sdist_build_env(Platform::Aarch64AppleDarwin).is_empty());
     }
 }

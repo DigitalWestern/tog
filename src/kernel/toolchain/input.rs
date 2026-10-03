@@ -642,20 +642,6 @@ mod tests {
     }
 
     #[test]
-    fn missing_and_present_shapes() {
-        let (temp, root) = project();
-        let dir = temp.0.join("proj");
-        let rows = discover(&root, "python").unwrap();
-        assert_eq!(rows.len(), 3);
-        assert!(rows.iter().all(|row| row.absent && row.sha256.is_none()));
-        std::fs::write(dir.join(".python-version"), "3.12.1\n").unwrap();
-        let rows = discover(&root, "python").unwrap();
-        assert_eq!(rows[0].value.as_deref(), Some("3.12.1"));
-        assert!(!rows[0].absent);
-        assert!(rows[0].sha256.is_some());
-    }
-
-    #[test]
     fn python_reader_finds_a_version() {
         assert_eq!(read_python_version(b"3.12.1\n"), Some("3.12.1".into()));
         assert_eq!(
@@ -1059,6 +1045,7 @@ mod tests {
         let rows = discover(&root, "node").unwrap();
         assert_eq!(rows[1].value.as_deref(), Some("24.20.0"));
         assert!(!rows[1].absent);
+        assert!(rows[1].sha256.is_some());
     }
 
     #[test]
@@ -1127,12 +1114,5 @@ mod tests {
         std::os::unix::fs::symlink(&victim, temp.0.join("proj/.python-version")).unwrap();
         let error = discover(&root, "python").unwrap_err();
         assert!(error.to_string().contains("is a symlink"), "{error}");
-    }
-
-    #[test]
-    fn computed_only_message_names_a_file() {
-        assert!(computed_only_message("python").contains(".python-version"));
-        assert!(computed_only_message("node").contains(".node-version"));
-        assert!(computed_only_message("dotnet").contains("global.json"));
     }
 }

@@ -490,6 +490,25 @@ mod tests {
         assert_eq!(error.kind(), io::ErrorKind::NotFound);
     }
 
+    #[test]
+    fn forget_rejects_unknown_and_malformed_keys() {
+        let temp = temp_store();
+        let store = Store {
+            root: temp.0.canonicalize().unwrap(),
+        };
+        let project = temp.0.join("project");
+        fs::create_dir_all(&project).unwrap();
+        store.register_root(&project).unwrap();
+
+        let error = store.forget_root(&"a".repeat(40)).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+        let error = store.forget_root("not-a-key").unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        let error = store.forget_root(&"g".repeat(40)).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(store.roots().unwrap().len(), 1);
+    }
+
     /// A record that is not a regular file is refused on its metadata,
     /// before anything opens it. Without that check, reading a FIFO nobody
     /// writes to blocks the listing, the sweep and `--forget` alike, which
@@ -611,6 +630,87 @@ mod tests {
             .unwrap();
         assert_eq!(same_object, object);
         assert_eq!(applied, vec![exception]);
+    }
+
+    /// A stage that sat in `tmp/` long enough to look abandoned is published
+    /// with a fresh mtime, so a sweep's active window protects it.
+    #[test]
+    fn publication_refreshes_an_old_stage_mtime() {
+        let temp = temp_store();
+        let store = Store {
+            root: temp.0.canonicalize().unwrap(),
+        };
+        let identity = identity();
+        let staged = staged(&store);
+        let old = SystemTime::now()
+            .checked_sub(std::time::Duration::from_secs(2 * 24 * 60 * 60))
+            .unwrap();
+        fs::File::open(&staged).unwrap().set_modified(old).unwrap();
+        store
+            .commit_with_deps(&identity, &staged, &[], &ObjectDeps::new())
+            .unwrap();
+        let modified = fs::metadata(store.object_path(&identity.object_id()))
+            .unwrap()
+            .modified()
+            .unwrap();
+        let age = SystemTime::now().duration_since(modified).unwrap();
+        assert!(age < std::time::Duration::from_secs(10 * 60), "{age:?}");
+    }
+
+    #[test]
+    fn cache_hit_does_not_certify_old_inferred_metadata() {
+        let temp = temp_store();
+        let store = Store {
+            root: temp.0.canonicalize().unwrap(),
+        };
+        let digest = "4".repeat(64);
+        let identity = Identity {
+            kind: "cpython".into(),
+            name: "cpython".into(),
+            version: "3.11.9".into(),
+            inputs: BTreeMap::from([
+                ("artifact_sha256".into(), digest.clone()),
+                ("platform".into(), "x86_64-unknown-linux-gnu".into()),
+            ]),
+        };
+        let id = identity.object_id();
+        // Publish, then rewrite the record into the pre-object-meta/2 shape
+        // an older tog left behind: refs instead of an evidence marker.
+        store
+            .commit_with_deps(&identity, &staged(&store), &[], &ObjectDeps::new())
+            .unwrap();
+        let meta = store.root.join("meta").join(format!("{id}.json"));
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&fs::read(&meta).unwrap()).unwrap();
+        let object = value.as_object_mut().unwrap();
+        for key in ["schema", "dependencies", "cache_digests", "evidence"] {
+            object.remove(key);
+        }
+        object.insert("refs".into(), serde_json::json!([]));
+        fs::write(&meta, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+        let before = fs::read(&meta).unwrap();
+
+        // A newer binary publishes the same identity with real evidence and
+        // finds the object already there. The cache hit must leave the old
+        // record exactly as it was; upgrading it is migration's job alone.
+        fs::write(store.cache_path("sha256", &digest), b"artifact").unwrap();
+        let mut deps = ObjectDeps::new();
+        deps.cache_digest(crate::kernel::fetch::Digest::sha256(&digest).unwrap());
+        store
+            .commit_with_deps(&identity, &staged(&store), &[], &deps)
+            .unwrap();
+
+        assert_eq!(
+            fs::read(&meta).unwrap(),
+            before,
+            "a cache hit rewrote a legacy record"
+        );
+        assert_eq!(
+            crate::kernel::objmeta::read_record_at(&meta)
+                .unwrap()
+                .evidence,
+            crate::kernel::objmeta::Evidence::Legacy
+        );
     }
 
     #[test]

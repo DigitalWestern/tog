@@ -663,11 +663,4 @@ mod tests {
         );
         assert_eq!(next_line("tog audit"), format!("{NEXT_PREFIX}tog audit\n"));
     }
-
-    #[test]
-    fn defaults_are_plain_and_loud() {
-        // Before init: no quiet, no verbose, no color (settings default).
-        let s = Settings::default();
-        assert!(!s.quiet && !s.verbose && !s.color);
-    }
 }

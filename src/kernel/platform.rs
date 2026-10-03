@@ -245,22 +245,15 @@ mod tests {
     }
 
     #[test]
-    fn triples_are_unique_and_darwin_is_stable() {
-        assert_eq!(
-            Platform::Aarch64AppleDarwin.triple(),
-            "aarch64-apple-darwin"
-        );
-        assert_ne!(
-            Platform::Aarch64AppleDarwin.triple(),
-            Platform::X86_64UnknownLinuxGnu.triple()
-        );
-    }
-
-    #[test]
     fn from_triple_round_trips_and_refuses_strangers() {
         for platform in Platform::ALL {
             assert_eq!(Platform::from_triple(platform.triple()), Some(*platform));
         }
+        // The darwin spelling is recorded in locks and must not drift.
+        assert_eq!(
+            Platform::from_triple("aarch64-apple-darwin"),
+            Some(Platform::Aarch64AppleDarwin)
+        );
         assert_eq!(Platform::from_triple("x86_64-apple-darwin"), None);
         assert_eq!(Platform::from_triple(""), None);
     }
