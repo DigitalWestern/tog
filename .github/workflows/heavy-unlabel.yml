@@ -33,6 +33,8 @@ jobs:
       - env:
           GH_TOKEN: ${{ github.token }}
           RUN: ${{ github.event.workflow_run.id }}
+          RUN_STARTED: ${{ github.event.workflow_run.run_started_at }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
           PR: ${{ github.event.workflow_run.pull_requests[0].number }}
           HEAD_OWNER: ${{ github.event.workflow_run.head_repository.owner.login }}
           HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
@@ -47,16 +49,32 @@ jobs:
           # GitHub leaves pull_requests empty in some cases; find the PR by
           # its branch then.
           if [ -z "$PR" ]; then
-            PR=$(gh api "repos/$GITHUB_REPOSITORY/pulls?state=open&head=$HEAD_OWNER:$HEAD_BRANCH" \
-              --jq '.[0].number // empty')
+            PR=$(gh api --method GET "repos/$GITHUB_REPOSITORY/pulls" \
+              -f state=open -f "head=$HEAD_OWNER:$HEAD_BRANCH" \
+              --jq ".[] | select(.head.ref == \"$HEAD_BRANCH\") | .number" | head -n 1)
           fi
           if [ -z "$PR" ]; then
             echo "no open pull request for $HEAD_OWNER:$HEAD_BRANCH"
             exit 0
           fi
-          labels=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR/labels" --jq '.[].name')
+          # The green run vouches for one commit and one label request. A
+          # push since, or the label added again after the run started,
+          # asks for a new run: leave the label for that one.
+          head=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" --jq .head.sha)
+          if [ "$head" != "$HEAD_SHA" ]; then
+            echo "#$PR moved from $HEAD_SHA to $head since run $RUN; the label stays"
+            exit 0
+          fi
+          labels=$(gh api --paginate "repos/$GITHUB_REPOSITORY/issues/$PR/labels" --jq '.[].name')
           if ! grep -qx heavy <<< "$labels"; then
             echo "#$PR has no heavy label"
+            exit 0
+          fi
+          labeled=$(gh api --paginate "repos/$GITHUB_REPOSITORY/issues/$PR/events" \
+            --jq '.[] | select(.event == "labeled" and .label.name == "heavy") | .created_at' | tail -n 1)
+          # Both are UTC ISO 8601 with a Z, so they compare as strings.
+          if [[ "$labeled" > "$RUN_STARTED" ]]; then
+            echo "heavy was added again at $labeled, after run $RUN started at $RUN_STARTED; the label stays"
             exit 0
           fi
           gh api -X DELETE "repos/$GITHUB_REPOSITORY/issues/$PR/labels/heavy" > /dev/null
