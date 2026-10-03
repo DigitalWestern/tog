@@ -1101,7 +1101,7 @@ mod tests {
         fs::create_dir_all(&deep).unwrap();
         fs::hard_link(&key, deep.join("Cargo.toml")).unwrap();
         let activity = store.activity(ActivityMode::Shared).unwrap();
-        let error = Snapshot::build(
+        let Err(error) = Snapshot::build(
             &store,
             &activity,
             &SnapshotSpec {
@@ -1110,9 +1110,9 @@ mod tests {
                 exclude: &[],
                 forbidden: &forbidden,
             },
-        )
-        .err()
-        .expect("a stage holding the key is refused");
+        ) else {
+            panic!("a stage holding the key is refused");
+        };
         assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
         let message = error.to_string();
         assert!(message.contains("is the signing key"), "{message}");
