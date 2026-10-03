@@ -590,7 +590,8 @@ pub(crate) fn download_verified_digest_held(
 /// anything else happens, cache hit or not, so a row the policy refuses is
 /// refused the same way online and offline. A network fetch then follows
 /// redirects itself and authorizes every `Location` before requesting it.
-/// No credential is sent: none is shipped, and sending one waits on #72.
+/// No credential is sent: none is shipped, and sending one is not built yet
+/// (policy decided in #72, work in #404).
 pub(crate) fn download_toolchain_artifact_held(
     store: &Store,
     activity: &StoreActivity,
