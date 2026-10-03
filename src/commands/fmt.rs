@@ -123,7 +123,7 @@ pub fn run(
         project_toolchain::resolve(
             &held,
             platform,
-            ecosystem_inputs(dir, &[formatter])?,
+            ecosystem_inputs(&[formatter])?,
             Mode::ReadOnly,
             false,
         )?

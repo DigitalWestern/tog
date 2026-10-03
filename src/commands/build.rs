@@ -73,7 +73,7 @@ pub fn run(ctx: &Context, args: &[String], frozen: bool) -> io::Result<()> {
     let toolchain = project_toolchain::resolve(
         &held,
         ctx.platform,
-        ecosystem_inputs(&root, &[tailor])?,
+        ecosystem_inputs(&[tailor])?,
         Mode::ReadOnly,
         false,
     )?;

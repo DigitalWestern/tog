@@ -88,8 +88,8 @@ impl Store {
     /// `None` when there is no store (or no `objects` namespace) there yet.
     /// The layout invariant is `open`'s: the canonical root, `objects` and
     /// `meta` must be real directories, never symlinks, and anything else
-    /// is an error rather than an absent store. For readers that must leave
-    /// the store exactly as they found it (legacy toolchain seeding);
+    /// is an error rather than an absent store. For readers that only
+    /// locate the store and never create it (the local Rust tree cache);
     /// anything that commits, leases or sweeps uses `open`.
     pub fn existing() -> io::Result<Option<Store>> {
         let (root, _) = Self::configured_root();
