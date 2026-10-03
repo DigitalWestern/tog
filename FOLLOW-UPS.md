@@ -189,7 +189,6 @@ After the proxy: the test-suite audit (#351) and then the quality review
   - #295 tests: four sandbox tests fail instead of skipping when bubblewrap is missing.
   - #297 python: two PEP 440 grammars; hoist `pep440.rs` into the kernel.
   - #300 heavy: the Elixir end-to-end test cannot run on ubuntu-22.04 (OTP needs glibc 2.43).
-  - #301 acceptance.sh: steps 9 and 9b re-run two ignored suites the heavy workflow already runs, one multi-threaded.
   - #302 acceptance.sh: step 13 carries its own copy of the closure signing format.
   - #307 archive: a tarball with macOS AppleDouble (`._name`) members is refused on macOS but extracted on Linux. The extraction carries `--no-mac-metadata`; the listing carries no restore flag (bsdtar documents them for other modes). On the Mac, try `/usr/bin/tar --no-mac-metadata -tf` on such a tarball: if it accepts the flag and prints the `._` members, add it to `TAR_LIST_FLAGS` and close.
 - **GC loose ends from #162.** Three small `src/kernel/store/roots.rs`

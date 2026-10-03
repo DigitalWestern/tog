@@ -3065,34 +3065,6 @@ exit 0
             .unwrap());
     }
 
-    /// A project with its manifest but no lock is refused by name and
-    /// nothing is written: the lock is `prepare`'s to generate, and a
-    /// frozen run skips `prepare`.
-    #[test]
-    fn a_missing_lock_is_refused_by_name_and_nothing_is_written() {
-        let temp = crate::kernel::testutil::TempDir::named("elixir-frozen");
-        std::fs::write(
-            temp.0.join("mix.exs"),
-            "defmodule Hello.MixProject do\nend\n",
-        )
-        .unwrap();
-        let project = crate::kernel::fsroot::ProjectRoot::open(&temp.0).unwrap();
-        let error = super::require_lock(&project).unwrap_err();
-        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
-        let message = error.to_string();
-        assert!(
-            message.contains("mix.lock is missing and --frozen never creates it"),
-            "{message}"
-        );
-        assert!(
-            message.contains("run `tog` once without --frozen"),
-            "{message}"
-        );
-        assert!(!temp.0.join("mix.lock").exists());
-        std::fs::write(temp.0.join("mix.lock"), "").unwrap();
-        super::require_lock(&project).unwrap();
-    }
-
     /// The check's input hash moves with the lock, the root mix.exs, an
     /// umbrella app's mix.exs and the BEAM object, ignores files the check
     /// does not read, and refuses to vouch for a symlinked app manifest.

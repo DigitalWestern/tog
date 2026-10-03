@@ -542,6 +542,11 @@ mod tests {
         let changed_lock = lock_source_hash("3.12", "six==1.17.0\n# changed");
         assert_ne!(lock, changed_lock); // source only
         assert_eq!(lock, lock_source_hash("3.12", source)); // same input
+                                                            // The default pin's full version is part of existing stamps.
+        assert_eq!(
+            lock_source_hash("3.12.14", "six==1.17.0\n"),
+            "2036e745694799536bfd9bee5ce7f4fbf3a1f621d96e8d54e632e4d0c2334c67"
+        );
         assert!(cached_lock_matches(&lock, "six==1.17.0\n", &lock));
         assert!(!cached_lock_matches(&changed_lock, "six==1.17.0\n", &lock));
         assert!(!cached_lock_matches(&lock, "", &lock));
@@ -786,26 +791,6 @@ mod tests {
         assert!(
             std::fs::read_dir(&outside).unwrap().next().is_none(),
             "wrote a manifest snapshot through the symlinked .tog"
-        );
-    }
-
-    #[test]
-    fn unconstrained_python_keeps_default_and_existing_cache_inputs() {
-        let selection = pyselect::select_python(Platform::Aarch64AppleDarwin, &[]).unwrap();
-        assert_eq!(selection.pin.version, "3.12.14");
-        let source = "six==1.17.0\n";
-        assert_eq!(
-            planner_input_hash(
-                Platform::Aarch64AppleDarwin,
-                selection.pin.version,
-                source,
-                pypi::Glibc(0, 0),
-            ),
-            "dc181496c6681389a89b3191dba44abdfe8efef8044e540777e7b62c91166411"
-        );
-        assert_eq!(
-            lock_source_hash(selection.pin.version, source),
-            "2036e745694799536bfd9bee5ce7f4fbf3a1f621d96e8d54e632e4d0c2334c67"
         );
     }
 

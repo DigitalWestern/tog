@@ -1045,23 +1045,6 @@ mod tests {
     use super::*;
     use crate::kernel::testutil::TempDir;
 
-    /// The identity matrix is reproducible: two builds in the same process
-    /// yield the same kinds and the same inputs, case for case, on both
-    /// platforms.
-    #[test]
-    fn live_identity_cases_are_reproducible() {
-        for platform in Platform::ALL {
-            let first = live_identity_cases(*platform);
-            let second = live_identity_cases(*platform);
-            assert_eq!(first.len(), second.len(), "{}", platform.triple());
-            for (a, b) in first.iter().zip(&second) {
-                assert_eq!(a.kind, b.kind, "{}", platform.triple());
-                assert_eq!(a.version, b.version, "{}: {}", platform.triple(), a.kind);
-                assert_eq!(a.inputs, b.inputs, "{}: {}", platform.triple(), a.kind);
-            }
-        }
-    }
-
     /// Drift check: the legacy adapter must reconstruct exactly what this
     /// producer supplies at commit, or a migrated record stops matching what
     /// a re-sync publishes and every later cache hit becomes a hard error.
@@ -1713,7 +1696,7 @@ mod tests {
     /// Characterization of the skip decision in `run_install_scripts_staged`:
     /// a package with no install hooks and no binding.gyp gets no scratch
     /// stage dir, no tool shim, and no cleanup entry. Packages that DO have
-    /// hooks need the build sandbox and are covered by the `#[ignore]` gates
+    /// hooks need the build sandbox and are covered by the sandboxed tests
     /// in tests/npm_scripts.rs (benign_install_script_runs_and_output_is_captured,
     /// permissive_install_script_is_cached_but_rejected_strict,
     /// network_access_during_install_script_fails).

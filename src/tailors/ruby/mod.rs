@@ -2078,30 +2078,6 @@ mod tests {
         checked.sort_unstable();
         assert_eq!(keys, checked);
     }
-
-    /// A project with its manifest but no lock is refused by name and
-    /// nothing is written: the lock is `prepare`'s to generate, and a
-    /// frozen run skips `prepare`.
-    #[test]
-    fn a_missing_lock_is_refused_by_name_and_nothing_is_written() {
-        let temp = crate::kernel::testutil::TempDir::named("ruby-frozen");
-        std::fs::write(temp.0.join("Gemfile"), "source \"https://rubygems.org\"\n").unwrap();
-        let project = crate::kernel::fsroot::ProjectRoot::open(&temp.0).unwrap();
-        let error = super::require_lock(&project).unwrap_err();
-        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
-        let message = error.to_string();
-        assert!(
-            message.contains("Gemfile.lock is missing and --frozen never creates it"),
-            "{message}"
-        );
-        assert!(
-            message.contains("run `tog` once without --frozen"),
-            "{message}"
-        );
-        assert!(!temp.0.join("Gemfile.lock").exists());
-        std::fs::write(temp.0.join("Gemfile.lock"), "").unwrap();
-        super::require_lock(&project).unwrap();
-    }
 }
 
 /// Offline tests for the two rubygems.org checks (#348): the version reply

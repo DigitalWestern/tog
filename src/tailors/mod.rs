@@ -813,6 +813,65 @@ mod tests {
     const DARWIN: Platform = Platform::Aarch64AppleDarwin;
     const LINUX: Platform = Platform::X86_64UnknownLinuxGnu;
 
+    /// A project with its manifest but no lock is refused by name and
+    /// nothing is written: the lock is `prepare`'s to generate, and a
+    /// frozen run skips `prepare`. One row per tailor that reads a lock.
+    #[test]
+    fn a_missing_lock_is_refused_by_name_and_nothing_is_written() {
+        type RequireLock = fn(&ProjectRoot) -> io::Result<()>;
+        let rows: [(&str, &str, &str, &str, RequireLock); 4] = [
+            (
+                "node",
+                "package.json",
+                "{\"name\": \"hello\"}\n",
+                "package-lock.json",
+                node::inputs::require_lock,
+            ),
+            (
+                "ruby",
+                "Gemfile",
+                "source \"https://rubygems.org\"\n",
+                "Gemfile.lock",
+                ruby::require_lock,
+            ),
+            (
+                "elixir",
+                "mix.exs",
+                "defmodule Hello.MixProject do\nend\n",
+                "mix.lock",
+                elixir::require_lock,
+            ),
+            (
+                "dotnet",
+                "hello.csproj",
+                "<Project Sdk=\"Microsoft.NET.Sdk\"></Project>\n",
+                "packages.lock.json",
+                dotnet::require_lock,
+            ),
+        ];
+        for (tailor, manifest, text, lock, require_lock) in rows {
+            let temp = crate::kernel::testutil::TempDir::named(&format!("{tailor}-frozen"));
+            std::fs::write(temp.0.join(manifest), text).unwrap();
+            let project = ProjectRoot::open(&temp.0).unwrap();
+            let Err(error) = require_lock(&project) else {
+                panic!("{tailor}: a missing {lock} was accepted");
+            };
+            assert_eq!(error.kind(), io::ErrorKind::NotFound, "{tailor}");
+            let message = error.to_string();
+            assert!(
+                message.contains(&format!("{lock} is missing and --frozen never creates it")),
+                "{tailor}: {message}"
+            );
+            assert!(
+                message.contains("run `tog` once without --frozen"),
+                "{tailor}: {message}"
+            );
+            assert!(!temp.0.join(lock).exists(), "{tailor}");
+            std::fs::write(temp.0.join(lock), "").unwrap();
+            require_lock(&project).unwrap_or_else(|error| panic!("{tailor}: {error}"));
+        }
+    }
+
     #[test]
     fn detection_reports_an_unreadable_project_instead_of_finding_nothing() {
         use std::os::unix::fs::PermissionsExt as _;

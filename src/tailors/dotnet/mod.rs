@@ -2101,6 +2101,29 @@ mod tests {
             .to_string();
         assert!(error.contains("requires SDK 9.0.100"), "{error}");
         assert!(error.contains(SDK_VERSION), "{error}");
+        // The right version still has to pin rollForward and redirect nothing.
+        for (text, refusal) in [
+            (
+                format!("{{\"sdk\":{{\"version\":\"{SDK_VERSION}\"}}}}"),
+                "rollForward",
+            ),
+            (
+                format!(
+                    "{{\"sdk\":{{\"version\":\"{SDK_VERSION}\",\"rollForward\":\"disable\"}},\
+                     \"msbuild-sdks\":{{\"X\":\"1.0\"}}}}"
+                ),
+                "SDK redirection",
+            ),
+        ] {
+            fs::write(temp.join("global.json"), &text).unwrap();
+            let error = check_global_json(&ProjectRoot::open(&temp).unwrap(), SDK_VERSION)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(refusal), "{text}: {error}");
+        }
+        // No global.json at all is no constraint.
+        fs::remove_file(temp.join("global.json")).unwrap();
+        check_global_json(&ProjectRoot::open(&temp).unwrap(), SDK_VERSION).unwrap();
     }
 
     /// Every closure this tailor writes carries which bundle realized it and
@@ -2249,7 +2272,9 @@ mod tests {
     }
 
     #[test]
-    fn dotnet_tmp_paths_are_platform_specific() {
+    fn dotnet_tmp_validation_is_path_specific_and_testable() {
+        // The validator requires canonical paths, and a TempDir path is one.
+        // On macOS `/tmp` is a symlink, so the real path names `/private`.
         assert_eq!(
             dotnet_tmp_path(Platform::Aarch64AppleDarwin),
             PathBuf::from("/private/tmp/.dotnet")
@@ -2258,11 +2283,6 @@ mod tests {
             dotnet_tmp_path(Platform::X86_64UnknownLinuxGnu),
             PathBuf::from("/tmp/.dotnet")
         );
-    }
-
-    #[test]
-    fn dotnet_tmp_validation_is_path_specific_and_testable() {
-        // The validator requires canonical paths, and a TempDir path is one.
         let scratch = TempDir::named("dn-tmp");
         let base = scratch.0.clone();
         let uid = invoking_uid().unwrap();
@@ -2448,37 +2468,6 @@ mod tests {
             SDK_VERSION
         )
         .is_err());
-    }
-
-    #[test]
-    fn global_json_gate() {
-        let scratch = TempDir::named("dn-gj");
-        let temp = scratch.0.clone();
-        assert!(check_global_json(&ProjectRoot::open(&temp).unwrap(), SDK_VERSION).is_ok()); // absent
-        std::fs::write(
-            temp.join("global.json"),
-            format!("{{\"sdk\":{{\"version\":\"{SDK_VERSION}\",\"rollForward\":\"disable\"}}}}"),
-        )
-        .unwrap();
-        assert!(check_global_json(&ProjectRoot::open(&temp).unwrap(), SDK_VERSION).is_ok());
-        std::fs::write(
-            temp.join("global.json"),
-            "{\"sdk\":{\"version\":\"8.0.100\",\"rollForward\":\"disable\"}}",
-        )
-        .unwrap();
-        assert!(check_global_json(&ProjectRoot::open(&temp).unwrap(), SDK_VERSION).is_err());
-        std::fs::write(
-            temp.join("global.json"),
-            format!("{{\"sdk\":{{\"version\":\"{SDK_VERSION}\"}}}}"),
-        )
-        .unwrap();
-        assert!(check_global_json(&ProjectRoot::open(&temp).unwrap(), SDK_VERSION).is_err()); // rollForward missing
-        std::fs::write(
-            temp.join("global.json"),
-            "{\"msbuild-sdks\":{\"X\":\"1.0\"}}",
-        )
-        .unwrap();
-        assert!(check_global_json(&ProjectRoot::open(&temp).unwrap(), SDK_VERSION).is_err());
     }
 
     #[test]
@@ -2955,33 +2944,5 @@ mod tests {
         assert!(!publish_project
             .join(format!(".tog-fp.old.{}", std::process::id()))
             .exists());
-    }
-
-    /// A project with its manifest but no lock is refused by name and
-    /// nothing is written: the lock is `prepare`'s to generate, and a
-    /// frozen run skips `prepare`.
-    #[test]
-    fn a_missing_lock_is_refused_by_name_and_nothing_is_written() {
-        let temp = crate::kernel::testutil::TempDir::named("dotnet-frozen");
-        std::fs::write(
-            temp.0.join("hello.csproj"),
-            "<Project Sdk=\"Microsoft.NET.Sdk\"></Project>\n",
-        )
-        .unwrap();
-        let project = crate::kernel::fsroot::ProjectRoot::open(&temp.0).unwrap();
-        let error = super::require_lock(&project).unwrap_err();
-        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
-        let message = error.to_string();
-        assert!(
-            message.contains("packages.lock.json is missing and --frozen never creates it"),
-            "{message}"
-        );
-        assert!(
-            message.contains("run `tog` once without --frozen"),
-            "{message}"
-        );
-        assert!(!temp.0.join("packages.lock.json").exists());
-        std::fs::write(temp.0.join("packages.lock.json"), "").unwrap();
-        super::require_lock(&project).unwrap();
     }
 }

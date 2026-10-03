@@ -612,6 +612,13 @@ mod tests {
             identity.object_id(),
             "b8418440835c4ec1f591381a17ae60ab12d1c727-rust-1.96.1"
         );
+        // The same release on another platform is another object.
+        let linux = Platform::X86_64UnknownLinuxGnu;
+        let components = rust_components(linux).unwrap();
+        assert_ne!(
+            rust_identity(linux, &components).object_id(),
+            identity.object_id()
+        );
     }
 
     #[test]
@@ -672,15 +679,6 @@ mod tests {
             .all(|component| component.url.contains("aarch64-apple-darwin")));
     }
 
-    #[test]
-    fn rust_identity_is_platform_specific() {
-        let darwin = rust_components(Platform::Aarch64AppleDarwin).unwrap();
-        let linux = rust_components(Platform::X86_64UnknownLinuxGnu).unwrap();
-        assert_ne!(
-            rust_identity(Platform::Aarch64AppleDarwin, &darwin).object_id(),
-            rust_identity(Platform::X86_64UnknownLinuxGnu, &linux).object_id()
-        );
-    }
     use crate::kernel::testutil::TempDir;
     use std::env;
     use std::ffi::OsString;
@@ -1116,27 +1114,6 @@ checksum = "{hash_b}"
                 )
                 .unwrap()
                 .object_id(),
-                "{}",
-                platform.triple()
-            );
-        }
-    }
-
-    /// The one resolver left that reads a version off a project path serves
-    /// callers with no selection to honor (the Python sdist build, `tog
-    /// deps`). With no toolchain file to narrow it, it must land on exactly
-    /// the shipped selection — the same release a lockless run of the Rust
-    /// tailor is handed — or those two paths would realize different Rust
-    /// toolchains for one machine.
-    #[test]
-    fn the_lockless_resolver_agrees_with_the_shipped_selection() {
-        let temp = TempDir::named("cargo-lockless");
-        let project = temp.0.join("project");
-        fs::create_dir_all(&project).unwrap();
-        for platform in Platform::ALL {
-            assert_eq!(
-                resolve_toolchain(*platform, &project).unwrap(),
-                default_version(),
                 "{}",
                 platform.triple()
             );

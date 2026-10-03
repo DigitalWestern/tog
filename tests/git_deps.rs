@@ -1,8 +1,7 @@
-//! Git dependencies realized by commit. Heavy: realizes Node
-//! and a git source, so it is ignored by default.
-//!
-//! The fixture repository is local and served over `file://`, so this needs no
-//! network beyond the pinned Node toolchain.
+//! Git dependencies realized by commit. The fixture repositories are local
+//! and served over `file://`. The npm and Python cases also realize the
+//! pinned Node or CPython toolchain, which needs the network, so they are
+//! ignored by default; the rest run offline on every PR.
 
 // Tests spawn fixtures and take leases freely (see clippy.toml).
 #![allow(clippy::disallowed_methods)]
@@ -13,7 +12,7 @@ use tog::kernel::gitsrc::{ensure_git_source, normalize_url, GitSource};
 use tog::kernel::platform::Platform;
 use tog::kernel::policy;
 use tog::kernel::store::Store;
-use tog::tailors::node::{self, NpmPackage, NpmPlan};
+use tog::tailors::node::{self, NpmPackage};
 
 mod common;
 
@@ -78,7 +77,10 @@ fn without_staging<T>(store: &Store, realize: impl FnOnce() -> T) -> T {
     result
 }
 
-fn attribution_guard() -> std::sync::MutexGuard<'static, ()> {
+/// One case at a time: policy attribution is process-global, and realizing
+/// a source runs the version-control binary under supervision, which takes
+/// one child per process and refuses a second rather than queue it.
+fn serial() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
@@ -86,7 +88,7 @@ fn attribution_guard() -> std::sync::MutexGuard<'static, ()> {
 #[test]
 #[ignore]
 fn npm_git_dependency_is_realized_from_its_commit() {
-    let _attribution_guard = attribution_guard();
+    let _serial = serial();
     let platform = Platform::host().expect("host platform");
     let root = TempDir::new("gitdep-npm");
     let (url, commit) = fixture_repo(&root.0);
@@ -139,7 +141,6 @@ fn npm_git_dependency_is_realized_from_its_commit() {
 }
 
 #[test]
-#[ignore]
 fn an_unpinned_git_reference_is_refused() {
     let platform = Platform::host().expect("host platform");
     let root = TempDir::new("gitdep-unpinned");
@@ -155,8 +156,6 @@ fn an_unpinned_git_reference_is_refused() {
         "an unpinned ref must be refused by name, got: {error:?}"
     );
 }
-
-fn _unused(_: NpmPlan) {}
 
 /// Build a parent repository with a relative file submodule. The parent has
 /// no usable submodule checkout until the realizing code records `origin`;
@@ -204,6 +203,7 @@ fn relative_submodule_fixture(root: &Path, transformed: bool) -> (String, String
 
 #[test]
 fn git_relative_submodule_is_pinned_and_raw() {
+    let _serial = serial();
     let root = TempDir::new("gitdep-submodule");
     let (url, commit) = relative_submodule_fixture(&root.0, false);
     let store = store_at(&root.0);
@@ -260,7 +260,7 @@ fn python_fixture_repo(root: &Path) -> (String, String) {
 #[test]
 #[ignore]
 fn python_git_dependency_builds_a_wheel_from_its_commit() {
-    let _attribution_guard = attribution_guard();
+    let _serial = serial();
     let platform = Platform::host().expect("host platform");
     let root = TempDir::new("gitdep-py");
     let (url, commit) = python_fixture_repo(&root.0);
@@ -363,9 +363,8 @@ fn cargo_fixture_repo(root: &Path) -> (String, String) {
 }
 
 #[test]
-#[ignore]
 fn cargo_git_dependency_is_vendored_from_its_commit() {
-    let _attribution_guard = attribution_guard();
+    let _serial = serial();
     let root = TempDir::new("gitdep-cargo");
     let (url, commit) = cargo_fixture_repo(&root.0);
     let store = store_at(&root.0);

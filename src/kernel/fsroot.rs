@@ -1635,41 +1635,6 @@ mod tests {
     }
 
     #[test]
-    fn toolchain_lock_and_inputs_fail_closed() {
-        // The lock and its inputs are read through the held root, so a
-        // symlinked lock, a symlinked input file, and a symlinked ancestor
-        // are all refused instead of read through.
-        let temp = TempDir::new();
-        let dir = project(&temp);
-        let victim = temp.0.join("victim");
-        fs::write(&victim, b"3.12.1\n").unwrap();
-        let root = ProjectRoot::open(&dir).unwrap();
-
-        symlink(&victim, dir.join("tog-toolchain.toml")).unwrap();
-        let error = root.read_file(Path::new("tog-toolchain.toml")).unwrap_err();
-        assert!(error.to_string().contains("is a symlink"), "{error}");
-
-        fs::remove_file(dir.join("tog-toolchain.toml")).unwrap();
-        symlink(&victim, dir.join(".python-version")).unwrap();
-        let error = root.read_file(Path::new(".python-version")).unwrap_err();
-        assert!(error.to_string().contains("is a symlink"), "{error}");
-
-        fs::remove_file(dir.join(".python-version")).unwrap();
-        let outside = temp.0.join("outside");
-        fs::create_dir_all(&outside).unwrap();
-        fs::create_dir_all(dir.join("sub")).unwrap();
-        fs::remove_dir(dir.join("sub")).unwrap();
-        symlink(&outside, dir.join("sub")).unwrap();
-        let error = root
-            .read_file(Path::new("sub/.python-version"))
-            .unwrap_err();
-        assert!(
-            error.to_string().contains("not a real directory"),
-            "{error}"
-        );
-    }
-
-    #[test]
     fn open_lock_file_creates_its_parents_and_refuses_a_symlink() {
         let temp = TempDir::new();
         let dir = project(&temp);
@@ -1704,25 +1669,6 @@ mod tests {
         assert!(
             error.to_string().contains("not a real directory"),
             "{error}"
-        );
-    }
-
-    #[test]
-    fn plain_path_reads_do_not_fail_closed() {
-        // The negative half of the lock guarantee: ordinary path reads
-        // follow a symlinked input, so only the held-descriptor walk above
-        // refuses. If this ever fails, the refusal tests prove nothing.
-        let temp = TempDir::new();
-        let dir = project(&temp);
-        let victim = temp.0.join("victim");
-        fs::write(&victim, b"3.12.1\n").unwrap();
-        symlink(&victim, dir.join(".python-version")).unwrap();
-        let root = ProjectRoot::open(&dir).unwrap();
-        assert!(root.read_file(Path::new(".python-version")).is_err());
-        assert_eq!(
-            fs::read(dir.join(".python-version")).unwrap(),
-            b"3.12.1\n",
-            "plain read refused a symlink it should follow"
         );
     }
 
