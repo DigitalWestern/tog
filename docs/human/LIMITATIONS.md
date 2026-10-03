@@ -314,11 +314,10 @@ Selection covers every patch of each maintained CPython minor that python-build-
   resolution record names files inside the workspace only, so a workspace with a path
   dependency outside it is not attested (`tog attest` refuses it by name) and its edits and
   generated lock carry no record (`unrecorded-resolution` at sync). `attest` runs at the
-  workspace root only. Finding that root (`cargo locate-project --offline`) still runs the
-  store cargo on the host, outside the sandbox, so every file it reads there is checked first:
-  a manifest or `.cargo` config (or a file it `include`s) inside the repository that is a
-  symlink out of it, or any of them that is the signing key, stops tog before anything runs.
-  Config `include`s are followed for the registries they declare and recorded as inputs; one
+  workspace root only. tog finds that root itself, reading the manifests the way cargo does;
+  no cargo runs on the host. A project file that is the signing key under another name (a
+  symlink, a hard link, an `include`) is refused before cargo reads it, and no message tog
+  prints carries the key. Config `include`s are followed for the registries they declare and recorded as inputs; one
   that leads out of the workspace is refused. A git dependency resolved through the proxy
   has no offline test yet (the fixture registry holds no upload-pack body), only the git
   row's unit test.

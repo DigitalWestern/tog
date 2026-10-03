@@ -170,8 +170,17 @@ fn paint(word: &str, code: &str) -> String {
     }
 }
 
-/// Write to the real stderr even under `--quiet`.
+/// `text` with the signing key's secret replaced wherever it appears: a
+/// message can quote a file a parser failed on, and a project file can be
+/// the key under another name.
+fn scrub(text: &str) -> String {
+    crate::kernel::resolve::confine::scrub_signing_key(text)
+}
+
+/// Write to the real stderr even under `--quiet`, the signing key's secret
+/// replaced ([`scrub`]).
 fn write_error_channel(text: &str) {
+    let text = scrub(text);
     match ERROR_FD.get() {
         Some(&fd) => {
             // SAFETY: fd is a valid, open descriptor this module saved and
@@ -222,7 +231,7 @@ pub fn warning(message: &str, fix: &str) {
     if quiet() {
         return;
     }
-    eprint!("{}", warning_lines(message, fix));
+    eprint!("{}", scrub(&warning_lines(message, fix)));
 }
 
 /// Both lines as text, newlines included, for a caller that writes to a
@@ -241,7 +250,7 @@ pub fn warning_next(message: &str, next: &str) {
     if quiet() {
         return;
     }
-    eprint!("{}", warning_next_lines(message, next));
+    eprint!("{}", scrub(&warning_next_lines(message, next)));
 }
 
 /// `warning_next` as text, the way `warning_lines` is `warning`'s.
@@ -284,7 +293,7 @@ pub fn note(message: &str) {
     if quiet() {
         return;
     }
-    eprintln!("tog: {message}");
+    eprintln!("tog: {}", scrub(message));
 }
 
 /// A handle for narration a lower layer renders itself: the store

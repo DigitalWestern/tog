@@ -3473,6 +3473,29 @@ fn a_cargo_manifest_hard_linked_to_the_signing_key_never_echoes_it() {
     assert_eq!(realized, 0, "{} holds objects", objects.display());
 }
 
+/// The other files a Cargo project's commands parse (the toolchain files
+/// and the project policy), each a hard link to the signing key: whatever
+/// parser fails on it, the message tog prints has the key's secret
+/// replaced, so no byte of it reaches stdout or stderr.
+#[test]
+fn project_files_hard_linked_to_the_signing_key_never_echo_it() {
+    for file in [
+        "rust-toolchain.toml",
+        "rust-toolchain",
+        "tog-toolchain.toml",
+        ".tog/policy.toml",
+    ] {
+        let home = TempDir::boundary("cli-key-files");
+        let project = TempDir::boundary("cli-key-files-project");
+        let (key, seed) = cargo_signing_key(&home.0);
+        plain_cargo_project(&project.0);
+        let path = project.0.join(file);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::hard_link(&key, &path).unwrap();
+        cargo_key_runs(&project.0, &home.0, &key, &seed);
+    }
+}
+
 /// A cloned Cargo project whose `.cargo/config.toml` is a symlink to the
 /// signing key: nothing on the host parses it with an echoing parser
 /// (tog's readers name a position, and no cargo runs on the host), so no

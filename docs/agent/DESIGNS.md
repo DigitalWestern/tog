@@ -897,7 +897,7 @@ ledger. "Runs code" is what the tool executes besides itself.
 Not doors: tog's own downloads (`kernel::fetch`, `kernel::gitsrc`, the
 `Tailor::registry_exists` check `tog add` makes) are tog code with tog
 verification. Host-local helpers (`tar`, `getconf`, `id`,
-`cargo locate-project --offline`, the Go module extraction
+the Go module extraction
 `go mod download path@version...` with the full offline environment, the
 Elixir helper's `hexmark` mode, the staged-OTP `erl` probe, the Ruby
 helper's `spec` read of a verified `.gem`) need no network. A planner row that needs
@@ -2566,8 +2566,9 @@ Contract 1 needs enforcement, not review alone:
   and admits no other, so a caller cannot add `LD_PRELOAD`,
   `LD_LIBRARY_PATH` or a tool setting outside the checked families. The Ruby and Elixir forms check the tailors' own scrub
   lists, which live in the tripwire and which the tailors alias. The
-  forms: `cargo locate-project --workspace --message-format plain
-  --offline` with `RUSTUP_HOME` and `RUSTUP_TOOLCHAIN` removed; `go mod
+  forms (the Cargo tailor's `cargo locate-project` form was removed in
+  PR 5: tog finds the workspace root itself and no cargo runs on the
+  host): `go mod
   download path@version...` with `GOROOT` the program's own toolchain,
   `GOPROXY`, `GOSUMDB`, `GOTOOLCHAIN`, `GOENV`, `GOWORK`, `GOVCS` and
   `GOAUTH` set off or local by the command, `GOFLAGS`, `GONOPROXY`,
@@ -3449,18 +3450,58 @@ interception and the cargo switch, each the flexible option:
   cargo has no offline test, only the git row's unit test.
 - **Review fixes (Codex GPT 6.1 Sol, 2026-10-03).** Each the flexible
   option that still fails closed:
-  - *No project file reaches the signing key or leaves the repository.*
-    Before any host cargo runs (`locate-project`, for sync, edit, attest
-    and fmt, ahead of realizing anything) `cargo_door::host_preflight`
-    checks the manifest and both config spellings (with their includes)
-    in the directory and each ancestor, and every `Cargo.toml` of the
-    repository (the nearest `.git` ancestor). Inside the repository none
-    may resolve out of it or be the key; above it, and in `CARGO_HOME`,
-    the files are the user's own and only the key is refused. tog's own
-    readers go through the same `Bound`, and a TOML error in these paths
-    names a line and column only, never the bytes (`Cargo.lock` too).
-    The same echo exists in other ecosystems' TOML errors (policy, Python
-    manifests, the toolchain lock); that sweep is a follow-up.
+  - *No cargo runs on the host; the signing key is refused by inode.*
+    The first fix (a `host_preflight` that checked the paths a host
+    `cargo locate-project` would read) kept missing cases: a
+    `Cargo.toml` hard-linked to the key (no symlink, a path inside the
+    repository) and a `CARGO_HOME` config that `include`s the key both
+    passed it, and cargo quoted the key in its TOML error. The fix
+    removes the reader instead of guarding it:
+    - `inputs::locate_cargo_root` is tog's own walk of the manifests,
+      cargo's algorithm (the nearest `Cargo.toml`, then the root its
+      `package.workspace` names, else itself if it holds `[workspace]`,
+      else the nearest ancestor whose `[workspace]` does not exclude it
+      unless it lists it as a member, else its own directory). Sync,
+      edit, attest and fmt call it before realizing anything. Its reads
+      refuse a manifest that is the key by `(dev, ino)` and name a parse
+      error's line and column only.
+    - `host_preflight` is gone, and so is the tripwire's one cargo
+      offline form: `local_*` now refuses every host cargo, the store's
+      included, so no later call site can bring one back unreviewed.
+    - "Is the signing key" is decided by `(dev, ino)` everywhere it is
+      asked (`confine::signing_key_ids`): `cargo_door::Bound`, the
+      manifest walk, and the door's stage, where `Snapshot::build`
+      checks every copied file's inode (any depth, hidden directories
+      included) and refuses the run before the tool starts.
+    - `tog fmt` runs `cargo-fmt` in the workspace itself, in a sandbox
+      that mounts the workspace and the store objects only (the user's
+      home is not there, `CARGO_HOME` is scratch). Before it starts,
+      `confine::refuse_key_links_under` walks the workspace (all depths,
+      hidden included, `target` excluded, symlinks not followed) for a
+      hard link to the key.
+    - As a last layer, the key's secret is replaced
+      (`confine::scrub_signing_key`) in the cargo stderr tog relays
+      (`run_cargo_checked`, attest's refusal, the sdist lock) and in
+      everything `ui` prints (errors, warnings, notes). A probe found
+      tog's own parsers quoting it too: a `rust-toolchain.toml`,
+      `rust-toolchain`, `tog-toolchain.toml` or `.tog/policy.toml` that
+      is a hard link to the key printed it from sync, attest, add and
+      fmt. The scrub covers those; `project_files_hard_linked_to_the_signing_key_never_echo_it`
+      holds it.
+    Sol's three further cases, each decided under that bound: a member
+    in a hidden directory and a member 13 levels deep are copied into
+    the stage like any file and refused there by inode (the stage has no
+    depth limit; `manifests_under`'s depth 12 bounds only the search for
+    out-of-root path dependencies, which a hard link cannot exploit). A
+    member through a symlinked directory is staged as the symlink, its
+    target outside the stage is not mounted, so cargo cannot read it and
+    reports the member missing. `tog build` and `tog run` still run the
+    project's cargo (they execute the project anyway, sandboxed for
+    build) and are left as they are. A TOML error in tog's own cargo
+    readers names a line and column only (`Cargo.lock` too). Other
+    parsers (policy, Python manifests, the toolchain files) still quote
+    the line they fail on, which the scrub catches for the key; making
+    them position-only too is a follow-up.
   - *Config includes.* `include = [...]` (paths or `{ path, optional }`,
     relative to the including file, transitive) is expanded from the
     bounded files: every registry declared there gets the forced

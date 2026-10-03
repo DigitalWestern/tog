@@ -188,13 +188,17 @@ impl Bound {
             return Ok(());
         };
         if self.keys.contains(&(meta.dev(), meta.ino())) {
+            let through = if real == path {
+                String::new()
+            } else {
+                format!(", through {}", real.display())
+            };
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 format!(
-                    "{} is the signing key (the same file as {}, by device and inode); tog does \
-                     not read it as a cargo file or let cargo read it",
-                    path.display(),
-                    real.display()
+                    "{} is the signing key (the same file, by device and inode{through}); tog \
+                     does not read it as a cargo file or let cargo read it",
+                    path.display()
                 ),
             ));
         }
