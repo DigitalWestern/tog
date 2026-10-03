@@ -22,6 +22,11 @@ Nothing queued; the next item comes from "Open work" below.
   followed by the full help screen, which can scroll the sync result away.
   Watch daily use; the candidates are a short footer, the full screen only
   when nothing needed syncing, or leaving it.
+- **Plain `tog audit` in CI without keys (#395).** Since #394 it judges
+  records with signatures unchecked instead of exiting 2; `--signed` is the
+  fail-closed form and CLI.md has the migration note. Open: also refuse
+  when `CI` is set unless `--unsigned` is passed. Pick: leave it until the
+  first tagged release.
 - **First outside target.** Cheapest visible artifact: a GitHub Action
   running `tog --frozen` under the company policy plus `tog sbom`, which
   should work on GitHub-hosted Ubuntu runners if unprivileged user
