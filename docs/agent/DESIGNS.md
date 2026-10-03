@@ -3418,7 +3418,16 @@ interception and the cargo switch, each the flexible option:
   manifest under the root and, transitively, theirs: the dependency
   tables (also under `target.*` and `[workspace]`), `[patch]`, and
   `[replace]`. `[lib]`/`[[bin]]` paths and missing paths are ignored, so
-  cargo reports a missing one itself.
+  cargo reports a missing one itself. The manifest does not choose host
+  directories: each root must lie inside the nearest ancestor holding
+  `.git` (else the lock root's parent), with no hidden component between
+  them, and must not contain the lock root. A bound of `/` or `$HOME` is
+  refused. Each refusal is an error naming the manifest and the path
+  (`path_dependencies_outside_the_boundary_are_refused`). The flexible
+  alternative, any existing directory, would let a cloned project copy
+  `~/.ssh` or `../.cargo/credentials.toml` into the sandbox, where an
+  unattested request could carry it out. `target` is excluded from the
+  snapshot, anchored at the root.
 - **Cargo `attest`** is `cargo metadata --locked --format-version 1` at
   the workspace root through a verification door that requires the lock
   and manifests unchanged and publishes nothing. From a member it is

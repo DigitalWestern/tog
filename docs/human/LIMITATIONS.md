@@ -307,8 +307,12 @@ Selection covers every patch of each maintained CPython minor that python-build-
   sandbox gets no token. Path dependencies outside the workspace root are found from the
   manifests (dependency tables, `[patch]`, `[replace]`, `target.*`, `[workspace]`) and
   snapshotted read-only; one named only through a `[lib] path`, a build script or a
-  symlinked directory is not, and cargo reports it missing. `attest` runs at the workspace
-  root only. A git dependency resolved through the proxy has no offline test yet (the
+  symlinked directory is not, and cargo reports it missing. They must lie inside the
+  project's repository (the nearest directory holding `.git`), or beside the workspace when
+  there is no repository, never in a hidden directory, and that bound may not be `/` or the
+  home directory: anything else is refused before cargo starts, naming the manifest. `attest`
+  runs at the workspace root only. Finding that root (`cargo locate-project --offline`)
+  still runs the store cargo on the host, outside the sandbox, as before. A git dependency resolved through the proxy has no offline test yet (the
   fixture registry holds no upload-pack body), only the git row's unit test.
 - **Pinned Git dependencies work for standalone crates**; workspace-inherited manifests and
   escaping symlinks fail closed, and workspace metadata is not rewritten into vendor
