@@ -497,7 +497,7 @@ URL must fall under one of its `provider`'s endpoints before the cache is
 consulted, and a network fetch follows redirects itself, at most ten and
 `https://` only, authorizing each `Location` before requesting it; a row or
 hop off the policy fails with the URL and publisher named. No credential is
-sent yet (#72). Package-registry downloads do not pass through it. `seed` chooses a bundle
+sent yet; the policy for them is decided (#72) but not built. Package-registry downloads do not pass through it. `seed` chooses a bundle
 from a pre-lock closure's recorded platform and exact versions and refuses,
 naming `tog update --toolchain`, when either is missing, when the
 version is not in the catalog, or when the bundle is incomplete on the

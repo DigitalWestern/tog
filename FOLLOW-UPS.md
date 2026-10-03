@@ -62,13 +62,17 @@ After the proxy: the test-suite audit (#351) and then the quality review
   #173 (the sandbox mirrors the host's `/bin` and `/lib` layout, so Ubuntu
   22.04 can sandbox) and its follow-up #175 is closed. Un-parking #70 is the
   owner's call.
-- **Key and credential policy for the trust work.** Where trusted publisher
-  keys live, who rotates them, and what revocation means (including a
-  company's own internal publisher); a test account for private-registry
-  credentials. Blocks the authenticated parts of `docs/agent/DESIGNS.md`
-  §2 and §4 (#72).
 
 ## Open work, each its own pull request
+
+- **The release catalog and the company layer (#72).** Decided
+  2026-10-03: trusted keys are entries in the files of the machine/home
+  policy chain, rotation is a commit to that policy, and revocation is
+  removal from the list, after which `tog audit` fails any record the
+  removed key signed. The private-registry test account is a GitHub
+  Packages registry under the DigitalWestern org. This unblocks the
+  authenticated parts of `docs/agent/DESIGNS.md` §2 (WP3) and §4 (WP5);
+  §2 PR 0, the provider evidence spike, comes first.
 
 - **Record `skipped-optional` as an informational closure field (#71).**
   Decided 2026-09-23: an optional group the user did not request is a

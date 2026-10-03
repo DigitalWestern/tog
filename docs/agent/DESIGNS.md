@@ -71,8 +71,9 @@ itself (at most ten, `https://` only) and authorizes each `Location`
 before requesting it. The policy is `SourcePolicy::shipped()`
 (`src/kernel/toolchain/source.rs`), built once per process. Still open:
 operator configuration of the policy, and sending an endpoint's credential,
-which waits on the owner decision in #72; no shipped endpoint names one
-and retrieval sends none. Integrity does not depend on the policy: every
+which follows the key and credential policy decided in #72 (§2 "Key and
+credential policy"); no shipped endpoint names one and retrieval sends
+none. Integrity does not depend on the policy: every
 artifact is still checked against its pinned digest.
 
 ### Every toolchain archive through the extractor (#236)
@@ -288,18 +289,43 @@ them; `LIMITATIONS.md` carries one honest row per TOFU source.
   both have the smallest surface and already have toolchain-file resolution
   (`go.mod` `toolchain`, `rust-toolchain.toml`). Pick whichever PR 0 shows has
   verifiable signing material covering the exact artifact tog downloads.
-- **Trusted key management needs the owner.** Where keys live, who rotates
-  them, and what revocation means operationally are policy decisions, not
-  implementation details. *Do not invent a key policy.* The owner's standing
-  direction (2026-09-09) is that the mechanism must accommodate a company's own
-  internal publisher, so design the storage and rotation story for "one
-  enterprise key alongside or instead of the upstream ones" from the start,
-  rather than for upstream publishers only.
+- **Trusted key management: decided, see "Key and credential policy"
+  below (#72).** The owner's standing direction (2026-09-09) still holds:
+  the mechanism accommodates a company's own internal publisher, "one
+  enterprise key alongside or instead of the upstream ones", from the
+  start.
 - **WP3 owns shared policy/trust infrastructure; WP5 owns the remaining
   ecosystem credential adapters and enforcement coverage.** Keep one source
   configuration model, with distinct authentication and authorization checks.
   Move the mandatory-loading prerequisite here rather than creating a cycle
   in which WP3 waits for WP5 and WP5 waits for WP3.
+
+#### Key and credential policy (owner decision, 2026-10-03, #72)
+
+- **Where keys live.** A trusted key is an entry in a file of the policy
+  chain: the machine/home scope declares the set, and a project or
+  `--policy` file can only narrow it. This is the shape the closure
+  signing keys already have (the `[signing] trusted` list,
+  `src/kernel/policy.rs`); publisher keys, including a company's own
+  internal publisher, use the same chain. No key is compiled into tog: the
+  shipped upstream keys are default contents of that list.
+- **Rotation.** Rotating a key is a policy commit: add the new key, then
+  remove the old one once nothing still needs it. Whoever owns the
+  machine/home policy file (for a company, whoever manages that file)
+  rotates.
+- **Revocation.** Revoking a key is removing it from the list. From then
+  on any record or catalog row that key signed is untrusted: `tog audit`
+  fails it, and a locked replay or cache hit refuses it with a trust
+  error, distinct from stale project inputs. There is no online revocation
+  service, so revocation works offline and there is no separate freshness
+  window to configure; snapshot expiry and rollback rejection remain WP3
+  PR 1's to define.
+- **Credentials.** A credential is a reference scoped to an endpoint and
+  audience in the same policy chain, never lock contents, never forwarded
+  to another redirect origin. The test account for the authenticated fetch
+  paths is a GitHub Packages registry under the DigitalWestern org; the
+  local authenticated fixture still covers everything CI can test without
+  it.
 
 
 ---
