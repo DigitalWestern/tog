@@ -3,7 +3,8 @@
 # pinned toolchains and resolve real packages from PyPI, npm, crates.io,
 # the Go proxy, RubyGems, Hex and NuGet, so they prove every ecosystem
 # syncs, builds in the sandbox and runs end to end, not just its fixtures.
-# That takes about 40 minutes on a 12-core machine and depends on those
+# That takes about 40 minutes on a 12-core machine, about 20 here with the
+# tests split over four runners (`e2e`), and depends on those
 # registries being up, so it is not on every PR; ci.yml runs the offline
 # suite there. It does run on a pull request in two cases, decided by the
 # `gate` job below:
@@ -13,6 +14,7 @@
 #     no fixture had: #316 was green in ci.yml and broke 15 targets here.
 #   - the PR has the `heavy` label. Adding it starts a run, and every
 #     later push to the PR runs again until the label comes off.
+#     heavy-unlabel.yml takes it off after a green run.
 # Weekly rather than nightly because the repository is
 # private and a nightly run of this length would use most of the Actions
 # minutes a free plan includes; change `cron` to `"0 6 * * *"` for nightly.
@@ -81,27 +83,55 @@ jobs:
           echo "run=$run"
           echo "run=$run" >> "$GITHUB_OUTPUT"
 
+  # The ignored tests, in four shards on four runners at once: one runner
+  # took about 50 minutes for them all. Within a shard, one test at a
+  # time: tests that realize through a child hold
+  # supervise::SUPERVISION_TEST_LOCK, and tests that set TOG_STORE hold
+  # store::STORE_ENV_LOCK. Separate runners share nothing, so the shards
+  # need no lock between them. The lists are balanced on the 2026-10-03
+  # green run's times (seconds per file in brackets).
   e2e:
     needs: gate
     # `gate` is skipped outside pull requests, so `!cancelled()` keeps
     # the weekly and by-hand runs from being skipped along with it.
     if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.gate.outputs.run == 'yes') }}
-    # The weekly and by-hand runs go one at a time: one started while
-    # another is going waits for it. On a pull request a new push
-    # cancels that PR's older run, which tested code that is gone.
+    name: e2e (${{ matrix.shard }})
+    strategy:
+      # A red shard does not stop the others, like --no-fail-fast.
+      fail-fast: false
+      matrix:
+        shard: [node, rust, python, other]
+    # The weekly and by-hand runs go one shard at a time: a shard started
+    # while the same shard of another run is going waits for it. On a
+    # pull request a new push cancels that PR's older run, which tested
+    # code that is gone. One group per shard: a group holds one running
+    # and one waiting job, so four shards in one group would cancel each
+    # other. The group is per job rather than for the whole workflow, so
+    # a run that `gate` skips (another label added) cancels nothing.
     concurrency:
-      group: ${{ github.event_name == 'pull_request' && format('heavy-pr-{0}', github.event.pull_request.number) || 'heavy' }}
+      group: ${{ github.event_name == 'pull_request' && format('heavy-pr-{0}-{1}', github.event.pull_request.number, matrix.shard) || format('heavy-{0}', matrix.shard) }}
       cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     runs-on: ubuntu-22.04
-    # About 40 minutes locally (2026-09-25): 31 for the ignored tests, 7
-    # for acceptance.sh, on 12 cores. The runner has 2 vCPUs and the
-    # sdist, cargo and node-gyp builds are CPU-bound; this leaves room.
-    timeout-minutes: 150
+    # The longest shard took about 11 minutes of tests on the 2-vCPU
+    # runner; the sdist, cargo and node-gyp builds are CPU-bound and a
+    # cold cache adds the whole build. This leaves room.
+    timeout-minutes: 100
     env:
       # A sandbox check that cannot run fails instead of skipping.
       TOG_SANDBOX_TESTS: required
-      # See the header: no Linux OTP runs on this glibc.
-      TOG_ACCEPT_SKIP_ELIXIR: "1"
+      # The test files each named shard runs. `other` runs every file in
+      # tests/ not named here, so a new test file is never left out.
+      # node: npm_scripts [538] npm_lock_import [10] electron_provision [4]
+      # run_scripts [10] git_deps [28] gc [55].
+      SHARD_NODE: npm_scripts npm_lock_import electron_provision run_scripts git_deps gc
+      # rust: toolchain_lock [402] cargo_e2e [274] catalog_upstream [10].
+      SHARD_RUST: toolchain_lock cargo_e2e catalog_upstream
+      # python, plus the ignored unit tests in src/ (--lib, [151]):
+      # build_isolation [299] fmt_e2e [145] native_libs [18] python_select
+      # [8] manifests [6] wheel_data [2] linux_python [1] kernel_smoke [0].
+      SHARD_PYTHON: build_isolation fmt_e2e native_libs python_select manifests wheel_data linux_python kernel_smoke
+      # other, about 570 seconds: deps_e2e [250] go_e2e [118] dotnet_e2e
+      # [114] ruby_e2e [86] sandbox_deny [4] elixir_e2e and the rest.
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       # zlib1g-dev is the host development package the Ruby host-fallback
@@ -121,18 +151,71 @@ jobs:
           mkdir -p "$RUNNER_TEMP/tog/tmp"
           echo "TMPDIR=$RUNNER_TEMP/tog/tmp" >> "$GITHUB_ENV"
           echo "TOG_STORE=$RUNNER_TEMP/tog/store" >> "$GITHUB_ENV"
-      # One test at a time: tests that realize through a child hold
-      # supervise::SUPERVISION_TEST_LOCK. --no-fail-fast so one red suite
-      # does not hide the ones after it.
+      # --no-fail-fast so one red suite does not hide the ones after it.
       - name: Ignored end-to-end tests
-        run: >
-          cargo test --locked --no-fail-fast -- --ignored --test-threads=1
-          --skip elixir_sync_sandboxed_build_and_run
-      - name: Acceptance checklist
-        if: ${{ !cancelled() }}
-        run: bash tests/acceptance.sh
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: |
+          set -euo pipefail
+          extra=()
+          case "$SHARD" in
+            node) files=$SHARD_NODE ;;
+            rust) files=$SHARD_RUST ;;
+            python) files=$SHARD_PYTHON; extra=(--lib --bins) ;;
+            other)
+              files=
+              named=" $SHARD_NODE $SHARD_RUST $SHARD_PYTHON "
+              for path in tests/*.rs; do
+                name=$(basename "$path" .rs)
+                if [[ "$named" != *" $name "* ]]; then files="$files $name"; fi
+              done
+              # See the header: no Linux OTP runs on this glibc.
+              skip=(--skip elixir_sync_sandboxed_build_and_run)
+              ;;
+            *) echo "::error::unknown shard $SHARD"; exit 1 ;;
+          esac
+          args=("${extra[@]}")
+          for name in $files; do args+=(--test "$name"); done
+          set -x
+          cargo test --locked --no-fail-fast "${args[@]}" -- --ignored --test-threads=1 ${skip[@]+"${skip[@]}"}
       # The runner disk is about 14 GB; the stores and target/ use most of
       # it. This shows how close a run came.
+      - name: Disk after the run
+        if: ${{ always() }}
+        run: df -h "$RUNNER_TEMP" && du -sh "$RUNNER_TEMP/tog"/* 2>/dev/null || true
+
+  # tests/acceptance.sh, once, after every shard has finished. It runs
+  # when a shard failed too, so one red suite does not hide the other.
+  # heavy-unlabel.yml looks for this job by name.
+  acceptance:
+    needs: [gate, e2e]
+    if: ${{ !cancelled() && needs.e2e.result != 'skipped' && needs.e2e.result != 'cancelled' }}
+    name: acceptance
+    # The node shard's group: a newer run's node shard, which starts
+    # with the run, cancels (on a pull request) or waits for this job.
+    concurrency:
+      group: ${{ github.event_name == 'pull_request' && format('heavy-pr-{0}-node', github.event.pull_request.number) || 'heavy-node' }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+    runs-on: ubuntu-22.04
+    # About 3 minutes on the runner (2026-10-03), plus the build.
+    timeout-minutes: 60
+    env:
+      TOG_SANDBOX_TESTS: required
+      # See the header: no Linux OTP runs on this glibc.
+      TOG_ACCEPT_SKIP_ELIXIR: "1"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Install the Linux sandbox and the host headers the suite needs
+        run: sudo apt-get update && sudo apt-get install -y bubblewrap zlib1g-dev
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: cargo build --locked
+      - name: Scratch directory on the runner disk
+        run: |
+          mkdir -p "$RUNNER_TEMP/tog/tmp"
+          echo "TMPDIR=$RUNNER_TEMP/tog/tmp" >> "$GITHUB_ENV"
+          echo "TOG_STORE=$RUNNER_TEMP/tog/store" >> "$GITHUB_ENV"
+      - name: Acceptance checklist
+        run: bash tests/acceptance.sh
       - name: Disk after the run
         if: ${{ always() }}
         run: df -h "$RUNNER_TEMP" && du -sh "$RUNNER_TEMP/tog"/* 2>/dev/null || true
