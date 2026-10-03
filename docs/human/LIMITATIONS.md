@@ -123,7 +123,8 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
 - **`tog x` covers PyPI and npm**. A removed *node* environment orphans its node_modules
   forest under `<store>/forests/`, which plain `tog gc` never visits: only `tog gc
   --project` reclaims it. Cleanup stops with an error when a root's recorded originating
-  store is unavailable.
+  store is unavailable, and skips a root with no request record whose owning store its
+  closure does not name.
 - **Automatic metadata migration is fail-closed.** A pre-`object-meta/2` store is upgraded in
   place only where a per-kind, per-schema adapter can reconstruct the dependency set; one
   unresolved record blocks every sweep. Records that will not migrate — collected inputs,

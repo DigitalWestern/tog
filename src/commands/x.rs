@@ -1308,7 +1308,27 @@ enum Registration {
     Unknown,
 }
 
-fn originating_store(root: &Path) -> io::Result<Option<Store>> {
+/// Which store owns an x root, as cleanup must know it to unregister the
+/// root under that store's lease.
+enum Origin {
+    /// The store the request record names, or else the one store every
+    /// object the root's closures reference lives in.
+    Store(Store),
+    /// No closure at all: a shell a run left before it wrote one, which
+    /// references nothing and was never registered with its objects.
+    Empty,
+    /// The closures name objects, but no single available store can be
+    /// recovered from them. Removing the root would orphan its registration.
+    Unknown(String),
+}
+
+/// The store that owns `root`: the request record's `store_root` when it
+/// has one, otherwise the store its closures' object references
+/// (`runtime_object`, `env_object`) live in. Only cleanup asks this. A root
+/// without a request record is never a cache hit, but deleting one under
+/// the wrong store would leave the owner's registration keeping its
+/// objects forever.
+fn originating_store(root: &Path) -> io::Result<Origin> {
     let marker = root.join(X_REQUEST_FILE);
     let marker_present = match fs::symlink_metadata(&marker) {
         Ok(metadata) => {
@@ -1350,10 +1370,98 @@ fn originating_store(root: &Path) -> io::Result<Option<Store>> {
                     store_root.display()
                 )));
             }
-            return Ok(Some(Store { root: store_root }));
+            return Ok(Origin::Store(Store { root: store_root }));
         }
     }
-    Ok(None)
+    closure_owner(root)
+}
+
+/// The one store every closure under `root` references objects in, read
+/// with the same no-follow rules as the rest of the x root.
+fn closure_owner(root: &Path) -> io::Result<Origin> {
+    let closures = root.join(".tog/closures");
+    let entries = match fs::read_dir(&closures) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Origin::Empty),
+        Err(error) => return Err(error),
+    };
+    let mut found: Option<Store> = None;
+    let mut any = false;
+    for entry in entries {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+        let stat = fs::symlink_metadata(&path)?;
+        if stat.file_type().is_symlink() || !stat.is_file() {
+            return Ok(Origin::Unknown(format!(
+                "closure {} is not a regular file",
+                path.display()
+            )));
+        }
+        any = true;
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(&path)?;
+        let Ok(value) = serde_json::from_reader::<_, serde_json::Value>(file) else {
+            return Ok(Origin::Unknown(format!(
+                "closure {} is unreadable",
+                path.display()
+            )));
+        };
+        let body = &value["body"];
+        let mut objects: Vec<PathBuf> = Vec::new();
+        let runtime = &body["runtime_object"];
+        if !runtime.is_null() {
+            match (runtime["id"].as_str(), runtime["path"].as_str()) {
+                (Some(id), Some(object))
+                    if store::is_object_id(id)
+                        && Path::new(object).file_name() == Some(id.as_ref()) =>
+                {
+                    objects.push(PathBuf::from(object));
+                }
+                _ => {
+                    return Ok(Origin::Unknown(format!(
+                        "closure {} has a malformed runtime_object",
+                        path.display()
+                    )))
+                }
+            }
+        }
+        if let Some(env) = body["env_object"].as_str() {
+            objects.push(PathBuf::from(env));
+        }
+        if objects.is_empty() {
+            return Ok(Origin::Unknown(format!(
+                "closure {} names no store object",
+                path.display()
+            )));
+        }
+        for object in objects {
+            let Some(store) = comforter::store_from_object_path(&object) else {
+                return Ok(Origin::Unknown(format!(
+                    "the store holding {} is unavailable",
+                    object.display()
+                )));
+            };
+            match &found {
+                Some(previous) if previous.root != store.root => {
+                    return Ok(Origin::Unknown(
+                        "its closures name objects in more than one store".into(),
+                    ))
+                }
+                Some(_) => {}
+                None => found = Some(store),
+            }
+        }
+    }
+    Ok(match found {
+        Some(store) => Origin::Store(store),
+        None if any => Origin::Unknown("its closures name no store object".into()),
+        None => Origin::Empty,
+    })
 }
 
 fn registration_for_store(root: &Path, store: Store) -> io::Result<Registration> {
@@ -1374,10 +1482,10 @@ fn registration_for_store(root: &Path, store: Store) -> io::Result<Registration>
 
 #[cfg(test)]
 fn registration_for(root: &Path) -> io::Result<Registration> {
-    let Some(store) = originating_store(root)? else {
-        return Ok(Registration::Unknown);
-    };
-    registration_for_store(root, store)
+    match originating_store(root)? {
+        Origin::Store(store) => registration_for_store(root, store),
+        Origin::Empty | Origin::Unknown(_) => Ok(Registration::Unknown),
+    }
 }
 
 /// Remove cached x projections. The store objects remain available for the
@@ -1400,15 +1508,26 @@ pub fn clean(request: CleanRequest) -> io::Result<()> {
         matched += 1;
         let ecosystem = candidate_ecosystem(&candidate.path);
         // Origin metadata is only a hint until the originating store is
-        // protected. A root whose request record names no store (none was
-        // ever written, as by a tog before x/4) is a cache nothing runs from
-        // (`x_request_is_ready` never reuses it), so the x-root lock below
-        // is the whole guard and the caller's store stands in for the lease.
-        let origin = originating_store(&candidate.path)?;
-        let unowned = origin.is_none();
-        let origin_store = match origin {
-            Some(store) => store,
-            None => Store::open()?,
+        // protected. The root is removed and unregistered under the store
+        // that owns it, never the caller's: a root whose owner cannot be
+        // recovered is skipped, because removing it would leave that store's
+        // registration keeping its objects. An empty shell references
+        // nothing, so the x-root lock below is its whole guard and the
+        // caller's store only lends the lease.
+        let origin = match originating_store(&candidate.path)? {
+            Origin::Unknown(why) => {
+                println!(
+                    "tog: skipped x environment {} (its owning store could not be recovered: {why}; remove the directory yourself once you know nothing is using it)",
+                    candidate.path.display()
+                );
+                skipped += 1;
+                continue;
+            }
+            origin => origin,
+        };
+        let origin_store = match &origin {
+            Origin::Store(store) => store.clone(),
+            Origin::Empty | Origin::Unknown(_) => Store::open()?,
         };
         let Some(activity) = origin_store.try_activity_exclusive()? else {
             println!(
@@ -1428,12 +1547,12 @@ pub fn clean(request: CleanRequest) -> io::Result<()> {
             continue;
         };
         let _project_lock = origin_store.project_lock(&candidate.path)?;
-        // Re-read the untrusted origin after both guards. A changed marker is
-        // a race, not permission to remove the candidate. An unowned
-        // projection must still be unowned: gaining a claim while it was
+        // Re-read the untrusted origin after both guards. A changed marker or
+        // closure is a race, not permission to remove the candidate. An
+        // empty shell must still be empty: gaining a claim while it was
         // being locked is the same race.
-        match originating_store(&candidate.path)? {
-            Some(revalidated_store) if !unowned => {
+        match (&origin, originating_store(&candidate.path)?) {
+            (Origin::Store(_), Origin::Store(revalidated_store)) => {
                 if revalidated_store.root != origin_store.root {
                     println!(
                         "tog: skipped x environment {} (originating store changed while it was being locked; retry later)",
@@ -1443,7 +1562,7 @@ pub fn clean(request: CleanRequest) -> io::Result<()> {
                     continue;
                 }
             }
-            None if unowned => {}
+            (Origin::Empty, Origin::Empty) => {}
             _ => {
                 println!(
                     "tog: skipped x environment {} (origin changed while it was being locked; retry later)",
@@ -1729,14 +1848,6 @@ pub(crate) fn realize_cached_tool(
     // it. The caller holds the lock for as long as it uses the root.
     let lock = acquire_x_root(&root)?;
     let executable = tool.bin_dir(&root).join(default_bin(package));
-    if executable.is_file() {
-        check_cached_projection(store, activity, &root, ecosystem)?;
-        return Ok(CachedTool {
-            root,
-            lock,
-            realized: false,
-        });
-    }
     // The same request record `tog x` writes, so the environment is one
     // `tog x` reuses and `tog x --clean <tool>` can name, and its
     // originating store is known when it is removed.
@@ -1745,15 +1856,22 @@ pub(crate) fn realize_cached_tool(
         runtime_object.as_str(),
         helper_objects.as_slice(),
     ));
-    write_x_request_for_store(
-        &root,
+    if cached_tool_hit(
         store,
+        activity,
+        &root,
         ecosystem,
         package,
-        Some(version),
-        "realizing",
+        version,
+        &executable,
         runtime,
-    )?;
+    )? {
+        return Ok(CachedTool {
+            root,
+            lock,
+            realized: false,
+        });
+    }
     tool.realize(door, &root, package, Some(version), &toolchain, &helpers)?;
     if !executable.is_file() {
         return Err(other(format!(
@@ -1774,6 +1892,38 @@ pub(crate) fn realize_cached_tool(
         lock,
         realized: true,
     })
+}
+
+/// The cache decision `realize_cached_tool` makes, under the x-root lock
+/// its caller holds: reuse the root exactly when `tog x` would
+/// (`x_request_is_ready`: a `ready` request record and a valid projection),
+/// otherwise mark it `realizing` and answer `false` so the caller rebuilds
+/// it. A root with no record, an unreadable one, or one left `realizing`
+/// is never reused, whatever executable it holds.
+#[allow(clippy::too_many_arguments)]
+fn cached_tool_hit(
+    store: &Store,
+    activity: &StoreActivity,
+    root: &Path,
+    ecosystem: &str,
+    package: &str,
+    version: &str,
+    executable: &Path,
+    runtime: Option<(&Selected, &str, &[(String, String)])>,
+) -> io::Result<bool> {
+    if x_request_is_ready(store, activity, root, ecosystem, executable)? {
+        return Ok(true);
+    }
+    write_x_request_for_store(
+        root,
+        store,
+        ecosystem,
+        package,
+        Some(version),
+        "realizing",
+        runtime,
+    )?;
+    Ok(false)
 }
 
 #[cfg(test)]
@@ -2670,7 +2820,12 @@ mod tests {
                 "{ecosystem:?} {tool:?}"
             );
         }
-        assert!(originating_store(&root).unwrap().is_none());
+        // Its closure names an object in a store that is not there, so no
+        // owner can be recovered and cleanup would skip it.
+        assert!(matches!(
+            originating_store(&root).unwrap(),
+            Origin::Unknown(why) if why.contains("is unavailable")
+        ));
         assert!(matches!(
             registration_for(&root).unwrap(),
             Registration::Unknown
@@ -2696,5 +2851,114 @@ mod tests {
         let unknown = base.join("mystery");
         fs::create_dir_all(unknown.join(".tog")).unwrap();
         assert_eq!(candidate_ecosystem(&unknown), None);
+    }
+
+    /// A pnpm cache root as `realize_cached_tool` leaves it after a finished
+    /// run, minus its request record: the store's environment object, the
+    /// `node-forest/2` projection its `node_modules` links into, and the
+    /// `pnpm` executable. Returns (store, root, executable, object).
+    fn pnpm_cache_without_record(base: &Path) -> (Store, PathBuf, PathBuf, PathBuf) {
+        fs::create_dir_all(base.join("store/objects/test-node-env")).unwrap();
+        fs::create_dir_all(base.join("store/meta")).unwrap();
+        fs::create_dir_all(base.join("store/tmp")).unwrap();
+        let store = Store {
+            root: base.join("store").canonicalize().unwrap(),
+        };
+        let object = store.root.join("objects/test-node-env");
+        fs::set_permissions(&object, fs::Permissions::from_mode(0o555)).unwrap();
+        fs::write(
+            store.root.join("meta/test-node-env.json"),
+            serde_json::json!({"id": "test-node-env", "exceptions": []}).to_string(),
+        )
+        .unwrap();
+
+        let root = base.join("home/.tog/x/npm-pnpm-0123456789abcdef");
+        fs::create_dir_all(root.join(".tog/closures")).unwrap();
+        let projection_id = "ab".repeat(16);
+        let key = hex::encode(Sha256::digest(
+            root.canonicalize().unwrap().as_os_str().as_bytes(),
+        ));
+        let forest = store
+            .root
+            .join("forests")
+            .join(&key[..32])
+            .join(&projection_id)
+            .join("node_modules");
+        fs::create_dir_all(forest.join(".bin")).unwrap();
+        let executable = forest.join(".bin/pnpm");
+        fs::write(&executable, "#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+        std::os::unix::fs::symlink(&forest, root.join("node_modules")).unwrap();
+        fs::write(
+            root.join(".tog/closures/node.json"),
+            serde_json::json!({
+                "schema": "closure/1",
+                "ecosystem": "node",
+                "platform": Platform::host().unwrap().triple(),
+                "body": {
+                    "env_object": object.display().to_string(),
+                    "projection_schema": "node-forest/2",
+                    "projection_id": projection_id,
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        (
+            store,
+            root.clone(),
+            root.join("node_modules/.bin/pnpm"),
+            object,
+        )
+    }
+
+    /// The pnpm cache `realize_cached_tool` uses is reused only when its
+    /// request record says `ready`, as `tog x` decides. One a tog before
+    /// this record left (no `x.json`) and one an interrupted run left
+    /// `realizing` are both marked `realizing` and rebuilt, never reused,
+    /// though each holds a working `pnpm`.
+    #[test]
+    fn a_pnpm_cache_without_a_ready_record_is_rebuilt_not_reused() {
+        let _guard = exception_guard();
+        let _attribution = policy::Attribution::open("node").unwrap();
+        let temp = TempDir::named("x-pnpm-cache");
+        let (store, root, executable, object) = pnpm_cache_without_record(&temp.0);
+        assert!(executable.is_file());
+        let activity = store
+            .activity(crate::kernel::activity::ActivityMode::Shared)
+            .unwrap();
+        let hit = |store: &Store| {
+            cached_tool_hit(
+                store,
+                &activity,
+                &root,
+                "node",
+                "pnpm",
+                "9.1.0",
+                &executable,
+                None,
+            )
+            .unwrap()
+        };
+        let state = || read_x_request(&root).and_then(|record| record.state);
+
+        // The control: the same root with a `ready` record is reused.
+        write_x_request_for_store(&root, &store, "node", "pnpm", Some("9.1.0"), "ready", None)
+            .unwrap();
+        assert!(hit(&store));
+        assert_eq!(state().as_deref(), Some("ready"));
+
+        // Record-less: rebuilt.
+        fs::remove_file(root.join(X_REQUEST_FILE)).unwrap();
+        assert!(!hit(&store));
+        assert_eq!(state().as_deref(), Some("realizing"));
+
+        // Left `realizing` by an interrupted run: rebuilt again.
+        assert!(!hit(&store));
+        assert_eq!(state().as_deref(), Some("realizing"));
+
+        let _ = policy::drain();
+        drop(activity);
+        fs::set_permissions(&object, fs::Permissions::from_mode(0o755)).unwrap();
     }
 }

@@ -435,8 +435,11 @@ project `x` runs in and written to the request record's `helpers`. `py:`
 tools have none and keep their `x/3` names. The key only names the
 directory. A run reuses it only when the request record it wrote there
 (`.tog/x.json`) says `ready`, so a directory left without one, as a tog
-before `x/4` left them, is realized again in place, and only the bare
-`tog x --clean` removes it, since nothing records what it was made for.
+before `x/4` left them, is realized again in place. Only the bare
+`tog x --clean` removes it, since nothing records what it was made for,
+and it does so under the store its closure's objects live in, so that
+store's root record goes with it. One whose store cannot be recovered is
+skipped. The pnpm cache a dependency edit uses follows the same rule.
 
 The catalog a lock is minted from
 (`src/kernel/toolchain/`). Each ecosystem's catalog is a checked-in,

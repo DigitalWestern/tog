@@ -14,7 +14,7 @@ use sha2::{Digest, Sha256};
 
 mod common;
 
-use common::{command, text, tog, tog_env, tog_offline, TempDir};
+use common::{command, text, tog, tog_at, tog_env, tog_offline, TempDir};
 
 /// The signing key under `home`, generated on first use and trusted by
 /// `home`'s machine policy (`~/.tog/policy.toml`, created with an empty
@@ -1756,14 +1756,17 @@ fn x_clean_refuses_a_symlinked_x_directory_or_a_relative_home() {
 }
 
 /// A root with no request record (`.tog/x.json`), as a tog before x/4 left
-/// one, is a cache nothing reuses. Its closure may name objects in a store
-/// this invocation knows nothing about: that is not an ownership claim any
-/// more. A filtered clean cannot tell what it was made for and leaves it
-/// alone without a word; the bare clean removes it.
+/// one, is a cache nothing reuses. A filtered clean cannot tell what it was
+/// made for and leaves it alone without a word. The bare clean removes it
+/// under the store its closure's objects live in, and skips one whose
+/// store cannot be recovered rather than orphan that store's registration.
 #[test]
 fn x_clean_removes_a_root_without_a_request_record_only_when_unfiltered() {
     let home = TempDir::boundary("cli-x-clean-unrecorded-home");
     let project = TempDir::boundary("cli-x-clean-unrecorded-project");
+    std::fs::create_dir_all(home.0.join("store")).unwrap();
+    let store = home.0.join("store").canonicalize().unwrap();
+    let object = publish_certified_object(&store, "unrecorded-env");
     let npm_root = home.0.join(".tog/x/npm-prettier-0123456789abcdef");
     std::fs::create_dir_all(npm_root.join(".tog/closures")).unwrap();
     std::fs::write(
@@ -1776,6 +1779,18 @@ fn x_clean_removes_a_root_without_a_request_record_only_when_unfiltered() {
     std::fs::write(py_root.join("requirements.in"), "ruff\n").unwrap();
     std::fs::write(
         py_root.join(".tog/closures/python.json"),
+        serde_json::json!({
+            "schema": "closure/1",
+            "ecosystem": "python",
+            "body": {"env_object": object.display().to_string()},
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let foreign = home.0.join(".tog/x/py-black-0123456789abcdef");
+    std::fs::create_dir_all(foreign.join(".tog/closures")).unwrap();
+    std::fs::write(
+        foreign.join(".tog/closures/python.json"),
         r#"{"schema":"closure/1","ecosystem":"python","body":{"env_object":"/somewhere/else/store/objects/0000000000000000000000000000000000000000-python.env-9"}}"#,
     )
     .unwrap();
@@ -1787,7 +1802,10 @@ fn x_clean_removes_a_root_without_a_request_record_only_when_unfiltered() {
         assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
         let stdout = text(&out.stdout);
         assert_eq!(stdout, "tog: x clean: nothing to clean\n", "{filter:?}");
-        assert!(py_root.is_dir() && npm_root.is_dir(), "{filter:?}");
+        assert!(
+            py_root.is_dir() && npm_root.is_dir() && foreign.is_dir(),
+            "{filter:?}"
+        );
     }
 
     let out = tog(&project.0, &home.0, &["x", "--clean"]);
@@ -1796,7 +1814,15 @@ fn x_clean_removes_a_root_without_a_request_record_only_when_unfiltered() {
     assert!(!py_root.exists(), "{stdout}");
     assert!(!npm_root.exists(), "{stdout}");
     assert!(
-        stdout.contains("x clean removed 2 environment(s), skipped 0"),
+        foreign.is_dir(),
+        "a root with no recoverable owner was removed"
+    );
+    assert!(
+        stdout.contains("its owning store could not be recovered"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("x clean removed 2 environment(s), skipped 1"),
         "{stdout}"
     );
     // The generated name still says which one was a node environment, and
@@ -1810,6 +1836,64 @@ fn x_clean_removes_a_root_without_a_request_record_only_when_unfiltered() {
             "cleanup left the per-root lock file behind"
         );
     }
+}
+
+/// A record-less root that store A registered, cleaned by a caller whose
+/// `TOG_STORE` is B: cleanup recovers A from the closure, removes the root
+/// under A's lease and drops A's record, so A's next `tog gc` really
+/// reclaims the objects the root kept alive.
+#[test]
+fn x_clean_unregisters_a_record_less_root_from_its_own_store() {
+    let home = TempDir::boundary("cli-x-clean-two-stores");
+    let store_a = home.0.join("store");
+    let store_b = home.0.join("store-b");
+    let (root, key) = registered_x_environment(&home.0, &store_a);
+    std::fs::remove_file(root.join(".tog/x.json")).unwrap();
+    let out = tog(
+        &home.0,
+        &home.0,
+        &["gc", "--register", root.to_str().unwrap()],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(registered_root_keys(&home.0, &home.0).contains(&key));
+    let object = std::fs::read_dir(store_a.join("objects"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .next()
+        .unwrap();
+    // Old enough that only a root keeps it (gc's active window is ten
+    // minutes), and no age-based retention: the record alone decides.
+    std::fs::File::open(&object)
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(11 * 60))
+        .unwrap();
+    let gc = ["gc", "--keep-days", "0"];
+    // While registered, A's gc keeps the object.
+    let out = tog(&home.0, &home.0, &gc);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(object.is_dir(), "gc collected an object a root keeps");
+
+    std::fs::create_dir_all(&store_b).unwrap();
+    let out = tog_at(&home.0, &home.0, &store_b, &["x", "--clean"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let stdout = text(&out.stdout);
+    assert!(!root.exists(), "{stdout}");
+    assert!(
+        stdout.contains("tog: removed x environment") && !stdout.contains("no matching registry"),
+        "{stdout}"
+    );
+    assert!(
+        !registered_root_keys(&home.0, &home.0).contains(&key),
+        "store A still registers the removed root: {stdout}"
+    );
+
+    let out = tog(&home.0, &home.0, &gc);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(
+        !object.exists(),
+        "store A kept the removed root's object: {}",
+        text(&out.stdout)
+    );
 }
 
 /// Build a cached, `ready` python `x` root for `home` whose store object
