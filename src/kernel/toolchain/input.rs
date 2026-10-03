@@ -498,24 +498,6 @@ fn go_mod_directive(bytes: &[u8], directive: &str) -> Option<String> {
     None
 }
 
-/// Message for a project whose only version statement is computed: it names
-/// the declarative file to add instead of guessing from the evaluator.
-pub fn computed_only_message(ecosystem: &str) -> String {
-    let file = match ecosystem {
-        "python" => ".python-version",
-        "node" => ".node-version",
-        "ruby" => ".ruby-version",
-        "go" => "go.mod (`go` directive)",
-        "rust" => "rust-toolchain.toml",
-        "elixir" => ".tool-versions",
-        "dotnet" => "global.json",
-        _ => ".tool-versions",
-    };
-    format!(
-        "{ecosystem}: version is only stated by computed project code; add a declarative {file} so the toolchain lock can record it"
-    )
-}
-
 fn row_for(
     root: &ProjectRoot,
     path: &str,
