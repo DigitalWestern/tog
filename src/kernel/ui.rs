@@ -77,10 +77,12 @@ fn install_panic_hook() {
             Some(location) => format!(" at {}:{}", location.file(), location.line()),
             None => String::new(),
         };
-        let backtrace = std::backtrace::Backtrace::capture();
-        let backtrace = match backtrace.status() {
-            std::backtrace::BacktraceStatus::Captured => format!("{backtrace}\n"),
-            _ => String::new(),
+        // RUST_BACKTRACE asks for the backtrace, as with the default hook.
+        let wanted = std::env::var_os("RUST_BACKTRACE").is_some_and(|value| value != "0");
+        let backtrace = if wanted {
+            format!("{}\n", std::backtrace::Backtrace::force_capture())
+        } else {
+            String::new()
         };
         write_error_channel(&format!(
             "tog: {}: {payload}{where_}\ntog: this is a bug in tog; please report it with the command you ran\n{backtrace}",

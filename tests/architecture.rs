@@ -934,7 +934,7 @@ fn comment_text(line: &str) -> Option<&str> {
 const STDERR_HANDLES: &[(&str, &str, &str)] = &[
     (
         "src/kernel/supervise.rs",
-        "let _ = io::stderr().write_all(&buffer[..count]);",
+        "let _ = io::stderr().write_all(bytes);",
         "verbatim relay of a supervised child's stderr",
     ),
     (

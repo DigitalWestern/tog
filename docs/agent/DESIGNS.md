@@ -3519,7 +3519,7 @@ interception and the cargo switch, each the flexible option:
     the line they fail on, which the scrub catches for the key; making
     them position-only too is a follow-up.
   - *Third Sol pass (2026-10-03).*
-    - *Member globs as cargo expands them.* `resolve::expand` follows the
+    - *Member globs as cargo expands them.* `cargo_door::expand` follows the
       `glob` crate's default rules that cargo uses (`*`, `?` and `[...]`
       within a name, `**` across directories, a wildcard matching a
       leading `.`, `target` like any directory), checked against

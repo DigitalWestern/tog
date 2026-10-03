@@ -25,6 +25,7 @@
 //!   `CARGO_NET_OFFLINE=false` undoes an inherited offline setting.
 
 use super::crates_index;
+use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::resolve::confine;
 use crate::kernel::resolve::door::{ConfinedSpec, ReceiptProducer, Target, Wire, Wiring};
 use crate::kernel::resolve::session::Intercept;
@@ -32,7 +33,7 @@ use crate::kernel::resolve::snapshot::PathGlob;
 use crate::kernel::resolve::{DelegateReport, DelegateSpec, ResolutionDoor};
 use std::ffi::OsString;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 /// Why cargo runs isolated, for the missing-capability message.
 const WHY: &str = "runs the build.rustc and credential-provider programs a project's \
@@ -518,6 +519,287 @@ fn path_dependencies(manifest: &Path, keys: &Bound) -> io::Result<Vec<String>> {
         }
     }
     Ok(paths)
+}
+
+/// A workspace's members inside its root, as cargo 1.98 finds them.
+pub(crate) struct Members {
+    /// The member directories (relative to the root) that hold a
+    /// `Cargo.toml`.
+    pub(crate) listed: Vec<PathBuf>,
+    /// Members reached through a symlinked directory. cargo follows the
+    /// link; the door's stage copies the link, not what it points at, so a
+    /// confined cargo would resolve without them, and a record names files
+    /// by their place in the workspace. They are not listed, and
+    /// [`refuse_unlisted_members`] refuses every confined cargo run on the
+    /// workspace (lock generation, edits, attest) rather than publish a
+    /// lock or a record that leaves them out.
+    pub(crate) through_symlinks: Vec<PathBuf>,
+}
+
+/// The member directories (relative to `root`) its `[workspace]` names:
+/// each `members` entry, a path or a glob, that holds a `Cargo.toml` and is
+/// not under an `exclude` entry, as cargo 1.98.1 lists them. A glob is
+/// expanded the way cargo's `glob` crate does ([`expand`]): `*`, `?` and
+/// `[...]` within a name, `**` across directories, a wildcard matching a
+/// name that starts with `.`, `target` like any other directory. A member
+/// outside the root (`../x`) is not listed: the door publishes only inside
+/// its lock root.
+pub(crate) fn member_dirs(root: &ProjectRoot) -> io::Result<Members> {
+    let mut members = Members {
+        listed: Vec::new(),
+        through_symlinks: Vec::new(),
+    };
+    let Some(text) = root.read_input_string(Path::new("Cargo.toml"))? else {
+        return Ok(members);
+    };
+    let manifest = parse_toml(&root.path().join("Cargo.toml"), &text)?;
+    let workspace = manifest.get("workspace").and_then(|w| w.as_table());
+    let list = |key: &str| -> Vec<String> {
+        workspace
+            .and_then(|w| w.get(key))
+            .and_then(|v| v.as_array())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| item.as_str())
+                    .filter_map(relative_pattern)
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let exclude: Vec<PathBuf> = list("exclude").iter().map(PathBuf::from).collect();
+    for pattern in list("members") {
+        let expanded = expand(root.path(), &pattern)?;
+        for dir in expanded.dirs {
+            let excluded = exclude.iter().any(|ex| dir.starts_with(ex));
+            if !excluded
+                && root.is_input_file(&dir.join("Cargo.toml"))
+                && !members.listed.contains(&dir)
+            {
+                members.listed.push(dir);
+            }
+        }
+        for dir in expanded.through_symlinks {
+            let excluded = exclude.iter().any(|ex| dir.starts_with(ex));
+            if !excluded && !members.through_symlinks.contains(&dir) {
+                members.through_symlinks.push(dir);
+            }
+        }
+    }
+    members.listed.sort();
+    members.through_symlinks.sort();
+    Ok(members)
+}
+
+/// Refuse to attest a workspace with a member reached through a symlinked
+/// directory ([`Members::through_symlinks`]) before a confined cargo runs
+/// on it: cargo in the stage would not see the member and would resolve
+/// without it, and a record could not name it. A sync from a committed
+/// lock runs no cargo and is not refused.
+pub fn refuse_unlisted_members(root: &ProjectRoot) -> io::Result<()> {
+    let members = member_dirs(root)?;
+    if members.through_symlinks.is_empty() {
+        return Ok(());
+    }
+    let named: Vec<String> = members
+        .through_symlinks
+        .iter()
+        .map(|dir| dir.display().to_string())
+        .collect();
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        format!(
+            "the Cargo workspace at {} has members reached through a symlinked directory ({}); \
+             the confined cargo sees the workspace's own files only, so it would resolve \
+             without them, and a resolution record could not name them. Replace the symlinks \
+             with the directories",
+            root.path().display(),
+            named.join(", ")
+        ),
+    ))
+}
+
+/// A members or exclude entry as a path under the root: `./` and a
+/// trailing `/` dropped, `None` for one that leaves the root.
+fn relative_pattern(entry: &str) -> Option<String> {
+    let trimmed = entry.trim_start_matches("./").trim_end_matches('/');
+    let path = Path::new(trimmed);
+    let inside = !trimmed.is_empty()
+        && path
+            .components()
+            .all(|part| matches!(part, Component::Normal(_)));
+    inside.then(|| trimmed.to_string())
+}
+
+/// What a members entry names under the root.
+#[derive(Default)]
+pub(crate) struct Expanded {
+    /// Directories it matches, reached without a symlink.
+    dirs: Vec<PathBuf>,
+    /// Directories it matches, or may match below, through a symlink to a
+    /// directory: not followed.
+    through_symlinks: Vec<PathBuf>,
+}
+
+/// One `/`-separated part of a members glob.
+enum Part {
+    /// `**`: any number of directories, none included.
+    AnyDepth,
+    /// A name pattern: `*`, `?` and `[...]` (`[!...]` negated, `a-z`
+    /// ranges, a `]` first taken literally), everything else literal.
+    Name(Vec<char>),
+}
+
+/// The directories under `root` a members entry names, the way cargo's
+/// `glob` crate (default options) expands it: `*` and `?` and classes
+/// within one name, `**` across directories, a leading `.` matched by a
+/// wildcard, no directory skipped. A pattern the `glob` crate would refuse
+/// (`**` inside a name, an unclosed `[`) is an error, as it is for cargo.
+/// Symlinks are not followed, so the walk ends on any tree; a symlinked
+/// directory it would enter is reported instead
+/// ([`Expanded::through_symlinks`]).
+pub(crate) fn expand(root: &Path, pattern: &str) -> io::Result<Expanded> {
+    let invalid = |why: &str| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("workspace members entry {pattern:?} is not a valid glob: {why}"),
+        )
+    };
+    let mut parts = Vec::new();
+    for part in pattern.split('/').filter(|part| !part.is_empty()) {
+        if part == "**" {
+            parts.push(Part::AnyDepth);
+            continue;
+        }
+        if part.contains("**") {
+            return Err(invalid("`**` must be a whole path component"));
+        }
+        let chars: Vec<char> = part.chars().collect();
+        check_classes(&chars).map_err(invalid)?;
+        parts.push(Part::Name(chars));
+    }
+    let mut out = Expanded::default();
+    let mut seen: std::collections::BTreeSet<(PathBuf, usize)> = Default::default();
+    let mut stack = vec![(PathBuf::new(), 0usize)];
+    while let Some((relative, index)) = stack.pop() {
+        if !seen.insert((relative.clone(), index)) {
+            continue;
+        }
+        let Some(part) = parts.get(index) else {
+            if !relative.as_os_str().is_empty() && !out.dirs.contains(&relative) {
+                out.dirs.push(relative);
+            }
+            continue;
+        };
+        if let Part::AnyDepth = part {
+            // None of it: the next part, here.
+            stack.push((relative.clone(), index + 1));
+        }
+        let entries = match std::fs::read_dir(root.join(&relative)) {
+            Ok(entries) => entries,
+            Err(error)
+                if error.kind() == io::ErrorKind::NotFound
+                    || error.raw_os_error() == Some(libc::ENOTDIR) =>
+            {
+                continue
+            }
+            Err(error) => {
+                return Err(io::Error::new(
+                    error.kind(),
+                    format!("read {}: {error}", root.join(&relative).display()),
+                ))
+            }
+        };
+        for entry in entries {
+            let entry = entry?;
+            let name = entry.file_name();
+            let child = relative.join(&name);
+            let next = match part {
+                Part::AnyDepth => index,
+                Part::Name(chars) => {
+                    let name: Vec<char> = name.to_string_lossy().chars().collect();
+                    if !name_matches(chars, &name) {
+                        continue;
+                    }
+                    index + 1
+                }
+            };
+            let kind = entry.file_type()?;
+            if kind.is_dir() {
+                stack.push((child, next));
+            } else if kind.is_symlink()
+                && root.join(&child).is_dir()
+                && !out.through_symlinks.contains(&child)
+            {
+                out.through_symlinks.push(child);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Every `[` in a name pattern is closed, as the `glob` crate requires.
+fn check_classes(pattern: &[char]) -> Result<(), &'static str> {
+    let mut index = 0;
+    while index < pattern.len() {
+        if pattern[index] == '[' {
+            match class_end(pattern, index) {
+                Some(end) => index = end + 1,
+                None => return Err("a `[` is not closed"),
+            }
+        } else {
+            index += 1;
+        }
+    }
+    Ok(())
+}
+
+/// The index of the `]` closing the class that opens at `open`: one may
+/// follow `[` or `[!` and be taken literally.
+fn class_end(pattern: &[char], open: usize) -> Option<usize> {
+    let mut index = open + 1;
+    if pattern.get(index) == Some(&'!') {
+        index += 1;
+    }
+    if pattern.get(index) == Some(&']') {
+        index += 1;
+    }
+    (index..pattern.len()).find(|&at| pattern[at] == ']')
+}
+
+/// Whether `name` matches the name pattern `pattern` (`glob` crate rules,
+/// case-sensitive, a leading `.` not special).
+fn name_matches(pattern: &[char], name: &[char]) -> bool {
+    match pattern.first() {
+        None => name.is_empty(),
+        Some('*') => (0..=name.len()).any(|skip| name_matches(&pattern[1..], &name[skip..])),
+        Some('?') => !name.is_empty() && name_matches(&pattern[1..], &name[1..]),
+        Some('[') => {
+            let Some(end) = class_end(pattern, 0) else {
+                return false;
+            };
+            let Some(&first) = name.first() else {
+                return false;
+            };
+            let (negated, body) = match pattern.get(1) {
+                Some('!') => (true, &pattern[2..end]),
+                _ => (false, &pattern[1..end]),
+            };
+            let mut hit = false;
+            let mut at = 0;
+            while at < body.len() {
+                if at + 2 < body.len() && body[at + 1] == '-' {
+                    hit |= body[at] <= first && first <= body[at + 2];
+                    at += 3;
+                } else {
+                    hit |= body[at] == first;
+                    at += 1;
+                }
+            }
+            hit != negated && name_matches(&pattern[end + 1..], &name[1..])
+        }
+        Some(&literal) => name.first() == Some(&literal) && name_matches(&pattern[1..], &name[1..]),
+    }
 }
 
 /// The `ConfinedSpec` of `run`, through the process proxy with TLS

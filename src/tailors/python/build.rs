@@ -543,7 +543,7 @@ fn generate_cargo_lock(
         source.to_path_buf(),
     ] {
         if dir.join("Cargo.toml").is_file() {
-            crate::tailors::cargo::resolve::refuse_unlisted_members(
+            crate::kernel::provider::cargo_door::refuse_unlisted_members(
                 &crate::kernel::fsroot::ProjectRoot::open(&dir)?,
             )?;
         }
