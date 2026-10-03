@@ -36,6 +36,18 @@
     merge from main after the PR is open costs a second full run.
   - Batch related work into one pull request, one commit per piece,
     rather than one pull request per piece.
+  - Know whether your change wakes the heavy suite. heavy.yml runs the
+    47-minute e2e job on a pull request when it changes any file its
+    `gate` job watches: `src/kernel/archive*`, `src/kernel/fetch*`,
+    anything under `src/kernel/provider/`, any `catalog.toml`,
+    `Cargo.lock`, `heavy.yml`, or `tests/acceptance.sh` (the regex in
+    `heavy.yml` is the authority). Once it is woken, every later push
+    to that pull request runs it again. So do not touch those files in
+    passing (a comment fix, a test-only helper): put that in a pull
+    request that has to touch them anyway. When a pull request must
+    touch them, run the e2e suites it affects locally before the first
+    push (see the local equivalents below). #409 woke the suite twice
+    with a one-line test-only change to `src/kernel/provider/rust.rs`.
   Never push only to retrigger CI. Do not open a pull request that
   only adds a FOLLOW-UPS.md pointer or another one-line doc change: put
   it in the next real pull request, or in the work's own pull request
@@ -58,6 +70,11 @@
     then `bash tests/acceptance.sh`. Point `TMPDIR` at a directory under
     `$HOME` first: these tests leave large stores behind and fill the
     `/tmp` quota.
+  Never re-run a failed job in the cloud (the Actions "Re-run jobs"
+  button, `gh run rerun`, or an empty commit) to see whether a fix
+  worked. The local run is the re-run, and you have permission to do it
+  without asking, however long it takes. Run long suites in the
+  background so other work goes on meanwhile.
   If a failure only happens on the runner (a different Ubuntu version,
   AppArmor, the runner's disk) and cannot be reproduced here, say so in
   the pull request. Then one push to test the fix in the cloud is fine.
