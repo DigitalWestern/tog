@@ -541,7 +541,14 @@ fn mixed_cargo_pnpm_edit_keeps_cargo_exception_with_cargo() {
         "mixed pnpm add",
     );
 
-    let cargo_exceptions = closure_exceptions(&project.join(".tog/closures/cargo.json"));
+    // The hand-written lock carries no resolution record, which Cargo's
+    // door reports as `unrecorded-resolution`; it is set apart so the git
+    // exception is the one traced.
+    let (unrecorded, cargo_exceptions): (Vec<_>, Vec<_>) =
+        closure_exceptions(&project.join(".tog/closures/cargo.json"))
+            .into_iter()
+            .partition(|exception| exception["kind"] == "unrecorded-resolution");
+    assert_eq!(unrecorded.len(), 1, "cargo exceptions: {unrecorded:?}");
     assert_eq!(
         cargo_exceptions.len(),
         1,

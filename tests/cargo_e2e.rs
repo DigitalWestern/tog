@@ -95,6 +95,35 @@ fn cargo_sync_build_and_run_again_offline() {
         "rustc reported the wrong host:\n{rustc}"
     );
     assert_ok(tog(&project, &temp.0, &["build"]), "build");
+    // Cargo resolves through a door, so `--strict` wants the lock to carry
+    // a signed resolution record: `tog attest cargo` checks the committed
+    // lock (`cargo metadata --locked`, confined) and signs one with a key
+    // the machine policy trusts.
+    let key = temp.0.join("signing.key");
+    let public = tog::kernel::signing::generate(&key).unwrap();
+    std::fs::create_dir_all(temp.0.join(".tog")).unwrap();
+    std::fs::write(
+        temp.0.join(".tog/policy.toml"),
+        format!("deny = []\n\n[signing]\ntrusted = [\"{public}\"]\n"),
+    )
+    .unwrap();
+    let lock_before = std::fs::read(project.join("Cargo.lock")).unwrap();
+    let attest = command(&project, &temp.0, &store)
+        .env("TOG_SIGNING_KEY", &key)
+        .args(["attest", "cargo"])
+        .output()
+        .unwrap();
+    assert!(
+        attest.status.success(),
+        "attest cargo: {}",
+        String::from_utf8_lossy(&attest.stderr)
+    );
+    assert!(project.join(".tog/resolution/cargo.json").is_file());
+    assert_eq!(
+        std::fs::read(project.join("Cargo.lock")).unwrap(),
+        lock_before,
+        "attest changed the lock"
+    );
     // On a synced project no sync runs in front of the build, so the only
     // policy load is build's own: `--strict` must reach it all the same.
     let strict = tog(&project, &temp.0, &["-v", "--strict", "build"]);
@@ -175,7 +204,15 @@ fn git_dependency_exception_is_published_on_the_cargo_closure_only() {
     let closures = project.join(".tog/closures");
     let cargo: serde_json::Value =
         serde_json::from_slice(&std::fs::read(closures.join("cargo.json")).unwrap()).unwrap();
-    let exceptions = cargo["body"]["exceptions"].as_array().unwrap();
+    // The committed lock carries no resolution record, which Cargo's door
+    // reports as `unrecorded-resolution` on the same closure; it is set
+    // apart here so the git exception is the one traced.
+    let (unrecorded, exceptions): (Vec<_>, Vec<_>) = cargo["body"]["exceptions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .partition(|exception| exception["kind"] == "unrecorded-resolution");
+    assert_eq!(unrecorded.len(), 1, "cargo exceptions: {unrecorded:?}");
     assert_eq!(exceptions.len(), 1, "cargo exceptions: {exceptions:?}");
     assert_eq!(exceptions[0]["kind"], "git-dependency");
     assert_eq!(exceptions[0]["subject"], "gitdep@1.0.0");
@@ -322,15 +359,22 @@ fn toolchain_file_components_and_targets_are_provisioned() {
         .join("target/wasm32-unknown-unknown/debug/cargo-hello.wasm")
         .is_file());
 
-    // Nothing here is an exception any more, on any closure.
+    // Nothing about the toolchain is an exception any more, on any
+    // closure. The committed lock carries no resolution record, which is
+    // `unrecorded-resolution` on the Cargo closure and nothing toolchain.
     for entry in std::fs::read_dir(project.join(".tog/closures")).unwrap() {
         let path = entry.unwrap().path();
         let closure: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        let exceptions = closure["body"]["exceptions"]
+        let exceptions: Vec<_> = closure["body"]["exceptions"]
             .as_array()
             .cloned()
-            .unwrap_or_default();
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|exception| {
+                !(path.ends_with("cargo.json") && exception["kind"] == "unrecorded-resolution")
+            })
+            .collect();
         assert!(exceptions.is_empty(), "{}: {exceptions:?}", path.display());
     }
 

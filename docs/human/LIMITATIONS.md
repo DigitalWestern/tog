@@ -27,8 +27,9 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   another bundle than the lock names is `stale`. It does not prove the signer's sync was
   honest or safe to run: it does not cover the doors that run unsandboxed with network
   (`add`/`remove`/`update`, where the ecosystem's own tool edits the manifest and lock, and
-  missing-lock generation during `sync`/`plan`, where uv, npm, cargo, bundler, mix resolve
-  with network), nor does it re-verify store bytes, re-check object metadata, or judge what
+  missing-lock generation during `sync`/`plan`, where uv, npm, bundler, mix resolve
+  with network; Go and Cargo resolve confined through tog's proxy instead, and `attest`
+  re-checks their locks), nor does it re-verify store bytes, re-check object metadata, or judge what
   `tog run`/`x` executed. A job that runs untrusted project code must not hold a signing
   key. The machine policy is whatever `TOG_POLICY` or `$HOME` selects: the gate's
   workflow, environment, binary, and machine policy must be controlled outside the
@@ -110,7 +111,8 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   declarative file to add. Reading those sources means running project code, which is
   exactly what frozen promises not to do.
 - **`add` / `remove` / `update` delegate to store tools with network, unsandboxed** (uv, npm,
-  pnpm, cargo, go, bundler, mix) — the same trust boundary as missing-lockfile generation.
+  pnpm, bundler, mix) — the same trust boundary as missing-lockfile generation. Go and Cargo
+  run theirs in the sandbox with no network of their own, through tog's resolution proxy.
   Refusal rows: Poetry/PDM, setup.py, `requirements/` dirs, Elixir add/remove, Yarn, .NET.
 - **pnpm edits require a root `packageManager` field** with an exact pinned version.
   Membership is the `pnpm-lock.yaml` `importers` list and nothing else. **A member added since
@@ -192,8 +194,8 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   outlive a run. **Store objects are trusted from permissions + metadata, and all
   toolchain pins are TOFU** (pin-time hashes, not signed manifests): same-user content
   replacement after commit is undetected.
-- **Delegated planning runs unsandboxed with user privileges** (uv, npm, cargo, go, bundler):
-  a hostile manifest executes code at PLAN time.
+- **Delegated planning runs unsandboxed with user privileges** (uv, npm, bundler):
+  a hostile manifest executes code at PLAN time. Go's and Cargo's run in the sandbox.
 - **Every tar archive is unpacked through the pre-materialization extractor**
   (`src/kernel/archive.rs`, #236). It reads every entry from the
   archive's own headers (ustar names and the POSIX prefix field, PAX `path`/`linkpath`/`size`,
@@ -232,7 +234,8 @@ Selection covers every patch of each maintained CPython minor that python-build-
   with dynamic build requirements** (PEP 517 `get_requires_for_build_wheel`) are unsupported —
   inspection is non-executing. Static backends are supported; `setup_requires` in legacy
   setup.py is unhandled — declare it in `pyproject.toml`. Rust sdists without a shipped
-  `Cargo.lock` get a store-Cargo lock recorded `unattested-cargo-lock`.
+  `Cargo.lock` get a store-Cargo lock recorded `unattested-cargo-lock`; that lock is
+  generated confined, through the resolution proxy, like a project's.
 - **Immutable venvs are not drop-in venvs**: no activate scripts, and pip cannot mutate them.
   `tog run pip ...` and `tog run activate` are refused with the verb that replaces them
   (`tog add`, `tog run <command>`) rather than left to report a missing file, but **no pip
@@ -294,6 +297,19 @@ Selection covers every patch of each maintained CPython minor that python-build-
 
 ## Rust / cargo
 
+- **Cargo resolves in the sandbox, through TLS interception** (`add`/`remove`/`update`, a
+  missing `Cargo.lock`, `attest`, and an sdist's missing lock). Cargo has no network of its
+  own: tog's proxy answers the crates.io index and download hosts and pinned git fetches,
+  and records each request. Known edges: a project `.cargo/config.toml` that sets
+  `registry.global-credential-providers` or a `credential-provider` as an array stops cargo
+  with a config merge error, because tog forces string forms so no project provider can run
+  (set them as strings or drop them). Authenticated alternative registries fail, as the
+  sandbox gets no token. Path dependencies outside the workspace root are found from the
+  manifests (dependency tables, `[patch]`, `[replace]`, `target.*`, `[workspace]`) and
+  snapshotted read-only; one named only through a `[lib] path`, a build script or a
+  symlinked directory is not, and cargo reports it missing. `attest` runs at the workspace
+  root only. A git dependency resolved through the proxy has no offline test yet (the
+  fixture registry holds no upload-pack body), only the git row's unit test.
 - **Pinned Git dependencies work for standalone crates**; workspace-inherited manifests and
   escaping symlinks fail closed, and workspace metadata is not rewritten into vendor
   manifests. **Fail-closed rows**: alternative registries; beta/nightly channels. Loud.

@@ -1698,7 +1698,7 @@ under the seccomp filter.
 |---|---|---|---|
 | npm | `--git=<store git>`, `--script-shell=<store sh>`, `--shell=<store sh>`, `--ignore-scripts`, `--node-options=`, `--node-gyp=` (a nonexistent path), `--editor`, `--browser`, and `--viewer` set to `false` | `git` (the lock-only install of a git dependency runs it). `script-shell`, `shell`, `node-gyp`, `editor`, `browser`, `viewer`, and `node-options` did not fire, and a git dependency's `prepare` script did not run under `--ignore-scripts` | no marker ran, exit 0 |
 | pnpm | `--config.script-shell=<store sh>`, `--config.shell-emulator=false`, `--config.git-shallow-hosts=`, `--ignore-scripts`, `--config.node-options=`, and **added by PR 0**: `--config.pnpmfile=.pnpmfile.cjs`, `--config.global-pnpmfile=`, `--config.manage-package-manager-versions=false` (the last from pnpm's docs: otherwise pnpm may download another pnpm named by `packageManager`). A `.pnpmfile.cjs` is project code pnpm runs by design, so it is left on (turning it off would change the lock) and the tier contains it | `pnpmfile` and `global-pnpmfile` (both name a JavaScript file pnpm loads). `script-shell` and `node-options` did not fire | only the by-design `.pnpmfile.cjs` ran, exit 0 |
-| cargo | `--config build.rustc=<store rustc>`, `build.rustc-wrapper=""`, `build.rustc-workspace-wrapper=""`, `build.rustdoc=<store rustdoc>`, `registry.global-credential-providers=["cargo:token"]`, `registries.<name>.credential-provider=["cargo:token"]` for every registry in the config, `net.git-fetch-with-cli=true` with the forced git below. `target.<triple>.runner` and `.linker` stay unset | `build.rustc`, `build.rustc-wrapper`, and `build.rustc-workspace-wrapper` in `cargo metadata` (it asks rustc for target info), not in `generate-lockfile`. Both credential-provider forms, against a registry whose `config.json` says `auth-required`. `build.rustdoc`, `runner`, and `linker` never fired (proved: resolution never reads them) | no marker ran. The authenticated registry then fails (exit 101, `cargo:token` has no token), which is the intended outcome. Without that dependency, exit 0 |
+| cargo | `--config build.rustc=<store rustc>`, `build.rustc-wrapper=""`, `build.rustc-workspace-wrapper=""`, `build.rustdoc=<store rustdoc>`, `registry.global-credential-providers=["cargo:token"]`, `registry.credential-provider="cargo:token"` (crates.io's own slot), `registries.<name>.credential-provider="cargo:token"` for every registry in the config (strings, since PR 5: cargo concatenates a `--config` array with a config-file array, so an array let the project's provider run after ours; the global slot must stay a list, and a project that sets it, or a per-registry slot, as an array now stops cargo with a merge error, which fails closed), `net.git-fetch-with-cli=true` with the forced git below. `target.<triple>.runner` and `.linker` stay unset | `build.rustc`, `build.rustc-wrapper`, and `build.rustc-workspace-wrapper` in `cargo metadata` (it asks rustc for target info), not in `generate-lockfile`. Both credential-provider forms, against a registry whose `config.json` says `auth-required`. `build.rustdoc`, `runner`, and `linker` never fired (proved: resolution never reads them) | no marker ran. The authenticated registry then fails (exit 101, `cargo:token` has no token), which is the intended outcome. Without that dependency, exit 0 |
 | uv | `--keyring-provider disabled`, `--no-python-downloads`, `--python <store python>` (on both `lock` and `pip compile`, replacing `UV_PYTHON`, which `pip compile` ignores), `--no-config` plus the project's `[tool.uv]` read by tog and passed as flags | `keyring-provider = "subprocess"` in `[tool.uv]` (runs `keyring` from `PATH`), and `python = ...` in `[tool.uv.pip]` (runs the named interpreter). A `.python-version` naming a program did not fire. `--no-config` alone drops `[tool.uv]` settings but keeps `[[tool.uv.index]]` and `[tool.uv.sources]`, so tog must still read those itself | no marker ran, exit 0 |
 | git | carried in `GIT_CONFIG_COUNT`/`KEY`/`VALUE` (the tools start git, so `-c` flags cannot reach it): `credential.helper=`, `core.fsmonitor=false`, `core.hooksPath=/dev/null`, `core.sshCommand=false` with `GIT_SSH_COMMAND` unset, `protocol.allow=never`, `protocol.https.allow=always`, `protocol.file.allow=always`, and **added by PR 0**: `protocol.ext.allow=never`, `protocol.ssh.allow=never`, `protocol.git.allow=never`, `protocol.http.allow=never`, `core.gitProxy=`; also `uploadpack.packObjectsHook=`, `core.askPass=false` with `GIT_ASKPASS` and `SSH_ASKPASS` unset, and `GIT_CONFIG_NOSYSTEM=1` with `GIT_CONFIG_GLOBAL=/dev/null` | `core.fsmonitor` (`status`), `core.sshCommand` (an `ssh://` remote), `core.gitProxy` (a `git://` remote), `credential.helper` and `core.askPass` (a 401 from an https remote), `core.hooksPath` (`commit`), and `protocol.ext.allow=always` (an `ext::` remote runs its command) | the design's set still ran the `ext::` marker: a repository's own `protocol.ext.allow=always` beats `protocol.allow=never`, which is only the default for unlisted protocols. With the per-protocol `never` entries above, no marker ran |
 | go | the census environment is built from empty: `GOFLAGS=-mod=mod`, `GOTOOLCHAIN=local`, `GOVCS=*:off` (modules come only through GOPROXY), `GOPROXY` the mirror with no `direct`, `GONOSUMDB=` and `GOPRIVATE=` unset, `CC` and `CXX` unset with `CGO_ENABLED=0`, and **added by PR 0**: `GOENV=off` (so a user `go.env` cannot set any of these), `GOAUTH=off`, `GOCACHEPROG` unset | `GOCACHEPROG` (go runs it as the build cache), `GOVCS` allowing git with `GOPROXY=direct` (runs `git` from `PATH`), and a `toolchain go1.99.0` line in `go.mod` under `GOTOOLCHAIN=auto` (requests `golang.org/toolchain/@v/v0.0.1-go1.99.0.linux-amd64.zip` from the mirror). `GOFLAGS=-toolexec=...`, `GOAUTH=command ...`, `CC`, and `CXX` did not fire in `go mod tidy`/`download` | no marker ran, no toolchain request, exit 0 |
@@ -3360,6 +3360,84 @@ lock URLs.
 (`rcgen` and rustls server, `ring` provider pinned), and the git row.
 Switch cargo (interception plus git) and the sdist
 `cargo generate-lockfile` in `tailors/python/build.rs`. Cargo `attest`.
+
+**PR 5 as built (Linux, 2026-10-03).** Decisions made building
+interception and the cargo switch, each the flexible option:
+
+- **One CA per process, written per session.** `kernel/resolve/ca.rs`
+  holds one ECDSA P-256 authority (via `ring`), its key only in memory.
+  Each intercepting session writes the certificate `0600` into its
+  session directory, bound read-only into the sandbox. Leaves are minted
+  per SNI name and cached as rustls server configs, all sharing one leaf
+  key. Validity is one day before today to 30 days after, which only
+  absorbs clock skew (the sandbox shares the host clock). The server
+  offers only `http/1.1` ALPN, with the `ring` provider pinned.
+- **CONNECT is authenticated once per tunnel.** A `CONNECT` without the
+  session token gets 407 with `Proxy-Authenticate: Basic` (git retries
+  with the credentials from `http.proxy`), and the tunnel is bound to
+  that session. The `CONNECT` itself is not a ledger entry; the requests
+  inside it are. `Expect: 100-continue` is answered.
+- **Three classes of intercepted request.** A route host's request
+  passes the route's own grammar (`Route::resolve`): a path the route
+  would serve from another URL, or not at all, is 403, so a tunnel
+  cannot reach paths the mirror form would refuse. Git smart-HTTP
+  fetches (`info/refs?service=git-upload-pack`, `git-upload-pack`, and
+  the `api.github.com` commit lookup cargo makes) are forwarded and
+  recorded as git. Anything else is forwarded and recorded unattested.
+  Redirects for git and unattested requests must stay on the same
+  origin. Every request goes through the same permitted set, ledger,
+  redaction, and SSRF checks as a mirror read.
+- **The git row.** `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null`,
+  `GIT_TERMINAL_PROMPT=0`, and `GIT_CONFIG_COUNT`/`KEY`/`VALUE` carrying
+  `http.proxy` (with the token), `http.sslCAInfo`, `http.sslVerify=true`,
+  `ssh://` to `https://` rewrites for every host plus the scp form for
+  github.com, gitlab.com, bitbucket.org, and codeberg.org, and the
+  `protocol.*.allow` set (`https` and `file` always, everything else
+  never). A `git-dependency` exception is denied only by policy at run
+  time, as before.
+- **Cargo's protocol and door live in the kernel provider**
+  (`kernel/provider/crates_index.rs`, `kernel/provider/cargo_door.rs`),
+  because both the cargo tailor and the Python sdist build use them and
+  one tailor may not name another. The crates route serves
+  `index.crates.io` (sparse index, `config.json`) and
+  `static.crates.io` (downloads), and claims each download by the
+  index line's `cksum`.
+- **The cargo row.** `--config http.proxy`, `--config http.cainfo`, the
+  forced settings (credential providers as strings, see the forced
+  table), `net.git-fetch-with-cli=true`, `CARGO_HOME` in scratch,
+  `CARGO_NET_OFFLINE=false`, `PATH` of the store Rust's `bin` then
+  `/usr/bin:/bin` (host git for git dependencies), `RUSTUP_*` removed.
+  Alternative registries are read from both `.cargo/config.toml` and
+  `.cargo/config` so each gets its forced provider.
+- **The lock root is the workspace root.** Outputs are the root
+  manifest, `Cargo.lock`, and every member manifest the `[workspace]`
+  `members` globs name (honoring `exclude`, inside the root only).
+  Inputs are the two `.cargo` config spellings. A member edit runs at the
+  root with `--manifest-path`. `target/` is excluded from the snapshot.
+- **Path dependencies outside the root are read roots.** Found from every
+  manifest under the root and, transitively, theirs: the dependency
+  tables (also under `target.*` and `[workspace]`), `[patch]`, and
+  `[replace]`. `[lib]`/`[[bin]]` paths and missing paths are ignored, so
+  cargo reports a missing one itself.
+- **Cargo `attest`** is `cargo metadata --locked --format-version 1` at
+  the workspace root through a verification door that requires the lock
+  and manifests unchanged and publishes nothing. From a member it is
+  refused, naming the root. The closure names its `resolution_basis`
+  (digests of the outputs and inputs, the lock taken from the planned
+  bytes), which the join requires.
+- **The sdist lock goes through the door.** `tailors/python/build.rs`
+  runs `cargo generate-lockfile` confined, `Detached`, in a reopened
+  missing-lock door. Its ledger is kept on the door
+  (`ResolutionDoor::keep_ledger`) and the Python sync roots it under the
+  project. `tog plan`'s sdist ledgers stay unrooted (no sync to root
+  them), and the Python closure does not list them in `ClosureRefs` yet.
+- **Contract 8 is tested.** `cargo_lock_through_interception_matches_direct_run`
+  generates the same lock through the door and through a blind CONNECT
+  forwarder to the same fixture registry, and asserts byte equality.
+  The fixture rows are filtered to the ones whose stored body matches
+  its sha (`testing::stored_rows`): the cargo `ryu` index body and the
+  git upload-pack body were not stored, so a git dependency through
+  cargo has no offline test, only the git row's unit test.
 
 **PR 6: Node.** npm and pnpm (edit, missing lock, `x`, `attest`), with the
 byte-identical-lock tests and the corrected pnpm flags.
