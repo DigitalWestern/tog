@@ -274,6 +274,52 @@ impl Harness {
     pub(crate) fn upstream_url(&self, path: &str) -> String {
         format!("https://registry.test:{}{path}", self.upstream.port())
     }
+
+    /// The fixture upstream's CA certificate as PEM, for a tool run
+    /// directly against the fixture.
+    pub(crate) fn upstream_ca_pem(&self) -> String {
+        self._ca.pem()
+    }
+}
+
+/// A forward proxy that answers every `CONNECT` with 200 and splices the
+/// tunnel to `target` without looking inside: a tool run "directly"
+/// against the fixture upstream, for comparing with the same run through
+/// interception. It runs until the test process ends.
+#[cfg(test)]
+pub(crate) fn blind_forwarder(target: SocketAddr) -> SocketAddr {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        for client in listener.incoming() {
+            let Ok(mut client) = client else { continue };
+            std::thread::spawn(move || {
+                if read_head_bytes(&mut client).is_err() {
+                    return;
+                }
+                let Ok(upstream) = TcpStream::connect(target) else {
+                    return;
+                };
+                if client
+                    .write_all(b"HTTP/1.1 200 Connection established\r\n\r\n")
+                    .is_err()
+                {
+                    return;
+                }
+                let (mut up_read, mut client_write) =
+                    (upstream.try_clone().unwrap(), client.try_clone().unwrap());
+                let (mut client_read, mut up_write) = (client, upstream);
+                let back = std::thread::spawn(move || {
+                    let _ = io::copy(&mut up_read, &mut client_write);
+                    let _ = client_write.shutdown(std::net::Shutdown::Write);
+                });
+                let _ = io::copy(&mut client_read, &mut up_write);
+                let _ = up_write.shutdown(std::net::Shutdown::Write);
+                let _ = back.join();
+            });
+        }
+    });
+    address
 }
 
 /// The mirror path of a fixture route path.

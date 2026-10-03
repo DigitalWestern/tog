@@ -260,14 +260,26 @@ const FORCED: &[ForcedRow] = &[
             "build.rustc-workspace-wrapper=\"\"",
             "--config",
             "build.rustdoc=\"@RUST@/bin/rustdoc\"",
+            // Each registry's own provider (`registry.credential-provider`
+            // is crates.io's) is forced as a string, not an array: cargo
+            // joins a `--config` array onto the array a config file sets
+            // (`[marker, "cargo:token"]`, a marker run with an argument),
+            // but a string replaces a string, and a string against a
+            // file's array is a merge error that stops cargo before any
+            // provider runs. With every registry's own provider forced, the
+            // global list is never consulted; it is forced as a list (the
+            // type cargo requires) all the same. Proved by
+            // `cargo_forced_settings_never_run_project_wrappers_or_credential_providers`.
             "--config",
             "registry.global-credential-providers=[\"cargo:token\"]",
+            "--config",
+            "registry.credential-provider=\"cargo:token\"",
             "--config",
             "net.git-fetch-with-cli=true",
         ],
         per_registry: &[
             "--config",
-            "registries.@REGISTRY@.credential-provider=[\"cargo:token\"]",
+            "registries.@REGISTRY@.credential-provider=\"cargo:token\"",
         ],
         env: &[],
         unset: &[

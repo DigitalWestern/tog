@@ -44,6 +44,11 @@ impl FixtureCa {
         Self { cert, key }
     }
 
+    /// The CA certificate as PEM, for a tool that trusts it directly.
+    pub(crate) fn pem(&self) -> String {
+        self.cert.pem()
+    }
+
     /// The root set that trusts this CA and nothing else.
     pub(crate) fn roots(&self) -> rustls::RootCertStore {
         let mut roots = rustls::RootCertStore::empty();

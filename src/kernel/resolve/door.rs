@@ -337,7 +337,7 @@ fn run_tool(
 ) -> io::Result<Ran> {
     let proxy = match confined.proxy {
         Some(proxy) => proxy,
-        None => super::proxy::proxy()?,
+        None => process_proxy()?,
     };
     let mut session = proxy.open_session(SessionConfig {
         ecosystem: confined.ecosystem.to_string(),
@@ -808,6 +808,16 @@ impl Drop for SessionDir {
     }
 }
 
+/// The process's proxy, or the one a unit test put in its place for a
+/// call site that builds its own `ConfinedSpec`.
+fn process_proxy() -> io::Result<&'static Proxy> {
+    #[cfg(test)]
+    if let Some(proxy) = PROXY_FOR_TEST.with(|proxy| proxy.get()) {
+        return Ok(proxy);
+    }
+    super::proxy::proxy()
+}
+
 /// The tog executable bound as the relay.
 fn relay_executable() -> io::Result<PathBuf> {
     #[cfg(test)]
@@ -833,6 +843,11 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
     /// Skip the host socket scan, which the confine tests cover.
     pub(crate) static SKIP_SCAN_FOR_TEST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// The proxy a door uses when its `ConfinedSpec` names none: a test
+    /// harness's, for a call site (the sdist's Cargo.lock) that a unit test
+    /// drives end to end.
+    pub(crate) static PROXY_FOR_TEST: std::cell::Cell<Option<&'static Proxy>> =
+        const { std::cell::Cell::new(None) };
 }
 
 #[cfg(test)]
