@@ -391,6 +391,21 @@ impl Tailor for Cargo {
             &crate::kernel::resolve::confine::signing_key_ids(),
             &[],
         )?;
+        // The configuration cargo-fmt's cargo reads, from the invocation
+        // directory up to the workspace root (nothing above it is mounted):
+        // a file there (or one it includes) that is the key, or a symlink
+        // out of the workspace, is refused by name before anything runs.
+        {
+            use crate::kernel::provider::cargo_door;
+            let bound = cargo_door::Bound::new(&workspace_root)?;
+            let invocation = cwd.canonicalize()?;
+            for dir in invocation.ancestors() {
+                if !dir.starts_with(&workspace_root) {
+                    break;
+                }
+                cargo_door::config_files(dir, &bound)?;
+            }
+        }
         let rust_object = cargo::realize_runtime(store, activity, platform, toolchain)?;
         let rustfmt_object =
             rustfmt::ensure_rustfmt(store, activity, platform, toolchain, &rust_object)?;

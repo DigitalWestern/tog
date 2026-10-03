@@ -47,6 +47,7 @@ pub(crate) fn edit_manifest(
     let rust_obj = super::realize_runtime(door.store(), door.lease(), door.platform(), &selected)?;
     let held = ProjectRoot::open(project)?;
     let workspace = super::inputs::workspace_root(&held, &root)?;
+    super::resolve::refuse_unlisted_members(&workspace)?;
     let member = workspace
         .relative(held.path())
         .filter(|relative| !relative.as_os_str().is_empty())

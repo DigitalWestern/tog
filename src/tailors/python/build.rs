@@ -535,6 +535,19 @@ fn generate_cargo_lock(
     source: &Path,
 ) -> io::Result<PathBuf> {
     use crate::kernel::provider::cargo_door::{run_cargo, CargoPublish, CargoRun};
+    // A workspace member through a symlinked directory would be missing
+    // from the confined run (the stage copies the link): refused, at the
+    // manifest's directory and the source root, whichever is the workspace.
+    for dir in [
+        source.join(manifest_rel.parent().unwrap_or_else(|| Path::new(""))),
+        source.to_path_buf(),
+    ] {
+        if dir.join("Cargo.toml").is_file() {
+            crate::tailors::cargo::resolve::refuse_unlisted_members(
+                &crate::kernel::fsroot::ProjectRoot::open(&dir)?,
+            )?;
+        }
+    }
     let manifest_arg = manifest_rel.to_string_lossy().into_owned();
     let args = [
         "generate-lockfile",

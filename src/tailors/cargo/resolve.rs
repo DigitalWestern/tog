@@ -115,10 +115,12 @@ struct Members {
     /// `Cargo.toml`.
     listed: Vec<PathBuf>,
     /// Members reached through a symlinked directory. cargo follows the
-    /// link; a record names files by their place in the workspace, and the
-    /// door's stage copies the link, not what it points at, so these are
-    /// not listed, and [`refuse_unlisted_members`] refuses to attest the
-    /// workspace rather than sign a record that leaves them out.
+    /// link; the door's stage copies the link, not what it points at, so a
+    /// confined cargo would resolve without them, and a record names files
+    /// by their place in the workspace. They are not listed, and
+    /// [`refuse_unlisted_members`] refuses every confined cargo run on the
+    /// workspace (lock generation, edits, attest) rather than publish a
+    /// lock or a record that leaves them out.
     through_symlinks: Vec<PathBuf>,
 }
 
@@ -178,8 +180,10 @@ fn member_dirs(root: &ProjectRoot) -> io::Result<Members> {
 }
 
 /// Refuse to attest a workspace with a member reached through a symlinked
-/// directory ([`Members::through_symlinks`]): the record could not name
-/// it, so a change there would leave the record attesting.
+/// directory ([`Members::through_symlinks`]) before a confined cargo runs
+/// on it: cargo in the stage would not see the member and would resolve
+/// without it, and a record could not name it. A sync from a committed
+/// lock runs no cargo and is not refused.
 pub(crate) fn refuse_unlisted_members(root: &ProjectRoot) -> io::Result<()> {
     let members = member_dirs(root)?;
     if members.through_symlinks.is_empty() {
@@ -194,9 +198,9 @@ pub(crate) fn refuse_unlisted_members(root: &ProjectRoot) -> io::Result<()> {
         io::ErrorKind::Unsupported,
         format!(
             "the Cargo workspace at {} has members reached through a symlinked directory ({}); \
-             a resolution record names files by their place in the workspace, so it cannot \
-             cover them and is not written. Replace the symlinks with the directories to \
-             attest it",
+             the confined cargo sees the workspace's own files only, so it would resolve \
+             without them, and a resolution record could not name them. Replace the symlinks \
+             with the directories",
             root.path().display(),
             named.join(", ")
         ),
@@ -394,6 +398,7 @@ pub(crate) fn generate_lock(
     rust_obj: &Path,
     toolchain: &Selected,
 ) -> io::Result<()> {
+    refuse_unlisted_members(workspace)?;
     let args = ["generate-lockfile"];
     let tailor = super::tailor::Cargo;
     let spec = crate::tailors::record_spec(&tailor, workspace, cargo_tool(toolchain)?, &args)?;
@@ -643,8 +648,8 @@ mod tests {
             ]
         );
         refuse_unlisted_members(&held).unwrap();
-        // A member through a symlinked directory cannot be named by a
-        // record: attesting the workspace is refused, by name.
+        // A member through a symlinked directory is not seen by a confined
+        // cargo nor named by a record: confined runs are refused, by name.
         package(&temp.0.join("elsewhere/linked"), "linked");
         std::os::unix::fs::symlink(temp.0.join("elsewhere/linked"), root.join("crates/linked"))
             .unwrap();
