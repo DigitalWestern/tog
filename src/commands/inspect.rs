@@ -13,6 +13,7 @@ use sha2::{Digest, Sha256};
 pub use crate::comforter::status::{sha256_file, string, State};
 use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::platform::Platform;
+use crate::kernel::policy::{self, Exception};
 use crate::kernel::sandbox;
 use crate::kernel::store::Store;
 use crate::kernel::toolchain::input;
@@ -236,6 +237,106 @@ pub fn ls(dir: &Path, filter: Option<&str>, json: bool, verbose: bool) -> io::Re
     Ok(out)
 }
 
+/// The command that rewrites a closure: `tog fmt` for the rustfmt
+/// record, which a sync never touches, and the bare `tog` for every other.
+pub fn refresh(ecosystem: &str) -> &'static str {
+    if ecosystem == "rustfmt" {
+        "tog fmt"
+    } else {
+        "tog"
+    }
+}
+
+/// The recorded exceptions, or `None` when the closure carries no exception
+/// record at all (absence is not evidence of a clean sync).
+pub fn recorded_exceptions(closure: &ClosureFile) -> io::Result<Option<Vec<Exception>>> {
+    match closure.body.get("exceptions") {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => serde_json::from_value(value.clone())
+            .map(Some)
+            .map_err(|error| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "{:?}: malformed exception record: {error}; run '{}'",
+                        closure.path.to_string_lossy(),
+                        refresh(&closure.ecosystem)
+                    ),
+                )
+            }),
+    }
+}
+
+/// The exceptions of the resolution record the closure joined, or none. A
+/// `resolution` field that is not a record object, or whose exception list
+/// does not parse, is refused like a malformed exception record.
+pub fn resolution_exceptions(closure: &ClosureFile) -> io::Result<Vec<Exception>> {
+    let malformed = |what: String| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "{:?}: malformed resolution record: {what}; run '{}'",
+                closure.path.to_string_lossy(),
+                refresh(&closure.ecosystem)
+            ),
+        )
+    };
+    let Some(resolution) = closure.body.get("resolution") else {
+        return Ok(Vec::new());
+    };
+    let Some(record) = resolution.as_object() else {
+        return Err(malformed("not a JSON object".into()));
+    };
+    match record.get("exceptions") {
+        None => Err(malformed("no exception list".into())),
+        Some(list) => {
+            serde_json::from_value(list.clone()).map_err(|error| malformed(error.to_string()))
+        }
+    }
+}
+
+/// What `exceptions` found in one closure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExceptionList {
+    /// Whether the closure carries an exception record at all
+    /// (`body.exceptions`). Absence is not evidence of a clean sync:
+    /// `audit` calls such a record outdated, whatever the joined
+    /// resolution record says.
+    pub recorded: bool,
+    /// The recorded list, then whatever the joined resolution record adds
+    /// that the list does not already name, each kind spelled the one way
+    /// this binary judges and prints (`policy::canonical_kind`).
+    pub exceptions: Vec<Exception>,
+}
+
+/// Every exception the closure carries, from both places it can record one.
+/// Both are read even when the top-level list is absent, so a malformed
+/// resolution record is refused the same way whichever list is missing,
+/// and `status` still shows what the joined record says.
+pub fn exceptions(closure: &ClosureFile) -> io::Result<ExceptionList> {
+    let recorded = recorded_exceptions(closure)?;
+    let joined = resolution_exceptions(closure)?;
+    let canonical = |mut exception: Exception| {
+        exception.kind = policy::canonical_kind(&exception.kind).to_string();
+        exception
+    };
+    let mut exceptions: Vec<Exception> = recorded
+        .clone()
+        .unwrap_or_default()
+        .into_iter()
+        .map(canonical)
+        .collect();
+    for exception in joined.into_iter().map(canonical) {
+        if !exceptions.contains(&exception) {
+            exceptions.push(exception);
+        }
+    }
+    Ok(ExceptionList {
+        recorded: recorded.is_some(),
+        exceptions,
+    })
+}
+
 // ---------------------------------------------------------------------------
 // status
 
@@ -245,6 +346,14 @@ pub struct EcosystemStatus {
     pub state: State,
     /// Toolchain and package count, for the synced line.
     pub summary: String,
+    /// What the sync that wrote this closure allowed and could not vouch
+    /// for, as recorded (`inspect::exceptions`). Shown under the row and
+    /// in `--json`; never part of the state, which is about freshness.
+    pub exceptions: Vec<Exception>,
+    /// Why the exception list could not be read, when it could not. An
+    /// empty `exceptions` beside this is "unknown", not "none recorded":
+    /// the row says so whatever its state is.
+    pub exceptions_error: Option<String>,
 }
 
 impl EcosystemStatus {
@@ -281,13 +390,33 @@ pub fn status(platform: Platform, dir: &Path) -> io::Result<Vec<EcosystemStatus>
                 ecosystem: ecosystem.into(),
                 state: State::NotSynced,
                 summary: String::new(),
+                exceptions: Vec::new(),
+                exceptions_error: None,
             });
             continue;
         };
+        let mut state = locked_closure_state(platform, dir, closure)?;
+        // A record whose exception list cannot be read is this row's
+        // finding, not the report's: the other ecosystems still report,
+        // and a state that already names a fix keeps it. The error is
+        // carried beside the state either way, so an empty list is never
+        // read as "no exceptions".
+        let (exceptions, exceptions_error) = match exceptions(closure) {
+            Ok(list) => (list.exceptions, None),
+            Err(error) => {
+                let error = error.to_string();
+                if state == State::Synced {
+                    state = State::Unchecked(error.clone());
+                }
+                (Vec::new(), Some(error))
+            }
+        };
         rows.push(EcosystemStatus {
             ecosystem: ecosystem.into(),
-            state: locked_closure_state(platform, dir, closure)?,
+            state,
             summary: summary(closure),
+            exceptions,
+            exceptions_error,
         });
     }
     Ok(rows)
@@ -617,6 +746,8 @@ pub fn render_status(dir: &Path, rows: &[EcosystemStatus], json: bool) -> io::Re
                     "state": row.word(),
                     "detail": detail,
                     "summary": row.summary,
+                    "exceptions": row.exceptions,
+                    "exceptions_error": row.exceptions_error,
                 })
             }).collect::<Vec<_>>(),
         });
@@ -648,9 +779,41 @@ pub fn render_status(dir: &Path, rows: &[EcosystemStatus], json: bool) -> io::Re
             State::Unchecked(why) => format!("unchecked   {why}"),
         };
         out.push_str(&format!("{:width$}  {line}\n", row.ecosystem));
+        for exception in &row.exceptions {
+            out.push_str(&printable(&format!(
+                "{:width$}    exception   {}  {}",
+                "", exception.kind, exception.subject
+            )));
+            out.push('\n');
+        }
+        // An unchecked row already printed this reason as its own.
+        if let Some(error) = &row.exceptions_error {
+            if !matches!(&row.state, State::Unchecked(why) if why == error) {
+                out.push_str(&printable(&format!(
+                    "{:width$}    exception   unreadable  {error}",
+                    ""
+                )));
+                out.push('\n');
+            }
+        }
     }
     out.push_str(&verdict(rows));
     Ok(out)
+}
+
+/// A status line as the text report prints it: control characters (an
+/// exception subject comes from the record) are escaped so a record cannot
+/// rewrite the terminal lines above it. Ordinary text prints unchanged.
+fn printable(text: &str) -> String {
+    text.chars()
+        .map(|c| {
+            if c.is_control() {
+                c.escape_debug().to_string()
+            } else {
+                c.to_string()
+            }
+        })
+        .collect()
 }
 
 /// The last line (or three) of `tog status`: what the rows add up to, and
@@ -660,7 +823,11 @@ pub fn render_status(dir: &Path, rows: &[EcosystemStatus], json: bool) -> io::Re
 fn verdict(rows: &[EcosystemStatus]) -> String {
     let synced = rows.iter().filter(|row| row.is_synced()).count();
     if synced == rows.len() {
-        return format!("\n{synced} of {} synced.\n", rows.len());
+        return format!(
+            "\n{synced} of {} synced.\n{}",
+            rows.len(),
+            exceptions_line(rows)
+        );
     }
     let mut counts: Vec<(&str, usize)> = Vec::new();
     for row in rows.iter().filter(|row| !row.is_synced()) {
@@ -677,8 +844,8 @@ fn verdict(rows: &[EcosystemStatus]) -> String {
     let mut out = format!("\n{synced} of {} synced; {listed}.\n", rows.len());
     if rows.iter().any(|row| row.word() == "unchecked") {
         out.push_str(
-            "unchecked: this closure predates the recording tog needs to compare it,\n\
-             so it is not a pass; run 'tog' once to make it checkable.\n",
+            "unchecked: this closure could not be compared (the row says why), so it\n\
+             is not a pass; run 'tog' once to rewrite it.\n",
         );
     }
     if rows.iter().any(|row| row.word() == "foreign-platform") {
@@ -688,7 +855,22 @@ fn verdict(rows: &[EcosystemStatus]) -> String {
         );
     }
     out.push_str("Exit status is 0 only when every ecosystem is synced.\n");
+    out.push_str(&exceptions_line(rows));
     out
+}
+
+/// After the verdict: how many exceptions the rows listed, and the one
+/// command that judges them. An exception is not a failure here, so the
+/// line is absent when there is none.
+fn exceptions_line(rows: &[EcosystemStatus]) -> String {
+    let total: usize = rows.iter().map(|row| row.exceptions.len()).sum();
+    if total == 0 {
+        return String::new();
+    }
+    format!(
+        "{total} policy exception(s) recorded: what a sync allowed that it cannot vouch for;\n\
+         'tog audit' says whether your policy permits them.\n"
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1430,7 +1612,7 @@ mod tests {
             json!({"go_sum_sha256": digest("go.sum"),
                    "plan": {"go_version": "1.27.0", "modules": []},
                    "resolution": {"outputs": {"go.mod": digest("go.mod"), "go.sum": digest("go.sum")},
-                                  "inputs": {}}}),
+                                  "inputs": {}, "exceptions": []}}),
         );
         let go_row = |rows: &[EcosystemStatus]| {
             rows.iter()

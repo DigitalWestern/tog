@@ -516,11 +516,11 @@ fn json_commands_report_failure_as_json_on_stderr() {
     let value: serde_json::Value = serde_json::from_slice(&out.stderr).unwrap();
     assert!(value["error"].as_str().is_some(), "{value}");
 
-    // `audit` reports a misconfigured gate itself, and keeps exit 2 so CI
-    // can tell an operator mistake from a denied build; under --json that
-    // report is a JSON object like any other failure.
+    // `audit --signed` reports a misconfigured gate itself, and keeps exit
+    // 2 so CI can tell an operator mistake from a denied build; under
+    // --json that report is a JSON object like any other failure.
     std::fs::create_dir_all(project.0.join(".tog/closures")).unwrap();
-    let out = tog(&project.0, &home.0, &["audit", "--json"]);
+    let out = tog(&project.0, &home.0, &["audit", "--signed", "--json"]);
     assert_eq!(out.status.code(), Some(2), "{}", text(&out.stderr));
     assert!(out.stdout.is_empty(), "{}", text(&out.stdout));
     let value: serde_json::Value = serde_json::from_slice(&out.stderr)
@@ -532,7 +532,7 @@ fn json_commands_report_failure_as_json_on_stderr() {
         "{value}"
     );
     // The same failure without --json is still the prose usage error.
-    let out = tog(&project.0, &home.0, &["audit"]);
+    let out = tog(&project.0, &home.0, &["audit", "--signed"]);
     assert_eq!(out.status.code(), Some(2));
     assert!(
         text(&out.stderr).starts_with("tog: error: audit: "),
@@ -2309,6 +2309,265 @@ fn synced_python_closure_with_exception(home: &Path, project: &Path, kind: &str)
     path
 }
 
+/// The solo setup: no `[signing]` table anywhere. `audit` judges the
+/// records on their contents, says on stdout and in the JSON that it did
+/// not check signatures, and still catches a denial and a tampered
+/// signature; `--signed` is the form that refuses to run this way.
+#[test]
+fn audit_without_trusted_keys_judges_records_and_says_so() {
+    let home = TempDir::boundary("cli-audit-unsigned-home");
+    let project = TempDir::boundary("cli-audit-unsigned-project");
+    let key_home = TempDir::boundary("cli-audit-unsigned-key");
+    // The fixture signs with a key whose policy table lands under
+    // `key_home`, so `home` has no [signing] table at all.
+    let closure = synced_python_closure_with_exception(&key_home.0, &project.0, "git-dependency");
+    let key = signing_key(&key_home.0);
+    assert!(!home.0.join(".tog/policy.toml").exists());
+
+    let out = tog(&project.0, &home.0, &["audit"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let stdout = text(&out.stdout);
+    assert!(stdout.contains("signatures: not checked"), "{stdout}");
+    assert!(stdout.contains("tog keygen"), "{stdout}");
+    assert!(
+        stdout.contains("python  clean         closure "),
+        "{stdout}"
+    );
+    assert!(stdout.contains("permitted: git-dependency 1"), "{stdout}");
+    assert!(!stdout.contains("trusted key"), "{stdout}");
+    assert!(
+        text(&out.stderr).contains("signatures=not-checked"),
+        "{}",
+        text(&out.stderr)
+    );
+    let out = tog(&project.0, &home.0, &["audit", "--json"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(value["passed"], true);
+    assert_eq!(value["signatures_checked"], false);
+    assert_eq!(value["policy"]["trusted"], serde_json::Value::Null);
+    assert_eq!(value["closures"][0]["verdict"], "clean");
+    assert_eq!(value["closures"][0]["signature"]["state"], "not-checked");
+    assert_eq!(
+        value["closures"][0]["signature"]["key"],
+        key.public_key().to_string()
+    );
+    assert_eq!(value["closures"][0]["permitted"]["git-dependency"], 1);
+
+    // The policy is still judged: a deny list fails the report.
+    let deny = project.0.join("deny.toml");
+    std::fs::write(&deny, "deny = [\"git-dependency\"]\n").unwrap();
+    let out = tog(
+        &project.0,
+        &home.0,
+        &["audit", "--policy", deny.to_str().unwrap()],
+    );
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    let stdout = text(&out.stdout);
+    assert!(
+        stdout.contains("python  denied        closure "),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("denied   git-dependency  left-pad"),
+        "{stdout}"
+    );
+
+    // An unsigned record is judged the same way: no key to miss.
+    let signed = std::fs::read_to_string(&closure).unwrap();
+    let mut stripped: serde_json::Value = serde_json::from_str(&signed).unwrap();
+    stripped.as_object_mut().unwrap().remove("signature");
+    std::fs::write(&closure, serde_json::to_vec_pretty(&stripped).unwrap()).unwrap();
+    let out = tog(&project.0, &home.0, &["audit", "--json"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(value["closures"][0]["verdict"], "clean");
+    assert_eq!(value["closures"][0]["signature"]["state"], "not-checked");
+    assert_eq!(
+        value["closures"][0]["signature"]["key"],
+        serde_json::Value::Null
+    );
+
+    // A signature that is present and does not verify is still tamper
+    // evidence, whoever signed: bad-signature, not evaluated, exit 1.
+    let mut edited: serde_json::Value = serde_json::from_str(&signed).unwrap();
+    edited["body"]["exceptions"] = serde_json::json!([]);
+    std::fs::write(&closure, serde_json::to_vec_pretty(&edited).unwrap()).unwrap();
+    let out = tog(&project.0, &home.0, &["audit", "--json"]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(value["closures"][0]["verdict"], "bad-signature");
+    assert_eq!(value["closures"][0]["freshness"], "not-evaluated");
+    let out = tog(&project.0, &home.0, &["audit"]);
+    let stdout = text(&out.stdout);
+    assert!(
+        stdout.contains("regenerate with 'tog' and commit"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("trusted key"), "{stdout}");
+
+    // The CI form refuses to run this way, under --json too, and before
+    // any record is read: a closure that is not even JSON gets the
+    // configuration error, not a parse error. The plain form never
+    // created a store.
+    std::fs::write(&closure, b"{ not json").unwrap();
+    let out = tog(&project.0, &home.0, &["audit", "--signed", "--json"]);
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out.stderr));
+    assert!(out.stdout.is_empty());
+    let error: serde_json::Value = serde_json::from_slice(&out.stderr).unwrap();
+    assert!(
+        error["error"]
+            .as_str()
+            .unwrap()
+            .contains("no trusted signing keys configured"),
+        "{error}"
+    );
+    let out = tog(&project.0, &home.0, &["audit", "--signed"]);
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stderr).contains("no trusted signing keys configured")
+            && !text(&out.stderr).contains("json"),
+        "{}",
+        text(&out.stderr)
+    );
+    assert!(!home.0.join("store").exists());
+}
+
+/// `status` shows what a sync allowed and could not vouch for, under the
+/// row it belongs to, with no policy and no key: the read-only place to
+/// see an exception before deciding whether to judge it.
+#[test]
+fn status_lists_the_exceptions_a_sync_recorded() {
+    let home = TempDir::boundary("cli-status-exceptions-home");
+    let project = TempDir::boundary("cli-status-exceptions-project");
+    synced_python_closure_with_exception(&home.0, &project.0, "git-dependency");
+
+    let out = tog(&project.0, &home.0, &["status"]);
+    let stdout = text(&out.stdout);
+    assert_eq!(out.status.code(), Some(0), "{stdout}{}", text(&out.stderr));
+    assert!(stdout.contains("python  synced"), "{stdout}");
+    // The whole line, newline included: an escaped control character in
+    // the subject must not swallow the line break after it.
+    assert!(
+        stdout.contains("python  synced      (cpython 3.12.14; 0 packages)\n          exception   git-dependency  left-pad\n"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("1 of 1 synced."), "{stdout}");
+    assert!(
+        stdout.contains("1 policy exception(s) recorded") && stdout.contains("'tog audit'"),
+        "{stdout}"
+    );
+
+    let out = tog(&project.0, &home.0, &["status", "--json"]);
+    assert_eq!(out.status.code(), Some(0));
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(value["synced"], true);
+    assert_eq!(
+        value["ecosystems"][0]["exceptions"],
+        serde_json::json!([{
+            "kind": "git-dependency",
+            "subject": "left-pad",
+            "detail": "git+https://example.invalid/left-pad",
+        }])
+    );
+
+    // A subject that carries control characters (a record is data from a
+    // sync, and a resolution record is data from a tool) is escaped on
+    // the text line, so it cannot forge a row or recolor the terminal,
+    // and the row after it still starts on its own line. JSON carries the
+    // subject as it was recorded.
+    let closure = project.0.join(".tog/closures/python.json");
+    let mut record: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&closure).unwrap()).unwrap();
+    record["body"]["exceptions"][0]["subject"] =
+        serde_json::json!("left-pad\npython  synced\r\u{1b}[31m");
+    std::fs::write(&closure, serde_json::to_vec_pretty(&record).unwrap()).unwrap();
+    let out = tog(&project.0, &home.0, &["status"]);
+    let stdout = text(&out.stdout);
+    assert_eq!(out.status.code(), Some(0), "{stdout}{}", text(&out.stderr));
+    assert!(
+        stdout.contains("          exception   git-dependency  left-pad\\npython  synced\\r\\u{1b}[31m\n\n1 of 1 synced.\n"),
+        "{stdout}"
+    );
+    assert_eq!(
+        stdout
+            .lines()
+            .filter(|line| line.starts_with("python  synced"))
+            .count(),
+        1,
+        "{stdout}"
+    );
+    let out = tog(&project.0, &home.0, &["status", "--json"]);
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(
+        value["ecosystems"][0]["exceptions"][0]["subject"],
+        "left-pad\npython  synced\r\u{1b}[31m"
+    );
+
+    // A joined resolution record's exceptions are listed even when the
+    // closure has no top-level list of its own.
+    record["body"].as_object_mut().unwrap().remove("exceptions");
+    record["body"]["resolution"] = serde_json::json!({
+        "exceptions": [{"kind": "unrecorded-resolution", "subject": "uv.lock", "detail": "no door"}]
+    });
+    std::fs::write(&closure, serde_json::to_vec_pretty(&record).unwrap()).unwrap();
+    let out = tog(&project.0, &home.0, &["status", "--json"]);
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(
+        value["ecosystems"][0]["exceptions"][0]["kind"],
+        "unrecorded-resolution"
+    );
+
+    // An exception list that cannot be read is this row's finding, not the
+    // whole report's: the row was synced on every other check, so it is
+    // `unchecked` with the reason, and the ecosystem beside it still
+    // reports. A row that already names a fix keeps it.
+    record["body"].as_object_mut().unwrap().remove("resolution");
+    record["body"]["exceptions"] = serde_json::json!("nope");
+    std::fs::write(&closure, serde_json::to_vec_pretty(&record).unwrap()).unwrap();
+    std::fs::write(project.0.join("package.json"), "{}\n").unwrap();
+    let out = tog(&project.0, &home.0, &["status"]);
+    let stdout = text(&out.stdout);
+    assert_eq!(out.status.code(), Some(1), "{stdout}{}", text(&out.stderr));
+    assert!(
+        stdout.contains("python  unchecked   ") && stdout.contains("malformed exception record"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("node    not synced"), "{stdout}");
+    assert!(
+        stdout.contains("0 of 2 synced; 1 unchecked, 1 not-synced."),
+        "{stdout}"
+    );
+    // The unchecked row carries the reason itself: no second line for it.
+    assert!(!stdout.contains("exception   unreadable"), "{stdout}");
+    // Under a state that keeps its own fix, the read error is still
+    // reported, beside the state: an empty list is not "none recorded".
+    std::fs::remove_file(project.0.join(".venv")).unwrap();
+    let out = tog(&project.0, &home.0, &["status"]);
+    let stdout = text(&out.stdout);
+    assert!(stdout.contains("python  missing     "), "{stdout}");
+    assert!(
+        stdout.contains("          exception   unreadable  ")
+            && stdout.contains("malformed exception record"),
+        "{stdout}"
+    );
+    let out = tog(&project.0, &home.0, &["status", "--json"]);
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(value["ecosystems"][0]["state"], "projection-missing");
+    assert_eq!(value["ecosystems"][0]["exceptions"], serde_json::json!([]));
+    assert!(
+        value["ecosystems"][0]["exceptions_error"]
+            .as_str()
+            .unwrap()
+            .contains("malformed exception record"),
+        "{value}"
+    );
+    assert_eq!(
+        value["ecosystems"][1]["exceptions_error"],
+        serde_json::Value::Null
+    );
+}
+
 /// `policy::load` unions silently, so the merged deny set alone cannot say
 /// which file asked for a denial. The JSON report carries the contributing
 /// policies under `policy.sources`, in merge order, so a CI log shows
@@ -2656,9 +2915,18 @@ fn audit_is_an_offline_admission_gate_over_recorded_exceptions() {
     let home = TempDir::boundary("cli-audit-home");
     let project = TempDir::boundary("cli-audit-project");
 
-    // No trusted set in the machine policy: the gate is not configured,
-    // which is an operator mistake (exit 2), before any record is read.
+    // No trusted set in the machine policy: a plain audit runs anyway
+    // (nothing is synced yet, so it says so); the CI form, --signed, is
+    // the one that refuses an unconfigured gate (exit 2) before any
+    // record is read.
     let out = tog(&project.0, &home.0, &["audit"]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stderr).contains("nothing synced"),
+        "{}",
+        text(&out.stderr)
+    );
+    let out = tog(&project.0, &home.0, &["audit", "--signed"]);
     assert_eq!(out.status.code(), Some(2), "{}", text(&out.stderr));
     assert!(
         text(&out.stderr).contains("no trusted signing keys configured")
@@ -2673,7 +2941,7 @@ fn audit_is_an_offline_admission_gate_over_recorded_exceptions() {
     let trusting = std::fs::read_to_string(&machine_policy).unwrap();
     std::fs::write(&machine_policy, "deny = []\n").unwrap();
     std::fs::write(project.0.join(".tog/policy.toml"), &trusting).unwrap();
-    let out = tog(&project.0, &home.0, &["audit"]);
+    let out = tog(&project.0, &home.0, &["audit", "--signed"]);
     assert_eq!(out.status.code(), Some(2), "{}", text(&out.stderr));
     std::fs::remove_file(project.0.join(".tog/policy.toml")).unwrap();
     std::fs::write(&machine_policy, &trusting).unwrap();

@@ -12,7 +12,7 @@ file 2013 src/tailors/elixir/mod.rs
 file 1777 src/tailors/node/lock_import/pnpm.rs
 file 1673 src/tailors/node/realize.rs
 fn 176 src/comforter/toolchain.rs::resolve
-fn 167 src/commands/audit.rs::render
+fn 163 src/commands/audit.rs::render
 fn 174 src/commands/mod.rs::dispatch
 fn 191 src/commands/x.rs::clean
 fn 166 src/kernel/archive.rs::read_entries

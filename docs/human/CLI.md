@@ -101,9 +101,9 @@ the program's status through. Which files tog reads per ecosystem:
   and a failure is one JSON object on stderr: `{"error":"<message>"}`.
   That holds for every failure the command itself reports, whatever its
   exit status: `audit --json` still exits 2 for a misconfigured gate (an
-  unreadable `--policy` file, no trusted set at machine scope), so CI can
-  tell an operator mistake from a denied build, and still writes the JSON
-  object rather than prose. Only an argv error is exempt — it is prose at
+  unreadable `--policy` file, or `--signed` with no trusted set at machine
+  scope), so CI can tell an operator mistake from a denied build, and
+  still writes the JSON object rather than prose. Only an argv error is exempt — it is prose at
   exit 2, because argv was wrong before the command that promised JSON
   ever started. `status`, `ls`, `audit`, `doctor` and `plan` take
   `--json`; `plan` prints JSON either way.
@@ -545,9 +545,24 @@ pass: it is reported under its own word, `--json` reports `"state":
 other not-synced state. Offline, read-only, exit 0 only when every detected
 ecosystem is `synced`, so CI can use it as a "did you commit the lock" gate.
 
-**audit** is the CI admission gate: it reads the closure records every sync
-committed to `.tog/closures/*.json`, authenticates each one, and judges the
-exceptions it records against the policy chain (`TOG_POLICY` or
+Under each row, `status` lists the policy exceptions that sync recorded,
+one `exception <kind> <subject>` line each: what the sync allowed and
+cannot vouch for (a failed install script, a git dependency, a SHA-1 lock
+entry), read from the closure with no policy and no key. They are not
+part of the state: a synced closure with three exceptions is `synced`,
+and the summary adds one line with the count and the command that judges
+them, `tog audit`. `--json` carries them as each ecosystem's `exceptions`
+array (`kind`, `subject`, `detail`). A record whose exception list cannot
+be read says so on its row: a row that was otherwise synced is `unchecked`
+with the reason, and a row in any other state keeps that state and adds an
+`exception unreadable <why>` line. `--json` carries the reason as
+`exceptions_error` (null when the list was read), so an empty `exceptions`
+array never stands for a list that could not be read.
+
+**audit** answers "does this environment pass my policy?": it reads the
+closure records every sync committed to `.tog/closures/*.json`,
+authenticates each one when the machine policy trusts signing keys, and
+judges the exceptions it records against the policy chain (`TOG_POLICY` or
 `~/.tog/policy.toml`, every ancestor's `.tog/policy.toml`,
 `TOG_STRICT`) merged with `--policy <file>`. Merging only tightens: a
 project or `--policy` file can add denials and drop trusted keys, never the
@@ -556,8 +571,9 @@ reverse; a `--policy` file that is missing or malformed is a usage error
 build.
 
 What a pass proves: every closure file carries a valid signature from a key
-the machine policy trusts, every ecosystem detected in the directory has its
-primary closure, each record is current for the inputs on disk and for the
+the machine policy trusts (when the policy has a `[signing]` table; see
+"Without trusted keys" below), every ecosystem detected in the directory
+has its primary closure, each record is current for the inputs on disk and for the
 committed `tog-toolchain.toml` (a missing or stale lock, or a record built
 from another bundle than the lock names, is `stale`, the same answer
 `status` gives), and no recorded exception is denied or unknown. It does not prove the signer's
@@ -603,9 +619,7 @@ written unsigned and the sync summary says so. Trust is the machine
 policy's `[signing]` table, `trusted = ["ed25519:<64 hex>", ...]`, in
 `TOG_POLICY` or `~/.tog/policy.toml`; a project `.tog/policy.toml`
 or the `--policy` file can only intersect with it, so a pull request that
-edits the record and the project policy can only remove trust. With no
-`[signing]` table at machine scope the gate is not configured: exit 2 with
-the fix in the message, before any record is judged. An explicit
+edits the record and the project policy can only remove trust. An explicit
 `trusted = []` is a decision: every signed record is `untrusted`. Rotation:
 add the new public key to the machine policy, re-sync under the new private
 key, then remove the old key; removal is revocation, and the records it
@@ -625,15 +639,38 @@ including `body.exceptions[]`. Whitespace and key order in the file do not
 matter; any change to the parsed value does. `run`, `x`, `ls`, `sbom`, and
 `status` keep accepting unsigned records: verification is the gate's job.
 
+**Without trusted keys.** With no `[signing]` table at machine scope,
+signatures are not checked: a signed record and an unsigned one are judged
+alike, on freshness and on their exceptions, and the report says so where
+it could be misread, with a `signatures: not checked` line before the
+verdicts (naming `tog keygen`, which prints the table that turns the check
+on), `"signatures_checked": false` and `"policy": {"trusted": null}` in
+the JSON, and `signature.state` `not-checked` on every closure (`key`
+present when a signature verified, without claiming anyone trusts it). A
+signature that is present and does not verify is still `bad-signature`:
+tampering is evidence whoever the signer was. The fix lines drop "under a
+trusted key". This is the solo setup, where `audit` is how a recorded
+exception gets judged at all; a CI job whose policy must trust keys passes
+`--signed`, which exits 2 with the fix in the message, before any record is
+judged, when the machine policy has no `[signing]` table, so a gate that
+lost its keys fails loudly instead of passing with signatures unchecked.
+
+**Migrating an existing gate.** Before this mode existed, plain `tog audit`
+exited 2 whenever the machine policy had no `[signing]` table. It now
+judges the records and can exit 0 with signatures unchecked. A CI job that
+relied on the old refusal has to run `tog audit --signed` to keep it;
+nothing else about the job changes.
+
 Per closure it prints the ecosystem, the record (sha256 of the closure file
 bytes), and the first of these that applies: `bad-signature` (a signature
 is present and does not verify: tampered, malformed, or an unknown
-algorithm; find out who changed it, then regenerate under a trusted key),
-`untrusted` (verifies under a key the effective set does not contain; the
-line names the key and the scopes that exclude it), `outdated` (no
-signature, or a record from before inputs, platform, or the exception
-record were written; run `tog` once under a trusted key, then
-commit. A record carrying an exception kind tog has retired is outdated
+algorithm; find out who changed it, then regenerate, under a trusted key
+when signatures are checked), `untrusted` (signatures checked: verifies
+under a key the effective set does not contain; the line names the key and
+the scopes that exclude it), `outdated` (no signature while signatures are
+checked, or a record from before inputs, platform, or the exception record
+were written; run `tog` once, under a trusted key when signatures are
+checked, then commit. A record carrying an exception kind tog has retired is outdated
 too, with the reason and the command that rewrites it (`run 'tog fmt'`
 for a `rustfmt` record, `run 'tog sync'` for the others): a closure recording
 `toolchain-component-unavailable` says `closure predates component
@@ -641,10 +678,11 @@ provisioning`), `stale` (the same inputs-changed / projection-missing /
 other-platform checks `status` makes, made per closure file from that
 file's own record), `denied` (each denied exception's kind, subject, and
 detail), `unknown` (an exception kind this binary cannot judge), or `clean`
-(permitted exceptions counted by kind). A `bad-signature`, `untrusted`, or
-unsigned record is not evaluated further: freshness is not computed and no
-exception is judged, and the line says `(not evaluated)` rather than
-claiming anything about its contents. A detected ecosystem with no
+(permitted exceptions counted by kind). A `bad-signature` record, and,
+when signatures are checked, an `untrusted` or unsigned one, is not
+evaluated further: freshness is not computed and no exception is judged,
+and the line says `(not evaluated)` rather than claiming anything about
+its contents. A detected ecosystem with no
 `.tog/closures/<ecosystem>.json` is listed as `missing` and fails the
 report; the optional `rustfmt` record is not a substitute for `cargo.json`.
 Only `clean` with nothing missing passes. The `rustfmt` closure is
@@ -669,12 +707,15 @@ are lossy UTF-8 strings. On Unix, a non-UTF-8 project path also has a
 sibling `project_bytes` field, and a non-UTF-8 closure path has a sibling
 `path_bytes` field, each containing the lowercase hex of the raw path bytes.
 Each closure has `verdict` (the word above), `signature` (`state` one of
-`trusted`, `unsigned`, `untrusted`, `bad`; `key` present when a public key
-could be decoded; `detail` the reason, or the excluding scopes), `freshness`
+`trusted`, `unsigned`, `untrusted`, `bad`, `not-checked`; `key` present when
+a public key could be decoded; `detail` the reason, or the excluding
+scopes), `freshness`
 (`current`, `stale`, `outdated`, or `not-evaluated`), `freshness_detail`,
 and `denied`, `unknown`, `permitted`, which are `null` for a record that was
 not evaluated. `missing` lists the detected ecosystems without a primary
-closure. `policy.trusted` is the effective trusted set. Under
+closure. `signatures_checked` says whether the machine policy had a
+`[signing]` table. `policy.trusted` is the effective trusted set, `null`
+when there is none. Under
 `policy.sources` it lists the policies that were merged into the one it
 judged against, in merge order. Each source has `origin`, `strict`, `deny`,
 and `trusted` (`null` when the file has no `[signing]` table, `[]` when it
@@ -694,7 +735,8 @@ Rust-Debug-quoted, so spaces and policy-like words in a filename cannot
 change the grammar. Strictness-only sources omit the path. Policy lines
 come first, then verdict lines, then `missing` lines, and `--quiet` leaves
 them in place. Exit 0 when every closure is clean and none is missing, 1
-otherwise, 2 when the gate is misconfigured. A company deny list to start
+otherwise, 2 when the gate is misconfigured (an unreadable `--policy` file,
+or `--signed` without trusted keys). A company deny list to start
 from ships as [policy-company.toml](policy-company.toml); every kind it
 names is checked against the binary's kind list by a unit test. Exception
 kind names use one separator, the hyphen (`weak-integrity`,
@@ -758,8 +800,9 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       # The machine policy: the deny list, and the public keys audit trusts.
-      # Nothing secret — a public key is a public key — but audit exits 2
-      # without a [signing] table, so the gate is never silently unconfigured.
+      # Nothing secret — a public key is a public key — but `audit --signed`
+      # below exits 2 without a [signing] table, so the gate is never
+      # silently unconfigured.
       - name: Machine policy
         run: |
           mkdir -p ~/.tog
@@ -781,8 +824,8 @@ jobs:
 
       # Every closure signed by a trusted key, current for the inputs on
       # disk and tog-toolchain.toml, no denied or unknown exception. Exit 1 is a denied build,
-      # exit 2 an operator mistake (missing or malformed policy).
-      - run: tog audit
+      # exit 2 an operator mistake (missing or malformed policy, no trusted keys).
+      - run: tog audit --signed
 
       - run: tog sbom -o sbom.json
       - uses: actions/upload-artifact@v4

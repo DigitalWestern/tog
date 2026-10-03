@@ -603,38 +603,27 @@ fn exception_count(project: &ProjectRoot) -> usize {
 }
 
 fn print_exception_summary(project: &ProjectRoot) -> io::Result<()> {
-    let total = exception_count(project);
-    match exception_summary(total, policy::signing_configured()) {
-        Some((message, Some(next))) => crate::kernel::ui::warning_next(&message, next),
-        Some((message, None)) => crate::kernel::ui::note(&message),
-        None => {}
+    if let Some((message, next)) = exception_summary(exception_count(project)) {
+        crate::kernel::ui::warning_next(&message, next);
     }
     Ok(())
 }
 
-/// A count and where to read it. The line this replaces advised `tog
-/// --strict`, which does not refuse the recorded exceptions: it fails the
-/// sync that recorded them, undoing the work that just finished.
+/// A count and the command that judges it. The line this replaces advised
+/// `tog --strict`, which does not refuse the recorded exceptions: it fails
+/// the sync that recorded them, undoing the work that just finished.
 ///
-/// It is a warning with `tog audit` on its `next:` line only where an audit
-/// gate is configured (a `[signing]` table with trusted keys): `audit`
-/// refuses to run without one, and unsigned closures are not judged, so
-/// without a gate there is nothing to type and the count is progress.
-/// `next:`, not `fix:`: the audit says whether an exception matters under
-/// the policy, and the exception stays recorded either way.
-fn exception_summary(total: usize, gate: bool) -> Option<(String, Option<&'static str>)> {
+/// `tog audit` is the `next:` line whether or not a `[signing]` table is
+/// configured: without one it judges the exceptions against the policy and
+/// says that signatures were not checked. `next:`, not `fix:`: the audit
+/// says whether an exception matters under the policy, and the exception
+/// stays recorded either way.
+fn exception_summary(total: usize) -> Option<(String, &'static str)> {
     (total > 0).then(|| {
-        let message = format!("{total} policy exception(s) recorded in .tog/closures/*.json");
-        if gate {
-            (message, Some("tog audit"))
-        } else {
-            (
-                format!(
-                    "{message}; a policy with [signing] trusted keys makes 'tog audit' judge them"
-                ),
-                None,
-            )
-        }
+        (
+            format!("{total} policy exception(s) recorded in .tog/closures/*.json"),
+            "tog audit",
+        )
     })
 }
 
@@ -796,18 +785,15 @@ mod tests {
     /// the sync that recorded them. The summary must not advise it.
     #[test]
     fn the_exception_summary_counts_and_points_at_a_read_command() {
-        assert_eq!(exception_summary(0, true), None);
-        assert_eq!(exception_summary(0, false), None);
-        let (line, next) = exception_summary(3, true).unwrap();
+        assert_eq!(exception_summary(0), None);
+        let (line, next) = exception_summary(3).unwrap();
         assert!(line.starts_with("3 policy exception(s) recorded"), "{line}");
         assert!(line.contains(".tog/closures/*.json"), "{line}");
-        assert_eq!(next, Some("tog audit"));
+        // `tog audit` runs with or without trusted keys now, so the count
+        // always has a command to type.
+        assert_eq!(next, "tog audit");
         assert!(!line.contains("--strict"), "{line}");
-        // Without a gate `tog audit` refuses to run, so there is nothing to
-        // type: the count is progress and names what would change that.
-        let (line, next) = exception_summary(3, false).unwrap();
-        assert_eq!(next, None);
-        assert!(line.contains("[signing]"), "{line}");
+        assert!(!line.contains("[signing]"), "{line}");
     }
 
     /// Closures are tog's own state: sync's toolchain seeding and its
@@ -998,6 +984,8 @@ mod tests {
             ecosystem: ecosystem.into(),
             state,
             summary: String::new(),
+            exceptions: Vec::new(),
+            exceptions_error: None,
         };
         assert_eq!(
             stale_reason(&row("node", State::NotSynced)),

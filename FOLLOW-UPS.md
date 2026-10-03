@@ -49,11 +49,6 @@ Nothing queued; the next item comes from "Open work" below.
   until it lands. Scope: ownership and permissions on the shared path, GC
   across users, the activity lease across uids, and the trust boundary a
   shared store changes.
-- **`tog audit` without trusted keys (#144).** It exits 2 by design, so a
-  recorded policy exception has no command that judges it in the default
-  unsigned setup. Decided 2026-09-23: both an unsigned mode of `audit`
-  and exceptions in `tog status`; then the exception summary can name a
-  real fix again. Stays open until both land.
 - **An offline fixture where a sync succeeds (#147).** Every green-sync
   test downloads a toolchain and is ignored, so "bare `tog`, then the
   help" and anything else that runs after a successful sync is verified by

@@ -1967,7 +1967,7 @@ policy kind. Permissive policy records it (so `tog status` and the
 exception summary show that a lock came from outside a tog door) and
 continues. `docs/human/policy-company.toml` denies it, beside
 `unconfined-resolution`, with a comment. A company that uses `tog audit`
-already has machine `[signing]` keys (audit exits 2 without them), and
+already has machine `[signing]` keys (`audit --signed` exits 2 without them), and
 that is the one prerequisite. From then on a lock must come through a tog
 door on a machine whose key the gate trusts. Which machines sign is the
 team's choice, and both options below use the same verification path
