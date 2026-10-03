@@ -488,6 +488,13 @@ fn manifests_under(root: &Path) -> io::Result<Vec<PathBuf>> {
     Ok(found)
 }
 
+/// [`path_dependencies`] of `manifest`, refusing the signing key: the
+/// Cargo tailor's receipt walks a workspace's path dependencies with it.
+pub fn manifest_path_dependencies(manifest: &Path) -> io::Result<Vec<String>> {
+    let dir = manifest.parent().unwrap_or(Path::new("/"));
+    path_dependencies(manifest, &Bound::new(dir)?)
+}
+
 /// The `path` of every dependency-like entry in `manifest`: the
 /// dependency tables (also under `target.<cfg>` and `workspace`),
 /// `[patch.<source>]`, and `[replace]`. `[lib]` and `[[bin]]` paths name
@@ -556,6 +563,25 @@ pub fn cargo_confined<'a>(
     confined.wire = Some(Box::new(|wire: &Wire<'_>| wiring(wire)));
     match publish {
         CargoPublish::Project { outputs, receipt } => {
+            // A record names files inside the workspace only, so it cannot
+            // cover a path dependency outside it: the lock is published
+            // without one, and a sync records `unrecorded-resolution`.
+            let receipt = match receipt {
+                Some(_) if !confined.extra_roots.is_empty() => {
+                    let outside: Vec<String> = confined
+                        .extra_roots
+                        .iter()
+                        .map(|root| root.display().to_string())
+                        .collect();
+                    crate::kernel::ui::note(&format!(
+                        "the lock is published without a resolution record: the workspace \
+                         reads path dependencies outside it ({}), which a record cannot name",
+                        outside.join(", ")
+                    ));
+                    None
+                }
+                receipt => receipt,
+            };
             confined.outputs = outputs;
             confined.target = Target::Project { receipt };
         }
@@ -913,6 +939,56 @@ mod tests {
         symlink(temp.0.join("outside.toml"), root.join(".cargo/opt.toml")).unwrap();
         let error = configured_registries(&root).unwrap_err().to_string();
         assert!(error.contains("outside"), "{error}");
+    }
+
+    /// A project door keeps its receipt for a self-contained workspace and
+    /// drops it when the workspace reads a path dependency outside its
+    /// root, which a record cannot name.
+    #[test]
+    fn a_workspace_with_external_path_dependencies_publishes_no_receipt() {
+        let temp = TempDir::named("cargo-receipt");
+        let root = temp.0.join("ws");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("Cargo.toml"), "[package]\nname = \"ws\"\n").unwrap();
+        let confined = |root: &Path| {
+            let producer: ReceiptProducer<'static> = Box::new(|_| Ok(None));
+            let publish = || CargoPublish::Project {
+                outputs: Vec::new(),
+                receipt: Some(Box::new(|_| Ok(None))),
+            };
+            let run = CargoRun {
+                rust_obj: Path::new("/nonexistent/rust"),
+                lock_root: root,
+                args: &["generate-lockfile"],
+                publish: publish(),
+            };
+            let spec = cargo_confined(
+                &run,
+                CargoPublish::Project {
+                    outputs: Vec::new(),
+                    receipt: Some(producer),
+                },
+                &[],
+            )
+            .unwrap();
+            matches!(spec.target, Target::Project { receipt: Some(_) })
+        };
+        assert!(
+            confined(&root),
+            "a self-contained workspace keeps its receipt"
+        );
+        std::fs::create_dir_all(temp.0.join("shared")).unwrap();
+        std::fs::write(
+            temp.0.join("shared/Cargo.toml"),
+            "[package]\nname = \"s\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"ws\"\n[dependencies]\nshared = { path = \"../shared\" }\n",
+        )
+        .unwrap();
+        assert!(!confined(&root), "an external path dependency drops it");
     }
 
     #[test]

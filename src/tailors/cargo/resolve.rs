@@ -29,18 +29,67 @@ pub(crate) fn cargo_tool(toolchain: &Selected) -> io::Result<record::Tool> {
 }
 
 /// `Tailor::resolution_outputs` for Cargo: the workspace root's
-/// `Cargo.toml` and `Cargo.lock`, and the manifest of every member its
-/// `[workspace] members` names (an edit in a member writes that member's
-/// manifest).
+/// `Cargo.toml` and `Cargo.lock`, and every manifest inside the root cargo
+/// reads to resolve it: each member `[workspace] members` names, and each
+/// path dependency (also `[patch]` and `[replace]`) of the root package and
+/// of those, transitively. A path dependency inside the workspace is an
+/// implicit member, so an edit there writes its manifest and a change to it
+/// can change resolution while `Cargo.lock` stays the same; both need it
+/// named. One outside the root is not listed (a record names files inside
+/// the workspace only): [`refuse_external_inputs`].
 pub(crate) fn resolution_outputs(root: &ProjectRoot) -> io::Result<Vec<PathBuf>> {
     let mut outputs = vec![PathBuf::from("Cargo.toml"), PathBuf::from("Cargo.lock")];
-    for member in member_dirs(root)? {
-        let manifest = member.join("Cargo.toml");
+    let real_root = std::fs::canonicalize(root.path())?;
+    let mut queue: Vec<PathBuf> = member_dirs(root)?;
+    queue.push(PathBuf::new());
+    let mut seen: Vec<PathBuf> = Vec::new();
+    while let Some(dir) = queue.pop() {
+        if seen.contains(&dir) {
+            continue;
+        }
+        seen.push(dir.clone());
+        let manifest = dir.join("Cargo.toml");
+        if !root.is_input_file(&manifest) {
+            continue;
+        }
         if !outputs.contains(&manifest) {
-            outputs.push(manifest);
+            outputs.push(manifest.clone());
+        }
+        for path in cargo_door::manifest_path_dependencies(&root.path().join(&manifest))? {
+            let Ok(found) = std::fs::canonicalize(root.path().join(&dir).join(&path)) else {
+                continue;
+            };
+            if let Ok(relative) = found.strip_prefix(&real_root) {
+                queue.push(relative.to_path_buf());
+            }
         }
     }
+    outputs[2..].sort();
     Ok(outputs)
+}
+
+/// Refuse to attest a workspace that reads path dependencies outside its
+/// root: a record names files inside the workspace only, so it could not
+/// cover them, and a change there would leave the record attesting.
+pub(crate) fn refuse_external_inputs(root: &Path) -> io::Result<()> {
+    let outside = cargo_door::path_dependency_roots(root)?;
+    if outside.is_empty() {
+        return Ok(());
+    }
+    let named: Vec<String> = outside
+        .iter()
+        .map(|dir| dir.display().to_string())
+        .collect();
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        format!(
+            "the Cargo workspace at {} reads path dependencies outside it ({}); a resolution \
+             record names files inside the workspace only, so it cannot cover them and is not \
+             written. Move them into the workspace to attest it",
+            root.display(),
+            named.join(", ")
+        ),
+    ))
 }
 
 /// `Tailor::resolution_inputs` for Cargo: the configuration cargo reads at
@@ -203,6 +252,7 @@ pub(crate) fn attest_project(
             root.display()
         )));
     }
+    refuse_external_inputs(project.path())?;
     let args = ["metadata", "--locked", "--format-version", "1"];
     let tailor = super::tailor::Cargo;
     let mut spec = crate::tailors::record_spec(&tailor, project, cargo_tool(toolchain)?, &args)?;
@@ -246,6 +296,79 @@ mod tests {
             format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\n"),
         )
         .unwrap();
+    }
+
+    /// Path dependencies inside the workspace are implicit members: their
+    /// manifests are outputs (an edit there publishes, and a change there
+    /// stales the record), found transitively from the root package and
+    /// the listed members, `[patch]` included. One outside the root is not
+    /// an output, and attesting such a workspace is refused, naming it.
+    #[test]
+    fn implicit_members_are_outputs_and_external_inputs_refuse_attest() {
+        let temp = TempDir::named("cargo-implicit");
+        let root = temp.0.join("ws");
+        let write = |relative: &str, text: &str| {
+            let path = root.join(relative);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, text).unwrap();
+        };
+        write(
+            "Cargo.toml",
+            "[package]\nname = \"root\"\n[dependencies]\ncore = { path = \"libs/core\" }\n\
+             [workspace]\nmembers = [\"app\"]\n[patch.crates-io]\nitoa = { path = \"vendor/itoa\" }\n",
+        );
+        write(
+            "app/Cargo.toml",
+            "[package]\nname = \"app\"\n[dev-dependencies]\ntesty = { path = \"../libs/testy\" }\n",
+        );
+        write(
+            "libs/core/Cargo.toml",
+            "[package]\nname = \"core\"\n[dependencies]\ndeep = { path = \"../deep\" }\n",
+        );
+        write("libs/deep/Cargo.toml", "[package]\nname = \"deep\"\n");
+        write("libs/testy/Cargo.toml", "[package]\nname = \"testy\"\n");
+        write("vendor/itoa/Cargo.toml", "[package]\nname = \"itoa\"\n");
+        write("unrelated/Cargo.toml", "[package]\nname = \"unrelated\"\n");
+        let held = ProjectRoot::open(&root).unwrap();
+        let mut outputs = resolution_outputs(&held).unwrap();
+        outputs.sort();
+        assert_eq!(
+            outputs,
+            [
+                "Cargo.lock",
+                "Cargo.toml",
+                "app/Cargo.toml",
+                "libs/core/Cargo.toml",
+                "libs/deep/Cargo.toml",
+                "libs/testy/Cargo.toml",
+                "vendor/itoa/Cargo.toml",
+            ]
+            .map(PathBuf::from)
+            .to_vec()
+        );
+        refuse_external_inputs(&root).unwrap();
+
+        // A path dependency outside the workspace.
+        fs::create_dir_all(temp.0.join("shared")).unwrap();
+        fs::write(
+            temp.0.join("shared/Cargo.toml"),
+            "[package]\nname = \"shared\"\n",
+        )
+        .unwrap();
+        write(
+            "libs/deep/Cargo.toml",
+            "[package]\nname = \"deep\"\n[dependencies]\nshared = { path = \"../../../shared\" }\n",
+        );
+        let outputs = resolution_outputs(&held).unwrap();
+        assert!(
+            outputs.iter().all(|path| !path.starts_with("..")),
+            "{outputs:?}"
+        );
+        let error = refuse_external_inputs(&root).unwrap_err().to_string();
+        assert!(
+            error.contains("shared") && error.contains("cannot cover"),
+            "{error}"
+        );
     }
 
     /// The inputs are both config spellings and every file they include,
