@@ -232,6 +232,59 @@ impl Bound {
     }
 }
 
+/// One cargo configuration file, read.
+pub struct ConfigFile {
+    /// Where it is, resolved.
+    pub real: PathBuf,
+    pub table: toml::Table,
+}
+
+/// cargo's configuration in `dir`: `.cargo/config.toml`, `.cargo/config`,
+/// and every file they include, transitively. cargo 1.98's `include` is a
+/// list of paths or `{ path, optional }` tables, each relative to the
+/// directory of the file that names it and ending in `.toml`. Each file is
+/// read through `bound`, so an include (or a symlink) that leads out of it
+/// is refused by name. An entry cargo itself would reject (not a list, not
+/// `.toml`, a missing required file) is left for cargo to report.
+pub fn config_files(dir: &Path, bound: &Bound) -> io::Result<Vec<ConfigFile>> {
+    let mut queue: Vec<PathBuf> = CONFIG_FILES
+        .iter()
+        .rev()
+        .map(|name| dir.join(name))
+        .collect();
+    let mut found: Vec<ConfigFile> = Vec::new();
+    while let Some(path) = queue.pop() {
+        let Some(real) = bound.resolve(&path)? else {
+            continue;
+        };
+        if found.iter().any(|file| file.real == real) {
+            continue;
+        }
+        let Some(text) = bound.read(&path)? else {
+            continue;
+        };
+        let table = parse_toml(&path, &text)?;
+        let base = path.parent().unwrap_or(dir).to_path_buf();
+        let entries = table
+            .get("include")
+            .and_then(|include| include.as_array())
+            .into_iter()
+            .flatten();
+        for entry in entries {
+            let named = match entry {
+                toml::Value::String(path) => Some(path.as_str()),
+                toml::Value::Table(table) => table.get("path").and_then(|path| path.as_str()),
+                _ => None,
+            };
+            if let Some(named) = named.filter(|named| named.ends_with(".toml")) {
+                queue.push(base.join(named));
+            }
+        }
+        found.push(ConfigFile { real, table });
+    }
+    Ok(found)
+}
+
 /// Before the store cargo runs on the host (`cargo locate-project` in
 /// `cwd`), check every file it reads there: the `Cargo.toml` and both
 /// config spellings in `cwd` and each ancestor, and every `Cargo.toml` of
@@ -255,14 +308,16 @@ fn host_preflight_with(cwd: &Path, keys: &[PathBuf], cargo_home: Option<&Path>) 
         .to_path_buf();
     let bound = Bound::with_keys(&repository, keys)?;
     for dir in cwd.ancestors() {
+        if dir.starts_with(&repository) {
+            bound.resolve(&dir.join("Cargo.toml"))?;
+            // Their includes too, each inside the repository.
+            config_files(dir, &bound)?;
+            continue;
+        }
         let mut files = vec![dir.join("Cargo.toml")];
         files.extend(CONFIG_FILES.iter().map(|name| dir.join(name)));
         for file in files {
-            if dir.starts_with(&repository) {
-                bound.resolve(&file)?;
-            } else {
-                bound.refuse_if_key(&file)?;
-            }
+            bound.refuse_if_key(&file)?;
         }
     }
     for manifest in manifests_under(&repository)? {
@@ -282,17 +337,14 @@ fn host_preflight_with(cwd: &Path, keys: &[PathBuf], cargo_home: Option<&Path>) 
 /// directory it runs in and its ancestors; inside the sandbox the lock root
 /// is the only one of those that holds the project's files. An unreadable
 /// or malformed file is an error: a registry it hides would keep its
-/// credential provider. Each is read through a [`Bound`] of the lock root.
+/// credential provider. Each is read through a [`Bound`] of the lock root,
+/// and the files they include are read too ([`config_files`]): a registry
+/// declared in an included file gets the forced provider like any other.
 pub fn configured_registries(lock_root: &Path) -> io::Result<Vec<String>> {
     let bound = Bound::new(lock_root)?;
     let mut names = Vec::new();
-    for file in CONFIG_FILES {
-        let path = lock_root.join(file);
-        let Some(text) = bound.read(&path)? else {
-            continue;
-        };
-        let value = parse_toml(&path, &text)?;
-        if let Some(registries) = value.get("registries").and_then(|r| r.as_table()) {
+    for file in config_files(lock_root, &bound)? {
+        if let Some(registries) = file.table.get("registries").and_then(|r| r.as_table()) {
             names.extend(registries.keys().cloned());
         }
     }
@@ -799,6 +851,68 @@ mod tests {
                 .to_string();
         assert!(error.contains("Cargo.lock is not valid TOML"), "{error}");
         assert!(!error.contains(SEED), "{error}");
+    }
+
+    /// Registries declared in included files (a path or a `{ path }`
+    /// table, nested, relative to the including file) are found, so each
+    /// gets the forced provider. An include that leads out of the lock root
+    /// is refused by name, as is one through a symlink.
+    #[test]
+    fn included_config_files_are_read_and_bounded() {
+        use std::os::unix::fs::symlink;
+        let temp = TempDir::named("cargo-includes");
+        let root = temp.0.join("ws");
+        std::fs::create_dir_all(root.join(".cargo/sub")).unwrap();
+        let write = |relative: &str, text: &str| {
+            std::fs::write(root.join(relative), text).unwrap();
+        };
+        write(
+            ".cargo/config.toml",
+            "include = [\"sub/a.toml\", { path = \"opt.toml\", optional = true }]\n\
+             [registries.top]\nindex = \"sparse+https://top.test/\"\n",
+        );
+        write(
+            ".cargo/sub/a.toml",
+            "include = [\"b.toml\"]\n[registries.evil]\nindex = \"sparse+https://evil.test/\"\n",
+        );
+        write(
+            ".cargo/sub/b.toml",
+            "[registries.deep]\nindex = \"sparse+https://deep.test/\"\n",
+        );
+        assert_eq!(
+            configured_registries(&root).unwrap(),
+            vec!["deep", "evil", "top"]
+        );
+        let bound = Bound::new(&root).unwrap();
+        let real = root.canonicalize().unwrap();
+        let files: Vec<PathBuf> = config_files(&root, &bound)
+            .unwrap()
+            .into_iter()
+            .map(|file| file.real.strip_prefix(&real).unwrap().to_path_buf())
+            .collect();
+        assert_eq!(
+            files,
+            [
+                ".cargo/config.toml",
+                ".cargo/sub/a.toml",
+                ".cargo/sub/b.toml"
+            ]
+            .map(PathBuf::from)
+            .to_vec()
+        );
+
+        // Out of the root, by path and by symlink.
+        std::fs::write(temp.0.join("outside.toml"), "[registries.x]\n").unwrap();
+        write(
+            ".cargo/sub/b.toml",
+            "include = [\"../../../outside.toml\"]\n",
+        );
+        let error = configured_registries(&root).unwrap_err().to_string();
+        assert!(error.contains("outside"), "{error}");
+        write(".cargo/sub/b.toml", "");
+        symlink(temp.0.join("outside.toml"), root.join(".cargo/opt.toml")).unwrap();
+        let error = configured_registries(&root).unwrap_err().to_string();
+        assert!(error.contains("outside"), "{error}");
     }
 
     #[test]

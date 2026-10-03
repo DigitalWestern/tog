@@ -44,9 +44,24 @@ pub(crate) fn resolution_outputs(root: &ProjectRoot) -> io::Result<Vec<PathBuf>>
 }
 
 /// `Tailor::resolution_inputs` for Cargo: the configuration cargo reads at
-/// the workspace root (its registries, source replacement, `net` settings).
-pub(crate) fn resolution_inputs(_root: &ProjectRoot) -> io::Result<Vec<PathBuf>> {
-    Ok(cargo_door::CONFIG_FILES.iter().map(PathBuf::from).collect())
+/// the workspace root (its registries, source replacement, `net` settings),
+/// with every file it includes, so an edit to an included file makes the
+/// record stale like an edit to the config itself.
+pub(crate) fn resolution_inputs(root: &ProjectRoot) -> io::Result<Vec<PathBuf>> {
+    let mut inputs: Vec<PathBuf> = cargo_door::CONFIG_FILES.iter().map(PathBuf::from).collect();
+    let bound = cargo_door::Bound::new(root.path())?;
+    let real_root = std::fs::canonicalize(root.path())?;
+    for file in cargo_door::config_files(root.path(), &bound)? {
+        let relative = file
+            .real
+            .strip_prefix(&real_root)
+            .map_err(|_| io::Error::other("a cargo config file left the bound"))?
+            .to_path_buf();
+        if !inputs.contains(&relative) {
+            inputs.push(relative);
+        }
+    }
+    Ok(inputs)
 }
 
 /// The member directories (relative to `root`) its `[workspace]` names:
@@ -231,6 +246,36 @@ mod tests {
             format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\n"),
         )
         .unwrap();
+    }
+
+    /// The inputs are both config spellings and every file they include,
+    /// so the record covers, and goes stale with, an included file.
+    #[test]
+    fn inputs_name_every_included_config_file() {
+        let temp = TempDir::named("cargo-inputs");
+        let root = temp.0.join("ws");
+        fs::create_dir_all(root.join(".cargo/sub")).unwrap();
+        fs::write(
+            root.join(".cargo/config.toml"),
+            "include = [\"sub/registries.toml\"]\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join(".cargo/sub/registries.toml"),
+            "[registries.evil]\nindex = \"sparse+https://evil.test/\"\n",
+        )
+        .unwrap();
+        let held = ProjectRoot::open(&root).unwrap();
+        assert_eq!(
+            resolution_inputs(&held).unwrap(),
+            [
+                ".cargo/config.toml",
+                ".cargo/config",
+                ".cargo/sub/registries.toml"
+            ]
+            .map(PathBuf::from)
+            .to_vec()
+        );
     }
 
     /// The outputs are the root's manifest and lock and every member's
@@ -671,11 +716,15 @@ mod tests {
              [credential-alias]\n\"cargo:token\" = [\"{}\"]\n",
             marker("registries.evil.credential-provider"),
         );
+        // The registry and its provider declared only in an included file:
+        // tog finds it there and forces its provider like any other.
+        fs::write(project.join(".cargo/evil.toml"), &string).unwrap();
         for (form, text) in [
             ("arrays", format!("{config}{providers}")),
             ("global array", global),
             ("string", string),
             ("alias", alias),
+            ("included", "include = [\"evil.toml\"]\n".to_string()),
         ] {
             fs::write(project.join(".cargo/config.toml"), &text).unwrap();
             let _ = fs::remove_file(project.join("Cargo.lock"));
