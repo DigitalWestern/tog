@@ -8,21 +8,24 @@
 # suite there. It does run on a pull request in two cases, decided by the
 # `gate` job below:
 #   - the PR changes a file listed in `gate` (tar extraction, downloads,
-#     the toolchain providers and catalogs, Cargo.lock, or the heavy
-#     suite itself). Real toolchain archives carry shapes
+#     the sandbox, the toolchain providers and catalogs, Cargo.lock, or
+#     the heavy suite itself). Real toolchain archives carry shapes
 #     no fixture had: #316 was green in ci.yml and broke 15 targets here.
 #   - the PR has the `heavy` label. Adding it starts a run, and every
 #     later push to the PR runs again until the label comes off.
+# A PR that needs neither but edits a test file holding `#[ignore]` tests
+# gets the `changed` job: the ignored tests of just those files, so an
+# edited end-to-end test never merges without having run once.
 # Weekly rather than nightly because the repository is
 # private and a nightly run of this length would use most of the Actions
 # minutes a free plan includes; change `cron` to `"0 6 * * *"` for nightly.
 #
-# Elixir is the one ecosystem this runner cannot prove: the only Linux OTP
-# in src/tailors/elixir/catalog.toml needs glibc 2.43 (Fedora 44) and
-# ubuntu-22.04 has 2.35 (docs/human/LIMITATIONS.md "Unpinned host build
-# inputs"), so its end-to-end test and acceptance step are skipped by name
-# here. Bringing it back (a Fedora 44 container job, or an OTP built on an
-# older baseline) is #300.
+# Elixir is the one ecosystem the ubuntu runner cannot prove: the only
+# Linux OTP in src/tailors/elixir/catalog.toml needs glibc 2.43 (Fedora 44)
+# and ubuntu-22.04 has 2.35 (docs/human/LIMITATIONS.md "Unpinned host build
+# inputs"), so the `e2e` job skips its end-to-end test and acceptance step
+# by name and the `elixir` job runs that test in a Fedora 44 container. An
+# OTP built on an older baseline, which would end the split, is #300.
 #
 # The last green run's date goes in STATUS.md by hand ("Last green heavy
 # run"); that date is when the end-to-end claims there were last true.
@@ -47,6 +50,7 @@ jobs:
       pull-requests: read
     outputs:
       run: ${{ steps.decide.outputs.run }}
+      tests: ${{ steps.decide.outputs.tests }}
     steps:
       - id: decide
         env:
@@ -58,12 +62,14 @@ jobs:
         run: |
           set -euo pipefail
           # The files whose changes need the heavy suite, as one regex:
-          # tar extraction and downloads, the toolchain providers that
-          # extract real archives, the catalogs that pin those archives,
-          # Cargo.lock (the decompression crates), and the heavy suite
-          # itself. The tailors also extract, but nearly every PR touches
-          # them; a tailor change that alters extraction gets the label.
-          watched='^(src/kernel/(archive|fetch)[^/]*|src/kernel/(archive|fetch)/.*|src/kernel/provider/.*|src/.*catalog\.toml|Cargo\.lock|\.github/workflows/heavy\.yml|tests/acceptance\.sh)$'
+          # tar extraction and downloads, the sandbox every build runs in,
+          # the toolchain providers that extract real archives, the
+          # catalogs that pin those archives, Cargo.lock (the decompression
+          # crates), and the heavy suite itself. The tailors also extract,
+          # but nearly every PR touches them; a tailor change that alters
+          # extraction gets the label (#325).
+          watched='^(src/kernel/(archive|fetch|sandbox)[^/]*|src/kernel/(archive|fetch|sandbox)/.*|src/kernel/provider/.*|src/.*catalog\.toml|Cargo\.lock|\.github/workflows/heavy\.yml|tests/acceptance\.sh)$'
+          tests=""
           if [ "$ACTION" = labeled ]; then
             # Some other label was added: nothing about the code changed.
             if [ "$ADDED_LABEL" = heavy ]; then run=yes; else run=no; fi
@@ -76,10 +82,21 @@ jobs:
                 --jq '.[] | .filename, (.previous_filename // empty)'); then
               echo "::warning::could not list the PR's files; running the heavy suite"
               run=yes
-            elif grep -qE "$watched" <<< "$files"; then run=yes; else run=no; fi
+            elif grep -qE "$watched" <<< "$files"; then
+              run=yes
+            else
+              run=no
+              # The test files this PR touches, as bare target names
+              # (`tests/gc.rs` is `gc`), for the `changed` job. Only names
+              # made of letters, digits and `_` pass, so nothing a PR can
+              # name reaches a shell as anything but a test target.
+              tests=$(grep -oE '^tests/[A-Za-z0-9_]+\.rs$' <<< "$files" \
+                | sed -E 's#^tests/(.*)\.rs$#\1#' | sort -u | tr '\n' ' ' || true)
+            fi
           fi
-          echo "run=$run"
+          echo "run=$run tests=$tests"
           echo "run=$run" >> "$GITHUB_OUTPUT"
+          echo "tests=$tests" >> "$GITHUB_OUTPUT"
 
   e2e:
     needs: gate
@@ -136,3 +153,115 @@ jobs:
       - name: Disk after the run
         if: ${{ always() }}
         run: df -h "$RUNNER_TEMP" && du -sh "$RUNNER_TEMP/tog"/* 2>/dev/null || true
+
+  # A PR the gate did not send to the whole suite, but which edits test
+  # files: run the `#[ignore]` tests of just those files. Without this an
+  # edited end-to-end test merges having never run, and the first to find
+  # it broken is the weekly run.
+  changed:
+    needs: gate
+    if: ${{ github.event_name == 'pull_request' && needs.gate.outputs.run == 'no' && needs.gate.outputs.tests != '' }}
+    concurrency:
+      group: heavy-changed-pr-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    runs-on: ubuntu-22.04
+    timeout-minutes: 150
+    env:
+      TOG_SANDBOX_TESTS: required
+      CHANGED: ${{ needs.gate.outputs.tests }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      # Decided before anything is installed or built: most edited test
+      # files hold no ignored test, and then the job ends here.
+      - id: pick
+        name: The edited test files that hold ignored tests
+        run: |
+          set -euo pipefail
+          picked=""
+          for name in $CHANGED; do
+            file="tests/$name.rs"
+            # A deleted file has nothing to run.
+            if [ -f "$file" ] && grep -qE '^[[:space:]]*#\[ignore' "$file"; then
+              picked="$picked $name"
+            fi
+          done
+          echo "picked=$picked"
+          echo "picked=$picked" >> "$GITHUB_OUTPUT"
+      - name: Install the Linux sandbox and the host headers the suite needs
+        if: steps.pick.outputs.picked != ''
+        run: sudo apt-get update && sudo apt-get install -y bubblewrap zlib1g-dev
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        if: steps.pick.outputs.picked != ''
+      - name: Scratch directory on the runner disk
+        if: steps.pick.outputs.picked != ''
+        run: |
+          mkdir -p "$RUNNER_TEMP/tog/tmp"
+          echo "TMPDIR=$RUNNER_TEMP/tog/tmp" >> "$GITHUB_ENV"
+          echo "TOG_STORE=$RUNNER_TEMP/tog/store" >> "$GITHUB_ENV"
+      # Every picked file runs even after one fails, like --no-fail-fast.
+      # Elixir is skipped by name here for the reason in the header; the
+      # `elixir` job runs it when tests/elixir_e2e.rs is among the files.
+      - name: Ignored tests of the edited files
+        if: steps.pick.outputs.picked != ''
+        env:
+          PICKED: ${{ steps.pick.outputs.picked }}
+        run: |
+          set -uo pipefail
+          failed=""
+          for name in $PICKED; do
+            echo "::group::cargo test --test $name -- --ignored"
+            cargo test --locked --test "$name" -- --ignored --test-threads=1 \
+              --skip elixir_sync_sandboxed_build_and_run || failed="$failed $name"
+            echo "::endgroup::"
+          done
+          if [ -n "$failed" ]; then
+            echo "::error::ignored tests failed in:$failed"
+            exit 1
+          fi
+
+  # The Elixir end-to-end test, on the one baseline its OTP runs on (see
+  # the header). It runs whenever `e2e` does, and when a PR edits the test
+  # itself. `--privileged` is what lets bubblewrap make its namespaces
+  # inside the container.
+  elixir:
+    needs: gate
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.gate.outputs.run == 'yes' || contains(format(' {0} ', needs.gate.outputs.tests), ' elixir_e2e ')) }}
+    concurrency:
+      group: ${{ github.event_name == 'pull_request' && format('heavy-elixir-pr-{0}', github.event.pull_request.number) || 'heavy-elixir' }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+    runs-on: ubuntu-22.04
+    container:
+      image: fedora:44
+      options: --privileged
+    timeout-minutes: 90
+    steps:
+      # git first, so checkout clones rather than downloading an archive.
+      # The image is minimal: tar and the decompressors tog and the cache
+      # action call are not in it.
+      - name: Install the compiler, the sandbox and the host tools
+        run: dnf install -y gcc git tar gzip xz bzip2 unzip zstd findutils util-linux jq bubblewrap rustup
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      # rust-toolchain.toml names the toolchain; cargo installs it on
+      # first use.
+      - name: Install rustup
+        run: |
+          rustup-init -y --default-toolchain none
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: cargo build --locked
+      # A container job's steps run as root, and root can write into a
+      # read-only store object, which the test asserts nobody can. So root
+      # builds, and the test binary runs as an ordinary user with a home
+      # and a scratch directory of its own.
+      - name: Elixir end-to-end test, as an ordinary user
+        run: |
+          set -euo pipefail
+          exe=$(cargo test --locked --test elixir_e2e --no-run --message-format=json \
+            | jq -r 'select(.executable != null and .target.name == "elixir_e2e") | .executable')
+          test -x "$exe"
+          useradd --create-home tester
+          scratch="$RUNNER_TEMP/tog-elixir"
+          mkdir -p "$scratch"
+          chown tester: "$scratch"
+          runuser -u tester -- env HOME=/home/tester TMPDIR="$scratch" \
+            TOG_SANDBOX_TESTS=required "$exe" --ignored --test-threads=1

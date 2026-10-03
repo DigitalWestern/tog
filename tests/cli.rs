@@ -3403,6 +3403,8 @@ fn a_bad_signing_key_fails_every_closure_writer_before_the_store_is_touched() {
             &["sync"][..],
             &["fmt", "--eco", "rust", "--check"],
             &["build"],
+            &["run", "true"],
+            &["env"],
             &["add", "py:six", "--no-sync"],
             &["attest"],
             &["x", "py:ruff", "--version"],

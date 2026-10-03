@@ -1,20 +1,26 @@
 //! Positive control for the sandboxed builder: a well-behaved sdist (docopt,
 //! sdist-only on PyPI) must build into a wheel inside the network-denied
 //! sandbox. Heavy; run: cargo test --test sdist_build -- --ignored
+//! The store is a scratch one unless TOG_STORE names another, never the
+//! developer's own.
 
 // Tests spawn fixtures and take leases freely (see clippy.toml).
 #![allow(clippy::disallowed_methods)]
 
 use tog::kernel::platform::Platform;
-use tog::kernel::store::Store;
 use tog::kernel::types::*;
 use tog::tailors::python;
 use tog::tailors::python::build;
 
+mod common;
+
+use common::TempDir;
+
 #[test]
 #[ignore]
 fn docopt_sdist_builds_in_sandbox() {
-    let store = Store::open().expect("store");
+    let temp = TempDir::new("sdist-build");
+    let store = common::open_store(&temp);
     let activity = &store
         .activity(tog::kernel::activity::ActivityMode::Shared)
         .unwrap();

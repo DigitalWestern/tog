@@ -704,4 +704,30 @@ mod plan_tests {
             )]
         );
     }
+
+    /// `read` already refuses an object whose record file is missing, so
+    /// this guard has no way in through a real store. It stays because it
+    /// is the last check before a sweep decides what to delete: a snapshot
+    /// holding an object the index has no record for must be refused, with
+    /// the fix named, whatever let it through.
+    #[test]
+    fn an_object_the_index_has_no_record_for_is_refused_with_the_fix() {
+        let temp = TempStore::new("plan-no-record");
+        let store = temp.store();
+        let id = super::super::tests::commit(&store, "orphan", None);
+        claim(&temp, Vec::new());
+        let options = Options::keep_days(0);
+        let activity = store.activity(ActivityMode::Exclusive).unwrap();
+        let mut out = Vec::new();
+        let mut snapshot = read(&store, &activity, &options, &BTreeMap::new(), &mut out).unwrap();
+        assert!(validate(&snapshot, &options).is_ok());
+
+        snapshot.meta = crate::kernel::objmeta::index_of(Vec::new());
+        let error = validate(&snapshot, &options).err().unwrap().to_string();
+        assert!(
+            error.contains(&format!("object {id} has no usable metadata"))
+                && error.contains(&format!("tog gc --drop-object {id}")),
+            "{error}"
+        );
+    }
 }

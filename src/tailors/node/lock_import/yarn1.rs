@@ -595,14 +595,16 @@ pub fn plan_yarn(
     }
 
     let workspaces = yarn_workspace_manifests(&package, project)?;
-    let mut root_deps: Vec<RootDependency> =
-        yarn_package_dependencies(&package, &selector_to_node, &workspaces, None)?
-            .into_iter()
-            .map(|dependency| RootDependency {
-                dependency,
-                workspace: None,
-            })
-            .collect();
+    let dependencies_of = |package: &JsonValue, dir: Option<&str>, dev: bool| {
+        yarn_package_dependencies(package, &selector_to_node, &workspaces, dir, project, dev)
+    };
+    let mut root_deps: Vec<RootDependency> = dependencies_of(&package, None, true)?
+        .into_iter()
+        .map(|dependency| RootDependency {
+            dependency,
+            workspace: None,
+        })
+        .collect();
     // Yarn classic links every discovered workspace into the root, including
     // members that no other manifest mentions. Keep these as root-local links
     // so `require("member")` works from the repository root just as it does
@@ -619,23 +621,17 @@ pub fn plan_yarn(
     }
     let mut workspace_roots = Vec::new();
     for workspace in &workspaces {
-        for dependency in yarn_package_dependencies(
-            &workspace.package,
-            &selector_to_node,
-            &workspaces,
-            Some(&workspace.path),
-        )? {
+        for dependency in dependencies_of(&workspace.package, Some(&workspace.path), true)? {
             workspace_roots.push(RootDependency {
                 dependency,
                 workspace: Some(workspace.path.clone()),
             });
         }
     }
-    yarn_unused_entry(
-        &entries,
-        &nodes,
-        &[root_deps.as_slice(), workspace_roots.as_slice()].concat(),
-    )?;
+    let all_roots = [root_deps.as_slice(), workspace_roots.as_slice()].concat();
+    let local_link_deps =
+        yarn_link_dependencies(&all_roots, &workspaces, project, &dependencies_of)?;
+    yarn_unused_entry(&entries, &nodes, &all_roots, &local_link_deps)?;
     let graph = Graph {
         nodes,
         roots: root_deps,
@@ -644,7 +640,7 @@ pub fn plan_yarn(
             .iter()
             .map(|workspace| workspace.path.clone())
             .collect(),
-        local_link_deps: BTreeMap::new(),
+        local_link_deps,
     };
     build_plan(platform, graph, "yarn.lock", node_version)
 }
@@ -652,22 +648,27 @@ pub fn plan_yarn(
 /// The lock entry a manifest's direct dependency names. yarn.lock keys each
 /// entry by the `name@spec` selectors that resolved to it, so a selector
 /// with no entry means the manifest changed after the lock was written.
-/// `link:` is the one form Yarn classic never locks; it stays an
-/// unresolvable target.
+/// `link:` is the one form Yarn classic never locks: it is a symlink to a
+/// directory, read relative to the directory holding yarn.lock whichever
+/// manifest names it (Yarn's link resolver resolves against its
+/// `lockfileFolder`). It becomes the same link a pnpm `link:` does, held to
+/// the same rule that the directory is inside the project.
 fn yarn_direct_target(
     selector_to_node: &BTreeMap<String, String>,
     manifest: &str,
     field: &str,
     name: &str,
     spec: &str,
+    project: &ProjectRoot,
 ) -> io::Result<Target> {
     let selector = format!("{name}@{spec}");
-    match selector_to_node.get(&selector) {
-        Some(node) => Ok(Target::Node(node.clone())),
-        None if spec.starts_with("link:") => Ok(Target::External(format!(
-            "missing yarn selector {selector}"
+    match (selector_to_node.get(&selector), spec.strip_prefix("link:")) {
+        (Some(node), _) => Ok(Target::Node(node.clone())),
+        (None, Some("")) => Err(err(format!(
+            "{manifest} {field} {name}: link: names no directory"
         ))),
-        None => Err(crate::tailors::node::freshness::stale(
+        (None, Some(raw)) => super::pnpm::workspace_target(project, ".", raw).map(Target::Link),
+        (None, None) => Err(crate::tailors::node::freshness::stale(
             manifest,
             field,
             &crate::tailors::node::freshness::YARN,
@@ -675,18 +676,66 @@ fn yarn_direct_target(
     }
 }
 
+/// The dependencies of every directory a manifest reaches through `link:`,
+/// by link target. Yarn reads a linked directory's package.json, when it has
+/// one, and resolves its `dependencies` and `optionalDependencies` into the
+/// lock like any package's (never its `devDependencies`), so those entries
+/// are part of the graph: they are placed where Node finds them from the
+/// linked directory, and they keep their lock entries reachable. A linked
+/// manifest is held to the lock as the project's own are. A workspace
+/// member is not read here: it is an importer with roots of its own.
+fn yarn_link_dependencies(
+    roots: &[RootDependency],
+    workspaces: &[YarnWorkspace],
+    project: &ProjectRoot,
+    dependencies_of: &dyn Fn(&JsonValue, Option<&str>, bool) -> io::Result<Vec<Dependency>>,
+) -> io::Result<BTreeMap<String, Vec<Dependency>>> {
+    fn link_targets<'a>(deps: impl Iterator<Item = &'a Dependency>) -> Vec<String> {
+        deps.filter_map(|dependency| match &dependency.target {
+            Target::Link(target) => Some(target.clone()),
+            _ => None,
+        })
+        .collect()
+    }
+    let mut found = BTreeMap::<String, Vec<Dependency>>::new();
+    let mut queue = link_targets(roots.iter().map(|root| &root.dependency));
+    while let Some(target) = queue.pop() {
+        let importer = target == "." || workspaces.iter().any(|member| member.path == target);
+        if importer || found.contains_key(&target) {
+            continue;
+        }
+        let manifest = crate::tailors::node::freshness::manifest_path(&target);
+        let deps = match project.read_input_string(Path::new(&manifest))? {
+            // A linked directory without a package.json depends on nothing.
+            None => Vec::new(),
+            Some(text) => {
+                let package: JsonValue = serde_json::from_str(&text)
+                    .map_err(|error| err(format!("{manifest}: {error}")))?;
+                dependencies_of(&package, Some(&target), false)?
+            }
+        };
+        queue.extend(link_targets(deps.iter()));
+        found.insert(target, deps);
+    }
+    Ok(found)
+}
+
 /// Every lock entry is reachable from some manifest's dependencies: `yarn
 /// install` drops the ones nothing needs, so one left over means a manifest
-/// lost a dependency after the lock was written.
+/// lost a dependency after the lock was written. `linked` holds the
+/// dependencies of the directories reached through `link:`.
 fn yarn_unused_entry(
     entries: &[YarnEntry],
     nodes: &BTreeMap<String, Node>,
     roots: &[RootDependency],
+    linked: &BTreeMap<String, Vec<Dependency>>,
 ) -> io::Result<()> {
     let mut reached = BTreeSet::<String>::new();
     let mut queue: Vec<String> = roots
         .iter()
-        .filter_map(|root| match &root.dependency.target {
+        .map(|root| &root.dependency)
+        .chain(linked.values().flatten())
+        .filter_map(|dependency| match &dependency.target {
             Target::Node(key) => Some(key.clone()),
             _ => None,
         })
@@ -721,6 +770,8 @@ pub(super) fn yarn_package_dependencies(
     selector_to_node: &BTreeMap<String, String>,
     workspaces: &[YarnWorkspace],
     importer: Option<&str>,
+    project: &ProjectRoot,
+    dev: bool,
 ) -> io::Result<Vec<Dependency>> {
     let manifest = crate::tailors::node::freshness::manifest_path(importer.unwrap_or("."));
     let mut deps = BTreeMap::<String, Dependency>::new();
@@ -732,6 +783,9 @@ pub(super) fn yarn_package_dependencies(
         let Some(map) = package[field].as_object() else {
             continue;
         };
+        if field == "devDependencies" && !dev {
+            continue;
+        }
         for (name, spec) in map {
             let spec = spec.as_str().ok_or_else(|| {
                 err(format!(
@@ -748,14 +802,14 @@ pub(super) fn yarn_package_dependencies(
                         workspace.name, workspace.version
                     )));
                 } else {
-                    yarn_direct_target(selector_to_node, &manifest, field, name, spec)?
+                    yarn_direct_target(selector_to_node, &manifest, field, name, spec, project)?
                 }
             } else if spec.starts_with("workspace:") {
                 return Err(err(format!(
                     "Yarn workspace dependency {name}@{spec} has no matching workspace member"
                 )));
             } else {
-                yarn_direct_target(selector_to_node, &manifest, field, name, spec)?
+                yarn_direct_target(selector_to_node, &manifest, field, name, spec, project)?
             };
             deps.insert(
                 name.clone(),

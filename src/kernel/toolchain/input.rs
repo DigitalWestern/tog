@@ -74,10 +74,31 @@ fn first_line(bytes: &[u8]) -> Option<String> {
         .map(str::to_string)
 }
 
-/// A TOML document, or `None` when the bytes are not valid TOML.
-fn toml_document(bytes: &[u8]) -> Option<toml::Value> {
-    let text = std::str::from_utf8(bytes).ok()?;
-    toml::from_str(text).ok()
+fn malformed_file(name: &str, what: &str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, format!("{name}: {what}"))
+}
+
+/// `pyproject.toml` as a TOML document. A file that is not UTF-8 TOML is
+/// refused in the parser's words, the way `rust_toolchain_table` refuses a
+/// toolchain file: a lock must never read a broken manifest as one that
+/// asks for nothing.
+fn pyproject_document(bytes: &[u8]) -> io::Result<toml::Value> {
+    let text = std::str::from_utf8(bytes).map_err(|_| malformed("is not UTF-8"))?;
+    toml::from_str(text).map_err(|error| malformed(error.to_string().trim()))
+}
+
+/// A JSON manifest (`package.json`, `global.json`) as a document, refused
+/// in the parser's words when it is not JSON, for the same reason. The
+/// UTF-8 refusal reads as the Node tailor's own does, since this reader
+/// reaches a `package.json` first.
+fn json_document(bytes: &[u8], name: &str) -> io::Result<serde_json::Value> {
+    let text = std::str::from_utf8(bytes).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{name} is not valid UTF-8"),
+        )
+    })?;
+    serde_json::from_str(text).map_err(|error| malformed_file(name, &error.to_string()))
 }
 
 /// `.python-version`: a version like `3.12.1`. An explicit CPython prefix
@@ -99,20 +120,18 @@ pub fn read_python_version(bytes: &[u8]) -> Option<String> {
 }
 
 fn malformed(message: &str) -> io::Error {
-    io::Error::new(
-        io::ErrorKind::InvalidData,
-        format!("pyproject.toml: {message}"),
-    )
+    malformed_file("pyproject.toml", message)
 }
 
-/// `pyproject.toml`: `[project] requires-python = ">=3.12"`. A value that
-/// is present but not a string is refused, as Python's own input check
-/// refuses it, rather than recorded as absent: a lock must not read a
-/// malformed request as no request.
+/// `pyproject.toml`: `[project] requires-python = ">=3.12"`. A file that
+/// is not TOML, or a value that is present but not a string, is refused, as
+/// Python's own input check refuses it, rather than recorded as absent: a
+/// lock must not read a malformed request as no request.
 pub fn read_pyproject_requires_python(bytes: &[u8]) -> io::Result<Option<String>> {
-    let Some(value) = toml_document(bytes)
-        .as_ref()
-        .and_then(|document| document.get("project")?.get("requires-python").cloned())
+    let document = pyproject_document(bytes)?;
+    let Some(value) = document
+        .get("project")
+        .and_then(|project| project.get("requires-python").cloned())
     else {
         return Ok(None);
     };
@@ -126,14 +145,16 @@ pub fn read_pyproject_requires_python(bytes: &[u8]) -> io::Result<Option<String>
 /// table spelling `python = { version = "^3.9" }`. Any other shape is
 /// refused, as Python's own input check refuses it.
 pub fn read_pyproject_poetry_python(bytes: &[u8]) -> io::Result<Option<String>> {
-    let Some(python) = toml_document(bytes).as_ref().and_then(|document| {
+    let document = pyproject_document(bytes)?;
+    let python = || {
         document
             .get("tool")?
             .get("poetry")?
             .get("dependencies")?
             .get("python")
             .cloned()
-    }) else {
+    };
+    let Some(python) = python() else {
         return Ok(None);
     };
     match python {
@@ -155,14 +176,19 @@ pub fn read_node_version(bytes: &[u8]) -> Option<String> {
     first_line(bytes).map(|line| line.strip_prefix('v').unwrap_or(&line).to_string())
 }
 
-/// `package.json`: `{"engines": {"node": ">=24"}}`.
-pub fn read_package_json_engines_node(bytes: &[u8]) -> Option<String> {
-    let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
-    value
-        .get("engines")?
-        .get("node")?
-        .as_str()
-        .map(str::to_string)
+/// `package.json`: `{"engines": {"node": ">=24"}}`. A file that is not
+/// JSON, or an `engines.node` that is not a string, is refused rather than
+/// recorded as a manifest with no request.
+pub fn read_package_json_engines_node(bytes: &[u8]) -> io::Result<Option<String>> {
+    let value = json_document(bytes, "package.json")?;
+    match value.get("engines").and_then(|engines| engines.get("node")) {
+        None => Ok(None),
+        Some(serde_json::Value::String(text)) => Ok(Some(text.clone())),
+        Some(_) => Err(malformed_file(
+            "package.json",
+            "engines.node must be a string",
+        )),
+    }
 }
 
 /// `.ruby-version`: `3.3.0` or `ruby-3.3.0`.
@@ -193,20 +219,29 @@ pub fn read_tool_versions(bytes: &[u8], tool: &str) -> Option<String> {
     None
 }
 
-/// `global.json`: `{"sdk": {"version": "8.0.100"}}`.
-pub fn read_global_json(bytes: &[u8]) -> Option<String> {
+/// `global.json`: `{"sdk": {"version": "8.0.100"}}`. A file that is not
+/// JSON, or a field that is not a string, is refused rather than recorded
+/// as a file with no request.
+pub fn read_global_json(bytes: &[u8]) -> io::Result<Option<String>> {
     global_json_sdk_field(bytes, "version")
 }
 
 /// `global.json`: `{"sdk": {"rollForward": "disable"}}`. Recorded beside
 /// the version because it decides whether that version is exact.
-pub fn read_global_json_roll_forward(bytes: &[u8]) -> Option<String> {
+pub fn read_global_json_roll_forward(bytes: &[u8]) -> io::Result<Option<String>> {
     global_json_sdk_field(bytes, "rollForward")
 }
 
-fn global_json_sdk_field(bytes: &[u8], field: &str) -> Option<String> {
-    let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
-    value.get("sdk")?.get(field)?.as_str().map(str::to_string)
+fn global_json_sdk_field(bytes: &[u8], field: &str) -> io::Result<Option<String>> {
+    let value = json_document(bytes, "global.json")?;
+    match value.get("sdk").and_then(|sdk| sdk.get(field)) {
+        None => Ok(None),
+        Some(serde_json::Value::String(text)) => Ok(Some(text.clone())),
+        Some(_) => Err(malformed_file(
+            "global.json",
+            &format!("sdk.{field} must be a string"),
+        )),
+    }
 }
 
 /// The `[toolchain]` table of a rustup toolchain file, as a TOML table.
@@ -563,7 +598,7 @@ pub fn discover(root: &ProjectRoot, ecosystem: &str) -> io::Result<Vec<InputRow>
         ],
         "node" => vec![
             row_for(root, ".node-version", "version", read_node_version)?,
-            row_for(
+            checked_row_for(
                 root,
                 "package.json",
                 "engines.node",
@@ -590,8 +625,8 @@ pub fn discover(root: &ProjectRoot, ecosystem: &str) -> io::Result<Vec<InputRow>
             })?,
         ],
         "dotnet" => vec![
-            row_for(root, "global.json", "sdk.version", read_global_json)?,
-            row_for(
+            checked_row_for(root, "global.json", "sdk.version", read_global_json)?,
+            checked_row_for(
                 root,
                 "global.json",
                 "sdk.rollForward",
@@ -694,7 +729,6 @@ mod tests {
         assert_eq!(poetry(table), Some("^3.9".into()));
         assert_eq!(read(b"[project]\n"), None);
         assert_eq!(poetry(b"[project]\n"), None);
-        assert_eq!(read(b"not toml ["), None);
     }
 
     /// A field that is there but malformed is refused in the words Python's
@@ -714,7 +748,124 @@ mod tests {
             b"[tool.poetry.dependencies]\npython = { version = 3 }\n",
             b"[tool.poetry.dependencies]\npython = {}\n",
         ] {
-            assert!(read_pyproject_poetry_python(bytes).is_err());
+            let error = read_pyproject_poetry_python(bytes).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("pyproject.toml: [tool.poetry.dependencies].python"),
+                "{error}"
+            );
+        }
+    }
+
+    /// A manifest that is not the format its name promises is refused in
+    /// the parser's words, never read as a file that asks for nothing: a
+    /// typo in `pyproject.toml`, `package.json` or `global.json` must not
+    /// quietly change which toolchain the project gets.
+    #[test]
+    fn a_malformed_manifest_is_refused_not_absent() {
+        type Reader = fn(&[u8]) -> io::Result<Option<String>>;
+        let cases: [(Reader, &[u8], &str); 13] = [
+            (
+                read_package_json_engines_node,
+                b"{\"name\":\"\xff\"}",
+                "package.json is not valid UTF-8",
+            ),
+            (
+                read_global_json,
+                b"\xff\xfe",
+                "global.json is not valid UTF-8",
+            ),
+            (
+                read_pyproject_requires_python,
+                b"not toml [",
+                "pyproject.toml:",
+            ),
+            (
+                read_pyproject_poetry_python,
+                b"not toml [",
+                "pyproject.toml:",
+            ),
+            (
+                read_pyproject_requires_python,
+                b"\xff\xfe",
+                "pyproject.toml: is not UTF-8",
+            ),
+            (read_package_json_engines_node, b"not json", "package.json:"),
+            (read_package_json_engines_node, b"", "package.json:"),
+            (
+                read_package_json_engines_node,
+                br#"{"engines": {"node": 24}}"#,
+                "package.json: engines.node must be a string",
+            ),
+            (read_global_json, b"not json", "global.json:"),
+            (read_global_json_roll_forward, b"not json", "global.json:"),
+            (
+                read_global_json,
+                br#"{"sdk": {"version": 8}}"#,
+                "global.json: sdk.version must be a string",
+            ),
+            (
+                read_global_json_roll_forward,
+                br#"{"sdk": {"rollForward": false}}"#,
+                "global.json: sdk.rollForward must be a string",
+            ),
+            (
+                read_global_json,
+                b"{\"sdk\": {\"version\": \"8.0.100\"}",
+                "global.json:",
+            ),
+        ];
+        for (read, bytes, words) in cases {
+            let error = read(bytes).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{error}");
+            assert!(error.to_string().contains(words), "{error}");
+        }
+    }
+
+    /// The refusal reaches discovery: a broken manifest stops it, for each
+    /// ecosystem whose request lives in one, and the same file made valid
+    /// is read again.
+    #[test]
+    fn discovery_stops_at_a_malformed_manifest() {
+        for (ecosystem, file, broken, valid, row, value) in [
+            (
+                "python",
+                "pyproject.toml",
+                "[project\nrequires-python = \">=3.12\"\n",
+                "[project]\nrequires-python = \">=3.12\"\n",
+                1,
+                ">=3.12",
+            ),
+            (
+                "node",
+                "package.json",
+                "{\"engines\": {\"node\": \">=24\"},}",
+                "{\"engines\": {\"node\": \">=24\"}}",
+                1,
+                ">=24",
+            ),
+            (
+                "dotnet",
+                "global.json",
+                "{\"sdk\": {\"version\": \"8.0.100\",}}",
+                "{\"sdk\": {\"version\": \"8.0.100\"}}",
+                0,
+                "8.0.100",
+            ),
+        ] {
+            let (temp, root) = project();
+            let path = temp.0.join("proj").join(file);
+            std::fs::write(&path, broken).unwrap();
+            let error = discover(&root, ecosystem).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{error}");
+            assert!(
+                error.to_string().starts_with(&format!("{file}: ")),
+                "{error}"
+            );
+            std::fs::write(&path, valid).unwrap();
+            let rows = discover(&root, ecosystem).unwrap();
+            assert_eq!(rows[row].value.as_deref(), Some(value), "{ecosystem}");
         }
     }
 
@@ -728,12 +879,11 @@ mod tests {
     #[test]
     fn node_engines_reader_finds_the_range() {
         let bytes = br#"{"name": "x", "engines": {"node": ">=24.20.0"}}"#;
-        assert_eq!(
-            read_package_json_engines_node(bytes),
-            Some(">=24.20.0".into())
-        );
-        assert_eq!(read_package_json_engines_node(b"{}"), None);
-        assert_eq!(read_package_json_engines_node(b"not json"), None);
+        let read = |bytes: &[u8]| read_package_json_engines_node(bytes).unwrap();
+        assert_eq!(read(bytes), Some(">=24.20.0".into()));
+        assert_eq!(read(b"{}"), None);
+        // The legacy array spelling states no `engines.node` field.
+        assert_eq!(read(br#"{"engines": ["node >= 0.6"]}"#), None);
     }
 
     #[test]
@@ -764,11 +914,12 @@ mod tests {
     #[test]
     fn global_json_reader_finds_sdk_version() {
         let bytes = br#"{"sdk": {"version": "8.0.100", "rollForward": "disable"}}"#;
-        assert_eq!(read_global_json(bytes), Some("8.0.100".into()));
-        assert_eq!(read_global_json_roll_forward(bytes), Some("disable".into()));
-        assert_eq!(read_global_json(b"{}"), None);
-        assert_eq!(read_global_json_roll_forward(b"{\"sdk\": {}}"), None);
-        assert_eq!(read_global_json(b"not json"), None);
+        let version = |bytes: &[u8]| read_global_json(bytes).unwrap();
+        let roll_forward = |bytes: &[u8]| read_global_json_roll_forward(bytes).unwrap();
+        assert_eq!(version(bytes), Some("8.0.100".into()));
+        assert_eq!(roll_forward(bytes), Some("disable".into()));
+        assert_eq!(version(b"{}"), None);
+        assert_eq!(roll_forward(b"{\"sdk\": {}}"), None);
     }
 
     #[test]

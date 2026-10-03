@@ -8,7 +8,9 @@
 use std::cmp::Ordering;
 use std::io;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// Equality is PEP 440's, the same answer `Ord` gives: `1.0 == 1.0.0` and
+/// `1.0A1 == 1.0a1`. The spelling in `raw` is not part of it.
+#[derive(Clone, Debug)]
 pub struct Version {
     raw: String,
     epoch: u64,
@@ -226,6 +228,14 @@ impl PartialOrd for Version {
         Some(self.cmp(other))
     }
 }
+
+impl PartialEq for Version {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == Ordering::Equal
+    }
+}
+
+impl Eq for Version {}
 
 fn compare_release(left: &[u64], right: &[u64]) -> Ordering {
     let length = left.len().max(right.len());
@@ -899,6 +909,35 @@ pub fn matches_specifiers_with_candidates(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Equality and ordering give one answer, so a set or map of versions
+    /// can never hold `1.0` and `1.0.0` as two entries.
+    #[test]
+    fn equality_agrees_with_ordering() {
+        for (left, right) in [
+            ("1.0", "1.0.0"),
+            ("1", "1.0.0.0"),
+            ("1.0A1", "1.0a1"),
+            ("1.0-post1", "1.0.post1"),
+            ("0!2.1", "2.1"),
+            ("1.0+Local.1", "1.0+local.1"),
+        ] {
+            let (a, b) = (
+                Version::parse(left).unwrap(),
+                Version::parse(right).unwrap(),
+            );
+            assert_eq!(a.cmp(&b), Ordering::Equal, "{left} {right}");
+            assert_eq!(a, b, "{left} {right}");
+        }
+        for (left, right) in [("1.0", "1.0.1"), ("1.0", "1.0+local"), ("1.0", "1.0.post0")] {
+            let (a, b) = (
+                Version::parse(left).unwrap(),
+                Version::parse(right).unwrap(),
+            );
+            assert_ne!(a.cmp(&b), Ordering::Equal, "{left} {right}");
+            assert_ne!(a, b, "{left} {right}");
+        }
+    }
 
     #[test]
     fn packaging_ordering_examples() {

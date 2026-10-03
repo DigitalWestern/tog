@@ -151,6 +151,25 @@ fn install_tailor_tables(command: &cli::Command) {
     }
 }
 
+/// Whether a verb that reaches `Context::open` can rewrite a closure or run
+/// a resolution door: build, add/remove/update, x, and run and env, which
+/// sync a stale project first. Such a verb loads the signing key first: a
+/// bad key fails before the store is opened or a manifest touched, and no
+/// closure is ever written unsigned under a configured key.
+fn writes_closures(command: &cli::Command) -> bool {
+    use cli::Command::*;
+    matches!(
+        command,
+        Build { .. }
+            | Run { .. }
+            | Env { .. }
+            | Add { .. }
+            | Remove { .. }
+            | Update { .. }
+            | X { .. }
+    )
+}
+
 /// Dispatch one parsed command to the verb's file. `sync` holds `--frozen`
 /// and `--strict`; the parser has already refused them for a verb that
 /// never syncs. `--frozen` is handed to the verbs that skip lock writes.
@@ -234,14 +253,7 @@ pub fn dispatch(command: cli::Command, sync: cli::SyncFlags) -> io::Result<i32> 
             | Update { .. }
             | X { .. }
     );
-    // A verb that can rewrite a closure or run a resolution door (build,
-    // add/remove/update, x) loads the signing key first: a bad key fails
-    // before the store is opened or a manifest touched, and no closure is
-    // ever written unsigned under a configured key.
-    if matches!(
-        &command,
-        Build { .. } | Add { .. } | Remove { .. } | Update { .. } | X { .. }
-    ) {
+    if writes_closures(&command) {
         crate::comforter::init_signing()?;
     }
     let ctx = Context::open(platform, needs_maintenance)?;

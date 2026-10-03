@@ -338,7 +338,7 @@ mod tests {
     }
 
     /// Publish a fully certified object whose only dependency is `input`.
-    fn commit(store: &Store, name: &str, input: Option<&str>) -> String {
+    pub(super) fn commit(store: &Store, name: &str, input: Option<&str>) -> String {
         let identity = test_identity(name, input);
         let id = identity.object_id();
         let staged = store.stage().unwrap();
