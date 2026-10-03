@@ -326,14 +326,23 @@ pub fn configured_registries(lock_root: &Path) -> io::Result<Vec<String>> {
 /// (`../.cargo` holds `credentials.toml`). A path dependency outside that
 /// is an error naming the manifest and the path, before cargo starts.
 pub fn path_dependency_roots(lock_root: &Path) -> io::Result<Vec<PathBuf>> {
-    let home = std::env::var_os("HOME").map(PathBuf::from);
-    bounded_path_dependency_roots(lock_root, home.as_deref())
+    let host = Host {
+        home: std::env::var_os("HOME").map(PathBuf::from),
+        ceiling: None,
+    };
+    bounded_path_dependency_roots(lock_root, &host)
 }
 
-fn bounded_path_dependency_roots(
-    lock_root: &Path,
-    home: Option<&Path>,
-) -> io::Result<Vec<PathBuf>> {
+/// What of the host the path-dependency boundary depends on, passed in so
+/// a test can fix it: the home directory, and the highest directory the
+/// repository search looks at (`None`: up to `/`). A machine with a `.git`
+/// above the test's temporary directory otherwise moves the boundary.
+struct Host {
+    home: Option<PathBuf>,
+    ceiling: Option<PathBuf>,
+}
+
+fn bounded_path_dependency_roots(lock_root: &Path, host: &Host) -> io::Result<Vec<PathBuf>> {
     let lock_root = std::fs::canonicalize(lock_root)?;
     let keys = Bound::new(&lock_root)?;
     let mut manifests = manifests_under(&lock_root)?;
@@ -363,7 +372,7 @@ fn bounded_path_dependency_roots(
                 )
             };
             if boundary.is_none() {
-                boundary = Some(path_dependency_boundary(&lock_root, home).map_err(refuse)?);
+                boundary = Some(path_dependency_boundary(&lock_root, host).map_err(refuse)?);
             }
             let within = boundary.as_deref().expect("set above");
             let Ok(relative) = found.strip_prefix(within) else {
@@ -398,9 +407,14 @@ fn bounded_path_dependency_roots(
 /// monorepo shares), else `lock_root`'s parent (sibling crates). Neither
 /// may be `/` or the home directory, which would let a manifest pull in
 /// anything the user owns.
-fn path_dependency_boundary(lock_root: &Path, home: Option<&Path>) -> Result<PathBuf, String> {
+fn path_dependency_boundary(lock_root: &Path, host: &Host) -> Result<PathBuf, String> {
     let repository = lock_root
         .ancestors()
+        .take_while(|dir| {
+            host.ceiling
+                .as_ref()
+                .is_none_or(|ceiling| dir.starts_with(ceiling))
+        })
         .find(|dir| dir.join(".git").exists())
         .map(Path::to_path_buf);
     let boundary = match repository {
@@ -410,7 +424,10 @@ fn path_dependency_boundary(lock_root: &Path, home: Option<&Path>) -> Result<Pat
             .map(Path::to_path_buf)
             .ok_or_else(|| "and the workspace is at the filesystem root".to_string())?,
     };
-    let home = home.and_then(|home| std::fs::canonicalize(home).ok());
+    let home = host
+        .home
+        .as_ref()
+        .and_then(|home| std::fs::canonicalize(home).ok());
     if boundary.parent().is_none() || home.as_deref() == Some(boundary.as_path()) {
         return Err(format!(
             "and the directory that would bound it is {}",
@@ -663,7 +680,11 @@ mod tests {
             "[dependencies]\nx = { path = \"../../../elsewhere\" }\n",
         );
         let root = temp.0.canonicalize().unwrap();
-        let names: Vec<String> = path_dependency_roots(&temp.0.join("ws"))
+        let host = Host {
+            home: None,
+            ceiling: Some(root.clone()),
+        };
+        let names: Vec<String> = bounded_path_dependency_roots(&temp.0.join("ws"), &host)
             .unwrap()
             .iter()
             .map(|path| path.strip_prefix(&root).unwrap().display().to_string())
@@ -688,6 +709,13 @@ mod tests {
             format!("[package]\nname = \"ws\"\n[dependencies]\nx = {{ path = {path:?} }}\n")
         };
         write("hidden/.cargo/Cargo.toml", "[package]\nname = \"x\"\n");
+        // The repository search stops at the temporary directory, so a
+        // `.git` above it (`/tmp/.git` on some machines) changes nothing.
+        let ceiling = temp.0.canonicalize().unwrap();
+        let host = |home: Option<PathBuf>| Host {
+            home,
+            ceiling: Some(ceiling.clone()),
+        };
         let cases = [
             ("/", "outside"),
             ("../..", "outside"),
@@ -696,7 +724,7 @@ mod tests {
         ];
         for (path, why) in cases {
             write("hidden/ws/Cargo.toml", &depends_on(path));
-            let error = bounded_path_dependency_roots(&temp.0.join("hidden/ws"), None)
+            let error = bounded_path_dependency_roots(&temp.0.join("hidden/ws"), &host(None))
                 .unwrap_err()
                 .to_string();
             assert!(error.contains(why), "{path}: {error}");
@@ -708,7 +736,7 @@ mod tests {
         write("home/ws/Cargo.toml", &depends_on("../shared"));
         write("home/shared/Cargo.toml", "[package]\nname = \"x\"\n");
         let home = temp.0.join("home");
-        let error = bounded_path_dependency_roots(&home.join("ws"), Some(&home))
+        let error = bounded_path_dependency_roots(&home.join("ws"), &host(Some(home.clone())))
             .unwrap_err()
             .to_string();
         assert!(error.contains("would bound it"), "{error}");
@@ -718,7 +746,8 @@ mod tests {
         write("repo/apps/ws/Cargo.toml", &depends_on("../../libs/x"));
         write("repo/libs/x/Cargo.toml", "[package]\nname = \"x\"\n");
         let roots =
-            bounded_path_dependency_roots(&temp.0.join("repo/apps/ws"), Some(&home)).unwrap();
+            bounded_path_dependency_roots(&temp.0.join("repo/apps/ws"), &host(Some(home.clone())))
+                .unwrap();
         let expected = temp.0.join("repo/libs/x").canonicalize().unwrap();
         assert_eq!(roots, vec![expected]);
     }
