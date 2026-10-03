@@ -2406,8 +2406,11 @@ fn audit_without_trusted_keys_judges_records_and_says_so() {
     );
     assert!(!stdout.contains("trusted key"), "{stdout}");
 
-    // The CI form refuses to run this way, under --json too, and the
-    // plain form never created a store.
+    // The CI form refuses to run this way, under --json too, and before
+    // any record is read: a closure that is not even JSON gets the
+    // configuration error, not a parse error. The plain form never
+    // created a store.
+    std::fs::write(&closure, b"{ not json").unwrap();
     let out = tog(&project.0, &home.0, &["audit", "--signed", "--json"]);
     assert_eq!(out.status.code(), Some(2), "{}", text(&out.stderr));
     assert!(out.stdout.is_empty());
@@ -2418,6 +2421,14 @@ fn audit_without_trusted_keys_judges_records_and_says_so() {
             .unwrap()
             .contains("no trusted signing keys configured"),
         "{error}"
+    );
+    let out = tog(&project.0, &home.0, &["audit", "--signed"]);
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stderr).contains("no trusted signing keys configured")
+            && !text(&out.stderr).contains("json"),
+        "{}",
+        text(&out.stderr)
     );
     assert!(!home.0.join("store").exists());
 }
@@ -2459,6 +2470,65 @@ fn status_lists_the_exceptions_a_sync_recorded() {
             "detail": "git+https://example.invalid/left-pad",
         }])
     );
+
+    // A subject that carries control characters (a record is data from a
+    // sync, and a resolution record is data from a tool) is escaped on
+    // the text line, so it cannot forge a row or recolor the terminal,
+    // and the row after it still starts on its own line. JSON carries the
+    // subject as it was recorded.
+    let closure = project.0.join(".tog/closures/python.json");
+    let mut record: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&closure).unwrap()).unwrap();
+    record["body"]["exceptions"][0]["subject"] =
+        serde_json::json!("left-pad\npython  synced\r\u{1b}[31m");
+    std::fs::write(&closure, serde_json::to_vec_pretty(&record).unwrap()).unwrap();
+    let out = tog(&project.0, &home.0, &["status"]);
+    let stdout = text(&out.stdout);
+    assert_eq!(out.status.code(), Some(0), "{stdout}{}", text(&out.stderr));
+    assert!(
+        stdout.contains("          exception   git-dependency  left-pad\\npython  synced\\r\\u{1b}[31m\n\n1 of 1 synced.\n"),
+        "{stdout}"
+    );
+    assert_eq!(
+        stdout
+            .lines()
+            .filter(|line| line.starts_with("python  synced"))
+            .count(),
+        1,
+        "{stdout}"
+    );
+    let out = tog(&project.0, &home.0, &["status", "--json"]);
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(
+        value["ecosystems"][0]["exceptions"][0]["subject"],
+        "left-pad\npython  synced\r\u{1b}[31m"
+    );
+
+    // A joined resolution record's exceptions are listed even when the
+    // closure has no top-level list of its own, and a resolution record
+    // that cannot be read is this row's finding, not the whole report's.
+    let mut record = record;
+    record["body"].as_object_mut().unwrap().remove("exceptions");
+    record["body"]["resolution"] = serde_json::json!({
+        "exceptions": [{"kind": "unrecorded-resolution", "subject": "uv.lock", "detail": "no door"}]
+    });
+    std::fs::write(&closure, serde_json::to_vec_pretty(&record).unwrap()).unwrap();
+    let out = tog(&project.0, &home.0, &["status", "--json"]);
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(
+        value["ecosystems"][0]["exceptions"][0]["kind"],
+        "unrecorded-resolution"
+    );
+    record["body"]["resolution"] = serde_json::json!("broken");
+    std::fs::write(&closure, serde_json::to_vec_pretty(&record).unwrap()).unwrap();
+    let out = tog(&project.0, &home.0, &["status"]);
+    let stdout = text(&out.stdout);
+    assert_eq!(out.status.code(), Some(1), "{stdout}{}", text(&out.stderr));
+    assert!(
+        stdout.contains("python  unchecked   ") && stdout.contains("malformed resolution record"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("0 of 1 synced; 1 unchecked."), "{stdout}");
 }
 
 /// `policy::load` unions silently, so the merged deny set alone cannot say

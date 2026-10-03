@@ -596,8 +596,9 @@ the report says so, and --signed makes that a usage error (exit 2) for a
 CI job that must never run unconfigured. Per closure, the first that
 applies: bad-signature (tampered or malformed; find out who changed it),
 untrusted (signed by a key the trusted set does not contain), outdated
-(unsigned, or predates input, platform, or exception recording; run
-'tog' once under a trusted key, then commit), stale (its inputs
+(unsigned while signatures are checked, or predates input, platform, or
+exception recording; run 'tog' once, under a trusted key when signatures
+are checked, then commit), stale (its inputs
 changed since the sync, the same check 'tog status' makes), denied
 (each denied exception's kind, subject, and detail, plus a count of
 permitted ones by kind), unknown (a kind this binary cannot judge), or

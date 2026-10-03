@@ -295,27 +295,46 @@ pub fn resolution_exceptions(closure: &ClosureFile) -> io::Result<Vec<Exception>
     }
 }
 
-/// Every exception the closure carries: the recorded list, then whatever
-/// the joined resolution record adds that the list does not already name,
-/// each kind spelled the one way this binary judges and prints
-/// (`policy::canonical_kind`). `None` when the closure has no exception
-/// record at all, which `audit` treats as outdated and `status` as
-/// nothing to show.
-pub fn exceptions(closure: &ClosureFile) -> io::Result<Option<Vec<Exception>>> {
-    let Some(recorded) = recorded_exceptions(closure)? else {
-        return Ok(None);
-    };
+/// What `exceptions` found in one closure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExceptionList {
+    /// Whether the closure carries an exception record at all
+    /// (`body.exceptions`). Absence is not evidence of a clean sync:
+    /// `audit` calls such a record outdated, whatever the joined
+    /// resolution record says.
+    pub recorded: bool,
+    /// The recorded list, then whatever the joined resolution record adds
+    /// that the list does not already name, each kind spelled the one way
+    /// this binary judges and prints (`policy::canonical_kind`).
+    pub exceptions: Vec<Exception>,
+}
+
+/// Every exception the closure carries, from both places it can record one.
+/// Both are read even when the top-level list is absent, so a malformed
+/// resolution record is refused the same way whichever list is missing,
+/// and `status` still shows what the joined record says.
+pub fn exceptions(closure: &ClosureFile) -> io::Result<ExceptionList> {
+    let recorded = recorded_exceptions(closure)?;
+    let joined = resolution_exceptions(closure)?;
     let canonical = |mut exception: Exception| {
         exception.kind = policy::canonical_kind(&exception.kind).to_string();
         exception
     };
-    let mut exceptions: Vec<Exception> = recorded.into_iter().map(canonical).collect();
-    for exception in resolution_exceptions(closure)?.into_iter().map(canonical) {
+    let mut exceptions: Vec<Exception> = recorded
+        .clone()
+        .unwrap_or_default()
+        .into_iter()
+        .map(canonical)
+        .collect();
+    for exception in joined.into_iter().map(canonical) {
         if !exceptions.contains(&exception) {
             exceptions.push(exception);
         }
     }
-    Ok(Some(exceptions))
+    Ok(ExceptionList {
+        recorded: recorded.is_some(),
+        exceptions,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -371,11 +390,24 @@ pub fn status(platform: Platform, dir: &Path) -> io::Result<Vec<EcosystemStatus>
             });
             continue;
         };
+        let mut state = locked_closure_state(platform, dir, closure)?;
+        // A record whose exception list cannot be read is this row's
+        // finding, not the report's: the other ecosystems still report,
+        // and a state that already names a fix keeps it.
+        let exceptions = match exceptions(closure) {
+            Ok(list) => list.exceptions,
+            Err(error) => {
+                if state == State::Synced {
+                    state = State::Unchecked(error.to_string());
+                }
+                Vec::new()
+            }
+        };
         rows.push(EcosystemStatus {
             ecosystem: ecosystem.into(),
-            state: locked_closure_state(platform, dir, closure)?,
+            state,
             summary: summary(closure),
-            exceptions: exceptions(closure)?.unwrap_or_default(),
+            exceptions,
         });
     }
     Ok(rows)
@@ -792,8 +824,8 @@ fn verdict(rows: &[EcosystemStatus]) -> String {
     let mut out = format!("\n{synced} of {} synced; {listed}.\n", rows.len());
     if rows.iter().any(|row| row.word() == "unchecked") {
         out.push_str(
-            "unchecked: this closure predates the recording tog needs to compare it,\n\
-             so it is not a pass; run 'tog' once to make it checkable.\n",
+            "unchecked: this closure could not be compared (the row says why), so it\n\
+             is not a pass; run 'tog' once to rewrite it.\n",
         );
     }
     if rows.iter().any(|row| row.word() == "foreign-platform") {
@@ -1560,7 +1592,7 @@ mod tests {
             json!({"go_sum_sha256": digest("go.sum"),
                    "plan": {"go_version": "1.27.0", "modules": []},
                    "resolution": {"outputs": {"go.mod": digest("go.mod"), "go.sum": digest("go.sum")},
-                                  "inputs": {}}}),
+                                  "inputs": {}, "exceptions": []}}),
         );
         let go_row = |rows: &[EcosystemStatus]| {
             rows.iter()

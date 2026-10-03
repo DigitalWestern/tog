@@ -391,11 +391,13 @@ fn check_shape(closure: &ClosureFile) -> io::Result<()> {
 /// Freshness of one closure file, from its own record. `present` is what
 /// `inspect::detected` found in the directory: a closure for an ecosystem
 /// whose inputs are gone describes a project that no longer exists here.
+/// `key` is `under_key` for the mode, spliced into the fix line.
 fn freshness(
     platform: Platform,
     dir: &Path,
     closure: &ClosureFile,
     present: &[&str],
+    key: &str,
 ) -> io::Result<Freshness> {
     // A closure is judged against the inputs of the ecosystem that owns it:
     // the `rustfmt` record `tog fmt` writes belongs to a Cargo project.
@@ -411,7 +413,7 @@ fn freshness(
         // Envelopes without a platform predate the Linux port; `status`
         // cannot tell whether such a record was made on this host.
         return Ok(Freshness::Outdated(format!(
-            "closure records no platform; run '{}' once under a trusted key, then commit",
+            "closure records no platform; run '{}' once{key}, then commit",
             refresh(&closure.ecosystem)
         )));
     }
@@ -528,14 +530,15 @@ pub fn evaluate(
             verdicts.push(Verdict::not_evaluated(closure, signature));
             continue;
         }
-        let mut freshness = freshness(platform, dir, closure, present)?;
+        let mut freshness = freshness(platform, dir, closure, present, key)?;
         let mut denied = Vec::new();
         let mut unknown = Vec::new();
         let mut permitted = BTreeMap::new();
         let mut retired = None;
-        match inspect::exceptions(closure)? {
-            Some(exceptions) => {
-                for exception in exceptions {
+        let listed = inspect::exceptions(closure)?;
+        match listed.recorded {
+            true => {
+                for exception in listed.exceptions {
                     if let Some(why) = policy::retired_kind(&exception.kind) {
                         retired.get_or_insert((why, exception.kind));
                     } else if !policy::KINDS.contains(&exception.kind.as_str()) {
@@ -547,7 +550,7 @@ pub fn evaluate(
                     }
                 }
             }
-            None => {
+            false => {
                 if !matches!(freshness, Freshness::Stale(_)) {
                     freshness = Freshness::Outdated(format!(
                         "no exception record in this closure; run '{}' once{key}, then commit",

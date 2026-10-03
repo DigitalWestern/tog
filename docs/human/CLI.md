@@ -666,10 +666,11 @@ provisioning`), `stale` (the same inputs-changed / projection-missing /
 other-platform checks `status` makes, made per closure file from that
 file's own record), `denied` (each denied exception's kind, subject, and
 detail), `unknown` (an exception kind this binary cannot judge), or `clean`
-(permitted exceptions counted by kind). A `bad-signature`, `untrusted`, or
-unsigned record is not evaluated further: freshness is not computed and no
-exception is judged, and the line says `(not evaluated)` rather than
-claiming anything about its contents. A detected ecosystem with no
+(permitted exceptions counted by kind). A `bad-signature` record, and,
+when signatures are checked, an `untrusted` or unsigned one, is not
+evaluated further: freshness is not computed and no exception is judged,
+and the line says `(not evaluated)` rather than claiming anything about
+its contents. A detected ecosystem with no
 `.tog/closures/<ecosystem>.json` is listed as `missing` and fails the
 report; the optional `rustfmt` record is not a substitute for `cargo.json`.
 Only `clean` with nothing missing passes. The `rustfmt` closure is

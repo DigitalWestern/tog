@@ -142,10 +142,11 @@ deny = [
 #                                    resolve against old metadata may add
 #                                    this kind to the list above.
 
-# Closure signing. `tog audit` accepts only records signed by a key in
-# the machine policy's [signing] table; a project or --policy copy of this
-# file can only remove keys from that table, never add one, and without the
-# table at machine scope the gate is not configured (exit 2). Generate a key
+# Closure signing. With a [signing] table in the machine policy, `tog audit`
+# accepts only records signed by a key it lists; a project or --policy copy
+# of this file can only remove keys from that table, never add one. Without
+# the table, audit judges records without checking signatures and says so;
+# a CI gate runs `tog audit --signed`, which exits 2 instead. Generate a key
 # on the signing machine with `tog keygen <path>`, set
 # TOG_SIGNING_KEY=<path> where `tog` runs, and paste the table
 # it prints here:
