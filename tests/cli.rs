@@ -3396,6 +3396,50 @@ fn a_bad_signing_key_fails_every_closure_writer_before_the_store_is_touched() {
     }
 }
 
+/// A cloned Cargo project whose `.cargo/config.toml` is a symlink to the
+/// signing key: the sync refuses before the host cargo (which would echo
+/// the line it cannot parse) or anything else reads it, and no byte of the
+/// key reaches stdout or stderr.
+#[test]
+fn a_cargo_config_symlinked_to_the_signing_key_never_echoes_it() {
+    let home = TempDir::boundary("cli-cargo-key");
+    let project = TempDir::boundary("cli-cargo-key-project");
+    let key = home.0.join("keys/signing.key");
+    std::fs::create_dir_all(key.parent().unwrap()).unwrap();
+    tog::kernel::signing::generate(&key).unwrap();
+    // The secret part of the file, whatever its framing.
+    let contents = std::fs::read_to_string(&key).unwrap();
+    let seed = contents.trim().rsplit(':').next().unwrap().to_string();
+    assert!(seed.len() >= 32, "{contents}");
+    let seed = seed.as_str();
+    std::fs::write(
+        project.0.join("Cargo.toml"),
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(project.0.join(".cargo")).unwrap();
+    std::os::unix::fs::symlink(&key, project.0.join(".cargo/config.toml")).unwrap();
+    for args in [
+        &["sync"][..],
+        &["attest", "cargo"][..],
+        &["add", "--no-sync", "cargo:itoa"][..],
+        &["fmt"][..],
+    ] {
+        let out = tog_env(&project.0, &home.0, args, &[("TOG_SIGNING_KEY", &key)]);
+        let (stdout, stderr) = (text(&out.stdout), text(&out.stderr));
+        assert!(!out.status.success(), "{args:?}: {stderr}");
+        assert!(stderr.contains("is the signing key"), "{args:?}: {stderr}");
+        assert!(
+            !stdout.contains(seed) && !stderr.contains(seed),
+            "{args:?}: the key reached the output\n{stdout}\n{stderr}"
+        );
+    }
+    // Refused before anything was realized: no store object exists.
+    let objects = home.0.join("store/objects");
+    let realized = std::fs::read_dir(&objects).map_or(0, |entries| entries.count());
+    assert_eq!(realized, 0, "{} holds objects", objects.display());
+}
+
 /// `tog attest` refuses offline, before any tool or store, what it cannot
 /// sign: an ecosystem with no lock a resolution door produces, or a project
 /// with none at all.

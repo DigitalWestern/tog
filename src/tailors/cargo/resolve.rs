@@ -57,12 +57,7 @@ fn member_dirs(root: &ProjectRoot) -> io::Result<Vec<PathBuf>> {
     let Some(text) = root.read_input_string(Path::new("Cargo.toml"))? else {
         return Ok(Vec::new());
     };
-    let manifest: toml::Table = toml::from_str(&text).map_err(|error| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("{}: {error}", root.path().join("Cargo.toml").display()),
-        )
-    })?;
+    let manifest = cargo_door::parse_toml(&root.path().join("Cargo.toml"), &text)?;
     let workspace = manifest.get("workspace").and_then(|w| w.as_table());
     let list = |key: &str| -> Vec<String> {
         workspace

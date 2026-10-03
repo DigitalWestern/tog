@@ -60,6 +60,10 @@ pub fn locate_cargo_root(
     cwd: &Path,
     activity: &StoreActivity,
 ) -> io::Result<PathBuf> {
+    // The host cargo reads the project's manifests and configuration and
+    // echoes a line it cannot parse: none may lead out of the project or
+    // be the signing key.
+    crate::kernel::provider::cargo_door::host_preflight(cwd)?;
     let mut command = locate_command(rust_obj, cwd);
     ui::trace_command(&command);
     let out = supervise::local_output(&mut command, activity)
@@ -139,6 +143,9 @@ fn locate_workspace(
     activity: &StoreActivity,
     toolchain: &Selected,
 ) -> io::Result<(PathBuf, PathBuf, ProjectRoot)> {
+    // Before anything is realized: the files cargo will read are checked
+    // first (again by `locate_cargo_root`, which other callers reach).
+    crate::kernel::provider::cargo_door::host_preflight(project.path())?;
     let extras = cargo::project_extras_in(lock_root)?;
     let rust_obj = cargo::realize_toolchain(store, activity, platform, toolchain, &extras)?;
     let root = locate_cargo_root(&rust_obj, project.path(), activity)?;

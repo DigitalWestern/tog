@@ -25,6 +25,7 @@
 //!   `CARGO_NET_OFFLINE=false` undoes an inherited offline setting.
 
 use super::crates_index;
+use crate::kernel::resolve::confine;
 use crate::kernel::resolve::door::{ConfinedSpec, ReceiptProducer, Target, Wire, Wiring};
 use crate::kernel::resolve::session::Intercept;
 use crate::kernel::resolve::snapshot::PathGlob;
@@ -83,33 +84,214 @@ pub fn cargo_spec(rust_obj: &Path, lock_root: &Path, args: &[&str]) -> DelegateS
     spec
 }
 
+/// The words a TOML parse error of `name` is reported in: the position
+/// only. A parser's own message quotes the source line, and a project file
+/// can be a symlink to a secret (the signing key's `ed25519:<seed>` line),
+/// so no byte of the file is ever echoed.
+pub fn toml_refusal(name: &str, text: &str, error: &toml::de::Error) -> io::Error {
+    let at = error
+        .span()
+        .and_then(|span| text.get(..span.start))
+        .map(|before| {
+            let line = before.matches('\n').count() + 1;
+            let column = before.rsplit('\n').next().unwrap_or("").chars().count() + 1;
+            format!(" at line {line}, column {column}")
+        })
+        .unwrap_or_default();
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!("{name} is not valid TOML{at}"),
+    )
+}
+
+/// `text` (read from `path`) as a TOML table, its error from
+/// [`toml_refusal`].
+pub fn parse_toml(path: &Path, text: &str) -> io::Result<toml::Table> {
+    toml::from_str(text).map_err(|error| toml_refusal(&path.display().to_string(), text, &error))
+}
+
+/// Where tog's own reads of a project's cargo files may land, and so where
+/// the host cargo's may: under `root`, never the signing key. A project is
+/// cloned, so its `.cargo/config.toml` or `Cargo.toml` can be a symlink to
+/// any file the user can read, and cargo echoes the line it fails to parse.
+pub struct Bound {
+    root: PathBuf,
+    /// The signing key's spellings that exist, canonical.
+    keys: Vec<PathBuf>,
+}
+
+impl Bound {
+    /// Bounded by `root`, refusing the key `TOG_SIGNING_KEY` or
+    /// `~/.tog/signing.key` names.
+    pub fn new(root: &Path) -> io::Result<Bound> {
+        Bound::with_keys(root, &confine::signing_key_paths())
+    }
+
+    pub(crate) fn with_keys(root: &Path, keys: &[PathBuf]) -> io::Result<Bound> {
+        Ok(Bound {
+            root: std::fs::canonicalize(root)?,
+            keys: keys
+                .iter()
+                .filter_map(|key| std::fs::canonicalize(key).ok())
+                .collect(),
+        })
+    }
+
+    /// The file `path` names, resolved: `None` when there is none (a
+    /// dangling symlink included, which cargo reports by its name). The
+    /// signing key and anything outside the root are refused by name.
+    pub fn resolve(&self, path: &Path) -> io::Result<Option<PathBuf>> {
+        match std::fs::symlink_metadata(path) {
+            Ok(_) => {}
+            Err(error)
+                if error.kind() == io::ErrorKind::NotFound
+                    || error.raw_os_error() == Some(libc::ENOTDIR) =>
+            {
+                return Ok(None)
+            }
+            Err(error) => {
+                return Err(io::Error::new(
+                    error.kind(),
+                    format!("{}: {error}", path.display()),
+                ))
+            }
+        }
+        let Ok(real) = std::fs::canonicalize(path) else {
+            return Ok(None);
+        };
+        self.refuse_key(path, &real)?;
+        if !real.starts_with(&self.root) {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!(
+                    "{} resolves to {}, outside {}; tog does not read, or let cargo read, a \
+                     project file that leads out of the project",
+                    path.display(),
+                    real.display(),
+                    self.root.display()
+                ),
+            ));
+        }
+        Ok(Some(real))
+    }
+
+    /// Refuse `path` when it is the signing key under any name, wherever
+    /// it is (a file of the user's own, above the project).
+    pub fn refuse_if_key(&self, path: &Path) -> io::Result<()> {
+        match std::fs::canonicalize(path) {
+            Ok(real) => self.refuse_key(path, &real),
+            Err(_) => Ok(()),
+        }
+    }
+
+    fn refuse_key(&self, path: &Path, real: &Path) -> io::Result<()> {
+        if self.keys.iter().any(|key| key == real) {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!(
+                    "{} is the signing key ({}); tog does not read it as a cargo file or let \
+                     cargo read it",
+                    path.display(),
+                    real.display()
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    /// The text of the file `path` names, read after [`Self::resolve`]
+    /// allowed it, without following a symlink in its last component.
+    pub fn read(&self, path: &Path) -> io::Result<Option<String>> {
+        use std::io::Read;
+        use std::os::unix::fs::OpenOptionsExt;
+        let Some(real) = self.resolve(path)? else {
+            return Ok(None);
+        };
+        let context = |error: io::Error| {
+            io::Error::new(error.kind(), format!("read {}: {error}", path.display()))
+        };
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+            .open(&real)
+            .map_err(context)?;
+        if !file.metadata().map_err(context)?.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{} is not a regular file", path.display()),
+            ));
+        }
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes).map_err(context)?;
+        String::from_utf8(bytes).map(Some).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("{} is not valid UTF-8", path.display()),
+            )
+        })
+    }
+}
+
+/// Before the store cargo runs on the host (`cargo locate-project` in
+/// `cwd`), check every file it reads there: the `Cargo.toml` and both
+/// config spellings in `cwd` and each ancestor, and every `Cargo.toml` of
+/// the repository (a workspace loads its members). Inside the repository
+/// (the nearest ancestor holding `.git`, else `cwd`) none may lead out of
+/// it or be the signing key; above it, and cargo's own home, the files are
+/// the user's, and only the signing key is refused.
+pub fn host_preflight(cwd: &Path) -> io::Result<()> {
+    let cargo_home = std::env::var_os("CARGO_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cargo")));
+    host_preflight_with(cwd, &confine::signing_key_paths(), cargo_home.as_deref())
+}
+
+fn host_preflight_with(cwd: &Path, keys: &[PathBuf], cargo_home: Option<&Path>) -> io::Result<()> {
+    let cwd = std::fs::canonicalize(cwd)?;
+    let repository = cwd
+        .ancestors()
+        .find(|dir| dir.join(".git").exists())
+        .unwrap_or(&cwd)
+        .to_path_buf();
+    let bound = Bound::with_keys(&repository, keys)?;
+    for dir in cwd.ancestors() {
+        let mut files = vec![dir.join("Cargo.toml")];
+        files.extend(CONFIG_FILES.iter().map(|name| dir.join(name)));
+        for file in files {
+            if dir.starts_with(&repository) {
+                bound.resolve(&file)?;
+            } else {
+                bound.refuse_if_key(&file)?;
+            }
+        }
+    }
+    for manifest in manifests_under(&repository)? {
+        bound.resolve(&manifest)?;
+    }
+    if let Some(home) = cargo_home {
+        for name in ["config.toml", "config", "credentials.toml", "credentials"] {
+            bound.refuse_if_key(&home.join(name))?;
+        }
+    }
+    Ok(())
+}
+
 /// Every registry name cargo's configuration in `lock_root` defines
 /// (`[registries.<name>]`), so each gets the forced credential provider.
 /// cargo reads `.cargo/config.toml` (and the older `.cargo/config`) in the
 /// directory it runs in and its ancestors; inside the sandbox the lock root
 /// is the only one of those that holds the project's files. An unreadable
 /// or malformed file is an error: a registry it hides would keep its
-/// credential provider.
+/// credential provider. Each is read through a [`Bound`] of the lock root.
 pub fn configured_registries(lock_root: &Path) -> io::Result<Vec<String>> {
+    let bound = Bound::new(lock_root)?;
     let mut names = Vec::new();
     for file in CONFIG_FILES {
         let path = lock_root.join(file);
-        let text = match std::fs::read_to_string(&path) {
-            Ok(text) => text,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
-            Err(error) => {
-                return Err(io::Error::new(
-                    error.kind(),
-                    format!("read {}: {error}", path.display()),
-                ))
-            }
+        let Some(text) = bound.read(&path)? else {
+            continue;
         };
-        let value: toml::Table = toml::from_str(&text).map_err(|error| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("{}: {error}", path.display()),
-            )
-        })?;
+        let value = parse_toml(&path, &text)?;
         if let Some(registries) = value.get("registries").and_then(|r| r.as_table()) {
             names.extend(registries.keys().cloned());
         }
@@ -141,6 +323,7 @@ fn bounded_path_dependency_roots(
     home: Option<&Path>,
 ) -> io::Result<Vec<PathBuf>> {
     let lock_root = std::fs::canonicalize(lock_root)?;
+    let keys = Bound::new(&lock_root)?;
     let mut manifests = manifests_under(&lock_root)?;
     let mut outside: Vec<PathBuf> = Vec::new();
     let mut boundary: Option<PathBuf> = None;
@@ -148,7 +331,7 @@ fn bounded_path_dependency_roots(
         let Some(dir) = manifest.parent() else {
             continue;
         };
-        for path in path_dependencies(&manifest)? {
+        for path in path_dependencies(&manifest, &keys)? {
             let Ok(found) = std::fs::canonicalize(dir.join(&path)) else {
                 continue;
             };
@@ -242,7 +425,9 @@ fn manifests_under(root: &Path) -> io::Result<Vec<PathBuf>> {
         for entry in std::fs::read_dir(&dir)? {
             let entry = entry?;
             let name = entry.file_name();
-            let skip = name.to_string_lossy().starts_with('.') || name == "target";
+            let skip = name.to_string_lossy().starts_with('.')
+                || name == "target"
+                || name == "node_modules";
             if !skip && entry.file_type()?.is_dir() {
                 stack.push((entry.path(), depth + 1));
             }
@@ -256,7 +441,7 @@ fn manifests_under(root: &Path) -> io::Result<Vec<PathBuf>> {
 /// `[patch.<source>]`, and `[replace]`. `[lib]` and `[[bin]]` paths name
 /// files of the package itself and are not read. A manifest that does not
 /// parse is left for cargo to report.
-fn path_dependencies(manifest: &Path) -> io::Result<Vec<String>> {
+fn path_dependencies(manifest: &Path, keys: &Bound) -> io::Result<Vec<String>> {
     const TABLES: [&str; 5] = [
         "dependencies",
         "dev-dependencies",
@@ -264,6 +449,7 @@ fn path_dependencies(manifest: &Path) -> io::Result<Vec<String>> {
         "patch",
         "replace",
     ];
+    keys.refuse_if_key(manifest)?;
     let text = std::fs::read_to_string(manifest)?;
     let Ok(value) = toml::from_str::<toml::Table>(&text) else {
         return Ok(Vec::new());
@@ -497,6 +683,122 @@ mod tests {
             bounded_path_dependency_roots(&temp.0.join("repo/apps/ws"), Some(&home)).unwrap();
         let expected = temp.0.join("repo/libs/x").canonicalize().unwrap();
         assert_eq!(roots, vec![expected]);
+    }
+
+    /// A fake signing key: the line a TOML parser would quote.
+    const SEED: &str = "SEEDBYTES0123456789abcdef";
+
+    fn fake_key(dir: &Path) -> PathBuf {
+        let key = dir.join("signing.key");
+        std::fs::write(&key, format!("ed25519:{SEED}\n")).unwrap();
+        key
+    }
+
+    /// A project file that is the signing key under another name (a
+    /// symlink, inside the project or out of it), or that leads out of the
+    /// repository, is refused before the host cargo runs, by name, and no
+    /// byte of it reaches the error. Above the repository only the key is
+    /// refused: those files are the user's own.
+    #[test]
+    fn project_files_that_lead_to_the_signing_key_are_refused_without_its_bytes() {
+        use std::os::unix::fs::symlink;
+        let temp = TempDir::named("cargo-key-symlink");
+        let key = fake_key(&temp.0);
+        let repo = temp.0.join("repo");
+        let project = repo.join("app");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::create_dir_all(project.join(".cargo")).unwrap();
+        std::fs::write(project.join("Cargo.toml"), "[package]\nname = \"app\"\n").unwrap();
+        let check = |cwd: &Path| {
+            host_preflight_with(cwd, std::slice::from_ref(&key), None)
+                .map_err(|error| error.to_string())
+        };
+        check(&project).unwrap();
+
+        let refused = |error: String, why: &str| {
+            assert!(error.contains(why), "{error}");
+            assert!(
+                !error.contains(SEED),
+                "the key's bytes reached the error: {error}"
+            );
+        };
+        // The config, the manifest, a member's manifest: each a symlink to
+        // the key outside the repository.
+        for file in [
+            ".cargo/config.toml",
+            ".cargo/config",
+            "Cargo.toml",
+            "member/Cargo.toml",
+        ] {
+            let path = project.join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let kept = std::fs::read(&path).ok();
+            let _ = std::fs::remove_file(&path);
+            symlink(&key, &path).unwrap();
+            refused(check(&project).unwrap_err(), "is the signing key");
+            std::fs::remove_file(&path).unwrap();
+            if let Some(kept) = kept {
+                std::fs::write(&path, kept).unwrap();
+            }
+        }
+        // The key inside the repository is refused all the same.
+        let inner = repo.join("keys/signing.key");
+        std::fs::create_dir_all(inner.parent().unwrap()).unwrap();
+        std::fs::write(&inner, format!("ed25519:{SEED}\n")).unwrap();
+        symlink(&inner, project.join(".cargo/config.toml")).unwrap();
+        let error = host_preflight_with(&project, std::slice::from_ref(&inner), None).unwrap_err();
+        refused(error.to_string(), "is the signing key");
+        std::fs::remove_file(project.join(".cargo/config.toml")).unwrap();
+        // Any other file outside the repository is refused too.
+        let elsewhere = temp.0.join("elsewhere.toml");
+        std::fs::write(&elsewhere, format!("secret = \"{SEED}\"\n")).unwrap();
+        symlink(&elsewhere, repo.join("Cargo.toml")).unwrap();
+        refused(check(&project).unwrap_err(), "outside");
+        std::fs::remove_file(repo.join("Cargo.toml")).unwrap();
+        // Above the repository: the key is refused, another file is not.
+        std::fs::create_dir_all(temp.0.join(".cargo")).unwrap();
+        symlink(&elsewhere, temp.0.join(".cargo/config.toml")).unwrap();
+        check(&project).unwrap();
+        std::fs::remove_file(temp.0.join(".cargo/config.toml")).unwrap();
+        symlink(&key, temp.0.join(".cargo/config.toml")).unwrap();
+        refused(check(&project).unwrap_err(), "is the signing key");
+        std::fs::remove_file(temp.0.join(".cargo/config.toml")).unwrap();
+        // So is cargo's home config.
+        let home = temp.0.join("cargo-home");
+        std::fs::create_dir_all(&home).unwrap();
+        symlink(&key, home.join("config.toml")).unwrap();
+        let error = host_preflight_with(&project, std::slice::from_ref(&key), Some(&home));
+        refused(error.unwrap_err().to_string(), "is the signing key");
+    }
+
+    /// tog's own readers name a parse error's position, never its text,
+    /// and refuse a config that leads out of the lock root.
+    #[test]
+    fn toml_errors_never_echo_the_file() {
+        use std::os::unix::fs::symlink;
+        let temp = TempDir::named("cargo-toml-echo");
+        let key = fake_key(&temp.0);
+        let root = temp.0.join("ws");
+        std::fs::create_dir_all(root.join(".cargo")).unwrap();
+        // A malformed file of the project's own.
+        std::fs::write(root.join(".cargo/config.toml"), format!("ed25519:{SEED}\n")).unwrap();
+        let error = configured_registries(&root).unwrap_err().to_string();
+        assert!(error.contains("is not valid TOML at line 1"), "{error}");
+        assert!(!error.contains(SEED), "{error}");
+        // A config that is a symlink out of the lock root.
+        std::fs::remove_file(root.join(".cargo/config.toml")).unwrap();
+        symlink(&key, root.join(".cargo/config.toml")).unwrap();
+        let error = configured_registries(&root).unwrap_err().to_string();
+        assert!(error.contains("outside"), "{error}");
+        assert!(!error.contains(SEED), "{error}");
+        // The lock the plan reads.
+        let error =
+            crate::kernel::provider::crates::plan_cargo(&format!("ed25519:{SEED}\n"), "1.98.1")
+                .map(drop)
+                .unwrap_err()
+                .to_string();
+        assert!(error.contains("Cargo.lock is not valid TOML"), "{error}");
+        assert!(!error.contains(SEED), "{error}");
     }
 
     #[test]

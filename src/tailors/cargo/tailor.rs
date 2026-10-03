@@ -67,6 +67,7 @@ impl Tailor for Cargo {
         toolchain: &Selected,
         door: &mut ResolutionDoor<'_>,
     ) -> io::Result<(crate::kernel::resolve::record::ResolutionRecord, Vec<u8>)> {
+        crate::kernel::provider::cargo_door::host_preflight(project.path())?;
         let extras = cargo::project_extras_in(project)?;
         let rust_obj =
             cargo::realize_toolchain(&ctx.store, &ctx.activity, ctx.platform, toolchain, &extras)?;
@@ -359,6 +360,7 @@ impl Tailor for Cargo {
 
     /// The Cargo workspace root, as the store Cargo locates it.
     fn fmt_root(&self, ctx: &Context, cwd: &Path, toolchain: &Selected) -> io::Result<PathBuf> {
+        crate::kernel::provider::cargo_door::host_preflight(cwd)?;
         let rust_object =
             cargo::realize_runtime(&ctx.store, &ctx.activity, ctx.platform, toolchain)?;
         inputs::locate_cargo_root(&rust_object, cwd, &ctx.activity)?.canonicalize()
@@ -379,6 +381,7 @@ impl Tailor for Cargo {
         let activity = &ctx.activity;
         // The formatter rides in the same release bundle as the compiler, so
         // one selection names both, and both are realized from its rows.
+        crate::kernel::provider::cargo_door::host_preflight(cwd)?;
         let rust_object = cargo::realize_runtime(store, activity, platform, toolchain)?;
         let rustfmt_object =
             rustfmt::ensure_rustfmt(store, activity, platform, toolchain, &rust_object)?;
