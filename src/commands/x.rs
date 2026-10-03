@@ -1377,8 +1377,16 @@ fn originating_store(root: &Path) -> io::Result<Origin> {
 }
 
 /// The one store every closure under `root` references objects in, read
-/// with the same no-follow rules as the rest of the x root.
+/// with the same no-follow rules as the rest of the x root. A closure
+/// directory or file that cannot be read leaves the owner unknown, so
+/// cleanup skips that root and goes on with the rest.
 fn closure_owner(root: &Path) -> io::Result<Origin> {
+    Ok(read_closure_owner(root).unwrap_or_else(|error| {
+        Origin::Unknown(format!("its closures could not be read: {error}"))
+    }))
+}
+
+fn read_closure_owner(root: &Path) -> io::Result<Origin> {
     let closures = root.join(".tog/closures");
     let entries = match fs::read_dir(&closures) {
         Ok(entries) => entries,
@@ -2829,6 +2837,30 @@ mod tests {
         assert!(matches!(
             registration_for(&root).unwrap(),
             Registration::Unknown
+        ));
+    }
+
+    /// A closure directory cleanup cannot read leaves the owner unknown, so
+    /// that root is skipped instead of stopping the whole clean.
+    #[test]
+    fn an_unreadable_closure_directory_leaves_the_owner_unknown() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = TempDir::named("x-unreadable-owner");
+        let root = temp.0.join("py-ruff-0123456789abcdef");
+        let closures = root.join(".tog/closures");
+        fs::create_dir_all(&closures).unwrap();
+        fs::write(closures.join("python.json"), b"{}").unwrap();
+        fs::set_permissions(&closures, fs::Permissions::from_mode(0o000)).unwrap();
+        let readable = fs::read_dir(&closures).is_ok();
+        let origin = originating_store(&root);
+        fs::set_permissions(&closures, fs::Permissions::from_mode(0o755)).unwrap();
+        if readable {
+            // Running as root: permissions do not bind, nothing to prove.
+            return;
+        }
+        assert!(matches!(
+            origin.unwrap(),
+            Origin::Unknown(why) if why.contains("could not be read")
         ));
     }
 
