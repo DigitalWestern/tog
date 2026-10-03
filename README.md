@@ -217,6 +217,9 @@ also runs on a PR that changes tar extraction or downloads
 (`src/kernel/archive.rs`, `src/kernel/fetch.rs`), the toolchain
 providers or a catalog, `Cargo.lock`, or the heavy suite itself, and on
 any PR with the `heavy` label (the list is in heavy.yml's `gate` job).
+The label comes off after the first green run
+(`.github/workflows/heavy-unlabel.yml`); add it again to rerun. CI skips a
+change to only `FOLLOW-UPS.md` or `STATUS.md`.
 
 On Linux the sandbox is bubblewrap (`dnf install bubblewrap`); set
 `TOG_SANDBOX_TESTS=required` to fail instead of skip when it is missing,

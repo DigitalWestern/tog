@@ -4,10 +4,26 @@
 # README.md "Test".
 name: ci
 
+# A change to only the planning files at the root runs nothing: no build,
+# test or check reads them. Nothing else is ignored: tests read files
+# under docs/.
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - FOLLOW-UPS.md
+      - STATUS.md
   pull_request:
+    paths-ignore:
+      - FOLLOW-UPS.md
+      - STATUS.md
+
+# On a pull request a new push cancels that PR's older run, which tested
+# code that is gone. Every push to main gets its own group, so none is
+# cancelled or dropped while another runs.
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && format('ci-pr-{0}', github.event.pull_request.number) || format('ci-push-{0}', github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
