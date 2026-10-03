@@ -317,7 +317,8 @@ Selection covers every patch of each maintained CPython minor that python-build-
   workspace root only. tog finds that root itself, reading the manifests the way cargo does;
   no cargo runs on the host. A project file that is the signing key under another name (a
   symlink, a hard link, an `include`) is refused before cargo reads it, and no message tog
-  prints carries the key. Config `include`s are followed for the registries they declare and recorded as inputs; one
+  prints carries the key. A workspace member reached through a symlinked directory is refused
+  for lock generation, edits and attest: the confined cargo would not see it. Config `include`s are followed for the registries they declare and recorded as inputs; one
   that leads out of the workspace is refused. A git dependency resolved through the proxy
   has no offline test yet (the fixture registry holds no upload-pack body), only the git
   row's unit test.

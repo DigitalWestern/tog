@@ -3476,13 +3476,25 @@ interception and the cargo switch, each the flexible option:
     - `tog fmt` runs `cargo-fmt` in the workspace itself, in a sandbox
       that mounts the workspace and the store objects only (the user's
       home is not there, `CARGO_HOME` is scratch). Before it starts,
-      `confine::refuse_key_links_under` walks the workspace (all depths,
-      hidden included, `target` excluded, symlinks not followed) for a
-      hard link to the key.
+      `confine::refuse_key_links_under` walks the whole workspace it
+      mounts (all depths, hidden and `target` included, symlinks not
+      followed) for a hard link to the key, and the config cargo-fmt's
+      cargo reads (the invocation directory up to the workspace root,
+      includes followed) is read through a `Bound`, so a config that is
+      the key or leads out of the workspace is refused by name.
     - As a last layer, the key's secret is replaced
       (`confine::scrub_signing_key`) in the cargo stderr tog relays
-      (`run_cargo_checked`, attest's refusal, the sdist lock) and in
-      everything `ui` prints (errors, warnings, notes). A probe found
+      (`run_cargo_checked`, attest's refusal, the sdist lock), in
+      everything `ui` prints (errors, warnings, notes, and panics, which
+      go through the error channel in every mode), and in every byte a
+      sandboxed child writes: `supervise::status_with_stderr` (builds,
+      fmt, inherited-output doors) pipes stdout and stderr and passes
+      both on through a `Relay`, a line at a time, holding each line
+      until the next arrives or the child goes quiet. The match is any
+      run of 10 or more of the secret's characters, with a line break
+      and its gutter (spaces, tabs, `|`) skipped, so a secret cut across
+      reads or split across two lines goes in both parts whatever their
+      length. The secret is read once per process. A probe found
       tog's own parsers quoting it too: a `rust-toolchain.toml`,
       `rust-toolchain`, `tog-toolchain.toml` or `.tog/policy.toml` that
       is a hard link to the key printed it from sync, attest, add and
@@ -3493,15 +3505,41 @@ interception and the cargo switch, each the flexible option:
     the stage like any file and refused there by inode (the stage has no
     depth limit; `manifests_under`'s depth 12 bounds only the search for
     out-of-root path dependencies, which a hard link cannot exploit). A
-    member through a symlinked directory is staged as the symlink, its
-    target outside the stage is not mounted, so cargo cannot read it and
-    reports the member missing. `tog build` and `tog run` still run the
+    member through a symlinked directory is staged as the symlink and
+    its target is not mounted, so the confined cargo cannot read it; it
+    would resolve without the member (a probe showed `tog add` publishing
+    such a lock), so every confined run on that workspace (lock
+    generation, edits, attest, the sdist lock) refuses it by name, and a
+    sync from the committed lock, which runs no cargo, still works.
+    `tog build` and `tog run` still run the
     project's cargo (they execute the project anyway, sandboxed for
     build) and are left as they are. A TOML error in tog's own cargo
     readers names a line and column only (`Cargo.lock` too). Other
     parsers (policy, Python manifests, the toolchain files) still quote
     the line they fail on, which the scrub catches for the key; making
     them position-only too is a follow-up.
+  - *Third Sol pass (2026-10-03).*
+    - *Member globs as cargo expands them.* `resolve::expand` follows the
+      `glob` crate's default rules that cargo uses (`*`, `?` and `[...]`
+      within a name, `**` across directories, a wildcard matching a
+      leading `.`, `target` like any directory), checked against
+      `cargo metadata` on 1.98.1. It does not follow symlinks, so it needs
+      no depth limit; a symlinked directory it would enter is reported and
+      refused as above. The earlier matcher skipped hidden directories
+      and stopped at depth 8, silently leaving members out of the record.
+      Adding the `glob` crate itself was the alternative; the matcher is
+      about 100 lines and adds no dependency.
+    - *The path-dependency boundary takes the host as input*
+      (`cargo_door::Host`: the home directory and a ceiling for the
+      `.git` search), so its tests do not depend on a `.git` above the
+      temporary directory.
+    - *The confidentiality tests reach what they test.* The offline CLI
+      test covers the files tog parses before any download and asserts
+      the redaction marker. Everything that needs the toolchain (the
+      symlinked config, the `target/key` alias, the `CARGO_HOME`
+      include, the toolchain files for `add`, the hidden-deep and
+      symlinked members) runs in `cargo_e2e` against the real toolchain
+      and asserts the refusal text, or success, and no seed byte.
   - *Config includes.* `include = [...]` (paths or `{ path, optional }`,
     relative to the including file, transitive) is expanded from the
     bounded files: every registry declared there gets the forced
