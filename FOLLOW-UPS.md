@@ -52,8 +52,9 @@ After the proxy: the test-suite audit (#351) and then the quality review
 - **Plain `tog audit` in CI without keys (#395).** Since #394 it judges
   records with signatures unchecked instead of exiting 2; `--signed` is the
   fail-closed form and CLI.md has the migration note. Open: also refuse
-  when `CI` is set unless `--unsigned` is passed. Pick: leave it until the
-  first tagged release.
+  when `CI` is set unless `--unsigned` is passed. Pick: leave it until tog
+  has an outside user. `v0.1.0` (2026-10-03) is private, so no released
+  caller can be broken yet.
 - **First outside target.** Cheapest visible artifact: a GitHub Action
   running `tog --frozen` under the company policy plus `tog sbom`, which
   should work on GitHub-hosted Ubuntu runners if unprivileged user
@@ -153,6 +154,9 @@ After the proxy: the test-suite audit (#351) and then the quality review
 - **Found in the #327 work (2026-09-26).** One issue and one PR each:
   - #328 sandbox: opt Python sdist builds and npm addons into HostView::RuntimeOnly.
   - #329 ruby: give native gem builds tog's pinned native-libs set.
+- **Found in the #399 release work (2026-10-03).** One issue and one PR each:
+  - #402 selfupdate: `update --self`, `doctor` and `install.sh` cannot read a release while the repository is private.
+  - #403 doctor: suggests an update the release has no asset for on this machine.
   - #334 sandbox: RuntimeOnly setup costs ~2 s per native gem; measure on the runner.
   - #330 sandbox: HostView::RuntimeOnly is a no-op on macOS.
   - #332 hostview: LD_LIBRARY_PATH outranks DT_RUNPATH for relocated host libraries.
