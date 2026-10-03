@@ -125,10 +125,25 @@ pub fn configured_registries(lock_root: &Path) -> io::Result<Vec<String>> {
 /// door snapshots them beside the lock root as read-only inputs, so a
 /// workspace that names `../shared` resolves confined. A path that does not
 /// exist is left for cargo to report.
+///
+/// The manifest is the project's, so it does not get to choose any host
+/// directory: every root must lie inside the boundary
+/// ([`path_dependency_boundary`]) with no hidden directory between the two
+/// (`../.cargo` holds `credentials.toml`). A path dependency outside that
+/// is an error naming the manifest and the path, before cargo starts.
 pub fn path_dependency_roots(lock_root: &Path) -> io::Result<Vec<PathBuf>> {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    bounded_path_dependency_roots(lock_root, home.as_deref())
+}
+
+fn bounded_path_dependency_roots(
+    lock_root: &Path,
+    home: Option<&Path>,
+) -> io::Result<Vec<PathBuf>> {
     let lock_root = std::fs::canonicalize(lock_root)?;
     let mut manifests = manifests_under(&lock_root)?;
     let mut outside: Vec<PathBuf> = Vec::new();
+    let mut boundary: Option<PathBuf> = None;
     while let Some(manifest) = manifests.pop() {
         let Some(dir) = manifest.parent() else {
             continue;
@@ -140,15 +155,74 @@ pub fn path_dependency_roots(lock_root: &Path) -> io::Result<Vec<PathBuf>> {
             if found.starts_with(&lock_root) || outside.iter().any(|seen| found.starts_with(seen)) {
                 continue;
             }
+            let refuse = |why: String| {
+                io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    format!(
+                        "{} names the path dependency {path:?} ({}), {why}; a confined cargo \
+                         reads only path dependencies inside the project's repository (or, \
+                         outside one, beside the workspace), so move it there",
+                        manifest.display(),
+                        found.display()
+                    ),
+                )
+            };
+            if boundary.is_none() {
+                boundary = Some(path_dependency_boundary(&lock_root, home).map_err(refuse)?);
+            }
+            let within = boundary.as_deref().expect("set above");
+            let Ok(relative) = found.strip_prefix(within) else {
+                return Err(refuse(format!("which is outside {}", within.display())));
+            };
+            let hidden = relative
+                .components()
+                .any(|component| component.as_os_str().to_string_lossy().starts_with('.'));
+            if hidden {
+                return Err(refuse("which is in a hidden directory".to_string()));
+            }
+            if lock_root.starts_with(&found) {
+                return Err(refuse(format!(
+                    "which contains the workspace root {}",
+                    lock_root.display()
+                )));
+            }
             let nested = found.join("Cargo.toml");
             if nested.is_file() {
                 manifests.push(nested);
             }
+            outside.retain(|seen| !seen.starts_with(&found));
             outside.push(found);
         }
     }
     outside.sort();
     Ok(outside)
+}
+
+/// The directory a workspace's out-of-root path dependencies must lie in:
+/// the nearest ancestor of `lock_root` holding `.git` (the repository a
+/// monorepo shares), else `lock_root`'s parent (sibling crates). Neither
+/// may be `/` or the home directory, which would let a manifest pull in
+/// anything the user owns.
+fn path_dependency_boundary(lock_root: &Path, home: Option<&Path>) -> Result<PathBuf, String> {
+    let repository = lock_root
+        .ancestors()
+        .find(|dir| dir.join(".git").exists())
+        .map(Path::to_path_buf);
+    let boundary = match repository {
+        Some(repository) => repository,
+        None => lock_root
+            .parent()
+            .map(Path::to_path_buf)
+            .ok_or_else(|| "and the workspace is at the filesystem root".to_string())?,
+    };
+    let home = home.and_then(|home| std::fs::canonicalize(home).ok());
+    if boundary.parent().is_none() || home.as_deref() == Some(boundary.as_path()) {
+        return Err(format!(
+            "and the directory that would bound it is {}",
+            boundary.display()
+        ));
+    }
+    Ok(boundary)
 }
 
 /// Every `Cargo.toml` under `root`, skipping hidden directories and
@@ -371,6 +445,58 @@ mod tests {
             .map(|path| path.strip_prefix(&root).unwrap().display().to_string())
             .collect();
         assert_eq!(names, vec!["deep", "patched", "shared", "unixy"]);
+    }
+
+    /// A manifest does not choose host directories: a path dependency
+    /// outside the boundary, in a hidden directory, or containing the
+    /// workspace is refused, naming the manifest, and a boundary that
+    /// would be the home directory is refused too. Inside a repository the
+    /// boundary is the repository, so a monorepo's `../../libs/x` is read.
+    #[test]
+    fn path_dependencies_outside_the_boundary_are_refused() {
+        let temp = TempDir::named("cargo-path-bounds");
+        let write = |relative: &str, text: &str| {
+            let path = temp.0.join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        };
+        let depends_on = |path: &str| {
+            format!("[package]\nname = \"ws\"\n[dependencies]\nx = {{ path = {path:?} }}\n")
+        };
+        write("hidden/.cargo/Cargo.toml", "[package]\nname = \"x\"\n");
+        let cases = [
+            ("/", "outside"),
+            ("../..", "outside"),
+            ("../.cargo", "hidden directory"),
+            ("..", "contains the workspace root"),
+        ];
+        for (path, why) in cases {
+            write("hidden/ws/Cargo.toml", &depends_on(path));
+            let error = bounded_path_dependency_roots(&temp.0.join("hidden/ws"), None)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(why), "{path}: {error}");
+            assert!(error.contains("hidden/ws/Cargo.toml"), "{path}: {error}");
+        }
+
+        // Outside a repository the boundary is the workspace's parent,
+        // which may not be the home directory.
+        write("home/ws/Cargo.toml", &depends_on("../shared"));
+        write("home/shared/Cargo.toml", "[package]\nname = \"x\"\n");
+        let home = temp.0.join("home");
+        let error = bounded_path_dependency_roots(&home.join("ws"), Some(&home))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("would bound it"), "{error}");
+
+        // Inside a repository the repository is the boundary.
+        std::fs::create_dir_all(temp.0.join("repo/.git")).unwrap();
+        write("repo/apps/ws/Cargo.toml", &depends_on("../../libs/x"));
+        write("repo/libs/x/Cargo.toml", "[package]\nname = \"x\"\n");
+        let roots =
+            bounded_path_dependency_roots(&temp.0.join("repo/apps/ws"), Some(&home)).unwrap();
+        let expected = temp.0.join("repo/libs/x").canonicalize().unwrap();
+        assert_eq!(roots, vec![expected]);
     }
 
     #[test]
