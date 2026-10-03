@@ -985,6 +985,7 @@ mod tests {
             state,
             summary: String::new(),
             exceptions: Vec::new(),
+            exceptions_error: None,
         };
         assert_eq!(
             stale_reason(&row("node", State::NotSynced)),

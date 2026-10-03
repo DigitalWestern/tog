@@ -552,7 +552,12 @@ entry), read from the closure with no policy and no key. They are not
 part of the state: a synced closure with three exceptions is `synced`,
 and the summary adds one line with the count and the command that judges
 them, `tog audit`. `--json` carries them as each ecosystem's `exceptions`
-array (`kind`, `subject`, `detail`).
+array (`kind`, `subject`, `detail`). A record whose exception list cannot
+be read says so on its row: a row that was otherwise synced is `unchecked`
+with the reason, and a row in any other state keeps that state and adds an
+`exception unreadable <why>` line. `--json` carries the reason as
+`exceptions_error` (null when the list was read), so an empty `exceptions`
+array never stands for a list that could not be read.
 
 **audit** answers "does this environment pass my policy?": it reads the
 closure records every sync committed to `.tog/closures/*.json`,
@@ -649,6 +654,12 @@ exception gets judged at all; a CI job whose policy must trust keys passes
 `--signed`, which exits 2 with the fix in the message, before any record is
 judged, when the machine policy has no `[signing]` table, so a gate that
 lost its keys fails loudly instead of passing with signatures unchecked.
+
+**Migrating an existing gate.** Before this mode existed, plain `tog audit`
+exited 2 whenever the machine policy had no `[signing]` table. It now
+judges the records and can exit 0 with signatures unchecked. A CI job that
+relied on the old refusal has to run `tog audit --signed` to keep it;
+nothing else about the job changes.
 
 Per closure it prints the ecosystem, the record (sha256 of the closure file
 bytes), and the first of these that applies: `bad-signature` (a signature

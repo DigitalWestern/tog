@@ -2538,11 +2538,34 @@ fn status_lists_the_exceptions_a_sync_recorded() {
         stdout.contains("0 of 2 synced; 1 unchecked, 1 not-synced."),
         "{stdout}"
     );
+    // The unchecked row carries the reason itself: no second line for it.
+    assert!(!stdout.contains("exception   unreadable"), "{stdout}");
+    // Under a state that keeps its own fix, the read error is still
+    // reported, beside the state: an empty list is not "none recorded".
     std::fs::remove_file(project.0.join(".venv")).unwrap();
+    let out = tog(&project.0, &home.0, &["status"]);
+    let stdout = text(&out.stdout);
+    assert!(stdout.contains("python  missing     "), "{stdout}");
+    assert!(
+        stdout.contains("          exception   unreadable  ")
+            && stdout.contains("malformed exception record"),
+        "{stdout}"
+    );
     let out = tog(&project.0, &home.0, &["status", "--json"]);
     let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(value["ecosystems"][0]["state"], "projection-missing");
     assert_eq!(value["ecosystems"][0]["exceptions"], serde_json::json!([]));
+    assert!(
+        value["ecosystems"][0]["exceptions_error"]
+            .as_str()
+            .unwrap()
+            .contains("malformed exception record"),
+        "{value}"
+    );
+    assert_eq!(
+        value["ecosystems"][1]["exceptions_error"],
+        serde_json::Value::Null
+    );
 }
 
 /// `policy::load` unions silently, so the merged deny set alone cannot say

@@ -350,6 +350,10 @@ pub struct EcosystemStatus {
     /// for, as recorded (`inspect::exceptions`). Shown under the row and
     /// in `--json`; never part of the state, which is about freshness.
     pub exceptions: Vec<Exception>,
+    /// Why the exception list could not be read, when it could not. An
+    /// empty `exceptions` beside this is "unknown", not "none recorded":
+    /// the row says so whatever its state is.
+    pub exceptions_error: Option<String>,
 }
 
 impl EcosystemStatus {
@@ -387,20 +391,24 @@ pub fn status(platform: Platform, dir: &Path) -> io::Result<Vec<EcosystemStatus>
                 state: State::NotSynced,
                 summary: String::new(),
                 exceptions: Vec::new(),
+                exceptions_error: None,
             });
             continue;
         };
         let mut state = locked_closure_state(platform, dir, closure)?;
         // A record whose exception list cannot be read is this row's
         // finding, not the report's: the other ecosystems still report,
-        // and a state that already names a fix keeps it.
-        let exceptions = match exceptions(closure) {
-            Ok(list) => list.exceptions,
+        // and a state that already names a fix keeps it. The error is
+        // carried beside the state either way, so an empty list is never
+        // read as "no exceptions".
+        let (exceptions, exceptions_error) = match exceptions(closure) {
+            Ok(list) => (list.exceptions, None),
             Err(error) => {
+                let error = error.to_string();
                 if state == State::Synced {
-                    state = State::Unchecked(error.to_string());
+                    state = State::Unchecked(error.clone());
                 }
-                Vec::new()
+                (Vec::new(), Some(error))
             }
         };
         rows.push(EcosystemStatus {
@@ -408,6 +416,7 @@ pub fn status(platform: Platform, dir: &Path) -> io::Result<Vec<EcosystemStatus>
             state,
             summary: summary(closure),
             exceptions,
+            exceptions_error,
         });
     }
     Ok(rows)
@@ -738,6 +747,7 @@ pub fn render_status(dir: &Path, rows: &[EcosystemStatus], json: bool) -> io::Re
                     "detail": detail,
                     "summary": row.summary,
                     "exceptions": row.exceptions,
+                    "exceptions_error": row.exceptions_error,
                 })
             }).collect::<Vec<_>>(),
         });
@@ -775,6 +785,16 @@ pub fn render_status(dir: &Path, rows: &[EcosystemStatus], json: bool) -> io::Re
                 "", exception.kind, exception.subject
             )));
             out.push('\n');
+        }
+        // An unchecked row already printed this reason as its own.
+        if let Some(error) = &row.exceptions_error {
+            if !matches!(&row.state, State::Unchecked(why) if why == error) {
+                out.push_str(&printable(&format!(
+                    "{:width$}    exception   unreadable  {error}",
+                    ""
+                )));
+                out.push('\n');
+            }
         }
     }
     out.push_str(&verdict(rows));
