@@ -358,7 +358,7 @@ Each keeps the WP1 rules: named command, script precedence, `--eco` escape
 hatch, own store object with a closure/GC reference, exit-status pass-through.
 
 **4b-6. One real project per fixture-only ecosystem** (Cargo, Go, Ruby,
-Elixir, .NET), recorded in `docs/agent/HITRATE.md`. Extend `tests/hitrate.py` to measure
+Elixir, .NET), recorded in `docs/agent/HITRATE.md`. Extend `tools/hitrate.py` to measure
 a build/test/format command, not only `sync`. Measured on both machines and
 recorded as two columns.
 

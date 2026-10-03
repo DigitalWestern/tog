@@ -13,7 +13,7 @@ use tog::kernel::gitsrc::{ensure_git_source, normalize_url, GitSource};
 use tog::kernel::platform::Platform;
 use tog::kernel::policy;
 use tog::kernel::store::Store;
-use tog::tailors::node::{self, NpmPackage, NpmPlan};
+use tog::tailors::node::{self, NpmPackage};
 
 mod common;
 
@@ -155,8 +155,6 @@ fn an_unpinned_git_reference_is_refused() {
         "an unpinned ref must be refused by name, got: {error:?}"
     );
 }
-
-fn _unused(_: NpmPlan) {}
 
 /// Build a parent repository with a relative file submodule. The parent has
 /// no usable submodule checkout until the realizing code records `origin`;

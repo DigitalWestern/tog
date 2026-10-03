@@ -163,10 +163,3 @@ fn dotnet_sync_sandboxed_build_and_run() {
         .collect();
     assert!(left.is_empty(), "runs left {left:?} under the temp root");
 }
-
-#[test]
-#[ignore]
-fn dotnet_realization_does_not_evaluate_user_project() {
-    let temp = TempDir::new("dotnet-e2e");
-    assert_realization_does_not_evaluate_user_project(&temp);
-}

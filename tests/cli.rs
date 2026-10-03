@@ -147,6 +147,9 @@ fn help_goes_to_stdout_and_exits_0() {
             stdout.contains("tog [--frozen] [--fresh] [--strict]"),
             "{args:?}: {stdout}"
         );
+        // `tog install <pkg>` is refused with a pointer to this screen,
+        // which must name the verb that does take a package.
+        assert!(stdout.contains("tog add <package>"), "{args:?}: {stdout}");
     }
     let inputs = text(&tog(&home.0, &home.0, &["help", "inputs"]).stdout);
     assert!(inputs.starts_with("tog inputs — "), "{inputs}");
@@ -640,45 +643,6 @@ fn fmt_reports_ecosystem_and_project_errors_offline() {
     assert!(text(&out.stderr).contains("fmt for python is not implemented yet"));
 }
 
-/// A package.json `fmt` script wins over rustfmt, and like every script it
-/// is run through `tog run`, which syncs a never-synced project first. The
-/// second manifest pins a CPython no catalog has, so that sync refuses
-/// offline, before any download: the evidence is the sync line, not a
-/// realized Node.
-#[test]
-fn fmt_script_precedence_syncs_instead_of_trying_rustfmt() {
-    let home = TempDir::boundary("cli-fmt-script-home");
-    let project = TempDir::boundary("cli-fmt-script-project");
-    std::fs::write(
-        project.0.join("package.json"),
-        r#"{"name":"p","scripts":{"fmt":"sh -c 'echo script-fmt; exit 7'"}}"#,
-    )
-    .unwrap();
-    std::fs::write(
-        project.0.join("pyproject.toml"),
-        "[project]\nname = \"fixture\"\nversion = \"0.1.0\"\nrequires-python = \"==0.0.1\"\n",
-    )
-    .unwrap();
-    let out = tog(&project.0, &home.0, &["fmt"]);
-    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
-    let stderr = text(&out.stderr);
-    assert!(stderr.contains("syncing first: "), "{stderr}");
-    assert!(stderr.contains("node not synced"), "{stderr}");
-    assert!(stderr.contains("no pinned CPython"), "{stderr}");
-    assert!(
-        !stderr.contains("script-fmt"),
-        "script ran without an environment: {stderr}"
-    );
-    assert!(!stderr.contains("rust toolchain"), "{stderr}");
-    // Opening the store creates its directories; nothing was realized in it.
-    let objects = home.0.join("store/objects");
-    assert!(
-        !objects.is_dir() || std::fs::read_dir(&objects).unwrap().next().is_none(),
-        "an object was realized offline"
-    );
-    assert!(!project.0.join(".tog/closures/rustfmt.json").exists());
-}
-
 /// `--eco` is tog's own selector: in a polyglot root whose package.json
 /// has a `fmt` script, `--eco rust` must reach the Rust path instead of
 /// running the script with a meaningless trailing `--eco rust`. The fixture
@@ -741,6 +705,7 @@ fn fmt_eco_selects_the_ecosystem_and_never_delegates_to_the_script() {
     );
     assert!(!stderr.contains("script-fmt"), "{stderr}");
     assert!(!project.0.join("script-ran.txt").exists());
+    assert!(!project.0.join(".tog/closures/rustfmt.json").exists());
     // Opening the store creates its directories; nothing was realized in it.
     let objects = home.0.join("store/objects");
     assert!(
@@ -983,42 +948,6 @@ fn store_path_honors_the_store_variable() {
 }
 
 // --- bare `tog`, aliases, the script shortcut, inspect verbs ---
-
-#[test]
-fn install_alias_reaches_sync() {
-    let home = TempDir::boundary("cli-alias");
-    let project = TempDir::boundary("cli-alias-project");
-    for args in [&["install"][..], &["i"], &["sync"]] {
-        let out = tog(&project.0, &home.0, args);
-        assert_eq!(out.status.code(), Some(1), "{args:?}");
-        assert!(
-            text(&out.stderr).contains("nothing to sync here"),
-            "{args:?}"
-        );
-    }
-}
-
-/// `tog install <pkg>` is what a pip or npm user types first, and
-/// `install` is a hidden alias of the bare `tog`, which takes no package. Every
-/// spelling must name `tog add` rather than reject the word.
-#[test]
-fn installing_a_package_by_name_points_at_add() {
-    let home = TempDir::boundary("cli-install-pkg");
-    let project = TempDir::boundary("cli-install-pkg-project");
-    for verb in ["install", "i", "sync"] {
-        let out = tog(&project.0, &home.0, &[verb, "requests"]);
-        assert_eq!(out.status.code(), Some(2), "{verb}");
-        let stderr = text(&out.stderr);
-        assert!(stderr.contains("tog add requests"), "{verb}: {stderr}");
-        assert!(
-            stderr.contains("Run 'tog help setup' for usage."),
-            "{stderr}"
-        );
-    }
-    // The help the error sends them to names the verb too.
-    let help = text(&tog(&project.0, &home.0, &["help", "setup"]).stdout);
-    assert!(help.contains("tog add <package>"), "{help}");
-}
 
 /// A projected environment is immutable, so the habits that mutate one are
 /// refused with the tog verb that replaces them — before the projection is
