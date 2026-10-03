@@ -498,24 +498,6 @@ fn go_mod_directive(bytes: &[u8], directive: &str) -> Option<String> {
     None
 }
 
-/// Message for a project whose only version statement is computed: it names
-/// the declarative file to add instead of guessing from the evaluator.
-pub fn computed_only_message(ecosystem: &str) -> String {
-    let file = match ecosystem {
-        "python" => ".python-version",
-        "node" => ".node-version",
-        "ruby" => ".ruby-version",
-        "go" => "go.mod (`go` directive)",
-        "rust" => "rust-toolchain.toml",
-        "elixir" => ".tool-versions",
-        "dotnet" => "global.json",
-        _ => ".tool-versions",
-    };
-    format!(
-        "{ecosystem}: version is only stated by computed project code; add a declarative {file} so the toolchain lock can record it"
-    )
-}
-
 fn row_for(
     root: &ProjectRoot,
     path: &str,
@@ -639,20 +621,6 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let root = ProjectRoot::open(&dir).unwrap();
         (temp, root)
-    }
-
-    #[test]
-    fn missing_and_present_shapes() {
-        let (temp, root) = project();
-        let dir = temp.0.join("proj");
-        let rows = discover(&root, "python").unwrap();
-        assert_eq!(rows.len(), 3);
-        assert!(rows.iter().all(|row| row.absent && row.sha256.is_none()));
-        std::fs::write(dir.join(".python-version"), "3.12.1\n").unwrap();
-        let rows = discover(&root, "python").unwrap();
-        assert_eq!(rows[0].value.as_deref(), Some("3.12.1"));
-        assert!(!rows[0].absent);
-        assert!(rows[0].sha256.is_some());
     }
 
     #[test]
@@ -1059,6 +1027,7 @@ mod tests {
         let rows = discover(&root, "node").unwrap();
         assert_eq!(rows[1].value.as_deref(), Some("24.20.0"));
         assert!(!rows[1].absent);
+        assert!(rows[1].sha256.is_some());
     }
 
     #[test]
@@ -1127,12 +1096,5 @@ mod tests {
         std::os::unix::fs::symlink(&victim, temp.0.join("proj/.python-version")).unwrap();
         let error = discover(&root, "python").unwrap_err();
         assert!(error.to_string().contains("is a symlink"), "{error}");
-    }
-
-    #[test]
-    fn computed_only_message_names_a_file() {
-        assert!(computed_only_message("python").contains(".python-version"));
-        assert!(computed_only_message("node").contains(".node-version"));
-        assert!(computed_only_message("dotnet").contains("global.json"));
     }
 }

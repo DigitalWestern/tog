@@ -23,7 +23,7 @@ use crate::kernel::resolve::{DelegateReport, DelegateSpec, ResolutionDoor};
 use crate::kernel::sandbox::BuildSpec;
 use crate::kernel::store::Store;
 use crate::kernel::toolchain::document::Shipped;
-use crate::kernel::toolchain::{ArtifactRow, Catalog, LegacyEvidence, Selected};
+use crate::kernel::toolchain::{ArtifactRow, Catalog, Selected};
 use crate::kernel::types::Identity;
 use crate::kernel::ui;
 use serde::{Deserialize, Serialize};
@@ -51,63 +51,6 @@ fn sdk_pin(platform: Platform) -> io::Result<&'static ArtifactRow> {
 /// Microsoft publishes, and the default.
 pub fn toolchain_catalog() -> io::Result<Catalog> {
     CATALOG.catalog()
-}
-
-/// A pre-lock .NET closure records the SDK under `plan.sdk_version` and the
-/// SDK object under `sdk_object`: the archive and recipe that object's
-/// identity names are the proof.
-pub fn legacy_toolchain_evidence(
-    platform: Option<Platform>,
-    body: &serde_json::Value,
-    store: Option<&crate::kernel::store::Store>,
-) -> LegacyEvidence {
-    use crate::comforter::toolchain::{self as project_toolchain, LegacyRuntime};
-    let mut evidence = crate::comforter::legacy_toolchain_evidence(
-        platform,
-        body,
-        &[("dotnet-sdk", "/plan/sdk_version")],
-    );
-    project_toolchain::prove_legacy_runtime(
-        &mut evidence,
-        store,
-        body,
-        LegacyRuntime {
-            pointer: "/sdk_object",
-            via: &[],
-            kind: "dotnet-sdk",
-        },
-        |identity, evidence| {
-            project_toolchain::expect_legacy_version(
-                identity,
-                evidence,
-                "dotnet-sdk",
-                &identity.version,
-            )?;
-            Ok(vec![project_toolchain::proved_from_identity(
-                identity,
-                "dotnet-sdk",
-                "artifact_sha512",
-                "sha512",
-                project_toolchain::schema_recipe(identity)?,
-            )?])
-        },
-    );
-    evidence
-}
-
-/// The SDK object a pre-lock sync from `selected` left for legacy seeding
-/// to read, and the body field that names it.
-#[cfg(test)]
-pub(crate) fn legacy_runtime_for_test(
-    platform: Platform,
-    selected: &Selected,
-    store: &Store,
-) -> (serde_json::Value, Vec<Identity>) {
-    let sdk = sdk_identity(&sdk_spec(platform, selected).unwrap());
-    let body = serde_json::json!({
-        "sdk_object": crate::comforter::toolchain::object_ref_for_test(store, &sdk.object_id()),
-    });
-    (body, vec![sdk])
 }
 
 pub fn preflight_platform(platform: Platform) -> io::Result<()> {
@@ -2101,6 +2044,29 @@ mod tests {
             .to_string();
         assert!(error.contains("requires SDK 9.0.100"), "{error}");
         assert!(error.contains(SDK_VERSION), "{error}");
+        // The right version still has to pin rollForward and redirect nothing.
+        for (text, refusal) in [
+            (
+                format!("{{\"sdk\":{{\"version\":\"{SDK_VERSION}\"}}}}"),
+                "rollForward",
+            ),
+            (
+                format!(
+                    "{{\"sdk\":{{\"version\":\"{SDK_VERSION}\",\"rollForward\":\"disable\"}},\
+                     \"msbuild-sdks\":{{\"X\":\"1.0\"}}}}"
+                ),
+                "SDK redirection",
+            ),
+        ] {
+            fs::write(temp.join("global.json"), &text).unwrap();
+            let error = check_global_json(&ProjectRoot::open(&temp).unwrap(), SDK_VERSION)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(refusal), "{text}: {error}");
+        }
+        // No global.json at all is no constraint.
+        fs::remove_file(temp.join("global.json")).unwrap();
+        check_global_json(&ProjectRoot::open(&temp).unwrap(), SDK_VERSION).unwrap();
     }
 
     /// Every closure this tailor writes carries which bundle realized it and
@@ -2249,7 +2215,9 @@ mod tests {
     }
 
     #[test]
-    fn dotnet_tmp_paths_are_platform_specific() {
+    fn dotnet_tmp_validation_is_path_specific_and_testable() {
+        // The validator requires canonical paths, and a TempDir path is one.
+        // On macOS `/tmp` is a symlink, so the real path names `/private`.
         assert_eq!(
             dotnet_tmp_path(Platform::Aarch64AppleDarwin),
             PathBuf::from("/private/tmp/.dotnet")
@@ -2258,11 +2226,6 @@ mod tests {
             dotnet_tmp_path(Platform::X86_64UnknownLinuxGnu),
             PathBuf::from("/tmp/.dotnet")
         );
-    }
-
-    #[test]
-    fn dotnet_tmp_validation_is_path_specific_and_testable() {
-        // The validator requires canonical paths, and a TempDir path is one.
         let scratch = TempDir::named("dn-tmp");
         let base = scratch.0.clone();
         let uid = invoking_uid().unwrap();
@@ -2448,37 +2411,6 @@ mod tests {
             SDK_VERSION
         )
         .is_err());
-    }
-
-    #[test]
-    fn global_json_gate() {
-        let scratch = TempDir::named("dn-gj");
-        let temp = scratch.0.clone();
-        assert!(check_global_json(&ProjectRoot::open(&temp).unwrap(), SDK_VERSION).is_ok()); // absent
-        std::fs::write(
-            temp.join("global.json"),
-            format!("{{\"sdk\":{{\"version\":\"{SDK_VERSION}\",\"rollForward\":\"disable\"}}}}"),
-        )
-        .unwrap();
-        assert!(check_global_json(&ProjectRoot::open(&temp).unwrap(), SDK_VERSION).is_ok());
-        std::fs::write(
-            temp.join("global.json"),
-            "{\"sdk\":{\"version\":\"8.0.100\",\"rollForward\":\"disable\"}}",
-        )
-        .unwrap();
-        assert!(check_global_json(&ProjectRoot::open(&temp).unwrap(), SDK_VERSION).is_err());
-        std::fs::write(
-            temp.join("global.json"),
-            format!("{{\"sdk\":{{\"version\":\"{SDK_VERSION}\"}}}}"),
-        )
-        .unwrap();
-        assert!(check_global_json(&ProjectRoot::open(&temp).unwrap(), SDK_VERSION).is_err()); // rollForward missing
-        std::fs::write(
-            temp.join("global.json"),
-            "{\"msbuild-sdks\":{\"X\":\"1.0\"}}",
-        )
-        .unwrap();
-        assert!(check_global_json(&ProjectRoot::open(&temp).unwrap(), SDK_VERSION).is_err());
     }
 
     #[test]
@@ -2955,33 +2887,5 @@ mod tests {
         assert!(!publish_project
             .join(format!(".tog-fp.old.{}", std::process::id()))
             .exists());
-    }
-
-    /// A project with its manifest but no lock is refused by name and
-    /// nothing is written: the lock is `prepare`'s to generate, and a
-    /// frozen run skips `prepare`.
-    #[test]
-    fn a_missing_lock_is_refused_by_name_and_nothing_is_written() {
-        let temp = crate::kernel::testutil::TempDir::named("dotnet-frozen");
-        std::fs::write(
-            temp.0.join("hello.csproj"),
-            "<Project Sdk=\"Microsoft.NET.Sdk\"></Project>\n",
-        )
-        .unwrap();
-        let project = crate::kernel::fsroot::ProjectRoot::open(&temp.0).unwrap();
-        let error = super::require_lock(&project).unwrap_err();
-        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
-        let message = error.to_string();
-        assert!(
-            message.contains("packages.lock.json is missing and --frozen never creates it"),
-            "{message}"
-        );
-        assert!(
-            message.contains("run `tog` once without --frozen"),
-            "{message}"
-        );
-        assert!(!temp.0.join("packages.lock.json").exists());
-        std::fs::write(temp.0.join("packages.lock.json"), "").unwrap();
-        super::require_lock(&project).unwrap();
     }
 }

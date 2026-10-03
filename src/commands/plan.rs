@@ -2,7 +2,7 @@
 //! realizing anything, through the tailor registry.
 
 use crate::comforter::toolchain::{self as project_toolchain, Mode};
-use crate::commands::shared::{ecosystem_inputs_in, no_inputs};
+use crate::commands::shared::{ecosystem_inputs, no_inputs};
 use crate::kernel::context::Context;
 use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::policy;
@@ -21,7 +21,7 @@ pub fn run(ctx: &Context, frozen: bool) -> io::Result<()> {
     let toolchain = project_toolchain::resolve(
         &root,
         ctx.platform,
-        ecosystem_inputs_in(&root, &present)?,
+        ecosystem_inputs(&present)?,
         Mode::ReadOnly,
         false,
     )?;

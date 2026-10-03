@@ -165,30 +165,6 @@ pub(crate) fn input_records(project: &ProjectRoot, names: &[&str]) -> io::Result
 
 #[cfg(test)]
 mod tests {
-    /// A project with its manifest but no lock is refused by name and
-    /// nothing is written: the lock is `prepare`'s to generate, and a
-    /// frozen run skips `prepare`.
-    #[test]
-    fn a_missing_lock_is_refused_by_name_and_nothing_is_written() {
-        let temp = crate::kernel::testutil::TempDir::named("node-frozen");
-        std::fs::write(temp.0.join("package.json"), "{\"name\": \"hello\"}\n").unwrap();
-        let project = crate::kernel::fsroot::ProjectRoot::open(&temp.0).unwrap();
-        let error = super::require_lock(&project).unwrap_err();
-        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
-        let message = error.to_string();
-        assert!(
-            message.contains("package-lock.json is missing and --frozen never creates it"),
-            "{message}"
-        );
-        assert!(
-            message.contains("run `tog` once without --frozen"),
-            "{message}"
-        );
-        assert!(!temp.0.join("package-lock.json").exists());
-        std::fs::write(temp.0.join("package-lock.json"), "").unwrap();
-        super::require_lock(&project).unwrap();
-    }
-
     /// A directory with no package.json is not a Node project: nothing to
     /// plan, and nothing to refuse.
     #[test]

@@ -4,22 +4,19 @@
 //! A tailor's shipped releases are a generated data file (`document`), read
 //! into [`Bundle`]s and a [`Catalog`] with an explicit default; nothing here
 //! names an ecosystem. `select` chooses a bundle from the releases that are
-//! complete on every supported platform, `source` is the typed endpoint
-//! policy every toolchain download checks, and `legacy` seeds a selection
-//! from a closure written before the lock existed. Realization reads the
+//! complete on every supported platform, and `source` is the typed
+//! endpoint policy every toolchain download checks. Realization reads the
 //! selected bundle's rows: a catalog row carries the URL and digest the
 //! object identity is built from, it does not mint a new identity.
 
 pub mod document;
 pub mod input;
-pub mod legacy;
 pub mod lock;
 pub mod resolve;
 pub mod runtime;
 pub mod select;
 pub mod source;
 
-pub use legacy::{seed, LegacyEvidence, ProvedArtifact};
 pub use resolve::{request_for, select_for};
 pub use runtime::{shipped, ArtifactSpec, Selected, Source};
 pub use select::{Op, Request, Specifier, Version, VersionRequest};

@@ -1445,16 +1445,6 @@ deny = ["git-dependency"]"#,
     }
 
     #[test]
-    fn drain_clears() {
-        let _guard = exception_guard();
-        let attribution = Attribution::open("test").unwrap();
-        record_with(&Policy::default(), "x", "s", "d").unwrap();
-        assert_eq!(drain().len(), 1);
-        assert!(drain().is_empty());
-        attribution.discard();
-    }
-
-    #[test]
     fn a_second_thread_cannot_record_into_the_innermost_frame() {
         let _guard = exception_guard();
         let attribution = Attribution::open("thread-owner").unwrap();

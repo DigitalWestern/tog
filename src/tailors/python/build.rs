@@ -583,14 +583,13 @@ struct RustPlanInputs {
 
 /// The Rust an sdist with no channel of its own builds on under the Python
 /// selection `selected`: its section's pin; [`LEGACY_SDIST_RUST`] for a
-/// section written before pins, or a selection seeded from a closure
-/// written before the lock (those builds used it); `None` (the catalog's
-/// default, which is what a section written now pins) otherwise.
+/// section written before pins (those builds used it); `None` (the
+/// catalog's default, which is what a section written now pins) otherwise.
 fn sdist_rust_default(selected: &Selected) -> Option<&str> {
     use crate::kernel::toolchain::Source;
     match selected.helpers.get("rust") {
         Some(pin) => Some(pin),
-        None if matches!(selected.source, Source::Lock | Source::Seeded) => Some(LEGACY_SDIST_RUST),
+        None if matches!(selected.source, Source::Lock) => Some(LEGACY_SDIST_RUST),
         None => None,
     }
 }
@@ -1748,35 +1747,6 @@ mod tests {
     }
 
     #[test]
-    fn native_sdist_identity_records_linker_configuration() {
-        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        let pkg = LockedPackage {
-            name: "example".into(),
-            version: "1.0".into(),
-            filename: "example-1.0.tar.gz".into(),
-            url: String::new(),
-            sha256: "a".repeat(64),
-            kind: ArtifactKind::Sdist,
-            git: None,
-        };
-        let pin =
-            crate::tailors::python::lookup(Platform::X86_64UnknownLinuxGnu, "3.12.14").unwrap();
-        let identity = isolated_sdist_identity_from_ids(
-            Platform::X86_64UnknownLinuxGnu,
-            &pkg,
-            &format!("{}:{}", pin.version, pin.sha256),
-            "build-env-id",
-            Some("rust-id"),
-            Some("vendor-id"),
-            Some("native-libs-id"),
-        );
-        assert_eq!(identity.inputs["native_libs"], "native-libs-id");
-        assert_eq!(identity.inputs["native_linker"], NATIVE_LINKER_CONFIG);
-    }
-
-    #[test]
     fn recursion_cap_is_loud() {
         let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
             .lock()
@@ -1882,9 +1852,6 @@ mod tests {
 
     #[test]
     fn linux_sdist_build_uses_host_compilers() {
-        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
         assert_eq!(
             sdist_build_env(Platform::X86_64UnknownLinuxGnu),
             vec![

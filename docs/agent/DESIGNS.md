@@ -47,7 +47,7 @@ The toolchain lock shipped on Linux on 2026-09-21: exact selection, the
 shipped-table adapter and catalogs, the lock core, runtime propagation, and
 activation with `tog update --toolchain`. Its behavior is documented in
 `docs/human/ARCHITECTURE.md` "Toolchain lock" (file, staleness rule,
-selection order, catalogs, legacy seeding, `x/3` keys) and "Store
+selection order, catalogs, `x/3` keys) and "Store
 concurrency" (lock order), `docs/human/CLI.md` (`--frozen`, `tog update
 --toolchain`), and `docs/human/LIMITATIONS.md` (one toolchain per lock
 root). The full reviewed design, with its reasoning, is in git history:
@@ -390,7 +390,7 @@ Each keeps the WP1 rules: named command, script precedence, `--eco` escape
 hatch, own store object with a closure/GC reference, exit-status pass-through.
 
 **4b-6. One real project per fixture-only ecosystem** (Cargo, Go, Ruby,
-Elixir, .NET), recorded in `docs/agent/HITRATE.md`. Extend `tests/hitrate.py` to measure
+Elixir, .NET), recorded in `docs/agent/HITRATE.md`. Extend `tools/hitrate.py` to measure
 a build/test/format command, not only `sync`. Measured on both machines and
 recorded as two columns.
 
