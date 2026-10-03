@@ -36,6 +36,7 @@
 pub(crate) static SUPERVISION_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 use crate::kernel::activity::StoreActivity;
+use crate::kernel::resolve::confine;
 use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::process::CommandExt;
@@ -741,12 +742,13 @@ pub fn status(command: &mut Command, activity: &StoreActivity) -> io::Result<Exi
     }
 }
 
-/// Spawn a command with inherited stdout and captured stderr, drain stderr
-/// while the child runs, and reap the direct child before returning.  Sandbox
-/// engines use this form so their setup diagnostics can still be classified
-/// without putting a large build log behind a pipe that the child could fill.
-/// The returned stderr is bounded to the same prefix used by the sandbox
-/// classifier; all bytes are also relayed to the caller's stderr.
+/// Spawn a command with stdout and stderr piped, drain both while the child
+/// runs, and reap the direct child before returning.  Sandbox engines use
+/// this form so their setup diagnostics can still be classified without
+/// putting a large build log behind a pipe that the child could fill. The
+/// returned stderr is bounded to the same prefix used by the sandbox
+/// classifier; every byte of both is relayed to the caller's matching
+/// stream through a [`Relay`], the signing key's secret replaced.
 // Reviewed site (tests/architecture.rs): the supervisor itself: spawns under the caller's lease.
 #[allow(clippy::disallowed_methods)]
 pub fn status_with_stderr(
@@ -759,7 +761,7 @@ pub fn status_with_stderr(
     session.prepare_child(command);
     command
         .stdin(Stdio::null())
-        .stdout(Stdio::inherit())
+        .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let mut child = command.spawn()?;
     if let Err(error) = session.publish_child(&child) {
@@ -767,13 +769,22 @@ pub fn status_with_stderr(
         return Err(error);
     }
     let mut stderr = child.stderr.take();
-    if let Some(pipe) = stderr.as_ref() {
-        if let Err(error) = set_nonblocking(pipe.as_raw_fd()) {
+    let mut stdout = child.stdout.take();
+    for fd in [
+        stderr.as_ref().map(AsRawFd::as_raw_fd),
+        stdout.as_ref().map(AsRawFd::as_raw_fd),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if let Err(error) = set_nonblocking(fd) {
             reap_after_error(&mut child);
             return Err(error);
         }
     }
     let mut stderr_bytes = Vec::new();
+    let mut stderr_relay = Relay::new(RelayTo::Stderr);
+    let mut stdout_relay = Relay::new(RelayTo::Stdout);
     let mut status = None;
     loop {
         if status.is_none() {
@@ -794,8 +805,13 @@ pub fn status_with_stderr(
                 }
             }
         }
-        let stderr_eof = match drain_stderr(&mut stderr, &mut stderr_bytes) {
-            Ok(eof) => eof,
+        let drained = drain_relayed(&mut stderr, Some(&mut stderr_bytes), &mut stderr_relay)
+            .and_then(|stderr_eof| {
+                drain_relayed(&mut stdout, None, &mut stdout_relay)
+                    .map(|stdout_eof| (stderr_eof, stdout_eof))
+            });
+        let (stderr_eof, stdout_eof) = match drained {
+            Ok(eofs) => eofs,
             Err(error) => {
                 reap_after_error(&mut child);
                 return Err(error);
@@ -804,8 +820,11 @@ pub fn status_with_stderr(
         if stderr_eof {
             stderr = None;
         }
+        if stdout_eof {
+            stdout = None;
+        }
         if let Some(status) = status {
-            if stderr.is_none() {
+            if stderr.is_none() && stdout.is_none() {
                 session.clear_child();
                 return session.conclude(status, (status, stderr_bytes));
             }
@@ -814,10 +833,13 @@ pub fn status_with_stderr(
             reap_after_error(&mut child);
             return Err(error);
         }
-        let output_fds = stderr
-            .as_ref()
-            .map(|pipe| vec![pipe.as_raw_fd()])
-            .unwrap_or_default();
+        let output_fds: Vec<RawFd> = [
+            stderr.as_ref().map(AsRawFd::as_raw_fd),
+            stdout.as_ref().map(AsRawFd::as_raw_fd),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
         if let Err(error) = session.wait_for_event(&output_fds) {
             reap_after_error(&mut child);
             return Err(error);
@@ -825,9 +847,130 @@ pub fn status_with_stderr(
     }
 }
 
-fn drain_stderr(
-    reader: &mut Option<std::process::ChildStderr>,
-    destination: &mut Vec<u8>,
+/// Where a [`Relay`] writes.
+#[derive(Clone, Copy)]
+enum RelayTo {
+    Stdout,
+    Stderr,
+    /// Into `Relay::captured`, for tests.
+    #[cfg(test)]
+    Captured,
+}
+
+/// A child's output passed on to one of tog's own streams with the signing
+/// key's secret replaced: a tool's parse error quotes the line it failed
+/// on, and a project file can be the key under another name. Output is
+/// passed on a line at a time (a newline or a carriage return ends one), so
+/// a secret is whole when it is checked however the child's writes were
+/// cut, and each line is held until the next one arrives or the child goes
+/// quiet, so a secret broken across two lines is checked as one
+/// ([`confine::redaction_mask`]). With no signing key there is nothing to
+/// replace and every byte is passed on as it arrives.
+struct Relay {
+    to: RelayTo,
+    secrets: &'static [Vec<u8>],
+    /// Bytes of a line not yet ended.
+    pending: Vec<u8>,
+    /// The last whole line, with what is already known to be secret.
+    held: Vec<u8>,
+    held_mask: Vec<bool>,
+    #[cfg(test)]
+    captured: Vec<u8>,
+}
+
+/// A line longer than this is passed on in pieces rather than held.
+const RELAY_LINE_MAX: usize = 64 * 1024;
+
+impl Relay {
+    fn new(to: RelayTo) -> Relay {
+        Relay::with_secrets(to, confine::signing_key_secrets())
+    }
+
+    fn with_secrets(to: RelayTo, secrets: &'static [Vec<u8>]) -> Relay {
+        Relay {
+            to,
+            secrets,
+            pending: Vec::new(),
+            held: Vec::new(),
+            held_mask: Vec::new(),
+            #[cfg(test)]
+            captured: Vec::new(),
+        }
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        if bytes.is_empty() {
+            return;
+        }
+        match self.to {
+            #[cfg(test)]
+            RelayTo::Captured => self.captured.extend_from_slice(bytes),
+            RelayTo::Stdout => {
+                let mut out = io::stdout().lock();
+                let _ = out.write_all(bytes);
+                let _ = out.flush();
+            }
+            RelayTo::Stderr => {
+                let _ = io::stderr().write_all(bytes);
+            }
+        }
+    }
+
+    fn push(&mut self, bytes: &[u8]) {
+        if self.secrets.is_empty() {
+            self.write(bytes);
+            return;
+        }
+        self.pending.extend_from_slice(bytes);
+        while let Some(end) = self.pending.iter().position(|b| matches!(b, b'\n' | b'\r')) {
+            let line: Vec<u8> = self.pending.drain(..=end).collect();
+            self.line(line);
+        }
+        if self.pending.len() > RELAY_LINE_MAX {
+            let piece = std::mem::take(&mut self.pending);
+            self.line(piece);
+        }
+    }
+
+    /// Check `line` together with the held one, pass the held one on, and
+    /// hold `line`.
+    fn line(&mut self, line: Vec<u8>) {
+        let mut joined = std::mem::take(&mut self.held);
+        let split = joined.len();
+        joined.extend_from_slice(&line);
+        let mut mask = confine::redaction_mask(&joined, self.secrets);
+        for (bit, known) in mask.iter_mut().zip(&self.held_mask) {
+            *bit |= known;
+        }
+        self.write(&confine::redact(&joined[..split], &mask[..split]));
+        self.held = line;
+        self.held_mask = mask[split..].to_vec();
+    }
+
+    /// The child is quiet: pass the held line on.
+    fn idle(&mut self) {
+        let held = std::mem::take(&mut self.held);
+        let mask = std::mem::take(&mut self.held_mask);
+        self.write(&confine::redact(&held, &mask));
+    }
+
+    /// The child closed its end: pass everything on.
+    fn finish(&mut self) {
+        if !self.pending.is_empty() {
+            let rest = std::mem::take(&mut self.pending);
+            self.line(rest);
+        }
+        self.idle();
+    }
+}
+
+/// Read what `reader` has now into `relay` (and the first 4 KiB into
+/// `destination`, the sandbox classifier's prefix). Returns whether the
+/// child closed it.
+fn drain_relayed<R: Read>(
+    reader: &mut Option<R>,
+    mut destination: Option<&mut Vec<u8>>,
+    relay: &mut Relay,
 ) -> io::Result<bool> {
     let Some(reader) = reader else {
         return Ok(true);
@@ -835,13 +978,21 @@ fn drain_stderr(
     let mut buffer = [0u8; 16 * 1024];
     loop {
         match reader.read(&mut buffer) {
-            Ok(0) => return Ok(true),
-            Ok(count) => {
-                let keep = count.min(4096usize.saturating_sub(destination.len()));
-                destination.extend_from_slice(&buffer[..keep]);
-                let _ = io::stderr().write_all(&buffer[..count]);
+            Ok(0) => {
+                relay.finish();
+                return Ok(true);
             }
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(false),
+            Ok(count) => {
+                if let Some(destination) = destination.as_deref_mut() {
+                    let keep = count.min(4096usize.saturating_sub(destination.len()));
+                    destination.extend_from_slice(&buffer[..keep]);
+                }
+                relay.push(&buffer[..count]);
+            }
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                relay.idle();
+                return Ok(false);
+            }
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
             Err(error) => return Err(error),
         }
@@ -1124,6 +1275,50 @@ mod tests {
             Some(3)
         );
         drop(activity);
+    }
+
+    /// The relay replaces the signing key's secret however the child's
+    /// writes were cut and when a line break splits it, and passes every
+    /// other byte on unchanged, in order.
+    #[test]
+    fn the_relay_replaces_the_key_however_the_output_is_cut() {
+        const SEED: &str = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+        static SECRETS: OnceLock<Vec<Vec<u8>>> = OnceLock::new();
+        let secrets = SECRETS.get_or_init(|| vec![SEED.as_bytes().to_vec()]);
+        let relayed = |pieces: &[&[u8]], idle_between: bool| {
+            let mut relay = Relay::with_secrets(RelayTo::Captured, secrets);
+            for piece in pieces {
+                relay.push(piece);
+                if idle_between {
+                    relay.idle();
+                }
+            }
+            relay.finish();
+            String::from_utf8(relay.captured).unwrap()
+        };
+        let message = format!("error: bad TOML\n1 | ed25519:{SEED}\n  |\nmore\n");
+        let bytes = message.as_bytes();
+        // Cut inside the secret, across two reads.
+        let out = relayed(&[&bytes[..30], &bytes[30..]], false);
+        assert!(!out.contains("33445566"), "{out}");
+        assert_eq!(
+            out,
+            "error: bad TOML\n1 | ed25519:[signing key redacted]\n  |\nmore\n"
+        );
+        // Cut into single bytes, the child going quiet after each.
+        let singles: Vec<&[u8]> = bytes.chunks(1).collect();
+        assert_eq!(relayed(&singles, true), out);
+        // Split across two lines with a short tail, written at once.
+        let split = format!("1 | {}\n  | {}\nend", &SEED[..58], &SEED[58..]);
+        let out = relayed(&[split.as_bytes()], false);
+        assert_eq!(
+            out,
+            "1 | [signing key redacted]\n  | [signing key redacted]\nend"
+        );
+        // Without a key every byte passes as it is.
+        let mut plain = Relay::with_secrets(RelayTo::Captured, &[]);
+        plain.push(b"partial line, no newline");
+        assert_eq!(plain.captured, b"partial line, no newline");
     }
 
     // Reviewed site (tests/architecture.rs): the supervisor's own tests of its primitives.

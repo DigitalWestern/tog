@@ -382,11 +382,14 @@ impl Tailor for Cargo {
         // cargo fmt runs in the workspace itself (writable, the user's home
         // out of sight): a file there that is the signing key under another
         // name (a hard link) would be read as a manifest or a config and
-        // quoted in cargo's parse error.
+        // quoted in cargo's parse error. The whole workspace is mounted,
+        // `target` included (a config can be a symlink to `../target/key`),
+        // so the whole of it is scanned. The formatter's output is relayed
+        // with the key's secret replaced as well (`supervise::Relay`).
         crate::kernel::resolve::confine::refuse_key_links_under(
             &workspace_root,
             &crate::kernel::resolve::confine::signing_key_ids(),
-            &[crate::kernel::resolve::snapshot::PathGlob::new("target")?],
+            &[],
         )?;
         let rust_object = cargo::realize_runtime(store, activity, platform, toolchain)?;
         let rustfmt_object =

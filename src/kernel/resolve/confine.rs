@@ -601,26 +601,115 @@ pub fn refuse_key_links_under(
 }
 
 /// `text` with the signing key's secret replaced, wherever it appears: a
-/// last layer for a child's output tog relays (a tool's parse error quotes
-/// the line it failed on). The key files are read as they are now; one
-/// that cannot be read leaves `text` as it is.
+/// last layer for a child's output tog relays and for everything tog prints
+/// (a parser's error quotes the line it failed on, and a project file can
+/// be the key under another name). See [`redact`] for what is matched.
 pub fn scrub_signing_key(text: &str) -> String {
-    scrub_keys(text, &signing_key_paths())
+    let secrets = signing_key_secrets();
+    if secrets.is_empty() {
+        return text.to_string();
+    }
+    let bytes = text.as_bytes();
+    let mask = redaction_mask(bytes, secrets);
+    // The secret is ASCII, so a redacted run never splits a character.
+    String::from_utf8(redact(bytes, &mask)).unwrap_or_else(|_| text.to_string())
 }
 
-fn scrub_keys(text: &str, keys: &[PathBuf]) -> String {
-    let mut out = text.to_string();
+/// The shortest run of a secret's characters that is redacted. The secret
+/// is 64 hex digits; 10 of them in a row turn up by chance about once in
+/// 10^12 positions, so ordinary hashes in tog's output are left alone.
+pub(crate) const MIN_SECRET_RUN: usize = 10;
+
+/// The text replacing each redacted run.
+pub(crate) const REDACTED: &[u8] = b"[signing key redacted]";
+
+/// The secrets of the signing-key files ([`signing_key_paths`]), read once
+/// per process: the part after the last `:` of each line (the hex seed of
+/// `ed25519:<seed>`), or the whole line when it has none, if at least 16
+/// bytes long. A file that cannot be read adds nothing.
+pub fn signing_key_secrets() -> &'static [Vec<u8>] {
+    static SECRETS: std::sync::OnceLock<Vec<Vec<u8>>> = std::sync::OnceLock::new();
+    SECRETS.get_or_init(|| key_secrets(&signing_key_paths()))
+}
+
+pub(crate) fn key_secrets(keys: &[PathBuf]) -> Vec<Vec<u8>> {
+    let mut secrets: Vec<Vec<u8>> = Vec::new();
     for path in keys {
         let Ok(contents) = fs::read_to_string(path) else {
             continue;
         };
         for line in contents.lines().map(str::trim) {
             let secret = line.rsplit(':').next().unwrap_or(line);
-            for part in [line, secret] {
-                if part.len() >= 16 {
-                    out = out.replace(part, "[signing key redacted]");
-                }
+            if secret.len() >= 16 && !secrets.iter().any(|s| s == secret.as_bytes()) {
+                secrets.push(secret.as_bytes().to_vec());
             }
+        }
+    }
+    secrets
+}
+
+/// Which bytes of `text` belong to a secret: every run of at least
+/// [`MIN_SECRET_RUN`] bytes that is a piece of one. Line breaks do not
+/// hide it: a newline or carriage return and the spaces, tabs and `|` that
+/// follow it (a parse error's gutter) are skipped when matching, so a
+/// secret split across two lines is found whole, and both of its parts are
+/// marked whatever their length.
+pub fn redaction_mask(text: &[u8], secrets: &[Vec<u8>]) -> Vec<bool> {
+    let mut mask = vec![false; text.len()];
+    if secrets.is_empty() {
+        return mask;
+    }
+    // The text as matched: line breaks and their gutters left out, each
+    // byte with its index in `text`.
+    let mut view: Vec<(u8, usize)> = Vec::with_capacity(text.len());
+    let mut index = 0;
+    while index < text.len() {
+        if matches!(text[index], b'\n' | b'\r') {
+            index += 1;
+            while index < text.len() && matches!(text[index], b' ' | b'\t' | b'|' | b'\n' | b'\r') {
+                index += 1;
+            }
+            continue;
+        }
+        view.push((text[index], index));
+        index += 1;
+    }
+    for start in 0..view.len() {
+        let mut longest = 0;
+        for secret in secrets {
+            for offset in 0..secret.len() {
+                let mut length = 0;
+                while start + length < view.len()
+                    && offset + length < secret.len()
+                    && view[start + length].0 == secret[offset + length]
+                {
+                    length += 1;
+                }
+                longest = longest.max(length);
+            }
+        }
+        if longest >= MIN_SECRET_RUN {
+            for &(_, original) in &view[start..start + longest] {
+                mask[original] = true;
+            }
+        }
+    }
+    mask
+}
+
+/// `text` with each run of masked bytes replaced by [`REDACTED`].
+pub fn redact(text: &[u8], mask: &[bool]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(text.len());
+    let mut index = 0;
+    while index < text.len() {
+        if mask[index] {
+            out.extend_from_slice(REDACTED);
+            while index < text.len() && mask[index] {
+                index += 1;
+            }
+        } else {
+            out.push(text[index]);
+            index += 1;
         }
     }
     out
@@ -1444,20 +1533,44 @@ mod tests {
         refuse_key_links_under(&root, &ids, &[]).unwrap();
     }
 
+    fn scrub_with(text: &str, secrets: &[Vec<u8>]) -> String {
+        String::from_utf8(redact(
+            text.as_bytes(),
+            &redaction_mask(text.as_bytes(), secrets),
+        ))
+        .unwrap()
+    }
+
     #[test]
     fn a_relayed_message_never_carries_the_key() {
+        const SEED: &str = "0123456789abcdef0123456789abcdef";
         let temp = TempDir::named("confine-scrub");
         let key = temp.0.join("signing.key");
-        fs::write(&key, b"ed25519:SEEDBYTES0123456789abcdef\n").unwrap();
-        let text = "error: invalid TOML\n  |\n1 | ed25519:SEEDBYTES0123456789abcdef\n  |";
-        let scrubbed = scrub_keys(text, &[key.clone(), temp.0.join("missing")]);
-        assert!(!scrubbed.contains("SEEDBYTES"), "{scrubbed}");
-        assert!(scrubbed.contains("[signing key redacted]"), "{scrubbed}");
-        // The secret alone, quoted without its prefix, too.
-        let scrubbed = scrub_keys("value \"SEEDBYTES0123456789abcdef\"", &[key]);
-        assert!(!scrubbed.contains("SEEDBYTES"), "{scrubbed}");
-        // Nothing else is touched.
-        assert_eq!(scrub_keys("plain", &[]), "plain");
+        fs::write(&key, format!("ed25519:{SEED}\n")).unwrap();
+        let secrets = key_secrets(&[key.clone(), temp.0.join("missing")]);
+        assert_eq!(secrets, vec![SEED.as_bytes().to_vec()]);
+        let text = format!("error: invalid TOML\n  |\n1 | ed25519:{SEED}\n  |");
+        let scrubbed = scrub_with(&text, &secrets);
+        assert!(!scrubbed.contains("0123456789"), "{scrubbed}");
+        assert!(
+            scrubbed.contains("ed25519:[signing key redacted]\n"),
+            "{scrubbed}"
+        );
+        // A piece of it, quoted alone.
+        let scrubbed = scrub_with("value \"6789abcdef0123\" end", &secrets);
+        assert_eq!(scrubbed, "value \"[signing key redacted]\" end");
+        // Split across two lines, behind a gutter, with a short tail: both
+        // parts go.
+        let split = format!("1 | {}\n  | {}\nnext", &SEED[..27], &SEED[27..]);
+        let scrubbed = scrub_with(&split, &secrets);
+        assert_eq!(
+            scrubbed,
+            "1 | [signing key redacted]\n  | [signing key redacted]\nnext"
+        );
+        // A short coincidence and the public prefix are left alone.
+        let plain = "ed25519:PUBLIC sha 01234567 abcdef";
+        assert_eq!(scrub_with(plain, &secrets), plain);
+        assert_eq!(scrub_with("plain", &[]), "plain");
     }
 
     #[test]

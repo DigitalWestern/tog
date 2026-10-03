@@ -59,17 +59,14 @@ pub fn init(quiet: bool, verbose: bool, no_color: bool) -> io::Result<()> {
 
 /// A panic must reach the user whatever `--quiet` did to fd 2: the default
 /// hook writes to fd 2, which quiet points at /dev/null, so the process
-/// would exit 101 having printed nothing.
+/// would exit 101 having printed nothing. It goes through the error channel
+/// in every mode, so its message has the signing key's secret replaced like
+/// any other ([`scrub`]); `RUST_BACKTRACE` still adds the backtrace.
 fn install_panic_hook() {
-    let default = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         // A download may be holding the cursor's row. Clear it first, or
         // the panic prints onto the tail of the progress line.
         erase_progress_line();
-        if ERROR_FD.get().is_none() {
-            default(info);
-            return;
-        }
         let payload = info
             .payload()
             .downcast_ref::<&str>()
@@ -80,8 +77,13 @@ fn install_panic_hook() {
             Some(location) => format!(" at {}:{}", location.file(), location.line()),
             None => String::new(),
         };
+        let backtrace = std::backtrace::Backtrace::capture();
+        let backtrace = match backtrace.status() {
+            std::backtrace::BacktraceStatus::Captured => format!("{backtrace}\n"),
+            _ => String::new(),
+        };
         write_error_channel(&format!(
-            "tog: {}: {payload}{where_}\ntog: this is a bug in tog; please report it with the command you ran\n",
+            "tog: {}: {payload}{where_}\ntog: this is a bug in tog; please report it with the command you ran\n{backtrace}",
             paint("internal error", RED)
         ));
     }));
