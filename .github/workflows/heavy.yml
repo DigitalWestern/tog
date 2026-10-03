@@ -16,6 +16,10 @@
 # A PR that needs neither but edits a test file holding `#[ignore]` tests
 # gets the `changed` job: the ignored tests of just those files, so an
 # edited end-to-end test never merges without having run once.
+# A PR that edits shared test inputs (`tests/common/`, fixtures, helpers)
+# without naming a test target gets the whole suite instead: those files
+# change what the ignored end-to-end tests prove, so the `changed` job
+# would test nothing, or only part of what the change affects.
 # Weekly rather than nightly because the repository is
 # private and a nightly run of this length would use most of the Actions
 # minutes a free plan includes; change `cron` to `"0 6 * * *"` for nightly.
@@ -92,6 +96,17 @@ jobs:
               # name reaches a shell as anything but a test target.
               tests=$(grep -oE '^tests/[A-Za-z0-9_]+\.rs$' <<< "$files" \
                 | sed -E 's#^tests/(.*)\.rs$#\1#' | sort -u | tr '\n' ' ' || true)
+              # Shared test inputs (`tests/common/`, fixtures, helpers)
+              # change what the ignored end-to-end tests prove without
+              # naming a test target, so the `changed` job would test
+              # nothing, or only part of what the change affects. Run the
+              # whole heavy suite for those instead of silently
+              # undertesting. (`tests/acceptance.sh` is already in
+              # `watched` above, so it never reaches this branch.)
+              if grep -E '^tests/' <<< "$files" | grep -qvE '^tests/[A-Za-z0-9_]+\.rs$'; then
+                run=yes
+                tests=""
+              fi
             fi
           fi
           echo "run=$run tests=$tests"
