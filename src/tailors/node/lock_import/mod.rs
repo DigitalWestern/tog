@@ -722,6 +722,22 @@ fn build_plan_recording(
     node_version: &str,
     record: &mut impl FnMut(&str, &str, &str) -> io::Result<()>,
 ) -> io::Result<NpmPlan> {
+    // One placed package, one exception: the traversal below reaches a
+    // required foreign-platform package once per dependency edge that names
+    // it, but the package is placed a single time, so its
+    // `foreign-platform-package` exception is recorded once per placed
+    // package instead of once per edge. (Greptile review on #398.)
+    let mut seen_foreign = BTreeSet::<String>::new();
+    let inner_record = &mut *record;
+    let mut dedup_record = |kind: &str, subject: &str, detail: &str| -> io::Result<()> {
+        if kind == crate::kernel::policy::FOREIGN_PLATFORM_PACKAGE
+            && !seen_foreign.insert(subject.to_string())
+        {
+            return Ok(());
+        }
+        inner_record(kind, subject, detail)
+    };
+    let record = &mut dedup_record;
     let workspace_paths = graph.workspace_paths.clone();
     let mut occupied = BTreeMap::<String, Occupied>::new();
     // (parent, dependency, workspace, who needs it when it is a requirement
