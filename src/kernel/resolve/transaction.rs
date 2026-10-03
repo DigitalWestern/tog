@@ -1334,6 +1334,7 @@ mod tests {
                 lock_root: &fx.project,
                 extra_roots: &[],
                 exclude: &[],
+                forbidden: &[],
             },
         )?;
         let staged = snapshot.lock_root().staged.clone();

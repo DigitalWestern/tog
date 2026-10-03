@@ -232,6 +232,9 @@ pub(super) fn run(
         Some(_) => None,
         None => Some(ProjectRoot::open(&lock_root)?),
     };
+    // The signing key never enters the stage, under any name (a hard link
+    // in the project is the key too).
+    let key_ids = confine::signing_key_ids();
     let snapshot = Snapshot::build(
         store,
         activity,
@@ -239,6 +242,7 @@ pub(super) fn run(
             lock_root: &lock_root,
             extra_roots: &confined.extra_roots,
             exclude: &confined.exclude,
+            forbidden: &key_ids,
         },
     )?;
     let ran = run_tool(door, &spec, &mut confined, &policy, &snapshot, &forced_args)?;

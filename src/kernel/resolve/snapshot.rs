@@ -28,6 +28,7 @@
 //! discarded. Anything else, and always a new `.git`, a change under
 //! `.git/hooks`, or a change under `.tog`, fails the door naming the paths.
 
+use super::confine::FileId;
 use crate::kernel::activity::StoreActivity;
 use crate::kernel::store::{self, Store};
 use sha2::{Digest, Sha256};
@@ -168,6 +169,9 @@ pub struct SnapshotSpec<'a> {
     pub extra_roots: &'a [PathBuf],
     /// Paths, relative to each root, that are neither copied nor diffed.
     pub exclude: &'a [PathGlob],
+    /// Files never copied, by identity (`confine::signing_key_ids`): a
+    /// hard link to the signing key anywhere in a root fails the snapshot.
+    pub forbidden: &'a [FileId],
 }
 
 /// One snapshotted tree.
@@ -237,6 +241,7 @@ impl Snapshot {
             let mut walk = Walk {
                 exclude: &snapshot.exclude,
                 entries: &mut snapshot.baseline,
+                forbidden: spec.forbidden,
             };
             walk.copy_root(&real, &staged)?;
             snapshot.roots.push(Root { real, staged });
@@ -283,6 +288,7 @@ impl Snapshot {
             let mut walk = Walk {
                 exclude: &self.exclude,
                 entries: &mut after,
+                forbidden: &[],
             };
             walk.scan_root(&root.real, &root.staged)?;
         }
@@ -670,6 +676,8 @@ fn special_kind(mode: libc::mode_t) -> &'static str {
 struct Walk<'a> {
     exclude: &'a [PathGlob],
     entries: &'a mut BTreeMap<PathBuf, EntryState>,
+    /// Files a copy refuses (the signing key, by identity).
+    forbidden: &'a [FileId],
 }
 
 impl Walk<'_> {
@@ -729,7 +737,9 @@ impl Walk<'_> {
                     self.entries.insert(child_real, EntryState::Dir { mode });
                 }
                 libc::S_IFREG => {
-                    if let Some(sha256) = copy_file(source, target, name, mode, &child_real)? {
+                    let copied =
+                        copy_file(source, target, name, mode, &child_real, self.forbidden)?;
+                    if let Some(sha256) = copied {
                         self.entries
                             .insert(child_real, EntryState::File { mode, sha256 });
                     }
@@ -865,6 +875,7 @@ fn copy_file(
     name: &[u8],
     mode: u32,
     shown: &Path,
+    forbidden: &[FileId],
 ) -> io::Result<Option<[u8; 32]>> {
     let from = store::open_file_at(
         source.as_raw_fd(),
@@ -878,8 +889,22 @@ fn copy_file(
             format!("snapshot {}: {error}", shown.display()),
         )
     })?;
-    if store::fd_stat(from.as_raw_fd())?.st_mode & libc::S_IFMT != libc::S_IFREG {
+    let stat = store::fd_stat(from.as_raw_fd())?;
+    if stat.st_mode & libc::S_IFMT != libc::S_IFREG {
         return Ok(None);
+    }
+    // Decided on the open file itself, so no rename in between can slip
+    // the key past it.
+    if forbidden.contains(&(stat.st_dev, stat.st_ino)) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "{} is the signing key (the same file, by device and inode), so it is not \
+                 copied where the tool could read it; move the key out of the project and \
+                 point TOG_SIGNING_KEY at it",
+                shown.display()
+            ),
+        ));
     }
     let mut to = store::open_file_at(
         target.as_raw_fd(),
@@ -960,6 +985,7 @@ mod tests {
                 lock_root,
                 extra_roots: &[],
                 exclude,
+                forbidden: &[],
             },
         )
         .unwrap()
@@ -1053,6 +1079,46 @@ mod tests {
         fs::create_dir_all(staged(&snapshot, "target")).unwrap();
         fs::write(staged(&snapshot, "target/new"), b"y").unwrap();
         assert!(snapshot.diff().unwrap().is_empty());
+    }
+
+    /// A hard link to the signing key is the key, whatever its name, however
+    /// deep, in a hidden directory or not: the stage is refused before the
+    /// tool could read it, and the refusal never carries its bytes.
+    #[test]
+    fn a_hard_link_to_a_forbidden_file_is_never_staged() {
+        use std::os::unix::fs::MetadataExt;
+        let temp = TempDir::named("snapshot-forbidden");
+        let store = temp_store(&temp);
+        let dir = project(&temp);
+        let key = temp.0.join("signing.key");
+        fs::write(&key, b"ed25519:SEEDBYTES0123456789abcdef\n").unwrap();
+        let meta = fs::metadata(&key).unwrap();
+        let forbidden = [(meta.dev(), meta.ino())];
+        let mut deep = dir.join(".hidden");
+        for level in 0..13 {
+            deep = deep.join(format!("d{level}"));
+        }
+        fs::create_dir_all(&deep).unwrap();
+        fs::hard_link(&key, deep.join("Cargo.toml")).unwrap();
+        let activity = store.activity(ActivityMode::Shared).unwrap();
+        let error = Snapshot::build(
+            &store,
+            &activity,
+            &SnapshotSpec {
+                lock_root: &dir,
+                extra_roots: &[],
+                exclude: &[],
+                forbidden: &forbidden,
+            },
+        )
+        .err()
+        .expect("a stage holding the key is refused");
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        let message = error.to_string();
+        assert!(message.contains("is the signing key"), "{message}");
+        assert!(!message.contains("SEEDBYTES"), "{message}");
+        // Nothing else of the project is held back.
+        build(&store, &dir, &[]);
     }
 
     /// A tool that rewrites an undeclared file with different bytes of the
@@ -1274,6 +1340,7 @@ mod tests {
                 lock_root: &dir,
                 extra_roots: &[lib.clone(), inside],
                 exclude: &[],
+                forbidden: &[],
             },
         )
         .unwrap();
@@ -1323,6 +1390,7 @@ mod tests {
                     lock_root: &dir,
                     extra_roots: &[root.to_path_buf()],
                     exclude: &[],
+                    forbidden: &[],
                 },
             )
         };

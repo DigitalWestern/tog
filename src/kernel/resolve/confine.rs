@@ -527,6 +527,101 @@ pub fn signing_key_paths() -> Vec<PathBuf> {
     paths
 }
 
+/// A file's identity: its device and inode. The same file under any name,
+/// a hard link included, has the same one.
+pub type FileId = (u64, u64);
+
+/// The identities of the signing-key files that exist ([`signing_key_paths`],
+/// symlinks followed): what "is the signing key" is decided by, so a hard
+/// link or another spelling is the key too.
+pub fn signing_key_ids() -> Vec<FileId> {
+    key_ids(&signing_key_paths())
+}
+
+pub(crate) fn key_ids(paths: &[PathBuf]) -> Vec<FileId> {
+    use std::os::unix::fs::MetadataExt;
+    let mut ids: Vec<FileId> = paths
+        .iter()
+        .filter_map(|path| fs::metadata(path).ok())
+        .map(|meta| (meta.dev(), meta.ino()))
+        .collect();
+    ids.sort_unstable();
+    ids.dedup();
+    ids
+}
+
+/// Refuse when any regular file under `root` (not following symlinks,
+/// every depth, hidden directories included, `exclude`d paths skipped) is
+/// one of `keys`: a hard link to the signing key inside a tree a tool reads
+/// would put the key in front of that tool, and in front of the user in
+/// the tool's parse error.
+pub fn refuse_key_links_under(
+    root: &Path,
+    keys: &[FileId],
+    exclude: &[super::snapshot::PathGlob],
+) -> io::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    if keys.is_empty() {
+        return Ok(());
+    }
+    let mut stack = vec![PathBuf::new()];
+    while let Some(relative) = stack.pop() {
+        let entries = match fs::read_dir(root.join(&relative)) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(io::Error::new(
+                    error.kind(),
+                    format!("read {}: {error}", root.join(&relative).display()),
+                ))
+            }
+        };
+        for entry in entries {
+            let entry = entry?;
+            let child = relative.join(entry.file_name());
+            if exclude.iter().any(|glob| glob.matches(&child)) {
+                continue;
+            }
+            let meta = fs::symlink_metadata(entry.path())?;
+            if meta.is_dir() {
+                stack.push(child);
+            } else if meta.is_file() && keys.contains(&(meta.dev(), meta.ino())) {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    format!(
+                        "{} is the signing key (the same file, by device and inode); move the \
+                         key out of the project and point TOG_SIGNING_KEY at it",
+                        entry.path().display()
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `text` with the signing key's secret replaced, wherever it appears: a
+/// last layer for a child's output tog relays (a tool's parse error quotes
+/// the line it failed on). The key files are read as they are now; one
+/// that cannot be read leaves `text` as it is.
+pub fn scrub_signing_key(text: &str) -> String {
+    let mut out = text.to_string();
+    for path in signing_key_paths() {
+        let Ok(contents) = fs::read_to_string(&path) else {
+            continue;
+        };
+        for line in contents.lines().map(str::trim) {
+            let secret = line.rsplit(':').next().unwrap_or(line);
+            for part in [line, secret] {
+                if part.len() >= 16 {
+                    out = out.replace(part, "[signing key redacted]");
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Every spelling of `path` worth comparing: as given (made absolute), and
 /// with its existing ancestors resolved.
 fn spellings(path: &Path) -> Vec<PathBuf> {
@@ -1313,6 +1408,36 @@ mod tests {
             reason: "setting up uid map: Permission denied".to_string(),
             fix: "install bubblewrap and allow it unprivileged user namespaces".to_string(),
         }]
+    }
+
+    #[test]
+    fn hard_links_to_the_key_are_found_at_any_depth() {
+        use crate::kernel::resolve::snapshot::PathGlob;
+        let temp = TempDir::named("confine-key-links");
+        let key = temp.0.join("signing.key");
+        fs::write(&key, b"ed25519:SEEDBYTES0123456789abcdef\n").unwrap();
+        let ids = key_ids(&[key.clone(), temp.0.join("missing.key")]);
+        assert_eq!(ids.len(), 1);
+        let root = temp.0.join("project");
+        let mut deep = root.join(".hidden");
+        for level in 0..13 {
+            deep = deep.join(format!("d{level}"));
+        }
+        fs::create_dir_all(&deep).unwrap();
+        fs::write(deep.join("Cargo.toml"), b"[package]\n").unwrap();
+        refuse_key_links_under(&root, &ids, &[]).unwrap();
+        fs::hard_link(&key, deep.join("config.toml")).unwrap();
+        let error = refuse_key_links_under(&root, &ids, &[]).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert!(!error.to_string().contains("SEEDBYTES"));
+        // An excluded tree is not walked.
+        let exclude = [PathGlob::new(".hidden").unwrap()];
+        refuse_key_links_under(&root, &ids, &exclude).unwrap();
+        // A symlink is not followed (the stage copies it as a link, and
+        // the confined tool cannot reach its target).
+        fs::remove_file(deep.join("config.toml")).unwrap();
+        std::os::unix::fs::symlink(&key, root.join("link.toml")).unwrap();
+        refuse_key_links_under(&root, &ids, &[]).unwrap();
     }
 
     #[test]

@@ -418,6 +418,7 @@ mod door {
                     lock_root: &self.project,
                     extra_roots: &[],
                     exclude: &[],
+                    forbidden: &[],
                 },
             )
             .unwrap()
