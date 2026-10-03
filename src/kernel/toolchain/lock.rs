@@ -1033,15 +1033,6 @@ digest = "sha256:855d581f8a4eb1a8117e3426de25fe02770592febcfb31369aee1ffbfee9e8e
         );
     }
 
-    #[test]
-    fn staleness_compares_values_not_digests() {
-        assert!(!input_is_stale(None, None));
-        assert!(input_is_stale(None, Some("24.20.0")));
-        assert!(input_is_stale(Some("24.20.0"), None));
-        assert!(!input_is_stale(Some("24.20.0"), Some("24.20.0")));
-        assert!(input_is_stale(Some("24.20.0"), Some("24.22.0")));
-    }
-
     fn input(path: &str, field: &str, value: Option<&str>, sha256: Option<&str>) -> InputRow {
         InputRow {
             path: PathBuf::from(path),
@@ -1434,6 +1425,14 @@ digest = "sha256:855d581f8a4eb1a8117e3426de25fe02770592febcfb31369aee1ffbfee9e8e
             Some(&"z".repeat(64)),
         )];
         assert!(stale_rows(&same[..1], &recorded[..1]).is_empty());
+        // Nor is a row that was absent and still is.
+        let absent = [input(
+            "pyproject.toml",
+            "project.requires-python",
+            None,
+            None,
+        )];
+        assert!(stale_rows(&absent, &recorded[1..2]).is_empty());
     }
 
     #[test]

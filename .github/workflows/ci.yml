@@ -50,6 +50,7 @@ jobs:
         run: |
           cargo test --locked --lib sandbox
           cargo test --locked --test sandbox_deny
+          cargo test --locked --test npm_scripts
 
   # Ubuntu 23.10 and later can deny unprivileged user namespaces to any
   # program without its own AppArmor profile
@@ -132,6 +133,7 @@ jobs:
         run: |
           cargo test --locked --lib sandbox
           cargo test --locked --test sandbox_deny
+          cargo test --locked --test npm_scripts
       - name: "Fix two: the sysctl set to 0"
         if: steps.host.outputs.restricted == 'yes'
         run: |

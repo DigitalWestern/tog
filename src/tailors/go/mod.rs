@@ -35,9 +35,7 @@ use crate::kernel::resolve::ResolutionDoor;
 use crate::kernel::sandbox::BuildSpec;
 use crate::kernel::store::Store;
 use crate::kernel::toolchain::document::Shipped;
-use crate::kernel::toolchain::{
-    ArtifactRow, ArtifactSpec, Catalog, LegacyEvidence, Selected, Source,
-};
+use crate::kernel::toolchain::{ArtifactRow, ArtifactSpec, Catalog, Selected, Source};
 use crate::kernel::types::Identity;
 use crate::kernel::ui;
 use serde::{Deserialize, Serialize};
@@ -120,56 +118,6 @@ fn go_pin(platform: Platform, version: &str) -> io::Result<GoPin> {
 /// release a project with no Go pin gets.
 pub fn toolchain_catalog() -> io::Result<Catalog> {
     CATALOG.catalog()
-}
-
-/// A pre-lock Go closure records the toolchain under `plan.go_version` and
-/// the Go object under `go_object`: the archive and recipe that object's
-/// identity names are the proof.
-pub fn legacy_toolchain_evidence(
-    platform: Option<Platform>,
-    body: &serde_json::Value,
-    store: Option<&crate::kernel::store::Store>,
-) -> LegacyEvidence {
-    use crate::comforter::toolchain::{self as project_toolchain, LegacyRuntime};
-    let mut evidence =
-        crate::comforter::legacy_toolchain_evidence(platform, body, &[("go", "/plan/go_version")]);
-    project_toolchain::prove_legacy_runtime(
-        &mut evidence,
-        store,
-        body,
-        LegacyRuntime {
-            pointer: "/go_object",
-            via: &[],
-            kind: "go",
-        },
-        |identity, evidence| {
-            project_toolchain::expect_legacy_version(identity, evidence, "go", &identity.version)?;
-            Ok(vec![project_toolchain::proved_from_identity(
-                identity,
-                "go",
-                "artifact_sha256",
-                "sha256",
-                project_toolchain::schema_recipe(identity)?,
-            )?])
-        },
-    );
-    evidence
-}
-
-/// The Go object a pre-lock sync from `selected` left for legacy seeding to
-/// read, and the body field that names it.
-#[cfg(test)]
-pub(crate) fn legacy_runtime_for_test(
-    platform: Platform,
-    selected: &Selected,
-    store: &Store,
-) -> (serde_json::Value, Vec<Identity>) {
-    let row = runtime_row(platform, selected).unwrap();
-    let go = runtime_identity(platform, &row.version, row.digest.hex());
-    let body = serde_json::json!({
-        "go_object": crate::comforter::toolchain::object_ref_for_test(store, &go.object_id()),
-    });
-    (body, vec![go])
 }
 
 pub fn preflight_platform(platform: Platform) -> io::Result<()> {
@@ -443,9 +391,8 @@ pub fn go_env(go_obj: &Path, modcache: &Path, offline: bool) -> Vec<(String, Str
 
 /// The Go version this project uses, answered the way sync answers it:
 /// the `[toolchain.go]` section of `tog-toolchain.toml` when there is a
-/// lock, otherwise the release a Go closure written before the lock existed
-/// proves (the seed the next sync would lock), otherwise the newest complete
-/// catalog release satisfying go.mod's `go` and `toolchain` directives. It
+/// lock, otherwise the newest complete catalog release satisfying go.mod's
+/// `go` and `toolchain` directives (what the next sync would lock). It
 /// writes nothing, and a lock sync would refuse (no Go section, or stale
 /// against go.mod) is refused here in the same words.
 ///
@@ -473,10 +420,8 @@ fn project_go_version_from(
         vec![EcosystemInput {
             lock_ecosystem: "go".into(),
             catalog,
-            legacy: project_toolchain::legacy_evidence_in(project, &tailor::Go)?,
             external: None,
             helper_pins: Default::default(),
-            legacy_helper_pins: Default::default(),
             declared_helpers: Default::default(),
         }],
         Mode::ReadOnly,
@@ -2129,13 +2074,20 @@ mod tests {
         );
     }
 
-    /// With no lock but a closure written before the lock existed, the
-    /// answer is the release that closure proves, because the next sync
-    /// seeds the lock from it rather than selecting the newest.
+    /// With no lock, a closure written before the lock existed changes
+    /// nothing: the answer is the catalog's, as the next sync would lock it,
+    /// and reading it neither errors nor writes.
     #[test]
-    fn a_pre_lock_closure_seeds_the_lockless_answer() {
+    fn a_pre_lock_closure_does_not_change_the_lockless_answer() {
         let temp = TempDir::new();
         let dir = gomod_project(&temp, "module m\n\ngo 1.26\n");
+        let fresh = project_go_version_from(
+            two_pin_catalog(),
+            Platform::X86_64UnknownLinuxGnu,
+            &ProjectRoot::open(&dir).unwrap(),
+        )
+        .unwrap();
+        assert_ne!(fresh, "1.26.0");
         fs::create_dir_all(dir.join(".tog/closures")).unwrap();
         fs::write(
             dir.join(".tog/closures/go.json"),
@@ -2155,8 +2107,9 @@ mod tests {
                 &ProjectRoot::open(&dir).unwrap()
             )
             .unwrap(),
-            "1.26.0"
+            fresh
         );
+        assert!(!dir.join(crate::kernel::toolchain::lock::LOCK_PATH).exists());
     }
 
     /// A committed lock that pins the older release wins over selection.

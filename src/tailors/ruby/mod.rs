@@ -26,7 +26,7 @@ use crate::kernel::resolve::{DelegateReport, DelegateSpec, ResolutionDoor};
 use crate::kernel::sandbox::{BuildSpec, HostView};
 use crate::kernel::store::Store;
 use crate::kernel::toolchain::document::Shipped;
-use crate::kernel::toolchain::{ArtifactRow, Catalog, LegacyEvidence, Selected};
+use crate::kernel::toolchain::{ArtifactRow, Catalog, Selected};
 use crate::kernel::types::Identity;
 use crate::kernel::ui;
 use native::{
@@ -70,63 +70,6 @@ fn ruby_pin(platform: Platform) -> io::Result<&'static ArtifactRow> {
 /// generated and verified by `tools/catalog.py ruby`, and its default.
 pub fn toolchain_catalog() -> io::Result<Catalog> {
     CATALOG.catalog()
-}
-
-/// A pre-lock Ruby closure records the interpreter under `plan.ruby_version`
-/// and the Ruby object under `ruby_object`: the archive and recipe that
-/// object's identity names are the proof.
-pub fn legacy_toolchain_evidence(
-    platform: Option<Platform>,
-    body: &serde_json::Value,
-    store: Option<&crate::kernel::store::Store>,
-) -> LegacyEvidence {
-    use crate::comforter::toolchain::{self as project_toolchain, LegacyRuntime};
-    let mut evidence = crate::comforter::legacy_toolchain_evidence(
-        platform,
-        body,
-        &[("ruby", "/plan/ruby_version")],
-    );
-    project_toolchain::prove_legacy_runtime(
-        &mut evidence,
-        store,
-        body,
-        LegacyRuntime {
-            pointer: "/ruby_object",
-            via: &[],
-            kind: "ruby",
-        },
-        |identity, evidence| {
-            project_toolchain::expect_legacy_version(
-                identity,
-                evidence,
-                "ruby",
-                &identity.version,
-            )?;
-            Ok(vec![project_toolchain::proved_from_identity(
-                identity,
-                "ruby",
-                "artifact_sha256",
-                "sha256",
-                project_toolchain::schema_recipe(identity)?,
-            )?])
-        },
-    );
-    evidence
-}
-
-/// The Ruby object a pre-lock sync from `selected` left for legacy seeding
-/// to read, and the body field that names it.
-#[cfg(test)]
-pub(crate) fn legacy_runtime_for_test(
-    platform: Platform,
-    selected: &Selected,
-    store: &Store,
-) -> (serde_json::Value, Vec<Identity>) {
-    let ruby = ruby_identity(&ruby_spec(platform, selected).unwrap());
-    let body = serde_json::json!({
-        "ruby_object": crate::comforter::toolchain::object_ref_for_test(store, &ruby.object_id()),
-    });
-    (body, vec![ruby])
 }
 
 pub fn preflight_platform(platform: Platform) -> io::Result<()> {
@@ -2077,30 +2020,6 @@ mod tests {
         keys.sort_unstable();
         checked.sort_unstable();
         assert_eq!(keys, checked);
-    }
-
-    /// A project with its manifest but no lock is refused by name and
-    /// nothing is written: the lock is `prepare`'s to generate, and a
-    /// frozen run skips `prepare`.
-    #[test]
-    fn a_missing_lock_is_refused_by_name_and_nothing_is_written() {
-        let temp = crate::kernel::testutil::TempDir::named("ruby-frozen");
-        std::fs::write(temp.0.join("Gemfile"), "source \"https://rubygems.org\"\n").unwrap();
-        let project = crate::kernel::fsroot::ProjectRoot::open(&temp.0).unwrap();
-        let error = super::require_lock(&project).unwrap_err();
-        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
-        let message = error.to_string();
-        assert!(
-            message.contains("Gemfile.lock is missing and --frozen never creates it"),
-            "{message}"
-        );
-        assert!(
-            message.contains("run `tog` once without --frozen"),
-            "{message}"
-        );
-        assert!(!temp.0.join("Gemfile.lock").exists());
-        std::fs::write(temp.0.join("Gemfile.lock"), "").unwrap();
-        super::require_lock(&project).unwrap();
     }
 }
 

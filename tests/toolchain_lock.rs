@@ -888,6 +888,55 @@ fn exact_statuses() {
     );
 }
 
+/// A closure written before the lock existed, with no lock beside it:
+/// read-only commands answer exactly as for any project that needs a sync.
+/// `status` names the missing lock and its one next step, `doctor` reports
+/// the project without an error, and neither writes a lock.
+#[test]
+fn a_pre_lock_closure_without_a_lock_reads_as_needing_a_sync() {
+    let fixture = Fixture::new("pre-lock");
+    let (newest, _) = two_python_versions();
+    fixture.write("pyproject.toml", PLAIN_PYPROJECT);
+    fixture.write(".python-version", &format!("{newest}\n"));
+    write_python_closure(fixture.dir(), None);
+
+    let status = fixture.tog(&["status", "--json"]);
+    assert_eq!(status.status.code(), Some(1), "{}", text(&status.stderr));
+    assert!(status.stderr.is_empty(), "{}", text(&status.stderr));
+    let value: serde_json::Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert_eq!(value["synced"], serde_json::json!(false));
+    assert_eq!(value["ecosystems"][0]["state"], "changed");
+    assert_eq!(
+        value["ecosystems"][0]["detail"][0],
+        "tog-toolchain.toml (missing; run 'tog' to create it)"
+    );
+
+    let manifest = format!(
+        "file://{}",
+        fixture.home.0.join("no-manifest.json").display()
+    );
+    let doctor = tog_env(
+        fixture.dir(),
+        &fixture.home.0,
+        &["doctor", "--json"],
+        &[("TOG_RELEASE_MANIFEST", manifest.as_str())],
+    );
+    let stderr = text(&doctor.stderr);
+    assert!(!stderr.contains("error"), "{stderr}");
+    let value: serde_json::Value = serde_json::from_slice(&doctor.stdout).unwrap();
+    let project = value["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|check| check["name"] == "project")
+        .unwrap();
+    assert_eq!(project["level"], "ok", "{project}");
+    assert!(
+        fixture.lock_bytes().is_none(),
+        "a read-only command wrote a lock"
+    );
+}
+
 /// A python closure whose dependency side is current for this fixture, so
 /// the lock verdict is the only thing left to decide the row.
 fn write_python_closure(dir: &Path, bundle_id: Option<&str>) {
@@ -966,10 +1015,8 @@ fn two_store_replay() {
             vec![project_toolchain::EcosystemInput {
                 lock_ecosystem: "python".into(),
                 catalog,
-                legacy: None,
                 external: None,
                 helper_pins: Default::default(),
-                legacy_helper_pins: Default::default(),
                 declared_helpers: Default::default(),
             }],
             project_toolchain::Mode::ReadOnly,
@@ -1137,10 +1184,8 @@ fn linux_lock_bytes_are_platform_independent() {
             vec![project_toolchain::EcosystemInput {
                 lock_ecosystem: "python".into(),
                 catalog: catalog_of("python"),
-                legacy: None,
                 external: None,
                 helper_pins: Default::default(),
-                legacy_helper_pins: Default::default(),
                 declared_helpers: Default::default(),
             }],
             project_toolchain::Mode::Writable,

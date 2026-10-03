@@ -27,7 +27,7 @@ use crate::kernel::store::Store;
 use crate::kernel::toolchain::document::Shipped;
 #[cfg(test)]
 use crate::kernel::toolchain::ArtifactRow;
-use crate::kernel::toolchain::{Catalog, LegacyEvidence, Selected};
+use crate::kernel::toolchain::{Catalog, Selected};
 use crate::kernel::types::Identity;
 use crate::kernel::ui;
 use serde::{Deserialize, Serialize};
@@ -67,100 +67,6 @@ static CATALOG: Shipped = Shipped::new(include_str!("catalog.toml"));
 /// The shipped BEAM catalog and its default pair.
 pub fn toolchain_catalog() -> io::Result<Catalog> {
     CATALOG.catalog()
-}
-
-/// A pre-lock Elixir closure records both halves of the BEAM pair under
-/// `plan.otp_version` and `plan.elixir_version`, and the composite BEAM
-/// object under `beam_object`: the four archives and recipes its identity
-/// names are the proof.
-pub fn legacy_toolchain_evidence(
-    platform: Option<Platform>,
-    body: &serde_json::Value,
-    store: Option<&crate::kernel::store::Store>,
-) -> LegacyEvidence {
-    use crate::comforter::toolchain::{self as project_toolchain, LegacyRuntime, ProofGap};
-    let mut evidence = crate::comforter::legacy_toolchain_evidence(
-        platform,
-        body,
-        &[
-            ("otp", "/plan/otp_version"),
-            ("elixir", "/plan/elixir_version"),
-        ],
-    );
-    project_toolchain::prove_legacy_runtime(
-        &mut evidence,
-        store,
-        body,
-        LegacyRuntime {
-            pointer: "/beam_object",
-            via: &[],
-            kind: "beam",
-        },
-        |identity, evidence| {
-            // `beam_identity` spells the pair `<otp>-elixir<elixir>`.
-            let Some((otp, elixir)) = identity.version.split_once("-elixir") else {
-                return Err(ProofGap::Contradicted(format!(
-                    "the closure's beam object {} records no OTP/Elixir pair",
-                    identity.object_id()
-                )));
-            };
-            project_toolchain::expect_legacy_version(identity, evidence, "otp", otp)?;
-            project_toolchain::expect_legacy_version(identity, evidence, "elixir", elixir)?;
-            let recipe = project_toolchain::schema_recipe(identity)?;
-            // Linux OTP is our relocated build, laid out under the
-            // relocation recipe the identity records beside the schema.
-            let otp_recipe = match identity.inputs.get("relocation_schema") {
-                Some(relocation) => relocation.as_str(),
-                None => recipe,
-            };
-            Ok(vec![
-                project_toolchain::proved_from_identity(
-                    identity,
-                    "otp",
-                    "otp_sha256",
-                    "sha256",
-                    otp_recipe,
-                )?,
-                project_toolchain::proved_from_identity(
-                    identity,
-                    "elixir",
-                    "elixir_sha256",
-                    "sha256",
-                    recipe,
-                )?,
-                project_toolchain::proved_from_identity(
-                    identity,
-                    "hex",
-                    "hex_sha512",
-                    "sha512",
-                    recipe,
-                )?,
-                project_toolchain::proved_from_identity(
-                    identity,
-                    "rebar3",
-                    "rebar3_sha512",
-                    "sha512",
-                    recipe,
-                )?,
-            ])
-        },
-    );
-    evidence
-}
-
-/// The BEAM object a pre-lock sync from `selected` into `store` left for
-/// legacy seeding to read, and the body field that names it.
-#[cfg(test)]
-pub(crate) fn legacy_runtime_for_test(
-    platform: Platform,
-    selected: &Selected,
-    store: &Store,
-) -> (serde_json::Value, Vec<Identity>) {
-    let beam = beam_identity(&beam_spec(platform, selected).unwrap(), &store.root).unwrap();
-    let body = serde_json::json!({
-        "beam_object": crate::comforter::toolchain::object_ref_for_test(store, &beam.object_id()),
-    });
-    (body, vec![beam])
 }
 
 pub fn preflight_platform(platform: Platform) -> io::Result<()> {
@@ -3063,34 +2969,6 @@ exit 0
         assert!(!tailor::Elixir
             .detect(&ProjectRoot::open(&project).unwrap())
             .unwrap());
-    }
-
-    /// A project with its manifest but no lock is refused by name and
-    /// nothing is written: the lock is `prepare`'s to generate, and a
-    /// frozen run skips `prepare`.
-    #[test]
-    fn a_missing_lock_is_refused_by_name_and_nothing_is_written() {
-        let temp = crate::kernel::testutil::TempDir::named("elixir-frozen");
-        std::fs::write(
-            temp.0.join("mix.exs"),
-            "defmodule Hello.MixProject do\nend\n",
-        )
-        .unwrap();
-        let project = crate::kernel::fsroot::ProjectRoot::open(&temp.0).unwrap();
-        let error = super::require_lock(&project).unwrap_err();
-        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
-        let message = error.to_string();
-        assert!(
-            message.contains("mix.lock is missing and --frozen never creates it"),
-            "{message}"
-        );
-        assert!(
-            message.contains("run `tog` once without --frozen"),
-            "{message}"
-        );
-        assert!(!temp.0.join("mix.lock").exists());
-        std::fs::write(temp.0.join("mix.lock"), "").unwrap();
-        super::require_lock(&project).unwrap();
     }
 
     /// The check's input hash moves with the lock, the root mix.exs, an

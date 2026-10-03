@@ -14,7 +14,8 @@
 //! An endpoint may name a credential *reference*, and a redirect is matched
 //! to the target endpoint, so it would get that endpoint's credential or
 //! none, never the original endpoint's. No shipped endpoint names one, and
-//! retrieval sends none (credential handling waits on #72). No secret is
+//! retrieval sends none (the credential policy is decided in #72; sending
+//! is not built yet, #404). No secret is
 //! ever stored here or in a catalog row: a [`CredentialRef`] names where an
 //! operator keeps one.
 

@@ -3,7 +3,7 @@
 //! registry.
 
 use crate::comforter::toolchain::{self as project_toolchain, Mode, ProjectToolchain};
-use crate::commands::shared::{ecosystem_inputs_in, no_inputs, projected_root};
+use crate::commands::shared::{ecosystem_inputs, no_inputs, projected_root};
 use crate::kernel::context::{self, Context};
 use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::platform::Platform;
@@ -55,9 +55,9 @@ impl Scope<'_> {
 /// publishes a created lock once the store lease is held.
 ///
 /// `project` is the directory the whole sync reads and writes through,
-/// opened once by the caller: detection, the input check, host preflight,
-/// the toolchain inputs, and the pre-lock closures all read the directory
-/// it holds, never whatever the project's path names by then.
+/// opened once by the caller: detection, the input check, host preflight
+/// and the toolchain inputs all read the directory it holds, never
+/// whatever the project's path names by then.
 pub fn preflight_sync(
     platform: Platform,
     project: &ProjectRoot,
@@ -101,7 +101,7 @@ fn preflight_detected(
     for tailor in present.iter().filter(|tailor| scope.covers(**tailor)) {
         tailor.preflight(platform, project)?;
     }
-    let inputs = ecosystem_inputs_in(project, present)?;
+    let inputs = ecosystem_inputs(present)?;
     project_toolchain::resolve(project, platform, inputs, mode, policy::strict())
 }
 
@@ -296,7 +296,7 @@ fn check_whole_project(platform: Platform, dir: &Path) -> io::Result<()> {
         return Ok(());
     }
     check_inputs(&root, &present)?;
-    let inputs = ecosystem_inputs_in(&root, &present)?;
+    let inputs = ecosystem_inputs(&present)?;
     project_toolchain::resolve(&root, platform, inputs, Mode::ReadOnly, false).map(|_| ())
 }
 
@@ -798,10 +798,9 @@ mod tests {
         assert!(!line.contains("[signing]"), "{line}");
     }
 
-    /// Closures are tog's own state: sync's toolchain seeding and its
-    /// exception summary read them through the held project with the strict
-    /// no-follow walk, so a symlinked `.tog` or closure file is refused (or,
-    /// for the advisory summary, counts nothing) instead of being read
+    /// Closures are tog's own state: sync's exception summary reads them
+    /// through the held project with the strict no-follow walk, so a
+    /// symlinked `.tog` or closure file counts nothing instead of being read
     /// through to another directory.
     #[test]
     fn closures_are_read_without_following_a_symlink() {
@@ -819,10 +818,6 @@ mod tests {
         std::fs::write(project.join(".tog/closures/python.json"), &closure).unwrap();
         std::fs::write(outside.join("closures/python.json"), &closure).unwrap();
         let root = ProjectRoot::open(&project).unwrap();
-        assert_eq!(
-            crate::commands::inspect::closures_in(&root).unwrap().len(),
-            1
-        );
         assert_eq!(exception_count(&root), 2);
 
         // A symlinked closure file.
@@ -832,15 +827,11 @@ mod tests {
             project.join(".tog/closures/python.json"),
         )
         .unwrap();
-        let error = crate::commands::inspect::closures_in(&root).unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{error}");
         assert_eq!(exception_count(&root), 0);
 
         // A symlinked `.tog`.
         std::fs::remove_dir_all(project.join(".tog")).unwrap();
         std::os::unix::fs::symlink(&outside, project.join(".tog")).unwrap();
-        let error = crate::commands::inspect::closures_in(&root).unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{error}");
         assert_eq!(exception_count(&root), 0);
     }
 
@@ -1155,15 +1146,6 @@ mod tests {
         fn toolchain_catalog(&self) -> io::Result<crate::kernel::toolchain::Catalog> {
             Self::real().toolchain_catalog()
         }
-        fn legacy_toolchain_evidence(
-            &self,
-            ecosystem: &str,
-            platform: Option<Platform>,
-            body: &serde_json::Value,
-            store: Option<&crate::kernel::store::Store>,
-        ) -> crate::kernel::toolchain::LegacyEvidence {
-            Self::real().legacy_toolchain_evidence(ecosystem, platform, body, store)
-        }
     }
 
     /// A build whose own ecosystem is synced runs no sync, so the
@@ -1455,15 +1437,6 @@ mod tests {
         }
         fn toolchain_catalog(&self) -> io::Result<crate::kernel::toolchain::Catalog> {
             HostlessPython::real().toolchain_catalog()
-        }
-        fn legacy_toolchain_evidence(
-            &self,
-            ecosystem: &str,
-            platform: Option<Platform>,
-            body: &serde_json::Value,
-            store: Option<&crate::kernel::store::Store>,
-        ) -> crate::kernel::toolchain::LegacyEvidence {
-            HostlessPython::real().legacy_toolchain_evidence(ecosystem, platform, body, store)
         }
     }
 

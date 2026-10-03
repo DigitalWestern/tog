@@ -181,16 +181,16 @@ pub fn environment_name(
 /// `bundle_id` covers every component version and every platform artifact
 /// row, so a changed uv, a changed extraction recipe, or any other bundle
 /// component yields a fresh environment; the runtime object id is what the
-/// projection actually points at. A directory an older tog made under the
-/// `x/2` key is never reused, and stays a GC root until `tog x --clean`.
-/// The name's first word is the registry tool's `cache_prefix`.
+/// projection actually points at. The name's first word is the registry
+/// tool's `cache_prefix`.
 ///
 /// A tool that builds with helper toolchains (npm's node-gyp Python) keys
 /// on each helper's runtime object too, under `x/4`: the `x/3` preimage
-/// with `<helper>=<object id>` fields appended. A tool with none keeps its
-/// `x/3` name byte for byte, so `py:` caches survive; every `npm:` cache
-/// from `x/3` is a miss, because none of them could say which Python its
-/// native addons were built on.
+/// with `<helper>=<object id>` fields appended. A tool with none keys on
+/// the `x/3` preimage alone. The key only names the directory: a cache hit
+/// also needs the request record (`.tog/x.json`) the run wrote there, so a
+/// directory an older tog made without one is rebuilt in place, never
+/// reused, and bare `tog x --clean` removes it.
 #[allow(clippy::too_many_arguments)]
 fn x_root_name(
     store: &Store,
@@ -1211,19 +1211,6 @@ fn x_candidates(x_dir: &Path) -> io::Result<Vec<XCandidate>> {
 enum CandidateMatch {
     Match,
     NoMatch,
-    Unrecoverable,
-}
-
-/// Ecosystem recovered from a legacy generated manifest, for a root that
-/// carries no recorded request. The matcher and the summary must read this
-/// the same way: a legacy root that parses as both would otherwise be matched
-/// for deletion as one ecosystem and reported to the user as the other.
-/// Registry order decides between two readings.
-fn recovered_legacy_ecosystem(path: &Path) -> Option<&'static str> {
-    registry_tools()
-        .into_iter()
-        .find(|(_, tool)| tool.legacy_packages(path).is_some())
-        .map(|(id, _)| id)
 }
 
 /// The ecosystem whose registry tool names cache directories with the
@@ -1236,52 +1223,6 @@ fn ecosystem_from_name(name: &str) -> Option<&'static str> {
                 .is_some_and(|rest| rest.starts_with('-'))
         })
         .map(|(id, _)| id)
-}
-
-fn old_root_matches(path: &Path, filter: &CleanFilter) -> CandidateMatch {
-    let Some(package) = filter.package.as_deref() else {
-        let Some(ecosystem) = filter.ecosystem.as_deref() else {
-            return CandidateMatch::Match;
-        };
-        let name_ecosystem = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .and_then(ecosystem_from_name);
-        let recovered_ecosystem = recovered_legacy_ecosystem(path).or(name_ecosystem);
-        return match recovered_ecosystem {
-            Some(recovered) if recovered == ecosystem => CandidateMatch::Match,
-            Some(_) => CandidateMatch::NoMatch,
-            None => CandidateMatch::Unrecoverable,
-        };
-    };
-    let mut recovered = false;
-    for (id, tool) in registry_tools() {
-        if filter
-            .ecosystem
-            .as_deref()
-            .is_some_and(|ecosystem| ecosystem != id)
-        {
-            continue;
-        }
-        let Some(packages) = tool.legacy_packages(path) else {
-            continue;
-        };
-        recovered = true;
-        if packages.iter().any(|record| {
-            record.package == package
-                && filter
-                    .version
-                    .as_deref()
-                    .is_none_or(|version| record.version.as_deref() == Some(version))
-        }) {
-            return CandidateMatch::Match;
-        }
-    }
-    if recovered {
-        CandidateMatch::NoMatch
-    } else {
-        CandidateMatch::Unrecoverable
-    }
 }
 
 fn record_matches(record: &XRecord, filter: &CleanFilter) -> bool {
@@ -1300,8 +1241,7 @@ fn record_matches(record: &XRecord, filter: &CleanFilter) -> bool {
 }
 
 /// Best-effort ecosystem of a candidate, used only to word the summary. The
-/// recorded request wins, then a recovered legacy manifest, then the
-/// generated name prefix.
+/// recorded request wins, then the generated name prefix.
 fn candidate_ecosystem(path: &Path) -> Option<&'static str> {
     if let Some(record) = read_x_request(path) {
         return registry_tools()
@@ -1309,23 +1249,23 @@ fn candidate_ecosystem(path: &Path) -> Option<&'static str> {
             .map(|(id, _)| id)
             .find(|id| *id == record.ecosystem);
     }
-    if let Some(recovered) = recovered_legacy_ecosystem(path) {
-        return Some(recovered);
-    }
     ecosystem_from_name(path.file_name().and_then(|name| name.to_str())?)
 }
 
+/// Whether `filter` selects `candidate`. Only the request record says what
+/// a root was made for, so a root without one matches only a clean with no
+/// filter at all: a filtered clean leaves it alone, and the bare
+/// `tog x --clean` removes it.
 fn candidate_matches(candidate: &XCandidate, filter: &CleanFilter) -> CandidateMatch {
-    read_x_request(&candidate.path).map_or_else(
-        || old_root_matches(&candidate.path, filter),
-        |record| {
-            if record_matches(&record, filter) {
-                CandidateMatch::Match
-            } else {
-                CandidateMatch::NoMatch
-            }
-        },
-    )
+    let matched = match read_x_request(&candidate.path) {
+        Some(record) => record_matches(&record, filter),
+        None => filter.ecosystem.is_none() && filter.package.is_none() && filter.version.is_none(),
+    };
+    if matched {
+        CandidateMatch::Match
+    } else {
+        CandidateMatch::NoMatch
+    }
 }
 
 /// Decide whether a cached root can be executed as it stands. A `true` answer
@@ -1339,18 +1279,12 @@ fn x_request_is_ready(
     ecosystem: &str,
     executable: &Path,
 ) -> io::Result<bool> {
-    // x-request/1 records written before lifecycle states were added, and
-    // roots without a marker, are legacy complete records when their
-    // projection is valid. A realization marker is always incomplete.
-    let marker_exists = fs::symlink_metadata(root.join(X_REQUEST_FILE)).is_ok();
-    let record = read_x_request(root);
-    if marker_exists && record.is_none() {
-        return Ok(false);
-    }
-    if record
-        .as_ref()
-        .and_then(|record| record.state.as_deref())
-        .is_some_and(|state| state != "ready")
+    // Only a root whose run recorded it `ready` is complete. A root with no
+    // record, an unreadable one, or one still `realizing` is rebuilt.
+    if read_x_request(root)
+        .and_then(|record| record.state)
+        .as_deref()
+        != Some("ready")
     {
         return Ok(false);
     }
@@ -1361,10 +1295,6 @@ fn x_request_is_ready(
     // missing projection and bypassed by a fresh realization.
     check_cached_projection(store, activity, root, ecosystem)?;
     Ok(true)
-}
-
-fn x_request_file_exists(root: &Path) -> bool {
-    fs::symlink_metadata(root.join(X_REQUEST_FILE)).is_ok()
 }
 
 enum Registration {
@@ -1378,7 +1308,27 @@ enum Registration {
     Unknown,
 }
 
-fn originating_store(root: &Path) -> io::Result<Option<Store>> {
+/// Which store owns an x root, as cleanup must know it to unregister the
+/// root under that store's lease.
+enum Origin {
+    /// The store the request record names, or else the one store every
+    /// object the root's closures reference lives in.
+    Store(Store),
+    /// No closure at all: a shell a run left before it wrote one, which
+    /// references nothing and was never registered with its objects.
+    Empty,
+    /// The closures name objects, but no single available store can be
+    /// recovered from them. Removing the root would orphan its registration.
+    Unknown(String),
+}
+
+/// The store that owns `root`: the request record's `store_root` when it
+/// has one, otherwise the store its closures' object references
+/// (`runtime_object`, `env_object`) live in. Only cleanup asks this. A root
+/// without a request record is never a cache hit, but deleting one under
+/// the wrong store would leave the owner's registration keeping its
+/// objects forever.
+fn originating_store(root: &Path) -> io::Result<Origin> {
     let marker = root.join(X_REQUEST_FILE);
     let marker_present = match fs::symlink_metadata(&marker) {
         Ok(metadata) => {
@@ -1420,174 +1370,106 @@ fn originating_store(root: &Path) -> io::Result<Option<Store>> {
                     store_root.display()
                 )));
             }
-            return Ok(Some(Store { root: store_root }));
+            return Ok(Origin::Store(Store { root: store_root }));
         }
     }
+    closure_owner(root)
+}
 
+/// The one store every closure under `root` references objects in, read
+/// with the same no-follow rules as the rest of the x root. A closure
+/// directory or file that cannot be read leaves the owner unknown, so
+/// cleanup skips that root and goes on with the rest.
+fn closure_owner(root: &Path) -> io::Result<Origin> {
+    Ok(read_closure_owner(root).unwrap_or_else(|error| {
+        Origin::Unknown(format!("its closures could not be read: {error}"))
+    }))
+}
+
+fn read_closure_owner(root: &Path) -> io::Result<Origin> {
     let closures = root.join(".tog/closures");
     let entries = match fs::read_dir(&closures) {
         Ok(entries) => entries,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Origin::Empty),
         Err(error) => return Err(error),
     };
     let mut found: Option<Store> = None;
+    let mut any = false;
     for entry in entries {
         let entry = entry?;
-        let stat = fs::symlink_metadata(entry.path())?;
-        if stat.file_type().is_symlink()
-            || !stat.is_file()
-            || entry.path().extension().and_then(|ext| ext.to_str()) != Some("json")
-        {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
             continue;
         }
+        let stat = fs::symlink_metadata(&path)?;
+        if stat.file_type().is_symlink() || !stat.is_file() {
+            return Ok(Origin::Unknown(format!(
+                "closure {} is not a regular file",
+                path.display()
+            )));
+        }
+        any = true;
         let file = fs::OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .open(entry.path())?;
-        let value: serde_json::Value = match serde_json::from_reader(file) {
-            Ok(value) => value,
-            Err(_) => continue,
+            .open(&path)?;
+        let Ok(value) = serde_json::from_reader::<_, serde_json::Value>(file) else {
+            return Ok(Origin::Unknown(format!(
+                "closure {} is unreadable",
+                path.display()
+            )));
         };
-        let body = value.get("body").unwrap_or(&value);
-        let mut paths = Vec::new();
-        collect_legacy_object_references(body, &mut paths);
-        for path in paths {
-            let Some(store) = comforter::store_from_object_path(&path) else {
-                continue;
-            };
-            let Some(id) = path.file_name().and_then(|name| name.to_str()) else {
-                continue;
-            };
-            if !store::is_object_id(id) || store.object_path(id) != path {
-                continue;
-            }
-            let object_stat = match fs::symlink_metadata(&path) {
-                Ok(stat) => stat,
-                Err(_) => continue,
-            };
-            if object_stat.file_type().is_symlink() || !object_stat.is_dir() {
-                continue;
-            }
-            if let Some(previous) = &found {
-                if previous.root != store.root {
-                    return Err(other(
-                        "x: legacy closure references more than one originating store",
-                    ));
-                }
-            } else {
-                found = Some(store);
-            }
-        }
-    }
-    Ok(found)
-}
-
-/// Does this candidate's closure claim any store object at all?
-///
-/// `originating_store` answers "which store owns this?", and returns `None`
-/// both for a projection that names objects nobody can resolve and for one
-/// that names nothing. Those are very different: the first is an unresolved
-/// ownership claim that cleanup must defer on, the second is an empty shell
-/// left by a partial run, which references nothing and can be removed under
-/// the x-root lock alone.
-fn closure_claims_an_object(root: &Path) -> io::Result<bool> {
-    if read_x_request(root)
-        .and_then(|record| record.store_root)
-        .is_some()
-    {
-        return Ok(true);
-    }
-    let closures = root.join(".tog/closures");
-    let entries = match fs::read_dir(&closures) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(error),
-    };
-    for entry in entries {
-        let entry = entry?;
-        let stat = fs::symlink_metadata(entry.path())?;
-        if stat.file_type().is_symlink()
-            || !stat.is_file()
-            || entry.path().extension().and_then(|ext| ext.to_str()) != Some("json")
-        {
-            continue;
-        }
-        let file = fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .open(entry.path())?;
-        let value: serde_json::Value = match serde_json::from_reader(file) {
-            Ok(value) => value,
-            // An unreadable closure is itself an unresolved claim.
-            Err(_) => return Ok(true),
-        };
-        let body = value.get("body").unwrap_or(&value);
-        let mut paths = Vec::new();
-        collect_legacy_object_references(body, &mut paths);
-        for path in paths {
-            // The question is what the closure *claims*, not what still
-            // resolves. A store that has been moved or deleted makes
-            // `store_from_object_path` fail, and that is exactly the case
-            // where deleting the projection would be a guess.
-            if names_a_store_object(&path) {
-                return Ok(true);
-            }
-        }
-    }
-    Ok(false)
-}
-
-/// Structural test for `<any store>/objects/<object-id>`, with no
-/// requirement that the store still exists.
-fn names_a_store_object(path: &Path) -> bool {
-    if !path.is_absolute() {
-        return false;
-    }
-    path.components()
-        .collect::<Vec<_>>()
-        .windows(2)
-        .any(|pair| {
-            let (std::path::Component::Normal(objects), std::path::Component::Normal(id)) =
-                (pair[0], pair[1])
-            else {
-                return false;
-            };
-            objects == "objects" && id.to_str().is_some_and(store::is_object_id)
-        })
-}
-
-fn collect_legacy_object_references(value: &serde_json::Value, paths: &mut Vec<PathBuf>) {
-    match value {
-        serde_json::Value::String(text) => {
-            let path = Path::new(text);
-            if path.is_absolute() {
-                paths.push(path.to_path_buf());
-            }
-        }
-        serde_json::Value::Array(values) => {
-            for value in values {
-                collect_legacy_object_references(value, paths);
-            }
-        }
-        serde_json::Value::Object(values) => {
-            if let (Some(id), Some(path)) = (
-                values.get("id").and_then(serde_json::Value::as_str),
-                values.get("path").and_then(serde_json::Value::as_str),
-            ) {
-                let path = Path::new(path);
-                if path.is_absolute()
-                    && store::is_object_id(id)
-                    && path.file_name() == Some(id.as_ref())
+        let body = &value["body"];
+        let mut objects: Vec<PathBuf> = Vec::new();
+        let runtime = &body["runtime_object"];
+        if !runtime.is_null() {
+            match (runtime["id"].as_str(), runtime["path"].as_str()) {
+                (Some(id), Some(object))
+                    if store::is_object_id(id)
+                        && Path::new(object).file_name() == Some(id.as_ref()) =>
                 {
-                    paths.push(path.to_path_buf());
+                    objects.push(PathBuf::from(object));
+                }
+                _ => {
+                    return Ok(Origin::Unknown(format!(
+                        "closure {} has a malformed runtime_object",
+                        path.display()
+                    )))
                 }
             }
-            for value in values.values() {
-                collect_legacy_object_references(value, paths);
+        }
+        if let Some(env) = body["env_object"].as_str() {
+            objects.push(PathBuf::from(env));
+        }
+        if objects.is_empty() {
+            return Ok(Origin::Unknown(format!(
+                "closure {} names no store object",
+                path.display()
+            )));
+        }
+        for object in objects {
+            let Some(store) = comforter::store_from_object_path(&object) else {
+                return Ok(Origin::Unknown(format!(
+                    "the store holding {} is unavailable",
+                    object.display()
+                )));
+            };
+            match &found {
+                Some(previous) if previous.root != store.root => {
+                    return Ok(Origin::Unknown(
+                        "its closures name objects in more than one store".into(),
+                    ))
+                }
+                Some(_) => {}
+                None => found = Some(store),
             }
         }
-        _ => {}
     }
+    Ok(match found {
+        Some(store) => Origin::Store(store),
+        None if any => Origin::Unknown("its closures name no store object".into()),
+        None => Origin::Empty,
+    })
 }
 
 fn registration_for_store(root: &Path, store: Store) -> io::Result<Registration> {
@@ -1608,10 +1490,10 @@ fn registration_for_store(root: &Path, store: Store) -> io::Result<Registration>
 
 #[cfg(test)]
 fn registration_for(root: &Path) -> io::Result<Registration> {
-    let Some(store) = originating_store(root)? else {
-        return Ok(Registration::Unknown);
-    };
-    registration_for_store(root, store)
+    match originating_store(root)? {
+        Origin::Store(store) => registration_for_store(root, store),
+        Origin::Empty | Origin::Unknown(_) => Ok(Registration::Unknown),
+    }
 }
 
 /// Remove cached x projections. The store objects remain available for the
@@ -1630,44 +1512,30 @@ pub fn clean(request: CleanRequest) -> io::Result<()> {
         match candidate_matches(&candidate, &filter) {
             CandidateMatch::Match => {}
             CandidateMatch::NoMatch => continue,
-            CandidateMatch::Unrecoverable => {
-                println!(
-                    "tog: skipped x environment {} (legacy root package could not be recovered; use 'tog x --clean' with no tool to remove all x environments)",
-                    candidate.path.display()
-                );
-                // A root that was considered and skipped still counts, so a
-                // run that skipped everything does not then claim there was
-                // nothing to clean.
-                matched += 1;
-                skipped += 1;
-                continue;
-            }
         }
         matched += 1;
         let ecosystem = candidate_ecosystem(&candidate.path);
         // Origin metadata is only a hint until the originating store is
-        // protected. Never delete an x projection whose store cannot be
-        // recovered, and never use the caller's current TOG_STORE as a
-        // substitute for that provenance.
-        let origin = originating_store(&candidate.path)?;
-        if origin.is_none() && closure_claims_an_object(&candidate.path)? {
-            // An unresolved ownership claim is a named skip, never permission
-            // to delete. The caller's current TOG_STORE is not evidence
-            // about this candidate: the projection can belong to a store that
-            // is not the one this invocation happens to be pointed at.
-            println!(
-                "tog: skipped x environment {} (it claims store objects whose originating store could not be recovered; restore that store's closure, or remove the directory yourself once you know nothing is using it)",
-                candidate.path.display()
-            );
-            skipped += 1;
-            continue;
-        }
-        // An empty projection claims nothing, so there is no originating
-        // store to protect and the x-root lock below is the whole guard.
-        let unowned = origin.is_none();
-        let origin_store = match origin {
-            Some(store) => store,
-            None => Store::open()?,
+        // protected. The root is removed and unregistered under the store
+        // that owns it, never the caller's: a root whose owner cannot be
+        // recovered is skipped, because removing it would leave that store's
+        // registration keeping its objects. An empty shell references
+        // nothing, so the x-root lock below is its whole guard and the
+        // caller's store only lends the lease.
+        let origin = match originating_store(&candidate.path)? {
+            Origin::Unknown(why) => {
+                println!(
+                    "tog: skipped x environment {} (its owning store could not be recovered: {why}; remove the directory yourself once you know nothing is using it)",
+                    candidate.path.display()
+                );
+                skipped += 1;
+                continue;
+            }
+            origin => origin,
+        };
+        let origin_store = match &origin {
+            Origin::Store(store) => store.clone(),
+            Origin::Empty | Origin::Unknown(_) => Store::open()?,
         };
         let Some(activity) = origin_store.try_activity_exclusive()? else {
             println!(
@@ -1687,12 +1555,12 @@ pub fn clean(request: CleanRequest) -> io::Result<()> {
             continue;
         };
         let _project_lock = origin_store.project_lock(&candidate.path)?;
-        // Re-read the untrusted origin after both guards. A changed marker is
-        // a race, not permission to remove the candidate. An unowned
-        // projection must still be unowned: gaining a claim while it was
+        // Re-read the untrusted origin after both guards. A changed marker or
+        // closure is a race, not permission to remove the candidate. An
+        // empty shell must still be empty: gaining a claim while it was
         // being locked is the same race.
-        match originating_store(&candidate.path)? {
-            Some(revalidated_store) if !unowned => {
+        match (&origin, originating_store(&candidate.path)?) {
+            (Origin::Store(_), Origin::Store(revalidated_store)) => {
                 if revalidated_store.root != origin_store.root {
                     println!(
                         "tog: skipped x environment {} (originating store changed while it was being locked; retry later)",
@@ -1702,7 +1570,7 @@ pub fn clean(request: CleanRequest) -> io::Result<()> {
                     continue;
                 }
             }
-            None if unowned && !closure_claims_an_object(&candidate.path)? => {}
+            (Origin::Empty, Origin::Empty) => {}
             _ => {
                 println!(
                     "tog: skipped x environment {} (origin changed while it was being locked; retry later)",
@@ -1875,9 +1743,6 @@ pub fn launch(
     let _x_lock = acquire_x_root(&root)?;
     let executable = tool.bin_dir(&root).join(bin);
     let mut attribution = policy::Attribution::open(ecosystem)?;
-    // A pre-state x-request/1 root has no marker but can still be a
-    // complete legacy cache. Preserve that cache path only when its
-    // projected executable already exists.
     let ready = x_request_is_ready(&store, activity, &root, ecosystem, &executable)?;
     if !ready {
         write_x_request_for_store(
@@ -1914,21 +1779,6 @@ pub fn launch(
         // `x_request_is_ready` already validated this projection against
         // the store and the active policy. Validating it again would
         // narrate and queue every persisted exception twice.
-        if !x_request_file_exists(&root) {
-            write_x_request_for_store(
-                &root,
-                &store,
-                ecosystem,
-                package,
-                version,
-                "ready",
-                Some((
-                    &toolchain,
-                    runtime_object.as_str(),
-                    helper_objects.as_slice(),
-                )),
-            )?;
-        }
         attribution.discard();
     }
     if !executable.is_file() {
@@ -2006,8 +1856,24 @@ pub(crate) fn realize_cached_tool(
     // it. The caller holds the lock for as long as it uses the root.
     let lock = acquire_x_root(&root)?;
     let executable = tool.bin_dir(&root).join(default_bin(package));
-    if executable.is_file() {
-        check_cached_projection(store, activity, &root, ecosystem)?;
+    // The same request record `tog x` writes, so the environment is one
+    // `tog x` reuses and `tog x --clean <tool>` can name, and its
+    // originating store is known when it is removed.
+    let runtime = Some((
+        &toolchain,
+        runtime_object.as_str(),
+        helper_objects.as_slice(),
+    ));
+    if cached_tool_hit(
+        store,
+        activity,
+        &root,
+        ecosystem,
+        package,
+        version,
+        &executable,
+        runtime,
+    )? {
         return Ok(CachedTool {
             root,
             lock,
@@ -2020,11 +1886,52 @@ pub(crate) fn realize_cached_tool(
             "'{package}@{version}' installed but provides no '{package}' executable"
         )));
     }
+    write_x_request_for_store(
+        &root,
+        store,
+        ecosystem,
+        package,
+        Some(version),
+        "ready",
+        runtime,
+    )?;
     Ok(CachedTool {
         root,
         lock,
         realized: true,
     })
+}
+
+/// The cache decision `realize_cached_tool` makes, under the x-root lock
+/// its caller holds: reuse the root exactly when `tog x` would
+/// (`x_request_is_ready`: a `ready` request record and a valid projection),
+/// otherwise mark it `realizing` and answer `false` so the caller rebuilds
+/// it. A root with no record, an unreadable one, or one left `realizing`
+/// is never reused, whatever executable it holds.
+#[allow(clippy::too_many_arguments)]
+fn cached_tool_hit(
+    store: &Store,
+    activity: &StoreActivity,
+    root: &Path,
+    ecosystem: &str,
+    package: &str,
+    version: &str,
+    executable: &Path,
+    runtime: Option<(&Selected, &str, &[(String, String)])>,
+) -> io::Result<bool> {
+    if x_request_is_ready(store, activity, root, ecosystem, executable)? {
+        return Ok(true);
+    }
+    write_x_request_for_store(
+        root,
+        store,
+        ecosystem,
+        package,
+        Some(version),
+        "realizing",
+        runtime,
+    )?;
+    Ok(false)
 }
 
 #[cfg(test)]
@@ -2071,7 +1978,7 @@ mod tests {
     /// realizes to, are two directories; everything else about the request
     /// being equal keeps one.
     #[test]
-    fn the_x_key_follows_the_runtime_and_never_reuses_an_older_one() {
+    fn the_x_key_follows_the_runtime() {
         let store = Store {
             root: PathBuf::from("/tmp/tog-x-key-fixture"),
         };
@@ -2111,18 +2018,6 @@ mod tests {
         component.version = format!("{}.1", component.version);
         assert_ne!(selected.bundle_id(), other.bundle_id());
         assert_ne!(base, name(&other, "object-a"));
-
-        // The name an older tog computed is never the name this one picks,
-        // so an `x/2` directory is a miss rather than a wrong hit.
-        let legacy = hex::encode(Sha256::digest(
-            format!(
-                "x/2\0{}\0python\0ruff\00.6.1\0{}",
-                store.root.display(),
-                platform.triple()
-            )
-            .as_bytes(),
-        ));
-        assert_ne!(base, format!("py-ruff-{}", &legacy[..16]));
     }
 
     /// `x` reaches Python and Node only through `Tailor::registry_tool`;
@@ -2463,32 +2358,6 @@ mod tests {
     }
 
     #[test]
-    fn legacy_clean_matching_reads_exact_generated_package() {
-        let temp = TempDir::named("x-legacy");
-        let base = &temp.0;
-        let exact = base.join("py-ruff-legacy");
-        let similar = base.join("py-ruff-lsp-legacy");
-        fs::create_dir_all(exact.join(".tog")).unwrap();
-        fs::create_dir_all(similar.join(".tog")).unwrap();
-        fs::write(exact.join("requirements.in"), "ruff\n").unwrap();
-        fs::write(similar.join("requirements.in"), "ruff-lsp\n").unwrap();
-        let filter = clean_filter(CleanRequest {
-            ecosystem: Some("python".into()),
-            from: None,
-            tool: Some("ruff".into()),
-        })
-        .unwrap();
-        assert_eq!(old_root_matches(&exact, &filter), CandidateMatch::Match);
-        assert_eq!(old_root_matches(&similar, &filter), CandidateMatch::NoMatch);
-        let unknown = base.join("py-unknown-legacy");
-        fs::create_dir_all(unknown.join(".tog")).unwrap();
-        assert_eq!(
-            old_root_matches(&unknown, &filter),
-            CandidateMatch::Unrecoverable
-        );
-    }
-
-    #[test]
     fn clean_records_package_identity_not_executable_name() {
         let temp = TempDir::named("x-record");
         let base = &temp.0;
@@ -2528,17 +2397,20 @@ mod tests {
         ));
     }
 
+    /// The request record names the originating store, and its registry
+    /// entry is found there even when it was registered through an alias
+    /// of the x directory.
     #[test]
-    fn cleanup_finds_alias_registration_in_closure_store() {
+    fn cleanup_finds_alias_registration_in_the_recorded_store() {
         let temp = TempDir::named("x-registry");
         let base = &temp.0;
         let x_dir = base.join("x");
         let root = x_dir.join("py-ruff-registry");
+        fs::create_dir_all(base.join("other-store/objects")).unwrap();
+        fs::create_dir_all(base.join("other-store/meta")).unwrap();
         let store = Store {
-            root: base.join("other-store"),
+            root: base.join("other-store").canonicalize().unwrap(),
         };
-        fs::create_dir_all(store.root.join("objects")).unwrap();
-        fs::create_dir_all(store.root.join("meta")).unwrap();
         let object = store.root.join("objects").join("a".repeat(40) + "-env");
         fs::create_dir_all(&object).unwrap();
         fs::create_dir_all(root.join(".tog/closures")).unwrap();
@@ -2552,6 +2424,7 @@ mod tests {
             .to_string(),
         )
         .unwrap();
+        write_x_request_for_store(&root, &store, "python", "ruff", None, "ready", None).unwrap();
         let entry = store.register_root(&root).unwrap();
         let alias = base.join("x-alias");
         std::os::unix::fs::symlink(&x_dir, &alias).unwrap();
@@ -2806,6 +2679,7 @@ mod tests {
             .to_string(),
         )
         .unwrap();
+        write_x_request_for_store(&root, &store, "python", "ruff", None, "ready", None).unwrap();
         (store, root, object)
     }
 
@@ -2881,34 +2755,120 @@ mod tests {
         fs::set_permissions(&object, fs::Permissions::from_mode(0o755)).unwrap();
     }
 
-    /// A run that considered a root and skipped it as unrecoverable has not
-    /// found "nothing to clean": unrecoverable candidates count as matched.
+    /// A root with no request record is never a cache hit, however
+    /// complete its projection: the same root with a `ready` record is one,
+    /// and so the run rebuilds a record-less root rather than reusing it.
     #[test]
-    fn unrecoverable_candidates_count_as_matched() {
-        let temp = TempDir::named("x-unrecoverable");
+    fn a_root_without_a_request_record_is_never_a_cache_hit() {
+        let _guard = exception_guard();
+        let _attribution = policy::Attribution::open("python").unwrap();
+        let temp = TempDir::named("x-no-record");
         let base = &temp.0;
-        let root = base.join("home/.tog/x/mystery");
+        let (store, root, object) = ready_python_root(base, &[]);
+        let activity = store
+            .activity(crate::kernel::activity::ActivityMode::Shared)
+            .unwrap();
+        let executable = root.join(".venv/bin/ruff");
+        assert!(x_request_is_ready(&store, &activity, &root, "python", &executable).unwrap());
+        fs::remove_file(root.join(X_REQUEST_FILE)).unwrap();
+        assert!(!x_request_is_ready(&store, &activity, &root, "python", &executable).unwrap());
+        // An unreadable record and a run still realizing are not hits either.
+        fs::write(root.join(X_REQUEST_FILE), "{").unwrap();
+        assert!(!x_request_is_ready(&store, &activity, &root, "python", &executable).unwrap());
+        write_x_request_for_store(&root, &store, "python", "ruff", None, "realizing", None)
+            .unwrap();
+        assert!(!x_request_is_ready(&store, &activity, &root, "python", &executable).unwrap());
+        let _ = policy::drain();
+        drop(activity);
+        fs::set_permissions(&object, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// A root with no request record cannot say what it was made for, so
+    /// only the unfiltered clean selects it, and no store owns it.
+    #[test]
+    fn a_root_without_a_request_record_matches_only_an_unfiltered_clean() {
+        let temp = TempDir::named("x-unrecorded");
+        let base = &temp.0;
+        let root = base.join("home/.tog/x/py-ruff-0123456789abcdef");
         fs::create_dir_all(root.join(".tog/closures")).unwrap();
-        let filter = clean_filter(CleanRequest {
-            ecosystem: None,
-            from: None,
-            tool: Some("ruff".into()),
-        })
+        // Its closure names an object in some store: that is no longer
+        // read as a claim of ownership.
+        fs::write(
+            root.join(".tog/closures/python.json"),
+            serde_json::json!({
+                "schema": "closure/1",
+                "ecosystem": "python",
+                "body": {"env_object": "/elsewhere/store/objects/0000000000000000000000000000000000000000-env"}
+            })
+            .to_string(),
+        )
         .unwrap();
         let candidates = x_candidates(&base.join("home/.tog/x")).unwrap();
         assert_eq!(candidates.len(), 1);
+        let filter = |ecosystem: Option<&str>, tool: Option<&str>| {
+            clean_filter(CleanRequest {
+                ecosystem: ecosystem.map(str::to_string),
+                from: None,
+                tool: tool.map(str::to_string),
+            })
+            .unwrap()
+        };
         assert_eq!(
-            candidate_matches(&candidates[0], &filter),
-            CandidateMatch::Unrecoverable
+            candidate_matches(&candidates[0], &filter(None, None)),
+            CandidateMatch::Match
         );
-        assert_eq!(candidate_ecosystem(&candidates[0].path), None);
+        for (ecosystem, tool) in [
+            (None, Some("ruff")),
+            (Some("python"), None),
+            (Some("python"), Some("ruff")),
+        ] {
+            assert_eq!(
+                candidate_matches(&candidates[0], &filter(ecosystem, tool)),
+                CandidateMatch::NoMatch,
+                "{ecosystem:?} {tool:?}"
+            );
+        }
+        // Its closure names an object in a store that is not there, so no
+        // owner can be recovered and cleanup would skip it.
+        assert!(matches!(
+            originating_store(&root).unwrap(),
+            Origin::Unknown(why) if why.contains("is unavailable")
+        ));
+        assert!(matches!(
+            registration_for(&root).unwrap(),
+            Registration::Unknown
+        ));
+    }
+
+    /// A closure directory cleanup cannot read leaves the owner unknown, so
+    /// that root is skipped instead of stopping the whole clean.
+    #[test]
+    fn an_unreadable_closure_directory_leaves_the_owner_unknown() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = TempDir::named("x-unreadable-owner");
+        let root = temp.0.join("py-ruff-0123456789abcdef");
+        let closures = root.join(".tog/closures");
+        fs::create_dir_all(&closures).unwrap();
+        fs::write(closures.join("python.json"), b"{}").unwrap();
+        fs::set_permissions(&closures, fs::Permissions::from_mode(0o000)).unwrap();
+        let readable = fs::read_dir(&closures).is_ok();
+        let origin = originating_store(&root);
+        fs::set_permissions(&closures, fs::Permissions::from_mode(0o755)).unwrap();
+        if readable {
+            // Running as root: permissions do not bind, nothing to prove.
+            return;
+        }
+        assert!(matches!(
+            origin.unwrap(),
+            Origin::Unknown(why) if why.contains("could not be read")
+        ));
     }
 
     /// `candidate_ecosystem` decides which environments the clean summary
-    /// calls node, so pin the order it reads: the recorded request, then a
-    /// recovered legacy manifest, then the generated name prefix.
+    /// calls node, so pin the order it reads: the recorded request, then
+    /// the generated name prefix.
     #[test]
-    fn candidate_ecosystem_reads_record_then_manifest_then_name() {
+    fn candidate_ecosystem_reads_record_then_name() {
         let temp = TempDir::named("x-ecosystem");
         let base = &temp.0;
         let recorded = base.join("py-recorded");
@@ -2916,21 +2876,121 @@ mod tests {
         write_x_request(&recorded, "node", "prettier", None, "ready").unwrap();
         assert_eq!(candidate_ecosystem(&recorded), Some("node"));
 
-        let legacy = base.join("npm-legacy");
-        fs::create_dir_all(legacy.join(".tog")).unwrap();
-        fs::write(
-            legacy.join("package.json"),
-            r#"{"dependencies":{"prettier":"1.0.0"}}"#,
-        )
-        .unwrap();
-        assert_eq!(candidate_ecosystem(&legacy), Some("node"));
-
-        let named = base.join("py-named");
+        let named = base.join("npm-named");
         fs::create_dir_all(named.join(".tog")).unwrap();
-        assert_eq!(candidate_ecosystem(&named), Some("python"));
+        assert_eq!(candidate_ecosystem(&named), Some("node"));
 
         let unknown = base.join("mystery");
         fs::create_dir_all(unknown.join(".tog")).unwrap();
         assert_eq!(candidate_ecosystem(&unknown), None);
+    }
+
+    /// A pnpm cache root as `realize_cached_tool` leaves it after a finished
+    /// run, minus its request record: the store's environment object, the
+    /// `node-forest/2` projection its `node_modules` links into, and the
+    /// `pnpm` executable. Returns (store, root, executable, object).
+    fn pnpm_cache_without_record(base: &Path) -> (Store, PathBuf, PathBuf, PathBuf) {
+        fs::create_dir_all(base.join("store/objects/test-node-env")).unwrap();
+        fs::create_dir_all(base.join("store/meta")).unwrap();
+        fs::create_dir_all(base.join("store/tmp")).unwrap();
+        let store = Store {
+            root: base.join("store").canonicalize().unwrap(),
+        };
+        let object = store.root.join("objects/test-node-env");
+        fs::set_permissions(&object, fs::Permissions::from_mode(0o555)).unwrap();
+        fs::write(
+            store.root.join("meta/test-node-env.json"),
+            serde_json::json!({"id": "test-node-env", "exceptions": []}).to_string(),
+        )
+        .unwrap();
+
+        let root = base.join("home/.tog/x/npm-pnpm-0123456789abcdef");
+        fs::create_dir_all(root.join(".tog/closures")).unwrap();
+        let projection_id = "ab".repeat(16);
+        let key = hex::encode(Sha256::digest(
+            root.canonicalize().unwrap().as_os_str().as_bytes(),
+        ));
+        let forest = store
+            .root
+            .join("forests")
+            .join(&key[..32])
+            .join(&projection_id)
+            .join("node_modules");
+        fs::create_dir_all(forest.join(".bin")).unwrap();
+        let executable = forest.join(".bin/pnpm");
+        fs::write(&executable, "#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+        std::os::unix::fs::symlink(&forest, root.join("node_modules")).unwrap();
+        fs::write(
+            root.join(".tog/closures/node.json"),
+            serde_json::json!({
+                "schema": "closure/1",
+                "ecosystem": "node",
+                "platform": Platform::host().unwrap().triple(),
+                "body": {
+                    "env_object": object.display().to_string(),
+                    "projection_schema": "node-forest/2",
+                    "projection_id": projection_id,
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        (
+            store,
+            root.clone(),
+            root.join("node_modules/.bin/pnpm"),
+            object,
+        )
+    }
+
+    /// The pnpm cache `realize_cached_tool` uses is reused only when its
+    /// request record says `ready`, as `tog x` decides. One a tog before
+    /// this record left (no `x.json`) and one an interrupted run left
+    /// `realizing` are both marked `realizing` and rebuilt, never reused,
+    /// though each holds a working `pnpm`.
+    #[test]
+    fn a_pnpm_cache_without_a_ready_record_is_rebuilt_not_reused() {
+        let _guard = exception_guard();
+        let _attribution = policy::Attribution::open("node").unwrap();
+        let temp = TempDir::named("x-pnpm-cache");
+        let (store, root, executable, object) = pnpm_cache_without_record(&temp.0);
+        assert!(executable.is_file());
+        let activity = store
+            .activity(crate::kernel::activity::ActivityMode::Shared)
+            .unwrap();
+        let hit = |store: &Store| {
+            cached_tool_hit(
+                store,
+                &activity,
+                &root,
+                "node",
+                "pnpm",
+                "9.1.0",
+                &executable,
+                None,
+            )
+            .unwrap()
+        };
+        let state = || read_x_request(&root).and_then(|record| record.state);
+
+        // The control: the same root with a `ready` record is reused.
+        write_x_request_for_store(&root, &store, "node", "pnpm", Some("9.1.0"), "ready", None)
+            .unwrap();
+        assert!(hit(&store));
+        assert_eq!(state().as_deref(), Some("ready"));
+
+        // Record-less: rebuilt.
+        fs::remove_file(root.join(X_REQUEST_FILE)).unwrap();
+        assert!(!hit(&store));
+        assert_eq!(state().as_deref(), Some("realizing"));
+
+        // Left `realizing` by an interrupted run: rebuilt again.
+        assert!(!hit(&store));
+        assert_eq!(state().as_deref(), Some("realizing"));
+
+        let _ = policy::drain();
+        drop(activity);
+        fs::set_permissions(&object, fs::Permissions::from_mode(0o755)).unwrap();
     }
 }

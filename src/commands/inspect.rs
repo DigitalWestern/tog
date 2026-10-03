@@ -79,36 +79,9 @@ pub fn closures(dir: &Path) -> io::Result<Vec<ClosureFile>> {
     Ok(out)
 }
 
-/// `closures`, read through a project the caller holds: sync seeds its
-/// toolchain from the closures of the directory it holds, not whatever the
-/// path names by then. Closures are tog's own state, so they are read with
-/// the strict no-follow walk: a symlinked `.tog`, `.tog/closures`, or
-/// closure file is refused rather than read through.
-pub fn closures_in(project: &ProjectRoot) -> io::Result<Vec<ClosureFile>> {
-    let mut out = Vec::new();
-    let closures = Path::new(".tog/closures");
-    let Some(names) = project.read_dir(closures)? else {
-        return Ok(out);
-    };
-    for name in names {
-        let name = name.to_string_lossy().into_owned();
-        if closure_stem(&name).is_none() {
-            continue;
-        }
-        let relative = closures.join(&name);
-        let Some(bytes) = project.read_file(&relative)? else {
-            continue;
-        };
-        out.push(closure_file(&name, project.path().join(&relative), &bytes)?);
-    }
-    out.sort_by_key(|closure| rank(&closure.ecosystem));
-    Ok(out)
-}
-
 /// The ecosystem stem of a closure file name: `<stem>.json`, not hidden,
 /// and not a retired record (`store::RETIRED_CLOSURES`), so a leftover never
-/// reads as an orphaned or unknown closure in listing, status, audit, or
-/// lock seeding.
+/// reads as an orphaned or unknown closure in listing, status, or audit.
 fn closure_stem(name: &str) -> Option<&str> {
     name.strip_suffix(".json").filter(|stem| {
         !stem.starts_with('.') && !crate::kernel::store::RETIRED_CLOSURES.contains(stem)
@@ -1492,8 +1465,6 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["cargo"]
         );
-        let held = ProjectRoot::open(dir).unwrap();
-        assert_eq!(closures_in(&held).unwrap().len(), 1);
         let rows = status(platform, dir).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].ecosystem, "cargo");
@@ -2136,8 +2107,10 @@ mod tests {
         }
     }
 
+    /// In a bare directory with a fresh store, `doctor` leaves no write
+    /// probe behind and reports that there is no project.
     #[test]
-    fn doctor_reports_host_and_project() {
+    fn doctor_cleans_up_its_probe_and_finds_no_project_in_a_bare_dir() {
         // Process-global test state follows env -> supervision -> store ->
         // attribution (see the comment on `commands::sync`'s
         // failed_tailor_sync test). `doctor`'s policy check reads
@@ -2155,39 +2128,19 @@ mod tests {
             Some(value) => std::env::set_var("TOG_STORE", value),
             None => std::env::remove_var("TOG_STORE"),
         }
-        let names: Vec<&str> = checks.iter().map(|check| check.name).collect();
-        for expected in [
-            "platform",
-            "store",
-            "disk",
-            "toolchains",
-            "sandbox",
-            "c-toolchain",
-            "policy",
-            "project",
-        ] {
-            assert!(names.contains(&expected), "{names:?} lacks {expected}");
-        }
-        let store_check = checks.iter().find(|check| check.name == "store").unwrap();
-        assert_eq!(store_check.level, Level::Ok, "{}", store_check.detail);
-        assert!(store_check.detail.contains("0 objects"));
         assert!(fs::read_dir(store.join("tmp"))
             .unwrap()
             .flatten()
             .all(|entry| !entry.file_name().to_string_lossy().starts_with(".doctor-")));
         let project = checks.iter().find(|check| check.name == "project").unwrap();
         assert!(project.detail.contains("no project in"));
-        let text = render_doctor(&checks, false).unwrap();
-        assert!(text.contains("  platform  "));
-        let value: Value = serde_json::from_str(&render_doctor(&checks, true).unwrap()).unwrap();
-        assert!(value["checks"].as_array().unwrap().len() >= 8);
     }
+
     /// Characterization: `doctor`'s value is the order and the wording of
-    /// what it prints, so pin both. `doctor_reports_host_and_project` only
-    /// checks that each expected check name is somewhere in the list.
+    /// what it prints, so pin both.
     #[test]
     fn doctor_check_order_and_wording_are_fixed() {
-        // Same env -> store order as `doctor_reports_host_and_project`.
+        // Same env -> store order as the bare-dir test above.
         let _env = crate::kernel::policy::test_env_lock();
         let _lock = crate::kernel::store::STORE_ENV_LOCK
             .lock()
@@ -2278,6 +2231,16 @@ mod tests {
             })
             .unwrap();
         assert!(last_check.ends_with(&detail("project").detail), "{text}");
+
+        // JSON carries every check, in the same order as the text.
+        let value: Value = serde_json::from_str(&render_doctor(&checks, true).unwrap()).unwrap();
+        let json_names: Vec<&str> = value["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|check| check["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(json_names, names);
 
         // The three level words are the ones CLI.md documents, lowercase.
         let failing = vec![

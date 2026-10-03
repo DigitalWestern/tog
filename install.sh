@@ -301,13 +301,15 @@ fi
 
 # --- platform ---------------------------------------------------------------
 # Same two rows as src/kernel/platform.rs; anything else must build from source.
+# release.yml builds Linux x86_64 only until the macOS gate (#66); the Darwin
+# row stays so a release that carries the asset again needs no script change.
 os="$(uname -s)"
 arch="$(uname -m)"
 case "$os/$arch" in
     Linux/x86_64) triple="x86_64-unknown-linux-gnu" ;;
     Darwin/arm64) triple="aarch64-apple-darwin" ;;
     *)
-        fail "no prebuilt binary for $os/$arch (tog ships for Linux x86_64 and macOS arm64).
+        fail "no prebuilt binary for $os/$arch (releases are built for Linux x86_64).
   Build from source instead:  cargo install --git https://github.com/$REPO --locked"
         ;;
 esac
@@ -346,7 +348,9 @@ trap 'rm -rf "$tmp"' EXIT INT TERM
 
 say "downloading $base/$asset"
 fetch "$base/$asset" "$tmp/$asset" \
-    || fail "download failed. Is there a release at https://github.com/$REPO/releases ?"
+    || fail "download failed. Is there a release at https://github.com/$REPO/releases with $asset?
+  Releases are built for Linux x86_64 only for now (macOS waits on #66).
+  Build from source instead:  cargo install --git https://github.com/$REPO --locked"
 fetch "$base/$asset.sha256" "$tmp/$asset.sha256" \
     || fail "checksum file missing next to the release asset; refusing to install an unverified binary"
 

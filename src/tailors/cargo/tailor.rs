@@ -12,7 +12,7 @@ use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::objmeta::KindAdapter;
 use crate::kernel::platform::Platform;
 use crate::kernel::resolve::ResolutionDoor;
-use crate::kernel::toolchain::{Catalog, LegacyEvidence, Selected};
+use crate::kernel::toolchain::{Catalog, Selected};
 use crate::kernel::ui;
 use crate::tailors::cargo::{self as cargo, inputs, rustfmt};
 use crate::tailors::{ClosureListing, PackageRow, SyncRequest, Tailor};
@@ -243,16 +243,6 @@ impl Tailor for Cargo {
     /// `[toolchain] path` in rust-toolchain.toml names a local tree.
     fn external_toolchain(&self) -> Option<crate::comforter::toolchain::ExternalToolchain> {
         Some(crate::kernel::provider::rust_path::select)
-    }
-
-    fn legacy_toolchain_evidence(
-        &self,
-        _ecosystem: &str,
-        platform: Option<Platform>,
-        body: &Value,
-        store: Option<&crate::kernel::store::Store>,
-    ) -> LegacyEvidence {
-        cargo::legacy_toolchain_evidence(platform, body, store)
     }
 
     fn listing(&self, ecosystem: &str, body: &Value) -> ClosureListing {

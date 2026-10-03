@@ -13,6 +13,18 @@
   options, and the one you would pick. Add a short pointer to each in
   FOLLOW-UPS.md so the repo's to-do list and the tracker agree.
 
+- When spawning a Claude subagent, pick the model by the kind of work.
+  Set `model` on the Agent call and ask for the effort level below. Use
+  the family names only, never a version number.
+  - Fable, high effort: work that needs a lot of critical decision
+    making, or code that is complex and hard to build.
+  - Opus, medium effort: intensive, long-form agentic work that is
+    decently complex but doable from a plan.
+  - Sonnet, medium effort: implementation of a clear, defined plan that
+    is hard to deviate from and needs few decisions. Also summaries and
+    collecting different parts of the codebase to report back to the
+    orchestrator.
+
 # About Ethan
 
 My name is Ethan. I work in finance at a private credit firm doing capital markets and origination, and software engineering is something I’ve taken up as a hobby on the side. I’ve built a number of smaller projects before this—mostly Python/data analysis, HTML/CSS, scripts, and other relatively straightforward projects—but Tog is my first large-scale backend/systems project. I am still very much a newcomer to Rust, systems programming, package managers, CI infrastructure, toolchains, dependency resolution, security, and many of the architectural concepts that appear throughout this codebase.

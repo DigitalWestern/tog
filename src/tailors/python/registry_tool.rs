@@ -10,7 +10,7 @@ use crate::kernel::store::Store;
 use crate::kernel::toolchain::Selected;
 use crate::kernel::ui;
 use crate::tailors::python::{self, env, pypi, pyselect};
-use crate::tailors::{LegacyPackage, RegistryTool, ToolEnv};
+use crate::tailors::{RegistryTool, ToolEnv};
 use serde_json::Value;
 use std::fs;
 use std::io;
@@ -55,30 +55,6 @@ impl RegistryTool for PythonTool {
         env_path: &Path,
     ) -> io::Result<bool> {
         Ok(canonical_symlink_target(&root.join(".venv")).as_deref() == Some(env_path))
-    }
-
-    /// The first line of the `requirements.in` an older `x` wrote:
-    /// `package` or `package==version`.
-    fn legacy_packages(&self, root: &Path) -> Option<Vec<LegacyPackage>> {
-        let text = fs::read_to_string(root.join("requirements.in")).ok()?;
-        let first = text.lines().next()?.trim();
-        if first.is_empty() {
-            return None;
-        }
-        let (package, version) = match first.split_once("==") {
-            Some((package, version)) if !package.is_empty() && !version.is_empty() => {
-                (package, Some(version.to_string()))
-            }
-            None => (first, None),
-            _ => return None,
-        };
-        if package.chars().any(char::is_whitespace) {
-            return None;
-        }
-        Some(vec![LegacyPackage {
-            package: package.to_string(),
-            version,
-        }])
     }
 
     fn realize(
