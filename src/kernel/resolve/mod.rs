@@ -23,11 +23,13 @@
 //! connects only to addresses it validated, verifies what registries
 //! promise, and records every request in a ledger.
 
+pub mod ca;
 pub mod cache;
 pub mod confine;
 pub mod door;
 pub mod http;
 pub mod iana;
+pub(crate) mod intercept;
 pub mod ledger;
 pub mod mirror;
 pub mod outputs;

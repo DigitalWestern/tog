@@ -51,8 +51,8 @@ pub enum Freshness {
 /// Entries describe outcomes: a failed attempt at a request the session
 /// also answered is not one (the session drops it).
 ///
-/// `class` is the request class (`index`, `metadata`, `artifact`, `sumdb`),
-/// `local` for an answer the proxy gave itself, `refused` for a request the
+/// `class` is the request class (`index`, `metadata`, `artifact`, `sumdb`,
+/// `git` for a git fetch through an intercepted tunnel), `local` for an answer the proxy gave itself, `refused` for a request the
 /// proxy would not forward, or `offline-miss` for one it could not serve
 /// without the network. `sha256` is the digest of the upstream bytes (never
 /// the rewritten body a tool may have been served), present only for a 2xx

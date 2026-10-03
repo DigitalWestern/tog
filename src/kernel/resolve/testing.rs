@@ -346,7 +346,10 @@ fn parse_response(raw: &[u8]) -> Response {
         headers.push(name.trim(), value.trim());
     }
     let rest = &raw[end + 4..];
-    let body = if headers
+    // A head read on its own (its body still on the wire) has no body yet.
+    let body = if rest.is_empty() {
+        Vec::new()
+    } else if headers
         .get("transfer-encoding")
         .is_some_and(|value| value.eq_ignore_ascii_case("chunked"))
     {
@@ -381,6 +384,118 @@ fn dechunk(mut raw: &[u8]) -> Vec<u8> {
         body.extend_from_slice(&raw[..size]);
         raw = &raw[size + 2..];
     }
+}
+
+/// A TLS client inside an intercepted tunnel, playing the tool.
+#[cfg(test)]
+pub(crate) type TlsTunnel = rustls::StreamOwned<rustls::ClientConnection, TcpStream>;
+
+/// `CONNECT authority` with `token`, then a TLS handshake naming
+/// `server_name`, trusting `roots` and offering `alpn`. The error is the
+/// refused `CONNECT`'s status or the handshake's failure.
+#[cfg(test)]
+pub(crate) fn open_tunnel(
+    address: &ProxyAddress,
+    authority: &str,
+    server_name: &str,
+    roots: rustls::RootCertStore,
+    alpn: &[&[u8]],
+) -> io::Result<TlsTunnel> {
+    let mut stream = TcpStream::connect(address.address)?;
+    stream.set_read_timeout(Some(Duration::from_secs(10)))?;
+    write!(
+        stream,
+        "CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\n{}\r\n",
+        proxy_authorization(address.token())
+    )?;
+    let head = read_head_bytes(&mut stream)?;
+    let status = std::str::from_utf8(&head)
+        .ok()
+        .and_then(|head| head.split(' ').nth(1))
+        .and_then(|status| status.parse::<u16>().ok());
+    if status != Some(200) {
+        return Err(io::Error::other(format!(
+            "CONNECT answered {}",
+            String::from_utf8_lossy(&head)
+        )));
+    }
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let mut config = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .map_err(io::Error::other)?
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    config.alpn_protocols = alpn.iter().map(|protocol| protocol.to_vec()).collect();
+    let name = rustls::pki_types::ServerName::try_from(server_name.to_string())
+        .map_err(io::Error::other)?;
+    let conn = rustls::ClientConnection::new(Arc::new(config), name).map_err(io::Error::other)?;
+    let mut tunnel = rustls::StreamOwned::new(conn, stream);
+    while tunnel.conn.is_handshaking() {
+        tunnel.conn.complete_io(&mut tunnel.sock)?;
+    }
+    Ok(tunnel)
+}
+
+/// Send `head` (without its final blank line) and `body` inside `tunnel`,
+/// and read exactly one response, so the tunnel can carry the next.
+#[cfg(test)]
+pub(crate) fn tunnel_request(tunnel: &mut TlsTunnel, head: &str, body: &[u8]) -> Response {
+    tunnel.write_all(format!("{head}\r\n").as_bytes()).unwrap();
+    tunnel.write_all(body).unwrap();
+    tunnel.flush().unwrap();
+    let raw_head = read_head_bytes(tunnel).unwrap();
+    let mut response = parse_response(&raw_head);
+    let mut body = Vec::new();
+    if response
+        .headers
+        .get("transfer-encoding")
+        .is_some_and(|value| value.eq_ignore_ascii_case("chunked"))
+    {
+        loop {
+            let line = read_line_bytes(tunnel);
+            let size = usize::from_str_radix(line.trim(), 16).unwrap();
+            let mut chunk = vec![0u8; size + 2];
+            tunnel.read_exact(&mut chunk).unwrap();
+            if size == 0 {
+                break;
+            }
+            body.extend_from_slice(&chunk[..size]);
+        }
+    } else if let Some(length) = response.headers.get("content-length") {
+        body = vec![0u8; length.parse().unwrap()];
+        tunnel.read_exact(&mut body).unwrap();
+    }
+    response.body = body;
+    response
+}
+
+/// Bytes up to and including the blank line that ends a head, read one at
+/// a time so nothing after it is consumed.
+#[cfg(test)]
+fn read_head_bytes(stream: &mut impl Read) -> io::Result<Vec<u8>> {
+    let mut head = Vec::new();
+    let mut byte = [0u8; 1];
+    while !head.ends_with(b"\r\n\r\n") {
+        if stream.read(&mut byte)? == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                format!("closed after {:?}", String::from_utf8_lossy(&head)),
+            ));
+        }
+        head.push(byte[0]);
+    }
+    Ok(head)
+}
+
+#[cfg(test)]
+fn read_line_bytes(stream: &mut impl Read) -> String {
+    let mut line = Vec::new();
+    let mut byte = [0u8; 1];
+    while !line.ends_with(b"\r\n") {
+        assert_eq!(stream.read(&mut byte).unwrap(), 1, "closed mid-chunk");
+        line.push(byte[0]);
+    }
+    String::from_utf8(line).unwrap()
 }
 
 /// `Proxy-Authorization` carrying `token`.

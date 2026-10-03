@@ -30,13 +30,19 @@ use url::Url;
 /// port) cannot grow a sidecar without bound.
 pub(crate) const MAX_DIAGNOSTIC_ROWS: usize = 10_000;
 
-/// What the proxy does with a `CONNECT` it may not forward as-is. TLS
-/// interception, the other answer, arrives with the tools that need it.
+/// What the proxy does with an authenticated `CONNECT`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Intercept {
     /// Answer 403 with a body naming the host and the reason, and record
-    /// the refusal. The tool sees why it failed.
+    /// the refusal. The tool sees why it failed. Mirror-dialect tools (Go,
+    /// Bundler, Hex, NuGet) reach registries only through their routes.
     RefuseVisibly,
+    /// Terminate TLS with a leaf for the tunnel's host signed by the
+    /// proxy's certificate authority, and serve each request inside like a
+    /// routed one (see [`super::intercept`]). `git://`'s port is still
+    /// refused. For tools whose locks record upstream URLs (cargo, git,
+    /// npm, pnpm, uv).
+    Tls,
 }
 
 /// Whether the proxy may contact upstream at all.
@@ -381,6 +387,36 @@ impl State {
             detail: detail.to_string(),
         });
         Ok(())
+    }
+
+    /// Apply policy to `kind` for real-time denial only: denied, the
+    /// refusal text (which fails the door); otherwise nothing is recorded.
+    /// For facts the lock itself shows (a git dependency), which the tailor
+    /// records from the lock at sync, so the record does not count them
+    /// twice.
+    pub(crate) fn refuse_if_denied(
+        &self,
+        kind: &'static str,
+        subject: &str,
+        detail: &str,
+    ) -> Result<(), String> {
+        if self.is_closed() {
+            return Err("the proxy session has finished".into());
+        }
+        if !policy::denied(&self.config.policy, kind) {
+            return Ok(());
+        }
+        let text = policy::refusal(
+            &self.config.policy,
+            kind,
+            &self.clean(subject),
+            &self.clean(detail),
+        );
+        let mut inner = self.inner();
+        if inner.refusal_texts.insert(text.clone()) {
+            inner.facts.refusals.push(text.clone());
+        }
+        Err(text)
     }
 
     /// A refusal with no request to attach it to (bytes that never parsed

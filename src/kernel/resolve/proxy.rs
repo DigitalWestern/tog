@@ -19,15 +19,21 @@
 //! - **Forward proxy.** `CONNECT host:port` carries the token as the
 //!   password of `Proxy-Authorization: Basic`, checked once per tunnel.
 //!   Without it the answer is 407. With it, the tunnel belongs to this
-//!   session and is refused visibly (403, a body naming the host and the
-//!   reason, a `refused` ledger entry, and an `unattested-index` or, for
-//!   `git://`'s port, `git-dependency` fact). Absolute-form requests
+//!   session. A session that intercepts ([`Intercept::Tls`]) terminates
+//!   the tunnel with a leaf from the process's own authority
+//!   ([`super::ca`]) and serves the requests inside it
+//!   ([`super::intercept`]). A session that does not refuses it visibly
+//!   (403, a body naming the host and the reason, a `refused` ledger
+//!   entry, and an `unattested-index` or, for `git://`'s port,
+//!   `git-dependency` fact). `git://`'s port is refused either way.
+//!   Absolute-form requests
 //!   (`GET http://...`, `git://...`) are refused the same way: every
 //!   registry is https.
 //! - **Registry mirror.** `GET http://127.0.0.1:<port>/<token>/<route>/...`
 //!   is routed through the route's protocol and served by
 //!   [`super::mirror`].
 
+use super::ca::Authority;
 use super::http::{self, Headers, ParseError, Request};
 use super::mirror::{self, Exchange, Record};
 use super::redact::{self, REDACTED};
@@ -104,11 +110,14 @@ pub struct Proxy {
     shared: Arc<Shared>,
 }
 
-struct Shared {
-    client: PinnedClient,
+pub(super) struct Shared {
+    pub(super) client: PinnedClient,
+    /// The process's certificate authority, which signs the leaf of every
+    /// intercepted tunnel.
+    pub(super) authority: Authority,
     pool: Arc<Pool>,
     idle_timeout: Duration,
-    request_timeout: Duration,
+    pub(super) request_timeout: Duration,
     /// Bounds each write to a tool.
     write_timeout: Duration,
     response_grace: Duration,
@@ -155,6 +164,7 @@ impl Proxy {
         Ok(Proxy {
             shared: Arc::new(Shared {
                 client,
+                authority: Authority::new()?,
                 pool: Arc::new(Pool::new(config.workers)),
                 idle_timeout: config.idle_timeout,
                 request_timeout: config.request_timeout,
@@ -164,6 +174,12 @@ impl Proxy {
                 drain_timeout: config.connect_timeout + config.io_timeout * 2,
             }),
         })
+    }
+
+    /// The certificate authority intercepted tunnels are signed by: its
+    /// certificate is what an intercepting door tells the tool to trust.
+    pub fn authority(&self) -> &Authority {
+        &self.shared.authority
     }
 
     /// Open a session for one door run. Every route endpoint must be in
@@ -301,10 +317,10 @@ impl Drop for Session {
 
 /// What every connection of one listener shares.
 #[derive(Clone)]
-struct Context {
-    state: Arc<State>,
-    shared: Arc<Shared>,
-    address: ProxyAddress,
+pub(super) struct Context {
+    pub(super) state: Arc<State>,
+    pub(super) shared: Arc<Shared>,
+    pub(super) address: ProxyAddress,
     live: Arc<Live>,
 }
 
@@ -317,7 +333,7 @@ trait Accept: AsRawFd + Send + 'static {
 }
 
 /// A tool connection.
-trait Stream: Read + Write + Send + 'static {
+pub(super) trait Stream: Read + Write + Send + 'static {
     fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()>;
     fn set_write_timeout(&self, timeout: Option<Duration>) -> io::Result<()>;
     fn set_nonblocking(&self, nonblocking: bool) -> io::Result<()>;
@@ -519,7 +535,7 @@ fn accept_loop<L: Accept>(listener: L, stop: &AtomicBool, context: &Context) {
 /// A tool connection whose reads end at a deadline, however slowly the
 /// bytes arrive, and whose responses must keep a minimum rate, however
 /// slowly the tool reads.
-struct Timed<S> {
+pub(super) struct Timed<S> {
     inner: S,
     deadline: Instant,
     /// When the current response started, and what it has written since.
@@ -540,6 +556,26 @@ impl<S> Timed<S> {
     fn write_deadline(&self) -> Instant {
         let earned = Duration::from_secs_f64(self.written as f64 / self.min_rate.max(1) as f64);
         self.response_start + self.grace + earned
+    }
+}
+
+/// What the request loop reads requests from and answers on: a tool's TCP
+/// or Unix connection, or the TLS stream inside a tunnel the proxy
+/// intercepts.
+pub(super) trait Transport: Read + Write {
+    /// Reads fail with `TimedOut` once `at` has passed.
+    fn set_deadline(&mut self, at: Instant);
+    /// A response starts now: the minimum-rate clock restarts.
+    fn start_response(&mut self);
+}
+
+impl<S: Stream> Transport for Timed<S> {
+    fn set_deadline(&mut self, at: Instant) {
+        self.deadline = at;
+    }
+
+    fn start_response(&mut self) {
+        Timed::start_response(self);
     }
 }
 
@@ -589,9 +625,10 @@ const FIRST_REQUEST_GRACE: Duration = Duration::from_millis(500);
 
 /// Wait for the next request to start. `false`: close the connection, the
 /// client is gone, too slow, or idle while other connections wait for a
-/// worker.
-fn next_request_starts<S: Stream>(
-    reader: &mut BufReader<Timed<S>>,
+/// worker. An intercepted tunnel waits the same way, so a kept-alive tunnel
+/// gives its worker back too.
+fn next_request_starts<T: Transport>(
+    reader: &mut BufReader<T>,
     context: &Context,
     first: bool,
 ) -> bool {
@@ -606,7 +643,7 @@ fn next_request_starts<S: Stream>(
         if context.state.is_closed() {
             return false;
         }
-        reader.get_mut().deadline = Instant::now() + IDLE_POLL;
+        reader.get_mut().set_deadline(Instant::now() + IDLE_POLL);
         match reader.fill_buf() {
             Ok(buffered) => return !buffered.is_empty(),
             Err(error)
@@ -630,7 +667,65 @@ fn next_request_starts<S: Stream>(
     }
 }
 
-/// Answer requests on one connection until it closes.
+/// Wait for the next request on `reader` and read it, answering one that
+/// does not parse itself. `None`: close the connection. The body is read
+/// only once the head is admitted, and only up to what `cap` allows for
+/// that head: an unauthenticated request cannot make the proxy buffer
+/// anything. A client that asked to be told to go on (`Expect:
+/// 100-continue`) is, when a body will be read at all.
+pub(super) fn next_request<T: Transport>(
+    reader: &mut BufReader<T>,
+    context: &Context,
+    first: bool,
+    cap: impl Fn(&http::Head) -> u64,
+) -> Option<Request> {
+    if !next_request_starts(reader, context, first) {
+        return None;
+    }
+    reader
+        .get_mut()
+        .set_deadline(Instant::now() + context.shared.request_timeout);
+    let read = http::read_head(reader).and_then(|head| {
+        let cap = cap(&head);
+        let expects = head
+            .headers
+            .get("expect")
+            .is_some_and(|value| value.trim().eq_ignore_ascii_case("100-continue"));
+        if expects && cap > 0 {
+            let out = reader.get_mut();
+            out.write_all(b"HTTP/1.1 100 Continue\r\n\r\n")
+                .and_then(|()| out.flush())
+                .map_err(ParseError::Io)?;
+        }
+        head.read_body(reader, cap)
+    });
+    let error = match read {
+        Ok(request) => return Some(request),
+        Err(ParseError::Closed | ParseError::Io(_)) => return None,
+        Err(error) => error,
+    };
+    let status = match error {
+        ParseError::TooLarge { head: true } => 431,
+        ParseError::TooLarge { head: false } => 413,
+        _ => 400,
+    };
+    context.state.note_refusal(error.to_string());
+    let mut headers = Headers::new();
+    headers.set("Content-Type", "text/plain; charset=utf-8");
+    let body = format!("tog: {}\n", context.state.clean(&error.to_string()));
+    let _ = http::write_response(
+        reader.get_mut(),
+        status,
+        &headers,
+        body.as_bytes(),
+        false,
+        false,
+    );
+    None
+}
+
+/// Answer requests on one connection until it closes. A `CONNECT` ends the
+/// request loop: the connection becomes the tunnel, or is refused.
 fn serve_connection<S: Stream>(stream: S, context: &Context) {
     let mut reader = BufReader::new(Timed {
         inner: stream,
@@ -641,43 +736,15 @@ fn serve_connection<S: Stream>(stream: S, context: &Context) {
         min_rate: context.shared.min_response_rate,
     });
     let mut first = true;
-    loop {
-        if !next_request_starts(&mut reader, context, first) {
+    while let Some(request) =
+        next_request(&mut reader, context, first, |head| body_cap(context, head))
+    {
+        first = false;
+        reader.get_mut().start_response();
+        if request.method == "CONNECT" {
+            connect(context, &request, &mut reader);
             return;
         }
-        first = false;
-        reader.get_mut().deadline = Instant::now() + context.shared.request_timeout;
-        // The body is read only once the head is admitted, and only up to
-        // what the route accepts: an unauthenticated request cannot make
-        // the proxy buffer anything.
-        let request = match http::read_head(&mut reader).and_then(|head| {
-            let cap = body_cap(context, &head);
-            head.read_body(&mut reader, cap)
-        }) {
-            Ok(request) => request,
-            Err(ParseError::Closed | ParseError::Io(_)) => return,
-            Err(error) => {
-                let status = match error {
-                    ParseError::TooLarge { head: true } => 431,
-                    ParseError::TooLarge { head: false } => 413,
-                    _ => 400,
-                };
-                context.state.note_refusal(error.to_string());
-                let mut headers = Headers::new();
-                headers.set("Content-Type", "text/plain; charset=utf-8");
-                let body = format!("tog: {}\n", context.state.clean(&error.to_string()));
-                let _ = http::write_response(
-                    reader.get_mut(),
-                    status,
-                    &headers,
-                    body.as_bytes(),
-                    false,
-                    false,
-                );
-                return;
-            }
-        };
-        reader.get_mut().start_response();
         match dispatch(context, &request, reader.get_mut()) {
             Ok(true) if request.keep_alive => {}
             _ => return,
@@ -717,10 +784,6 @@ const MIRROR_METHODS: &[&str] = &["GET", "HEAD"];
 
 /// Serve one request. `Ok(true)`: the connection may carry another.
 fn dispatch(context: &Context, request: &Request, out: &mut dyn Write) -> io::Result<bool> {
-    if request.method == "CONNECT" {
-        connect(context, request, out)?;
-        return Ok(false);
-    }
     if request.target.starts_with('/') {
         return mirror_request(context, request, out);
     }
@@ -757,21 +820,26 @@ fn proxy_auth_challenge() -> Headers {
 }
 
 /// A tunnel whose token was checked: it belongs to this session.
-struct Tunnel<'a> {
-    authority: &'a str,
-    host: &'a str,
-    port: u16,
+pub(super) struct Tunnel<'a> {
+    /// `host:port` as the tool sent it, userinfo removed.
+    pub(super) authority: &'a str,
+    /// Lowercase, without an IPv6 literal's brackets.
+    pub(super) host: &'a str,
+    pub(super) port: u16,
 }
 
-fn connect(context: &Context, request: &Request, out: &mut dyn Write) -> io::Result<()> {
+/// A `CONNECT`. Its token is checked once, here: every request inside an
+/// intercepted tunnel belongs to this session without one.
+fn connect<S: Stream>(context: &Context, request: &Request, reader: &mut BufReader<Timed<S>>) {
     let state = &*context.state;
+    let out = reader.get_mut();
     // Userinfo in a CONNECT target is dropped before anything names it.
     let shown = redact::url(&request.target, &[]);
     let authority = shown.as_str();
     let record = Record::new("refused", "CONNECT", shown.clone());
     if !authenticated(state, &request.headers) {
         let reason = format!("CONNECT {authority} without this session's proxy token");
-        return mirror::refuse_unauthenticated(
+        let _ = mirror::refuse_unauthenticated(
             state,
             out,
             record,
@@ -779,6 +847,7 @@ fn connect(context: &Context, request: &Request, out: &mut dyn Write) -> io::Res
             &reason,
             &proxy_auth_challenge(),
         );
+        return;
     }
     let parsed = authority
         .rsplit_once(':')
@@ -786,16 +855,25 @@ fn connect(context: &Context, request: &Request, out: &mut dyn Write) -> io::Res
         .filter(|(host, _)| !host.is_empty());
     let Some((host, port)) = parsed else {
         let reason = format!("CONNECT target {authority} is not host:port");
-        return mirror::refuse(state, out, record, 400, &reason, &Headers::new(), false);
+        let _ = mirror::refuse(state, out, record, 400, &reason, &Headers::new(), false);
+        return;
     };
+    let host = host
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .to_ascii_lowercase();
     let tunnel = Tunnel {
         authority,
-        host: host.trim_start_matches('[').trim_end_matches(']'),
+        host: &host,
         port,
     };
-    match state.config.intercept {
-        Intercept::RefuseVisibly => refuse_tunnel(state, &tunnel, record, out),
-    }
+    let _ = match state.config.intercept {
+        Intercept::Tls if port != GIT_PORT => {
+            super::intercept::serve_tunnel(context, &tunnel, record, reader);
+            Ok(())
+        }
+        Intercept::Tls | Intercept::RefuseVisibly => refuse_tunnel(state, &tunnel, record, out),
+    };
 }
 
 /// Refuse an authenticated tunnel, naming the host and why, and record the
@@ -935,6 +1013,8 @@ fn mirror_request(context: &Context, request: &Request, out: &mut dyn Write) -> 
         address: &context.address,
         method: &request.method,
         request: &request.headers,
+        body: None,
+        permitted: &state.config.permitted,
         // A streamed body is delimited by the close for HTTP/1.0, so an
         // HTTP/1.0 connection ends after each mirror response.
         keep_alive: request.keep_alive && !request.http10,

@@ -70,6 +70,10 @@ pub struct Wire<'w> {
     /// The tool's forced arguments. Each must appear in `Wiring::args`,
     /// wherever the tool's grammar reads it.
     pub forced_args: &'w [OsString],
+    /// The proxy's CA certificate as the tool sees it (`relay::CA_FILE`),
+    /// when the door intercepts TLS: the file to name as the tool's trust
+    /// root.
+    pub ca_file: Option<&'w Path>,
 }
 
 /// How a tool is pointed at its session.
@@ -112,6 +116,11 @@ pub struct ConfinedSpec<'a> {
     /// never snapshotted (see `ConfinedRun::cache_roots`).
     pub cache_roots: Vec<PathBuf>,
     pub routes: Vec<Route>,
+    /// What the proxy does with the tool's `CONNECT`s: refuse them (mirror
+    /// tools), or intercept TLS (tools whose locks record upstream URLs).
+    /// Intercepting binds the proxy's CA certificate into the sandbox and
+    /// gives every git the tool starts the git row ([`git_row`]).
+    pub intercept: Intercept,
     pub network: Network,
     /// `None` passes the spec's arguments with the forced ones appended
     /// (before a `--`, if there is one).
@@ -141,6 +150,7 @@ impl<'a> ConfinedSpec<'a> {
             store_reads: Vec::new(),
             cache_roots: Vec::new(),
             routes: Vec::new(),
+            intercept: Intercept::RefuseVisibly,
             network: Network::Online,
             wire: None,
             target: Target::Project { receipt: None },
@@ -333,7 +343,7 @@ fn run_tool(
         ecosystem: confined.ecosystem.to_string(),
         door: door.kind.as_str().to_string(),
         routes: confined.routes.clone(),
-        intercept: Intercept::RefuseVisibly,
+        intercept: confined.intercept,
         policy: policy.clone(),
         mode: confined.network,
         store: door.store.clone(),
@@ -341,6 +351,10 @@ fn run_tool(
         permitted: confined.permitted.clone(),
     })?;
     let dir = SessionDir::create()?;
+    let ca_file = match confined.intercept {
+        Intercept::Tls => Some(dir.write_ca(proxy.authority().pem())?),
+        Intercept::RefuseVisibly => None,
+    };
     let advertised = relay::LISTEN_ADDRESS
         .parse()
         .map_err(|error| io::Error::other(format!("the relay address: {error}")))?;
@@ -357,6 +371,7 @@ fn run_tool(
             unconfined_denied,
             snapshot,
             proxy_socket: &dir.socket,
+            ca_file: ca_file.as_deref(),
             executable: &executable,
             argv: &invocation.argv,
             cwd: &snapshot.lock_root().real,
@@ -394,12 +409,17 @@ fn invocation(
     snapshot: &Snapshot,
     forced_args: &[OsString],
 ) -> io::Result<Invocation> {
+    let ca_file = match confined.intercept {
+        Intercept::Tls => Some(Path::new(relay::CA_FILE)),
+        Intercept::RefuseVisibly => None,
+    };
     let wiring = match confined.wire.take() {
         Some(wire) => wire(&Wire {
             address,
             scratch: snapshot.scratch(),
             args: &spec.args,
             forced_args,
+            ca_file,
         })?,
         None => Wiring {
             args: with_forced(&spec.args, forced_args),
@@ -421,7 +441,15 @@ fn invocation(
     for (relative, bytes) in &wiring.files {
         write_scratch_file(snapshot.scratch(), relative, bytes)?;
     }
-    let forced = confine::forced_settings(confined.tool, &confined.forced, &wiring.extra_git)?;
+    // An intercepting door points every git the tool starts at the proxy:
+    // the git row first, the wiring's own settings after it, and the
+    // forced ones last.
+    let mut extra_git = match ca_file {
+        Some(ca_file) => git_row(address, ca_file),
+        None => Vec::new(),
+    };
+    extra_git.extend(wiring.extra_git);
+    let forced = confine::forced_settings(confined.tool, &confined.forced, &extra_git)?;
     // The spec's variables over nothing: a confined tool never sees tog's
     // own environment.
     let mut env: Vec<(OsString, OsString)> = spec
@@ -437,6 +465,44 @@ fn invocation(
     let mut argv = vec![spec.program.clone().into_os_string()];
     argv.extend(wiring.args);
     Ok(Invocation { argv, env })
+}
+
+/// Hosts whose scp-style git remotes (`git@<host>:owner/repo`) the git row
+/// rewrites to https. The `ssh://` forms are rewritten for every host; the
+/// scp form has no scheme to match, so each host is named.
+pub const SCP_GIT_HOSTS: &[&str] = &["github.com", "gitlab.com", "bitbucket.org", "codeberg.org"];
+
+/// The git row: the settings that point any git a confined tool starts at
+/// the proxy, carried in `GIT_CONFIG_COUNT`/`KEY`/`VALUE` beside the forced
+/// ones (`confine::forced_settings`). `http.proxy` carries the session token
+/// as credentials (git sends its first `CONNECT` without them and retries
+/// after the proxy's 407), `http.sslCAInfo` makes the proxy's CA git's whole
+/// root set, and ssh remotes become https ones, since the sandbox has no
+/// ssh and the proxy serves git only over https. `git://` and `ext::` stay
+/// refused by the forced `protocol.*.allow` set.
+pub fn git_row(address: &ProxyAddress, ca_file: &Path) -> Vec<(String, String)> {
+    let mut row = vec![
+        ("http.proxy".to_string(), address.proxy_url()),
+        (
+            "http.sslCAInfo".to_string(),
+            ca_file.to_string_lossy().into_owned(),
+        ),
+        ("http.sslVerify".to_string(), "true".to_string()),
+        // The longest match wins: `ssh://git@host/x` drops the user name,
+        // any other `ssh://` keeps the rest of the URL as it is.
+        (
+            "url.https://.insteadOf".to_string(),
+            "ssh://git@".to_string(),
+        ),
+        ("url.https://.insteadOf".to_string(), "ssh://".to_string()),
+    ];
+    for host in SCP_GIT_HOSTS {
+        row.push((
+            format!("url.https://{host}/.insteadOf"),
+            format!("git@{host}:"),
+        ));
+    }
+    row
 }
 
 /// `args` with `forced` appended, before the first `--`.
@@ -715,10 +781,28 @@ impl SessionDir {
              set XDG_RUNTIME_DIR or TMPDIR to a shorter one",
         ))
     }
+
+    /// Write the proxy's CA certificate (never its key) into the session
+    /// directory, 0600, for the sandbox to bind read-only.
+    fn write_ca(&self, pem: &str) -> io::Result<PathBuf> {
+        let path = self.dir.join(CA_NAME);
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&path)?;
+        io::Write::write_all(&mut file, pem.as_bytes())?;
+        Ok(path)
+    }
 }
+
+/// The CA certificate's name in the session directory.
+const CA_NAME: &str = "ca.pem";
 
 impl Drop for SessionDir {
     fn drop(&mut self) {
+        let _ = fs::remove_file(self.dir.join(CA_NAME));
         let _ = fs::remove_file(&self.socket);
         let _ = fs::remove_dir(&self.dir);
     }

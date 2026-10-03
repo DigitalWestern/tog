@@ -741,6 +741,9 @@ pub struct ConfinedRun<'a> {
     pub snapshot: &'a Snapshot,
     /// The proxy's Unix socket on the host.
     pub proxy_socket: &'a Path,
+    /// The proxy's CA certificate on the host, for an intercepting door:
+    /// bound read-only at `relay::CA_FILE`.
+    pub ca_file: Option<&'a Path>,
     /// The tog executable to bind as the relay (`running_executable()` in
     /// production).
     pub executable: &'a Path,
@@ -928,6 +931,7 @@ struct Mounts {
     read_roots: Vec<PathBuf>,
     cache_roots: Vec<PathBuf>,
     proxy_socket: PathBuf,
+    ca_file: Option<PathBuf>,
     executable: PathBuf,
     scratch: PathBuf,
     cwd: PathBuf,
@@ -967,6 +971,19 @@ impl Mounts {
                 format!("{} is not the proxy's socket", proxy_socket.display()),
             ));
         }
+        let ca_file = match run.ca_file {
+            Some(path) => {
+                let real = fs::canonicalize(path)?;
+                if !fs::symlink_metadata(&real)?.is_file() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!("{} is not the proxy's CA certificate", real.display()),
+                    ));
+                }
+                Some(real)
+            }
+            None => None,
+        };
         let executable = fs::canonicalize(run.executable)?;
         let scratch = fs::canonicalize(run.snapshot.scratch())?;
         let cwd = fs::canonicalize(run.cwd)?;
@@ -1018,6 +1035,7 @@ impl Mounts {
             read_roots,
             cache_roots,
             proxy_socket,
+            ca_file,
             executable,
             scratch,
             cwd,
@@ -1122,6 +1140,11 @@ fn proxy_args(
     args.push("--ro-bind".into());
     args.push(mounts.proxy_socket.clone().into_os_string());
     args.push(relay::PROXY_SOCKET.into());
+    if let Some(ca_file) = &mounts.ca_file {
+        args.push("--ro-bind".into());
+        args.push(ca_file.clone().into_os_string());
+        args.push(relay::CA_FILE.into());
+    }
     args.push("--ro-bind".into());
     args.push(mounts.executable.clone().into_os_string());
     args.push(relay::TOG_EXECUTABLE.into());
