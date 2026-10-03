@@ -46,6 +46,10 @@ pub struct CargoInputs {
     pub rust_obj: PathBuf,
     pub plan: cargo::CargoPlan,
     pub lock_digest: String,
+    /// The workspace's resolution files by the digests the plan read (the
+    /// lock by the very bytes it was planned from): the closure's
+    /// `resolution_basis`.
+    pub resolution_basis: crate::comforter::join::Digests,
 }
 
 /// Workspace rooting is delegated to the pinned Cargo itself
@@ -98,12 +102,29 @@ pub fn load_cargo_inputs(
     let lock = read_cargo_lock(&workspace)?
         .ok_or_else(|| crate::tailors::missing_lock(&workspace, "Cargo.lock"))?;
     let plan = cargo::plan_cargo(&lock, rust_version)?;
+    let resolution_basis = resolution_basis(&workspace, &lock)?;
     Ok(CargoInputs {
         root,
         rust_obj,
         plan,
         lock_digest: cargo::lock_digest(&lock),
+        resolution_basis,
     })
+}
+
+/// The closure's `resolution_basis`: every resolution file of the
+/// workspace that exists, by digest, with `Cargo.lock` taken from `lock`,
+/// the bytes the plan was built from.
+fn resolution_basis(
+    workspace: &ProjectRoot,
+    lock: &str,
+) -> io::Result<crate::comforter::join::Digests> {
+    use crate::kernel::resolve::record::{file_digests, sha256_hex};
+    let mut listed = super::resolve::resolution_outputs(workspace)?;
+    listed.extend(super::resolve::resolution_inputs(workspace)?);
+    let mut basis = file_digests(workspace, &listed)?;
+    basis.insert("Cargo.lock".into(), sha256_hex(lock.as_bytes()));
+    Ok(basis)
 }
 
 /// The Rust the selection names, realized, and the workspace Cargo

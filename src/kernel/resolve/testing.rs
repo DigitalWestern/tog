@@ -282,6 +282,42 @@ impl Harness {
     }
 }
 
+/// A copy of the recorded registry `tests/fixtures/proxy/registry/<registry>`
+/// holding only the rows whose bodies were stored, for
+/// [`Harness::serving`] (by its absolute path). PR 0 kept some answers
+/// without their bodies (cargo's ryu index file and `git-upload-pack`),
+/// which the fixture upstream refuses to load.
+#[cfg(test)]
+pub(crate) fn stored_rows(registry: &str, label: &str) -> TempDir {
+    use sha2::{Digest as _, Sha256};
+    let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/proxy/registry")
+        .join(registry);
+    let index: Vec<serde_json::Value> =
+        serde_json::from_slice(&std::fs::read(source.join("index.json")).unwrap()).unwrap();
+    let temp = TempDir::named(&format!("{label}-registry"));
+    let mut kept = Vec::new();
+    for row in index {
+        let Some(file) = row["file"].as_str() else {
+            continue;
+        };
+        let body = std::fs::read(source.join(file)).unwrap();
+        if Some(hex::encode(Sha256::digest(&body)).as_str()) != row["sha256"].as_str() {
+            continue;
+        }
+        let target = temp.0.join(file);
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(target, body).unwrap();
+        kept.push(row);
+    }
+    std::fs::write(
+        temp.0.join("index.json"),
+        serde_json::to_vec(&kept).unwrap(),
+    )
+    .unwrap();
+    temp
+}
+
 /// A forward proxy that answers every `CONNECT` with 200 and splices the
 /// tunnel to `target` without looking inside: a tool run "directly"
 /// against the fixture upstream, for comparing with the same run through

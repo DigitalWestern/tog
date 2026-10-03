@@ -156,6 +156,7 @@ impl Tailor for Cargo {
             &vendor_obj,
             &inputs.plan,
             &inputs.lock_digest,
+            &inputs.resolution_basis,
             toolchain,
             attribution,
         )?;
@@ -216,6 +217,7 @@ impl Tailor for Cargo {
             &vendor_obj,
             &inputs.plan,
             &inputs.lock_digest,
+            &inputs.resolution_basis,
             toolchain,
             attribution,
         )?;

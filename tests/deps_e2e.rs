@@ -926,8 +926,12 @@ fn nested_independent_npm_project_does_not_use_ancestor_pnpm_lock() {
 #[ignore]
 fn cargo_add_update_remove_roundtrip() {
     let temp = scratch("cargo");
-    let project = &temp.0;
-    let store = project.join("store");
+    // The project is its own directory beside home and the store: cargo
+    // runs confined, and the door refuses a project that contains the
+    // signing key under home.
+    let project = &temp.0.join("project");
+    std::fs::create_dir_all(project).unwrap();
+    let store = temp.0.join("store");
     std::fs::write(
         project.join("Cargo.toml"),
         "[package]\nname = \"deps-e2e\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",

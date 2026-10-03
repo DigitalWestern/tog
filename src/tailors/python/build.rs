@@ -1873,4 +1873,97 @@ mod tests {
         );
         assert!(sdist_build_env(Platform::Aarch64AppleDarwin).is_empty());
     }
+
+    /// An sdist's Rust extension with no `Cargo.lock`: the lock is generated
+    /// by the store cargo confined through a missing-lock door (TLS
+    /// interception to the recorded crates.io), written back into the
+    /// unpacked source in a store stage, and the run's ledger is kept on
+    /// the door for the sync that opened it to root.
+    ///
+    /// Ignored: it realizes the store Rust toolchain, which is fetched over
+    /// the network. The resolution itself is offline.
+    #[test]
+    #[ignore = "realizes the store Rust toolchain over the network"]
+    fn sdist_cargo_lock_generation_goes_through_the_door() {
+        use crate::kernel::resolve::door::{PROXY_FOR_TEST, RELAY_FOR_TEST};
+        use crate::kernel::resolve::ledger;
+        use crate::kernel::resolve::testing::{
+            relay, stored_rows, Harness, Reach, TEST_ORIGIN_PUBLIC,
+        };
+        let name = "sdist_cargo_lock_generation_goes_through_the_door";
+        let Some(relay) = relay(name) else {
+            return;
+        };
+        let registry = stored_rows("cargo", name);
+        let mut reach = Reach::public(|_, _| vec![TEST_ORIGIN_PUBLIC.parse().unwrap()]);
+        reach.request_timeout = std::time::Duration::from_secs(10);
+        // The door takes the process proxy here, which a test replaces
+        // with one that lives as long as the process.
+        let harness: &'static Harness = Box::leak(Box::new(Harness::serving(
+            name,
+            reach,
+            &["index.crates.io", "static.crates.io"],
+            &registry.0.to_string_lossy(),
+        )));
+        RELAY_FOR_TEST.with(|slot| *slot.borrow_mut() = Some(relay));
+        PROXY_FOR_TEST.with(|slot| slot.set(Some(&harness.proxy)));
+        let (store, activity) = (&harness.store, &harness.activity);
+        let platform = Platform::host().unwrap();
+        let rust = crate::kernel::provider::rust::shipped_selection(
+            crate::kernel::provider::rust::RUST_VERSION,
+        )
+        .unwrap();
+        let rust_obj =
+            crate::kernel::provider::rust::realize_runtime(store, activity, platform, &rust)
+                .unwrap();
+        // The unpacked sdist, in a store stage as the planner makes it.
+        let work = store.stage_with_activity(activity).unwrap();
+        let source = work.join("source");
+        fs::create_dir_all(source.join("src")).unwrap();
+        fs::write(
+            source.join("Cargo.toml"),
+            "[package]\nname = \"sdist-ext\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
+             [dependencies]\nitoa = \"=1.0.18\"\n",
+        )
+        .unwrap();
+        fs::write(source.join("src/lib.rs"), "").unwrap();
+
+        let mut scope = crate::kernel::testutil::DoorScope::new();
+        let mut door = scope.door(
+            store,
+            activity,
+            platform,
+            crate::kernel::resolve::DoorKind::Planner,
+        );
+        let lock =
+            super::generate_cargo_lock(&mut door, &rust_obj, Path::new("Cargo.toml"), &source);
+        let kept = door.take_kept_ledgers();
+        drop(door);
+        PROXY_FOR_TEST.with(|slot| slot.set(None));
+        RELAY_FOR_TEST.with(|slot| *slot.borrow_mut() = None);
+        let lock = lock.unwrap();
+        assert_eq!(lock, source.join("Cargo.lock"));
+        let text = fs::read_to_string(&lock).unwrap();
+        assert!(
+            text.contains(
+                "name = \"itoa\"\nversion = \"1.0.18\"\n\
+                 source = \"registry+https://github.com/rust-lang/crates.io-index\"\n\
+                 checksum = \"8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682\""
+            ),
+            "{text}"
+        );
+        assert_eq!(kept.len(), 1, "one ledger, kept for the sync to root");
+        let portable =
+            ledger::PortableLedger::parse(&ledger::read_portable(store, &kept[0].ledger).unwrap())
+                .unwrap();
+        assert!(
+            portable
+                .entries()
+                .any(|entry| entry.url == "https://index.crates.io/it/oa/itoa"
+                    && entry.class == "index"),
+            "{:?}",
+            portable.entries().collect::<Vec<_>>()
+        );
+        let _ = fs::remove_dir_all(&store.root);
+    }
 }

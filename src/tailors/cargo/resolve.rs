@@ -301,45 +301,12 @@ mod tests {
     use crate::kernel::resolve::door::RELAY_FOR_TEST;
     use crate::kernel::resolve::ledger::{self, Entry};
     use crate::kernel::resolve::testing::{
-        blind_forwarder, relay, Harness, Reach, TEST_ORIGIN_PUBLIC,
+        blind_forwarder, relay, stored_rows, Harness, Reach, TEST_ORIGIN_PUBLIC,
     };
     use crate::kernel::resolve::{DelegateReport, DoorKind};
 
     const CRATES_IO: &str = "registry+https://github.com/rust-lang/crates.io-index";
     const ITOA_CKSUM: &str = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682";
-
-    /// The recorded cargo registry's rows whose bodies were stored. PR 0
-    /// kept ryu's index file and its `git-upload-pack` answer without their
-    /// bodies, so those rows cannot be served; the itoa rows and
-    /// `config.json` can.
-    fn recorded_rows(label: &str) -> TempDir {
-        use sha2::{Digest as _, Sha256};
-        let source =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/proxy/registry/cargo");
-        let index: Vec<serde_json::Value> =
-            serde_json::from_slice(&fs::read(source.join("index.json")).unwrap()).unwrap();
-        let temp = TempDir::named(&format!("{label}-registry"));
-        let mut kept = Vec::new();
-        for row in index {
-            let Some(file) = row["file"].as_str() else {
-                continue;
-            };
-            let body = fs::read(source.join(file)).unwrap();
-            if Some(hex::encode(Sha256::digest(&body)).as_str()) != row["sha256"].as_str() {
-                continue;
-            }
-            let target = temp.0.join(file);
-            fs::create_dir_all(target.parent().unwrap()).unwrap();
-            fs::write(target, body).unwrap();
-            kept.push(row);
-        }
-        fs::write(
-            temp.0.join("index.json"),
-            serde_json::to_vec(&kept).unwrap(),
-        )
-        .unwrap();
-        temp
-    }
 
     /// The recorded crates.io answers behind a harness proxy that every
     /// host reaches (`evil.test` too, for an unattested registry), and the
@@ -349,7 +316,7 @@ mod tests {
         RELAY_FOR_TEST.with(|slot| *slot.borrow_mut() = Some(relay));
         let mut reach = Reach::public(|_, _| vec![TEST_ORIGIN_PUBLIC.parse().unwrap()]);
         reach.request_timeout = std::time::Duration::from_secs(10);
-        let registry = recorded_rows(label);
+        let registry = stored_rows("cargo", label);
         let harness = Harness::serving(
             label,
             reach,
