@@ -70,6 +70,10 @@ After the proxy: the test-suite audit (#351) and then the quality review
 
 ## Open work, each its own pull request
 
+- **Leftover `rustfmt.json` from an older tog (#416).** A lone record is
+  never cleaned up by `tog fmt`, and `tog gc --register` on such a project
+  gives an unhelpful message. Pick: gc forgets a root whose only closure is
+  retired.
 - **Record `skipped-optional` as an informational closure field (#71).**
   Decided 2026-09-23: an optional group the user did not request is a
   choice, not an exception. Record it as `optional_groups_skipped` so
