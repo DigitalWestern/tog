@@ -30,9 +30,11 @@ deny = [
     # pin the bytes it claims to. Denied: re-lock to get SHA-512 integrity.
     "weak-integrity",
 
-    # A package was projected as a writable copy-on-write clone (declared in
-    # "tog": {"mutablePackages": [...]}) whose runtime contents tog
-    # cannot attest. Denied: what runs is not what the closure recorded.
+    # node_modules was projected as a writable copy-on-write clone whose
+    # runtime contents tog cannot attest: a package was declared in
+    # "tog": {"mutablePackages": [...]}, or a registry package depends on
+    # one of the project's own workspace packages and can only reach it
+    # from a copy. Denied: what runs is not what the closure recorded.
     "unattested-mutable-state",
 
     # A manifest named a private index or an index-like option (a Poetry or

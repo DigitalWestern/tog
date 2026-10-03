@@ -3024,7 +3024,7 @@ mod tests {
             ));
             restriction_verdict(Platform::Aarch64AppleDarwin, &l, "os", compatible);
         }
-        // `libc` restricts Linux only, as it does for npm.
+        // `libc` is judged on Linux only.
         let l = lock(&format!(
             r#""node_modules/restricted":{{"version":"1","libc":["musl"],"resolved":"https://r/restricted.tgz","integrity":"{TEST_SRI}"}}"#
         ));
@@ -3430,15 +3430,21 @@ mod tests {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let _attribution_lock = crate::kernel::policy::attribution_test_lock();
-        for (manifest, cloned) in [
-            (r#"{"name":"plugin","peerDependencies":{"core":"*"}}"#, true),
-            (
-                r#"{"name":"plugin","peerDependencies":{"other":"*"}}"#,
-                false,
-            ),
+        let needs_core = r#"{"name":"plugin","peerDependencies":{"core":"*"}}"#;
+        let needs_other = r#"{"name":"plugin","peerDependencies":{"other":"*"}}"#;
+        for (manifest, dangling, cloned) in [
+            (needs_core, false, true),
+            // a dangling `core` the plugin ships does not stop Node's walk
+            (needs_core, true, true),
+            (needs_other, false, false),
         ] {
             let scratch = TempDir::named("npm-yarn-workspace-peer");
             let (project, env) = workspace_peer_fixture(&scratch.0, None);
+            if dangling {
+                let inside = env.join("node_modules/plugin/node_modules");
+                fs::create_dir_all(&inside).unwrap();
+                std::os::unix::fs::symlink("missing-core", inside.join("core")).unwrap();
+            }
             // Yarn links the workspace `core` at the root; no registry one.
             fs::remove_dir_all(env.join("node_modules/core")).unwrap();
             fs::write(env.join("node_modules/plugin/package.json"), manifest).unwrap();

@@ -377,10 +377,9 @@ fn workspace_dependents(plan: &NpmPlan, env_obj: &Path) -> Vec<String> {
         if plan.links.iter().any(|link| link.path == path) {
             Some(true)
         } else {
-            env_package_path(env_obj, path)
-                .symlink_metadata()
-                .is_ok()
-                .then_some(false)
+            // Followed, as Node follows it: a dangling symlink a package
+            // ships is not there, and the walk goes on past it.
+            env_package_path(env_obj, path).exists().then_some(false)
         }
     };
     plan.packages
