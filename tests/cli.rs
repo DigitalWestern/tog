@@ -3473,12 +3473,16 @@ fn a_cargo_manifest_hard_linked_to_the_signing_key_never_echoes_it() {
     assert_eq!(realized, 0, "{} holds objects", objects.display());
 }
 
-/// The other files a Cargo project's commands parse (the toolchain files
-/// and the project policy), each a hard link to the signing key: whatever
-/// parser fails on it, the message tog prints has the key's secret
-/// replaced, so no byte of it reaches stdout or stderr.
+/// The other files a Cargo project's commands parse before anything is
+/// downloaded (the toolchain files and the project policy), each a hard
+/// link to the signing key: each command reaches the parser that fails on
+/// it (its error quotes the line, so the redaction marker shows), and no
+/// byte of the key reaches stdout or stderr. `attest` never reads
+/// `rust-toolchain` (it runs frozen on `tog-toolchain.toml`), so that pair
+/// is refused for the missing lock instead.
 #[test]
 fn project_files_hard_linked_to_the_signing_key_never_echo_it() {
+    const REDACTED: &str = "[signing key redacted]";
     for file in [
         "rust-toolchain.toml",
         "rust-toolchain",
@@ -3492,40 +3496,18 @@ fn project_files_hard_linked_to_the_signing_key_never_echo_it() {
         let path = project.0.join(file);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::hard_link(&key, &path).unwrap();
-        cargo_key_runs(&project.0, &home.0, &key, &seed);
+        let runs = cargo_key_runs(&project.0, &home.0, &key, &seed);
+        for (args, stderr) in CARGO_KEY_COMMANDS.iter().zip(runs) {
+            let expected = match (file, args[0]) {
+                ("rust-toolchain", "attest") => "tog-toolchain.toml is missing",
+                _ => REDACTED,
+            };
+            assert!(
+                stderr.contains(expected),
+                "{file} {args:?}: expected {expected:?}\n{stderr}"
+            );
+        }
     }
-}
-
-/// A cloned Cargo project whose `.cargo/config.toml` is a symlink to the
-/// signing key: nothing on the host parses it with an echoing parser
-/// (tog's readers name a position, and no cargo runs on the host), so no
-/// byte of the key reaches stdout or stderr.
-#[test]
-fn a_cargo_config_symlinked_to_the_signing_key_never_echoes_it() {
-    let home = TempDir::boundary("cli-cargo-key");
-    let project = TempDir::boundary("cli-cargo-key-project");
-    let (key, seed) = cargo_signing_key(&home.0);
-    plain_cargo_project(&project.0);
-    std::fs::create_dir_all(project.0.join(".cargo")).unwrap();
-    std::os::unix::fs::symlink(&key, project.0.join(".cargo/config.toml")).unwrap();
-    cargo_key_runs(&project.0, &home.0, &key, &seed);
-}
-
-/// Cargo's own home configuration including a file that is the signing
-/// key (`include = ["key.toml"]`, a hard link): no cargo runs on the host,
-/// and a confined one gets a scratch `CARGO_HOME`, so nothing reads it and
-/// no byte of the key reaches stdout or stderr.
-#[test]
-fn a_cargo_home_config_including_the_signing_key_never_echoes_it() {
-    let home = TempDir::boundary("cli-cargo-home-key");
-    let project = TempDir::boundary("cli-cargo-home-key-project");
-    let (key, seed) = cargo_signing_key(&home.0);
-    plain_cargo_project(&project.0);
-    let cargo_home = home.0.join(".cargo");
-    std::fs::create_dir_all(&cargo_home).unwrap();
-    std::fs::write(cargo_home.join("config.toml"), "include = [\"key.toml\"]\n").unwrap();
-    std::fs::hard_link(&key, cargo_home.join("key.toml")).unwrap();
-    cargo_key_runs(&project.0, &home.0, &key, &seed);
 }
 
 /// `tog attest` refuses offline, before any tool or store, what it cannot

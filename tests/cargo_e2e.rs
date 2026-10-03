@@ -596,18 +596,24 @@ fn a_local_toolchain_directory_builds_the_project() {
 }
 
 /// Every way a Cargo project or cargo's own home can put the signing key in
-/// front of cargo, with the real toolchain: no byte of the key reaches
-/// stdout or stderr of sync, attest, add or fmt.
+/// front of cargo, with the real toolchain, so each command reaches the
+/// step that reads the file: no byte of the key reaches stdout or stderr of
+/// sync, attest, add or fmt, and each refusal names the file.
 ///
 /// - cargo's home config includes a file hard-linked to the key: no cargo
 ///   runs on the host and a confined one gets a scratch `CARGO_HOME`, so
 ///   every command succeeds.
+/// - `.cargo/config.toml` a symlink to the key outside the project, and the
+///   `target/key` alias (a hard link in `target/`, the config a symlink to
+///   `../target/key`): sync, attest, add and fmt refuse it by name.
+/// - the toolchain files hard-linked to the key: `add` reaches them with
+///   the toolchain realized.
 /// - a workspace member in a hidden directory, 13 levels down, whose
-///   manifest is a hard link to the key: the door's stage refuses it by
-///   device and inode, and fmt refuses it before cargo-fmt starts.
+///   manifest is a hard link to the key: refused by name.
 /// - a member reached through a symlinked directory that holds a manifest
-///   hard-linked to the key: the stage copies the symlink, not its target,
-///   and fmt's sandbox does not mount it, so cargo cannot read it (a host
+///   hard-linked to the key: attest and add refuse the workspace (the
+///   confined cargo would resolve without the member), and fmt's sandbox
+///   does not mount the target, so cargo-fmt cannot read it (a host
 ///   `cargo fmt --all` there quotes the key).
 #[test]
 #[ignore]
@@ -643,6 +649,19 @@ fn the_signing_key_never_reaches_the_output_through_cargo_files() {
         );
         (out.status.success(), stderr)
     };
+    let refused = |project: &Path, args: &[&str]| {
+        let (ok, stderr) = run(project, args);
+        assert!(!ok, "{args:?} succeeded: {stderr}");
+        assert!(
+            stderr.contains("is the signing key"),
+            "{args:?} was not refused for the key: {stderr}"
+        );
+    };
+    let fresh = |name: &str| {
+        let project = temp.0.join(name);
+        copy_tree(&fixture("cargo-hello"), &project);
+        project
+    };
     let commands: [&[&str]; 4] = [
         &["sync"],
         &["attest", "cargo"],
@@ -650,22 +669,52 @@ fn the_signing_key_never_reaches_the_output_through_cargo_files() {
         &["fmt"],
     ];
 
-    // cargo's home config including the key.
+    // cargo's home config including the key: nothing reads it.
     let cargo_home = temp.0.join(".cargo");
     std::fs::create_dir_all(&cargo_home).unwrap();
     std::fs::write(cargo_home.join("config.toml"), "include = [\"key.toml\"]\n").unwrap();
     std::fs::hard_link(&key, cargo_home.join("key.toml")).unwrap();
-    let project = temp.0.join("home-include");
-    copy_tree(&fixture("cargo-hello"), &project);
+    let project = fresh("home-include");
     for args in commands {
         let (ok, stderr) = run(&project, args);
         assert!(ok, "{args:?}: {stderr}");
     }
     std::fs::remove_dir_all(&cargo_home).unwrap();
 
+    // The project's config leading to the key: a symlink out of the
+    // project, and the `target/key` alias.
+    for (name, alias) in [("config-symlink", false), ("config-target-alias", true)] {
+        let project = fresh(name);
+        std::fs::create_dir_all(project.join(".cargo")).unwrap();
+        let config = project.join(".cargo/config.toml");
+        if alias {
+            std::fs::create_dir_all(project.join("target")).unwrap();
+            std::fs::hard_link(&key, project.join("target/key")).unwrap();
+            std::os::unix::fs::symlink("../target/key", &config).unwrap();
+        } else {
+            std::os::unix::fs::symlink(&key, &config).unwrap();
+        }
+        // sync reads the config as a resolution input (its digest goes in
+        // the closure), so it refuses too, before any cargo runs.
+        for args in commands {
+            refused(&project, args);
+        }
+    }
+
+    // The toolchain files, read by add after the toolchain is realized.
+    for file in ["rust-toolchain.toml", "rust-toolchain"] {
+        let project = fresh(&format!("toolchain-{file}"));
+        std::fs::hard_link(&key, project.join(file)).unwrap();
+        let (ok, stderr) = run(&project, &["add", "--no-sync", "cargo:itoa"]);
+        assert!(!ok, "{file}: add succeeded");
+        assert!(
+            stderr.contains("is the signing key") || stderr.contains("[signing key redacted]"),
+            "{file}: {stderr}"
+        );
+    }
+
     // A hidden, deep member hard-linked to the key.
-    let project = temp.0.join("deep-member");
-    copy_tree(&fixture("cargo-hello"), &project);
+    let project = fresh("deep-member");
     let member: PathBuf = std::iter::once(".hidden".to_string())
         .chain((1..=13).map(|level| level.to_string()))
         .collect();
@@ -678,17 +727,13 @@ fn the_signing_key_never_reaches_the_output_through_cargo_files() {
         member.display()
     ));
     std::fs::write(&manifest, text).unwrap();
-    for args in commands {
-        let (ok, stderr) = run(&project, args);
-        if args[0] != "sync" {
-            assert!(!ok, "{args:?} succeeded");
-            assert!(stderr.contains("is the signing key"), "{args:?}: {stderr}");
-        }
+    for args in &commands[1..] {
+        refused(&project, args);
     }
+    run(&project, &["sync"]);
 
     // A member through a symlinked directory.
-    let project = temp.0.join("linked-member");
-    copy_tree(&fixture("cargo-hello"), &project);
+    let project = fresh("linked-member");
     let outside = temp.0.join("outside");
     std::fs::create_dir_all(&outside).unwrap();
     std::fs::hard_link(&key, outside.join("Cargo.toml")).unwrap();
@@ -697,15 +742,20 @@ fn the_signing_key_never_reaches_the_output_through_cargo_files() {
     let mut text = std::fs::read_to_string(&manifest).unwrap();
     text.push_str("\n[workspace]\nmembers = [\"linked\"]\n");
     std::fs::write(&manifest, text).unwrap();
-    for args in commands {
+    // sync writes tog-toolchain.toml, which attest needs.
+    run(&project, &["sync"]);
+    // The confined cargo would not see the member: attest and edits are
+    // refused, naming it.
+    for args in [
+        &["attest", "cargo"][..],
+        &["add", "--no-sync", "cargo:itoa"],
+    ] {
         let (ok, stderr) = run(&project, args);
-        // attest and add resolve the workspace, which cannot load the
-        // member; sync uses the committed lock, and cargo-fmt formats the
-        // package without loading a member it cannot read.
-        if matches!(args[0], "attest" | "add") {
-            assert!(!ok, "{args:?} succeeded: {stderr}");
-        }
+        assert!(
+            !ok && stderr.contains("symlinked directory"),
+            "{args:?}: {stderr}"
+        );
     }
-    let (_, stderr) = run(&project, &["fmt", "--all"]);
-    assert!(!stderr.contains("ed25519"), "{stderr}");
+    run(&project, &["fmt"]);
+    run(&project, &["fmt", "--all"]);
 }
