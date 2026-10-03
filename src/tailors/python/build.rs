@@ -566,7 +566,9 @@ fn generate_cargo_lock(
     if !report.status.success() {
         return Err(io::Error::other(format!(
             "store cargo generate-lockfile failed for the sdist: {}",
-            String::from_utf8_lossy(&report.stderr).trim()
+            crate::kernel::resolve::confine::scrub_signing_key(
+                String::from_utf8_lossy(&report.stderr).trim()
+            )
         )));
     }
     cargo_lock_for(source, &source.join(manifest_rel)).ok_or_else(|| {

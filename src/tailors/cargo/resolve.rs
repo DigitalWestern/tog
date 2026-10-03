@@ -276,7 +276,9 @@ pub(crate) fn attest_project(
             "Cargo.lock in {} is not what cargo resolves the manifests to, so it is not \
              attested; run `tog` to bring it up to date and commit the result\n{}",
             project.path().display(),
-            String::from_utf8_lossy(&report.stderr).trim()
+            crate::kernel::resolve::confine::scrub_signing_key(
+                String::from_utf8_lossy(&report.stderr).trim()
+            )
         )));
     }
     let signed = slot.borrow_mut().take();

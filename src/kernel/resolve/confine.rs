@@ -605,9 +605,13 @@ pub fn refuse_key_links_under(
 /// the line it failed on). The key files are read as they are now; one
 /// that cannot be read leaves `text` as it is.
 pub fn scrub_signing_key(text: &str) -> String {
+    scrub_keys(text, &signing_key_paths())
+}
+
+fn scrub_keys(text: &str, keys: &[PathBuf]) -> String {
     let mut out = text.to_string();
-    for path in signing_key_paths() {
-        let Ok(contents) = fs::read_to_string(&path) else {
+    for path in keys {
+        let Ok(contents) = fs::read_to_string(path) else {
             continue;
         };
         for line in contents.lines().map(str::trim) {
@@ -1438,6 +1442,22 @@ mod tests {
         fs::remove_file(deep.join("config.toml")).unwrap();
         std::os::unix::fs::symlink(&key, root.join("link.toml")).unwrap();
         refuse_key_links_under(&root, &ids, &[]).unwrap();
+    }
+
+    #[test]
+    fn a_relayed_message_never_carries_the_key() {
+        let temp = TempDir::named("confine-scrub");
+        let key = temp.0.join("signing.key");
+        fs::write(&key, b"ed25519:SEEDBYTES0123456789abcdef\n").unwrap();
+        let text = "error: invalid TOML\n  |\n1 | ed25519:SEEDBYTES0123456789abcdef\n  |";
+        let scrubbed = scrub_keys(text, &[key.clone(), temp.0.join("missing")]);
+        assert!(!scrubbed.contains("SEEDBYTES"), "{scrubbed}");
+        assert!(scrubbed.contains("[signing key redacted]"), "{scrubbed}");
+        // The secret alone, quoted without its prefix, too.
+        let scrubbed = scrub_keys("value \"SEEDBYTES0123456789abcdef\"", &[key]);
+        assert!(!scrubbed.contains("SEEDBYTES"), "{scrubbed}");
+        // Nothing else is touched.
+        assert_eq!(scrub_keys("plain", &[]), "plain");
     }
 
     #[test]

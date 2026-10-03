@@ -1062,8 +1062,8 @@ mod tests {
     }
 
     /// Every `local_*` form refuses a dependency tool before spawning it,
-    /// naming the program and the door, and lets a plain helper and a
-    /// reviewed offline form through to the supervisor.
+    /// naming the program and the door, and lets a plain helper through to
+    /// the supervisor.
     #[test]
     fn local_supervise_refuses_resolver_programs() {
         let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
@@ -1090,8 +1090,8 @@ mod tests {
             assert!(message.contains("npm"), "{message}");
             assert!(message.contains("kernel::resolve"), "{message}");
         }
-        // The offline workspace lookup runs, but only as the store's own
-        // Cargo: the same argv from a host cargo is refused unspawned.
+        // No cargo runs on the host: the workspace lookup it once ran is
+        // refused unspawned, the store's own Cargo included.
         let lookup = |program: &Path| {
             let mut command = Command::new(program);
             command
@@ -1112,10 +1112,11 @@ mod tests {
         );
         assert_eq!(host.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
         let cargo = crate::kernel::testutil::store_program(&store.root, "objects/rust/bin/cargo");
-        assert!(local_output(&mut lookup(&cargo), &activity)
-            .unwrap()
-            .status
-            .success());
+        let store_cargo = local_output(&mut lookup(&cargo), &activity);
+        assert_eq!(
+            store_cargo.unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
         let mut helper = Command::new("/bin/sh");
         helper.args(["-c", "exit 3"]);
         assert_eq!(

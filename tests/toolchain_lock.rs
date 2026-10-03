@@ -1280,8 +1280,7 @@ fn foreign_platform_lock_is_refused() {
 // Rust toolchain files beyond a channel
 
 /// A stand-in for a rustup-built toolchain directory: `bin/rustc -vV` and
-/// `bin/cargo -V` print what the real ones print for this host, `cargo
-/// locate-project` answers from its working directory, and the tree has the
+/// `bin/cargo -V` print what the real ones print for this host, and the tree has the
 /// layout a Rust object needs. Nothing here compiles. The sync these tests
 /// run needs no compiler, only the toolchain's identity and layout.
 fn fake_rust_tree(tree: &Path, release: &str) {
@@ -1306,7 +1305,6 @@ fn fake_rust_tree(tree: &Path, release: &str) {
         format!(
             "case \"$1\" in\n\
              -V) printf 'cargo {release} (4567fedcb 2026-06-26)\\n' ;;\n\
-             locate-project) printf '%s/Cargo.toml\\n' \"$(pwd -P)\" ;;\n\
              *) echo \"fake cargo: $*\" >&2; exit 1 ;;\n\
              esac\n"
         ),

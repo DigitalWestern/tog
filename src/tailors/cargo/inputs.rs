@@ -7,30 +7,11 @@ use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::platform::Platform;
 use crate::kernel::resolve::ResolutionDoor;
 use crate::kernel::store;
-use crate::kernel::supervise;
 use crate::kernel::toolchain::Selected;
 use crate::kernel::ui;
 use crate::tailors::cargo;
 use std::io;
 use std::path::{Path, PathBuf};
-
-/// The workspace lookup `locate_cargo_root` runs: the store Cargo, offline,
-/// with rustup's toolchain selection removed.
-fn locate_command(rust_obj: &Path, cwd: &Path) -> std::process::Command {
-    let mut command = std::process::Command::new(rust_obj.join("bin/cargo"));
-    command
-        .args([
-            "locate-project",
-            "--workspace",
-            "--message-format",
-            "plain",
-            "--offline",
-        ])
-        .current_dir(cwd)
-        .env_remove("RUSTUP_HOME")
-        .env_remove("RUSTUP_TOOLCHAIN");
-    command
-}
 
 /// Implicit detection for sync/plan: cargo joins the party only when the
 /// invocation dir is itself a Cargo package (workspace members included).
@@ -52,33 +33,151 @@ pub struct CargoInputs {
     pub resolution_basis: crate::comforter::join::Digests,
 }
 
-/// Workspace rooting is delegated to the pinned Cargo itself
-/// (`locate-project --workspace`): an ancestor-walk for Cargo.lock picks an
-/// unrelated outer lock when independent packages nest.
-pub fn locate_cargo_root(
-    rust_obj: &Path,
-    cwd: &Path,
-    activity: &StoreActivity,
-) -> io::Result<PathBuf> {
-    // The host cargo reads the project's manifests and configuration and
-    // echoes a line it cannot parse: none may lead out of the project or
-    // be the signing key.
-    crate::kernel::provider::cargo_door::host_preflight(cwd)?;
-    let mut command = locate_command(rust_obj, cwd);
-    ui::trace_command(&command);
-    let out = supervise::local_output(&mut command, activity)
-        .map_err(|e| io::Error::new(e.kind(), format!("run store cargo locate-project: {e}")))?;
-    if !out.status.success() {
-        return Err(io::Error::other(format!(
-            "cargo locate-project failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        )));
+/// The workspace root cargo uses for `cwd`, found by tog's own walk of the
+/// manifests, the way cargo finds it: the nearest `Cargo.toml` at or above
+/// `cwd`; the root its `package.workspace` names, if any; else itself when
+/// it holds `[workspace]`; else the nearest ancestor whose `Cargo.toml`
+/// holds a `[workspace]` that does not exclude it; else its own directory.
+/// An ancestor-walk for `Cargo.lock` would pick an unrelated outer lock
+/// when independent packages nest.
+///
+/// No cargo runs on the host to find it. A host cargo reads the project's
+/// manifests and configuration (and the files they include, and its own
+/// home's) and quotes the line it cannot parse, so a project file that is
+/// the signing key under another name (a symlink, a hard link, an include)
+/// would print the key. tog's own reads name a parse error's position only,
+/// and a manifest that is the signing key is refused by name.
+pub fn locate_cargo_root(cwd: &Path) -> io::Result<PathBuf> {
+    let cwd = std::fs::canonicalize(cwd)
+        .map_err(|error| io::Error::new(error.kind(), format!("{}: {error}", cwd.display())))?;
+    let keys = crate::kernel::resolve::confine::signing_key_ids();
+    let manifest = cwd
+        .ancestors()
+        .map(|dir| dir.join("Cargo.toml"))
+        .find(|manifest| manifest.is_file())
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!(
+                    "could not find Cargo.toml in {} or any parent directory",
+                    cwd.display()
+                ),
+            )
+        })?;
+    let dir = manifest.parent().unwrap_or(Path::new("/"));
+    let table = read_manifest(&manifest, &keys)?;
+    let named = table
+        .get("package")
+        .and_then(|package| package.get("workspace"))
+        .and_then(|workspace| workspace.as_str());
+    if let Some(named) = named {
+        let root = normalize(&dir.join(named));
+        if !root.join("Cargo.toml").is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!(
+                    "{} names the workspace {named:?}, which has no Cargo.toml",
+                    manifest.display()
+                ),
+            ));
+        }
+        return Ok(root);
     }
-    let manifest = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
-    manifest
-        .parent()
-        .map(Path::to_path_buf)
-        .ok_or_else(|| io::Error::other("cargo locate-project returned no manifest path"))
+    if table.contains_key("workspace") {
+        return Ok(dir.to_path_buf());
+    }
+    for ancestor in dir.ancestors().skip(1) {
+        let candidate = ancestor.join("Cargo.toml");
+        if !candidate.is_file() {
+            continue;
+        }
+        let outer = read_manifest(&candidate, &keys)?;
+        let Some(workspace) = outer.get("workspace").and_then(|w| w.as_table()) else {
+            continue;
+        };
+        if !excludes(ancestor, workspace, &manifest) {
+            return Ok(ancestor.to_path_buf());
+        }
+    }
+    Ok(dir.to_path_buf())
+}
+
+/// cargo's `is_excluded`: `manifest` is under an `exclude` entry of the
+/// workspace at `root` and under none of its `members` entries (each
+/// compared as a path prefix, as cargo does).
+fn excludes(root: &Path, workspace: &toml::Table, manifest: &Path) -> bool {
+    let under = |key: &str| {
+        workspace
+            .get(key)
+            .and_then(|list| list.as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|entry| entry.as_str())
+            .any(|entry| manifest.starts_with(root.join(entry)))
+    };
+    under("exclude") && !under("members")
+}
+
+/// `path` with `.` and `..` resolved by name, as cargo resolves the
+/// workspace a package names (symlinks are not followed).
+fn normalize(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// A manifest read by tog, never echoed: a file that is the signing key
+/// (by device and inode, so a hard link too) is refused by name, anything
+/// but a regular file is refused, and a parse error names its position.
+fn read_manifest(
+    path: &Path,
+    keys: &[crate::kernel::resolve::confine::FileId],
+) -> io::Result<toml::Table> {
+    use std::io::Read;
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    let context = |error: io::Error| {
+        io::Error::new(error.kind(), format!("read {}: {error}", path.display()))
+    };
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC)
+        .open(path)
+        .map_err(context)?;
+    let meta = file.metadata().map_err(context)?;
+    if keys.contains(&(meta.dev(), meta.ino())) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "{} is the signing key (the same file, by device and inode); move the key out \
+                 of the project and point TOG_SIGNING_KEY at it",
+                path.display()
+            ),
+        ));
+    }
+    if !meta.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{} is not a regular file", path.display()),
+        ));
+    }
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).map_err(context)?;
+    let text = String::from_utf8(bytes).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{} is not valid UTF-8", path.display()),
+        )
+    })?;
+    crate::kernel::provider::cargo_door::parse_toml(path, &text)
 }
 
 /// `toolchain` is the project's selection, and it decides which Rust this
@@ -132,7 +231,7 @@ fn resolution_basis(
 }
 
 /// The Rust the selection names, realized, and the workspace Cargo
-/// reports for `project`: its root path and that root held as a
+/// uses for `project` ([`locate_cargo_root`]): its root path and that root held as a
 /// descriptor. Lock generation and planning share it so both see the same
 /// workspace.
 fn locate_workspace(
@@ -143,12 +242,9 @@ fn locate_workspace(
     activity: &StoreActivity,
     toolchain: &Selected,
 ) -> io::Result<(PathBuf, PathBuf, ProjectRoot)> {
-    // Before anything is realized: the files cargo will read are checked
-    // first (again by `locate_cargo_root`, which other callers reach).
-    crate::kernel::provider::cargo_door::host_preflight(project.path())?;
-    let extras = cargo::project_extras_in(lock_root)?;
-    let rust_obj = cargo::realize_toolchain(store, activity, platform, toolchain, &extras)?;
-    let root = locate_cargo_root(&rust_obj, project.path(), activity)?;
+    // Found before anything is realized, by tog's own walk: no cargo runs
+    // on the host.
+    let root = locate_cargo_root(project.path())?;
     // Cargo is the one tailor whose registered root is not the directory
     // sync was run in: a member of a workspace sends its closure and its
     // record to the workspace root. The preflight checked the invocation
@@ -157,6 +253,8 @@ fn locate_workspace(
     // registered and so cannot be protected.
     store::Store::check_registrable(&root)?;
     let workspace = workspace_root(project, &root)?;
+    let extras = cargo::project_extras_in(lock_root)?;
+    let rust_obj = cargo::realize_toolchain(store, activity, platform, toolchain, &extras)?;
     Ok((rust_obj, root, workspace))
 }
 
@@ -256,33 +354,81 @@ mod tests {
         assert!(is_cargo_here(&open(&nested)));
     }
 
-    /// The workspace lookup passes the host-local tripwire as built, and
-    /// loosening anything its offline form pins is refused: a Cargo outside
-    /// the store, or rustup's toolchain selection left in.
+    /// tog's walk finds the root cargo would: a package's own directory, a
+    /// workspace above it, the root `package.workspace` names, and past a
+    /// workspace that excludes it (unless it is also a listed member).
     #[test]
-    fn the_workspace_lookup_passes_the_tripwire_only_as_built() {
-        use crate::kernel::resolve::tripwire::refusal;
-        let store = TempDir::named("cargo-tripwire");
-        let rust_obj = store.0.join("objects/rust");
-        crate::kernel::testutil::store_program(&store.0, "objects/rust/bin/cargo");
-        let command = locate_command(&rust_obj, &store.0);
-        assert!(
-            refusal(&command, &store.0).is_none(),
-            "{:?}",
-            refusal(&command, &store.0)
+    fn the_workspace_root_is_found_without_cargo() {
+        let temp = TempDir::named("cargo-locate");
+        let base = temp.0.canonicalize().unwrap();
+        let write = |relative: &str, text: &str| {
+            let path = base.join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        };
+        let root = |relative: &str| locate_cargo_root(&base.join(relative)).unwrap();
+        write("solo/Cargo.toml", "[package]\nname = \"solo\"\n");
+        std::fs::create_dir_all(base.join("solo/src/deep")).unwrap();
+        assert_eq!(root("solo/src/deep"), base.join("solo"));
+        write(
+            "ws/Cargo.toml",
+            "[workspace]\nmembers = [\"a\"]\nexclude = [\"out\"]\n",
         );
-        let host = TempDir::named("cargo-tripwire-host");
-        crate::kernel::testutil::store_program(&host.0, "bin/cargo");
-        assert!(refusal(&locate_command(&host.0, &store.0), &store.0).is_some());
-        let loosened = crate::kernel::testutil::loosened(|| locate_command(&rust_obj, &store.0));
-        assert_eq!(
-            loosened.len(),
-            3,
-            "RUSTUP_HOME, RUSTUP_TOOLCHAIN, and an added LD_PRELOAD"
+        write("ws/a/Cargo.toml", "[package]\nname = \"a\"\n");
+        assert_eq!(root("ws/a"), base.join("ws"));
+        assert_eq!(root("ws"), base.join("ws"));
+        // An implicit member, in a hidden directory and deep: still the
+        // workspace's.
+        write(
+            ".h/1/2/3/4/5/6/7/8/9/10/11/12/13/Cargo.toml",
+            "[package]\nname = \"deep\"\n",
         );
-        for (key, command) in &loosened {
-            assert!(refusal(command, &store.0).is_some(), "loosened {key}");
+        write(".h/Cargo.toml", "[workspace]\n");
+        assert_eq!(root(".h/1/2/3/4/5/6/7/8/9/10/11/12/13"), base.join(".h"));
+        // Excluded: its own root.
+        write("ws/out/Cargo.toml", "[package]\nname = \"out\"\n");
+        assert_eq!(root("ws/out"), base.join("ws/out"));
+        // `package.workspace` wins, resolved by name.
+        write(
+            "ws/out/inner/Cargo.toml",
+            "[package]\nname = \"inner\"\nworkspace = \"../..\"\n",
+        );
+        assert_eq!(root("ws/out/inner"), base.join("ws"));
+        write(
+            "ws/out/bad/Cargo.toml",
+            "[package]\nworkspace = \"../nowhere\"\n",
+        );
+        assert!(locate_cargo_root(&base.join("ws/out/bad")).is_err());
+        // Nothing at all.
+        std::fs::create_dir_all(base.join("empty")).unwrap();
+        let error = locate_cargo_root(&base.join("empty"));
+        if !Path::new("/Cargo.toml").exists() {
+            assert_eq!(error.unwrap_err().kind(), io::ErrorKind::NotFound);
         }
+    }
+
+    /// A manifest the walk reads that is the signing key (a hard link, so
+    /// no symlink to see) or that does not parse is refused by name and
+    /// position, and none of its bytes reach the error.
+    #[test]
+    fn the_walk_never_echoes_a_manifest() {
+        const SEED: &str = "SEEDBYTES0123456789abcdef";
+        let temp = TempDir::named("cargo-locate-key");
+        let base = temp.0.canonicalize().unwrap();
+        let key = base.join("signing.key");
+        std::fs::write(&key, format!("ed25519:{SEED}\n")).unwrap();
+        let keys = crate::kernel::resolve::confine::key_ids(std::slice::from_ref(&key));
+        let project = base.join("p");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::hard_link(&key, project.join("Cargo.toml")).unwrap();
+        let error = read_manifest(&project.join("Cargo.toml"), &keys)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("is the signing key"), "{error}");
+        assert!(!error.contains(SEED), "{error}");
+        // Without the key known, the parse error is position only.
+        let error = locate_cargo_root(&project).unwrap_err().to_string();
+        assert!(!error.contains(SEED), "{error}");
     }
 
     #[test]

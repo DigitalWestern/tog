@@ -39,12 +39,12 @@ pub(crate) fn edit_manifest(
     // targets the toolchain file asks for are provisioned by the sync that
     // follows.
     let selected = edit.host.toolchain(project, "cargo")?;
-    crate::kernel::provider::cargo_door::host_preflight(project)?;
-    let rust_obj = super::realize_runtime(door.store(), door.lease(), door.platform(), &selected)?;
     // The lock, the record, and the closure belong to the workspace root;
-    // an edit in a member names the member's manifest from there.
-    let root = super::inputs::locate_cargo_root(&rust_obj, project, door.lease())?;
+    // an edit in a member names the member's manifest from there. tog's
+    // own walk finds it, before anything is realized.
+    let root = super::inputs::locate_cargo_root(project)?;
     crate::kernel::store::Store::check_registrable(&root)?;
+    let rust_obj = super::realize_runtime(door.store(), door.lease(), door.platform(), &selected)?;
     let held = ProjectRoot::open(project)?;
     let workspace = super::inputs::workspace_root(&held, &root)?;
     let member = workspace

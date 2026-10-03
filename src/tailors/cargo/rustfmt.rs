@@ -732,14 +732,10 @@ mod tests {
         )
         .unwrap()
         .object_id();
-        // `cargo locate-project` names the invocation directory's manifest;
-        // `cargo-fmt` formats nothing and succeeds.
+        // tog finds the workspace itself; `cargo-fmt` formats nothing and
+        // succeeds.
         for (id, script, body) in [
-            (
-                &rust_id,
-                "cargo",
-                "#!/bin/sh\necho \"$(pwd -P)/Cargo.toml\"\n",
-            ),
+            (&rust_id, "cargo", "#!/bin/sh\nexit 1\n"),
             (&rustfmt_id, "cargo-fmt", "#!/bin/sh\nexit 0\n"),
         ] {
             let object = store.object_path(id);
