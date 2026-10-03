@@ -3293,7 +3293,9 @@ and `--reap`, `tog doctor --isolation`), with the survivor and
 concurrent-session tests. The macOS VM backend follows the
 `aarch64-unknown-linux-gnu` platform rows and is not in this PR. Until it lands, a host without the native
 sandbox fails with the missing-capability message, which is the
-fail-closed outcome.
+fail-closed outcome. **Built after PR 9, before PR 10** (decided
+2026-10-03): PR 4 shipped Go confined without it, so no ecosystem PR
+depends on it, and only PR 10's removal of `Legacy` needs the fallback.
 
 **PR 4: Go end to end, attestation, and the join.** Switch the Go rows to
 the proxied mode (mirror plus sumdb), including the planner doors that

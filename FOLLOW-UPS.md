@@ -14,7 +14,34 @@ by position.
 
 ## Next up, in order
 
-Nothing queued; the next item comes from "Open work" below.
+The resolution proxy (#68), then the cleanup. Today only Go resolves
+confined through the proxy (PRs 1 to 4: #198, #199, #200, #202). Every
+other ecosystem's `add`, `remove`, `update`, and missing-lock generation
+runs through the door's unsandboxed `Legacy` mode with network, the
+largest gap in what tog promises. Design: `docs/agent/DESIGNS.md` §6
+(#196), evidence in #209. One pull request each, in this order:
+
+1. **#203 (PR 5): interception.** The session CA, TLS termination, the
+   git row; cargo and the sdist `cargo generate-lockfile` switch.
+2. **#204 (PR 6): Node.** npm and pnpm. Absorbs #212 (npm notifier and
+   audit requests).
+3. **#205 (PR 7): Python.** uv. Absorbs #210 (`uv pip compile` ignores
+   `UV_PYTHON`).
+4. **#206 (PR 8): Ruby and Elixir.** Bundler and Hex mirrors. Absorbs
+   #211 (`bundle add` installs).
+5. **#207 (PR 9): .NET.** The `nuget.config` mirror.
+6. **#201 (PR 3b): the container backend and `tog-isolate`.** Moved after
+   the doors: Go shipped confined without it, so no door waits on it. It
+   must land before #208, because removing `Legacy` leaves a host without
+   the native sandbox with no way to resolve.
+7. **#208 (PR 10): remove `Legacy`.**
+
+The macOS door (Seatbelt rules, the Mach allow-list from one run of
+`tools/proxy_spike/macos_mach.sh` on a Mac, tree freeze) is not one of
+these; it waits with the macOS gate below.
+
+After the proxy: the test-suite audit (#351) and then the quality review
+(#264), both under "Open work", each in its listed order.
 
 ## Decisions waiting on the owner
 
@@ -71,18 +98,6 @@ Nothing queued; the next item comes from "Open work" below.
   workaround is `SUPERVISION_TEST_LOCK` plus `--test-threads=1` for
   `--ignored` targets. Design: `docs/agent/DESIGNS.md` §5 "Per-operation
   signal sessions" (#57); implementation follows its review.
-- **The resolution proxy (#68).** Design: `docs/agent/DESIGNS.md` §6
-  (#196). PR 0, the measured evidence, shipped in #209. PRs 1 to 4 (#198
-  the door type, #199 the proxy core, #200 confinement and the transaction,
-  #202 Go end to end, attestation, and the join) are built on Linux: Go
-  resolves confined through the proxy and every other delegated tool still
-  runs through the door's unsandboxed `Legacy` mode. Still open, in order:
-  #201 (PR 3b, the container backend and `tog-isolate`), #203, #204, #205,
-  #206, #207, #208 (PR 10, remove `Legacy`). The macOS door (Seatbelt rules,
-  Mach allow-list from one run of `tools/proxy_spike/macos_mach.sh` on a
-  Mac, tree freeze) is not built. Found by PR 0 and slotted into those:
-  #210 (uv ignores `UV_PYTHON`), #211 (`bundle add` installs), #212 (npm
-  notifier and audit requests).
 - **Test-suite audit of 2026-09-27 (#351).** Nine reviewers, one per
   area, looked for tests that stay green when the code they name is
   broken. The fake passes were fixed in #351; what remains is grouped by
