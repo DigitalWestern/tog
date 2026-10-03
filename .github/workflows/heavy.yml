@@ -101,11 +101,13 @@ jobs:
       fail-fast: false
       matrix:
         shard: [node, rust, python, other]
-    # The weekly and by-hand runs go one at a time: one started while
-    # another is going waits for it. On a pull request a new push
-    # cancels that PR's older run, which tested code that is gone. One
-    # group per shard: a group holds one running and one waiting job, so
-    # four shards in one group would cancel each other.
+    # The weekly and by-hand runs go one shard at a time: a shard started
+    # while the same shard of another run is going waits for it. On a
+    # pull request a new push cancels that PR's older run, which tested
+    # code that is gone. One group per shard: a group holds one running
+    # and one waiting job, so four shards in one group would cancel each
+    # other. The group is per job rather than for the whole workflow, so
+    # a run that `gate` skips (another label added) cancels nothing.
     concurrency:
       group: ${{ github.event_name == 'pull_request' && format('heavy-pr-{0}-{1}', github.event.pull_request.number, matrix.shard) || format('heavy-{0}', matrix.shard) }}
       cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -189,8 +191,10 @@ jobs:
     needs: [gate, e2e]
     if: ${{ !cancelled() && needs.e2e.result != 'skipped' && needs.e2e.result != 'cancelled' }}
     name: acceptance
+    # The node shard's group: a newer run's node shard, which starts
+    # with the run, cancels (on a pull request) or waits for this job.
     concurrency:
-      group: ${{ github.event_name == 'pull_request' && format('heavy-pr-{0}-acceptance', github.event.pull_request.number) || 'heavy-acceptance' }}
+      group: ${{ github.event_name == 'pull_request' && format('heavy-pr-{0}-node', github.event.pull_request.number) || 'heavy-node' }}
       cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     runs-on: ubuntu-22.04
     # About 3 minutes on the runner (2026-10-03), plus the build.
