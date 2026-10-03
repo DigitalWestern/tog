@@ -1567,20 +1567,6 @@ fn run_package_phases(
     Ok(())
 }
 
-/// The packages whose install scripts may run, in the order they run:
-/// deepest first, so nested deps build before their dependents. A package
-/// this host cannot run is files only, because its scripts would build or
-/// download for a platform that is not this one.
-fn lifecycle_candidates(plan: &NpmPlan) -> Vec<&NpmPackage> {
-    let mut pkgs: Vec<&NpmPackage> = plan
-        .packages
-        .iter()
-        .filter(|p| !p.foreign_platform)
-        .collect();
-    pkgs.sort_by_key(|p| std::cmp::Reverse(p.path.matches("node_modules/").count()));
-    pkgs
-}
-
 pub(super) fn run_install_scripts_staged(
     store: &Store,
     activity: &StoreActivity,
@@ -1853,6 +1839,7 @@ mod tests {
             bin: Vec::new(),
             optional: false,
             foreign_platform: false,
+            needs_workspace: false,
             patch: None,
             git: None,
         };
@@ -1911,6 +1898,7 @@ mod tests {
             bin: Vec::new(),
             optional: false,
             foreign_platform,
+            needs_workspace: false,
             patch: None,
             git: None,
         };

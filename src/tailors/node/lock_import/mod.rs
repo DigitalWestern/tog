@@ -634,6 +634,7 @@ fn resolved_packages(
     platform: Platform,
     occupied: BTreeMap<String, Occupied>,
     nodes: &BTreeMap<String, Node>,
+    needs_workspace: &BTreeSet<String>,
 ) -> io::Result<Vec<NpmPackage>> {
     let mut packages = Vec::new();
     for (path, occupied) in occupied {
@@ -646,7 +647,7 @@ fn resolved_packages(
             .ok_or_else(|| err(format!("internal: no package for {path}")))?;
         let git = lock_git_source(&node.url, !node.integrity.is_empty());
         packages.push(NpmPackage {
-            path,
+            path: path.clone(),
             name: node.name.clone(),
             version: node.version.clone(),
             url: node.url.clone(),
@@ -661,13 +662,55 @@ fn resolved_packages(
             // Placed although this host is excluded: only a required
             // package gets this far, and it was recorded when it was placed.
             foreign_platform: node_unsupported(platform, node).is_some(),
+            needs_workspace: needs_workspace.contains(&path),
         });
     }
     packages.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(packages)
 }
 
+/// A link below a package sits inside that package's directory. When the
+/// package itself asked for the link, the projection is a copy and the link
+/// is planted in the copy. Any other link there (an importer keyed beneath a
+/// package) would be written through a symlink into a read-only store
+/// object.
+fn check_links_inside_packages(
+    links: &BTreeMap<String, NpmLink>,
+    occupied: &BTreeMap<String, Occupied>,
+    needs_workspace: &BTreeSet<String>,
+) -> io::Result<()> {
+    for (path, link) in links {
+        let host = occupied.iter().find_map(|(package, entry)| {
+            (matches!(entry, Occupied::Package { .. }) && path.starts_with(&format!("{package}/")))
+                .then_some(package)
+        });
+        if let Some(package) = host.filter(|package| !needs_workspace.contains(*package)) {
+            return Err(err(format!(
+                "link {path} -> {} would be planted inside the package {package}, which is store content; tog cannot project a local package nested under a registry package that does not depend on it",
+                link.target
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// `build_plan_recording` through the process policy.
 fn build_plan(
+    platform: Platform,
+    graph: Graph,
+    lock_source: &str,
+    node_version: &str,
+) -> io::Result<NpmPlan> {
+    let record = &mut crate::kernel::policy::record;
+    build_plan_recording(platform, graph, lock_source, node_version, record)
+}
+
+/// Place every package and link the graph reaches. `needs_workspace`
+/// collects, by placed path, the registry packages with a dependency on a
+/// workspace package (a plugin whose peer is the package this repository
+/// develops): wherever the link lands, beside the package or hoisted, the
+/// package only finds it from a real path inside the project.
+fn build_plan_recording(
     platform: Platform,
     graph: Graph,
     lock_source: &str,
@@ -702,6 +745,7 @@ fn build_plan(
     // placed: checked against the final layout, so a later placement cannot
     // shadow one of them unnoticed.
     let mut requirements = Vec::<(Requirer, Dependency)>::new();
+    let mut needs_workspace = BTreeSet::<String>::new();
 
     while !queue.is_empty() || !workspace_queue.is_empty() {
         if queue.is_empty() {
@@ -769,6 +813,10 @@ fn build_plan(
                 (path, true)
             }
             Target::Link(target) => {
+                // Only a registry package's own dependency has no requirer.
+                if requirer.is_none() && occupied.contains_key(&parent) {
+                    needs_workspace.insert(parent.clone());
+                }
                 let path = place_workspace_link(
                     target,
                     &dependency,
@@ -849,21 +897,8 @@ fn build_plan(
             }
         }
     }
-    // A link below a package would be planted inside that package's
-    // directory, which projection reaches through a symlink into a
-    // read-only store object.
-    for (path, link) in &links {
-        if let Some(package) = occupied.iter().find_map(|(package, entry)| {
-            (matches!(entry, Occupied::Package { .. }) && path.starts_with(&format!("{package}/")))
-                .then_some(package)
-        }) {
-            return Err(err(format!(
-                "link {path} -> {} would be planted inside the package {package}, which is store content; tog cannot project a local package nested under a registry package",
-                link.target
-            )));
-        }
-    }
-    let packages = resolved_packages(platform, occupied, &graph.nodes)?;
+    check_links_inside_packages(&links, &occupied, &needs_workspace)?;
+    let packages = resolved_packages(platform, occupied, &graph.nodes, &needs_workspace)?;
     check_destinations(&packages, &links)?;
     Ok(NpmPlan {
         node_version: node_version.to_string(),
@@ -1886,6 +1921,92 @@ snapshots:
         }
     }
 
+    /// tailwindcss's other shape: a registry plugin whose peer is the
+    /// package the repository develops. `root_core` is what the root
+    /// importer depends on under the name `core`.
+    fn workspace_peer_lock(root_core: &str) -> String {
+        format!(
+            r#"lockfileVersion: '9.0'
+importers:
+  .:
+    dependencies:
+      core:
+{root_core}
+      plugin:
+        specifier: 1.0.0
+        version: 1.0.0(core@packages+core)
+  packages/core: {{}}
+packages:
+  core@3.0.0:
+    resolution: {{integrity: {SRI}}}
+  plugin@1.0.0:
+    resolution: {{integrity: {SRI}}}
+    peerDependencies:
+      core: '*'
+snapshots:
+  core@3.0.0: {{}}
+  plugin@1.0.0(core@packages+core):
+    dependencies:
+      core: link:packages/core
+"#
+        )
+    }
+
+    fn workspace_peer_plan(root_core: &str) -> NpmPlan {
+        let dir = project();
+        fs::create_dir_all(dir.0.join("packages/core")).unwrap();
+        plan_pnpm(
+            Platform::X86_64UnknownLinuxGnu,
+            &workspace_peer_lock(root_core),
+            &held(&dir.0),
+            node_version(),
+        )
+        .unwrap()
+    }
+
+    /// (path, needs_workspace) of every planned package, in plan order.
+    fn workspace_flags(plan: &NpmPlan) -> Vec<(&str, bool)> {
+        plan.packages
+            .iter()
+            .map(|package| (package.path.as_str(), package.needs_workspace))
+            .collect()
+    }
+
+    fn link_pairs(plan: &NpmPlan) -> Vec<(&str, &str)> {
+        plan.links
+            .iter()
+            .map(|link| (link.path.as_str(), link.target.as_str()))
+            .collect()
+    }
+
+    /// The root already holds a registry `core`, so the plugin's link to the
+    /// workspace `core` has to sit inside the plugin. That is planned, not
+    /// refused, and the plugin is marked so the projection becomes a copy.
+    #[test]
+    fn a_plugin_whose_peer_is_a_workspace_package_gets_its_link_beside_it() {
+        let plan = workspace_peer_plan("        specifier: 3.0.0\n        version: 3.0.0");
+        assert_eq!(
+            workspace_flags(&plan),
+            [("node_modules/core", false), ("node_modules/plugin", true)]
+        );
+        assert_eq!(
+            link_pairs(&plan),
+            [("node_modules/plugin/node_modules/core", "packages/core")]
+        );
+    }
+
+    /// With the workspace `core` hoisted to the root, no link sits inside
+    /// the plugin, and the plugin is marked all the same: from a store
+    /// object it could not reach the root link either.
+    #[test]
+    fn a_plugin_whose_workspace_peer_is_hoisted_is_still_marked() {
+        let plan = workspace_peer_plan(
+            "        specifier: workspace:*\n        version: link:packages/core",
+        );
+        assert_eq!(workspace_flags(&plan), [("node_modules/plugin", true)]);
+        assert_eq!(link_pairs(&plan), [("node_modules/core", "packages/core")]);
+    }
+
     #[test]
     fn hoisting_has_one_root_and_one_nested_version() {
         let dir = project();
@@ -2663,7 +2784,6 @@ mod placement_tests {
             graph,
             "pnpm-lock.yaml",
             node_version(),
-            &mut crate::kernel::policy::record,
         )
         .map(|plan| {
             plan.packages
@@ -2885,7 +3005,7 @@ snapshots:
         .unwrap_err();
         assert_eq!(
             error.to_string(),
-            "link node_modules/x/node_modules/lib -> vendor/lib would be planted inside the package node_modules/x, which is store content; tog cannot project a local package nested under a registry package"
+            "link node_modules/x/node_modules/lib -> vendor/lib would be planted inside the package node_modules/x, which is store content; tog cannot project a local package nested under a registry package that does not depend on it"
         );
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
     }

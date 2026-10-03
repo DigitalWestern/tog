@@ -96,6 +96,16 @@ deny = [
 #                                    later one won. Both are locked and
 #                                    hash-verified; this is a packaging
 #                                    hygiene issue, not a provenance gap.
+#   foreign-platform-package         a required package whose os/cpu/libc
+#                                    excludes this host was placed anyway,
+#                                    because pnpm, which wrote the lock,
+#                                    places it (a project that cross-compiles
+#                                    lists every platform's binary). Its
+#                                    files are locked and hash-verified like
+#                                    any other package's, and its install
+#                                    scripts are not run. Teams that want a
+#                                    sync to stop on one may add this kind to
+#                                    the list above.
 #   requirement-skipped              a project-local or direct-reference
 #                                    requirement was left to the project;
 #                                    nothing unverified entered the store.

@@ -464,6 +464,12 @@ pub struct NpmPackage {
     /// anyway because pnpm places it (recorded as `foreign-platform-package`).
     /// Its files are extracted; its install scripts never run.
     pub foreign_platform: bool,
+    /// One of this registry package's dependencies is a workspace package:
+    /// the project's own source (a plugin whose peer is the package the
+    /// repository develops). Node resolves a package's dependencies from the
+    /// package's real path, and a store object can hold no link into a
+    /// project, so a plan with one of these is projected as a copy.
+    pub needs_workspace: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -905,6 +911,7 @@ pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
         git: None,
         optional: false,
         foreign_platform: false,
+        needs_workspace: false,
     };
     let package_plan = NpmPlan {
         packages: vec![package.clone()],
@@ -921,6 +928,7 @@ pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
         git: None,
         optional: false,
         foreign_platform: false,
+        needs_workspace: false,
     };
     let multi_package_plan = NpmPlan {
         packages: vec![package, second_package],
@@ -1011,6 +1019,7 @@ pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
         git: None,
         optional: false,
         foreign_platform: false,
+        needs_workspace: false,
     };
     let electron_plan = NpmPlan {
         packages: vec![electron],
@@ -1258,6 +1267,7 @@ mod tests {
             git: None,
             optional: false,
             foreign_platform: false,
+            needs_workspace: false,
         };
         let artifact = DeclaredArtifact {
             url: "https://artifacts.example.invalid/tool.tar.gz".into(),
@@ -1371,6 +1381,7 @@ mod tests {
             git: None,
             optional: false,
             foreign_platform: false,
+            needs_workspace: false,
         };
         let artifact = DeclaredArtifact {
             url: "https://artifacts.example.invalid/tool.tar.gz".into(),
@@ -1492,6 +1503,7 @@ mod tests {
                     git: None,
                     optional: false,
                     foreign_platform: false,
+                    needs_workspace: false,
                 }],
                 links: Vec::new(),
                 workspaces: Vec::new(),
@@ -1663,6 +1675,7 @@ mod tests {
                 git: None,
                 optional: false,
                 foreign_platform: false,
+                needs_workspace: false,
             }],
             links: Vec::new(),
             workspaces: Vec::new(),
@@ -1771,6 +1784,7 @@ mod tests {
             git: None,
             optional: false,
             foreign_platform: false,
+            needs_workspace: false,
         };
         let plan = NpmPlan {
             node_version: "24.20.0".into(),
@@ -1837,6 +1851,7 @@ mod tests {
                 bin: Vec::new(),
                 optional: false,
                 foreign_platform: false,
+                needs_workspace: false,
                 patch: None,
                 git: None,
             }],
@@ -1917,6 +1932,7 @@ mod tests {
                 bin: Vec::new(),
                 optional: false,
                 foreign_platform: false,
+                needs_workspace: false,
                 patch: None,
                 git: None,
             }],
@@ -1989,6 +2005,7 @@ mod tests {
                 bin: Vec::new(),
                 optional: false,
                 foreign_platform: false,
+                needs_workspace: false,
                 patch: None,
                 git: None,
             }],
@@ -2292,6 +2309,7 @@ mod tests {
                 git: None,
                 optional: false,
                 foreign_platform: false,
+                needs_workspace: false,
             }],
             links: Vec::new(),
             workspaces: Vec::new(),
@@ -2338,6 +2356,7 @@ mod tests {
             git: None,
             optional: false,
             foreign_platform: false,
+            needs_workspace: false,
         };
         let plan = NpmPlan {
             node_version: "24.20.0".into(),
@@ -2581,6 +2600,7 @@ mod tests {
                 git: None,
                 optional: false,
                 foreign_platform: false,
+                needs_workspace: false,
             }],
             links: Vec::new(),
             workspaces: Vec::new(),
@@ -2681,6 +2701,7 @@ mod tests {
             git: None,
             optional: false,
             foreign_platform: false,
+            needs_workspace: false,
         };
         let first = NpmPlan {
             node_version: "24.20.0".into(),
@@ -3026,6 +3047,215 @@ mod tests {
         );
     }
 
+    /// A package-lock names no edges between placements, so the walk Node
+    /// makes from each package decides: the first `node_modules/<name>` on
+    /// the way up is a workspace link, or it is not.
+    #[test]
+    fn a_package_lock_entry_that_reaches_a_workspace_link_is_marked() {
+        let entry = |path: &str, extra: &str| {
+            format!(
+                r#""{path}":{{"version":"1.0.0","resolved":"https://r/x.tgz","integrity":"{TEST_SRI}"{extra}}}"#
+            )
+        };
+        let l = lock(
+            &[
+                r#""packages/core":{"name":"core","version":"4.0.0"}"#.to_string(),
+                r#""node_modules/core":{"resolved":"packages/core","link":true}"#.to_string(),
+                // its peer is the workspace package, hoisted to the root
+                entry("node_modules/plugin", r#","peerDependencies":{"core":"*"}"#),
+                // its own nested registry `core` is nearer than the link
+                entry("node_modules/pinned", r#","dependencies":{"core":"^3"}"#),
+                entry("node_modules/pinned/node_modules/core", ""),
+                // an optional peer nothing installed, and a plain package
+                entry(
+                    "node_modules/loose",
+                    r#","peerDependencies":{"absent":"*"}"#,
+                ),
+                entry(
+                    "node_modules/@scope/deep",
+                    r#","optionalDependencies":{"core":"*"}"#,
+                ),
+            ]
+            .join(","),
+        );
+        let plan = plan_npm(Platform::X86_64UnknownLinuxGnu, &l).unwrap();
+        let flags: Vec<(&str, bool)> = plan
+            .packages
+            .iter()
+            .map(|package| (package.path.as_str(), package.needs_workspace))
+            .collect();
+        assert_eq!(
+            flags,
+            [
+                ("node_modules/@scope/deep", true),
+                ("node_modules/loose", false),
+                ("node_modules/pinned", false),
+                ("node_modules/pinned/node_modules/core", false),
+                ("node_modules/plugin", true),
+            ]
+        );
+    }
+
+    /// A fake environment object holding a plugin, a registry `core`, and a
+    /// package of the `packages/app` importer; `core_inside_plugin` adds the
+    /// directory a bundled copy would leave where the link goes.
+    fn workspace_peer_fixture(root: &Path, core_inside_plugin: bool) -> (PathBuf, PathBuf) {
+        let project = root.join("project");
+        let env = root.join("home/store/objects/env");
+        fs::create_dir_all(project.join("packages/core")).unwrap();
+        fs::create_dir_all(project.join("packages/app")).unwrap();
+        fs::write(project.join("packages/core/package.json"), "{}").unwrap();
+        for package in [
+            "node_modules/plugin",
+            "node_modules/core",
+            "workspaces/packages%2Fapp/node_modules/dep",
+        ] {
+            fs::create_dir_all(env.join(package)).unwrap();
+            fs::write(env.join(package).join("package.json"), "{}").unwrap();
+        }
+        if core_inside_plugin {
+            fs::create_dir_all(env.join("node_modules/plugin/node_modules/core")).unwrap();
+        }
+        (project, env)
+    }
+
+    fn workspace_peer_plan(needs_workspace: bool) -> NpmPlan {
+        let package = |path: &str, name: &str, needs_workspace: bool| NpmPackage {
+            path: path.into(),
+            name: name.into(),
+            version: "1.0.0".into(),
+            url: "https://example.invalid/x.tgz".into(),
+            integrity: TEST_SRI.into(),
+            bin: Vec::new(),
+            patch: None,
+            git: None,
+            optional: false,
+            foreign_platform: false,
+            needs_workspace,
+        };
+        NpmPlan {
+            node_version: "24.20.0".into(),
+            packages: vec![
+                package("node_modules/core", "core", false),
+                package("node_modules/plugin", "plugin", needs_workspace),
+                package("packages/app/node_modules/dep", "dep", false),
+            ],
+            links: if needs_workspace {
+                vec![NpmLink {
+                    path: "node_modules/plugin/node_modules/core".into(),
+                    target: "packages/core".into(),
+                }]
+            } else {
+                Vec::new()
+            },
+            workspaces: vec!["packages/app".into()],
+            lock_source: "pnpm-lock.yaml".into(),
+        }
+    }
+
+    fn project_workspace_peer(project: &Path, env: &Path, plan: &NpmPlan) -> io::Result<()> {
+        let mut attribution = crate::kernel::policy::Attribution::open("node").unwrap();
+        let lease = crate::kernel::testutil::detached_lease();
+        let result = project_node_env(
+            &lease.1,
+            &crate::kernel::fsroot::ProjectRoot::open(project).unwrap(),
+            env,
+            Platform::host().unwrap(),
+            plan,
+            &[],
+            false,
+            &mut attribution,
+        );
+        match &result {
+            Ok(()) => attribution.finish(true).unwrap(),
+            Err(_) => attribution.discard(),
+        }
+        result
+    }
+
+    /// A plugin that depends on a workspace package is projected as a copy:
+    /// a real directory inside the projection, with the link to the
+    /// project's own source planted in it, so Node resolving from the
+    /// plugin's real path finds the workspace package and not the registry
+    /// one at the root. The importer's own node_modules is copied too, and
+    /// the closure says the tree is an unattested clone and why.
+    #[test]
+    fn a_package_that_needs_a_workspace_package_is_projected_as_a_copy() {
+        // The copy is made by a supervised `cp`.
+        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _attribution_lock = crate::kernel::policy::attribution_test_lock();
+        let scratch = TempDir::named("npm-workspace-peer");
+        let (project, env) = workspace_peer_fixture(&scratch.0, false);
+
+        // The same packages with no such dependency: links into the store.
+        project_workspace_peer(&project, &env, &workspace_peer_plan(false)).unwrap();
+        let linked_forest = fs::read_link(project.join("node_modules")).unwrap();
+        assert!(fs::symlink_metadata(linked_forest.join("plugin"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
+
+        project_workspace_peer(&project, &env, &workspace_peer_plan(true)).unwrap();
+        let forest = fs::read_link(project.join("node_modules")).unwrap();
+        assert_ne!(forest, linked_forest, "a clone never reuses a link forest");
+        let plugin = project.join("node_modules/plugin");
+        assert!(fs::symlink_metadata(forest.join("plugin"))
+            .unwrap()
+            .file_type()
+            .is_dir());
+        // The plugin's real path is inside the projection, not the store.
+        assert!(plugin.canonicalize().unwrap().starts_with(&forest));
+        assert_eq!(
+            plugin.join("node_modules/core").canonicalize().unwrap(),
+            project.join("packages/core").canonicalize().unwrap()
+        );
+        assert!(project
+            .join("packages/app/node_modules/dep/package.json")
+            .is_file());
+        // The store object was read, never written.
+        assert!(!env.join("node_modules/plugin/node_modules").exists());
+
+        let envelope: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(project.join(".tog/closures/node.json")).unwrap(),
+        )
+        .unwrap();
+        let closure = &envelope["body"];
+        assert_eq!(closure["mutable_state"], "unattested");
+        assert_eq!(closure["mutable_scope"], "whole-tree-clone");
+        assert_eq!(closure["mutable_packages"], serde_json::json!([]));
+        assert_eq!(
+            closure["workspace_dependents"],
+            serde_json::json!(["node_modules/plugin"])
+        );
+        let exceptions = closure["exceptions"].as_array().unwrap();
+        assert_eq!(exceptions.len(), 1, "{exceptions:?}");
+        assert_eq!(
+            exceptions[0]["kind"],
+            crate::kernel::policy::UNATTESTED_MUTABLE_STATE
+        );
+        assert_eq!(exceptions[0]["subject"], "node_modules/plugin");
+    }
+
+    /// A package that ships its own directory where the link belongs keeps
+    /// it only by failing the sync: the link is never skipped in silence.
+    #[test]
+    fn a_workspace_link_is_not_planted_over_a_directory_the_package_ships() {
+        // The copy is made by a supervised `cp`.
+        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _attribution_lock = crate::kernel::policy::attribution_test_lock();
+        let scratch = TempDir::named("npm-workspace-peer-bundled");
+        let (project, env) = workspace_peer_fixture(&scratch.0, true);
+        let error = project_workspace_peer(&project, &env, &workspace_peer_plan(true)).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "workspace link node_modules/plugin/node_modules/core cannot be planted: the package it sits in already ships node_modules/plugin/node_modules/core"
+        );
+    }
+
     #[test]
     fn rejections() {
         let refused = |lock: &str, needle: &str| {
@@ -3224,6 +3454,7 @@ mod tests {
             bin: Vec::new(),
             optional: false,
             foreign_platform: false,
+            needs_workspace: false,
             patch: None,
             git: None,
         });

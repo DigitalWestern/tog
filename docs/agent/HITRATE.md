@@ -57,6 +57,18 @@ Rust and fails on the next known row.
 | clash-verge-rev/clash-verge-rev | other | Rust 1.98.0 not in the catalog | **fixed by #213** (re-run ok) |
 | tailwindlabs/tailwindcss | other → npm_platform_required | Rust 1.95.0, then a required darwin-only devDependency | Rust fixed by #213; platform row is #214 |
 
+**2026-10-03, one repo re-run (not a new column).** tailwindcss at its
+pinned commit, on the branch that closes #214: `tog sync` exits 0 for both
+of its ecosystems (node, 443 packages; cargo). It took two changes. The
+required foreign-platform packages are placed and recorded
+(`foreign-platform-package`, 10 of them). Three registry plugins
+(`@tailwindcss/forms`, `typography`, `aspect-ratio`) have the workspace's own
+`tailwindcss` as their peer, which used to be the next refusal ("would be
+planted inside the package"); the tree is now projected as a copy and each
+records `unattested-mutable-state`, so tailwindcss is a permissive ok and
+not a company-policy ok. `bun`'s postinstall still fails in the sandbox
+(`install-script-failed`, as before). The full 60 were not re-run.
+
 ## Linux x86_64 — 2026-09-11 (m6-fedora, tog fb8b1d6, pinned 60)
 
 Command: `cargo build --release`, then `python3 tests/hitrate.py --repos

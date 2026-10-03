@@ -252,6 +252,42 @@ pub(super) fn unsupported_restriction(
     None
 }
 
+/// Whether one of this lock entry's dependencies is a workspace package:
+/// the name, looked up the way Node looks it up from the package's
+/// directory (each enclosing `node_modules`, nearest first), first meets a
+/// `link: true` entry. An optional peer nothing installed meets no entry.
+fn entry_needs_workspace(
+    packages: &serde_json::Map<String, serde_json::Value>,
+    path: &str,
+    entry: &serde_json::Value,
+) -> bool {
+    ["dependencies", "optionalDependencies", "peerDependencies"]
+        .iter()
+        .filter_map(|field| entry[*field].as_object())
+        .flat_map(|names| names.keys())
+        .any(|name| {
+            let mut dir = path;
+            loop {
+                // Node never looks inside a directory named node_modules
+                // for another node_modules.
+                if !dir.ends_with("node_modules") {
+                    let candidate = if dir.is_empty() {
+                        format!("node_modules/{name}")
+                    } else {
+                        format!("{dir}/node_modules/{name}")
+                    };
+                    if let Some(found) = packages.get(&candidate) {
+                        return found["link"].as_bool() == Some(true);
+                    }
+                }
+                if dir.is_empty() {
+                    return false;
+                }
+                dir = dir.rsplit_once('/').map_or("", |(parent, _)| parent);
+            }
+        })
+}
+
 /// A `link: true` lock entry: a symlink into the project's own source. The
 /// target comes from the lockfile (attacker-editable), so it is validated
 /// before it can become a projected symlink.
@@ -425,7 +461,22 @@ fn npm_package_from_entry(
         git,
         optional: entry["optional"].as_bool() == Some(true),
         foreign_platform: false,
+        needs_workspace: false,
     }
+}
+
+/// The packages whose install scripts may run, in the order they run:
+/// deepest first, so nested deps build before their dependents. A package
+/// this host cannot run is files only, because its scripts would build or
+/// download for a platform that is not this one.
+pub(super) fn lifecycle_candidates(plan: &NpmPlan) -> Vec<&NpmPackage> {
+    let mut pkgs: Vec<&NpmPackage> = plan
+        .packages
+        .iter()
+        .filter(|p| !p.foreign_platform)
+        .collect();
+    pkgs.sort_by_key(|p| std::cmp::Reverse(p.path.matches("node_modules/").count()));
+    pkgs
 }
 
 /// Parse package-lock.json (lockfileVersion 2 or 3) into a plan.
@@ -543,9 +594,9 @@ fn plan_npm_recording(
             }
         };
         let integrity = entry_integrity(path, entry, &pinned_git, record)?;
-        out.push(npm_package_from_entry(
-            path, entry, resolved, pinned_git, integrity,
-        ));
+        let mut package = npm_package_from_entry(path, entry, resolved, pinned_git, integrity);
+        package.needs_workspace = entry_needs_workspace(packages, path, entry);
+        out.push(package);
     }
     out.sort_by(|a, b| a.path.cmp(&b.path));
     links.sort_by(|a, b| a.path.cmp(&b.path));
