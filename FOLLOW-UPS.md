@@ -55,6 +55,10 @@ After the proxy: the test-suite audit (#351) and then the quality review
   when `CI` is set unless `--unsigned` is passed. Pick: leave it until tog
   has an outside user. `v0.1.0` (2026-10-03) is private, so no released
   caller can be broken yet.
+- **Store-format epoch (#414).** #259 decided that the store metadata
+  migration goes at the tag, and `v0.1.0` shipped before #408 merged. So
+  a format marker ships first and the migration code goes at the next tag.
+  Open: migrate your own store once or reset it. Pick: reset.
 - **First outside target.** Cheapest visible artifact: a GitHub Action
   running `tog --frozen` under the company policy plus `tog sbom`, which
   should work on GitHub-hosted Ubuntu runners if unprivileged user
@@ -130,8 +134,8 @@ After the proxy: the test-suite audit (#351) and then the quality review
   - #245 kernel: consolidate duplicated primitives (base64, SRI, metadata parser, forest key, file hash, temp names).
   - #246 tailors: shared closure_state, checked_artifact, object_ref and merge_record helpers; cargo status misses GC'd objects.
   - #248 sandbox and gitsrc: collapse the _with_activity twin of every entry point.
-  - #259 legacy: drop pre-release legacy toolchain seeding and x legacy roots now.
   - #249 x.rs: reuse kernel fsops, one lock, one name validator, and split the file.
+  - #413 x clean: delete before unregister, corrupt registry entries, pathname ownership reads (from the #408 review). Do it with #249.
   - #250 python manifest: four requirements include walkers; uv.lock silently drops edges; pypi host check is a substring.
   - #261 perf: every sync parses every metadata record before starting.
   - #251 commands: one project-discovery function; tog <script> and tog run <script> disagree.
