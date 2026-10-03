@@ -428,12 +428,15 @@ existed counts as `null`, which is what it was built on.
 Cached `tog x` environments key on `x/3`: store root, ecosystem, package
 request, platform, the primary runtime version, the selected `bundle_id`
 and the realized runtime object, so a changed bundle component gives a
-fresh environment and an `x/2` directory is never reused. A registry tool
+fresh environment. A registry tool
 that builds with helpers (npm's node-gyp Python) keys on `x/4` instead: the
 `x/3` fields plus `<helper>=<object id>` for each, decided as above for the
 project `x` runs in and written to the request record's `helpers`. `py:`
-tools have none and keep their `x/3` names; every `npm:` cache from before
-is a miss.
+tools have none and keep their `x/3` names. The key only names the
+directory. A run reuses it only when the request record it wrote there
+(`.tog/x.json`) says `ready`, so a directory left without one, as a tog
+before `x/4` left them, is realized again in place, and only the bare
+`tog x --clean` removes it, since nothing records what it was made for.
 
 The catalog a lock is minted from
 (`src/kernel/toolchain/`). Each ecosystem's catalog is a checked-in,
@@ -833,10 +836,10 @@ answers "tog x does not support <id>"; Python and Node return a
 `RegistryTool` (`registry_tool.rs` in each folder) that supplies the cache
 directory prefix (`py`, `npm`), the runtime object id in the cache key, the
 command-line word and message labels, the executable directory,
-resolve-realize-project for one package, the launch environment, whether a
-cached projection still points at its environment, and the packages a
-pre-record cache root was made for. `commands/x.rs` keeps the `~/.tog/x`
-directory, the `x/3`/`x/4` key, the lifecycle lock, gc root registration, and the
+resolve-realize-project for one package, the launch environment, and
+whether a cached projection still points at its environment.
+`commands/x.rs` keeps the `~/.tog/x` directory, the `x/3`/`x/4` key,
+the request record, the lifecycle lock, gc root registration, and the
 policy checks on a cached hit, and is ecosystem-neutral except for the
 Corepack `pnpm` delegate path, which is Node by definition. The grammar
 cannot ask the registry (the cli layer names no tailor), so

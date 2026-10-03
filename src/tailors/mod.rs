@@ -624,11 +624,6 @@ pub trait RegistryTool: Sync {
         env_path: &Path,
     ) -> io::Result<bool>;
 
-    /// The packages a cache root written before `x` recorded its request
-    /// was made for, read back from the manifest this tool generated in
-    /// it. `None` when `root` holds no such manifest.
-    fn legacy_packages(&self, root: &Path) -> Option<Vec<LegacyPackage>>;
-
     /// What `tog x --clean` adds to its summary when it removed at least
     /// one of this tool's environments.
     fn clean_note(&self) -> Option<&'static str> {
@@ -676,14 +671,6 @@ pub trait RegistryTool: Sync {
         root: &Path,
         toolchain: &Selected,
     ) -> io::Result<ToolEnv>;
-}
-
-/// One package a pre-record `x` cache root was made for
-/// (`RegistryTool::legacy_packages`).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LegacyPackage {
-    pub package: String,
-    pub version: Option<String>,
 }
 
 /// The environment a registry tool launches in (`RegistryTool::launch_env`).

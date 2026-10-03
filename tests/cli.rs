@@ -14,7 +14,7 @@ use sha2::{Digest, Sha256};
 
 mod common;
 
-use common::{command, text, tog, tog_env, TempDir};
+use common::{command, text, tog, tog_env, tog_offline, TempDir};
 
 /// The signing key under `home`, generated on first use and trusted by
 /// `home`'s machine policy (`~/.tog/policy.toml`, created with an empty
@@ -1755,108 +1755,61 @@ fn x_clean_refuses_a_symlinked_x_directory_or_a_relative_home() {
     assert!(relative_victim.is_dir(), "relative HOME target was removed");
 }
 
-/// A projection that claims store objects whose store cannot be recovered is
-/// never removed, however empty the caller's own store happens to be. The
-/// caller's `TOG_STORE` is not evidence about someone else's projection.
+/// A root with no request record (`.tog/x.json`), as a tog before x/4 left
+/// one, is a cache nothing reuses. Its closure may name objects in a store
+/// this invocation knows nothing about: that is not an ownership claim any
+/// more. A filtered clean cannot tell what it was made for and leaves it
+/// alone without a word; the bare clean removes it.
 #[test]
-fn x_clean_keeps_a_projection_whose_originating_store_is_unrecoverable() {
-    let home = TempDir::boundary("cli-x-clean-foreign-home");
-    let project = TempDir::boundary("cli-x-clean-foreign-project");
-    let victim = home.0.join(".tog/x/py-foreign");
-    std::fs::create_dir_all(victim.join(".tog/closures")).unwrap();
-    // A closure naming an object in a store this invocation knows nothing
-    // about — the shape a projection has after the machine's real store was
-    // moved, or when TOG_STORE points somewhere new.
-    std::fs::write(
-        victim.join(".tog/closures/python.json"),
-        r#"{"schema":"closure/1","ecosystem":"python","body":{"env_object":"/somewhere/else/store/objects/0000000000000000000000000000000000000000-python.env-9"}}"#,
-    )
-    .unwrap();
-
-    let out = tog(&project.0, &home.0, &["x", "--clean"]);
-    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
-    let stdout = text(&out.stdout);
-    assert!(
-        victim.is_dir(),
-        "a projection with an unrecoverable originating store was deleted: {stdout}"
-    );
-    assert!(
-        stdout.contains("originating store could not be recovered"),
-        "the skip was not narrated: {stdout}"
-    );
-}
-
-/// Legacy roots (no `x.json`) must obey the ecosystem filter, and a
-/// successful removal must leave nothing behind in `.locks`. Nothing here
-/// needs the network or a realized object, so it belongs in the offline
-/// suite: `HOME` and `TOG_STORE` are per-child temp directories.
-#[test]
-fn x_clean_py_leaves_legacy_npm_root() {
-    let home = TempDir::boundary("cli-x-clean-legacy-home");
-    let project = TempDir::boundary("cli-x-clean-legacy-project");
-
-    let npm_root = home.0.join(".tog/x/npm-legacy");
+fn x_clean_removes_a_root_without_a_request_record_only_when_unfiltered() {
+    let home = TempDir::boundary("cli-x-clean-unrecorded-home");
+    let project = TempDir::boundary("cli-x-clean-unrecorded-project");
+    let npm_root = home.0.join(".tog/x/npm-prettier-0123456789abcdef");
     std::fs::create_dir_all(npm_root.join(".tog/closures")).unwrap();
     std::fs::write(
         npm_root.join("package.json"),
         r#"{"dependencies":{"prettier":"1.0.0"}}"#,
     )
     .unwrap();
-    let py_root = home.0.join(".tog/x/py-legacy");
+    let py_root = home.0.join(".tog/x/py-ruff-0123456789abcdef");
     std::fs::create_dir_all(py_root.join(".tog/closures")).unwrap();
     std::fs::write(py_root.join("requirements.in"), "ruff\n").unwrap();
+    std::fs::write(
+        py_root.join(".tog/closures/python.json"),
+        r#"{"schema":"closure/1","ecosystem":"python","body":{"env_object":"/somewhere/else/store/objects/0000000000000000000000000000000000000000-python.env-9"}}"#,
+    )
+    .unwrap();
 
-    let out = tog(&project.0, &home.0, &["x", "--clean", "--py"]);
-    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
-    assert!(!py_root.exists(), "legacy Python root was not removed");
-    assert!(
-        npm_root.exists(),
-        "legacy npm root was removed by --py cleanup"
-    );
-    let stdout = text(&out.stdout);
-    assert!(
-        !stdout.contains("gc --project"),
-        "a python-only cleanup mentioned the node forests: {stdout}"
-    );
-    // The per-root lock is unlinked while it is still held, so `.locks`
-    // cannot collect one stale file per environment ever created.
-    assert!(
-        !home.0.join(".tog/x/.locks/py-legacy.lock").exists(),
-        "cleanup left the per-root lock file behind"
-    );
+    for filter in [&["--py"][..], &["ruff"], &["--npm", "prettier"]] {
+        let mut args = vec!["x", "--clean"];
+        args.extend_from_slice(filter);
+        let out = tog(&project.0, &home.0, &args);
+        assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+        let stdout = text(&out.stdout);
+        assert_eq!(stdout, "tog: x clean: nothing to clean\n", "{filter:?}");
+        assert!(py_root.is_dir() && npm_root.is_dir(), "{filter:?}");
+    }
 
     let out = tog(&project.0, &home.0, &["x", "--clean"]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
-    assert!(!npm_root.exists(), "legacy npm root cleanup did not work");
     let stdout = text(&out.stdout);
-    // A removed node root also orphans its ~/.tog/forests projection,
-    // which plain `tog gc` never sweeps.
-    assert!(stdout.contains("tog gc --project"), "{stdout}");
+    assert!(!py_root.exists(), "{stdout}");
+    assert!(!npm_root.exists(), "{stdout}");
     assert!(
-        !home.0.join(".tog/x/.locks/npm-legacy.lock").exists(),
-        "cleanup left the per-root lock file behind"
-    );
-}
-
-#[test]
-fn x_clean_that_skips_every_candidate_does_not_claim_nothing_to_clean() {
-    let home = TempDir::boundary("cli-x-clean-unrecoverable");
-    let root = home.0.join(".tog/x/mystery");
-    std::fs::create_dir_all(root.join(".tog/closures")).unwrap();
-
-    let out = tog(&home.0, &home.0, &["x", "--clean", "ruff"]);
-    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
-    let stdout = text(&out.stdout);
-    assert!(stdout.contains("skipped x environment"), "{stdout}");
-    assert!(
-        !stdout.contains("nothing to clean"),
-        "a run that skipped a candidate reported nothing to clean: {stdout}"
-    );
-    assert!(
-        stdout.contains("removed 0 environment(s), skipped 1"),
+        stdout.contains("x clean removed 2 environment(s), skipped 0"),
         "{stdout}"
     );
-    assert!(root.is_dir(), "an unrecoverable root was removed");
+    // The generated name still says which one was a node environment, and
+    // a removed node root orphans its ~/.tog/forests projection.
+    assert!(stdout.contains("tog gc --project"), "{stdout}");
+    // The per-root lock is unlinked while it is still held, so `.locks`
+    // cannot collect one stale file per environment ever created.
+    for name in ["py-ruff-0123456789abcdef", "npm-prettier-0123456789abcdef"] {
+        assert!(
+            !home.0.join(format!(".tog/x/.locks/{name}.lock")).exists(),
+            "cleanup left the per-root lock file behind"
+        );
+    }
 }
 
 /// Build a cached, `ready` python `x` root for `home` whose store object
@@ -1917,6 +1870,20 @@ fn cached_x_root_with_exception(home: &Path) -> PathBuf {
         .to_string(),
     )
     .unwrap();
+    // A run that finished: only a root recorded `ready` is a cache hit.
+    std::fs::write(
+        root.join(".tog/x.json"),
+        serde_json::json!({
+            "schema": "x-request/2",
+            "ecosystem": "python",
+            "package": "fake",
+            "version": serde_json::Value::Null,
+            "state": "ready",
+            "store_root": store.display().to_string(),
+        })
+        .to_string(),
+    )
+    .unwrap();
     root
 }
 
@@ -1942,6 +1909,33 @@ fn cached_x_rechecks_object_exceptions_under_project_policy() {
         "{}",
         text(&out.stderr)
     );
+}
+
+/// The same complete projection without its request record (a root a tog
+/// before x/4 left) is not a cache hit: `tog x` starts a fresh realization
+/// in that directory instead of running the executable it finds there. The
+/// network is cut, so the realization fails and the cached tool never runs.
+#[test]
+fn cached_x_without_a_request_record_is_rebuilt_not_run() {
+    let home = TempDir::boundary("cli-x-unrecorded-home");
+    let project = TempDir::boundary("cli-x-unrecorded-project");
+    let root = cached_x_root_with_exception(&home.0);
+    std::fs::remove_file(root.join(".tog/x.json")).unwrap();
+
+    let out = tog_offline(
+        &project.0,
+        &home.0,
+        &["x", "--py", "--from", "fake", "ruff"],
+    );
+    assert_ne!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(
+        !text(&out.stderr).contains("cached test exception"),
+        "the record-less root was validated as a cache hit: {}",
+        text(&out.stderr)
+    );
+    let record: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(root.join(".tog/x.json")).unwrap()).unwrap();
+    assert_eq!(record["state"], "realizing", "{record}");
 }
 
 /// A cache hit validates the projection once. When the validation ran twice
@@ -2210,41 +2204,65 @@ fn failed_x_cleanup_retains_the_root_record() {
     );
 }
 
-/// Cleanup must recover the originating store from either spelling —
-/// the explicit `x.json` marker, or a legacy environment's closure records —
-/// and act on that store's registry, never on the caller's `TOG_STORE`.
+/// Cleanup recovers the originating store from the `x.json` request record
+/// and acts on that store's registry.
 #[test]
-fn x_cleanup_revalidates_explicit_or_legacy_origin() {
-    for spelling in ["explicit", "legacy"] {
-        let home = TempDir::boundary(&format!("cli-x-clean-origin-{spelling}"));
-        let store_root = home.0.join("store");
-        let (root, key) = registered_x_environment(&home.0, &store_root);
-        if spelling == "legacy" {
-            // A pre-`x-request/2` environment: the origin is only derivable
-            // from the store object its closure names.
-            std::fs::remove_file(root.join(".tog/x.json")).unwrap();
-        }
+fn x_cleanup_revalidates_the_recorded_origin() {
+    let home = TempDir::boundary("cli-x-clean-origin-explicit");
+    let store_root = home.0.join("store");
+    let (root, key) = registered_x_environment(&home.0, &store_root);
 
-        let out = tog(
-            &home.0,
-            &home.0,
-            &["gc", "--register", root.to_str().unwrap()],
-        );
-        assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
-        assert!(registered_root_keys(&home.0, &home.0).contains(&key));
+    let out = tog(
+        &home.0,
+        &home.0,
+        &["gc", "--register", root.to_str().unwrap()],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(registered_root_keys(&home.0, &home.0).contains(&key));
 
-        let out = tog(&home.0, &home.0, &["x", "--clean"]);
-        let stdout = text(&out.stdout);
-        assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
-        assert!(
-            !root.exists(),
-            "{spelling} origin was not resolved, so nothing was cleaned: {stdout}"
-        );
-        assert!(
-            !registered_root_keys(&home.0, &home.0).contains(&key),
-            "{spelling}: successful cleanup left the root record behind: {stdout}"
-        );
-    }
+    let out = tog(&home.0, &home.0, &["x", "--clean"]);
+    let stdout = text(&out.stdout);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(
+        !root.exists(),
+        "the origin was not resolved, so nothing was cleaned: {stdout}"
+    );
+    assert!(
+        !registered_root_keys(&home.0, &home.0).contains(&key),
+        "successful cleanup left the root record behind: {stdout}"
+    );
+}
+
+/// `tog gc` learns about x environments only as registered roots, like any
+/// project. One with no request record, or whose closure no longer parses,
+/// neither stops nor fails a sweep: gc never reads `.tog/x.json`.
+#[test]
+fn gc_sweeps_past_an_x_root_without_a_request_record() {
+    let home = TempDir::boundary("cli-x-gc-unrecorded");
+    let store_root = home.0.join("store");
+    let (root, key) = registered_x_environment(&home.0, &store_root);
+    std::fs::remove_file(root.join(".tog/x.json")).unwrap();
+    let out = tog(
+        &home.0,
+        &home.0,
+        &["gc", "--register", root.to_str().unwrap()],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(registered_root_keys(&home.0, &home.0).contains(&key));
+
+    let out = tog(&home.0, &home.0, &["gc"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+
+    std::fs::write(root.join(".tog/closures/python.json"), "{").unwrap();
+    let out = tog(&home.0, &home.0, &["gc"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(root.is_dir(), "gc removed an x environment directory");
+
+    // A record-less root the bare clean removed under another store leaves
+    // that store's record pointing at nothing: gc still sweeps.
+    std::fs::remove_dir_all(&root).unwrap();
+    let out = tog(&home.0, &home.0, &["gc"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
 }
 
 // --- CLI.md: `tog audit`, the CI admission gate over recorded exceptions ---

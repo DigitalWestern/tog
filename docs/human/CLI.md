@@ -497,9 +497,10 @@ something else (`tog x --from httpie http`). Sharp edges of `x --clean`:
 - A running tool is left in place, reported as in use; retry after it exits.
 - An environment is keyed on the runtime it runs on as well as the tool, so
   a project with a toolchain lock gets the tool on the locked runtime and an
-  `update --toolchain` gives the next run a fresh environment. Environments
-  made by an older tog have a different name and are never reused; they stay
-  until `tog x --clean`.
+  `update --toolchain` gives the next run a fresh environment. An
+  environment an older tog made, with another name or without the request
+  record a run now writes, is never reused. `tog x --clean` with no tool
+  removes it, and a filtered clean leaves it alone.
 
 **build** runs the ecosystem's build tool in the network-denied sandbox with
 the pinned toolchain and realized dependency objects; the ecosystem is
