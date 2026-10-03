@@ -310,10 +310,18 @@ Selection covers every patch of each maintained CPython minor that python-build-
   symlinked directory is not, and cargo reports it missing. They must lie inside the
   project's repository (the nearest directory holding `.git`), or beside the workspace when
   there is no repository, never in a hidden directory, and that bound may not be `/` or the
-  home directory: anything else is refused before cargo starts, naming the manifest. `attest`
-  runs at the workspace root only. Finding that root (`cargo locate-project --offline`)
-  still runs the store cargo on the host, outside the sandbox, as before. A git dependency resolved through the proxy has no offline test yet (the
-  fixture registry holds no upload-pack body), only the git row's unit test.
+  home directory: anything else is refused before cargo starts, naming the manifest. A
+  resolution record names files inside the workspace only, so a workspace with a path
+  dependency outside it is not attested (`tog attest` refuses it by name) and its edits and
+  generated lock carry no record (`unrecorded-resolution` at sync). `attest` runs at the
+  workspace root only. Finding that root (`cargo locate-project --offline`) still runs the
+  store cargo on the host, outside the sandbox, so every file it reads there is checked first:
+  a manifest or `.cargo` config (or a file it `include`s) inside the repository that is a
+  symlink out of it, or any of them that is the signing key, stops tog before anything runs.
+  Config `include`s are followed for the registries they declare and recorded as inputs; one
+  that leads out of the workspace is refused. A git dependency resolved through the proxy
+  has no offline test yet (the fixture registry holds no upload-pack body), only the git
+  row's unit test.
 - **Pinned Git dependencies work for standalone crates**; workspace-inherited manifests and
   escaping symlinks fail closed, and workspace metadata is not rewritten into vendor
   manifests. **Fail-closed rows**: alternative registries; beta/nightly channels. Loud.

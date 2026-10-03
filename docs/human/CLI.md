@@ -958,7 +958,9 @@ all` then `go mod tidy -diff`. Cargo's is `cargo metadata --locked` at the
 workspace root, run in the sandbox through tog's resolution proxy (TLS
 interception to crates.io), so its fetches are in the record's ledger. Run
 it at the workspace root: from a member crate it is refused, naming the
-root, because the root's `Cargo.lock` is the one the record covers.
+root, because the root's `Cargo.lock` is the one the record covers. A
+workspace with a path dependency outside its root is refused too: a
+record names files inside the workspace only, so it could not cover it.
 
 - `--record-out <path>` writes the record outside the checkout instead: to
   `<path>` itself when one ecosystem is named, else `<path>/<ecosystem>.json`.

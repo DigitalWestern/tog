@@ -3447,6 +3447,50 @@ interception and the cargo switch, each the flexible option:
   its sha (`testing::stored_rows`): the cargo `ryu` index body and the
   git upload-pack body were not stored, so a git dependency through
   cargo has no offline test, only the git row's unit test.
+- **Review fixes (Codex GPT 6.1 Sol, 2026-10-03).** Each the flexible
+  option that still fails closed:
+  - *No project file reaches the signing key or leaves the repository.*
+    Before any host cargo runs (`locate-project`, for sync, edit, attest
+    and fmt, ahead of realizing anything) `cargo_door::host_preflight`
+    checks the manifest and both config spellings (with their includes)
+    in the directory and each ancestor, and every `Cargo.toml` of the
+    repository (the nearest `.git` ancestor). Inside the repository none
+    may resolve out of it or be the key; above it, and in `CARGO_HOME`,
+    the files are the user's own and only the key is refused. tog's own
+    readers go through the same `Bound`, and a TOML error in these paths
+    names a line and column only, never the bytes (`Cargo.lock` too).
+    The same echo exists in other ecosystems' TOML errors (policy, Python
+    manifests, the toolchain lock); that sweep is a follow-up.
+  - *Config includes.* `include = [...]` (paths or `{ path, optional }`,
+    relative to the including file, transitive) is expanded from the
+    bounded files: every registry declared there gets the forced
+    provider, every included file is a receipt input, and an include
+    that leaves the lock root is refused.
+  - *Implicit members.* The outputs walk the path dependencies (with
+    `[patch]` and `[replace]`) of the root package and every listed
+    member, transitively; each inside the workspace is named, so a
+    change there stales the record and an edit there publishes. A path
+    dependency outside the workspace cannot be named by a record (plain
+    project-relative paths only): attest refuses that workspace, and the
+    other doors publish the lock without a receipt. Representing outside
+    inputs in the record is the alternative, deferred because it needs a
+    record format change every verifier must learn.
+  - *Redirect hops are reauthorized.* `Exchange::hop` classifies every
+    hop with the method it would be sent with, as the first request was:
+    a push is refused on any hop, and a hop whose class differs answers
+    to the new class's policy (`git-dependency`, or `unattested-index`,
+    recorded like a first request). Mirror routes keep the permitted set
+    alone. The portable ledger entry gains `redirected_to` (the last hop,
+    redacted), absent without a redirect so existing ledgers keep their
+    bytes and ids.
+  - *No swap between check and copy.* The cargo door hands the snapshot
+    the canonical roots it checked; the snapshot refuses an extra root
+    that no longer resolves to itself and opens every root one component
+    at a time from `/` with `O_NOFOLLOW`.
+  - *The git test proves the body.* The fixture upstream records bodies
+    and can require bytes (400 otherwise): the git-row test requires
+    `ls-refs`' negotiation, and a gzip-encoded POST redirected by 307 to
+    another `upload-pack` reaches both hops byte for byte.
 
 **PR 6: Node.** npm and pnpm (edit, missing lock, `x`, `attest`), with the
 byte-identical-lock tests and the corrected pnpm flags.
