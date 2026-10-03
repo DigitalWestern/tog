@@ -247,7 +247,8 @@ fn serve(
             );
             return refuse(out, shown, 403, &why, keep_alive);
         }
-        let exchange = exchange(context, route, &state.config.permitted, request);
+        let check = |next: &Url, method: &str| hop_allowed(state, &Class::Route, next, method);
+        let exchange = exchange(context, route, &state.config.permitted, request, &check);
         match upstream {
             Upstream::Local(answer) => exchange.local(answer, out)?,
             Upstream::Fetch(url) => exchange.serve(&url, out)?,
@@ -269,7 +270,9 @@ fn serve(
                 return refuse(out, shown, 403, &refusal, keep_alive);
             }
             let route = intercepted_route(&GIT_FETCH, target)?;
-            exchange(context, &route, &only, request).serve(&url, out)?;
+            let first = Class::Git { repository };
+            let check = |next: &Url, method: &str| hop_allowed(state, &first, next, method);
+            exchange(context, &route, &only, request, &check).serve(&url, out)?;
         }
         None => {
             if !READ_METHODS.contains(&request.method.as_str()) {
@@ -288,10 +291,85 @@ fn serve(
                 return refuse(out, shown, 403, &refusal, keep_alive);
             }
             let route = intercepted_route(&UNATTESTED, target)?;
-            exchange(context, &route, &only, request).serve(&url, out)?;
+            let check =
+                |next: &Url, method: &str| hop_allowed(state, &Class::Unattested, next, method);
+            exchange(context, &route, &only, request, &check).serve(&url, out)?;
         }
     }
     Ok(!request.http10)
+}
+
+/// What an intercepted request is, as [`serve`] decides it: the class
+/// that sets its methods and the policy it answers to.
+#[derive(Debug, PartialEq, Eq)]
+enum Class {
+    /// A host one of the door's routes serves.
+    Route,
+    /// A git fetch from `repository`.
+    Git { repository: String },
+    /// Anything else: `unattested-index`.
+    Unattested,
+}
+
+/// Classify `url` requested with `method` as `serve` does: a push is
+/// refused on any host, a route host takes only reads, a git fetch only
+/// git's methods, and anything else only reads.
+fn classify(routes: &[Route], url: &Url, method: &str) -> Result<Class, String> {
+    let fetch = git_fetch(url, method);
+    if let Some(Err(why)) = fetch {
+        return Err(why);
+    }
+    let read = READ_METHODS.contains(&method);
+    let routed = routes
+        .iter()
+        .any(|route| route.endpoints.iter().any(|endpoint| endpoint.serves(url)));
+    match fetch {
+        _ if routed && read => Ok(Class::Route),
+        _ if routed => Err(format!("{method} is not served by registry routes")),
+        Some(Ok(repository)) if GIT_METHODS.contains(&method) => Ok(Class::Git { repository }),
+        _ if read => Ok(Class::Unattested),
+        _ => Err(format!(
+            "{method} to {} is not a registry read",
+            url.origin().ascii_serialization()
+        )),
+    }
+}
+
+/// Authorize one redirect hop of a request that started as `first`: the
+/// hop is classified again with the method it would be sent with, and when
+/// its class differs from the first request's, the new class's policy
+/// decides (a git fetch answers to `git-dependency`, anything else to
+/// `unattested-index`, which is recorded like the first request's would
+/// be). A hop to a route host was allowed by the permitted set already.
+fn hop_allowed(
+    state: &super::session::State,
+    first: &Class,
+    next: &Url,
+    method: &str,
+) -> Result<(), String> {
+    let class = classify(&state.config.routes, next, method)
+        .map_err(|why| format!("redirect to {}: {why}", redact::url(next.as_str(), &[])))?;
+    if std::mem::discriminant(&class) == std::mem::discriminant(first) {
+        return Ok(());
+    }
+    let origin = next.origin().ascii_serialization();
+    match &class {
+        Class::Route => Ok(()),
+        Class::Git { repository } => state.refuse_if_denied(
+            policy::GIT_DEPENDENCY,
+            repository,
+            "a redirect to a git fetch through the resolution proxy",
+        ),
+        Class::Unattested => state.check(
+            policy::UNATTESTED_INDEX,
+            &origin,
+            &format!(
+                "a redirect led to {}, which is not one of this door's registries; it was \
+                 forwarded through interception and recorded",
+                redact::url(next.as_str(), &[])
+            ),
+        ),
+    }
 }
 
 fn exchange<'a>(
@@ -299,6 +377,7 @@ fn exchange<'a>(
     route: &'a Route,
     permitted: &'a Permitted,
     request: &'a Request,
+    hop: &'a mirror::HopCheck<'a>,
 ) -> Exchange<'a> {
     Exchange {
         state: &context.state,
@@ -309,6 +388,7 @@ fn exchange<'a>(
         request: &request.headers,
         body: (request.method == "POST").then_some(request.body.as_slice()),
         permitted,
+        hop: Some(hop),
         // A streamed body is delimited by the close for HTTP/1.0.
         keep_alive: request.keep_alive && !request.http10,
         http10: request.http10,
@@ -462,6 +542,7 @@ mod tests {
     use crate::kernel::resolve::testing::{
         open_tunnel, tunnel_request, Harness, Reach, TEST_ORIGIN_PUBLIC,
     };
+    use crate::kernel::testutil::upstream::{Behavior, Reply};
 
     fn intercepting(harness: &Harness, policy: Policy) -> (Session, ProxyAddress) {
         let mut config = harness.config(policy, Mode::Online);
@@ -745,6 +826,101 @@ mod tests {
                 report.diagnostics.unauthenticated >= 1,
                 "git's first CONNECT carries no credentials"
             );
+        }
+    }
+
+    /// A git `POST` inside a tunnel to `third.test` (no route serves it).
+    fn post(authority: &str, path: &str, body: &[u8], gzip: bool) -> String {
+        let encoding = if gzip {
+            "Content-Encoding: gzip\r\n"
+        } else {
+            ""
+        };
+        format!(
+            "POST {path} HTTP/1.1\r\nHost: {authority}\r\n\
+             Content-Type: application/x-git-upload-pack-request\r\n{encoding}\
+             Content-Length: {}\r\n",
+            body.len()
+        )
+    }
+
+    /// A 307 from `git-upload-pack` to `git-receive-pack` would forward the
+    /// POST and its body to a push endpoint: every hop is classified
+    /// again, and a push is refused on any hop.
+    #[test]
+    fn a_redirect_cannot_turn_a_fetch_into_a_push() {
+        let harness = Harness::new("intercept-git-push");
+        let (session, address) = intercepting(&harness, Policy::default());
+        let authority = format!("third.test:{}", harness.upstream.port());
+        let (from, to) = (
+            "/a/repo.git/git-upload-pack",
+            "/a/repo.git/git-receive-pack",
+        );
+        harness.upstream.set(
+            from,
+            Behavior::Reply(Reply::new(307, b"").header("location", to)),
+        );
+        harness
+            .upstream
+            .set(to, Behavior::Reply(Reply::new(200, b"pushed")));
+        let roots = harness.proxy.authority().roots();
+        let mut tunnel = open_tunnel(&address, &authority, "third.test", roots, &[]).unwrap();
+        let body = b"0000".to_vec();
+        let answer = tunnel_request(&mut tunnel, &post(&authority, from, &body, false), &body);
+        assert_eq!(answer.status, 403, "{}", answer.text());
+        assert!(
+            answer.text().contains("git-receive-pack"),
+            "{}",
+            answer.text()
+        );
+        drop(tunnel);
+        let report = session.finish();
+        assert_eq!(
+            harness.upstream.hits(to),
+            0,
+            "the push endpoint was reached"
+        );
+        assert!(entries(&report).iter().all(|entry| entry.status != 200));
+    }
+
+    /// A git discovery request that redirects, on the same host, to a path
+    /// that is not git changes class: the hop answers to `unattested-index`
+    /// as a first request would, refused when the kind is denied and
+    /// recorded as the exception when it is not.
+    #[test]
+    fn a_redirect_out_of_a_git_fetch_answers_to_the_new_class_policy() {
+        for (policy, served) in [
+            (Policy::default(), true),
+            (deny(policy::UNATTESTED_INDEX), false),
+        ] {
+            let harness = Harness::new("intercept-git-class");
+            let (session, address) = intercepting(&harness, policy);
+            let authority = format!("third.test:{}", harness.upstream.port());
+            let from = "/a/repo.git/info/refs?service=git-upload-pack";
+            harness.upstream.set(
+                from,
+                Behavior::Reply(Reply::new(302, b"").header("location", "/meta/pkg.json")),
+            );
+            let roots = harness.proxy.authority().roots();
+            let mut tunnel = open_tunnel(&address, &authority, "third.test", roots, &[]).unwrap();
+            let answer = tunnel_request(&mut tunnel, &get(&authority, from), b"");
+            drop(tunnel);
+            let report = session.finish();
+            let origin = format!("https://{authority}");
+            if served {
+                assert_eq!(answer.status, 200, "{}", answer.text());
+                let facts: Vec<_> = report.facts.exceptions.iter().collect();
+                assert_eq!(facts.len(), 1, "{facts:?}");
+                assert_eq!(facts[0].kind, policy::UNATTESTED_INDEX);
+                assert_eq!(facts[0].subject, origin);
+                assert!(entries(&report).iter().any(|entry| entry.class == "git"
+                    && entry.redirected_to.as_deref() == Some(&format!("{origin}/meta/pkg.json"))));
+            } else {
+                assert_eq!(answer.status, 403, "{}", answer.text());
+                assert_eq!(harness.upstream.hits("/meta/pkg.json"), 0);
+                assert!(report.facts.exceptions.is_empty(), "{:?}", report.facts);
+                assert_eq!(report.facts.refusals.len(), 1, "{:?}", report.facts);
+            }
         }
     }
 

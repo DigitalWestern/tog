@@ -123,6 +123,7 @@ impl Record {
             claimed: self.claimed,
             verified: self.verified,
             freshness: self.freshness,
+            redirected_to: self.hops.last().cloned(),
         };
         let diag = DiagRequest {
             seq: 0,
@@ -268,11 +269,20 @@ pub(crate) struct Exchange<'a> {
     /// Where a redirect may lead: the session's permitted set, or for a
     /// host no route serves, only that host.
     pub permitted: &'a Permitted,
+    /// Authorizes each redirect hop (the next URL and the method it would
+    /// be sent with) after the permitted set allowed it, the way the first
+    /// request was authorized: intercepted traffic is classified again, so
+    /// a hop cannot turn into a push, or into a class policy denies. `None`
+    /// for a mirror route, whose hops the permitted set alone decides.
+    pub hop: Option<&'a HopCheck<'a>>,
     pub keep_alive: bool,
     /// The tool spoke HTTP/1.0: a body of unknown length ends with the
     /// connection, and the connection closes after every response.
     pub http10: bool,
 }
+
+/// [`Exchange::hop`]: `Err(why)` refuses the redirect.
+pub(crate) type HopCheck<'a> = dyn Fn(&Url, &str) -> Result<(), String> + 'a;
 
 impl Exchange<'_> {
     fn redacted(&self, url: &Url) -> String {
@@ -469,6 +479,11 @@ impl Exchange<'_> {
             }
             if response.status == 303 && method != "HEAD" {
                 method = "GET".into();
+            }
+            if let Some(check) = self.hop {
+                if let Err(why) = check(&next, &method) {
+                    return Err((Failure::Redirect(why), hops));
+                }
             }
             url = next;
         }

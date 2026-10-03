@@ -70,6 +70,12 @@ pub struct Entry {
     pub claimed: Option<String>,
     pub verified: bool,
     pub freshness: Option<Freshness>,
+    /// Where the answer came from when upstream redirected (the last hop,
+    /// redacted): `url` stays what the tool asked for. Absent, and left out
+    /// of the bytes, when there was no redirect, so a ledger without one
+    /// keeps its bytes and its id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redirected_to: Option<String>,
 }
 
 impl Entry {
@@ -562,6 +568,7 @@ mod tests {
             claimed: None,
             verified: false,
             freshness: Some(Freshness::Live),
+            redirected_to: None,
         }
     }
 

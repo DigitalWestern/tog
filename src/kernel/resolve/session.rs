@@ -292,6 +292,7 @@ impl State {
     /// Record one request: its portable entry and its diagnostics row.
     pub(crate) fn record(&self, mut entry: Entry, mut diag: DiagRequest) {
         entry.url = self.clean(&entry.url);
+        entry.redirected_to = entry.redirected_to.map(|hop| self.clean(&hop));
         diag.url = self.clean(&diag.url);
         diag.detail = diag.detail.map(|detail| self.clean(&detail));
         diag.hops = diag.hops.iter().map(|hop| self.clean(hop)).collect();

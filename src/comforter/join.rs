@@ -627,6 +627,7 @@ mod tests {
             claimed: None,
             verified: false,
             freshness: None,
+            redirected_to: None,
         });
         LedgerSummary::of(&ledger.identity().object_id(), &ledger)
     }

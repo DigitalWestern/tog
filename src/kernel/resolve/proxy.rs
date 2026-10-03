@@ -1015,6 +1015,7 @@ fn mirror_request(context: &Context, request: &Request, out: &mut dyn Write) -> 
         request: &request.headers,
         body: None,
         permitted: &state.config.permitted,
+        hop: None,
         // A streamed body is delimited by the close for HTTP/1.0, so an
         // HTTP/1.0 connection ends after each mirror response.
         keep_alive: request.keep_alive && !request.http10,
@@ -1355,6 +1356,7 @@ mod tests {
                 claimed: None,
                 verified: false,
                 freshness: None,
+                redirected_to: None,
             }]
         );
         assert_eq!(
@@ -1925,6 +1927,7 @@ mod tests {
                 claimed: None,
                 verified: false,
                 freshness: None,
+                redirected_to: None,
             },
             crate::kernel::resolve::ledger::DiagRequest {
                 seq: 0,

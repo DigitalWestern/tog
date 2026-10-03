@@ -1840,6 +1840,7 @@ mod tests {
             claimed: None,
             verified: false,
             freshness: None,
+            redirected_to: None,
         });
         let objects = ledger::commit(&store, activity, &portable, &Diagnostics::default()).unwrap();
         let ids =
