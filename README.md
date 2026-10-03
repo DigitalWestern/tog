@@ -133,8 +133,10 @@ refuses, naming the directory, when that directory is not writable. `tog
 doctor` says when a newer release exists (one request; "not checked" when
 offline, or while no release can be read), and `tog --version` prints the
 commit and its date, so a stale binary can be told from a current one.
-Nothing checks in the background. Until a release is tagged, `tog update
---self` reports that it cannot read the latest release.
+Nothing checks in the background. While the repository is private, `tog
+update --self` reports that it cannot read the latest release: it asks
+GitHub without logging in, and GitHub answers 404. Releases are built for
+Linux x86_64 only for now.
 
 ## Use
 

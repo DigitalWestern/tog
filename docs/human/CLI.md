@@ -365,7 +365,9 @@ release's version, so a mislabeled asset is refused too. It takes no other
 argument. A release is compared by version only, because a release does not
 name the commit it was built from: a local build of the same crate version
 is "at the latest release's version" and stays. The asset names and the
-checksum rule are `install.sh`'s, so the two read a release the same way. `TOG_RELEASE_MANIFEST` names another
+checksum rule are `install.sh`'s, so the two read a release the same way. Releases are built for Linux x86_64
+only for now (macOS waits on #66), and while the repository is private the anonymous request gets a 404, which
+tog reports as no published release. `TOG_RELEASE_MANIFEST` names another
 manifest URL (the tests use `file://`); nothing checks in the background.
 
 **update --toolchain** `[<ecosystem>]` is the other update, and the two never
