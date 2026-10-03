@@ -1,10 +1,10 @@
 # Working in this repo
 
 - The independent review of every pull request is Codex GPT 6.1 Sol at
-  high reasoning effort (`codex exec -m gpt-6.1-sol -c
-  model_reasoning_effort="high"`), run through the alarm wrapper in
-  the global CLAUDE.md with stdin closed. Its findings, and what was
-  fixed or declined, go in the pull request description.
+  high reasoning effort, run through the `codex` MCP server, not the
+  `codex exec` CLI: `codex_run` with `kind: "review"` and `cwd` set to
+  the repo root, then `codex_wait` on the job id. Its findings, and
+  what was fixed or declined, go in the pull request description.
 
 - After a pull request you worked on is merged, open a GitHub issue for
   every exception, problem, or needed fix you found along the way and did
