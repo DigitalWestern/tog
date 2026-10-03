@@ -25,6 +25,23 @@
     collecting different parts of the codebase to report back to the
     orchestrator.
 
+- Keep CI runs few. The GitHub Actions budget is small (2,000 minutes a
+  month, and it has run out before), and the heavy suite is slow: one
+  e2e run took 47 minutes. Every push to a pull request re-runs the
+  whole suite, and every merge runs it again on main, so each extra push
+  is a full run. Before the first push:
+  - Run clippy (`-D warnings`), the tests and the Sol review locally, so
+    the branch goes up once, finished.
+  - If main has moved, merge it into the branch locally, then push. A
+    merge from main after the PR is open costs a second full run.
+  - Batch related work into one pull request, one commit per piece,
+    rather than one pull request per piece.
+  Never push only to retrigger CI. Do not open a pull request that
+  only adds a FOLLOW-UPS.md pointer or another one-line doc change: put
+  it in the next real pull request, or in the work's own pull request
+  before it merges. Run `gh pr list --state open` first, so you do not
+  duplicate a pull request another agent already opened.
+
 # About Ethan
 
 My name is Ethan. I work in finance at a private credit firm doing capital markets and origination, and software engineering is something I’ve taken up as a hobby on the side. I’ve built a number of smaller projects before this—mostly Python/data analysis, HTML/CSS, scripts, and other relatively straightforward projects—but Tog is my first large-scale backend/systems project. I am still very much a newcomer to Rust, systems programming, package managers, CI infrastructure, toolchains, dependency resolution, security, and many of the architectural concepts that appear throughout this codebase.
