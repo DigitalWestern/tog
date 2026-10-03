@@ -70,6 +70,19 @@
     then `bash tests/acceptance.sh`. Point `TMPDIR` at a directory under
     `$HOME` first: these tests leave large stores behind and fill the
     `/tmp` quota.
+  Clean up after yourself. Give each run its own fresh scratch directory,
+  for example `TMPDIR=$HOME/tog-tmp/<branch-name>`. Once the checks pass,
+  delete that directory (`rm -rf "$HOME/tog-tmp/<branch-name>"`), and
+  any `$HOME/tog-tmp/run-*` directory you created. Do this before you
+  report the work as done, so nobody has to clear disk space later.
+  Delete only directories you created in this task: never
+  `$HOME/tog-tmp` itself, and never another agent's directory, which may
+  still be in use. Also delete the `/tmp/tog-*` stores your own test
+  runs left, and only those. Use `find /tmp -mindepth 1 -maxdepth 1
+  -name 'tog-*' -user "$USER" -mmin -<minutes since you started>`, and
+  read the list before deleting anything. A `find` without `-mindepth 1`
+  can match the parent directory itself, and once deleted a whole tree
+  that way.
   Never re-run a failed job in the cloud (the Actions "Re-run jobs"
   button, `gh run rerun`, or an empty commit) to see whether a fix
   worked. The local run is the re-run, and you have permission to do it
