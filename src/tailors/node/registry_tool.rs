@@ -173,7 +173,8 @@ impl RegistryTool for NodeTool {
         ));
         let node_obj = node::realize_runtime(store, activity, platform, toolchain)?;
         let mut spec = DelegateSpec::new(node_obj.join("bin/npm"));
-        spec.args(["install", "--package-lock-only", "--ignore-scripts"]);
+        spec.arg("install").args(node::NPM_RESOLVE_ONLY);
+        node::quiet_npm(&mut spec);
         if !ui::verbose() {
             spec.arg("--silent");
         }

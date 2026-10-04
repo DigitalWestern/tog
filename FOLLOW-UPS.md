@@ -21,8 +21,8 @@ generation runs through the door's unsandboxed `Legacy` mode with network,
 the largest gap in what tog promises. Design: `docs/agent/DESIGNS.md` §6
 (#196), evidence in #209. One pull request each, in this order:
 
-1. **#204 (PR 6): Node.** npm and pnpm. Absorbs #212 (npm notifier and
-   audit requests).
+1. **#204 (PR 6): Node.** npm and pnpm. npm already skips its audit,
+   fund and update-notifier requests (#212).
 2. **#205 (PR 7): Python.** uv. Every uv call already passes
    `--python <store python>` (#210); the forced row's own `--python` then
    replaces it.
