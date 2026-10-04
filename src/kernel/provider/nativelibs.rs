@@ -1510,12 +1510,8 @@ mod tests {
         }
         let first = temp_dir("identity-first");
         let second = temp_dir("identity-second");
-        let first_store = Store {
-            root: first.0.clone(),
-        };
-        let second_store = Store {
-            root: second.0.clone(),
-        };
+        let first_store = Store::for_test(first.0.clone());
+        let second_store = Store::for_test(second.0.clone());
         assert_ne!(
             object_id_for(&first_store, Platform::X86_64UnknownLinuxGnu).unwrap(),
             object_id_for(&second_store, Platform::X86_64UnknownLinuxGnu).unwrap()

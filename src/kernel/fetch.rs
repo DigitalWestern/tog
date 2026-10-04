@@ -1139,7 +1139,7 @@ mod tests {
         for sub in ["objects", "meta", "cache/sha256", "cache/sha1", "tmp"] {
             fs::create_dir_all(root.join(sub)).unwrap();
         }
-        let store = Store { root: root.clone() };
+        let store = Store::for_test(root.clone());
         let activity = &store
             .activity(crate::kernel::activity::ActivityMode::Shared)
             .unwrap();
@@ -1161,7 +1161,7 @@ mod tests {
         for sub in ["objects", "meta", "cache/sha256", "tmp"] {
             fs::create_dir_all(root.join(sub)).unwrap();
         }
-        let store = Store { root: root.clone() };
+        let store = Store::for_test(root.clone());
         let activity = &store
             .activity(crate::kernel::activity::ActivityMode::Shared)
             .unwrap();
@@ -1377,7 +1377,7 @@ mod tests {
         for sub in ["objects", "meta", "cache/sha256", "tmp"] {
             fs::create_dir_all(root.join(sub)).unwrap();
         }
-        let store = Store { root: root.clone() };
+        let store = Store::for_test(root.clone());
         let activity = &store
             .activity(crate::kernel::activity::ActivityMode::Shared)
             .unwrap();
@@ -1432,7 +1432,7 @@ mod integrity_tests {
         for sub in ["objects", "meta", "cache/sha256", "tmp"] {
             fs::create_dir_all(root.join(sub)).unwrap();
         }
-        (scratch, Store { root })
+        (scratch, Store::for_test(root))
     }
 
     fn sha256_hex(bytes: &[u8]) -> String {

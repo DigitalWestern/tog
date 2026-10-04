@@ -30,7 +30,7 @@ pub(crate) fn scratch_store(label: &str) -> (TempDir, Store, StoreActivity) {
         std::fs::create_dir_all(root.join(sub)).unwrap();
     }
     let activity = StoreActivity::acquire(&root, ActivityMode::Shared).unwrap();
-    (temp, Store { root }, activity)
+    (temp, Store::for_test(root), activity)
 }
 
 #[cfg(test)]

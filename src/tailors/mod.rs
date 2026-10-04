@@ -1479,9 +1479,7 @@ mod tests {
         for sub in ["objects", "meta"] {
             std::fs::create_dir_all(root.join(sub)).unwrap();
         }
-        crate::kernel::store::Store {
-            root: root.canonicalize().unwrap(),
-        }
+        crate::kernel::store::Store::for_test(root.canonicalize().unwrap())
     }
 
     #[test]

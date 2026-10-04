@@ -1275,9 +1275,7 @@ mod tests {
         ] {
             fs::create_dir_all(store_root.join(sub)).unwrap();
         }
-        let store = Store {
-            root: store_root.canonicalize().unwrap(),
-        };
+        let store = Store::for_test(store_root.canonicalize().unwrap());
         let activity = store
             .activity(crate::kernel::activity::ActivityMode::Exclusive)
             .unwrap();

@@ -1502,9 +1502,7 @@ mod tests {
     fn realization_refuses_a_foreign_selection_and_an_unknown_recipe() {
         use crate::kernel::toolchain::fixtures;
         let temp = TempDir::new();
-        let store = Store {
-            root: temp.0.join("absent-store"),
-        };
+        let store = Store::for_test(temp.0.join("absent-store"));
         let lease = crate::kernel::testutil::detached_lease();
         let activity = &lease.1;
         let platform = Platform::host().unwrap();
@@ -1601,7 +1599,7 @@ mod tests {
         for sub in ["objects", "meta", "cache/sha256", "tmp", "roots"] {
             fs::create_dir_all(store_root.join(sub)).unwrap();
         }
-        let store = Store { root: store_root };
+        let store = Store::for_test(store_root);
         let activity = &store
             .activity(crate::kernel::activity::ActivityMode::Shared)
             .unwrap();
@@ -1679,9 +1677,7 @@ mod tests {
         for sub in ["objects", "meta", "cache/sha256", "tmp", "roots"] {
             fs::create_dir_all(store_root.join(sub)).unwrap();
         }
-        let store = Store {
-            root: store_root.canonicalize().unwrap(),
-        };
+        let store = Store::for_test(store_root.canonicalize().unwrap());
         let lease = store
             .activity(crate::kernel::activity::ActivityMode::Shared)
             .unwrap();
@@ -1765,9 +1761,7 @@ mod tests {
         for sub in ["objects", "meta", "cache/sha256", "tmp", "roots"] {
             fs::create_dir_all(store_root.join(sub)).unwrap();
         }
-        let store = Store {
-            root: store_root.canonicalize().unwrap(),
-        };
+        let store = Store::for_test(store_root.canonicalize().unwrap());
         let lease = store
             .activity(crate::kernel::activity::ActivityMode::Shared)
             .unwrap();
@@ -1869,7 +1863,7 @@ mod tests {
         for sub in ["objects", "meta", "cache/sha256", "tmp", "roots"] {
             fs::create_dir_all(store_root.join(sub)).unwrap();
         }
-        let store = Store { root: store_root };
+        let store = Store::for_test(store_root);
         let activity = &store
             .activity(crate::kernel::activity::ActivityMode::Shared)
             .unwrap();
@@ -2580,9 +2574,7 @@ mod tests {
         );
         // A store root that does not exist and a go binary that does not
         // exist: a cache hit must reach neither.
-        let store = Store {
-            root: temp.0.join("absent-store"),
-        };
+        let store = Store::for_test(temp.0.join("absent-store"));
         let got = plan_go(
             &mut crate::kernel::testutil::DoorScope::new().door(
                 &store,
@@ -2617,9 +2609,7 @@ mod tests {
             &expected_input_hash(&project, &gomod, &gosum),
             &plan,
         );
-        let store = Store {
-            root: temp.0.join("absent-store"),
-        };
+        let store = Store::for_test(temp.0.join("absent-store"));
         let root = ProjectRoot::open(&project).unwrap();
         let planned = plan_go_read(
             &mut crate::kernel::testutil::DoorScope::new().door(
@@ -2687,9 +2677,7 @@ mod tests {
         );
         // A store root that does not exist and a go binary that does not
         // exist: the selected toolchain hits the cache and reaches neither.
-        let store = Store {
-            root: temp.0.join("absent-store"),
-        };
+        let store = Store::for_test(temp.0.join("absent-store"));
         let got = plan_go(
             &mut crate::kernel::testutil::DoorScope::new().door(
                 &store,
@@ -2772,9 +2760,7 @@ mod tests {
             &expected_input_hash(&project, &gomod, gosum),
             &plan,
         );
-        let store = Store {
-            root: temp.0.join("absent-store"),
-        };
+        let store = Store::for_test(temp.0.join("absent-store"));
         let e = plan_go(
             &mut crate::kernel::testutil::DoorScope::new().door(
                 &store,
@@ -2873,9 +2859,7 @@ mod tests {
         plan.modules.clear();
         write_plan_cache(&project, &expected_input_hash(&project, &gomod, ""), &plan);
         fs::set_permissions(project.join("go.sum"), fs::Permissions::from_mode(0o000)).unwrap();
-        let store = Store {
-            root: temp.0.join("absent-store"),
-        };
+        let store = Store::for_test(temp.0.join("absent-store"));
         let e = plan_go(
             &mut crate::kernel::testutil::DoorScope::new().door(
                 &store,
@@ -2913,9 +2897,7 @@ mod tests {
             &plan,
         );
         std::os::unix::fs::symlink(outside.join(".tog"), project.join(".tog")).unwrap();
-        let store = Store {
-            root: temp.0.join("absent-store"),
-        };
+        let store = Store::for_test(temp.0.join("absent-store"));
         let e = plan_go(
             &mut crate::kernel::testutil::DoorScope::new().door(
                 &store,
@@ -2949,9 +2931,7 @@ mod tests {
             &expected_input_hash(&project, &gomod, &gosum),
             &plan,
         );
-        let store = Store {
-            root: temp.0.join("absent-store"),
-        };
+        let store = Store::for_test(temp.0.join("absent-store"));
         let e = plan_go(
             &mut crate::kernel::testutil::DoorScope::new().door(
                 &store,
@@ -2992,7 +2972,7 @@ mod tests {
         for sub in ["objects", "meta", "cache/sha256", "tmp", "roots"] {
             fs::create_dir_all(store_root.join(sub)).unwrap();
         }
-        let store = Store { root: store_root };
+        let store = Store::for_test(store_root);
         // A miss goes on to the tidy gate, which creates its module cache in
         // the store before running the (absent) go: that directory is how
         // the test tells a miss from a hit through `plan_go` itself.
@@ -3062,9 +3042,7 @@ mod tests {
         assert_eq!(source_digest(&root).unwrap(), digest);
         // The original's cache is served; the replacement has none, so a
         // read of the replacement would have missed and reached the store.
-        let store = Store {
-            root: temp.0.join("absent-store"),
-        };
+        let store = Store::for_test(temp.0.join("absent-store"));
         let got = plan_go(
             &mut crate::kernel::testutil::DoorScope::new().door(
                 &store,
@@ -3107,7 +3085,7 @@ mod tests {
             for sub in ["objects", "meta", "cache/sha256", "tmp"] {
                 fs::create_dir_all(root.join(sub)).unwrap();
             }
-            let store = Store { root };
+            let store = Store::for_test(root);
             let activity = store
                 .activity(crate::kernel::activity::ActivityMode::Shared)
                 .unwrap();

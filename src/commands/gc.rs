@@ -160,7 +160,9 @@ fn reset(args: &cli::GcArgs) -> io::Result<()> {
         ));
     }
     let mut narrate = ui::narration();
-    let Some((root, _)) = store::Store::probe()? else {
+    // Only the root is located: a reset reads no record and no marker, so a
+    // marker that cannot even be read does not stop it.
+    let Some(root) = store::Store::locate()? else {
         // No directory yet: a new store is already what a reset leaves.
         if !args.dry_run {
             store::Store::open()?;
@@ -169,10 +171,10 @@ fn reset(args: &cli::GcArgs) -> io::Result<()> {
         return Ok(());
     };
     // A handle on the root alone. The store may be one `open` refuses.
-    let store = store::Store { root };
+    let store = store::Store::handle(root);
     // A reset is a requested mutation: it fails loudly rather than skipping
     // when another job holds the store.
-    let Some(activity) = store.try_activity_exclusive()? else {
+    let Some(activity) = store.try_activity_exclusive_unchecked()? else {
         return Err(io::Error::other(
             "a Tog job is using this store; retry when it finishes",
         ));

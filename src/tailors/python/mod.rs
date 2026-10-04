@@ -159,9 +159,7 @@ pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
     for sub in ["objects", "meta", "cache/sha256", "tmp"] {
         fs::create_dir_all(fixture.0.join(sub)).expect("Python identity fixture store");
     }
-    let store = Store {
-        root: fixture.0.clone(),
-    };
+    let store = Store::for_test(fixture.0.clone());
     let activity = &store
         .activity(crate::kernel::activity::ActivityMode::Shared)
         .unwrap();
@@ -422,9 +420,7 @@ mod toolchain_tests {
 
     #[test]
     fn realization_refuses_an_unknown_recipe_and_another_ecosystem() {
-        let store = Store {
-            root: std::env::temp_dir().join("tog-python-recipe-refusal"),
-        };
+        let store = Store::for_test(std::env::temp_dir().join("tog-python-recipe-refusal"));
         let lease = crate::kernel::testutil::detached_lease();
         let activity = &lease.1;
         // The row check is per platform; realization can only run for the

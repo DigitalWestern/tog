@@ -66,9 +66,7 @@ fn linux_python_sync_run_and_uv_round_trip() {
         "unexpected sysconfig platform in {run:?}"
     );
 
-    let store = Store {
-        root: store_path.canonicalize().unwrap(),
-    };
+    let store = Store::open_at(&store_path).unwrap();
     let activity = &store
         .activity(tog::kernel::activity::ActivityMode::Shared)
         .unwrap();

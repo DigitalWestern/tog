@@ -889,9 +889,7 @@ mod tests {
         for sub in ["objects", "meta", "tmp", "roots", "records"] {
             fs::create_dir_all(root.join(sub)).unwrap();
         }
-        Store {
-            root: root.canonicalize().unwrap(),
-        }
+        Store::for_test(root.canonicalize().unwrap())
     }
 
     fn project(temp: &TempDir) -> PathBuf {

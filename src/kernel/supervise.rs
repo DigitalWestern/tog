@@ -1039,7 +1039,7 @@ mod tests {
         ] {
             std::fs::create_dir_all(root.join(sub)).unwrap();
         }
-        (Store { root }, dir)
+        (Store::for_test(root), dir)
     }
 
     // Reviewed site (tests/architecture.rs): the supervisor's own tests of its primitives.

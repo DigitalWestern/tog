@@ -249,7 +249,7 @@ fn test_store(label: &str) -> (crate::kernel::testutil::TempDir, Store) {
         fs::create_dir_all(dir.0.join(sub)).expect("create Python identity fixture store");
     }
     let root = dir.0.clone();
-    (dir, Store { root })
+    (dir, Store::for_test(root))
 }
 
 /// A byte-identical `.tar.gz` for a fixture tree, with no dependence on
@@ -1764,9 +1764,7 @@ mod tests {
         let activity = &lease.1;
         let error = build_sdist_wheel_at_depth(
             &mut crate::kernel::testutil::DoorScope::new().door(
-                &Store {
-                    root: PathBuf::from("/does/not/matter"),
-                },
+                &Store::for_test(PathBuf::from("/does/not/matter")),
                 activity,
                 Platform::Aarch64AppleDarwin,
                 crate::kernel::resolve::DoorKind::Planner,
@@ -1807,9 +1805,7 @@ mod tests {
         let activity = &lease.1;
         let error = build_sdist_wheel_at_depth(
             &mut crate::kernel::testutil::DoorScope::new().door(
-                &Store {
-                    root: PathBuf::from("/does/not/matter"),
-                },
+                &Store::for_test(PathBuf::from("/does/not/matter")),
                 activity,
                 foreign,
                 crate::kernel::resolve::DoorKind::Planner,

@@ -770,9 +770,7 @@ mod object_id_guard_tests {
         }
         fs::write(temp.0.join("objects/victim"), "keep").unwrap();
         fs::write(temp.0.join("keep"), "keep").unwrap();
-        let store = Store {
-            root: temp.0.clone(),
-        };
+        let store = Store::for_test(temp.0.clone());
         let activity = store.activity(ActivityMode::Shared).unwrap();
         for id in ["", ".", "..", "a/b", "../keep", "/etc", "a\0b"] {
             let error = store.has_with_activity(&activity, id).unwrap_err();

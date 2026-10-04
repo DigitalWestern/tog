@@ -278,9 +278,7 @@ mod tests {
             Self { root, _dir: dir }
         }
         pub(super) fn store(&self) -> Store {
-            Store {
-                root: self.root.clone(),
-            }
+            Store::for_test(self.root.clone())
         }
     }
 
@@ -392,12 +390,14 @@ mod tests {
     /// it without a kind row: an object whose kind or schema this tog no
     /// longer produces is ordinary garbage once nothing roots it, and is
     /// kept while something does. Needing the row would instead block every
-    /// sweep on a store that holds one, after any schema bump.
+    /// sweep on a store that holds one, after any schema bump. What such a
+    /// record says it depends on is followed like any other record's: a
+    /// rooted object keeps its dependencies, and theirs.
     #[test]
     fn an_object_of_a_kind_with_no_row_is_swept_or_kept_like_any_other() {
         let temp = TempStore::new("retired-kind");
         let store = temp.store();
-        let publish = |name: &str| {
+        let publish = |name: &str, dependencies: &[&str]| {
             let identity = Identity {
                 kind: "retired-kind".into(),
                 name: name.into(),
@@ -421,7 +421,7 @@ mod tests {
                     "identity": identity,
                     "created": 0,
                     "exceptions": [],
-                    "dependencies": [],
+                    "dependencies": dependencies,
                     "cache_digests": [],
                     "evidence": "explicit",
                 }))
@@ -431,8 +431,12 @@ mod tests {
             age(&object);
             id
         };
-        let rooted = publish("rooted");
-        let orphan = publish("orphan");
+        // rooted -> needed -> needed-below, and orphan -> orphan-needed.
+        let below = publish("needed-below", &[]);
+        let needed = publish("needed", &[&below]);
+        let rooted = publish("rooted", &[&needed]);
+        let orphan_needed = publish("orphan-needed", &[]);
+        let orphan = publish("orphan", &[&orphan_needed]);
         register_objects(&store, &temp.root.join("project"), &[&rooted]);
 
         let (report, text) = sweep(
@@ -442,9 +446,20 @@ mod tests {
                 ..Options::default()
             },
         );
-        assert_eq!(report.unwrap().objects, 1, "{text}");
+        assert_eq!(report.unwrap().objects, 2, "{text}");
         assert!(!store.object_path(&orphan).exists(), "{text}");
-        assert!(store.object_path(&rooted).is_dir(), "{text}");
+        assert!(!store.object_path(&orphan_needed).exists(), "{text}");
+        for kept in [&rooted, &needed, &below] {
+            assert!(store.object_path(kept).is_dir(), "{kept}: {text}");
+            assert!(
+                store
+                    .root
+                    .join("meta")
+                    .join(format!("{kept}.json"))
+                    .is_file(),
+                "{kept}: {text}"
+            );
+        }
     }
 
     #[test]
@@ -2147,9 +2162,7 @@ mod tests {
             ] {
                 fs::create_dir_all(root.join(sub)).unwrap();
             }
-            Store {
-                root: root.canonicalize().unwrap(),
-            }
+            Store::for_test(root.canonicalize().unwrap())
         });
         let reference = store::ProjectionRef::new(
             store::ProjectionBase::Forests,

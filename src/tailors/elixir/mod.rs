@@ -2802,9 +2802,7 @@ exit 0
         for sub in ["objects", "meta", "cache/sha256", "tmp", "roots", "forests"] {
             fs::create_dir_all(store_root.join(sub)).unwrap();
         }
-        let store = Store {
-            root: store_root.canonicalize().unwrap(),
-        };
+        let store = Store::for_test(store_root.canonicalize().unwrap());
         let lease = store
             .activity(crate::kernel::activity::ActivityMode::Shared)
             .unwrap();
@@ -2943,9 +2941,7 @@ exit 0
         for sub in ["objects", "meta", "tmp"] {
             fs::create_dir_all(store_root.join(sub)).unwrap();
         }
-        let store = Store {
-            root: store_root.canonicalize().unwrap(),
-        };
+        let store = Store::for_test(store_root.canonicalize().unwrap());
         let activity = store
             .activity(crate::kernel::activity::ActivityMode::Shared)
             .unwrap();

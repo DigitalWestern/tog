@@ -31,10 +31,11 @@ const PUBLISH_LOCK: &str = ".publish.lock";
 /// activity lease. `store` is a handle on the root only: it need not be a
 /// store `Store::open` would accept, which is the point.
 ///
-/// The marker goes first and comes back last. A reset that is interrupted
-/// therefore leaves a store with no marker, which every command refuses
-/// with this command as the fix, and never a marked store holding half of
-/// its records.
+/// The marker goes first, its removal made durable before anything else is
+/// deleted, and comes back last, after the fresh namespaces are durable. A
+/// reset that is interrupted therefore leaves a store with no marker, which
+/// `Store::open` and every validated lease refuse with this command as the
+/// fix, and never a marked store holding half of its records.
 pub fn reset<W: Write>(
     store: &Store,
     activity: &StoreActivity,
@@ -89,7 +90,15 @@ pub fn reset<W: Write>(
     store.ensure_namespace(Path::new("tmp"))?;
     let _publish_lock = store.publish_lock()?;
 
+    // No `Store::open` reads the marker or creates a namespace from here
+    // until the new marker is published.
+    root.lock()?;
+
+    // The marker goes first, and its removal is made durable before
+    // anything else is deleted: after a power failure the store is then
+    // either untouched or unmarked, never marked with half its records.
     store::remove_tree_entry_at(root.as_raw_fd(), store::FORMAT_FILE.as_bytes())?;
+    store::fsync_directory(root.as_raw_fd())?;
     for (name, bytes) in &present {
         store::remove_tree_entry_at(root.as_raw_fd(), name.as_bytes())?;
         writeln!(
@@ -104,7 +113,7 @@ pub fn reset<W: Write>(
         store::remove_tree_entry_at(tmp.as_raw_fd(), name.as_bytes())?;
     }
     report_stages(store, verb, stages.len(), stage_bytes, out)?;
-    store.initialize()?;
+    store.reinitialize()?;
     Ok(report)
 }
 
@@ -154,15 +163,18 @@ mod reset_tests {
     use crate::kernel::activity::ActivityMode;
     use crate::kernel::store::{ObjectDeps, StoreFormat, FORMAT_FILE};
 
+    /// The lease `tog gc --reset` takes: exclusive, and not validated
+    /// against the marker, since these stores are ones tog refuses.
     fn run(store: &Store, dry_run: bool) -> (io::Result<ResetReport>, String) {
-        let activity = store.activity(ActivityMode::Exclusive).unwrap();
+        let activity = store.try_activity_exclusive_unchecked().unwrap().unwrap();
         let mut out = Vec::new();
         let result = reset(store, &activity, dry_run, &mut out);
         (result, String::from_utf8(out).unwrap())
     }
 
     /// One published object, a root that protects it, a cached download, a
-    /// backup, a stale stage and a file tog never wrote.
+    /// backup, a stale stage and a file tog never wrote, in a store with no
+    /// format marker.
     fn populated(temp: &TempStore) -> (Store, String) {
         let store = temp.store();
         let identity = test_identity("kept", None);
@@ -182,6 +194,7 @@ mod reset_tests {
         fs::create_dir_all(store.root.join("tmp/stage-old")).unwrap();
         fs::write(store.root.join("maintenance-deferred"), b"old").unwrap();
         fs::write(store.root.join("notes.txt"), b"not tog's").unwrap();
+        fs::remove_file(store.root.join(FORMAT_FILE)).unwrap();
         (store, id)
     }
 
@@ -350,6 +363,8 @@ mod reset_tests {
     fn reset_needs_the_exclusive_lease() {
         let temp = TempStore::new("reset-lease");
         let (store, id) = populated(&temp);
+        // A shared lease exists only on a store tog reads: mark this one.
+        fs::write(store.root.join(FORMAT_FILE), StoreFormat::current_line()).unwrap();
         let shared = store.activity(ActivityMode::Shared).unwrap();
         let mut out = Vec::new();
         let error = reset(&store, &shared, false, &mut out).unwrap_err();
@@ -385,5 +400,96 @@ mod reset_tests {
             .unwrap()
             .file_type()
             .is_symlink());
+    }
+
+    /// A reset that stops after the marker is gone leaves a store every
+    /// lease refuses: a command that opened the store before the reset and
+    /// waited for its lease behind it must not go on to read records.
+    #[test]
+    fn a_lease_taken_after_an_interrupted_reset_is_refused() {
+        let temp = TempStore::new("reset-interrupted");
+        let store = temp.store();
+        // The command that will wait: it has opened the store already.
+        let opened = Store::open_at(&store.root).unwrap();
+        // The reset gets as far as removing the marker and stops.
+        fs::remove_file(store.root.join(FORMAT_FILE)).unwrap();
+        for result in [
+            opened.activity(ActivityMode::Shared).map(|_| ()),
+            opened.activity(ActivityMode::Exclusive).map(|_| ()),
+            opened.try_activity_exclusive().map(|_| ()),
+        ] {
+            let error = result.unwrap_err();
+            assert!(
+                error.to_string().contains("has no format marker"),
+                "{error}"
+            );
+            assert_eq!(store::refusal_fix(&error), Some("tog gc --reset"));
+        }
+        // The refusal released the lease it had taken: reset can run.
+        run(&store, false).0.unwrap();
+        opened.activity(ActivityMode::Shared).unwrap();
+    }
+
+    /// A marker that cannot be read stops nothing: reset never reads it.
+    #[test]
+    fn reset_replaces_a_marker_that_cannot_be_read() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = TempStore::new("reset-unreadable");
+        let (store, _) = populated(&temp);
+        let marker = store.root.join(FORMAT_FILE);
+        fs::write(&marker, b"tog-store 1\n").unwrap();
+        fs::set_permissions(&marker, fs::Permissions::from_mode(0o000)).unwrap();
+        if fs::read(&marker).is_ok() {
+            // Running as root: every mode is readable, nothing to prove.
+            return;
+        }
+        assert!(matches!(
+            Store::probe_at(&store.root).unwrap().unwrap().1,
+            StoreFormat::Unreadable(_)
+        ));
+        let error = Store::open_at(&store.root).unwrap_err();
+        assert!(error.to_string().contains("cannot read"), "{error}");
+        assert_eq!(store::refusal_fix(&error), Some("tog gc --reset"));
+
+        let (result, text) = run(&store, true);
+        result.unwrap();
+        assert!(text.contains("would remove"), "{text}");
+        run(&store, false).0.unwrap();
+        assert_eq!(
+            Store::probe_at(&store.root).unwrap().unwrap().1,
+            StoreFormat::Current
+        );
+    }
+
+    /// While a reset holds the root, `Store::open` waits: it neither reads
+    /// the half-emptied store nor creates namespaces inside it.
+    #[test]
+    fn open_waits_for_the_root_a_reset_holds() {
+        let temp = TempStore::new("reset-root-lock");
+        let store = temp.store();
+        let held = store::lock_root_for_test(&store.root);
+        fs::remove_file(store.root.join(FORMAT_FILE)).unwrap();
+        fs::remove_dir_all(store.root.join("objects")).unwrap();
+        let root = store.root.clone();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let opener = std::thread::spawn(move || {
+            sender.send(Store::open_at(&root).map(|_| ())).unwrap();
+        });
+        assert!(
+            receiver.recv_timeout(Duration::from_millis(300)).is_err(),
+            "open did not wait for the held root"
+        );
+        assert!(
+            !store.root.join("objects").exists(),
+            "open created a namespace"
+        );
+        // The reset finishes: namespaces, then the marker.
+        store.reinitialize().unwrap();
+        drop(held);
+        receiver
+            .recv_timeout(Duration::from_secs(30))
+            .unwrap()
+            .unwrap();
+        opener.join().unwrap();
     }
 }

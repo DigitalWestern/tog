@@ -51,6 +51,13 @@ fn main() {
             ui::error(message)
         }
     };
+    // A store this tog refuses to open fails with the reason and, on its
+    // own line, the one command that is the way out.
+    let report_failure = |error: &std::io::Error| match tog::kernel::store::refusal_fix(error) {
+        Some(fix) if json => ui::error_json_with_fix(&error.to_string(), fix),
+        Some(fix) => ui::error_with_fix(&error.to_string(), fix),
+        None => report(&error.to_string()),
+    };
     if let Err(error) = ui::init(options.quiet, options.verbose, options.no_color) {
         report(&format!("cannot set up output: {error}"));
         exit(cli::EXIT_FAILURE);
@@ -74,14 +81,14 @@ fn main() {
     let command = match commands::resolve(pending) {
         Ok(command) => command,
         Err(error) => {
-            report(&error.to_string());
+            report_failure(&error);
             exit(cli::EXIT_FAILURE);
         }
     };
     let code = match commands::dispatch(command, options.sync) {
         Ok(code) => code,
         Err(error) => {
-            report(&error.to_string());
+            report_failure(&error);
             cli::EXIT_FAILURE
         }
     };

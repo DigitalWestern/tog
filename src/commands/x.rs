@@ -153,9 +153,7 @@ pub fn environment_name(
     package: &str,
     version: Option<&str>,
 ) -> io::Result<String> {
-    let store = Store {
-        root: store_root.to_path_buf(),
-    };
+    let store = Store::handle(store_root.to_path_buf());
     let toolchain = x_toolchain(platform, cwd, ecosystem)?;
     let runtime_object = runtime_object_id(platform, ecosystem, &toolchain)?;
     let (_, helper_objects) = x_helpers(platform, cwd, ecosystem)?;
@@ -1370,7 +1368,10 @@ fn originating_store(root: &Path) -> io::Result<Origin> {
                     store_root.display()
                 )));
             }
-            return Ok(Origin::Store(Store { root: store_root }));
+            // A handle only: `clean` takes the exclusive lease on it before
+            // it reads or removes anything, and the lease validates the
+            // store's format marker.
+            return Ok(Origin::Store(Store::handle(store_root)));
         }
     }
     closure_owner(root)
@@ -1500,6 +1501,35 @@ fn registration_for(root: &Path) -> io::Result<Registration> {
 /// ordinary GC pass; deleting a projection is deliberately not object GC.
 // Reviewed site (tests/architecture.rs): operation boundary: command entry point.
 #[allow(clippy::disallowed_methods)]
+/// The exclusive lease `clean` removes one environment under, or `None`
+/// with the skip already printed. The lease validates the store's format
+/// marker. A recorded store this tog does not read is not ours to change:
+/// its registration stays, so the root that registration protects stays
+/// too. It is a skip rather than a failure because the store named may not
+/// be the configured one, and the fix belongs to that store.
+fn clean_lease(origin_store: &Store, environment: &Path) -> io::Result<Option<StoreActivity>> {
+    match origin_store.try_activity_exclusive() {
+        Ok(Some(activity)) => Ok(Some(activity)),
+        Ok(None) => {
+            println!(
+                "tog: skipped x environment {} (in use by a running tool; retry later; originating store is busy)",
+                environment.display()
+            );
+            Ok(None)
+        }
+        Err(error) => match store::refusal_fix(&error) {
+            Some(fix) => {
+                println!(
+                    "tog: skipped x environment {} (its originating store is not one this tog reads: {error}; fix: {fix})",
+                    environment.display()
+                );
+                Ok(None)
+            }
+            None => Err(error),
+        },
+    }
+}
+
 pub fn clean(request: CleanRequest) -> io::Result<()> {
     let filter = clean_filter(request)?;
     let x_dir = home()?.join(".tog/x");
@@ -1537,11 +1567,7 @@ pub fn clean(request: CleanRequest) -> io::Result<()> {
             Origin::Store(store) => store.clone(),
             Origin::Empty | Origin::Unknown(_) => Store::open()?,
         };
-        let Some(activity) = origin_store.try_activity_exclusive()? else {
-            println!(
-                "tog: skipped x environment {} (in use by a running tool; retry later; originating store is busy)",
-                candidate.path.display()
-            );
+        let Some(activity) = clean_lease(&origin_store, &candidate.path)? else {
             skipped += 1;
             continue;
         };
@@ -1979,9 +2005,7 @@ mod tests {
     /// being equal keeps one.
     #[test]
     fn the_x_key_follows_the_runtime() {
-        let store = Store {
-            root: PathBuf::from("/tmp/tog-x-key-fixture"),
-        };
+        let store = Store::for_test(PathBuf::from("/tmp/tog-x-key-fixture"));
         let platform = Platform::host().unwrap();
         let selected = fixed_selection("python", "cpython", "3.12.14");
         let name = |toolchain: &Selected, runtime_object: &str| {
@@ -2050,9 +2074,7 @@ mod tests {
     /// request is still the `x/3` golden, so only the helper moved it.
     #[test]
     fn x_root_names_are_byte_identical_goldens() {
-        let store = Store {
-            root: PathBuf::from("/home/golden/.tog/store"),
-        };
+        let store = Store::for_test(PathBuf::from("/home/golden/.tog/store"));
         let platform = Platform::X86_64UnknownLinuxGnu;
         let python = fixed_selection("python", "cpython", "3.12.14");
         let node = fixed_selection("node", "node", "24.20.0");
@@ -2408,9 +2430,7 @@ mod tests {
         let root = x_dir.join("py-ruff-registry");
         fs::create_dir_all(base.join("other-store/objects")).unwrap();
         fs::create_dir_all(base.join("other-store/meta")).unwrap();
-        let store = Store {
-            root: base.join("other-store").canonicalize().unwrap(),
-        };
+        let store = Store::for_test(base.join("other-store").canonicalize().unwrap());
         let object = store.root.join("objects").join("a".repeat(40) + "-env");
         fs::create_dir_all(&object).unwrap();
         fs::create_dir_all(root.join(".tog/closures")).unwrap();
@@ -2647,9 +2667,7 @@ mod tests {
         // `Store::has_with_activity` takes the publish lock under `tmp/`.
         fs::create_dir_all(base.join("store/tmp")).unwrap();
         // Closures record the store's own canonical object path.
-        let store = Store {
-            root: base.join("store").canonicalize().unwrap(),
-        };
+        let store = Store::for_test(base.join("store").canonicalize().unwrap());
         let object = store.root.join("objects/test-env");
         let executable = object.join("bin/ruff");
         fs::write(&executable, "#!/bin/sh\nexit 0\n").unwrap();
@@ -2893,9 +2911,7 @@ mod tests {
         fs::create_dir_all(base.join("store/objects/test-node-env")).unwrap();
         fs::create_dir_all(base.join("store/meta")).unwrap();
         fs::create_dir_all(base.join("store/tmp")).unwrap();
-        let store = Store {
-            root: base.join("store").canonicalize().unwrap(),
-        };
+        let store = Store::for_test(base.join("store").canonicalize().unwrap());
         let object = store.root.join("objects/test-node-env");
         fs::set_permissions(&object, fs::Permissions::from_mode(0o555)).unwrap();
         fs::write(

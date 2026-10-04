@@ -3275,9 +3275,7 @@ mod tests {
         let plain = with_exceptions(dir, &[]);
         let plain_state = inspect::closure_state(host(), dir, &plain).unwrap();
         let store_dir = TempDir::named("audit-readers-store");
-        let store = crate::kernel::store::Store {
-            root: store_dir.0.clone(),
-        };
+        let store = crate::kernel::store::Store::for_test(store_dir.0.clone());
         let plain_root = format!("{:?}", store.root_record_from_project(dir));
         let plain_sbom = format!("{:?}", crate::commands::sbom::generate(dir));
         let joined = with_resolution(

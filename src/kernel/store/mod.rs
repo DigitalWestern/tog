@@ -25,8 +25,10 @@ mod roots;
 use env::home;
 #[cfg(test)]
 pub(crate) use env::STORE_ENV_LOCK;
+#[cfg(test)]
+pub(crate) use format::lock_root as lock_root_for_test;
 pub(crate) use format::RESET_REMOVES;
-pub use format::{StoreFormat, FORMAT_FILE, STORE_FORMAT};
+pub use format::{refusal_fix, Refused, StoreFormat, FORMAT_FILE, STORE_FORMAT};
 pub use fsops::*;
 pub use objects::*;
 pub use projection::*;
@@ -162,6 +164,42 @@ impl Store {
         Self::probe_at(&root)
     }
 
+    /// The configured store's canonical root, without reading anything in
+    /// it: `None` when there is no directory there yet. `tog gc --reset`
+    /// starts here, because it must work on a store whose marker cannot
+    /// even be read.
+    pub fn locate() -> io::Result<Option<PathBuf>> {
+        let (root, _) = Self::configured_root();
+        match root.canonicalize() {
+            Ok(root) => Ok(Some(root)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// A handle on the store at `root`, with nothing checked and nothing
+    /// created. Safe to hand out because a handle alone reads no record:
+    /// every lease primitive (`activity`, `try_activity_exclusive`)
+    /// validates the format marker once the lease is held, so an operation
+    /// on a store this tog refuses stops there. `root` should be canonical.
+    pub fn handle(root: PathBuf) -> Store {
+        Store { root }
+    }
+
+    /// `handle` for a unit test that lays a store out by hand: the root is
+    /// given the current format marker when it exists and has none, so the
+    /// leases the test takes accept it. A test of a refused store removes
+    /// or rewrites the marker afterwards.
+    #[cfg(test)]
+    pub(crate) fn for_test(root: impl Into<PathBuf>) -> Store {
+        let root = root.into();
+        let marker = root.join(FORMAT_FILE);
+        if root.is_dir() && fs::symlink_metadata(&marker).is_err() {
+            fs::write(&marker, StoreFormat::current_line()).unwrap();
+        }
+        Store { root }
+    }
+
     /// `probe` for a root the caller names.
     pub fn probe_at(root: &Path) -> io::Result<Option<(PathBuf, StoreFormat)>> {
         let root = match root.canonicalize() {
@@ -197,6 +235,10 @@ impl Store {
         let root = root
             .canonicalize()
             .map_err(|error| open_error(root, from_env, error))?;
+        // Held while the marker is read and whatever is missing is
+        // created: a reset holds the same lock while it empties the store,
+        // and a second tog creating this store waits for the first.
+        let _held = format::lock_root(&root).map_err(|error| open_error(&root, from_env, error))?;
         match format::probe(&root)? {
             StoreFormat::Current => {}
             // The marker goes in before the first namespace, so neither a
@@ -209,11 +251,40 @@ impl Store {
         Ok(Store { root })
     }
 
-    /// Make this root a fresh store of the current format: the marker, then
-    /// the namespaces. `gc::reset` calls it once the old records are gone.
-    pub(crate) fn initialize(&self) -> io::Result<()> {
-        format::write_marker(&self.root)?;
-        Self::create_namespaces(&self.root, false)
+    /// Make this root a fresh store of the current format, for `gc::reset`
+    /// once the old records are gone and while it holds `format::lock_root`.
+    /// The namespaces go in first and are made durable, and the marker is
+    /// published last: a crash before the marker leaves a store that is
+    /// still refused, never a marked one that is half initialised. (A new
+    /// store is created the other way round, marker first, in `open_root`:
+    /// there the marker is what tells its namespaces from an older tog's.)
+    pub(crate) fn reinitialize(&self) -> io::Result<()> {
+        Self::create_namespaces(&self.root, false)?;
+        let root = open_store_directory(&self.root, "store root")?;
+        // `cache` is the one namespace with directories below it: its own
+        // entries, then the root's.
+        fs::File::open(self.root.join("cache"))?.sync_all()?;
+        fsync_directory(root.as_raw_fd())?;
+        format::write_marker(&self.root)
+    }
+
+    /// Refuse unless the marker says this is a store this tog reads. Called
+    /// with a lease held, which is what makes the answer last: the one
+    /// operation that removes a marker, `gc --reset`, needs the exclusive
+    /// lease.
+    fn check_format(&self) -> io::Result<()> {
+        match format::probe(&self.root)? {
+            StoreFormat::Current => Ok(()),
+            StoreFormat::Uninitialized => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "there is no tog store at {}: the directory has no format marker and \
+                     nothing stored in it",
+                    self.root.display()
+                ),
+            )),
+            refused => refused.refuse(&self.root),
+        }
     }
 
     fn create_namespaces(root: &Path, from_env: bool) -> io::Result<()> {
@@ -287,16 +358,37 @@ impl Store {
     /// the in-process coordinator or the on-disk lock.
     // Reviewed site (tests/architecture.rs): lease primitive (operation boundary).
     #[allow(clippy::disallowed_methods)]
-    pub fn activity(&self, mode: ActivityMode) -> io::Result<StoreActivity> {
-        StoreActivity::acquire(&self.root, mode)
-    }
-
-    /// Try to acquire exclusive activity without waiting. Maintenance and GC
-    /// use this form so a running job can be reported as busy instead of
-    /// making cleanup contend with an unbounded command.
+    ///
+    /// The format marker is validated once the lease is held, before the
+    /// caller can read a record under it: a command that opened the store,
+    /// then waited here behind a `gc --reset`, is refused if the reset left
+    /// the store without its marker.
     // Reviewed site (tests/architecture.rs): lease primitive (operation boundary).
     #[allow(clippy::disallowed_methods)]
+    pub fn activity(&self, mode: ActivityMode) -> io::Result<StoreActivity> {
+        let activity = StoreActivity::acquire(&self.root, mode)?;
+        self.check_format()?;
+        Ok(activity)
+    }
+
+    /// Try to acquire exclusive activity without waiting. GC uses this form
+    /// so a running job can be reported as busy instead of making cleanup
+    /// contend with an unbounded command. The format marker is validated
+    /// under the lease, as in `activity`.
     pub fn try_activity_exclusive(&self) -> io::Result<Option<StoreActivity>> {
+        let Some(activity) = self.try_activity_exclusive_unchecked()? else {
+            return Ok(None);
+        };
+        self.check_format()?;
+        Ok(Some(activity))
+    }
+
+    /// `try_activity_exclusive` without the format check, for the one
+    /// operation that exists to work on a store this tog refuses:
+    /// `gc --reset`, which reads no record.
+    // Reviewed site (tests/architecture.rs): lease primitive (operation boundary).
+    #[allow(clippy::disallowed_methods)]
+    pub(crate) fn try_activity_exclusive_unchecked(&self) -> io::Result<Option<StoreActivity>> {
         StoreActivity::try_exclusive(&self.root)
     }
 
@@ -1492,9 +1584,10 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("is not a real directory"));
-        let refusal = pre_epoch.unwrap_err().to_string();
+        let refusal = pre_epoch.unwrap_err();
+        assert_eq!(refusal_fix(&refusal), Some("tog gc --reset"));
+        let refusal = refusal.to_string();
         assert!(refusal.contains("has no format marker"), "{refusal}");
-        assert!(refusal.contains("`tog gc --reset`"), "{refusal}");
         assert!(!old_store.join(FORMAT_FILE).exists());
     }
 
@@ -1544,7 +1637,7 @@ mod tests {
         );
         assert!(text.contains("has no format marker"), "{text}");
         assert!(text.contains("an older tog wrote it"), "{text}");
-        assert!(text.contains("`tog gc --reset`"), "{text}");
+        assert_eq!(refusal_fix(&error), Some("tog gc --reset"));
         assert!(text.contains("move the directory aside"), "{text}");
         assert!(!old.join(FORMAT_FILE).exists());
         assert!(!old.join("cache").exists(), "a refused store was changed");
@@ -1553,11 +1646,11 @@ mod tests {
         let newer = temp.0.join("newer");
         fs::create_dir(&newer).unwrap();
         fs::write(newer.join(FORMAT_FILE), b"tog-store 2\n").unwrap();
-        let text = Store::open_at(&newer).unwrap_err().to_string();
+        let error = Store::open_at(&newer).unwrap_err();
+        assert_eq!(refusal_fix(&error), Some("tog update --self"));
+        let text = error.to_string();
         assert!(text.contains("a newer tog wrote it"), "{text}");
         assert!(text.contains("tog-store 2"), "{text}");
-        assert!(text.contains("`tog update --self`"), "{text}");
-        assert!(text.contains("`tog gc --reset`"), "{text}");
         assert!(
             !newer.join("objects").exists(),
             "a refused store was changed"
@@ -1565,13 +1658,14 @@ mod tests {
         let unknown = temp.0.join("unknown");
         fs::create_dir(&unknown).unwrap();
         fs::write(unknown.join(FORMAT_FILE), b"hello\n").unwrap();
-        let text = Store::open_at(&unknown).unwrap_err().to_string();
+        let error = Store::open_at(&unknown).unwrap_err();
+        assert_eq!(refusal_fix(&error), Some("tog gc --reset"));
+        let text = error.to_string();
         assert!(
             text.contains("a format marker this tog does not know"),
             "{text}"
         );
         assert!(text.contains("hello"), "{text}");
-        assert!(text.contains("`tog gc --reset`"), "{text}");
         assert_eq!(fs::read(unknown.join(FORMAT_FILE)).unwrap(), b"hello\n");
     }
 

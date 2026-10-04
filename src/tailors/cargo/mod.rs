@@ -912,9 +912,7 @@ checksum = "{hash_b}"
     fn realization_refuses_a_foreign_selection_and_an_unknown_recipe() {
         use crate::kernel::toolchain::fixtures;
         let temp = TempDir::named("rust-refusals");
-        let store = Store {
-            root: temp.0.join("absent-store"),
-        };
+        let store = Store::for_test(temp.0.join("absent-store"));
         let lease = crate::kernel::testutil::detached_lease();
         let activity = &lease.1;
         let platform = Platform::host().unwrap();
@@ -1560,9 +1558,7 @@ checksum = "{hash_b}"
         for sub in ["objects", "meta", "cache/sha256", "tmp", "roots"] {
             fs::create_dir_all(store_root.join(sub)).unwrap();
         }
-        let store = Store {
-            root: store_root.canonicalize().unwrap(),
-        };
+        let store = Store::for_test(store_root.canonicalize().unwrap());
         let lease = store
             .activity(crate::kernel::activity::ActivityMode::Shared)
             .unwrap();

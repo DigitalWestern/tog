@@ -190,6 +190,23 @@ pub fn error(message: &str) {
     write_error_channel(&format!("tog: {}: {message}\n", paint("error", RED)));
 }
 
+/// A failure with one command that is the way out: the error line, then the
+/// same `fix:` line an advisory carries. Always visible, like `error`.
+pub fn error_with_fix(message: &str, fix: &str) {
+    debug_assert_command(message, fix);
+    write_error_channel(&format!(
+        "tog: {}: {message}\n{}",
+        paint("error", RED),
+        fix_line(fix)
+    ));
+}
+
+/// `error_with_fix` for a `--json` command: the command is a second key.
+pub fn error_json_with_fix(message: &str, fix: &str) {
+    let object = serde_json::json!({ "error": message, "fix": fix });
+    write_error_channel(&format!("{object}\n"));
+}
+
 /// The same failure for a `--json` command: one JSON object on stderr, so
 /// stdout carries the document or nothing at all and a script never parses
 /// prose. Never colored: this line is read by a program.

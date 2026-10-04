@@ -389,9 +389,7 @@ mod tests {
             fs::write(dir.join(format!("{ecosystem}.lock")), "pinned 1.0.0\n").unwrap();
         }
         Fixture {
-            store: Store {
-                root: root.canonicalize().unwrap(),
-            },
+            store: Store::for_test(root.canonicalize().unwrap()),
             dir: dir.canonicalize().unwrap(),
             _temp: temp,
         }

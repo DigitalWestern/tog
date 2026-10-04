@@ -1368,10 +1368,15 @@ fn raw_child_at(tokens: &[(Token, String)], i: usize, names: &Names) -> bool {
         || path_call(tokens, i, &names.commands, SPAWNS)
 }
 
-/// A lease taken: `.activity(`/`.try_activity_exclusive(`, the same as a
-/// `Store` path, or `StoreActivity::acquire`/`try_exclusive`, under any alias.
+/// A lease taken: `.activity(`/`.try_activity_exclusive(` (or its
+/// `_unchecked` form), the same as a `Store` path, or
+/// `StoreActivity::acquire`/`try_exclusive`, under any alias.
 fn lease_at(tokens: &[(Token, String)], i: usize, names: &Names) -> bool {
-    const STORE: &[&str] = &["activity", "try_activity_exclusive"];
+    const STORE: &[&str] = &[
+        "activity",
+        "try_activity_exclusive",
+        "try_activity_exclusive_unchecked",
+    ];
     method_call(tokens, i, STORE)
         || path_call(tokens, i, &names.stores, STORE)
         || path_call(tokens, i, &names.activities, &["acquire", "try_exclusive"])
@@ -1459,6 +1464,12 @@ const LEASE_BOUNDARIES: &[(&str, &str, usize)] = &[
     // The primitives themselves.
     ("src/kernel/store/mod.rs", "activity", 1),
     ("src/kernel/store/mod.rs", "try_activity_exclusive", 1),
+    // The one primitive that does not validate the format marker.
+    (
+        "src/kernel/store/mod.rs",
+        "try_activity_exclusive_unchecked",
+        1,
+    ),
     // Command entry points: the shared lease every tailor command borrows
     // (`Context`), and the commands that open the store without one.
     ("src/kernel/context.rs", "open_with_project_dir", 1),
@@ -1467,7 +1478,8 @@ const LEASE_BOUNDARIES: &[(&str, &str, usize)] = &[
     ("src/commands/gc.rs", "run", 1),
     // `gc --reset` opens a store `run` cannot: one tog refuses to read.
     ("src/commands/gc.rs", "reset", 1),
-    ("src/commands/x.rs", "clean", 1),
+    // `x --clean`, once per environment, on the store that owns it.
+    ("src/commands/x.rs", "clean_lease", 1),
     ("src/kernel/gc/mod.rs", "collect", 1),
     // Public root-registry calls for callers holding no lease (tests and
     // library users). Each has a `_with_activity` form that production uses.
@@ -1480,6 +1492,53 @@ const LEASE_BOUNDARIES: &[(&str, &str, usize)] = &[
     // lease on a scratch directory for tests with no store.
     ("src/kernel/testutil.rs", "detached_lease", 1),
 ];
+
+/// A `Store` made without reading its format marker: the struct written
+/// out (`Store { root }`) or `Store::handle(`, under any alias.
+fn unchecked_store_at(tokens: &[(Token, String)], i: usize, names: &Names) -> bool {
+    path_call(tokens, i, &names.stores, &["handle"])
+        || (matches!(token_at(tokens, i), Some(Token::Ident(name)) if names.stores.contains(name))
+            && is_punct(token_at(tokens, i + 1), '{')
+            && is_ident(token_at(tokens, i + 2), "root"))
+}
+
+/// The functions allowed to make a `Store` without validating its format
+/// marker, with how many times. Everything else goes through `Store::open`,
+/// `Store::existing` or `Store::open_at`, which refuse a store this tog
+/// does not read. A store made here is still validated before any record
+/// is read, because every lease but `try_activity_exclusive_unchecked`
+/// checks the marker once it is held.
+const UNCHECKED_STORES: &[(&str, &str, usize)] = &[
+    // The constructors: `open_root` and `existing` have just validated or
+    // written the marker, and `handle` is the unchecked form itself.
+    ("src/kernel/store/mod.rs", "open_root", 1),
+    ("src/kernel/store/mod.rs", "existing", 1),
+    ("src/kernel/store/mod.rs", "handle", 1),
+    // `gc --reset` empties a store tog refuses to read, and never reads a
+    // record of it.
+    ("src/commands/gc.rs", "reset", 1),
+    // A store named by an x environment's own records, which may not be the
+    // configured one: by its request record here, and by the object paths
+    // in its closure in `store_from_object_path`. `x --clean` leases either
+    // (validated) before it reads or removes anything.
+    ("src/commands/x.rs", "originating_store", 1),
+    ("src/comforter/mod.rs", "store_from_object_path", 1),
+    // Names an x environment's directory from the store's path alone, and
+    // reads nothing in the store.
+    ("src/commands/x.rs", "environment_name", 1),
+];
+
+#[test]
+fn stores_are_made_through_a_checked_constructor() {
+    assert_eq!(
+        count_sites(&[], unchecked_store_at),
+        expected_sites(UNCHECKED_STORES),
+        "a `Store` is made without validating its format marker; use \
+         `Store::open`/`existing`/`open_at` (or, for a store that is leased \
+         before any record is read, count it in UNCHECKED_STORES with the \
+         reason)"
+    );
+}
 
 #[test]
 fn store_children_borrow_the_callers_lease() {

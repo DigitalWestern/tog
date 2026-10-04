@@ -612,9 +612,7 @@ fn supervisor_harness() {
         int_counter();
     }
     let root = PathBuf::from(std::env::var_os("TOG_SUPERVISE_STORE").unwrap());
-    let store = Store {
-        root: root.canonicalize().unwrap(),
-    };
+    let store = Store::open_at(&root).unwrap();
     let activity = store.activity(ActivityMode::Shared).unwrap();
     let code = run_scenario(&scenario, &activity);
     drop(activity);

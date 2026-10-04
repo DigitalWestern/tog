@@ -828,7 +828,7 @@ pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
     ] {
         fs::create_dir_all(root.join(sub)).expect("Node identity fixture store");
     }
-    let store = Store { root };
+    let store = Store::for_test(root);
     let empty_plan = NpmPlan {
         node_version: node.version.clone(),
         packages: Vec::new(),
@@ -1142,9 +1142,7 @@ mod tests {
     #[test]
     fn node_env_identity_goldens_and_dropped_plan_entries() {
         crate::tailors::install_kinds();
-        let store = Store {
-            root: PathBuf::from("/fixture/tog-store"),
-        };
+        let store = Store::for_test(PathBuf::from("/fixture/tog-store"));
         let package = |path: &str, name: &str, version: &str| NpmPackage {
             path: path.into(),
             name: name.into(),
@@ -1256,9 +1254,7 @@ mod tests {
     #[test]
     fn a_producer_that_skips_a_plan_input_is_refused() {
         crate::tailors::install_kinds();
-        let store = Store {
-            root: PathBuf::from("/fixture/tog-store"),
-        };
+        let store = Store::for_test(PathBuf::from("/fixture/tog-store"));
         let package = |path: &str, name: &str, version: &str| NpmPackage {
             path: path.into(),
             name: name.into(),
@@ -1374,9 +1370,7 @@ mod tests {
 
     #[test]
     fn patch_identity_spelling_binds_pnpm_9_content_by_sha256() {
-        let store = Store {
-            root: PathBuf::from("/nonexistent/tog-test-store"),
-        };
+        let store = Store::for_test(PathBuf::from("/nonexistent/tog-test-store"));
         let node_obj = PathBuf::from("/nonexistent/nodejs");
         let identity_for = |patch: NpmPatch| {
             let plan = NpmPlan {
@@ -1437,9 +1431,7 @@ mod tests {
 
     #[test]
     fn darwin_binding_gyp_keeps_legacy_identity_inputs() {
-        let store = Store {
-            root: PathBuf::from("/nonexistent/tog-test-store"),
-        };
+        let store = Store::for_test(PathBuf::from("/nonexistent/tog-test-store"));
         assert_eq!(
             native_libs_identity_id(&store, Platform::Aarch64AppleDarwin, true).unwrap(),
             None
@@ -1490,9 +1482,7 @@ mod tests {
         for subdir in ["objects", "meta", "cache/sha512", "tmp"] {
             fs::create_dir_all(root.join(subdir)).unwrap();
         }
-        let store = Store {
-            root: root.canonicalize().unwrap(),
-        };
+        let store = Store::for_test(root.canonicalize().unwrap());
         let activity = &store
             .activity(crate::kernel::activity::ActivityMode::Shared)
             .unwrap();
@@ -1637,9 +1627,7 @@ mod tests {
         for subdir in ["objects", "meta", "cache/sha256", "tmp"] {
             fs::create_dir_all(root.join(subdir)).unwrap();
         }
-        let store = Store {
-            root: root.canonicalize().unwrap(),
-        };
+        let store = Store::for_test(root.canonicalize().unwrap());
         let activity = &store
             .activity(crate::kernel::activity::ActivityMode::Shared)
             .unwrap();
@@ -1721,9 +1709,7 @@ mod tests {
         for subdir in ["objects", "meta", "cache/sha512", "tmp"] {
             std::fs::create_dir_all(root.join(subdir)).unwrap();
         }
-        let store = Store {
-            root: root.canonicalize().unwrap(),
-        };
+        let store = Store::for_test(root.canonicalize().unwrap());
         let activity = &store
             .activity(crate::kernel::activity::ActivityMode::Shared)
             .unwrap();
@@ -1801,9 +1787,7 @@ mod tests {
         for subdir in ["objects", "meta", "cache/sha256", "tmp"] {
             std::fs::create_dir_all(root.join(subdir)).unwrap();
         }
-        let store = Store {
-            root: root.canonicalize().unwrap(),
-        };
+        let store = Store::for_test(root.canonicalize().unwrap());
         let activity = &store
             .activity(crate::kernel::activity::ActivityMode::Shared)
             .unwrap();
@@ -1875,9 +1859,7 @@ mod tests {
         for subdir in ["objects", "meta", "cache/sha512", "tmp"] {
             std::fs::create_dir_all(root.join(subdir)).unwrap();
         }
-        let store = Store {
-            root: root.canonicalize().unwrap(),
-        };
+        let store = Store::for_test(root.canonicalize().unwrap());
         let activity = &store
             .activity(crate::kernel::activity::ActivityMode::Shared)
             .unwrap();
@@ -1970,9 +1952,7 @@ mod tests {
     /// access or download.
     #[test]
     fn realize_node_env_labels_a_runtime_failure_and_keeps_its_kind() {
-        let store = Store {
-            root: PathBuf::from("/nonexistent/tog-test-store"),
-        };
+        let store = Store::for_test(PathBuf::from("/nonexistent/tog-test-store"));
         let lease = crate::kernel::testutil::detached_lease();
         let plan = NpmPlan {
             node_version: "24.20.0".into(),
@@ -2002,9 +1982,7 @@ mod tests {
 
     #[test]
     fn realize_node_env_rejects_foreign_platform_before_store_access() {
-        let store = Store {
-            root: PathBuf::from("/nonexistent/tog-test-store"),
-        };
+        let store = Store::for_test(PathBuf::from("/nonexistent/tog-test-store"));
         let lease = crate::kernel::testutil::detached_lease();
         let activity = &lease.1;
         let plan = NpmPlan {
@@ -2434,9 +2412,7 @@ mod tests {
         ] {
             fs::create_dir_all(store_root.join(sub)).unwrap();
         }
-        let store = Store {
-            root: store_root.canonicalize().unwrap(),
-        };
+        let store = Store::for_test(store_root.canonicalize().unwrap());
         let lease = store
             .activity(crate::kernel::activity::ActivityMode::Shared)
             .unwrap();
@@ -2995,9 +2971,7 @@ mod tests {
         for subdir in ["objects", "meta", "cache/sha256", "tmp"] {
             fs::create_dir_all(root.join(subdir)).unwrap();
         }
-        let store = Store {
-            root: root.canonicalize().unwrap(),
-        };
+        let store = Store::for_test(root.canonicalize().unwrap());
         let platform = Platform::X86_64UnknownLinuxGnu;
         let node_obj = store.object_path("node-cache");
         let identity = |foreign_platform: bool| {
@@ -3057,9 +3031,7 @@ mod tests {
         for subdir in ["objects", "meta", "cache/sha256", "tmp"] {
             fs::create_dir_all(root.join(subdir)).unwrap();
         }
-        let store = Store {
-            root: root.canonicalize().unwrap(),
-        };
+        let store = Store::for_test(root.canonicalize().unwrap());
         let activity = &store
             .activity(crate::kernel::activity::ActivityMode::Shared)
             .unwrap();
@@ -3511,9 +3483,7 @@ mod tests {
     #[test]
     fn an_empty_node_env_names_its_empty_layout_in_the_identity() {
         let scratch = TempDir::named("npm-empty-layout");
-        let store = Store {
-            root: scratch.0.canonicalize().unwrap(),
-        };
+        let store = Store::for_test(scratch.0.canonicalize().unwrap());
         let platform = Platform::X86_64UnknownLinuxGnu;
         let node_obj = store.object_path("node-cache");
         let mut plan = NpmPlan {
@@ -3645,9 +3615,7 @@ mod toolchain_tests {
 
     #[test]
     fn realization_refuses_an_unknown_recipe_and_another_ecosystem() {
-        let store = Store {
-            root: std::env::temp_dir().join("tog-node-recipe-refusal"),
-        };
+        let store = Store::for_test(std::env::temp_dir().join("tog-node-recipe-refusal"));
         let lease = crate::kernel::testutil::detached_lease();
         let activity = &lease.1;
         // The row check is per platform; realization can only run for the

@@ -53,13 +53,7 @@ fn fixture_repo(root: &Path) -> (String, String) {
 }
 
 fn store_at(root: &Path) -> Store {
-    let store_root = root.join("store");
-    for sub in ["objects", "meta", "cache/sha256", "tmp"] {
-        std::fs::create_dir_all(store_root.join(sub)).unwrap();
-    }
-    Store {
-        root: store_root.canonicalize().unwrap(),
-    }
+    Store::open_at(&root.join("store")).unwrap()
 }
 
 /// Runs `realize` with the store's `tmp` read-only. A cache hit answers

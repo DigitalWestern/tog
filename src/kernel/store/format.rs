@@ -76,6 +76,36 @@ pub enum StoreFormat {
     /// A marker this tog cannot read as any format; the text says what is
     /// there instead.
     Unknown(String),
+    /// A marker that is there and cannot be opened or read (its mode, an
+    /// I/O error); the text is the system's reason. Nothing in the store is
+    /// trusted without it, and `tog gc --reset` replaces it without reading
+    /// it.
+    Unreadable(String),
+}
+
+/// The error a refused store is reported with: the reason as its message,
+/// and the one command that is the way out as a separate `fix`, so the
+/// top level prints it on its own `fix:` line.
+#[derive(Debug)]
+pub struct Refused {
+    pub message: String,
+    pub fix: &'static str,
+}
+
+impl std::fmt::Display for Refused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for Refused {}
+
+/// The `fix:` command of an error that is a store refusal, if it is one.
+pub fn refusal_fix(error: &io::Error) -> Option<&'static str> {
+    error
+        .get_ref()
+        .and_then(|inner| inner.downcast_ref::<Refused>())
+        .map(|refused| refused.fix)
 }
 
 impl StoreFormat {
@@ -89,30 +119,34 @@ impl StoreFormat {
         matches!(self, StoreFormat::Current | StoreFormat::Uninitialized)
     }
 
-    /// Why the store at `root` is not opened, with the way out, or `None`
-    /// for a store this tog may open. A sentence with no leading capital
-    /// and no final period, so it reads after `tog: error: ` and inside a
-    /// `doctor` row alike.
+    /// Why the store at `root` is not opened, or `None` for a store this
+    /// tog may open. A sentence with no leading capital and no final
+    /// period, so it reads after `tog: error: ` and inside a `doctor` row
+    /// alike. The command that is the way out is `fix`, printed on its own
+    /// line, so the prose names what it does and not how it is spelled.
     pub fn refusal(&self, root: &Path) -> Option<String> {
         let root = root.display();
-        let reset = "empty it with `tog gc --reset` (downloads are kept, and the next `tog` in \
-                     each project rebuilds what it needs), or move the directory aside";
+        let reset = "Emptying it keeps its downloads, and the next `tog` in each project \
+                     rebuilds what it needs (or move the directory aside)";
         match self {
             StoreFormat::Current | StoreFormat::Uninitialized => None,
             StoreFormat::PreEpoch => Some(format!(
                 "the store at {root} has no format marker: an older tog wrote it, and this tog \
-                 does not read its records; {reset}"
+                 does not read its records. {reset}"
             )),
             StoreFormat::Newer(format) => Some(format!(
                 "the store at {root} is format {FORMAT_WORD} {format} and this tog reads \
-                 {FORMAT_WORD} {STORE_FORMAT}: a newer tog wrote it. Update tog with `tog update \
-                 --self`, or point TOG_STORE at another directory; to give the store to this \
-                 older tog instead, {reset}"
+                 {FORMAT_WORD} {STORE_FORMAT}: a newer tog wrote it. Update this tog, or point \
+                 TOG_STORE at another directory"
             )),
             StoreFormat::Unknown(found) => Some(format!(
                 "the store at {root} has a format marker this tog does not know ({found}; \
                  expected \"{FORMAT_WORD} {STORE_FORMAT}\"): the marker is damaged, or the \
-                 directory is not a tog store; {reset}"
+                 directory is not a tog store. {reset}"
+            )),
+            StoreFormat::Unreadable(why) => Some(format!(
+                "the store at {root} has a format marker this tog cannot read ({why}), so \
+                 nothing in it is trusted. {reset}"
             )),
         }
     }
@@ -129,15 +163,49 @@ impl StoreFormat {
     /// `refusal` as the error a command returns.
     pub(super) fn refuse(&self, root: &Path) -> io::Result<()> {
         match self.refusal(root) {
-            Some(message) => Err(io::Error::new(io::ErrorKind::InvalidData, message)),
+            Some(message) => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                Refused {
+                    message,
+                    fix: self.fix(),
+                },
+            )),
             None => Ok(()),
         }
     }
 }
 
+/// Hold the store root against a concurrent creation or reset: an
+/// exclusive `flock` on the root directory itself, released when the
+/// returned handle is dropped. `Store::open` holds it while it reads the
+/// marker and creates what is missing, and `gc::reset` holds it from the
+/// moment it removes the marker until the new one is published, so an open
+/// never initialises namespaces inside a store that is being emptied and
+/// never judges one that is half created.
+pub(crate) fn lock_root(root: &Path) -> io::Result<fs::File> {
+    let directory = open_store_directory(root, "store root")?;
+    directory.lock()?;
+    Ok(directory)
+}
+
 /// Read what the marker says about `root`, changing nothing. `root` must
 /// exist.
 pub fn probe(root: &Path) -> io::Result<StoreFormat> {
+    if let Some(format) = read_marker(root)? {
+        return Ok(format);
+    }
+    if !has_namespace(root)? {
+        return Ok(StoreFormat::Uninitialized);
+    }
+    // A tog creating this store publishes the marker before its first
+    // namespace. So namespaces seen after a missing marker may be a store
+    // being created right now, whose marker has landed since: read it again
+    // before calling the store unmarked.
+    Ok(read_marker(root)?.unwrap_or(StoreFormat::PreEpoch))
+}
+
+/// What the marker file says, or `None` when there is no marker file.
+fn read_marker(root: &Path) -> io::Result<Option<StoreFormat>> {
     let path = root.join(FORMAT_FILE);
     // Open first, then check what was opened, and never follow a symlink:
     // the marker decides whether every record under this root is trusted.
@@ -147,34 +215,34 @@ pub fn probe(root: &Path) -> io::Result<StoreFormat> {
         .open(&path);
     let file = match file {
         Ok(file) => file,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            return if has_namespace(root)? {
-                Ok(StoreFormat::PreEpoch)
-            } else {
-                Ok(StoreFormat::Uninitialized)
-            };
-        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(error) => {
             // A symlink (ELOOP) or a socket (ENXIO, EOPNOTSUPP) fails to
-            // open. Either is a marker nobody wrote, not an I/O failure.
+            // open: a marker nobody wrote. A regular file that fails to
+            // open is a marker that cannot be read, which is an answer
+            // about the store and not a reason to say nothing at all.
             return match fs::symlink_metadata(&path) {
-                Ok(stat) if !stat.is_file() => Ok(StoreFormat::Unknown(
+                Ok(stat) if !stat.is_file() => Ok(Some(StoreFormat::Unknown(
                     "the marker is not a regular file".into(),
-                )),
-                _ => Err(error),
+                ))),
+                Ok(_) => Ok(Some(StoreFormat::Unreadable(error.to_string()))),
+                Err(gone) if gone.kind() == io::ErrorKind::NotFound => Ok(None),
+                Err(_) => Err(error),
             };
         }
     };
     if !file.metadata()?.is_file() {
-        return Ok(StoreFormat::Unknown(
+        return Ok(Some(StoreFormat::Unknown(
             "the marker is not a regular file".into(),
-        ));
+        )));
     }
     // The marker is one short line. Anything longer is not a marker, and is
     // not read to its end to find that out.
     let mut bytes = Vec::new();
-    file.take(65).read_to_end(&mut bytes)?;
-    Ok(parse(&bytes))
+    match file.take(65).read_to_end(&mut bytes) {
+        Ok(_) => Ok(Some(parse(&bytes))),
+        Err(error) => Ok(Some(StoreFormat::Unreadable(error.to_string()))),
+    }
 }
 
 /// What a marker holding `bytes` says.
@@ -350,20 +418,79 @@ mod tests {
         assert_eq!(StoreFormat::Uninitialized.refusal(root), None);
         for format in [
             StoreFormat::PreEpoch,
-            StoreFormat::Newer(2),
             StoreFormat::Unknown("it reads \"x\"".into()),
+            StoreFormat::Unreadable("Permission denied (os error 13)".into()),
         ] {
             assert!(!format.usable());
             let message = format.refusal(root).unwrap();
             assert!(message.contains("/somewhere/store"), "{message}");
-            assert!(message.contains("`tog gc --reset`"), "{message}");
             assert!(message.contains("move the directory aside"), "{message}");
+            // The command is the fix line's, never spelled in the prose.
+            assert!(!message.contains("--reset"), "{message}");
+            assert_eq!(format.fix(), "tog gc --reset");
+            let error = format.refuse(root).unwrap_err();
+            assert_eq!(error.to_string(), message);
+            assert_eq!(refusal_fix(&error), Some("tog gc --reset"));
         }
-        let newer = StoreFormat::Newer(2).refusal(root).unwrap();
+        let newer = StoreFormat::Newer(2);
+        assert!(!newer.usable());
+        assert_eq!(newer.fix(), "tog update --self");
+        let newer = newer.refusal(root).unwrap();
         assert!(newer.contains("a newer tog wrote it"), "{newer}");
         assert!(newer.contains("tog-store 2"), "{newer}");
-        assert!(newer.contains("`tog update --self`"), "{newer}");
         let old = StoreFormat::PreEpoch.refusal(root).unwrap();
         assert!(old.contains("an older tog wrote it"), "{old}");
+        let unreadable = StoreFormat::Unreadable("Permission denied".into())
+            .refusal(root)
+            .unwrap();
+        assert!(unreadable.contains("Permission denied"), "{unreadable}");
+        assert_eq!(refusal_fix(&io::Error::other("something else")), None);
+    }
+
+    /// Many togs creating one store at once: every one of them ends with
+    /// the store open, and none takes the other's namespaces for a store
+    /// written before the marker existed.
+    #[test]
+    fn concurrent_creation_never_reads_as_a_store_without_a_marker() {
+        for round in 0..20 {
+            let temp = TempDir::named(&format!("store-format-race-{round}"));
+            let root = temp.0.join("store");
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(16));
+            let threads: Vec<_> = (0..16)
+                .map(|index| {
+                    let root = root.clone();
+                    let barrier = barrier.clone();
+                    std::thread::spawn(move || {
+                        barrier.wait();
+                        // Half create the store, half only look at it.
+                        if index % 2 == 0 {
+                            Store::open_at(&root).map(|_| StoreFormat::Current)
+                        } else {
+                            Ok(Store::probe_at(&root)?
+                                .map_or(StoreFormat::Uninitialized, |(_, format)| format))
+                        }
+                    })
+                })
+                .collect();
+            for thread in threads {
+                let seen = thread.join().unwrap().unwrap();
+                assert!(seen.usable(), "round {round}: {seen:?}");
+            }
+            assert_eq!(probe(&root).unwrap(), StoreFormat::Current);
+        }
+    }
+
+    /// The window the re-read closes, held open by hand: the marker is
+    /// absent on the first read and published, with its namespaces, by the
+    /// time the namespaces are looked for.
+    #[test]
+    fn a_marker_published_between_the_two_reads_is_honoured() {
+        let temp = TempDir::named("store-format-reread");
+        assert_eq!(read_marker(&temp.0).unwrap(), None);
+        write_marker(&temp.0).unwrap();
+        fs::create_dir(temp.0.join("objects")).unwrap();
+        assert!(has_namespace(&temp.0).unwrap());
+        assert_eq!(read_marker(&temp.0).unwrap(), Some(StoreFormat::Current));
+        assert_eq!(probe(&temp.0).unwrap(), StoreFormat::Current);
     }
 }
