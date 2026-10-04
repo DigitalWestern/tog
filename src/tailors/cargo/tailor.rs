@@ -145,13 +145,14 @@ impl Tailor for Cargo {
         let vendor_obj = cargo::realize_vendor(store, activity, &inputs.plan)?;
         // The workspace root the closure and cargo-home belong to: the held
         // project, or a directory resolved from it.
-        let workspace = inputs::workspace_root(project, &inputs.root)?;
+        let workspace = &inputs.workspace;
+        workspace.check_still_named()?;
         if fresh {
             workspace.remove_dir_all(Path::new(".tog/cargo-home"))?;
         }
         cargo::project_cargo_env(
             activity,
-            &workspace,
+            workspace,
             rust_obj,
             &vendor_obj,
             &inputs.plan,
@@ -209,10 +210,11 @@ impl Tailor for Cargo {
             toolchain,
         )?;
         let vendor_obj = cargo::realize_vendor(store, activity, &inputs.plan)?;
-        let workspace = inputs::workspace_root(&project, &inputs.root)?;
+        let workspace = &inputs.workspace;
+        workspace.check_still_named()?;
         cargo::project_cargo_env(
             activity,
-            &workspace,
+            workspace,
             &inputs.rust_obj,
             &vendor_obj,
             &inputs.plan,
@@ -239,10 +241,8 @@ impl Tailor for Cargo {
         _cmd: &[String],
         command: &mut Command,
     ) -> io::Result<Vec<String>> {
-        let dir = project.path();
         let activity = &ctx.activity;
         let mut prefix = Vec::new();
-        let cargo_home = dir.join(".tog/cargo-home");
         if project.input_entry(Path::new(".tog/cargo-home"))? != Entry::Absent {
             let closure = comforter::read_closure_in(project, "cargo")?;
             // Store-contained resolution: a project-editable closure must never
@@ -254,9 +254,15 @@ impl Tailor for Cargo {
                 "rust_object",
                 "bin/rustc",
             )?;
+            let cargo_home = project
+                .subdir(Path::new(".tog/cargo-home"))?
+                .ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::NotFound, "held Cargo home disappeared")
+                })?
+                .current_name()?;
             prefix.push(cargo_home.join("bin").to_string_lossy().into_owned());
             prefix.push(rust_obj.join("bin").to_string_lossy().into_owned());
-            command.env("CARGO_HOME", cargo_home.canonicalize()?);
+            command.env("CARGO_HOME", &cargo_home);
             command.env_remove("RUSTUP_HOME");
             command.env_remove("RUSTUP_TOOLCHAIN");
         }

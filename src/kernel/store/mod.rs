@@ -21,6 +21,7 @@ mod objects;
 mod projection;
 mod records;
 mod roots;
+mod roots_lookup;
 
 use env::home;
 #[cfg(test)]
