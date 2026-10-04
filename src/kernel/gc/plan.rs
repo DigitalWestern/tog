@@ -164,6 +164,33 @@ pub(super) fn validate<'a>(snapshot: &'a Snapshot) -> io::Result<Validated<'a>> 
     })
 }
 
+/// Every leftover under `tmp/` past the stage window.
+fn stale_temporaries(snapshot: &Snapshot) -> io::Result<Vec<Removal>> {
+    let mut temporaries = Vec::new();
+    for entry in &snapshot.stages {
+        if !older_than_at(snapshot.now, &entry.stat, STAGE_WINDOW) {
+            continue;
+        }
+        let bytes = tree_size(&entry.path)?;
+        temporaries.push(Removal {
+            parent: entry.parent,
+            name: entry.name.clone(),
+            stat: entry.stat,
+            companion: None,
+            label: format!("stage {}", entry.path.display()),
+            display: format!(
+                "stale {} {} ({})",
+                tmp_kind(&entry.name),
+                entry.path.display(),
+                size(bytes)
+            ),
+            bytes,
+            counter: Counter::Stages,
+        });
+    }
+    Ok(temporaries)
+}
+
 /// Every record whose object is gone. Validation proved no retained object
 /// needs one.
 fn stray_record_removals(snapshot: &Snapshot) -> impl Iterator<Item = Removal> + '_ {
@@ -304,22 +331,7 @@ pub(super) fn plan(validated: &Validated, options: &Options) -> io::Result<Sweep
         });
     }
 
-    for entry in &snapshot.stages {
-        if !older_than_at(snapshot.now, &entry.stat, STAGE_WINDOW) {
-            continue;
-        }
-        let bytes = tree_size(&entry.path)?;
-        removals.push(Removal {
-            parent: entry.parent,
-            name: entry.name.clone(),
-            stat: entry.stat,
-            companion: None,
-            label: format!("stage {}", entry.path.display()),
-            display: format!("stale stage {} ({})", entry.path.display(), size(bytes)),
-            bytes,
-            counter: Counter::Stages,
-        });
-    }
+    removals.extend(stale_temporaries(snapshot)?);
 
     if options.project {
         for entry in &snapshot.forests {

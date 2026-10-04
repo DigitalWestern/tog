@@ -1606,6 +1606,50 @@ mod tests {
             .is_file());
     }
 
+    /// A tog killed mid-write leaves a temporary under `tmp/`. Every kind tog
+    /// writes is swept once it is past the stage window. A fresh one, the
+    /// publish lock, and a name tog never writes are left alone.
+    #[test]
+    fn every_kind_of_crashed_temporary_is_swept_once_stale() {
+        let temp = TempStore::new("tmp-leftovers");
+        let store = temp.store();
+        register_objects(&store, &temp.root.join("project"), &[]);
+        let tmp = store.root.join("tmp");
+        let make = |name: &str, kind: libc::mode_t| {
+            let path = tmp.join(name);
+            if kind == libc::S_IFDIR {
+                fs::create_dir(&path).unwrap();
+                fs::write(path.join("partial"), b"x").unwrap();
+            } else {
+                fs::write(&path, b"x").unwrap();
+            }
+            path
+        };
+        let mut stale = Vec::new();
+        let mut fresh = Vec::new();
+        for (prefix, kind) in read::TMP_LEFTOVERS {
+            let old = make(&format!("{prefix}0-0-crashed"), *kind);
+            age(&old);
+            stale.push(old);
+            fresh.push(make(&format!("{prefix}0-0-running"), *kind));
+        }
+        let foreign = make("not-a-tog-temporary", libc::S_IFREG);
+        age(&foreign);
+        fresh.push(foreign);
+        fresh.push(tmp.join(".publish.lock"));
+        store.publish_lock().unwrap();
+
+        let (result, text) = sweep(&store, Options::default());
+        let report = result.unwrap();
+        assert_eq!(report.stages, stale.len(), "{text}");
+        for path in &stale {
+            assert!(!path.exists(), "{} survived: {text}", path.display());
+        }
+        for path in &fresh {
+            assert!(path.exists(), "{} was removed: {text}", path.display());
+        }
+    }
+
     /// A dry run writes nothing: no record, no root, no timestamp.
     #[test]
     fn dry_run_removes_no_root_rewrites_no_record_and_refreshes_no_timestamp() {

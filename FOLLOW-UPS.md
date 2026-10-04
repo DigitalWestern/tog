@@ -109,7 +109,6 @@ After the proxy: the test-suite audit (#351) and then the quality review
   the 09-20 to 09-24 run. #264 holds the work order and the overall verdict.
   Each line is one issue and one PR, in order:
   - #238 http: pypi, rubygems, dotnet and deps call ureq directly, bypassing kernel::fetch.
-  - #242 gc: crashed download temp files in tmp/ are never removed.
   - #240 store: a CacheLease holds gc.lock exclusively, so separate tog processes download one at a time.
   - #244 supervise: waits forever for stderr EOF if the child leaves a background process.
   - #247 dead code: about 90 unused items hidden by pub mod, plus a CI check to keep it at zero.
