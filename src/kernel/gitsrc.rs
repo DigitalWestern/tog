@@ -279,8 +279,8 @@ fn supervise_git(
 }
 
 /// Which project-relative directories hold files tracked by any repository
-/// around them. Bind every query to the metadata found through held parents,
-/// including nested repositories and worktree/submodule .git files.
+/// around or inside them. Bind every query to held metadata, including
+/// nested repositories and worktree/submodule .git files.
 pub fn tracked_among(
     project: &crate::kernel::fsroot::ProjectRoot,
     paths: &[String],
@@ -292,20 +292,13 @@ pub fn tracked_among(
     let mut tracked = Vec::new();
     for path in paths {
         let relative = Path::new(path);
-        let parent = relative
-            .parent()
-            .filter(|p| !p.as_os_str().is_empty())
-            .unwrap_or(Path::new("."));
-        let name = relative
-            .file_name()
-            .ok_or_else(|| err("tracked-file query requires a relative directory name"))?;
-        let held = project.input_subdir(parent)?.ok_or_else(|| {
+        let held = project.input_subdir(relative)?.ok_or_else(|| {
             err(format!(
-                "directory {parent:?} disappeared before checking tracked source"
+                "directory {relative:?} disappeared before checking tracked source"
             ))
         })?;
         let mut dir = open_file_at(held.as_raw_fd(), b".", flags, 0)?;
-        let mut relative = PathBuf::from(name);
+        let mut relative = PathBuf::from(".");
         let mut protected = false;
         loop {
             match stat_at(dir.as_raw_fd(), b".git") {
@@ -338,6 +331,10 @@ pub fn tracked_among(
             relative = PathBuf::from(child).join(relative);
             dir = parent;
         }
+        if !protected {
+            let mut seen = std::collections::HashSet::new();
+            protected = tracked_repositories_inside(held.as_raw_fd(), activity, &mut seen, 0)?;
+        }
         if protected {
             tracked.push(path.clone());
         }
@@ -350,7 +347,6 @@ fn tracked_in_git_index(
     relative: &Path,
     activity: &StoreActivity,
 ) -> io::Result<bool> {
-    use std::os::unix::ffi::OsStrExt;
     use std::os::unix::process::CommandExt;
     let mut command = Command::new(GIT);
     // An explicit git-dir refuses damaged metadata instead of discovering
@@ -394,11 +390,57 @@ fn tracked_in_git_index(
             String::from_utf8_lossy(&output.stderr).trim()
         )));
     }
+    // Git already applied the fixed literal pathspec. Any returned index
+    // entry protects the directory, including when the pathspec is '.'.
     Ok(output
         .stdout
         .split(|byte| *byte == 0)
-        .filter(|file| !file.is_empty())
-        .any(|file| Path::new(std::ffi::OsStr::from_bytes(file)).starts_with(relative)))
+        .any(|file| !file.is_empty()))
+}
+
+fn tracked_repositories_inside(
+    fd: std::os::fd::RawFd,
+    activity: &StoreActivity,
+    seen: &mut std::collections::HashSet<(libc::dev_t, libc::ino_t)>,
+    depth: usize,
+) -> io::Result<bool> {
+    use crate::kernel::store::{open_file_at, read_dir_names_at, stat_at};
+    use std::os::fd::AsRawFd;
+    use std::os::unix::ffi::OsStrExt;
+    let current = stat_at(fd, b".")?;
+    if !seen.insert((current.st_dev, current.st_ino)) {
+        return Ok(false);
+    }
+    if depth >= 256 {
+        return Err(err(
+            "Git source check exceeded directory depth; refusing to move source",
+        ));
+    }
+    match stat_at(fd, b".git") {
+        Ok(_) if tracked_in_git_index(fd, Path::new("."), activity)? => return Ok(true),
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    for name in read_dir_names_at(fd)? {
+        if name == ".git" {
+            continue;
+        }
+        let metadata = stat_at(fd, name.as_bytes())?;
+        if metadata.st_mode & libc::S_IFMT != libc::S_IFDIR {
+            continue;
+        }
+        let dir = open_file_at(
+            fd,
+            name.as_bytes(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            0,
+        )?;
+        if tracked_repositories_inside(dir.as_raw_fd(), activity, seen, depth + 1)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn git_ok(args: &[&str], cwd: Option<&Path>, what: &str) -> io::Result<String> {

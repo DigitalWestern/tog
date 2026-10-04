@@ -1239,6 +1239,8 @@ mod tests {
             "suffix-member",
             "damaged-member",
             "outer-tracked",
+            "candidate-checkout",
+            "descendant-checkout",
         ] {
             let temp = TempDir::named(shape);
             let project = temp.0.join("project");
@@ -1295,7 +1297,10 @@ mod tests {
                     ],
                 );
                 git_fixture(&project, &["submodule", "absorbgitdirs", workspace]);
-            } else if shape != "damaged-member" {
+            } else if !matches!(
+                shape,
+                "damaged-member" | "candidate-checkout" | "descendant-checkout"
+            ) {
                 let tracked = if root_case {
                     "node_modules/fixture.js".to_string()
                 } else {
@@ -1305,6 +1310,17 @@ mod tests {
             }
             if shape == "outer-tracked" {
                 git_fixture(&project.join(workspace), &["init", "-q"]);
+            }
+            if shape == "candidate-checkout" {
+                git_fixture(&source, &["init", "-q"]);
+                git_fixture(&source, &["add", "fixture.js"]);
+            }
+            if shape == "descendant-checkout" {
+                let child = source.join("dep");
+                fs::create_dir(&child).unwrap();
+                fs::write(child.join("fixture.js"), "committed dependency").unwrap();
+                git_fixture(&child, &["init", "-q"]);
+                git_fixture(&child, &["add", "fixture.js"]);
             }
             if shape == "damaged-member" {
                 let member = project.join(workspace);

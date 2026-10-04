@@ -292,7 +292,8 @@ Selection covers every patch of each maintained CPython minor that python-build-
   synced while its directory is there). A tracked `node_modules` at the project root stops
   the sync instead, even when the only tracked file is a `.gitkeep` or `.gitignore`: untrack
   it (`git rm -r --cached node_modules`) and sync again. Each workspace's own repository
-  is checked, including submodules. A failed index read stops sync before projection.
+  is checked, including submodules and repositories inside `node_modules`. A failed index
+  read stops sync before projection.
   Outside a repository nothing counts as tracked, including when Git is unavailable.
 - **A registry package that depends on a workspace package makes `node_modules` a copy.**
   A plugin whose peer dependency is the package the repository itself develops has to
