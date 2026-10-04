@@ -463,10 +463,15 @@ Cached `tog x` environments key on `x/3`: store root, ecosystem, package
 request, platform, the primary runtime version, the selected `bundle_id`
 and the realized runtime object, so a changed bundle component gives a
 fresh environment. A registry tool
-that builds with helpers (npm's node-gyp Python) keys on `x/4` instead: the
-`x/3` fields plus `<helper>=<object id>` for each, decided as above for the
-project `x` runs in and written to the request record's `helpers`. `py:`
-tools have none and keep their `x/3` names. The key only names the
+that builds with helpers (npm's node-gyp Python, a `py:` tool's Rust for
+sdists with a Rust extension) keys on `x/4` instead: the `x/3` fields plus
+`<helper>=<build identity>` for each, decided as above for the project `x`
+runs in and written to the request record's `helpers`. Python's Rust helper
+identity includes both its base runtime object id and its full selection
+fingerprint, covering channel manifests and extension components. Python has
+no default Rust, so a `py:` tool outside a project that locks Rust has no helper,
+keeps its `x/3` name, and its sdists build on what their own toolchain
+file picks; inside one they build on the locked Rust. The key only names the
 directory. A run reuses it only when the request record it wrote there
 (`.tog/x.json`) says `ready`, so a directory left without one, as a tog
 before `x/4` left them, is realized again in place. Only the bare
