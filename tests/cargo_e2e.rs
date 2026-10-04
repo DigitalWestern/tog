@@ -597,7 +597,8 @@ fn a_local_toolchain_directory_builds_the_project() {
 
 /// Every way a Cargo project or cargo's own home can put the signing key in
 /// front of cargo, with the real toolchain, so each command reaches the
-/// step that reads the file: no byte of the key reaches stdout or stderr of
+/// step that reads the file: no piece of the key (10 characters or more)
+/// reaches stdout or stderr of
 /// sync, attest, add or fmt, and each refusal names the file.
 ///
 /// - cargo's home config includes a file hard-linked to the key: no cargo
@@ -609,11 +610,12 @@ fn a_local_toolchain_directory_builds_the_project() {
 /// - the toolchain files hard-linked to the key: `add` reaches them with
 ///   the toolchain realized.
 /// - a workspace member in a hidden directory, 13 levels down, whose
-///   manifest is a hard link to the key: refused by name.
+///   manifest is a hard link to the key: refused by name, sync included.
 /// - a member reached through a symlinked directory that holds a manifest
 ///   hard-linked to the key: attest and add refuse the workspace (the
-///   confined cargo would resolve without the member), and fmt's sandbox
-///   does not mount the target, so cargo-fmt cannot read it (a host
+///   confined cargo would resolve without the member), the committed-lock
+///   sync succeeds, and fmt and `fmt --all` format the project while their
+///   sandbox does not mount the target, so cargo-fmt cannot read it (a host
 ///   `cargo fmt --all` there quotes the key).
 #[test]
 #[ignore]
@@ -643,10 +645,15 @@ fn the_signing_key_never_reaches_the_output_through_cargo_files() {
             String::from_utf8_lossy(&out.stdout).into_owned(),
             String::from_utf8_lossy(&out.stderr).into_owned(),
         );
-        assert!(
-            !stdout.contains(&seed) && !stderr.contains(&seed),
-            "{args:?}: the key reached the output\n{stdout}\n{stderr}"
-        );
+        // Not the seed, nor any 10-character piece of it (the scrub's
+        // smallest match).
+        for start in 0..=seed.len() - 10 {
+            let piece = &seed[start..start + 10];
+            assert!(
+                !stdout.contains(piece) && !stderr.contains(piece),
+                "{args:?}: {piece} of the key reached the output\n{stdout}\n{stderr}"
+            );
+        }
         (out.status.success(), stderr)
     };
     let refused = |project: &Path, args: &[&str]| {
@@ -730,7 +737,9 @@ fn the_signing_key_never_reaches_the_output_through_cargo_files() {
     for args in &commands[1..] {
         refused(&project, args);
     }
-    run(&project, &["sync"]);
+    // sync names every member manifest as an output and reads it for its
+    // digest: the member that is the key is refused there too.
+    refused(&project, &["sync"]);
 
     // A member through a symlinked directory.
     let project = fresh("linked-member");
@@ -743,7 +752,9 @@ fn the_signing_key_never_reaches_the_output_through_cargo_files() {
     text.push_str("\n[workspace]\nmembers = [\"linked\"]\n");
     std::fs::write(&manifest, text).unwrap();
     // sync writes tog-toolchain.toml, which attest needs.
-    run(&project, &["sync"]);
+    // A sync from the committed lock runs no cargo: it succeeds.
+    let (ok, stderr) = run(&project, &["sync"]);
+    assert!(ok && stderr.contains("synced: cargo"), "sync: {stderr}");
     // The confined cargo would not see the member: attest and edits are
     // refused, naming it.
     for args in [
@@ -756,6 +767,19 @@ fn the_signing_key_never_reaches_the_output_through_cargo_files() {
             "{args:?}: {stderr}"
         );
     }
-    run(&project, &["fmt"]);
-    run(&project, &["fmt", "--all"]);
+    // fmt formats the project's own code (the fixture's one-line main)
+    // and does not reach the linked member's manifest.
+    let main = project.join("src/main.rs");
+    let formatted =
+        "fn main() {\n    println!(\"hello {}\", itoa::Buffer::new().format(128u64));\n}\n";
+    assert_ne!(std::fs::read_to_string(&main).unwrap(), formatted);
+    for args in [&["fmt"][..], &["fmt", "--all"]] {
+        let (ok, stderr) = run(&project, args);
+        assert!(ok && !stderr.contains("error"), "{args:?}: {stderr}");
+        assert_eq!(
+            std::fs::read_to_string(&main).unwrap(),
+            formatted,
+            "{args:?}"
+        );
+    }
 }
