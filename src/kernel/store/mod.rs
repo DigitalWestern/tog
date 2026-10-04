@@ -20,6 +20,7 @@ mod fsops;
 mod objects;
 mod projection;
 mod records;
+pub(crate) use records::{record_project, RECORDS, RECORD_CAP};
 mod roots;
 
 use env::home;

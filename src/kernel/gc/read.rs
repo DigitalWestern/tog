@@ -295,6 +295,7 @@ pub(super) enum Parent {
     ForestProject(usize),
     Backups,
     RunHomes,
+    RecordKind(usize),
     Meta,
 }
 
@@ -306,6 +307,7 @@ pub(super) struct Dirs {
     pub(super) forest_projects: Vec<HeldDir>,
     pub(super) backups: Option<HeldDir>,
     pub(super) run_homes: Option<HeldDir>,
+    pub(super) record_kinds: Vec<HeldDir>,
 }
 
 impl Dirs {
@@ -324,6 +326,7 @@ impl Dirs {
                 .run_homes
                 .as_ref()
                 .expect("a run home candidate implies a held run-homes descriptor"),
+            Parent::RecordKind(index) => &self.record_kinds[index],
         }
     }
 }
@@ -372,6 +375,8 @@ pub struct Snapshot {
     pub(super) backups: Vec<DirEntrySnapshot>,
     /// `run-homes/<project key>` directories.
     pub(super) run_homes: Vec<DirEntrySnapshot>,
+    /// Store records about a project whose directory is gone.
+    pub(super) orphan_records: Vec<DirEntrySnapshot>,
     /// Records whose object is gone. Under the exclusive lease nothing can
     /// be mid-publication (commit writes the object first), so each is the
     /// residue of a removal that stopped between the object and its record.
@@ -587,6 +592,8 @@ struct Projections {
     backups: Vec<DirEntrySnapshot>,
     run_homes_dir: Option<HeldDir>,
     run_homes: Vec<DirEntrySnapshot>,
+    record_kinds: Vec<HeldDir>,
+    orphan_records: Vec<DirEntrySnapshot>,
 }
 
 /// Enumerate the project projections, holding each project directory, the
@@ -624,7 +631,62 @@ fn read_projections(store: &Store) -> io::Result<Projections> {
     }
     (read.backups_dir, read.backups) = read_directories(store, "backups", Parent::Backups)?;
     (read.run_homes_dir, read.run_homes) = read_directories(store, "run-homes", Parent::RunHomes)?;
+    read_orphan_records(store, &mut read)?;
     Ok(read)
+}
+
+/// Every record under `records/<kind>/` that names a project (see
+/// `Store::write_project_record`) whose directory no longer exists. Each
+/// kind is held open; a record is read without following a symlink, and
+/// one that names no project is never a candidate.
+fn read_orphan_records(store: &Store, read: &mut Projections) -> io::Result<()> {
+    use std::io::Read as _;
+    use std::os::unix::fs::OpenOptionsExt;
+    let records = store.root.join(store::RECORDS);
+    validate_projection_namespace(&records, store::RECORDS)?;
+    if !records.is_dir() {
+        return Ok(());
+    }
+    for kind in fs::read_dir(&records)? {
+        let kind = kind?;
+        let kind_stat = fs::symlink_metadata(kind.path())?;
+        if kind_stat.file_type().is_symlink() || !kind_stat.is_dir() {
+            continue;
+        }
+        let held = open_held(&kind.path(), "store record kind")?;
+        let index = read.record_kinds.len();
+        for entry in fs::read_dir(kind.path())? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let stat = store::stat_at(held.file.as_raw_fd(), name.as_bytes())?;
+            if (stat.st_mode & libc::S_IFMT) != libc::S_IFREG
+                || stat.st_size.max(0) as u64 > store::RECORD_CAP
+            {
+                continue;
+            }
+            let mut bytes = Vec::new();
+            fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+                .open(entry.path())?
+                .read_to_end(&mut bytes)?;
+            let Some(project) = store::record_project(&bytes) else {
+                continue;
+            };
+            match fs::symlink_metadata(&project) {
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                _ => continue,
+            }
+            read.orphan_records.push(DirEntrySnapshot {
+                name,
+                path: entry.path(),
+                parent: Parent::RecordKind(index),
+                stat,
+            });
+        }
+        read.record_kinds.push(held);
+    }
+    Ok(())
 }
 
 /// Every directory directly under the store's `namespace`, with that
@@ -702,6 +764,7 @@ pub(super) fn read(
         forests: projections.forests,
         backups: projections.backups,
         run_homes: projections.run_homes,
+        orphan_records: projections.orphan_records,
         stray_records,
         dirs: Dirs {
             objects,
@@ -711,6 +774,7 @@ pub(super) fn read(
             forest_projects: projections.forest_projects,
             backups: projections.backups_dir,
             run_homes: projections.run_homes_dir,
+            record_kinds: projections.record_kinds,
         },
     })
 }

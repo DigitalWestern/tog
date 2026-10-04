@@ -14,10 +14,19 @@ use super::*;
 use sha2::{Digest, Sha256};
 use std::io::{Read as _, Write as _};
 
-const RECORDS: &str = "records";
+pub(crate) const RECORDS: &str = "records";
 
 /// The largest record `read_record` accepts: records are small facts.
-const RECORD_CAP: u64 = 1 << 20;
+pub(crate) const RECORD_CAP: u64 = 1 << 20;
+
+/// The project a record belongs to, when it was written with
+/// [`Store::write_project_record`]: `tog gc --project` removes such a record
+/// once that directory is gone. `None` for a record about something
+/// immutable (a registry digest), or bytes that are no record at all.
+pub(crate) fn record_project(bytes: &[u8]) -> Option<PathBuf> {
+    let record: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+    record["project"].as_str().map(PathBuf::from)
+}
 
 /// A record kind is one path component tog names itself: lowercase ASCII,
 /// digits and `-`.
@@ -135,6 +144,42 @@ impl Store {
         key: &str,
         value: &serde_json::Value,
     ) -> io::Result<()> {
+        let body = serde_json::json!({"key": key, "value": value});
+        self.write_record_body(activity, kind, key, &body)
+    }
+
+    /// The record `kind` keeps for the project at `project` (canonical), read
+    /// back with [`Store::read_project_record`].
+    pub fn read_project_record(
+        &self,
+        kind: &str,
+        project: &Path,
+    ) -> io::Result<Option<serde_json::Value>> {
+        self.read_record(kind, &project.display().to_string())
+    }
+
+    /// [`Store::write_record`] for a fact about one project, keyed by its
+    /// canonical path. The record also names the project, so `tog gc
+    /// --project` can remove it once the project is gone.
+    pub fn write_project_record(
+        &self,
+        activity: &StoreActivity,
+        kind: &str,
+        project: &Path,
+        value: &serde_json::Value,
+    ) -> io::Result<()> {
+        let key = project.display().to_string();
+        let body = serde_json::json!({"key": key, "project": project, "value": value});
+        self.write_record_body(activity, kind, &key, &body)
+    }
+
+    fn write_record_body(
+        &self,
+        activity: &StoreActivity,
+        kind: &str,
+        key: &str,
+        body: &serde_json::Value,
+    ) -> io::Result<()> {
         use std::sync::atomic::{AtomicU64, Ordering};
         static SEQ: AtomicU64 = AtomicU64::new(0);
         self.require_activity(activity, "store record write")?;
@@ -146,7 +191,7 @@ impl Store {
         let tmp = self
             .open_namespace(&["tmp"])?
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "store tmp is missing"))?;
-        let bytes = serde_json::to_vec_pretty(&serde_json::json!({"key": key, "value": value}))?;
+        let bytes = serde_json::to_vec_pretty(body)?;
         let tmp_name = loop {
             let candidate = format!(
                 "record-{}-{}-{}",
