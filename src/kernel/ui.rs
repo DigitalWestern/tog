@@ -198,11 +198,13 @@ pub fn error_json(message: &str) {
     write_error_channel(&format!("{object}\n"));
 }
 
-/// The prefix of an advisory's first line, before color is applied. Kept
-/// plain so a caller can compare, store or re-color the text.
+/// The prefix of an advisory's first line, before color is applied. The
+/// tests hold `advisory_line` to it.
+#[cfg(test)]
 pub(crate) const WARNING_PREFIX: &str = "tog: warning: ";
 /// The prefix of the fix line. The same 14 columns as `WARNING_PREFIX`, so
 /// `fix:` right-aligns under `warning:`.
+#[cfg(test)]
 pub(crate) const FIX_PREFIX: &str = "tog:     fix: ";
 /// The prefix of the next line, for the rare warning whose best command
 /// explains the condition rather than clears it. The same 14 columns again,
@@ -226,8 +228,7 @@ pub fn warning(message: &str, fix: &str) {
 }
 
 /// Both lines as text, newlines included, for a caller that writes to a
-/// handle of its own (the maintenance narration holds a locked stderr) and
-/// must still look like every other advisory.
+/// handle of its own and must still look like every other advisory.
 pub fn warning_lines(message: &str, fix: &str) -> String {
     debug_assert_command(message, fix);
     format!("{}{}", advisory_line(message), fix_line(fix))
@@ -287,9 +288,8 @@ pub fn note(message: &str) {
     eprintln!("tog: {message}");
 }
 
-/// A handle for narration a lower layer renders itself: the store
-/// maintenance and GC reports write to any `Write`, so their tests can
-/// capture them. `--quiet` still silences it, at the descriptor level.
+/// A handle for narration a lower layer renders itself: the GC reports
+/// write to any `Write`, so their tests can capture them. `--quiet` still silences it, at the descriptor level.
 /// Every line written through it starts with `tog: `, like `note`.
 pub fn narration() -> io::StderrLock<'static> {
     io::stderr().lock()

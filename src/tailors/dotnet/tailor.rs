@@ -8,7 +8,7 @@ use crate::kernel::cyclonedx::{
     component, list, purl_encode, push_property, required, toolchain_component, version_of,
 };
 use crate::kernel::fsroot::ProjectRoot;
-use crate::kernel::objmeta::KindAdapter;
+use crate::kernel::objmeta::ObjectKind;
 use crate::kernel::platform::Platform;
 use crate::kernel::resolve::ResolutionDoor;
 use crate::kernel::sandbox;
@@ -271,7 +271,7 @@ impl Tailor for Dotnet {
         Ok(())
     }
 
-    fn object_kinds(&self) -> &'static [KindAdapter] {
+    fn object_kinds(&self) -> &'static [ObjectKind] {
         super::objects::KINDS
     }
 
@@ -296,7 +296,7 @@ mod tests {
         let scratch = TempDir::named("dotnet-run-guard");
         let previous_store = std::env::var_os("TOG_STORE");
         std::env::set_var("TOG_STORE", scratch.0.join("store"));
-        let ctx = Context::open(Platform::host().unwrap(), false);
+        let ctx = Context::open(Platform::host().unwrap());
         match previous_store {
             Some(value) => std::env::set_var("TOG_STORE", value),
             None => std::env::remove_var("TOG_STORE"),

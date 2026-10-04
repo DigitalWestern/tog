@@ -9,7 +9,7 @@ use crate::kernel::cyclonedx::{
     version_of,
 };
 use crate::kernel::fsroot::ProjectRoot;
-use crate::kernel::objmeta::KindAdapter;
+use crate::kernel::objmeta::ObjectKind;
 use crate::kernel::platform::Platform;
 use crate::kernel::resolve::{DoorKind, ResolutionDoor};
 use crate::kernel::sandbox;
@@ -324,7 +324,7 @@ impl Tailor for Elixir {
         Ok(())
     }
 
-    fn object_kinds(&self) -> &'static [KindAdapter] {
+    fn object_kinds(&self) -> &'static [ObjectKind] {
         super::objects::KINDS
     }
 

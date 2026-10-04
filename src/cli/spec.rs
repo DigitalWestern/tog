@@ -621,29 +621,34 @@ stdout unless --output is given.",
         name: "gc",
         group: Group::Maintain,
         summary: "collect unreferenced store objects and cached artifacts",
-        usage: "tog gc [--dry-run] [--keep-days <n>] [--project] [--collect-legacy]\n  \
-                tog gc --migrate-metadata [--dry-run]\n  \
+        usage: "tog gc [--dry-run] [--keep-days <n>] [--project]\n  \
                 tog gc --drop-object <id>... [--dry-run]\n  \
-                tog gc --register <dir>... [--forget <key>...]",
+                tog gc --register <dir>... [--forget <key>...]\n  \
+                tog gc --reset [--dry-run]",
         description: "\
 Follows every registered project closure, removes store objects nothing
 references, drops cached artifacts older than the retention window, and
 cleans stale staging directories. Objects touched in the last ten minutes
 are always kept so a concurrent sync cannot lose one. Ordinary gc never
 deletes inside project projections; --project collects old unused forests
-and backups. A record that says for itself what it needs keeps protecting
-it even when the project directory is gone; an older pathname-only record
-that has become unavailable stops the sweep instead of losing its record,
-so make it available again or forget it with --forget. Cleanup is skipped
-while another Tog job is using this store, and any object whose
-recorded evidence cannot be certified stops the sweep rather than being
-guessed at; --migrate-metadata lists every record that stops it and
+and backups. A root record says for itself what its project needs, so it
+keeps protecting those objects even when the project directory is gone;
+give the protection up with --forget. Cleanup is skipped while another Tog
+job is using this store. A record that cannot be read stops the sweep
+rather than being guessed at: the refusal lists every one, and
 --drop-object removes the ones that cannot be repaired. Usable on a copied
-store from any host.",
+store from any host.
+
+--reset empties the store and starts it again: every object, record, root
+and project forest goes, and the downloads in the cache stay, so the next
+'tog' in each project rebuilds what it needs, mostly without the network.
+It is the way out of a store this tog refuses to open, one written by an
+older tog in a format it no longer reads.",
         examples: &[
             ("tog gc --dry-run", "what would be collected, without collecting it"),
             ("tog gc", "collect unreferenced store objects"),
             ("tog gc --project", "also collect old project forests and backups"),
+            ("tog gc --reset", "empty the store, keeping its downloads"),
         ],
         options: &[
             (
@@ -653,27 +658,23 @@ store from any host.",
             ("--keep-days <n>", "retain cached artifacts used within <n> days"),
             ("--project", "also collect old unused project forests and backups"),
             (
-                "--collect-legacy",
-                "also collect objects written before the roots registry existed; \
-                 never a licence to delete through evidence that is missing",
-            ),
-            (
-                "--migrate-metadata",
-                "upgrade provable legacy object metadata without collecting",
-            ),
-            (
                 "--drop-object <id>...",
-                "drop an object whose metadata is unusable, legacy, or missing, together \
-                 with its record; the next sync rebuilds it",
+                "drop an object whose metadata is unusable or missing, together with its \
+                 record; the next sync rebuilds it",
             ),
             (
                 "--register <dir>...",
-                "register project roots before collecting (pre-registry projects)",
+                "register project roots from their closures before collecting",
             ),
             (
                 "--forget <key>...",
                 "forget project roots by their exact key (`store roots` prints keys); \
                  removes only the protection record, so their objects become collectible",
+            ),
+            (
+                "--reset",
+                "empty the store and start it again in the current format, keeping the \
+                 download cache; works on a store this tog refuses to open",
             ),
             HELP_OPTION,
         ],

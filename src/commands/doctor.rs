@@ -11,8 +11,18 @@ use std::io;
 // Reviewed site (tests/architecture.rs): operation boundary: command entry point.
 #[allow(clippy::disallowed_methods)]
 pub fn run(json: bool) -> io::Result<i32> {
-    let store = store::Store::open()?;
-    let _activity = store.activity(ActivityMode::Shared)?;
+    // A store this tog refuses to open is a failing row with its fix
+    // (`inspect::doctor` reports it), not a reason to print no rows at all.
+    // There is nothing to lease in it either.
+    let refused = matches!(
+        store::Store::probe()?,
+        Some((_, format)) if !format.usable()
+    );
+    let _activity = if refused {
+        None
+    } else {
+        Some(store::Store::open()?.activity(ActivityMode::Shared)?)
+    };
     // The build comes first: every other row is read against it. It is the
     // one row that talks to the network, and it lives here rather than in
     // `inspect::doctor`, which stays offline for the callers that need it

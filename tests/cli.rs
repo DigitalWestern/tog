@@ -14,7 +14,7 @@ use sha2::{Digest, Sha256};
 
 mod common;
 
-use common::{command, text, tog, tog_at, tog_env, tog_offline, TempDir};
+use common::{command, fresh_store, text, tog, tog_at, tog_env, tog_offline, TempDir};
 
 /// The signing key under `home`, generated on first use and trusted by
 /// `home`'s machine policy (`~/.tog/policy.toml`, created with an empty
@@ -556,7 +556,7 @@ fn json_commands_report_failure_as_json_on_stderr() {
 fn gc_narrates_on_stderr_and_quiet_silences_it() {
     let home = TempDir::boundary("cli-gc-stream-home");
     let store_root = home.0.join("store");
-    std::fs::create_dir_all(&store_root).unwrap();
+    fresh_store(&store_root);
     let canonical_store = store_root.canonicalize().unwrap();
     let project = home.0.join("project");
     std::fs::create_dir_all(project.join(".tog/closures")).unwrap();
@@ -1393,78 +1393,16 @@ fn x_needs_a_registry_outside_a_project() {
     assert_eq!(out.status.code(), Some(2));
 }
 
-/// A pre-object-meta/2 record is upgraded by the automatic maintenance any
-/// writable command runs at dispatch — not only by explicit
-/// `gc --migrate-metadata`. Removing the automatic maintenance calls from
-/// main must fail this test, because the record would stay legacy and the
-/// next sweep would refuse it.
-#[test]
-fn command_dispatch_runs_automatic_metadata_maintenance() {
-    let home = TempDir::boundary("cli-x-maintenance");
-    let store_root = home.0.join("store");
-    let identity = tog::kernel::types::Identity {
-        kind: "cpython".into(),
-        name: "cpython".into(),
-        version: "3.11.9".into(),
-        inputs: [
-            ("artifact_sha256".to_string(), "1".repeat(64)),
-            (
-                "platform".to_string(),
-                "x86_64-unknown-linux-gnu".to_string(),
-            ),
-        ]
-        .into_iter()
-        .collect(),
-    };
-    let id = identity.object_id();
-    let object = store_root.join("objects").join(&id);
-    std::fs::create_dir_all(&object).unwrap();
-    std::fs::write(object.join("payload"), "cpython").unwrap();
-    let mut perms = std::fs::metadata(&object).unwrap().permissions();
-    perms.set_mode(perms.mode() & !0o222);
-    std::fs::set_permissions(&object, perms).unwrap();
-    std::fs::create_dir_all(store_root.join("meta")).unwrap();
-    let meta_path = store_root.join("meta").join(format!("{id}.json"));
-    std::fs::write(
-        &meta_path,
-        serde_json::to_vec_pretty(&serde_json::json!({
-            "id": id,
-            "identity": identity,
-            "created": 1,
-            "exceptions": [],
-            "refs": [],
-        }))
-        .unwrap(),
-    )
-    .unwrap();
-
-    // An ordinary writable command in the maintenance set: it fails offline
-    // (no x registry), but its dispatch already ran maintenance over the
-    // store.
-    let out = tog(&home.0, &home.0, &["x", "ruff", "--version"]);
-    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
-
-    let record: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&meta_path).unwrap()).unwrap();
-    assert_eq!(
-        record["evidence"], "adapted:cpython@1",
-        "an ordinary writable command did not run automatic metadata maintenance: {}",
-        record
-    );
-    assert!(record["schema"] == "object-meta/2", "{record}");
-}
-
 /// Issue #101. A record whose identity no longer hashes to the id it is
-/// filed under cannot be read, so the fail-closed sweep refuses — and used
-/// to reprint that refusal on every single command with no way out. The
-/// warning is now news rather than noise, and `--drop-object` is the exit.
+/// filed under cannot be read, so the fail-closed sweep refuses. The refusal
+/// names the record and `--drop-object`, which is the exit.
 #[test]
-fn an_unreadable_record_warns_once_and_is_cleared_by_drop_object() {
+fn an_unreadable_record_stops_the_sweep_and_is_cleared_by_drop_object() {
     let home = TempDir::boundary("cli-wedged-record");
     let store_root = home.0.join("store");
 
     // A project root, so the sweep has an initialized registry to work from.
-    std::fs::create_dir_all(&store_root).unwrap();
+    fresh_store(&store_root);
     let canonical_store = store_root.canonicalize().unwrap();
     let project = home.0.join("project");
     std::fs::create_dir_all(project.join(".tog/closures")).unwrap();
@@ -1515,39 +1453,40 @@ fn an_unreadable_record_warns_once_and_is_cleared_by_drop_object() {
     std::fs::write(
         &meta_path,
         serde_json::to_vec_pretty(&serde_json::json!({
+            "schema": "object-meta/2",
             "id": id,
             "identity": identity,
             "created": 1,
             "exceptions": [],
-            "refs": [],
+            "dependencies": [],
+            "cache_digests": [],
+            "evidence": "explicit",
         }))
         .unwrap(),
     )
     .unwrap();
 
-    // `x` fails offline, but its dispatch runs maintenance over the store.
-    let first = tog(&home.0, &home.0, &["x", "ruff", "--version"]);
-    let first = text(&first.stderr);
+    // A command that does not sweep is not held up by the record: `x`
+    // fails offline for its own reason and says nothing about it.
+    let other = tog(&home.0, &home.0, &["x", "ruff", "--version"]);
     assert!(
-        first.contains("metadata maintenance deferred")
-            && first.contains(&format!("--drop-object {id}")),
-        "the deferral was not announced: {first}"
-    );
-    let second = tog(&home.0, &home.0, &["x", "ruff", "--version"]);
-    let second = text(&second.stderr);
-    assert!(
-        !second.contains("metadata maintenance deferred"),
-        "the same deferral was repeated: {second}"
+        !text(&other.stderr).contains(&id),
+        "{}",
+        text(&other.stderr)
     );
 
-    // The command every refusal names must print the list, not refuse on it.
-    let out = tog(&home.0, &home.0, &["gc", "--migrate-metadata"]);
-    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
-    let listed = format!("{}{}", text(&out.stdout), text(&out.stderr));
-    assert!(
-        listed.contains(&format!("--drop-object {id}")),
-        "the recovery command is not named: {listed}"
-    );
+    // The sweep refuses, deletes nothing, and names the way out.
+    for args in [&["gc"][..], &["gc", "--dry-run"]] {
+        let out = tog(&home.0, &home.0, args);
+        assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+        let stderr = text(&out.stderr);
+        assert!(stderr.contains("refusing to sweep"), "{stderr}");
+        assert!(
+            stderr.contains(&format!("--drop-object {id}")),
+            "the recovery command is not named: {stderr}"
+        );
+        assert!(object.is_dir(), "{stderr}");
+    }
 
     let out = tog(&home.0, &home.0, &["gc", "--drop-object", &id]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
@@ -1556,6 +1495,359 @@ fn an_unreadable_record_warns_once_and_is_cleared_by_drop_object() {
 
     let out = tog(&home.0, &home.0, &["gc", "--dry-run"]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+}
+
+/// A store as a tog from before the format marker left it: namespaces, an
+/// object with the record shape of that time, a pathname-only root, a
+/// download, a staging leftover and a backup, and no marker. Returns the
+/// canonical store root and the object's path.
+fn pre_epoch_store(home: &Path) -> (PathBuf, PathBuf) {
+    let store = home.join("store");
+    for sub in ["objects", "meta", "cache/sha256", "tmp/stage-old", "roots"] {
+        std::fs::create_dir_all(store.join(sub)).unwrap();
+    }
+    std::fs::create_dir_all(store.join("backups/venv-old")).unwrap();
+    let store = store.canonicalize().unwrap();
+    let object = publish_certified_object(&store, "pre-epoch-env");
+    let id = object.file_name().unwrap().to_str().unwrap().to_string();
+    let record = store.join("meta").join(format!("{id}.json"));
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&record).unwrap()).unwrap();
+    let fields = value.as_object_mut().unwrap();
+    for key in ["schema", "dependencies", "cache_digests", "evidence"] {
+        fields.remove(key);
+    }
+    fields.insert("refs".into(), serde_json::json!([]));
+    std::fs::write(&record, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+    std::fs::write(
+        store.join("roots").join("a".repeat(40)),
+        format!("{}\n", home.join("project").display()),
+    )
+    .unwrap();
+    std::fs::write(store.join("cache/sha256").join("c".repeat(64)), b"download").unwrap();
+    std::fs::write(store.join("backups/venv-old/kept"), b"mine").unwrap();
+    (store, object)
+}
+
+/// The first command that opens a store creates it with the format marker.
+#[test]
+fn a_new_store_is_created_with_the_format_marker() {
+    let home = TempDir::boundary("cli-format-new");
+    let store = home.0.join("store");
+    assert!(!store.exists());
+    let out = tog(&home.0, &home.0, &["store", "path"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(text(&out.stderr).is_empty(), "{}", text(&out.stderr));
+    assert_eq!(
+        std::fs::read_to_string(store.join("format")).unwrap(),
+        "tog-store 1\n"
+    );
+    assert!(store.join("objects").is_dir());
+    // And it opens again, marker unchanged.
+    let out = tog(&home.0, &home.0, &["store", "roots"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(
+        std::fs::read_to_string(store.join("format")).unwrap(),
+        "tog-store 1\n"
+    );
+}
+
+/// A store with no marker is refused by every command that would read it,
+/// with the fix named, and is left exactly as it was. `store path` and
+/// `doctor` still answer, and help and version never open a store.
+#[test]
+fn a_store_from_before_the_marker_is_refused_and_the_fix_is_named() {
+    let home = TempDir::boundary("cli-format-pre-epoch");
+    let (store, object) = pre_epoch_store(&home.0);
+
+    for args in [
+        &["gc"][..],
+        &["gc", "--dry-run"],
+        &["gc", "--keep-days", "0"],
+        &["gc", "--forget", &"a".repeat(40)],
+        &["store", "roots"],
+        &["ls"],
+        &["x", "ruff", "--version"],
+    ] {
+        let out = tog(&home.0, &home.0, args);
+        let stderr = text(&out.stderr);
+        assert_eq!(out.status.code(), Some(1), "{args:?}: {stderr}");
+        assert!(
+            stderr.contains("has no format marker"),
+            "{args:?}: {stderr}"
+        );
+        assert!(stderr.contains("`tog gc --reset`"), "{args:?}: {stderr}");
+        assert!(
+            stderr.contains("move the directory aside"),
+            "{args:?}: {stderr}"
+        );
+        assert!(
+            object.join("payload").is_file(),
+            "{args:?} removed an object"
+        );
+        assert!(!store.join("format").exists(), "{args:?} wrote a marker");
+        assert!(
+            store.join("roots").join("a".repeat(40)).is_file(),
+            "{args:?} removed a root"
+        );
+    }
+
+    let out = tog(&home.0, &home.0, &["store", "path"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(text(&out.stdout).trim_end(), store.to_str().unwrap());
+    let stderr = text(&out.stderr);
+    assert!(
+        stderr.starts_with("tog: warning: the store at "),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("tog:     fix: tog gc --reset\n"),
+        "{stderr}"
+    );
+
+    let out = tog(&home.0, &home.0, &["doctor"]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    let stdout = text(&out.stdout);
+    let row = stdout
+        .lines()
+        .find(|line| line.contains(" store "))
+        .unwrap_or_else(|| panic!("no store row: {stdout}"));
+    assert!(row.starts_with("fail"), "{row}");
+    assert!(row.contains("`tog gc --reset`"), "{row}");
+
+    for args in [&["--help"][..], &["version"], &["gc", "--help"]] {
+        let out = tog(&home.0, &home.0, args);
+        assert_eq!(out.status.code(), Some(0), "{args:?}");
+        assert!(text(&out.stderr).is_empty(), "{args:?}");
+    }
+    assert!(!store.join("format").exists());
+}
+
+/// A marker this tog does not know is refused too, and never rewritten: a
+/// higher number says a newer tog wrote the store, anything else says the
+/// marker is damaged.
+#[test]
+fn an_unknown_or_newer_format_marker_is_refused() {
+    let home = TempDir::boundary("cli-format-unknown");
+    let store = home.0.join("store");
+    fresh_store(&store);
+    let store = store.canonicalize().unwrap();
+    let object = publish_certified_object(&store, "newer-env");
+
+    for (marker, expected, fix) in [
+        ("tog-store 2\n", "a newer tog wrote it", "tog update --self"),
+        (
+            "tog-store one\n",
+            "a format marker this tog does not know",
+            "tog gc --reset",
+        ),
+        (
+            "",
+            "a format marker this tog does not know",
+            "tog gc --reset",
+        ),
+        (
+            "tog-store 1\nextra\n",
+            "a format marker this tog does not know",
+            "tog gc --reset",
+        ),
+    ] {
+        std::fs::write(store.join("format"), marker).unwrap();
+        for args in [&["gc", "--dry-run"][..], &["store", "roots"]] {
+            let out = tog(&home.0, &home.0, args);
+            let stderr = text(&out.stderr);
+            assert_eq!(out.status.code(), Some(1), "{marker:?} {args:?}: {stderr}");
+            assert!(stderr.contains(expected), "{marker:?} {args:?}: {stderr}");
+            assert!(
+                stderr.contains("`tog gc --reset`"),
+                "{marker:?} {args:?}: {stderr}"
+            );
+        }
+        let out = tog(&home.0, &home.0, &["store", "path"]);
+        assert_eq!(out.status.code(), Some(0), "{marker:?}");
+        assert!(
+            text(&out.stderr).contains(&format!("tog:     fix: {fix}\n")),
+            "{marker:?}: {}",
+            text(&out.stderr)
+        );
+        assert_eq!(
+            std::fs::read_to_string(store.join("format")).unwrap(),
+            marker,
+            "the marker was rewritten"
+        );
+        assert!(object.join("payload").is_file(), "{marker:?}");
+    }
+}
+
+/// `gc --reset --dry-run` on a store tog refuses: it lists what a reset
+/// would remove and changes nothing, so the store is still refused after.
+#[test]
+fn gc_reset_dry_run_lists_what_it_would_remove_and_writes_nothing() {
+    let home = TempDir::boundary("cli-reset-dry-run");
+    let (store, object) = pre_epoch_store(&home.0);
+
+    let out = tog(&home.0, &home.0, &["gc", "--reset", "--dry-run"]);
+    let stderr = text(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{stderr}");
+    assert!(text(&out.stdout).is_empty(), "{}", text(&out.stdout));
+    for name in ["objects", "meta", "roots"] {
+        assert!(
+            stderr.contains(&format!("tog: would remove {}", store.join(name).display())),
+            "{name}: {stderr}"
+        );
+    }
+    assert!(stderr.contains("would remove 1 staging entry"), "{stderr}");
+    assert!(
+        !stderr.contains(&store.join("cache").display().to_string()),
+        "{stderr}"
+    );
+    assert!(
+        !stderr.contains(&store.join("backups").display().to_string()),
+        "{stderr}"
+    );
+    assert!(stderr.contains("would free"), "{stderr}");
+
+    assert!(
+        object.join("payload").is_file(),
+        "a dry run removed an object"
+    );
+    assert!(store.join("tmp/stage-old").is_dir());
+    assert!(store.join("roots").join("a".repeat(40)).is_file());
+    assert!(!store.join("format").exists(), "a dry run wrote the marker");
+    let out = tog(&home.0, &home.0, &["gc", "--dry-run"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(text(&out.stderr).contains("has no format marker"));
+}
+
+/// `gc --reset` takes no other option: a reset that also swept, registered
+/// or forgot would be two commands' worth of deletion under one name.
+#[test]
+fn gc_reset_refuses_every_other_gc_option() {
+    let home = TempDir::boundary("cli-reset-alone");
+    let (store, object) = pre_epoch_store(&home.0);
+    for args in [
+        &["gc", "--reset", "--keep-days", "0"][..],
+        &["gc", "--reset", "--project"],
+        &["gc", "--reset", "--register", "."],
+        &["gc", "--reset", "--forget", &"a".repeat(40)],
+        &[
+            "gc",
+            "--reset",
+            "--drop-object",
+            &format!("{}-x-1", "a".repeat(40)),
+        ],
+    ] {
+        let out = tog(&home.0, &home.0, args);
+        let stderr = text(&out.stderr);
+        assert_eq!(out.status.code(), Some(1), "{args:?}: {stderr}");
+        assert!(
+            stderr.contains("--reset cannot be combined with other gc options"),
+            "{args:?}: {stderr}"
+        );
+        assert!(object.join("payload").is_file(), "{args:?}");
+        assert!(!store.join("format").exists(), "{args:?}");
+    }
+}
+
+/// The way out, end to end: `gc --reset` empties a store tog refused, keeps
+/// the downloads and the backups, and leaves a store that works: it opens,
+/// takes a new object and a root, sweeps, and `doctor` passes its row.
+#[test]
+fn gc_reset_empties_a_refused_store_and_normal_use_resumes() {
+    let home = TempDir::boundary("cli-reset");
+    let (store, object) = pre_epoch_store(&home.0);
+    let download = store.join("cache/sha256").join("c".repeat(64));
+
+    let out = tog(&home.0, &home.0, &["gc", "--reset"]);
+    let stderr = text(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{stderr}");
+    assert!(
+        stderr.contains(&format!("tog: removed {}", store.join("objects").display())),
+        "{stderr}"
+    );
+    assert!(stderr.contains("kept the download cache"), "{stderr}");
+    assert!(stderr.contains("run 'tog' in each project"), "{stderr}");
+
+    assert_eq!(
+        std::fs::read_to_string(store.join("format")).unwrap(),
+        "tog-store 1\n"
+    );
+    assert!(!object.exists(), "the reset kept an object");
+    for name in ["objects", "meta", "roots"] {
+        assert_eq!(
+            std::fs::read_dir(store.join(name)).unwrap().count(),
+            0,
+            "{name} is not empty"
+        );
+    }
+    assert!(!store.join("tmp/stage-old").exists());
+    assert_eq!(std::fs::read(&download).unwrap(), b"download");
+    assert_eq!(
+        std::fs::read(store.join("backups/venv-old/kept")).unwrap(),
+        b"mine"
+    );
+
+    // Normal use. The store opens with nothing to say.
+    let out = tog(&home.0, &home.0, &["store", "path"]);
+    assert_eq!(out.status.code(), Some(0));
+    assert!(text(&out.stderr).is_empty(), "{}", text(&out.stderr));
+    let out = tog(&home.0, &home.0, &["store", "roots"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(text(&out.stdout).is_empty(), "{}", text(&out.stdout));
+
+    // A project publishes an object and registers its root, as a sync does.
+    let project = home.0.join("project");
+    std::fs::create_dir_all(project.join(".tog/closures")).unwrap();
+    let env_object = publish_certified_object(&store, "after-reset-env");
+    std::fs::write(
+        project.join(".tog/closures/python.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema": "closure/1",
+            "ecosystem": "python",
+            "body": {"env_object": env_object.display().to_string()},
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let out = tog(
+        &home.0,
+        &home.0,
+        &[
+            "gc",
+            "--register",
+            project.to_str().unwrap(),
+            "--keep-days",
+            "0",
+        ],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(
+        env_object.join("payload").is_file(),
+        "the sweep took a rooted object"
+    );
+    // The kept download is an ordinary unreferenced artifact again: the
+    // sweep ages it out like any other, it is not pinned by the reset.
+    let out = tog(&home.0, &home.0, &["gc", "--dry-run"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(registered_root_keys(&home.0, &home.0).len(), 1);
+
+    let out = tog(&home.0, &home.0, &["doctor"]);
+    let stdout = text(&out.stdout);
+    let row = stdout
+        .lines()
+        .find(|line| line.contains(" store "))
+        .unwrap_or_else(|| panic!("no store row: {stdout}"));
+    assert!(row.starts_with("ok"), "{row}");
+
+    // A second reset on a healthy store is the same operation.
+    let out = tog(&home.0, &home.0, &["gc", "--reset"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(!env_object.exists());
+    assert_eq!(std::fs::read(&download).ok().is_some(), download.exists());
+    assert_eq!(
+        std::fs::read_to_string(store.join("format")).unwrap(),
+        "tog-store 1\n"
+    );
 }
 
 #[test]
@@ -1675,7 +1967,7 @@ fn x_clean_refuses_a_symlinked_x_directory_or_a_relative_home() {
 fn x_clean_removes_a_root_without_a_request_record_only_when_unfiltered() {
     let home = TempDir::boundary("cli-x-clean-unrecorded-home");
     let project = TempDir::boundary("cli-x-clean-unrecorded-project");
-    std::fs::create_dir_all(home.0.join("store")).unwrap();
+    fresh_store(&home.0.join("store"));
     let store = home.0.join("store").canonicalize().unwrap();
     let object = publish_certified_object(&store, "unrecorded-env");
     let npm_root = home.0.join(".tog/x/npm-prettier-0123456789abcdef");
@@ -1814,6 +2106,7 @@ fn cached_x_root_with_exception(home: &Path) -> PathBuf {
     // canonicalized root, so the fixture has to canonicalize too: on macOS the
     // temp dir sits under /var, a symlink to /private/var, and an
     // uncanonicalized path here compares unequal to `store.object_path`.
+    fresh_store(&home.join("store"));
     std::fs::create_dir_all(home.join("store/objects/test-env/bin")).unwrap();
     let store = home.join("store").canonicalize().unwrap();
     let object = store.join("objects/test-env");
@@ -2007,7 +2300,7 @@ fn registered_x_environment(home: &Path, store_root: &Path) -> (PathBuf, String)
     // Same reason as `cached_x_root_with_exception`: tog records object
     // paths under the store's canonicalized root, so the fixture must too
     // (on macOS the temp dir is under /var, a symlink to /private/var).
-    std::fs::create_dir_all(store_root).unwrap();
+    fresh_store(store_root);
     let store_root = store_root.canonicalize().unwrap();
     let store_root = store_root.as_path();
     let root = home.join(".tog/x/py-ruff-test");

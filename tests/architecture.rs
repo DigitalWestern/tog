@@ -1465,9 +1465,9 @@ const LEASE_BOUNDARIES: &[(&str, &str, usize)] = &[
     ("src/commands/doctor.rs", "run", 1),
     ("src/commands/ls.rs", "run", 1),
     ("src/commands/gc.rs", "run", 1),
+    // `gc --reset` opens a store `run` cannot: one tog refuses to read.
+    ("src/commands/gc.rs", "reset", 1),
     ("src/commands/x.rs", "clean", 1),
-    // Exclusive maintenance that runs before any shared lease is taken.
-    ("src/kernel/gc/migrate.rs", "automatic_maintenance", 1),
     ("src/kernel/gc/mod.rs", "collect", 1),
     // Public root-registry calls for callers holding no lease (tests and
     // library users). Each has a `_with_activity` form that production uses.

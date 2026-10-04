@@ -18,7 +18,7 @@
 
 use crate::kernel::activity::StoreActivity;
 use crate::kernel::fsroot::ProjectRoot;
-use crate::kernel::objmeta::{self, Grammar, KindAdapter, MetaIndex, Record};
+use crate::kernel::objmeta::ObjectKind;
 use crate::kernel::store::{self, ObjectDeps, Store};
 use crate::kernel::types::Identity;
 use serde::{Deserialize, Serialize};
@@ -453,36 +453,20 @@ pub(crate) fn sweep_index(store: &Store, dry_run: bool) -> io::Result<usize> {
 }
 
 /// The kernel's rows for the two kinds, so GC can certify them.
-pub(crate) static KINDS: &[KindAdapter] = &[
-    KindAdapter {
+pub(crate) static KINDS: &[ObjectKind] = &[
+    ObjectKind {
         kind: LEDGER_KIND,
         schema: None,
-        superseded_by: None,
         live_required: &["portable"],
         live_optional: &[],
-        legacy_only: &[],
         live_contract: Some(ledger_contract),
-        grammar: Grammar {
-            required: &["portable"],
-            optional: &[],
-            groups: &[],
-        },
-        adapt: ledger_dependencies,
     },
-    KindAdapter {
+    ObjectKind {
         kind: DIAGNOSTICS_KIND,
         schema: None,
-        superseded_by: None,
         live_required: &["ledger", "diagnostics"],
         live_optional: &[],
-        legacy_only: &[],
         live_contract: Some(diagnostics_contract),
-        grammar: Grammar {
-            required: &["ledger", "diagnostics"],
-            optional: &[],
-            groups: &[],
-        },
-        adapt: diagnostics_dependencies,
     },
 ];
 
@@ -519,23 +503,6 @@ fn diagnostics_contract(identity: &Identity) -> Result<(), String> {
     Ok(())
 }
 
-/// A ledger depends on nothing.
-fn ledger_dependencies(_record: &Record, _index: &MetaIndex) -> Result<ObjectDeps, String> {
-    Ok(ObjectDeps::new())
-}
-
-/// A sidecar keeps its ledger alive.
-fn diagnostics_dependencies(record: &Record, index: &MetaIndex) -> Result<ObjectDeps, String> {
-    let mut deps = ObjectDeps::new();
-    objmeta::add_object(
-        &mut deps,
-        objmeta::input(record, "ledger")?,
-        index,
-        "the resolution ledger",
-    )?;
-    Ok(deps)
-}
-
 /// One live identity per row, for the object-kind table's tests.
 #[cfg(test)]
 pub(crate) fn live_identities_for_test() -> Vec<Identity> {
@@ -550,6 +517,7 @@ pub(crate) fn live_identities_for_test() -> Vec<Identity> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::kernel::objmeta;
     use crate::kernel::testutil::TempDir;
 
     fn entry(class: &str, url: &str, status: u16) -> Entry {
@@ -765,21 +733,14 @@ mod tests {
     fn resolution_ledger_kind_is_registered_for_gc() {
         let (_temp, store, activity) = scratch();
         let objects = commit(&store, &activity, &sample(), &Diagnostics::default()).unwrap();
-        let index = MetaIndex::read(&store).unwrap();
+        let (index, unusable) = objmeta::MetaIndex::read_reporting_unusable(&store).unwrap();
+        assert!(unusable.is_empty(), "{unusable:?}");
         for id in [&objects.ledger, &objects.diagnostics] {
             let record = index.get(id).unwrap();
             assert_eq!(objmeta::check_identity_grammar(&record.identity), Ok(()));
-            // Migration of a legacy-shaped record of this kind is proven,
-            // not refused: GC can certify it.
-            let mut legacy = record.clone();
-            legacy.evidence = objmeta::Evidence::Legacy;
-            match objmeta::adapt(&legacy, &index) {
-                objmeta::Adaptation::Proven(deps) => {
-                    if record.identity.kind == DIAGNOSTICS_KIND {
-                        assert!(deps.objects.contains(&objects.ledger));
-                    }
-                }
-                objmeta::Adaptation::Unresolved(why) => panic!("{id}: {why}"),
+            // The sidecar's record names the ledger, so GC keeps the pair.
+            if record.identity.kind == DIAGNOSTICS_KIND {
+                assert!(record.dependencies.contains(&objects.ledger));
             }
         }
         // A malformed identity is refused at publication.

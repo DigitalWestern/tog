@@ -1,19 +1,14 @@
-//! Object kinds the Elixir tailor produces. Each row has a migration grammar
-//! for legacy records and a separate live grammar for current commits, plus
-//! the `object-meta/2` dependency adapter. Every row is proven by the metadata
-//! goldens in `kernel/objmeta.rs`.
+//! Object kinds the Elixir tailor produces: one row per (kind, schema) pair,
+//! naming the identity inputs its producer writes. Debug builds check every
+//! commit against its row (`objmeta::check_identity_grammar`).
 
-use crate::kernel::objmeta::{
-    add_digest, add_object, input, platform_of, Algo, Grammar, KindAdapter, MetaIndex, Record,
-};
-use crate::kernel::store::ObjectDeps;
+use crate::kernel::objmeta::{platform_of, ObjectKind};
 use crate::kernel::types::Identity;
 
-pub static KINDS: &[KindAdapter] = &[
-    KindAdapter {
+pub static KINDS: &[ObjectKind] = &[
+    ObjectKind {
         kind: "beam",
         schema: Some("beam-toolchain/1"),
-        superseded_by: None,
         live_required: &[
             "schema",
             "otp_sha256",
@@ -24,35 +19,14 @@ pub static KINDS: &[KindAdapter] = &[
             "platform",
         ],
         live_optional: &["relocation_schema", "store_root"],
-        legacy_only: &[],
         live_contract: Some(beam_contract),
-        grammar: Grammar {
-            required: &[
-                "schema",
-                "otp_sha256",
-                "elixir_sha256",
-                "hex_sha512",
-                "rebar3_sha512",
-            ],
-            optional: &["platform", "versions", "relocation_schema", "store_root"],
-            groups: &[],
-        },
-        adapt: beam_toolchain,
     },
-    KindAdapter {
+    ObjectKind {
         kind: "hex-deps",
         schema: Some("hex-deps/1"),
-        superseded_by: None,
         live_required: &["schema", "beam"],
         live_optional: &["dep:"],
-        legacy_only: &[],
         live_contract: Some(hex_deps_contract),
-        grammar: Grammar {
-            required: &["schema", "beam"],
-            optional: &[],
-            groups: &[("dep:", None)],
-        },
-        adapt: hex_deps,
     },
 ];
 
@@ -95,74 +69,4 @@ fn hex_deps_contract(identity: &Identity) -> Result<(), String> {
         ));
     }
     Ok(())
-}
-/// `beam-toolchain/1`: OTP and Elixir by sha256, Hex and rebar3 by sha512.
-/// All four are direct identity inputs; the `versions` and relocation inputs
-/// are not artifacts.
-fn beam_toolchain(record: &Record, _index: &MetaIndex) -> Result<ObjectDeps, String> {
-    let mut deps = ObjectDeps::new();
-    for (key, algo) in [
-        ("otp_sha256", Algo::Sha256),
-        ("elixir_sha256", Algo::Sha256),
-        ("hex_sha512", Algo::Sha512),
-        ("rebar3_sha512", Algo::Sha512),
-    ] {
-        add_digest(&mut deps, algo, input(record, key)?, key)?;
-    }
-    Ok(deps)
-}
-
-/// `hex-deps/1`: the BEAM reference is a truncated digest over the toolchain
-/// artifact hashes, so the object is found by recomputing that fingerprint
-/// from each candidate `beam` record's *own* inputs — never from this
-/// build's pins. Each dependency contributes its outer tarball sha256; the
-/// inner checksum is a content hash of the unpacked tarball and was never a
-/// cache key, so it is not an artifact dependency.
-fn hex_deps(record: &Record, index: &MetaIndex) -> Result<ObjectDeps, String> {
-    let fingerprint = input(record, "beam")?;
-    let beam = index.unique(
-        "beam",
-        &format!("BEAM toolchain fingerprint {fingerprint}"),
-        |candidate| beam_fingerprint_of(candidate).as_deref() == Some(fingerprint),
-    )?;
-    let mut deps = ObjectDeps::new();
-    add_object(&mut deps, &beam, index, "beam")?;
-    for (key, value) in &record.identity.inputs {
-        if let Some(app) = key.strip_prefix("dep:") {
-            // "<package>@<version>:<outer>:<inner>:<managers>"
-            let mut fields = value.splitn(4, ':');
-            let _package = fields.next();
-            let outer = fields.next().ok_or_else(|| {
-                format!("dependency {app} entry {value:?} has no outer tarball digest")
-            })?;
-            add_digest(
-                &mut deps,
-                Algo::Sha256,
-                outer,
-                &format!("hex package {app}"),
-            )?;
-        } else if key != "schema" && key != "beam" {
-            return Err(format!("unexpected identity input {key}"));
-        }
-    }
-    Ok(deps)
-}
-
-/// Recompute `elixir::beam_fingerprint_for` from a candidate BEAM record's own
-/// identity inputs. Darwin and Linux use different formulas, and the Linux
-/// one includes the relocation schema, so both are reproduced exactly.
-pub fn beam_fingerprint_of(record: &Record) -> Option<String> {
-    if record.identity.kind != "beam" || record.schema_input() != Some("beam-toolchain/1") {
-        return None;
-    }
-    let inputs = &record.identity.inputs;
-    let otp = inputs.get("otp_sha256")?;
-    let elixir = inputs.get("elixir_sha256")?;
-    let hex = inputs.get("hex_sha512")?;
-    let rebar3 = inputs.get("rebar3_sha512")?;
-    let joined = match inputs.get("relocation_schema") {
-        Some(relocation) => format!("{otp}:{elixir}:{hex}:{rebar3}:{relocation}"),
-        None => format!("{otp}:{elixir}:{hex}:{rebar3}"),
-    };
-    Some(crate::tailors::elixir::fingerprint_of_joined(&joined))
 }

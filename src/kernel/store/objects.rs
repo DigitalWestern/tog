@@ -291,7 +291,7 @@ impl Store {
     ///
     /// This is the only publication entry point. There is deliberately no
     /// convenience form that infers a dependency set from the identity map:
-    /// an inferred set is a guess, and `commit_internal_impl` stamps what it
+    /// an inferred set is a guess, and `commit_internal` stamps what it
     /// is given as `evidence: "explicit"`. Certifying a guess as explicit is
     /// exactly the failure this explicit-evidence boundary prevents.
     ///
@@ -328,27 +328,13 @@ impl Store {
         exceptions: &[Exception],
         deps: &ObjectDeps,
     ) -> io::Result<(PathBuf, Vec<Exception>)> {
-        self.commit_internal_impl(activity, identity, staged, exceptions, deps, true)
-    }
-
-    pub(super) fn commit_internal_impl(
-        &self,
-        activity: &StoreActivity,
-        identity: &Identity,
-        staged: &Path,
-        exceptions: &[Exception],
-        deps: &ObjectDeps,
-        explicit: bool,
-    ) -> io::Result<(PathBuf, Vec<Exception>)> {
         self.require_activity(activity, "store publication")?;
         validate_object_deps(self, activity, deps)?;
-        // Grammar drift check. Each `KindAdapter` row
-        // claims to describe the inputs its producer writes *today*, but the
-        // rows were only ever read by the legacy-migration path, so a
-        // producer could drift away from its row and nothing would notice
-        // until a migration ran on a store nobody could rebuild. This is the
-        // one publication choke point, and the identity is final here, so the
-        // row is checked against the real thing.
+        // Grammar drift check. Each `ObjectKind` row describes the inputs
+        // its producer writes, and nothing else would notice a producer
+        // drifting away from its row. This is the one publication choke
+        // point, and the identity is final here, so the row is checked
+        // against the real thing.
         //
         // `debug_assertions`, not `test`: public tailor realization entry
         // points self-install the rows, direct kernel callers install them
@@ -361,7 +347,7 @@ impl Store {
         if let Err(reason) = crate::kernel::objmeta::check_identity_grammar(identity) {
             panic!(
                 "object-kind grammar drift: kind {}, {}: {reason}\nthe producer and its \
-                 KindAdapter row in src/kernel/objmeta.rs (or the tailor's objects.rs) disagree; \
+                 ObjectKind row in src/kernel/objmeta.rs (or the tailor's objects.rs) disagree; \
                  restore the producer if the drift is accidental (a dropped input like \
                  artifact_sha256 would let distinct artifacts share an object id); update the row \
                  only for an intentional, compatible addition; introduce a new schema value when \
@@ -411,28 +397,18 @@ impl Store {
             perms.set_mode(perms.mode() & !0o222);
             fs::set_permissions(&dest, perms)?;
         }
-        let meta = if explicit {
-            serde_json::json!({
-                "schema": "object-meta/2",
-                "id": id,
-                "identity": identity,
-                "created": unix_secs(),
-                "exceptions": exceptions,
-                "dependencies": deps.objects.iter().collect::<Vec<_>>(),
-                "cache_digests": deps.cache.iter().map(|digest| {
-                    serde_json::json!({"algo": digest.algo(), "hex": digest.hex()})
-                }).collect::<Vec<_>>(),
-                "evidence": "explicit",
-            })
-        } else {
-            serde_json::json!({
-                "id": id,
-                "identity": identity,
-                "created": unix_secs(),
-                "exceptions": exceptions,
-                "refs": object_refs(identity),
-            })
-        };
+        let meta = serde_json::json!({
+            "schema": "object-meta/2",
+            "id": id,
+            "identity": identity,
+            "created": unix_secs(),
+            "exceptions": exceptions,
+            "dependencies": deps.objects.iter().collect::<Vec<_>>(),
+            "cache_digests": deps.cache.iter().map(|digest| {
+                serde_json::json!({"algo": digest.algo(), "hex": digest.hex()})
+            }).collect::<Vec<_>>(),
+            "evidence": "explicit",
+        });
         // Meta is the completion marker: write via tmp + atomic rename so a
         // crash mid-write can never leave a partial file that has() would
         // accept as complete.
@@ -489,35 +465,6 @@ impl Store {
                 )
             }),
         }
-    }
-
-    /// Replace one metadata record atomically. Callers must already own the
-    /// exclusive maintenance/activity lease; keeping that requirement at the
-    /// call site prevents a migration from upgrading a long-lived shared job.
-    pub(crate) fn replace_metadata(&self, id: &str, bytes: &[u8]) -> io::Result<()> {
-        use std::io::Write as _;
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static SEQ: AtomicU64 = AtomicU64::new(0);
-        let tmp = self.root.join("tmp").join(format!(
-            "meta-migrate-{id}-{}-{}",
-            std::process::id(),
-            SEQ.fetch_add(1, Ordering::Relaxed)
-        ));
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .open(&tmp)?;
-        if let Err(error) = file.write_all(bytes).and_then(|_| file.sync_all()) {
-            let _ = fs::remove_file(&tmp);
-            return Err(error);
-        }
-        let destination = self.root.join("meta").join(format!("{id}.json"));
-        if let Err(error) = fs::rename(&tmp, &destination) {
-            let _ = fs::remove_file(&tmp);
-            return Err(error);
-        }
-        fs::File::open(self.root.join("meta"))?.sync_all()
     }
 }
 
@@ -628,24 +575,6 @@ pub(crate) fn is_object_id(value: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || *b == b'.' || *b == b'_' || *b == b'-')
 }
 
-/// An id a store written before `sanitize` split dot runs may still hold:
-/// 40 lowercase hex, `-`, then a label of `[A-Za-z0-9._-]` that may contain
-/// `..`. Accepted only by `tog gc --drop-object`, so such a store can be
-/// emptied of it; everything else keeps refusing it through `is_object_id`.
-/// The label cannot hold `/` or NUL, so the id is one entry under
-/// `objects/` and cannot traverse, and it is never `.` or `..` itself.
-pub(crate) fn is_legacy_object_id(value: &str) -> bool {
-    let bytes = value.as_bytes();
-    bytes.len() > 41
-        && bytes[..40]
-            .iter()
-            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
-        && bytes[40] == b'-'
-        && bytes[41..]
-            .iter()
-            .all(|b| b.is_ascii_alphanumeric() || *b == b'.' || *b == b'_' || *b == b'-')
-}
-
 /// One plain directory entry name: not empty, not `.` or `..`, no `/` or
 /// NUL. Looser than `is_object_id` on purpose: `Identity::object_id` keeps
 /// `.` from names and versions, so a committed id may contain `..`.
@@ -655,16 +584,6 @@ fn is_single_entry_name(value: &str) -> bool {
 
 pub(super) fn is_sha1(value: &str) -> bool {
     value.len() == 40 && value.bytes().all(|b| b.is_ascii_hexdigit())
-}
-
-pub(super) fn object_refs(identity: &Identity) -> Vec<String> {
-    let mut refs = BTreeSet::new();
-    for value in identity.inputs.values() {
-        if let Some(id) = object_id_token(value) {
-            refs.insert(id);
-        }
-    }
-    refs.into_iter().collect()
 }
 
 pub(super) fn validate_object_deps(
@@ -708,11 +627,9 @@ pub(super) fn validate_object_deps(
 }
 
 /// Compare newly supplied evidence with an already-published object's
-/// explicit metadata. A legacy record is deliberately left alone: a cache hit
-/// cannot upgrade or certify it, and the maintenance adapter owns that
-/// transition. An explicit record with different evidence is unsafe to reuse
-/// because the winner's transitive closure would no longer be the candidate's
-/// closure.
+/// metadata. A record with different evidence is unsafe to reuse because the
+/// winner's transitive closure would no longer be the candidate's closure,
+/// and so is one whose evidence cannot be read at all.
 pub(super) fn validate_cached_dependency_evidence(
     root: &Path,
     id: &str,
@@ -726,21 +643,26 @@ pub(super) fn validate_cached_dependency_evidence(
             format!("parse object metadata {}: {error}", path.display()),
         )
     })?;
-    if let Some(schema_value) = value.get("schema") {
-        let schema = schema_value.as_str().ok_or_else(|| {
+    let schema = value
+        .get("schema")
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("object metadata {id} has no schema"),
+            )
+        })?
+        .as_str()
+        .ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("object metadata {id} has an invalid schema"),
             )
         })?;
-        if schema != "object-meta/2" {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("object {id} has unknown metadata schema {schema}"),
-            ));
-        }
-    } else {
-        return Ok(());
+    if schema != "object-meta/2" {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("object {id} has unknown metadata schema {schema}"),
+        ));
     }
     let mut objects = BTreeSet::new();
     for value in value

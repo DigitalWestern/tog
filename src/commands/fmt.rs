@@ -71,13 +71,7 @@ pub fn run(
                     command.push("--check".into());
                 }
                 command.extend(args.iter().cloned());
-                // `Context::open` scopes the maintenance narration's stderr
-                // handle to the one call that narrates. Holding it any longer
-                // serialises every other thread's stderr for the rest of the
-                // command: `sandbox::relay_stderr` drains a child's stderr
-                // from its own thread through `io::stderr()`, so an outer
-                // lock held across a child is a pipe that stops being drained.
-                let ctx = Context::open(platform, true)?;
+                let ctx = Context::open(platform)?;
                 return run::run(&ctx, &command, frozen);
             }
             tailors::registry()
@@ -104,10 +98,7 @@ pub fn run(
     }
     formatter.fmt_check_project(&cwd)?;
 
-    // Same scoping as the delegated branch above: the maintenance narration
-    // is the only thing that needs the handle, and the toolchain
-    // provisioning and formatter children below all run outside it.
-    let ctx = Context::open(platform, true)?;
+    let ctx = Context::open(platform)?;
     // The formatter rides in the same bundle as the toolchain, so it is
     // chosen by the same committed lock and never by a fresh selection.
     // A workspace is formatted as one, so the lock at its root decides,

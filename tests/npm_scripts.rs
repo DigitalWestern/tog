@@ -24,7 +24,7 @@ use tog::tailors::node::{self, NpmPackage, NpmPlan};
 mod common;
 
 use common::node_stub::{sandbox_or_skip, seed_gyp_python, seed_shipped_node, stub_node_selection};
-use common::{tar_create, tog, TempDir};
+use common::{fresh_store, tar_create, tog, TempDir};
 
 /// Build a one-package tarball whose postinstall runs `script`.
 fn make_pkg_tarball(dir: &std::path::Path, script: &str) -> (PathBuf, String) {
@@ -914,6 +914,7 @@ fn assert_signal_mid_script_stops_the_sync(signal: libc::c_int, whole_group: boo
     }
     let temp = TempDir::new("npm-interrupt");
     let store_root = temp.0.join("store");
+    fresh_store(&store_root);
     for sub in ["objects", "meta", "cache/sha256", "tmp"] {
         std::fs::create_dir_all(store_root.join(sub)).unwrap();
     }

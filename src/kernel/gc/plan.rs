@@ -45,7 +45,6 @@ pub(super) enum Counter {
 pub struct SweepPlan {
     pub(super) removals: Vec<Removal>,
     pub(super) skips: Vec<String>,
-    pub(super) notes: Vec<String>,
 }
 
 impl SweepPlan {
@@ -70,7 +69,7 @@ impl SweepPlan {
 /// Missing or incomplete dependency information is never an empty dependency
 /// list: it aborts the whole sweep. There is deliberately no partial-recovery
 /// rule here.
-pub(super) fn validate<'a>(snapshot: &'a Snapshot, options: &Options) -> io::Result<Validated<'a>> {
+pub(super) fn validate<'a>(snapshot: &'a Snapshot) -> io::Result<Validated<'a>> {
     let mut blocked: Vec<String> = Vec::new();
 
     // Every object must have a record, and every record must have an object.
@@ -97,18 +96,6 @@ pub(super) fn validate<'a>(snapshot: &'a Snapshot, options: &Options) -> io::Res
         }
     }
 
-    // Legacy evidence can never authorize a deletion. Maintenance runs before
-    // this phase, so anything still legacy here could not be certified.
-    for (id, record) in snapshot.meta.iter() {
-        if record.evidence == crate::kernel::objmeta::Evidence::Legacy {
-            blocked.push(format!(
-                "object {id} ({}) still carries pre-object-meta/2 metadata; its dependencies are \
-                 not proven, so no sweep can run. Run `tog gc --migrate-metadata` and resolve \
-                 the records it names",
-                record.describe()
-            ));
-        }
-    }
     if !blocked.is_empty() {
         return Err(blockage(&blocked));
     }
@@ -119,8 +106,7 @@ pub(super) fn validate<'a>(snapshot: &'a Snapshot, options: &Options) -> io::Res
     // "policy is keeping this for now"; the union is what survives.
     let mut marking: HashSet<String> = snapshot.state.object_ids.clone();
     for entry in &snapshot.objects {
-        let record = snapshot.meta.get(&entry.id).expect("presence proven above");
-        if retained_by_policy(snapshot.now, entry, record, options) {
+        if retained_by_policy(snapshot.now, entry) {
             marking.insert(entry.id.clone());
         }
     }
@@ -208,22 +194,11 @@ pub(super) fn blockage(reasons: &[String]) -> io::Error {
 
 /// Retention policy, evaluated against the frozen snapshot time so a dry run
 /// and the sweep that follows it choose the same candidates.
-pub(super) fn retained_by_policy(
-    now: SystemTime,
-    entry: &ObjectEntry,
-    record: &crate::kernel::objmeta::Record,
-    options: &Options,
-) -> bool {
-    if recent_at(now, &entry.stat, ACTIVE_WINDOW) {
-        return true;
-    }
-    // An object published before the roots registry existed carries no
-    // reference metadata of its own. Migration proves such a record's
-    // outgoing dependencies; it says nothing about whether some pre-registry
-    // project still needs the object, so the opt-in boundary is preserved.
-    !record.had_legacy_refs
-        && (!options.collect_legacy
-            || !older_than_at(now, &entry.stat, keep_age(options.keep_days)))
+///
+/// The one rule: an object used within the active window is kept, so a sync
+/// that has published it and not yet written its root cannot lose it.
+pub(super) fn retained_by_policy(now: SystemTime, entry: &ObjectEntry) -> bool {
+    recent_at(now, &entry.stat, ACTIVE_WINDOW)
 }
 
 /// Phase 3. Build the complete deletion plan. Nothing is removed here.
@@ -231,7 +206,6 @@ pub(super) fn plan(validated: &Validated, options: &Options) -> io::Result<Sweep
     let snapshot = validated.snapshot;
     let mut removals = Vec::new();
     let mut skips = Vec::new();
-    let mut notes = Vec::new();
 
     for entry in &snapshot.objects {
         let record = snapshot
@@ -247,19 +221,9 @@ pub(super) fn plan(validated: &Validated, options: &Options) -> io::Result<Sweep
         // the deletion candidates rather than silently folded into them.
         if validated.live.contains(&entry.id) {
             let reason = if recent_at(snapshot.now, &entry.stat, ACTIVE_WINDOW) {
-                "it was used within the active window".to_string()
-            } else if !record.had_legacy_refs {
-                if options.collect_legacy {
-                    format!(
-                        "it predates reference metadata and is younger than --keep-days {}",
-                        options.keep_days
-                    )
-                } else {
-                    "it predates reference metadata; `--collect-legacy` is required to collect it"
-                        .to_string()
-                }
+                "it was used within the active window"
             } else {
-                "another object retention policy is keeping depends on it".to_string()
+                "another object retention policy is keeping depends on it"
             };
             skips.push(format!(
                 "object {} ([{}]) — {reason}",
@@ -267,7 +231,7 @@ pub(super) fn plan(validated: &Validated, options: &Options) -> io::Result<Sweep
             ));
             continue;
         }
-        let bytes = tree_size(&entry.path)? + entry.meta_size;
+        let bytes = tree_size(&entry.path)? + file_size_of(&entry.meta_stat);
         removals.push(Removal {
             parent: Parent::Objects,
             name: entry.name.clone(),
@@ -385,16 +349,9 @@ pub(super) fn plan(validated: &Validated, options: &Options) -> io::Result<Sweep
                 counter: Counter::Backups,
             });
         }
-        if let Some(note) = &snapshot.legacy_projection_note {
-            notes.push(note.clone());
-        }
     }
 
-    Ok(SweepPlan {
-        removals,
-        skips,
-        notes,
-    })
+    Ok(SweepPlan { removals, skips })
 }
 
 pub(super) fn report_plan<W: Write>(plan: &SweepPlan, out: &mut W) -> io::Result<()> {
@@ -403,9 +360,6 @@ pub(super) fn report_plan<W: Write>(plan: &SweepPlan, out: &mut W) -> io::Result
     }
     for skip in &plan.skips {
         writeln!(out, "skipped: {skip}")?;
-    }
-    for note in &plan.notes {
-        writeln!(out, "skipped: {note}")?;
     }
     Ok(())
 }
@@ -480,10 +434,9 @@ mod plan_tests {
     ) -> SweepPlan {
         let activity = store.activity(ActivityMode::Exclusive).unwrap();
         let mut out = Vec::new();
-        let mut snapshot =
-            read(store, &activity, read_options, &BTreeMap::new(), &mut out).unwrap();
+        let mut snapshot = read(store, &activity, read_options, &mut out).unwrap();
         snapshot.now = now;
-        let validated = validate(&snapshot, plan_options).unwrap();
+        let validated = validate(&snapshot).unwrap();
         plan(&validated, plan_options).unwrap()
     }
 
@@ -672,8 +625,6 @@ mod plan_tests {
         let store = temp.store();
         let forest = entry(&store.root.join("forests/k/stale"), 0);
         let backup = entry(&store.root.join("backups/stale"), 0);
-        // A legacy sibling namespace, whose note is project-sweep output too.
-        fs::create_dir_all(store.root.parent().unwrap().join("forests")).unwrap();
         claim(&temp, Vec::new());
         let now = at(WINDOW + 1);
 
@@ -684,7 +635,6 @@ mod plan_tests {
             removed(&plan, Counter::Forests)
         );
         assert!(plan.skips.is_empty(), "{:?}", plan.skips);
-        assert!(plan.notes.is_empty(), "{:?}", plan.notes);
         assert_eq!(plan.report(), Report::default());
 
         let plan = plan_at(&store, &project(0), &project(0), now);
@@ -695,13 +645,6 @@ mod plan_tests {
         assert_eq!(
             removed(&plan, Counter::Backups),
             [format!("backup {} (5 B)", backup.display())]
-        );
-        assert_eq!(
-            plan.notes,
-            [format!(
-                "legacy project projections under {} are shared by sibling stores",
-                store.root.parent().unwrap().display()
-            )]
         );
     }
 
@@ -719,11 +662,11 @@ mod plan_tests {
         let options = Options::keep_days(0);
         let activity = store.activity(ActivityMode::Exclusive).unwrap();
         let mut out = Vec::new();
-        let mut snapshot = read(&store, &activity, &options, &BTreeMap::new(), &mut out).unwrap();
-        assert!(validate(&snapshot, &options).is_ok());
+        let mut snapshot = read(&store, &activity, &options, &mut out).unwrap();
+        assert!(validate(&snapshot).is_ok());
 
-        snapshot.meta = crate::kernel::objmeta::index_of(Vec::new());
-        let error = validate(&snapshot, &options).err().unwrap().to_string();
+        snapshot.meta = crate::kernel::objmeta::MetaIndex::default();
+        let error = validate(&snapshot).err().unwrap().to_string();
         assert!(
             error.contains(&format!("object {id} has no usable metadata"))
                 && error.contains(&format!("tog gc --drop-object {id}")),

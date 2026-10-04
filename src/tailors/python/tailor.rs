@@ -7,7 +7,7 @@ use crate::kernel::cyclonedx::{
     component, list, purl_encode, push_hash, required, toolchain_component, version_of,
 };
 use crate::kernel::fsroot::ProjectRoot;
-use crate::kernel::objmeta::KindAdapter;
+use crate::kernel::objmeta::ObjectKind;
 use crate::kernel::platform::Platform;
 use crate::kernel::resolve::{DoorKind, ResolutionDoor};
 use crate::kernel::toolchain::{Catalog, Selected};
@@ -230,7 +230,7 @@ impl Tailor for Python {
         Ok(())
     }
 
-    fn object_kinds(&self) -> &'static [KindAdapter] {
+    fn object_kinds(&self) -> &'static [ObjectKind] {
         super::objects::KINDS
     }
 

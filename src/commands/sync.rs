@@ -152,7 +152,7 @@ pub(crate) fn run_in_mode(
     // publication, before any work is done for it.
     let ctx = match early {
         Some(ctx) => ctx,
-        None => Context::open(platform, true)?,
+        None => Context::open(platform)?,
     };
     project.check_still_named()?;
     if stop_after_lock {
@@ -194,7 +194,7 @@ fn recover_resolution(platform: Platform, dir: &Path) -> io::Result<Option<Conte
     if !resolve::transaction::has_pending_journal(dir) {
         return Ok(None);
     }
-    let ctx = Context::open(platform, true)?;
+    let ctx = Context::open(platform)?;
     resolve::transaction::recover_project(&ctx.store, &ctx.activity, dir)?;
     Ok(Some(ctx))
 }
@@ -1046,7 +1046,7 @@ mod tests {
         let nested = project.join("src").join("deep");
         std::fs::create_dir_all(&nested).unwrap();
         let _store_env = StoreEnv::enter(&temp.0.join("store"));
-        let ctx = Context::open_in(Platform::host().unwrap(), &bare, false).unwrap();
+        let ctx = Context::open_in(Platform::host().unwrap(), &bare).unwrap();
 
         let root =
             ensure_current(&ctx, &bare, false).expect("a directory with no manifest is left alone");
@@ -1308,7 +1308,7 @@ mod tests {
         )
         .unwrap();
         let _store_env = StoreEnv::enter(&temp.0.join("store"));
-        let ctx = Context::open_in(Platform::host().unwrap(), &project, false).unwrap();
+        let ctx = Context::open_in(Platform::host().unwrap(), &project).unwrap();
 
         let error = run(&ctx, false).unwrap_err();
         assert!(
@@ -1469,7 +1469,7 @@ mod tests {
         std::fs::write(project.join(".python-version"), "3.12.14\n").unwrap();
         let _store_env = StoreEnv::enter(&temp.0.join("store"));
         let platform = Platform::host().unwrap();
-        let ctx = Context::open_in(platform, &project, false).unwrap();
+        let ctx = Context::open_in(platform, &project).unwrap();
         let root = ProjectRoot::open(&project).unwrap();
         let moved = temp.0.join("moved");
         let swapped = SwappedMidSync {
@@ -1538,7 +1538,7 @@ mod tests {
         std::fs::write(project.join(".python-version"), "3.12.14\n").unwrap();
         let _store_env = StoreEnv::enter(&temp.0.join("store"));
         let platform = Platform::host().unwrap();
-        let ctx = Context::open_in(platform, &project, false).unwrap();
+        let ctx = Context::open_in(platform, &project).unwrap();
         let root = ProjectRoot::open(&project).unwrap();
         let moved = temp.0.join("moved");
         let swapped: &'static SwappedMidSync = Box::leak(Box::new(SwappedMidSync {

@@ -265,49 +265,6 @@ pub fn ensure_python_for(
 mod tests {
     use super::*;
 
-    /// Drift check: the legacy adapter must reconstruct exactly what this
-    /// producer supplies at commit. If it does not, a migrated record stops
-    /// matching what a re-sync publishes and every later cache hit becomes a
-    /// hard error (`store::validate_cached_dependency_evidence`), which is
-    /// what made a migrated store un-syncable in the rejected implementation.
-    #[test]
-    fn legacy_adapters_recover_the_pinned_cpython_and_uv_artifacts() {
-        for platform in Platform::ALL {
-            for pin in pythons()
-                .unwrap()
-                .iter()
-                .filter(|pin| pin.platform == *platform)
-            {
-                let expected = vec![format!("sha256:{}", pin.sha256)];
-                assert_eq!(recovered_cache(cpython_identity(pin)), expected);
-            }
-            for pin in uv_pins()
-                .unwrap()
-                .iter()
-                .filter(|pin| pin.platform == *platform)
-            {
-                let expected = vec![format!("sha256:{}", pin.sha256)];
-                assert_eq!(recovered_cache(uv_identity(pin)), expected);
-            }
-        }
-    }
-
-    fn recovered_cache(identity: crate::kernel::types::Identity) -> Vec<String> {
-        match crate::kernel::objmeta::adapt_identity_for_test(identity, Vec::new()) {
-            crate::kernel::objmeta::Adaptation::Proven(deps) => {
-                assert!(
-                    deps.objects.is_empty(),
-                    "a pinned artifact has no object deps"
-                );
-                deps.cache
-                    .iter()
-                    .map(|digest| format!("{}:{}", digest.algo(), digest.hex()))
-                    .collect()
-            }
-            crate::kernel::objmeta::Adaptation::Unresolved(reason) => panic!("{reason}"),
-        }
-    }
-
     #[test]
     fn every_cpython_release_has_one_row_per_platform_and_the_default_uv() {
         let catalog = toolchain_catalog().unwrap();

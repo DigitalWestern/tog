@@ -6,7 +6,7 @@
 //! stops the sweep until it returns or its record is explicitly forgotten.
 
 use crate::kernel::activity::StoreActivity;
-use crate::kernel::store::{self, ObjectDeps, RootEntry, Store};
+use crate::kernel::store::{self, RootEntry, Store};
 use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::ffi::OsString;
 use std::fs;
@@ -18,15 +18,15 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 mod drop;
-mod migrate;
 mod plan;
 mod read;
+mod reset;
 mod sweep;
 
 pub use self::drop::*;
-pub use migrate::*;
 pub use plan::*;
 pub use read::*;
+pub use reset::*;
 use sweep::*;
 
 const ACTIVE_WINDOW: Duration = Duration::from_secs(10 * 60);
@@ -37,9 +37,6 @@ pub struct Options {
     pub dry_run: bool,
     pub keep_days: u64,
     pub project: bool,
-    /// Explicit opt-in to collect objects written without reference
-    /// metadata. They may belong to projects from before the roots registry.
-    pub collect_legacy: bool,
     /// Root keys this sweep must ignore. A real `--forget` removed the
     /// record before the sweep, so this is a belt-and-braces repeat; a
     /// `--dry-run --forget` leaves the record in place and excludes it only
@@ -54,7 +51,6 @@ impl Default for Options {
             dry_run: false,
             keep_days: 30,
             project: false,
-            collect_legacy: false,
             forgotten: Vec::new(),
         }
     }
@@ -113,31 +109,6 @@ pub fn collect_with_activity<W: Write>(
                 + "project",
         ));
     }
-    // The maintenance phase runs first, under the same exclusive token, and
-    // before any deletion lock or snapshot. The migration opens the
-    // publication lock itself, so taking it here first would be a recursive
-    // acquisition through a second descriptor.
-    //
-    // A dry run does not write, so it carries the upgrades it *would* have
-    // published forward as an in-memory overlay. The real sweep applies the
-    // same overlay over records it has just written. Both paths therefore
-    // plan from byte-identical evidence — the preview cannot show a deletion
-    // the sweep would not make, and the sweep cannot make one the preview did
-    // not show.
-    let (migration, upgrades) =
-        migrate_metadata_locked(store, activity, options.dry_run, out, false)?;
-    if migration.unresolved != 0 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!(
-                "refusing to sweep: metadata maintenance left {} unresolved record(s); \
-                 nothing was deleted. Run `tog gc --migrate-metadata` for the full list, then \
-                 repair the records it names or drop the ones you cannot with `tog gc \
-                 --drop-object <id>`",
-                migration.unresolved
-            ),
-        ));
-    }
     // GC has its own user-visible lock, and also holds the publication lock
     // across the liveness snapshot and removals. Store::has/commit use the
     // latter, so a sync either touches an object before this sweep or waits
@@ -145,8 +116,8 @@ pub fn collect_with_activity<W: Write>(
     let _gc_lock = store.gc_lock()?;
     let _publish_lock = store.publish_lock()?;
 
-    let snapshot = read(store, activity, &options, &upgrades, out)?;
-    let validated = validate(&snapshot, &options)?;
+    let snapshot = read(store, activity, &options, out)?;
+    let validated = validate(&snapshot)?;
     let plan = plan(&validated, &options)?;
     let window = keep_age(options.keep_days);
     if options.dry_run {
@@ -284,6 +255,7 @@ fn short_sha256(bytes: &[u8], hex_len: usize) -> String {
 mod tests {
     use super::*;
     use crate::kernel::activity::ActivityMode;
+    use crate::kernel::store::ObjectDeps;
     use crate::kernel::testutil::TempDir;
     use crate::kernel::types::Identity;
     use sha2::Digest;
@@ -297,8 +269,7 @@ mod tests {
     impl TempStore {
         pub(super) fn new(label: &str) -> Self {
             let dir = TempDir::named(&format!("gc-{label}"));
-            // One level down, so the store's parent (where the legacy
-            // shared `forests/` and `backups/` live) is private to the test
+            // One level down, so the store's parent is private to the test
             // and removed with it, never the system temp directory.
             let root = dir.0.join("store");
             for sub in ["objects", "meta", "cache/sha256", "tmp", "roots"] {
@@ -341,70 +312,6 @@ mod tests {
         id
     }
 
-    /// Publish an object and then rewrite its record into the pre-object-meta/2
-    /// shape, so the adapters and the containment guard have something real to
-    /// work on.
-    fn commit_legacy_fixture(store: &Store, identity: &Identity, refs: Option<&[&str]>) -> String {
-        let id = identity.object_id();
-        if crate::kernel::objmeta::is_historical_only(identity) {
-            // An unknown kind, or a schema since superseded: a shape no live
-            // producer can commit, but one a store synced by an older tog
-            // still has on disk. Publish the legacy-shaped object by hand.
-            // Anything else goes through the real commit below, so a fixture
-            // with a typo'd input still fails at the guard.
-            let object = store.object_path(&id);
-            fs::create_dir_all(&object).unwrap();
-            fs::write(object.join("payload"), &identity.name).unwrap();
-            use std::os::unix::fs::PermissionsExt;
-            let mut permissions = fs::metadata(&object).unwrap().permissions();
-            permissions.set_mode(permissions.mode() & !0o222);
-            fs::set_permissions(&object, permissions).unwrap();
-            fs::write(
-                store.root.join("meta").join(format!("{id}.json")),
-                serde_json::json!({
-                    "schema": "object-meta/2",
-                    "id": id,
-                    "identity": identity,
-                    "created": 0,
-                    "exceptions": [],
-                    "dependencies": [],
-                    "cache_digests": [],
-                    "evidence": "explicit",
-                })
-                .to_string(),
-            )
-            .unwrap();
-        } else {
-            let staged = store.stage().unwrap();
-            fs::write(staged.join("payload"), &identity.name).unwrap();
-            store
-                .commit_with_deps(identity, &staged, &[], &ObjectDeps::new())
-                .unwrap();
-        }
-        let path = store.root.join("meta").join(format!("{id}.json"));
-        let mut value: serde_json::Value =
-            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-        let object = value.as_object_mut().unwrap();
-        object.remove("schema");
-        object.remove("dependencies");
-        object.remove("cache_digests");
-        object.remove("evidence");
-        if let Some(refs) = refs {
-            object.insert(
-                "refs".into(),
-                serde_json::json!(refs.iter().map(|r| r.to_string()).collect::<Vec<_>>()),
-            );
-        }
-        fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
-        id
-    }
-
-    /// Read one record the way every phase reads it.
-    fn record(store: &Store, id: &str) -> crate::kernel::objmeta::Record {
-        crate::kernel::objmeta::read_record_at(&store.root.join("meta").join(format!("{id}.json")))
-            .unwrap()
-    }
-
     fn closure(project: &Path, object: &Path, extra: serde_json::Value) {
         fs::create_dir_all(project.join(".tog/closures")).unwrap();
         let body = serde_json::json!({
@@ -423,198 +330,11 @@ mod tests {
         .unwrap();
     }
 
-    /// Materialise a verified cache artifact so a legacy fixture can name it.
+    /// Materialise a verified cache artifact so a fixture can name it.
     fn cached_artifact(store: &Store, hex: &str) {
         let path = store.root.join("cache/sha256").join(hex);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, b"artifact").unwrap();
-    }
-
-    /// A BEAM toolchain fixture plus the fingerprint a `hex-deps` record
-    /// would use to name it. The fingerprint is not an object id, so the
-    /// adapter has to find the object by recomputing it — which is exactly
-    /// the indirect-reference case covered by this adapter.
-    fn beam_fixture(store: &Store) -> (String, String) {
-        let otp = "1".repeat(64);
-        let elixir = "2".repeat(64);
-        let hex_archive = "3".repeat(128);
-        let rebar3 = "4".repeat(128);
-        let identity = Identity {
-            kind: "beam".into(),
-            name: "beam".into(),
-            version: "29.0.5-elixir1.20.4".into(),
-            inputs: BTreeMap::from([
-                ("schema".into(), "beam-toolchain/1".into()),
-                ("otp_sha256".into(), otp.clone()),
-                ("elixir_sha256".into(), elixir.clone()),
-                ("hex_sha512".into(), hex_archive.clone()),
-                ("rebar3_sha512".into(), rebar3.clone()),
-                ("versions".into(), "hex2.5.1:rebar3.25.1".into()),
-                ("platform".into(), "x86_64-unknown-linux-gnu".into()),
-                (
-                    "relocation_schema".into(),
-                    "otp-install-cross-minimal/1".into(),
-                ),
-                ("store_root".into(), "/fixture/tog-store".into()),
-            ]),
-        };
-        let fingerprint = crate::tailors::elixir::fingerprint_of_joined(&format!(
-            "{otp}:{elixir}:{hex_archive}:{rebar3}:otp-install-cross-minimal/1"
-        ));
-        cached_artifact(store, &otp);
-        cached_artifact(store, &elixir);
-        let id = commit_legacy_fixture(store, &identity, Some(&[]));
-        (id, fingerprint)
-    }
-
-    fn hex_deps_identity(fingerprint: &str, outer: &str, inner: &str) -> Identity {
-        Identity {
-            kind: "hex-deps".into(),
-            name: "deps".into(),
-            version: "1".into(),
-            inputs: BTreeMap::from([
-                ("schema".into(), "hex-deps/1".into()),
-                ("beam".into(), fingerprint.to_string()),
-                (
-                    "dep:jason".into(),
-                    format!("jason@1.4.4:{outer}:{inner}:mix"),
-                ),
-            ]),
-        }
-    }
-
-    /// The containment guard. A migration may make retention more precise,
-    /// never narrower.
-    ///
-    /// A `hex-deps` record names two digests per dependency: the outer
-    /// tarball, which is a real cache address, and the inner content
-    /// checksum, which normally is not. The old reader could not tell them
-    /// apart and retained both. If a file happens to sit at the inner
-    /// checksum's cache address, certifying only the outer digest would make
-    /// the sweep free a file the old reader kept — so the record must stay
-    /// legacy instead.
-    #[test]
-    fn migration_refuses_to_certify_less_than_the_legacy_reader_retained() {
-        let temp = TempStore::new("narrow-migration");
-        let store = temp.store();
-        let (_beam, fingerprint) = beam_fixture(&store);
-        let outer = "a".repeat(64);
-        let inner = "b".repeat(64);
-        cached_artifact(&store, &outer);
-        // The artifact the old reader retained through the inner checksum.
-        cached_artifact(&store, &inner);
-        let identity = hex_deps_identity(&fingerprint, &outer, &inner);
-        let id = commit_legacy_fixture(&store, &identity, Some(&[]));
-
-        let activity = store.activity(ActivityMode::Exclusive).unwrap();
-        let mut out = Vec::new();
-        let report = migrate_metadata(&store, &activity, false, &mut out).unwrap();
-        let text = String::from_utf8(out).unwrap();
-        assert_eq!(
-            report.unresolved, 1,
-            "the narrower certification was accepted: {text}"
-        );
-        assert!(text.contains("kind hex-deps, schema hex-deps/1"), "{text}");
-        assert!(text.contains(&inner), "the reason names no digest: {text}");
-        assert!(
-            record(&store, &id).evidence == crate::kernel::objmeta::Evidence::Legacy,
-            "the record was rewritten despite the narrowing"
-        );
-        drop(activity);
-    }
-
-    /// The mutation check for the guard above: with nothing cached at the
-    /// inner checksum's address, the old reader retained nothing there, the
-    /// certification narrows nothing, and the same record migrates. A guard
-    /// that simply refused every `hex-deps` record would fail this test.
-    #[test]
-    fn migration_certifies_a_record_whose_evidence_it_can_account_for() {
-        let temp = TempStore::new("wide-migration");
-        let store = temp.store();
-        let (beam, fingerprint) = beam_fixture(&store);
-        let outer = "a".repeat(64);
-        let inner = "b".repeat(64);
-        cached_artifact(&store, &outer);
-        let identity = hex_deps_identity(&fingerprint, &outer, &inner);
-        let id = commit_legacy_fixture(&store, &identity, Some(&[]));
-
-        let activity = store.activity(ActivityMode::Exclusive).unwrap();
-        let mut out = Vec::new();
-        let report = migrate_metadata(&store, &activity, false, &mut out).unwrap();
-        assert_eq!(
-            (report.upgraded, report.unresolved),
-            (2, 0),
-            "{}",
-            String::from_utf8_lossy(&out)
-        );
-        let upgraded = record(&store, &id);
-        assert_eq!(
-            upgraded.evidence,
-            crate::kernel::objmeta::Evidence::Adapted("hex-deps@1".into())
-        );
-        assert_eq!(upgraded.dependencies, BTreeSet::from([beam]));
-        assert_eq!(
-            upgraded
-                .cache
-                .iter()
-                .map(|digest| format!("{}:{}", digest.algo(), digest.hex()))
-                .collect::<Vec<_>>(),
-            vec![format!("sha256:{outer}")]
-        );
-        drop(activity);
-    }
-
-    /// Unresolved records do not cancel the upgrades that were proven, and
-    /// the announced count is the number of records actually written.
-    /// The store still refuses to sweep while one legacy record remains.
-    #[test]
-    fn a_cancelled_migration_does_not_report_upgrades_it_never_wrote() {
-        let temp = TempStore::new("cancelled-migration");
-        let store = temp.store();
-        let digest = "e".repeat(64);
-        cached_artifact(&store, &digest);
-        let good = Identity {
-            kind: "cpython".into(),
-            name: "cpython".into(),
-            version: "3.11.9".into(),
-            inputs: BTreeMap::from([
-                ("artifact_sha256".into(), digest.clone()),
-                ("platform".into(), "x86_64-unknown-linux-gnu".into()),
-            ]),
-        };
-        let good_id = commit_legacy_fixture(&store, &good, Some(&[]));
-        let unknown = Identity {
-            kind: "not-a-known-kind".into(),
-            name: "mystery".into(),
-            version: "1".into(),
-            inputs: BTreeMap::new(),
-        };
-        let unknown_id = commit_legacy_fixture(&store, &unknown, Some(&[]));
-
-        let activity = store.activity(ActivityMode::Exclusive).unwrap();
-        let mut out = Vec::new();
-        let report = migrate_metadata(&store, &activity, false, &mut out).unwrap();
-        let text = String::from_utf8(out).unwrap();
-        assert_eq!((report.upgraded, report.unresolved), (1, 1), "{text}");
-        assert_eq!(
-            record(&store, &good_id).evidence,
-            crate::kernel::objmeta::Evidence::Adapted("cpython@1".into())
-        );
-        assert_eq!(
-            record(&store, &unknown_id).evidence,
-            crate::kernel::objmeta::Evidence::Legacy,
-            "an unknown kind was certified"
-        );
-        assert!(text.contains("kind not-a-known-kind"), "{text}");
-        drop(activity);
-
-        // One legacy record is enough to keep every sweep closed.
-        let project = temp.root.join("project");
-        fs::create_dir_all(project.join(".tog/closures")).unwrap();
-        store.register_root(&project).unwrap();
-        let mut out = Vec::new();
-        let error = collect(&store, Options::default(), &mut out).unwrap_err();
-        assert!(error.to_string().contains("unresolved record"), "{error}");
     }
 
     fn age(path: &Path) {
@@ -652,7 +372,6 @@ mod tests {
                 dry_run: true,
                 keep_days: 0,
                 project: false,
-                collect_legacy: false,
                 forgotten: Vec::new(),
             },
             &mut output,
@@ -669,133 +388,63 @@ mod tests {
         assert!(!output.contains(&child), "{output}");
     }
 
+    /// A record says for itself what its object needs, so the sweep reads
+    /// it without a kind row: an object whose kind or schema this tog no
+    /// longer produces is ordinary garbage once nothing roots it, and is
+    /// kept while something does. Needing the row would instead block every
+    /// sweep on a store that holds one, after any schema bump.
     #[test]
-    fn collect_legacy_requires_explicit_opt_in() {
-        let temp = TempStore::new("keep-days");
+    fn an_object_of_a_kind_with_no_row_is_swept_or_kept_like_any_other() {
+        let temp = TempStore::new("retired-kind");
         let store = temp.store();
-        let id = commit(&store, "new", None);
-        let artifact = "a".repeat(64);
-        let artifact_path = store.cache_path("sha256", &artifact);
-        fs::write(&artifact_path, b"artifact").unwrap();
-        age(&artifact_path);
-        // An object published before the roots registry existed: certified,
-        // but still carrying the opt-in retention boundary migration
-        // preserves for a record that never had reference metadata.
-        let meta_path = store.root.join("meta").join(format!("{id}.json"));
-        let mut meta: serde_json::Value =
-            serde_json::from_reader(fs::File::open(&meta_path).unwrap()).unwrap();
-        let object = meta.as_object_mut().unwrap();
-        object.insert("evidence".into(), serde_json::json!("adapted:test@1"));
-        object.insert("legacy_retention".into(), serde_json::json!(true));
-        // The object names the artifact, so the artifact lives and dies with
-        // the object's retention rather than on its own age.
-        object.insert(
-            "cache_digests".into(),
-            serde_json::json!([{"algo": "sha256", "hex": artifact}]),
-        );
-        fs::write(&meta_path, serde_json::to_vec(&meta).unwrap()).unwrap();
-        age(&store.object_path(&id));
-        let project = temp.root.join("project");
-        fs::create_dir_all(&project).unwrap();
-        // The project needs a closure of its own to be a resolvable root; it
-        // names a real committed object (an unresolvable reference is what
-        // the sweep refuses), which the root record then protects — so the
-        // legacy object under test stays unprotected.
-        let anchor = commit(&store, "anchor", None);
-        closure(&project, &store.object_path(&anchor), serde_json::json!({}));
-        store.register_root(&project).unwrap();
-        // Both runs sweep everything past the active window; only the
-        // opt-in changes between them, so it alone decides the outcome.
-        let mut output = Vec::new();
-        let report = collect(
-            &store,
-            Options {
-                dry_run: false,
-                keep_days: 0,
-                project: false,
-                collect_legacy: false,
-                forgotten: Vec::new(),
-            },
-            &mut output,
-        )
-        .unwrap();
-        assert_eq!(report.objects, 0);
-        assert_eq!(report.cached_artifacts, 0);
-        assert!(store.object_path(&id).exists());
-        assert!(artifact_path.exists());
-        let report = collect(
-            &store,
-            Options {
-                dry_run: false,
-                keep_days: 0,
-                project: false,
-                collect_legacy: true,
-                forgotten: Vec::new(),
-            },
-            &mut output,
-        )
-        .unwrap();
-        assert_eq!(report.objects, 1);
-        assert_eq!(report.cached_artifacts, 1);
-        assert!(!store.object_path(&id).exists());
-        assert!(!artifact_path.exists());
-    }
-
-    /// An object minted under a schema that has since been superseded is
-    /// ordinary garbage once nothing roots it. Its row stays registered, so
-    /// the sweep can read the record and delete the object; losing the row
-    /// would instead block every sweep on a store that has one.
-    #[test]
-    fn an_object_of_a_superseded_schema_is_swept_as_garbage() {
-        let temp = TempStore::new("superseded-schema");
-        let store = temp.store();
-        let rooted = commit(&store, "rooted", None);
-        let project = temp.root.join("project");
-        fs::create_dir_all(&project).unwrap();
-        closure(&project, &store.object_path(&rooted), serde_json::json!({}));
-        store.register_root(&project).unwrap();
-        // A pre-object-meta/2 record, which is the case that actually needs
-        // the row: `migrate_metadata` only adapts `Evidence::Legacy`, and a
-        // record it cannot adapt closes every sweep. A crate whose sha256 is
-        // in the cache gives the adapter something real to reconstruct.
-        let crate_sha256 = "d".repeat(64);
-        cached_artifact(&store, &crate_sha256);
-        let identity = Identity {
-            kind: "cargo-vendor".into(),
-            name: "vendor".into(),
-            version: "1".into(),
-            inputs: BTreeMap::from([
-                ("schema".into(), "cargo-vendor/1".into()),
-                ("crate:serde@1.0.0".into(), crate_sha256.clone()),
-            ]),
+        let publish = |name: &str| {
+            let identity = Identity {
+                kind: "retired-kind".into(),
+                name: name.into(),
+                version: "1".into(),
+                inputs: BTreeMap::from([("schema".into(), "retired-kind/1".into())]),
+            };
+            assert!(crate::kernel::objmeta::check_identity_grammar(&identity).is_err());
+            let id = identity.object_id();
+            let object = store.object_path(&id);
+            fs::create_dir_all(&object).unwrap();
+            fs::write(object.join("payload"), name).unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = fs::metadata(&object).unwrap().permissions();
+            permissions.set_mode(permissions.mode() & !0o222);
+            fs::set_permissions(&object, permissions).unwrap();
+            fs::write(
+                store.root.join("meta").join(format!("{id}.json")),
+                serde_json::to_vec_pretty(&serde_json::json!({
+                    "schema": "object-meta/2",
+                    "id": id,
+                    "identity": identity,
+                    "created": 0,
+                    "exceptions": [],
+                    "dependencies": [],
+                    "cache_digests": [],
+                    "evidence": "explicit",
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            age(&object);
+            id
         };
-        let id = commit_legacy_fixture(&store, &identity, Some(&[]));
-        let object = store.object_path(&id);
-        assert_eq!(
-            record(&store, &id).evidence,
-            crate::kernel::objmeta::Evidence::Legacy,
-            "the fixture must be a real legacy record, not an explicit one"
-        );
-        age(&object);
+        let rooted = publish("rooted");
+        let orphan = publish("orphan");
+        register_objects(&store, &temp.root.join("project"), &[&rooted]);
 
-        let mut output = Vec::new();
-        let report = collect(
+        let (report, text) = sweep(
             &store,
             Options {
-                dry_run: false,
                 keep_days: 0,
-                project: false,
-                collect_legacy: false,
-                forgotten: Vec::new(),
+                ..Options::default()
             },
-            &mut output,
-        )
-        .expect("a superseded schema must not block the sweep");
-        // The superseded row is what let the sweep read this record at all:
-        // without it the adapter is missing, the record stays legacy, and
-        // the sweep above refuses instead of returning a report.
-        assert_eq!(report.objects, 1);
-        assert!(!object.exists());
+        );
+        assert_eq!(report.unwrap().objects, 1, "{text}");
+        assert!(!store.object_path(&orphan).exists(), "{text}");
+        assert!(store.object_path(&rooted).is_dir(), "{text}");
     }
 
     #[test]
@@ -816,7 +465,6 @@ mod tests {
                 dry_run: true,
                 keep_days: 0,
                 project: false,
-                collect_legacy: false,
                 forgotten: Vec::new(),
             },
             &mut output,
@@ -946,7 +594,6 @@ mod tests {
                 dry_run: false,
                 keep_days: 0,
                 project: false,
-                collect_legacy: false,
                 forgotten: Vec::new(),
             },
             &mut output,
@@ -980,7 +627,6 @@ mod tests {
                     dry_run,
                     keep_days: 0,
                     project: false,
-                    collect_legacy: false,
                     forgotten: Vec::new(),
                 },
                 &mut output,
@@ -1011,7 +657,6 @@ mod tests {
                 dry_run: false,
                 keep_days: 0,
                 project: false,
-                collect_legacy: false,
                 forgotten: Vec::new(),
             },
             &mut output,
@@ -1090,7 +735,6 @@ mod tests {
                 dry_run: false,
                 keep_days: 0,
                 project: false,
-                collect_legacy: false,
                 forgotten: Vec::new(),
             },
             &mut output,
@@ -1105,32 +749,25 @@ mod tests {
         assert!(store.object_path(&id).is_dir());
     }
 
-    /// A store from before the roots registry has no marker and no records,
-    /// so a sweep there would run with no idea what any project needs. It
-    /// must refuse from every entry, including `--project --collect-legacy`,
-    /// the combination that exists to reach exactly those old objects. The
-    /// end-to-end upgrade test covers this as well, but only in the ignored
-    /// suite, which leaves the guard unwatched on an ordinary `cargo test`.
+    /// A registry no root was ever written to has no `.initialized` marker
+    /// and no records, so a sweep there would run with no idea what any
+    /// project needs. It must refuse from every entry, `--project`
+    /// included.
     #[test]
     fn an_uninitialized_registry_blocks_every_sweep() {
         let temp = TempStore::new("uninitialized-registry");
         let store = temp.store();
-        let id = commit(&store, "legacy", None);
+        let id = commit(&store, "unrooted", None);
         age(&store.object_path(&id));
         assert!(!store.root.join("roots/.initialized").exists());
 
-        for (dry_run, project, collect_legacy) in [
-            (false, false, false),
-            (true, false, false),
-            (false, true, true),
-        ] {
+        for (dry_run, project) in [(false, false), (true, false), (false, true)] {
             let mut output = Vec::new();
             let error = collect(
                 &store,
                 Options {
                     dry_run,
                     project,
-                    collect_legacy,
                     keep_days: 0,
                     forgotten: Vec::new(),
                 },
@@ -1205,7 +842,6 @@ mod tests {
                 dry_run: false,
                 keep_days: 0,
                 project: false,
-                collect_legacy: false,
                 forgotten: Vec::new(),
             },
             &mut output,
@@ -1272,9 +908,9 @@ mod tests {
         snapshot: &mut Option<Snapshot>,
     ) -> SweepPlan {
         let mut out = Vec::new();
-        *snapshot = Some(read(store, activity, options, &BTreeMap::new(), &mut out).unwrap());
+        *snapshot = Some(read(store, activity, options, &mut out).unwrap());
         let taken = snapshot.as_ref().unwrap();
-        let validated = validate(taken, options).unwrap();
+        let validated = validate(taken).unwrap();
         plan(&validated, options).unwrap()
     }
 
@@ -1396,14 +1032,10 @@ mod tests {
         );
         let error = result.expect_err("corrupt metadata did not stop the sweep");
         assert!(
-            error
-                .to_string()
-                .contains("metadata maintenance left 1 unresolved record(s)"),
+            error.to_string().contains(&format!(
+                "blocked: metadata record meta/{last}.json is unusable"
+            )),
             "{error}\n{text}"
-        );
-        assert!(
-            text.contains(&format!("metadata record unusable: meta/{last}.json")),
-            "{text}"
         );
         for id in &ids {
             assert!(
@@ -1586,18 +1218,17 @@ mod tests {
             },
         );
         let error = result.unwrap_err().to_string();
-        assert!(error.contains("unresolved record"), "{error}");
-        // The refusal counts; the narration names the record and the way out.
+        // The refusal names the record and the way out.
         assert!(
-            text.contains("unknown metadata schema object-meta/3")
-                && text.contains("--drop-object"),
-            "{text}"
+            error.contains("unknown metadata schema object-meta/3")
+                && error.contains("--drop-object"),
+            "{error}\n{text}"
         );
         assert!(store.object_path(&dead).is_dir(), "a sweep ran anyway");
     }
 
     /// A dependency that is not an object id, including one that tries to
-    /// walk out of the store, leaves the record unresolved and names the
+    /// walk out of the store, makes the record unusable and names the
     /// repair.
     #[test]
     fn invalid_reference_in_metadata_is_an_error() {
@@ -1622,13 +1253,9 @@ mod tests {
             );
             let error = result.unwrap_err().to_string();
             assert!(
-                error.contains("unresolved record"),
-                "{reference:?} was accepted: {error}"
-            );
-            assert!(
-                text.contains("malformed or duplicate dependency")
-                    && text.contains("--drop-object"),
-                "{reference:?} was accepted: {text}"
+                error.contains("malformed or duplicate dependency")
+                    && error.contains("--drop-object"),
+                "{reference:?} was accepted: {error}\n{text}"
             );
         }
     }
@@ -1821,29 +1448,19 @@ mod tests {
         let temp = TempStore::new("failed-validation-temp");
         let store = temp.store();
         register_objects(&store, &temp.root.join("project"), &[]);
-        let unknown = Identity {
-            kind: "not-a-known-kind".into(),
-            name: "mystery".into(),
-            version: "1".into(),
-            inputs: BTreeMap::new(),
-        };
-        commit_legacy_fixture(&store, &unknown, Some(&[]));
+        let wedged = wedge(&store, "mystery");
         let key =
             store::Store::root_key(&temp.root.join("project").canonicalize().unwrap()).unwrap();
         let path = store.root.join("roots").join(format!(".{key}.tmp.1234.0"));
         fs::write(&path, b"crash residue").unwrap();
 
         let (result, text) = sweep(&store, Options::default());
-        let error = result.expect_err("a legacy record did not stop the sweep");
+        let error = result.expect_err("an unreadable record did not stop the sweep");
         assert!(
             error
                 .to_string()
-                .contains("metadata maintenance left 1 unresolved record(s)"),
+                .contains(&format!("metadata record meta/{wedged}.json is unusable")),
             "{error}\n{text}"
-        );
-        assert!(
-            text.contains("no adapter covers kind not-a-known-kind"),
-            "{text}"
         );
         assert!(
             path.is_file(),
@@ -1939,25 +1556,15 @@ mod tests {
         result.unwrap();
     }
 
-    /// A legacy store: the dry run must adapt in memory, migrate nothing on
-    /// disk, remove no root, and refresh no timestamp.
+    /// A dry run writes nothing: no record, no root, no timestamp.
     #[test]
-    fn dry_run_removes_no_root_migrates_nothing_and_refreshes_no_timestamp() {
+    fn dry_run_removes_no_root_rewrites_no_record_and_refreshes_no_timestamp() {
         let temp = TempStore::new("dry-run-immutable");
         let store = temp.store();
-        let digest = "1".repeat(64);
-        cached_artifact(&store, &digest);
-        let identity = Identity {
-            kind: "cpython".into(),
-            name: "cpython".into(),
-            version: "3.11.9".into(),
-            inputs: BTreeMap::from([
-                ("artifact_sha256".into(), digest.clone()),
-                ("platform".into(), "x86_64-unknown-linux-gnu".into()),
-            ]),
-        };
-        let id = commit_legacy_fixture(&store, &identity, Some(&[]));
+        let id = commit(&store, "kept", None);
         age(&store.object_path(&id));
+        let dead = commit(&store, "dead", None);
+        age(&store.object_path(&dead));
         let key = register_objects(&store, &temp.root.join("project"), &[&id]);
         let meta_path = store.root.join("meta").join(format!("{id}.json"));
         let before_meta = fs::read(&meta_path).unwrap();
@@ -1975,8 +1582,8 @@ mod tests {
                 ..Options::default()
             },
         );
-        report.unwrap();
-        assert!(text.contains("would migrate metadata"), "{text}");
+        assert_eq!(report.unwrap().objects, 1, "{text}");
+        assert!(store.object_path(&dead).is_dir(), "a dry run removed it");
         assert_eq!(
             fs::read(&meta_path).unwrap(),
             before_meta,
@@ -1995,45 +1602,19 @@ mod tests {
             before_roots,
             "a dry run changed a root record"
         );
-        assert_eq!(
-            record(&store, &id).evidence,
-            crate::kernel::objmeta::Evidence::Legacy
-        );
     }
 
-    /// Build a legacy store with one live object, one dead object and one
-    /// unreferenced cached artifact.
-    fn legacy_store(temp: &TempStore) -> (Store, String, String) {
-        let store = temp.store();
-        let live_digest = "1".repeat(64);
-        let dead_digest = "2".repeat(64);
-        cached_artifact(&store, &live_digest);
-        cached_artifact(&store, &dead_digest);
-        age(&store.cache_path("sha256", &live_digest));
-        age(&store.cache_path("sha256", &dead_digest));
-        let make = |version: &str, digest: &str| Identity {
-            kind: "cpython".into(),
-            name: "cpython".into(),
-            version: version.into(),
-            inputs: BTreeMap::from([
-                ("artifact_sha256".into(), digest.to_string()),
-                ("platform".into(), "x86_64-unknown-linux-gnu".into()),
-            ]),
-        };
-        let live = commit_legacy_fixture(&store, &make("3.11.9", &live_digest), Some(&[]));
-        let dead = commit_legacy_fixture(&store, &make("3.12.7", &dead_digest), Some(&[]));
-        age(&store.object_path(&live));
-        age(&store.object_path(&dead));
-        register_objects(&store, &temp.root.join("project"), &[&live]);
-        (store, live, dead)
-    }
-
-    /// The dry run's in-memory adaptation and the real sweep's published
-    /// one must agree: same plan, and the preview publishes nothing.
+    /// The dry run and the real sweep must agree: same plan, and the
+    /// preview removes nothing.
     #[test]
     fn dry_run_and_real_sweep_produce_the_same_plan() {
         let temp = TempStore::new("same-plan");
-        let (store, live, dead) = legacy_store(&temp);
+        let store = temp.store();
+        let live = commit(&store, "live", None);
+        let dead = commit(&store, "dead", None);
+        age(&store.object_path(&live));
+        age(&store.object_path(&dead));
+        register_objects(&store, &temp.root.join("project"), &[&live]);
         let options = || Options {
             keep_days: 0,
             ..Options::default()
@@ -2055,13 +1636,7 @@ mod tests {
             "would remove object {}",
             store.object_path(&live).display()
         )));
-        // Nothing was published, so the store is still legacy...
-        assert_eq!(
-            record(&store, &dead).evidence,
-            crate::kernel::objmeta::Evidence::Legacy
-        );
-        // ...yet the preview planned a deletion, which is only possible if
-        // the adaptation happened in memory.
+        assert!(store.object_path(&dead).is_dir(), "the preview removed it");
         assert_eq!(preview.objects, 1, "{text}");
 
         let (real, real_text) = sweep(&store, options());
@@ -2069,255 +1644,6 @@ mod tests {
         assert_eq!(preview, real, "preview {text}\nreal {real_text}");
         assert!(!store.object_path(&dead).exists(), "{real_text}");
         assert!(store.object_path(&live).is_dir(), "{real_text}");
-    }
-
-    #[test]
-    fn collect_legacy_cannot_override_incomplete_evidence() {
-        let temp = TempStore::new("collect-legacy-override");
-        let store = temp.store();
-        let dead = commit(&store, "dead", None);
-        age(&store.object_path(&dead));
-        let unknown = Identity {
-            kind: "not-a-known-kind".into(),
-            name: "mystery".into(),
-            version: "1".into(),
-            inputs: BTreeMap::new(),
-        };
-        commit_legacy_fixture(&store, &unknown, Some(&[]));
-        register_objects(&store, &temp.root.join("project"), &[]);
-
-        for collect_legacy in [false, true] {
-            let (result, text) = sweep(
-                &store,
-                Options {
-                    keep_days: 0,
-                    collect_legacy,
-                    ..Options::default()
-                },
-            );
-            let error = result.unwrap_err().to_string();
-            assert!(
-                error.contains("unresolved record"),
-                "--collect-legacy={collect_legacy} authorized a sweep: {error} {text}"
-            );
-            assert!(store.object_path(&dead).is_dir());
-        }
-    }
-
-    #[test]
-    fn legacy_metadata_with_an_adapter_migrates_and_validates_the_id() {
-        let temp = TempStore::new("adapter-validates-id");
-        let store = temp.store();
-        let digest = "3".repeat(64);
-        cached_artifact(&store, &digest);
-        let identity = Identity {
-            kind: "cpython".into(),
-            name: "cpython".into(),
-            version: "3.11.9".into(),
-            inputs: BTreeMap::from([
-                ("artifact_sha256".into(), digest.clone()),
-                ("platform".into(), "x86_64-unknown-linux-gnu".into()),
-            ]),
-        };
-        let id = commit_legacy_fixture(&store, &identity, Some(&[]));
-        let activity = store.activity(ActivityMode::Exclusive).unwrap();
-        let mut out = Vec::new();
-        let report = migrate_metadata(&store, &activity, false, &mut out).unwrap();
-        assert_eq!((report.upgraded, report.unresolved), (1, 0));
-        let upgraded = record(&store, &id);
-        assert_eq!(
-            upgraded.evidence,
-            crate::kernel::objmeta::Evidence::Adapted("cpython@1".into())
-        );
-        assert_eq!(
-            upgraded
-                .cache
-                .iter()
-                .map(|d| d.hex().to_string())
-                .collect::<Vec<_>>(),
-            vec![digest]
-        );
-        drop(activity);
-
-        // The id/identity relationship is validated on every read: a record
-        // whose identity hashes to something else is refused, not adapted.
-        edit_record(&store, &id, |record| {
-            record.insert(
-                "identity".into(),
-                serde_json::json!({
-                    "kind": "cpython",
-                    "name": "cpython",
-                    "version": "9.9.9",
-                    "inputs": {},
-                }),
-            );
-        });
-        let error = crate::kernel::objmeta::read_record_at(
-            &store.root.join("meta").join(format!("{id}.json")),
-        )
-        .unwrap_err()
-        .to_string();
-        assert!(error.contains("hashes to a different object id"), "{error}");
-    }
-
-    #[test]
-    fn legacy_metadata_with_an_unknown_kind_stays_blocked_and_is_named() {
-        let temp = TempStore::new("unknown-kind-blocked");
-        let store = temp.store();
-        let unknown = Identity {
-            kind: "not-a-known-kind".into(),
-            name: "mystery".into(),
-            version: "7".into(),
-            inputs: BTreeMap::from([("schema".into(), "mystery/4".into())]),
-        };
-        let id = commit_legacy_fixture(&store, &unknown, Some(&[]));
-        register_objects(&store, &temp.root.join("project"), &[]);
-
-        let activity = store.activity(ActivityMode::Exclusive).unwrap();
-        let mut out = Vec::new();
-        let report = migrate_metadata(&store, &activity, false, &mut out).unwrap();
-        let text = String::from_utf8(out).unwrap();
-        assert_eq!((report.upgraded, report.unresolved), (0, 1));
-        assert!(text.contains(&id), "the object id is not named: {text}");
-        assert!(
-            text.contains("kind not-a-known-kind, schema mystery/4"),
-            "the kind and schema are not named: {text}"
-        );
-        drop(activity);
-
-        let (result, _) = sweep(
-            &store,
-            Options {
-                keep_days: 0,
-                ..Options::default()
-            },
-        );
-        assert!(result.is_err(), "a store with an unknown kind swept anyway");
-        assert_eq!(
-            record(&store, &id).evidence,
-            crate::kernel::objmeta::Evidence::Legacy
-        );
-    }
-
-    #[test]
-    fn automatic_maintenance_precedes_shared_job_activity() {
-        let temp = TempStore::new("maintenance-precedes");
-        let store = temp.store();
-        let digest = "5".repeat(64);
-        cached_artifact(&store, &digest);
-        let identity = Identity {
-            kind: "cpython".into(),
-            name: "cpython".into(),
-            version: "3.11.9".into(),
-            inputs: BTreeMap::from([
-                ("artifact_sha256".into(), digest),
-                ("platform".into(), "x86_64-unknown-linux-gnu".into()),
-            ]),
-        };
-        let id = commit_legacy_fixture(&store, &identity, Some(&[]));
-
-        // The shape `Context::open` uses: maintenance first, then the job's
-        // token.
-        let mut out = Vec::new();
-        let report = automatic_maintenance(&store, &mut out).unwrap();
-        assert_eq!((report.upgraded, report.unresolved), (1, 0));
-        assert_eq!(
-            record(&store, &id).evidence,
-            crate::kernel::objmeta::Evidence::Adapted("cpython@1".into())
-        );
-        let job = store.activity(ActivityMode::Shared).unwrap();
-        store.require_activity(&job, "job").unwrap();
-        drop(job);
-
-        // Re-running it under no lease is an idempotent no-op.
-        let mut out = Vec::new();
-        let again = automatic_maintenance(&store, &mut out).unwrap();
-        assert_eq!((again.upgraded, again.unresolved), (0, 0));
-    }
-
-    #[test]
-    fn busy_automatic_maintenance_defers_without_lock_upgrade() {
-        let temp = TempStore::new("maintenance-defers");
-        let store = temp.store();
-        let digest = "6".repeat(64);
-        cached_artifact(&store, &digest);
-        let identity = Identity {
-            kind: "cpython".into(),
-            name: "cpython".into(),
-            version: "3.11.9".into(),
-            inputs: BTreeMap::from([
-                ("artifact_sha256".into(), digest),
-                ("platform".into(), "x86_64-unknown-linux-gnu".into()),
-            ]),
-        };
-        let id = commit_legacy_fixture(&store, &identity, Some(&[]));
-
-        // A job already owns the store. Maintenance must report a deferral
-        // and return, never wait for or upgrade the caller's own lease.
-        let job = store.activity(ActivityMode::Shared).unwrap();
-        let mut out = Vec::new();
-        let report = automatic_maintenance(&store, &mut out).unwrap();
-        let text = String::from_utf8(out).unwrap();
-        assert_eq!((report.upgraded, report.unresolved), (0, 0));
-        assert!(text.contains("metadata maintenance deferred"), "{text}");
-        assert_eq!(
-            record(&store, &id).evidence,
-            crate::kernel::objmeta::Evidence::Legacy
-        );
-        // The caller's own lease is untouched and still usable.
-        store.require_activity(&job, "job").unwrap();
-        drop(job);
-    }
-
-    #[test]
-    fn migration_failure_never_starts_deletion() {
-        let temp = TempStore::new("migration-failure");
-        let store = temp.store();
-        let dead = commit(&store, "dead", None);
-        age(&store.object_path(&dead));
-        let artifact = "7".repeat(64);
-        cached_artifact(&store, &artifact);
-        age(&store.cache_path("sha256", &artifact));
-        // A record whose adapter cannot resolve its indirect reference: the
-        // Go toolchain it names has been collected by an older sweep.
-        let unresolvable = Identity {
-            kind: "go-modcache".into(),
-            name: "modcache".into(),
-            version: "0".into(),
-            inputs: BTreeMap::from([
-                ("schema".into(), "go-modcache/1".into()),
-                ("extractor".into(), format!("go1.25.3:{}", "8".repeat(64))),
-            ]),
-        };
-        commit_legacy_fixture(&store, &unresolvable, Some(&[]));
-        register_objects(&store, &temp.root.join("project"), &[]);
-
-        let (result, text) = sweep(
-            &store,
-            Options {
-                keep_days: 0,
-                ..Options::default()
-            },
-        );
-        let error = result.expect_err("an unresolvable legacy record did not stop the sweep");
-        assert!(
-            error
-                .to_string()
-                .contains("metadata maintenance left 1 unresolved record(s)"),
-            "{error}\n{text}"
-        );
-        assert!(
-            text.contains("no go object in this store matches Go 1.25.3"),
-            "{text}"
-        );
-        assert!(
-            store.object_path(&dead).is_dir(),
-            "an object was deleted: {text}"
-        );
-        assert!(
-            store.cache_path("sha256", &artifact).is_file(),
-            "a cached artifact was deleted: {text}"
-        );
     }
 
     #[test]
@@ -2378,42 +1704,6 @@ mod tests {
                 "{algo}:{hex} survived: {text}"
             );
         }
-    }
-
-    #[test]
-    fn hex_package_tarballs_remain_cached_for_a_retained_hex_object() {
-        let temp = TempStore::new("hex-tarballs");
-        let store = temp.store();
-        let (beam, fingerprint) = beam_fixture(&store);
-        let outer = "a".repeat(64);
-        cached_artifact(&store, &outer);
-        age(&store.cache_path("sha256", &outer));
-        let stray = "f".repeat(64);
-        cached_artifact(&store, &stray);
-        age(&store.cache_path("sha256", &stray));
-        let identity = hex_deps_identity(&fingerprint, &outer, &"b".repeat(64));
-        let deps_id = commit_legacy_fixture(&store, &identity, Some(&[]));
-        age(&store.object_path(&deps_id));
-        age(&store.object_path(&beam));
-        register_objects(&store, &temp.root.join("project"), &[&deps_id]);
-
-        let (report, text) = sweep(
-            &store,
-            Options {
-                keep_days: 0,
-                ..Options::default()
-            },
-        );
-        report.unwrap();
-        assert!(
-            store.cache_path("sha256", &outer).is_file(),
-            "a retained hex object lost its package tarball: {text}"
-        );
-        assert!(
-            store.object_path(&beam).is_dir(),
-            "the BEAM object was collected: {text}"
-        );
-        assert!(!store.cache_path("sha256", &stray).exists(), "{text}");
     }
 
     #[test]
@@ -2705,8 +1995,8 @@ mod tests {
     /// per-store activity lease cannot authorize deleting from them, so they
     /// are named as retained and never swept.
     #[test]
-    fn legacy_shared_forests_and_backups_are_never_swept() {
-        let temp = TempStore::new("legacy-shared");
+    fn forests_and_backups_beside_the_store_are_never_swept() {
+        let temp = TempStore::new("beside-store");
         let store = temp.store();
         let home = store.root.parent().unwrap().to_path_buf();
         let shared_forest = home.join("forests/deadbeef/projection");
@@ -2733,10 +2023,6 @@ mod tests {
         assert!(
             shared_backup.is_dir(),
             "a sibling-namespace backup was swept: {text}"
-        );
-        assert!(
-            text.contains("shared by sibling stores"),
-            "the retention was not narrated: {text}"
         );
     }
 
@@ -3012,15 +2298,9 @@ mod tests {
             "the retention reason was not given: {text}"
         );
 
-        // The same store with one legacy record reports a block instead, and
-        // authorizes no deletion at all.
-        let unknown = Identity {
-            kind: "not-a-known-kind".into(),
-            name: "mystery".into(),
-            version: "1".into(),
-            inputs: BTreeMap::new(),
-        };
-        commit_legacy_fixture(&store, &unknown, Some(&[]));
+        // The same store with one unreadable record reports a block instead,
+        // and authorizes no deletion at all.
+        wedge(&store, "mystery");
         let (result, text) = sweep(
             &store,
             Options {
@@ -3047,13 +2327,7 @@ mod tests {
         plant(&store);
         let activity = store.try_activity_exclusive().unwrap().unwrap();
         let mut out = Vec::new();
-        match read(
-            &store,
-            &activity,
-            &Options::default(),
-            &BTreeMap::new(),
-            &mut out,
-        ) {
+        match read(&store, &activity, &Options::default(), &mut out) {
             Ok(_) => panic!("the read phase accepted a malformed store"),
             Err(error) => error.to_string(),
         }
@@ -3149,11 +2423,14 @@ mod tests {
         fs::write(
             store.root.join("meta").join(format!("{id}.json")),
             serde_json::to_vec_pretty(&serde_json::json!({
+                "schema": "object-meta/2",
                 "id": id,
                 "identity": identity,
                 "created": 0,
                 "exceptions": [],
-                "refs": [],
+                "dependencies": [],
+                "cache_digests": [],
+                "evidence": "explicit",
             }))
             .unwrap(),
         )
@@ -3168,16 +2445,8 @@ mod tests {
         (result, String::from_utf8(out).unwrap())
     }
 
-    fn migrated(store: &Store) -> (io::Result<MigrationReport>, String) {
-        let activity = store.activity(ActivityMode::Exclusive).unwrap();
-        let mut out = Vec::new();
-        let result = migrate_metadata(store, &activity, false, &mut out);
-        (result, String::from_utf8(out).unwrap())
-    }
-
-    /// The whole issue, end to end: migration reports the record instead of
-    /// refusing on it, the sweep still refuses, and `--drop-object` is the
-    /// thing that unwedges the store.
+    /// The whole issue, end to end: the sweep refuses and names the recovery
+    /// command, and `--drop-object` is the thing that unwedges the store.
     #[test]
     fn an_unreadable_record_is_reported_droppable_and_unwedges_the_sweep() {
         let temp = TempStore::new("wedged-record");
@@ -3185,21 +2454,16 @@ mod tests {
         let id = wedge(&store, "wedged");
         register_objects(&store, &temp.root.join("project"), &[]);
 
-        let (report, text) = migrated(&store);
-        let report = report.expect("migration must report the record, not refuse on it");
-        assert_eq!(report.unresolved, 1, "{text}");
-        assert!(
-            text.contains(&format!("--drop-object {id}")),
-            "the recovery command is not named: {text}"
-        );
-
         let activity = store.activity(ActivityMode::Exclusive).unwrap();
         let mut out = Vec::new();
         let error = collect_with_activity(&store, &activity, Options::default(), &mut out)
             .unwrap_err()
             .to_string();
         drop(activity);
-        assert!(error.contains("--drop-object"), "{error}");
+        assert!(
+            error.contains(&format!("--drop-object {id}")),
+            "the recovery command is not named: {error}"
+        );
         assert!(
             store.object_path(&id).is_dir(),
             "the fail-closed sweep deleted something"
@@ -3321,104 +2585,6 @@ mod tests {
         assert_eq!(error, format!("no such object {absent}"), "{text}");
     }
 
-    /// The warning an operator sees before every single command is not a
-    /// warning, it is noise. It must appear when the store's problem appears,
-    /// again whenever that problem changes, and never in between.
-    #[test]
-    fn deferred_maintenance_is_announced_once_per_store_and_again_when_it_changes() {
-        let temp = TempStore::new("maintenance-once");
-        let store = temp.store();
-        let first = wedge(&store, "wedged-one");
-        let marker = store.root.join("maintenance-deferred");
-
-        let announce = |label: &str| -> String {
-            let mut out = Vec::new();
-            automatic_maintenance(&store, &mut out)
-                .unwrap_or_else(|error| panic!("{label}: {error}"));
-            String::from_utf8(out).unwrap()
-        };
-
-        let text = announce("first");
-        assert!(text.contains("metadata maintenance deferred"), "{text}");
-        assert!(text.contains(&format!("--drop-object {first}")), "{text}");
-        assert!(text.contains("tog: shown once per store"), "{text}");
-        // At most three warnings, and each one names the command that
-        // resolves it on the line below.
-        let warnings = text.matches("tog: warning: ").count();
-        assert!(warnings <= 3, "{warnings} warnings: {text}");
-        assert_eq!(warnings, text.matches("tog:     fix: ").count(), "{text}");
-        assert!(marker.is_file(), "the marker was not written: {text}");
-
-        let text = announce("second");
-        assert!(text.is_empty(), "the same deferral was repeated: {text}");
-
-        // A second wedged record is new information, so it is announced.
-        let second = wedge(&store, "wedged-two");
-        let text = announce("third");
-        assert!(text.contains(&format!("--drop-object {second}")), "{text}");
-
-        let (count, text) = dropped(&store, &[first, second], false);
-        assert_eq!(count.unwrap(), 2, "{text}");
-        assert!(!marker.exists(), "dropping left the marker behind: {text}");
-        let text = announce("fourth");
-        assert!(text.is_empty(), "a healthy store warned: {text}");
-        assert!(!marker.exists(), "a healthy store kept a marker: {text}");
-    }
-
-    /// Migration may not certify anything while a record is missing from the
-    /// index. An adapter resolves indirect references by asking for the one
-    /// record that matches, so a skipped record can turn an ambiguity the
-    /// strict reader would have refused into a confident wrong answer.
-    #[test]
-    fn an_unusable_record_holds_migration_of_every_other_legacy_record() {
-        let temp = TempStore::new("migration-held");
-        let store = temp.store();
-        let wedged = wedge(&store, "wedged");
-        let digest = "1".repeat(64);
-        cached_artifact(&store, &digest);
-        let provable = commit_legacy_fixture(
-            &store,
-            &Identity {
-                kind: "cpython".into(),
-                name: "cpython".into(),
-                version: "3.11.9".into(),
-                inputs: BTreeMap::from([
-                    ("artifact_sha256".into(), digest),
-                    ("platform".into(), "x86_64-unknown-linux-gnu".into()),
-                ]),
-            },
-            Some(&[]),
-        );
-        let record_path = store.root.join("meta").join(format!("{provable}.json"));
-        let before = fs::read(&record_path).unwrap();
-
-        let (report, text) = migrated(&store);
-        let report = report.expect("migration must report, not refuse");
-        assert_eq!(report.upgraded, 0, "{text}");
-        assert_eq!(
-            report.unresolved, 2,
-            "the held legacy record was not counted: {text}"
-        );
-        assert!(
-            text.contains("metadata migration held: 1 unusable"),
-            "{text}"
-        );
-        assert_eq!(
-            fs::read(&record_path).unwrap(),
-            before,
-            "a record was rewritten while the index was partial"
-        );
-
-        // With the unusable record gone the index is whole again, so the
-        // provable record migrates on the next pass.
-        let (count, text) = dropped(&store, &[wedged], false);
-        assert_eq!(count.unwrap(), 1, "{text}");
-        let (report, text) = migrated(&store);
-        let report = report.unwrap();
-        assert_eq!((report.upgraded, report.unresolved), (1, 0), "{text}");
-        assert_ne!(fs::read(&record_path).unwrap(), before, "{text}");
-    }
-
     /// Removal order is a durability choice, not tidiness. A batch that
     /// fails partway must never leave a readable record naming an id with
     /// nothing under `objects/`, so the shape checks all happen first.
@@ -3450,40 +2616,5 @@ mod tests {
                     .is_file(),
             "the refusal removed part of the batch: {error}"
         );
-    }
-
-    /// The marker may only claim the operator has seen the text once the
-    /// text has actually been written. A failing writer must leave no
-    /// marker, or the warning is silenced for a store nobody warned about.
-    #[test]
-    fn a_failed_warning_write_leaves_no_marker_behind() {
-        struct BrokenWriter;
-        impl Write for BrokenWriter {
-            fn write(&mut self, _: &[u8]) -> io::Result<usize> {
-                Err(io::Error::other("stderr is gone"))
-            }
-            fn flush(&mut self) -> io::Result<()> {
-                Ok(())
-            }
-        }
-
-        let temp = TempStore::new("marker-after-write");
-        let store = temp.store();
-        wedge(&store, "wedged");
-        let marker = store.root.join("maintenance-deferred");
-
-        let error = automatic_maintenance(&store, &mut BrokenWriter).unwrap_err();
-        assert!(error.to_string().contains("stderr is gone"), "{error}");
-        assert!(
-            !marker.exists(),
-            "a warning nobody saw was recorded as shown"
-        );
-
-        // The next run, with a working writer, still announces it.
-        let mut out = Vec::new();
-        automatic_maintenance(&store, &mut out).unwrap();
-        let text = String::from_utf8(out).unwrap();
-        assert!(text.contains("metadata maintenance deferred"), "{text}");
-        assert!(marker.is_file(), "{text}");
     }
 }

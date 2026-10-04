@@ -885,8 +885,7 @@ fn parse_gc(args: &[String]) -> Result<Option<Command>, UsageError> {
             "-h" | "--help" => return Ok(None),
             "--dry-run" => gc.dry_run = true,
             "--project" => gc.project = true,
-            "--collect-legacy" => gc.collect_legacy = true,
-            "--migrate-metadata" => gc.migrate_metadata = true,
+            "--reset" => gc.reset = true,
             "--register" => {
                 index += 1;
                 let first = index;
@@ -999,24 +998,15 @@ fn valid_root_key(value: &str) -> Result<String, UsageError> {
 /// `store::is_object_id` remains the authority, and the kernel re-checks
 /// every id it is given.
 ///
-/// A label with `..` is accepted when the prefix is 40 lowercase hex, the
-/// shape of `store::is_legacy_object_id`: stores written before `sanitize`
-/// split dot runs hold such ids, and this is the only command that removes
-/// them. The label still cannot hold `/` or NUL, so it cannot traverse.
 fn valid_object_id(value: &str) -> Result<String, UsageError> {
     let bytes = value.as_bytes();
-    let label_ok = |bytes: &[u8]| {
-        bytes
-            .iter()
-            .all(|b| b.is_ascii_alphanumeric() || *b == b'.' || *b == b'_' || *b == b'-')
-    };
     let well_formed = bytes.len() > 41
+        && bytes[..40].iter().all(u8::is_ascii_hexdigit)
         && bytes[40] == b'-'
-        && label_ok(&bytes[41..])
-        && ((bytes[..40].iter().all(u8::is_ascii_hexdigit) && !value.contains(".."))
-            || bytes[..40]
-                .iter()
-                .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')));
+        && !value.contains("..")
+        && bytes[41..]
+            .iter()
+            .all(|b| b.is_ascii_alphanumeric() || *b == b'.' || *b == b'_' || *b == b'-');
     if well_formed {
         Ok(value.to_string())
     } else {
@@ -2414,19 +2404,41 @@ mod tests {
                 "/b",
                 "--project",
                 "--register=/c",
-                "--collect-legacy",
                 "--keep-days=7",
             ]),
             Command::Gc(GcArgs {
                 dry_run: true,
                 keep_days: Some(7),
                 project: true,
-                collect_legacy: true,
-                migrate_metadata: false,
+                reset: false,
                 register: vec!["/a".into(), "/b".into(), "/c".into()],
                 forget: Vec::new(),
                 drop_objects: Vec::new(),
             })
+        );
+        assert_eq!(
+            command(&["gc", "--reset"]),
+            Command::Gc(GcArgs {
+                reset: true,
+                ..GcArgs::default()
+            })
+        );
+        assert_eq!(
+            command(&["gc", "--dry-run", "--reset"]),
+            Command::Gc(GcArgs {
+                dry_run: true,
+                reset: true,
+                ..GcArgs::default()
+            })
+        );
+        // A flag, never a flag with a value.
+        assert_eq!(
+            message(&["gc", "--reset=now"]),
+            "gc: unknown option '--reset=now'; did you mean '--reset'?"
+        );
+        assert_eq!(
+            message(&["gc", "--reset", "now"]),
+            "gc: unexpected argument 'now'"
         );
         assert_eq!(
             message(&["gc", "--register"]),
@@ -2496,7 +2508,7 @@ mod tests {
         );
         for refused in [
             format!("{}-../escape", "a".repeat(40)),
-            format!("{}-a..b-1", "A".repeat(40)),
+            format!("{}-a..b-1", "a".repeat(40)),
             format!("{}-a..b-1", "a".repeat(39)),
             format!("{}g-a..b-1", "a".repeat(39)),
         ] {
@@ -2508,15 +2520,6 @@ mod tests {
                 )
             );
         }
-        // A store written before `sanitize` split dot runs holds this shape.
-        let legacy = format!("{}-a..b-1", "a".repeat(40));
-        assert_eq!(
-            command(&["gc", "--drop-object", &legacy]),
-            Command::Gc(GcArgs {
-                drop_objects: vec![legacy.clone()],
-                ..GcArgs::default()
-            })
-        );
         assert_eq!(message(&["gc", "--keep-days"]), "--keep-days needs <n>");
         assert_eq!(
             message(&["gc", "--keep-days", "soon"]),

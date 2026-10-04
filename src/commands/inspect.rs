@@ -1020,6 +1020,14 @@ fn toolchains_check(store: &Store, checks: &mut Vec<Check>) {
 /// The store block: opening it is the only thing `doctor` does that could
 /// fail for the whole group, so the three probes below hang off the `Ok`.
 fn store_checks(checks: &mut Vec<Check>) {
+    // A store written in a format this tog does not read is not opened.
+    // The row says so in the refusal's own words, which name the fix.
+    if let Ok(Some((root, format))) = Store::probe() {
+        if let Some(refusal) = format.refusal(&root) {
+            checks.push(check("store", Level::Fail, refusal));
+            return;
+        }
+    }
     match Store::open() {
         Ok(store) => {
             store_writable_check(&store, checks);

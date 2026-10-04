@@ -110,9 +110,6 @@ pub(super) fn execute<W: Write>(
             ));
         }
     }
-    for note in &plan.notes {
-        writeln!(out, "skipped {note}")?;
-    }
     Ok(report)
 }
 

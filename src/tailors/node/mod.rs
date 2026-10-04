@@ -997,36 +997,6 @@ mod tests {
     use super::*;
     use crate::kernel::testutil::TempDir;
 
-    /// Drift check: the legacy adapter must reconstruct exactly what this
-    /// producer supplies at commit, or a migrated record stops matching what
-    /// a re-sync publishes and every later cache hit becomes a hard error.
-    #[test]
-    fn legacy_adapter_recovers_the_pinned_node_artifact() {
-        for platform in Platform::ALL {
-            let pin = node_pin(*platform).unwrap();
-            assert_eq!(
-                recovered_cache(node_identity(pin)),
-                vec![format!("sha256:{}", pin.sha256)]
-            );
-        }
-    }
-
-    fn recovered_cache(identity: crate::kernel::types::Identity) -> Vec<String> {
-        match crate::kernel::objmeta::adapt_identity_for_test(identity, Vec::new()) {
-            crate::kernel::objmeta::Adaptation::Proven(deps) => {
-                assert!(
-                    deps.objects.is_empty(),
-                    "a pinned artifact has no object deps"
-                );
-                deps.cache
-                    .iter()
-                    .map(|digest| format!("{}:{}", digest.algo(), digest.hex()))
-                    .collect()
-            }
-            crate::kernel::objmeta::Adaptation::Unresolved(reason) => panic!("{reason}"),
-        }
-    }
-
     pub(super) const TEST_SRI: &str =
         "sha512-m3HSJL1i83hdltRq0+o9czGb+8KJDKra4t/3JRXMui/CET1IEDrHK6nHYbdEaGL/uhPMbuF3AGkGxXTVpn3ETw==";
 
@@ -2567,28 +2537,11 @@ mod tests {
             ])
         );
 
-        // `gc --register` rebuilds the same record from this closure alone,
-        // plus one reference the publisher never makes: the importer also
-        // follows the `projection_id` route that `node-forest/1` closures
-        // needed, and adds the forest's spelling in the legacy sibling
-        // namespace. That namespace is never swept, so the extra reference
-        // retains nothing; it is pinned here so a change to it is seen.
+        // `gc --register` rebuilds the same record from this closure alone.
         drop(lease);
         let reimported = crate::kernel::store::reimport_root_for_test(&store, &project).unwrap();
         assert_eq!(reimported.objects, record.objects);
-        let mut expected = record.projections.clone();
-        let proj_id = forest.parent().unwrap();
-        expected.insert(
-            crate::kernel::store::ProjectionRef::new(
-                crate::kernel::store::ProjectionBase::LegacyForests,
-                vec![
-                    proj_id.parent().unwrap().file_name().unwrap().into(),
-                    proj_id.file_name().unwrap().into(),
-                ],
-            )
-            .unwrap(),
-        );
-        assert_eq!(reimported.projections, expected);
+        assert_eq!(reimported.projections, record.projections);
     }
 
     #[test]
