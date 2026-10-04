@@ -258,8 +258,6 @@ fn configure_git(command: &mut Command, args: &[&str], cwd: Option<&Path>) {
     command.env("GIT_ASKPASS", "/bin/true");
 }
 
-// Reviewed site (tests/architecture.rs): tog's own git fetch: tog verifies what it brings back, so it is not a resolution door, and it needs the network, so it is no host-local helper either.
-#[allow(clippy::disallowed_methods)]
 fn run_git_with_activity(
     args: &[&str],
     cwd: Option<&Path>,
@@ -267,53 +265,140 @@ fn run_git_with_activity(
 ) -> io::Result<std::process::Output> {
     let mut command = Command::new(GIT);
     configure_git(&mut command, args, cwd);
-    crate::kernel::supervise::output(&mut command, activity)
+    supervise_git(&mut command, activity)
         .map_err(|e| io::Error::new(e.kind(), format!("run {GIT} {}: {e}", args.join(" "))))
 }
 
-/// Which of `paths` (relative to `dir`) hold at least one file git tracks
-/// in the repository around `dir`. Outside a repository, or on a host
-/// without git, none do: the only question is whether moving a directory
-/// away would delete committed source.
+// Reviewed site (tests/architecture.rs): tog's own verified Git fetches and its fixed, scrubbed index-only query, built here rather than supplied by a dependency tool.
+#[allow(clippy::disallowed_methods)]
+fn supervise_git(
+    command: &mut Command,
+    activity: &StoreActivity,
+) -> io::Result<std::process::Output> {
+    crate::kernel::supervise::output(command, activity)
+}
+
+/// Which project-relative directories hold files tracked by any repository
+/// around them. Bind every query to the metadata found through held parents,
+/// including nested repositories and worktree/submodule .git files.
 pub fn tracked_among(
-    dir: &Path,
+    project: &crate::kernel::fsroot::ProjectRoot,
     paths: &[String],
-    activity: &crate::kernel::activity::StoreActivity,
+    activity: &StoreActivity,
 ) -> io::Result<Vec<String>> {
-    if paths.is_empty() {
-        return Ok(Vec::new());
+    use crate::kernel::store::{open_file_at, read_dir_names_at, same_inode, stat_at};
+    use std::os::fd::AsRawFd;
+    let flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC;
+    let mut tracked = Vec::new();
+    for path in paths {
+        let relative = Path::new(path);
+        let parent = relative
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        let name = relative
+            .file_name()
+            .ok_or_else(|| err("tracked-file query requires a relative directory name"))?;
+        let held = project.input_subdir(parent)?.ok_or_else(|| {
+            err(format!(
+                "directory {parent:?} disappeared before checking tracked source"
+            ))
+        })?;
+        let mut dir = open_file_at(held.as_raw_fd(), b".", flags, 0)?;
+        let mut relative = PathBuf::from(name);
+        let mut protected = false;
+        loop {
+            match stat_at(dir.as_raw_fd(), b".git") {
+                Ok(_) => protected |= tracked_in_git_index(dir.as_raw_fd(), &relative, activity)?,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+            let parent = open_file_at(dir.as_raw_fd(), b"..", flags, 0)?;
+            let current = stat_at(dir.as_raw_fd(), b".")?;
+            if same_inode(&current, &stat_at(parent.as_raw_fd(), b".")?) {
+                break;
+            }
+            // Recover the actual directory name from its held parent. A
+            // pathname captured before a rename is not an index authority.
+            let mut child = None;
+            for name in read_dir_names_at(parent.as_raw_fd())? {
+                use std::os::unix::ffi::OsStrExt;
+                match stat_at(parent.as_raw_fd(), name.as_bytes()) {
+                    Ok(stat) if same_inode(&current, &stat) => {
+                        child = Some(name);
+                        break;
+                    }
+                    Ok(_) => {}
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error),
+                }
+            }
+            let child = child
+                .ok_or_else(|| err("project ancestry changed during Git source check; retry"))?;
+            relative = PathBuf::from(child).join(relative);
+            dir = parent;
+        }
+        if protected {
+            tracked.push(path.clone());
+        }
     }
-    // Literal pathspecs: a workspace path is a name, never a glob. The
-    // repository's own fsmonitor hook is not run for a read of the index.
-    let mut args = vec![
-        "--literal-pathspecs",
-        "-c",
-        "core.fsmonitor=false",
-        "ls-files",
-        "-z",
-        "--",
-    ];
-    args.extend(paths.iter().map(String::as_str));
-    let output = match run_git_with_activity(&args, Some(dir), activity) {
-        Ok(output) => output,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return Err(error),
-    };
-    if !output.status.success() {
-        return Ok(Vec::new());
-    }
+    Ok(tracked)
+}
+
+fn tracked_in_git_index(
+    fd: std::os::fd::RawFd,
+    relative: &Path,
+    activity: &StoreActivity,
+) -> io::Result<bool> {
     use std::os::unix::ffi::OsStrExt;
-    let listed: Vec<&Path> = output
+    use std::os::unix::process::CommandExt;
+    let mut command = Command::new(GIT);
+    // An explicit git-dir refuses damaged metadata instead of discovering
+    // a healthy ancestor. Check every surrounding index, including outer
+    // repositories that track files a healthy inner repository omits.
+    configure_git(
+        &mut command,
+        &[
+            "--literal-pathspecs",
+            "-c",
+            "core.fsmonitor=false",
+            "--git-dir=.git",
+            "--work-tree=.",
+            "ls-files",
+            "-z",
+            "--",
+        ],
+        None,
+    );
+    command.arg(relative);
+    // SAFETY: the caller owns fd throughout spawn and wait. fchdir is
+    // async-signal-safe and runs before exec closes this CLOEXEC fd.
+    unsafe {
+        command.pre_exec(move || {
+            if libc::fchdir(fd) == 0 {
+                Ok(())
+            } else {
+                Err(io::Error::last_os_error())
+            }
+        });
+    }
+    let output = supervise_git(&mut command, activity).map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!("cannot check Git-tracked source: {error}"),
+        )
+    })?;
+    if !output.status.success() {
+        return Err(err(format!(
+            "cannot check Git-tracked source {relative:?}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    Ok(output
         .stdout
         .split(|byte| *byte == 0)
         .filter(|file| !file.is_empty())
-        .map(|file| Path::new(std::ffi::OsStr::from_bytes(file)))
-        .collect();
-    Ok(paths
-        .iter()
-        .filter(|path| listed.iter().any(|file| file.starts_with(path)))
-        .cloned()
-        .collect())
+        .any(|file| Path::new(std::ffi::OsStr::from_bytes(file)).starts_with(relative)))
 }
 
 fn git_ok(args: &[&str], cwd: Option<&Path>, what: &str) -> io::Result<String> {

@@ -24,7 +24,7 @@ fn 163 src/kernel/toolchain/resolve.rs::request_for
 fn 214 src/tailors/node/lock_import/mod.rs::build_plan_recording
 fn 160 src/tailors/node/lock_import/pnpm.rs::pnpm_nodes
 fn 152 src/tailors/node/lock_import/yarn1.rs::plan_yarn
-fn 174 src/tailors/node/project.rs::project_node_env_recorded
+fn 173 src/tailors/node/project.rs::project_node_env_recorded
 fn 159 src/tailors/python/edit.rs::edit_requirements
 fn 153 src/tailors/python/env.rs::realize_env_at_depth
 fn 214 src/tailors/python/inputs.rs::read_plan
