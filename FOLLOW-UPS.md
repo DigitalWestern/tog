@@ -57,6 +57,7 @@ After the proxy: the test-suite audit (#351) and then the quality review
 - **#464: macOS supervision: deferred notification-pipe initialization and validation.** macOS supervision initialization and validation. Deferred by the owner on 2026-10-04.
 - **#465: heavy: audit shared state before allowing parallel ignored suites.** audit shared state before running ignored suites in parallel. Keep --test-threads=1 until local evidence supports removal.
 - **#466: ci: GitHub Actions job startup blocked by account billing or spending limit.** Actions jobs cannot start because of account billing or spending-limit restrictions. Pick: owner repairs account access, use documented local checks meanwhile.
+- **#469: root removal identity.** Carry the decoded record's device/inode and held directory through deletion. Refuse replacements, including directory entries.
 
 - **The action's fixture wakes the heavy suite (#426).** A change under
   `tests/fixtures/action-demo/` runs the e2e job. Pick: move the fixture
@@ -183,9 +184,6 @@ After the proxy: the test-suite audit (#351) and then the quality review
   - #300 heavy: the Elixir end-to-end test cannot run on ubuntu-22.04 (OTP needs glibc 2.43).
   - #302 acceptance.sh: step 13 carries its own copy of the closure signing format.
   - #307 archive: a tarball with macOS AppleDouble (`._name`) members is refused on macOS but extracted on Linux. The extraction carries `--no-mac-metadata`; the listing carries no restore flag (bsdtar documents them for other modes). On the Mac, try `/usr/bin/tar --no-mac-metadata -tf` on such a tarball: if it accepts the flag and prints the `._` members, add it to `TAR_LIST_FLAGS` and close.
-- **GC loose end from #162.** The root/2 importer in
-  `src/kernel/store/roots.rs` calls a path inside this store's own object
-  "another store" (#164).
 - **Two PEP 440 version grammars (#297).** `src/kernel/toolchain/select.rs` has
   the small numeric `Version`/specifier subset the toolchain selector needs;
   `src/tailors/python/pep440.rs` has the full grammar. The toolchain lock's

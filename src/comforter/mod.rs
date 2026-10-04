@@ -1112,9 +1112,30 @@ mod tests {
                 "inside": store.object_path(&mentioned).join("bin/python").display().to_string(),
             }),
         );
-        // A path inside an object is refused outright, not read as the object.
-        // The foreign-store scan in `import_absolute_reference` runs before
-        // the local "must name an object root" check, hence the wording.
+        // A path inside an object is refused outright, not read as the
+        // object, and the refusal names the object it is inside (#164).
+        let error = store
+            .root_record_from_project(project)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains(&format!(
+                "python\" is inside object {mentioned}, not an object root or a projection"
+            )),
+            "{error}"
+        );
+        // The same path under another store's root is that store's.
+        let foreign = std::path::Path::new("/elsewhere/store/objects")
+            .join(&mentioned)
+            .join("bin/python");
+        envelope(
+            project,
+            "python",
+            serde_json::json!({
+                "env_object": store.object_path(&id),
+                "foreign": foreign.display().to_string(),
+            }),
+        );
         let error = store
             .root_record_from_project(project)
             .unwrap_err()
@@ -1123,6 +1144,27 @@ mod tests {
             error.contains("python\" belongs to another store"),
             "{error}"
         );
+        let traversal = store
+            .object_path(&mentioned)
+            .join("../../../foreign-store/objects")
+            .join(&id)
+            .join("bin/python");
+        envelope(
+            project,
+            "python",
+            serde_json::json!({
+                "env_object": store.object_path(&id), "traversal": traversal,
+            }),
+        );
+        let error = store
+            .root_record_from_project(project)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("contains parent-directory traversal"),
+            "{error}"
+        );
+        assert!(!error.contains("is inside object"), "{error}");
         envelope(
             project,
             "python",

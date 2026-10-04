@@ -1386,11 +1386,20 @@ pub(super) fn import_absolute_reference(
                 continue;
             };
             if is_object_id(id) && path != store.object_path(id) {
-                let foreign = Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("closure object reference {path:?} belongs to another store"),
-                ));
-                unresolvable(foreign, mode)?;
+                // Inside one of this store's own objects is a different
+                // mistake from another store's path: say which (#164).
+                let message = if components.contains(&std::path::Component::ParentDir) {
+                    format!("closure object reference {path:?} contains parent-directory traversal")
+                } else if path.starts_with(store.object_path(id)) {
+                    format!(
+                        "closure object reference {path:?} is inside object {id}, not \
+                         an object root or a projection"
+                    )
+                } else {
+                    format!("closure object reference {path:?} belongs to another store")
+                };
+                let refused = Err(io::Error::new(io::ErrorKind::InvalidData, message));
+                unresolvable(refused, mode)?;
                 return Ok(());
             }
         }
