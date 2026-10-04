@@ -3609,6 +3609,33 @@ interception and the cargo switch, each the flexible option:
       and format the fixture's one-line `main.rs`. Every output is
       checked for any 10-character piece of the seed, not only the whole
       seed.
+  - *Fifth Sol pass (2026-10-03).*
+    - *A glob that matches nothing is its literal path.* cargo falls back
+      to the literal path when a members glob matches nothing at all
+      (`members_paths` in 1.98). `cargo_door::expand_or_literal` does the
+      same, so `members = ["crates/a[1]"]` names the directory
+      `crates/a[1]` when there is no `crates/a1`. A pattern that matched
+      only a file names nothing, as in cargo. The literal path is walked
+      under the walk's rules: through a symlinked directory it is refused
+      like any symlinked member. External members get the same fallback,
+      then the path-dependency rules. The test signs a receipt and
+      requires it to go stale when that member's manifest changes.
+    - *No edits from a member outside the root.* An edit runs a confined
+      cargo at the workspace root, which cannot name a member outside it,
+      so without a manifest path it would edit the root package.
+      `edit::member_manifest` refuses an edit run in such a member before
+      anything is realized, naming the member and the workspace. The
+      error says to run cargo in the member directly or to move the
+      member inside the workspace.
+    - *A failed relay wakes the supervisor.* Each reader holds a
+      `RelayWake` (a shared flag and its own copy of the session's
+      self-pipe write end) that fires on a read error or a panic. The
+      loop checks the flag before and after `forward_pending` drains the
+      pipe, so no wakeup is lost. On any failure the child is killed and
+      reaped, and every path joins both readers before the session and
+      the activity borrow end. A grandchild that keeps a pipe open still
+      keeps its reader waiting. That is an existing limitation, left as
+      is.
   - *Config includes.* `include = [...]` (paths or `{ path, optional }`,
     relative to the including file, transitive) is expanded from the
     bounded files: every registry declared there gets the forced
