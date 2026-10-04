@@ -243,6 +243,14 @@ impl Environment<'_> {
     fn value(&self, operand: Operand) -> io::Result<String> {
         match operand {
             Operand::Literal(text) => Ok(text.to_string()),
+            Operand::Variable(
+                name @ ("platform_release" | "platform_version" | "platform.version"),
+            ) => kernel_value(name, self.platform).map_err(|why| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("unsupported environment marker operand `{name}`: {why}"),
+                )
+            }),
             Operand::Variable(name) => {
                 marker_value(name, self.python_version, self.platform, self.extra).ok_or_else(
                     || {
@@ -285,20 +293,21 @@ impl Environment<'_> {
             right_value = normalized_extra(&right_value);
         }
         match op {
-            "in" => return Ok(right_value.contains(left_value.as_str())),
-            "not in" => return Ok(!right_value.contains(left_value.as_str())),
             // An extra is a name, never a version: `extra == '01'` does not
             // match the extra `1`. `packaging` compares them as versions
             // here; uv, which writes the lock, compares names and ignores
-            // any other operator with a warning (`in` included, which tog
-            // still reads as `packaging` does). Tog refuses the rest.
+            // any other operator with a warning, `in` and `not in` included.
+            // Tog refuses those: ignoring one could install what the marker
+            // excludes, and `packaging`'s substring rule disagrees with uv.
             "==" if extra => return Ok(left_value == right_value),
             "!=" if extra => return Ok(left_value != right_value),
             _ if extra => {
                 return Err(unsupported(format!(
-                    "`{op}` cannot compare extra names; use `==`, `!=`, `in` or `not in`"
+                    "`{op}` cannot compare extra names; use `==` or `!=`"
                 )))
             }
+            "in" => return Ok(right_value.contains(left_value.as_str())),
+            "not in" => return Ok(!right_value.contains(left_value.as_str())),
             _ => {}
         }
         let as_versions =
@@ -333,6 +342,66 @@ fn normalized_extra(name: &str) -> String {
     normalized.to_lowercase()
 }
 
+/// `platform_release` and `platform_version` are the running kernel's
+/// `uname -r` and `uname -v` (Python's `platform.release()` and
+/// `platform.version()`), so they are known only when the target is this
+/// host. For any other target the marker is refused, never guessed.
+fn kernel_value(name: &str, platform: Platform) -> Result<String, String> {
+    #[cfg(test)]
+    if let Some((host, release, version)) = TEST_HOST_KERNEL.with(|slot| slot.borrow().clone()) {
+        return kernel_field(name, platform, host, || Ok((release, version)));
+    }
+    let host = Platform::host().map_err(|error| error.to_string())?;
+    kernel_field(name, platform, host, uname)
+}
+
+fn kernel_field(
+    name: &str,
+    platform: Platform,
+    host: Platform,
+    read: impl FnOnce() -> io::Result<(String, String)>,
+) -> Result<String, String> {
+    if platform != host {
+        return Err(format!(
+            "it describes the running kernel, so it is known only when the target is \
+             this host ({}), not {}",
+            host.triple(),
+            platform.triple()
+        ));
+    }
+    let (release, version) = read().map_err(|error| format!("uname: {error}"))?;
+    Ok(if name == "platform_release" {
+        release
+    } else {
+        version
+    })
+}
+
+/// The running kernel's release and version, as `uname(2)` reports them.
+fn uname() -> io::Result<(String, String)> {
+    let mut name = std::mem::MaybeUninit::<libc::utsname>::uninit();
+    // SAFETY: uname fills the buffer it is given when it returns 0.
+    if unsafe { libc::uname(name.as_mut_ptr()) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: uname returned 0, so every field is a NUL-terminated string.
+    let name = unsafe { name.assume_init() };
+    let field = |chars: &[libc::c_char]| {
+        // SAFETY: the field is NUL-terminated within its array.
+        unsafe { std::ffi::CStr::from_ptr(chars.as_ptr()) }
+            .to_string_lossy()
+            .into_owned()
+    };
+    Ok((field(&name.release), field(&name.version)))
+}
+
+#[cfg(test)]
+thread_local! {
+    /// A test's stand-in for the host and its `uname`.
+    static TEST_HOST_KERNEL: std::cell::RefCell<Option<(Platform, String, String)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 fn marker_value(
     name: &str,
     python_version: &str,
@@ -353,7 +422,6 @@ fn marker_value(
         "platform.python_implementation" | "python_implementation" => {
             "platform_python_implementation"
         }
-        "platform.version" => "platform_version",
         name => name,
     };
     Some(match name {
@@ -586,8 +654,8 @@ mod marker_tests {
             );
         }
         assert_eq!(
-            refused("platform_release >= '5'"),
-            "unsupported environment marker operand `platform_release`"
+            refused("platform_kernel >= '5'"),
+            "unsupported environment marker operand `platform_kernel`"
         );
         assert_eq!(
             refused("sys_platform == linux"),
@@ -596,12 +664,12 @@ mod marker_tests {
         // Both sides are evaluated: an unknown marker is refused even where
         // the other side of `or` already decides the answer.
         assert_eq!(
-            refused("sys_platform == 'linux' or platform_version == '1'"),
-            "unsupported environment marker operand `platform_version`"
+            refused("sys_platform == 'linux' or platform_kernel == '1'"),
+            "unsupported environment marker operand `platform_kernel`"
         );
         assert_eq!(
-            refused("sys_platform == 'win32' and platform_version == '1'"),
-            "unsupported environment marker operand `platform_version`"
+            refused("sys_platform == 'win32' and platform_kernel == '1'"),
+            "unsupported environment marker operand `platform_kernel`"
         );
         // Ordering needs a version on the right; `packaging` would compare
         // these as strings, tog refuses.
@@ -654,10 +722,91 @@ mod marker_tests {
             refused("sys_platform\n== 'linux'"),
             "unsupported environment marker `sys_platform\n== 'linux'`: unexpected character `\\n`"
         );
+        // `platform.version` is a legacy spelling `packaging` accepts;
+        // `platform.release` never was one.
         assert_eq!(
-            refused("platform.version == '1'"),
-            "unsupported environment marker operand `platform.version`"
+            refused("platform.release == '1'"),
+            "unsupported environment marker operand `platform.release`"
         );
+    }
+
+    /// Run `body` with `host` standing in for this machine, whose kernel
+    /// reports `release` and `version`.
+    fn on_host<T>(host: Platform, release: &str, version: &str, body: impl FnOnce() -> T) -> T {
+        TEST_HOST_KERNEL
+            .with(|slot| *slot.borrow_mut() = Some((host, release.into(), version.into())));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(body));
+        TEST_HOST_KERNEL.with(|slot| *slot.borrow_mut() = None);
+        result.unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+    }
+
+    /// `platform_release` and `platform_version` are the host kernel's, as
+    /// `packaging` reads them, and refused for a target that is not the
+    /// host. A kernel release that is not a PEP 440 version compares as a
+    /// string by `==`, and ordering it is refused, as `packaging` raises.
+    #[test]
+    fn kernel_markers_are_the_hosts_and_refused_across_targets() {
+        on_host(MAC, "23.4.0", "Darwin Kernel Version 23.4.0", || {
+            assert!(eval("platform_release >= '22.0'", MAC, None));
+            assert!(!eval("platform_release < '22.0'", MAC, None));
+            assert!(eval(
+                "platform_version == 'Darwin Kernel Version 23.4.0'",
+                MAC,
+                None
+            ));
+            assert!(eval(
+                "platform.version == 'Darwin Kernel Version 23.4.0'",
+                MAC,
+                None
+            ));
+            assert!(eval("'Darwin' in platform_version", MAC, None));
+            for marker in ["platform_release >= '22.0'", "platform_version == '1'"] {
+                let name = marker.split(' ').next().unwrap();
+                assert_eq!(
+                    refused(marker),
+                    format!(
+                        "unsupported environment marker operand `{name}`: it describes the \
+                         running kernel, so it is known only when the target is this host \
+                         (aarch64-apple-darwin), not x86_64-unknown-linux-gnu"
+                    )
+                );
+            }
+        });
+        on_host(
+            LINUX,
+            "7.2.5-200.fc44.x86_64",
+            "#1 SMP PREEMPT_DYNAMIC",
+            || {
+                assert!(eval(
+                    "platform_release == '7.2.5-200.fc44.x86_64'",
+                    LINUX,
+                    None
+                ));
+                assert!(eval("'fc44' in platform_release", LINUX, None));
+                assert!(eval(
+                    "platform_version == '#1 SMP PREEMPT_DYNAMIC'",
+                    LINUX,
+                    None
+                ));
+                for marker in ["platform_release >= '5.0'", "platform_release != '7.2.5'"] {
+                    assert_eq!(
+                        refused(marker),
+                        "environment marker: invalid PEP 440 version `7.2.5-200.fc44.x86_64`: \
+                         unrecognized version suffix `-200.fc44.x86_64`",
+                        "{marker}"
+                    );
+                }
+            },
+        );
+        // Without a stand-in, the values are this machine's own `uname`.
+        let host = Platform::host().unwrap();
+        let (release, _) = uname().unwrap();
+        assert!(!release.is_empty());
+        assert!(eval(
+            &format!("platform_release == '{release}'"),
+            host,
+            None
+        ));
     }
 
     /// `packaging`'s dispatch: `op value` that is a PEP 440 specifier
@@ -691,9 +840,7 @@ mod marker_tests {
         // PEP 440: `<V` never admits a pre-release of V itself.
         assert!(!rc("python_full_version < '3.13.0'"));
         assert!(rc("python_full_version < '3.13.1'"));
-        // Extras normalize before `in` too, and keep separators at the ends.
-        assert!(eval("extra in 'Foo_Bar'", LINUX, Some("foo-bar")));
-        assert!(!eval("extra not in 'Foo_Bar'", LINUX, Some("foo-bar")));
+        // Extras keep separators at the ends.
         assert!(!eval("extra == '-foo-'", LINUX, Some("foo")));
         assert!(!eval("extra == '-foo'", LINUX, Some("foo")));
         assert!(!eval("extra == 'foo'", LINUX, Some("foo_")));
@@ -709,15 +856,36 @@ mod marker_tests {
         assert!(eval("'1' == extra", LINUX, Some("1")));
         assert!(!eval("'01' == extra", LINUX, Some("1")));
         assert!(!eval("extra == '018446744073709551616'", LINUX, Some("1")));
-        for op in ["<", "<=", ">", ">=", "~=", "==="] {
-            let marker = format!("extra {op} '1'");
+        // Only `==` and `!=` compare extras: uv ignores every other
+        // operator, `in` and `not in` included, and tog refuses them.
+        for marker in [
+            "extra < '1'".to_string(),
+            "extra <= '1'".into(),
+            "extra > '1'".into(),
+            "extra >= '1'".into(),
+            "extra ~= '1'".into(),
+            "extra === '1'".into(),
+            "extra in 'Foo_Bar'".into(),
+            "extra not in 'Foo_Bar'".into(),
+            "'foo' in extra".into(),
+        ] {
+            let op = if marker.contains("not in") {
+                "not in"
+            } else {
+                marker.split(' ').nth(1).unwrap()
+            };
             assert_eq!(
-                refused(&marker),
+                marker_matches_for_extra(&marker, "3.12.14", LINUX, Some("foo-bar"))
+                    .unwrap_err()
+                    .to_string(),
                 format!(
                     "unsupported environment marker `{marker}`: `{op}` cannot compare extra \
-                     names; use `==`, `!=`, `in` or `not in`"
+                     names; use `==` or `!=`"
                 ),
             );
         }
+        // `in` still compares strings for every other variable.
+        assert!(eval("'linux' in sys_platform", LINUX, None));
+        assert!(eval("sys_platform not in 'darwin win32'", LINUX, None));
     }
 }

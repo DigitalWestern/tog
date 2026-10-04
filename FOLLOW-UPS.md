@@ -96,7 +96,6 @@ After the proxy: the test-suite audit (#351) and then the quality review
   - #373 sandbox: host-socket scan leftovers (from the #372 review).
   - #410 ci: eight test files skip sandboxed tests silently because the main test step doesn't require the sandbox (from the #400 review).
   - #411 tests: an objmeta socket test fails under a long TMPDIR, path over SUN_LEN (found during #400).
-  - #380 python markers: platform_release/platform_version, extras `in` versus uv, and documented divergences from packaging (from the #348 Python markers block).
   - #382 node: credentials in lockfile URLs beyond tarballs, mutable-mode hoisting, bin case collisions (from the #348 Lockfile shapes block).
   - #387 gc: `--drop-object` recovery leftovers: the sweep's refusal names no fix, rooted objects, the advice's shell line untested (from the #384 review).
 - **Quality review of 2026-09-24 (#264).** A whole-codebase review after

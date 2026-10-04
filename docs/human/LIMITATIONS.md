@@ -266,6 +266,27 @@ Selection covers every patch of each maintained CPython minor that python-build-
   **Project-level `uv pip compile` in `src/commands/shared.rs` can still execute resolve-time metadata
   builds outside the sandbox** — sdist build-requirement resolution rejects build-time sdists
   instead.
+- **Lock markers are read as PEP 508 and `packaging` 25 read them, with these
+  refusals.** Each is a marker tog will not guess at, so a lock that uses one fails
+  to import, naming it:
+  - `platform_release` and `platform_version` are the running kernel's `uname -r` and
+    `uname -v`, so a marker using them is evaluated only when the target is this host,
+    and refused for a cross target.
+  - An ordering operator (`<`, `>=`, `~=`, ...) on a value that is not a PEP 440 version
+    (`sys_platform > 'darwin'`) is refused, where `packaging` compares the strings.
+  - A backslash or control character in a quoted value is refused, where `packaging`
+    decodes it as a Python escape (`'lin\x75x'` is `linux`). No lock generator emits one.
+  - A version segment past 2^64 (`18446744073709551616`) is refused.
+  - A non-ASCII local version (`1.0+K` with the Kelvin sign) is refused, where
+    `packaging`'s case-insensitive match folds some of them.
+  - `extra` compares by normalized name with `==` and `!=` only, as uv does
+    (`extra == '01'` does not match the extra `1`, where `packaging` compares versions).
+    Every other operator on `extra`, `in` and `not in` included, is refused. uv ignores
+    them with a warning, so ignoring one could install what the marker excludes.
+
+  One divergence evaluates differently: `python_full_version ~= '3.12.0c1'` follows
+  PEP 440 (`>=3.12.0c1, ==3.12.*`) and is true for 3.12.5, where `packaging` 25 keeps an
+  extra release component for the `c`/`pre`/`preview` spellings and answers false.
 
 ## JavaScript / npm
 
