@@ -276,10 +276,21 @@ impl StoreActivity {
     /// never reports a busy store as free — only the reverse, and only for
     /// as long as the window.
     pub(crate) fn try_exclusive(root: &Path) -> io::Result<Option<Self>> {
+        Self::try_acquire(root, ActivityMode::Exclusive)
+    }
+
+    /// Try to take the shared lease without waiting for an exclusive job
+    /// (a sweep, a reset), with the same confirmation as `try_exclusive`.
+    /// For a reader that would rather say the store is busy than wait.
+    pub(crate) fn try_shared(root: &Path) -> io::Result<Option<Self>> {
+        Self::try_acquire(root, ActivityMode::Shared)
+    }
+
+    fn try_acquire(root: &Path, mode: ActivityMode) -> io::Result<Option<Self>> {
         const ATTEMPTS: u32 = 10;
         const PAUSE: std::time::Duration = std::time::Duration::from_millis(5);
         for attempt in 0..ATTEMPTS {
-            if let Some(activity) = Self::acquire_inner(root, ActivityMode::Exclusive, true)? {
+            if let Some(activity) = Self::acquire_inner(root, mode, true)? {
                 return Ok(Some(activity));
             }
             if attempt + 1 < ATTEMPTS {

@@ -509,8 +509,8 @@ something else (`tog x --from httpie http`). Sharp edges of `x --clean`:
 - An environment made under a store this tog refuses to open (see "Store
   format" in ARCHITECTURE.md) is left in place and reported as skipped,
   with the fix for that store: `TOG_STORE=<that store> tog gc --reset`
-  when it is not the store this shell selects, so pasting the fix never
-  empties another store. Nothing in that store is read or changed.
+  unless it is the store an absolute or unset `TOG_STORE` selects, so
+  pasting the fix never empties another store. Nothing in that store is read or changed.
 - An environment is keyed on the runtime it runs on as well as the tool, so
   a project with a toolchain lock gets the tool on the locked runtime and an
   `update --toolchain` gives the next run a fresh environment. An
@@ -768,7 +768,9 @@ this build against the newest release (the first row, `warn` with `run 'tog
 update --self'` when one is newer, `ok` with `not checked` when the manifest
 is unreachable: offline is not unhealthy), then platform, store, sandbox,
 host C toolchain, and realized toolchains, each line `ok`/`warn`/`fail`
-(lowercase, in text and in JSON) with the fix; exit 1 on any fail.
+(lowercase, in text and in JSON) with the fix; exit 1 on any fail. It does
+not wait for a store another Tog job (a `gc`, a reset) is using: the store
+row is `warn`, says so, and every check that needs no store still runs.
 
 **--version** prints `tog <crate version> (<short commit> <commit date>)`,
 stamped at build time from the checkout (`tog 0.1.0 (7688cfd 2026-09-21)`);

@@ -1309,6 +1309,11 @@ fn production_tokens(text: &str) -> Vec<(Token, String)> {
 /// The names a file uses for `ty`: `ty` itself plus every `ty as Alias`
 /// import, so `use std::process::Command as P; P::spawn(&mut c)` is seen,
 /// and every `type Alias = path::to::ty;`.
+///
+/// The limit: one step only. An alias of an alias (`type A = ty;
+/// type B = A;`, or `use` of a name another file aliased) is not followed,
+/// so `B` is not a name for `ty` here. Nothing in `src/` spells a scanned
+/// type that way.
 fn names_for(tokens: &[(Token, String)], ty: &str) -> Vec<String> {
     let mut names = vec![ty.to_string()];
     for i in 0..tokens.len() {
@@ -1385,12 +1390,18 @@ fn raw_child_at(tokens: &[(Token, String)], i: usize, names: &Names) -> bool {
 fn lease_at(tokens: &[(Token, String)], i: usize, names: &Names) -> bool {
     const STORE: &[&str] = &[
         "activity",
+        "try_activity_shared",
         "try_activity_exclusive",
         "try_activity_exclusive_unchecked",
     ];
     method_call(tokens, i, STORE)
         || path_call(tokens, i, &names.stores, STORE)
-        || path_call(tokens, i, &names.activities, &["acquire", "try_exclusive"])
+        || path_call(
+            tokens,
+            i,
+            &names.activities,
+            &["acquire", "try_shared", "try_exclusive"],
+        )
 }
 
 /// Per-function counts of `(file, fn)` sites matching `hit` at a token.
@@ -1475,6 +1486,7 @@ const LEASE_BOUNDARIES: &[(&str, &str, usize)] = &[
     // The primitives themselves.
     ("src/kernel/store/mod.rs", "activity", 1),
     ("src/kernel/store/mod.rs", "try_activity_exclusive", 1),
+    ("src/kernel/store/mod.rs", "try_activity_shared", 1),
     // The one primitive that does not validate the format marker.
     (
         "src/kernel/store/mod.rs",
@@ -1752,6 +1764,10 @@ fn the_scan_sees_every_spelling() {
             "handle"
         ]
     );
+    // The stated limit: an alias of an alias is not followed.
+    let chained = "type A = Store;\ntype B = A;\n\
+        fn first() { A { root }; }\nfn second() { B { root }; }";
+    assert_eq!(fixture_owners(chained, unchecked_store_at), ["first"]);
     let trait_impl = "impl From<PathBuf> for Store {\n\
         fn from(root: PathBuf) -> Self { Self { root } }\n\
         }";

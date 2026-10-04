@@ -2730,15 +2730,7 @@ fn the_fix_x_clean_prints_resets_the_refused_store_and_no_other() {
     );
 
     // Paste it: `tog` on PATH, TOG_STORE still naming store B.
-    let bin = home.0.join("bin");
-    std::fs::create_dir_all(&bin).unwrap();
-    std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_tog"), bin.join("tog")).unwrap();
-    let out = common::command_for(Path::new("/bin/sh"), &home.0, &home.0, &store_b)
-        .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
-        .arg("-c")
-        .arg(fix)
-        .output()
-        .unwrap();
+    let out = paste_fix(fix, &home.0, &home.0, &store_b);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
 
     // Store A was emptied and is a store again.
@@ -2764,6 +2756,278 @@ fn the_fix_x_clean_prints_resets_the_refused_store_and_no_other() {
     let out = tog_at(&home.0, &home.0, &store_b, &["x", "--clean"]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     assert!(!root.exists(), "{}", text(&out.stdout));
+}
+
+/// Run a fix line as it would be pasted: by `/bin/sh` in `cwd`, with `tog`
+/// on PATH and `TOG_STORE` exported as `selected`, the way the shell that
+/// printed it had it.
+fn paste_fix(fix: &str, cwd: &Path, home: &Path, selected: &Path) -> std::process::Output {
+    let bin = home.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    if !bin.join("tog").exists() {
+        std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_tog"), bin.join("tog")).unwrap();
+    }
+    common::command_for(Path::new("/bin/sh"), cwd, home, selected)
+        .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+        .arg("-c")
+        .arg(fix)
+        .output()
+        .unwrap()
+}
+
+/// A relative `TOG_STORE` names a different store from every directory.
+/// `tog -C project` resolves it under `project`, and the shell that pastes
+/// the fix resolves it where the shell is. So the fix for the store under
+/// `project` names that store, absolute, and pasting it leaves the store
+/// beside the shell alone.
+#[test]
+fn the_fix_for_a_relatively_selected_store_resets_that_store_from_anywhere() {
+    let home = TempDir::boundary("cli-format-relative");
+    let work = home.0.join("work");
+    std::fs::create_dir_all(work.join("project")).unwrap();
+    let work = work.canonicalize().unwrap();
+    // `work/store`: healthy, and what `TOG_STORE=store` means in `work`.
+    fresh_store(&work.join("store"));
+    let kept = publish_certified_object(&work.join("store"), "kept-env");
+    // `work/project/store`: written before the marker existed.
+    let refused = work.join("project/store");
+    std::fs::create_dir_all(refused.join("objects")).unwrap();
+    std::fs::create_dir_all(refused.join("meta")).unwrap();
+    let old = publish_certified_object(&refused, "old-env");
+    assert!(!refused.join("format").exists());
+
+    let relative = Path::new("store");
+    let out = tog_at(&work, &home.0, relative, &["-C", "project", "ls"]);
+    let stderr = text(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    assert!(stderr.contains("has no format marker"), "{stderr}");
+    let fix = stderr
+        .lines()
+        .find_map(|line| line.strip_prefix("tog:     fix: "))
+        .unwrap_or_else(|| panic!("no fix line: {stderr}"));
+    assert_eq!(
+        fix,
+        format!("TOG_STORE={} tog gc --reset", refused.display())
+    );
+    // The same from inside the project, with no `-C`: still relative, so
+    // still spelled out.
+    let out = tog_at(&work.join("project"), &home.0, relative, &["ls"]);
+    assert!(
+        text(&out.stderr).contains(&format!("tog:     fix: {fix}\n")),
+        "{}",
+        text(&out.stderr)
+    );
+    // `store path` and `doctor` print the same command.
+    let out = tog_at(
+        &work,
+        &home.0,
+        relative,
+        &["-C", "project", "store", "path"],
+    );
+    assert!(
+        text(&out.stderr).contains(&format!("tog:     fix: {fix}\n")),
+        "{}",
+        text(&out.stderr)
+    );
+    let out = tog_at(&work, &home.0, relative, &["-C", "project", "doctor"]);
+    assert!(
+        text(&out.stdout).contains(&format!("; run '{fix}'")),
+        "{}",
+        text(&out.stdout)
+    );
+
+    // Pasted in the shell at `work`, where `store` is the healthy store.
+    let out = paste_fix(fix, &work, &home.0, relative);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(!old.exists(), "the fix did not reset the refused store");
+    assert_eq!(
+        std::fs::read_to_string(refused.join("format")).unwrap(),
+        "tog-store 1\n"
+    );
+    assert!(
+        kept.join("payload").is_file(),
+        "the fix emptied the store beside the shell"
+    );
+
+    // An absolute selection of the refused store is the one case with a
+    // bare fix: it means the same store wherever it is pasted.
+    std::fs::remove_file(refused.join("format")).unwrap();
+    let out = tog_at(&work, &home.0, &refused, &["-C", "project", "ls"]);
+    assert!(
+        text(&out.stderr).ends_with("tog:     fix: tog gc --reset\n"),
+        "{}",
+        text(&out.stderr)
+    );
+}
+
+/// A store path that is not UTF-8 cannot be written in a `String`, and the
+/// nearest text (U+FFFD for each bad byte) is another path. The fix spells
+/// the path's own bytes, so pasting it resets the refused store and not a
+/// store that happens to sit at the look-alike path.
+#[test]
+fn the_fix_for_a_store_whose_path_is_not_utf8_resets_that_store() {
+    use std::os::unix::ffi::OsStrExt as _;
+    let home = TempDir::boundary("cli-format-bytes");
+    let base = home.0.canonicalize().unwrap();
+    // Store A at `st<ff>`: refused. Store R at `st<U+FFFD>`: healthy, and
+    // where a lossy spelling of A would point. Store B: selected.
+    let store_a = base.join(std::ffi::OsStr::from_bytes(b"st\xff"));
+    if std::fs::create_dir(&store_a).is_err() {
+        // A filesystem that takes only UTF-8 names (APFS) has no such store.
+        return;
+    }
+    assert_eq!(
+        store_a.to_string_lossy(),
+        base.join("st\u{fffd}").to_string_lossy()
+    );
+    let store_r = base.join("st\u{fffd}");
+    let store_b = base.join("store-b");
+    for sub in ["objects", "meta"] {
+        std::fs::create_dir_all(store_a.join(sub)).unwrap();
+    }
+    let object_a = publish_certified_object(&store_a, "old-env");
+    fresh_store(&store_r);
+    let object_r = publish_certified_object(&store_r, "look-alike-env");
+    fresh_store(&store_b);
+    let object_b = publish_certified_object(&store_b, "selected-env");
+
+    // An x environment recorded against store A, through a symlink whose
+    // own name is text: a request record is JSON and holds only text.
+    let link = base.join("link-to-a");
+    std::os::unix::fs::symlink(&store_a, &link).unwrap();
+    let root = home.0.join(".tog/x/py-ruff-test");
+    std::fs::create_dir_all(root.join(".tog/closures")).unwrap();
+    std::fs::write(
+        root.join(".tog/x.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema": "x-request/2",
+            "ecosystem": "python",
+            "package": "ruff",
+            "version": serde_json::Value::Null,
+            "state": "ready",
+            "store_root": link.to_str().unwrap(),
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let out = tog_at(&home.0, &home.0, &store_b, &["x", "--clean"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let stdout = text(&out.stdout);
+    let fix = stdout
+        .lines()
+        .find_map(|line| line.split_once("; fix: "))
+        .and_then(|(_, rest)| rest.strip_suffix(')'))
+        .unwrap_or_else(|| panic!("no fix: {stdout}"));
+    assert!(
+        fix.starts_with("TOG_STORE=\"$(printf '/") && fix.ends_with("/st\\377')\" tog gc --reset"),
+        "{fix}"
+    );
+    assert!(!fix.contains('\u{fffd}'), "{fix}");
+
+    let out = paste_fix(fix, &home.0, &home.0, &store_b);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(!object_a.exists(), "the fix did not reset store A");
+    assert_eq!(
+        std::fs::read_to_string(store_a.join("format")).unwrap(),
+        "tog-store 1\n"
+    );
+    assert!(
+        object_r.join("payload").is_file(),
+        "the fix emptied the store at the look-alike path"
+    );
+    assert!(
+        object_b.join("payload").is_file(),
+        "the fix emptied the selected store"
+    );
+
+    // Selected directly and absolutely, the bare command is right, and it
+    // is the only spelling that needs no path at all.
+    std::fs::remove_file(store_a.join("format")).unwrap();
+    let out = tog_at(&home.0, &home.0, &store_a, &["ls"]);
+    assert!(
+        text(&out.stderr).ends_with("tog:     fix: tog gc --reset\n"),
+        "{}",
+        text(&out.stderr)
+    );
+}
+
+/// `tog doctor` does not wait behind a job that holds the store
+/// exclusively (a sweep, a reset). It says the store is in use, as a
+/// warning, and still reports everything that needs no store.
+#[test]
+fn doctor_reports_a_busy_store_and_runs_its_other_checks() {
+    use std::os::unix::io::AsRawFd;
+    let home = TempDir::boundary("cli-doctor-busy");
+    let store = home.0.join("store");
+    fresh_store(&store);
+    let out = tog(&home.0, &home.0, &["store", "roots"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let free = tog(&home.0, &home.0, &["doctor"]);
+    let free_rows = text(&free.stdout);
+
+    // What a sweep holds: the exclusive flock on `activity.lock`.
+    let held = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(store.join("activity.lock"))
+        .unwrap();
+    assert_eq!(unsafe { libc::flock(held.as_raw_fd(), libc::LOCK_EX) }, 0);
+    // Let go after a while whatever happens, so a doctor that waits fails
+    // this test (by the row it then prints) and does not hang it.
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    let holder = std::thread::spawn(move || {
+        let _ = released.recv_timeout(std::time::Duration::from_secs(60));
+        drop(held);
+    });
+
+    let out = tog(&home.0, &home.0, &["doctor"]);
+    let stdout = text(&out.stdout);
+    let json = tog(&home.0, &home.0, &["doctor", "--json"]);
+    release.send(()).unwrap();
+    holder.join().unwrap();
+
+    let row = |rows: &str, name: &str| {
+        rows.lines()
+            .find(|line| line.split_whitespace().nth(1) == Some(name))
+            .map(str::to_string)
+    };
+    let store_row = row(&stdout, "store").unwrap_or_else(|| panic!("no store row: {stdout}"));
+    assert!(store_row.starts_with("warn"), "{store_row}");
+    assert!(
+        store_row.contains("a Tog job is using the store at"),
+        "{store_row}"
+    );
+    // The rows that read the store are left out, and every other row is
+    // what it was when the store was free.
+    for name in ["disk", "toolchains"] {
+        assert!(row(&free_rows, name).is_some(), "{name}: {free_rows}");
+        assert!(row(&stdout, name).is_none(), "{name}: {stdout}");
+    }
+    for name in ["platform", "policy", "project"] {
+        assert_eq!(row(&stdout, name), row(&free_rows, name), "{name}");
+        assert!(row(&stdout, name).is_some(), "{name}: {stdout}");
+    }
+    // A busy store is not a failure: the exit status is what it was.
+    assert_eq!(out.status.code(), free.status.code(), "{stdout}");
+
+    // The same row under `--json`.
+    let json: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    let busy = json["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|check| check["name"] == "store")
+        .unwrap_or_else(|| panic!("no store check: {json}"));
+    assert_eq!(busy["level"], "warn", "{busy}");
+    assert!(
+        busy["detail"]
+            .as_str()
+            .unwrap()
+            .contains("a Tog job is using the store at"),
+        "{busy}"
+    );
 }
 
 /// A tog that finds another tog creating or emptying the store says what it

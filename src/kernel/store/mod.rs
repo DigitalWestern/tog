@@ -382,6 +382,20 @@ impl Store {
         Ok(Some(activity))
     }
 
+    /// Try to acquire shared activity without waiting behind an exclusive
+    /// job. `doctor` uses this form, so a store that is being swept or
+    /// emptied is reported as busy and the rest of its checks still run.
+    /// The format marker is validated under the lease, as in `activity`.
+    // Reviewed site (tests/architecture.rs): lease primitive (operation boundary).
+    #[allow(clippy::disallowed_methods)]
+    pub fn try_activity_shared(&self) -> io::Result<Option<StoreActivity>> {
+        let Some(activity) = StoreActivity::try_shared(&self.root)? else {
+            return Ok(None);
+        };
+        self.check_format()?;
+        Ok(Some(activity))
+    }
+
     /// `try_activity_exclusive` without the format check, for the one
     /// operation that exists to work on a store this tog refuses:
     /// `gc --reset`, which reads no record.
@@ -1592,6 +1606,39 @@ mod tests {
 
     /// The marker is written when the store is created, before any
     /// namespace, and a store without one is never opened or changed.
+    /// The shared lease that does not wait: none while another job holds
+    /// the store exclusively, one afterwards, and a refusal, not a lease,
+    /// on a store whose marker is gone.
+    #[test]
+    fn try_activity_shared_reports_a_busy_store_and_validates_the_marker() {
+        let temp = TempDir::named("store-try-shared");
+        let store = Store::open_at(&temp.0.join("store")).unwrap();
+        let (hold, held) = std::sync::mpsc::channel::<()>();
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let other = store.clone();
+        let job = std::thread::spawn(move || {
+            let _exclusive = other.try_activity_exclusive().unwrap().unwrap();
+            hold.send(()).unwrap();
+            released.recv().unwrap();
+        });
+        held.recv().unwrap();
+        assert!(store.try_activity_shared().unwrap().is_none());
+        release.send(()).unwrap();
+        job.join().unwrap();
+
+        let shared = store.try_activity_shared().unwrap().unwrap();
+        assert_eq!(shared.mode(), ActivityMode::Shared);
+        // Shared with other readers.
+        assert!(store.try_activity_shared().unwrap().is_some());
+        drop(shared);
+
+        fs::remove_file(store.root.join(FORMAT_FILE)).unwrap();
+        let error = store.try_activity_shared().unwrap_err();
+        assert!(refusal_fix(&error).is_some(), "{error}");
+        // The refusal let go of the lease it had taken.
+        assert!(store.try_activity_exclusive_unchecked().unwrap().is_some());
+    }
+
     #[test]
     fn open_writes_the_marker_and_refuses_a_store_without_one() {
         let temp = TempDir::named("store-format");

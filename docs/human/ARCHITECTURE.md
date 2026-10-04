@@ -631,23 +631,37 @@ neither creates namespaces inside a store a reset is emptying. A tog that
 finds the root held prints one line saying what it is waiting for, then
 waits. The store therefore has to be on a filesystem where a directory can
 be locked with `flock`, which local Linux and macOS filesystems allow.
-Where it cannot, opening or resetting the store
-fails before anything is changed, and the error says to point `TOG_STORE`
-at a local disk. There is no fallback lock. A reader that
-takes no lock (`tog store path`, `tog doctor`) reads the marker a second
-time before it calls namespaces without a marker an old store, because a
-store being created publishes the marker before its first namespace. During
-a reset such a reader can report the store as having no marker. That is
-true at that moment, and it stops when the reset finishes.
+Where it cannot, opening or resetting the store fails before anything is
+deleted, and the error says to point `TOG_STORE` at a local disk. Not
+before anything is written: an open may already have created the root
+directory, and a reset may already have created its lock files and `tmp/`.
+There is no fallback lock.
+
+The one reader that takes no lock is `tog store path`, which only prints
+the path and reads the marker to say whether the store is refused. It reads
+the marker a second time before it calls namespaces without a marker an old
+store, because a store being created publishes the marker before its first
+namespace. During a reset it can report the store as having no marker. That
+is true at that moment, and it stops when the reset finishes. `tog doctor`
+is not such a reader: it opens the store (waiting for the root lock like
+any other command) and takes a shared lease without waiting. Behind a
+sweep or a reset it reports the store as in use, as a warning, and still
+runs every check that needs no store.
 
 A refusal is an error whose message says why and whose fix is a separate
 `tog:     fix:` line (a `"fix"` key under `--json`): `tog gc --reset`, or
 `tog update --self` for a store a newer tog wrote. Moving the directory
 aside works too. A reset empties whichever store the command selects, so
-the fix always acts on the store that was refused: when that is not the
-store a bare `tog` would use (`tog x --clean` meets other stores), the
-line reads `TOG_STORE=<that store> tog gc --reset`, with the path quoted
-for the shell. `tog gc --reset` (`src/kernel/gc/reset.rs`) locates the
+the fix always acts on the store that was refused. The bare command is
+printed only when it selects that store from any directory: `TOG_STORE` is
+unset or absolute, and names it. Otherwise the line reads
+`TOG_STORE=<that store> tog gc --reset` with the absolute path. That
+covers `tog x --clean`, which meets other stores, and a relative
+`TOG_STORE`, which `tog -C <dir>` resolves from `<dir>` and the shell
+that pastes the fix resolves from wherever it is. The path is spelled
+exactly for a POSIX shell: bare, in single quotes, or, for a path that is
+not UTF-8 or holds control characters, as `"$(printf '...')"` with its
+bytes in octal. `tog gc --reset` (`src/kernel/gc/reset.rs`) locates the
 root without reading the marker, takes the exclusive lease, and then:
 
 1. unlinks the marker and fsyncs the root directory, so the removal is on
@@ -685,7 +699,8 @@ with that error. Three still work: `tog store path` prints the path with a
 warning and the fix, `tog doctor` reports the store row as `fail` with the
 fix, and `tog gc --reset` empties it. `tog doctor` opens and leases the
 store once and hands the pair to its checks, so the store rows are either
-all read under that lease or replaced by the one failing row. Commands that never open a store
+all read under that lease or replaced by one row: failing for a store it
+could not open, a warning for one that is in use. Commands that never open a store
 (`--help`, `version`) are unaffected. `tog x --clean` is the one command
 that meets stores other than the configured one: an environment whose own
 store is refused is skipped and reported, and nothing in that store changes.

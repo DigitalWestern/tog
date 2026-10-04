@@ -109,31 +109,60 @@ pub fn refusal_fix(error: &io::Error) -> Option<&str> {
         .map(|refused| refused.fix.as_str())
 }
 
-/// `path` as one word of a POSIX shell command: bare when every byte is
-/// one no shell reads specially, otherwise in single quotes, with each
-/// single quote inside written as `'\''`.
-fn shell_word(path: &Path) -> String {
-    let text = path.to_string_lossy();
-    let plain = !text.is_empty()
-        && text
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || b"/._-+:@%,".contains(&byte));
-    if plain {
-        text.into_owned()
-    } else {
-        format!("'{}'", text.replace('\'', "'\\''"))
+/// `command` with `TOG_STORE` set to exactly `root`, as a POSIX shell
+/// reads it. The command empties a store, so the path is never
+/// approximated: it is spelled from its bytes, in the plainest of three
+/// forms that is exact.
+///
+/// - Every byte one no shell reads specially: the path as it is.
+/// - Text with no control character: single quotes, each single quote
+///   inside written as `'\''`.
+/// - Anything else (bytes that are not UTF-8, which a `String` cannot
+///   carry, or control characters, which a terminal may not show): the
+///   bytes as octal escapes in a `printf` format. `$(...)` drops trailing
+///   newlines, so a path that ends in one is printed with a `.` after it
+///   that the command takes off again.
+fn with_store(command: &str, root: &Path) -> String {
+    let bytes = root.as_os_str().as_bytes();
+    let plain = |byte: u8| byte.is_ascii_alphanumeric() || b"/._-+:@,".contains(&byte);
+    match std::str::from_utf8(bytes) {
+        Ok(text) if !text.is_empty() && bytes.iter().all(|&byte| plain(byte) || byte == b'%') => {
+            format!("TOG_STORE={text} {command}")
+        }
+        Ok(text) if !text.chars().any(char::is_control) => {
+            format!("TOG_STORE='{}' {command}", text.replace('\'', "'\\''"))
+        }
+        _ => {
+            let mut format = String::new();
+            for &byte in bytes {
+                match byte {
+                    byte if plain(byte) => format.push(char::from(byte)),
+                    b'%' => format.push_str("%%"),
+                    byte => format.push_str(&format!("\\{byte:03o}")),
+                }
+            }
+            if bytes.last() == Some(&b'\n') {
+                format!("(p=\"$(printf '{format}.')\"; TOG_STORE=\"${{p%.}}\" {command})")
+            } else {
+                format!("TOG_STORE=\"$(printf '{format}')\" {command}")
+            }
+        }
     }
 }
 
 /// `command`, made to act on the store at `root`. A bare `tog` acts on the
-/// store `selected` (what `TOG_STORE`, or the default, names): for any
-/// other store the command carries its own `TOG_STORE=`, so pasting it
-/// never empties the wrong one.
+/// store `selected`: for any other store the command carries its own
+/// `TOG_STORE=`, with `root` absolute, so pasting it never empties the
+/// wrong one. `selected` is `None` when what a bare `tog` selects cannot be
+/// relied on: see `StoreFormat::fix_for`.
 fn command_on(command: &str, root: &Path, selected: Option<&Path>) -> String {
-    let same = |a: &Path, b: &Path| a == b || a.canonicalize().is_ok_and(|a| a == b);
+    let root = root
+        .canonicalize()
+        .or_else(|_| std::path::absolute(root))
+        .unwrap_or_else(|_| root.to_path_buf());
     match selected {
-        Some(selected) if same(root, selected) => command.to_string(),
-        _ => format!("TOG_STORE={} {command}", shell_word(root)),
+        Some(selected) if root == selected => command.to_string(),
+        _ => with_store(command, &root),
     }
 }
 
@@ -191,16 +220,25 @@ impl StoreFormat {
     }
 
     /// `fix` as a `fix:` line prints it for the store at `root`. A reset
-    /// empties whichever store the command selects, so when `root` is not
-    /// the store a bare `tog` would use (an x environment's own store,
-    /// while `TOG_STORE` names another) the command names `root` itself:
-    /// `TOG_STORE=<root> tog gc --reset`. Updating tog is the same command
-    /// for every store.
+    /// empties whichever store the command selects, and the line is pasted
+    /// into a shell, not into this process. So the bare command is printed
+    /// only when it selects `root` wherever it is typed: `TOG_STORE` is
+    /// unset or absolute, and names `root`. In every other case the
+    /// command names `root` itself, absolute:
+    /// `TOG_STORE=<root> tog gc --reset`. That covers a store other than
+    /// the configured one (an x environment's own store), and a relative
+    /// `TOG_STORE`, which `tog -C <dir>` resolves from `<dir>` and the
+    /// shell that pastes the fix resolves from somewhere else. Updating tog
+    /// is the same command for every store.
     pub fn fix_for(&self, root: &Path) -> String {
         match self {
             StoreFormat::Newer(_) => self.fix().to_string(),
             _ => {
-                let selected = Store::configured_root().0.canonicalize().ok();
+                let configured = Store::configured_root().0;
+                let selected = configured
+                    .is_absolute()
+                    .then(|| configured.canonicalize().ok())
+                    .flatten();
                 command_on(self.fix(), root, selected.as_deref())
             }
         }
@@ -549,27 +587,89 @@ mod tests {
         let link = temp.0.join("link");
         std::os::unix::fs::symlink(&real, &link).unwrap();
         assert_eq!(command_on(reset, &link, Some(&real)), reset);
+        assert_eq!(command_on(reset, &real, Some(&real)), reset);
 
-        for (path, word) in [
-            ("/plain/path-1.0_x+y:z@h%,", "/plain/path-1.0_x+y:z@h%,"),
-            ("/with space/store", "'/with space/store'"),
-            ("/it's/store", "'/it'\\''s/store'"),
+        // Every spelling is exact: a shell that runs the command gives the
+        // child the path's own bytes, whatever they are.
+        let cases: [(&[u8], &str); 12] = [
             (
-                "/a$b`c\"d\\e;f&g|h*i?j(k)l<m>n~o#p!q",
-                "'/a$b`c\"d\\e;f&g|h*i?j(k)l<m>n~o#p!q'",
+                b"/plain/path-1.0_x+y:z@h%,",
+                "TOG_STORE=/plain/path-1.0_x+y:z@h%, env",
             ),
-            ("/new\nline", "'/new\nline'"),
-            ("", "''"),
-        ] {
-            assert_eq!(shell_word(Path::new(path)), word, "{path:?}");
-            // And a shell reads the word back as the path.
+            (b"/with space/store", "TOG_STORE='/with space/store' env"),
+            (b"/it's/store", "TOG_STORE='/it'\\''s/store' env"),
+            (
+                b"/a$b`c\"d\\e;f&g|h*i?j(k)l<m>n~o#p!q",
+                "TOG_STORE='/a$b`c\"d\\e;f&g|h*i?j(k)l<m>n~o#p!q' env",
+            ),
+            (
+                "/caf\u{e9}/\u{fffd}".as_bytes(),
+                "TOG_STORE='/caf\u{e9}/\u{fffd}' env",
+            ),
+            (b"/-dash/~tilde", "TOG_STORE='/-dash/~tilde' env"),
+            // Not UTF-8: no `String` holds this path, so its bytes are
+            // spelled out.
+            (b"/st\xff", "TOG_STORE=\"$(printf '/st\\377')\" env"),
+            (
+                b"/a b\xfe'%\\c",
+                "TOG_STORE=\"$(printf '/a\\040b\\376\\047%%\\134c')\" env",
+            ),
+            // Control characters, a newline inside among them.
+            (
+                b"/new\nline\x1b[0m",
+                "TOG_STORE=\"$(printf '/new\\012line\\033\\1330m')\" env",
+            ),
+            // Trailing newlines, which `$(...)` would drop.
+            (
+                b"/ends\n\n",
+                "(p=\"$(printf '/ends\\012\\012.')\"; TOG_STORE=\"${p%.}\" env)",
+            ),
+            (
+                b"/x\xff\n",
+                "(p=\"$(printf '/x\\377\\012.')\"; TOG_STORE=\"${p%.}\" env)",
+            ),
+            (b"/9\x01", "TOG_STORE=\"$(printf '/9\\001')\" env"),
+        ];
+        for (bytes, expected) in cases {
+            use std::os::unix::ffi::OsStrExt as _;
+            let path = Path::new(std::ffi::OsStr::from_bytes(bytes));
+            assert_eq!(with_store("env", path), expected, "{path:?}");
+            // A shell that runs it hands the command a TOG_STORE of
+            // exactly these bytes.
+            let command = with_store("sh -c 'printf %s \"$TOG_STORE\"'", path);
             let out = std::process::Command::new("/bin/sh")
                 .arg("-c")
-                .arg(format!("printf %s {word}"))
+                .arg(&command)
+                .env_remove("TOG_STORE")
                 .output()
                 .unwrap();
-            assert_eq!(String::from_utf8_lossy(&out.stdout), path, "{word}");
+            assert!(out.status.success(), "{command}");
+            assert_eq!(out.stdout, bytes, "{command}");
         }
+    }
+
+    /// The bare command is printed only for a store a bare `tog` selects
+    /// from any directory. A relative selection is not that: the fix names
+    /// the refused store, absolute.
+    #[test]
+    fn a_fix_for_a_store_selected_relatively_names_it_absolutely() {
+        let temp = TempDir::named("store-format-relative");
+        let root = temp.0.join("store");
+        fs::create_dir(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+        // What `fix_for` passes when TOG_STORE is relative: no selection.
+        assert_eq!(
+            command_on("tog gc --reset", &root, None),
+            format!("TOG_STORE={} tog gc --reset", root.display())
+        );
+        // A root that reaches here relative is printed absolute.
+        let relative = Path::new("no-such-store-here");
+        let command = command_on("tog gc --reset", relative, None);
+        let absolute = std::path::absolute(relative).unwrap();
+        assert_eq!(
+            command,
+            format!("TOG_STORE={} tog gc --reset", absolute.display())
+        );
     }
 
     /// Many togs creating one store at once: every one of them ends with

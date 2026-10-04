@@ -1018,16 +1018,31 @@ fn toolchains_check(store: &Store, checks: &mut Vec<Check>) {
     }
 }
 
-/// The store as `doctor` was handed it: opened and under a lease, or the
-/// error that stopped either. The caller decides once, and the lease comes
-/// with the store, so nothing here reads a store without one.
-pub type DoctorStore<'a> = Result<(&'a Store, &'a StoreActivity), &'a io::Error>;
+/// The store as `doctor` was handed it: opened and under a lease, opened
+/// with no lease because another job holds it exclusively, or the error
+/// that stopped either. The caller decides once, and the lease comes with
+/// the store, so nothing here reads a store without one.
+pub type DoctorStore<'a> = Result<(&'a Store, Option<&'a StoreActivity>), &'a io::Error>;
 
 /// The store block: opening it is the only thing `doctor` does that could
 /// fail for the whole group, so the three probes below hang off the `Ok`.
 fn store_checks(store: DoctorStore, checks: &mut Vec<Check>) {
     let (store, activity) = match store {
-        Ok(leased) => leased,
+        Ok((store, Some(activity))) => (store, activity),
+        // In use is not broken: a warning, like gc's "cleanup skipped".
+        // Nothing in the store is read without the lease.
+        Ok((store, None)) => {
+            checks.push(check(
+                "store",
+                Level::Warn,
+                format!(
+                    "a Tog job is using the store at {}; its checks were skipped, run 'tog \
+                     doctor' again when the job finishes",
+                    store.root.display()
+                ),
+            ));
+            return;
+        }
         Err(error) => {
             checks.push(check("store", Level::Fail, unopened_store_detail(error)));
             return;
@@ -2135,12 +2150,14 @@ mod tests {
     /// and leased, or the error that stopped it.
     fn doctor_of_configured_store(dir: &Path) -> Vec<Check> {
         let opened = Store::open().and_then(|store| {
-            let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
+            let activity = store.try_activity_shared()?;
             Ok((store, activity))
         });
         doctor(
             dir,
-            opened.as_ref().map(|(store, activity)| (store, activity)),
+            opened
+                .as_ref()
+                .map(|(store, activity)| (store, activity.as_ref())),
         )
     }
 
@@ -2179,7 +2196,7 @@ mod tests {
             .activity(crate::kernel::activity::ActivityMode::Shared)
             .unwrap();
         let mut checks = Vec::new();
-        store_checks(Ok((&store, &foreign)), &mut checks);
+        store_checks(Ok((&store, Some(&foreign))), &mut checks);
         assert_eq!(
             checks.len(),
             1,
@@ -2192,9 +2209,25 @@ mod tests {
             .activity(crate::kernel::activity::ActivityMode::Shared)
             .unwrap();
         let mut checks = Vec::new();
-        store_checks(Ok((&store, &own)), &mut checks);
+        store_checks(Ok((&store, Some(&own))), &mut checks);
         let names: Vec<&str> = checks.iter().map(|check| check.name).collect();
         assert_eq!(names, ["store", "disk", "toolchains"]);
+
+        // No lease because the store is busy: one warning, nothing read.
+        let mut checks = Vec::new();
+        store_checks(Ok((&store, None)), &mut checks);
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].name, "store");
+        assert_eq!(checks[0].level, Level::Warn);
+        assert!(
+            checks[0].detail.contains("a Tog job is using the store at"),
+            "{}",
+            checks[0].detail
+        );
+        assert!(fs::read_dir(store.root.join("tmp"))
+            .unwrap()
+            .flatten()
+            .all(|entry| !entry.file_name().to_string_lossy().starts_with(".doctor-")));
     }
 
     #[test]
