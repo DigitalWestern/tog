@@ -40,8 +40,8 @@ mod x;
 pub use self::completions::completions;
 pub use self::parse::{option_spellings, parse, suggest};
 pub use self::spec::{
-    after_command, canonical_name, help, spec, sync_footer, usage, BUILD_WORDS, COMMANDS, LS_WORDS,
-    SHELL_WORDS, SYNC_ALIASES,
+    after_command, canonical_name, help, inputs, spec, sync_footer, usage, BUILD_WORDS, COMMANDS,
+    LS_WORDS, SHELL_WORDS, SYNC_ALIASES,
 };
 
 use std::path::PathBuf;

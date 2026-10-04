@@ -118,6 +118,10 @@ impl Tailor for Node {
             .any(|name| project.is_input_file(Path::new(name))))
     }
 
+    fn input_files(&self) -> &'static str {
+        "package.json, package-lock.json, pnpm-lock.yaml, yarn.lock"
+    }
+
     /// `tog x` resolves from the public registry and projects into its own
     /// cache directory (`registry_tool.rs`).
     fn registry_tool(&self) -> io::Result<&'static dyn RegistryTool> {

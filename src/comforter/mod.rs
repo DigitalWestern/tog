@@ -7,6 +7,7 @@
 //! so a crash can only over-retain. Realization itself lives in each tailor.
 
 pub mod join;
+pub mod records;
 pub mod status;
 pub mod toolchain;
 

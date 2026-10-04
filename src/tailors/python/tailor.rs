@@ -47,6 +47,10 @@ impl Tailor for Python {
         inputs::has_python_input(project)
     }
 
+    fn input_files(&self) -> &'static str {
+        "requirements.lock.txt, requirements.txt, pyproject.toml ([project], [tool.poetry], [dependency-groups]), setup.cfg, setup.py, requirements/{common.txt,base.txt,requirements.in,cpu.txt,cuda.txt,rocm.txt,xpu.txt}"
+    }
+
     /// An sdist with a Rust extension compiles with a Rust. With no locked
     /// Rust there is no single default: each sdist's own toolchain file
     /// picks among the shipped pins.

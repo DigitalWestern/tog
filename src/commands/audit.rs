@@ -560,7 +560,7 @@ pub fn evaluate(
         if let Some((why, kind)) = retired {
             if !matches!(freshness, Freshness::Stale(_)) {
                 freshness = Freshness::Outdated(format!(
-                    "{why} (it records the retired {kind} exception); run 'tog sync'{key}, then commit"
+                    "{why} (it records the retired {kind} exception); run 'tog' once{key}, then commit"
                 ));
             }
         }
@@ -1626,7 +1626,7 @@ mod tests {
                 matches!(
                     verdict.freshness,
                     Freshness::Outdated(ref why) if why.starts_with(
-                        "closure predates component provisioning (it records the retired toolchain-component-unavailable exception); run 'tog sync'"
+                        "closure predates component provisioning (it records the retired toolchain-component-unavailable exception); run 'tog' once"
                     )
                 ),
                 "{verdict:?}"

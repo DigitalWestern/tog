@@ -104,7 +104,7 @@ pub fn run(ctx: &Context, cmd: &[String], frozen: bool) -> io::Result<i32> {
             io::ErrorKind::NotFound,
             format!(
                 "no environment projected here for command '{}', and no manifest to sync one \
-                 from in {} (see PROJECT INPUTS in 'tog --help')",
+                 from in {} (see 'tog help inputs')",
                 cmd[0],
                 dir.display()
             ),

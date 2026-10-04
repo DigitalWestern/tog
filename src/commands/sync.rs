@@ -137,7 +137,9 @@ pub(crate) fn run_in_mode(
     mode: Mode,
     stop_after_lock: bool,
 ) -> io::Result<()> {
-    let dir = context::project_dir();
+    // The project above, as `run` and the bare `tog` find it, so a sync
+    // from `src/` syncs the project, not `src/`.
+    let dir = project_root(&context::project_dir())?;
     // An interrupted resolution publication is undone before anything
     // reads the project. Its originals are in the store, so opening the
     // store early leaves no trace a refusal would have avoided.
@@ -199,15 +201,10 @@ fn recover_resolution(platform: Platform, dir: &Path) -> io::Result<Option<Conte
     Ok(Some(ctx))
 }
 
-/// Sync with a context the caller already opened (`add`/`remove`/`update`
-/// after their manifest edit).
-pub fn run(ctx: &Context, fresh: bool) -> io::Result<()> {
-    run_in(ctx, &project_root(&ctx.project_dir())?, fresh, false)
-}
-
-/// The same sync of one named directory: the projected root a command
-/// found by walking up, which is not always the process cwd.
-fn run_in(ctx: &Context, dir: &Path, fresh: bool, frozen: bool) -> io::Result<()> {
+/// A sync of one named directory, with a context the caller
+/// already opened: `add`/`remove`/`update` after their manifest edit, and
+/// the sync `run` and `build` start.
+pub(crate) fn run_in(ctx: &Context, dir: &Path, fresh: bool, frozen: bool) -> io::Result<()> {
     let mode = if frozen { Mode::Frozen } else { Mode::Writable };
     if resolve::transaction::has_pending_journal(dir) {
         resolve::transaction::recover_project(&ctx.store, &ctx.activity, dir)?;
@@ -1059,6 +1056,9 @@ mod tests {
     }
 
     impl Tailor for HostlessPython {
+        fn input_files(&self) -> &'static str {
+            "test input"
+        }
         fn id(&self) -> &'static str {
             "python"
         }
@@ -1268,7 +1268,7 @@ mod tests {
         let _store_env = StoreEnv::enter(&temp.0.join("store"));
         let ctx = Context::open_in(Platform::host().unwrap(), &project).unwrap();
 
-        let error = run(&ctx, false).unwrap_err();
+        let error = run_in(&ctx, &project, false, false).unwrap_err();
         assert!(
             error
                 .to_string()
@@ -1322,6 +1322,9 @@ mod tests {
     }
 
     impl Tailor for SwappedMidSync {
+        fn input_files(&self) -> &'static str {
+            "test input"
+        }
         fn id(&self) -> &'static str {
             "python"
         }

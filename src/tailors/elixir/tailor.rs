@@ -85,6 +85,10 @@ impl Tailor for Elixir {
         Ok(project.is_input_file(Path::new("mix.exs")))
     }
 
+    fn input_files(&self) -> &'static str {
+        "mix.exs"
+    }
+
     fn preflight(&self, platform: Platform, _project: &ProjectRoot) -> io::Result<()> {
         elixir::preflight_platform(platform)
     }

@@ -696,7 +696,7 @@ the scopes that exclude it), `outdated` (no signature while signatures are
 checked, or a record from before inputs, platform, or the exception record
 were written; run `tog` once, under a trusted key when signatures are
 checked, then commit. A record carrying an exception kind tog has retired is outdated
-too, with the reason and the command that rewrites it (`run 'tog sync'`): a closure recording
+too, with the reason and the command that rewrites it (`run 'tog' once`): a closure recording
 `toolchain-component-unavailable` says `closure predates component
 provisioning`), `stale` (the same inputs-changed / projection-missing /
 other-platform checks `status` makes, made per closure file from that

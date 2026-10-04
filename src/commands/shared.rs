@@ -258,8 +258,21 @@ pub(crate) fn child_status_code(status: &std::process::ExitStatus) -> i32 {
 pub(crate) fn no_inputs() -> io::Error {
     io::Error::new(
         io::ErrorKind::NotFound,
-        "nothing to sync here: no manifest found (looked for requirements.lock.txt, requirements.txt, pyproject.toml ([project], [tool.poetry], [dependency-groups]), setup.cfg, setup.py, requirements/{common.txt,base.txt,requirements.in,cpu.txt,cuda.txt,rocm.txt,xpu.txt}, package-lock.json, pnpm-lock.yaml, yarn.lock, Cargo.toml, go.mod, Gemfile, mix.exs, and .csproj/packages.lock.json)",
+        format!(
+            "nothing to sync here: no manifest found (looked for {}; see 'tog help inputs')",
+            input_files()
+        ),
     )
+}
+
+/// Every file any tailor detects a project by ([`Tailor::input_files`]),
+/// in registry order: the one list the "no project" messages print.
+pub(crate) fn input_files() -> String {
+    crate::tailors::registry()
+        .iter()
+        .map(|tailor| tailor.input_files())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 #[cfg(test)]
@@ -415,6 +428,32 @@ mod tests {
                 .root,
             home
         );
+    }
+
+    /// The "no manifest found" list and `tog help inputs` name the same
+    /// files: every file a tailor detects by is in the help topic.
+    #[test]
+    fn every_detected_input_file_is_in_the_help() {
+        let help = crate::cli::inputs();
+        for tailor in crate::tailors::registry() {
+            for item in tailor.input_files().split(", ") {
+                let name = item.split([' ', '{']).next().unwrap();
+                // `pyproject.toml ([project], [tool.poetry], ...)`: the
+                // tables qualify the file before them.
+                if name.starts_with('[') {
+                    continue;
+                }
+                assert!(
+                    help.contains(name),
+                    "{}: {name} is not in 'tog help inputs'",
+                    tailor.id()
+                );
+            }
+        }
+        let error = no_inputs().to_string();
+        assert!(error.contains("package.json, package-lock.json"), "{error}");
+        assert!(error.contains("setup.cfg"), "{error}");
+        assert!(error.contains("see 'tog help inputs'"), "{error}");
     }
 
     #[test]

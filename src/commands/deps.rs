@@ -237,8 +237,9 @@ pub fn nearest_project(cwd: &Path) -> io::Result<(PathBuf, Vec<Eco>)> {
     Err(io::Error::new(
         io::ErrorKind::NotFound,
         format!(
-            "no project from {} upward (looked for requirements.txt, pyproject.toml, package.json, Cargo.toml, go.mod, Gemfile, mix.exs, *.csproj)",
-            cwd.display()
+            "no project from {} upward (looked for {})",
+            cwd.display(),
+            crate::commands::shared::input_files()
         ),
     ))
 }
@@ -526,12 +527,11 @@ pub fn run(ctx: &Context, request: Request, no_sync: bool) -> io::Result<()> {
         return Ok(());
     }
     if outcome.project != cwd {
-        std::env::set_current_dir(&outcome.project)?;
         ui::trace(&format!("syncing in {}", outcome.project.display()));
     }
     // The edit owns its exceptions. Sync must open a fresh ecosystem scope.
     edit_attribution.discard();
-    sync::run(ctx, false)
+    sync::run_in(ctx, &outcome.project, false, false)
 }
 
 /// Open the dependency edit's attribution scope before the edit can record.

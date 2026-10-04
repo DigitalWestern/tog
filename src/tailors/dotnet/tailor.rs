@@ -81,6 +81,10 @@ impl Tailor for Dotnet {
         dotnet::has_marker(project)
     }
 
+    fn input_files(&self) -> &'static str {
+        "*.csproj, *.sln, *.slnx, packages.lock.json"
+    }
+
     fn preflight(&self, platform: Platform, _project: &ProjectRoot) -> io::Result<()> {
         dotnet::preflight_platform(platform)
     }
