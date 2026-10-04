@@ -62,7 +62,7 @@ pub struct SetupCfgPackagesFind {
 pub struct ExplicitPython {
     pub raw: String,
     pub source: String,
-    version: crate::tailors::python::pep440::Version,
+    version: crate::kernel::pep440::Version,
 }
 
 #[derive(Clone, Debug)]
@@ -114,7 +114,7 @@ impl PythonSelection {
 
 /// Pure PEP 440/Poetry matching helper for a pinned X.Y.Z candidate.
 pub fn matches_specifier(specifier: &str, version: &str) -> io::Result<bool> {
-    crate::tailors::python::pep440::matches_specifier(specifier, version)
+    crate::kernel::pep440::matches_specifier(specifier, version)
 }
 
 #[cfg(test)]
@@ -192,11 +192,8 @@ pub fn locked(
         .constraints
         .iter()
         .map(|constraint| {
-            crate::tailors::python::pep440::SpecifierSet::parse(
-                &constraint.text,
-                &constraint.source,
-            )
-            .map(|set| (constraint, set))
+            crate::kernel::pep440::SpecifierSet::parse(&constraint.text, &constraint.source)
+                .map(|set| (constraint, set))
         })
         .collect::<io::Result<Vec<_>>>()?
         .into_iter()
@@ -241,7 +238,7 @@ pub fn locked(
 pub fn check_project_inputs(project: &ProjectRoot) -> io::Result<()> {
     let inputs = collect_project_inputs(project)?;
     for constraint in &inputs.constraints {
-        crate::tailors::python::pep440::SpecifierSet::parse(&constraint.text, &constraint.source)?;
+        crate::kernel::pep440::SpecifierSet::parse(&constraint.text, &constraint.source)?;
     }
     Ok(())
 }
@@ -259,11 +256,8 @@ pub fn select_python_with_inputs(
         .constraints
         .iter()
         .map(|constraint| {
-            crate::tailors::python::pep440::SpecifierSet::parse(
-                &constraint.text,
-                &constraint.source,
-            )
-            .map(|set| (constraint, set))
+            crate::kernel::pep440::SpecifierSet::parse(&constraint.text, &constraint.source)
+                .map(|set| (constraint, set))
         })
         .collect::<io::Result<Vec<_>>>()?;
     let constraint_text = if inputs.constraints.is_empty() {
@@ -388,7 +382,7 @@ pub fn select_python_with_inputs(
 /// constructing its `Version`.
 fn select_explicit_pin<'a>(
     pins: &[&'a PinnedPython],
-    requested: &crate::tailors::python::pep440::Version,
+    requested: &crate::kernel::pep440::Version,
     default_version: &str,
 ) -> Option<&'a PinnedPython> {
     match requested.release_len() {
@@ -525,8 +519,8 @@ fn no_exact_satisfying_pin(
     )
 }
 
-fn pinned_version(text: &str) -> Option<crate::tailors::python::pep440::Version> {
-    let version = crate::tailors::python::pep440::Version::parse(text).ok()?;
+fn pinned_version(text: &str) -> Option<crate::kernel::pep440::Version> {
+    let version = crate::kernel::pep440::Version::parse(text).ok()?;
     (version.release_len() == 3 && !version.has_epoch() && !version.is_prerelease())
         .then_some(version)
 }
@@ -575,7 +569,7 @@ pub fn parse_python_version_file(text: &str, source: &str) -> io::Result<Explici
     Ok(ExplicitPython {
         raw: line.to_string(),
         source: source.to_string(),
-        version: crate::tailors::python::pep440::Version::parse(numeric).map_err(|why| {
+        version: crate::kernel::pep440::Version::parse(numeric).map_err(|why| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("{source}: invalid .python-version request `{line}`: {why}"),
@@ -1084,7 +1078,7 @@ mod tests {
             url: "https://example.invalid/3.11.9.tar.gz",
             sha256: "9",
         };
-        let minor = crate::tailors::python::pep440::Version::parse("3.11").unwrap();
+        let minor = crate::kernel::pep440::Version::parse("3.11").unwrap();
         for pins in [[&older, &newer], [&newer, &older]] {
             assert_eq!(
                 select_explicit_pin(&pins, &minor, "3.12.14")
@@ -1102,7 +1096,7 @@ mod tests {
         }
 
         let pins = [&older, &newer];
-        let exact = crate::tailors::python::pep440::Version::parse("3.11.9").unwrap();
+        let exact = crate::kernel::pep440::Version::parse("3.11.9").unwrap();
         assert_eq!(
             select_explicit_pin(&pins, &exact, "3.11.16")
                 .unwrap()
@@ -1110,7 +1104,7 @@ mod tests {
             "3.11.9"
         );
 
-        let unavailable = crate::tailors::python::pep440::Version::parse("3.11.4").unwrap();
+        let unavailable = crate::kernel::pep440::Version::parse("3.11.4").unwrap();
         assert!(select_explicit_pin(&pins, &unavailable, "3.11.16").is_none());
     }
 

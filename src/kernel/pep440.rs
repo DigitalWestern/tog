@@ -414,7 +414,7 @@ enum Operator {
     BareEqual,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum Clause {
     Any,
     Literal(String),
@@ -423,7 +423,7 @@ enum Clause {
     PrefixNotEqual { epoch: u64, prefix: Vec<u64> },
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SpecifierSet {
     alternatives: Vec<Vec<Clause>>,
 }
@@ -450,6 +450,14 @@ impl SpecifierSet {
             return false;
         }
         self.matches_raw(version)
+    }
+
+    /// True when some alternative admits every version (`*`, an empty set,
+    /// `^3.9 || *`): the set then states nothing.
+    pub fn admits_everything(&self) -> bool {
+        self.alternatives
+            .iter()
+            .any(|clauses| clauses.iter().all(|clause| matches!(clause, Clause::Any)))
     }
 
     fn matches_raw(&self, version: &Version) -> bool {

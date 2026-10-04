@@ -10,7 +10,6 @@ pub mod env;
 pub mod inputs;
 pub mod manifest;
 pub mod objects;
-pub mod pep440;
 pub mod pypi;
 pub mod pyselect;
 pub mod registry_tool;
@@ -134,7 +133,7 @@ fn lookup_in_pins<'a>(
     version: &str,
 ) -> Option<&'a PinnedPython> {
     let release_len = canonical_release_len(version)?;
-    let requested = crate::tailors::python::pep440::Version::parse(version).ok()?;
+    let requested = crate::kernel::pep440::Version::parse(version).ok()?;
     if requested.has_epoch() || requested.is_prerelease() || requested.has_local() {
         return None;
     }
@@ -160,8 +159,8 @@ fn lookup_in_pins<'a>(
     }
 }
 
-fn parse_pinned_version(version: &str) -> Option<crate::tailors::python::pep440::Version> {
-    let parsed = crate::tailors::python::pep440::Version::parse(version).ok()?;
+fn parse_pinned_version(version: &str) -> Option<crate::kernel::pep440::Version> {
+    let parsed = crate::kernel::pep440::Version::parse(version).ok()?;
     (parsed.release_len() == 3
         && !parsed.has_epoch()
         && !parsed.is_prerelease()

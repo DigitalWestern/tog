@@ -365,7 +365,7 @@ pub(super) fn poetry_python_marker(version: &str) -> io::Result<Option<String>> 
                                 format!("unsupported Poetry python constraint `{version}`"),
                             )
                         })?;
-                    let variable = if crate::tailors::python::pep440::Version::parse(value)
+                    let variable = if crate::kernel::pep440::Version::parse(value)
                         .ok()
                         .is_some_and(|value| value.release_len() >= 3)
                     {
@@ -773,7 +773,7 @@ pub(super) fn poetry_package_matches(
             .map(String::as_str)
             .collect::<Vec<_>>();
         if !specifiers.is_empty()
-            && !crate::tailors::python::pep440::matches_specifiers_with_candidates(
+            && !crate::kernel::pep440::matches_specifiers_with_candidates(
                 &specifiers,
                 version,
                 candidate_versions,

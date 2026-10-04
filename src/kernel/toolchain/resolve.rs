@@ -20,7 +20,7 @@ use std::io;
 const UPDATE_HINT: &str = "run `tog update --toolchain`";
 
 /// What `.python-version` accepts, spelled the way the refusal spells it.
-const PYTHON_HINT: &str = "put an X.Y, X.Y.Z, or supported specifier in .python-version, then run `tog update --toolchain`";
+const PYTHON_HINT: &str = "put an X.Y, X.Y.Z, or PEP 440 specifier set in .python-version, then run `tog update --toolchain`";
 
 /// The value a row holds, looked up by the (path, field) pair discovery
 /// recorded it under. A row with no value reads the same as no row.
@@ -44,48 +44,22 @@ fn parse_version(field: &str, text: &str) -> io::Result<Version> {
     Version::parse(text).map_err(|error| invalid(format!("{field}: {error}; {UPDATE_HINT}")))
 }
 
-/// The one supported operator set: PEP 440's `>=`, `<`, `==`, `~=`, `!=`.
-/// `>` and `<=` are refused rather than approximated, because a lock minted
-/// from an approximation is wrong in a way nobody reviews.
-fn parse_op(term: &str) -> Option<(Op, &str)> {
-    for (text, op) in [
-        (">=", Op::Ge),
-        ("==", Op::Eq),
-        ("~=", Op::Compatible),
-        ("!=", Op::Ne),
-        ("<", Op::Lt),
-    ] {
-        if let Some(rest) = term.strip_prefix(text) {
-            // `<=` must not be read as `<`.
-            if text == "<" && rest.starts_with('=') {
-                return None;
-            }
-            return Some((op, rest));
-        }
+/// A Python specifier set in the full PEP 440 grammar, with Poetry's `^`,
+/// `~` and `||`: the parser interpreter selection (`pyselect`) reads the
+/// same fields with, so the lock and the sync never disagree on what a
+/// constraint admits. A set that admits everything (`*`, `^3.9 || *`)
+/// states nothing and lowers to no request.
+fn python_specifiers(field: &str, text: &str) -> io::Result<Option<VersionRequest>> {
+    let text = text.trim();
+    let set = crate::kernel::pep440::SpecifierSet::parse(text, field)
+        .map_err(|error| invalid(format!("{error}; {UPDATE_HINT}")))?;
+    if set.admits_everything() {
+        return Ok(None);
     }
-    None
-}
-
-/// A comma-joined specifier set over the supported operators.
-fn specifier_set(field: &str, text: &str) -> io::Result<VersionRequest> {
-    let mut specifiers = Vec::new();
-    for term in text.split(',') {
-        let term = term.trim();
-        let (op, rest) = parse_op(term).ok_or_else(|| {
-            invalid(format!(
-                "{field}: {term} is not a supported version specifier; use >=, <, ==, ~=, or != and {UPDATE_HINT}"
-            ))
-        })?;
-        let version = parse_version(field, rest.trim())?;
-        specifiers.push(
-            Specifier::new(op, version)
-                .map_err(|error| invalid(format!("{field}: {error}; {UPDATE_HINT}")))?,
-        );
-    }
-    if specifiers.is_empty() {
-        return Err(invalid(format!("{field}: empty version specifier set")));
-    }
-    Ok(VersionRequest::Specifiers(specifiers))
+    Ok(Some(VersionRequest::Pep440 {
+        text: text.to_string(),
+        set,
+    }))
 }
 
 /// The request `.python-version` states, or the refusal uv's own grammar
@@ -113,63 +87,12 @@ fn python_version_request(text: &str) -> io::Result<VersionRequest> {
     if let Ok(version) = Version::parse(text) {
         return Ok(exact_or_prefix(version));
     }
-    if let Ok(request) = specifier_set(".python-version", text) {
+    if let Ok(Some(request)) = python_specifiers(".python-version", text) {
         return Ok(request);
     }
     Err(invalid(format!(
         ".python-version: invalid .python-version request `{text}`; {PYTHON_HINT}"
     )))
-}
-
-/// A Poetry constraint: one alternative, or `||`-joined alternatives that
-/// lower to one [`VersionRequest::AnyOf`]. `*` (alone or as any
-/// alternative) admits every release and states nothing.
-fn poetry_python_request(text: &str) -> io::Result<Option<VersionRequest>> {
-    let mut alternatives = Vec::new();
-    for alternative in text.split("||") {
-        if alternative.trim() == "*" {
-            return Ok(None);
-        }
-        alternatives.push(poetry_python_alternative(alternative)?);
-    }
-    if alternatives.len() == 1 {
-        return Ok(alternatives.pop());
-    }
-    Ok(Some(VersionRequest::AnyOf(
-        alternatives.into_iter().map(|one| vec![one]).collect(),
-    )))
-}
-
-/// Poetry's caret and tilde over the same grammar: `^3.9` is `>=3.9,<4`,
-/// `~3.9` is `>=3.9,<3.10`.
-fn poetry_python_alternative(text: &str) -> io::Result<VersionRequest> {
-    const FIELD: &str = "tool.poetry.dependencies.python";
-    let bounded = |rest: &str, keep: usize| -> io::Result<VersionRequest> {
-        let lower = parse_version(FIELD, rest.trim())?;
-        let mut upper: Vec<u64> = lower.parts().iter().copied().take(keep).collect();
-        while upper.len() < keep {
-            upper.push(0);
-        }
-        let last = upper.len() - 1;
-        upper[last] += 1;
-        let upper: Vec<String> = upper.iter().map(u64::to_string).collect();
-        let upper = parse_version(FIELD, &upper.join("."))?;
-        Ok(VersionRequest::Specifiers(vec![
-            Specifier::new(Op::Ge, lower).map_err(|error| invalid(format!("{FIELD}: {error}")))?,
-            Specifier::new(Op::Lt, upper).map_err(|error| invalid(format!("{FIELD}: {error}")))?,
-        ]))
-    };
-    if let Some(rest) = text.trim().strip_prefix('^') {
-        return bounded(rest, 1);
-    }
-    if let Some(rest) = text.trim().strip_prefix('~') {
-        let parts = parse_version(FIELD, rest.trim())?.parts().len();
-        return bounded(rest, parts.min(2));
-    }
-    if let Some(prefix) = text.trim().strip_suffix(".*") {
-        return Ok(VersionRequest::Prefix(parse_version(FIELD, prefix)?));
-    }
-    specifier_set(FIELD, text.trim())
 }
 
 /// The refusal every unreadable `engines.node` range gets.
@@ -345,15 +268,11 @@ pub fn request_for(ecosystem: &str, rows: &[InputRow]) -> io::Result<Request> {
             if let Some(text) = value(rows, ".python-version", "version") {
                 request = request.with("cpython", python_version_request(text)?);
             }
-            if let Some(text) = value(rows, "pyproject.toml", "project.requires-python") {
-                request = request.with(
-                    "cpython",
-                    specifier_set("project.requires-python", text.trim())?,
-                );
-            }
-            if let Some(text) = value(rows, "pyproject.toml", "tool.poetry.dependencies.python") {
-                if let Some(poetry) = poetry_python_request(text)? {
-                    request = request.with("cpython", poetry);
+            for field in ["project.requires-python", "tool.poetry.dependencies.python"] {
+                if let Some(text) = value(rows, "pyproject.toml", field) {
+                    if let Some(specifiers) = python_specifiers(field, text)? {
+                        request = request.with("cpython", specifiers);
+                    }
                 }
             }
         }
@@ -594,6 +513,16 @@ mod tests {
         assert_eq!(request("python", &pin("~=3.11.2")), "cpython ~=3.11.2");
     }
 
+    /// Whether the request `rows` state admits CPython `version`.
+    fn admits(rows: &[InputRow], version: &str) -> bool {
+        let candidate = Version::parse(version).unwrap();
+        request_for("python", rows)
+            .unwrap()
+            .components
+            .iter()
+            .all(|(_, request)| request.matches(&candidate))
+    }
+
     #[test]
     fn python_intersects_every_source_that_states_a_version() {
         let rows = vec![
@@ -607,49 +536,73 @@ mod tests {
         ];
         assert_eq!(
             request("python", &rows),
-            "cpython 3.12.*; cpython >=3.11; cpython >=3.9,<4"
+            "cpython 3.12.*; cpython >=3.11; cpython ^3.9"
         );
         let catalog = catalog("python", "cpython", &["3.10.21", "3.12.14", "3.13.15"]);
         assert_eq!(
             select_for(&catalog, "python", &rows).unwrap().release,
             "cpython-3.12.14"
         );
+        let poetry = |text: &str| {
+            vec![row(
+                "pyproject.toml",
+                "tool.poetry.dependencies.python",
+                Some(text),
+            )]
+        };
         // Poetry's tilde bounds the minor, its caret the major.
-        let tilde = vec![row(
-            "pyproject.toml",
-            "tool.poetry.dependencies.python",
-            Some("~3.9"),
-        )];
-        assert_eq!(request("python", &tilde), "cpython >=3.9,<3.10");
-        let star = vec![row(
-            "pyproject.toml",
-            "tool.poetry.dependencies.python",
-            Some("3.9.*"),
-        )];
-        assert_eq!(request("python", &star), "cpython 3.9.*");
+        assert!(admits(&poetry("~3.9"), "3.9.20"));
+        assert!(!admits(&poetry("~3.9"), "3.10.0"));
+        assert!(admits(&poetry("^3.9"), "3.13.1"));
+        assert!(!admits(&poetry("^3.9"), "4.0.0"));
+        assert!(admits(&poetry("3.9.*"), "3.9.1"));
+        assert!(!admits(&poetry("3.9.*"), "3.10.1"));
         // Poetry's `||` joins alternatives; the newest any of them admits wins.
-        let either = vec![row(
-            "pyproject.toml",
-            "tool.poetry.dependencies.python",
-            Some(">=3.9,<3.11 || ~3.12"),
-        )];
-        assert_eq!(
-            request("python", &either),
-            "cpython >=3.9,<3.11 || >=3.12,<3.13"
-        );
+        let either = poetry(">=3.9,<3.11 || ~3.12");
+        assert_eq!(request("python", &either), "cpython >=3.9,<3.11 || ~3.12");
         assert_eq!(
             select_for(&catalog, "python", &either).unwrap().release,
             "cpython-3.12.14"
         );
         // Poetry's `*` states nothing, alone or as one alternative.
         for text in ["*", " * ", "^3.9 || *"] {
-            let any = vec![row(
-                "pyproject.toml",
-                "tool.poetry.dependencies.python",
-                Some(text),
-            )];
-            assert_eq!(request("python", &any), "newest", "{text}");
+            assert_eq!(request("python", &poetry(text)), "newest", "{text}");
         }
+    }
+
+    /// The lock reads Python constraints with the grammar interpreter
+    /// selection uses (#297): `>`, `<=`, `===`, wildcards and `!=` with a
+    /// wildcard all mean what `pyselect` takes them to mean.
+    #[test]
+    fn python_metadata_reads_the_full_pep440_grammar() {
+        let requires =
+            |text: &str| vec![row("pyproject.toml", "project.requires-python", Some(text))];
+        for (text, version, admitted) in [
+            (">3.11", "3.11.0", false),
+            (">3.11", "3.11.1", true),
+            ("<=3.13", "3.13.0", true),
+            ("<=3.13", "3.13.1", false),
+            ("==3.12.*", "3.12.9", true),
+            ("!=3.12.*", "3.12.9", false),
+            ("!=3.12.*", "3.13.0", true),
+            ("~=3.11.2", "3.11.9", true),
+            ("~=3.11.2", "3.12.0", false),
+            ("===3.12.4", "3.12.4", true),
+            (">=3.10, <3.12", "3.11.0", true),
+        ] {
+            assert_eq!(
+                admits(&requires(text), version),
+                admitted,
+                "{text} against {version}"
+            );
+        }
+        let catalog = catalog("python", "cpython", &["3.11.0", "3.12.14", "3.13.15"]);
+        assert_eq!(
+            select_for(&catalog, "python", &requires("<=3.12.14"))
+                .unwrap()
+                .release,
+            "cpython-3.12.14"
+        );
     }
 
     #[test]
@@ -670,7 +623,7 @@ mod tests {
             );
             assert!(error.contains(PYTHON_HINT), "{text}: {error}");
         }
-        for text in ["/usr/bin/python3", "not a version", ">3.11"] {
+        for text in ["/usr/bin/python3", "not a version", "*"] {
             let error = refusal("python", &[row(".python-version", "version", Some(text))]);
             assert!(
                 error.contains("invalid .python-version request"),
@@ -678,29 +631,18 @@ mod tests {
             );
             assert!(error.contains(PYTHON_HINT), "{text}: {error}");
         }
-        // An unsupported operator in the metadata names the field it read.
+        // A malformed constraint in the metadata names the field it read.
         let error = refusal(
             "python",
             &[row(
                 "pyproject.toml",
                 "project.requires-python",
-                Some(">3.11"),
+                Some(">=3.11,,"),
             )],
         );
         assert!(error.contains("project.requires-python"), "{error}");
-        assert!(
-            error.contains("not a supported version specifier"),
-            "{error}"
-        );
-        let error = refusal(
-            "python",
-            &[row(
-                "pyproject.toml",
-                "project.requires-python",
-                Some("<=3.13"),
-            )],
-        );
-        assert!(error.contains("project.requires-python"), "{error}");
+        assert!(error.contains("invalid PEP 440 specifier"), "{error}");
+        assert!(error.contains(UPDATE_HINT), "{error}");
     }
 
     #[test]
