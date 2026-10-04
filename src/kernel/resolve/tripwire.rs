@@ -791,7 +791,19 @@ mod tests {
                 &["add", "rails", "--skip-install"],
                 &[("BUNDLE_FROZEN", "false")],
             ),
-            ("/s/ruby/bin/bundle", &["remove", "rails"], &[]),
+            (
+                "/s/ruby/bin/ruby",
+                &[
+                    "-rbundler",
+                    "-rbundler/injector",
+                    "-e",
+                    crate::tailors::ruby::edit::REMOVE_GEMS,
+                    "--",
+                    "rails",
+                ],
+                &[],
+            ),
+            ("/s/ruby/bin/bundle", &["lock"], &[]),
             ("/s/ruby/bin/bundle", &["lock", "--update"], &[]),
             // Elixir: missing lock, the check gate, the lock parser, update.
             ("/s/beam/elixir/bin/mix", &["deps.get"], &[]),
