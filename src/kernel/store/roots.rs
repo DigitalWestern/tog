@@ -379,7 +379,7 @@ impl Store {
     pub fn roots(&self) -> io::Result<Vec<RootEntry>> {
         let roots = self.root.join("roots");
         ensure_directory_tree(&self.root, Path::new("roots"))?;
-        let roots_dir = open_store_directory(&roots, "roots")?;
+        let roots_dir = open_real_directory(&roots, "roots")?;
         let mut entries = Vec::new();
         for name in read_dir_names_at(roots_dir.as_raw_fd())? {
             if name.as_os_str().as_bytes() == ROOTS_INITIALIZED.as_bytes() {
@@ -411,7 +411,7 @@ impl Store {
     pub fn root_diagnostics(&self, activity: &StoreActivity) -> io::Result<Vec<RootDiagnostic>> {
         self.require_activity(activity, "listing the registered roots")?;
         let roots = self.root.join("roots");
-        let roots_dir = open_store_directory(&roots, "roots")?;
+        let roots_dir = open_real_directory(&roots, "roots")?;
         let mut diagnostics = Vec::new();
         for name in read_dir_names_at(roots_dir.as_raw_fd())? {
             let key = name.to_string_lossy().into_owned();
@@ -456,7 +456,7 @@ impl Store {
     pub(crate) fn roots_for_sweep(&self) -> io::Result<(Vec<RootEntry>, Vec<OsString>)> {
         let roots = self.root.join("roots");
         ensure_directory_tree(&self.root, Path::new("roots"))?;
-        let roots_dir = open_store_directory(&roots, "roots")?;
+        let roots_dir = open_real_directory(&roots, "roots")?;
         let mut entries = Vec::new();
         let mut crash_temps = Vec::new();
         for name in read_dir_names_at(roots_dir.as_raw_fd())? {
@@ -519,7 +519,7 @@ impl Store {
             return Ok(());
         }
         let roots = self.root.join("roots");
-        let roots_dir = open_store_directory(&roots, "roots")?;
+        let roots_dir = open_real_directory(&roots, "roots")?;
         for name in temps {
             let key = name.to_string_lossy();
             if !is_own_registry_temp(&key) {
@@ -547,7 +547,7 @@ impl Store {
     pub(crate) fn registry_initialized(&self) -> io::Result<bool> {
         let roots = self.root.join("roots");
         ensure_directory_tree(&self.root, Path::new("roots"))?;
-        let roots_dir = open_store_directory(&roots, "roots")?;
+        let roots_dir = open_real_directory(&roots, "roots")?;
         for name in read_dir_names_at(roots_dir.as_raw_fd())? {
             if name.as_os_str().as_bytes() == ROOTS_INITIALIZED.as_bytes() {
                 // A malformed marker is still an initialized-but-corrupt
@@ -656,7 +656,7 @@ impl Store {
         Self::validate_root_key(key)?;
         let roots = self.root.join("roots");
         ensure_directory_tree(&self.root, Path::new("roots"))?;
-        let roots_dir = open_store_directory(&roots, "roots")?;
+        let roots_dir = open_real_directory(&roots, "roots")?;
         let metadata = match stat_at(roots_dir.as_raw_fd(), key.as_bytes()) {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -835,7 +835,7 @@ impl Store {
     pub(super) fn read_root_entry_strict(&self, key: &str) -> io::Result<Option<RootEntry>> {
         let roots = self.root.join("roots");
         ensure_directory_tree(&self.root, Path::new("roots"))?;
-        let roots_dir = open_store_directory(&roots, "roots")?;
+        let roots_dir = open_real_directory(&roots, "roots")?;
         let path = roots.join(key);
         let metadata = match stat_at(roots_dir.as_raw_fd(), key.as_bytes()) {
             Ok(metadata) => metadata,
@@ -1125,7 +1125,7 @@ pub(super) fn write_registry_entry(roots: &Path, name: &str, bytes: &[u8]) -> io
     use std::sync::atomic::{AtomicU64, Ordering};
     static SEQ: AtomicU64 = AtomicU64::new(0);
 
-    let roots_dir = open_store_directory(roots, "roots")?;
+    let roots_dir = open_real_directory(roots, "roots")?;
     let name_bytes = name.as_bytes();
     let tmp_name = loop {
         let candidate = format!(

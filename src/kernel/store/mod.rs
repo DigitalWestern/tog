@@ -259,7 +259,7 @@ impl Store {
     /// there the marker is what tells its namespaces from an older tog's.)
     pub(crate) fn reinitialize(&self) -> io::Result<()> {
         Self::create_namespaces(&self.root, false)?;
-        let root = open_store_directory(&self.root, "store root")?;
+        let root = open_real_directory(&self.root, "store root")?;
         // `cache` is the one namespace with directories below it: its own
         // entries, then the root's.
         fs::File::open(self.root.join("cache"))?.sync_all()?;

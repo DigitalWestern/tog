@@ -1655,7 +1655,7 @@ fn publish_output(
     }
     match fs::rename(staged, &new) {
         Ok(()) => {}
-        Err(e) if e.raw_os_error() == Some(18) => {
+        Err(e) if e.raw_os_error() == Some(libc::EXDEV) => {
             let cloned = match activity {
                 Some(activity) => {
                     crate::kernel::store::clone_tree_with_activity(activity, staged, &new, platform)

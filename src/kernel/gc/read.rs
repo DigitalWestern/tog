@@ -756,6 +756,6 @@ pub(super) fn remove_record_line(store: &Store, file: &str) -> String {
 pub(super) fn open_held(path: &Path, label: &str) -> io::Result<HeldDir> {
     Ok(HeldDir {
         label: label.to_string(),
-        file: open_directory(path, label)?,
+        file: open_real_directory(path, label)?,
     })
 }

@@ -271,7 +271,7 @@ impl StoreFormat {
 /// says so before this one blocks. A filesystem with no `flock` on a
 /// directory cannot hold a store, and the error says that.
 pub(crate) fn lock_root(root: &Path) -> io::Result<fs::File> {
-    let directory = open_store_directory(root, "store root")?;
+    let directory = open_real_directory(root, "store root")?;
     let unsupported = |error: io::Error| {
         io::Error::new(
             error.kind(),
@@ -407,7 +407,7 @@ fn has_namespace(root: &Path) -> io::Result<bool> {
 /// marker or a whole one, and two togs creating the same store at once both
 /// rename the same line.
 pub(super) fn write_marker(root: &Path) -> io::Result<()> {
-    let root_dir = open_store_directory(root, "store root")?;
+    let root_dir = open_real_directory(root, "store root")?;
     let tmp = format!(".{FORMAT_FILE}.{}.{}.tmp", std::process::id(), nanos());
     let mut file = open_file_at(
         root_dir.as_raw_fd(),

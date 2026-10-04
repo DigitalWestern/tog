@@ -572,8 +572,16 @@ pub(super) fn open_private_lock(path: &Path, label: &str) -> io::Result<fs::File
     Ok(file)
 }
 
-pub(super) fn open_store_directory(path: &Path, label: &str) -> io::Result<fs::File> {
-    let metadata = fs::symlink_metadata(path)?;
+/// Open a directory that must be a real one: a symlink or any other file
+/// type at `path` is refused, and the open itself follows no symlink. The
+/// store, gc and the comforter's projection moves all open this way.
+pub(crate) fn open_real_directory(path: &Path, label: &str) -> io::Result<fs::File> {
+    let metadata = fs::symlink_metadata(path).map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!("open {label} {}: {error}", path.display()),
+        )
+    })?;
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,

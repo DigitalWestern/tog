@@ -43,7 +43,7 @@ pub fn reset<W: Write>(
     out: &mut W,
 ) -> io::Result<ResetReport> {
     store.require_exclusive_activity(activity, "resetting the store")?;
-    let root = open_directory(&store.root, "store root")?;
+    let root = open_real_directory(&store.root, "store root")?;
     let mut report = ResetReport::default();
 
     // What is there, measured before anything is removed. A dry run stops
@@ -108,7 +108,7 @@ pub fn reset<W: Write>(
             size(*bytes)
         )?;
     }
-    let tmp = open_directory(&store.root.join("tmp"), "tmp")?;
+    let tmp = open_real_directory(&store.root.join("tmp"), "tmp")?;
     for name in &stages {
         store::remove_tree_entry_at(tmp.as_raw_fd(), name.as_bytes())?;
     }
@@ -147,7 +147,7 @@ fn staging_entries(store: &Store) -> io::Result<Vec<OsString>> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(error) => return Err(error),
     }
-    let tmp = open_directory(&path, "tmp")?;
+    let tmp = open_real_directory(&path, "tmp")?;
     let mut names: Vec<OsString> = store::read_dir_names_at(tmp.as_raw_fd())?
         .into_iter()
         .filter(|name| name.as_bytes() != PUBLISH_LOCK.as_bytes())

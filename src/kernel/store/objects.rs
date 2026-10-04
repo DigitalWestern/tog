@@ -245,7 +245,7 @@ impl Store {
                 // Looks like a crashed publication. The parent descriptor and
                 // inode check make this cleanup safe if an entry was replaced
                 // between the completeness read and removal.
-                let objects = open_store_directory(&self.root.join("objects"), "objects")?;
+                let objects = open_real_directory(&self.root.join("objects"), "objects")?;
                 let name = id.as_bytes();
                 let expected = match stat_at(objects.as_raw_fd(), name) {
                     Ok(expected) => expected,
@@ -391,7 +391,7 @@ impl Store {
         // Under the lock, anything at dest is a crashed leftover (a live
         // publication can't be mid-window, and a complete object returned
         // above): sweep it so the rename lands.
-        let objects = open_store_directory(&self.root.join("objects"), "objects")?;
+        let objects = open_real_directory(&self.root.join("objects"), "objects")?;
         if let Ok(expected) = stat_at(objects.as_raw_fd(), id.as_bytes()) {
             if !remove_tree_entry_if_same(objects.as_raw_fd(), id.as_bytes(), &expected)? {
                 return Err(io::Error::new(
@@ -437,7 +437,7 @@ impl Store {
             file.sync_all()?;
         }
         fs::rename(&meta_tmp, self.root.join("meta").join(format!("{id}.json")))?;
-        fsync_directory(open_store_directory(&self.root.join("meta"), "meta")?.as_raw_fd())?;
+        fsync_directory(open_real_directory(&self.root.join("meta"), "meta")?.as_raw_fd())?;
         // The stage directory may have been built for hours. Refresh the
         // published object's activity marker while publication is still
         // protected by the lock, before GC can inspect it.

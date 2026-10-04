@@ -6,13 +6,12 @@
 //! stops the sweep until it returns or its record is explicitly forgotten.
 
 use crate::kernel::activity::StoreActivity;
-use crate::kernel::store::{self, RootEntry, Store};
+use crate::kernel::store::{self, open_real_directory, RootEntry, Store};
 use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::ffi::OsString;
 use std::fs;
 use std::io::{self, Write};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
@@ -197,24 +196,6 @@ fn validate_projection_namespace(path: &Path, name: &str) -> io::Result<()> {
         ));
     }
     Ok(())
-}
-
-/// Open a managed directory without following a symlink at its pathname. The
-/// descriptor is held from the read phase through execution, so every
-/// removal names an entry inside the directory that was actually inspected.
-fn open_directory(path: &Path, label: &str) -> io::Result<fs::File> {
-    let stat = fs::symlink_metadata(path)?;
-    if stat.file_type().is_symlink() || !stat.is_dir() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("{label} {} is not a real directory", path.display()),
-        ));
-    }
-    let mut options = fs::OpenOptions::new();
-    options
-        .read(true)
-        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC);
-    options.open(path)
 }
 
 fn related(path: &Path, keep: &Path) -> bool {
