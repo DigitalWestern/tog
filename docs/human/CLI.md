@@ -113,6 +113,10 @@ the program's status through. Which files tog reads per ecosystem:
 - **Errors have three parts**: what failed, why, what to type next. Unknown
   options get an edit-distance or prefix suggestion
   (`unknown option '--fersh'; did you mean '--fresh'?`) and exit 2.
+- **A signal that stops tog exits `128 + signal`**, the shell's
+  convention: Ctrl-C during a sync exits 130 and says it was interrupted.
+  `tog run` and `tog x` exit with their child's code, so the child decides
+  what an interrupt means there.
 - **`--quiet`** suppresses narration; **`--verbose`** prints every decision
   and every subprocess command line — the bug-report mode. An error is never
   narration: `--quiet` redirects stderr but keeps a private copy of it, and
