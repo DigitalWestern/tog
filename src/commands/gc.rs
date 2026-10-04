@@ -11,7 +11,7 @@ use std::io::Write;
 // Reviewed site (tests/architecture.rs): operation boundary: command entry point.
 #[allow(clippy::disallowed_methods)]
 pub fn run(args: &cli::GcArgs) -> io::Result<()> {
-    let options = gc::Options {
+    let mut options = gc::Options {
         dry_run: args.dry_run,
         project: args.project,
         keep_days: args.keep_days.unwrap_or(gc::Options::default().keep_days),
@@ -93,7 +93,10 @@ pub fn run(args: &cli::GcArgs) -> io::Result<()> {
                 "refusing to forget root key {key} more than once in one invocation"
             )));
         }
-        store.lookup_root(key)?;
+        // The sweep compares the record's on-disk name; on a
+        // case-insensitive filesystem the key may have been typed in
+        // another case (#163).
+        options.forgotten[index] = store.lookup_root(key)?.key;
     }
     for project in &args.register {
         if options.dry_run {

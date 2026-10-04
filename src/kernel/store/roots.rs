@@ -647,12 +647,16 @@ impl Store {
     /// including on the corrupt record itself. The key is matched by exact
     /// directory-entry name, so a case-insensitive filesystem cannot answer
     /// with a neighbouring spelling's record.
+    ///
+    /// A case-insensitive filesystem still answers a key typed in another
+    /// case (hex keys differ only in a-f). The entry then carries the
+    /// record's on-disk spelling, so anything that compares keys (the
+    /// `--dry-run --forget` exclusion) compares the one the sweep sees.
     pub fn lookup_root(&self, key: &str) -> io::Result<RootEntry> {
         Self::validate_root_key(key)?;
         let roots = self.root.join("roots");
         ensure_directory_tree(&self.root, Path::new("roots"))?;
         let roots_dir = open_store_directory(&roots, "roots")?;
-        let path = roots.join(key);
         let metadata = match stat_at(roots_dir.as_raw_fd(), key.as_bytes()) {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -666,6 +670,14 @@ impl Store {
             }
             Err(error) => return Err(error),
         };
+        let spelling = on_disk_spelling(
+            std::fs::read_dir(&roots)?
+                .flatten()
+                .map(|entry| entry.file_name()),
+            key,
+        );
+        let key = spelling.as_deref().unwrap_or(key);
+        let path = roots.join(key);
         if is_symlink(&metadata) {
             // Exact-key forgetting is allowed to remove the registry link
             // itself, but it never follows the link or treats its target as
@@ -1551,4 +1563,55 @@ pub(super) fn record_pathname(project_dir: &Path) -> io::Result<&str> {
         ));
     }
     Ok(text)
+}
+
+/// The directory-entry name `key` stands for among `names`: itself when an
+/// entry has exactly that name, otherwise the one entry that equals it
+/// ignoring ASCII case (what a case-insensitive filesystem opened). `None`
+/// when neither exists, so the caller keeps the key as typed.
+fn on_disk_spelling(
+    names: impl IntoIterator<Item = std::ffi::OsString>,
+    key: &str,
+) -> Option<String> {
+    let mut folded = None;
+    for name in names {
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if name == key {
+            return Some(name.to_string());
+        }
+        if folded.is_none() && name.eq_ignore_ascii_case(key) {
+            folded = Some(name.to_string());
+        }
+    }
+    folded
+}
+
+#[cfg(test)]
+mod spelling_tests {
+    use super::on_disk_spelling;
+    use std::ffi::OsString;
+
+    fn names(list: &[&str]) -> Vec<OsString> {
+        list.iter().map(OsString::from).collect()
+    }
+
+    /// A key typed in another case maps to the record's on-disk name, an
+    /// exact name wins over a folded one, and an absent key maps to
+    /// nothing (#163: the dry-run exclusion compares on-disk names).
+    #[test]
+    fn a_key_maps_to_its_on_disk_spelling() {
+        let lower = "abcdef0123456789abcdef0123456789abcdef01";
+        let upper = lower.to_ascii_uppercase();
+        assert_eq!(
+            on_disk_spelling(names(&[lower]), &upper).as_deref(),
+            Some(lower)
+        );
+        assert_eq!(
+            on_disk_spelling(names(&[&upper, lower]), lower).as_deref(),
+            Some(lower)
+        );
+        assert_eq!(on_disk_spelling(names(&["other"]), lower), None);
+    }
 }
