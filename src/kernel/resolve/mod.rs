@@ -30,6 +30,7 @@ pub mod door;
 pub mod http;
 pub mod iana;
 pub(crate) mod intercept;
+pub mod keyscrub;
 pub mod ledger;
 pub mod mirror;
 pub mod outputs;
