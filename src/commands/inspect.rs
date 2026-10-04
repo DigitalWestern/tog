@@ -61,23 +61,57 @@ pub struct ClosureFile {
 /// are included (the caller decides what they mean), unlike
 /// `project::read_closure`, which refuses them.
 pub fn closures(dir: &Path) -> io::Result<Vec<ClosureFile>> {
+    match open_project(dir)? {
+        Some(project) => closures_in(&project),
+        None => Ok(Vec::new()),
+    }
+}
+
+/// `closures` for a project the command holds: the directory listing and
+/// every record are read through its descriptor, tog state read strictly
+/// (a symlinked record is refused, never followed).
+pub fn closures_in(project: &ProjectRoot) -> io::Result<Vec<ClosureFile>> {
     let mut out = Vec::new();
-    let entries = match fs::read_dir(dir.join(".tog/closures")) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(out),
-        Err(error) => return Err(error),
+    let dir = Path::new(".tog/closures");
+    let Some(names) = project.read_dir(dir)? else {
+        return Ok(out);
     };
-    for entry in entries {
-        let entry = entry?;
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if closure_stem(&name).is_none() {
+    for name in names {
+        if closure_stem(&name.to_string_lossy()).is_none() {
             continue;
         }
-        let bytes = fs::read(entry.path())?;
-        out.push(closure_file(&name, entry.path(), &bytes)?);
+        let text = name.to_str().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "invalid UTF-8 closure filename in {}",
+                    project.path().join(dir).display()
+                ),
+            )
+        })?;
+        let relative = dir.join(&name);
+        let Some(bytes) = project.read_file(&relative)? else {
+            continue;
+        };
+        out.push(closure_file(text, project.path().join(&relative), &bytes)?);
     }
     out.sort_by_key(|closure| rank(&closure.ecosystem));
     Ok(out)
+}
+
+/// The project in `dir`, held for one report command: `None` when it is
+/// absent or not a directory (nothing to report), as detection reads it.
+pub fn open_project(dir: &Path) -> io::Result<Option<ProjectRoot>> {
+    match ProjectRoot::open(dir) {
+        Ok(project) => Ok(Some(project)),
+        Err(error)
+            if error.kind() == io::ErrorKind::NotFound
+                || error.kind() == io::ErrorKind::InvalidData =>
+        {
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 /// The ecosystem stem of a closure file name: `<stem>.json`, not hidden,
@@ -343,9 +377,21 @@ impl EcosystemStatus {
     }
 }
 
+/// `tog status` for `dir`: the project is opened once and every read the
+/// report makes goes through that descriptor.
 pub fn status(platform: Platform, dir: &Path) -> io::Result<Vec<EcosystemStatus>> {
-    let present = detected(dir)?;
-    let closures = closures(dir)?;
+    match open_project(dir)? {
+        Some(project) => status_in(platform, &project),
+        None => Ok(Vec::new()),
+    }
+}
+
+pub fn status_in(platform: Platform, project: &ProjectRoot) -> io::Result<Vec<EcosystemStatus>> {
+    let present: Vec<&str> = tailors::detected_in(project)?
+        .into_iter()
+        .map(|tailor| tailor.id())
+        .collect();
+    let closures = closures_in(project)?;
     let mut rows = Vec::new();
     for ecosystem in present {
         let Some(closure) = closures
@@ -361,7 +407,7 @@ pub fn status(platform: Platform, dir: &Path) -> io::Result<Vec<EcosystemStatus>
             });
             continue;
         };
-        let mut state = locked_closure_state(platform, dir, closure)?;
+        let mut state = locked_closure_state(platform, project, closure)?;
         // A record whose exception list cannot be read is this row's
         // finding, not the report's: the other ecosystems still report,
         // and a state that already names a fix keeps it. The error is
@@ -401,11 +447,11 @@ pub fn status(platform: Platform, dir: &Path) -> io::Result<Vec<EcosystemStatus>
 /// `Synced` closure is downgraded to what the lock has to add.
 pub fn locked_closure_state(
     platform: Platform,
-    dir: &Path,
+    project: &ProjectRoot,
     closure: &ClosureFile,
 ) -> io::Result<State> {
-    let mut state = closure_state(platform, dir, closure)?;
-    match toolchain_lock_state(dir, &closure.ecosystem, &closure.body)? {
+    let mut state = closure_state(platform, project, closure)?;
+    match toolchain_lock_state(project, &closure.ecosystem, &closure.body)? {
         Some(LockVerdict {
             state: verdict,
             refuses_sync: true,
@@ -414,12 +460,12 @@ pub fn locked_closure_state(
         _ => {}
     }
     if state == State::Synced {
-        if let Some(verdict) = helper_state(dir, &closure.ecosystem, &closure.body)? {
+        if let Some(verdict) = helper_state(project, &closure.ecosystem, &closure.body)? {
             state = verdict;
         }
     }
     if state == State::Synced {
-        if let Some(verdict) = resolution_state(dir, closure) {
+        if let Some(verdict) = resolution_state(project, closure) {
             state = verdict;
         }
     }
@@ -435,9 +481,9 @@ pub fn locked_closure_state(
 /// added to go.mod alone shows here. A record whose digest maps do not
 /// parse, or a file that cannot be read to compare, is `Unchecked` for
 /// this closure alone, never an error for the whole command.
-pub fn resolution_state(dir: &Path, closure: &ClosureFile) -> Option<State> {
+pub fn resolution_state(project: &ProjectRoot, closure: &ClosureFile) -> Option<State> {
     let resolution = closure.body.get("resolution")?;
-    match resolution_changes(dir, &closure.ecosystem, resolution) {
+    match resolution_changes(project, &closure.ecosystem, resolution) {
         Ok(changed) if changed.is_empty() => None,
         Ok(changed) => Some(State::Changed(changed)),
         Err(why) => Some(State::Unchecked(format!(
@@ -447,7 +493,7 @@ pub fn resolution_state(dir: &Path, closure: &ClosureFile) -> Option<State> {
 }
 
 fn resolution_changes(
-    dir: &Path,
+    project: &ProjectRoot,
     ecosystem: &str,
     resolution: &Value,
 ) -> Result<Vec<String>, String> {
@@ -475,7 +521,6 @@ fn resolution_changes(
     };
     let mut named = digests("outputs")?;
     named.extend(digests("inputs")?);
-    let project = ProjectRoot::open(dir).map_err(|error| error.to_string())?;
     let mut changed = BTreeSet::new();
     for (path, digest) in &named {
         let current = if project.is_input_file(Path::new(path)) {
@@ -492,14 +537,14 @@ fn resolution_changes(
     }
     let files = match tailors::by_id(ecosystem) {
         Some(tailor) => {
-            tailors::resolution_files(tailor, &project).map_err(|error| error.to_string())?
+            tailors::resolution_files(tailor, project).map_err(|error| error.to_string())?
         }
         None => None,
     };
     if let Some(files) = files {
         let mut listed = files.outputs;
         listed.extend(files.inputs);
-        let present = record::file_digests(&project, &listed).map_err(|error| error.to_string())?;
+        let present = record::file_digests(project, &listed).map_err(|error| error.to_string())?;
         for path in present.into_keys() {
             if !named.contains_key(&path) {
                 changed.insert(path);
@@ -522,16 +567,15 @@ fn resolution_changes(
 /// skipped here: that ecosystem's own row already names the lock verb. A
 /// closure with no recorded decision predates this record and was built on
 /// the shipped helpers, which is what `null` means.
-fn helper_state(dir: &Path, ecosystem: &str, body: &Value) -> io::Result<Option<State>> {
+fn helper_state(project: &ProjectRoot, ecosystem: &str, body: &Value) -> io::Result<Option<State>> {
     let Some(tailor) = tailors::by_id(ecosystem) else {
         return Ok(None);
     };
     if tailor.helpers().is_empty() {
         return Ok(None);
     }
-    let present = tailors::detected(dir)?;
-    let root = ProjectRoot::open(dir)?;
-    let lock = ToolchainLock::read_via(&root)?;
+    let present = tailors::detected_in(project)?;
+    let lock = ToolchainLock::read_via(project)?;
     let mut changed = Vec::new();
     for helper in tailor.helpers() {
         let has_helper = present
@@ -592,7 +636,7 @@ impl LockVerdict {
 /// file's digest alone — so `tog status` predicts the next sync rather than
 /// having a second opinion about staleness.
 fn toolchain_lock_state(
-    dir: &Path,
+    project: &ProjectRoot,
     ecosystem: &str,
     body: &Value,
 ) -> io::Result<Option<LockVerdict>> {
@@ -600,8 +644,7 @@ fn toolchain_lock_state(
         return Ok(None);
     };
     let lock_ecosystem = tailor.lock_ecosystem();
-    let root = ProjectRoot::open(dir)?;
-    let Some(lock) = ToolchainLock::read_via(&root)? else {
+    let Some(lock) = ToolchainLock::read_via(project)? else {
         return Ok(LockVerdict::changed(
             vec![format!("{LOCK_PATH} (missing; run 'tog' to create it)")],
             false,
@@ -618,7 +661,7 @@ fn toolchain_lock_state(
     };
     // A toolchain file that does not parse is never the lock's answer: it is
     // stale, named, and a sync refuses it the same way.
-    let current = match input::discover(&root, lock_ecosystem) {
+    let current = match input::discover(project, lock_ecosystem) {
         Ok(current) => current,
         Err(error) if error.kind() == io::ErrorKind::InvalidData => {
             return Ok(LockVerdict::changed(
@@ -678,14 +721,18 @@ pub fn summary(closure: &ClosureFile) -> String {
     )
 }
 
-pub fn closure_state(platform: Platform, dir: &Path, closure: &ClosureFile) -> io::Result<State> {
+pub fn closure_state(
+    platform: Platform,
+    project: &ProjectRoot,
+    closure: &ClosureFile,
+) -> io::Result<State> {
     if let Some(recorded) = &closure.platform {
         if recorded != platform.triple() {
             return Ok(State::ForeignPlatform(recorded.clone()));
         }
     }
     match tailors::for_closure(&closure.ecosystem) {
-        Some(tailor) => tailor.closure_state(platform, dir, &closure.ecosystem, &closure.body),
+        Some(tailor) => tailor.closure_state(platform, project, &closure.ecosystem, &closure.body),
         None => Ok(State::Unchecked("unknown ecosystem".into())),
     }
 }
@@ -1105,9 +1152,12 @@ fn c_toolchain_check(platform: Platform, checks: &mut Vec<Check>) {
 
 /// Everything that needs a known host: the per-tailor probes in registry
 /// order, then the sandbox, then the C toolchain.
-fn platform_checks(platform: Platform, dir: &Path, checks: &mut Vec<Check>) {
+fn platform_checks(platform: Platform, project: Option<&ProjectRoot>, checks: &mut Vec<Check>) {
     for tailor in tailors::registry() {
-        for probe in tailor.doctor(platform, dir) {
+        let Some(project) = project else {
+            break;
+        };
+        for probe in tailor.doctor(platform, project) {
             let level = if probe.ok { Level::Ok } else { Level::Fail };
             checks.push(check(probe.name, level, probe.detail));
         }
@@ -1126,7 +1176,7 @@ fn platform_checks(platform: Platform, dir: &Path, checks: &mut Vec<Check>) {
 }
 
 /// Which policy sources are in force, in the order they are consulted.
-fn policy_check(dir: &Path, checks: &mut Vec<Check>) {
+fn policy_check(project: Option<&ProjectRoot>, checks: &mut Vec<Check>) {
     let strict = std::env::var("TOG_STRICT").as_deref() == Ok("1");
     let policy_file = std::env::var_os("TOG_POLICY")
         .map(PathBuf::from)
@@ -1142,7 +1192,7 @@ fn policy_check(dir: &Path, checks: &mut Vec<Check>) {
     if let Some(path) = policy_file {
         policy.push(path.display().to_string());
     }
-    if dir.join(".tog/policy.toml").is_file() {
+    if project.is_some_and(|project| project.is_input_file(Path::new(".tog/policy.toml"))) {
         policy.push(".tog/policy.toml".to_string());
     }
     checks.push(check(
@@ -1158,15 +1208,27 @@ fn policy_check(dir: &Path, checks: &mut Vec<Check>) {
 
 /// What is here and whether it has been synced. Detection is the same test
 /// `sync` uses, so this never disagrees with what a sync would do.
-fn project_check(dir: &Path, checks: &mut Vec<Check>) {
-    match detected(dir) {
+fn project_check(dir: &Path, project: &io::Result<Option<ProjectRoot>>, checks: &mut Vec<Check>) {
+    let found = match project {
+        Ok(Some(project)) => tailors::detected_in(project).map(|found| {
+            found
+                .into_iter()
+                .map(|tailor| tailor.id())
+                .collect::<Vec<_>>()
+        }),
+        Ok(None) => Ok(Vec::new()),
+        Err(error) => Err(io::Error::new(error.kind(), error.to_string())),
+    };
+    match found {
         Ok(found) if found.is_empty() => checks.push(check(
             "project",
             Level::Ok,
             format!("no project in {} (nothing to sync here)", dir.display()),
         )),
         Ok(found) => {
-            let synced: Vec<String> = closures(dir)
+            let held = project.as_ref().ok().and_then(Option::as_ref);
+            let synced: Vec<String> = held
+                .map_or(Ok(Vec::new()), closures_in)
                 .map(|closures| closures.into_iter().map(|c| c.ecosystem).collect())
                 .unwrap_or_default();
             let unsynced: Vec<&str> = found
@@ -1198,15 +1260,18 @@ fn project_check(dir: &Path, checks: &mut Vec<Check>) {
 /// The order the checks are pushed in is the order they print in, and that
 /// order is the contract: host, then store, then everything that needs a
 /// known host, then the two project-local answers.
+/// The project is opened once, and every project read goes through it.
 pub fn doctor(dir: &Path, store: DoctorStore) -> Vec<Check> {
     let mut checks = Vec::new();
     let platform = host_platform_check(&mut checks);
     store_checks(store, &mut checks);
+    let project = open_project(dir);
+    let held = project.as_ref().ok().and_then(Option::as_ref);
     if let Some(platform) = platform {
-        platform_checks(platform, dir, &mut checks);
+        platform_checks(platform, held, &mut checks);
     }
-    policy_check(dir, &mut checks);
-    project_check(dir, &mut checks);
+    policy_check(held, &mut checks);
+    project_check(dir, &project, &mut checks);
     checks
 }
 pub fn render_doctor(checks: &[Check], json: bool) -> io::Result<String> {
@@ -1339,6 +1404,41 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
+    }
+
+    /// A report reads the project it opened: a synced project renamed away
+    /// and replaced by an unsynced one at its path is still reported as
+    /// the one held, while a fresh open by path sees the replacement.
+    #[test]
+    fn status_reads_the_project_it_opened() {
+        let temp = TempDir::new();
+        let dir = temp.0.join("p");
+        let platform = Platform::host().unwrap();
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("requirements.txt"), "six\n").unwrap();
+        let env = temp.0.join("env");
+        fs::create_dir_all(env.join("bin")).unwrap();
+        std::os::unix::fs::symlink(&env, dir.join(".venv")).unwrap();
+        write_closure(
+            &dir,
+            "python",
+            platform.triple(),
+            json!({
+                "env_object": env,
+                "inputs": [{"path": "requirements.txt", "sha256":
+                    crate::kernel::resolve::record::sha256_hex(b"six\n")}],
+                "exceptions": [],
+            }),
+        );
+        let project = ProjectRoot::open(&dir).unwrap();
+        fs::rename(&dir, temp.0.join("moved")).unwrap();
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("requirements.txt"), "six\n").unwrap();
+        let held = status_in(platform, &project).unwrap();
+        assert_eq!(held.len(), 1);
+        assert_eq!(held[0].state, State::Synced);
+        assert_eq!(closures_in(&project).unwrap().len(), 1);
+        assert_eq!(status(platform, &dir).unwrap()[0].state, State::NotSynced);
     }
 
     #[test]
@@ -1589,7 +1689,10 @@ mod tests {
             let body = with_toolchain_lock(dir, ecosystem, json!({}));
             let recorded = body["toolchain"]["helpers"][helper].clone();
             assert!(recorded.is_string(), "{ecosystem}: {body}");
-            assert_eq!(helper_state(dir, ecosystem, &body).unwrap(), None);
+            assert_eq!(
+                helper_state(&ProjectRoot::open(dir).unwrap(), ecosystem, &body).unwrap(),
+                None
+            );
             let default = tailors::by_id(ecosystem)
                 .unwrap()
                 .default_helper(helper)
@@ -1604,12 +1707,15 @@ mod tests {
                 "the {helper} toolchain {ecosystem} builds with"
             )]);
             assert_eq!(
-                helper_state(dir, ecosystem, &body).unwrap(),
+                helper_state(&ProjectRoot::open(dir).unwrap(), ecosystem, &body).unwrap(),
                 Some(expected.clone()),
                 "{ecosystem}: helper lock change"
             );
             let body = with_toolchain_lock(dir, ecosystem, json!({}));
-            assert_eq!(helper_state(dir, ecosystem, &body).unwrap(), None);
+            assert_eq!(
+                helper_state(&ProjectRoot::open(dir).unwrap(), ecosystem, &body).unwrap(),
+                None
+            );
 
             // The helper's manifest removed: its section may linger in the
             // lock, but a sync now decides the tailor's default.
@@ -1617,13 +1723,16 @@ mod tests {
                 fs::remove_file(dir.join(name)).unwrap();
             }
             assert_eq!(
-                helper_state(dir, ecosystem, &body).unwrap(),
+                helper_state(&ProjectRoot::open(dir).unwrap(), ecosystem, &body).unwrap(),
                 Some(expected),
                 "{ecosystem}: helper input removed"
             );
             let mut resynced = body.clone();
             resynced["toolchain"]["helpers"][helper] = default;
-            assert_eq!(helper_state(dir, ecosystem, &resynced).unwrap(), None);
+            assert_eq!(
+                helper_state(&ProjectRoot::open(dir).unwrap(), ecosystem, &resynced).unwrap(),
+                None
+            );
         }
     }
 

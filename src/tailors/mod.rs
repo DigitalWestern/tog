@@ -279,7 +279,7 @@ pub trait Tailor: Sync {
     fn run_env(
         &self,
         _ctx: &Context,
-        _dir: &Path,
+        _project: &ProjectRoot,
         _cwd: &Path,
         _cmd: &[String],
         _command: &mut Command,
@@ -305,17 +305,18 @@ pub trait Tailor: Sync {
     /// `tog ls`: what a closure of this ecosystem lists.
     fn listing(&self, ecosystem: &str, body: &Value) -> ClosureListing;
 
-    /// `tog status`: is the closure's projection still current?
+    /// `tog status`: is the closure's projection still current? Read
+    /// through the project the command holds, never its path.
     fn closure_state(
         &self,
         platform: Platform,
-        dir: &Path,
+        project: &ProjectRoot,
         ecosystem: &str,
         body: &Value,
     ) -> io::Result<State>;
 
     /// `tog doctor`: project-level checks specific to this ecosystem.
-    fn doctor(&self, _platform: Platform, _dir: &Path) -> Vec<DoctorCheck> {
+    fn doctor(&self, _platform: Platform, _project: &ProjectRoot) -> Vec<DoctorCheck> {
         Vec::new()
     }
 

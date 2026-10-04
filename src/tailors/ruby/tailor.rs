@@ -118,15 +118,16 @@ impl Tailor for Ruby {
     fn run_env(
         &self,
         ctx: &Context,
-        dir: &Path,
+        project: &ProjectRoot,
         _cwd: &Path,
         _cmd: &[String],
         command: &mut Command,
     ) -> io::Result<Vec<String>> {
+        let dir = project.path();
         let activity = &ctx.activity;
         let mut prefix = Vec::new();
-        if dir.join(".tog/closures/ruby.json").exists() {
-            let closure = comforter::read_closure(dir, "ruby")?;
+        if comforter::has_closure(project, "ruby")? {
+            let closure = comforter::read_closure_in(project, "ruby")?;
             let ruby_obj = comforter::closure_object(
                 &ctx.store,
                 activity,
@@ -170,13 +171,13 @@ impl Tailor for Ruby {
     fn closure_state(
         &self,
         _platform: Platform,
-        dir: &Path,
+        project: &ProjectRoot,
         _ecosystem: &str,
         body: &Value,
     ) -> io::Result<State> {
         Ok(
             object_liveness_state(body, &["ruby_object", "gems_object"]).unwrap_or(lock_state(
-                dir,
+                project,
                 "Gemfile.lock",
                 &string(&body["gemfile_lock_sha256"]),
             )?),

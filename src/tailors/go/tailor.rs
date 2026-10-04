@@ -8,7 +8,7 @@ use crate::kernel::cyclonedx::{
     component, list, purl_encode, purl_encode_path, push_hash, push_property, required,
     toolchain_component, version_of,
 };
-use crate::kernel::fsroot::ProjectRoot;
+use crate::kernel::fsroot::{Entry, ProjectRoot};
 use crate::kernel::objmeta::ObjectKind;
 use crate::kernel::platform::Platform;
 use crate::kernel::resolve::{DoorKind, ResolutionDoor};
@@ -17,7 +17,6 @@ use crate::kernel::ui;
 use crate::tailors::go::{self as go, inputs};
 use crate::tailors::{ClosureListing, DoctorCheck, PackageRow, SyncRequest, Tailor};
 use serde_json::Value;
-use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -209,15 +208,15 @@ impl Tailor for Go {
     fn run_env(
         &self,
         ctx: &Context,
-        dir: &Path,
+        project: &ProjectRoot,
         _cwd: &Path,
         _cmd: &[String],
         command: &mut Command,
     ) -> io::Result<Vec<String>> {
         let activity = &ctx.activity;
         let mut prefix = Vec::new();
-        if dir.join(".tog/closures/go.json").exists() {
-            let closure = comforter::read_closure(dir, "go")?;
+        if comforter::has_closure(project, "go")? {
+            let closure = comforter::read_closure_in(project, "go")?;
             let go_obj =
                 comforter::closure_object(&ctx.store, activity, &closure, "go_object", "bin/go")?;
             let modcache =
@@ -257,17 +256,17 @@ impl Tailor for Go {
     fn closure_state(
         &self,
         platform: Platform,
-        dir: &Path,
+        project: &ProjectRoot,
         _ecosystem: &str,
         body: &Value,
     ) -> io::Result<State> {
-        go_status(platform, dir, body)
+        go_status(platform, project, body)
     }
 
-    fn doctor(&self, platform: Platform, dir: &Path) -> Vec<DoctorCheck> {
+    fn doctor(&self, platform: Platform, project: &ProjectRoot) -> Vec<DoctorCheck> {
         let mut checks = Vec::new();
-        if dir.join("go.mod").is_file() {
-            match ProjectRoot::open(dir).and_then(|root| go::project_go_version(platform, &root)) {
+        if project.is_input_file(Path::new("go.mod")) {
+            match go::project_go_version(platform, project) {
                 Ok(version) => checks.push(DoctorCheck {
                     name: "go-toolchain",
                     ok: true,
@@ -322,7 +321,7 @@ impl Tailor for Go {
 /// Compare the selected Go version in go.mod with the one recorded in the
 /// closure. This is read-only: status must never realize a toolchain or touch
 /// the network just to detect a stale selection.
-fn go_status(platform: Platform, dir: &Path, body: &Value) -> io::Result<State> {
+fn go_status(platform: Platform, project: &ProjectRoot, body: &Value) -> io::Result<State> {
     if let Some(state) = object_liveness_state(body, &["go_object", "modcache_object"]) {
         return Ok(state);
     }
@@ -330,22 +329,17 @@ fn go_status(platform: Platform, dir: &Path, body: &Value) -> io::Result<State> 
     let mut changed = Vec::new();
     let recorded_version = string(&body["plan"]["go_version"]);
     if !recorded_version.is_empty() {
-        match fs::metadata(dir.join("go.mod")) {
-            Ok(_) => match ProjectRoot::open(dir)
-                .and_then(|root| go::project_go_version(platform, &root))
-            {
+        match project.input_entry(Path::new("go.mod"))? {
+            Entry::Absent => changed.push("go.mod (removed)".to_string()),
+            _ => match go::project_go_version(platform, project) {
                 Ok(selected) if selected == recorded_version => {}
                 Ok(_) => changed.push("go.mod".to_string()),
                 Err(_) => changed.push("go.mod (Go toolchain selection unavailable)".to_string()),
             },
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                changed.push("go.mod (removed)".to_string())
-            }
-            Err(error) => return Err(error),
         }
     }
 
-    let lock_state = lock_state(dir, "go.sum", &string(&body["go_sum_sha256"]))?;
+    let lock_state = lock_state(project, "go.sum", &string(&body["go_sum_sha256"]))?;
     match lock_state {
         State::Changed(files) => changed.extend(files),
         State::Unchecked(reason) if changed.is_empty() => {

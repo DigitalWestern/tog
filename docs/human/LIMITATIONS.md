@@ -85,8 +85,9 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   directories that contain the held one (`..` from its descriptor), not from the path's
   parents. Policy loading verifies each held ancestor still has its original name and
   refuses a changed chain, so a temporary move cannot lift a parent policy.
-  The machine policy is read by path. Commands that do not sync (`status`, `doctor`, `run`'s
-  environment, `gc --register`) open the project by path.
+  The machine policy is read by path. `status`, `doctor` and the environment `run`
+  and `env` build open the project once and read it through that descriptor. `audit` uses the same held project for policy, closures,
+  detection, freshness, and resolution evidence. `gc --register` still opens it by path.
 - **CLI exit status is 0 / 1 / 2** (success / command failed / usage error); `run`, `x` and
   `fmt` pass the program's status through. A tool argument that is spelled like one of tog's
   own options needs `--` first: `-h`/`--help` for all four, and for `fmt` and `x` also the

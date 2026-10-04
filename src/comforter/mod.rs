@@ -553,7 +553,47 @@ pub fn read_closure(project_dir: &Path, ecosystem: &str) -> io::Result<serde_jso
             format!("read {}: {e}; run `tog` first", path.display()),
         )
     })?;
-    let v: serde_json::Value = serde_json::from_str(&text).map_err(|e| {
+    closure_body(&path, &text, ecosystem)
+}
+
+/// Is there a closure record for `ecosystem` in the held project?
+pub fn has_closure(project: &ProjectRoot, ecosystem: &str) -> io::Result<bool> {
+    Ok(project.entry(Path::new(&format!(".tog/closures/{ecosystem}.json")))? != Entry::Absent)
+}
+
+/// `read_closure` through a project the command holds: the record is tog
+/// state, read with the strict no-follow walk.
+pub fn read_closure_in(project: &ProjectRoot, ecosystem: &str) -> io::Result<serde_json::Value> {
+    let relative = PathBuf::from(format!(".tog/closures/{ecosystem}.json"));
+    let path = project.path().join(&relative);
+    let missing = || {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("read {}: not found; run `tog` first", path.display()),
+        )
+    };
+    let bytes = project
+        .read_file(&relative)
+        .map_err(|e| {
+            io::Error::new(
+                e.kind(),
+                format!("read {}: {e}; run `tog` first", path.display()),
+            )
+        })?
+        .ok_or_else(missing)?;
+    let text = String::from_utf8(bytes).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("parse {}: not UTF-8; run `tog` first", path.display()),
+        )
+    })?;
+    closure_body(&path, &text, ecosystem)
+}
+
+/// The body of a closure envelope read from `path`, checked: it parses,
+/// was projected on this host, and is a `closure/1` of `ecosystem`.
+fn closure_body(path: &Path, text: &str, ecosystem: &str) -> io::Result<serde_json::Value> {
+    let v: serde_json::Value = serde_json::from_str(text).map_err(|e| {
         io::Error::new(
             io::ErrorKind::InvalidData,
             format!("parse {}: {e}; run `tog` first", path.display()),

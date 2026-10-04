@@ -187,16 +187,17 @@ impl Tailor for Elixir {
     fn run_env(
         &self,
         ctx: &Context,
-        dir: &Path,
+        project: &ProjectRoot,
         _cwd: &Path,
         _cmd: &[String],
         command: &mut Command,
     ) -> io::Result<Vec<String>> {
+        let dir = project.path();
         let activity = &ctx.activity;
         let mut prefix = Vec::new();
-        if dir.join(".tog/closures/elixir.json").exists() {
+        if comforter::has_closure(project, "elixir")? {
             let store = &ctx.store;
-            let closure = comforter::read_closure(dir, "elixir")?;
+            let closure = comforter::read_closure_in(project, "elixir")?;
             let beam = comforter::closure_object(
                 store,
                 activity,
@@ -275,13 +276,13 @@ impl Tailor for Elixir {
     fn closure_state(
         &self,
         _platform: Platform,
-        dir: &Path,
+        project: &ProjectRoot,
         _ecosystem: &str,
         body: &Value,
     ) -> io::Result<State> {
         Ok(
             object_liveness_state(body, &["beam_object", "deps_object"]).unwrap_or(lock_state(
-                dir,
+                project,
                 "mix.lock",
                 &string(&body["mix_lock_sha256"]),
             )?),
