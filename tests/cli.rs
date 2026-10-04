@@ -1567,6 +1567,8 @@ fn a_store_from_before_the_marker_is_refused_and_the_fix_is_named() {
         &["gc", "--forget", &"a".repeat(40)],
         &["store", "roots"],
         &["ls"],
+        // The fix line is part of the failure: `--quiet` keeps it.
+        &["-q", "ls"],
         &["x", "ruff", "--version"],
     ] {
         let out = tog(&home.0, &home.0, args);
@@ -2648,6 +2650,7 @@ fn x_clean_skips_an_environment_whose_store_this_tog_does_not_read() {
 
         // From the refused store itself: the same, by name.
         let out = tog(&home.0, &home.0, &["x", "--clean", "ruff"]);
+        assert_eq!(out.status.code(), Some(0), "{case}: {}", text(&out.stderr));
         untouched("from its own store", &out);
         assert!(
             !text(&out.stdout).contains("removed x environment"),
