@@ -258,8 +258,6 @@ fn configure_git(command: &mut Command, args: &[&str], cwd: Option<&Path>) {
     command.env("GIT_ASKPASS", "/bin/true");
 }
 
-// Reviewed site (tests/architecture.rs): tog's own git fetch: tog verifies what it brings back, so it is not a resolution door, and it needs the network, so it is no host-local helper either.
-#[allow(clippy::disallowed_methods)]
 fn run_git_with_activity(
     args: &[&str],
     cwd: Option<&Path>,
@@ -267,8 +265,207 @@ fn run_git_with_activity(
 ) -> io::Result<std::process::Output> {
     let mut command = Command::new(GIT);
     configure_git(&mut command, args, cwd);
-    crate::kernel::supervise::output(&mut command, activity)
+    supervise_git(&mut command, activity)
         .map_err(|e| io::Error::new(e.kind(), format!("run {GIT} {}: {e}", args.join(" "))))
+}
+
+// Reviewed site (tests/architecture.rs): tog's own verified Git fetches and its fixed, scrubbed index-only query, built here rather than supplied by a dependency tool.
+#[allow(clippy::disallowed_methods)]
+fn supervise_git(
+    command: &mut Command,
+    activity: &StoreActivity,
+) -> io::Result<std::process::Output> {
+    crate::kernel::supervise::output(command, activity)
+}
+
+/// Which project-relative directories hold files tracked by any repository
+/// around or inside them. Bind every query to held metadata, including
+/// nested repositories and worktree/submodule .git files.
+pub fn tracked_among(
+    project: &crate::kernel::fsroot::ProjectRoot,
+    paths: &[String],
+    activity: &StoreActivity,
+) -> io::Result<Vec<String>> {
+    use crate::kernel::store::{open_file_at, same_inode, stat_at};
+    use std::os::fd::AsRawFd;
+    use std::os::unix::ffi::OsStrExt;
+    #[cfg(target_os = "linux")]
+    let flags = libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC;
+    #[cfg(not(target_os = "linux"))]
+    let flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC;
+    let mut tracked = Vec::new();
+    for path in paths {
+        let relative = Path::new(path);
+        let held = project.input_subdir(relative)?.ok_or_else(|| {
+            err(format!(
+                "directory {relative:?} disappeared before checking tracked source"
+            ))
+        })?;
+        let mut dir = open_file_at(held.as_raw_fd(), b".", flags, 0)?;
+        let mut relative = PathBuf::from(".");
+        let mut protected = false;
+        loop {
+            match stat_at(dir.as_raw_fd(), b".git") {
+                Ok(_) => protected |= tracked_in_git_index(dir.as_raw_fd(), &relative, activity)?,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+            if protected {
+                break;
+            }
+            let actual_path = held_git_directory_path(dir.as_raw_fd())?;
+            let Some(child) = actual_path.file_name() else {
+                break;
+            };
+            let parent = open_file_at(dir.as_raw_fd(), b"..", flags, 0)?;
+            let current = stat_at(dir.as_raw_fd(), b".")?;
+            // Recover the descriptor's current name without listing its
+            // parent. Search permission suffices, as it does for Git.
+            if !same_inode(&current, &stat_at(parent.as_raw_fd(), child.as_bytes())?) {
+                return Err(err(
+                    "project ancestry changed during Git source check; retry",
+                ));
+            }
+            relative = PathBuf::from(child).join(relative);
+            dir = parent;
+        }
+        if !protected {
+            let mut seen = std::collections::HashSet::new();
+            protected = tracked_repositories_inside(held.as_raw_fd(), activity, &mut seen, 0)?;
+        }
+        if protected {
+            tracked.push(path.clone());
+        }
+    }
+    Ok(tracked)
+}
+
+fn held_git_directory_path(fd: std::os::fd::RawFd) -> io::Result<PathBuf> {
+    #[cfg(target_os = "linux")]
+    {
+        fs::read_link(format!("/proc/self/fd/{fd}"))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::ffi::OsStringExt;
+        let mut bytes = [0 as libc::c_char; libc::PATH_MAX as usize];
+        // SAFETY: F_GETPATH writes at most PATH_MAX bytes to this buffer.
+        if unsafe { libc::fcntl(fd, libc::F_GETPATH, bytes.as_mut_ptr()) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: successful F_GETPATH writes a NUL-terminated pathname.
+        let path = unsafe { std::ffi::CStr::from_ptr(bytes.as_ptr()) };
+        Ok(std::ffi::OsString::from_vec(path.to_bytes().to_vec()).into())
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = fd;
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "held Git directory paths are unsupported on this platform",
+        ))
+    }
+}
+
+fn tracked_in_git_index(
+    fd: std::os::fd::RawFd,
+    relative: &Path,
+    activity: &StoreActivity,
+) -> io::Result<bool> {
+    use std::os::unix::process::CommandExt;
+    let mut command = Command::new(GIT);
+    // An explicit git-dir refuses damaged metadata instead of discovering
+    // a healthy ancestor. Check every surrounding index, including outer
+    // repositories that track files a healthy inner repository omits.
+    configure_git(
+        &mut command,
+        &[
+            "--literal-pathspecs",
+            "-c",
+            "core.fsmonitor=false",
+            "--git-dir=.git",
+            "--work-tree=.",
+            "ls-files",
+            "-z",
+            "--",
+        ],
+        None,
+    );
+    command.arg(relative);
+    // SAFETY: the caller owns fd throughout spawn and wait. fchdir is
+    // async-signal-safe and runs before exec closes this CLOEXEC fd.
+    unsafe {
+        command.pre_exec(move || {
+            if libc::fchdir(fd) == 0 {
+                Ok(())
+            } else {
+                Err(io::Error::last_os_error())
+            }
+        });
+    }
+    let output = supervise_git(&mut command, activity).map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!("cannot check Git-tracked source: {error}"),
+        )
+    })?;
+    if !output.status.success() {
+        return Err(err(format!(
+            "cannot check Git-tracked source {relative:?}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    // Git already applied the fixed literal pathspec. Any returned index
+    // entry protects the directory, including when the pathspec is '.'.
+    Ok(output
+        .stdout
+        .split(|byte| *byte == 0)
+        .any(|file| !file.is_empty()))
+}
+
+fn tracked_repositories_inside(
+    fd: std::os::fd::RawFd,
+    activity: &StoreActivity,
+    seen: &mut std::collections::HashSet<(libc::dev_t, libc::ino_t)>,
+    depth: usize,
+) -> io::Result<bool> {
+    use crate::kernel::store::{open_file_at, read_dir_names_at, stat_at};
+    use std::os::fd::AsRawFd;
+    use std::os::unix::ffi::OsStrExt;
+    let current = stat_at(fd, b".")?;
+    if !seen.insert((current.st_dev, current.st_ino)) {
+        return Ok(false);
+    }
+    if depth >= 256 {
+        return Err(err(
+            "Git source check exceeded directory depth; refusing to move source",
+        ));
+    }
+    match stat_at(fd, b".git") {
+        Ok(_) if tracked_in_git_index(fd, Path::new("."), activity)? => return Ok(true),
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    for name in read_dir_names_at(fd)? {
+        if name == ".git" {
+            continue;
+        }
+        let metadata = stat_at(fd, name.as_bytes())?;
+        if metadata.st_mode & libc::S_IFMT != libc::S_IFDIR {
+            continue;
+        }
+        let dir = open_file_at(
+            fd,
+            name.as_bytes(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            0,
+        )?;
+        if tracked_repositories_inside(dir.as_raw_fd(), activity, seen, depth + 1)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn git_ok(args: &[&str], cwd: Option<&Path>, what: &str) -> io::Result<String> {
@@ -746,6 +943,24 @@ pub fn ensure_git_source(
 mod tests {
     use super::*;
     use crate::kernel::testutil::TempDir;
+
+    #[test]
+    fn an_untracked_directory_below_a_search_only_parent_is_checkable() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = TempDir::named("git-search-only");
+        let project = temp.0.join("project");
+        fs::create_dir_all(project.join("node_modules/dep")).unwrap();
+        let held = crate::kernel::fsroot::ProjectRoot::open(&project).unwrap();
+        fs::set_permissions(&temp.0, fs::Permissions::from_mode(0o111)).unwrap();
+        // Permission restrictions do not apply to a privileged test user.
+        if fs::read_dir(&temp.0).is_ok() {
+            return;
+        }
+        let (_lease_dir, activity) = crate::kernel::testutil::detached_lease();
+        assert!(tracked_among(&held, &["node_modules".into()], &activity)
+            .unwrap()
+            .is_empty());
+    }
 
     #[test]
     fn urls_normalize_to_one_spelling() {

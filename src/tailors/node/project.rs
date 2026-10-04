@@ -308,6 +308,9 @@ fn projection_project_lock(
 /// Real directories are user state and retain backup_real_dir semantics; only
 /// symlinks proven to target tog-owned roots are removed automatically.
 ///
+/// A workspace member's node_modules that git tracks (`tracked`) is left
+/// where it is: it is the user's source, not npm's output.
+///
 /// Returns (backup paths, pending moves) — nothing is moved yet.
 #[allow(clippy::type_complexity)]
 fn reserve_projection_backups(
@@ -317,11 +320,15 @@ fn reserve_projection_backups(
     home: &Path,
     previous_workspaces: &[String],
     workspaces: &[String],
+    tracked: &[String],
 ) -> io::Result<(Vec<PathBuf>, Vec<(PathBuf, PathBuf)>)> {
     let mut backup_paths = Vec::new();
     let mut pending_backups = Vec::new();
     for workspace in previous_workspaces {
-        if workspaces.contains(workspace) || !safe_workspace_path(workspace) {
+        if workspaces.contains(workspace)
+            || !safe_workspace_path(workspace)
+            || tracked.contains(workspace)
+        {
             continue;
         }
         let workspace_nm = Path::new(workspace).join("node_modules");
@@ -341,7 +348,7 @@ fn reserve_projection_backups(
         pending_backups.push((nm.to_path_buf(), backup.clone()));
         backup_paths.push(backup);
     }
-    for workspace in workspaces {
+    for workspace in workspaces.iter().filter(|w| !tracked.contains(w)) {
         let workspace_nm = Path::new(workspace).join("node_modules");
         if let Some(backup) =
             crate::comforter::reserve_backup_real_dir_for_store(project, &workspace_nm, store)?
@@ -351,6 +358,74 @@ fn reserve_projection_backups(
         }
     }
     Ok((backup_paths, pending_backups))
+}
+
+/// The workspace members, old and new, whose node_modules is a real
+/// directory holding files git tracks. Some repositories commit one as a
+/// test fixture; moving it into the store's backups would delete source
+/// from the working tree, so the member is left unprojected and the user is
+/// told. A tracked node_modules at the project root stops the sync instead:
+/// nothing in the project could resolve its dependencies without it.
+fn git_tracked_node_modules(
+    project: &ProjectRoot,
+    previous_workspaces: &[String],
+    workspaces: &[String],
+    activity: &StoreActivity,
+) -> io::Result<Vec<String>> {
+    let real = |importer: &Path| {
+        project
+            .entry(&importer.join("node_modules"))
+            .map(|entry| entry == crate::kernel::fsroot::Entry::Directory)
+    };
+    let mut candidates: Vec<String> = Vec::new();
+    if real(Path::new(""))? {
+        candidates.push("node_modules".to_string());
+    }
+    for workspace in workspaces.iter().chain(previous_workspaces) {
+        let path = format!("{workspace}/node_modules");
+        if safe_workspace_path(workspace)
+            && real(Path::new(workspace))?
+            && !candidates.contains(&path)
+        {
+            candidates.push(path);
+        }
+    }
+    let tracked = crate::kernel::gitsrc::tracked_among(project, &candidates, activity)?;
+    if tracked.iter().any(|path| path == "node_modules") {
+        return Err(err(
+            "node_modules holds files git tracks (git ls-files node_modules), and \
+             tog will not move committed source aside to project dependencies \
+             there; untrack them (git rm -r --cached node_modules) and run `tog` again",
+        ));
+    }
+    let mut members = Vec::new();
+    for path in tracked {
+        let member = path
+            .strip_suffix("/node_modules")
+            .unwrap_or(&path)
+            .to_string();
+        if workspaces.contains(&member) {
+            crate::kernel::ui::warning_next(
+                &format!(
+                    "{path} holds files git tracks, so tog left it in place and did not \
+                     project workspace {member}'s dependencies"
+                ),
+                &crate::kernel::ui::shell_line(&["git", "ls-files", &path]),
+            );
+        }
+        members.push(member);
+    }
+    Ok(members)
+}
+
+/// Name in the closure the members `git_tracked_node_modules` kept back:
+/// `status` checks every other member's link, and these keep their own
+/// directory by design.
+fn record_unprojected(body: &mut serde_json::Value, tracked: &[String], workspaces: &[String]) {
+    let kept: Vec<&String> = tracked.iter().filter(|m| workspaces.contains(m)).collect();
+    if !kept.is_empty() {
+        body["unprojected_workspaces"] = serde_json::json!(kept);
+    }
 }
 
 /// Where this projection lives: its id and the forest paths derived from it.
@@ -802,6 +877,7 @@ pub fn project_node_env_recorded(
     // removal, or projection mutation. A lexical `packages/lib` can be an
     // external symlink after the previous closure was written.
     validate_workspace_parents(project_dir, &previous_workspaces, &workspaces)?;
+    let tracked = git_tracked_node_modules(project, &previous_workspaces, &workspaces, activity)?;
     let store = crate::comforter::store_from_object_path(env_obj)
         .ok_or_else(|| err("environment object is not in a Tog store"))?;
     let env_obj = env_obj.canonicalize()?;
@@ -820,8 +896,15 @@ pub fn project_node_env_recorded(
         .root
         .parent()
         .ok_or_else(|| err("cannot locate tog home for legacy forests"))?;
-    let (backup_paths, pending_backups) =
-        reserve_projection_backups(project, nm, &store, home, &previous_workspaces, &workspaces)?;
+    let (backup_paths, pending_backups) = reserve_projection_backups(
+        project,
+        nm,
+        &store,
+        home,
+        &previous_workspaces,
+        &workspaces,
+        &tracked,
+    )?;
 
     let paths = forest_paths(project, &env_obj, &store, plan, &reasons, &workspaces)?;
     let ForestPaths {
@@ -891,7 +974,7 @@ pub fn project_node_env_recorded(
     remove_sync_duplicate_links(project, &store, home);
 
     replace_with_symlink(project, nm, forest, "node_modules")?;
-    for workspace in &workspaces {
+    for workspace in workspaces.iter().filter(|w| !tracked.contains(w)) {
         let workspace_nm = Path::new(workspace).join("node_modules");
         let workspace_forest = proj_dir
             .join("workspaces")
@@ -916,6 +999,7 @@ pub fn project_node_env_recorded(
         &reasons,
         inputs,
     );
+    record_unprojected(&mut body, &tracked, &workspaces);
     if let Some(record) = runtime_record {
         for (key, value) in record.as_object().into_iter().flatten() {
             body[key] = value.clone();
@@ -1059,5 +1143,297 @@ mod tests {
         )
         .unwrap();
         assert!(forest.join("a").symlink_metadata().unwrap().is_symlink());
+    }
+
+    /// vite commits a fixture `node_modules` inside a workspace member
+    /// (#174). Only a real directory holding a tracked file is kept back;
+    /// an untracked npm-made one, and a member git cannot see, are moved
+    /// aside as before. A tracked one at the project root stops the sync.
+    #[test]
+    fn a_node_modules_git_tracks_is_never_moved_aside() {
+        let scratch = TempDir::named("tracked-node-modules");
+        let project = scratch.0.join("project");
+        for dir in [
+            "packages/fixture/node_modules/dep",
+            "packages/built/node_modules/dep",
+            "packages/linked",
+        ] {
+            fs::create_dir_all(project.join(dir)).unwrap();
+        }
+        fs::write(
+            project.join("packages/fixture/node_modules/dep/index.js"),
+            "",
+        )
+        .unwrap();
+        fs::write(project.join("packages/built/node_modules/dep/index.js"), "").unwrap();
+        std::os::unix::fs::symlink(
+            project.join("packages/fixture/node_modules"),
+            project.join("packages/linked/node_modules"),
+        )
+        .unwrap();
+        let workspaces = ["packages/fixture", "packages/built", "packages/linked"]
+            .map(String::from)
+            .to_vec();
+        let (_lease_dir, activity) = crate::kernel::testutil::detached_lease();
+
+        let held = ProjectRoot::open(&project).unwrap();
+        // Outside a repository nothing is tracked.
+        assert!(git_tracked_node_modules(&held, &[], &workspaces, &activity)
+            .unwrap()
+            .is_empty());
+
+        let git = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+                .args(args)
+                .current_dir(&project)
+                .output()
+                .unwrap();
+            assert!(status.status.success(), "{status:?}");
+        };
+        git(&["init", "-q"]);
+        git(&["add", "packages/fixture/node_modules/dep/index.js"]);
+        git(&["commit", "-q", "-m", "fixture"]);
+        assert_eq!(
+            git_tracked_node_modules(&held, &[], &workspaces, &activity).unwrap(),
+            ["packages/fixture"]
+        );
+        // A member that left the lockfile is kept back the same way.
+        assert_eq!(
+            git_tracked_node_modules(&held, &workspaces[..1], &[], &activity).unwrap(),
+            ["packages/fixture"]
+        );
+
+        fs::create_dir_all(project.join("node_modules")).unwrap();
+        fs::write(project.join("node_modules/.keep"), "").unwrap();
+        git(&["add", "node_modules/.keep"]);
+        git(&["commit", "-q", "-m", "root"]);
+        let error = git_tracked_node_modules(&held, &[], &workspaces, &activity).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("node_modules holds files git tracks"),
+            "{error}"
+        );
+    }
+
+    fn git_fixture(dir: &Path, args: &[&str]) {
+        let output = std::process::Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+    }
+
+    #[test]
+    fn projection_preserves_tracked_source_across_git_and_directory_boundaries() {
+        let _lock = crate::kernel::policy::attribution_test_lock();
+        for shape in [
+            "corrupt-index",
+            "renamed-root",
+            "renamed-member",
+            "submodule",
+            "departed-submodule",
+            "suffix-member",
+            "damaged-member",
+            "outer-tracked",
+            "candidate-checkout",
+            "descendant-checkout",
+            "search-only-parent",
+        ] {
+            let temp = TempDir::named(shape);
+            let project = temp.0.join("project");
+            let store_root = temp.0.join("home/store");
+            let env_id = format!("{}-npm-env-0", "1".repeat(40));
+            let env = store_root.join("objects").join(&env_id);
+            let workspace = if shape == "suffix-member" {
+                "packages/member/node_modules"
+            } else {
+                "packages/member"
+            };
+            let root_case = matches!(shape, "corrupt-index" | "renamed-root");
+            let source = if root_case {
+                project.join("node_modules")
+            } else {
+                project.join(workspace).join("node_modules")
+            };
+            fs::create_dir_all(&source).unwrap();
+            fs::write(source.join("fixture.js"), "committed source").unwrap();
+            fs::create_dir_all(env.join("node_modules")).unwrap();
+            for namespace in ["meta", "cache/sha256", "tmp", "roots"] {
+                fs::create_dir_all(store_root.join(namespace)).unwrap();
+            }
+            fs::write(
+                store_root.join("meta").join(format!("{env_id}.json")),
+                serde_json::json!({"id": env_id,
+                    "identity": {"kind": "test", "name": env_id, "version": "0", "inputs": {}}
+                })
+                .to_string(),
+            )
+            .unwrap();
+            fs::create_dir_all(
+                env.join("workspaces")
+                    .join(encode_workspace_path(workspace))
+                    .join("node_modules"),
+            )
+            .unwrap();
+            git_fixture(&project, &["init", "-q"]);
+            if shape.contains("submodule") {
+                let member = project.join(workspace);
+                git_fixture(&member, &["init", "-q"]);
+                git_fixture(&member, &["add", "node_modules/fixture.js"]);
+                git_fixture(&member, &["commit", "-qm", "fixture"]);
+                git_fixture(
+                    &project,
+                    &[
+                        "-c",
+                        "protocol.file.allow=always",
+                        "submodule",
+                        "add",
+                        "--",
+                        member.to_str().unwrap(),
+                        workspace,
+                    ],
+                );
+                git_fixture(&project, &["submodule", "absorbgitdirs", workspace]);
+            } else if !matches!(
+                shape,
+                "damaged-member" | "candidate-checkout" | "descendant-checkout"
+            ) {
+                let tracked = if root_case {
+                    "node_modules/fixture.js".to_string()
+                } else {
+                    format!("{workspace}/node_modules/fixture.js")
+                };
+                git_fixture(&project, &["add", &tracked]);
+            }
+            if shape == "outer-tracked" {
+                git_fixture(&project.join(workspace), &["init", "-q"]);
+            }
+            if shape == "candidate-checkout" {
+                git_fixture(&source, &["init", "-q"]);
+                git_fixture(&source, &["add", "fixture.js"]);
+            }
+            if shape == "descendant-checkout" {
+                let child = source.join("dep");
+                fs::create_dir(&child).unwrap();
+                fs::write(child.join("fixture.js"), "committed dependency").unwrap();
+                git_fixture(&child, &["init", "-q"]);
+                git_fixture(&child, &["add", "fixture.js"]);
+            }
+            if shape == "damaged-member" {
+                let member = project.join(workspace);
+                git_fixture(&member, &["init", "-q"]);
+                git_fixture(&member, &["add", "node_modules/fixture.js"]);
+                fs::remove_file(member.join(".git/HEAD")).unwrap();
+            }
+            if shape == "corrupt-index" {
+                fs::write(project.join(".git/index"), "corrupt index").unwrap();
+            }
+            if shape == "departed-submodule" {
+                fs::create_dir_all(project.join(".tog/closures")).unwrap();
+                fs::write(
+                    project.join(".tog/closures/node.json"),
+                    serde_json::json!({
+                        "schema": "closure/1", "ecosystem": "node",
+                        "body": {"workspaces": [workspace]}
+                    })
+                    .to_string(),
+                )
+                .unwrap();
+            }
+            let held = ProjectRoot::open(&project).unwrap();
+            if shape == "search-only-parent" {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(&temp.0, fs::Permissions::from_mode(0o111)).unwrap();
+                let (_lease_dir, activity) = crate::kernel::testutil::detached_lease();
+                assert_eq!(
+                    git_tracked_node_modules(&held, &[], &[workspace.into()], &activity).unwrap(),
+                    [workspace]
+                );
+            }
+            let mut actual = project.clone();
+            if shape.starts_with("renamed-") {
+                actual = temp.0.join("moved");
+                fs::rename(&project, &actual).unwrap();
+                fs::create_dir(&project).unwrap();
+            }
+            crate::kernel::store::make_read_only_for_test(&env).unwrap();
+            let workspaces = if root_case || shape == "departed-submodule" {
+                Vec::new()
+            } else {
+                vec![workspace.to_string()]
+            };
+            let plan = NpmPlan {
+                node_version: "24.20.0".into(),
+                packages: Vec::new(),
+                links: Vec::new(),
+                workspaces,
+                lock_source: "pnpm-lock.yaml".into(),
+            };
+            let store = crate::kernel::store::Store::for_test(store_root);
+            let activity = store
+                .activity(crate::kernel::activity::ActivityMode::Shared)
+                .unwrap();
+            let mut attribution = crate::kernel::policy::Attribution::open("node").unwrap();
+            let result = project_node_env(
+                &activity,
+                &held,
+                &env,
+                Platform::host().unwrap(),
+                &plan,
+                &[],
+                false,
+                &mut attribution,
+            );
+            attribution.finish(result.is_ok()).unwrap();
+            if root_case
+                || matches!(
+                    shape,
+                    "renamed-member" | "damaged-member" | "search-only-parent"
+                )
+            {
+                let error = result.unwrap_err().to_string();
+                let expected = if matches!(shape, "corrupt-index" | "damaged-member") {
+                    "cannot check Git-tracked source"
+                } else if shape == "renamed-member" {
+                    "the project directory was moved or replaced"
+                } else if shape == "search-only-parent" {
+                    "the project directory was moved or became unreadable"
+                } else {
+                    "node_modules holds files git tracks"
+                };
+                assert!(error.contains(expected), "{shape}: {error}");
+            } else {
+                result.unwrap();
+            }
+            let remaining = actual.join(if root_case {
+                PathBuf::from("node_modules")
+            } else {
+                Path::new(workspace).join("node_modules")
+            });
+            assert!(
+                fs::symlink_metadata(&remaining).unwrap().is_dir(),
+                "{shape}"
+            );
+            assert_eq!(
+                fs::read_to_string(remaining.join("fixture.js")).unwrap(),
+                "committed source",
+                "{shape}"
+            );
+            assert!(
+                !temp.0.join("home/store/backups").exists()
+                    || fs::read_dir(temp.0.join("home/store/backups"))
+                        .unwrap()
+                        .next()
+                        .is_none(),
+                "{shape}"
+            );
+            if shape.starts_with("renamed-") {
+                assert!(fs::read_dir(&project).unwrap().next().is_none(), "{shape}");
+            }
+        }
     }
 }
