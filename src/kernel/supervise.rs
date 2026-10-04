@@ -790,38 +790,79 @@ fn status_relayed(
     // One reader per pipe, each blocking on its own stream: a child that
     // floods one while the other's pipe is full cannot stall either. The
     // supervising thread keeps the child and the signals, as `status` does.
-    let stderr = child
-        .stderr
-        .take()
-        .map(|pipe| spawn_relay(pipe, stderr_sink, secrets, CLASSIFIER_PREFIX));
-    let stdout = child
-        .stdout
-        .take()
-        .map(|pipe| spawn_relay(pipe, stdout_sink, secrets, 0));
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) => {}
+    // A reader that fails (a read error, a panic) wakes it through the
+    // session's self-pipe, as a signal does ([`RelayWake`]).
+    let failed = std::sync::Arc::new(AtomicBool::new(false));
+    let mut readers = Vec::with_capacity(2);
+    let started: io::Result<()> = (|| {
+        if let Some(pipe) = child.stderr.take() {
+            let wake = RelayWake::new(session.write_fd, &failed)?;
+            readers.push((
+                true,
+                spawn_relay(pipe, stderr_sink, secrets, CLASSIFIER_PREFIX, wake)?,
+            ));
+        }
+        if let Some(pipe) = child.stdout.take() {
+            let wake = RelayWake::new(session.write_fd, &failed)?;
+            readers.push((false, spawn_relay(pipe, stdout_sink, secrets, 0, wake)?));
+        }
+        Ok(())
+    })();
+    let waited = match started {
+        Err(error) => Err(error),
+        Ok(()) => loop {
+            if failed.load(Ordering::SeqCst) {
+                break Err(io::Error::other("a child output relay failed"));
+            }
+            match child.try_wait() {
+                Ok(Some(status)) => break Ok(status),
+                Ok(None) => {}
+                Err(error) => break Err(error),
+            }
+            if let Err(error) = session.forward_pending() {
+                break Err(error);
+            }
+            // Checked again after `forward_pending` drained the self-pipe:
+            // a reader that failed before this sees the flag, one that
+            // fails after it writes a byte the poll below wakes on.
+            if failed.load(Ordering::SeqCst) {
+                break Err(io::Error::other("a child output relay failed"));
+            }
+            if let Err(error) = session.wait_for_event(&[]) {
+                break Err(error);
+            }
+        },
+    };
+    if waited.is_err() {
+        reap_after_error(&mut child);
+    }
+    // The direct child is reaped: no forwarded signal may reach its pid
+    // again while the pipes drain. Both readers are joined on every path,
+    // before the session and the activity borrow end. A grandchild that
+    // keeps a pipe open keeps its reader waiting (a known limitation).
+    session.clear_child();
+    let mut stderr_bytes = Ok(Vec::new());
+    let mut relay_error = None;
+    for (is_stderr, reader) in readers {
+        match join_relay(reader) {
+            Ok(bytes) if is_stderr => stderr_bytes = Ok(bytes),
+            Ok(_) => {}
             Err(error) => {
-                reap_after_error(&mut child);
-                return Err(error);
+                if relay_error.is_none() {
+                    relay_error = Some(io::Error::new(error.kind(), error.to_string()));
+                }
+                if is_stderr {
+                    stderr_bytes = Err(error);
+                }
             }
         }
-        if let Err(error) = session.forward_pending() {
-            reap_after_error(&mut child);
-            return Err(error);
-        }
-        if let Err(error) = session.wait_for_event(&[]) {
-            reap_after_error(&mut child);
-            return Err(error);
-        }
+    }
+    let status = match (waited, relay_error) {
+        (_, Some(error)) => return Err(error),
+        (Err(error), None) => return Err(error),
+        (Ok(status), None) => status,
     };
-    // The direct child is reaped: no forwarded signal may reach its pid
-    // again while the pipes drain.
-    session.clear_child();
-    let stderr_bytes = join_relay(stderr)?;
-    join_relay(stdout)?;
-    session.conclude(status, (status, stderr_bytes))
+    session.conclude(status, (status, stderr_bytes?))
 }
 
 /// The bytes of a child's stderr kept for the sandbox failure classifier.
@@ -834,6 +875,9 @@ enum Sink {
     /// Into a buffer, for tests.
     #[cfg(test)]
     Buffer(std::sync::Arc<Mutex<Vec<u8>>>),
+    /// A relay that panics on its first write, for the fault test.
+    #[cfg(test)]
+    Panic,
 }
 
 impl Sink {
@@ -855,28 +899,90 @@ impl Sink {
                 .lock()
                 .unwrap_or_else(|error| error.into_inner())
                 .extend_from_slice(bytes),
+            #[cfg(test)]
+            Sink::Panic => panic!("injected relay failure"),
         }
     }
 }
 
-/// Relay `pipe` to `sink` on a thread of its own ([`relay`]).
+/// How a relay thread tells the supervising thread it failed: a shared
+/// flag, and a byte on its own copy of the session's self-pipe, which the
+/// supervision loop polls. Dropped without [`RelayWake::done`] it fires, so
+/// a read error and a panic (the drop runs while unwinding) both reach it.
+struct RelayWake {
+    fd: std::os::fd::OwnedFd,
+    failed: std::sync::Arc<AtomicBool>,
+    done: bool,
+}
+
+impl RelayWake {
+    fn new(write_fd: RawFd, failed: &std::sync::Arc<AtomicBool>) -> io::Result<Self> {
+        use std::os::fd::FromRawFd;
+        // SAFETY: write_fd is the session's open self-pipe write end; the
+        // duplicate is owned here and closed when the wake is dropped.
+        let fd = unsafe { libc::fcntl(write_fd, libc::F_DUPFD_CLOEXEC, 0) };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Self {
+            // SAFETY: fd was just returned by fcntl and nothing else owns it.
+            fd: unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) },
+            failed: failed.clone(),
+            done: false,
+        })
+    }
+
+    /// The relay finished: nothing to report.
+    fn done(mut self) {
+        self.done = true;
+    }
+}
+
+impl Drop for RelayWake {
+    fn drop(&mut self) {
+        if self.done {
+            return;
+        }
+        self.failed.store(true, Ordering::SeqCst);
+        // SAFETY: the byte is a valid one-byte buffer and fd is an open,
+        // nonblocking pipe end (a full pipe already holds a wakeup).
+        unsafe {
+            libc::write(
+                self.fd.as_raw_fd(),
+                &SIGNAL_BYTE as *const u8 as *const libc::c_void,
+                1,
+            );
+        }
+    }
+}
+
+type RelayHandle = std::thread::JoinHandle<io::Result<Vec<u8>>>;
+
+/// Relay `pipe` to `sink` on a thread of its own ([`relay`]), reporting a
+/// failure through `wake`.
 fn spawn_relay<R: Read + Send + 'static>(
     pipe: R,
     sink: Sink,
     secrets: &[Vec<u8>],
     keep: usize,
-) -> std::thread::JoinHandle<io::Result<Vec<u8>>> {
+    wake: RelayWake,
+) -> io::Result<RelayHandle> {
     let scrubber = confine::Scrubber::new(secrets.to_vec());
-    std::thread::spawn(move || relay(pipe, &sink, scrubber, keep))
+    std::thread::Builder::new()
+        .name("tog-relay".into())
+        .spawn(move || {
+            let result = relay(pipe, &sink, scrubber, keep);
+            if result.is_ok() {
+                wake.done();
+            }
+            result
+        })
 }
 
-fn join_relay(relay: Option<std::thread::JoinHandle<io::Result<Vec<u8>>>>) -> io::Result<Vec<u8>> {
-    match relay {
-        None => Ok(Vec::new()),
-        Some(handle) => handle
-            .join()
-            .map_err(|_| io::Error::other("a child output relay panicked"))?,
-    }
+fn join_relay(handle: RelayHandle) -> io::Result<Vec<u8>> {
+    handle
+        .join()
+        .map_err(|_| io::Error::other("a child output relay panicked"))?
 }
 
 /// Pass a child's output stream on to `sink` with the signing key's secret
@@ -1229,6 +1335,47 @@ mod tests {
         assert_eq!(prefix.len(), stderr.len().min(CLASSIFIER_PREFIX));
         assert_eq!(prefix, stderr[..prefix.len()]);
         (status, stdout, stderr)
+    }
+
+    /// A relay thread that panics while the child sleeps wakes the
+    /// supervising thread, which kills and reaps the child, joins both
+    /// readers, and returns the failure, well before the child would end.
+    #[test]
+    fn a_failing_relay_wakes_the_supervisor_and_the_child_is_reaped() {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let _test_session = TEST_SESSION
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let (store, _root) = test_store("relay-fail");
+            let activity = store.activity(ActivityMode::Shared).unwrap();
+            // `exec`: the sleep is the direct child, so killing it closes
+            // both pipes (a grandchild holding one is a known limitation).
+            let mut command = Command::new("/bin/sh");
+            command.args(["-c", "printf 'x\\n' >&2; exec sleep 600"]);
+            let started = std::time::Instant::now();
+            let result = status_relayed(
+                &mut command,
+                &activity,
+                Sink::Buffer(std::sync::Arc::new(Mutex::new(Vec::new()))),
+                Sink::Panic,
+                &[],
+            );
+            drop(activity);
+            let _ = sender.send((
+                result.map(drop).map_err(|error| error.to_string()),
+                started.elapsed(),
+            ));
+        });
+        let (result, elapsed) = receiver
+            .recv_timeout(std::time::Duration::from_secs(60))
+            .expect("the supervisor did not wake for a failed relay");
+        let error = result.unwrap_err();
+        assert!(error.contains("relay panicked"), "{error}");
+        assert!(elapsed < std::time::Duration::from_secs(60), "{elapsed:?}");
     }
 
     /// No piece of the secret 10 characters or longer is in `text`.
