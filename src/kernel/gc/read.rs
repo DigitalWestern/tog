@@ -25,11 +25,10 @@ pub(super) struct RootState {
     pub(super) project_keep: Vec<PathBuf>,
 }
 
-pub(super) fn collect_roots<W: Write>(
+pub(super) fn collect_roots(
     store: &Store,
     roots: &[RootEntry],
     options: &Options,
-    out: &mut W,
 ) -> io::Result<RootState> {
     let mut state = RootState::default();
     for root in roots {
@@ -100,7 +99,7 @@ pub(super) fn collect_roots<W: Write>(
         // backing directory underneath, which can carry an empty
         // `.tog/closures` of its own and would otherwise be swept as if
         // the registered project had agreed it needed nothing.
-        if read_closures(store, &project, &mut state, out)? == 0 {
+        if read_closures(store, &project, &mut state)? == 0 {
             return Err(unresolvable_root(
                 root,
                 &io::Error::new(
@@ -142,11 +141,10 @@ pub(super) fn unusable_root(root: &RootEntry, reason: &str) -> io::Error {
 
 /// Read a project's closures into the live set, returning how many closure
 /// files it held.
-pub(super) fn read_closures<W: Write>(
+pub(super) fn read_closures(
     store: &Store,
     project: &Path,
     state: &mut RootState,
-    out: &mut W,
 ) -> io::Result<usize> {
     let closures = project.join(".tog/closures");
     let mut found = 0usize;
@@ -199,7 +197,6 @@ pub(super) fn read_closures<W: Write>(
             }
         }
     }
-    let _ = out;
     Ok(found)
 }
 
@@ -635,16 +632,15 @@ fn read_projections(store: &Store) -> io::Result<Projections> {
 /// Root *resolution* happens here rather than in `validate` because it is an
 /// I/O probe, not a structural check; either way it runs before anything can
 /// be deleted, which is the safety property this phase protects.
-pub(super) fn read<W: Write>(
+pub(super) fn read(
     store: &Store,
     activity: &StoreActivity,
     options: &Options,
-    out: &mut W,
 ) -> io::Result<Snapshot> {
     store.require_exclusive_activity(activity, "garbage collection")?;
     let now = SystemTime::now();
     let (roots, crash_temps) = store.roots_for_sweep()?;
-    let state = collect_roots(store, &roots, options, out)?;
+    let state = collect_roots(store, &roots, options)?;
     let meta = read_records(store)?;
 
     // Every descriptor below is held from here through execution, so the

@@ -474,8 +474,7 @@ mod plan_tests {
         now: SystemTime,
     ) -> SweepPlan {
         let activity = store.activity(ActivityMode::Exclusive).unwrap();
-        let mut out = Vec::new();
-        let mut snapshot = read(store, &activity, read_options, &mut out).unwrap();
+        let mut snapshot = read(store, &activity, read_options).unwrap();
         snapshot.now = now;
         let validated = validate(&snapshot).unwrap();
         plan(&validated, plan_options).unwrap()
@@ -702,8 +701,7 @@ mod plan_tests {
         claim(&temp, Vec::new());
         let options = Options::keep_days(0);
         let activity = store.activity(ActivityMode::Exclusive).unwrap();
-        let mut out = Vec::new();
-        let mut snapshot = read(&store, &activity, &options, &mut out).unwrap();
+        let mut snapshot = read(&store, &activity, &options).unwrap();
         assert!(validate(&snapshot).is_ok());
 
         snapshot.meta = crate::kernel::objmeta::MetaIndex::default();

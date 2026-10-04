@@ -2030,7 +2030,6 @@ mod tests {
         );
         assert!(a.patch.is_none());
         assert!(a.git.is_none());
-        assert!(!a.optional);
         let g = &plan.packages[1];
         let source = g.git.as_ref().expect("pinned git source");
         assert_eq!(source.commit, "1234567890abcdef1234567890abcdef12345678");

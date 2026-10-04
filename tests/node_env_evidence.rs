@@ -103,7 +103,6 @@ fn electron_package(dir: &Path, version: &str, postinstall: Option<&str>) -> Npm
         bin: Vec::new(),
         patch: None,
         git: None,
-        optional: false,
         foreign_platform: false,
         needs_workspace: false,
     }
@@ -424,7 +423,6 @@ fn script_package(dir: &Path, name: &str, postinstall: &str) -> NpmPackage {
         bin: Vec::new(),
         patch: None,
         git: None,
-        optional: false,
         foreign_platform: false,
         needs_workspace: false,
     }
@@ -514,7 +512,6 @@ fn a_lifecycle_reference_to_the_gyp_python_survives_a_sweep() {
         bin: Vec::new(),
         patch: None,
         git: None,
-        optional: false,
         foreign_platform: false,
         needs_workspace: false,
     };

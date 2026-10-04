@@ -882,8 +882,7 @@ pub(super) fn target_for_ref(
     let local_reference = reference
         .find("file:")
         .map(|index| &reference[index..])
-        .or_else(|| reference.find("link:").map(|index| &reference[index..]))
-        .or_else(|| reference.strip_prefix("link:").map(|_| reference));
+        .or_else(|| reference.find("link:").map(|index| &reference[index..]));
     if let Some(local_reference) = local_reference {
         let raw = local_reference
             .split_once(':')

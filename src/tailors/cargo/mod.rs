@@ -298,21 +298,9 @@ pub fn project_cargo_env(
                 .is_some_and(crate::kernel::store::is_object_id)
         });
     if !valid_objects {
-        #[cfg(test)]
-        {
-            return crate::comforter::write_closure_legacy(
-                &project_dir,
-                "cargo",
-                body,
-                attribution,
-            );
-        }
-        #[cfg(not(test))]
-        {
-            return Err(err(
-                "Cargo closure references must name complete store objects",
-            ));
-        }
+        return Err(err(
+            "Cargo closure references must name complete store objects",
+        ));
     }
     let mut refs = crate::comforter::ClosureRefs::new();
     // The runtime object and `rust_object` are the same object; the direct

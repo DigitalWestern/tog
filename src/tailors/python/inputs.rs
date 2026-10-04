@@ -163,7 +163,7 @@ pub fn read_plan(
     let source = manifest.requirements_text();
     let resolver_source = manifest.resolver_text();
     if !input.starts_with("requirements") {
-        record_skippable_specs(&input, &source)?;
+        record_skippable_specs(&source)?;
     }
     selection.emit_warnings();
 
@@ -309,11 +309,11 @@ pub fn read_plan(
     Ok((plan, selection, inputs))
 }
 
-pub fn record_skippable_specs(input: &str, source: &str) -> io::Result<()> {
-    record_skippable_specs_with(input, source, policy::record)
+pub fn record_skippable_specs(source: &str) -> io::Result<()> {
+    record_skippable_specs_with(source, policy::record)
 }
 
-pub fn record_skippable_specs_with<F>(_input: &str, source: &str, mut record: F) -> io::Result<()>
+pub fn record_skippable_specs_with<F>(source: &str, mut record: F) -> io::Result<()>
 where
     F: FnMut(&str, &str, &str) -> io::Result<()>,
 {
@@ -830,15 +830,14 @@ mod tests {
             strict: true,
             ..policy::Policy::default()
         };
-        let error =
-            record_skippable_specs_with("requirements.txt", source, |kind, subject, detail| {
-                policy::record_with(&strict, kind, subject, detail)
-            })
-            .unwrap_err();
+        let error = record_skippable_specs_with(source, |kind, subject, detail| {
+            policy::record_with(&strict, kind, subject, detail)
+        })
+        .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
 
         let mut recorded = Vec::new();
-        record_skippable_specs_with("requirements.txt", source, |kind, subject, detail| {
+        record_skippable_specs_with(source, |kind, subject, detail| {
             recorded.push((kind.to_string(), subject.to_string(), detail.to_string()));
             Ok(())
         })
