@@ -161,8 +161,6 @@ pub enum VersionRequest {
     /// request: an alternative that states nothing makes the whole
     /// disjunction unconstrained, and the reader lowers that to no request.
     AnyOf(Vec<Vec<VersionRequest>>),
-    /// The newest complete release.
-    Newest,
 }
 
 impl VersionRequest {
@@ -176,7 +174,6 @@ impl VersionRequest {
             VersionRequest::AnyOf(alternatives) => alternatives
                 .iter()
                 .any(|all| all.iter().all(|request| request.matches(candidate))),
-            VersionRequest::Newest => true,
         }
     }
 }
@@ -212,7 +209,6 @@ impl fmt::Display for VersionRequest {
                     .collect();
                 f.write_str(&parts.join(" || "))
             }
-            VersionRequest::Newest => f.write_str("newest"),
         }
     }
 }
@@ -231,6 +227,7 @@ impl Request {
         Request::default()
     }
 
+    #[cfg(test)]
     pub fn exact(component: &str, version: &str) -> io::Result<Request> {
         Ok(Request::newest().with(component, VersionRequest::Exact(Version::parse(version)?)))
     }
@@ -354,6 +351,7 @@ impl Catalog {
         Ok(ranked)
     }
 
+    #[cfg(test)]
     /// Every complete release in selection order, best first.
     pub fn ordered(&self) -> io::Result<Vec<&Bundle>> {
         Ok(self.ranked()?.into_iter().map(|r| r.bundle).collect())

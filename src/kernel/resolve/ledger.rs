@@ -138,10 +138,6 @@ impl PortableLedger {
         &self.ecosystem
     }
 
-    pub fn door(&self) -> &str {
-        &self.door
-    }
-
     /// The entries in their canonical order.
     pub fn entries(&self) -> impl Iterator<Item = &Entry> {
         self.entries.values()

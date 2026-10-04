@@ -20,11 +20,10 @@
 //!   Teredo;
 //! - outside the table, only IPv6 global unicast (`2000::/3`) is eligible.
 
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::net::IpAddr;
+#[cfg(test)]
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::sync::OnceLock;
-
-/// The `<updated>` date of both registries the table was compiled from.
-pub const REGISTRY_DATE: &str = "2025-10-09";
 
 /// One refused block: `(prefix, name)`. Order is only for reading.
 const V4: &[(&str, &str)] = &[
@@ -106,6 +105,7 @@ impl Block {
         }
     }
 
+    #[cfg(test)]
     /// Whether every address of `other` is inside this block.
     pub fn covers(&self, other: &Block) -> bool {
         match (self, other) {
@@ -127,6 +127,7 @@ impl Block {
         }
     }
 
+    #[cfg(test)]
     /// The first and last address of the block.
     pub fn bounds(&self) -> (IpAddr, IpAddr) {
         match *self {

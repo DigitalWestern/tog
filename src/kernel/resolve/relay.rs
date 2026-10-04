@@ -85,10 +85,6 @@ impl ToolStatus {
             ToolStatus::Signal(signal) => 128 + signal,
         }
     }
-
-    pub fn success(self) -> bool {
-        self == ToolStatus::Code(0)
-    }
 }
 
 impl std::fmt::Display for ToolStatus {

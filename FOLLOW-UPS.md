@@ -110,7 +110,7 @@ After the proxy: the test-suite audit (#351) and then the quality review
   Each line is one issue and one PR, in order:
   - #238 http: pypi, rubygems, dotnet and deps call ureq directly, bypassing kernel::fetch.
   - #240 store: a CacheLease holds gc.lock exclusively, so separate tog processes download one at a time.
-  - #247 dead code: about 90 unused items hidden by pub mod, plus a CI check to keep it at zero.
+  - #247 dead code: the non-heavy part shipped; left are the unused items in heavy-watched files (`fetch.rs`, `archive.rs`, `sandbox.rs`, `provider/`) and the CI job that builds with `--cfg tog_dead_code -D dead_code`.
   - #245 kernel: consolidate duplicated primitives. Left after the first pass: the file hash copy in `provider/crates.rs` and `fetch.rs` (heavy gate), the pid temp names in `fetch.rs`, `validate_object_complete` and `exceptions()` reading records their own way.
   - #246 left: move the recipe checks in `kernel/provider` (cpython, rust, rust_path) onto `Selected::checked_artifact`. Deferred because those files wake the heavy suite.
   - #248 sandbox and gitsrc: collapse the _with_activity twin of every entry point.

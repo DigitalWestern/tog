@@ -286,6 +286,7 @@ fn framing(headers: &Headers, http10: bool) -> Result<Framing, ParseError> {
     }
 }
 
+#[cfg(test)]
 /// Read one request from `reader`. Refuses a request whose bytes arrived
 /// together with the start of another one: this subset answers one request
 /// before it reads the next, and a pipelined second request is exactly the

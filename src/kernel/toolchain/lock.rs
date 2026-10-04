@@ -615,6 +615,7 @@ impl EcoLock {
         &self.bundle_id
     }
 
+    #[cfg(test)]
     /// The primary component(s), in comparison order.
     pub fn primary(&self) -> &[String] {
         &self.primary

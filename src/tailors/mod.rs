@@ -51,11 +51,10 @@ pub struct ClosureListing {
 }
 
 /// What a sync asks of one tailor: the flags that change how it works
-/// and the toolchain it must use. With `frozen` the caller skips `prepare`
-/// and each tailor validates the committed lock instead of writing inputs.
+/// and the toolchain it must use. Under `--frozen` the caller skips
+/// `prepare`, so the tailor syncs from the committed lock.
 pub struct SyncRequest<'a> {
     pub fresh: bool,
-    pub frozen: bool,
     pub toolchain: &'a Selected,
     /// Every selection the project resolved, keyed by lock ecosystem. A
     /// tailor that builds with another ecosystem's toolchain (node-gyp's
@@ -64,13 +63,6 @@ pub struct SyncRequest<'a> {
 }
 
 impl SyncRequest<'_> {
-    /// The project's own selection for a helper ecosystem (`python`,
-    /// `rust`), when its toolchain lock names one. `None` means the project
-    /// has no such section, and the caller uses the shipped default.
-    pub fn helper(&self, lock_ecosystem: &str) -> Option<&Selected> {
-        self.selections.get(lock_ecosystem)
-    }
-
     /// Every helper `tailor` builds with, decided as [`helper_selections`]
     /// decides them from this sync's selections.
     pub fn helpers(&self, tailor: &dyn Tailor) -> io::Result<BTreeMap<String, Selected>> {

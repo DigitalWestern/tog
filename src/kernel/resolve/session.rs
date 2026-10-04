@@ -431,6 +431,7 @@ impl State {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn note_port(&self, port: u16) {
         self.inner().diagnostics.port.get_or_insert(port);
     }

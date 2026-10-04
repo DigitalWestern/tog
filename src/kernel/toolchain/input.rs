@@ -625,7 +625,9 @@ pub fn discover(root: &ProjectRoot, ecosystem: &str) -> io::Result<Vec<InputRow>
     Ok(rows)
 }
 
-/// Every ecosystem this module knows, in lock order.
+/// Every ecosystem this module knows, in lock order. Only the test that
+/// every tailor's lock ecosystem is one of them reads it.
+#[cfg(test)]
 pub const ECOSYSTEMS: [&str; 7] = ["python", "node", "ruby", "go", "rust", "elixir", "dotnet"];
 
 /// The named ecosystems, each with its consulted rows.
@@ -638,11 +640,6 @@ pub fn discover_many<'a>(
         out.push((ecosystem.to_string(), discover(root, ecosystem)?));
     }
     Ok(out)
-}
-
-/// All seven ecosystems, each with its consulted rows.
-pub fn discover_all(root: &ProjectRoot) -> io::Result<Vec<(String, Vec<InputRow>)>> {
-    discover_many(root, ECOSYSTEMS)
 }
 
 #[cfg(test)]

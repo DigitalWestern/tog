@@ -427,7 +427,6 @@ pub(crate) fn sync_preflighted(
         }
         let request = SyncRequest {
             fresh,
-            frozen,
             toolchain: selected,
             selections: &toolchain.entries,
         };
@@ -1524,7 +1523,6 @@ mod tests {
         let selections = std::collections::BTreeMap::new();
         let request = SyncRequest {
             fresh: false,
-            frozen: false,
             toolchain: toolchain.get("python").unwrap(),
             selections: &selections,
         };

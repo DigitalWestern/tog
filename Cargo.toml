@@ -57,6 +57,11 @@ rcgen = { version = "0.13", default-features = false, features = ["ring", "pem"]
 # itself, without following symlinks; only `glob::Pattern` is used.
 glob = "0.3"
 
+[lints.rust]
+# `--cfg tog_dead_code` makes the internal modules private, so rustc's
+# dead-code lint sees what no command reaches (#247).
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(tog_dead_code)"] }
+
 # CI runs `cargo clippy --locked --all-targets -- -D warnings`, so every
 # clippy warning fails the build. These few are allowed project-wide.
 [lints.clippy]

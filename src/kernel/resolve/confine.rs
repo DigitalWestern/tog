@@ -24,7 +24,7 @@
 
 use crate::kernel::activity::StoreActivity;
 use crate::kernel::resolve::relay::{self, RelayRecord, ToolStatus};
-use crate::kernel::resolve::snapshot::{self, Snapshot};
+use crate::kernel::resolve::snapshot::Snapshot;
 use crate::kernel::sandbox;
 use crate::kernel::store::{self, Store};
 use std::ffi::{OsStr, OsString};
@@ -402,6 +402,7 @@ const GIT_UNSET: &[&str] = &[
     "GIT_CONFIG_SYSTEM",
 ];
 
+#[cfg(test)]
 /// The tools with a forced-settings row.
 pub fn forced_tools() -> impl Iterator<Item = &'static str> {
     FORCED.iter().map(|row| row.tool)
@@ -529,9 +530,7 @@ pub fn signing_key_paths() -> Vec<PathBuf> {
 
 /// A file's identity: its device and inode. The same file under any name,
 /// a hard link included, has the same one.
-pub use super::keyscrub::{
-    redact, redaction_mask, scrub_signing_key, signing_key_secrets, Scrubber,
-};
+pub use super::keyscrub::{scrub_signing_key, signing_key_secrets, Scrubber};
 
 pub type FileId = (u64, u64);
 
@@ -1363,12 +1362,6 @@ fn read_log(reader: OwnedFd) -> io::Result<Vec<u8>> {
 /// caller that wants to refuse before building one.
 pub fn refuse_key_in_snapshot_roots(roots: &[PathBuf]) -> io::Result<()> {
     refuse_protected_under_roots(&signing_key_paths(), roots)
-}
-
-/// The messages a refused door names its paths in, for callers that
-/// collect several.
-pub fn listing(items: &[String]) -> String {
-    snapshot::listing(items)
 }
 
 #[cfg(test)]

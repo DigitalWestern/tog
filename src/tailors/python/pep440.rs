@@ -160,10 +160,6 @@ impl Version {
         self.release.get(1).copied().unwrap_or(0)
     }
 
-    pub fn patch(&self) -> u64 {
-        self.release.get(2).copied().unwrap_or(0)
-    }
-
     pub fn is_prerelease(&self) -> bool {
         self.pre.is_some() || self.dev.is_some()
     }
@@ -451,22 +447,6 @@ impl SpecifierSet {
 
     pub fn matches(&self, version: &Version) -> bool {
         if version.is_prerelease() && !self.allows_prereleases() {
-            return false;
-        }
-        self.matches_raw(version)
-    }
-
-    /// PEP 440 allows a pre-release as a fallback when a set has no matching
-    /// final release. Callers that have a candidate set can use this method to
-    /// implement that final fallback without weakening ordinary comparisons.
-    pub fn matches_with_fallback(&self, version: &Version, candidates: &[Version]) -> bool {
-        if !version.is_prerelease() || self.allows_prereleases() {
-            return self.matches_raw(version);
-        }
-        if candidates
-            .iter()
-            .any(|candidate| !candidate.is_prerelease() && self.matches_raw(candidate))
-        {
             return false;
         }
         self.matches_raw(version)

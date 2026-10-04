@@ -198,6 +198,7 @@ impl Endpoint {
         }
     }
 
+    #[cfg(test)]
     /// Attach an `Authorization` value to requests for this origin only.
     /// The value must be a valid header value (visible ASCII, space, and
     /// tab): the error names neither the value nor the bad byte, and a
@@ -218,10 +219,6 @@ impl Endpoint {
 
     pub fn host(&self) -> &str {
         &self.host
-    }
-
-    pub fn port(&self) -> u16 {
-        self.port
     }
 
     /// `https://host[:port]`.
@@ -294,6 +291,7 @@ impl ProxyAddress {
         format!("http://{}/{}/{route_id}/", self.address, self.token)
     }
 
+    #[cfg(test)]
     /// The session token, for the output checks that make sure it never
     /// reaches a published file.
     pub fn token(&self) -> &str {

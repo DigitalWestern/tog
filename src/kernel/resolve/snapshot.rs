@@ -75,10 +75,6 @@ impl PathGlob {
         })
     }
 
-    pub fn as_str(&self) -> &str {
-        &self.pattern
-    }
-
     /// Does the pattern cover `relative` (itself or an ancestor)?
     pub fn matches(&self, relative: &Path) -> bool {
         let components: Vec<&[u8]> = relative

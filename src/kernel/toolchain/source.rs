@@ -49,6 +49,7 @@ impl Endpoint {
         })
     }
 
+    #[cfg(test)]
     /// An endpoint that sends the referenced credential, and only there.
     pub fn with_credential(base: &str, credential: &str) -> io::Result<Endpoint> {
         let mut endpoint = Endpoint::new(base)?;
@@ -261,6 +262,7 @@ impl SourcePolicy {
         body()
     }
 
+    #[cfg(test)]
     pub fn publishers(&self) -> &[Publisher] {
         &self.publishers
     }

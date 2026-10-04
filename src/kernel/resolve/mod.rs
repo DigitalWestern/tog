@@ -225,10 +225,6 @@ impl<'a> ResolutionDoor<'a> {
         self.attribution
     }
 
-    pub fn kind(&self) -> DoorKind {
-        self.kind
-    }
-
     pub fn store(&self) -> &'a Store {
         self.store
     }

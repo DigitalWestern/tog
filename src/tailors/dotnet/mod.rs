@@ -90,6 +90,7 @@ fn sdk_spec(platform: Platform, selected: &Selected) -> io::Result<SdkSpec> {
     })
 }
 
+#[cfg(test)]
 /// The shipped catalog's SDK, for callers with no project selection to
 /// honor. Inside a project every caller realizes from the lock instead.
 fn shipped_selection() -> io::Result<Selected> {
@@ -190,21 +191,6 @@ pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
     let nuget_package = nuget_identity(&package_plan, &sdk.object_id(), &raw_hashes)
         .expect("NuGet package identity");
     vec![sdk, nuget_empty, nuget_package]
-}
-
-/// Ensure the pinned .NET SDK is realized (muxer at <obj>/dotnet).
-pub fn ensure_sdk(store: &Store, activity: &StoreActivity) -> io::Result<PathBuf> {
-    ensure_sdk_for(store, activity, Platform::host()?)
-}
-
-/// The shipped SDK, for callers with no project selection: tests and the
-/// host-side work that precedes a project's first sync.
-pub fn ensure_sdk_for(
-    store: &Store,
-    activity: &StoreActivity,
-    platform: Platform,
-) -> io::Result<PathBuf> {
-    realize_runtime(store, activity, platform, &shipped_selection()?)
 }
 
 /// Realize the SDK the selection names: its bytes, its version, its digest.

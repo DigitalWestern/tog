@@ -17,10 +17,12 @@ pub mod runtime;
 pub mod select;
 pub mod source;
 
-pub use resolve::{request_for, select_for};
+pub use resolve::select_for;
 pub use runtime::{shipped, ArtifactSpec, Selected, Source};
-pub use select::{Op, Request, Specifier, Version, VersionRequest};
-pub use source::{CredentialRef, Endpoint, Publisher, SourcePolicy};
+pub use select::{Request, Version, VersionRequest};
+#[cfg(test)]
+pub use source::Endpoint;
+pub use source::SourcePolicy;
 
 use crate::kernel::digest::Digest;
 use crate::kernel::platform::Platform;
@@ -426,11 +428,6 @@ impl Catalog {
 
     pub fn release(&self, key: &str) -> Option<&Bundle> {
         self.bundles.iter().find(|b| b.release == key)
-    }
-
-    /// The releases complete on every supported platform, in catalog order.
-    pub fn complete(&self) -> impl Iterator<Item = &Bundle> {
-        self.bundles.iter().filter(|b| b.complete_everywhere())
     }
 }
 

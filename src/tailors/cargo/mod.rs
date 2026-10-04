@@ -18,16 +18,17 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-pub use crate::kernel::provider::crates::{
-    lock_digest, plan_cargo, vendor_object_id, CargoCrate, CargoGitReference, CargoGitSource,
-    CargoPlan,
-};
+pub use crate::kernel::provider::crates::{lock_digest, plan_cargo, CargoPlan};
 pub(crate) use crate::kernel::provider::crates::{
     plan_git_sources, project_git_sources, tog_config_text_for,
 };
 pub use crate::kernel::provider::rust::{
-    preflight_platform, project_extras, project_extras_in, resolve_toolchain, runtime_object_id,
-    rust_object_id, toolchain_catalog, Extras,
+    preflight_platform, project_extras_in, runtime_object_id, toolchain_catalog, Extras,
+};
+#[cfg(test)]
+pub use crate::kernel::provider::{
+    crates::CargoCrate,
+    rust::{resolve_toolchain, rust_object_id},
 };
 
 /// Realize the base Rust toolchain `selected` names; see

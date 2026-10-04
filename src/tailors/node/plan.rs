@@ -465,7 +465,6 @@ fn npm_package_from_entry(
         bin,
         patch: None,
         git,
-        optional: entry["optional"].as_bool() == Some(true),
         foreign_platform: false,
         needs_workspace: false,
     }

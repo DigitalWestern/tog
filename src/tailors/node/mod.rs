@@ -59,6 +59,7 @@ fn wrap_ensure_node_error(error: io::Error) -> io::Error {
     io::Error::new(error.kind(), format!("ensure node: {error}"))
 }
 
+#[cfg(test)]
 /// Read the string-valued scripts from a package.json.
 pub fn package_scripts(package_json: &str) -> io::Result<BTreeMap<String, String>> {
     let package: serde_json::Value = serde_json::from_str(package_json)
@@ -149,6 +150,9 @@ static CATALOG: Shipped = Shipped::new(include_str!("catalog.toml"));
 pub struct PinnedNode {
     pub platform: Platform,
     pub version: &'static str,
+    /// Realization reads the URL from the selected lock row; the catalog
+    /// test checks this one's shape.
+    #[cfg(test)]
     pub url: &'static str,
     pub sha256: &'static str,
 }
@@ -173,6 +177,7 @@ pub fn node_pins() -> io::Result<&'static [PinnedNode]> {
                     .map(move |row| PinnedNode {
                         platform: row.platform,
                         version,
+                        #[cfg(test)]
                         url: row.url.as_str(),
                         sha256: row.digest.hex(),
                     })
@@ -400,9 +405,6 @@ pub struct NpmPackage {
     /// package content comes from the realized git object, not a tarball, and
     /// `integrity` carries `git:<commit>` rather than an SRI.
     pub git: Option<crate::kernel::gitsrc::GitSource>,
-    /// Install-script failures are kept by default; strict policy makes them
-    /// fatal for both optional and required packages.
-    pub optional: bool,
     /// A required package whose os/cpu/libc excludes this host, placed
     /// anyway because pnpm places it (recorded as `foreign-platform-package`).
     /// Its files are extracted; its install scripts never run.
@@ -852,7 +854,6 @@ pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
         bin: Vec::new(),
         patch: None,
         git: None,
-        optional: false,
         foreign_platform: false,
         needs_workspace: false,
     };
@@ -869,7 +870,6 @@ pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
         bin: Vec::new(),
         patch: None,
         git: None,
-        optional: false,
         foreign_platform: false,
         needs_workspace: false,
     };
@@ -960,7 +960,6 @@ pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
         bin: Vec::new(),
         patch: None,
         git: None,
-        optional: false,
         foreign_platform: false,
         needs_workspace: false,
     };
@@ -1159,7 +1158,6 @@ mod tests {
             bin: Vec::new(),
             patch: None,
             git: None,
-            optional: false,
             foreign_platform: false,
             needs_workspace: false,
         };
@@ -1271,7 +1269,6 @@ mod tests {
             bin: Vec::new(),
             patch: None,
             git: None,
-            optional: false,
             foreign_platform: false,
             needs_workspace: false,
         };
@@ -1391,7 +1388,6 @@ mod tests {
                     bin: Vec::new(),
                     patch: Some(patch),
                     git: None,
-                    optional: false,
                     foreign_platform: false,
                     needs_workspace: false,
                 }],
@@ -1528,7 +1524,6 @@ mod tests {
                 bin: vec![("a".into(), "bin/a.js".into())],
                 patch: None,
                 git: None,
-                optional: false,
                 foreign_platform: false,
                 needs_workspace: false,
             }],
@@ -1635,7 +1630,6 @@ mod tests {
             bin: Vec::new(),
             patch: None,
             git: None,
-            optional: false,
             foreign_platform: false,
             needs_workspace: false,
         };
@@ -1700,7 +1694,6 @@ mod tests {
                 url: "https://127.0.0.1:9/never-requested.tgz".into(),
                 integrity: TEST_SRI.into(),
                 bin: Vec::new(),
-                optional: false,
                 foreign_platform: false,
                 needs_workspace: false,
                 patch: None,
@@ -1779,7 +1772,6 @@ mod tests {
                 url: "https://127.0.0.1:9/never-requested.tgz".into(),
                 integrity: TEST_SRI.into(),
                 bin: Vec::new(),
-                optional: false,
                 foreign_platform: false,
                 needs_workspace: false,
                 patch: None,
@@ -1850,7 +1842,6 @@ mod tests {
                 url: "https://127.0.0.1:9/never-requested.tgz".into(),
                 integrity: TEST_SRI.into(),
                 bin: Vec::new(),
-                optional: false,
                 foreign_platform: false,
                 needs_workspace: false,
                 patch: None,
@@ -2150,7 +2141,6 @@ mod tests {
                 bin: Vec::new(),
                 patch: None,
                 git: None,
-                optional: false,
                 foreign_platform: false,
                 needs_workspace: false,
             }],
@@ -2197,7 +2187,6 @@ mod tests {
             bin: Vec::new(),
             patch: None,
             git: None,
-            optional: false,
             foreign_platform: false,
             needs_workspace: false,
         };
@@ -2439,7 +2428,6 @@ mod tests {
                 bin: Vec::new(),
                 patch: None,
                 git: None,
-                optional: false,
                 foreign_platform: false,
                 needs_workspace: false,
             }],
@@ -2523,7 +2511,6 @@ mod tests {
             bin: Vec::new(),
             patch: None,
             git: None,
-            optional: false,
             foreign_platform: false,
             needs_workspace: false,
         };
@@ -2960,7 +2947,6 @@ mod tests {
                     url: "https://127.0.0.1:9/never-requested.tgz".into(),
                     integrity: TEST_SRI.into(),
                     bin: Vec::new(),
-                    optional: false,
                     foreign_platform,
                     needs_workspace: false,
                     patch: None,
@@ -3032,7 +3018,6 @@ mod tests {
                 bin: Vec::new(),
                 patch: None,
                 git: None,
-                optional: false,
                 foreign_platform: true,
                 needs_workspace: false,
             }],
@@ -3101,7 +3086,6 @@ mod tests {
             bin: Vec::new(),
             patch: None,
             git: None,
-            optional: false,
             foreign_platform: false,
             needs_workspace,
         };
@@ -3483,7 +3467,6 @@ mod tests {
             url: "https://127.0.0.1:9/never-requested.tgz".into(),
             integrity: TEST_SRI.into(),
             bin: Vec::new(),
-            optional: false,
             foreign_platform: false,
             needs_workspace: false,
             patch: None,

@@ -658,7 +658,6 @@ fn resolved_packages(
             bin: Vec::new(),
             patch: node.patch.clone(),
             git,
-            optional: node.optional,
             // Placed although this host is excluded: only a required
             // package gets this far, and it was recorded when it was placed.
             foreign_platform: node_unsupported(platform, node).is_some(),
@@ -1229,7 +1228,6 @@ snapshots:
             assert!(package.bin.is_empty());
             assert!(package.patch.is_none());
             assert!(package.git.is_none());
-            assert!(!package.optional);
         }
         let links: Vec<(&str, &str)> = plan
             .links

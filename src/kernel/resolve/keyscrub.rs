@@ -190,11 +190,6 @@ pub struct Scrubber {
 }
 
 impl Scrubber {
-    /// A scrubber for the signing key's secrets ([`signing_key_secrets`]).
-    pub fn for_signing_key() -> Scrubber {
-        Scrubber::new(signing_key_secrets().to_vec())
-    }
-
     pub fn new(secrets: Vec<Vec<u8>>) -> Scrubber {
         let longest = secrets.iter().map(Vec::len).max().unwrap_or(0);
         Scrubber {
