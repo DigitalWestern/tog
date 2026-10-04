@@ -485,18 +485,14 @@ fn reject_workspaces_with(
     if gowork.is_some_and(|v| !v.is_empty() && v != "off") {
         return Err(err("GOWORK is set; Go workspaces are not supported yet"));
     }
-    let project_dir = project.path();
-    for dir in project_dir.ancestors() {
-        let found = if dir == project_dir {
-            project.is_input_file(Path::new("go.work"))
-        } else {
-            dir.join("go.work").is_file()
-        };
-        if found {
+    // Each directory above is reached from the held project, not its path.
+    for dir in project.ancestors() {
+        let dir = dir?;
+        if dir.is_input_file(Path::new("go.work")) {
             return Err(err(format!(
                 "{}/go.work found; Go workspaces are not supported yet — \
                  run from a single-module project",
-                dir.display()
+                dir.path().display()
             )));
         }
     }
@@ -2343,6 +2339,21 @@ mod tests {
     /// v0 builds single-module projects only: a `go.work` in the project or
     /// in any directory above it is refused, and so is a `GOWORK` naming a
     /// workspace file. `GOWORK=off` or empty is the single-module default.
+    /// A parent `go.work` is found above the held project, not at its path:
+    /// moving the parent away after the open does not hide it.
+    #[test]
+    fn a_parent_go_work_is_found_from_the_held_project() {
+        let temp = crate::kernel::testutil::TempDir::new();
+        let parent = temp.0.join("parent");
+        fs::create_dir_all(parent.join("module")).unwrap();
+        fs::write(parent.join("go.work"), "go 1.22\n").unwrap();
+        let root = ProjectRoot::open(&parent.join("module")).unwrap();
+        fs::rename(&parent, temp.0.join("moved")).unwrap();
+        fs::create_dir_all(parent.join("module")).unwrap();
+        let error = reject_workspaces_with(&root, None).unwrap_err();
+        assert!(error.to_string().contains("go.work found"), "{error}");
+    }
+
     #[test]
     fn go_workspaces_are_refused_in_the_project_above_it_and_through_gowork() {
         let scratch = TempDir::named("go-workspace-guard");

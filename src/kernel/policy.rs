@@ -480,8 +480,9 @@ pub fn load_with_sources(
 
 /// `load_with_sources` with the project directory itself read through a
 /// descriptor the caller holds: its own `.tog/policy.toml` is the one of
-/// the directory being synced, whatever its path names by then. Ancestor
-/// and machine policies are outside the project and still read by path.
+/// the directory being synced, whatever its path names by then, and its
+/// ancestors' are those of the directories that contain it. The machine
+/// policy is read by path.
 fn load_with_sources_from(
     project_dir: &Path,
     project: Option<&ProjectRoot>,
@@ -515,41 +516,69 @@ fn load_with_sources_from(
     // Every ancestor's project policy applies (union only tightens), so a
     // workspace-root policy governs builds started in a member directory
     // without tog having to know each ecosystem's rooting rule.
-    for dir in project_dir.ancestors() {
-        let path = dir.join(".tog/policy.toml");
-        if machine_path
-            .as_ref()
-            .is_some_and(|machine| path_identity(&path).as_ref() == Some(machine))
-        {
-            continue;
-        }
-        if let Some(project) = project.filter(|project| project.path() == dir) {
-            // The project's own policy is tog state under `.tog`: read with
-            // the strict no-follow walk, so a symlinked `.tog` or policy
-            // file is refused rather than read through.
-            let own = Path::new(".tog/policy.toml");
-            if let Some(bytes) = project.read_file(own)? {
-                let text = String::from_utf8(bytes).map_err(|_| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("{} is not valid UTF-8", path.display()),
-                    )
-                })?;
-                merge_text(
+    let is_machine = |identity: Option<PathIdentity>| {
+        machine_path.is_some() && identity.as_ref() == machine_path.as_ref()
+    };
+    let Some(project) = project else {
+        for dir in project_dir.ancestors() {
+            let path = dir.join(".tog/policy.toml");
+            if !is_machine(path_identity(&path)) {
+                merge_file(
                     &mut policy,
                     &mut sources,
                     &path,
-                    &text,
+                    false,
                     SourceOrigin::Project,
                 )?;
             }
-            continue;
         }
-        merge_file(
+        apply_requested_strictness(&mut policy, &mut sources, cli_strict);
+        return Ok((policy, sources));
+    };
+    // A held project's ancestors are reached from its descriptor, not its
+    // path, so they are the directories that contain the project synced.
+    for (depth, dir) in project.ancestors().enumerate() {
+        let dir = dir?;
+        let path = dir.path().join(".tog/policy.toml");
+        let own = Path::new(".tog/policy.toml");
+        let text = if depth == 0 {
+            // The project's own policy is tog state under `.tog`: read with
+            // the strict no-follow walk, so a symlinked `.tog` or policy
+            // file is refused rather than read through.
+            if is_machine(path_identity(&path)) {
+                continue;
+            }
+            dir.read_file(own)?.map(|bytes| (bytes, path.clone()))
+        } else {
+            match dir.open_input_file(own)? {
+                Some(mut file) => {
+                    let meta = file.metadata()?;
+                    if is_machine(Some((meta.dev(), meta.ino()))) {
+                        continue;
+                    }
+                    let mut bytes = Vec::new();
+                    io::Read::read_to_end(&mut file, &mut bytes).map_err(|error| {
+                        io::Error::new(error.kind(), format!("read {}: {error}", path.display()))
+                    })?;
+                    Some((bytes, path.clone()))
+                }
+                None => None,
+            }
+        };
+        let Some((bytes, path)) = text else {
+            continue;
+        };
+        let text = String::from_utf8(bytes).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("{} is not valid UTF-8", path.display()),
+            )
+        })?;
+        merge_text(
             &mut policy,
             &mut sources,
             &path,
-            false,
+            &text,
             SourceOrigin::Project,
         )?;
     }
@@ -1571,6 +1600,28 @@ deny = ["git-dependency"]"#,
             assert_eq!(serialized, format!("\"{}\"", origin.as_str()));
             assert_eq!(origin.as_str(), origin.as_str().to_lowercase());
         }
+    }
+
+    /// An ancestor's policy is the one above the held project: a parent
+    /// renamed away after the project was opened still governs it, and a
+    /// policy-free directory put at the old path does not lift it.
+    #[test]
+    fn an_ancestor_policy_is_read_from_the_directory_holding_the_project() {
+        let temp = crate::kernel::testutil::TempDir::new();
+        let home = temp.0.join("home");
+        let parent = temp.0.join("parent");
+        fs::create_dir_all(&home).unwrap();
+        fs::create_dir_all(parent.join("project")).unwrap();
+        fs::create_dir_all(parent.join(".tog")).unwrap();
+        fs::write(parent.join(".tog/policy.toml"), "strict = true\n").unwrap();
+        let _env = test_env_lock();
+        let _home = EnvVarGuard::set("HOME", home.as_os_str());
+        let _policy = EnvVarGuard::remove("TOG_POLICY");
+        let root = ProjectRoot::open(&parent.join("project")).unwrap();
+        fs::rename(&parent, temp.0.join("moved")).unwrap();
+        fs::create_dir_all(parent.join("project")).unwrap();
+        let (policy, _) = load_with_sources_from(root.path(), Some(&root), false).unwrap();
+        assert!(policy.strict);
     }
 
     #[test]

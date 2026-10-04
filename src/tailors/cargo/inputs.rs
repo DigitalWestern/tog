@@ -48,58 +48,89 @@ pub struct CargoInputs {
 /// would print the key. tog's own reads name a parse error's position only,
 /// and a manifest that is the signing key is refused by name.
 pub fn locate_cargo_root(cwd: &Path) -> io::Result<PathBuf> {
-    let cwd = std::fs::canonicalize(cwd)
+    let held = ProjectRoot::open(cwd)
         .map_err(|error| io::Error::new(error.kind(), format!("{}: {error}", cwd.display())))?;
+    Ok(locate_held_cargo_root(&held)?.0)
+}
+
+/// `locate_cargo_root` for a held project: every manifest above it is read
+/// from the directories that contain the held one (`ProjectRoot::ancestors`),
+/// not by path, and the root comes back held too. A `package.workspace`
+/// root is opened below the nearest of those directories that contains it.
+pub(crate) fn locate_held_cargo_root(project: &ProjectRoot) -> io::Result<(PathBuf, ProjectRoot)> {
     let keys = crate::kernel::resolve::confine::signing_key_ids();
-    let manifest = cwd
-        .ancestors()
-        .map(|dir| dir.join("Cargo.toml"))
-        .find(|manifest| manifest.is_file())
-        .ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::NotFound,
-                format!(
-                    "could not find Cargo.toml in {} or any parent directory",
-                    cwd.display()
-                ),
-            )
-        })?;
-    let dir = manifest.parent().unwrap_or(Path::new("/"));
-    let table = read_manifest(&manifest, &keys)?;
+    let manifest_name = Path::new("Cargo.toml");
+    let mut found = None;
+    for dir in project.ancestors() {
+        let dir = dir?;
+        if dir.is_input_file(manifest_name) {
+            found = Some(dir);
+            break;
+        }
+    }
+    let dir = found.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            format!(
+                "could not find Cargo.toml in {} or any parent directory",
+                project.path().display()
+            ),
+        )
+    })?;
+    let manifest = dir.path().join(manifest_name);
+    let table = read_manifest(&dir, &keys)?;
     let named = table
         .get("package")
         .and_then(|package| package.get("workspace"))
         .and_then(|workspace| workspace.as_str());
     if let Some(named) = named {
-        let root = normalize(&dir.join(named));
-        if !root.join("Cargo.toml").is_file() {
-            return Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                format!(
-                    "{} names the workspace {named:?}, which has no Cargo.toml",
-                    manifest.display()
-                ),
-            ));
-        }
-        return Ok(root);
+        let root = normalize(&dir.path().join(named));
+        let held = held_below(&dir, &root)?
+            .filter(|held| held.is_input_file(manifest_name))
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!(
+                        "{} names the workspace {named:?}, which has no Cargo.toml",
+                        manifest.display()
+                    ),
+                )
+            })?;
+        return Ok((root, held));
     }
     if table.contains_key("workspace") {
-        return Ok(dir.to_path_buf());
+        return Ok((dir.path().to_path_buf(), dir));
     }
     for ancestor in dir.ancestors().skip(1) {
-        let candidate = ancestor.join("Cargo.toml");
-        if !candidate.is_file() {
+        let ancestor = ancestor?;
+        if !ancestor.is_input_file(manifest_name) {
             continue;
         }
-        let outer = read_manifest(&candidate, &keys)?;
+        let outer = read_manifest(&ancestor, &keys)?;
         let Some(workspace) = outer.get("workspace").and_then(|w| w.as_table()) else {
             continue;
         };
-        if !excludes(ancestor, workspace, &manifest) {
-            return Ok(ancestor.to_path_buf());
+        if !excludes(ancestor.path(), workspace, &manifest) {
+            return Ok((ancestor.path().to_path_buf(), ancestor));
         }
     }
-    Ok(dir.to_path_buf())
+    Ok((dir.path().to_path_buf(), dir))
+}
+
+/// `path` opened below the nearest directory containing `from` (itself
+/// included) whose path is a prefix of it; `None` when it is absent or not
+/// a directory.
+fn held_below(from: &ProjectRoot, path: &Path) -> io::Result<Option<ProjectRoot>> {
+    for dir in from.ancestors() {
+        let dir = dir?;
+        if let Some(rest) = dir.relative(path) {
+            if rest.as_os_str().is_empty() {
+                return Ok(Some(dir));
+            }
+            return dir.input_subdir(rest);
+        }
+    }
+    Ok(None)
 }
 
 /// cargo's `is_excluded`: `manifest` is under an `exclude` entry of the
@@ -139,19 +170,19 @@ fn normalize(path: &Path) -> PathBuf {
 /// (by device and inode, so a hard link too) is refused by name, anything
 /// but a regular file is refused, and a parse error names its position.
 fn read_manifest(
-    path: &Path,
+    dir: &ProjectRoot,
     keys: &[crate::kernel::resolve::confine::FileId],
 ) -> io::Result<toml::Table> {
     use std::io::Read;
-    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    use std::os::unix::fs::MetadataExt;
+    let path = &dir.path().join("Cargo.toml");
     let context = |error: io::Error| {
         io::Error::new(error.kind(), format!("read {}: {error}", path.display()))
     };
-    let mut file = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC)
-        .open(path)
-        .map_err(context)?;
+    let mut file = dir
+        .open_input_file(Path::new("Cargo.toml"))
+        .map_err(context)?
+        .ok_or_else(|| context(io::ErrorKind::NotFound.into()))?;
     let meta = file.metadata().map_err(context)?;
     if keys.contains(&(meta.dev(), meta.ino())) {
         return Err(io::Error::new(
@@ -244,7 +275,7 @@ fn locate_workspace(
 ) -> io::Result<(PathBuf, PathBuf, ProjectRoot)> {
     // Found before anything is realized, by tog's own walk: no cargo runs
     // on the host.
-    let root = locate_cargo_root(project.path())?;
+    let (root, workspace) = locate_held_cargo_root(project)?;
     // Cargo is the one tailor whose registered root is not the directory
     // sync was run in: a member of a workspace sends its closure and its
     // record to the workspace root. The preflight checked the invocation
@@ -252,7 +283,6 @@ fn locate_workspace(
     // a vendor object or a cargo-home lands in a workspace that cannot be
     // registered and so cannot be protected.
     store::Store::check_registrable(&root)?;
-    let workspace = workspace_root(project, &root)?;
     let extras = cargo::project_extras_in(lock_root)?;
     let rust_obj = cargo::realize_toolchain(store, activity, platform, toolchain, &extras)?;
     Ok((rust_obj, root, workspace))
@@ -289,20 +319,16 @@ pub fn ensure_lock(
     Ok(())
 }
 
-/// The workspace root Cargo reported, held as a descriptor: the project
-/// itself or a directory inside it resolved from the project's descriptor,
-/// and only a root above the project opened by its path.
+/// The workspace root Cargo reported, held as a descriptor and resolved
+/// from the project's (`held_below`): the project itself, a directory
+/// inside it, or one below a directory that contains it.
 pub(crate) fn workspace_root(project: &ProjectRoot, root: &Path) -> io::Result<ProjectRoot> {
-    match project.relative(root) {
-        Some(relative) if relative.as_os_str().is_empty() => project.try_clone(),
-        Some(relative) => project.input_subdir(relative)?.ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::NotFound,
-                format!("workspace root {} is not a directory", root.display()),
-            )
-        }),
-        None => ProjectRoot::open(root),
-    }
+    held_below(project, root)?.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("workspace root {} is not a directory", root.display()),
+        )
+    })
 }
 
 /// The workspace's Cargo.lock, read through the held descriptor; `None`
@@ -421,7 +447,7 @@ mod tests {
         let project = base.join("p");
         std::fs::create_dir_all(&project).unwrap();
         std::fs::hard_link(&key, project.join("Cargo.toml")).unwrap();
-        let error = read_manifest(&project.join("Cargo.toml"), &keys)
+        let error = read_manifest(&ProjectRoot::open(&project).unwrap(), &keys)
             .unwrap_err()
             .to_string();
         assert!(error.contains("is the signing key"), "{error}");
@@ -429,6 +455,37 @@ mod tests {
         // Without the key known, the parse error is position only.
         let error = locate_cargo_root(&project).unwrap_err().to_string();
         assert!(!error.contains(SEED), "{error}");
+    }
+
+    /// The workspace above a held member is found, and held, from the
+    /// member's descriptor: a workspace renamed away after the open is
+    /// still the one returned, not a directory put at its path.
+    #[test]
+    fn a_held_member_finds_the_workspace_that_contains_it() {
+        let temp = TempDir::new();
+        let ws = temp.0.canonicalize().unwrap().join("ws");
+        std::fs::create_dir_all(ws.join("member")).unwrap();
+        std::fs::write(
+            ws.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"member\"]\n",
+        )
+        .unwrap();
+        std::fs::write(ws.join("member/Cargo.toml"), "[package]\nname = \"m\"\n").unwrap();
+        let member = ProjectRoot::open(&ws.join("member")).unwrap();
+        std::fs::rename(&ws, temp.0.join("moved")).unwrap();
+        std::fs::create_dir_all(ws.join("member")).unwrap();
+        std::fs::write(ws.join("member/Cargo.toml"), "[package]\nname = \"m\"\n").unwrap();
+        let (root, held) = locate_held_cargo_root(&member).unwrap();
+        assert_eq!(root, ws);
+        let text = held
+            .read_input_string(Path::new("Cargo.toml"))
+            .unwrap()
+            .unwrap();
+        assert!(text.contains("[workspace]"), "{text}");
+        let again = workspace_root(&member, &root).unwrap();
+        assert!(again.is_input_file(Path::new("Cargo.toml")));
+        assert!(again.is_input_dir(Path::new("member")));
+        assert!(!ws.join("Cargo.toml").exists());
     }
 
     #[test]

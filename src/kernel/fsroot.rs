@@ -752,6 +752,49 @@ impl ProjectRoot {
         path.strip_prefix(&self.path).ok()
     }
 
+    /// The directory that contains the held one, reached through `..` from
+    /// the descriptor, never the path: while `check_still_named` holds it is
+    /// the path's parent, and if the project is moved it is wherever the
+    /// held directory now is. `None` at `/`. Its `path` is `path().parent()`,
+    /// for messages.
+    pub fn parent(&self) -> io::Result<Option<ProjectRoot>> {
+        let Some(path) = self.path.parent() else {
+            return Ok(None);
+        };
+        let dir =
+            open_file_at(self.dir.as_raw_fd(), b"..", DIRECTORY_FLAGS, 0).map_err(|error| {
+                io::Error::new(error.kind(), format!("open {}: {error}", path.display()))
+            })?;
+        if same_inode(&fd_stat(dir.as_raw_fd())?, &fd_stat(self.dir.as_raw_fd())?) {
+            return Ok(None);
+        }
+        Ok(Some(ProjectRoot {
+            _held: None,
+            dir,
+            path: path.to_path_buf(),
+        }))
+    }
+
+    /// This root, then each directory above it (`parent`), up to `/`. Opened
+    /// one at a time as the walk reaches it, so a walk that stops early
+    /// holds nothing more.
+    pub fn ancestors(&self) -> impl Iterator<Item = io::Result<ProjectRoot>> {
+        let mut next = Some(self.try_clone());
+        std::iter::from_fn(move || {
+            let current = next.take()?;
+            if let Ok(root) = &current {
+                next = root.parent().transpose();
+            }
+            Some(current)
+        })
+    }
+
+    /// A project input opened for reading the way `read_input` resolves it,
+    /// for a caller that needs the file itself (its device and inode).
+    pub fn open_input_file(&self, relative: &Path) -> io::Result<Option<fs::File>> {
+        self.open_input(relative)
+    }
+
     fn open_input(&self, relative: &Path) -> io::Result<Option<fs::File>> {
         let name = input_name(relative)?;
         let display = self.path.join(relative);
