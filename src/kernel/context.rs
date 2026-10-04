@@ -28,8 +28,7 @@ impl Context {
     }
 
     /// Open a context whose project directory is independent of the process
-    /// cwd. Production dispatch uses `open`, which keeps the existing dynamic
-    /// cwd behavior needed by dependency edits.
+    /// cwd. Production dispatch uses `open`, which reads the cwd.
     pub fn open_in(platform: Platform, project_dir: &std::path::Path) -> io::Result<Self> {
         Self::open_with_project_dir(platform, Some(project_dir.to_path_buf()))
     }
@@ -47,9 +46,7 @@ impl Context {
         })
     }
 
-    /// The directory `open_in` pinned, or the current directory read fresh
-    /// on every call: `add`/`remove`/`update` may change directory to the
-    /// project the edit landed in before running the ordinary sync.
+    /// The directory `open_in` pinned, or the current directory.
     pub fn project_dir(&self) -> PathBuf {
         self.project_dir.clone().unwrap_or_else(project_dir)
     }

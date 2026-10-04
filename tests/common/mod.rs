@@ -114,9 +114,17 @@ pub fn command_for(binary: &Path, cwd: &Path, home: &Path, store: &Path) -> Comm
     configure(Command::new(binary), cwd, home, store)
 }
 
-/// The environment [`command_for`] gives the binary, applied to `command`,
-/// which may be a wrapper that execs the binary.
-fn configure(mut command: Command, cwd: &Path, home: &Path, store: &Path) -> Command {
+/// A child that is not tog (`git`, the test binary re-run) with the
+/// developer's environment kept out, as [`command`] keeps it out of tog:
+/// no `TOG_*` variable, `HOME` at `home`, and no global or system git
+/// config (signing, hooks, `init.defaultBranch`, `safe.directory`).
+pub fn child(program: impl AsRef<std::ffi::OsStr>, home: &Path) -> Command {
+    scrubbed(Command::new(program), home)
+}
+
+/// Drop the developer's `TOG_*` variables and point `HOME` and git's
+/// config at the scratch world.
+fn scrubbed(mut command: Command, home: &Path) -> Command {
     for (name, _) in std::env::vars_os() {
         let leaks = name
             .to_str()
@@ -126,8 +134,18 @@ fn configure(mut command: Command, cwd: &Path, home: &Path, store: &Path) -> Com
         }
     }
     command
-        .current_dir(cwd)
         .env("HOME", home)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1");
+    command
+}
+
+/// The environment [`command_for`] gives the binary, applied to `command`,
+/// which may be a wrapper that execs the binary.
+fn configure(command: Command, cwd: &Path, home: &Path, store: &Path) -> Command {
+    let mut command = scrubbed(command, home);
+    command
+        .current_dir(cwd)
         .env("TOG_STORE", store)
         .env(
             "TOG_RELEASE_MANIFEST",
@@ -381,7 +399,7 @@ pub fn add_git_dependency(root: &Path, project: &Path) -> String {
     let repo = root.join("gitdep-repo");
     std::fs::create_dir_all(repo.join("src")).unwrap();
     let git = |args: &[&str]| {
-        let output = Command::new("git")
+        let output = child("git", root)
             .args(args)
             .current_dir(&repo)
             .output()
