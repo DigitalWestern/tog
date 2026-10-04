@@ -557,10 +557,8 @@ pub fn read_closure(project_dir: &Path, ecosystem: &str) -> io::Result<serde_jso
 }
 
 /// Is there a closure record for `ecosystem` in the held project?
-pub fn has_closure(project: &ProjectRoot, ecosystem: &str) -> bool {
-    project
-        .entry(Path::new(&format!(".tog/closures/{ecosystem}.json")))
-        .is_ok_and(|entry| entry != Entry::Absent)
+pub fn has_closure(project: &ProjectRoot, ecosystem: &str) -> io::Result<bool> {
+    Ok(project.entry(Path::new(&format!(".tog/closures/{ecosystem}.json")))? != Entry::Absent)
 }
 
 /// `read_closure` through a project the command holds: the record is tog

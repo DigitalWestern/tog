@@ -222,3 +222,5 @@ After the proxy: the test-suite audit (#351) and then the quality review
 - **Held project mounts (#497).** Sandbox mounts still resolve project paths. Bind the held directory through a descriptor rather than accepting a replacement at that name. See `src/kernel/sandbox/`.
 - **Held confined snapshots (#498).** Confined snapshot creation still reopens the project path. Carry the held root into the snapshot walk. See `src/kernel/resolve/confine/`.
 - **Tool-opened absolute inputs (#499).** Delegated tools can reopen absolute arguments and environment paths, including `BUNDLE_GEMFILE`. Choose a held input or an immutable snapshot for each such input.
+
+- **Machine policy descriptor (#500).** Read and identify `TOG_POLICY` or the home policy from one opened file, so replacement cannot mix policy bytes with another inode during deduplication. See `src/kernel/policy.rs`.

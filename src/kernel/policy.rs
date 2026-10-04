@@ -483,7 +483,7 @@ pub fn load_with_sources(
 /// the directory being synced, whatever its path names by then, and its
 /// ancestors' are those of the directories that contain it. The machine
 /// policy is read by path.
-fn load_with_sources_from(
+pub(crate) fn load_with_sources_from(
     project_dir: &Path,
     project: Option<&ProjectRoot>,
     cli_strict: bool,

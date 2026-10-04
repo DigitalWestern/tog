@@ -572,6 +572,22 @@ impl ProjectRoot {
         self
     }
 
+    /// A current filesystem name of the held directory, verified against
+    /// its identity. This also works after the original name is replaced.
+    pub(crate) fn current_name(&self) -> io::Result<PathBuf> {
+        #[cfg(target_os = "linux")]
+        let path = fs::read_link(format!("/proc/self/fd/{}", self.dir.as_raw_fd()))?;
+        #[cfg(not(target_os = "linux"))]
+        let path = self.path.canonicalize()?;
+        let now = walk_from_root(&path)?;
+        if !same_inode(&fd_stat(now.as_raw_fd())?, &fd_stat(self.dir.as_raw_fd())?) {
+            return Err(refusal(
+                "held directory name changed while resolving it".into(),
+            ));
+        }
+        Ok(path)
+    }
+
     /// Resolve an input alias without replacing the descriptor already held.
     /// Refuse if the resolved name no longer names that same directory.
     pub(crate) fn canonicalize_name(mut self) -> io::Result<Self> {

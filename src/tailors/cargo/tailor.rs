@@ -241,10 +241,8 @@ impl Tailor for Cargo {
         _cmd: &[String],
         command: &mut Command,
     ) -> io::Result<Vec<String>> {
-        let dir = project.path();
         let activity = &ctx.activity;
         let mut prefix = Vec::new();
-        let cargo_home = dir.join(".tog/cargo-home");
         if project.input_entry(Path::new(".tog/cargo-home"))? != Entry::Absent {
             let closure = comforter::read_closure_in(project, "cargo")?;
             // Store-contained resolution: a project-editable closure must never
@@ -256,9 +254,15 @@ impl Tailor for Cargo {
                 "rust_object",
                 "bin/rustc",
             )?;
+            let cargo_home = project
+                .subdir(Path::new(".tog/cargo-home"))?
+                .ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::NotFound, "held Cargo home disappeared")
+                })?
+                .current_name()?;
             prefix.push(cargo_home.join("bin").to_string_lossy().into_owned());
             prefix.push(rust_obj.join("bin").to_string_lossy().into_owned());
-            command.env("CARGO_HOME", cargo_home.canonicalize()?);
+            command.env("CARGO_HOME", &cargo_home);
             command.env_remove("RUSTUP_HOME");
             command.env_remove("RUSTUP_TOOLCHAIN");
         }
