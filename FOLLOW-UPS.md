@@ -125,7 +125,6 @@ After the proxy: the test-suite audit (#351) and then the quality review
   - #317 archive: hard links in registry packages are refused; allow contained ones.
   - #321 tests: kernel_smoke realizes against the developer's own store, so a local run can pass on cached objects.
   - #319 archive: read_member runs a tar -t cross-check it does not need.
-  - #318 architecture: tar_runs_only_in_kernel_archive cannot see a bare "tar".
 - **Found in the #323 review (2026-09-26).** One issue and one PR each:
   - #324 ci: adding the heavy label during a path-triggered heavy run restarts it on the same commit.
   - #325 ci: tailor changes to extraction do not trigger the heavy suite on their own.
