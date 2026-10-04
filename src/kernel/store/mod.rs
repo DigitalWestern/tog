@@ -25,8 +25,7 @@ mod roots;
 use env::home;
 #[cfg(test)]
 pub(crate) use env::STORE_ENV_LOCK;
-#[cfg(test)]
-pub(crate) use format::lock_root as lock_root_for_test;
+pub(crate) use format::lock_root;
 pub(crate) use format::RESET_REMOVES;
 pub use format::{refusal_fix, Refused, StoreFormat, FORMAT_FILE, STORE_FORMAT};
 pub use fsops::*;
@@ -238,7 +237,7 @@ impl Store {
         // Held while the marker is read and whatever is missing is
         // created: a reset holds the same lock while it empties the store,
         // and a second tog creating this store waits for the first.
-        let _held = format::lock_root(&root).map_err(|error| open_error(&root, from_env, error))?;
+        let _held = format::lock_root(&root)?;
         match format::probe(&root)? {
             StoreFormat::Current => {}
             // The marker goes in before the first namespace, so neither a
@@ -1637,7 +1636,14 @@ mod tests {
         );
         assert!(text.contains("has no format marker"), "{text}");
         assert!(text.contains("an older tog wrote it"), "{text}");
-        assert_eq!(refusal_fix(&error), Some("tog gc --reset"));
+        // Not the store a bare `tog` selects, so the fix names it.
+        assert_eq!(
+            refusal_fix(&error).unwrap(),
+            format!(
+                "TOG_STORE={} tog gc --reset",
+                old.canonicalize().unwrap().display()
+            )
+        );
         assert!(text.contains("move the directory aside"), "{text}");
         assert!(!old.join(FORMAT_FILE).exists());
         assert!(!old.join("cache").exists(), "a refused store was changed");
@@ -1659,7 +1665,7 @@ mod tests {
         fs::create_dir(&unknown).unwrap();
         fs::write(unknown.join(FORMAT_FILE), b"hello\n").unwrap();
         let error = Store::open_at(&unknown).unwrap_err();
-        assert_eq!(refusal_fix(&error), Some("tog gc --reset"));
+        assert!(refusal_fix(&error).unwrap().ends_with(" tog gc --reset"));
         let text = error.to_string();
         assert!(
             text.contains("a format marker this tog does not know"),

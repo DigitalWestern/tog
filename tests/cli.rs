@@ -2644,11 +2644,29 @@ fn x_clean_skips_an_environment_whose_store_this_tog_does_not_read() {
             stdout.contains("its originating store is not one this tog reads"),
             "{case}: {stdout}"
         );
-        assert!(stdout.contains("fix: tog gc --reset"), "{case}: {stdout}");
+        // The fix is for the environment's store, not the selected one: a
+        // bare `tog gc --reset` here would empty store B.
+        let store_a = store_a.canonicalize().unwrap();
+        assert!(
+            stdout.contains(&format!(
+                "; fix: TOG_STORE={} tog gc --reset)",
+                store_a.display()
+            )),
+            "{case}: {stdout}"
+        );
         assert!(stdout.contains("skipped 1"), "{case}: {stdout}");
         untouched("from another store", &out);
 
-        // From the refused store itself: the same, by name.
+        // From the refused store itself: the same, and there the bare
+        // command is the right one.
+        let out = tog(&home.0, &home.0, &["x", "--clean"]);
+        assert_eq!(out.status.code(), Some(0), "{case}: {}", text(&out.stderr));
+        assert!(
+            text(&out.stdout).contains("; fix: tog gc --reset)"),
+            "{case}: {}",
+            text(&out.stdout)
+        );
+        untouched("from its own store, unfiltered", &out);
         let out = tog(&home.0, &home.0, &["x", "--clean", "ruff"]);
         assert_eq!(out.status.code(), Some(0), "{case}: {}", text(&out.stderr));
         untouched("from its own store", &out);
@@ -2658,6 +2676,140 @@ fn x_clean_skips_an_environment_whose_store_this_tog_does_not_read() {
             text(&out.stdout)
         );
     }
+}
+
+/// The fix `x --clean` prints for an environment whose store is refused is
+/// a command for that store. Pasted as printed, in a shell where
+/// `TOG_STORE` selects another, healthy store, it empties the refused one
+/// and leaves the selected one alone. The refused store's path has a space
+/// and an apostrophe in it, so the command only works if it is quoted.
+#[test]
+fn the_fix_x_clean_prints_resets_the_refused_store_and_no_other() {
+    let home = TempDir::boundary("cli-x-clean-fix");
+    let store_a = home.0.join("it's a store");
+    let store_b = home.0.join("store-b");
+    let (root, _) = registered_x_environment(&home.0, &store_a);
+    let store_a = store_a.canonicalize().unwrap();
+    let out = tog_at(
+        &home.0,
+        &home.0,
+        &store_a,
+        &["gc", "--register", root.to_str().unwrap()],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let object_a = std::fs::read_dir(store_a.join("objects"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .next()
+        .unwrap();
+    std::fs::remove_file(store_a.join("format")).unwrap();
+
+    // Store B: healthy, selected, and holding an object and a root of its
+    // own, which a reset aimed at it would remove.
+    fresh_store(&store_b);
+    let store_b = store_b.canonicalize().unwrap();
+    let object_b = publish_certified_object(&store_b, "kept-env");
+    let out = tog_at(&home.0, &home.0, &store_b, &["store", "roots"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    std::fs::write(store_b.join("roots/note"), b"mine").unwrap();
+
+    let out = tog_at(&home.0, &home.0, &store_b, &["x", "--clean"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let stdout = text(&out.stdout);
+    let fix = stdout
+        .lines()
+        .find_map(|line| line.split_once("; fix: "))
+        .and_then(|(_, rest)| rest.strip_suffix(')'))
+        .unwrap_or_else(|| panic!("no fix: {stdout}"));
+    assert_eq!(
+        fix,
+        format!(
+            "TOG_STORE='{}' tog gc --reset",
+            store_a.to_str().unwrap().replace('\'', "'\\''")
+        )
+    );
+
+    // Paste it: `tog` on PATH, TOG_STORE still naming store B.
+    let bin = home.0.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_tog"), bin.join("tog")).unwrap();
+    let out = common::command_for(Path::new("/bin/sh"), &home.0, &home.0, &store_b)
+        .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+        .arg("-c")
+        .arg(fix)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+
+    // Store A was emptied and is a store again.
+    assert!(!object_a.exists(), "the fix did not reset store A");
+    assert_eq!(
+        std::fs::read_to_string(store_a.join("format")).unwrap(),
+        "tog-store 1\n"
+    );
+    let out = tog_at(&home.0, &home.0, &store_a, &["store", "roots"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    // Store B is as it was.
+    assert!(
+        object_b.join("payload").is_file(),
+        "the fix emptied store B"
+    );
+    assert_eq!(std::fs::read(store_b.join("roots/note")).unwrap(), b"mine");
+    assert_eq!(
+        std::fs::read_to_string(store_b.join("format")).unwrap(),
+        "tog-store 1\n"
+    );
+
+    // And the environment can now be cleaned.
+    let out = tog_at(&home.0, &home.0, &store_b, &["x", "--clean"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(!root.exists(), "{}", text(&out.stdout));
+}
+
+/// A tog that finds another tog creating or emptying the store says what it
+/// is waiting for before it waits, and goes on when the store is released.
+#[test]
+fn a_tog_waiting_for_the_store_root_says_so() {
+    use std::io::BufRead as _;
+    use std::os::unix::io::AsRawFd;
+    let home = TempDir::boundary("cli-root-wait");
+    let store = home.0.join("store");
+    fresh_store(&store);
+    // What a reset holds while it works: an exclusive flock on the root.
+    let held = std::fs::File::open(&store).unwrap();
+    assert_eq!(unsafe { libc::flock(held.as_raw_fd(), libc::LOCK_EX) }, 0);
+    // Released when the test says so, or after a while on its own, so a
+    // tog that waits without a word fails the test and does not hang it.
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    let holder = std::thread::spawn(move || {
+        let _ = released.recv_timeout(std::time::Duration::from_secs(60));
+        drop(held);
+    });
+
+    let mut child = command(&home.0, &home.0, &store)
+        .args(["store", "roots"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stderr = std::io::BufReader::new(child.stderr.take().unwrap());
+    let mut line = String::new();
+    stderr.read_line(&mut line).unwrap();
+    assert_eq!(
+        line,
+        format!(
+            "tog: waiting for another tog that is creating or emptying the store at {}\n",
+            store.canonicalize().unwrap().display()
+        )
+    );
+    assert!(
+        child.try_wait().unwrap().is_none(),
+        "tog did not wait for the held store"
+    );
+    release.send(()).unwrap();
+    holder.join().unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(out.status.code(), Some(0));
 }
 
 /// Cleanup recovers the originating store from the `x.json` request record

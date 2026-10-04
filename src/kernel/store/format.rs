@@ -85,11 +85,12 @@ pub enum StoreFormat {
 
 /// The error a refused store is reported with: the reason as its message,
 /// and the one command that is the way out as a separate `fix`, so the
-/// top level prints it on its own `fix:` line.
+/// top level prints it on its own `fix:` line. The command acts on the
+/// store that was refused: see `StoreFormat::fix_for`.
 #[derive(Debug)]
 pub struct Refused {
     pub message: String,
-    pub fix: &'static str,
+    pub fix: String,
 }
 
 impl std::fmt::Display for Refused {
@@ -101,11 +102,39 @@ impl std::fmt::Display for Refused {
 impl std::error::Error for Refused {}
 
 /// The `fix:` command of an error that is a store refusal, if it is one.
-pub fn refusal_fix(error: &io::Error) -> Option<&'static str> {
+pub fn refusal_fix(error: &io::Error) -> Option<&str> {
     error
         .get_ref()
         .and_then(|inner| inner.downcast_ref::<Refused>())
-        .map(|refused| refused.fix)
+        .map(|refused| refused.fix.as_str())
+}
+
+/// `path` as one word of a POSIX shell command: bare when every byte is
+/// one no shell reads specially, otherwise in single quotes, with each
+/// single quote inside written as `'\''`.
+fn shell_word(path: &Path) -> String {
+    let text = path.to_string_lossy();
+    let plain = !text.is_empty()
+        && text
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"/._-+:@%,".contains(&byte));
+    if plain {
+        text.into_owned()
+    } else {
+        format!("'{}'", text.replace('\'', "'\\''"))
+    }
+}
+
+/// `command`, made to act on the store at `root`. A bare `tog` acts on the
+/// store `selected` (what `TOG_STORE`, or the default, names): for any
+/// other store the command carries its own `TOG_STORE=`, so pasting it
+/// never empties the wrong one.
+fn command_on(command: &str, root: &Path, selected: Option<&Path>) -> String {
+    let same = |a: &Path, b: &Path| a == b || a.canonicalize().is_ok_and(|a| a == b);
+    match selected {
+        Some(selected) if same(root, selected) => command.to_string(),
+        _ => format!("TOG_STORE={} {command}", shell_word(root)),
+    }
 }
 
 impl StoreFormat {
@@ -151,12 +180,29 @@ impl StoreFormat {
         }
     }
 
-    /// The one command a `fix:` line names for a refused store: update for
-    /// a store a newer tog wrote, reset for the rest.
+    /// The one command that is the way out of a refused store: update for
+    /// a store a newer tog wrote, reset for the rest. This is the command
+    /// for the store a bare `tog` selects; `fix_for` is the one to print.
     pub fn fix(&self) -> &'static str {
         match self {
             StoreFormat::Newer(_) => "tog update --self",
             _ => "tog gc --reset",
+        }
+    }
+
+    /// `fix` as a `fix:` line prints it for the store at `root`. A reset
+    /// empties whichever store the command selects, so when `root` is not
+    /// the store a bare `tog` would use (an x environment's own store,
+    /// while `TOG_STORE` names another) the command names `root` itself:
+    /// `TOG_STORE=<root> tog gc --reset`. Updating tog is the same command
+    /// for every store.
+    pub fn fix_for(&self, root: &Path) -> String {
+        match self {
+            StoreFormat::Newer(_) => self.fix().to_string(),
+            _ => {
+                let selected = Store::configured_root().0.canonicalize().ok();
+                command_on(self.fix(), root, selected.as_deref())
+            }
         }
     }
 
@@ -167,7 +213,7 @@ impl StoreFormat {
                 io::ErrorKind::InvalidData,
                 Refused {
                     message,
-                    fix: self.fix(),
+                    fix: self.fix_for(root),
                 },
             )),
             None => Ok(()),
@@ -182,9 +228,35 @@ impl StoreFormat {
 /// moment it removes the marker until the new one is published, so an open
 /// never initialises namespaces inside a store that is being emptied and
 /// never judges one that is half created.
+///
+/// The wait is never silent: when another tog holds the root, one line
+/// says so before this one blocks. A filesystem with no `flock` on a
+/// directory cannot hold a store, and the error says that.
 pub(crate) fn lock_root(root: &Path) -> io::Result<fs::File> {
     let directory = open_store_directory(root, "store root")?;
-    directory.lock()?;
+    let unsupported = |error: io::Error| {
+        io::Error::new(
+            error.kind(),
+            format!(
+                "lock the store directory {}: {error}. tog takes a file lock (flock) on \
+                 the store directory before it creates or empties a store, so the store has to \
+                 be on a filesystem that supports one; point TOG_STORE at a directory on a \
+                 local disk",
+                root.display()
+            ),
+        )
+    };
+    match directory.try_lock() {
+        Ok(()) => {}
+        Err(fs::TryLockError::WouldBlock) => {
+            crate::kernel::ui::note(&format!(
+                "waiting for another tog that is creating or emptying the store at {}",
+                root.display()
+            ));
+            directory.lock().map_err(unsupported)?;
+        }
+        Err(fs::TryLockError::Error(error)) => return Err(unsupported(error)),
+    }
     Ok(directory)
 }
 
@@ -430,11 +502,17 @@ mod tests {
             assert_eq!(format.fix(), "tog gc --reset");
             let error = format.refuse(root).unwrap_err();
             assert_eq!(error.to_string(), message);
-            assert_eq!(refusal_fix(&error), Some("tog gc --reset"));
+            // `/somewhere/store` is not the store a bare `tog` selects.
+            assert_eq!(
+                refusal_fix(&error),
+                Some("TOG_STORE=/somewhere/store tog gc --reset")
+            );
         }
         let newer = StoreFormat::Newer(2);
         assert!(!newer.usable());
         assert_eq!(newer.fix(), "tog update --self");
+        // Updating tog is one command whatever store asked for it.
+        assert_eq!(newer.fix_for(root), "tog update --self");
         let newer = newer.refusal(root).unwrap();
         assert!(newer.contains("a newer tog wrote it"), "{newer}");
         assert!(newer.contains("tog-store 2"), "{newer}");
@@ -445,6 +523,53 @@ mod tests {
             .unwrap();
         assert!(unreadable.contains("Permission denied"), "{unreadable}");
         assert_eq!(refusal_fix(&io::Error::other("something else")), None);
+    }
+
+    /// A fix acts on the store that was refused: bare for the store a bare
+    /// `tog` selects, and naming any other store in a form a shell reads
+    /// back as exactly that path.
+    #[test]
+    fn a_fix_names_a_store_the_bare_command_would_not_select() {
+        let reset = "tog gc --reset";
+        let a = Path::new("/home/me/.tog/store");
+        assert_eq!(command_on(reset, a, Some(a)), reset);
+        assert_eq!(
+            command_on(reset, a, Some(Path::new("/elsewhere"))),
+            "TOG_STORE=/home/me/.tog/store tog gc --reset"
+        );
+        assert_eq!(
+            command_on(reset, a, None),
+            "TOG_STORE=/home/me/.tog/store tog gc --reset"
+        );
+        // A selected store named through a symlink is the same store.
+        let temp = TempDir::named("store-format-fix");
+        let real = temp.0.join("real");
+        fs::create_dir(&real).unwrap();
+        let real = real.canonicalize().unwrap();
+        let link = temp.0.join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        assert_eq!(command_on(reset, &link, Some(&real)), reset);
+
+        for (path, word) in [
+            ("/plain/path-1.0_x+y:z@h%,", "/plain/path-1.0_x+y:z@h%,"),
+            ("/with space/store", "'/with space/store'"),
+            ("/it's/store", "'/it'\\''s/store'"),
+            (
+                "/a$b`c\"d\\e;f&g|h*i?j(k)l<m>n~o#p!q",
+                "'/a$b`c\"d\\e;f&g|h*i?j(k)l<m>n~o#p!q'",
+            ),
+            ("/new\nline", "'/new\nline'"),
+            ("", "''"),
+        ] {
+            assert_eq!(shell_word(Path::new(path)), word, "{path:?}");
+            // And a shell reads the word back as the path.
+            let out = std::process::Command::new("/bin/sh")
+                .arg("-c")
+                .arg(format!("printf %s {word}"))
+                .output()
+                .unwrap();
+            assert_eq!(String::from_utf8_lossy(&out.stdout), path, "{word}");
+        }
     }
 
     /// Many togs creating one store at once: every one of them ends with

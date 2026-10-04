@@ -405,12 +405,12 @@ impl Store {
         Ok(entries)
     }
 
-    /// Diagnostic enumeration for `store roots`.  Unlike `roots()`, an entry
-    /// whose name is not a root key is reported as a diagnostic instead of
-    /// being skipped; this command is intentionally not a sweep authority.
-    pub fn root_diagnostics(&self) -> io::Result<Vec<RootDiagnostic>> {
+    /// Diagnostic enumeration for `store roots`, under the caller's lease
+    /// and creating nothing. Unlike `roots()`, an entry whose name is not a
+    /// root key is reported, not skipped: this is no sweep authority.
+    pub fn root_diagnostics(&self, activity: &StoreActivity) -> io::Result<Vec<RootDiagnostic>> {
+        self.require_activity(activity, "listing the registered roots")?;
         let roots = self.root.join("roots");
-        ensure_directory_tree(&self.root, Path::new("roots"))?;
         let roots_dir = open_store_directory(&roots, "roots")?;
         let mut diagnostics = Vec::new();
         for name in read_dir_names_at(roots_dir.as_raw_fd())? {

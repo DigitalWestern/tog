@@ -508,7 +508,9 @@ something else (`tog x --from httpie http`). Sharp edges of `x --clean`:
 - A running tool is left in place, reported as in use; retry after it exits.
 - An environment made under a store this tog refuses to open (see "Store
   format" in ARCHITECTURE.md) is left in place and reported as skipped,
-  with the fix for that store. Nothing in that store is read or changed.
+  with the fix for that store: `TOG_STORE=<that store> tog gc --reset`
+  when it is not the store this shell selects, so pasting the fix never
+  empties another store. Nothing in that store is read or changed.
 - An environment is keyed on the runtime it runs on as well as the tool, so
   a project with a toolchain lock gets the tool on the locked runtime and an
   `update --toolchain` gives the next run a fresh environment. An

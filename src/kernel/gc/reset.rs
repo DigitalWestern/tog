@@ -92,7 +92,7 @@ pub fn reset<W: Write>(
 
     // No `Store::open` reads the marker or creates a namespace from here
     // until the new marker is published.
-    root.lock()?;
+    let _root_lock = store::lock_root(&store.root)?;
 
     // The marker goes first, and its removal is made durable before
     // anything else is deleted: after a power failure the store is then
@@ -423,7 +423,9 @@ mod reset_tests {
                 error.to_string().contains("has no format marker"),
                 "{error}"
             );
-            assert_eq!(store::refusal_fix(&error), Some("tog gc --reset"));
+            assert!(store::refusal_fix(&error)
+                .unwrap()
+                .ends_with(" tog gc --reset"));
         }
         // The refusal released the lease it had taken: reset can run.
         run(&store, false).0.unwrap();
@@ -449,7 +451,9 @@ mod reset_tests {
         ));
         let error = Store::open_at(&store.root).unwrap_err();
         assert!(error.to_string().contains("cannot read"), "{error}");
-        assert_eq!(store::refusal_fix(&error), Some("tog gc --reset"));
+        assert!(store::refusal_fix(&error)
+            .unwrap()
+            .ends_with(" tog gc --reset"));
 
         let (result, text) = run(&store, true);
         result.unwrap();
@@ -467,7 +471,7 @@ mod reset_tests {
     fn open_waits_for_the_root_a_reset_holds() {
         let temp = TempStore::new("reset-root-lock");
         let store = temp.store();
-        let held = store::lock_root_for_test(&store.root);
+        let held = store::lock_root(&store.root).unwrap();
         fs::remove_file(store.root.join(FORMAT_FILE)).unwrap();
         fs::remove_dir_all(store.root.join("objects")).unwrap();
         let root = store.root.clone();
