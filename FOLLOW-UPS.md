@@ -110,7 +110,6 @@ After the proxy: the test-suite audit (#351) and then the quality review
   Each line is one issue and one PR, in order:
   - #238 http: pypi, rubygems, dotnet and deps call ureq directly, bypassing kernel::fetch.
   - #240 store: a CacheLease holds gc.lock exclusively, so separate tog processes download one at a time.
-  - #244 supervise: waits forever for stderr EOF if the child leaves a background process.
   - #247 dead code: about 90 unused items hidden by pub mod, plus a CI check to keep it at zero.
   - #245 kernel: consolidate duplicated primitives (base64, SRI, metadata parser, forest key, file hash, temp names).
   - #246 tailors: shared closure_state, checked_artifact, object_ref and merge_record helpers; cargo status misses GC'd objects.
