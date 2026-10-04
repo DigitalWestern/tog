@@ -36,7 +36,7 @@ impl RegistryTool for NodeTool {
         &["python"]
     }
 
-    fn helper_object_id(
+    fn helper_cache_key(
         &self,
         platform: Platform,
         helper: &str,
