@@ -114,8 +114,7 @@ After the proxy: the test-suite audit (#351) and then the quality review
   - #245 kernel: consolidate duplicated primitives. Left after the first pass: the file hash copy in `provider/crates.rs` and `fetch.rs` (heavy gate), the pid temp names in `fetch.rs`, `validate_object_complete` and `exceptions()` reading records their own way.
   - #246 left: move the recipe checks in `kernel/provider` (cpython, rust, rust_path) onto `Selected::checked_artifact`. Deferred because those files wake the heavy suite.
   - #248 sandbox and gitsrc: collapse the _with_activity twin of every entry point.
-  - #249 x.rs: reuse kernel fsops, one lock, one name validator, and split the file.
-  - #413 x clean: delete before unregister, corrupt registry entries, pathname ownership reads (from the #408 review). Do it with #249.
+  - #413 x clean: delete before unregister, corrupt registry entries, pathname ownership reads (from the #408 review).
   - #250 python manifest: four requirements include walkers; uv.lock silently drops edges; pypi host check is a substring.
   - #261 perf: every sync parses every metadata record before starting.
   - #251 commands: one project-discovery function; tog <script> and tog run <script> disagree.

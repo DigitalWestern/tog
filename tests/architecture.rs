@@ -220,6 +220,23 @@ const ALLOWED: &[(&str, &str, &str)] = &[
         "commands::deps::validate_spec",
         "argv validation",
     ),
+    // Likewise `tog x`'s argument rules, owned by its command.
+    (
+        "cli/x.rs",
+        "commands::x::request_version",
+        "argv validation",
+    ),
+    ("cli/x.rs", "commands::x::split_version", "argv validation"),
+    (
+        "cli/x.rs",
+        "commands::x::validate_from_bin",
+        "argv validation",
+    ),
+    (
+        "cli/x.rs",
+        "commands::x::validate_package",
+        "argv validation",
+    ),
 ];
 
 /// Whether `path`, named in `relative`, is one of the listed exceptions.
@@ -1502,7 +1519,7 @@ const LEASE_BOUNDARIES: &[(&str, &str, usize)] = &[
     // `gc --reset` opens a store `run` cannot: one tog refuses to read.
     ("src/commands/gc.rs", "reset", 1),
     // `x --clean`, once per environment, on the store that owns it.
-    ("src/commands/x.rs", "clean_lease", 1),
+    ("src/commands/x/cleanup.rs", "clean_lease", 1),
     ("src/kernel/gc/mod.rs", "collect", 1),
     // Public root-registry calls for callers holding no lease (tests and
     // library users). Each has a `_with_activity` form that production uses.
@@ -1561,11 +1578,11 @@ const UNCHECKED_STORES: &[(&str, &str, usize)] = &[
     // configured one: by its request record here, and by the object paths
     // in its closure in `store_from_object_path`. `x --clean` leases either
     // (validated) before it reads or removes anything.
-    ("src/commands/x.rs", "originating_store", 1),
+    ("src/commands/x/cleanup.rs", "originating_store", 1),
     ("src/comforter/mod.rs", "store_from_object_path", 1),
     // Names an x environment's directory from the store's path alone, and
     // reads nothing in the store.
-    ("src/commands/x.rs", "environment_name", 1),
+    ("src/commands/x/mod.rs", "environment_name", 1),
 ];
 
 #[test]

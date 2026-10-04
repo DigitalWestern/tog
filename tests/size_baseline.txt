@@ -5,7 +5,6 @@
 #
 #   file <non-test lines> <path>
 #   fn <lines> <path>::<name>[#<nth occurrence in the file>]
-file 1962 src/commands/x.rs
 file 1549 src/kernel/store/roots.rs
 file 1807 src/tailors/dotnet/mod.rs
 file 1856 src/tailors/elixir/mod.rs
@@ -14,7 +13,7 @@ file 1672 src/tailors/node/realize.rs
 fn 171 src/comforter/toolchain.rs::resolve
 fn 163 src/commands/audit.rs::render
 fn 160 src/commands/mod.rs::dispatch
-fn 173 src/commands/x.rs::clean
+fn 172 src/commands/x/cleanup.rs::clean
 fn 166 src/kernel/archive.rs::read_entries
 fn 151 src/kernel/gitsrc.rs::ensure_git_source
 fn 164 src/kernel/provider/crates.rs::realize_vendor_inner

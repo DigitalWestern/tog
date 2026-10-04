@@ -917,7 +917,8 @@ every tailor and the kernel):
     deps.rs         add / remove / update, delegated to each ecosystem's tool
     sbom.rs         CycloneDX 1.5 JSON from the closure envelopes
     selfupdate.rs   tog update --self, and doctor's version row (release lookup)
-    x.rs            tog x: run a registry tool without adding it to a project
+    x/              tog x: run a registry tool without adding it to a project
+                    (mod.rs; lock.rs the per-environment locks; cleanup.rs --clean)
 
 Kernel (`src/kernel/`, names no tailor; `provider/` holds the pinned toolchains
 and build inputs tailors share, so no tailor reaches into another):
@@ -995,9 +996,11 @@ directory prefix (`py`, `npm`), the runtime object id in the cache key, the
 command-line word and message labels, the executable directory,
 resolve-realize-project for one package, the launch environment, and
 whether a cached projection still points at its environment.
-`commands/x.rs` keeps the `~/.tog/x` directory, the `x/3`/`x/4` key,
-the request record, the lifecycle lock, gc root registration, and the
-policy checks on a cached hit, and is ecosystem-neutral except for the
+`commands/x/` keeps the `~/.tog/x` directory, the `x/3`/`x/4` key,
+the request record, gc root registration, and the policy checks on a
+cached hit (`mod.rs`), the lifecycle lock (`lock.rs`), and
+`tog x --clean` (`cleanup.rs`). It owns the one package-name and version
+validator the parser also calls, and is ecosystem-neutral except for the
 Corepack `pnpm` delegate path, which is Node by definition. The grammar
 cannot ask the registry (the cli layer names no tailor), so
 `cli::spec::X_REGISTRIES` mirrors each registry tool's `spelling` for the

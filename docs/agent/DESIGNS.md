@@ -2331,7 +2331,7 @@ Contract 1 needs enforcement, not review alone:
   `tog::kernel::supervise::status_with_stderr`, and
   `tog::kernel::supervise::output` to `disallowed-methods`, allowed only in
   `kernel::resolve`, `kernel::gitsrc`, and `kernel::supervise` itself, and
-  in the user-program launchers of `commands/run.rs` and `commands/x.rs`,
+  in the user-program launchers of `commands/run.rs` and `commands/x/`,
   each with its reason. That is three kernel sites and two command sites,
   not an allow-list row per tailor. Any spawn primitive added to `supervise` later joins the
   list in the same PR, and the named test

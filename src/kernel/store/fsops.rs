@@ -164,6 +164,16 @@ pub(crate) fn open_file_at(
     Ok(unsafe { fs::File::from_raw_fd(fd) })
 }
 
+/// Open the directory `name` under `dirfd`, following no symlink.
+pub(crate) fn open_directory_at(dirfd: RawFd, name: &[u8]) -> io::Result<fs::File> {
+    open_file_at(
+        dirfd,
+        name,
+        libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        0,
+    )
+}
+
 pub(crate) fn rename_at(dirfd: RawFd, old_name: &[u8], new_name: &[u8]) -> io::Result<()> {
     let old_name = CString::new(old_name)
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "directory entry contains NUL"))?;
@@ -343,7 +353,20 @@ pub(crate) fn same_inode(left: &libc::stat, right: &libc::stat) -> bool {
     left.st_dev == right.st_dev && left.st_ino == right.st_ino
 }
 
-pub(super) fn is_directory(stat: &libc::stat) -> bool {
+/// A file's identity, device and inode, comparable across `stat` calls.
+// `st_dev` is a u64 on Linux but an i32 on macOS: the cast is a no-op
+// here and needed there, and clippy only sees the target it runs on.
+#[allow(clippy::unnecessary_cast)]
+pub(crate) fn stat_identity(stat: &libc::stat) -> (u64, u64) {
+    (stat.st_dev as u64, stat.st_ino as u64)
+}
+
+/// [`stat_identity`] of an open file.
+pub(crate) fn fd_identity(file: &fs::File) -> io::Result<(u64, u64)> {
+    Ok(stat_identity(&fd_stat(file.as_raw_fd())?))
+}
+
+pub(crate) fn is_directory(stat: &libc::stat) -> bool {
     (stat.st_mode & libc::S_IFMT) == libc::S_IFDIR
 }
 
