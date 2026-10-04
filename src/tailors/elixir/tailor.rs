@@ -195,7 +195,7 @@ impl Tailor for Elixir {
         let dir = project.path();
         let activity = &ctx.activity;
         let mut prefix = Vec::new();
-        if comforter::has_closure(project, "elixir") {
+        if comforter::has_closure(project, "elixir")? {
             let store = &ctx.store;
             let closure = comforter::read_closure_in(project, "elixir")?;
             let beam = comforter::closure_object(

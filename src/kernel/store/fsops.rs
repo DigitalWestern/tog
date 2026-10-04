@@ -460,40 +460,83 @@ pub(crate) fn remove_tree_entry_if_same(
         return unlink_if_same(parentfd, name, expected, 0);
     }
 
-    let name_c = CString::new(name)
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "directory entry contains NUL"))?;
-    // SAFETY: name_c is NUL-terminated and parentfd is borrowed.
-    let childfd = unsafe {
-        libc::openat(
-            parentfd,
-            name_c.as_ptr(),
-            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-        )
-    };
-    if childfd < 0 {
-        let error = io::Error::last_os_error();
-        if error.kind() == io::ErrorKind::NotFound {
-            return Ok(false);
+    let child = match open_file_at(
+        parentfd,
+        name,
+        libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        0,
+    ) {
+        Ok(child) => child,
+        Err(error)
+            if error.kind() == io::ErrorKind::NotFound
+                || error.raw_os_error() == Some(libc::ELOOP) =>
+        {
+            return Ok(false)
         }
-        if error.raw_os_error() == Some(libc::ELOOP) {
-            // The original directory was replaced; never clean the new
-            // symlink under the old snapshot.
-            return Ok(false);
+        #[cfg(target_os = "linux")]
+        Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
+            let Some(child) = reopen_private_directory(parentfd, name, expected)? else {
+                return Ok(false);
+            };
+            child
         }
-        return Err(error);
+        Err(error) => return Err(error),
     };
-    // SAFETY: childfd was returned by openat and ownership moves into File.
-    let child = unsafe { fs::File::from_raw_fd(childfd) };
     let actual = fd_stat(child.as_raw_fd())?;
     if !same_inode(&actual, expected) {
         return Ok(false);
     }
     let mut mode = actual.st_mode;
-    mode |= 0o200;
+    mode |= 0o700;
     // SAFETY: child is owned by this function.
-    let _ = unsafe { libc::fchmod(child.as_raw_fd(), mode) };
+    if unsafe { libc::fchmod(child.as_raw_fd(), mode) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
     remove_tree_at(child.as_raw_fd())?;
     unlink_if_same(parentfd, name, expected, libc::AT_REMOVEDIR)
+}
+
+/// Open an unreadable private directory without resolving a replacement
+/// pathname for chmod. O_PATH permits holding it before restoring owner rwx.
+#[cfg(target_os = "linux")]
+fn reopen_private_directory(
+    parent: RawFd,
+    name: &[u8],
+    expected: &libc::stat,
+) -> io::Result<Option<fs::File>> {
+    use std::os::unix::fs::PermissionsExt;
+    let held = match open_file_at(
+        parent,
+        name,
+        libc::O_PATH | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        0,
+    ) {
+        Ok(held) => held,
+        Err(error)
+            if error.kind() == io::ErrorKind::NotFound
+                || matches!(error.raw_os_error(), Some(libc::ELOOP | libc::ENOTDIR)) =>
+        {
+            return Ok(None)
+        }
+        Err(error) => return Err(error),
+    };
+    let actual = fd_stat(held.as_raw_fd())?;
+    if !same_inode(&actual, expected) {
+        return Ok(None);
+    }
+    // The proc magic link refers to this open inode, even after a rename.
+    // fchmod itself cannot operate on an O_PATH descriptor.
+    fs::set_permissions(
+        format!("/proc/self/fd/{}", held.as_raw_fd()),
+        fs::Permissions::from_mode(actual.st_mode | 0o700),
+    )?;
+    let readable = open_file_at(
+        held.as_raw_fd(),
+        b".",
+        libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        0,
+    )?;
+    Ok(Some(readable))
 }
 
 /// Remove the contents of a possibly read-only directory through a borrowed
@@ -509,9 +552,11 @@ pub(crate) fn remove_tree_at(dirfd: RawFd) -> io::Result<()> {
         ));
     }
     let mut mode = stat.st_mode;
-    mode |= 0o200;
+    mode |= 0o700;
     // SAFETY: dirfd is borrowed by the caller.
-    let _ = unsafe { libc::fchmod(dirfd, mode) };
+    if unsafe { libc::fchmod(dirfd, mode) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
     for name in entry_names_at(dirfd)? {
         remove_tree_entry_at(dirfd, name.as_os_str().as_bytes())?;
     }

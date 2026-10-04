@@ -556,10 +556,8 @@ pub fn read_closure(project_dir: &Path, ecosystem: &str) -> io::Result<serde_jso
 }
 
 /// Is there a closure record for `ecosystem` in the held project?
-pub fn has_closure(project: &ProjectRoot, ecosystem: &str) -> bool {
-    project
-        .entry(Path::new(&format!(".tog/closures/{ecosystem}.json")))
-        .is_ok_and(|entry| entry != Entry::Absent)
+pub fn has_closure(project: &ProjectRoot, ecosystem: &str) -> io::Result<bool> {
+    Ok(project.entry(Path::new(&format!(".tog/closures/{ecosystem}.json")))? != Entry::Absent)
 }
 
 /// `read_closure` through a project the command holds: the record is tog
@@ -1166,6 +1164,27 @@ mod tests {
             error.contains("python\" belongs to another store"),
             "{error}"
         );
+        let traversal = store
+            .object_path(&mentioned)
+            .join("../../../foreign-store/objects")
+            .join(&id)
+            .join("bin/python");
+        envelope(
+            project,
+            "python",
+            serde_json::json!({
+                "env_object": store.object_path(&id), "traversal": traversal,
+            }),
+        );
+        let error = store
+            .root_record_from_project(project)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("contains parent-directory traversal"),
+            "{error}"
+        );
+        assert!(!error.contains("is inside object"), "{error}");
         envelope(
             project,
             "python",

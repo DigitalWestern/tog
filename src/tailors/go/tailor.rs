@@ -215,7 +215,7 @@ impl Tailor for Go {
     ) -> io::Result<Vec<String>> {
         let activity = &ctx.activity;
         let mut prefix = Vec::new();
-        if comforter::has_closure(project, "go") {
+        if comforter::has_closure(project, "go")? {
             let closure = comforter::read_closure_in(project, "go")?;
             let go_obj =
                 comforter::closure_object(&ctx.store, activity, &closure, "go_object", "bin/go")?;
