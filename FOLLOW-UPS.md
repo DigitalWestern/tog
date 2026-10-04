@@ -111,7 +111,7 @@ After the proxy: the test-suite audit (#351) and then the quality review
   - #238 http: pypi, rubygems, dotnet and deps call ureq directly, bypassing kernel::fetch.
   - #240 store: a CacheLease holds gc.lock exclusively, so separate tog processes download one at a time.
   - #247 dead code: about 90 unused items hidden by pub mod, plus a CI check to keep it at zero.
-  - #245 kernel: consolidate duplicated primitives (base64, SRI, metadata parser, forest key, file hash, temp names).
+  - #245 kernel: consolidate duplicated primitives. Left after the first pass: the file hash copy in `provider/crates.rs` and `fetch.rs` (heavy gate), the pid temp names in `fetch.rs`, `validate_object_complete` and `exceptions()` reading records their own way.
   - #246 tailors: shared closure_state, checked_artifact, object_ref and merge_record helpers; cargo status misses GC'd objects.
   - #248 sandbox and gitsrc: collapse the _with_activity twin of every entry point.
   - #249 x.rs: reuse kernel fsops, one lock, one name validator, and split the file.
