@@ -2271,6 +2271,61 @@ mod tests {
     }
 
     #[test]
+    fn a_python_tool_keys_on_the_projects_locked_rust() {
+        let platform = Platform::host().unwrap();
+        let temp = TempDir::named("x-rust");
+        let project = temp.0.join("project");
+        let outside = temp.0.join("outside");
+        fs::create_dir(&project).unwrap();
+        fs::create_dir(&outside).unwrap();
+        fs::write(
+            project.join("Cargo.toml"),
+            "[package]\nname = \"p\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        fs::write(project.join("requirements.txt"), "six==1.17.0\n").unwrap();
+        fs::write(
+            project.join("rust-toolchain.toml"),
+            "[toolchain]\nchannel = \"1.98.0\"\n",
+        )
+        .unwrap();
+        let root = crate::kernel::fsroot::ProjectRoot::open(&project).unwrap();
+        let inputs = crate::commands::shared::ecosystem_inputs(&[
+            crate::tailors::by_id("cargo").unwrap(),
+            crate::tailors::by_id("python").unwrap(),
+        ])
+        .unwrap();
+        let resolved = comforter::toolchain::resolve(
+            &root,
+            platform,
+            inputs,
+            comforter::toolchain::Mode::Writable,
+            false,
+        )
+        .unwrap();
+        let bytes = resolved.pending.unwrap().canonical_bytes();
+        fs::write(project.join("tog-toolchain.toml"), &bytes).unwrap();
+
+        let (helpers, ids) = x_helpers(platform, &project, "python").unwrap();
+        assert_eq!(
+            helpers["rust"].source,
+            crate::kernel::toolchain::Source::Lock
+        );
+        assert_eq!(helpers["rust"].version("rustc").unwrap(), "1.98.0");
+        assert_eq!(
+            ids,
+            vec![(
+                "rust".to_string(),
+                crate::kernel::provider::rust::runtime_object_id(platform, &helpers["rust"])
+                    .unwrap()
+            )]
+        );
+        let (helpers, ids) = x_helpers(platform, &outside, "python").unwrap();
+        assert!(helpers.is_empty() && ids.is_empty());
+        assert_eq!(fs::read(project.join("tog-toolchain.toml")).unwrap(), bytes);
+    }
+
+    #[test]
     fn shared_x_lock_blocks_nonblocking_cleanup_until_runner_exit() {
         let temp = TempDir::named("x-lock");
         let base = &temp.0;
