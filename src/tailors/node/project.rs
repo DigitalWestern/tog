@@ -308,6 +308,9 @@ fn projection_project_lock(
 /// Real directories are user state and retain backup_real_dir semantics; only
 /// symlinks proven to target tog-owned roots are removed automatically.
 ///
+/// A workspace member's node_modules that git tracks (`tracked`) is left
+/// where it is: it is the user's source, not npm's output.
+///
 /// Returns (backup paths, pending moves) — nothing is moved yet.
 #[allow(clippy::type_complexity)]
 fn reserve_projection_backups(
@@ -317,11 +320,15 @@ fn reserve_projection_backups(
     home: &Path,
     previous_workspaces: &[String],
     workspaces: &[String],
+    tracked: &[String],
 ) -> io::Result<(Vec<PathBuf>, Vec<(PathBuf, PathBuf)>)> {
     let mut backup_paths = Vec::new();
     let mut pending_backups = Vec::new();
     for workspace in previous_workspaces {
-        if workspaces.contains(workspace) || !safe_workspace_path(workspace) {
+        if workspaces.contains(workspace)
+            || !safe_workspace_path(workspace)
+            || tracked.contains(workspace)
+        {
             continue;
         }
         let workspace_nm = Path::new(workspace).join("node_modules");
@@ -341,7 +348,7 @@ fn reserve_projection_backups(
         pending_backups.push((nm.to_path_buf(), backup.clone()));
         backup_paths.push(backup);
     }
-    for workspace in workspaces {
+    for workspace in workspaces.iter().filter(|w| !tracked.contains(w)) {
         let workspace_nm = Path::new(workspace).join("node_modules");
         if let Some(backup) =
             crate::comforter::reserve_backup_real_dir_for_store(project, &workspace_nm, store)?
@@ -351,6 +358,59 @@ fn reserve_projection_backups(
         }
     }
     Ok((backup_paths, pending_backups))
+}
+
+/// The workspace members, old and new, whose node_modules is a real
+/// directory holding files git tracks. Some repositories commit one as a
+/// test fixture; moving it into the store's backups would delete source
+/// from the working tree, so the member is left unprojected and the user is
+/// told. A tracked node_modules at the project root stops the sync instead:
+/// nothing in the project could resolve its dependencies without it.
+fn git_tracked_node_modules(
+    project_dir: &Path,
+    previous_workspaces: &[String],
+    workspaces: &[String],
+    activity: &StoreActivity,
+) -> io::Result<Vec<String>> {
+    let real = |importer: &Path| {
+        fs::symlink_metadata(project_dir.join(importer).join("node_modules"))
+            .is_ok_and(|meta| meta.is_dir())
+    };
+    let mut candidates: Vec<String> = Vec::new();
+    if real(Path::new("")) {
+        candidates.push("node_modules".to_string());
+    }
+    for workspace in workspaces.iter().chain(previous_workspaces) {
+        let path = format!("{workspace}/node_modules");
+        if safe_workspace_path(workspace)
+            && real(Path::new(workspace))
+            && !candidates.contains(&path)
+        {
+            candidates.push(path);
+        }
+    }
+    let tracked = crate::kernel::gitsrc::tracked_among(project_dir, &candidates, activity)?;
+    if tracked.iter().any(|path| path == "node_modules") {
+        return Err(err(
+            "node_modules holds files git tracks; tog will not move committed \
+             source aside to project dependencies there (git ls-files node_modules)",
+        ));
+    }
+    let mut members = Vec::new();
+    for path in tracked {
+        let member = path.trim_end_matches("/node_modules").to_string();
+        if workspaces.contains(&member) {
+            crate::kernel::ui::warning_next(
+                &format!(
+                    "{path} holds files git tracks, so tog left it in place and did not \
+                     project workspace {member}'s dependencies"
+                ),
+                &format!("git ls-files {path}"),
+            );
+        }
+        members.push(member);
+    }
+    Ok(members)
 }
 
 /// Where this projection lives: its id and the forest paths derived from it.
@@ -802,6 +862,8 @@ pub fn project_node_env_recorded(
     // removal, or projection mutation. A lexical `packages/lib` can be an
     // external symlink after the previous closure was written.
     validate_workspace_parents(project_dir, &previous_workspaces, &workspaces)?;
+    let tracked =
+        git_tracked_node_modules(project_dir, &previous_workspaces, &workspaces, activity)?;
     let store = crate::comforter::store_from_object_path(env_obj)
         .ok_or_else(|| err("environment object is not in a Tog store"))?;
     let env_obj = env_obj.canonicalize()?;
@@ -820,8 +882,15 @@ pub fn project_node_env_recorded(
         .root
         .parent()
         .ok_or_else(|| err("cannot locate tog home for legacy forests"))?;
-    let (backup_paths, pending_backups) =
-        reserve_projection_backups(project, nm, &store, home, &previous_workspaces, &workspaces)?;
+    let (backup_paths, pending_backups) = reserve_projection_backups(
+        project,
+        nm,
+        &store,
+        home,
+        &previous_workspaces,
+        &workspaces,
+        &tracked,
+    )?;
 
     let paths = forest_paths(project, &env_obj, &store, plan, &reasons, &workspaces)?;
     let ForestPaths {
@@ -891,7 +960,7 @@ pub fn project_node_env_recorded(
     remove_sync_duplicate_links(project, &store, home);
 
     replace_with_symlink(project, nm, forest, "node_modules")?;
-    for workspace in &workspaces {
+    for workspace in workspaces.iter().filter(|w| !tracked.contains(w)) {
         let workspace_nm = Path::new(workspace).join("node_modules");
         let workspace_forest = proj_dir
             .join("workspaces")
@@ -1059,5 +1128,78 @@ mod tests {
         )
         .unwrap();
         assert!(forest.join("a").symlink_metadata().unwrap().is_symlink());
+    }
+
+    /// vite commits a fixture `node_modules` inside a workspace member
+    /// (#174). Only a real directory holding a tracked file is kept back;
+    /// an untracked npm-made one, and a member git cannot see, are moved
+    /// aside as before. A tracked one at the project root stops the sync.
+    #[test]
+    fn a_node_modules_git_tracks_is_never_moved_aside() {
+        let scratch = TempDir::named("tracked-node-modules");
+        let project = scratch.0.join("project");
+        for dir in [
+            "packages/fixture/node_modules/dep",
+            "packages/built/node_modules/dep",
+            "packages/linked",
+        ] {
+            fs::create_dir_all(project.join(dir)).unwrap();
+        }
+        fs::write(
+            project.join("packages/fixture/node_modules/dep/index.js"),
+            "",
+        )
+        .unwrap();
+        fs::write(project.join("packages/built/node_modules/dep/index.js"), "").unwrap();
+        std::os::unix::fs::symlink(
+            project.join("packages/fixture/node_modules"),
+            project.join("packages/linked/node_modules"),
+        )
+        .unwrap();
+        let workspaces = ["packages/fixture", "packages/built", "packages/linked"]
+            .map(String::from)
+            .to_vec();
+        let (_lease_dir, activity) = crate::kernel::testutil::detached_lease();
+
+        // Outside a repository nothing is tracked.
+        assert!(
+            git_tracked_node_modules(&project, &[], &workspaces, &activity)
+                .unwrap()
+                .is_empty()
+        );
+
+        let git = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+                .args(args)
+                .current_dir(&project)
+                .output()
+                .unwrap();
+            assert!(status.status.success(), "{status:?}");
+        };
+        git(&["init", "-q"]);
+        git(&["add", "packages/fixture/node_modules/dep/index.js"]);
+        git(&["commit", "-q", "-m", "fixture"]);
+        assert_eq!(
+            git_tracked_node_modules(&project, &[], &workspaces, &activity).unwrap(),
+            ["packages/fixture"]
+        );
+        // A member that left the lockfile is kept back the same way.
+        assert_eq!(
+            git_tracked_node_modules(&project, &workspaces[..1], &[], &activity).unwrap(),
+            ["packages/fixture"]
+        );
+
+        fs::create_dir_all(project.join("node_modules")).unwrap();
+        fs::write(project.join("node_modules/.keep"), "").unwrap();
+        git(&["add", "node_modules/.keep"]);
+        git(&["commit", "-q", "-m", "root"]);
+        let error = git_tracked_node_modules(&project, &[], &workspaces, &activity).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("node_modules holds files git tracks"),
+            "{error}"
+        );
     }
 }

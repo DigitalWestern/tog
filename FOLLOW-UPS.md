@@ -153,7 +153,6 @@ After the proxy: the test-suite audit (#351) and then the quality review
   - #333 ruby: host-fallback fingerprint is stat-based, not content-based (accepted).
 - **Smaller open issues from the 2026-09-23/24 run.** One line each; the
   issue has the options and the pick.
-  - #174 npm: git-tracked `node_modules` in workspace members moved into backups.
   - #180 build: first build with no lock still needs a catalog row for every ecosystem.
   - #183 `status`/`doctor` create and lease the store; add a read-only context mode.
   - #188 npm: realize `file:` packages as tog-owned trees.

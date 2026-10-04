@@ -271,6 +271,51 @@ fn run_git_with_activity(
         .map_err(|e| io::Error::new(e.kind(), format!("run {GIT} {}: {e}", args.join(" "))))
 }
 
+/// Which of `paths` (relative to `dir`) hold at least one file git tracks
+/// in the repository around `dir`. Outside a repository, or on a host
+/// without git, none do: the only question is whether moving a directory
+/// away would delete committed source.
+pub fn tracked_among(
+    dir: &Path,
+    paths: &[String],
+    activity: &crate::kernel::activity::StoreActivity,
+) -> io::Result<Vec<String>> {
+    if paths.is_empty() {
+        return Ok(Vec::new());
+    }
+    // Literal pathspecs: a workspace path is a name, never a glob. The
+    // repository's own fsmonitor hook is not run for a read of the index.
+    let mut args = vec![
+        "--literal-pathspecs",
+        "-c",
+        "core.fsmonitor=false",
+        "ls-files",
+        "-z",
+        "--",
+    ];
+    args.extend(paths.iter().map(String::as_str));
+    let output = match run_git_with_activity(&args, Some(dir), activity) {
+        Ok(output) => output,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error),
+    };
+    if !output.status.success() {
+        return Ok(Vec::new());
+    }
+    use std::os::unix::ffi::OsStrExt;
+    let listed: Vec<&Path> = output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|file| !file.is_empty())
+        .map(|file| Path::new(std::ffi::OsStr::from_bytes(file)))
+        .collect();
+    Ok(paths
+        .iter()
+        .filter(|path| listed.iter().any(|file| file.starts_with(path)))
+        .cloned()
+        .collect())
+}
+
 fn git_ok(args: &[&str], cwd: Option<&Path>, what: &str) -> io::Result<String> {
     let output = run_git(args, cwd)?;
     if !output.status.success() {
