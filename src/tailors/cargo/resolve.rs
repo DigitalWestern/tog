@@ -31,8 +31,8 @@ pub(crate) fn cargo_tool(toolchain: &Selected) -> io::Result<record::Tool> {
 /// of those, transitively. A path dependency inside the workspace is an
 /// implicit member, so an edit there writes its manifest and a change to it
 /// can change resolution while `Cargo.lock` stays the same; both need it
-/// named. One outside the root is not listed (a record names files inside
-/// the workspace only): [`refuse_external_inputs`].
+/// named. One outside the root, path dependency or member, is not listed
+/// (a record names files inside the workspace only): [`refuse_external_inputs`].
 pub(crate) fn resolution_outputs(root: &ProjectRoot) -> io::Result<Vec<PathBuf>> {
     let mut outputs = vec![PathBuf::from("Cargo.toml"), PathBuf::from("Cargo.lock")];
     let real_root = std::fs::canonicalize(root.path())?;
@@ -64,8 +64,8 @@ pub(crate) fn resolution_outputs(root: &ProjectRoot) -> io::Result<Vec<PathBuf>>
     Ok(outputs)
 }
 
-/// Refuse to attest a workspace that reads path dependencies outside its
-/// root: a record names files inside the workspace only, so it could not
+/// Refuse to attest a workspace that reads path dependencies or members
+/// outside its root: a record names files inside the workspace only, so it could not
 /// cover them, and a change there would leave the record attesting.
 pub(crate) fn refuse_external_inputs(root: &Path) -> io::Result<()> {
     let outside = cargo_door::path_dependency_roots(root)?;
@@ -79,9 +79,9 @@ pub(crate) fn refuse_external_inputs(root: &Path) -> io::Result<()> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         format!(
-            "the Cargo workspace at {} reads path dependencies outside it ({}); a resolution \
-             record names files inside the workspace only, so it cannot cover them and is not \
-             written. Move them into the workspace to attest it",
+            "the Cargo workspace at {} reads path dependencies or members outside it ({}); a \
+             resolution record names files inside the workspace only, so it cannot cover them \
+             and is not written. Move them into the workspace to attest it",
             root.display(),
             named.join(", ")
         ),
@@ -319,9 +319,10 @@ mod tests {
     /// 1.98.1 lists them (checked against `cargo metadata`): a
     /// wildcard matches a hidden directory and `target`, a class matches
     /// its letters (`[**]` a class of `*`, not a recursive wildcard), `**`
-    /// reaches any depth. An absolute entry or one with
-    /// `.` or `..` is placed lexically, and refused by name when it lands
-    /// outside the root. A directory with no manifest is not listed.
+    /// reaches any depth. An absolute entry or one with `.` or `..` is
+    /// placed lexically. One outside the root is not an output and refuses
+    /// attest, like a path dependency there. A directory with no manifest
+    /// is not listed.
     #[test]
     fn outputs_name_every_member_manifest_inside_the_root() {
         let temp = TempDir::named("cargo-outputs");
@@ -410,12 +411,29 @@ mod tests {
         assert!(cargo_door::expand(&root, "crates/[ab").is_err());
         assert!(cargo_door::expand(&root, "crates/a**").is_err());
         assert!(cargo_door::expand(&root, "crates/***").is_err());
-        // A member tog cannot place inside the root is refused by name,
-        // before anything runs or is signed: never dropped.
+        // A member outside the root is not an output (a record names files
+        // inside the workspace only): it is handled like an out-of-root path
+        // dependency, so the outputs and a sync work, and attest refuses it
+        // by name. A `..` after a wildcard is refused everywhere.
+        std::fs::create_dir_all(root.join("../.git")).unwrap();
+        package(&temp.0.join("outside"), "outside");
         fs::write(
             root.join("Cargo.toml"),
-            "[workspace]\nmembers = [\"app\", \"../outside\", \"/elsewhere/x\", \
-             \"crates/*/../a\"]\n",
+            "[workspace]\nmembers = [\"app\", \"../outside\"]\n",
+        )
+        .unwrap();
+        assert_eq!(
+            resolution_outputs(&held).unwrap(),
+            ["Cargo.toml", "Cargo.lock", "app/Cargo.toml"]
+                .map(PathBuf::from)
+                .to_vec()
+        );
+        let error = refuse_external_inputs(&root).unwrap_err().to_string();
+        assert!(error.contains("members outside it"), "{error}");
+        assert!(error.contains("outside"), "{error}");
+        fs::write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\", \"crates/*/../a\"]\n",
         )
         .unwrap();
         for result in [
@@ -424,14 +442,10 @@ mod tests {
             resolution_outputs(&held).map(|_| ()),
         ] {
             let error = result.unwrap_err().to_string();
-            for named in [
-                "\"../outside\" (outside the workspace root)",
-                "\"/elsewhere/x\" (outside the workspace root)",
-                "\"crates/*/../a\" (a `..` after a wildcard)",
-            ] {
-                assert!(error.contains(named), "{error}");
-            }
-            assert!(!error.contains("\"app\""), "{error}");
+            assert!(
+                error.contains("\"crates/*/../a\" (a `..` after a wildcard)"),
+                "{error}"
+            );
         }
         // A single package has just its manifest and lock.
         package(&temp.0.join("single"), "single");

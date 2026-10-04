@@ -783,3 +783,65 @@ fn the_signing_key_never_reaches_the_output_through_cargo_files() {
         );
     }
 }
+
+/// A workspace member outside the workspace root (`members =
+/// ["../shared"]`, inside the same repository) is handled like an
+/// out-of-root path dependency: a sync from the committed lock works,
+/// `tog attest` refuses the workspace by name, and the missing-lock door
+/// runs cargo confined with the member as a read root and publishes the
+/// lock without a receipt, so the sync records `unrecorded-resolution`.
+#[test]
+#[ignore]
+fn an_external_workspace_member_is_read_like_an_external_path_dependency() {
+    let temp = TempDir::new("cargo-e2e-external-member");
+    let store = temp.0.join("store");
+    let repo = temp.0.join("repo");
+    std::fs::create_dir_all(repo.join(".git")).unwrap();
+    let project = repo.join("project");
+    copy_tree(&fixture("cargo-hello"), &project);
+    let shared = repo.join("shared");
+    std::fs::create_dir_all(shared.join("src")).unwrap();
+    std::fs::write(
+        shared.join("Cargo.toml"),
+        "[package]\nname = \"shared\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\
+         workspace = \"../project\"\n",
+    )
+    .unwrap();
+    std::fs::write(shared.join("src/lib.rs"), "pub fn one() -> u8 { 1 }\n").unwrap();
+    let manifest = project.join("Cargo.toml");
+    let mut text = std::fs::read_to_string(&manifest).unwrap();
+    text.push_str("\n[workspace]\nmembers = [\"../shared\"]\n");
+    std::fs::write(&manifest, text).unwrap();
+    let run = |args: &[&str]| -> (bool, String) {
+        let out = command(&project, &temp.0, &store)
+            .args(args)
+            .output()
+            .unwrap();
+        (
+            out.status.success(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        )
+    };
+
+    // The committed lock: no cargo runs, the sync works.
+    let (ok, stderr) = run(&["sync"]);
+    assert!(ok && stderr.contains("synced: cargo"), "sync: {stderr}");
+    // A record cannot name the member: attest refuses, naming it.
+    let (ok, stderr) = run(&["attest", "cargo"]);
+    assert!(!ok, "attest succeeded: {stderr}");
+    assert!(
+        stderr.contains("members outside it") && stderr.contains("shared"),
+        "attest: {stderr}"
+    );
+    // The missing lock is generated confined, the member read from its
+    // place beside the workspace, and published without a receipt.
+    std::fs::remove_file(project.join("Cargo.lock")).unwrap();
+    let (ok, stderr) = run(&["sync"]);
+    assert!(ok, "sync without a lock: {stderr}");
+    let lock = std::fs::read_to_string(project.join("Cargo.lock")).unwrap();
+    assert!(lock.contains("name = \"shared\""), "{lock}");
+    assert!(stderr.contains("unrecorded-resolution"), "{stderr}");
+    // And the lock it wrote syncs again.
+    let (ok, stderr) = run(&["sync"]);
+    assert!(ok, "sync from the generated lock: {stderr}");
+}

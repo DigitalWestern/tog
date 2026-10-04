@@ -3413,8 +3413,8 @@ interception and the cargo switch, each the flexible option:
 - **The lock root is the workspace root.** Outputs are the root
   manifest, `Cargo.lock`, and every member manifest the `[workspace]`
   `members` globs name (`exclude` applied as cargo applies it, each
-  entry placed lexically under the root, one that lands outside refused
-  by name).
+  entry placed lexically, one outside the root handled like an
+  out-of-root path dependency).
   Inputs are the two `.cargo` config spellings. A member edit runs at the
   root with `--manifest-path`. `target/` is excluded from the snapshot.
 - **Path dependencies outside the root are read roots.** Found from every
@@ -3575,11 +3575,27 @@ interception and the cargo switch, each the flexible option:
     - *Members entries are placed, not dropped.* `member_pattern`
       normalizes an entry the way cargo does (joined to the root,
       lexically: absolute taken as is, `.` dropped, `..` taking off the
-      part before it). Inside the root it is expanded. Outside it, or with
-      a `..` that would take off a wildcard (only the disk could resolve
-      that), it is refused with every such entry named, before any cargo
-      runs or anything is signed. Before, these entries vanished from the
-      outputs silently.
+      part before it). Inside the root it is expanded. Outside it
+      (`../shared`, an absolute path elsewhere, a glob there) it is an
+      external member, handled exactly like an out-of-root path dependency
+      (the round 1 call): `path_dependency_roots` adds it, so it is held to
+      the same boundary (inside the repository, not hidden, not containing
+      the root) and becomes a read root of the confined doors, which
+      publish without a receipt (`unrecorded-resolution` at sync). A sync
+      from the committed lock works. `tog attest` refuses it by name. It
+      is not an output, since a record names files inside the workspace
+      only. An entry whose `..` would take off a wildcard (only the disk
+      could resolve that) is refused by name before any cargo runs.
+      Before, all of these entries vanished from the outputs silently.
+      `an_external_workspace_member_is_read_like_an_external_path_dependency`
+      runs it with the real toolchain.
+    - *Deferred.* tog canonicalizes the project root, and an entry is
+      placed against that path. An absolute member written through
+      another spelling of the root (a symlinked home, say) is therefore
+      taken as outside the root, so attest refuses it and the doors
+      publish without a receipt, where cargo treats it as an ordinary
+      member. That fails closed. Placing absolute entries against the
+      root as the user spells it too is the follow-up.
     - *Glob parts are the `glob` crate's.* The third pass kept a
       hand-written matcher to avoid a dependency. It refused `[**]`, which
       cargo reads as a class holding `*`. Each name part is now a

@@ -315,8 +315,9 @@ pub fn configured_registries(lock_root: &Path) -> io::Result<Vec<String>> {
 }
 
 /// The directories outside `lock_root` that cargo reads as `path`
-/// dependencies (and `[patch]` or `[replace]` entries), found from every
-/// manifest under the lock root and, in turn, from each of theirs: the
+/// dependencies (and `[patch]` or `[replace]` entries) or as workspace
+/// members ([`external_members`]), found from every manifest under the
+/// lock root and, in turn, from each of theirs: the
 /// door snapshots them beside the lock root as read-only inputs, so a
 /// workspace that names `../shared` resolves confined. A path that does not
 /// exist is left for cargo to report.
@@ -347,13 +348,30 @@ fn bounded_path_dependency_roots(lock_root: &Path, host: &Host) -> io::Result<Ve
     let lock_root = std::fs::canonicalize(lock_root)?;
     let keys = Bound::new(&lock_root)?;
     let mut manifests = manifests_under(&lock_root)?;
+    let root_manifest = lock_root.join("Cargo.toml");
     let mut outside: Vec<PathBuf> = Vec::new();
     let mut boundary: Option<PathBuf> = None;
     while let Some(manifest) = manifests.pop() {
         let Some(dir) = manifest.parent() else {
             continue;
         };
-        for path in path_dependencies(&manifest, &keys)? {
+        let mut paths: Vec<(PathBuf, &str)> = path_dependencies(&manifest, &keys)?
+            .into_iter()
+            .map(|path| (PathBuf::from(path), "the path dependency"))
+            .collect();
+        // The workspace's external members are read like its out-of-root
+        // path dependencies, under the same rules.
+        if manifest == root_manifest {
+            let text = std::fs::read_to_string(&manifest)?;
+            if let Ok(table) = toml::from_str::<toml::Table>(&text) {
+                paths.extend(
+                    external_members(&lock_root, &table)?
+                        .into_iter()
+                        .map(|dir| (dir, "the workspace member")),
+                );
+            }
+        }
+        for (path, kind) in paths {
             let Ok(found) = std::fs::canonicalize(dir.join(&path)) else {
                 continue;
             };
@@ -364,8 +382,8 @@ fn bounded_path_dependency_roots(lock_root: &Path, host: &Host) -> io::Result<Ve
                 io::Error::new(
                     io::ErrorKind::PermissionDenied,
                     format!(
-                        "{} names the path dependency {path:?} ({}), {why}; a confined cargo \
-                         reads only path dependencies inside the project's repository (or, \
+                        "{} names {kind} {path:?} ({}), {why}; a confined cargo reads only \
+                         path dependencies and members inside the project's repository (or, \
                          outside one, beside the workspace), so move it there",
                         manifest.display(),
                         found.display()
@@ -542,9 +560,10 @@ pub(crate) struct Members {
 /// expanded the way cargo's `glob` crate does ([`expand`]): `*`, `?` and
 /// `[...]` within a name, `**` across directories, a wildcard matching a
 /// name that starts with `.`, `target` like any other directory. Each
-/// entry is placed under the root first ([`member_pattern`]); one that
-/// cannot be (`../x`, an absolute path elsewhere) is refused by name, since
-/// the door publishes only inside its lock root.
+/// entry is placed first ([`member_pattern`]). One outside the root
+/// (`../x`, an absolute path elsewhere) is an external member: it is not
+/// listed here (a record names files inside the workspace only) and is
+/// handled like an out-of-root path dependency ([`external_members`]).
 pub(crate) fn member_dirs(root: &ProjectRoot) -> io::Result<Members> {
     let mut members = Members {
         listed: Vec::new(),
@@ -554,44 +573,10 @@ pub(crate) fn member_dirs(root: &ProjectRoot) -> io::Result<Members> {
         return Ok(members);
     };
     let manifest = parse_toml(&root.path().join("Cargo.toml"), &text)?;
-    let workspace = manifest.get("workspace").and_then(|w| w.as_table());
-    let raw = |key: &str| -> Vec<String> {
-        workspace
-            .and_then(|w| w.get(key))
-            .and_then(|v| v.as_array())
-            .map(|items| {
-                items
-                    .iter()
-                    .filter_map(|item| item.as_str().map(str::to_string))
-                    .collect()
-            })
-            .unwrap_or_default()
-    };
-    let (raw_members, raw_exclude) = (raw("members"), raw("exclude"));
-    let left_out = |dir: &Path| excluded(root.path(), dir, &raw_members, &raw_exclude);
-    let mut patterns = Vec::new();
-    let mut refused = Vec::new();
-    for entry in &raw_members {
-        match member_pattern(root.path(), entry) {
-            Ok(pattern) => patterns.push(pattern),
-            Err(why) => refused.push(format!("{entry:?} ({why})")),
-        }
-    }
-    if !refused.is_empty() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!(
-                "the Cargo workspace at {} names members tog cannot place inside it: {}. \
-                 A lock and a resolution record cover the workspace's own files only, so \
-                 they would be signed without these members. Name them by a path inside \
-                 the workspace",
-                root.path().display(),
-                refused.join(", ")
-            ),
-        ));
-    }
-    for pattern in patterns {
-        let expanded = expand(root.path(), &pattern)?;
+    let placed = place_members(root.path(), &manifest)?;
+    let left_out = |dir: &Path| placed.excluded(root.path(), dir);
+    for pattern in &placed.inside {
+        let expanded = expand(root.path(), pattern)?;
         for dir in expanded.dirs {
             if !left_out(&dir)
                 && root.is_input_file(&dir.join("Cargo.toml"))
@@ -609,6 +594,103 @@ pub(crate) fn member_dirs(root: &ProjectRoot) -> io::Result<Members> {
     members.listed.sort();
     members.through_symlinks.sort();
     Ok(members)
+}
+
+/// A workspace manifest's `members` entries, placed ([`member_pattern`]),
+/// with the raw `members` and `exclude` lists cargo's exclusion rule reads.
+struct Placed {
+    inside: Vec<String>,
+    outside: Vec<PathBuf>,
+    raw_members: Vec<String>,
+    raw_exclude: Vec<String>,
+}
+
+impl Placed {
+    fn excluded(&self, root: &Path, dir: &Path) -> bool {
+        excluded(root, dir, &self.raw_members, &self.raw_exclude)
+    }
+}
+
+/// Place every `members` entry of the workspace manifest `manifest` at
+/// `root`. An entry whose `..` would take off a wildcard is refused, every
+/// such entry named.
+fn place_members(root: &Path, manifest: &toml::Table) -> io::Result<Placed> {
+    let workspace = manifest.get("workspace").and_then(|w| w.as_table());
+    let raw = |key: &str| -> Vec<String> {
+        workspace
+            .and_then(|w| w.get(key))
+            .and_then(|v| v.as_array())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| item.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let mut placed = Placed {
+        inside: Vec::new(),
+        outside: Vec::new(),
+        raw_members: raw("members"),
+        raw_exclude: raw("exclude"),
+    };
+    let mut refused = Vec::new();
+    for entry in &placed.raw_members {
+        match member_pattern(root, entry) {
+            Ok(Place::Inside(pattern)) => placed.inside.push(pattern),
+            Ok(Place::Outside(pattern)) => placed.outside.push(pattern),
+            Err(why) => refused.push(format!("{entry:?} ({why})")),
+        }
+    }
+    if !refused.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "the Cargo workspace at {} names members tog cannot place: {}. Write each \
+                 without a `..` after a wildcard",
+                root.display(),
+                refused.join(", ")
+            ),
+        ));
+    }
+    Ok(placed)
+}
+
+/// The directories of the external members (outside the root) that the
+/// workspace manifest `manifest` at `root` names, absolute, globs expanded
+/// from their literal start, less those cargo excludes. Not checked:
+/// [`bounded_path_dependency_roots`] holds them to the path-dependency
+/// rules.
+fn external_members(root: &Path, manifest: &toml::Table) -> io::Result<Vec<PathBuf>> {
+    let placed = place_members(root, manifest)?;
+    let mut dirs = Vec::new();
+    for pattern in &placed.outside {
+        let literal: PathBuf = pattern
+            .components()
+            .take_while(|part| !is_wildcard(part.as_os_str()))
+            .collect();
+        let rest: Vec<String> = pattern
+            .components()
+            .skip(literal.components().count())
+            .map(|part| part.as_os_str().to_string_lossy().into_owned())
+            .collect();
+        if rest.is_empty() {
+            dirs.push(literal);
+            continue;
+        }
+        let expanded = expand(&literal, &rest.join("/"))?;
+        dirs.extend(
+            expanded
+                .dirs
+                .iter()
+                .chain(&expanded.through_symlinks)
+                .map(|dir| literal.join(dir)),
+        );
+    }
+    dirs.retain(|dir| !placed.excluded(root, dir));
+    dirs.sort();
+    dirs.dedup();
+    Ok(dirs)
 }
 
 /// Whether cargo leaves the member at `dir` (relative to `root`) out, by
@@ -657,13 +739,22 @@ pub fn refuse_unlisted_members(root: &ProjectRoot) -> io::Result<()> {
     ))
 }
 
-/// A members entry as a pattern relative to `root`, normalized the way
-/// cargo places it (`paths::normalize_path` on the entry joined to the
-/// root, lexically): an absolute entry taken as is, `.` dropped, `..`
-/// taking off the part before it. Empty for the root itself. Refused (with
-/// why) when it lands outside the root, or when a `..` would take off a
-/// wildcard, which only the files on disk could resolve.
-fn member_pattern(root: &Path, entry: &str) -> Result<String, &'static str> {
+/// Where a members entry lands.
+enum Place {
+    /// A pattern relative to the root (empty for the root itself).
+    Inside(String),
+    /// An absolute pattern outside the root: an external member, which
+    /// the confined doors take as a read root like an out-of-root path
+    /// dependency ([`path_dependency_roots`]).
+    Outside(PathBuf),
+}
+
+/// A members entry placed the way cargo places it (`paths::normalize_path`
+/// on the entry joined to the root, lexically): an absolute entry taken as
+/// is, `.` dropped, `..` taking off the part before it. Refused (with why)
+/// only when a `..` would take off a wildcard, which only the files on
+/// disk could resolve.
+fn member_pattern(root: &Path, entry: &str) -> Result<Place, &'static str> {
     // Each part, and whether the entry (not the root) wrote it.
     let mut parts: Vec<(std::ffi::OsString, bool)> = Vec::new();
     normalize_onto(&mut parts, root, false)?;
@@ -676,10 +767,15 @@ fn member_pattern(root: &Path, entry: &str) -> Result<String, &'static str> {
             .zip(&at_root)
             .all(|((name, _), root_name)| name == root_name);
     if !inside {
-        return Err("outside the workspace root");
+        let mut absolute = PathBuf::from("/");
+        absolute.extend(parts.iter().map(|(name, _)| name));
+        return Ok(Place::Outside(absolute));
     }
     let relative: PathBuf = parts[root_parts..].iter().map(|(name, _)| name).collect();
-    relative.to_str().map(str::to_string).ok_or("not UTF-8")
+    relative
+        .to_str()
+        .map(|pattern| Place::Inside(pattern.to_string()))
+        .ok_or("not UTF-8")
 }
 
 /// Add `path`'s parts to `parts`, lexically: an absolute path starts over,
@@ -694,7 +790,8 @@ fn normalize_onto(
             Component::Prefix(_) | Component::RootDir => parts.clear(),
             Component::CurDir => {}
             Component::ParentDir => match parts.pop() {
-                None => return Err("outside the workspace root"),
+                // `/..` is `/`.
+                None => {}
                 Some((name, true)) if is_wildcard(&name) => return Err("a `..` after a wildcard"),
                 Some(_) => {}
             },
@@ -995,6 +1092,74 @@ mod tests {
     /// workspace is refused, naming the manifest, and a boundary that
     /// would be the home directory is refused too. Inside a repository the
     /// boundary is the repository, so a monorepo's `../../libs/x` is read.
+    /// A workspace member outside the root (`../shared`, an absolute path,
+    /// a glob) is a read root like an out-of-root path dependency, under
+    /// the same boundary: inside the repository, not hidden. cargo's
+    /// exclusion rule applies, and a `..` after a wildcard stays refused.
+    #[test]
+    fn external_members_are_read_roots_under_the_path_dependency_rules() {
+        let temp = TempDir::named("cargo-external-members");
+        let base = temp.0.canonicalize().unwrap();
+        let write = |relative: &str, text: &str| {
+            let path = base.join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        };
+        let package = |name: &str| format!("[package]\nname = \"{name}\"\n");
+        std::fs::create_dir_all(base.join("repo/.git")).unwrap();
+        for dir in [
+            "repo/ws/app",
+            "repo/shared",
+            "repo/libs/a",
+            "repo/libs/skip",
+        ] {
+            write(&format!("{dir}/Cargo.toml"), &package("p"));
+        }
+        let host = Host {
+            home: None,
+            ceiling: Some(base.clone()),
+        };
+        let workspace = |members: &str, exclude: &str| {
+            write(
+                "repo/ws/Cargo.toml",
+                &format!("[workspace]\nmembers = [{members}]\nexclude = [{exclude}]\n"),
+            );
+        };
+        let libs = base.join("repo/libs");
+        workspace(
+            &format!("\"app\", \"../shared\", \"{}/*\"", libs.display()),
+            &format!("\"{}/skip\"", libs.display()),
+        );
+        let ws = base.join("repo/ws");
+        assert_eq!(
+            bounded_path_dependency_roots(&ws, &host).unwrap(),
+            vec![libs.join("a"), base.join("repo/shared")]
+        );
+        // An external member is held to the path-dependency boundary.
+        write("repo/.hidden/Cargo.toml", &package("h"));
+        for (members, why) in [
+            ("\"../.hidden\"", "hidden directory"),
+            ("\"/\"", "outside"),
+            ("\"..\"", "contains the workspace root"),
+        ] {
+            workspace(members, "");
+            let error = bounded_path_dependency_roots(&ws, &host)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(why), "{members}: {error}");
+            assert!(error.contains("the workspace member"), "{members}: {error}");
+        }
+        // A `..` after a wildcard is still refused, by name.
+        workspace("\"../libs/*/../a\"", "");
+        let error = bounded_path_dependency_roots(&ws, &host)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("\"../libs/*/../a\" (a `..` after a wildcard)"),
+            "{error}"
+        );
+    }
+
     #[test]
     fn path_dependencies_outside_the_boundary_are_refused() {
         let temp = TempDir::named("cargo-path-bounds");
