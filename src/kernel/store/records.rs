@@ -54,7 +54,7 @@ fn file_name(key: &str) -> String {
 impl Store {
     /// Open `relative` under the store root one component at a time, never
     /// following a symlink. `None` when a component is absent.
-    fn open_namespace(&self, relative: &[&str]) -> io::Result<Option<fs::File>> {
+    pub(super) fn open_namespace(&self, relative: &[&str]) -> io::Result<Option<fs::File>> {
         let mut dir = open_real_directory(&self.root, "store root")?;
         for component in relative {
             match open_file_at(
@@ -192,6 +192,17 @@ impl Store {
             .open_namespace(&["tmp"])?
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "store tmp is missing"))?;
         let bytes = serde_json::to_vec_pretty(body)?;
+        // `read_record` returns no record above the cap, so a larger one
+        // would be written on every sync and never read back.
+        if bytes.len() as u64 > RECORD_CAP {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "store record of kind {kind} is {} bytes, over the {RECORD_CAP}-byte cap",
+                    bytes.len()
+                ),
+            ));
+        }
         let tmp_name = loop {
             let candidate = format!(
                 "record-{}-{}-{}",
@@ -406,6 +417,49 @@ mod record_guard_tests {
             fs::write(&path, bytes).unwrap();
             assert_eq!(store.read_record("demo", "a").unwrap(), None, "{tail:?}");
         }
+    }
+
+    /// The cap holds on write too: a record `read_record` would refuse is
+    /// never written, and the one before it is kept.
+    #[test]
+    fn a_record_over_one_mib_is_refused_on_write() {
+        let (store, _dir) = store();
+        let activity = store.activity(ActivityMode::Shared).unwrap();
+        let overhead = serde_json::to_vec_pretty(&serde_json::json!({"key": "a", "value": ""}))
+            .unwrap()
+            .len();
+        let fits = "x".repeat((1 << 20) - overhead);
+        store
+            .write_record(&activity, "demo", "a", &serde_json::json!(fits))
+            .unwrap();
+        assert_eq!(
+            fs::metadata(record_path(&store, "demo", "a"))
+                .unwrap()
+                .len(),
+            1 << 20
+        );
+        assert_eq!(
+            store.read_record("demo", "a").unwrap(),
+            Some(serde_json::json!(fits))
+        );
+
+        let over = "x".repeat((1 << 20) - overhead + 1);
+        let error = store
+            .write_record(&activity, "demo", "a", &serde_json::json!(over))
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "{error}");
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "store record of kind demo is {} bytes, over the 1048576-byte cap",
+                (1 << 20) + 1
+            )
+        );
+        assert_eq!(
+            store.read_record("demo", "a").unwrap(),
+            Some(serde_json::json!(fits))
+        );
+        assert_eq!(fs::read_dir(store.root.join("tmp")).unwrap().count(), 0);
     }
 
     #[test]

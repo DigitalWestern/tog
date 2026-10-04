@@ -94,7 +94,6 @@ After the proxy: the test-suite audit (#351) and then the quality review
   - #367 tests: the artifact size caps in kernel::fetch (8 GiB artifact, 256 MiB text) have no test (from the #363 review).
   - #418 fmt: a never-synced project whose only closure is the retired rustfmt.json never self-heals, and `gc --register` refuses it (from #409).
   - #373 sandbox: host-socket scan leftovers (from the #372 review).
-  - #375 store: metadata readers and record writer leftovers (from the #374 review).
   - #377 catalog: uv GitHub digest unchecked, uv .sha256 parse, Node signer not pinned (from the #348 Tooling review).
   - #410 ci: eight test files skip sandboxed tests silently because the main test step doesn't require the sandbox (from the #400 review).
   - #411 tests: an objmeta socket test fails under a long TMPDIR, path over SUN_LEN (found during #400).

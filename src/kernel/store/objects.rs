@@ -72,21 +72,24 @@ impl Store {
                 format!("object reference {id} is still writable"),
             ));
         }
-        let metadata = self.root.join("meta").join(format!("{id}.json"));
-        let metadata_stat = fs::symlink_metadata(&metadata).map_err(|error| {
+        let no_metadata = |error: io::Error| {
             io::Error::new(
                 error.kind(),
                 format!("object reference {id} has no metadata: {error}"),
             )
-        })?;
-        if metadata_stat.file_type().is_symlink() || !metadata_stat.is_file() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("object reference {id} metadata is not a regular file"),
-            ));
-        }
+        };
+        let file = match self.open_object_meta(id).map_err(no_metadata)? {
+            MetaFile::File(file) => file,
+            MetaFile::Missing => return Err(no_metadata(io::ErrorKind::NotFound.into())),
+            MetaFile::NotRegular => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("object reference {id} metadata is not a regular file"),
+                ))
+            }
+        };
         let value: serde_json::Value =
-            serde_json::from_slice(&fs::read(&metadata)?).map_err(|e| {
+            serde_json::from_reader(io::BufReader::new(file)).map_err(|e| {
                 io::Error::new(
                     io::ErrorKind::InvalidData,
                     format!("parse object reference metadata {id}: {e}"),
@@ -110,6 +113,15 @@ impl Store {
         Ok(f)
     }
 
+    /// Open `meta/<id>.json` from held descriptors: the store root, then
+    /// `meta/`, then the record, none of them through a symlink.
+    pub(crate) fn open_object_meta(&self, id: &str) -> io::Result<MetaFile> {
+        let Some(dir) = self.open_namespace(&["meta"])? else {
+            return Ok(MetaFile::Missing);
+        };
+        open_meta_file_at(dir.as_raw_fd(), format!("{id}.json").as_bytes())
+    }
+
     /// Completeness check without sweeping (safe to call while holding the
     /// publish lock).
     ///
@@ -120,20 +132,20 @@ impl Store {
     pub(super) fn is_complete(&self, id: &str) -> Option<bool> {
         let md = fs::symlink_metadata(self.object_path(id)).ok()?;
         use std::os::unix::fs::PermissionsExt;
-        let meta_path = self.root.join("meta").join(format!("{id}.json"));
-        let meta = fs::symlink_metadata(&meta_path);
-        let record_is_whole = || match fs::read(&meta_path) {
-            Ok(bytes) => serde_json::from_slice::<serde_json::Value>(&bytes)
-                .is_ok_and(|value| value.is_object()),
+        let record_is_whole = || match self.open_object_meta(id) {
+            Ok(MetaFile::File(file)) => {
+                match serde_json::from_reader::<_, serde_json::Value>(io::BufReader::new(file)) {
+                    Ok(value) => value.is_object(),
+                    Err(error) => error.is_io(),
+                }
+            }
+            Ok(MetaFile::Missing | MetaFile::NotRegular) => false,
             Err(_) => true,
         };
         Some(
             !md.file_type().is_symlink()
                 && md.is_dir()
                 && md.permissions().mode() & 0o222 == 0
-                && meta
-                    .as_ref()
-                    .is_ok_and(|metadata| !metadata.file_type().is_symlink() && metadata.is_file())
                 && record_is_whole(),
         )
     }
@@ -174,28 +186,16 @@ impl Store {
             return Ok(None);
         }
         published_identity_failpoint("before-metadata-open");
-        let path = self.root.join("meta").join(format!("{id}.json"));
-        // O_NONBLOCK: a FIFO planted as the record must not hang a
-        // read-only caller in open(2); the descriptor's own type is checked
-        // before a byte is read. On a regular file the flag changes nothing.
-        let file = match fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
-            .open(&path)
-        {
-            Ok(file) => file,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-            Err(error) if error.raw_os_error() == Some(libc::ELOOP) => {
-                return Err(invalid(format!("store object {id} metadata is a symlink")))
+        let file = match self.open_object_meta(id)? {
+            MetaFile::File(file) => file,
+            MetaFile::Missing => return Ok(None),
+            MetaFile::NotRegular => {
+                return Err(invalid(format!(
+                    "store object {id} metadata is not a regular file"
+                )))
             }
-            Err(error) => return Err(error),
         };
-        if !file.metadata()?.is_file() {
-            return Err(invalid(format!(
-                "store object {id} metadata is not a regular file"
-            )));
-        }
-        let value: serde_json::Value = serde_json::from_reader(file)
+        let value: serde_json::Value = serde_json::from_reader(io::BufReader::new(file))
             .map_err(|error| invalid(format!("parse store object {id} metadata: {error}")))?;
         // The record must describe `id`: its identity hashes to it. A
         // sweep and a republish of the same id in between leave a record
@@ -441,7 +441,7 @@ impl Store {
         candidate: &[Exception],
         deps: &ObjectDeps,
     ) -> io::Result<(PathBuf, Vec<Exception>)> {
-        validate_cached_dependency_evidence(&self.root, id, deps)?;
+        validate_cached_dependency_evidence(self, id, deps)?;
         let winner = self.exceptions(id)?;
         let result = crate::kernel::policy::check_exception_set(id, &winner).and_then(|_| {
             if winner != candidate {
@@ -460,8 +460,23 @@ impl Store {
 
     pub fn exceptions(&self, id: &str) -> io::Result<Vec<Exception>> {
         let path = self.root.join("meta").join(format!("{id}.json"));
+        let file = match self.open_object_meta(id)? {
+            MetaFile::File(file) => file,
+            MetaFile::Missing => {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("{} is missing", path.display()),
+                ))
+            }
+            MetaFile::NotRegular => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("{} is not a regular file", path.display()),
+                ))
+            }
+        };
         let meta: serde_json::Value =
-            serde_json::from_reader(fs::File::open(&path)?).map_err(|e| {
+            serde_json::from_reader(io::BufReader::new(file)).map_err(|e| {
                 io::Error::new(
                     io::ErrorKind::InvalidData,
                     format!("parse {}: {e}", path.display()),
@@ -642,12 +657,11 @@ pub(super) fn validate_object_deps(
 /// winner's transitive closure would no longer be the candidate's closure,
 /// and so is one whose evidence cannot be read at all.
 pub(super) fn validate_cached_dependency_evidence(
-    root: &Path,
+    store: &Store,
     id: &str,
     candidate: &ObjectDeps,
 ) -> io::Result<()> {
-    let record =
-        crate::kernel::objmeta::read_record_at(&root.join("meta").join(format!("{id}.json")))?;
+    let record = crate::kernel::objmeta::read_store_record(store, id)?;
     if record.dependencies != candidate.objects || record.cache != candidate.cache {
         let names = |cache: &BTreeSet<crate::kernel::digest::Digest>| {
             cache
@@ -718,5 +732,115 @@ mod object_id_guard_tests {
             fs::read_to_string(store.object_path(&id).join("payload")).unwrap(),
             "a..b"
         );
+    }
+}
+
+/// Every reader of `meta/<id>.json` opens it through `open_object_meta`:
+/// a FIFO planted as the record is refused without blocking, and a
+/// symlinked `meta/` does not redirect the read.
+#[cfg(test)]
+mod meta_reader_tests {
+    use super::*;
+    use crate::kernel::testutil::TempDir;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn published(store: &Store) -> String {
+        crate::kernel::objmeta::register_test_kinds();
+        let identity = Identity {
+            kind: "test".into(),
+            name: "meta-reader".into(),
+            version: "1".into(),
+            inputs: Default::default(),
+        };
+        let id = identity.object_id();
+        fs::create_dir_all(store.object_path(&id)).unwrap();
+        fs::set_permissions(store.object_path(&id), fs::Permissions::from_mode(0o555)).unwrap();
+        fs::write(
+            store.root.join("meta").join(format!("{id}.json")),
+            serde_json::to_vec(&serde_json::json!({
+                "schema": "object-meta/2",
+                "id": id,
+                "identity": identity,
+                "dependencies": [],
+                "cache_digests": [],
+                "evidence": "explicit",
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        id
+    }
+
+    /// Each reader's answer, on a thread so a reader that blocks on a FIFO
+    /// fails the test instead of hanging it.
+    fn readers(store: &Store, id: &str) -> [Result<(), String>; 5] {
+        let (store, id) = (store.clone(), id.to_owned());
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let activity = store.activity(ActivityMode::Shared).unwrap();
+            let text = |result: io::Result<()>| result.map_err(|error| error.to_string());
+            let _ = sender.send([
+                text(store.published_identity(&id).and_then(|found| {
+                    found
+                        .map(drop)
+                        .ok_or_else(|| io::Error::other("no identity"))
+                })),
+                text(store.validate_object_complete(&activity, &id)),
+                match store.is_complete(&id) {
+                    Some(true) => Ok(()),
+                    other => Err(format!("is_complete: {other:?}")),
+                },
+                text(store.exceptions(&id).map(drop)),
+                text(validate_cached_dependency_evidence(
+                    &store,
+                    &id,
+                    &ObjectDeps::new(),
+                )),
+            ]);
+        });
+        receiver
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("a metadata reader blocked")
+    }
+
+    #[test]
+    fn every_metadata_reader_refuses_a_fifo_and_a_symlinked_meta() {
+        let temp = TempDir::named("meta-readers");
+        Store::open_at(&temp.0).unwrap();
+        let store = Store {
+            root: temp.0.canonicalize().unwrap(),
+        };
+        let id = published(&store);
+        for (index, answer) in readers(&store, &id).iter().enumerate() {
+            assert_eq!(answer, &Ok(()), "reader {index}");
+        }
+
+        // A FIFO where the record belongs.
+        let record = store.root.join("meta").join(format!("{id}.json"));
+        let saved = fs::read(&record).unwrap();
+        fs::remove_file(&record).unwrap();
+        let name = std::ffi::CString::new(record.as_os_str().as_bytes()).unwrap();
+        // SAFETY: a NUL-terminated path in a directory this test owns.
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        let [identity, complete, is_complete, exceptions, evidence] = readers(&store, &id);
+        for answer in [identity, complete, exceptions, evidence] {
+            assert!(answer.unwrap_err().contains("not a regular file"));
+        }
+        assert_eq!(is_complete.unwrap_err(), "is_complete: Some(false)");
+        fs::remove_file(&record).unwrap();
+
+        // `meta/` itself a symlink to a directory holding a good record.
+        let elsewhere = store.root.join("meta-elsewhere");
+        fs::create_dir(&elsewhere).unwrap();
+        fs::write(elsewhere.join(format!("{id}.json")), saved).unwrap();
+        fs::remove_dir(store.root.join("meta")).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, store.root.join("meta")).unwrap();
+        let [identity, complete, is_complete, exceptions, evidence] = readers(&store, &id);
+        for answer in [identity, complete, exceptions, evidence] {
+            assert!(answer.unwrap_err().contains("is not a real directory"));
+        }
+        // A `meta/` that cannot be opened is no evidence of a crashed
+        // publication, so the lookup does not clear the object over it.
+        assert_eq!(is_complete, Ok(()));
     }
 }
