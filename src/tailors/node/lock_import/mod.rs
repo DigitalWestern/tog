@@ -185,35 +185,19 @@ fn lock_git_source(url: &str, has_integrity: bool) -> Option<crate::kernel::gits
     })
 }
 
-fn platform_values_compatible(platform: Platform, values: &[String], ours: &str) -> bool {
-    if values.is_empty() {
-        return true;
+/// The restriction list that excludes this host, if one does. Only a pnpm
+/// lock records restrictions; yarn.lock carries none, so its nodes are
+/// compatible everywhere.
+fn node_unsupported(platform: Platform, node: &Node) -> Option<&'static str> {
+    fn values(list: &[String]) -> Vec<&str> {
+        list.iter().map(String::as_str).collect()
     }
-    if platform.is_macos() {
-        if values
-            .iter()
-            .any(|value| value.strip_prefix('!') == Some(ours))
-        {
-            return false;
-        }
-        !values.iter().any(|value| !value.starts_with('!'))
-            || values.iter().any(|value| value == ours)
-    } else {
-        if values
-            .iter()
-            .any(|value| value.strip_prefix('!') == Some(ours))
-        {
-            return false;
-        }
-        values.iter().any(|value| value == ours)
-            || values.iter().all(|value| value.starts_with('!'))
-    }
-}
-
-fn node_compatible(platform: Platform, node: &Node) -> bool {
-    platform_values_compatible(platform, &node.os, platform.npm_os())
-        && platform_values_compatible(platform, &node.cpu, platform.npm_cpu())
-        && (platform.is_macos() || platform_values_compatible(platform, &node.libc, "glibc"))
+    crate::tailors::node::plan::unsupported_restriction(
+        platform,
+        &values(&node.os),
+        &values(&node.cpu),
+        &values(&node.libc),
+    )
 }
 
 #[derive(Debug, Clone)]
@@ -402,12 +386,16 @@ fn existing_ancestor(
 /// A dependency the lockfile could not resolve to a package. Returning `Ok`
 /// means the traversal skips it (an optional git dependency is recorded as a
 /// policy exception first); a required one is fatal.
-fn skip_external_dependency(dependency: &Dependency, detail: &str) -> io::Result<()> {
+fn skip_external_dependency(
+    dependency: &Dependency,
+    detail: &str,
+    record: &mut impl FnMut(&str, &str, &str) -> io::Result<()>,
+) -> io::Result<()> {
     if !dependency.optional {
         return Err(err(format!("{}: {detail}", dependency.name)));
     }
     if detail.starts_with("npm_git_dep:") {
-        crate::kernel::policy::record(
+        record(
             crate::kernel::policy::GIT_DEPENDENCY,
             &dependency.name,
             detail,
@@ -416,15 +404,36 @@ fn skip_external_dependency(dependency: &Dependency, detail: &str) -> io::Result
     Ok(())
 }
 
+/// What a `foreign-platform-package` exception says about a package.
+fn foreign_platform_detail(platform: Platform, node: &Node) -> String {
+    let mut restrictions = Vec::new();
+    for (field, values) in [("os", &node.os), ("cpu", &node.cpu), ("libc", &node.libc)] {
+        if !values.is_empty() {
+            restrictions.push(format!("{field}={values:?}"));
+        }
+    }
+    format!(
+        "{} excludes host {}; placed as files, the way pnpm places a required package, and its install scripts are not run",
+        restrictions.join(", "),
+        platform.triple()
+    )
+}
+
 /// The graph node this dependency names, once it is known to be realizable on
 /// this host. `Ok(None)` means the traversal skips it: an optional package
 /// that is platform-incompatible, unresolvable, or carries no integrity.
+///
+/// A required package whose restrictions exclude this host is realizable:
+/// pnpm warns and installs it (a project that cross-compiles lists every
+/// platform's binary as a plain dependency), so it is placed and recorded as
+/// a `foreign-platform-package` exception, which a policy can deny.
 fn realizable_node<'a>(
     platform: Platform,
     nodes: &'a BTreeMap<String, Node>,
     node_key: &str,
     dependency: &Dependency,
     lock_source: &str,
+    record: &mut impl FnMut(&str, &str, &str) -> io::Result<()>,
 ) -> io::Result<Option<&'a Node>> {
     let node = nodes.get(node_key).ok_or_else(|| {
         err(format!(
@@ -435,30 +444,22 @@ fn realizable_node<'a>(
     // A pnpm identity may carry its tarball URL as the version; never
     // print that URL's credentials.
     let version = crate::tailors::node::redact_url_userinfo(&node.version);
-    if !node_compatible(platform, node) {
+    if node_unsupported(platform, node).is_some() {
         if dependency.optional || node.optional {
             // pnpm records every platform variant in one lockfile;
             // incompatible optional packages are omitted.
             return Ok(None);
         }
-        return Err(err(format!(
-            "{}@{}: required dependency does not support host {} (os={:?}, cpu={:?}, libc={:?})",
-            node.name,
-            version,
-            platform.triple(),
-            node.os,
-            node.cpu,
-            node.libc
-        )));
+        record(
+            crate::kernel::policy::FOREIGN_PLATFORM_PACKAGE,
+            &format!("{}@{version}", node.name),
+            &foreign_platform_detail(platform, node),
+        )?;
     }
     if let Some(detail) = &node.external {
         if dependency.optional || node.optional {
             if detail.starts_with("npm_git_dep:") {
-                crate::kernel::policy::record(
-                    crate::kernel::policy::GIT_DEPENDENCY,
-                    &node.name,
-                    detail,
-                )?;
+                record(crate::kernel::policy::GIT_DEPENDENCY, &node.name, detail)?;
             }
             return Ok(None);
         }
@@ -630,8 +631,10 @@ fn place_workspace_link(
 
 /// Turn the settled placement map into the plan's package list.
 fn resolved_packages(
+    platform: Platform,
     occupied: BTreeMap<String, Occupied>,
     nodes: &BTreeMap<String, Node>,
+    needs_workspace: &BTreeSet<String>,
 ) -> io::Result<Vec<NpmPackage>> {
     let mut packages = Vec::new();
     for (path, occupied) in occupied {
@@ -644,7 +647,7 @@ fn resolved_packages(
             .ok_or_else(|| err(format!("internal: no package for {path}")))?;
         let git = lock_git_source(&node.url, !node.integrity.is_empty());
         packages.push(NpmPackage {
-            path,
+            path: path.clone(),
             name: node.name.clone(),
             version: node.version.clone(),
             url: node.url.clone(),
@@ -656,18 +659,85 @@ fn resolved_packages(
             patch: node.patch.clone(),
             git,
             optional: node.optional,
+            // Placed although this host is excluded: only a required
+            // package gets this far, and it was recorded when it was placed.
+            foreign_platform: node_unsupported(platform, node).is_some(),
+            needs_workspace: needs_workspace.contains(&path),
         });
     }
     packages.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(packages)
 }
 
+/// A link below a package sits inside that package's directory. When the
+/// package itself asked for the link, the projection is a copy and the link
+/// is planted in the copy. Any other link there (an importer keyed beneath a
+/// package) would be written through a symlink into a read-only store
+/// object.
+fn check_links_inside_packages(
+    links: &BTreeMap<String, NpmLink>,
+    occupied: &BTreeMap<String, Occupied>,
+    needs_workspace: &BTreeSet<String>,
+) -> io::Result<()> {
+    for (path, link) in links {
+        // The nearest enclosing package owns the directory the link is in.
+        let host = occupied
+            .iter()
+            .filter(|(package, entry)| {
+                matches!(entry, Occupied::Package { .. })
+                    && path.starts_with(&format!("{package}/"))
+            })
+            .map(|(package, _)| package)
+            .max_by_key(|package| package.len());
+        if let Some(package) = host.filter(|package| !needs_workspace.contains(*package)) {
+            return Err(err(format!(
+                "link {path} -> {} would be planted inside the package {package}, which is store content; tog cannot project a local package nested under a registry package that does not depend on it",
+                link.target
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// `build_plan_recording` through the process policy.
 fn build_plan(
     platform: Platform,
     graph: Graph,
     lock_source: &str,
     node_version: &str,
 ) -> io::Result<NpmPlan> {
+    let record = &mut crate::kernel::policy::record;
+    build_plan_recording(platform, graph, lock_source, node_version, record)
+}
+
+/// Place every package and link the graph reaches. `needs_workspace`
+/// collects, by placed path, the registry packages with a dependency on a
+/// workspace package (a plugin whose peer is the package this repository
+/// develops): wherever the link lands, beside the package or hoisted, the
+/// package only finds it from a real path inside the project.
+fn build_plan_recording(
+    platform: Platform,
+    graph: Graph,
+    lock_source: &str,
+    node_version: &str,
+    record: &mut impl FnMut(&str, &str, &str) -> io::Result<()>,
+) -> io::Result<NpmPlan> {
+    // One placed package, one exception: the traversal below reaches a
+    // required foreign-platform package once per dependency edge that names
+    // it, but the package is placed a single time, so its
+    // `foreign-platform-package` exception is recorded once per placed
+    // package instead of once per edge. (Greptile review on #398.)
+    let mut seen_foreign = BTreeSet::<String>::new();
+    let inner_record = &mut *record;
+    let mut dedup_record = |kind: &str, subject: &str, detail: &str| -> io::Result<()> {
+        if kind == crate::kernel::policy::FOREIGN_PLATFORM_PACKAGE
+            && !seen_foreign.insert(subject.to_string())
+        {
+            return Ok(());
+        }
+        inner_record(kind, subject, detail)
+    };
+    let record = &mut dedup_record;
     let workspace_paths = graph.workspace_paths.clone();
     let mut occupied = BTreeMap::<String, Occupied>::new();
     // (parent, dependency, workspace, who needs it when it is a requirement
@@ -696,6 +766,7 @@ fn build_plan(
     // placed: checked against the final layout, so a later placement cannot
     // shadow one of them unnoticed.
     let mut requirements = Vec::<(Requirer, Dependency)>::new();
+    let mut needs_workspace = BTreeSet::<String>::new();
 
     while !queue.is_empty() || !workspace_queue.is_empty() {
         if queue.is_empty() {
@@ -732,14 +803,20 @@ fn build_plan(
             workspace.is_some() || (!parent.is_empty() && !parent.starts_with("node_modules/"));
         let (path, should_expand) = match &dependency.target {
             Target::External(detail) => {
-                skip_external_dependency(&dependency, detail)?;
+                skip_external_dependency(&dependency, detail, record)?;
                 continue;
             }
             Target::Node(node_key) => {
                 // A platform-skipped optional dependency is not placed, so it
                 // is no requirement either.
-                let Some(node) =
-                    realizable_node(platform, &graph.nodes, node_key, &dependency, lock_source)?
+                let Some(node) = realizable_node(
+                    platform,
+                    &graph.nodes,
+                    node_key,
+                    &dependency,
+                    lock_source,
+                    record,
+                )?
                 else {
                     continue;
                 };
@@ -757,6 +834,10 @@ fn build_plan(
                 (path, true)
             }
             Target::Link(target) => {
+                // Only a registry package's own dependency has no requirer.
+                if requirer.is_none() && occupied.contains_key(&parent) {
+                    needs_workspace.insert(parent.clone());
+                }
                 let path = place_workspace_link(
                     target,
                     &dependency,
@@ -837,21 +918,8 @@ fn build_plan(
             }
         }
     }
-    // A link below a package would be planted inside that package's
-    // directory, which projection reaches through a symlink into a
-    // read-only store object.
-    for (path, link) in &links {
-        if let Some(package) = occupied.iter().find_map(|(package, entry)| {
-            (matches!(entry, Occupied::Package { .. }) && path.starts_with(&format!("{package}/")))
-                .then_some(package)
-        }) {
-            return Err(err(format!(
-                "link {path} -> {} would be planted inside the package {package}, which is store content; tog cannot project a local package nested under a registry package",
-                link.target
-            )));
-        }
-    }
-    let packages = resolved_packages(occupied, &graph.nodes)?;
+    check_links_inside_packages(&links, &occupied, &needs_workspace)?;
+    let packages = resolved_packages(platform, occupied, &graph.nodes, &needs_workspace)?;
     check_destinations(&packages, &links)?;
     Ok(NpmPlan {
         node_version: node_version.to_string(),
@@ -1674,6 +1742,374 @@ snapshots: {}
         );
     }
 
+    /// tailwindcss's shape: a project that cross-compiles lists every
+    /// platform's binary package as a plain dependency, and one more as an
+    /// optional one.
+    fn every_platform_lock() -> String {
+        format!(
+            r#"lockfileVersion: '9.0'
+importers:
+  .:
+    dependencies:
+      watcher-darwin-arm64:
+        specifier: 2.6.0
+        version: 2.6.0
+      watcher-linux-x64-glibc:
+        specifier: 2.6.0
+        version: 2.6.0
+    optionalDependencies:
+      watcher-win32-x64:
+        specifier: 2.6.0
+        version: 2.6.0
+packages:
+  watcher-darwin-arm64@2.6.0:
+    resolution: {{integrity: {SRI}}}
+    cpu: [arm64]
+    os: [darwin]
+  watcher-linux-x64-glibc@2.6.0:
+    resolution: {{integrity: {SRI}}}
+    cpu: [x64]
+    os: [linux]
+    libc: [glibc]
+  watcher-win32-x64@2.6.0:
+    resolution: {{integrity: {SRI}}}
+    cpu: [x64]
+    os: [win32]
+snapshots:
+  watcher-darwin-arm64@2.6.0: {{}}
+  watcher-linux-x64-glibc@2.6.0: {{}}
+  watcher-win32-x64@2.6.0:
+    optional: true
+"#
+        )
+    }
+
+    /// (name, foreign_platform) of every planned package, in plan order.
+    fn foreign_flags(plan: &NpmPlan) -> Vec<(&str, bool)> {
+        plan.packages
+            .iter()
+            .map(|package| (package.name.as_str(), package.foreign_platform))
+            .collect()
+    }
+
+    /// pnpm installs a required package whose os/cpu excludes the host, so
+    /// the plan places it, marks it, and records one exception for it. An
+    /// optional one is still left out, and a native one is not marked.
+    #[test]
+    fn a_required_foreign_platform_package_is_placed_and_recorded() {
+        let _attribution_lock = crate::kernel::policy::exception_guard();
+        let _attribution = crate::kernel::policy::Attribution::open("node").unwrap();
+        let dir = project();
+        let permissive = crate::kernel::policy::Policy::default();
+        let plan = super::pnpm::plan_pnpm_with_policy(
+            Platform::X86_64UnknownLinuxGnu,
+            &every_platform_lock(),
+            &held(&dir.0),
+            node_version(),
+            &permissive,
+        )
+        .unwrap();
+        assert_eq!(
+            foreign_flags(&plan),
+            [
+                ("watcher-darwin-arm64", true),
+                ("watcher-linux-x64-glibc", false)
+            ]
+        );
+        let exceptions = crate::kernel::policy::drain();
+        assert_eq!(exceptions.len(), 1, "{exceptions:?}");
+        assert_eq!(
+            exceptions[0].kind,
+            crate::kernel::policy::FOREIGN_PLATFORM_PACKAGE
+        );
+        assert_eq!(exceptions[0].subject, "watcher-darwin-arm64@2.6.0");
+        assert_eq!(
+            exceptions[0].detail,
+            "os=[\"darwin\"], cpu=[\"arm64\"] excludes host x86_64-unknown-linux-gnu; placed as files, the way pnpm places a required package, and its install scripts are not run"
+        );
+    }
+
+    /// The same lock on the other host: which package is foreign follows the
+    /// host, and `libc` is a restriction on Linux only.
+    #[test]
+    fn which_package_is_foreign_follows_the_host() {
+        let _attribution_lock = crate::kernel::policy::exception_guard();
+        let _attribution = crate::kernel::policy::Attribution::open("node").unwrap();
+        let dir = project();
+        let permissive = crate::kernel::policy::Policy::default();
+        let plan = super::pnpm::plan_pnpm_with_policy(
+            Platform::Aarch64AppleDarwin,
+            &every_platform_lock(),
+            &held(&dir.0),
+            node_version(),
+            &permissive,
+        )
+        .unwrap();
+        assert_eq!(
+            foreign_flags(&plan),
+            [
+                ("watcher-darwin-arm64", false),
+                ("watcher-linux-x64-glibc", true)
+            ]
+        );
+        let exceptions = crate::kernel::policy::drain();
+        assert_eq!(exceptions.len(), 1, "{exceptions:?}");
+        assert_eq!(exceptions[0].subject, "watcher-linux-x64-glibc@2.6.0");
+        assert!(
+            exceptions[0].detail.starts_with(
+                "os=[\"linux\"], cpu=[\"x64\"], libc=[\"glibc\"] excludes host aarch64-apple-darwin;"
+            ),
+            "{exceptions:?}"
+        );
+    }
+
+    /// A policy that denies the kind turns the placement back into a
+    /// refusal that names the kind and the package.
+    #[test]
+    fn a_denied_foreign_platform_package_refuses_the_lock() {
+        let _attribution_lock = crate::kernel::policy::exception_guard();
+        let _attribution = crate::kernel::policy::Attribution::open("node").unwrap();
+        let dir = project();
+        let deny = crate::kernel::policy::Policy {
+            deny: std::collections::BTreeSet::from([
+                crate::kernel::policy::FOREIGN_PLATFORM_PACKAGE.to_string(),
+            ]),
+            ..Default::default()
+        };
+        let error = super::pnpm::plan_pnpm_with_policy(
+            Platform::X86_64UnknownLinuxGnu,
+            &every_platform_lock(),
+            &held(&dir.0),
+            node_version(),
+            &deny,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("policy denies foreign-platform-package: watcher-darwin-arm64@2.6.0"),
+            "{error}"
+        );
+        assert!(crate::kernel::policy::drain().is_empty());
+    }
+
+    /// A pnpm lock's restriction lists read the way a package-lock's do:
+    /// the same list gives the same verdict through either planner, on
+    /// either host.
+    #[test]
+    fn pnpm_and_npm_locks_judge_a_restriction_list_alike() {
+        let _attribution_lock = crate::kernel::policy::exception_guard();
+        let dir = project();
+        let permissive = crate::kernel::policy::Policy::default();
+        // (the list as YAML, the list as JSON, supported on Linux, on macOS)
+        let cases = [
+            ("[any]", r#"["any"]"#, true, true),
+            ("[linux, '!win32']", r#"["linux","!win32"]"#, true, false),
+            ("['!darwin']", r#"["!darwin"]"#, true, false),
+            ("[darwin, linux]", r#"["darwin","linux"]"#, true, true),
+            ("linux", r#""linux""#, true, false),
+            ("[any, '!darwin']", r#"["any","!darwin"]"#, false, false),
+        ];
+        for (yaml, json, on_linux, on_macos) in cases {
+            let pnpm_lock = format!(
+                r#"lockfileVersion: '9.0'
+importers:
+  .:
+    dependencies:
+      restricted:
+        specifier: 1.0.0
+        version: 1.0.0
+packages:
+  restricted@1.0.0:
+    resolution: {{integrity: {SRI}}}
+    os: {yaml}
+snapshots:
+  restricted@1.0.0: {{}}
+"#
+            );
+            let npm_lock = format!(
+                r#"{{"lockfileVersion":3,"packages":{{"":{{}},"node_modules/restricted":{{"version":"1.0.0","os":{json},"resolved":"https://r/restricted.tgz","integrity":"{SRI}"}}}}}}"#
+            );
+            for (platform, supported) in [
+                (Platform::X86_64UnknownLinuxGnu, on_linux),
+                (Platform::Aarch64AppleDarwin, on_macos),
+            ] {
+                let _attribution = crate::kernel::policy::Attribution::open("node").unwrap();
+                let plan = super::pnpm::plan_pnpm_with_policy(
+                    platform,
+                    &pnpm_lock,
+                    &held(&dir.0),
+                    node_version(),
+                    &permissive,
+                )
+                .unwrap();
+                assert_eq!(
+                    foreign_flags(&plan),
+                    [("restricted", !supported)],
+                    "pnpm os: {yaml} on {platform:?}"
+                );
+                crate::kernel::policy::drain();
+                assert_eq!(
+                    crate::tailors::node::plan_npm(platform, &npm_lock).is_ok(),
+                    supported,
+                    "npm os: {json} on {platform:?}"
+                );
+            }
+        }
+    }
+
+    /// tailwindcss's other shape: a registry plugin whose peer is the
+    /// package the repository develops. `root_core` is what the root
+    /// importer depends on under the name `core`.
+    fn workspace_peer_lock(root_core: &str) -> String {
+        format!(
+            r#"lockfileVersion: '9.0'
+importers:
+  .:
+    dependencies:
+      core:
+{root_core}
+      plugin:
+        specifier: 1.0.0
+        version: 1.0.0(core@packages+core)
+  packages/core: {{}}
+packages:
+  core@3.0.0:
+    resolution: {{integrity: {SRI}}}
+  plugin@1.0.0:
+    resolution: {{integrity: {SRI}}}
+    peerDependencies:
+      core: '*'
+snapshots:
+  core@3.0.0: {{}}
+  plugin@1.0.0(core@packages+core):
+    dependencies:
+      core: link:packages/core
+"#
+        )
+    }
+
+    fn workspace_peer_plan(root_core: &str) -> NpmPlan {
+        let dir = project();
+        fs::create_dir_all(dir.0.join("packages/core")).unwrap();
+        plan_pnpm(
+            Platform::X86_64UnknownLinuxGnu,
+            &workspace_peer_lock(root_core),
+            &held(&dir.0),
+            node_version(),
+        )
+        .unwrap()
+    }
+
+    /// (path, needs_workspace) of every planned package, in plan order.
+    fn workspace_flags(plan: &NpmPlan) -> Vec<(&str, bool)> {
+        plan.packages
+            .iter()
+            .map(|package| (package.path.as_str(), package.needs_workspace))
+            .collect()
+    }
+
+    fn link_pairs(plan: &NpmPlan) -> Vec<(&str, &str)> {
+        plan.links
+            .iter()
+            .map(|link| (link.path.as_str(), link.target.as_str()))
+            .collect()
+    }
+
+    /// The root already holds a registry `core`, so the plugin's link to the
+    /// workspace `core` has to sit inside the plugin. That is planned, not
+    /// refused, and the plugin is marked so the projection becomes a copy.
+    #[test]
+    fn a_plugin_whose_peer_is_a_workspace_package_gets_its_link_beside_it() {
+        let plan = workspace_peer_plan("        specifier: 3.0.0\n        version: 3.0.0");
+        assert_eq!(
+            workspace_flags(&plan),
+            [("node_modules/core", false), ("node_modules/plugin", true)]
+        );
+        assert_eq!(
+            link_pairs(&plan),
+            [("node_modules/plugin/node_modules/core", "packages/core")]
+        );
+    }
+
+    /// The dependent is itself nested: the root holds another version of it
+    /// and of `core`. The link belongs to the nearest enclosing package, the
+    /// nested dependent, which is the one marked, not the package above it.
+    #[test]
+    fn a_nested_dependent_owns_the_link_planted_inside_it() {
+        let dir = project();
+        fs::create_dir_all(dir.0.join("packages/core")).unwrap();
+        let lock = format!(
+            r#"lockfileVersion: '9.0'
+importers:
+  .:
+    dependencies:
+      a:
+        specifier: 1.0.0
+        version: 1.0.0(core@packages+core)
+      core:
+        specifier: 3.0.0
+        version: 3.0.0
+      plugin:
+        specifier: 1.0.0
+        version: 1.0.0
+  packages/core: {{}}
+packages:
+  a@1.0.0:
+    resolution: {{integrity: {SRI}}}
+  core@3.0.0:
+    resolution: {{integrity: {SRI}}}
+  plugin@1.0.0:
+    resolution: {{integrity: {SRI}}}
+  plugin@2.0.0:
+    resolution: {{integrity: {SRI}}}
+snapshots:
+  a@1.0.0(core@packages+core):
+    dependencies:
+      plugin: 2.0.0(core@packages+core)
+  core@3.0.0: {{}}
+  plugin@1.0.0: {{}}
+  plugin@2.0.0(core@packages+core):
+    dependencies:
+      core: link:packages/core
+"#
+        );
+        let plan = plan_pnpm(
+            Platform::X86_64UnknownLinuxGnu,
+            &lock,
+            &held(&dir.0),
+            node_version(),
+        )
+        .unwrap();
+        assert_eq!(
+            workspace_flags(&plan),
+            [
+                ("node_modules/a", false),
+                ("node_modules/a/node_modules/plugin", true),
+                ("node_modules/core", false),
+                ("node_modules/plugin", false),
+            ]
+        );
+        assert_eq!(
+            link_pairs(&plan),
+            [(
+                "node_modules/a/node_modules/plugin/node_modules/core",
+                "packages/core"
+            )]
+        );
+    }
+
+    /// With the workspace `core` hoisted to the root, no link sits inside
+    /// the plugin, and the plugin is marked all the same: from a store
+    /// object it could not reach the root link either.
+    #[test]
+    fn a_plugin_whose_workspace_peer_is_hoisted_is_still_marked() {
+        let plan = workspace_peer_plan(
+            "        specifier: workspace:*\n        version: link:packages/core",
+        );
+        assert_eq!(workspace_flags(&plan), [("node_modules/plugin", true)]);
+        assert_eq!(link_pairs(&plan), [("node_modules/core", "packages/core")]);
+    }
+
     #[test]
     fn workspace_importer_gets_its_own_conflicting_version() {
         let dir = project();
@@ -1865,6 +2301,7 @@ is-number@^6.0.0:
                 "is-odd@3.0.1",
                 &dependency,
                 lock_source,
+                &mut crate::kernel::policy::record,
             )
             .unwrap_err()
             .to_string();
@@ -2247,37 +2684,6 @@ deep@^2.0.0:
     fn yarn_workspace_match_compares_prereleases_exactly() {
         assert!(!yarn_workspace_spec_matches("1.0.0-beta.1", "1.0.0"));
         assert!(yarn_workspace_spec_matches("1.0.0-beta.1", "1.0.0-beta.1"));
-    }
-
-    #[test]
-    fn required_pnpm_platform_dependency_fails_on_foreign_platform() {
-        let dir = project();
-        let lock = format!(
-            r#"lockfileVersion: '9.0'
-importers:
-  .:
-    dependencies:
-      linux-only:
-        specifier: 1.0.0
-        version: 1.0.0
-packages:
-  linux-only@1.0.0:
-    resolution: {{integrity: {SRI}}}
-    os: [linux]
-snapshots:
-  linux-only@1.0.0: {{}}
-"#
-        );
-        let error = plan_pnpm(
-            Platform::Aarch64AppleDarwin,
-            &lock,
-            &held(&dir.0),
-            node_version(),
-        )
-        .unwrap_err();
-        let text = error.to_string();
-        assert!(text.contains("linux-only@1.0.0"));
-        assert!(text.contains("aarch64-apple-darwin"));
     }
 }
 
@@ -2787,7 +3193,7 @@ snapshots:
         .unwrap_err();
         assert_eq!(
             error.to_string(),
-            "link node_modules/x/node_modules/lib -> vendor/lib would be planted inside the package node_modules/x, which is store content; tog cannot project a local package nested under a registry package"
+            "link node_modules/x/node_modules/lib -> vendor/lib would be planted inside the package node_modules/x, which is store content; tog cannot project a local package nested under a registry package that does not depend on it"
         );
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
     }

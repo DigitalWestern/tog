@@ -227,46 +227,69 @@ pub(super) fn npm_list_compatible(values: &[&str], ours: &str) -> bool {
     matched || negated == values.len()
 }
 
-/// Darwin semantics from before Linux support, kept byte-for-byte: only array
-/// restrictions count, and any negated entry makes positives irrelevant.
-/// (A shared correction to npm's semantics is a separate decision.)
-pub(super) fn darwin_list_compatible(entry: &serde_json::Value, field: &str, ours: &str) -> bool {
-    match entry[field].as_array() {
-        None => true,
-        Some(list) => {
-            let allowed: Vec<&str> = list.iter().filter_map(|v| v.as_str()).collect();
-            let negated: Vec<&str> = allowed.iter().filter_map(|s| s.strip_prefix('!')).collect();
-            if !negated.is_empty() {
-                !negated.contains(&ours)
+/// The first of a lock entry's `libc`, `os` and `cpu` restriction lists that
+/// excludes `platform`, by field name; `None` when the host is supported.
+/// An absent list is an empty one, which excludes nothing.
+///
+/// This is the one platform filter: package-lock.json, pnpm-lock.yaml and
+/// both hosts read restrictions through it, with npm's list semantics, which
+/// pnpm shares. `libc` is judged on Linux only: tog's Linux is glibc, and
+/// on macOS the field is ignored (npm itself refuses any `libc` list there,
+/// a case no lock for a macOS package has been seen to carry).
+pub(super) fn unsupported_restriction(
+    platform: Platform,
+    os: &[&str],
+    cpu: &[&str],
+    libc: &[&str],
+) -> Option<&'static str> {
+    if !platform.is_macos() && !npm_list_compatible(libc, LINUX_LIBC) {
+        return Some("libc");
+    }
+    if !npm_list_compatible(os, platform.npm_os()) {
+        return Some("os");
+    }
+    if !npm_list_compatible(cpu, platform.npm_cpu()) {
+        return Some("cpu");
+    }
+    None
+}
+
+/// Whether Node, resolving `name` from the package directory `path`, first
+/// meets a workspace link: each enclosing `node_modules`, nearest first.
+/// `placed` answers for one project-relative path: `Some(true)` for a link,
+/// `Some(false)` for anything else that is really there, `None` for nothing.
+pub(super) fn resolves_to_workspace_link(
+    placed: &impl Fn(&str) -> Option<bool>,
+    path: &str,
+    name: &str,
+) -> bool {
+    let mut dir = path;
+    loop {
+        // Node never looks inside a directory named node_modules for
+        // another node_modules.
+        if dir != "node_modules" && !dir.ends_with("/node_modules") {
+            let candidate = if dir.is_empty() {
+                format!("node_modules/{name}")
             } else {
-                allowed.is_empty() || allowed.contains(&ours)
+                format!("{dir}/node_modules/{name}")
+            };
+            if let Some(link) = placed(&candidate) {
+                return link;
             }
         }
+        if dir.is_empty() {
+            return false;
+        }
+        dir = dir.rsplit_once('/').map_or("", |(parent, _)| parent);
     }
 }
 
-pub(super) fn platform_list_compatible(
-    platform: Platform,
-    entry: &serde_json::Value,
-    field: &str,
-    ours: &str,
-) -> bool {
-    if platform.is_macos() {
-        return darwin_list_compatible(entry, field, ours);
-    }
-    restriction_values(entry, field)
-        .map(|values| npm_list_compatible(&values, ours))
-        .unwrap_or(true)
-}
-
-/// `libc` restrictions only apply on Linux; Darwin keeps ignoring the field.
-pub(super) fn libc_compatible(platform: Platform, entry: &serde_json::Value) -> bool {
-    if platform.is_macos() {
-        return true;
-    }
-    restriction_values(entry, "libc")
-        .map(|values| npm_list_compatible(&values, LINUX_LIBC))
-        .unwrap_or(true)
+/// The names a manifest or lock entry may resolve at run time.
+pub(super) fn dependency_names(entry: &serde_json::Value) -> impl Iterator<Item = &String> {
+    ["dependencies", "optionalDependencies", "peerDependencies"]
+        .iter()
+        .filter_map(|field| entry[*field].as_object())
+        .flat_map(|names| names.keys())
 }
 
 /// A `link: true` lock entry: a symlink into the project's own source. The
@@ -290,36 +313,32 @@ fn lock_link_entry(path: &str, entry: &serde_json::Value) -> io::Result<NpmLink>
 
 /// Platform filtering: lock entries carry os/cpu/libc restrictions.
 /// Incompatible optional deps are skipped (npm does the same), which is what
-/// `Ok(false)` means; incompatible required deps are an error. Linux uses
-/// npm's list semantics (deny a matching exclusion, then require a matching
-/// positive when positives exist), while Darwin keeps its established
-/// behavior.
+/// `Ok(false)` means; incompatible required deps are an error, as they are
+/// for npm itself (`EBADPLATFORM`).
 fn entry_platform_compatible(
     platform: Platform,
     entry: &serde_json::Value,
     path: &str,
 ) -> io::Result<bool> {
-    let os_ok = platform_list_compatible(platform, entry, "os", platform.npm_os());
-    let cpu_ok = platform_list_compatible(platform, entry, "cpu", platform.npm_cpu());
-    let libc_ok = libc_compatible(platform, entry);
-    if os_ok && cpu_ok && libc_ok {
+    let values = |field: &str| restriction_values(entry, field).unwrap_or_default();
+    let Some(field) =
+        unsupported_restriction(platform, &values("os"), &values("cpu"), &values("libc"))
+    else {
         return Ok(true);
-    }
+    };
     if entry["optional"].as_bool() == Some(true) {
         return Ok(false);
     }
-    let restriction = if !libc_ok {
+    let restriction = if field == "libc" {
         format!(
-            "libc restriction {:?} is incompatible with host {LINUX_LIBC}",
+            "libc restriction {} is incompatible with host {LINUX_LIBC}",
             entry["libc"]
         )
-    } else if !os_ok {
-        format!("os restriction {:?} is incompatible", entry["os"])
     } else {
-        format!("cpu restriction {:?} is incompatible", entry["cpu"])
+        format!("{field} restriction {} is incompatible", entry[field])
     };
     Err(err(format!(
-        "{path}: required dependency does not support host {} ({}; npm {}/{})",
+        "{path}: required dependency does not support host {} ({}; npm {}/{}); npm refuses this lock here too (EBADPLATFORM), so make the dependency optional or drop it",
         platform.triple(),
         restriction,
         platform.npm_os(),
@@ -445,7 +464,61 @@ fn npm_package_from_entry(
         patch: None,
         git,
         optional: entry["optional"].as_bool() == Some(true),
+        foreign_platform: false,
+        needs_workspace: false,
     }
+}
+
+/// Mark each package one of whose dependencies is a workspace package. A
+/// package-lock names no edges between placements, so the walk Node makes
+/// decides, over what this plan really places: a lock entry left out for
+/// this platform is not there to stop the walk.
+fn mark_workspace_dependents(
+    lock: &serde_json::Map<String, serde_json::Value>,
+    packages: &mut [NpmPackage],
+    links: &[NpmLink],
+    bundled: &[&str],
+) {
+    let mut placed: std::collections::BTreeMap<&str, bool> = links
+        .iter()
+        .map(|link| (link.path.as_str(), true))
+        .collect();
+    placed.extend(bundled.iter().map(|path| (*path, false)));
+    let paths: Vec<String> = packages.iter().map(|p| p.path.clone()).collect();
+    placed.extend(paths.iter().map(|path| (path.as_str(), false)));
+    let placed = |path: &str| placed.get(path).copied();
+    for package in packages {
+        package.needs_workspace = dependency_names(&lock[package.path.as_str()])
+            .any(|name| resolves_to_workspace_link(&placed, &package.path, name));
+    }
+}
+
+impl NpmPackage {
+    /// What this package adds to its environment-identity input for its
+    /// install scripts. A foreign-platform package's are not run, which
+    /// changes the tree a package with scripts leaves behind; the marker is
+    /// added only for such a package, so every other identity stands.
+    pub(super) fn scripts_identity(&self) -> &'static str {
+        if self.foreign_platform {
+            ":scripts[not-run]"
+        } else {
+            ""
+        }
+    }
+}
+
+/// The packages whose install scripts may run, in the order they run:
+/// deepest first, so nested deps build before their dependents. A package
+/// this host cannot run is files only, because its scripts would build or
+/// download for a platform that is not this one.
+pub(super) fn lifecycle_candidates(plan: &NpmPlan) -> Vec<&NpmPackage> {
+    let mut pkgs: Vec<&NpmPackage> = plan
+        .packages
+        .iter()
+        .filter(|p| !p.foreign_platform)
+        .collect();
+    pkgs.sort_by_key(|p| std::cmp::Reverse(p.path.matches("node_modules/").count()));
+    pkgs
 }
 
 /// Parse package-lock.json (lockfileVersion 2 or 3) into a plan.
@@ -567,6 +640,7 @@ fn plan_npm_recording(
             path, entry, resolved, pinned_git, integrity,
         ));
     }
+    mark_workspace_dependents(packages, &mut out, &links, &bundled);
     out.sort_by(|a, b| a.path.cmp(&b.path));
     links.sort_by(|a, b| a.path.cmp(&b.path));
     refuse_case_colliding_paths(

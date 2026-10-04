@@ -177,7 +177,6 @@ After the proxy: the test-suite audit (#351) and then the quality review
   - #188 npm: realize `file:` packages as tog-owned trees.
   - #190 `tog x` py: tools in a Rust-locked project build sdists on shipped Rust.
   - #191 provider object-kind rows still live in the tailors' `objects.rs`.
-  - #214 npm/pnpm: a required foreign-platform dependency is refused (tailwindcss).
   - #215 python: sdists that need Rust at build time (stable-diffusion-webui).
   - #216 python: `uv pip compile` fails for vllm and MetaGPT; classifier label.
   - #219 descriptor: delegated tools a sync starts still run with a path cwd.

@@ -333,13 +333,23 @@ snapshots:
             "      a:\n        specifier: link:vendor/other\n        version: link:vendor/other\n      host:\n",
         )
         .replace("      b: 2.0.0\n", "      b: 1.0.0\n");
-    let error = plan_local("local-nested", &["vendor/a", "vendor/other"], &nested).unwrap_err();
+    let plan = plan_local("local-nested", &["vendor/a", "vendor/other"], &nested).unwrap();
     assert!(
-        error
-            .to_string()
-            .contains("would be planted inside the package node_modules/host"),
-        "{error}"
+        plan.links.iter().any(
+            |link| link.path == "node_modules/host/node_modules/a" && link.target == "vendor/a"
+        ),
+        "{:?}",
+        plan.links
     );
+    // host asked for the link, so host is what turns the projection into a
+    // copy the link can be planted in.
+    let needs_workspace: Vec<&str> = plan
+        .packages
+        .iter()
+        .filter(|package| package.needs_workspace)
+        .map(|package| package.path.as_str())
+        .collect();
+    assert_eq!(needs_workspace, ["node_modules/host"]);
 
     // Cross-workspace: app links a package that lives inside the lib
     // importer. Node looks in packages/lib/node_modules, then the root.

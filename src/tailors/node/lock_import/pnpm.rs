@@ -1266,10 +1266,8 @@ pub fn plan_pnpm(
     project: &ProjectRoot,
     node_version: &str,
 ) -> io::Result<NpmPlan> {
-    let mut record = |kind: &str, subject: &str, detail: &str| {
-        crate::kernel::policy::record(kind, subject, detail)
-    };
-    plan_pnpm_with_recorder(platform, lock_yaml, project, node_version, &mut record)
+    let record = &mut crate::kernel::policy::record;
+    plan_pnpm_with_recorder(platform, lock_yaml, project, node_version, record)
 }
 
 fn plan_pnpm_with_recorder(
@@ -1360,7 +1358,7 @@ fn plan_pnpm_with_recorder(
             .cmp(&b.workspace)
             .then_with(|| a.dependency.name.cmp(&b.dependency.name))
     });
-    build_plan(
+    build_plan_recording(
         platform,
         Graph {
             nodes,
@@ -1371,6 +1369,7 @@ fn plan_pnpm_with_recorder(
         },
         "pnpm-lock.yaml",
         node_version,
+        record,
     )
 }
 

@@ -473,11 +473,12 @@ fn node_env_identity_inner(
             .insert(
                 format!("pkg:{}", p.path),
                 format!(
-                    "{}:{}@{}:{patch_identity}:bin[{}]",
+                    "{}:{}@{}:{patch_identity}:bin[{}]{}",
                     content,
                     p.name,
                     p.version,
-                    bins.join(",")
+                    bins.join(","),
+                    p.scripts_identity()
                 ),
             )
             .is_some()
@@ -1580,9 +1581,7 @@ pub(super) fn run_install_scripts_staged(
     consumed: &mut crate::kernel::store::ObjectDeps,
     cleanup: &mut Vec<PathBuf>,
 ) -> io::Result<()> {
-    // Deepest first: nested deps build before their dependents.
-    let mut pkgs: Vec<&NpmPackage> = plan.packages.iter().collect();
-    pkgs.sort_by_key(|p| std::cmp::Reverse(p.path.matches("node_modules/").count()));
+    let pkgs = lifecycle_candidates(plan);
 
     // The shared tool stage dir and the pinned node-gyp Python are realized
     // lazily, on the first package that actually has lifecycle work.
@@ -1840,6 +1839,8 @@ mod tests {
             integrity: String::new(),
             bin: Vec::new(),
             optional: false,
+            foreign_platform: false,
+            needs_workspace: false,
             patch: None,
             git: None,
         };
@@ -1883,5 +1884,41 @@ mod tests {
         assert_eq!(fs::read(pkg_dir.join("state")).unwrap(), b"mid-install");
         assert!(snapshot.join("state").is_file());
         attribution.discard();
+    }
+
+    /// A foreign-platform package never reaches the script runner, and the
+    /// rest keep the deepest-first order.
+    #[test]
+    fn a_foreign_platform_package_is_not_a_lifecycle_candidate() {
+        let package = |path: &str, foreign_platform: bool| NpmPackage {
+            path: path.into(),
+            name: path.rsplit("node_modules/").next().unwrap().into(),
+            version: "1.0.0".into(),
+            url: "https://127.0.0.1:9/never-requested.tgz".into(),
+            integrity: String::new(),
+            bin: Vec::new(),
+            optional: false,
+            foreign_platform,
+            needs_workspace: false,
+            patch: None,
+            git: None,
+        };
+        let plan = NpmPlan {
+            node_version: "24.20.0".into(),
+            packages: vec![
+                package("node_modules/a", false),
+                package("node_modules/a/node_modules/b", false),
+                package("node_modules/darwin-only", true),
+                package("node_modules/a/node_modules/darwin-only", true),
+            ],
+            links: Vec::new(),
+            workspaces: Vec::new(),
+            lock_source: "pnpm-lock.yaml".into(),
+        };
+        let paths: Vec<&str> = lifecycle_candidates(&plan)
+            .into_iter()
+            .map(|package| package.path.as_str())
+            .collect();
+        assert_eq!(paths, ["node_modules/a/node_modules/b", "node_modules/a"]);
     }
 }

@@ -65,6 +65,11 @@ pub const UNRECORDED_RESOLUTION: &str = "unrecorded-resolution";
 /// Resolution could not complete without building a third-party source
 /// distribution, and the build was allowed.
 pub const RESOLUTION_BUILD: &str = "resolution-build";
+/// A required package whose `os`/`cpu`/`libc` excludes this host was placed
+/// anyway, because the package manager that wrote the lock places it. Its
+/// files are verified like any other package's; its install scripts are not
+/// run.
+pub const FOREIGN_PLATFORM_PACKAGE: &str = "foreign-platform-package";
 
 pub const KINDS: &[&str] = &[
     REQUIREMENT_SKIPPED,
@@ -86,6 +91,7 @@ pub const KINDS: &[&str] = &[
     UNCONFINED_RESOLUTION,
     UNRECORDED_RESOLUTION,
     RESOLUTION_BUILD,
+    FOREIGN_PLATFORM_PACKAGE,
 ];
 
 /// Kinds were spelled with two separators until the names were unified on

@@ -265,6 +265,24 @@ Selection covers every patch of each maintained CPython minor that python-build-
   script; tog does not. Python and Cargo git deps work the same way, but Cargo's are not
   re-verified against the project's Cargo.lock at `run` — a post-sync lock edit is caught by
   cargo, not tog.
+- **A required package for another platform is installed only from a pnpm lock.** pnpm
+  installs a non-optional package whose `os`/`cpu`/`libc` excludes the host (with a warning);
+  npm refuses the same lock with `EBADPLATFORM`, and tog follows whichever tool wrote the
+  lock. From a pnpm lock the package is placed as verified files, recorded as
+  `foreign-platform-package`, and its install scripts are not run. From a `package-lock.json`
+  the sync stops and says to make the dependency optional. `yarn.lock` records no
+  restrictions, so nothing is filtered there at all. pnpm's `supportedArchitectures` setting
+  (install optional packages for other platforms too) is not read: an optional package for
+  another platform is always left out.
+- **A registry package that depends on a workspace package makes `node_modules` a copy.**
+  A plugin whose peer dependency is the package the repository itself develops has to
+  resolve that package from the project's own source. Node looks dependencies up from a
+  package's real path, and a store object cannot hold a link into a project, so for such a
+  project the whole tree is copied into the projection (copy-on-write where the filesystem
+  has reflinks: XFS, Btrfs, APFS; a full copy on ext4) instead of linked. The copy is
+  writable and tog does not re-verify it, so each such package records
+  `unattested-mutable-state`, which the company policy template denies. Copying only the
+  packages that need it is not built.
 - **Skipped install-time downloads are not in the closure**: puppeteer- and cypress-class
   packages record `artifact-not-provisioned`, fetched unverified only when the user runs that
   command. Electron's zip is provisioned instead, and a failed provisioning fails the sync.

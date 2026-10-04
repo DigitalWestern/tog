@@ -396,6 +396,16 @@ pub struct NpmPackage {
     /// Install-script failures are kept by default; strict policy makes them
     /// fatal for both optional and required packages.
     pub optional: bool,
+    /// A required package whose os/cpu/libc excludes this host, placed
+    /// anyway because pnpm places it (recorded as `foreign-platform-package`).
+    /// Its files are extracted; its install scripts never run.
+    pub foreign_platform: bool,
+    /// One of this registry package's dependencies is a workspace package:
+    /// the project's own source (a plugin whose peer is the package the
+    /// repository develops). Node resolves a package's dependencies from the
+    /// package's real path, and a store object can hold no link into a
+    /// project, so a plan with one of these is projected as a copy.
+    pub needs_workspace: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -836,6 +846,8 @@ pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
         patch: None,
         git: None,
         optional: false,
+        foreign_platform: false,
+        needs_workspace: false,
     };
     let package_plan = NpmPlan {
         packages: vec![package.clone()],
@@ -851,6 +863,8 @@ pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
         patch: None,
         git: None,
         optional: false,
+        foreign_platform: false,
+        needs_workspace: false,
     };
     let multi_package_plan = NpmPlan {
         packages: vec![package, second_package],
@@ -940,6 +954,8 @@ pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
         patch: None,
         git: None,
         optional: false,
+        foreign_platform: false,
+        needs_workspace: false,
     };
     let electron_plan = NpmPlan {
         packages: vec![electron],
@@ -1169,6 +1185,8 @@ mod tests {
             patch: None,
             git: None,
             optional: false,
+            foreign_platform: false,
+            needs_workspace: false,
         };
         let artifact = DeclaredArtifact {
             url: "https://artifacts.example.invalid/tool.tar.gz".into(),
@@ -1281,6 +1299,8 @@ mod tests {
             patch: None,
             git: None,
             optional: false,
+            foreign_platform: false,
+            needs_workspace: false,
         };
         let artifact = DeclaredArtifact {
             url: "https://artifacts.example.invalid/tool.tar.gz".into(),
@@ -1401,6 +1421,8 @@ mod tests {
                     patch: Some(patch),
                     git: None,
                     optional: false,
+                    foreign_platform: false,
+                    needs_workspace: false,
                 }],
                 links: Vec::new(),
                 workspaces: Vec::new(),
@@ -1571,6 +1593,8 @@ mod tests {
                 patch: None,
                 git: None,
                 optional: false,
+                foreign_platform: false,
+                needs_workspace: false,
             }],
             links: Vec::new(),
             workspaces: Vec::new(),
@@ -1678,6 +1702,8 @@ mod tests {
             patch: None,
             git: None,
             optional: false,
+            foreign_platform: false,
+            needs_workspace: false,
         };
         let plan = NpmPlan {
             node_version: "24.20.0".into(),
@@ -1743,6 +1769,8 @@ mod tests {
                 integrity: TEST_SRI.into(),
                 bin: Vec::new(),
                 optional: false,
+                foreign_platform: false,
+                needs_workspace: false,
                 patch: None,
                 git: None,
             }],
@@ -1822,6 +1850,8 @@ mod tests {
                 integrity: TEST_SRI.into(),
                 bin: Vec::new(),
                 optional: false,
+                foreign_platform: false,
+                needs_workspace: false,
                 patch: None,
                 git: None,
             }],
@@ -1893,6 +1923,8 @@ mod tests {
                 integrity: TEST_SRI.into(),
                 bin: Vec::new(),
                 optional: false,
+                foreign_platform: false,
+                needs_workspace: false,
                 patch: None,
                 git: None,
             }],
@@ -2195,6 +2227,8 @@ mod tests {
                 patch: None,
                 git: None,
                 optional: false,
+                foreign_platform: false,
+                needs_workspace: false,
             }],
             links: Vec::new(),
             workspaces: Vec::new(),
@@ -2240,6 +2274,8 @@ mod tests {
             patch: None,
             git: None,
             optional: false,
+            foreign_platform: false,
+            needs_workspace: false,
         };
         let plan = NpmPlan {
             node_version: "24.20.0".into(),
@@ -2482,6 +2518,8 @@ mod tests {
                 patch: None,
                 git: None,
                 optional: false,
+                foreign_platform: false,
+                needs_workspace: false,
             }],
             links: Vec::new(),
             workspaces: Vec::new(),
@@ -2581,6 +2619,8 @@ mod tests {
             patch: None,
             git: None,
             optional: false,
+            foreign_platform: false,
+            needs_workspace: false,
         };
         let first = NpmPlan {
             node_version: "24.20.0".into(),
@@ -2880,17 +2920,22 @@ mod tests {
     }
 
     #[test]
-    fn darwin_restriction_semantics_are_unchanged_by_the_linux_selector() {
-        // Darwin behavior predating the Linux selector, preserved verbatim:
-        // array-only, and any negated entry makes positives irrelevant.
+    fn darwin_restriction_lists_follow_npm_semantics_too() {
+        // One filter for both hosts: npm's checkList does not depend on the
+        // platform it runs on, so neither does tog's.
         let cases = [
             (r#"["darwin"]"#, true),
             (r#"["linux"]"#, false),
             (r#"["!linux"]"#, true),
             (r#"["!darwin"]"#, false),
-            (r#"["linux","!win32"]"#, true), // negation present: positives ignored
+            // a positive exists and does not match, whatever is negated
+            (r#"["linux","!win32"]"#, false),
+            (r#"["darwin","!win32"]"#, true),
+            (r#"["any"]"#, true),
             (r#"["any","!darwin"]"#, false),
-            (r#""linux""#, true), // string form is not an array: ignored
+            // the bare string form is a one-element list
+            (r#""linux""#, false),
+            (r#""darwin""#, true),
         ];
         for (restriction, compatible) in cases {
             let l = lock(&format!(
@@ -2898,11 +2943,458 @@ mod tests {
             ));
             restriction_verdict(Platform::Aarch64AppleDarwin, &l, "os", compatible);
         }
-        // Darwin ignores libc entirely.
+        // `libc` is judged on Linux only.
         let l = lock(&format!(
             r#""node_modules/restricted":{{"version":"1","libc":["musl"],"resolved":"https://r/restricted.tgz","integrity":"{TEST_SRI}"}}"#
         ));
         assert!(plan_npm(Platform::Aarch64AppleDarwin, &l).is_ok());
+    }
+
+    /// npm refuses a required package this host cannot run, so tog does, and
+    /// the refusal says so: for a package-lock the fix is in the manifest.
+    #[test]
+    fn a_required_foreign_package_in_a_package_lock_is_refused_as_npm_refuses_it() {
+        let l = lock(&format!(
+            r#""node_modules/required":{{"version":"1","os":["darwin"],"resolved":"https://r/required.tgz","integrity":"{TEST_SRI}"}}"#
+        ));
+        let error = plan_npm(Platform::X86_64UnknownLinuxGnu, &l)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            error,
+            "node_modules/required: required dependency does not support host x86_64-unknown-linux-gnu (os restriction [\"darwin\"] is incompatible; npm linux/x64); npm refuses this lock here too (EBADPLATFORM), so make the dependency optional or drop it"
+        );
+    }
+
+    /// A package-lock names no edges between placements, so the walk Node
+    /// makes from each package decides: the first `node_modules/<name>` on
+    /// the way up is a workspace link, or it is not.
+    #[test]
+    fn a_package_lock_entry_that_reaches_a_workspace_link_is_marked() {
+        let entry = |path: &str, extra: &str| {
+            format!(
+                r#""{path}":{{"version":"1.0.0","resolved":"https://r/x.tgz","integrity":"{TEST_SRI}"{extra}}}"#
+            )
+        };
+        let l = lock(
+            &[
+                r#""packages/core":{"name":"core","version":"4.0.0"}"#.to_string(),
+                r#""node_modules/core":{"resolved":"packages/core","link":true}"#.to_string(),
+                // its peer is the workspace package, hoisted to the root
+                entry("node_modules/plugin", r#","peerDependencies":{"core":"*"}"#),
+                // its own nested registry `core` is nearer than the link
+                entry("node_modules/pinned", r#","dependencies":{"core":"^3"}"#),
+                entry("node_modules/pinned/node_modules/core", ""),
+                // an optional peer nothing installed, and a plain package
+                entry(
+                    "node_modules/loose",
+                    r#","peerDependencies":{"absent":"*"}"#,
+                ),
+                entry(
+                    "node_modules/@scope/deep",
+                    r#","optionalDependencies":{"core":"*"}"#,
+                ),
+                // a nearer `core` this host leaves out does not hide the link
+                entry("node_modules/windows", r#","dependencies":{"core":"*"}"#),
+                entry(
+                    "node_modules/windows/node_modules/core",
+                    r#","optional":true,"os":["win32"]"#,
+                ),
+                // a name that merely ends in "node_modules" is a package like
+                // any other: its own nested registry `core` is the nearest
+                entry(
+                    "node_modules/x-node_modules",
+                    r#","dependencies":{"core":"*"}"#,
+                ),
+                entry("node_modules/x-node_modules/node_modules/core", ""),
+            ]
+            .join(","),
+        );
+        let plan = plan_npm(Platform::X86_64UnknownLinuxGnu, &l).unwrap();
+        let flags: Vec<(&str, bool)> = plan
+            .packages
+            .iter()
+            .map(|package| (package.path.as_str(), package.needs_workspace))
+            .collect();
+        assert_eq!(
+            flags,
+            [
+                ("node_modules/@scope/deep", true),
+                ("node_modules/loose", false),
+                ("node_modules/pinned", false),
+                ("node_modules/pinned/node_modules/core", false),
+                ("node_modules/plugin", true),
+                ("node_modules/windows", true),
+                ("node_modules/x-node_modules", false),
+                ("node_modules/x-node_modules/node_modules/core", false),
+            ]
+        );
+    }
+
+    /// Skipping a foreign-platform package's install scripts changes the
+    /// tree, so the same packages with and without the mark are two
+    /// environments, and an unmarked plan keeps the identity it always had.
+    #[test]
+    fn a_foreign_platform_package_is_a_different_environment() {
+        crate::tailors::install_kinds();
+        let scratch = TempDir::named("npm-foreign-identity");
+        let root = scratch.0.clone();
+        for subdir in ["objects", "meta", "cache/sha256", "tmp"] {
+            fs::create_dir_all(root.join(subdir)).unwrap();
+        }
+        let store = Store {
+            root: root.canonicalize().unwrap(),
+        };
+        let platform = Platform::X86_64UnknownLinuxGnu;
+        let node_obj = store.object_path("node-cache");
+        let identity = |foreign_platform: bool| {
+            let plan = NpmPlan {
+                node_version: "24.20.0".into(),
+                packages: vec![NpmPackage {
+                    path: "node_modules/darwin-only".into(),
+                    name: "darwin-only".into(),
+                    version: "1.0.0".into(),
+                    url: "https://127.0.0.1:9/never-requested.tgz".into(),
+                    integrity: TEST_SRI.into(),
+                    bin: Vec::new(),
+                    optional: false,
+                    foreign_platform,
+                    needs_workspace: false,
+                    patch: None,
+                    git: None,
+                }],
+                links: Vec::new(),
+                workspaces: Vec::new(),
+                lock_source: "pnpm-lock.yaml".into(),
+            };
+            node_env_identity(
+                &store,
+                platform,
+                &node_obj,
+                &plan,
+                &[],
+                None,
+                &test_gyp_python_id(platform),
+            )
+            .unwrap()
+        };
+        let native = identity(false);
+        let foreign = identity(true);
+        assert_ne!(native.object_id(), foreign.object_id());
+        let digest = Digest::from_sri(TEST_SRI).unwrap();
+        let unmarked = format!(
+            "{}:{}:darwin-only@1.0.0:patch[]:bin[]",
+            digest.algo(),
+            digest.hex()
+        );
+        assert_eq!(native.inputs["pkg:node_modules/darwin-only"], unmarked);
+        assert_eq!(
+            foreign.inputs["pkg:node_modules/darwin-only"],
+            format!("{unmarked}:scripts[not-run]")
+        );
+    }
+
+    /// The script runner itself passes a foreign-platform package by: one
+    /// with a postinstall takes no scratch directory and runs nothing, where
+    /// the same package unmarked would need the build sandbox.
+    #[test]
+    fn install_scripts_are_not_run_for_a_foreign_platform_package() {
+        let scratch = TempDir::named("npm-foreign-lifecycle");
+        let root = scratch.0.clone();
+        for subdir in ["objects", "meta", "cache/sha256", "tmp"] {
+            fs::create_dir_all(root.join(subdir)).unwrap();
+        }
+        let store = Store {
+            root: root.canonicalize().unwrap(),
+        };
+        let activity = &store
+            .activity(crate::kernel::activity::ActivityMode::Shared)
+            .unwrap();
+        let node_obj = store.object_path("node-cache");
+        fs::create_dir_all(&node_obj).unwrap();
+        let staged = store.stage().unwrap();
+        let dir = staged.join("node_modules/darwin-only");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("package.json"),
+            r#"{"name":"darwin-only","scripts":{"postinstall":"exit 1"}}"#,
+        )
+        .unwrap();
+        let plan = NpmPlan {
+            node_version: "24.20.0".into(),
+            packages: vec![NpmPackage {
+                path: "node_modules/darwin-only".into(),
+                name: "darwin-only".into(),
+                version: "1.0.0".into(),
+                url: "https://127.0.0.1:9/never-requested.tgz".into(),
+                integrity: TEST_SRI.into(),
+                bin: Vec::new(),
+                patch: None,
+                git: None,
+                optional: false,
+                foreign_platform: true,
+                needs_workspace: false,
+            }],
+            links: Vec::new(),
+            workspaces: Vec::new(),
+            lock_source: "pnpm-lock.yaml".into(),
+        };
+        let mut cleanup: Vec<PathBuf> = Vec::new();
+        let mut consumed = crate::kernel::store::ObjectDeps::new();
+        run_install_scripts_staged(
+            &store,
+            activity,
+            Platform::host().unwrap(),
+            &staged,
+            &node_obj,
+            &plan,
+            &[],
+            None,
+            &test_gyp_python(),
+            &mut consumed,
+            &mut cleanup,
+        )
+        .expect("the script is not run, so it cannot fail");
+        assert!(
+            cleanup.is_empty(),
+            "no scratch stage dirs were taken: {cleanup:?}"
+        );
+    }
+
+    /// A fake environment object holding a plugin, a registry `core`, and a
+    /// package of the `packages/app` importer; `core_inside_plugin` adds the
+    /// directory a bundled copy would leave where the link goes.
+    fn workspace_peer_fixture(root: &Path, plugin_ships: Option<&str>) -> (PathBuf, PathBuf) {
+        let project = root.join("project");
+        let env = root.join("home/store/objects/env");
+        fs::create_dir_all(project.join("packages/core")).unwrap();
+        fs::create_dir_all(project.join("packages/app")).unwrap();
+        fs::write(project.join("packages/core/package.json"), "{}").unwrap();
+        for package in [
+            "node_modules/plugin",
+            "node_modules/core",
+            "workspaces/packages%2Fapp/node_modules/dep",
+        ] {
+            fs::create_dir_all(env.join(package)).unwrap();
+            fs::write(env.join(package).join("package.json"), "{}").unwrap();
+        }
+        let inside = env.join("node_modules/plugin/node_modules");
+        match plugin_ships {
+            Some("directory") => fs::create_dir_all(inside.join("core")).unwrap(),
+            Some("symlink") => {
+                fs::create_dir_all(inside.join("bundled-core")).unwrap();
+                std::os::unix::fs::symlink("bundled-core", inside.join("core")).unwrap();
+            }
+            _ => {}
+        }
+        (project, env)
+    }
+
+    fn workspace_peer_plan(needs_workspace: bool) -> NpmPlan {
+        let package = |path: &str, name: &str, needs_workspace: bool| NpmPackage {
+            path: path.into(),
+            name: name.into(),
+            version: "1.0.0".into(),
+            url: "https://example.invalid/x.tgz".into(),
+            integrity: TEST_SRI.into(),
+            bin: Vec::new(),
+            patch: None,
+            git: None,
+            optional: false,
+            foreign_platform: false,
+            needs_workspace,
+        };
+        NpmPlan {
+            node_version: "24.20.0".into(),
+            packages: vec![
+                package("node_modules/core", "core", false),
+                package("node_modules/plugin", "plugin", needs_workspace),
+                package("packages/app/node_modules/dep", "dep", false),
+            ],
+            links: if needs_workspace {
+                vec![NpmLink {
+                    path: "node_modules/plugin/node_modules/core".into(),
+                    target: "packages/core".into(),
+                }]
+            } else {
+                Vec::new()
+            },
+            workspaces: vec!["packages/app".into()],
+            lock_source: "pnpm-lock.yaml".into(),
+        }
+    }
+
+    fn project_workspace_peer(project: &Path, env: &Path, plan: &NpmPlan) -> io::Result<()> {
+        let mut attribution = crate::kernel::policy::Attribution::open("node").unwrap();
+        let lease = crate::kernel::testutil::detached_lease();
+        let result = project_node_env(
+            &lease.1,
+            &crate::kernel::fsroot::ProjectRoot::open(project).unwrap(),
+            env,
+            Platform::host().unwrap(),
+            plan,
+            &[],
+            false,
+            &mut attribution,
+        );
+        match &result {
+            Ok(()) => attribution.finish(true).unwrap(),
+            Err(_) => attribution.discard(),
+        }
+        result
+    }
+
+    /// A plugin that depends on a workspace package is projected as a copy:
+    /// a real directory inside the projection, with the link to the
+    /// project's own source planted in it, so Node resolving from the
+    /// plugin's real path finds the workspace package and not the registry
+    /// one at the root. The importer's own node_modules is copied too, and
+    /// the closure says the tree is an unattested clone and why.
+    #[test]
+    fn a_package_that_needs_a_workspace_package_is_projected_as_a_copy() {
+        // The copy is made by a supervised `cp`.
+        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _attribution_lock = crate::kernel::policy::attribution_test_lock();
+        let scratch = TempDir::named("npm-workspace-peer");
+        let (project, env) = workspace_peer_fixture(&scratch.0, None);
+
+        // The same packages with no such dependency: links into the store.
+        project_workspace_peer(&project, &env, &workspace_peer_plan(false)).unwrap();
+        let linked_forest = fs::read_link(project.join("node_modules")).unwrap();
+        assert!(fs::symlink_metadata(linked_forest.join("plugin"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
+
+        project_workspace_peer(&project, &env, &workspace_peer_plan(true)).unwrap();
+        let forest = fs::read_link(project.join("node_modules")).unwrap();
+        assert_ne!(forest, linked_forest, "a clone never reuses a link forest");
+        let plugin = project.join("node_modules/plugin");
+        assert!(fs::symlink_metadata(forest.join("plugin"))
+            .unwrap()
+            .file_type()
+            .is_dir());
+        // The plugin's real path is inside the projection, not the store.
+        assert!(plugin.canonicalize().unwrap().starts_with(&forest));
+        assert_eq!(
+            plugin.join("node_modules/core").canonicalize().unwrap(),
+            project.join("packages/core").canonicalize().unwrap()
+        );
+        assert!(project
+            .join("packages/app/node_modules/dep/package.json")
+            .is_file());
+        // A second sync finds its own link and leaves it.
+        project_workspace_peer(&project, &env, &workspace_peer_plan(true)).unwrap();
+        assert_eq!(
+            plugin.join("node_modules/core").canonicalize().unwrap(),
+            project.join("packages/core").canonicalize().unwrap()
+        );
+        // The store object was read, never written.
+        assert!(!env.join("node_modules/plugin/node_modules").exists());
+
+        let envelope: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(project.join(".tog/closures/node.json")).unwrap(),
+        )
+        .unwrap();
+        let closure = &envelope["body"];
+        assert_eq!(closure["mutable_state"], "unattested");
+        assert_eq!(closure["mutable_scope"], "whole-tree-clone");
+        assert_eq!(closure["mutable_packages"], serde_json::json!([]));
+        assert_eq!(
+            closure["workspace_dependents"],
+            serde_json::json!(["node_modules/plugin"])
+        );
+        let exceptions = closure["exceptions"].as_array().unwrap();
+        assert_eq!(exceptions.len(), 1, "{exceptions:?}");
+        assert_eq!(
+            exceptions[0]["kind"],
+            crate::kernel::policy::UNATTESTED_MUTABLE_STATE
+        );
+        assert_eq!(exceptions[0]["subject"], "node_modules/plugin");
+    }
+
+    /// A package that ships its own directory where the link belongs keeps
+    /// it only by failing the sync: the link is never skipped in silence.
+    #[test]
+    fn a_workspace_link_is_not_planted_over_a_directory_the_package_ships() {
+        // The copy is made by a supervised `cp`.
+        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _attribution_lock = crate::kernel::policy::attribution_test_lock();
+        for ships in ["directory", "symlink"] {
+            let scratch = TempDir::named("npm-workspace-peer-bundled");
+            let (project, env) = workspace_peer_fixture(&scratch.0, Some(ships));
+            let error =
+                project_workspace_peer(&project, &env, &workspace_peer_plan(true)).unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                "workspace link node_modules/plugin/node_modules/core cannot be planted: the package it sits in already ships node_modules/plugin/node_modules/core",
+                "{ships}"
+            );
+        }
+    }
+
+    /// A yarn.lock records no peer dependencies, so a Yarn plan marks
+    /// nothing. The realized plugin's own manifest says its peer is `core`,
+    /// and the plan places `core` as a workspace link at the root, where the
+    /// plugin could not reach it from a store object: the projection is a
+    /// copy all the same. A package whose manifest names no such dependency
+    /// leaves the forest of links alone.
+    #[test]
+    fn a_yarn_plan_reads_the_workspace_dependency_from_the_package_manifest() {
+        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _attribution_lock = crate::kernel::policy::attribution_test_lock();
+        let needs_core = r#"{"name":"plugin","peerDependencies":{"core":"*"}}"#;
+        let needs_other = r#"{"name":"plugin","peerDependencies":{"other":"*"}}"#;
+        for (manifest, dangling, cloned) in [
+            (needs_core, false, true),
+            // a dangling `core` the plugin ships does not stop Node's walk
+            (needs_core, true, true),
+            (needs_other, false, false),
+        ] {
+            let scratch = TempDir::named("npm-yarn-workspace-peer");
+            let (project, env) = workspace_peer_fixture(&scratch.0, None);
+            if dangling {
+                let inside = env.join("node_modules/plugin/node_modules");
+                fs::create_dir_all(&inside).unwrap();
+                std::os::unix::fs::symlink("missing-core", inside.join("core")).unwrap();
+            }
+            // Yarn links the workspace `core` at the root; no registry one.
+            fs::remove_dir_all(env.join("node_modules/core")).unwrap();
+            fs::write(env.join("node_modules/plugin/package.json"), manifest).unwrap();
+            let mut plan = workspace_peer_plan(false);
+            plan.lock_source = "yarn.lock".into();
+            plan.packages.retain(|package| package.name != "core");
+            plan.links = vec![NpmLink {
+                path: "node_modules/core".into(),
+                target: "packages/core".into(),
+            }];
+            project_workspace_peer(&project, &env, &plan).unwrap();
+            let forest = fs::read_link(project.join("node_modules")).unwrap();
+            assert_eq!(
+                fs::symlink_metadata(forest.join("plugin"))
+                    .unwrap()
+                    .file_type()
+                    .is_dir(),
+                cloned,
+                "{manifest}"
+            );
+            let envelope: serde_json::Value = serde_json::from_str(
+                &fs::read_to_string(project.join(".tog/closures/node.json")).unwrap(),
+            )
+            .unwrap();
+            let expected = if cloned {
+                serde_json::json!(["node_modules/plugin"])
+            } else {
+                serde_json::json!([])
+            };
+            assert_eq!(envelope["body"]["workspace_dependents"], expected);
+        }
     }
 
     #[test]
@@ -3102,6 +3594,8 @@ mod tests {
             integrity: TEST_SRI.into(),
             bin: Vec::new(),
             optional: false,
+            foreign_platform: false,
+            needs_workspace: false,
             patch: None,
             git: None,
         });
