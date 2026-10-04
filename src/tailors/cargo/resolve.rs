@@ -318,8 +318,9 @@ mod tests {
     /// (which an explicit member, or one under it, overrides), as cargo
     /// 1.98.1 lists them (checked against `cargo metadata`): a
     /// wildcard matches a hidden directory and `target`, a class matches
-    /// its letters, `**` reaches any depth. A member outside the root and a
-    /// directory with no manifest are not listed.
+    /// its letters, `**` reaches any depth. An absolute entry or one with
+    /// `.` or `..` is placed lexically, and refused by name when it lands
+    /// outside the root. A directory with no manifest is not listed.
     #[test]
     fn outputs_name_every_member_manifest_inside_the_root() {
         let temp = TempDir::named("cargo-outputs");
@@ -331,6 +332,9 @@ mod tests {
             ("crates/b", "b"),
             ("crates/skipped", "skipped"),
             ("kept", "kept"),
+            ("abs", "abs"),
+            ("dotdot", "dotdot"),
+            ("dot/inner", "dotinner"),
             ("sub", "sub"),
             ("sub/inner", "inner"),
             ("crates/.hidden", "hidden"),
@@ -345,9 +349,13 @@ mod tests {
         fs::create_dir_all(root.join("crates/empty")).unwrap();
         fs::write(
             root.join("Cargo.toml"),
-            "[workspace]\nmembers = [\"./app/\", \"crates/*\", \"letters/[ab]\", \
-             \"nested/**/c\", \"target/*\", \"../outside\", \"kept\", \"sub\", \"sub/i*\"]\n\
-             exclude = [\"crates/skipped\", \"kept\", \"sub/inner\"]\n",
+            format!(
+                "[workspace]\nmembers = [\"./app/\", \"crates/*\", \"letters/[ab]\", \
+                 \"nested/**/c\", \"target/*\", \"kept\", \"sub\", \"sub/i*\", \
+                 \"{}/abs\", \"x/../dotdot\", \"dot/./inner\", \"../ws/app\"]\n\
+                 exclude = [\"crates/skipped\", \"kept\", \"sub/inner\"]\n",
+                root.display()
+            ),
         )
         .unwrap();
         let held = ProjectRoot::open(&root).unwrap();
@@ -361,10 +369,13 @@ mod tests {
             vec![
                 "Cargo.toml".to_string(),
                 "Cargo.lock".to_string(),
+                "abs/Cargo.toml".to_string(),
                 "app/Cargo.toml".to_string(),
                 "crates/.hidden/Cargo.toml".to_string(),
                 "crates/a/Cargo.toml".to_string(),
                 "crates/b/Cargo.toml".to_string(),
+                "dot/inner/Cargo.toml".to_string(),
+                "dotdot/Cargo.toml".to_string(),
                 "kept/Cargo.toml".to_string(),
                 "letters/a/Cargo.toml".to_string(),
                 "letters/b/Cargo.toml".to_string(),
@@ -387,6 +398,29 @@ mod tests {
         // A pattern the glob crate refuses is refused here too.
         assert!(cargo_door::expand(&root, "crates/[ab").is_err());
         assert!(cargo_door::expand(&root, "crates/a**").is_err());
+        // A member tog cannot place inside the root is refused by name,
+        // before anything runs or is signed: never dropped.
+        fs::write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\", \"../outside\", \"/elsewhere/x\", \
+             \"crates/*/../a\"]\n",
+        )
+        .unwrap();
+        for result in [
+            cargo_door::member_dirs(&held).map(|_| ()),
+            cargo_door::refuse_unlisted_members(&held),
+            resolution_outputs(&held).map(|_| ()),
+        ] {
+            let error = result.unwrap_err().to_string();
+            for named in [
+                "\"../outside\" (outside the workspace root)",
+                "\"/elsewhere/x\" (outside the workspace root)",
+                "\"crates/*/../a\" (a `..` after a wildcard)",
+            ] {
+                assert!(error.contains(named), "{error}");
+            }
+            assert!(!error.contains("\"app\""), "{error}");
+        }
         // A single package has just its manifest and lock.
         package(&temp.0.join("single"), "single");
         let single = ProjectRoot::open(&temp.0.join("single")).unwrap();

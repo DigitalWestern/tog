@@ -541,9 +541,10 @@ pub(crate) struct Members {
 /// not excluded ([`excluded`]), as cargo 1.98.1 lists them. A glob is
 /// expanded the way cargo's `glob` crate does ([`expand`]): `*`, `?` and
 /// `[...]` within a name, `**` across directories, a wildcard matching a
-/// name that starts with `.`, `target` like any other directory. A member
-/// outside the root (`../x`) is not listed: the door publishes only inside
-/// its lock root.
+/// name that starts with `.`, `target` like any other directory. Each
+/// entry is placed under the root first ([`member_pattern`]); one that
+/// cannot be (`../x`, an absolute path elsewhere) is refused by name, since
+/// the door publishes only inside its lock root.
 pub(crate) fn member_dirs(root: &ProjectRoot) -> io::Result<Members> {
     let mut members = Members {
         listed: Vec::new(),
@@ -554,19 +555,6 @@ pub(crate) fn member_dirs(root: &ProjectRoot) -> io::Result<Members> {
     };
     let manifest = parse_toml(&root.path().join("Cargo.toml"), &text)?;
     let workspace = manifest.get("workspace").and_then(|w| w.as_table());
-    let list = |key: &str| -> Vec<String> {
-        workspace
-            .and_then(|w| w.get(key))
-            .and_then(|v| v.as_array())
-            .map(|items| {
-                items
-                    .iter()
-                    .filter_map(|item| item.as_str())
-                    .filter_map(relative_pattern)
-                    .collect()
-            })
-            .unwrap_or_default()
-    };
     let raw = |key: &str| -> Vec<String> {
         workspace
             .and_then(|w| w.get(key))
@@ -581,7 +569,28 @@ pub(crate) fn member_dirs(root: &ProjectRoot) -> io::Result<Members> {
     };
     let (raw_members, raw_exclude) = (raw("members"), raw("exclude"));
     let left_out = |dir: &Path| excluded(root.path(), dir, &raw_members, &raw_exclude);
-    for pattern in list("members") {
+    let mut patterns = Vec::new();
+    let mut refused = Vec::new();
+    for entry in &raw_members {
+        match member_pattern(root.path(), entry) {
+            Ok(pattern) => patterns.push(pattern),
+            Err(why) => refused.push(format!("{entry:?} ({why})")),
+        }
+    }
+    if !refused.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "the Cargo workspace at {} names members tog cannot place inside it: {}. \
+                 A lock and a resolution record cover the workspace's own files only, so \
+                 they would be signed without these members. Name them by a path inside \
+                 the workspace",
+                root.path().display(),
+                refused.join(", ")
+            ),
+        ));
+    }
+    for pattern in patterns {
         let expanded = expand(root.path(), &pattern)?;
         for dir in expanded.dirs {
             if !left_out(&dir)
@@ -648,16 +657,56 @@ pub fn refuse_unlisted_members(root: &ProjectRoot) -> io::Result<()> {
     ))
 }
 
-/// A members or exclude entry as a path under the root: `./` and a
-/// trailing `/` dropped, `None` for one that leaves the root.
-fn relative_pattern(entry: &str) -> Option<String> {
-    let trimmed = entry.trim_start_matches("./").trim_end_matches('/');
-    let path = Path::new(trimmed);
-    let inside = !trimmed.is_empty()
-        && path
-            .components()
-            .all(|part| matches!(part, Component::Normal(_)));
-    inside.then(|| trimmed.to_string())
+/// A members entry as a pattern relative to `root`, normalized the way
+/// cargo places it (`paths::normalize_path` on the entry joined to the
+/// root, lexically): an absolute entry taken as is, `.` dropped, `..`
+/// taking off the part before it. Empty for the root itself. Refused (with
+/// why) when it lands outside the root, or when a `..` would take off a
+/// wildcard, which only the files on disk could resolve.
+fn member_pattern(root: &Path, entry: &str) -> Result<String, &'static str> {
+    // Each part, and whether the entry (not the root) wrote it.
+    let mut parts: Vec<(std::ffi::OsString, bool)> = Vec::new();
+    normalize_onto(&mut parts, root, false)?;
+    let root_parts = parts.len();
+    let at_root: Vec<_> = parts.iter().map(|(name, _)| name.clone()).collect();
+    normalize_onto(&mut parts, Path::new(entry), true)?;
+    let inside = parts.len() >= root_parts
+        && parts[..root_parts]
+            .iter()
+            .zip(&at_root)
+            .all(|((name, _), root_name)| name == root_name);
+    if !inside {
+        return Err("outside the workspace root");
+    }
+    let relative: PathBuf = parts[root_parts..].iter().map(|(name, _)| name).collect();
+    relative.to_str().map(str::to_string).ok_or("not UTF-8")
+}
+
+/// Add `path`'s parts to `parts`, lexically: an absolute path starts over,
+/// `.` is dropped, `..` takes off the part before it.
+fn normalize_onto(
+    parts: &mut Vec<(std::ffi::OsString, bool)>,
+    path: &Path,
+    from_entry: bool,
+) -> Result<(), &'static str> {
+    for part in path.components() {
+        match part {
+            Component::Prefix(_) | Component::RootDir => parts.clear(),
+            Component::CurDir => {}
+            Component::ParentDir => match parts.pop() {
+                None => return Err("outside the workspace root"),
+                Some((name, true)) if is_wildcard(&name) => return Err("a `..` after a wildcard"),
+                Some(_) => {}
+            },
+            Component::Normal(name) => parts.push((name.to_os_string(), from_entry)),
+        }
+    }
+    Ok(())
+}
+
+/// Whether a path part holds a glob wildcard (`*`, `?`, `[`).
+fn is_wildcard(name: &std::ffi::OsStr) -> bool {
+    name.to_string_lossy().contains(['*', '?', '['])
 }
 
 /// What a members entry names under the root.
