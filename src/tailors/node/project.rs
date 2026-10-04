@@ -410,7 +410,7 @@ fn git_tracked_node_modules(
                     "{path} holds files git tracks, so tog left it in place and did not \
                      project workspace {member}'s dependencies"
                 ),
-                &format!("git ls-files {path}"),
+                &crate::kernel::ui::shell_line(&["git", "ls-files", &path]),
             );
         }
         members.push(member);
@@ -1241,6 +1241,7 @@ mod tests {
             "outer-tracked",
             "candidate-checkout",
             "descendant-checkout",
+            "search-only-parent",
         ] {
             let temp = TempDir::named(shape);
             let project = temp.0.join("project");
@@ -1344,6 +1345,15 @@ mod tests {
                 .unwrap();
             }
             let held = ProjectRoot::open(&project).unwrap();
+            if shape == "search-only-parent" {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(&temp.0, fs::Permissions::from_mode(0o111)).unwrap();
+                let (_lease_dir, activity) = crate::kernel::testutil::detached_lease();
+                assert_eq!(
+                    git_tracked_node_modules(&held, &[], &[workspace.into()], &activity).unwrap(),
+                    [workspace]
+                );
+            }
             let mut actual = project.clone();
             if shape.starts_with("renamed-") {
                 actual = temp.0.join("moved");
@@ -1379,12 +1389,19 @@ mod tests {
                 &mut attribution,
             );
             attribution.finish(result.is_ok()).unwrap();
-            if root_case || shape == "renamed-member" || shape == "damaged-member" {
+            if root_case
+                || matches!(
+                    shape,
+                    "renamed-member" | "damaged-member" | "search-only-parent"
+                )
+            {
                 let error = result.unwrap_err().to_string();
                 let expected = if matches!(shape, "corrupt-index" | "damaged-member") {
                     "cannot check Git-tracked source"
                 } else if shape == "renamed-member" {
                     "the project directory was moved or replaced"
+                } else if shape == "search-only-parent" {
+                    "the project directory was moved or became unreadable"
                 } else {
                     "node_modules holds files git tracks"
                 };

@@ -286,8 +286,12 @@ pub fn tracked_among(
     paths: &[String],
     activity: &StoreActivity,
 ) -> io::Result<Vec<String>> {
-    use crate::kernel::store::{open_file_at, read_dir_names_at, same_inode, stat_at};
+    use crate::kernel::store::{open_file_at, same_inode, stat_at};
     use std::os::fd::AsRawFd;
+    use std::os::unix::ffi::OsStrExt;
+    #[cfg(target_os = "linux")]
+    let flags = libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC;
+    #[cfg(not(target_os = "linux"))]
     let flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC;
     let mut tracked = Vec::new();
     for path in paths {
@@ -306,28 +310,22 @@ pub fn tracked_among(
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {}
                 Err(error) => return Err(error),
             }
-            let parent = open_file_at(dir.as_raw_fd(), b"..", flags, 0)?;
-            let current = stat_at(dir.as_raw_fd(), b".")?;
-            if same_inode(&current, &stat_at(parent.as_raw_fd(), b".")?) {
+            if protected {
                 break;
             }
-            // Recover the actual directory name from its held parent. A
-            // pathname captured before a rename is not an index authority.
-            let mut child = None;
-            for name in read_dir_names_at(parent.as_raw_fd())? {
-                use std::os::unix::ffi::OsStrExt;
-                match stat_at(parent.as_raw_fd(), name.as_bytes()) {
-                    Ok(stat) if same_inode(&current, &stat) => {
-                        child = Some(name);
-                        break;
-                    }
-                    Ok(_) => {}
-                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                    Err(error) => return Err(error),
-                }
+            let actual_path = held_git_directory_path(dir.as_raw_fd())?;
+            let Some(child) = actual_path.file_name() else {
+                break;
+            };
+            let parent = open_file_at(dir.as_raw_fd(), b"..", flags, 0)?;
+            let current = stat_at(dir.as_raw_fd(), b".")?;
+            // Recover the descriptor's current name without listing its
+            // parent. Search permission suffices, as it does for Git.
+            if !same_inode(&current, &stat_at(parent.as_raw_fd(), child.as_bytes())?) {
+                return Err(err(
+                    "project ancestry changed during Git source check; retry",
+                ));
             }
-            let child = child
-                .ok_or_else(|| err("project ancestry changed during Git source check; retry"))?;
             relative = PathBuf::from(child).join(relative);
             dir = parent;
         }
@@ -340,6 +338,33 @@ pub fn tracked_among(
         }
     }
     Ok(tracked)
+}
+
+fn held_git_directory_path(fd: std::os::fd::RawFd) -> io::Result<PathBuf> {
+    #[cfg(target_os = "linux")]
+    {
+        fs::read_link(format!("/proc/self/fd/{fd}"))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::ffi::OsStringExt;
+        let mut bytes = [0 as libc::c_char; libc::PATH_MAX as usize];
+        // SAFETY: F_GETPATH writes at most PATH_MAX bytes to this buffer.
+        if unsafe { libc::fcntl(fd, libc::F_GETPATH, bytes.as_mut_ptr()) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: successful F_GETPATH writes a NUL-terminated pathname.
+        let path = unsafe { std::ffi::CStr::from_ptr(bytes.as_ptr()) };
+        Ok(std::ffi::OsString::from_vec(path.to_bytes().to_vec()).into())
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = fd;
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "held Git directory paths are unsupported on this platform",
+        ))
+    }
 }
 
 fn tracked_in_git_index(
@@ -918,6 +943,24 @@ pub fn ensure_git_source(
 mod tests {
     use super::*;
     use crate::kernel::testutil::TempDir;
+
+    #[test]
+    fn an_untracked_directory_below_a_search_only_parent_is_checkable() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = TempDir::named("git-search-only");
+        let project = temp.0.join("project");
+        fs::create_dir_all(project.join("node_modules/dep")).unwrap();
+        let held = crate::kernel::fsroot::ProjectRoot::open(&project).unwrap();
+        fs::set_permissions(&temp.0, fs::Permissions::from_mode(0o111)).unwrap();
+        // Permission restrictions do not apply to a privileged test user.
+        if fs::read_dir(&temp.0).is_ok() {
+            return;
+        }
+        let (_lease_dir, activity) = crate::kernel::testutil::detached_lease();
+        assert!(tracked_among(&held, &["node_modules".into()], &activity)
+            .unwrap()
+            .is_empty());
+    }
 
     #[test]
     fn urls_normalize_to_one_spelling() {
