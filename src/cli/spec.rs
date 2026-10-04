@@ -821,6 +821,15 @@ pub fn sync_footer() -> &'static str {
     SYNC_FOOTER
 }
 
+/// What `main` prints after a command ends with `code`, if anything: the
+/// [`sync_footer`] when the command was a bare `tog` whose sync succeeded
+/// and output is not `-q` (results only, which is what CI uses). A failed
+/// sync gets nothing, so its error stays the last thing on screen, and
+/// every named command gets nothing.
+pub fn after_command(bare: bool, code: i32, quiet: bool) -> Option<String> {
+    (bare && code == 0 && !quiet).then(|| format!("\n{SYNC_FOOTER}"))
+}
+
 const ENVIRONMENT: &str = "\
 ENVIRONMENT:
   TOG_STORE           store root (default ~/.tog/store)
@@ -1076,6 +1085,22 @@ pub fn help(spec: &Spec) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The footer follows only a bare `tog` whose sync went green, on its
+    /// own line after the sync's result, and never under `-q`. The
+    /// integration tests cover a bare `tog` outside a project and one whose
+    /// sync fails; every fixture where a sync succeeds downloads a
+    /// toolchain, so this is where the success case is pinned (#147).
+    #[test]
+    fn the_footer_follows_only_a_green_bare_sync() {
+        let footer = after_command(true, 0, false).expect("a green bare sync gets the footer");
+        assert!(footer.starts_with("\nNEXT:\n"), "{footer}");
+        assert!(footer.contains("tog --help"), "{footer}");
+        assert_eq!(after_command(true, 0, true), None, "-q suppresses it");
+        assert_eq!(after_command(true, 1, false), None, "a failed sync");
+        assert_eq!(after_command(true, 130, false), None, "an interrupted sync");
+        assert_eq!(after_command(false, 0, false), None, "a named command");
+    }
 
     #[test]
     fn usage_lists_every_command_with_its_help() {
