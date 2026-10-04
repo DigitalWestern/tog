@@ -1078,7 +1078,7 @@ importers:
   .:
     dependencies:
       is-odd:
-        specifier: catalog:
+        specifier: 'catalog:'
         version: 3.0.1
       lib:
         specifier: workspace:*
@@ -1127,7 +1127,7 @@ snapshots:
         // entry for the dependency.
         for (lock, catalog) in [
             (
-                lock.replace("specifier: catalog:", "specifier: catalog:absent"),
+                lock.replace("specifier: 'catalog:'", "specifier: catalog:absent"),
                 "absent",
             ),
             (

@@ -23,8 +23,28 @@ pub fn pnpm_lock_importers(lock_yaml: &str) -> io::Result<Vec<String>> {
 /// tog reads, write peer context only in parentheses
 /// (`1.0.0(react@18.0.0)`), so an underscore is an ordinary character of
 /// a version, a `file:` path or a tarball URL.
+///
+/// The suffix is found as pnpm's `indexOfPeersSuffix` finds it: only a
+/// value that ends in `)` has one, and it is the run of balanced groups
+/// read back from the end. So `file:../a(b)c` keeps its parenthesis, and
+/// only the trailing groups of `1.0.0(patch_hash=x)(react@18.0.0)` go.
 pub(super) fn trim_peer_suffix(value: &str) -> &str {
-    value.find('(').map_or(value, |index| &value[..index])
+    if !value.ends_with(')') {
+        return value;
+    }
+    let bytes = value.as_bytes();
+    let mut open = 1i64;
+    for index in (0..bytes.len() - 1).rev() {
+        match bytes[index] {
+            b'(' => open -= 1,
+            b')' => open += 1,
+            // An ASCII byte just before a parenthesis ends a character, so
+            // the cut falls on a boundary.
+            _ if open == 0 => return &value[..index + 1],
+            _ => {}
+        }
+    }
+    value
 }
 
 pub(super) fn split_identity(value: &str) -> Option<(String, String)> {
@@ -1660,6 +1680,11 @@ mod identity_tests {
             ("1.0.0_react@18.0.0", "1.0.0_react@18.0.0"),
             ("foo@file:packages/my_pkg", "foo@file:packages/my_pkg"),
             ("evp_bytestokey@1.0.3", "evp_bytestokey@1.0.3"),
+            // Only trailing balanced groups are a suffix, as pnpm reads it.
+            ("file:../a(b)c", "file:../a(b)c"),
+            ("file:../a(b)c(react@18.0.0)", "file:../a(b)c"),
+            ("1.0.0((nested))", "1.0.0"),
+            ("(only-a-group)", "(only-a-group)"),
         ] {
             assert_eq!(trim_peer_suffix(value), expected, "{value}");
         }
