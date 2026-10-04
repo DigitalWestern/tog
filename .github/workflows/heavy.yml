@@ -22,6 +22,8 @@
 # without naming a test target gets the whole suite instead: those files
 # change what the ignored end-to-end tests prove, so the `changed` job
 # would test nothing, or only part of what the change affects.
+# `tests/size_baseline.txt` and `tests/install.sh` do not count: only the
+# offline suite in ci.yml reads them.
 # Weekly rather than nightly because the repository is
 # private and a nightly run of this length would use most of the Actions
 # minutes a free plan includes; change `cron` to `"0 6 * * *"` for nightly.
@@ -29,9 +31,9 @@
 # Elixir is the one ecosystem the ubuntu runner cannot prove: the only
 # Linux OTP in src/tailors/elixir/catalog.toml needs glibc 2.43 (Fedora 44)
 # and ubuntu-22.04 has 2.35 (docs/human/LIMITATIONS.md "Unpinned host build
-# inputs"), so the `e2e` and `acceptance` jobs skip its end-to-end test
-# and acceptance step by name and the `elixir` job runs that test in a
-# Fedora 44 container. An OTP built on an older baseline, which would end
+# inputs"), so the `e2e` job skips its end-to-end test by name, the
+# `acceptance` job skips its step (TOG_ACCEPT_SKIP_ELIXIR), and the
+# `elixir` job runs that test in a Fedora 44 container. An OTP built on an older baseline, which would end
 # the split, is #300.
 #
 # The last green run's date goes in STATUS.md by hand ("Last green heavy
@@ -106,7 +108,10 @@ jobs:
               # whole heavy suite for those instead of silently
               # undertesting. (`tests/acceptance.sh` is already in
               # `watched` above, so it never reaches this branch.)
-              if grep -E '^tests/' <<< "$files" | grep -qvE '^tests/[A-Za-z0-9_]+\.rs$'; then
+              # Two files under tests/ are no end-to-end input: the size
+              # ratchet's baseline, which most refactors edit, and
+              # install.sh. Only ci.yml's offline suite reads them.
+              if grep -E '^tests/' <<< "$files" | grep -qvE '^tests/([A-Za-z0-9_]+\.rs|size_baseline\.txt|install\.sh)$'; then
                 run=yes
                 tests=""
               fi
