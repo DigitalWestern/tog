@@ -26,8 +26,8 @@ the largest gap in what tog promises. Design: `docs/agent/DESIGNS.md` §6
 2. **#205 (PR 7): Python.** uv. Every uv call already passes
    `--python <store python>` (#210); the forced row's own `--python` then
    replaces it.
-3. **#206 (PR 8): Ruby and Elixir.** Bundler and Hex mirrors. Absorbs
-   #211 (`bundle add` installs).
+3. **#206 (PR 8): Ruby and Elixir.** Bundler and Hex mirrors. Edits
+   already resolve without installing (#211).
 4. **#207 (PR 9): .NET.** The `nuget.config` mirror.
 5. **#201 (PR 3b): the container backend and `tog-isolate`.** Moved after
    the doors: Go shipped confined without it, so no door waits on it. It

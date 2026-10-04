@@ -281,9 +281,9 @@ choice. For a plain requirements file tog deletes the line itself.",
         description: "\
 Re-locks everything (or only the named packages) to the newest versions the
 manifest allows: uv lock --upgrade, npm update, cargo update, go get -u,
-bundle update, mix deps.update, and pnpm update --lockfile-only. Poetry, PDM,
-Yarn classic, and .NET projects are told which command to run with their own
-tool.
+bundle lock --update, mix deps.update, and pnpm update --lockfile-only.
+Poetry, PDM, Yarn classic, and .NET projects are told which command to run
+with their own tool.
 
 --toolchain is the other update, and the two never mix: it re-reads the
 project's declarative toolchain sources, selects the newest compatible

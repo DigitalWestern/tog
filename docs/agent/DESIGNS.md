@@ -615,7 +615,7 @@ ledger. "Runs code" is what the tool executes besides itself.
 | `tailors/ruby/mod.rs` `plan_ruby` | `bundle lock` | yes | Gemfile eval | missing-lock |
 | `tailors/ruby/mod.rs` `plan_ruby` gate 1 | Bundler helper | none (PR 0 confirmed) | Gemfile eval | planner |
 | `tailors/ruby/mod.rs` `plan_ruby` gate 2 | Bundler helper `plan` (reads `Gemfile.lock` only) | none expected (lock-only read; not in the PR 0 census) | no | planner |
-| `tailors/ruby/edit.rs` `edit_manifest` | `bundle add` / `remove` / `update` | yes | Gemfile eval | edit |
+| `tailors/ruby/edit.rs` `edit_manifest` | `bundle add --skip-install` / `remove` / `lock --update` | yes | Gemfile eval | edit |
 | `tailors/elixir/mod.rs` `plan_elixir` | `mix deps.get`, `mix deps.get --check-locked` | yes | mix.exs eval (git deps' too) | missing-lock / planner |
 | `tailors/elixir/mod.rs` lock helper | `elixir` AST parse of `mix.lock` | no | no (never evaluates) | planner (no routes) |
 | `tailors/elixir/edit.rs` `edit_manifest` | `mix deps.update` | yes | mix.exs eval | edit |
