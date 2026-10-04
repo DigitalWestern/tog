@@ -171,10 +171,55 @@ pub fn lock_state(project: &ProjectRoot, lock: &str, recorded: &str) -> io::Resu
     })
 }
 
+/// The state most tailors report: a recorded object gone from the store is
+/// a missing projection, checked first so a lock that cannot be read never
+/// hides it; otherwise the lock file against the hash in `hash_field`.
+pub fn standard_state(
+    project: &ProjectRoot,
+    body: &Value,
+    objects: &[&str],
+    lock: &str,
+    hash_field: &str,
+) -> io::Result<State> {
+    match object_liveness_state(body, objects) {
+        Some(state) => Ok(state),
+        None => lock_state(project, lock, &string(&body[hash_field])),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn standard_state_reports_a_missing_object_before_an_unreadable_lock() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = crate::kernel::testutil::TempDir::new();
+        let project = ProjectRoot::open(&temp.0).unwrap();
+        let lock = temp.0.join("Gemfile.lock");
+        fs::write(&lock, "locked inputs").unwrap();
+        fs::set_permissions(&lock, fs::Permissions::from_mode(0o000)).unwrap();
+        let object = temp.0.join("runtime");
+        let body = json!({"runtime": {"path": object}, "lock_hash": "recorded"});
+        assert_eq!(
+            lock_state(&project, "Gemfile.lock", "recorded")
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        assert_eq!(
+            standard_state(&project, &body, &["runtime"], "Gemfile.lock", "lock_hash").unwrap(),
+            State::ProjectionMissing("runtime object".into())
+        );
+        fs::create_dir(&object).unwrap();
+        assert_eq!(
+            standard_state(&project, &body, &["runtime"], "Gemfile.lock", "lock_hash")
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::PermissionDenied
+        );
+    }
 
     #[test]
     fn external_absolute_requirements_track_unchanged_changed_and_removed_bytes() {

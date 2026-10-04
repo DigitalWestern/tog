@@ -2,7 +2,7 @@
 //! `run`, `ls`, `status`, and `sbom` do for a NuGet-locked project.
 
 use crate::comforter;
-use crate::comforter::status::{lock_state, object_liveness_state, string, State};
+use crate::comforter::status::{standard_state, string, State};
 use crate::kernel::context::Context;
 use crate::kernel::cyclonedx::{
     component, list, purl_encode, push_property, required, toolchain_component, version_of,
@@ -22,6 +22,33 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 pub struct Dotnet;
+
+/// What `sync` and `build` share: realize the SDK and the restored
+/// packages, then project the closure through the descriptor the command
+/// holds. Returns the SDK object and the packages object.
+fn realize_and_project(
+    ctx: &Context,
+    project: &ProjectRoot,
+    toolchain: &Selected,
+    attribution: &mut crate::kernel::policy::Attribution,
+) -> io::Result<(PathBuf, PathBuf)> {
+    let (activity, platform, store) = (&ctx.activity, ctx.platform, &ctx.store);
+    let sdk = dotnet::realize_runtime(store, activity, platform, toolchain)?;
+    let (plan, lock_sha256) = dotnet::plan_dotnet(project, toolchain)?;
+    let packages =
+        dotnet::realize_packages(store, activity, platform, &plan, &sdk, project, toolchain)?;
+    dotnet::project_dotnet_env(
+        activity,
+        project,
+        &sdk,
+        &packages,
+        &plan,
+        &lock_sha256,
+        toolchain,
+        attribution,
+    )?;
+    Ok((sdk, packages))
+}
 
 impl Tailor for Dotnet {
     fn package_registry(&self) -> Option<crate::tailors::PackageRegistry> {
@@ -91,27 +118,10 @@ impl Tailor for Dotnet {
         request: &SyncRequest,
         attribution: &mut crate::kernel::policy::Attribution,
     ) -> io::Result<bool> {
-        let activity = &ctx.activity;
         let toolchain = request.toolchain;
-        let platform = ctx.platform;
-        let store = &ctx.store;
         dotnet::preflight(project, toolchain.version("dotnet-sdk")?)?;
         dotnet::require_lock(project)?;
-        let sdk = dotnet::realize_runtime(store, activity, platform, toolchain)?;
-        let (plan, lock_sha256) = dotnet::plan_dotnet(project, toolchain)?;
-        let packages =
-            dotnet::realize_packages(store, activity, platform, &plan, &sdk, project, toolchain)?;
-        // The closure is published through the descriptor this sync holds.
-        dotnet::project_dotnet_env(
-            activity,
-            project,
-            &sdk,
-            &packages,
-            &plan,
-            &lock_sha256,
-            toolchain,
-            attribution,
-        )?;
+        let (_, packages) = realize_and_project(ctx, project, toolchain, attribution)?;
         ui::synced("nuget packages", &packages);
         Ok(true)
     }
@@ -137,26 +147,16 @@ impl Tailor for Dotnet {
         toolchain: &Selected,
         attribution: &mut crate::kernel::policy::Attribution,
     ) -> io::Result<()> {
-        let activity = &ctx.activity;
-        let platform = ctx.platform;
-        let store = &ctx.store;
         let project = ProjectRoot::open(cwd)?;
-        let sdk = dotnet::realize_runtime(store, activity, platform, toolchain)?;
-        let (plan, lock_sha256) = dotnet::plan_dotnet(&project, toolchain)?;
-        let packages =
-            dotnet::realize_packages(store, activity, platform, &plan, &sdk, &project, toolchain)?;
-        dotnet::project_dotnet_env(
-            activity,
+        let (sdk, packages) = realize_and_project(ctx, &project, toolchain, attribution)?;
+        dotnet::build_sandboxed(
+            ctx.platform,
+            &ctx.activity,
             &project,
             &sdk,
             &packages,
-            &plan,
-            &lock_sha256,
+            args,
             toolchain,
-            attribution,
-        )?;
-        dotnet::build_sandboxed(
-            platform, activity, &project, &sdk, &packages, args, toolchain,
         )
     }
 
@@ -235,12 +235,12 @@ impl Tailor for Dotnet {
         _ecosystem: &str,
         body: &Value,
     ) -> io::Result<State> {
-        Ok(
-            object_liveness_state(body, &["sdk_object", "packages_object"]).unwrap_or(lock_state(
-                project,
-                "packages.lock.json",
-                &string(&body["packages_lock_sha256"]),
-            )?),
+        standard_state(
+            project,
+            body,
+            &["sdk_object", "packages_object"],
+            "packages.lock.json",
+            "packages_lock_sha256",
         )
     }
 

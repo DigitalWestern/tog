@@ -97,26 +97,8 @@ struct RubySpec {
 /// The selected Ruby's row for `platform`, refused unless this tog knows
 /// the recipe that produced it.
 fn ruby_spec(platform: Platform, selected: &Selected) -> io::Result<RubySpec> {
-    if selected.ecosystem != "ruby" || selected.runtime() != "ruby" {
-        return Err(err(format!(
-            "ruby: selected toolchain is {} ({}), not ruby",
-            selected.ecosystem,
-            selected.runtime()
-        )));
-    }
-    let row = selected.artifact(platform, "ruby")?;
-    if row.recipe != RUBY_RECIPE {
-        return Err(err(format!(
-            "ruby: recipe {} in tog-toolchain.toml is not known to this tog; upgrade tog",
-            row.recipe
-        )));
-    }
-    if row.digest.algo() != "sha256" {
-        return Err(err(format!(
-            "ruby: artifact digest must be sha256, got {}",
-            row.digest.algo()
-        )));
-    }
+    selected.require("ruby", "ruby")?;
+    let row = selected.checked_artifact(platform, "ruby", RUBY_RECIPE, "sha256")?;
     Ok(RubySpec {
         platform,
         version: row.version,
@@ -1285,25 +1267,14 @@ fn closure_body(
     lock_sha256: &str,
     selected: &Selected,
 ) -> io::Result<serde_json::Value> {
-    let object_ref = |path: &Path| -> io::Result<serde_json::Value> {
-        let id = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .ok_or_else(|| err(format!("object path has no UTF-8 id: {}", path.display())))?;
-        Ok(serde_json::json!({"path": path.display().to_string(), "id": id}))
-    };
     let mut body = serde_json::json!({
-        "ruby_object": object_ref(ruby_obj)?,
-        "gems_object": object_ref(gems_obj)?,
+        "ruby_object": crate::comforter::object_ref(ruby_obj)?,
+        "gems_object": crate::comforter::object_ref(gems_obj)?,
         "gemfile_lock_sha256": lock_sha256,
         "plan": plan,
     });
     let record = crate::comforter::toolchain::closure_record(selected, ruby_obj);
-    if let (Some(body), Some(record)) = (body.as_object_mut(), record.as_object()) {
-        for (key, value) in record {
-            body.insert(key.clone(), value.clone());
-        }
-    }
+    crate::comforter::merge_record(&mut body, record);
     Ok(body)
 }
 

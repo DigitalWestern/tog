@@ -84,26 +84,7 @@ fn identity_from(
 /// The formatter row of `selected`, checked before it is fetched: it rides
 /// in the same release bundle as the compiler, under its own recipe.
 fn rustfmt_row(platform: Platform, selected: &Selected) -> io::Result<ArtifactSpec> {
-    let row = selected.artifact(platform, "rustfmt")?;
-    if row.recipe != RUSTFMT_RECIPE {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!(
-                "cargo: recipe {} in tog-toolchain.toml is not known to this tog; upgrade tog",
-                row.recipe
-            ),
-        ));
-    }
-    if row.digest.algo() != "sha256" {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!(
-                "cargo: rustfmt artifact is a {} digest; this tog realizes rustfmt from sha256 artifacts",
-                row.digest.algo()
-            ),
-        ));
-    }
-    Ok(row)
+    selected.checked_artifact(platform, "rustfmt", RUSTFMT_RECIPE, "sha256")
 }
 
 /// Where tog 0.x wrote the `rustfmt` closure, relative to the workspace root.

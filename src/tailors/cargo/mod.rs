@@ -214,15 +214,6 @@ fn reject_user_config(args: &[String]) -> io::Result<()> {
     Ok(())
 }
 
-/// Fold the two toolchain entries into a closure body being built.
-pub(crate) fn merge_record(body: &mut serde_json::Value, record: serde_json::Value) {
-    if let (Some(body), Some(record)) = (body.as_object_mut(), record.as_object()) {
-        for (key, value) in record {
-            body.insert(key.clone(), value.clone());
-        }
-    }
-}
-
 /// Project Cargo with a writable home, forced directory-source replacement,
 /// and provenance for the exact toolchain/vendor closure. `toolchain` is the
 /// selection the run honored: the closure records it so the release this
@@ -281,19 +272,9 @@ pub fn project_cargo_env(
         0o755,
     )?;
 
-    let object_ref = |path: &Path| -> io::Result<serde_json::Value> {
-        let id = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .ok_or_else(|| err(format!("object path has no UTF-8 id: {}", path.display())))?;
-        Ok(serde_json::json!({
-            "path": path.display().to_string(),
-            "id": id,
-        }))
-    };
     let mut body = serde_json::json!({
-        "rust_object": object_ref(&rust_obj)?,
-        "vendor_object": object_ref(&vendor_obj)?,
+        "rust_object": crate::comforter::object_ref(&rust_obj)?,
+        "vendor_object": crate::comforter::object_ref(&vendor_obj)?,
         "cargo_lock_sha256": lock_digest,
         "plan": plan,
     });
@@ -304,7 +285,7 @@ pub fn project_cargo_env(
     // The Rust object is this ecosystem's runtime: the record names the
     // bundle it came from and refers to it directly, so a later catalog
     // refresh cannot re-pair these dependencies with another compiler.
-    merge_record(
+    crate::comforter::merge_record(
         &mut body,
         crate::comforter::toolchain::closure_record(toolchain, &rust_obj),
     );
@@ -488,6 +469,42 @@ mod tests {
     use sha2::{Digest as _, Sha256};
     use std::collections::BTreeSet;
     use std::process::Command;
+
+    /// After gc removes the Rust or vendor object a closure records, status
+    /// says the projection is missing instead of calling the project synced.
+    #[test]
+    fn status_reports_an_object_gc_removed() {
+        use crate::comforter::status::State;
+        use crate::tailors::Tailor as _;
+        let scratch = crate::kernel::testutil::TempDir::named("cargo-status-gone");
+        let project = scratch.0.join("project");
+        std::fs::create_dir_all(project.join(".tog/cargo-home")).unwrap();
+        std::fs::write(project.join("Cargo.lock"), "").unwrap();
+        let present = scratch.0.join("rust");
+        std::fs::create_dir_all(&present).unwrap();
+        let body = |rust: &Path, vendor: &Path| {
+            serde_json::json!({
+                "rust_object": {"path": rust.display().to_string()},
+                "vendor_object": {"path": vendor.display().to_string()},
+                "cargo_lock_sha256": hex::encode(Sha256::digest(b"")),
+            })
+        };
+        let held = crate::kernel::fsroot::ProjectRoot::open(&project).unwrap();
+        let state = |body: &serde_json::Value| {
+            super::tailor::Cargo
+                .closure_state(Platform::X86_64UnknownLinuxGnu, &held, "cargo", body)
+                .unwrap()
+        };
+        assert_eq!(state(&body(&present, &present)), State::Synced);
+        assert_eq!(
+            state(&body(&present, &scratch.0.join("gone"))),
+            State::ProjectionMissing("vendor_object object".into())
+        );
+        assert_eq!(
+            state(&body(&scratch.0.join("gone"), &present)),
+            State::ProjectionMissing("rust_object object".into())
+        );
+    }
 
     /// The shipped Rust selection: what a run with no lock to honor is
     /// handed, and the only thing these tests need a `Selected` for.

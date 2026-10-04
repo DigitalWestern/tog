@@ -79,26 +79,8 @@ struct SdkSpec {
 /// recipe that produced it. Microsoft publishes sha512, so the row must
 /// carry one: a sha256 row is a different provenance channel.
 fn sdk_spec(platform: Platform, selected: &Selected) -> io::Result<SdkSpec> {
-    if selected.ecosystem != "dotnet" || selected.runtime() != "dotnet-sdk" {
-        return Err(err(format!(
-            "dotnet: selected toolchain is {} ({}), not dotnet",
-            selected.ecosystem,
-            selected.runtime()
-        )));
-    }
-    let row = selected.artifact(platform, "dotnet-sdk")?;
-    if row.recipe != SDK_RECIPE {
-        return Err(err(format!(
-            "dotnet: recipe {} in tog-toolchain.toml is not known to this tog; upgrade tog",
-            row.recipe
-        )));
-    }
-    if row.digest.algo() != "sha512" {
-        return Err(err(format!(
-            "dotnet: artifact digest must be sha512, got {}",
-            row.digest.algo()
-        )));
-    }
+    selected.require("dotnet", "dotnet-sdk")?;
+    let row = selected.checked_artifact(platform, "dotnet-sdk", SDK_RECIPE, "sha512")?;
     Ok(SdkSpec {
         platform,
         version: row.version,
@@ -1359,25 +1341,14 @@ fn closure_body(
     lock_sha256: &str,
     selected: &Selected,
 ) -> io::Result<serde_json::Value> {
-    let object_ref = |path: &Path| -> io::Result<serde_json::Value> {
-        let id = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .ok_or_else(|| err(format!("object path has no UTF-8 id: {}", path.display())))?;
-        Ok(serde_json::json!({"path": path.display().to_string(), "id": id}))
-    };
     let mut body = serde_json::json!({
-        "sdk_object": object_ref(sdk_obj)?,
-        "packages_object": object_ref(packages_obj)?,
+        "sdk_object": crate::comforter::object_ref(sdk_obj)?,
+        "packages_object": crate::comforter::object_ref(packages_obj)?,
         "packages_lock_sha256": lock_sha256,
         "plan": plan,
     });
     let record = crate::comforter::toolchain::closure_record(selected, sdk_obj);
-    if let (Some(body), Some(record)) = (body.as_object_mut(), record.as_object()) {
-        for (key, value) in record {
-            body.insert(key.clone(), value.clone());
-        }
-    }
+    crate::comforter::merge_record(&mut body, record);
     Ok(body)
 }
 

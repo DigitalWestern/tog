@@ -3,7 +3,7 @@
 //! pinned formatter `tog fmt` runs.
 
 use crate::comforter;
-use crate::comforter::status::{lock_state, string, State};
+use crate::comforter::status::{lock_state, object_liveness_state, string, State};
 use crate::kernel::context::Context;
 use crate::kernel::cyclonedx::{
     component, list, purl_encode, push_hash, required, toolchain_component, version_of,
@@ -31,6 +31,41 @@ fn child_status_code(status: &std::process::ExitStatus) -> i32 {
 }
 
 pub struct Cargo;
+
+/// What `sync` and `build` share: load the plan from `lock_root`'s lock,
+/// realize the vendor object, and project the closure and cargo-home into
+/// the workspace root, the held `project` or a directory resolved from it.
+/// `fresh` clears cargo-home first. Returns the inputs and the vendor object.
+fn realize_and_project(
+    ctx: &Context,
+    lock_root: &ProjectRoot,
+    project: &ProjectRoot,
+    toolchain: &Selected,
+    fresh: bool,
+    attribution: &mut crate::kernel::policy::Attribution,
+) -> io::Result<(inputs::CargoInputs, PathBuf)> {
+    let (activity, store) = (&ctx.activity, &ctx.store);
+    let inputs =
+        inputs::load_cargo_inputs(ctx.platform, lock_root, project, store, activity, toolchain)?;
+    let vendor_obj = cargo::realize_vendor(store, activity, &inputs.plan)?;
+    let workspace = &inputs.workspace;
+    workspace.check_still_named()?;
+    if fresh {
+        workspace.remove_dir_all(Path::new(".tog/cargo-home"))?;
+    }
+    cargo::project_cargo_env(
+        activity,
+        workspace,
+        &inputs.rust_obj,
+        &vendor_obj,
+        &inputs.plan,
+        &inputs.lock_digest,
+        &inputs.resolution_basis,
+        toolchain,
+        attribution,
+    )?;
+    Ok((inputs, vendor_obj))
+}
 
 impl Tailor for Cargo {
     fn package_registry(&self) -> Option<crate::tailors::PackageRegistry> {
@@ -128,37 +163,12 @@ impl Tailor for Cargo {
         request: &SyncRequest,
         attribution: &mut crate::kernel::policy::Attribution,
     ) -> io::Result<bool> {
-        let activity = &ctx.activity;
-        let toolchain = request.toolchain;
-        let fresh = request.fresh;
-
-        let store = &ctx.store;
-        let inputs = inputs::load_cargo_inputs(
-            ctx.platform,
+        let (_, vendor_obj) = realize_and_project(
+            ctx,
             project,
             project,
-            store,
-            &ctx.activity,
-            toolchain,
-        )?;
-        let rust_obj = &inputs.rust_obj;
-        let vendor_obj = cargo::realize_vendor(store, activity, &inputs.plan)?;
-        // The workspace root the closure and cargo-home belong to: the held
-        // project, or a directory resolved from it.
-        let workspace = &inputs.workspace;
-        workspace.check_still_named()?;
-        if fresh {
-            workspace.remove_dir_all(Path::new(".tog/cargo-home"))?;
-        }
-        cargo::project_cargo_env(
-            activity,
-            workspace,
-            rust_obj,
-            &vendor_obj,
-            &inputs.plan,
-            &inputs.lock_digest,
-            &inputs.resolution_basis,
-            toolchain,
+            request.toolchain,
+            request.fresh,
             attribution,
         )?;
         ui::synced("cargo env", &vendor_obj);
@@ -197,32 +207,10 @@ impl Tailor for Cargo {
         toolchain: &Selected,
         attribution: &mut crate::kernel::policy::Attribution,
     ) -> io::Result<()> {
-        let activity = &ctx.activity;
-        let store = &ctx.store;
         let lock_root = ProjectRoot::open(root)?;
         let project = ProjectRoot::open(cwd)?;
-        let inputs = inputs::load_cargo_inputs(
-            ctx.platform,
-            &lock_root,
-            &project,
-            store,
-            &ctx.activity,
-            toolchain,
-        )?;
-        let vendor_obj = cargo::realize_vendor(store, activity, &inputs.plan)?;
-        let workspace = &inputs.workspace;
-        workspace.check_still_named()?;
-        cargo::project_cargo_env(
-            activity,
-            workspace,
-            &inputs.rust_obj,
-            &vendor_obj,
-            &inputs.plan,
-            &inputs.lock_digest,
-            &inputs.resolution_basis,
-            toolchain,
-            attribution,
-        )?;
+        let (inputs, vendor_obj) =
+            realize_and_project(ctx, &lock_root, &project, toolchain, false, attribution)?;
         cargo::build_sandboxed(
             ctx.platform,
             &ctx.activity,
@@ -304,13 +292,15 @@ impl Tailor for Cargo {
         body: &Value,
     ) -> io::Result<State> {
         Ok(match ecosystem {
-            "cargo" => {
-                if !project.is_input_dir(Path::new(".tog/cargo-home")) {
+            // An object gc removed is checked before the projection that
+            // points into it.
+            "cargo" => match object_liveness_state(body, &["rust_object", "vendor_object"]) {
+                Some(state) => state,
+                None if !project.is_input_dir(Path::new(".tog/cargo-home")) => {
                     State::ProjectionMissing(".tog/cargo-home".into())
-                } else {
-                    lock_state(project, "Cargo.lock", &string(&body["cargo_lock_sha256"]))?
                 }
-            }
+                None => lock_state(project, "Cargo.lock", &string(&body["cargo_lock_sha256"]))?,
+            },
             _ => State::Unchecked("unknown ecosystem".into()),
         })
     }

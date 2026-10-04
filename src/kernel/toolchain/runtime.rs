@@ -59,7 +59,59 @@ pub struct ArtifactSpec {
     pub digest: Digest,
 }
 
+impl ArtifactSpec {
+    /// Refuse a row this tog cannot realize: a `recipe` it does not know, or
+    /// a digest of another algorithm than `algo`, the one the publisher
+    /// signs with. `ecosystem` names the selection in the message.
+    pub fn check(&self, ecosystem: &str, recipe: &str, algo: &str) -> io::Result<()> {
+        if self.recipe != recipe {
+            return Err(invalid(format!(
+                "{ecosystem}: recipe {} in tog-toolchain.toml is not known to this tog; upgrade tog",
+                self.recipe
+            )));
+        }
+        if self.digest.algo() != algo {
+            return Err(invalid(format!(
+                "{ecosystem}: {} artifact digest must be {algo}, got {}",
+                self.component,
+                self.digest.algo()
+            )));
+        }
+        Ok(())
+    }
+}
+
 impl Selected {
+    /// Refuse a selection made for another ecosystem or runtime than the
+    /// tailor about to realize it. That is a caller's mistake, so the error
+    /// is `InvalidInput`, not the `InvalidData` of a bad lock row.
+    pub fn require(&self, ecosystem: &str, runtime: &str) -> io::Result<()> {
+        if self.ecosystem != ecosystem || self.runtime() != runtime {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "{ecosystem}: selected toolchain is {} ({}), not {ecosystem} ({runtime})",
+                    self.ecosystem,
+                    self.runtime()
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    /// [`Selected::artifact`], checked with [`ArtifactSpec::check`].
+    pub fn checked_artifact(
+        &self,
+        platform: Platform,
+        component: &str,
+        recipe: &str,
+        algo: &str,
+    ) -> io::Result<ArtifactSpec> {
+        let row = self.artifact(platform, component)?;
+        row.check(&self.ecosystem, recipe, algo)?;
+        Ok(row)
+    }
+
     /// The row for one component on one platform, with the component's
     /// version beside it. An embedded component has no row of its own.
     pub fn artifact(&self, platform: Platform, component: &str) -> io::Result<ArtifactSpec> {

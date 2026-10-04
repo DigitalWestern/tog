@@ -123,7 +123,7 @@ After the proxy: the test-suite audit (#351) and then the quality review
   - #240 store: a CacheLease holds gc.lock exclusively, so separate tog processes download one at a time.
   - #247 dead code: about 90 unused items hidden by pub mod, plus a CI check to keep it at zero.
   - #245 kernel: consolidate duplicated primitives. Left after the first pass: the file hash copy in `provider/crates.rs` and `fetch.rs` (heavy gate), the pid temp names in `fetch.rs`, `validate_object_complete` and `exceptions()` reading records their own way.
-  - #246 tailors: shared closure_state, checked_artifact, object_ref and merge_record helpers; cargo status misses GC'd objects.
+  - #246 left: move the recipe checks in `kernel/provider` (cpython, rust, rust_path) onto `Selected::checked_artifact`. Deferred because those files wake the heavy suite.
   - #248 sandbox and gitsrc: collapse the _with_activity twin of every entry point.
   - #249 x.rs: reuse kernel fsops, one lock, one name validator, and split the file.
   - #413 x clean: delete before unregister, corrupt registry entries, pathname ownership reads (from the #408 review). Do it with #249.
@@ -227,3 +227,9 @@ After the proxy: the test-suite audit (#351) and then the quality review
 - **Object metadata byte limits (#502).** Give object-metadata reads and writes one explicit shared cap. Oversized existing records must refuse without deleting their object. This is separate from #375's guarded opens and the fact-record limit.
 
 - **Unreadable rollback cleanup (#503).** Replace the pathname cleanup helper with held-descriptor removal so mode-000 and search-only directories do not leave rollback or teardown data behind. See `src/kernel/store/fsops.rs::remove_tree`.
+
+- **Shared file hashing (#504).** Unify crate and fetch hashing through one descriptor/reader helper in the digest layer.
+- **Random fetch temporaries (#505).** Share random suffixes for download/install temporaries while preserving exclusive creation and GC prefixes.
+- **Complete reference metadata (#506).** Use the shared semantic parser for referenced objects and replace legitimate minimal fixtures with complete records.
+- **Shared exception parsing (#507).** Add checked exceptions to object metadata records instead of reading that field separately.
+- **SRI alternatives (#508).** Preserve all strongest hash candidates through Node planning and verification. The consolidation preserves first-entry behavior on ties.

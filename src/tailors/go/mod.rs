@@ -153,27 +153,8 @@ fn runtime_identity(platform: Platform, version: &str, artifact_sha256: &str) ->
 /// fetched: the selection must be a Go one, the platform must have a row,
 /// and the recipe must be one this binary knows how to lay out.
 fn runtime_row(platform: Platform, selected: &Selected) -> io::Result<ArtifactSpec> {
-    if selected.runtime() != "go" {
-        return Err(err(format!(
-            "internal: a {} selection (runtime {}) reached the Go tailor",
-            selected.ecosystem,
-            selected.runtime()
-        )));
-    }
-    let row = selected.artifact(platform, "go")?;
-    if row.recipe != GO_RECIPE {
-        return Err(err(format!(
-            "go: recipe {} in tog-toolchain.toml is not known to this tog; upgrade tog",
-            row.recipe
-        )));
-    }
-    if row.digest.algo() != "sha256" {
-        return Err(err(format!(
-            "go: artifact is a {} digest; this tog realizes Go from sha256 artifacts",
-            row.digest.algo()
-        )));
-    }
-    Ok(row)
+    selected.require("go", "go")?;
+    selected.checked_artifact(platform, "go", GO_RECIPE, "sha256")
 }
 
 fn go_pins(platform: Platform) -> io::Result<Vec<&'static str>> {
@@ -1233,13 +1214,6 @@ pub fn project_go_env(
     let modcache_obj = modcache_obj.canonicalize()?;
     let store = crate::comforter::store_from_object_path(&go_obj)
         .ok_or_else(|| err("Go object is not in a Tog store"))?;
-    let object_ref = |path: &Path| -> io::Result<serde_json::Value> {
-        let id = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .ok_or_else(|| err(format!("object path has no UTF-8 id: {}", path.display())))?;
-        Ok(serde_json::json!({"path": path.display().to_string(), "id": id}))
-    };
     let mut refs = crate::comforter::ClosureRefs::new();
     // The runtime object and `go_object` are the same object; the direct
     // reference is what keeps it alive across a GC.
@@ -1252,12 +1226,12 @@ pub fn project_go_env(
     for objects in ledgers {
         for id in [&objects.ledger, &objects.diagnostics] {
             refs.object_id(&store, activity, id)?;
-            ledger_refs.push(object_ref(&store.object_path(id))?);
+            ledger_refs.push(crate::comforter::object_ref(&store.object_path(id))?);
         }
     }
     let mut body = serde_json::json!({
-        "go_object": object_ref(&go_obj.canonicalize()?)?,
-        "modcache_object": object_ref(&modcache_obj.canonicalize()?)?,
+        "go_object": crate::comforter::object_ref(&go_obj.canonicalize()?)?,
+        "modcache_object": crate::comforter::object_ref(&modcache_obj.canonicalize()?)?,
         "go_sum_sha256": gosum_sha256,
         "plan": plan,
         "resolution_ledgers": ledger_refs,
@@ -1269,14 +1243,10 @@ pub fn project_go_env(
     // The Go object is this ecosystem's runtime: the record names the bundle
     // it came from and refers to it directly, so a later catalog refresh
     // cannot re-pair these modules with another toolchain.
-    if let (Some(body), Some(record)) = (
-        body.as_object_mut(),
-        crate::comforter::toolchain::closure_record(toolchain, &go_obj).as_object(),
-    ) {
-        for (key, value) in record {
-            body.insert(key.clone(), value.clone());
-        }
-    }
+    crate::comforter::merge_record(
+        &mut body,
+        crate::comforter::toolchain::closure_record(toolchain, &go_obj),
+    );
     crate::comforter::write_closure(project, "go", body, &store, activity, refs, attribution)
 }
 
@@ -1513,8 +1483,26 @@ mod tests {
         let error = realize_runtime(&store, activity, platform, &foreign)
             .unwrap_err()
             .to_string();
-        assert!(error.contains("node selection"), "{error}");
-        assert!(error.contains("Go tailor"), "{error}");
+        assert!(
+            error.contains("selected toolchain is node (node), not go"),
+            "{error}"
+        );
+
+        // A Go bundle assigned to another ecosystem must be refused before
+        // its artifact recipe is considered or any store is opened.
+        let mislabeled = Selected {
+            helpers: Default::default(),
+            ecosystem: "node".into(),
+            bundle: fixtures::bundle("go-9.9.9", "go", "9.9.9", Platform::ALL),
+            lock_sha256: None,
+            source: Source::Lock,
+        };
+        let error = realize_runtime(&store, activity, platform, &mislabeled).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(error
+            .to_string()
+            .contains("selected toolchain is node (go)"));
+        assert!(!store.root.exists());
 
         let unknown = Selected {
             helpers: Default::default(),
