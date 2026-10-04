@@ -1466,10 +1466,10 @@ pub(super) fn path_under_objects(store: &Store, path: &Path) -> bool {
     path.starts_with(store.root.join("objects"))
 }
 
-/// Strict base64 for stored path bytes: the length must stay a multiple
-/// of four, so only padded output the registry itself wrote is accepted.
-/// SRI values use the shared permissive decoder instead, which also
-/// accepts the unpadded form registries publish.
+/// Strict base64 for stored path bytes: the input length must be a
+/// multiple of four, so unpadded input is refused. SRI values use the
+/// shared permissive decoder instead, which also accepts the unpadded
+/// form registries publish.
 pub(super) fn base64_decode(value: &str) -> Option<Vec<u8>> {
     let bytes = value.as_bytes();
     if !bytes.len().is_multiple_of(4) {
