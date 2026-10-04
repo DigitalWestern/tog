@@ -120,7 +120,6 @@ After the proxy: the test-suite audit (#351) and then the quality review
   the 09-20 to 09-24 run. #264 holds the work order and the overall verdict.
   Each line is one issue and one PR, in order:
   - #238 http: pypi, rubygems, dotnet and deps call ureq directly, bypassing kernel::fetch.
-  - #242 gc: crashed download temp files in tmp/ are never removed.
   - #240 store: a CacheLease holds gc.lock exclusively, so separate tog processes download one at a time.
   - #244 supervise: waits forever for stderr EOF if the child leaves a background process.
   - #247 dead code: about 90 unused items hidden by pub mod, plus a CI check to keep it at zero.
@@ -225,3 +224,5 @@ After the proxy: the test-suite audit (#351) and then the quality review
 - **Machine policy descriptor (#500).** Read and identify `TOG_POLICY` or the home policy from one opened file, so replacement cannot mix policy bytes with another inode during deduplication. See `src/kernel/policy.rs`.
 
 - **External requirements consistency (#501).** Select external absolute Python requirements once across command stages, using held input descriptors or immutable snapshots. Preserve existing supported external requirements. See `src/comforter/status.rs` and `src/tailors/python/inputs.rs`.
+
+- **Object metadata byte limits (#502).** Give object-metadata reads and writes one explicit shared cap. Oversized existing records must refuse without deleting their object. This is separate from #375's guarded opens and the fact-record limit.

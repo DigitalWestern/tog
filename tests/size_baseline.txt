@@ -16,7 +16,6 @@ fn 163 src/commands/audit.rs::render
 fn 160 src/commands/mod.rs::dispatch
 fn 173 src/commands/x.rs::clean
 fn 166 src/kernel/archive.rs::read_entries
-fn 151 src/kernel/gc/plan.rs::plan
 fn 151 src/kernel/gitsrc.rs::ensure_git_source
 fn 164 src/kernel/provider/crates.rs::realize_vendor_inner
 fn 209 src/kernel/toolchain/lock.rs::validate

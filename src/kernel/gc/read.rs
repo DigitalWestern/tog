@@ -524,20 +524,29 @@ fn read_cache(store: &Store) -> io::Result<(Vec<(&'static str, HeldDir)>, Vec<Ca
     Ok((cache_dirs, cache_entries))
 }
 
-/// Enumerate interrupted staging directories under the already-held `tmp`.
+/// Enumerate interrupted staging directories, and every other temporary a
+/// killed tog leaves, under the already-held `tmp`.
 fn read_stages(store: &Store, tmp: &HeldDir) -> io::Result<Vec<DirEntrySnapshot>> {
     let mut stages = Vec::new();
     for entry in fs::read_dir(store.root.join("tmp"))? {
         let entry = entry?;
         let name = entry.file_name();
-        if !name.to_string_lossy().starts_with("stage-") {
+        let text = name.to_string_lossy();
+        let Some((_, expected)) = TMP_LEFTOVERS
+            .iter()
+            .find(|(prefix, _)| text.starts_with(prefix))
+        else {
             continue;
-        }
+        };
         let stat = store::stat_at(tmp.file.as_raw_fd(), name.as_bytes())?;
-        if (stat.st_mode & libc::S_IFMT) != libc::S_IFDIR {
+        if (stat.st_mode & libc::S_IFMT) != *expected {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("refusing to sweep: invalid stage entry {:?}", entry.path()),
+                format!(
+                    "refusing to sweep: invalid {} entry {:?}",
+                    tmp_kind(&name),
+                    entry.path()
+                ),
             ));
         }
         stages.push(DirEntrySnapshot {
@@ -549,6 +558,45 @@ fn read_stages(store: &Store, tmp: &HeldDir) -> io::Result<Vec<DirEntrySnapshot>
     }
     Ok(stages)
 }
+
+/// What a leftover under `tmp/` is called in the sweep's output.
+pub(super) fn tmp_kind(name: &std::ffi::OsStr) -> &'static str {
+    if name.to_string_lossy().starts_with("stage-") {
+        "stage"
+    } else {
+        "temporary"
+    }
+}
+
+/// Every name tog gives a temporary under `tmp/`, with the file type it
+/// writes there. A longer prefix comes before the shorter one it extends
+/// (`resolve-meta-` is a file, `resolve-` a directory). GC holds the
+/// exclusive lease, so any of these it sees was left by a process that died
+/// before cleaning up, and the stage window still applies. `.publish.lock`
+/// and any name not listed here are left alone.
+pub(super) const TMP_LEFTOVERS: &[(&str, libc::mode_t)] = &[
+    // Store::stage
+    ("stage-", libc::S_IFDIR),
+    // kernel::resolve::outputs
+    ("resolve-out-", libc::S_IFDIR),
+    // kernel::resolve::cache
+    ("resolve-meta-", libc::S_IFREG),
+    // kernel::resolve::snapshot
+    ("resolve-", libc::S_IFDIR),
+    // kernel::fetch: a download, and a local file being inserted
+    ("dl-", libc::S_IFREG),
+    ("ins-", libc::S_IFREG),
+    // Store::commit's record before its rename
+    ("meta-", libc::S_IFREG),
+    // kernel::resolve::ledger
+    ("diag-", libc::S_IFREG),
+    // tailors::node::realize
+    ("npm-archive-classification-", libc::S_IFREG),
+    // Store record writes
+    ("record-", libc::S_IFREG),
+    // `tog doctor`'s writability probe
+    (".doctor-", libc::S_IFREG),
+];
 
 /// The projection half of the snapshot. Default (everything empty, no
 /// descriptors held) is what a sweep that will not touch projections reads.
