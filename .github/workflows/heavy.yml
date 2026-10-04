@@ -111,7 +111,10 @@ jobs:
               # Two files under tests/ are no end-to-end input: the size
               # ratchet's baseline, which most refactors edit, and
               # install.sh. Only ci.yml's offline suite reads them.
-              if grep -E '^tests/' <<< "$files" | grep -qvE '^tests/([A-Za-z0-9_]+\.rs|size_baseline\.txt|install\.sh)$'; then
+              # No `-q` on the second grep: it would stop at its first
+              # match, and on a long list the first grep then dies of a
+              # closed pipe, which `pipefail` reads as "no match".
+              if grep -E '^tests/' <<< "$files" | grep -vE '^tests/([A-Za-z0-9_]+\.rs|size_baseline\.txt|install\.sh)$' > /dev/null; then
                 run=yes
                 tests=""
               fi
