@@ -1016,9 +1016,17 @@ fn pip_activate_and_npm_install_are_refused_with_the_tog_verb() {
             &["run", "npm", "--prefix", ".", "install", "is-odd"],
             "'npm install' would replace the node_modules projection",
         ),
-        // Bare yarn and bare bun install.
+        // Bare yarn installs.
         (&["run", "yarn"], "node_modules"),
-        (&["run", "bun"], "node_modules"),
+        // An install another command runs, and an npm abbreviation.
+        (
+            &["run", "npx", "npm", "install"],
+            "'npm install' would replace the node_modules projection",
+        ),
+        (
+            &["run", "npm", "dedu"],
+            "'npm dedupe' would replace the node_modules projection",
+        ),
     ];
     for (args, expected) in cases {
         let out = tog(&project.0, &home.0, args);
