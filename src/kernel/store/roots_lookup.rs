@@ -85,7 +85,7 @@ mod tests {
         let upper = lower.to_ascii_uppercase();
         fs::write(temp.0.join(lower), "original").unwrap();
         fs::write(temp.0.join(&upper), "neighbor").unwrap();
-        let dir = open_store_directory(&temp.0, "roots").unwrap();
+        let dir = open_real_directory(&temp.0, "roots").unwrap();
         let expected = stat_at(dir.as_raw_fd(), lower.as_bytes()).unwrap();
         let neighbor = stat_at(dir.as_raw_fd(), upper.as_bytes()).unwrap();
         if same_inode(&expected, &neighbor) {
@@ -108,7 +108,7 @@ mod tests {
         fs::create_dir(&roots).unwrap();
         let key = "abcdef0123456789abcdef0123456789abcdef01";
         fs::write(roots.join(key), "original").unwrap();
-        let dir = open_store_directory(&roots, "roots").unwrap();
+        let dir = open_real_directory(&roots, "roots").unwrap();
         let expected = stat_at(dir.as_raw_fd(), key.as_bytes()).unwrap();
         fs::rename(&roots, temp.0.join("held")).unwrap();
         fs::create_dir(&roots).unwrap();

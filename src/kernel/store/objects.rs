@@ -411,7 +411,7 @@ impl Store {
         // An old record must stop certifying this id before a replacement
         // becomes visible. Persist that invalidation even when the object
         // is already gone, as after an interrupted GC.
-        let metadata = open_store_directory(&self.root.join("meta"), "meta")?;
+        let metadata = open_real_directory(&self.root.join("meta"), "meta")?;
         let meta_name = format!("{id}.json");
         match stat_at(metadata.as_raw_fd(), meta_name.as_bytes()) {
             Ok(stat) => {
@@ -529,7 +529,7 @@ fn publish_completion(
     name: &str,
     value: &serde_json::Value,
 ) -> io::Result<()> {
-    let tmp = open_store_directory(&store.root.join("tmp"), "tmp")?;
+    let tmp = open_real_directory(&store.root.join("tmp"), "tmp")?;
     let bytes = serde_json::to_vec_pretty(value)?;
     for _ in 0..16 {
         let candidate = format!("meta-{}-{}.json", std::process::id(), nanos());
