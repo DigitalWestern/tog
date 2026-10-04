@@ -127,9 +127,10 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   closure does not name.
 - **A store is never migrated.** The store carries a format marker (`<store>/format`), and
   this tog reads exactly one format. A store written before the marker existed, or by a
-  newer tog, is refused by every command except `tog gc --reset`, `tog store path` and
-  `tog doctor`. `tog gc --reset` empties it (the download cache is kept) and every project
-  syncs again; nothing carries old objects across a format change.
+  newer tog, or whose marker is damaged or unreadable, is refused by every command that
+  reads or writes the store. `tog store path` and `tog doctor` still report on it, and
+  `tog gc --reset` empties it (the download cache is kept), after which every project
+  syncs again. Nothing carries old objects across a format change.
 - **`cargo test -- --ignored` must run single-threaded**: the supervisor owns process-wide
   signal dispositions and rejects a second concurrent child (`--test-threads=1`; the offline
   suite holds `SUPERVISION_TEST_LOCK`).

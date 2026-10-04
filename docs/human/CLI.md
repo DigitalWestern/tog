@@ -92,7 +92,10 @@ the program's status through. Which files tog reads per ecosystem:
   setup.py probe's `egg_info`, `tog audit` over recorded exceptions); the
   command starts in the same column either way. A line with nothing for
   you to do is progress, not a warning. A
-  failure is `tog: error: <what failed>`. `--quiet` silences the first two
+  failure is `tog: error: <what failed>`. A store this tog refuses to open
+  is the one failure with a single command that clears it, so that error
+  is followed by the same `tog:     fix: <command>` line (under `--json`,
+  a `"fix"` key beside `"error"`). `--quiet` silences the first two
   and never the third. `gc` narrates, so every line it prints — registered,
   forgot, would free, freed, cleanup skipped — is stderr and `--quiet`
   silences all of it.
@@ -503,6 +506,9 @@ something else (`tog x --from httpie http`). Sharp edges of `x --clean`:
   0 whenever cleanup completed, and `nothing to clean` prints only when no
   candidate matched — a root skipped as in use is reported.
 - A running tool is left in place, reported as in use; retry after it exits.
+- An environment made under a store this tog refuses to open (see "Store
+  format" in ARCHITECTURE.md) is left in place and reported as skipped,
+  with the fix for that store. Nothing in that store is read or changed.
 - An environment is keyed on the runtime it runs on as well as the tool, so
   a project with a toolchain lock gets the tool on the locked runtime and an
   `update --toolchain` gives the next run a fresh environment. An
@@ -930,13 +936,15 @@ concurrent sync cannot lose one. Sharp edges:
 - `--project` also collects old unused project forests and backups.
 - `--reset` empties the store and starts it again in the current format. It
   is the fix for a store this tog refuses to open: one written before the
-  format marker existed, or one whose marker it does not know (see "Store
-  format" in ARCHITECTURE.md). It removes every object, record, root and
-  forest, and keeps the download cache, `backups/` and the run homes, so
-  the next sync in each project rebuilds from the cache rather than the
-  network where it can. It works on any store, readable or not, refuses
-  while another Tog job is using the store, takes `--dry-run` (which lists
-  what it would remove and writes nothing) and no other option.
+  format marker existed, or one whose marker it does not know or cannot
+  read (see "Store format" in ARCHITECTURE.md). It removes every object,
+  record, root and forest, and keeps the download cache, `backups/` and the
+  run homes, so the next sync in each project rebuilds from the cache
+  rather than the network where it can. It never reads the marker, so it
+  works on any store, readable or not. It refuses while another Tog job is
+  using the store, takes `--dry-run` (which lists what it would remove and
+  writes nothing) and no other option. A reset that is interrupted leaves
+  a store with no marker, which is still refused: run it again.
 
 **attest** `[<ecosystem>...]` gives existing locks a signed resolution
 record without changing them. For each named ecosystem (all detected ones

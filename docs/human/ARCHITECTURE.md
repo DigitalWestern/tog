@@ -599,31 +599,71 @@ and fails closed.
 ## Store format
 
 A store says which format it is in: `<store>/format` holds one line,
-`tog-store 1`. The marker is written when a store is created and read every
-time one is opened (`src/kernel/store/format.rs`). This tog reads format 1
-and nothing else. There is no migration code: a store it cannot read is
+`tog-store 1` (`src/kernel/store/format.rs`). This tog reads format 1 and
+nothing else. There is no migration code: a store it cannot read is
 refused, and the fix is to empty it.
 
 - No directory, or an empty one: a new store is created, marker first.
 - The marker says `tog-store 1`: the store opens.
 - Store directories but no marker: a store written before the marker
-  existed. Refused.
-- A higher number: a newer tog wrote it. Refused, and the message says to
-  update this tog.
-- Anything else in the marker: refused.
+  existed, or one a reset did not finish. Refused.
+- A higher number: a newer tog wrote it. Refused, and the fix is to update
+  this tog.
+- Anything else in the marker, or a marker that cannot be read (its mode,
+  an I/O error): refused.
 
-Every refusal names the same way out: `tog gc --reset`, or move the
-directory aside. `tog gc --reset` takes the exclusive lease, removes the
-marker, then `objects/`, `meta/`, `roots/`, `records/`, `resolve/`,
-`forests/`, `root-locks/` and staging, and writes a fresh marker last, so an
-interrupted reset leaves a store that is still refused rather than one that
-looks current. It keeps `cache/` (downloads are stored under their own
-digest and are checked again on every use, so no store format reads them
-wrong), `backups/` (the user's own moved-aside directories) and `run-homes/`.
-The next `tog` in a project finds its objects gone and syncs again, mostly
-from the kept cache. On a refused store `tog store path` still prints the
-path, `tog doctor` reports the store row as `fail` with the fix, and
-`tog gc --reset` works; nothing else opens it.
+The marker is read twice. `Store::open` reads it when a command starts, and
+every activity lease (`Store::activity`, `Store::try_activity_exclusive`)
+reads it again once the lease is held, before the operation reads any
+record. The second read is the one that counts: a command can open the
+store, wait for its lease behind a `tog gc --reset`, and get the lease on a
+store that has changed underneath it. Only a reset removes a marker, and a
+reset needs the exclusive lease, so a marker read under a lease stays true
+for as long as the lease is held. A `Store` made without the check
+(`Store::handle`, for a store an x environment's own records name) is
+validated the same way at its lease; `tests/architecture.rs` lists the
+functions allowed to make one.
+
+Creating a store and emptying one both hold an exclusive `flock` on the
+store root directory. `Store::open` holds it while it reads the marker and
+creates what is missing, so two togs creating one store take turns, and
+neither creates namespaces inside a store a reset is emptying. A reader that
+takes no lock (`tog store path`, `tog doctor`) reads the marker a second
+time before it calls namespaces without a marker an old store, because a
+store being created publishes the marker before its first namespace. During
+a reset such a reader can report the store as having no marker. That is
+true at that moment, and it stops when the reset finishes.
+
+A refusal is an error whose message says why and whose fix is a separate
+`tog:     fix:` line (a `"fix"` key under `--json`): `tog gc --reset`, or
+`tog update --self` for a store a newer tog wrote. Moving the directory
+aside works too. `tog gc --reset` (`src/kernel/gc/reset.rs`) locates the
+root without reading the marker, takes the exclusive lease, and then:
+
+1. unlinks the marker and fsyncs the root directory, so the removal is on
+   disk before anything else is deleted;
+2. removes `objects/`, `meta/`, `roots/`, `records/`, `resolve/`,
+   `forests/`, `root-locks/` and staging;
+3. recreates the namespaces and fsyncs them;
+4. publishes the new marker: written to a temporary file, fsynced, renamed
+   into place, and the root directory fsynced.
+
+A reset that stops anywhere between step 1 and the end of step 4, by a
+crash or a power failure, leaves a store with no marker. That store is
+refused, and running the reset again finishes the job. It never leaves a
+marked store holding half of its records. It keeps `cache/` (downloads are
+stored under their own digest and are checked again on every use, so no
+store format reads them wrong), `backups/` (the user's own moved-aside
+directories) and `run-homes/`. The next `tog` in a project finds its objects
+gone and syncs again, mostly from the kept cache.
+
+On a refused store, every command that would read or write the store stops
+with that error. Three still work: `tog store path` prints the path with a
+warning and the fix, `tog doctor` reports the store row as `fail` with the
+fix, and `tog gc --reset` empties it. Commands that never open a store
+(`--help`, `version`) are unaffected. `tog x --clean` is the one command
+that meets stores other than the configured one: an environment whose own
+store is refused is skipped and reported, and nothing in that store changes.
 
 ## GC root safety
 
