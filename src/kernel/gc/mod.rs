@@ -1582,6 +1582,27 @@ mod tests {
         assert!(!record.exists(), "the stray record survived: {text}");
     }
 
+    #[test]
+    fn a_directory_replacing_a_parsed_orphan_record_is_never_swept() {
+        let temp = TempStore::new("orphan-directory-replacement");
+        let store = temp.store();
+        let gone = commit(&store, "gone", None);
+        store::remove_tree(&store.object_path(&gone)).unwrap();
+        let (index, unusable) =
+            crate::kernel::objmeta::MetaIndex::read_reporting_unusable(&store).unwrap();
+        assert!(unusable.is_empty());
+        let record = store.root.join("meta").join(format!("{gone}.json"));
+        fs::remove_file(&record).unwrap();
+        fs::create_dir(&record).unwrap();
+        fs::write(record.join("user-data"), "keep").unwrap();
+        let held = read::open_held(&store.root.join("meta"), "meta").unwrap();
+        assert!(read::read_stray_records(&index, &[], &held).is_err());
+        assert_eq!(
+            fs::read_to_string(record.join("user-data")).unwrap(),
+            "keep"
+        );
+    }
+
     /// A record whose object is gone while a rooted object still depends on
     /// it is a real loss, not residue: the sweep refuses and keeps it.
     #[test]

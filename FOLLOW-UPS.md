@@ -223,3 +223,5 @@ After the proxy: the test-suite audit (#351) and then the quality review
 - **Tool-opened absolute inputs (#499).** Delegated tools can reopen absolute arguments and environment paths, including `BUNDLE_GEMFILE`. Choose a held input or an immutable snapshot for each such input.
 
 - **Machine policy descriptor (#500).** Read and identify `TOG_POLICY` or the home policy from one opened file, so replacement cannot mix policy bytes with another inode during deduplication. See `src/kernel/policy.rs`.
+
+- **External requirements consistency (#501).** Select external absolute Python requirements once across command stages, using held input descriptors or immutable snapshots. Preserve existing supported external requirements. See `src/comforter/status.rs` and `src/tailors/python/inputs.rs`.
