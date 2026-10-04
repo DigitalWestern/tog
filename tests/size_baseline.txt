@@ -6,7 +6,7 @@
 #   file <non-test lines> <path>
 #   fn <lines> <path>::<name>[#<nth occurrence in the file>]
 file 1962 src/commands/x.rs
-file 1590 src/kernel/store/roots.rs
+file 1597 src/kernel/store/roots.rs
 file 1870 src/tailors/dotnet/mod.rs
 file 1919 src/tailors/elixir/mod.rs
 file 1776 src/tailors/node/lock_import/pnpm.rs
