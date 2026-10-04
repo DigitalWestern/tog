@@ -174,7 +174,9 @@ pinned in `kernel/provider/cpython.rs`; interpreter selection happens before loc
 (`.python-version` wins, then `requires-python`). Wheels install into the
 env object; sdists build in a network-denied sandbox (legacy setuptools
 records keep `sdist-build/2`, PEP 517 uses `sdist-build/4` with an immutable
-build environment). Environments are immutable: no activate scripts, pip
+build environment. Rust builds use `sdist-build/5`, adding a versioned Rust
+flag configuration. Plain builds keep their existing identities, and old
+Rust `/4` records remain readable). Environments are immutable: no activate scripts, pip
 cannot mutate them.
 
 **npm** (`tailors/node/`: `plan.rs`, `realize.rs`, `project.rs`, `lock_import/`). `package-lock.json` is parsed
@@ -603,8 +605,9 @@ project also locks Python, the shipped 3.12 otherwise. Its object id is the
 environment. Likewise a Python sdist with a Rust extension compiles with the
 project's locked Rust when the lock has a `rust` section, and with the shipped
 Rust its toolchain file resolves to otherwise (the Python section's pinned Rust
-when the file names no channel); `sdist-build/4` already commits
-to that Rust object id through its `rust` input. Both helpers come from
+when the file names no channel); `sdist-build/5` commits
+to that Rust object id through its `rust` input and to the Rust flag policy
+through `rust_build_config`. Both helpers come from
 `kernel/provider/`. This is a cooperative network-denial build sandbox, not
 hostile-code containment. Packages that download binaries at install time
 get them via declared artifacts: the project pins `url` + `sha256`, tog
@@ -808,6 +811,7 @@ successor together, accepting one store-wide rebuild of those kinds:
 | `python-env` | `python-env/3` | `package_digest` over every `pkg:` entry, and a `native` decision | a one-wheel plan that lost its only `pkg:` key became the empty environment; a native sdist could lose `native_libs` |
 | `node-env` | `node-env/4` | `plan_digest` over every `pkg:` and `artifact:` entry, and a `native` decision | a multi-package plan could lose one package, or a declared `artifact:` or Linux `native_libs` key |
 | `sdist-build` | `sdist-build/4` | `build_mode` and `native_mode` | dropping *both* halves of `rust`/`vendor` or `native_libs`/`native_linker` left the valid shape that never had one |
+| Rust `sdist-build` | `sdist-build/5` | `rust_build_config` | changed Rust flags could reuse a wheel built with the previous environment. Plain builds retain `/4` |
 
 Each added input is written unconditionally, including in the empty case, and
 the producer derives it from the *plan* — the locked package list, the
