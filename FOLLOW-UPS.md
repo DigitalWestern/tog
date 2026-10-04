@@ -45,10 +45,6 @@ After the proxy: the test-suite audit (#351) and then the quality review
 
 ## Decisions waiting on the owner
 
-- **Help after every bare `tog` (#145).** Since #142 a successful sync is
-  followed by the full help screen, which can scroll the sync result away.
-  Watch daily use; the candidates are a short footer, the full screen only
-  when nothing needed syncing, or leaving it.
 - **Plain `tog audit` in CI without keys (#395).** Since #394 it judges
   records with signatures unchecked instead of exiting 2; `--signed` is the
   fail-closed form and CLI.md has the migration note. Open: also refuse
@@ -59,14 +55,6 @@ After the proxy: the test-suite audit (#351) and then the quality review
   migration goes at the tag, and `v0.1.0` shipped before #408 merged. So
   a format marker ships first and the migration code goes at the next tag.
   Open: migrate your own store once or reset it. Pick: reset.
-- **First outside target.** Cheapest visible artifact: a GitHub Action
-  running `tog --frozen` under the company policy plus `tog sbom`, which
-  should work on GitHub-hosted Ubuntu runners if unprivileged user
-  namespaces are allowed there. Parked 2026-09-23 until the Ubuntu sandbox
-  behavior (#87) was understood. That condition has fired: #87 was fixed by
-  #173 (the sandbox mirrors the host's `/bin` and `/lib` layout, so Ubuntu
-  22.04 can sandbox) and its follow-up #175 is closed. Un-parking #70 is the
-  owner's call.
 
 ## Open work, each its own pull request
 
@@ -87,7 +75,7 @@ After the proxy: the test-suite audit (#351) and then the quality review
   shared store changes.
 - **An offline fixture where a sync succeeds (#147).** Every green-sync
   test downloads a toolchain and is ignored, so "bare `tog`, then the
-  help" and anything else that runs after a successful sync is verified by
+  footer" and anything else that runs after a successful sync is verified by
   hand. That includes `tog build` syncing a stale ecosystem first; the
   ignored e2e suites could drop their explicit `sync` step to cover it.
 

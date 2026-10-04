@@ -1,0 +1,286 @@
+# The tog GitHub Action: install a released tog on the runner, build the
+# project's environments from its lockfiles under a policy, judge the
+# recorded exceptions, and write an SBOM.
+#
+#   - uses: actions/checkout@v4
+#   - uses: DigitalWestern/tog@main
+#
+# The ref after the `@` picks this file; which tog it installs is the
+# `version` input. v0.1.0 was tagged before this file existed, so the first
+# tag that can be named there is the next one.
+#
+# A composite action: its steps run on the caller's runner, in the caller's
+# job, so `tog` stays on PATH (and TOG_POLICY set) for every later step.
+# Inputs reach the scripts as environment variables, never as text pasted
+# into a script, so an input cannot be read as shell.
+#
+# Linux x86_64 only, the one platform release.yml builds. docs/human/CLI.md
+# "Gating a pull request with sync and audit" explains what each step
+# decides; .github/workflows/action.yml runs this file against
+# tests/fixtures/action-demo.
+name: tog
+description: Set up a project with tog under a policy, audit it, and write an SBOM
+author: DigitalWestern
+
+inputs:
+  version:
+    description: Release of tog to install, as a tag (v0.1.0) or 'latest'.
+    default: latest
+  token:
+    description: >-
+      Token that can read the releases of DigitalWestern/tog. While that
+      repository is private the default token only works inside it; pass a
+      token with read access to it from anywhere else.
+    default: ${{ github.token }}
+  working-directory:
+    description: Directory of the project to set up.
+    default: .
+  policy:
+    description: >-
+      Machine policy for the job. Empty uses the company deny list that
+      ships with tog (docs/human/policy-company.toml), anything else is the
+      path of a policy file in the workspace. 'none' sets nothing: a
+      TOG_POLICY already in the job's environment, ~/.tog/policy.toml and
+      the project's own .tog/policy.toml still apply.
+    default: ""
+  frozen:
+    description: >-
+      'true' runs 'tog --frozen': the locks and tog-toolchain.toml must be
+      committed and current, and nothing is written to them. 'false' runs a
+      plain 'tog', which may write them.
+    default: "true"
+  strict:
+    description: "'true' refuses every policy exception ('tog --strict')."
+    default: "false"
+  audit:
+    description: >-
+      'true' runs 'tog audit' after the sync, 'signed' runs 'tog audit
+      --signed' (the policy must then carry a [signing] table), 'false'
+      skips it.
+    default: "true"
+  signing-key:
+    description: >-
+      Closure-signing key (the contents of a 'tog keygen' file), from a
+      secret. It exists on disk only while the sync runs. Never pass one to
+      a job that builds a pull request from a fork: a sync can run project
+      code, and that code could read the key.
+    default: ""
+  sbom:
+    description: Where to write the CycloneDX SBOM, relative to the project. Empty skips it.
+    default: sbom.json
+  upload-sbom:
+    description: "'true' uploads the SBOM as a workflow artifact named by 'sbom-artifact'."
+    default: "true"
+  sbom-artifact:
+    description: Name of the uploaded SBOM artifact.
+    default: sbom
+  sandbox:
+    description: >-
+      'true' makes the Linux build sandbox usable: installs bubblewrap when
+      it is missing and, where Ubuntu denies it a user namespace, the
+      AppArmor profile 'tog doctor' names. 'false' leaves the runner alone.
+    default: "true"
+
+outputs:
+  version:
+    description: The installed tog, as 'tog --version' prints it.
+    value: ${{ steps.install.outputs.version }}
+  sbom:
+    description: Path of the SBOM, empty when none was written.
+    value: ${{ steps.sbom.outputs.path }}
+
+runs:
+  using: composite
+  steps:
+    # Before anything runs. A switch that is neither 'true' nor 'false'
+    # would otherwise read as off ('frozen: True' would sync unfrozen), and
+    # a path with a line break in it would write a second line into
+    # GITHUB_ENV or GITHUB_OUTPUT, which GitHub reads as another variable.
+    - name: Check the inputs
+      shell: bash
+      env:
+        TOG_ACTION_FROZEN: ${{ inputs.frozen }}
+        TOG_ACTION_STRICT: ${{ inputs.strict }}
+        TOG_ACTION_UPLOAD_SBOM: ${{ inputs.upload-sbom }}
+        TOG_ACTION_SANDBOX: ${{ inputs.sandbox }}
+        TOG_ACTION_AUDIT: ${{ inputs.audit }}
+        TOG_ACTION_POLICY: ${{ inputs.policy }}
+        TOG_ACTION_SBOM: ${{ inputs.sbom }}
+        TOG_ACTION_VERSION: ${{ inputs.version }}
+      run: |
+        set -euo pipefail
+        bad=0
+        switch() {
+          case "$2" in
+            true | false) ;;
+            *) echo "::error::$1 must be 'true' or 'false', not '$2'"; bad=1 ;;
+          esac
+        }
+        switch frozen "$TOG_ACTION_FROZEN"
+        switch strict "$TOG_ACTION_STRICT"
+        switch upload-sbom "$TOG_ACTION_UPLOAD_SBOM"
+        switch sandbox "$TOG_ACTION_SANDBOX"
+        case "$TOG_ACTION_AUDIT" in
+          true | signed | false) ;;
+          *) echo "::error::audit must be 'true', 'signed' or 'false', not '$TOG_ACTION_AUDIT'"; bad=1 ;;
+        esac
+        one_line() {
+          case "$2" in
+            *$'\n'* | *$'\r'*) echo "::error::$1 must be a single line"; bad=1 ;;
+          esac
+        }
+        one_line policy "$TOG_ACTION_POLICY"
+        one_line sbom "$TOG_ACTION_SBOM"
+        one_line version "$TOG_ACTION_VERSION"
+        exit "$bad"
+
+    # install.sh does the verified install (sha256 next to the asset, the
+    # atomic rename). It is handed the two release files from a local
+    # directory, because `gh` can read a private repository's release with
+    # a token and the installer's anonymous download cannot.
+    - name: Install tog
+      id: install
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        TOG_ACTION_VERSION: ${{ inputs.version }}
+      run: |
+        set -euo pipefail
+        if [ "$RUNNER_OS" != Linux ] || [ "$(uname -m)" != x86_64 ]; then
+          echo "::error::tog releases are built for Linux x86_64 only; this runner is $RUNNER_OS $(uname -m)"
+          exit 1
+        fi
+        assets="$RUNNER_TEMP/tog-release"
+        rm -rf "$assets"
+        mkdir -p "$assets"
+        case "$TOG_ACTION_VERSION" in
+          latest) tag=() ;;
+          v*) tag=("$TOG_ACTION_VERSION") ;;
+          *) tag=("v$TOG_ACTION_VERSION") ;;
+        esac
+        if ! gh release download "${tag[@]}" --repo DigitalWestern/tog \
+            --pattern 'tog-x86_64-unknown-linux-gnu.tar.gz*' --dir "$assets"; then
+          echo "::error::cannot download tog ($TOG_ACTION_VERSION) from DigitalWestern/tog; while that repository is private, pass 'token' a token that can read it"
+          exit 1
+        fi
+        TOG_DOWNLOAD_BASE="file://$assets" sh "$GITHUB_ACTION_PATH/install.sh" \
+          --no-modify-path --no-completions --dir="$HOME/.local/bin"
+        rm -rf "$assets"
+        echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+        echo "version=$("$HOME/.local/bin/tog" --version)" >> "$GITHUB_OUTPUT"
+
+    # Ubuntu 23.10 and later can deny unprivileged user namespaces to any
+    # program without its own AppArmor profile, and bwrap needs one. The
+    # profile is the first of the two fixes `tog doctor` names; ci.yml's
+    # sandbox-ubuntu-24 job proves both.
+    - name: Linux sandbox
+      if: inputs.sandbox == 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+        if ! command -v bwrap > /dev/null; then
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap
+        fi
+        level() { tog doctor --json | jq -r '.checks[] | select(.name == "sandbox") | .level' || true; }
+        switch=$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null || echo absent)
+        if [ "$(level)" != ok ] && [ "$switch" = 1 ]; then
+          sudo tee /etc/apparmor.d/bwrap > /dev/null <<'EOF'
+        abi <abi/4.0>,
+        include <tunables/global>
+
+        profile bwrap /usr/bin/bwrap flags=(unconfined) {
+          userns,
+          include if exists <local/bwrap>
+        }
+        EOF
+          sudo apparmor_parser -r /etc/apparmor.d/bwrap
+        fi
+        if [ "$(level)" != ok ]; then
+          tog doctor || true
+          echo "::error::the Linux sandbox does not work on this runner; 'tog doctor' above names the fix"
+          exit 1
+        fi
+
+    # TOG_POLICY goes into the job's environment, so the steps below and
+    # every later `tog` in the job run under the same policy.
+    - name: Policy
+      shell: bash
+      env:
+        TOG_ACTION_POLICY: ${{ inputs.policy }}
+      run: |
+        set -euo pipefail
+        case "$TOG_ACTION_POLICY" in
+          none) exit 0 ;;
+          "") policy="$GITHUB_ACTION_PATH/docs/human/policy-company.toml" ;;
+          /*) policy="$TOG_ACTION_POLICY" ;;
+          *) policy="$GITHUB_WORKSPACE/$TOG_ACTION_POLICY" ;;
+        esac
+        if [ ! -f "$policy" ]; then
+          echo "::error::policy file $policy does not exist"
+          exit 1
+        fi
+        echo "TOG_POLICY=$policy" >> "$GITHUB_ENV"
+
+    # A denied exception fails here, while the environment is built. The
+    # key is written under umask 077 and removed whether the sync passed or
+    # not; printf, so no newline is appended to it.
+    - name: Sync
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        TOG_ACTION_FROZEN: ${{ inputs.frozen }}
+        TOG_ACTION_STRICT: ${{ inputs.strict }}
+        TOG_ACTION_SIGNING_KEY: ${{ inputs.signing-key }}
+      run: |
+        set -euo pipefail
+        flags=()
+        if [ "$TOG_ACTION_FROZEN" = true ]; then flags+=(--frozen); fi
+        if [ "$TOG_ACTION_STRICT" = true ]; then flags+=(--strict); fi
+        # With no flag this would be the bare `tog`, which outside a
+        # project prints the help and exits 0. Named as `sync` it fails
+        # there like the flagged forms do, and prints no footer.
+        if [ "${#flags[@]}" = 0 ]; then flags+=(sync); fi
+        if [ -n "$TOG_ACTION_SIGNING_KEY" ]; then
+          key="$RUNNER_TEMP/tog-signing.key"
+          trap 'rm -f "$key"' EXIT
+          (umask 077; printf '%s' "$TOG_ACTION_SIGNING_KEY" > "$key")
+          export TOG_SIGNING_KEY="$key"
+        fi
+        tog "${flags[@]}"
+
+    # Exit 1 is a denied build, exit 2 an operator mistake (an unreadable
+    # policy, or --signed with no trusted keys).
+    - name: Audit
+      if: inputs.audit != 'false'
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        TOG_ACTION_AUDIT: ${{ inputs.audit }}
+      run: |
+        set -euo pipefail
+        if [ "$TOG_ACTION_AUDIT" = signed ]; then
+          tog audit --signed
+        else
+          tog audit
+        fi
+
+    - name: SBOM
+      id: sbom
+      if: inputs.sbom != ''
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        TOG_ACTION_SBOM: ${{ inputs.sbom }}
+      run: |
+        set -euo pipefail
+        tog sbom -o "$TOG_ACTION_SBOM"
+        echo "path=$(realpath "$TOG_ACTION_SBOM")" >> "$GITHUB_OUTPUT"
+
+    - name: Upload the SBOM
+      if: inputs.sbom != '' && inputs.upload-sbom == 'true'
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      with:
+        name: ${{ inputs.sbom-artifact }}
+        path: ${{ steps.sbom.outputs.path }}
+        if-no-files-found: error

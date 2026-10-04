@@ -89,10 +89,10 @@ fn quiet_outside_a_project_keeps_the_help_and_drops_the_note() {
     assert!(out.stderr.is_empty(), "{}", text(&out.stderr));
 }
 
-/// The help follows a sync that worked. A sync that failed has already
-/// said why, and a screen of help under an error buries it.
+/// The footer follows a sync that worked. A sync that failed has already
+/// said why, and nothing is printed under the error.
 #[test]
-fn a_bare_tog_whose_sync_fails_prints_no_help() {
+fn a_bare_tog_whose_sync_fails_prints_no_footer() {
     let home = TempDir::boundary("cli-bare-fail-home");
     let project = TempDir::boundary("cli-bare-fail-project");
     std::fs::write(project.0.join("requirements.txt"), "six==1.17.0\n").unwrap();

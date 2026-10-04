@@ -1,0 +1,55 @@
+# Runs the tog GitHub Action (action.yml at the repository root) the way an
+# outside repository would, against tests/fixtures/action-demo: install the
+# latest release, sync under the company policy, audit, SBOM.
+#
+# Only when the action or something it reads changes, or by hand
+# (`gh workflow run action`): it tests the released binary, not the code in
+# the checkout, so every other pull request would learn nothing from it.
+name: action
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - action.yml
+      - .github/workflows/action.yml
+      - install.sh
+      - docs/human/policy-company.toml
+      - tests/fixtures/action-demo/**
+
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && format('action-pr-{0}', github.event.pull_request.number) || format('action-{0}', github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  demo:
+    # 22.04 lets bwrap have a user namespace as it comes; 24.04 does not,
+    # so that leg is the one that needs the action's AppArmor profile.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: ./
+        id: tog
+        with:
+          working-directory: tests/fixtures/action-demo
+          sbom-artifact: sbom-${{ matrix.os }}
+      - name: The environment runs, under the policy the action set
+        working-directory: tests/fixtures/action-demo
+        env:
+          TOG_VERSION_LINE: ${{ steps.tog.outputs.version }}
+          TOG_SBOM: ${{ steps.tog.outputs.sbom }}
+        run: |
+          set -euo pipefail
+          echo "$TOG_VERSION_LINE"
+          case "$TOG_VERSION_LINE" in "tog "*) ;; *) exit 1 ;; esac
+          test "$(realpath "$TOG_POLICY")" = "$(realpath "$GITHUB_WORKSPACE/docs/human/policy-company.toml")"
+          tog run python -c 'import six; print("six", six.__version__)'
+          jq -e '.bomFormat == "CycloneDX"' "$TOG_SBOM"
+          tog status

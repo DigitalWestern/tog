@@ -100,7 +100,7 @@ pub fn parse(args: &[String]) -> Result<Parsed, UsageError> {
             return Ok(Parsed::Implicit(options));
         }
         // With a flag the sync is deliberate, so it runs as a command: no
-        // help after it, and outside a project it fails like any sync.
+        // footer after it, and outside a project it fails like any sync.
         return match parse_sync(&setup, &mut options)? {
             Some(command) => Ok(Parsed::Run(Invocation { options, command })),
             None => unreachable!("setup holds only the three setup flags"),
@@ -1588,7 +1588,7 @@ mod tests {
     }
 
     /// The bare `tog` with a setup flag is a sync command rather than the
-    /// implicit form, so no help follows it and a directory with no project
+    /// implicit form, so no footer follows it and a directory with no project
     /// fails like any sync. `--frozen` and `--strict` are also global
     /// options on every other verb; `--fresh` stays bare-only.
     #[test]

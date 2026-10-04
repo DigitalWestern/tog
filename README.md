@@ -142,7 +142,7 @@ Linux x86_64 only for now.
 
 ```sh
 cd your-project     # an EXISTING project works as-is:
-tog             # set up ./.venv and/or ./node_modules from the lockfiles, then show the help
+tog             # set up ./.venv and/or ./node_modules from the lockfiles, then show what to run next
 tog run python app.py       # run one command inside the environment(s)
 tog dev                     # a package.json script, without the 'run'
 tog test --watch            # same; every later argument is the script's
