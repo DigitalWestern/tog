@@ -156,7 +156,6 @@ After the proxy: the test-suite audit (#351) and then the quality review
   issue has the options and the pick.
   - #188 npm: realize `file:` packages as tog-owned trees.
   - #191 provider object-kind rows still live in the tailors' `objects.rs`.
-  - #215 python: sdists that need Rust at build time (stable-diffusion-webui).
   - #216 python: `uv pip compile` fails for vllm and MetaGPT; classifier label.
   - #219 descriptor: delegated tools a sync starts still run with a path cwd.
   - #220 descriptor: files above the project (Cargo workspace, `go.work`, .NET `Directory.*`) read by path.

@@ -171,7 +171,7 @@ fn wrap_sandbox_build_error_with_tail(
 ) -> io::Error {
     let diagnostics = stderr_tail
         .filter(|tail| !tail.trim().is_empty())
-        .map(|tail| format!("\nfirst 40 lines of build stderr tail:\n{tail}"))
+        .map(|tail| format!("\n{tail}"))
         .unwrap_or_else(|| {
             "\nbuild stderr was relayed by the sandbox API and was not available for inclusion"
                 .into()
@@ -493,10 +493,57 @@ pub(crate) fn sdist_identity_input(
     Ok(plan_sdist_identity_input(&mut door, pkg, selected, None, runtime_plan)?.input)
 }
 
+/// An sdist's crate is a third-party dependency, so its lints warn and
+/// never fail the build, as Cargo already caps them for every registry
+/// crate. Without this, a lint rustc later made deny-by-default (such as
+/// `invalid_reference_casting` in 1.73) stops a release that built on the
+/// Rust of its day (tokenizers 0.13.3). Lints change diagnostics, never
+/// codegen, so a build that succeeded before produces the same bytes and
+/// the build identity is unchanged. Both flag channels carry it, and
+/// `nativelibs::compose_env` appends its own flags after these.
+fn rust_lint_cap() -> [(String, String); 2] {
+    [
+        ("RUSTFLAGS".into(), "--cap-lints=warn".into()),
+        ("CARGO_ENCODED_RUSTFLAGS".into(), "--cap-lints=warn".into()),
+    ]
+}
+
+/// The part of pip's build log a failure message shows: the first compiler
+/// error with the lines after it, then the log's last 40 lines. A Rust or C
+/// build's real error sits above a long command line and pip's traceback,
+/// so the tail alone often shows only warnings.
 fn stderr_tail(path: &Path) -> Option<String> {
-    let text = fs::read_to_string(path).ok()?;
+    build_log_excerpt(&fs::read_to_string(path).ok()?)
+}
+
+fn build_log_excerpt(text: &str) -> Option<String> {
     let lines: Vec<_> = text.lines().collect();
-    Some(lines[lines.len().saturating_sub(40)..].join("\n"))
+    let tail_start = lines.len().saturating_sub(40);
+    let tail = lines[tail_start..].join("\n");
+    let first_error = lines[..tail_start]
+        .iter()
+        .position(|line| is_compiler_error(line));
+    Some(match first_error {
+        Some(at) => {
+            let end = (at + 20).min(tail_start);
+            format!(
+                "first compiler error in the build log:\n{}\n...\nlast 40 lines of the build log:\n{tail}",
+                lines[at..end].join("\n")
+            )
+        }
+        None => format!("last 40 lines of the build log:\n{tail}"),
+    })
+}
+
+/// A rustc/cargo (`error:`, `error[E0308]:`) or gcc/clang
+/// (`file.c:12:3: error:`) error line, after pip's timestamp and indent.
+fn is_compiler_error(line: &str) -> bool {
+    let body = line
+        .split_once(char::is_whitespace)
+        .filter(|(stamp, _)| stamp.starts_with(|ch: char| ch.is_ascii_digit()))
+        .map_or(line, |(_, rest)| rest)
+        .trim_start();
+    body.starts_with("error:") || body.starts_with("error[") || body.contains(": error:")
 }
 
 fn cargo_lock_for(source: &Path, manifest: &Path) -> Option<PathBuf> {
@@ -804,6 +851,7 @@ fn run_sdist_build(
         // Required by pyo3 0.18 in tokenizers 0.13.x when the selected
         // interpreter is CPython 3.12.
         envs.push(("PYO3_USE_ABI3_FORWARD_COMPATIBILITY".into(), "1".into()));
+        envs.extend(rust_lint_cap());
     }
     envs.push(("PATH".into(), base_path));
     if let Some(native_libs) = native_libs {
@@ -1352,6 +1400,67 @@ pub fn ensure_build_environment(
 
 #[cfg(test)]
 mod tests {
+    /// tokenizers 0.13.3's real error sat above rustc's command line and
+    /// pip's traceback, so the 40-line tail showed only warnings. The
+    /// excerpt leads with the first compiler error.
+    #[test]
+    fn a_build_failure_shows_the_first_compiler_error() {
+        let mut log = vec![
+            "2026-10-04T11:20:17,332   warning: hidden lifetime".to_string(),
+            "2026-10-04T11:20:17,332   error: casting `&T` to `&mut T` is undefined behavior"
+                .to_string(),
+            "2026-10-04T11:20:17,332      --> src/models/bpe/trainer.rs:526:47".to_string(),
+        ];
+        log.extend((0..60).map(|n| format!("2026-10-04T11:20:17,447   traceback line {n}")));
+        let excerpt = super::build_log_excerpt(&log.join("\n")).unwrap();
+        assert!(
+            excerpt.starts_with(
+                "first compiler error in the build log:\n\
+                 2026-10-04T11:20:17,332   error: casting `&T` to `&mut T`"
+            ),
+            "{excerpt}"
+        );
+        assert!(excerpt.contains("trainer.rs:526:47"), "{excerpt}");
+        assert!(excerpt.ends_with("traceback line 59"), "{excerpt}");
+        assert!(!excerpt.contains("hidden lifetime"), "{excerpt}");
+
+        let short = super::build_log_excerpt("  error: within the tail\nlast").unwrap();
+        assert_eq!(
+            short,
+            "last 40 lines of the build log:\n  error: within the tail\nlast"
+        );
+        assert!(super::is_compiler_error("x.c:12:3: error: missing header"));
+        assert!(super::is_compiler_error("error[E0308]: mismatched types"));
+        assert!(!super::is_compiler_error(
+            "2026-10-04T11:20:17,447 ERROR: Failed"
+        ));
+    }
+
+    /// The sdist's crate is a dependency: its lints are capped through both
+    /// of Cargo's flag channels, and the native library flags append after.
+    #[test]
+    fn an_sdist_rust_build_caps_lints() {
+        let envs: Vec<_> = super::rust_lint_cap().into();
+        let get = |key: &str| {
+            envs.iter()
+                .find(|(name, _)| name == key)
+                .map(|(_, value)| value.as_str())
+        };
+        assert_eq!(get("RUSTFLAGS"), Some("--cap-lints=warn"));
+        assert_eq!(get("CARGO_ENCODED_RUSTFLAGS"), Some("--cap-lints=warn"));
+        let dir = crate::kernel::testutil::TempDir::named("lint-cap-libs");
+        let composed = crate::kernel::provider::nativelibs::compose_env(&dir.0, &envs);
+        let encoded = composed
+            .iter()
+            .find(|(name, _)| name == "CARGO_ENCODED_RUSTFLAGS")
+            .map(|(_, value)| value.as_str())
+            .unwrap();
+        assert!(
+            encoded.starts_with("--cap-lints=warn\x1f-C\x1f"),
+            "{encoded:?}"
+        );
+    }
+
     /// A project that locks Rust builds its sdists' Rust extensions on that
     /// selection: the `rust` input is the locked object's id, not the one the
     /// shipped pin would give. A lock naming the shipped release changes
