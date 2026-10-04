@@ -65,10 +65,11 @@ pub fn check_lock_freshness(project: &ProjectRoot, plan: &NpmPlan) -> io::Result
             &inputs::read_input(project, NPM.lock)?,
             &read_manifests(project, &plan.workspaces)?,
         ),
-        "pnpm-lock.yaml" => pnpm(
-            &inputs::read_input(project, PNPM.lock)?,
-            &read_manifests(project, &plan.workspaces)?,
-        ),
+        "pnpm-lock.yaml" => {
+            let lock = inputs::read_input(project, PNPM.lock)?;
+            pnpm_members(&lock, &lock_import::pnpm_workspace_members(project)?)?;
+            pnpm(&lock, &read_manifests(project, &plan.workspaces)?)
+        }
         // plan_yarn resolves every manifest's dependencies through the
         // lock's selectors and refuses a stale lock while planning, since
         // yarn.lock has no graph of its own to plan from; a yarn plan exists
@@ -180,6 +181,28 @@ fn string_map(path: &str, package: &Value, field: &str) -> io::Result<BTreeMap<S
         .collect()
 }
 
+/// pnpm writes an importer for every workspace member, even one with no
+/// dependencies, so a member `pnpm-workspace.yaml` names without one was
+/// added after the lock was generated and its dependencies are missing.
+pub fn pnpm_members(lock: &str, members: &[String]) -> io::Result<()> {
+    let record = lock_import::pnpm_manifest_record(lock)?;
+    match members
+        .iter()
+        .find(|member| !record.importers.contains_key(*member))
+    {
+        Some(member) => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "{} is a pnpm workspace member but {} has no importer for it; regenerate the lock ({})",
+                manifest_path(member),
+                PNPM.lock,
+                PNPM.regenerate
+            ),
+        )),
+        None => Ok(()),
+    }
+}
+
 /// pnpm-lock.yaml has one importer per manifest, and each dependency under
 /// an importer carries `specifier`, the manifest's own string. The
 /// comparison follows pnpm's own: a name in several fields counts in the
@@ -217,9 +240,10 @@ pub fn pnpm(lock: &str, manifests: &[Manifest]) -> io::Result<()> {
             for (name, spec) in &declared {
                 let fresh = match entries.get(name) {
                     Some(entry) => {
-                        entry.specifier == *spec || record.overrides_to(name, &entry.specifier)
+                        entry.specifier == *spec
+                            || record.overrides_to(&package, name, spec, &entry.specifier)
                     }
-                    None => record.overrides_to(name, "-"),
+                    None => record.overrides_to(&package, name, spec, "-"),
                 };
                 if !fresh {
                     return Err(stale(&path, field, &PNPM));
@@ -513,5 +537,82 @@ dependencies:
             message(pnpm(lock, &[root(r#"{"dependencies":{"a":"^1.1.0"}}"#)])),
             pnpm_stale("package.json", "dependencies")
         );
+    }
+
+    #[test]
+    fn pnpm_overrides_apply_only_to_the_range_and_parent_they_select() {
+        let lock = |selector: &str| {
+            format!(
+                "lockfileVersion: '9.0'\noverrides:\n  '{selector}': 1.2.3\nimporters:\n  .:\n    dependencies:\n      a:\n        specifier: 1.2.3\n        version: 1.2.3\n"
+            )
+        };
+        let package = |spec: &str| {
+            root(&format!(
+                r#"{{"name":"app","version":"2.0.0","dependencies":{{"a":"{spec}"}}}}"#
+            ))
+        };
+        for (selector, spec) in [
+            ("a", "^9.0.0"),
+            ("a@^1", "^1.0.0"),
+            ("a@^1", "1.4.0"),
+            ("a@>=1 <3", "^2.1.0"),
+            ("app>a", "^1.0.0"),
+            ("app@2>a@^1", "^1.1.0"),
+        ] {
+            pnpm(&lock(selector), &[package(spec)])
+                .unwrap_or_else(|error| panic!("{selector} over {spec}: {error}"));
+        }
+        for (selector, spec) in [
+            ("a@^1", "^2.0.0"),
+            ("a@^1", "*"),
+            ("a@^1", "latest"),
+            ("b", "^1.0.0"),
+            ("other>a", "^1.0.0"),
+            ("app@^3>a", "^1.0.0"),
+            ("x>app>a", "^1.0.0"),
+        ] {
+            assert_eq!(
+                message(pnpm(&lock(selector), &[package(spec)])),
+                pnpm_stale("package.json", "dependencies"),
+                "{selector} over {spec}"
+            );
+        }
+    }
+
+    #[test]
+    fn pnpm_refuses_a_workspace_member_without_an_importer() {
+        let scratch = crate::kernel::testutil::TempDir::named("pnpm-members");
+        let dir = &scratch.0;
+        for member in [
+            "packages/lib",
+            "packages/new",
+            "packages/skip",
+            "packages/lib/test",
+            "examples/demo",
+        ] {
+            std::fs::create_dir_all(dir.join(member)).unwrap();
+            std::fs::write(dir.join(member).join("package.json"), "{}").unwrap();
+        }
+        let project = ProjectRoot::open(dir).unwrap();
+        let members = || lock_import::pnpm_workspace_members(&project).unwrap();
+        assert!(members().is_empty(), "no workspace file is one project");
+        std::fs::write(
+            dir.join("pnpm-workspace.yaml"),
+            "# members\npackages:\n  - '!packages/skip'\n  - ./packages/**\n",
+        )
+        .unwrap();
+        assert_eq!(members(), ["packages/lib", "packages/new"]);
+        let lock = "lockfileVersion: '9.0'\nimporters:\n  .: {}\n  packages/lib: {}\n";
+        assert_eq!(
+            message(pnpm_members(lock, &members())),
+            "packages/new/package.json is a pnpm workspace member but pnpm-lock.yaml has no importer for it; regenerate the lock (pnpm install --lockfile-only)"
+        );
+        let regenerated = format!("{lock}  packages/new: {{}}\n");
+        pnpm_members(&regenerated, &members()).unwrap();
+        std::fs::write(dir.join("pnpm-workspace.yaml"), "packages:\n  - ../out\n").unwrap();
+        let error = lock_import::pnpm_workspace_members(&project).unwrap_err();
+        assert!(error.to_string().contains("escapes the project"), "{error}");
+        std::fs::write(dir.join("pnpm-workspace.yaml"), "catalog:\n  a: ^1.0.0\n").unwrap();
+        assert!(members().is_empty(), "settings alone name no members");
     }
 }

@@ -290,6 +290,13 @@ Selection covers every patch of each maintained CPython minor that python-build-
   restrictions, so nothing is filtered there at all. pnpm's `supportedArchitectures` setting
   (install optional packages for other platforms too) is not read: an optional package for
   another platform is always left out.
+- **A pnpm lock is checked against the manifests, but not through `.pnpmfile.cjs`.** Before
+  planning, tog refuses a `pnpm-lock.yaml` that is missing a workspace member
+  `pnpm-workspace.yaml` names, or whose importers disagree with a package.json, applying the
+  lock's `overrides` by pnpm's selector rules (`name@range`, `parent>name`). A
+  `.pnpmfile.cjs` `readPackage` hook that rewrites a project's own dependencies is not run,
+  since that is project code, so such a lock reads as stale. A member that has only a
+  `package.yaml` or `package.json5` is not found by the member check.
 - **A workspace member whose `node_modules` holds files git tracks is not projected.** Some
   repositories commit a fixture `node_modules` (vite does). tog moves an npm-made
   `node_modules` into the store's backups before projecting, but moving a tracked one would
