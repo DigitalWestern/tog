@@ -233,3 +233,4 @@ After the proxy: the test-suite audit (#351) and then the quality review
 - **Complete reference metadata (#506).** Use the shared semantic parser for referenced objects and replace legitimate minimal fixtures with complete records.
 - **Shared exception parsing (#507).** Add checked exceptions to object metadata records instead of reading that field separately.
 - **SRI alternatives (#508).** Preserve all strongest hash candidates through Node planning and verification. The consolidation preserves first-entry behavior on ties.
+- **Provider selection checks (#509).** Share recipe, runtime, and digest checks in the remaining CPython, Rust, and Rust-path providers.
