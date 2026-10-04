@@ -43,13 +43,15 @@ pub(crate) struct ProjectLocation {
 /// Which project am I in? The one answer every command uses: `run`,
 /// `sync`, `tog <script>`, `fmt`, `add`, `x` and toolchain selection.
 ///
-/// 1. The nearest ancestor tog has marked: a `.tog` directory (closures,
-///    the journal, the resolution record) or a toolchain lock entry, a
-///    dangling symlink included, so a lock that cannot be read refuses
-///    instead of being skipped. A marked root wins over a nearer manifest,
-///    so a nested `package.json` under a synced root (a docs site) keeps
-///    belonging to that root, and an outer checkout never decides an inner
-///    project's runtime. `$HOME/.tog` is tog's own home, not a project.
+/// 1. The nearest ancestor tog has marked: a projection (`.tog/closures`)
+///    or a toolchain lock entry, a dangling symlink included, so a lock
+///    that cannot be read refuses instead of being skipped. A marked root
+///    wins over a nearer manifest, so a nested `package.json` under a
+///    synced root (a docs site) keeps belonging to that root, and an outer
+///    checkout never decides an inner project's runtime. A bare `.tog`
+///    (a journal left by a first sync that failed) is not a mark: it would
+///    claim every unsynced project below it. `$HOME/.tog` is tog's own
+///    home, not a project.
 /// 2. Otherwise the nearest ancestor with any project input, so `tog run`
 ///    from `src/` of a never-synced project finds the project.
 /// 3. Otherwise none.
@@ -60,7 +62,7 @@ pub(crate) fn project_for(cwd: &Path) -> io::Result<Option<ProjectLocation>> {
 fn project_for_in(cwd: &Path, home: Option<&Path>) -> io::Result<Option<ProjectLocation>> {
     let marked = cwd.ancestors().find(|dir| {
         dir.join(lock::LOCK_PATH).symlink_metadata().is_ok()
-            || (dir.join(".tog").is_dir() && home != Some(*dir))
+            || (dir.join(".tog/closures").is_dir() && home != Some(*dir))
     });
     if let Some(root) = marked {
         return Ok(Some(ProjectLocation {
@@ -316,10 +318,10 @@ mod tests {
         assert_eq!(shipped.source, crate::kernel::toolchain::Source::Shipped);
         assert_ne!(shipped.version("cpython").unwrap(), other);
 
-        // A `.tog` boundary with no lock resolves the project's own
-        // sources, exactly as the sync that creates its lock would.
+        // A projection with no lock resolves the project's own sources,
+        // exactly as the sync that creates its lock would.
         let project = t.0.join("project");
-        std::fs::create_dir_all(project.join(".tog")).unwrap();
+        std::fs::create_dir_all(project.join(".tog/closures")).unwrap();
         std::fs::write(project.join(".python-version"), format!("{other}\n")).unwrap();
         let selected = selected_toolchain(platform, &project.join("src"), "python").unwrap();
         assert_eq!(selected.version("cpython").unwrap(), other);
@@ -394,6 +396,12 @@ mod tests {
         assert_eq!(location.root, fresh);
         assert!(!location.marked);
         assert_eq!(location.detected, ["node"]);
+        // A bare `.tog` above an unsynced project does not claim it.
+        let stray = t.0.join("code");
+        std::fs::create_dir_all(stray.join(".tog/journal")).unwrap();
+        std::fs::create_dir_all(stray.join("app")).unwrap();
+        std::fs::write(stray.join("app/go.mod"), "module app\n").unwrap();
+        assert_eq!(none(&stray.join("app")).unwrap().root, stray.join("app"));
         // Nothing at all.
         let outside = t.0.join("elsewhere");
         std::fs::create_dir_all(&outside).unwrap();
@@ -405,7 +413,9 @@ mod tests {
     fn the_tog_home_is_not_a_project() {
         let t = TempDir::new();
         let home = t.0.join("home");
-        std::fs::create_dir_all(home.join(".tog/store")).unwrap();
+        // tog's home holds `x` environments and the store, never a
+        // projection, but its shape must not matter either way.
+        std::fs::create_dir_all(home.join(".tog/closures")).unwrap();
         let work = home.join("work");
         std::fs::create_dir_all(work.join("src")).unwrap();
         assert_eq!(
