@@ -1144,6 +1144,27 @@ mod tests {
             error.contains("python\" belongs to another store"),
             "{error}"
         );
+        let traversal = store
+            .object_path(&mentioned)
+            .join("../../../foreign-store/objects")
+            .join(&id)
+            .join("bin/python");
+        envelope(
+            project,
+            "python",
+            serde_json::json!({
+                "env_object": store.object_path(&id), "traversal": traversal,
+            }),
+        );
+        let error = store
+            .root_record_from_project(project)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("contains parent-directory traversal"),
+            "{error}"
+        );
+        assert!(!error.contains("is inside object"), "{error}");
         envelope(
             project,
             "python",

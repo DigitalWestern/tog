@@ -474,6 +474,9 @@ fn node_projection_state(dir: &Path, body: &Value) -> State {
             let Some(workspace) = workspace.as_str() else {
                 return State::ProjectionMissing("workspace node_modules".into());
             };
+            let Some(encoded) = encoded_workspace(workspace) else {
+                return State::ProjectionMissing("workspace node_modules".into());
+            };
             // A member whose node_modules git tracks was left unprojected
             // on purpose (#174): its own directory is what belongs there.
             if body["unprojected_workspaces"]
@@ -485,9 +488,6 @@ fn node_projection_state(dir: &Path, body: &Value) -> State {
                 }
                 return State::ProjectionMissing("workspace node_modules".into());
             }
-            let Some(encoded) = encoded_workspace(workspace) else {
-                return State::ProjectionMissing("workspace node_modules".into());
-            };
             let Some(expected) = expected_root
                 .join("workspaces")
                 .join(encoded)
@@ -577,6 +577,19 @@ mod tests {
             node_projection_state(&dir, &body(json!(["packages/fixture"]))),
             State::Synced
         );
+        let outside = temp.0.join("outside");
+        fs::create_dir_all(outside.join("node_modules")).unwrap();
+        for workspace in [
+            "../outside".to_string(),
+            outside.to_string_lossy().into_owned(),
+        ] {
+            let mut invalid = body(json!([workspace]));
+            invalid["workspaces"] = json!([workspace]);
+            assert!(matches!(
+                node_projection_state(&dir, &invalid),
+                State::ProjectionMissing(_)
+            ));
+        }
         assert!(matches!(
             node_projection_state(&dir, &body(Value::Null)),
             State::ProjectionMissing(_)
