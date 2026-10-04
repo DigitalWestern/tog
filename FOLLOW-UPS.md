@@ -219,3 +219,7 @@ After the proxy: the test-suite audit (#351) and then the quality review
   sessions (#57; everything but the `/proc` cases runs there), and the
   resolution proxy's Mach allow-list (`tools/proxy_spike/macos_mach.sh`). Nothing Linux-side
   clears this.
+
+- **Held project mounts (#497).** Sandbox mounts still resolve project paths. Bind the held directory through a descriptor rather than accepting a replacement at that name. See `src/kernel/sandbox/`.
+- **Held confined snapshots (#498).** Confined snapshot creation still reopens the project path. Carry the held root into the snapshot walk. See `src/kernel/resolve/confine/`.
+- **Tool-opened absolute inputs (#499).** Delegated tools can reopen absolute arguments and environment paths, including `BUNDLE_GEMFILE`. Choose a held input or an immutable snapshot for each such input.
