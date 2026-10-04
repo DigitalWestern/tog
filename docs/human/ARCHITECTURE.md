@@ -596,14 +596,44 @@ freetype, cairo, ...) with prefixes relocated at staging; the set id is an
 input of every derivation that mounts it. macOS arm64 has no native pin yet
 and fails closed.
 
+## Store format
+
+A store says which format it is in: `<store>/format` holds one line,
+`tog-store 1`. The marker is written when a store is created and read every
+time one is opened (`src/kernel/store/format.rs`). This tog reads format 1
+and nothing else. There is no migration code: a store it cannot read is
+refused, and the fix is to empty it.
+
+- No directory, or an empty one: a new store is created, marker first.
+- The marker says `tog-store 1`: the store opens.
+- Store directories but no marker: a store written before the marker
+  existed. Refused.
+- A higher number: a newer tog wrote it. Refused, and the message says to
+  update this tog.
+- Anything else in the marker: refused.
+
+Every refusal names the same way out: `tog gc --reset`, or move the
+directory aside. `tog gc --reset` takes the exclusive lease, removes the
+marker, then `objects/`, `meta/`, `roots/`, `records/`, `resolve/`,
+`forests/`, `root-locks/` and staging, and writes a fresh marker last, so an
+interrupted reset leaves a store that is still refused rather than one that
+looks current. It keeps `cache/` (downloads are stored under their own
+digest and are checked again on every use, so no store format reads them
+wrong), `backups/` (the user's own moved-aside directories) and `run-homes/`.
+The next `tog` in a project finds its objects gone and syncs again, mostly
+from the kept cache. On a refused store `tog store path` still prints the
+path, `tog doctor` reports the store row as `fail` with the fix, and
+`tog gc --reset` works; nothing else opens it.
+
 ## GC root safety
 
 The store's `roots/<sha1>` registry records every project whose closure can
 protect store objects. New `root/2` records contain the complete object set
 and typed projection references, so GC never opens the project's diagnostic
 path: a moved, unmounted, or deleted project keeps its tools protected.
-Legacy pathname-only records stay conservative: if the project cannot be
-read, the whole sweep stops before any deletion, dry run included.
+A pathname-only record, which holds a project path and nothing else, stays
+conservative: if the project cannot be read, the whole sweep stops before
+any deletion, dry run included.
 `tog store roots` prints each key beside its path. `tog gc --forget
 <key>` is the explicit recovery valve: it removes only the registry file, and
 a root is never removed implicitly.
@@ -618,41 +648,38 @@ it, so preview and sweep are the same phases over the same snapshot.
 
 Whether an object may be deleted is decided by `meta/<id>.json`
 (`object-meta/2`): explicit dependency object ids, algorithm-qualified cache
-digests, and an `evidence` marker, `"explicit"` or `"adapted:<kind>@<n>"`.
+digests, and the `evidence` marker `"explicit"`.
 Explicit evidence names what the realization actually read, which can be
 less than its identity names: a node env's identity carries every declared
 artifact and provisioned download the plan could use, but only the ones an
 install script was given are cache dependencies, because a commit refuses to
 claim a cache entry that is not present.
-Adapters in `src/kernel/objmeta.rs` upgrade legacy records to this form; each is a
-pure function of one record plus a read-only index, dispatched on the
-(kind, schema) pair, and never guesses from a current default pin. Unknown
-or incomplete metadata blocks deletion. A legacy record whose evidence cannot
-be fully accounted for stays legacy, and on a store whose records cannot all
-be adapted, the sweep refuses and names what to fix. The containment guard
-keeps migration sound: a proposed dependency set is checked against what the
-old reader retained, and one that would narrow retention keeps legacy
-protection instead of being published.
+A record is the whole of the evidence: the sweep reads it without knowing
+the object's kind, so an object of a kind or schema this tog no longer
+produces is kept or collected like any other. A record the sweep cannot read
+(no schema, another schema, any other evidence marker, an identity that does
+not hash to its id, a malformed dependency) blocks deletion: the sweep
+refuses, lists every such record, and names `tog gc --drop-object <id>` for
+each.
 
-Each row in that (kind, schema) coverage matrix declares two input grammars.
-Its `grammar` is the migration grammar, which remains compatible with legacy
-records. Its `live_required` and `live_optional` fields describe the inputs
-the current producer writes, including dynamic prefixes for conditional
-package entries. Where identity shape has collection or platform semantics,
+Every (kind, schema) pair a producer commits has a row (`ObjectKind`, in the
+tailor's `objects.rs`). Its `live_required` and `live_optional` fields
+describe the inputs the current producer writes, including dynamic prefixes
+for conditional package entries. Where identity shape has collection or platform semantics,
 the tailor owns a `live_contract` beside the producer's identity constructor
 in `objects.rs`; it receives the whole `Identity` and validates count fields,
 paired keys, and platform-conditional inputs. The live check validates
 required names and the live key whitelist before calling that contract.
 Debug builds enforce all three at the one publication choke point,
-`Store::commit_internal_impl`, so a producer that starts writing a new input,
+`Store::commit_internal`, so a producer that starts writing a new input,
 drops a required one, or emits an impossible partial group fails at the commit
-that drifts rather than years later during migration.
+that drifts.
 A panic there means the producer and its row disagree: restore the producer if
 the drift is accidental (a dropped input like `artifact_sha256` would let
 distinct artifacts share an object id); update the row only for an intentional,
 compatible addition; introduce a new schema value when identity semantics
-change. A kind or schema with no registered row is rejected at commit time and
-also fails closed at sweep time. Public tailor realization entry points call
+change. A kind or schema with no registered row is rejected at commit time.
+Public tailor realization entry points call
 `tailors::install_kinds()` before they can publish, while commands call it
 through `commands::dispatch`; direct kernel callers install it explicitly.
 Release builds skip the check; it catches developer error, it is not a store
@@ -709,9 +736,8 @@ selection changes the value and never the shape.
 A new schema reissues every object id of its kind. Nothing caches the old id:
 a re-sync computes the successor identity, misses the store, and realizes
 fresh, and the orphaned old-schema objects are swept as ordinary garbage
-when nothing roots them. Their rows stay registered, marked `superseded_by`,
-so a pre-`object-meta/2` record of the old layout still migrates rather than
-blocking the sweep; publishing a superseded schema is refused at commit.
+when nothing roots them. The old schema's row is deleted with its producer,
+so publishing it again is refused at commit.
 
 ## Store concurrency
 
@@ -808,7 +834,8 @@ and build inputs tailors share, so no tailor reaches into another):
     policy.rs       permissive/strict exception policy and the [signing] trust chain
     signing.rs      Ed25519 closure signing: key files, canonical bytes, verify
     gc/             store garbage collection: read.rs snapshot, plan.rs
-                    validate + plan, sweep.rs execute, migrate.rs maintenance
+                    validate + plan, sweep.rs execute, drop.rs --drop-object,
+                    reset.rs --reset
     objmeta.rs      object-meta/2 records; kind rows are installed by
                     commands::dispatch or public tailor entry points
     activity.rs     store activity leases
@@ -844,8 +871,8 @@ folder has `tailor.rs` (its `impl Tailor`, the one blueprint every
 ecosystem answers: detect, preflight, plan, sync, build, run_env,
 refused_command, listing, closure_state, sbom_components, object_kinds,
 toolchain_kinds) and `objects.rs` (the store
-object kinds it produces, with their live and migration identity grammars and
-legacy-metadata adapters); `src/tailors/mod.rs` holds the trait and the registry the
+object kinds it produces, with their identity grammars);
+`src/tailors/mod.rs` holds the trait and the registry the
 commands iterate. See docs/human/ADDING-A-TAILOR.md. A command file never
 spells a tailor's name as a string: `tests/architecture.rs` fails on a
 literal in `src/commands/` that is a tailor id, lock ecosystem, or registry

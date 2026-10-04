@@ -40,11 +40,11 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   under a trusted key before the gate is
   useful. An exception kind this binary does not know (a record written by a newer tog)
   fails as `unknown` rather than being permitted. Loud.
-- **GC is conservative around legacy state.** Store jobs hold a shared activity lease; GC
-  skips while work is active (older binaries do not know the protocol). `root/2` records
-  survive moves, but legacy pathname-only roots and unresolved metadata block the sweep — an
-  unreadable registry record blocks it too, and `tog gc --forget <key>` is the give-up
-  valve.
+- **GC is conservative around what it cannot read.** Store jobs hold a shared activity
+  lease; GC skips while work is active (older binaries do not know the protocol). `root/2`
+  records survive moves, but a pathname-only root whose project is gone and an unreadable
+  object record block the sweep — an unreadable registry record blocks it too. `tog gc
+  --forget <key>` and `tog gc --drop-object <id>` are the give-up valves.
 - **The GC safety guarantee has a stated boundary.** It covers cooperating tog processes
   on a local filesystem with working locks and atomic rename. Not covered: older binaries;
   programs run directly from store paths; malicious same-user modification; descendants
@@ -125,11 +125,11 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   --project` reclaims it. Cleanup stops with an error when a root's recorded originating
   store is unavailable, and skips a root with no request record whose owning store its
   closure does not name.
-- **Automatic metadata migration is fail-closed.** A pre-`object-meta/2` store is upgraded in
-  place only where a per-kind, per-schema adapter can reconstruct the dependency set; one
-  unresolved record blocks every sweep. Records that will not migrate — collected inputs,
-  ambiguous matches, vanished pin tables — need a rebuild under the current producer; the
-  store keeps its pre-D retention.
+- **A store is never migrated.** The store carries a format marker (`<store>/format`), and
+  this tog reads exactly one format. A store written before the marker existed, or by a
+  newer tog, is refused by every command except `tog gc --reset`, `tog store path` and
+  `tog doctor`. `tog gc --reset` empties it (the download cache is kept) and every project
+  syncs again; nothing carries old objects across a format change.
 - **`cargo test -- --ignored` must run single-threaded**: the supervisor owns process-wide
   signal dispositions and rejects a second concurrent child (`--test-threads=1`; the offline
   suite holds `SUPERVISION_TEST_LOCK`).

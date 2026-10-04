@@ -1744,17 +1744,16 @@ every other object: kind `resolution-ledger`, name = ecosystem, version =
 holds only `portable.json`. The ecosystem and the door kind are inside
 the portable bytes, so the identity covers them. The identity is a pure
 function of the portable evidence, so **two machines holding the same
-portable ledger compute the same object id**. It gets a `KindAdapter` row
-in the kernel's object-kind table with live and migration grammars, as
-every kind must have or GC refuses to certify it (§ARCHITECTURE "GC root
-safety").
+portable ledger compute the same object id**. It gets an `ObjectKind` row
+in the kernel's object-kind table with its live grammar, as every kind
+must have or the commit is refused (§ARCHITECTURE "GC root safety").
 
 **The diagnostics sidecar.** The run-local part is the second object, of
 kind `resolution-diagnostics`, identity inputs
 `{ledger: <ledger object id>, diagnostics: sha256(diagnostic bytes)}`,
 holding `diagnostics.json`. Nothing portable names it. The ledger does
 not reference it, and it is found through the index
-`<store>/resolve/diag/<ledger id>`. It has its own `KindAdapter` row, is
+`<store>/resolve/diag/<ledger id>`. It has its own `ObjectKind` row, is
 rooted alongside its ledger on the machine that produced it, and never
 leaves that machine.
 

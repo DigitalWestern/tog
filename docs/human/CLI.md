@@ -914,33 +914,29 @@ concurrent sync cannot lose one. Sharp edges:
 - `--dry-run` prints the same plan a sweep would execute — `would remove …`,
   `blocked: …` with the recovery action, `skipped: …` — and writes nothing;
   it refuses alongside `--register`, which would have to write a record.
-- Any object whose recorded evidence cannot be certified stops the sweep
-  rather than being guessed at — `--collect-legacy` never overrides that —
-  as does an unavailable legacy pathname-only record; restore it or forget
-  its key.
-- `--migrate-metadata` upgrades provable legacy object metadata to
-  `object-meta/2` and stops without sweeping (`N upgraded, M unresolved`);
-  it is incompatible with the registry and collection options. It never
-  deletes anything: its job is to list every record that stops the sweep,
-  including the ones nothing can read, each with the command that clears it.
-  The same migration also runs automatically before the first
-  resource-consuming job. When it is deferred because records are
-  unresolved, the warning is printed once per store and again whenever the
-  list of records changes, since it would otherwise precede every command
-  until someone acted on it; `tog gc --migrate-metadata` repeats it on
-  demand. A deferral because another Tog job owns the store is transient
-  and still prints every time.
+- Any object whose record cannot be read stops the sweep rather than being
+  guessed at, and the refusal lists every such record with the command that
+  clears it. A pathname-only root record whose project is unavailable stops
+  it too; restore the project or forget its key.
 - `--drop-object <id>...` removes an object and its record outright, for the
-  records the sweep cannot use: unusable, still legacy after migration, or
-  missing their object (and an object missing its record). Everything in the
+  records the sweep cannot use: unusable, or missing their object (and an
+  object missing its record). Everything in the
   store is content-addressed, so the next sync that needs the object rebuilds
   it at the same id. It refuses an object whose record is readable and
   certified — that is the sweep's decision, reached by forgetting the roots
   that protect it — and it refuses to leave a readable record naming an
   object it removed, naming the whole set that has to go together instead.
   It takes `--dry-run` and nothing else.
-- `--project` also collects old unused project forests and backups; legacy
-  sibling-home forests are never swept and are reported as skipped.
+- `--project` also collects old unused project forests and backups.
+- `--reset` empties the store and starts it again in the current format. It
+  is the fix for a store this tog refuses to open: one written before the
+  format marker existed, or one whose marker it does not know (see "Store
+  format" in ARCHITECTURE.md). It removes every object, record, root and
+  forest, and keeps the download cache, `backups/` and the run homes, so
+  the next sync in each project rebuilds from the cache rather than the
+  network where it can. It works on any store, readable or not, refuses
+  while another Tog job is using the store, takes `--dry-run` (which lists
+  what it would remove and writes nothing) and no other option.
 
 **attest** `[<ecosystem>...]` gives existing locks a signed resolution
 record without changing them. For each named ecosystem (all detected ones
@@ -975,7 +971,8 @@ moves one ledger.
 **keygen** `<path>` creates a closure-signing key (see **audit** above) and
 prints the `[signing]` table to paste into the machine policy.
 **store** prints the store root (`store path`) or every registered project
-root (`store roots`). **version** prints `tog 0.1.0`.
+root (`store roots`). `store path` also answers for a store tog refuses to
+open, with a `warning:` and the `fix:` on stderr. **version** prints `tog 0.1.0`.
 
 ## Open questions
 
