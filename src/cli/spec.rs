@@ -20,6 +20,8 @@ pub struct EcosystemWords {
     pub toolchain: &'static str,
     /// `Tailor::builds`: whether `tog build <id>` names it.
     pub builds: bool,
+    /// `Tailor::fmt_ecosystem`: the word `tog fmt --eco` selects it by.
+    pub formats: Option<&'static str>,
 }
 
 /// One row per tailor, in registry order.
@@ -28,36 +30,43 @@ pub const ECOSYSTEM_WORDS: &[EcosystemWords] = &[
         id: "python",
         toolchain: "python",
         builds: false,
+        formats: None,
     },
     EcosystemWords {
         id: "node",
         toolchain: "node",
         builds: false,
+        formats: None,
     },
     EcosystemWords {
         id: "cargo",
         toolchain: "rust",
         builds: true,
+        formats: Some("rust"),
     },
     EcosystemWords {
         id: "go",
         toolchain: "go",
         builds: true,
+        formats: None,
     },
     EcosystemWords {
         id: "ruby",
         toolchain: "ruby",
         builds: false,
+        formats: None,
     },
     EcosystemWords {
         id: "elixir",
         toolchain: "elixir",
         builds: true,
+        formats: None,
     },
     EcosystemWords {
         id: "dotnet",
         toolchain: "dotnet",
         builds: true,
+        formats: None,
     },
 ];
 
@@ -131,6 +140,11 @@ pub fn toolchain_aliases() -> impl Iterator<Item = &'static str> {
         .iter()
         .filter(|row| row.id != row.toolchain)
         .map(|row| row.id)
+}
+
+/// What `tog fmt --eco` accepts, in registry order.
+pub fn fmt_words() -> impl Iterator<Item = &'static str> {
+    ECOSYSTEM_WORDS.iter().filter_map(|row| row.formats)
 }
 
 /// The `[toolchain.<name>]` section key an accepted word names.
@@ -460,7 +474,7 @@ deleted by a run without --check once the project has another closure.
 A package.json script named fmt takes precedence and is run as
 'tog run fmt'. In a polyglot directory use --eco rust: an explicit --eco
 selects the ecosystem, so it formats Rust instead of running that script.
-Other ecosystems are not implemented yet.",
+--eco accepts rust.",
         examples: &[
             ("tog fmt", "format the Rust workspace with the pinned rustfmt"),
             ("tog fmt --check", "CI: fail when something is unformatted"),

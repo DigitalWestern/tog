@@ -3,8 +3,8 @@
 use std::path::PathBuf;
 
 use super::spec::{
-    canonical_name, help, inputs, listed, spec, toolchain_aliases, toolchain_section, usage,
-    HELP_TOPICS, LS_WORDS, SHELL_WORDS, TOOLCHAIN_WORDS,
+    canonical_name, fmt_words, help, inputs, listed, spec, toolchain_aliases, toolchain_section,
+    usage, BUILD_WORDS, HELP_TOPICS, LS_WORDS, SHELL_WORDS, TOOLCHAIN_WORDS,
 };
 use super::{
     Command, GcArgs, Invocation, Options, Parsed, Shell, Spec, SyncFlags, ToolchainUpdate,
@@ -558,6 +558,21 @@ fn parse_fmt(args: &[String]) -> Result<Option<Command>, UsageError> {
         }
         index += 1;
     }
+    if let Some(word) = ecosystem.as_deref() {
+        if !fmt_words().any(|known| known == word) {
+            return Err(UsageError::new(
+                with_suggestion(
+                    format!(
+                        "fmt: --eco {word}: tog fmt formats {}",
+                        fmt_words().collect::<Vec<_>>().join(", ")
+                    ),
+                    word,
+                    fmt_words(),
+                ),
+                Some("fmt"),
+            ));
+        }
+    }
     Ok(Some(Command::Fmt {
         check,
         ecosystem,
@@ -662,6 +677,19 @@ fn parse_passthrough(args: &[String], name: &'static str) -> Result<Option<Comma
     let args = match args.first().map(String::as_str) {
         Some("-h" | "--help") => return Ok(None),
         Some("--") => &args[1..],
+        // An ecosystem that does not build is a mistake, not an argument
+        // for the one that does: `tog build python` in a Cargo project.
+        Some(word)
+            if name == "build" && LS_WORDS.contains(&word) && !BUILD_WORDS.contains(&word) =>
+        {
+            return Err(UsageError::new(
+                format!(
+                    "build: {word} does not build; tog build takes {}",
+                    BUILD_WORDS.join(", ")
+                ),
+                Some("build"),
+            ));
+        }
         _ => args,
     };
     if name == "run" && args.is_empty() {
@@ -957,7 +985,39 @@ fn parse_gc(args: &[String]) -> Result<Option<Command>, UsageError> {
         }
         index += 1;
     }
+    gc_combination(&gc)?;
     Ok(Some(Command::Gc(gc)))
+}
+
+/// The gc options that cannot be honoured together, refused from argv
+/// before any store is opened.
+fn gc_combination(gc: &GcArgs) -> Result<(), UsageError> {
+    let refuse = |message: &str| Err(UsageError::new(message, Some("gc")));
+    let others = gc.project || !gc.register.is_empty() || !gc.forget.is_empty();
+    // A reset removes every root and object, and dropping is a targeted
+    // removal: each shares only `--dry-run`.
+    if gc.reset && (others || !gc.drop_objects.is_empty() || gc.keep_days.is_some()) {
+        return refuse("--reset cannot be combined with other gc options");
+    }
+    if !gc.drop_objects.is_empty() && (others || gc.keep_days.is_some()) {
+        return refuse("--drop-object cannot be combined with other gc options");
+    }
+    // A dry run writes nothing and registration is a write. Previewing the
+    // sweep as though the project were registered would protect a root
+    // with no record, the rule GC may not bend.
+    if gc.dry_run && !gc.register.is_empty() {
+        return refuse(
+            "--dry-run cannot be combined with --register: registering writes a record and \
+             a dry run writes nothing. Register the project, then preview with `tog gc \
+             --dry-run`",
+        );
+    }
+    for (index, key) in gc.forget.iter().enumerate() {
+        if gc.forget[..index].contains(key) {
+            return refuse(&format!("--forget names root key {key} more than once"));
+        }
+    }
+    Ok(())
 }
 
 fn parse_days(value: &str) -> Result<u64, UsageError> {
@@ -2298,6 +2358,7 @@ mod tests {
         for (row, tailor) in ECOSYSTEM_WORDS.iter().zip(registry) {
             assert_eq!(row.toolchain, tailor.lock_ecosystem(), "{}", row.id);
             assert_eq!(row.builds, tailor.builds(), "{}", row.id);
+            assert_eq!(row.formats, tailor.fmt_ecosystem(), "{}", row.id);
         }
         assert_eq!(
             LS_WORDS,
@@ -2403,13 +2464,86 @@ mod tests {
         );
     }
 
+    /// Option combinations gc cannot honour are usage errors from argv
+    /// (#253): exit 2, before any store is opened.
+    #[test]
+    fn gc_refuses_combinations_from_argv() {
+        let key = "a".repeat(40);
+        let object = format!("{}-x-1", "b".repeat(40));
+        for (words, expected) in [
+            (
+                vec!["gc", "--reset", "--project"],
+                "--reset cannot be combined with other gc options",
+            ),
+            (
+                vec!["gc", "--reset", "--keep-days", "1"],
+                "--reset cannot be combined with other gc options",
+            ),
+            (
+                vec!["gc", "--reset", "--drop-object", &object],
+                "--reset cannot be combined with other gc options",
+            ),
+            (
+                vec!["gc", "--drop-object", &object, "--forget", &key],
+                "--drop-object cannot be combined with other gc options",
+            ),
+            (
+                vec!["gc", "--drop-object", &object, "--keep-days=3"],
+                "--drop-object cannot be combined with other gc options",
+            ),
+            (
+                vec!["gc", "--forget", &key, &key],
+                &*format!("--forget names root key {key} more than once"),
+            ),
+        ] {
+            assert_eq!(message(&words), expected, "{words:?}");
+        }
+        assert!(message(&["gc", "--dry-run", "--register", "."])
+            .starts_with("--dry-run cannot be combined with --register"));
+        // `--dry-run` is the one option each removal shares.
+        command(&["gc", "--dry-run", "--reset"]);
+        command(&["gc", "--dry-run", "--drop-object", &object]);
+    }
+
+    #[test]
+    fn fmt_eco_and_build_words_are_checked_from_argv() {
+        assert_eq!(
+            message(&["fmt", "--eco", "python"]),
+            "fmt: --eco python: tog fmt formats rust"
+        );
+        assert_eq!(
+            message(&["fmt", "--eco=rsut"]),
+            "fmt: --eco rsut: tog fmt formats rust; did you mean 'rust'?"
+        );
+        assert!(matches!(
+            command(&["fmt", "--eco", "rust"]),
+            Command::Fmt { .. }
+        ));
+        assert_eq!(
+            message(&["build", "python", "--release"]),
+            "build: python does not build; tog build takes cargo, go, elixir, dotnet"
+        );
+        assert_eq!(
+            command(&["build", "cargo", "--release"]),
+            Command::Build {
+                args: argv(&["cargo", "--release"])
+            }
+        );
+        // After `--` the word is the build tool's.
+        assert_eq!(
+            command(&["build", "--", "python"]),
+            Command::Build {
+                args: argv(&["python"])
+            }
+        );
+    }
+
     #[test]
     fn gc_options_keep_their_shapes() {
         assert_eq!(command(&["gc"]), Command::Gc(GcArgs::default()));
         assert_eq!(
             command(&[
                 "gc",
-                "--dry-run",
                 "--keep-days",
                 "0",
                 "--register",
@@ -2420,7 +2554,7 @@ mod tests {
                 "--keep-days=7",
             ]),
             Command::Gc(GcArgs {
-                dry_run: true,
+                dry_run: false,
                 keep_days: Some(7),
                 project: true,
                 reset: false,
@@ -2846,13 +2980,13 @@ mod tests {
             Some(PathBuf::from("/tmp"))
         );
         // The next option this command knows still ends the list.
-        let parsed = run(&["gc", "--register", "a", "--dry-run", "-v"]);
+        let parsed = run(&["gc", "--register", "a", "--project", "-v"]);
         assert!(parsed.options.verbose);
         assert_eq!(
             parsed.command,
             Command::Gc(GcArgs {
                 register: vec![PathBuf::from("a")],
-                dry_run: true,
+                project: true,
                 ..GcArgs::default()
             })
         );

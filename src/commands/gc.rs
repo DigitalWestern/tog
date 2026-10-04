@@ -27,18 +27,7 @@ pub fn run(args: &cli::GcArgs) -> io::Result<()> {
     // for results (`plan`, `sbom`, `store path`, the `--json` forms), so
     // every line below is narration, where `--quiet` can silence it.
     let mut narrate = ui::narration();
-    // A dry run writes nothing and registration is a write, so the two
-    // cannot both be honoured. Previewing the sweep as though the project
-    // were registered would mean protecting a root with no record, which is
-    // exactly the resolution rule GC is not allowed to bend; refuse the
-    // combination instead of half-keeping either promise.
-    if args.dry_run && !args.register.is_empty() {
-        return Err(io::Error::other(
-            "refusing to combine --dry-run with --register: registering writes a record and a \
-             dry run writes nothing. Register the project, then preview with `tog gc \
-             --dry-run`",
-        ));
-    }
+    // Option combinations were refused from argv (`cli::parse`).
     let Some(activity) = store.try_activity_exclusive()? else {
         // An explicitly requested mutation fails loudly; an opportunistic
         // sweep skips quietly.
@@ -56,16 +45,6 @@ pub fn run(args: &cli::GcArgs) -> io::Result<()> {
     // Dropping is a targeted removal, not a sweep and not a registry edit.
     // It shares only `--dry-run`, which every destructive path here honours.
     if !args.drop_objects.is_empty() {
-        if args.project
-            || !args.register.is_empty()
-            || !args.forget.is_empty()
-            || args.keep_days.is_some()
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "--drop-object cannot be combined with other gc options",
-            ));
-        }
         gc::drop_objects(
             &store,
             &activity,
@@ -88,29 +67,15 @@ pub fn run(args: &cli::GcArgs) -> io::Result<()> {
     // Resolve every key before changing the registry. This keeps a typo or
     // unknown key from partially applying a multi-key forget request.
     for (index, key) in args.forget.iter().enumerate() {
-        if args.forget[..index].iter().any(|previous| previous == key) {
-            return Err(io::Error::other(format!(
-                "refusing to forget root key {key} more than once in one invocation"
-            )));
-        }
         // The sweep compares the record's on-disk name; on a
         // case-insensitive filesystem the key may have been typed in
         // another case (#163).
         options.forgotten[index] = store.lookup_root(key)?.key;
     }
+    // `--dry-run` with `--register` was refused from argv.
     for project in &args.register {
-        if options.dry_run {
-            let record = store.root_record_from_project(project)?;
-            writeln!(
-                narrate,
-                "tog: would register root {} ({} objects)",
-                record.project_path.display(),
-                record.objects.len()
-            )?;
-        } else {
-            let entry = store.register_root_from_project_with_activity(&activity, project)?;
-            writeln!(narrate, "tog: registered root {}", entry.path.display())?;
-        }
+        let entry = store.register_root_from_project_with_activity(&activity, project)?;
+        writeln!(narrate, "tog: registered root {}", entry.path.display())?;
     }
     for key in &args.forget {
         if options.dry_run {
@@ -148,20 +113,6 @@ pub fn run(args: &cli::GcArgs) -> io::Result<()> {
 // Reviewed site (tests/architecture.rs): operation boundary: command entry point.
 #[allow(clippy::disallowed_methods)]
 fn reset(args: &cli::GcArgs) -> io::Result<()> {
-    // Like `--drop-object`, a reset shares only `--dry-run`: it removes
-    // every root and object, so there is nothing left for another option to
-    // act on.
-    if args.project
-        || !args.register.is_empty()
-        || !args.forget.is_empty()
-        || !args.drop_objects.is_empty()
-        || args.keep_days.is_some()
-    {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "--reset cannot be combined with other gc options",
-        ));
-    }
     let mut narrate = ui::narration();
     // Only the root is located: a reset reads no record and no marker, so a
     // marker that cannot even be read does not stop it.

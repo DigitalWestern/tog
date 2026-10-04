@@ -41,12 +41,11 @@ pub fn run(
             .find(|tailor| tailor.fmt_ecosystem() == Some(ecosystem))
         {
             Some(tailor) => tailor,
+            // The parser accepts only `cli::spec::fmt_words`.
             None => {
                 return Err(io::Error::new(
-                    io::ErrorKind::Unsupported,
-                    format!(
-                        "fmt for {ecosystem} is not implemented yet; Rust is the only supported ecosystem"
-                    ),
+                    io::ErrorKind::InvalidInput,
+                    format!("fmt: no formatter for {ecosystem}"),
                 ));
             }
         },
