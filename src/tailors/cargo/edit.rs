@@ -44,14 +44,11 @@ pub(crate) fn edit_manifest(
     // own walk finds it, before anything is realized.
     let root = super::inputs::locate_cargo_root(project)?;
     crate::kernel::store::Store::check_registrable(&root)?;
-    let rust_obj = super::realize_runtime(door.store(), door.lease(), door.platform(), &selected)?;
     let held = ProjectRoot::open(project)?;
     let workspace = super::inputs::workspace_root(&held, &root)?;
+    let member = member_manifest(&workspace, &held)?;
     crate::kernel::provider::cargo_door::refuse_unlisted_members(&workspace)?;
-    let member = workspace
-        .relative(held.path())
-        .filter(|relative| !relative.as_os_str().is_empty())
-        .map(|relative| relative.join("Cargo.toml").to_string_lossy().into_owned());
+    let rust_obj = super::realize_runtime(door.store(), door.lease(), door.platform(), &selected)?;
     let mut args: Vec<String> = Vec::new();
     match edit.verb {
         EditVerb::Add | EditVerb::Remove => {
@@ -107,4 +104,66 @@ pub(crate) fn edit_manifest(
         files: vec!["Cargo.toml".to_string(), "Cargo.lock".to_string()],
         sync_root: project.to_path_buf(),
     })
+}
+
+/// The `--manifest-path` (relative to the workspace root) of the member
+/// the edit was run in: `None` at the root itself. A member outside the
+/// root (`members = ["../shared"]`) is refused before anything runs: the
+/// confined cargo runs at the root and sees the root's own files, so
+/// without a manifest path it would edit the root package, and the member
+/// cannot be named from there.
+fn member_manifest(workspace: &ProjectRoot, member: &ProjectRoot) -> io::Result<Option<String>> {
+    match workspace.relative(member.path()) {
+        Some(relative) if relative.as_os_str().is_empty() => Ok(None),
+        Some(relative) => Ok(Some(
+            relative.join("Cargo.toml").to_string_lossy().into_owned(),
+        )),
+        None => Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!(
+                "{} is a member of the Cargo workspace at {} but lies outside it; tog edits a \
+                 workspace with a confined cargo at its root, which sees the workspace's own \
+                 files only, so it cannot edit this member. Run cargo in {} directly (for \
+                 example `cargo add`), or move the member inside the workspace",
+                member.path().display(),
+                workspace.path().display(),
+                member.path().display()
+            ),
+        )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::kernel::testutil::TempDir;
+
+    /// An edit at the root names no manifest, one in a member names the
+    /// member's, and one in a member outside the root is refused, naming
+    /// the member and the workspace, before cargo could edit the root
+    /// package instead.
+    #[test]
+    fn an_edit_from_a_member_outside_the_root_is_refused() {
+        let temp = TempDir::named("cargo-edit-outside-member");
+        for dir in ["ws/inner", "shared"] {
+            std::fs::create_dir_all(temp.0.join(dir)).unwrap();
+        }
+        let open = |dir: &str| ProjectRoot::open(&temp.0.join(dir)).unwrap();
+        let workspace = open("ws");
+        assert_eq!(member_manifest(&workspace, &open("ws")).unwrap(), None);
+        assert_eq!(
+            member_manifest(&workspace, &open("ws/inner")).unwrap(),
+            Some("inner/Cargo.toml".to_string())
+        );
+        let error = member_manifest(&workspace, &open("shared"))
+            .unwrap_err()
+            .to_string();
+        let shared = open("shared").path().display().to_string();
+        let ws = workspace.path().display().to_string();
+        assert!(error.contains(&shared) && error.contains(&ws), "{error}");
+        assert!(
+            error.contains("Run cargo in") && error.contains("move the member inside"),
+            "{error}"
+        );
+    }
 }

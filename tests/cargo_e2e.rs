@@ -833,6 +833,22 @@ fn an_external_workspace_member_is_read_like_an_external_path_dependency() {
         stderr.contains("members outside it") && stderr.contains("shared"),
         "attest: {stderr}"
     );
+    // An edit run in the member is refused, naming it and the workspace:
+    // from the root, cargo would edit the root package instead.
+    let root_manifest = std::fs::read_to_string(&manifest).unwrap();
+    let out = command(&shared, &temp.0, &store)
+        .args(["add", "--no-sync", "cargo:itoa"])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "add from the member: {stderr}");
+    assert!(
+        stderr.contains("lies outside it")
+            && stderr.contains("shared")
+            && stderr.contains("project"),
+        "add from the member: {stderr}"
+    );
+    assert_eq!(std::fs::read_to_string(&manifest).unwrap(), root_manifest);
     // The missing lock is generated confined, the member read from its
     // place beside the workspace, and published without a receipt.
     std::fs::remove_file(project.join("Cargo.lock")).unwrap();
