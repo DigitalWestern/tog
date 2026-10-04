@@ -640,10 +640,22 @@ fn a_stray_beside_the_marker_is_refused_by_the_reader_not_the_gate() {
 /// must come back byte for byte unchanged.
 #[test]
 fn an_ambiguous_or_partly_unknown_request_changes_no_record() {
-    for shape in ["same-root", "alias", "duplicate", "unknown"] {
+    for shape in [
+        "same-root",
+        "alias",
+        "duplicate",
+        "unknown",
+        "case-collision",
+        "case-duplicate",
+    ] {
         let fixture = Fixture::new(shape);
         let project = fixture.project("project", true);
         let key = fixture.record(&project);
+        let upper = key.to_ascii_uppercase();
+        if shape.starts_with("case-") && !fixture.store.join("roots").join(&upper).exists() {
+            // These aliases exist only on a filesystem that folds case.
+            continue;
+        }
         let other = fixture.project("other", true);
         let before = fixture.record_snapshot();
 
@@ -676,6 +688,21 @@ fn an_ambiguous_or_partly_unknown_request_changes_no_record() {
                 "--forget".into(),
                 key.clone().into(),
                 key.clone().into(),
+            ],
+            "case-collision" => vec![
+                "gc".into(),
+                "--register".into(),
+                project.clone().into(),
+                "--forget".into(),
+                upper.clone().into(),
+            ],
+            "case-duplicate" => vec![
+                "gc".into(),
+                "--register".into(),
+                other.clone().into(),
+                "--forget".into(),
+                key.clone().into(),
+                upper.clone().into(),
             ],
             // An unknown key must stop the whole request, including the
             // registration that was asked for in the same invocation.

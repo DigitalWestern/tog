@@ -39,7 +39,7 @@ use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Mutex;
 
 const SIGNAL_COUNT: usize = 5;
@@ -67,11 +67,11 @@ const ONE_SESSION: u64 = 1 << 32;
 /// accounts for it) or after (the handler acts as inherited). No window
 /// between the two exists for a TERM to be lost in.
 static SESSION_TERM: AtomicU64 = AtomicU64::new(0);
-/// Plain monotonic counts: no session re-raises these, so they need no
-/// link to the live count.
-static INT_RECEIVED: AtomicU32 = AtomicU32::new(0);
-static HUP_RECEIVED: AtomicU32 = AtomicU32::new(0);
-static QUIT_RECEIVED: AtomicU32 = AtomicU32::new(0);
+/// Each terminating signal pairs its count with its own live registrations,
+/// so a handler paused across registration/departure cannot lose cancellation.
+static SESSION_INT: AtomicU64 = AtomicU64::new(0);
+static SESSION_HUP: AtomicU64 = AtomicU64::new(0);
+static SESSION_QUIT: AtomicU64 = AtomicU64::new(0);
 static CHLD_RECEIVED: AtomicU32 = AtomicU32::new(0);
 /// The global self-pipe, created at the first install and never closed, so
 /// the handler never writes into a reused descriptor.
@@ -94,6 +94,11 @@ static INHERITED: InheritedActions =
 static RECORDED: AtomicU32 = AtomicU32::new(0);
 /// Bit `i` set: tog's handler is installed for `SIGNALS[i]`, for good.
 static INSTALLED: AtomicU32 = AtomicU32::new(0);
+/// One-shot inherited handlers reset only when their inherited action runs.
+static RESET_HANDLED: AtomicU32 = AtomicU32::new(0);
+/// A final session's orphaned TERM belongs to this thread, even if its mask
+/// delays delivery. No new session may register until that delivery finishes.
+static RERAISE_THREAD: AtomicUsize = AtomicUsize::new(0);
 
 /// Bookkeeping shared by sessions. Held only for the first install and a
 /// session's arrival and departure, never across a child's lifetime, a
@@ -128,6 +133,15 @@ fn live_sessions(packed: u64) -> u64 {
 
 fn term_count(packed: u64) -> u32 {
     packed as u32
+}
+
+/// Count a signal without letting low-half rollover change registrations.
+fn count_signal(counter: &AtomicU64) -> u64 {
+    counter
+        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |packed| {
+            Some((packed & !(u32::MAX as u64)) | u64::from(term_count(packed).wrapping_add(1)))
+        })
+        .expect("a signal counter update is never refused")
 }
 
 /// The terminating signals in the order an error names them when more than
@@ -221,22 +235,32 @@ extern "C" fn signal_handler(
 ) {
     // SAFETY: errno_location points at this signal-handler thread's errno.
     let saved_errno = unsafe { *errno_location() };
+    // SAFETY: pthread_self is async-signal-safe. Supported targets represent
+    // pthread_t as an integer or pointer and never use zero for a live thread.
+    let inherited_reraise = signal == libc::SIGTERM
+        && RERAISE_THREAD.load(Ordering::SeqCst) == unsafe { libc::pthread_self() } as usize;
     let live = match signal {
-        libc::SIGTERM => live_sessions(SESSION_TERM.fetch_add(1, Ordering::SeqCst)) != 0,
-        libc::SIGINT | libc::SIGHUP | libc::SIGQUIT | libc::SIGCHLD => {
+        libc::SIGTERM if inherited_reraise => false,
+        libc::SIGTERM => live_sessions(count_signal(&SESSION_TERM)) != 0,
+        libc::SIGINT | libc::SIGHUP | libc::SIGQUIT => {
             let counter = match signal {
-                libc::SIGINT => &INT_RECEIVED,
-                libc::SIGHUP => &HUP_RECEIVED,
-                libc::SIGQUIT => &QUIT_RECEIVED,
-                _ => &CHLD_RECEIVED,
+                libc::SIGINT => &SESSION_INT,
+                libc::SIGHUP => &SESSION_HUP,
+                _ => &SESSION_QUIT,
             };
-            counter.fetch_add(1, Ordering::SeqCst);
+            live_sessions(count_signal(counter)) != 0
+        }
+        libc::SIGCHLD => {
+            CHLD_RECEIVED.fetch_add(1, Ordering::SeqCst);
             live_sessions(SESSION_TERM.load(Ordering::SeqCst)) != 0
         }
         _ => true,
     };
     if !live {
         act_as_inherited(signal, info, context);
+        if inherited_reraise {
+            RERAISE_THREAD.store(0, Ordering::SeqCst);
+        }
     }
     let fd = NOTIFY_WRITE.load(Ordering::SeqCst);
     if fd >= 0 {
@@ -255,7 +279,9 @@ extern "C" fn signal_handler(
 /// done. `SIG_DFL` for TERM/INT/HUP/QUIT puts the default back and raises
 /// the signal again, so it is delivered with its default action (tog dies)
 /// as soon as the handler returns. An inherited function is called, with
-/// `siginfo` when it asked for it; its other flags are not emulated. A
+/// `siginfo` when it asked for it. One-shot handlers become default after
+/// their first inherited invocation. The installed action preserves the
+/// inherited restart, alternate-stack, deferred-delivery and mask behavior. A
 /// default or ignored SIGCHLD needs nothing. `sigaction`, `raise` and a
 /// plain call are async-signal-safe.
 fn act_as_inherited(signal: libc::c_int, info: *mut libc::siginfo_t, context: *mut libc::c_void) {
@@ -268,7 +294,14 @@ fn act_as_inherited(signal: libc::c_int, info: *mut libc::siginfo_t, context: *m
     // SAFETY: the slot was written before RECORDED published it and is never
     // written again.
     let action = unsafe { &(*INHERITED.0.get())[index] };
-    match action.sa_sigaction {
+    let function = if action.sa_flags & libc::SA_RESETHAND != 0
+        && RESET_HANDLED.fetch_or(1 << index, Ordering::SeqCst) & (1 << index) != 0
+    {
+        libc::SIG_DFL
+    } else {
+        action.sa_sigaction
+    };
+    match function {
         libc::SIG_IGN => {}
         libc::SIG_DFL => {
             if signal == libc::SIGCHLD {
@@ -422,7 +455,14 @@ fn install_handlers(_registry: &mut Registry) -> io::Result<()> {
         if unsafe { libc::sigemptyset(&mut replacement.sa_mask) } != 0 {
             return Err(io::Error::last_os_error());
         }
-        replacement.sa_flags = libc::SA_SIGINFO | libc::SA_RESTART;
+        replacement.sa_mask = inherited.sa_mask;
+        replacement.sa_flags = libc::SA_SIGINFO
+            | (inherited.sa_flags & (libc::SA_RESTART | libc::SA_ONSTACK | libc::SA_NODEFER));
+        // Default dispositions have no inherited handler whose restart
+        // behavior must be preserved. The supervisor's own handler can restart.
+        if inherited.sa_sigaction == libc::SIG_DFL || inherited.sa_sigaction == libc::SIG_IGN {
+            replacement.sa_flags |= libc::SA_RESTART;
+        }
         replacement.sa_sigaction = signal_handler as *const () as usize;
         // SAFETY: replacement contains a valid async-signal-safe handler.
         if unsafe { libc::sigaction(number, &replacement, std::ptr::null_mut()) } != 0 {
@@ -469,6 +509,45 @@ fn failpoint_after_sigaction(_call: usize) {
         drop(out);
         if let Some(fifo) = std::env::var_os("TOG_SUPERVISE_FAILPOINT_FIFO") {
             let _ = std::fs::read(fifo);
+        }
+    }
+}
+
+/// Pause exactly at a registration or departure boundary, in integration tests.
+fn pause_boundary(_name: &str) {
+    #[cfg(debug_assertions)]
+    if std::env::var("TOG_SUPERVISE_FAILPOINT").as_deref() == Ok(_name)
+        && !FAILPOINT_SPENT.swap(true, Ordering::SeqCst)
+    {
+        if _name == "before-reraise" {
+            // Exercise a caller whose mask delays the thread-directed replay.
+            // SAFETY: the initialized set names one valid signal on this thread.
+            unsafe {
+                let mut set = std::mem::zeroed();
+                libc::sigemptyset(&mut set);
+                libc::sigaddset(&mut set, libc::SIGTERM);
+                assert_eq!(
+                    libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut()),
+                    0
+                );
+            }
+        }
+        let mut out = io::stdout().lock();
+        let _ = writeln!(out, "FAILPOINT PAUSED {_name}");
+        let _ = out.flush();
+        drop(out);
+        if let Some(fifo) = std::env::var_os("TOG_SUPERVISE_FAILPOINT_FIFO") {
+            let _ = std::fs::read(fifo);
+        }
+        if let Ok(name) = std::env::var("TOG_SUPERVISE_BOUNDARY_SIGNAL") {
+            let signal = match name.as_str() {
+                "INT" => libc::SIGINT,
+                "HUP" => libc::SIGHUP,
+                "QUIT" => libc::SIGQUIT,
+                _ => return,
+            };
+            // SAFETY: synchronously inject a valid signal at the paused boundary.
+            unsafe { libc::raise(signal) };
         }
     }
 }
@@ -534,17 +613,27 @@ impl Session {
     fn new() -> io::Result<Self> {
         let mut registry = registry();
         install_handlers(&mut registry)?;
+        if RERAISE_THREAD.load(Ordering::SeqCst) != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "termination from an earlier operation is still pending",
+            ));
+        }
         #[cfg(debug_assertions)]
         assert_term_handler_is_tog_s();
+        // Each signal's registration and starting cursor are one atomic step,
+        // just like TERM. Admission is serialized until all four are published.
+        let int_cursor = term_count(SESSION_INT.fetch_add(ONE_SESSION, Ordering::SeqCst));
+        let hup_cursor = term_count(SESSION_HUP.fetch_add(ONE_SESSION, Ordering::SeqCst));
+        let quit_cursor = term_count(SESSION_QUIT.fetch_add(ONE_SESSION, Ordering::SeqCst));
         let packed = SESSION_TERM.fetch_add(ONE_SESSION, Ordering::SeqCst);
-        // Read just after registering: a signal counted in between is
-        // attributed to this session, which errs toward rejecting a spawn.
+        pause_boundary("after-register");
         let session = Self {
             child_pid: Cell::new(-1),
             term_cursor: Cell::new(term_count(packed)),
-            int_cursor: Cell::new(INT_RECEIVED.load(Ordering::SeqCst)),
-            hup_cursor: Cell::new(HUP_RECEIVED.load(Ordering::SeqCst)),
-            quit_cursor: Cell::new(QUIT_RECEIVED.load(Ordering::SeqCst)),
+            int_cursor: Cell::new(int_cursor),
+            hup_cursor: Cell::new(hup_cursor),
+            quit_cursor: Cell::new(quit_cursor),
             chld_seen: Cell::new(CHLD_RECEIVED.load(Ordering::SeqCst)),
             unconsumed_terms: Cell::new(0),
             received: Cell::new(0),
@@ -577,11 +666,11 @@ impl Session {
                 .set(self.received.get() | signal_bit(libc::SIGTERM));
         }
         for (counter, cursor, signal) in [
-            (&INT_RECEIVED, &self.int_cursor, libc::SIGINT),
-            (&HUP_RECEIVED, &self.hup_cursor, libc::SIGHUP),
-            (&QUIT_RECEIVED, &self.quit_cursor, libc::SIGQUIT),
+            (&SESSION_INT, &self.int_cursor, libc::SIGINT),
+            (&SESSION_HUP, &self.hup_cursor, libc::SIGHUP),
+            (&SESSION_QUIT, &self.quit_cursor, libc::SIGQUIT),
         ] {
-            let now = counter.load(Ordering::SeqCst);
+            let now = term_count(counter.load(Ordering::SeqCst));
             if now != cursor.get() {
                 cursor.set(now);
                 self.received.set(self.received.get() | signal_bit(signal));
@@ -666,6 +755,14 @@ impl Session {
     }
 
     fn clear_child(&self) {
+        if self.child_pid.get() > 0 {
+            // This is the session's reap boundary. Cancellation already caught
+            // belongs to the child's lifetime and carries its exit status,
+            // even if it exited before we could forward. Only later TERMs,
+            // caught while draining without a child, can become orphans.
+            self.reconcile();
+            self.unconsumed_terms.set(0);
+        }
         self.child_pid.set(-1);
     }
 
@@ -756,23 +853,39 @@ impl Session {
         if self.unconsumed_terms.get() != 0 {
             registry.term_orphaned = true;
         }
+        pause_boundary("before-deregister");
         let packed = SESSION_TERM.fetch_sub(ONE_SESSION, Ordering::SeqCst);
         let unseen = term_count(packed) != self.term_cursor.get();
         if unseen {
+            registry.term_orphaned = true;
             self.received
                 .set(self.received.get() | signal_bit(libc::SIGTERM));
+        }
+        for (counter, cursor, signal) in [
+            (&SESSION_INT, &self.int_cursor, libc::SIGINT),
+            (&SESSION_HUP, &self.hup_cursor, libc::SIGHUP),
+            (&SESSION_QUIT, &self.quit_cursor, libc::SIGQUIT),
+        ] {
+            let previous = counter.fetch_sub(ONE_SESSION, Ordering::SeqCst);
+            if term_count(previous) != cursor.get() {
+                self.received.set(self.received.get() | signal_bit(signal));
+            }
         }
         let mut reraise = false;
         if live_sessions(packed) == 1 {
             reraise = registry.term_orphaned || unseen;
             registry.term_orphaned = false;
         }
-        drop(registry);
         if reraise {
-            // SAFETY: raise targets this thread; the handler, with no session
-            // live, gives the TERM its inherited behavior.
+            pause_boundary("before-reraise");
+            // Keep admission closed until inherited delivery. When the caller
+            // blocks TERM, RERAISE_THREAD keeps later registrations closed even
+            // after raise returns, without changing that caller's signal mask.
+            // SAFETY: pthread_self and raise are valid on this live thread.
+            RERAISE_THREAD.store(unsafe { libc::pthread_self() } as usize, Ordering::SeqCst);
             unsafe { libc::raise(libc::SIGTERM) };
         }
+        drop(registry);
         self.received.get()
     }
 
@@ -1414,6 +1527,19 @@ fn refuse_resolver(command: &Command, activity: &StoreActivity) -> io::Result<()
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn signal_counter_rollover_preserves_the_live_registration_count() {
+        for live in [0, 1, 3] {
+            let counter = AtomicU64::new((live * ONE_SESSION) | u64::from(u32::MAX));
+            let previous = count_signal(&counter);
+            assert_eq!(live_sessions(previous), live);
+            assert_eq!(term_count(previous), u32::MAX);
+            let wrapped = counter.load(Ordering::SeqCst);
+            assert_eq!(live_sessions(wrapped), live);
+            assert_eq!(term_count(wrapped), 0);
+        }
+    }
     use crate::kernel::activity::ActivityMode;
     use crate::kernel::store::Store;
     use crate::kernel::testutil::TempDir;

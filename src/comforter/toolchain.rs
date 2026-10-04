@@ -172,7 +172,7 @@ fn first_lock_needs_every(ecosystem: &str, error: io::Error) -> io::Error {
         format!(
             "{error}\n(creating tog-toolchain.toml selects a toolchain for every ecosystem \
              in the project, {ecosystem} included, so every sync and build here waits on \
-             this; change the {ecosystem} version request to one tog serves, then run `tog`)"
+             this; fix the {ecosystem} toolchain error above, then run `tog`)"
         ),
     )
 }
@@ -725,6 +725,34 @@ mod tests {
             mode,
             false,
         )
+    }
+
+    #[test]
+    fn a_first_lock_preserves_a_missing_local_rust_toolchain_error() {
+        let temp = TempDir::new();
+        let dir = temp.0.join("crate");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(
+            dir.join("rust-toolchain.toml"),
+            "[toolchain]\npath = \"missing-rust\"\n",
+        )
+        .unwrap();
+        let root = ProjectRoot::open(&dir).unwrap();
+        let original = resolve_rust(&root, Mode::ReadOnly).unwrap_err();
+        let first = resolve_rust(&root, Mode::Writable).unwrap_err();
+        assert_eq!(original.kind(), io::ErrorKind::NotFound);
+        assert_eq!(first.kind(), original.kind());
+        let message = first.to_string();
+        assert!(message.starts_with(&original.to_string()), "{message}");
+        assert!(
+            message.contains("fix the rust toolchain error above"),
+            "{message}"
+        );
+        assert!(
+            !message.contains("change the rust version request"),
+            "{message}"
+        );
+        assert!(!dir.join(LOCK_PATH).exists());
     }
 
     /// `targets` and `components` are lock rows: editing either stales the

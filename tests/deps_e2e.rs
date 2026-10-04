@@ -635,6 +635,8 @@ fn install_with_store_pnpm(temp: &TempDir, project: &Path, store: &Path) {
     let install = Command::new(x_root.join("node_modules/.bin/pnpm"))
         .current_dir(project)
         .args(["install", "--ignore-scripts", "--reporter", "append-only"])
+        .arg("--store-dir")
+        .arg(user_home.join("pnpm-store"))
         .env(
             "PATH",
             format!(

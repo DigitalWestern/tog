@@ -84,6 +84,31 @@ pub fn projected_node_modules(dir: &Path, cwd: &Path) -> (bool, PathBuf) {
     (node_projected, nearest_nm)
 }
 
+fn projected_node_modules_in(project: &ProjectRoot, cwd: &Path) -> io::Result<(bool, PathBuf)> {
+    let root = project.current_name()?;
+    let nm = root.join("node_modules");
+    let node_projected = project.entry(Path::new("node_modules"))? == Entry::Symlink
+        && comforter::has_closure(project, "node")?;
+    if node_projected {
+        let forest = held_link_target(project, Path::new("node_modules"))
+            .and_then(|path| path.parent().map(Path::to_path_buf));
+        if let Some(relative) = project.relative(cwd) {
+            for dir in relative.ancestors() {
+                let relative_nm = dir.join("node_modules");
+                if project.entry(&relative_nm)? == Entry::Symlink
+                    && forest.as_ref().is_some_and(|forest| {
+                        held_link_target(project, &relative_nm)
+                            .is_some_and(|target| target.starts_with(forest))
+                    })
+                {
+                    return Ok((true, root.join(relative_nm)));
+                }
+            }
+        }
+    }
+    Ok((node_projected, nm))
+}
+
 impl Tailor for Node {
     fn package_registry(&self) -> Option<crate::tailors::PackageRegistry> {
         Some(super::edit::REGISTRY)
@@ -254,11 +279,10 @@ impl Tailor for Node {
         _cmd: &[String],
         _command: &mut Command,
     ) -> io::Result<Vec<String>> {
-        let dir = project.path();
         let activity = &ctx.activity;
         let mut prefix = Vec::new();
-        let nm = dir.join("node_modules");
-        let (_, nearest_nm) = projected_node_modules(dir, cwd);
+        let nm = project.current_name()?.join("node_modules");
+        let (_, nearest_nm) = projected_node_modules_in(project, cwd)?;
         if project.input_entry(Path::new("node_modules"))? != Entry::Absent {
             prefix.push(nearest_nm.join(".bin").to_string_lossy().into_owned());
             if nearest_nm != nm {
@@ -422,13 +446,8 @@ fn replaced_by_a_real_directory(project: &ProjectRoot, node_modules: &Path) -> b
 /// The canonical target of a project symlink, read through the held
 /// descriptor (`canonical_symlink_target` for a held project).
 fn held_link_target(project: &ProjectRoot, link: &Path) -> Option<PathBuf> {
-    let target = project.read_link(link).ok()??;
-    let target = if target.is_absolute() {
-        target
-    } else {
-        project.path().join(link).parent()?.join(target)
-    };
-    target.canonicalize().ok()
+    project.read_link(link).ok()??;
+    project.input_subdir(link).ok()??.current_name().ok()
 }
 
 /// The `State` detail for that case. Reads as one sentence inside the
@@ -485,6 +504,9 @@ fn node_projection_state(project: &ProjectRoot, body: &Value) -> State {
             let Some(workspace) = workspace.as_str() else {
                 return State::ProjectionMissing("workspace node_modules".into());
             };
+            let Some(encoded) = encoded_workspace(workspace) else {
+                return State::ProjectionMissing("workspace node_modules".into());
+            };
             // A member whose node_modules git tracks was left unprojected
             // on purpose (#174): its own directory is what belongs there.
             if body["unprojected_workspaces"]
@@ -497,9 +519,6 @@ fn node_projection_state(project: &ProjectRoot, body: &Value) -> State {
                 }
                 return State::ProjectionMissing("workspace node_modules".into());
             }
-            let Some(encoded) = encoded_workspace(workspace) else {
-                return State::ProjectionMissing("workspace node_modules".into());
-            };
             let Some(expected) = expected_root
                 .join("workspaces")
                 .join(encoded)
@@ -553,6 +572,159 @@ mod tests {
         .unwrap();
     }
 
+    #[test]
+    fn a_relative_projection_link_cannot_resolve_through_a_replaced_project() {
+        let temp = TempDir::new();
+        let project = temp.0.join("project");
+        let original = project.join("env/node_modules");
+        fs::create_dir_all(&original).unwrap();
+        std::os::unix::fs::symlink("env/node_modules", project.join("node_modules")).unwrap();
+        let held = ProjectRoot::open(&project).unwrap();
+        let moved = temp.0.join("moved");
+        fs::rename(&project, &moved).unwrap();
+        let replacement = project.join("env/node_modules");
+        fs::create_dir_all(&replacement).unwrap();
+        let found = held_link_target(&held, Path::new("node_modules"));
+        assert_eq!(
+            found,
+            Some(moved.join("env/node_modules").canonicalize().unwrap())
+        );
+    }
+
+    #[test]
+    fn absolute_projection_stays_synced_when_its_project_name_is_replaced() {
+        let temp = TempDir::new();
+        let project = temp.0.join("project");
+        let forest = temp.0.join("forest/node_modules");
+        let env = temp.0.join("env");
+        fs::create_dir_all(&project).unwrap();
+        fs::create_dir_all(&forest).unwrap();
+        fs::create_dir_all(&env).unwrap();
+        std::os::unix::fs::symlink(&forest, project.join("node_modules")).unwrap();
+        let body = json!({"env_object": env, "projection_id": "p", "forest_path": forest});
+        let held = ProjectRoot::open(&project).unwrap();
+        assert_eq!(node_projection_state(&held, &body), State::Synced);
+        fs::rename(&project, temp.0.join("moved")).unwrap();
+        fs::create_dir_all(&project).unwrap();
+        assert_eq!(node_projection_state(&held, &body), State::Synced);
+    }
+
+    #[test]
+    fn workspace_bin_selection_uses_the_held_project() {
+        let temp = TempDir::new();
+        let project = temp.0.join("project");
+        let moved = temp.0.join("moved");
+        let forest = temp.0.join("forest");
+        let outside = temp.0.join("outside/node_modules");
+        fs::create_dir_all(project.join("packages/member")).unwrap();
+        fs::create_dir_all(project.join(".tog/closures")).unwrap();
+        fs::write(project.join(".tog/closures/node.json"), "{}").unwrap();
+        fs::create_dir_all(forest.join("node_modules")).unwrap();
+        fs::create_dir_all(forest.join("workspaces/member/node_modules")).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(forest.join("node_modules"), project.join("node_modules"))
+            .unwrap();
+        std::os::unix::fs::symlink(
+            forest.join("workspaces/member/node_modules"),
+            project.join("packages/member/node_modules"),
+        )
+        .unwrap();
+        let held = ProjectRoot::open(&project).unwrap();
+        fs::rename(&project, &moved).unwrap();
+        fs::create_dir_all(project.join("packages/member")).unwrap();
+        std::os::unix::fs::symlink(forest.join("node_modules"), project.join("node_modules"))
+            .unwrap();
+        std::os::unix::fs::symlink(outside, project.join("packages/member/node_modules")).unwrap();
+        let (_, nearest) =
+            projected_node_modules_in(&held, &project.join("packages/member")).unwrap();
+        assert_eq!(nearest, moved.join("packages/member/node_modules"));
+    }
+
+    #[test]
+    fn run_env_refuses_symlinked_state_parents_for_every_closure_tailor() {
+        let _lock = crate::kernel::store::STORE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let temp = TempDir::new();
+        let old = std::env::var_os("TOG_STORE");
+        std::env::set_var("TOG_STORE", temp.0.join("store"));
+        let _guard = StoreEnv(old);
+        let ctx = Context::open(Platform::host().unwrap()).unwrap();
+        for parent in [".tog", ".tog/closures"] {
+            let dir = temp.0.join(parent.replace('/', "-"));
+            let outside = temp.0.join(format!("outside-{}", parent.replace('/', "-")));
+            fs::create_dir_all(&outside).unwrap();
+            fs::create_dir_all(dir.join(Path::new(parent).parent().unwrap())).unwrap();
+            std::os::unix::fs::symlink(outside, dir.join(parent)).unwrap();
+            let project = ProjectRoot::open(&dir).unwrap();
+            for ecosystem in ["go", "ruby", "elixir", "dotnet"] {
+                let tailor = crate::tailors::by_id(ecosystem).unwrap();
+                let mut command = Command::new("unused");
+                assert!(
+                    tailor
+                        .run_env(&ctx, &project, project.path(), &[], &mut command)
+                        .is_err(),
+                    "{ecosystem} silently ignored {parent}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn cargo_environment_uses_the_held_home_after_detachment_and_replacement() {
+        let _lock = crate::kernel::store::STORE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let temp = TempDir::new();
+        let old = std::env::var_os("TOG_STORE");
+        std::env::set_var("TOG_STORE", temp.0.join("store"));
+        let _guard = StoreEnv(old);
+        let ctx = Context::open(Platform::host().unwrap()).unwrap();
+        let id = format!("{}-rust-1.96.1", "b".repeat(40));
+        let object = ctx.store.object_path(&id);
+        fs::create_dir_all(object.join("bin")).unwrap();
+        fs::write(object.join("bin/rustc"), "rust").unwrap();
+        fs::write(ctx.store.root.join(format!("meta/{id}.json")), "{}").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&object, fs::Permissions::from_mode(0o555)).unwrap();
+        let dir = temp.0.join("project");
+        fs::create_dir_all(dir.join(".tog/cargo-home/bin")).unwrap();
+        fs::create_dir_all(dir.join(".tog/closures")).unwrap();
+        fs::write(
+            dir.join(".tog/closures/cargo.json"),
+            serde_json::to_vec(&json!({
+                "schema": "closure/1", "ecosystem": "cargo", "platform": ctx.platform.triple(),
+                "body": {"rust_object": {"id": id, "path": object}},
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let project = ProjectRoot::open(&dir).unwrap();
+        let moved = temp.0.join("moved");
+        fs::rename(&dir, &moved).unwrap();
+        for replacement in [false, true] {
+            if replacement {
+                fs::create_dir_all(dir.join(".tog/cargo-home")).unwrap();
+            }
+            let mut command = Command::new("unused");
+            let prefix = crate::tailors::by_id("cargo")
+                .unwrap()
+                .run_env(&ctx, &project, project.path(), &[], &mut command)
+                .unwrap();
+            assert_eq!(
+                prefix[0],
+                moved.join(".tog/cargo-home/bin").to_string_lossy()
+            );
+            let home = command
+                .get_envs()
+                .find(|(key, _)| *key == "CARGO_HOME")
+                .unwrap()
+                .1
+                .unwrap();
+            assert_eq!(Path::new(home), moved.join(".tog/cargo-home"));
+        }
+    }
+
     /// A member whose node_modules git tracks keeps its own directory
     /// (#174). `status` takes that directory as the member's projection,
     /// and still reports the member missing once the directory is gone.
@@ -593,6 +765,19 @@ mod tests {
             ),
             State::Synced
         );
+        let outside = temp.0.join("outside");
+        fs::create_dir_all(outside.join("node_modules")).unwrap();
+        for workspace in [
+            "../outside".to_string(),
+            outside.to_string_lossy().into_owned(),
+        ] {
+            let mut invalid = body(json!([workspace]));
+            invalid["workspaces"] = json!([workspace]);
+            assert!(matches!(
+                node_projection_state(&ProjectRoot::open(&dir).unwrap(), &invalid),
+                State::ProjectionMissing(_)
+            ));
+        }
         assert!(matches!(
             node_projection_state(&ProjectRoot::open(&dir).unwrap(), &body(Value::Null)),
             State::ProjectionMissing(_)
