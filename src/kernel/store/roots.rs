@@ -1596,7 +1596,7 @@ fn on_disk_spelling(
 }
 
 #[cfg(test)]
-mod spelling_tests {
+mod tests {
     use super::on_disk_spelling;
     use std::ffi::OsString;
 
