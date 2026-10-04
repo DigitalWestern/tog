@@ -181,9 +181,13 @@ pub fn dispatch(command: cli::Command, sync: cli::SyncFlags) -> io::Result<i32> 
     install_tailor_tables(&command);
     // Maintenance commands need no host-platform validation here: GC must
     // stay usable on a copied store from a host that cannot realize its
-    // objects, `attest` checks the host itself, and `audit` is read-only (no
-    // store open, no lease, no realization, no network).
+    // objects, `attest` checks the host itself, and `audit`, `status` and
+    // `sbom` are read-only (no store open, no lease, no realization, no
+    // network), so they work with an unwritable store, leave no store where
+    // there was none, and never wait behind a GC sweep.
     match command {
+        Status { json } => return status::run(Platform::host()?, json),
+        Sbom { ref output } => return sbom::run(output.as_deref()).map(|_| 0),
         Gc(args) => return gc::run(&args).map(|_| 0),
         XClean {
             ecosystem,
@@ -256,7 +260,6 @@ pub fn dispatch(command: cli::Command, sync: cli::SyncFlags) -> io::Result<i32> 
         // runtime is a store object, and its bin directory is part of the
         // PATH `env` prints.
         Env { shell } => env::run(&ctx, shell, sync.frozen),
-        Sbom { output } => sbom::run(output.as_deref()).map(|_| 0),
         Add {
             specs,
             dev,
@@ -313,8 +316,9 @@ pub fn dispatch(command: cli::Command, sync: cli::SyncFlags) -> io::Result<i32> 
                 args,
             },
         ),
-        Status { json } => status::run(ctx.platform, json),
         Fmt { .. }
+        | Status { .. }
+        | Sbom { .. }
         | Sync { .. }
         | Gc(_)
         | XClean { .. }

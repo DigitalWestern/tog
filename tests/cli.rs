@@ -1257,6 +1257,33 @@ fn inspect_verbs_offline() {
     assert_eq!(out.status.code(), Some(2));
 }
 
+/// `status` and `sbom` read the project, never the store (#183): they
+/// create no store where there was none, so they work with a store that
+/// cannot be written, and take no lease a GC sweep could make them wait on.
+#[test]
+fn read_only_reports_never_create_the_store() {
+    let home = TempDir::boundary("cli-readonly-home");
+    let project = TempDir::boundary("cli-readonly-project");
+    std::fs::write(project.0.join("requirements.txt"), "six==1.17.0\n").unwrap();
+    let out = tog(&project.0, &home.0, &["status"]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stdout).contains("not synced"),
+        "{}",
+        text(&out.stdout)
+    );
+    let out = tog(&project.0, &home.0, &["sbom"]);
+    assert!(
+        text(&out.stderr).contains("no closures found"),
+        "{}",
+        text(&out.stderr)
+    );
+    assert!(
+        !home.0.join("store").exists(),
+        "a read-only report created the store"
+    );
+}
+
 /// A closure whose inputs were never recorded cannot be compared with the
 /// files on disk, so `status` must not report it synced or exit 0: a CI
 /// gate that trusts that word would admit any closure old enough.
