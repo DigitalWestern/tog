@@ -105,7 +105,7 @@ impl ProjectRoot {
     /// expected, or a destination that is not a regular file (a FIFO, a
     /// device, a directory) is an error, so a tampered cache fails closed
     /// instead of being read as a miss.
-    fn open_file(&self, relative: &Path) -> io::Result<Option<fs::File>> {
+    pub(crate) fn open_file(&self, relative: &Path) -> io::Result<Option<fs::File>> {
         let mut display = self.path.clone();
         let Some((held, name)) = self.open_parent(relative, "read", &mut display)? else {
             return Ok(None);
@@ -551,12 +551,43 @@ impl ProjectRoot {
     /// outlives the borrow it was handed (the toolchain-input guard).
     pub fn try_clone(&self) -> io::Result<Self> {
         let dir = self.dir.try_clone()?;
-        let held = HeldEntry::register(&self.path, &dir);
+        let held = self
+            ._held
+            .as_ref()
+            .map(|_| HeldEntry::register(&self.path, &dir));
         Ok(Self {
             dir,
             path: self.path.clone(),
-            _held: Some(held),
+            _held: held,
         })
+    }
+
+    /// Promote an ancestor used for reading into the directory a delegated
+    /// tool will enter. Read-only ancestor walks must not install unrelated
+    /// process-wide cwd bindings. Clones preserve their holder's role.
+    pub(crate) fn with_cwd_binding(mut self) -> Self {
+        if self._held.is_none() {
+            self._held = Some(HeldEntry::register(&self.path, &self.dir));
+        }
+        self
+    }
+
+    /// Resolve an input alias without replacing the descriptor already held.
+    /// Refuse if the resolved name no longer names that same directory.
+    pub(crate) fn canonicalize_name(mut self) -> io::Result<Self> {
+        let path = self.path.canonicalize()?;
+        let now = walk_from_root(&path)?;
+        if !same_inode(&fd_stat(now.as_raw_fd())?, &fd_stat(self.dir.as_raw_fd())?) {
+            return Err(refusal(
+                "input directory changed while resolving its name".into(),
+            ));
+        }
+        let bound = self._held.take().is_some();
+        self.path = path;
+        if bound {
+            self._held = Some(HeldEntry::register(&self.path, &self.dir));
+        }
+        Ok(self)
     }
 
     /// Does the canonical path still name the directory this descriptor
@@ -761,7 +792,59 @@ impl ProjectRoot {
         path.strip_prefix(&self.path).ok()
     }
 
+    /// The directory that contains the held one, reached through `..` from
+    /// the descriptor, never the path: while `check_still_named` holds it is
+    /// the path's parent, and if the project is moved it is wherever the
+    /// held directory now is. `None` at `/`. Its `path` is `path().parent()`,
+    /// for messages.
+    pub fn parent(&self) -> io::Result<Option<ProjectRoot>> {
+        // The displayed name can become shallower than the actual directory
+        // after a move. Only descriptor identity determines the end of a walk.
+        let path = self.path.parent().unwrap_or(Path::new("/"));
+        let dir =
+            open_file_at(self.dir.as_raw_fd(), b"..", DIRECTORY_FLAGS, 0).map_err(|error| {
+                io::Error::new(error.kind(), format!("open {}: {error}", path.display()))
+            })?;
+        if same_inode(&fd_stat(dir.as_raw_fd())?, &fd_stat(self.dir.as_raw_fd())?) {
+            return Ok(None);
+        }
+        Ok(Some(ProjectRoot {
+            _held: None,
+            dir,
+            path: path.to_path_buf(),
+        }))
+    }
+
+    /// This root, then each directory above it (`parent`), up to `/`. Opened
+    /// one at a time as the walk reaches it, so a walk that stops early
+    /// holds nothing more.
+    pub fn ancestors(&self) -> impl Iterator<Item = io::Result<ProjectRoot>> {
+        let mut next = Some(self.try_clone());
+        std::iter::from_fn(move || {
+            let current = next.take()?;
+            if let Ok(root) = &current {
+                next = root.parent().transpose();
+            }
+            Some(current)
+        })
+    }
+
+    /// A project input opened for reading the way `read_input` resolves it,
+    /// for a caller that needs the file itself (its device and inode).
+    /// A malformed parent component is an error, not a missing input.
+    pub fn open_input_file(&self, relative: &Path) -> io::Result<Option<fs::File>> {
+        self.open_input_with_missing(relative, false)
+    }
+
     fn open_input(&self, relative: &Path) -> io::Result<Option<fs::File>> {
+        self.open_input_with_missing(relative, true)
+    }
+
+    fn open_input_with_missing(
+        &self,
+        relative: &Path,
+        not_dir_is_absent: bool,
+    ) -> io::Result<Option<fs::File>> {
         let name = input_name(relative)?;
         let display = self.path.join(relative);
         let file = match open_file_at(
@@ -773,7 +856,7 @@ impl ProjectRoot {
             Ok(file) => file,
             Err(error)
                 if error.kind() == io::ErrorKind::NotFound
-                    || error.raw_os_error() == Some(libc::ENOTDIR) =>
+                    || (not_dir_is_absent && error.raw_os_error() == Some(libc::ENOTDIR)) =>
             {
                 return Ok(None)
             }

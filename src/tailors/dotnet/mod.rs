@@ -951,43 +951,31 @@ pub fn preflight(project: &ProjectRoot, sdk_version: &str) -> io::Result<(PathBu
     regular_file_if_present(project, Path::new("global.json"), "global.json")?;
     check_global_json(project, sdk_version)?;
 
-    for (depth, ancestor) in project_dir.ancestors().enumerate() {
+    // Each directory above is reached from the held project, not its path.
+    for (depth, ancestor) in project.ancestors().enumerate() {
+        let ancestor = ancestor?;
+        let present = |name: &str| {
+            ancestor
+                .entry(Path::new(name))
+                .map(|entry| entry != Entry::Absent)
+        };
         for name in [
             "Directory.Packages.props",
             "Directory.Build.rsp",
             "packages.config",
         ] {
-            // The project itself through the descriptor, its ancestors
-            // (outside the project) by path.
-            let present = if depth == 0 {
-                project
-                    .entry(Path::new(name))
-                    .map(|entry| entry != Entry::Absent)
-            } else {
-                path_present(&ancestor.join(name))
-            };
-            match present {
-                Ok(true) => {
-                    return Err(err(format!(
-                        "{name} is not supported in the project or an SDK ancestor: {}",
-                        ancestor.join(name).display()
-                    )))
-                }
-                Ok(false) => {}
-                Err(e) => return Err(e),
+            if present(name)? {
+                return Err(err(format!(
+                    "{name} is not supported in the project or an SDK ancestor: {}",
+                    ancestor.path().join(name).display()
+                )));
             }
         }
-        if depth > 0 {
-            match path_present(&ancestor.join("global.json")) {
-                Ok(true) => {
-                    return Err(err(format!(
-                        "ancestor global.json is not supported; SDK discovery would see {}",
-                        ancestor.join("global.json").display()
-                    )))
-                }
-                Ok(false) => {}
-                Err(e) => return Err(e),
-            }
+        if depth > 0 && present("global.json")? {
+            return Err(err(format!(
+                "ancestor global.json is not supported; SDK discovery would see {}",
+                ancestor.path().join("global.json").display()
+            )));
         }
     }
     if project.is_input_file(lock_rel) {
@@ -997,15 +985,6 @@ pub fn preflight(project: &ProjectRoot, sdk_version: &str) -> io::Result<(PathBu
 }
 
 const LOCK_FILE: &str = "packages.lock.json";
-
-/// Does a path outside the project name anything (`symlink_metadata`)?
-fn path_present(path: &Path) -> io::Result<bool> {
-    match fs::symlink_metadata(path) {
-        Ok(_) => Ok(true),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
-        Err(e) => Err(e),
-    }
-}
 
 /// The lock every plan reads, or the refusal that names it: `prepare`
 /// generates it, and the command layer skips `prepare` under `--frozen`.
@@ -2534,9 +2513,15 @@ mod tests {
         let child = ancestor.join("child");
         fs::create_dir(&child).unwrap();
         fs::write(child.join("project.csproj"), minimal_csproj()).unwrap();
-        let error = preflight(&ProjectRoot::open(&child).unwrap(), SDK_VERSION)
-            .unwrap_err()
-            .to_string();
+        let held = ProjectRoot::open(&child).unwrap();
+        let error = preflight(&held, SDK_VERSION).unwrap_err().to_string();
+        assert!(error.contains("ancestor global.json"), "{error}");
+        // The ancestor is the directory holding the project: moved away
+        // after the open, with a clean one at its path, it still refuses.
+        fs::rename(&ancestor, base.join("ancestor-moved")).unwrap();
+        fs::create_dir_all(&child).unwrap();
+        fs::write(child.join("project.csproj"), minimal_csproj()).unwrap();
+        let error = preflight(&held, SDK_VERSION).unwrap_err().to_string();
         assert!(error.contains("ancestor global.json"), "{error}");
 
         let solution_only = base.join("solution-only");

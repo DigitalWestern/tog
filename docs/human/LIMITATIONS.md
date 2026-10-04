@@ -81,8 +81,11 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   puts the original back while one of those runs can make it read or write the replacement.
   Loud when the tool's output is read back (a lock it wrote is missing from the held
   directory); silent otherwise. Files above the project (a Cargo workspace root, a parent
-  `go.work`, .NET `Directory.*` files, a parent `.tog/policy.toml`, the machine policy) are
-  read by path. Commands that do not sync (`status`, `doctor`, `run`'s
+  `go.work`, .NET `Directory.*` files, a parent `.tog/policy.toml`) are read from the
+  directories that contain the held one (`..` from its descriptor), not from the path's
+  parents. Policy loading verifies each held ancestor still has its original name and
+  refuses a changed chain, so a temporary move cannot lift a parent policy.
+  The machine policy is read by path. Commands that do not sync (`status`, `doctor`, `run`'s
   environment, `gc --register`) open the project by path.
 - **CLI exit status is 0 / 1 / 2** (success / command failed / usage error); `run`, `x` and
   `fmt` pass the program's status through. A tool argument that is spelled like one of tog's
