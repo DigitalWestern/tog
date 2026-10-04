@@ -152,7 +152,7 @@ pub(crate) fn run_in_mode(
     // publication, before any work is done for it.
     let ctx = match early {
         Some(ctx) => ctx,
-        None => Context::open(platform, true)?,
+        None => Context::open(platform)?,
     };
     project.check_still_named()?;
     if stop_after_lock {
@@ -194,7 +194,7 @@ fn recover_resolution(platform: Platform, dir: &Path) -> io::Result<Option<Conte
     if !resolve::transaction::has_pending_journal(dir) {
         return Ok(None);
     }
-    let ctx = Context::open(platform, true)?;
+    let ctx = Context::open(platform)?;
     resolve::transaction::recover_project(&ctx.store, &ctx.activity, dir)?;
     Ok(Some(ctx))
 }
@@ -737,9 +737,7 @@ mod tests {
 
         // The slot is a real once-per-store claim, not a coin flip.
         let temp = TempDir::new();
-        let store = store::Store {
-            root: temp.0.clone(),
-        };
+        let store = store::Store::for_test(temp.0.clone());
         assert!(first_signing_notice(&store));
         assert!(!first_signing_notice(&store));
     }
@@ -760,26 +758,20 @@ mod tests {
 
         // The slot is a real once-per-store claim, not a coin flip.
         let temp = TempDir::new();
-        let store = store::Store {
-            root: temp.0.clone(),
-        };
+        let store = store::Store::for_test(temp.0.clone());
         assert!(claim_habits_notice(&store, false));
         assert!(!claim_habits_notice(&store, false));
 
         // Quiet would drop the line on the way out, so it never spends the
         // showing: a fresh store is left unclaimed for a loud run.
         let quiet_temp = TempDir::new();
-        let quiet_store = store::Store {
-            root: quiet_temp.0.clone(),
-        };
+        let quiet_store = store::Store::for_test(quiet_temp.0.clone());
         assert!(!claim_habits_notice(&quiet_store, true));
         assert!(!quiet_store.root.join("habits-notice").exists());
         assert!(claim_habits_notice(&quiet_store, false));
 
         // A store that cannot be written stays quiet rather than nagging.
-        let unwritable = store::Store {
-            root: temp.0.join("no/such/store"),
-        };
+        let unwritable = store::Store::for_test(temp.0.join("no/such/store"));
         assert!(!claim_habits_notice(&unwritable, false));
     }
 
@@ -1046,7 +1038,7 @@ mod tests {
         let nested = project.join("src").join("deep");
         std::fs::create_dir_all(&nested).unwrap();
         let _store_env = StoreEnv::enter(&temp.0.join("store"));
-        let ctx = Context::open_in(Platform::host().unwrap(), &bare, false).unwrap();
+        let ctx = Context::open_in(Platform::host().unwrap(), &bare).unwrap();
 
         let root =
             ensure_current(&ctx, &bare, false).expect("a directory with no manifest is left alone");
@@ -1308,7 +1300,7 @@ mod tests {
         )
         .unwrap();
         let _store_env = StoreEnv::enter(&temp.0.join("store"));
-        let ctx = Context::open_in(Platform::host().unwrap(), &project, false).unwrap();
+        let ctx = Context::open_in(Platform::host().unwrap(), &project).unwrap();
 
         let error = run(&ctx, false).unwrap_err();
         assert!(
@@ -1469,7 +1461,7 @@ mod tests {
         std::fs::write(project.join(".python-version"), "3.12.14\n").unwrap();
         let _store_env = StoreEnv::enter(&temp.0.join("store"));
         let platform = Platform::host().unwrap();
-        let ctx = Context::open_in(platform, &project, false).unwrap();
+        let ctx = Context::open_in(platform, &project).unwrap();
         let root = ProjectRoot::open(&project).unwrap();
         let moved = temp.0.join("moved");
         let swapped = SwappedMidSync {
@@ -1538,7 +1530,7 @@ mod tests {
         std::fs::write(project.join(".python-version"), "3.12.14\n").unwrap();
         let _store_env = StoreEnv::enter(&temp.0.join("store"));
         let platform = Platform::host().unwrap();
-        let ctx = Context::open_in(platform, &project, false).unwrap();
+        let ctx = Context::open_in(platform, &project).unwrap();
         let root = ProjectRoot::open(&project).unwrap();
         let moved = temp.0.join("moved");
         let swapped: &'static SwappedMidSync = Box::leak(Box::new(SwappedMidSync {

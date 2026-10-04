@@ -11,6 +11,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 pub use crate::comforter::status::{sha256_file, string, State};
+use crate::kernel::activity::StoreActivity;
 use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::platform::Platform;
 use crate::kernel::policy::{self, Exception};
@@ -1017,17 +1018,53 @@ fn toolchains_check(store: &Store, checks: &mut Vec<Check>) {
     }
 }
 
+/// The store as `doctor` was handed it: opened and under a lease, opened
+/// with no lease because another job holds it exclusively, or the error
+/// that stopped either. The caller decides once, and the lease comes with
+/// the store, so nothing here reads a store without one.
+pub type DoctorStore<'a> = Result<(&'a Store, Option<&'a StoreActivity>), &'a io::Error>;
+
 /// The store block: opening it is the only thing `doctor` does that could
 /// fail for the whole group, so the three probes below hang off the `Ok`.
-fn store_checks(checks: &mut Vec<Check>) {
-    match Store::open() {
-        Ok(store) => {
-            store_writable_check(&store, checks);
-            disk_check(&store, checks);
-            toolchains_check(&store, checks);
+fn store_checks(store: DoctorStore, checks: &mut Vec<Check>) {
+    let (store, activity) = match store {
+        Ok((store, Some(activity))) => (store, activity),
+        // In use is not broken: a warning, like gc's "cleanup skipped".
+        // Nothing in the store is read without the lease.
+        Ok((store, None)) => {
+            checks.push(check(
+                "store",
+                Level::Warn,
+                format!(
+                    "a Tog job is using the store at {}; its checks were skipped, run 'tog \
+                     doctor' again when the job finishes",
+                    store.root.display()
+                ),
+            ));
+            return;
         }
-        // The error names the path, the cause, and TOG_STORE already.
-        Err(error) => checks.push(check("store", Level::Fail, format!("cannot {error}"))),
+        Err(error) => {
+            checks.push(check("store", Level::Fail, unopened_store_detail(error)));
+            return;
+        }
+    };
+    if let Err(error) = store.require_activity(activity, "checking the store") {
+        checks.push(check("store", Level::Fail, error.to_string()));
+        return;
+    }
+    store_writable_check(store, checks);
+    disk_check(store, checks);
+    toolchains_check(store, checks);
+}
+
+/// Why the store row fails when the store was not opened. A store written
+/// in a format this tog does not read, or whose marker cannot be read, is a
+/// refusal: the row gives its reason and keeps the command that is the way
+/// out. Any other error names the path, the cause, and TOG_STORE already.
+fn unopened_store_detail(error: &io::Error) -> String {
+    match crate::kernel::store::refusal_fix(error) {
+        Some(fix) => format!("{error}; run '{fix}'"),
+        None => format!("cannot {error}"),
     }
 }
 
@@ -1161,10 +1198,10 @@ fn project_check(dir: &Path, checks: &mut Vec<Check>) {
 /// The order the checks are pushed in is the order they print in, and that
 /// order is the contract: host, then store, then everything that needs a
 /// known host, then the two project-local answers.
-pub fn doctor(dir: &Path) -> Vec<Check> {
+pub fn doctor(dir: &Path, store: DoctorStore) -> Vec<Check> {
     let mut checks = Vec::new();
     let platform = host_platform_check(&mut checks);
-    store_checks(&mut checks);
+    store_checks(store, &mut checks);
     if let Some(platform) = platform {
         platform_checks(platform, dir, &mut checks);
     }
@@ -2109,6 +2146,90 @@ mod tests {
 
     /// In a bare directory with a fresh store, `doctor` leaves no write
     /// probe behind and reports that there is no project.
+    /// `doctor` the way `tog doctor` calls it: the configured store, opened
+    /// and leased, or the error that stopped it.
+    fn doctor_of_configured_store(dir: &Path) -> Vec<Check> {
+        let opened = Store::open().and_then(|store| {
+            let activity = store.try_activity_shared()?;
+            Ok((store, activity))
+        });
+        doctor(
+            dir,
+            opened
+                .as_ref()
+                .map(|(store, activity)| (store, activity.as_ref())),
+        )
+    }
+
+    /// A refusal that becomes a doctor row keeps its fix, and one for a
+    /// store the bare command would not select names that store.
+    #[test]
+    fn a_refused_store_row_keeps_the_typed_fix() {
+        let temp = TempDir::named("doctor-refused");
+        let root = temp.0.join("store");
+        fs::create_dir_all(root.join("objects")).unwrap();
+        let error = Store::open_at(&root).unwrap_err();
+        let mut checks = Vec::new();
+        store_checks(Err(&error), &mut checks);
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].level, Level::Fail);
+        let detail = &checks[0].detail;
+        assert!(detail.contains("has no format marker"), "{detail}");
+        let fix = crate::kernel::store::refusal_fix(&error).unwrap();
+        assert!(fix.starts_with("TOG_STORE="), "{fix}");
+        assert!(detail.ends_with(&format!("; run '{fix}'")), "{detail}");
+
+        // Any other failure reads as before.
+        let mut checks = Vec::new();
+        store_checks(Err(&io::Error::other("create the store")), &mut checks);
+        assert_eq!(checks[0].detail, "cannot create the store");
+    }
+
+    /// The store doctor reads is the one it was handed under a lease: a
+    /// lease on another store is a failing row, and nothing is probed.
+    #[test]
+    fn doctor_reads_no_store_without_its_own_lease() {
+        let temp = TempDir::named("doctor-lease");
+        let store = Store::open_at(&temp.0.join("store")).unwrap();
+        let other = Store::open_at(&temp.0.join("other")).unwrap();
+        let foreign = other
+            .activity(crate::kernel::activity::ActivityMode::Shared)
+            .unwrap();
+        let mut checks = Vec::new();
+        store_checks(Ok((&store, Some(&foreign))), &mut checks);
+        assert_eq!(
+            checks.len(),
+            1,
+            "{:?}",
+            checks.iter().map(|c| &c.detail).collect::<Vec<_>>()
+        );
+        assert_eq!(checks[0].level, Level::Fail);
+
+        let own = store
+            .activity(crate::kernel::activity::ActivityMode::Shared)
+            .unwrap();
+        let mut checks = Vec::new();
+        store_checks(Ok((&store, Some(&own))), &mut checks);
+        let names: Vec<&str> = checks.iter().map(|check| check.name).collect();
+        assert_eq!(names, ["store", "disk", "toolchains"]);
+
+        // No lease because the store is busy: one warning, nothing read.
+        let mut checks = Vec::new();
+        store_checks(Ok((&store, None)), &mut checks);
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].name, "store");
+        assert_eq!(checks[0].level, Level::Warn);
+        assert!(
+            checks[0].detail.contains("a Tog job is using the store at"),
+            "{}",
+            checks[0].detail
+        );
+        assert!(fs::read_dir(store.root.join("tmp"))
+            .unwrap()
+            .flatten()
+            .all(|entry| !entry.file_name().to_string_lossy().starts_with(".doctor-")));
+    }
+
     #[test]
     fn doctor_cleans_up_its_probe_and_finds_no_project_in_a_bare_dir() {
         // Process-global test state follows env -> supervision -> store ->
@@ -2123,7 +2244,7 @@ mod tests {
         let store = temp.0.join("store");
         let old_store = std::env::var_os("TOG_STORE");
         std::env::set_var("TOG_STORE", &store);
-        let checks = doctor(&temp.0);
+        let checks = doctor_of_configured_store(&temp.0);
         match old_store {
             Some(value) => std::env::set_var("TOG_STORE", value),
             None => std::env::remove_var("TOG_STORE"),
@@ -2152,7 +2273,7 @@ mod tests {
         fs::write(temp.0.join(".tog/policy.toml"), "").unwrap();
         let old_store = std::env::var_os("TOG_STORE");
         std::env::set_var("TOG_STORE", &store);
-        let checks = doctor(&temp.0);
+        let checks = doctor_of_configured_store(&temp.0);
         match old_store {
             Some(value) => std::env::set_var("TOG_STORE", value),
             None => std::env::remove_var("TOG_STORE"),

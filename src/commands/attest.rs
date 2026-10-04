@@ -140,7 +140,7 @@ fn attest(
     // The committed toolchain lock names the tool; attesting never writes
     // one, so the lock is read the way `--frozen` reads it.
     let (_, toolchain) = preflight_sync(platform, project, Mode::Frozen, scope)?;
-    let ctx = Context::open(platform, true)?;
+    let ctx = Context::open(platform)?;
     // An interrupted publication is finished or undone before any check
     // reads the lock it was replacing.
     transaction::recover_project(&ctx.store, &ctx.activity, project.path())?;
@@ -278,7 +278,7 @@ fn export_ledger(
             format!("{}: not a resolution record: {reason}", receipt.display()),
         )
     })?;
-    let ctx = Context::open(platform, false)?;
+    let ctx = Context::open(platform)?;
     let portable = record::read_ledger(&ctx.store, &ctx.activity, &record)?;
     fs::write(file, &portable).map_err(|error| {
         io::Error::new(error.kind(), format!("write {}: {error}", file.display()))
@@ -339,7 +339,7 @@ fn import_ledger(platform: Platform, project: &ProjectRoot, file: &Path) -> io::
             ),
         ));
     };
-    let ctx = Context::open(platform, false)?;
+    let ctx = Context::open(platform)?;
     let objects = record::commit_ledger(&ctx.store, &ctx.activity, &record, &portable)?;
     // Root it under the project now; the next closure write retains it
     // through the closure's references.
@@ -389,9 +389,7 @@ mod tests {
             fs::write(dir.join(format!("{ecosystem}.lock")), "pinned 1.0.0\n").unwrap();
         }
         Fixture {
-            store: Store {
-                root: root.canonicalize().unwrap(),
-            },
+            store: Store::for_test(root.canonicalize().unwrap()),
             dir: dir.canonicalize().unwrap(),
             _temp: temp,
         }

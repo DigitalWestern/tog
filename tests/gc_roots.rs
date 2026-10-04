@@ -18,13 +18,13 @@ use std::time::{Duration, SystemTime};
 
 mod common;
 
-use common::{command, tog, TempDir};
+use common::{command, fresh_store, TempDir};
 
 /// The one hand-written object. Its id must be the real hash of its identity:
 /// the sweep's metadata reader refuses any record whose identity hashes to a
-/// different id, and a legacy (schemaless) record of an unknown kind can
-/// never be certified, so the fixture publishes a complete `object-meta/2`
-/// record the way `tests/cli.rs::publish_certified_object` does.
+/// different id, and a record with no schema cannot be read at all, so the
+/// fixture publishes a complete `object-meta/2` record the way
+/// `tests/cli.rs::publish_certified_object` does.
 fn protected_identity() -> tog::kernel::types::Identity {
     tog::kernel::types::Identity {
         kind: "test".into(),
@@ -45,6 +45,7 @@ impl Fixture {
     fn new(label: &str) -> Self {
         let temp = TempDir::new(&format!("gc-roots-{label}"));
         let store = temp.0.join("store");
+        fresh_store(&store);
         for sub in ["objects", "meta", "cache/sha256", "tmp", "roots"] {
             fs::create_dir_all(store.join(sub)).unwrap();
         }
@@ -1027,82 +1028,4 @@ fn forget_registry_symlink_never_touches_its_target() {
         assert_eq!(fs::read(&closure).unwrap(), closure_bytes, "{shape}");
         assert_eq!(fixture.record_names(), vec![other_key], "{shape}");
     }
-}
-
-/// Upgrade scenario: objects and closure files can predate the roots
-/// registry, while the project's root entry was never written. A default GC
-/// must refuse to sweep before migration, regardless of --keep-days.
-#[test]
-fn gc_upgrade_does_not_collect_unregistered_legacy_project() {
-    let temp = TempDir::new("gc-e2e");
-    let store = temp.0.join("store");
-    for sub in ["objects", "meta", "cache/sha256", "tmp"] {
-        fs::create_dir_all(store.join(sub)).unwrap();
-    }
-    let id = format!("{}-legacy", "a".repeat(40));
-    let object = store.join("objects").join(&id);
-    fs::create_dir_all(&object).unwrap();
-    fs::write(object.join("payload"), b"pre-registry object").unwrap();
-    fs::write(
-        store.join("meta").join(format!("{id}.json")),
-        serde_json::json!({
-            "id": id,
-            "identity": {"kind": "legacy-project", "inputs": {}}
-        })
-        .to_string(),
-    )
-    .unwrap();
-    age(&object);
-
-    let project = temp.0.join("never-resynced");
-    fs::create_dir_all(project.join(".tog/closures")).unwrap();
-    fs::write(
-        project.join(".tog/closures/python.json"),
-        serde_json::json!({
-            "schema": "closure/1",
-            "ecosystem": "python",
-            "body": {"env_object": object.display().to_string()}
-        })
-        .to_string(),
-    )
-    .unwrap();
-
-    let home = temp.path();
-    let refused = tog(&project, home, &["gc", "--keep-days", "0"]);
-    assert!(
-        !refused.status.success(),
-        "uninitialized GC unexpectedly ran"
-    );
-    let stderr = String::from_utf8_lossy(&refused.stderr);
-    assert!(
-        stderr.contains("refusing to sweep"),
-        "unexpected error: {stderr}"
-    );
-    assert!(
-        stderr.contains("--register"),
-        "migration hint missing: {stderr}"
-    );
-    assert!(object.is_dir(), "default upgrade GC deleted the old object");
-
-    let registered = tog(
-        &project,
-        home,
-        &["gc", "--register", project.to_str().unwrap()],
-    );
-    assert!(
-        !registered.status.success(),
-        "registration unexpectedly started a sweep with uncertified metadata"
-    );
-    assert!(
-        String::from_utf8_lossy(&registered.stderr).contains("--migrate-metadata"),
-        "unresolved metadata recovery hint missing: {}",
-        String::from_utf8_lossy(&registered.stderr)
-    );
-    assert!(
-        fs::read_dir(store.join("roots"))
-            .unwrap()
-            .any(|entry| entry.unwrap().file_name() != ".initialized"),
-        "explicit root registration was not durable before migration refusal"
-    );
-    assert!(object.is_dir(), "registered legacy object was collected");
 }

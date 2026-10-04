@@ -344,18 +344,6 @@ mod door {
         }
         let temp = TempDir::new("door");
         let root = temp.path().join("store");
-        for sub in [
-            "objects",
-            "meta",
-            "tmp",
-            "roots",
-            "root-locks",
-            "records",
-            "forests",
-            "backups",
-        ] {
-            std::fs::create_dir_all(root.join(sub)).unwrap();
-        }
         let tools = temp.path().join("tools");
         std::fs::create_dir_all(&tools).unwrap();
         let probe = tools.join("door_probe");
@@ -396,9 +384,7 @@ mod door {
             }
         });
         Some(Door {
-            store: Store {
-                root: root.canonicalize().unwrap(),
-            },
+            store: Store::open_at(&root).unwrap(),
             project: project.canonicalize().unwrap(),
             tools: tools.canonicalize().unwrap(),
             probe,

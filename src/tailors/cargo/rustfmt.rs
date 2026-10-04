@@ -533,43 +533,6 @@ fn allowed_entries(root: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-
-    /// Drift check: the legacy adapter must reconstruct exactly what this
-    /// producer supplies at commit, or a migrated record stops matching what
-    /// a re-sync publishes and every later cache hit becomes a hard error.
-    #[test]
-    fn legacy_adapter_recovers_the_paired_rust_object_and_component() {
-        for platform in Platform::ALL {
-            let pin = component(*platform).unwrap();
-            let rust_object = format!("{}-rust-{RUST_VERSION}", "b".repeat(40));
-            let identity =
-                rustfmt_identity(*platform, RUST_VERSION, Path::new(&rust_object)).unwrap();
-            let stub = crate::kernel::objmeta::legacy_record(crate::kernel::types::Identity {
-                kind: "rust".into(),
-                name: "rust".into(),
-                version: RUST_VERSION.into(),
-                inputs: std::collections::BTreeMap::new(),
-            });
-            let mut stub = stub;
-            stub.id = rust_object.clone();
-            match crate::kernel::objmeta::adapt_identity_for_test(identity, vec![stub]) {
-                crate::kernel::objmeta::Adaptation::Proven(deps) => {
-                    assert_eq!(
-                        deps.objects.iter().cloned().collect::<Vec<_>>(),
-                        vec![rust_object]
-                    );
-                    assert_eq!(
-                        deps.cache
-                            .iter()
-                            .map(|d| format!("{}:{}", d.algo(), d.hex()))
-                            .collect::<Vec<_>>(),
-                        vec![format!("sha256:{}", pin.digest.hex())]
-                    );
-                }
-                crate::kernel::objmeta::Adaptation::Unresolved(reason) => panic!("{reason}"),
-            }
-        }
-    }
     use super::*;
     use crate::kernel::testutil::TempDir;
 
@@ -712,7 +675,7 @@ mod tests {
         let previous_store = std::env::var_os("TOG_STORE");
         std::env::set_var("TOG_STORE", root.join("store"));
         let platform = Platform::host().unwrap();
-        let ctx = crate::kernel::context::Context::open(platform, false);
+        let ctx = crate::kernel::context::Context::open(platform);
         match previous_store {
             Some(value) => std::env::set_var("TOG_STORE", value),
             None => std::env::remove_var("TOG_STORE"),

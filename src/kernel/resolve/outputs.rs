@@ -346,9 +346,7 @@ mod tests {
         fs::write(dir.join("package.json"), b"{}").unwrap();
         fs::write(dir.join("sub/package.json"), b"{}").unwrap();
         (
-            Store {
-                root: root.canonicalize().unwrap(),
-            },
+            Store::for_test(root.canonicalize().unwrap()),
             dir.canonicalize().unwrap(),
         )
     }

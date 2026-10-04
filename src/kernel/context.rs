@@ -4,10 +4,8 @@
 //! naming the command layer.
 
 use crate::kernel::activity::{ActivityMode, StoreActivity};
-use crate::kernel::gc;
 use crate::kernel::platform::Platform;
 use crate::kernel::store::Store;
-use crate::kernel::ui;
 use std::io;
 use std::path::PathBuf;
 
@@ -24,38 +22,22 @@ pub struct Context {
 }
 
 impl Context {
-    /// Open the store, run the opportunistic maintenance sweep if this
-    /// command asks for one, then take the shared lease.
-    pub fn open(platform: Platform, maintenance: bool) -> io::Result<Self> {
-        Self::open_with_project_dir(platform, None, maintenance)
+    /// Open the store and take the shared lease.
+    pub fn open(platform: Platform) -> io::Result<Self> {
+        Self::open_with_project_dir(platform, None)
     }
 
     /// Open a context whose project directory is independent of the process
     /// cwd. Production dispatch uses `open`, which keeps the existing dynamic
     /// cwd behavior needed by dependency edits.
-    pub fn open_in(
-        platform: Platform,
-        project_dir: &std::path::Path,
-        maintenance: bool,
-    ) -> io::Result<Self> {
-        Self::open_with_project_dir(platform, Some(project_dir.to_path_buf()), maintenance)
+    pub fn open_in(platform: Platform, project_dir: &std::path::Path) -> io::Result<Self> {
+        Self::open_with_project_dir(platform, Some(project_dir.to_path_buf()))
     }
 
     // Reviewed site (tests/architecture.rs): operation boundary: the shared lease every command borrows via `Context`.
     #[allow(clippy::disallowed_methods)]
-    fn open_with_project_dir(
-        platform: Platform,
-        project_dir: Option<PathBuf>,
-        maintenance: bool,
-    ) -> io::Result<Self> {
+    fn open_with_project_dir(platform: Platform, project_dir: Option<PathBuf>) -> io::Result<Self> {
         let store = Store::open()?;
-        if maintenance {
-            // Scope the narration's stderr handle to the one call that uses
-            // it: a lock held across a child whose stderr is relayed from
-            // another thread is a pipe that stops being drained.
-            let mut stderr = ui::narration();
-            gc::automatic_maintenance(&store, &mut stderr)?;
-        }
         let activity = store.activity(ActivityMode::Shared)?;
         Ok(Self {
             platform,

@@ -1,49 +1,24 @@
-//! Object kinds the Ruby tailor produces. Each row has a migration grammar
-//! for legacy records and a separate live grammar for current commits, plus
-//! the `object-meta/2` dependency adapter. Every row is proven by the metadata
-//! goldens in `kernel/objmeta.rs`.
+//! Object kinds the Ruby tailor produces: one row per (kind, schema) pair,
+//! naming the identity inputs its producer writes. Debug builds check every
+//! commit against its row (`objmeta::check_identity_grammar`).
 
-use crate::kernel::objmeta::{
-    add_digest, add_object, artifact_sha256, input, Algo, Grammar, KindAdapter, MetaIndex, Record,
-};
-use crate::kernel::store::ObjectDeps;
+use crate::kernel::objmeta::ObjectKind;
 use crate::kernel::types::Identity;
 
-pub static KINDS: &[KindAdapter] = &[
-    KindAdapter {
+pub static KINDS: &[ObjectKind] = &[
+    ObjectKind {
         kind: "ruby",
         schema: Some("ruby-toolchain/1"),
-        superseded_by: None,
         live_required: &["schema", "artifact_sha256", "platform"],
         live_optional: &[],
-        legacy_only: &[],
         live_contract: None,
-        grammar: Grammar {
-            required: &["schema", "artifact_sha256"],
-            optional: &["platform"],
-            groups: &[],
-        },
-        adapt: artifact_sha256,
     },
-    KindAdapter {
+    ObjectKind {
         kind: "ruby-gems",
         schema: Some("ruby-gems/1"),
-        superseded_by: None,
         live_required: &["schema", "installer", "ruby_platform"],
         live_optional: &["build_view", "host_fallback", "host_inputs", "gem:"],
-        legacy_only: &[],
         live_contract: Some(ruby_gems_contract),
-        grammar: Grammar {
-            required: &["schema", "installer"],
-            optional: &[
-                "ruby_platform",
-                "build_view",
-                "host_fallback",
-                "host_inputs",
-            ],
-            groups: &[("gem:", None)],
-        },
-        adapt: ruby_gems,
     },
 ];
 
@@ -120,52 +95,4 @@ fn host_fallback_contract(identity: &Identity) -> Result<(), String> {
         (_, Some(_)) => Err("host_fallback without build_view host-fallback/1".to_string()),
         (_, None) => Ok(()),
     }
-}
-
-/// `ruby-gems/1`: the installer is a `ruby<version>:<sha256>` fingerprint;
-/// each gem contributes its `.gem` sha256. `build_view` (Linux) names what
-/// of the host the native extensions compiled against, `host_fallback`
-/// which gems were rebuilt against the whole host, and `host_inputs` the
-/// fingerprint of the host state they were rebuilt against; none carries a
-/// dependency.
-fn ruby_gems(record: &Record, index: &MetaIndex) -> Result<ObjectDeps, String> {
-    let installer = input(record, "installer")?;
-    let (version, sha256) = installer
-        .strip_prefix("ruby")
-        .and_then(|rest| rest.split_once(':'))
-        .ok_or_else(|| {
-            format!("installer {installer:?} is not a ruby<version>:<sha256> reference")
-        })?;
-    let ruby = index.unique(
-        "ruby",
-        &format!("Ruby {version} built from artifact {sha256}"),
-        |candidate| {
-            candidate.identity.version == version
-                && candidate
-                    .identity
-                    .inputs
-                    .get("artifact_sha256")
-                    .map(String::as_str)
-                    == Some(sha256)
-        },
-    )?;
-    let mut deps = ObjectDeps::new();
-    add_object(&mut deps, &ruby, index, "installer")?;
-    for (key, value) in &record.identity.inputs {
-        if let Some(gem) = key.strip_prefix("gem:") {
-            add_digest(&mut deps, Algo::Sha256, value, &format!("gem {gem}"))?;
-        } else if ![
-            "schema",
-            "installer",
-            "ruby_platform",
-            "build_view",
-            "host_fallback",
-            "host_inputs",
-        ]
-        .contains(&key.as_str())
-        {
-            return Err(format!("unexpected identity input {key}"));
-        }
-    }
-    Ok(deps)
 }

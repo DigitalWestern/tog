@@ -13,13 +13,7 @@ mod common;
 use common::TempDir;
 
 fn store_at(root: &Path) -> Store {
-    let store_root = root.join("store");
-    for sub in ["objects", "meta", "cache/sha256", "tmp"] {
-        std::fs::create_dir_all(store_root.join(sub)).unwrap();
-    }
-    Store {
-        root: store_root.canonicalize().unwrap(),
-    }
+    Store::open_at(&root.join("store")).unwrap()
 }
 
 #[test]

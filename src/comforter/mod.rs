@@ -530,7 +530,7 @@ pub(crate) fn store_from_closure_body(body: &serde_json::Value) -> Option<Store>
                     if ancestor.file_name().and_then(|name| name.to_str()) == Some("objects") {
                         let root = ancestor.parent()?.to_path_buf();
                         if root.join("objects").is_dir() {
-                            return Some(Store { root });
+                            return Some(Store::for_test(root));
                         }
                     }
                 }
@@ -822,7 +822,9 @@ pub(crate) fn store_from_object_path(path: &Path) -> Option<Store> {
     if root.join("objects") != objects.canonicalize().ok()? {
         return None;
     }
-    Some(Store { root })
+    // A handle only: its users take a lease before they read a record, and
+    // the lease validates the store's format marker.
+    Some(Store::handle(root))
 }
 
 /// A project file the plan was computed from, recorded in the closure so
@@ -895,9 +897,7 @@ mod tests {
         for sub in ["objects", "meta", "cache/sha256", "tmp"] {
             fs::create_dir_all(temp.0.join(sub)).unwrap();
         }
-        let store = Store {
-            root: temp.0.clone(),
-        };
+        let store = Store::for_test(temp.0.clone());
         (temp, store)
     }
 

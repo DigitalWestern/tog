@@ -1307,13 +1307,29 @@ fn production_tokens(text: &str) -> Vec<(Token, String)> {
 }
 
 /// The names a file uses for `ty`: `ty` itself plus every `ty as Alias`
-/// import, so `use std::process::Command as P; P::spawn(&mut c)` is seen.
+/// import, so `use std::process::Command as P; P::spawn(&mut c)` is seen,
+/// and every `type Alias = path::to::ty;`.
+///
+/// The limit: one step only. An alias of an alias (`type A = ty;
+/// type B = A;`, or `use` of a name another file aliased) is not followed,
+/// so `B` is not a name for `ty` here. Nothing in `src/` spells a scanned
+/// type that way.
 fn names_for(tokens: &[(Token, String)], ty: &str) -> Vec<String> {
     let mut names = vec![ty.to_string()];
     for i in 0..tokens.len() {
         if is_ident(token_at(tokens, i), ty) && is_ident(token_at(tokens, i + 1), "as") {
             if let Some(Token::Ident(alias)) = token_at(tokens, i + 2) {
                 names.push(alias.clone());
+            }
+        }
+        // `type Alias = a::b::ty;`: the path's last segment, right before
+        // the `;`, is the type. (`type R = Result<ty, E>;` ends in `>`.)
+        if is_ident(token_at(tokens, i), "type") && is_punct(token_at(tokens, i + 2), '=') {
+            let end = (i + 3..tokens.len()).find(|&j| is_punct(token_at(tokens, j), ';'));
+            if let (Some(Token::Ident(alias)), Some(end)) = (token_at(tokens, i + 1), end) {
+                if is_ident(token_at(tokens, end - 1), ty) {
+                    names.push(alias.clone());
+                }
             }
         }
     }
@@ -1368,13 +1384,24 @@ fn raw_child_at(tokens: &[(Token, String)], i: usize, names: &Names) -> bool {
         || path_call(tokens, i, &names.commands, SPAWNS)
 }
 
-/// A lease taken: `.activity(`/`.try_activity_exclusive(`, the same as a
-/// `Store` path, or `StoreActivity::acquire`/`try_exclusive`, under any alias.
+/// A lease taken: `.activity(`/`.try_activity_exclusive(` (or its
+/// `_unchecked` form), the same as a `Store` path, or
+/// `StoreActivity::acquire`/`try_exclusive`, under any alias.
 fn lease_at(tokens: &[(Token, String)], i: usize, names: &Names) -> bool {
-    const STORE: &[&str] = &["activity", "try_activity_exclusive"];
+    const STORE: &[&str] = &[
+        "activity",
+        "try_activity_shared",
+        "try_activity_exclusive",
+        "try_activity_exclusive_unchecked",
+    ];
     method_call(tokens, i, STORE)
         || path_call(tokens, i, &names.stores, STORE)
-        || path_call(tokens, i, &names.activities, &["acquire", "try_exclusive"])
+        || path_call(
+            tokens,
+            i,
+            &names.activities,
+            &["acquire", "try_shared", "try_exclusive"],
+        )
 }
 
 /// Per-function counts of `(file, fn)` sites matching `hit` at a token.
@@ -1459,15 +1486,25 @@ const LEASE_BOUNDARIES: &[(&str, &str, usize)] = &[
     // The primitives themselves.
     ("src/kernel/store/mod.rs", "activity", 1),
     ("src/kernel/store/mod.rs", "try_activity_exclusive", 1),
+    ("src/kernel/store/mod.rs", "try_activity_shared", 1),
+    // The one primitive that does not validate the format marker.
+    (
+        "src/kernel/store/mod.rs",
+        "try_activity_exclusive_unchecked",
+        1,
+    ),
     // Command entry points: the shared lease every tailor command borrows
     // (`Context`), and the commands that open the store without one.
     ("src/kernel/context.rs", "open_with_project_dir", 1),
     ("src/commands/doctor.rs", "run", 1),
     ("src/commands/ls.rs", "run", 1),
+    // `store roots`: the lease its diagnostic read borrows.
+    ("src/commands/store.rs", "list_roots", 1),
     ("src/commands/gc.rs", "run", 1),
-    ("src/commands/x.rs", "clean", 1),
-    // Exclusive maintenance that runs before any shared lease is taken.
-    ("src/kernel/gc/migrate.rs", "automatic_maintenance", 1),
+    // `gc --reset` opens a store `run` cannot: one tog refuses to read.
+    ("src/commands/gc.rs", "reset", 1),
+    // `x --clean`, once per environment, on the store that owns it.
+    ("src/commands/x.rs", "clean_lease", 1),
     ("src/kernel/gc/mod.rs", "collect", 1),
     // Public root-registry calls for callers holding no lease (tests and
     // library users). Each has a `_with_activity` form that production uses.
@@ -1480,6 +1517,70 @@ const LEASE_BOUNDARIES: &[(&str, &str, usize)] = &[
     // lease on a scratch directory for tests with no store.
     ("src/kernel/testutil.rs", "detached_lease", 1),
 ];
+
+/// A `Store` made without reading its format marker: the struct written
+/// out (`Store { root }`) or `Store::handle(`, under any `use` or `type`
+/// alias, and `Self { root }` / `Self::handle(` in a file with an
+/// `impl Store` or `impl Trait for Store` block (the scan does not track
+/// which `impl` a function is in, so `Self` counts anywhere in such a
+/// file).
+fn unchecked_store_at(tokens: &[(Token, String)], i: usize, names: &Names) -> bool {
+    let mut stores = names.stores.clone();
+    if is_ident(token_at(tokens, i), "Self") {
+        let implements_store = (0..tokens.len()).any(|j| {
+            (is_ident(token_at(tokens, j), "impl") || is_ident(token_at(tokens, j), "for"))
+                && matches!(token_at(tokens, j + 1), Some(Token::Ident(name)) if names.stores.contains(name))
+                && is_punct(token_at(tokens, j + 2), '{')
+        });
+        if implements_store {
+            stores.push("Self".into());
+        }
+    }
+    path_call(tokens, i, &stores, &["handle"])
+        || (matches!(token_at(tokens, i), Some(Token::Ident(name)) if stores.contains(name))
+            && is_punct(token_at(tokens, i + 1), '{')
+            && is_ident(token_at(tokens, i + 2), "root"))
+}
+
+/// The seven functions allowed to make a `Store` without validating its
+/// format marker, with how many times. Everything else goes through `Store::open`,
+/// `Store::existing` or `Store::open_at`, which refuse a store this tog
+/// does not read. A store made here is still validated before any record
+/// is read, because every lease but `try_activity_exclusive_unchecked`
+/// checks the marker once it is held. That last part is not something this
+/// count proves: it is why the readers take a `&StoreActivity`, and why
+/// `store_children_borrow_the_callers_lease` lists who may take a lease.
+const UNCHECKED_STORES: &[(&str, &str, usize)] = &[
+    // The constructors: `open_root` and `existing` have just validated or
+    // written the marker, and `handle` is the unchecked form itself.
+    ("src/kernel/store/mod.rs", "open_root", 1),
+    ("src/kernel/store/mod.rs", "existing", 1),
+    ("src/kernel/store/mod.rs", "handle", 1),
+    // `gc --reset` empties a store tog refuses to read, and never reads a
+    // record of it.
+    ("src/commands/gc.rs", "reset", 1),
+    // A store named by an x environment's own records, which may not be the
+    // configured one: by its request record here, and by the object paths
+    // in its closure in `store_from_object_path`. `x --clean` leases either
+    // (validated) before it reads or removes anything.
+    ("src/commands/x.rs", "originating_store", 1),
+    ("src/comforter/mod.rs", "store_from_object_path", 1),
+    // Names an x environment's directory from the store's path alone, and
+    // reads nothing in the store.
+    ("src/commands/x.rs", "environment_name", 1),
+];
+
+#[test]
+fn stores_are_made_through_a_checked_constructor() {
+    assert_eq!(
+        count_sites(&[], unchecked_store_at),
+        expected_sites(UNCHECKED_STORES),
+        "a `Store` is made without validating its format marker; use \
+         `Store::open`/`existing`/`open_at` (or, for a store that is leased \
+         before any record is read, count it in UNCHECKED_STORES with the \
+         reason)"
+    );
+}
 
 #[test]
 fn store_children_borrow_the_callers_lease() {
@@ -1633,6 +1734,49 @@ fn the_scan_sees_every_spelling() {
             "acquire"
         ]
     );
+
+    let stores = "use crate::kernel::store::Store as S;\n\
+        type Mine = crate::kernel::store::Store;\n\
+        type Maybe = Option<Store>;\n\
+        impl Store {\n\
+        fn literal() -> Store { Store { root } }\n\
+        fn spaced() -> Store { store::Store {\n    root: path.into(),\n} }\n\
+        fn self_literal() -> Self { Self { root } }\n\
+        fn self_handle() -> Self { Self::handle(root) }\n\
+        }\n\
+        fn alias() { S { root }; }\n\
+        fn type_alias() { Mine { root }; Mine::handle(root); }\n\
+        fn handle() { Store::handle(root); let f = S::handle; }\n\
+        fn checked() -> io::Result<Store> { Store::open_at(root) }\n\
+        fn other() { Maybe::handle(root); Other { root }; let s = \"Store { root }\"; }\n\
+        #[cfg(test)]\nfn test_only() { Store { root }; }";
+    assert_eq!(
+        fixture_owners(stores, unchecked_store_at),
+        [
+            "literal",
+            "spaced",
+            "self_literal",
+            "self_handle",
+            "alias",
+            "type_alias",
+            "type_alias",
+            "handle",
+            "handle"
+        ]
+    );
+    // The stated limit: an alias of an alias is not followed.
+    let chained = "type A = Store;\ntype B = A;\n\
+        fn first() { A { root }; }\nfn second() { B { root }; }";
+    assert_eq!(fixture_owners(chained, unchecked_store_at), ["first"]);
+    let trait_impl = "impl From<PathBuf> for Store {\n\
+        fn from(root: PathBuf) -> Self { Self { root } }\n\
+        }";
+    assert_eq!(fixture_owners(trait_impl, unchecked_store_at), ["from"]);
+    // `Self` in a file with no `impl Store` is some other type's.
+    let elsewhere = "use crate::kernel::store::Store;\n\
+        impl Project { fn new() -> Self { Self { root } } }\n\
+        fn walk() { for store in stores { Self { root }; } }";
+    assert!(fixture_owners(elsewhere, unchecked_store_at).is_empty());
 }
 
 /// Every word that names a tailor: its id and lock ecosystem, and the

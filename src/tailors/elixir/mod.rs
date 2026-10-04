@@ -1920,26 +1920,6 @@ pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
 #[cfg(test)]
 mod tests {
 
-    /// Drift check: the legacy adapter must reconstruct exactly what this
-    /// producer supplies at commit, or a migrated record stops matching what
-    /// a re-sync publishes and every later cache hit becomes a hard error.
-    #[test]
-    fn legacy_adapter_recovers_the_beam_toolchain_artifacts() {
-        for platform in Platform::ALL {
-            let spec = pin_spec(*platform);
-            let identity = beam_identity(&spec, Path::new("/tmp/store")).unwrap();
-            let mut expected = vec![
-                format!("sha256:{}", spec.otp_sha256),
-                format!("sha256:{ELIXIR_SHA256}"),
-                format!("sha512:{HEX_SHA512}"),
-                format!("sha512:{REBAR3_SHA512}"),
-            ];
-            expected.sort();
-            expected.dedup();
-            assert_eq!(recovered_cache(identity), expected);
-        }
-    }
-
     /// The host-local tripwire admits this helper by content: the digest
     /// it holds is the digest of the text written here, so an edit to the
     /// helper is also an edit to the reviewed table.
@@ -2070,58 +2050,6 @@ mod tests {
         store_program(&host.0, "otp/bin/erl");
         let host_probe = tool::otp_probe_command(&host.0.join("otp"), &scratch);
         assert!(refused(&host_probe).is_some(), "an erl outside the store");
-    }
-
-    /// A `hex-deps` record names the BEAM object only by fingerprint. The
-    /// adapter must recompute that fingerprint from the candidate BEAM
-    /// record's own inputs — including the Darwin formula, which omits the
-    /// relocation schema.
-    #[test]
-    fn legacy_adapter_matches_the_beam_object_by_its_own_fingerprint() {
-        for platform in Platform::ALL {
-            let spec = pin_spec(*platform);
-            let identity = beam_identity(&spec, Path::new("/tmp/store")).unwrap();
-            let beam = crate::kernel::objmeta::legacy_record(identity);
-            let outer = "a".repeat(64);
-            let hex_deps = crate::kernel::types::Identity {
-                kind: "hex-deps".into(),
-                name: "deps".into(),
-                version: "1".into(),
-                inputs: std::collections::BTreeMap::from([
-                    ("schema".to_string(), "hex-deps/1".to_string()),
-                    ("beam".to_string(), beam_fingerprint_for(&spec)),
-                    (
-                        "dep:jason".to_string(),
-                        format!("jason@1.4.4:{outer}:{}:mix", "b".repeat(64)),
-                    ),
-                ]),
-            };
-            match crate::kernel::objmeta::adapt_identity_for_test(hex_deps, vec![beam.clone()]) {
-                crate::kernel::objmeta::Adaptation::Proven(deps) => {
-                    assert_eq!(
-                        deps.objects.iter().cloned().collect::<Vec<_>>(),
-                        vec![beam.id.clone()]
-                    );
-                }
-                crate::kernel::objmeta::Adaptation::Unresolved(reason) => panic!("{reason}"),
-            }
-        }
-    }
-
-    fn recovered_cache(identity: crate::kernel::types::Identity) -> Vec<String> {
-        match crate::kernel::objmeta::adapt_identity_for_test(identity, Vec::new()) {
-            crate::kernel::objmeta::Adaptation::Proven(deps) => {
-                assert!(
-                    deps.objects.is_empty(),
-                    "a pinned artifact has no object deps"
-                );
-                deps.cache
-                    .iter()
-                    .map(|digest| format!("{}:{}", digest.algo(), digest.hex()))
-                    .collect()
-            }
-            crate::kernel::objmeta::Adaptation::Unresolved(reason) => panic!("{reason}"),
-        }
     }
     use super::*;
     use std::os::unix::fs::PermissionsExt;
@@ -2874,9 +2802,7 @@ exit 0
         for sub in ["objects", "meta", "cache/sha256", "tmp", "roots", "forests"] {
             fs::create_dir_all(store_root.join(sub)).unwrap();
         }
-        let store = Store {
-            root: store_root.canonicalize().unwrap(),
-        };
+        let store = Store::for_test(store_root.canonicalize().unwrap());
         let lease = store
             .activity(crate::kernel::activity::ActivityMode::Shared)
             .unwrap();
@@ -3015,9 +2941,7 @@ exit 0
         for sub in ["objects", "meta", "tmp"] {
             fs::create_dir_all(store_root.join(sub)).unwrap();
         }
-        let store = Store {
-            root: store_root.canonicalize().unwrap(),
-        };
+        let store = Store::for_test(store_root.canonicalize().unwrap());
         let activity = store
             .activity(crate::kernel::activity::ActivityMode::Shared)
             .unwrap();

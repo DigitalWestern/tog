@@ -103,12 +103,7 @@ fn tailor_grammar_drift_panics_before_publishing() {
     // points now self-install their rows.
     tog::tailors::install_kinds();
     let temp = TempDir::new("kernel-smoke");
-    for sub in ["objects", "meta", "cache/sha256", "tmp"] {
-        fs::create_dir_all(temp.0.join(sub)).unwrap();
-    }
-    let store = Store {
-        root: temp.0.clone(),
-    };
+    let store = Store::open_at(&temp.0).unwrap();
     let activity = &store
         .activity(tog::kernel::activity::ActivityMode::Shared)
         .unwrap();

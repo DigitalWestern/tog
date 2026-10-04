@@ -186,13 +186,7 @@ fn policy_guard() -> std::sync::MutexGuard<'static, ()> {
 }
 
 fn store_at(dir: &std::path::Path) -> Store {
-    let root = dir.join("store");
-    for sub in ["objects", "meta", "cache/sha256", "tmp"] {
-        std::fs::create_dir_all(root.join(sub)).unwrap();
-    }
-    Store {
-        root: root.canonicalize().unwrap(),
-    }
+    Store::open_at(&dir.join("store")).unwrap()
 }
 
 fn make_fixture_tarball(
@@ -914,12 +908,7 @@ fn assert_signal_mid_script_stops_the_sync(signal: libc::c_int, whole_group: boo
     }
     let temp = TempDir::new("npm-interrupt");
     let store_root = temp.0.join("store");
-    for sub in ["objects", "meta", "cache/sha256", "tmp"] {
-        std::fs::create_dir_all(store_root.join(sub)).unwrap();
-    }
-    let store = Store {
-        root: store_root.canonicalize().unwrap(),
-    };
+    let store = Store::open_at(&store_root).unwrap();
     let project = temp.0.join("project");
     std::fs::create_dir_all(&project).unwrap();
     std::fs::write(

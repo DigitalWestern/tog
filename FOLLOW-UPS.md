@@ -49,13 +49,14 @@ After the proxy: the test-suite audit (#351) and then the quality review
   when `CI` is set unless `--unsigned` is passed. Pick: leave it until tog
   has an outside user. `v0.1.0` (2026-10-03) is private, so no released
   caller can be broken yet.
-- **Store-format epoch (#414).** #259 decided that the store metadata
-  migration goes at the tag, and `v0.1.0` shipped before #408 merged. So
-  a format marker ships first and the migration code goes at the next tag.
-  Open: migrate your own store once or reset it. Pick: reset.
 
 ## Open work, each its own pull request
 
+- **The action's fixture wakes the heavy suite (#426).** A change under
+  `tests/fixtures/action-demo/` runs the e2e job. Pick: move the fixture
+  out of `tests/`.
+- **Action leftovers (#427).** The first tag that carries `action.yml`, a
+  store cache between runs, and a self-test of the signed path.
 - **Leftover `rustfmt.json` from an older tog (#416).** A lone record is
   never cleaned up by `tog fmt`, and `tog gc --register` on such a project
   gives an unhelpful message. Pick: gc forgets a root whose only closure is
@@ -186,14 +187,10 @@ After the proxy: the test-suite audit (#351) and then the quality review
   - #300 heavy: the Elixir end-to-end test cannot run on ubuntu-22.04 (OTP needs glibc 2.43).
   - #302 acceptance.sh: step 13 carries its own copy of the closure signing format.
   - #307 archive: a tarball with macOS AppleDouble (`._name`) members is refused on macOS but extracted on Linux. The extraction carries `--no-mac-metadata`; the listing carries no restore flag (bsdtar documents them for other modes). On the Mac, try `/usr/bin/tar --no-mac-metadata -tf` on such a tarball: if it accepts the flag and prints the `._` members, add it to `TAR_LIST_FLAGS` and close.
-- **GC loose ends from #162.** Three small `src/kernel/store/roots.rs`
+- **GC loose ends from #162.** Two small `src/kernel/store/roots.rs`
   fixes: a case-mismatched `gc --dry-run --forget` key previews fewer
   deletions on macOS (#163); the root/2 importer calls a path inside this
-  store's own object "another store" (#164); re-importing a
-  `node-forest/2` closure adds a legacy `projection_id` projection sync
-  never published (#165).
-- **`gc --migrate-metadata` as a `fix:` line (#166).** It resolves only a
-  transient failure. Recommended: keep `fix:`.
+  store's own object "another store" (#164).
 - **Two PEP 440 version grammars (#297).** `src/kernel/toolchain/select.rs` has
   the small numeric `Version`/specifier subset the toolchain selector needs;
   `src/tailors/python/pep440.rs` has the full grammar. The toolchain lock's

@@ -294,7 +294,7 @@ impl Store {
             let body = validate_closure_envelope(&value, &path)?;
             // Explicit registration: the user named this project, so an
             // unresolvable reference is reported rather than dropped.
-            import_closure_refs(self, &project_dir, body, &mut record, ImportMode::Strict)?;
+            import_closure_refs(self, body, &mut record, ImportMode::Strict)?;
             imported_any = true;
         }
         if !imported_any {
@@ -357,7 +357,7 @@ impl Store {
                 ImportMode::DropUnresolvable,
             )?;
         }
-        import_closure_refs(self, &project_dir, body, &mut record, ImportMode::Strict)?;
+        import_closure_refs(self, body, &mut record, ImportMode::Strict)?;
         if record.objects.is_empty() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -405,12 +405,12 @@ impl Store {
         Ok(entries)
     }
 
-    /// Diagnostic enumeration for `store roots`.  Unlike `roots()`, an entry
-    /// whose name is not a root key is reported as a diagnostic instead of
-    /// being skipped; this command is intentionally not a sweep authority.
-    pub fn root_diagnostics(&self) -> io::Result<Vec<RootDiagnostic>> {
+    /// Diagnostic enumeration for `store roots`, under the caller's lease
+    /// and creating nothing. Unlike `roots()`, an entry whose name is not a
+    /// root key is reported, not skipped: this is no sweep authority.
+    pub fn root_diagnostics(&self, activity: &StoreActivity) -> io::Result<Vec<RootDiagnostic>> {
+        self.require_activity(activity, "listing the registered roots")?;
         let roots = self.root.join("roots");
-        ensure_directory_tree(&self.root, Path::new("roots"))?;
         let roots_dir = open_store_directory(&roots, "roots")?;
         let mut diagnostics = Vec::new();
         for name in read_dir_names_at(roots_dir.as_raw_fd())? {
@@ -1280,14 +1280,13 @@ pub(super) fn import_existing_project_closures(
         let value: serde_json::Value = serde_json::from_slice(&bytes)
             .map_err(|error| invalid_root_import(&path, error.to_string()))?;
         let body = validate_closure_envelope(&value, &path)?;
-        import_closure_refs(store, project.path(), body, record, mode)?;
+        import_closure_refs(store, body, record, mode)?;
     }
     Ok(())
 }
 
 pub(super) fn import_closure_refs(
     store: &Store,
-    project: &Path,
     body: &serde_json::Value,
     record: &mut RootRecord,
     mode: ImportMode,
@@ -1334,21 +1333,7 @@ pub(super) fn import_closure_refs(
         }
     }
 
-    walk(store, body, record, mode)?;
-    if matches!(
-        body["projection_schema"].as_str(),
-        Some("node-forest/1" | "node-forest/2")
-    ) {
-        if let Some(projection_id) = body["projection_id"].as_str() {
-            let key = short_project_key(project);
-            let reference = ProjectionRef::new(
-                ProjectionBase::LegacyForests,
-                vec![OsString::from(key), OsString::from(projection_id)],
-            )?;
-            record.projections.insert(reference);
-        }
-    }
-    Ok(())
+    walk(store, body, record, mode)
 }
 
 /// Apply an import mode to one reference's validation result.  Returns
@@ -1479,11 +1464,6 @@ pub(super) fn validate_object_reference(store: &Store, id: &str, path: &Path) ->
 
 pub(super) fn path_under_objects(store: &Store, path: &Path) -> bool {
     path.starts_with(store.root.join("objects"))
-}
-
-pub(super) fn short_project_key(project: &Path) -> String {
-    use sha2::{Digest, Sha256};
-    hex::encode(&Sha256::digest(project.as_os_str().as_bytes())[..16])
 }
 
 pub(super) fn base64_encode(bytes: &[u8]) -> String {

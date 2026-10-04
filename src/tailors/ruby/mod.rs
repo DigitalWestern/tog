@@ -1366,20 +1366,6 @@ pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
 #[cfg(test)]
 mod tests {
 
-    /// Drift check: the legacy adapter must reconstruct exactly what this
-    /// producer supplies at commit, or a migrated record stops matching what
-    /// a re-sync publishes and every later cache hit becomes a hard error.
-    #[test]
-    fn legacy_adapter_recovers_the_pinned_ruby_artifact() {
-        for platform in Platform::ALL {
-            let spec = pin_spec(*platform);
-            assert_eq!(
-                recovered_cache(ruby_identity(&spec)),
-                vec![format!("sha256:{}", spec.sha256)]
-            );
-        }
-    }
-
     /// The host-local tripwire admits this helper by content: the digest
     /// it holds is the digest of the text written here, so an edit to the
     /// helper is also an edit to the reviewed table.
@@ -1480,22 +1466,6 @@ mod tests {
             refused(&build_at(&host.0.join("ruby"), &gem)).is_some(),
             "a ruby outside the store"
         );
-    }
-
-    fn recovered_cache(identity: crate::kernel::types::Identity) -> Vec<String> {
-        match crate::kernel::objmeta::adapt_identity_for_test(identity, Vec::new()) {
-            crate::kernel::objmeta::Adaptation::Proven(deps) => {
-                assert!(
-                    deps.objects.is_empty(),
-                    "a pinned artifact has no object deps"
-                );
-                deps.cache
-                    .iter()
-                    .map(|digest| format!("{}:{}", digest.algo(), digest.hex()))
-                    .collect()
-            }
-            crate::kernel::objmeta::Adaptation::Unresolved(reason) => panic!("{reason}"),
-        }
     }
     use super::*;
     use crate::kernel::testutil::TempDir;
@@ -1859,9 +1829,7 @@ mod tests {
         for sub in ["objects", "meta", "cache/sha256", "tmp", "roots"] {
             fs::create_dir_all(store_root.join(sub)).unwrap();
         }
-        let store = Store {
-            root: store_root.canonicalize().unwrap(),
-        };
+        let store = Store::for_test(store_root.canonicalize().unwrap());
         let lease = store
             .activity(crate::kernel::activity::ActivityMode::Shared)
             .unwrap();
@@ -1944,9 +1912,7 @@ mod tests {
         for sub in ["objects", "meta", "tmp"] {
             fs::create_dir_all(root.join(sub)).unwrap();
         }
-        let store = Store {
-            root: root.canonicalize().unwrap(),
-        };
+        let store = Store::for_test(root.canonicalize().unwrap());
         let activity = store
             .activity(crate::kernel::activity::ActivityMode::Shared)
             .unwrap();

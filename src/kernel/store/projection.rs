@@ -7,8 +7,6 @@ use super::*;
 pub enum ProjectionBase {
     Forests,
     Backups,
-    LegacyForests,
-    LegacyBackups,
 }
 
 impl ProjectionBase {
@@ -16,8 +14,6 @@ impl ProjectionBase {
         match self {
             Self::Forests => "forests",
             Self::Backups => "backups",
-            Self::LegacyForests => "legacy-forests",
-            Self::LegacyBackups => "legacy-backups",
         }
     }
 
@@ -25,14 +21,11 @@ impl ProjectionBase {
         match self {
             Self::Forests => 0,
             Self::Backups => 1,
-            Self::LegacyForests => 2,
-            Self::LegacyBackups => 3,
         }
     }
 }
 
-/// A typed, relative projection reference.  Legacy variants are retention
-/// only and are never passed to an automatic deletion path.
+/// A typed, relative projection reference.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectionRef {
     pub base: ProjectionBase,
@@ -72,12 +65,6 @@ impl ProjectionRef {
         let base = match self.base {
             ProjectionBase::Forests => store.root.join("forests"),
             ProjectionBase::Backups => store.root.join("backups"),
-            ProjectionBase::LegacyForests => {
-                store.root.parent().unwrap_or(&store.root).join("forests")
-            }
-            ProjectionBase::LegacyBackups => {
-                store.root.parent().unwrap_or(&store.root).join("backups")
-            }
         };
         self.components
             .iter()
@@ -91,16 +78,9 @@ impl Store {
         base: ProjectionBase,
         path: &Path,
     ) -> io::Result<ProjectionRef> {
-        if !matches!(base, ProjectionBase::Forests | ProjectionBase::Backups) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "new closure references may only name store-owned projections",
-            ));
-        }
         let prefix = match base {
             ProjectionBase::Forests => self.root.join("forests"),
             ProjectionBase::Backups => self.root.join("backups"),
-            _ => unreachable!(),
         };
         let relative = path.strip_prefix(&prefix).map_err(|_| {
             io::Error::new(
@@ -148,8 +128,6 @@ pub(super) fn projection_from_wire(wire: ProjectionWire, label: &str) -> io::Res
     let base = match wire.base.as_str() {
         "forests" => ProjectionBase::Forests,
         "backups" => ProjectionBase::Backups,
-        "legacy-forests" => ProjectionBase::LegacyForests,
-        "legacy-backups" => ProjectionBase::LegacyBackups,
         other => {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -274,14 +252,6 @@ pub(super) fn projection_reference_for_path(
     let bases = [
         (ProjectionBase::Forests, store.root.join("forests")),
         (ProjectionBase::Backups, store.root.join("backups")),
-        (
-            ProjectionBase::LegacyForests,
-            store.root.parent().unwrap_or(&store.root).join("forests"),
-        ),
-        (
-            ProjectionBase::LegacyBackups,
-            store.root.parent().unwrap_or(&store.root).join("backups"),
-        ),
     ];
     for (base, prefix) in bases {
         let Ok(relative) = path.strip_prefix(&prefix) else {

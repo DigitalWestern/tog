@@ -1792,9 +1792,7 @@ mod tests {
         for sub in ["objects", "meta", "tmp", "records"] {
             fs::create_dir_all(root.join(sub)).unwrap();
         }
-        let store = Store {
-            root: root.canonicalize().unwrap(),
-        };
+        let store = Store::for_test(root.canonicalize().unwrap());
         let activity = store
             .activity(crate::kernel::activity::ActivityMode::Shared)
             .unwrap();

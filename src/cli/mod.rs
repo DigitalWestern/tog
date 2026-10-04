@@ -240,8 +240,9 @@ pub struct GcArgs {
     pub dry_run: bool,
     pub keep_days: Option<u64>,
     pub project: bool,
-    pub collect_legacy: bool,
-    pub migrate_metadata: bool,
+    /// Empty the store and start it again in the current format. The way
+    /// out of a store this tog refuses to open; see `kernel::gc::reset`.
+    pub reset: bool,
     pub register: Vec<PathBuf>,
     pub forget: Vec<String>,
     /// Store object ids to remove outright, with their records. The recovery

@@ -30,13 +30,7 @@ use common::node_stub::{sandbox_or_skip, seed_gyp_python, stub_node_selection, t
 use common::TempDir;
 
 fn store_at(dir: &Path) -> Store {
-    let root = dir.join("store");
-    for sub in ["objects", "meta", "cache/sha256", "tmp"] {
-        std::fs::create_dir_all(root.join(sub)).unwrap();
-    }
-    Store {
-        root: root.canonicalize().unwrap(),
-    }
+    Store::open_at(&dir.join("store")).unwrap()
 }
 
 /// Minimal standard base64 encoder (test-only; the crate has no base64 dep).

@@ -242,21 +242,10 @@ pub fn dispatch(command: cli::Command, sync: cli::SyncFlags) -> io::Result<i32> 
     {
         return toolchain::run(platform, update, no_sync).map(|_| 0);
     }
-    let needs_maintenance = matches!(
-        &command,
-        Plan { .. }
-            | Build { .. }
-            | Run { .. }
-            | Env { .. }
-            | Add { .. }
-            | Remove { .. }
-            | Update { .. }
-            | X { .. }
-    );
     if writes_closures(&command) {
         crate::comforter::init_signing()?;
     }
-    let ctx = Context::open(platform, needs_maintenance)?;
+    let ctx = Context::open(platform)?;
     match command {
         // `json` is not read here: plan's output is JSON either way, and
         // the flag only tells `main` which error renderer to use.

@@ -810,7 +810,7 @@ mod tests {
             fs::create_dir_all(dir.0.join(sub)).unwrap();
         }
         let root = dir.0.clone();
-        (dir, Store { root })
+        (dir, Store::for_test(root))
     }
 
     /// A byte-reproducible sdist (see `deterministic_tar_gz`), so its
@@ -909,9 +909,7 @@ mod tests {
     #[test]
     fn environment_identity_goldens_and_dropped_sole_wheel() {
         crate::tailors::install_kinds();
-        let store = Store {
-            root: PathBuf::from("/fixture/tog-store"),
-        };
+        let store = Store::for_test(PathBuf::from("/fixture/tog-store"));
         let lease = crate::kernel::testutil::detached_lease();
         let activity = &lease.1;
         let empty_plan = Plan {
@@ -1011,9 +1009,7 @@ mod tests {
     #[test]
     fn a_producer_that_skips_a_package_input_is_refused() {
         crate::tailors::install_kinds();
-        let store = Store {
-            root: PathBuf::from("/fixture/tog-store"),
-        };
+        let store = Store::for_test(PathBuf::from("/fixture/tog-store"));
         let lease = crate::kernel::testutil::detached_lease();
         let activity = &lease.1;
         let empty_plan = Plan {

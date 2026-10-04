@@ -1274,9 +1274,7 @@ mod tests {
             fs::write(project.join(receipt_path("npm")), OLD_RECEIPT).unwrap();
         }
         Fixture {
-            store: Store {
-                root: root.canonicalize().unwrap(),
-            },
+            store: Store::for_test(root.canonicalize().unwrap()),
             project: project.canonicalize().unwrap(),
             _temp: temp,
         }

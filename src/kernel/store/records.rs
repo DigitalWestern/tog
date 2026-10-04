@@ -197,7 +197,7 @@ mod tests {
             fs::create_dir_all(root.join(sub)).unwrap();
         }
         let root = root.canonicalize().unwrap();
-        (Store { root }, dir)
+        (Store::for_test(root), dir)
     }
 
     #[test]

@@ -14,7 +14,7 @@ use sha2::{Digest, Sha256};
 
 mod common;
 
-use common::{command, text, tog, tog_at, tog_env, tog_offline, TempDir};
+use common::{command, fresh_store, text, tog, tog_at, tog_env, tog_offline, TempDir};
 
 /// The signing key under `home`, generated on first use and trusted by
 /// `home`'s machine policy (`~/.tog/policy.toml`, created with an empty
@@ -556,7 +556,7 @@ fn json_commands_report_failure_as_json_on_stderr() {
 fn gc_narrates_on_stderr_and_quiet_silences_it() {
     let home = TempDir::boundary("cli-gc-stream-home");
     let store_root = home.0.join("store");
-    std::fs::create_dir_all(&store_root).unwrap();
+    fresh_store(&store_root);
     let canonical_store = store_root.canonicalize().unwrap();
     let project = home.0.join("project");
     std::fs::create_dir_all(project.join(".tog/closures")).unwrap();
@@ -1393,78 +1393,16 @@ fn x_needs_a_registry_outside_a_project() {
     assert_eq!(out.status.code(), Some(2));
 }
 
-/// A pre-object-meta/2 record is upgraded by the automatic maintenance any
-/// writable command runs at dispatch — not only by explicit
-/// `gc --migrate-metadata`. Removing the automatic maintenance calls from
-/// main must fail this test, because the record would stay legacy and the
-/// next sweep would refuse it.
-#[test]
-fn command_dispatch_runs_automatic_metadata_maintenance() {
-    let home = TempDir::boundary("cli-x-maintenance");
-    let store_root = home.0.join("store");
-    let identity = tog::kernel::types::Identity {
-        kind: "cpython".into(),
-        name: "cpython".into(),
-        version: "3.11.9".into(),
-        inputs: [
-            ("artifact_sha256".to_string(), "1".repeat(64)),
-            (
-                "platform".to_string(),
-                "x86_64-unknown-linux-gnu".to_string(),
-            ),
-        ]
-        .into_iter()
-        .collect(),
-    };
-    let id = identity.object_id();
-    let object = store_root.join("objects").join(&id);
-    std::fs::create_dir_all(&object).unwrap();
-    std::fs::write(object.join("payload"), "cpython").unwrap();
-    let mut perms = std::fs::metadata(&object).unwrap().permissions();
-    perms.set_mode(perms.mode() & !0o222);
-    std::fs::set_permissions(&object, perms).unwrap();
-    std::fs::create_dir_all(store_root.join("meta")).unwrap();
-    let meta_path = store_root.join("meta").join(format!("{id}.json"));
-    std::fs::write(
-        &meta_path,
-        serde_json::to_vec_pretty(&serde_json::json!({
-            "id": id,
-            "identity": identity,
-            "created": 1,
-            "exceptions": [],
-            "refs": [],
-        }))
-        .unwrap(),
-    )
-    .unwrap();
-
-    // An ordinary writable command in the maintenance set: it fails offline
-    // (no x registry), but its dispatch already ran maintenance over the
-    // store.
-    let out = tog(&home.0, &home.0, &["x", "ruff", "--version"]);
-    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
-
-    let record: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&meta_path).unwrap()).unwrap();
-    assert_eq!(
-        record["evidence"], "adapted:cpython@1",
-        "an ordinary writable command did not run automatic metadata maintenance: {}",
-        record
-    );
-    assert!(record["schema"] == "object-meta/2", "{record}");
-}
-
 /// Issue #101. A record whose identity no longer hashes to the id it is
-/// filed under cannot be read, so the fail-closed sweep refuses — and used
-/// to reprint that refusal on every single command with no way out. The
-/// warning is now news rather than noise, and `--drop-object` is the exit.
+/// filed under cannot be read, so the fail-closed sweep refuses. The refusal
+/// names the record and `--drop-object`, which is the exit.
 #[test]
-fn an_unreadable_record_warns_once_and_is_cleared_by_drop_object() {
+fn an_unreadable_record_stops_the_sweep_and_is_cleared_by_drop_object() {
     let home = TempDir::boundary("cli-wedged-record");
     let store_root = home.0.join("store");
 
     // A project root, so the sweep has an initialized registry to work from.
-    std::fs::create_dir_all(&store_root).unwrap();
+    fresh_store(&store_root);
     let canonical_store = store_root.canonicalize().unwrap();
     let project = home.0.join("project");
     std::fs::create_dir_all(project.join(".tog/closures")).unwrap();
@@ -1515,39 +1453,40 @@ fn an_unreadable_record_warns_once_and_is_cleared_by_drop_object() {
     std::fs::write(
         &meta_path,
         serde_json::to_vec_pretty(&serde_json::json!({
+            "schema": "object-meta/2",
             "id": id,
             "identity": identity,
             "created": 1,
             "exceptions": [],
-            "refs": [],
+            "dependencies": [],
+            "cache_digests": [],
+            "evidence": "explicit",
         }))
         .unwrap(),
     )
     .unwrap();
 
-    // `x` fails offline, but its dispatch runs maintenance over the store.
-    let first = tog(&home.0, &home.0, &["x", "ruff", "--version"]);
-    let first = text(&first.stderr);
+    // A command that does not sweep is not held up by the record: `x`
+    // fails offline for its own reason and says nothing about it.
+    let other = tog(&home.0, &home.0, &["x", "ruff", "--version"]);
     assert!(
-        first.contains("metadata maintenance deferred")
-            && first.contains(&format!("--drop-object {id}")),
-        "the deferral was not announced: {first}"
-    );
-    let second = tog(&home.0, &home.0, &["x", "ruff", "--version"]);
-    let second = text(&second.stderr);
-    assert!(
-        !second.contains("metadata maintenance deferred"),
-        "the same deferral was repeated: {second}"
+        !text(&other.stderr).contains(&id),
+        "{}",
+        text(&other.stderr)
     );
 
-    // The command every refusal names must print the list, not refuse on it.
-    let out = tog(&home.0, &home.0, &["gc", "--migrate-metadata"]);
-    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
-    let listed = format!("{}{}", text(&out.stdout), text(&out.stderr));
-    assert!(
-        listed.contains(&format!("--drop-object {id}")),
-        "the recovery command is not named: {listed}"
-    );
+    // The sweep refuses, deletes nothing, and names the way out.
+    for args in [&["gc"][..], &["gc", "--dry-run"]] {
+        let out = tog(&home.0, &home.0, args);
+        assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+        let stderr = text(&out.stderr);
+        assert!(stderr.contains("refusing to sweep"), "{stderr}");
+        assert!(
+            stderr.contains(&format!("--drop-object {id}")),
+            "the recovery command is not named: {stderr}"
+        );
+        assert!(object.is_dir(), "{stderr}");
+    }
 
     let out = tog(&home.0, &home.0, &["gc", "--drop-object", &id]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
@@ -1556,6 +1495,453 @@ fn an_unreadable_record_warns_once_and_is_cleared_by_drop_object() {
 
     let out = tog(&home.0, &home.0, &["gc", "--dry-run"]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+}
+
+/// A store as a tog from before the format marker left it: namespaces, an
+/// object with the record shape of that time, a pathname-only root, a
+/// download, a staging leftover and a backup, and no marker. Returns the
+/// canonical store root and the object's path.
+fn pre_epoch_store(home: &Path) -> (PathBuf, PathBuf) {
+    let store = home.join("store");
+    for sub in ["objects", "meta", "cache/sha256", "tmp/stage-old", "roots"] {
+        std::fs::create_dir_all(store.join(sub)).unwrap();
+    }
+    std::fs::create_dir_all(store.join("backups/venv-old")).unwrap();
+    let store = store.canonicalize().unwrap();
+    let object = publish_certified_object(&store, "pre-epoch-env");
+    let id = object.file_name().unwrap().to_str().unwrap().to_string();
+    let record = store.join("meta").join(format!("{id}.json"));
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&record).unwrap()).unwrap();
+    let fields = value.as_object_mut().unwrap();
+    for key in ["schema", "dependencies", "cache_digests", "evidence"] {
+        fields.remove(key);
+    }
+    fields.insert("refs".into(), serde_json::json!([]));
+    std::fs::write(&record, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+    std::fs::write(
+        store.join("roots").join("a".repeat(40)),
+        format!("{}\n", home.join("project").display()),
+    )
+    .unwrap();
+    std::fs::write(store.join("cache/sha256").join("c".repeat(64)), b"download").unwrap();
+    std::fs::write(store.join("backups/venv-old/kept"), b"mine").unwrap();
+    (store, object)
+}
+
+/// The first command that opens a store creates it with the format marker.
+#[test]
+fn a_new_store_is_created_with_the_format_marker() {
+    let home = TempDir::boundary("cli-format-new");
+    let store = home.0.join("store");
+    assert!(!store.exists());
+    let out = tog(&home.0, &home.0, &["store", "path"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(text(&out.stderr).is_empty(), "{}", text(&out.stderr));
+    assert_eq!(
+        std::fs::read_to_string(store.join("format")).unwrap(),
+        "tog-store 1\n"
+    );
+    assert!(store.join("objects").is_dir());
+    // And it opens again, marker unchanged.
+    let out = tog(&home.0, &home.0, &["store", "roots"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(
+        std::fs::read_to_string(store.join("format")).unwrap(),
+        "tog-store 1\n"
+    );
+}
+
+/// A store with no marker is refused by every command that would read it,
+/// with the fix on its own line, and is left exactly as it was. `store path` and
+/// `doctor` still answer, and help and version never open a store.
+#[test]
+fn a_store_from_before_the_marker_is_refused_and_the_fix_is_named() {
+    let home = TempDir::boundary("cli-format-pre-epoch");
+    let (store, object) = pre_epoch_store(&home.0);
+
+    for args in [
+        &["gc"][..],
+        &["gc", "--dry-run"],
+        &["gc", "--keep-days", "0"],
+        &["gc", "--forget", &"a".repeat(40)],
+        &["store", "roots"],
+        &["ls"],
+        // The fix line is part of the failure: `--quiet` keeps it.
+        &["-q", "ls"],
+        &["x", "ruff", "--version"],
+    ] {
+        let out = tog(&home.0, &home.0, args);
+        let stderr = text(&out.stderr);
+        assert_eq!(out.status.code(), Some(1), "{args:?}: {stderr}");
+        assert!(
+            stderr.contains("has no format marker"),
+            "{args:?}: {stderr}"
+        );
+        // The command is the fix line, not a phrase inside the sentence.
+        assert!(
+            stderr.ends_with("tog:     fix: tog gc --reset\n"),
+            "{args:?}: {stderr}"
+        );
+        assert_eq!(
+            stderr.matches("gc --reset").count(),
+            1,
+            "{args:?}: {stderr}"
+        );
+        assert!(
+            stderr.contains("move the directory aside"),
+            "{args:?}: {stderr}"
+        );
+        assert!(
+            object.join("payload").is_file(),
+            "{args:?} removed an object"
+        );
+        assert!(!store.join("format").exists(), "{args:?} wrote a marker");
+        assert!(
+            store.join("roots").join("a".repeat(40)).is_file(),
+            "{args:?} removed a root"
+        );
+    }
+
+    let out = tog(&home.0, &home.0, &["store", "path"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(text(&out.stdout).trim_end(), store.to_str().unwrap());
+    let stderr = text(&out.stderr);
+    assert!(
+        stderr.starts_with("tog: warning: the store at "),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("tog:     fix: tog gc --reset\n"),
+        "{stderr}"
+    );
+
+    let out = tog(&home.0, &home.0, &["doctor"]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    let stdout = text(&out.stdout);
+    let row = stdout
+        .lines()
+        .find(|line| line.contains(" store "))
+        .unwrap_or_else(|| panic!("no store row: {stdout}"));
+    assert!(row.starts_with("fail"), "{row}");
+    assert!(row.contains("has no format marker"), "{row}");
+    assert!(row.contains("run 'tog gc --reset'"), "{row}");
+
+    // A command asked for JSON fails in JSON, the fix a key of its own.
+    let out = tog(&home.0, &home.0, &["ls", "--json"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(text(&out.stdout).is_empty(), "{}", text(&out.stdout));
+    let failure: serde_json::Value = serde_json::from_slice(&out.stderr)
+        .unwrap_or_else(|error| panic!("{error}: {}", text(&out.stderr)));
+    assert_eq!(failure["fix"], "tog gc --reset");
+    let error = failure["error"].as_str().unwrap();
+    assert!(error.contains("has no format marker"), "{error}");
+    assert!(!error.contains("--reset"), "{error}");
+
+    for args in [&["--help"][..], &["version"], &["gc", "--help"]] {
+        let out = tog(&home.0, &home.0, args);
+        assert_eq!(out.status.code(), Some(0), "{args:?}");
+        assert!(text(&out.stderr).is_empty(), "{args:?}");
+    }
+    assert!(!store.join("format").exists());
+}
+
+/// A marker this tog does not know is refused too, and never rewritten: a
+/// higher number says a newer tog wrote the store, anything else says the
+/// marker is damaged.
+#[test]
+fn an_unknown_or_newer_format_marker_is_refused() {
+    let home = TempDir::boundary("cli-format-unknown");
+    let store = home.0.join("store");
+    fresh_store(&store);
+    let store = store.canonicalize().unwrap();
+    let object = publish_certified_object(&store, "newer-env");
+
+    for (marker, expected, fix) in [
+        ("tog-store 2\n", "a newer tog wrote it", "tog update --self"),
+        (
+            "tog-store one\n",
+            "a format marker this tog does not know",
+            "tog gc --reset",
+        ),
+        (
+            "",
+            "a format marker this tog does not know",
+            "tog gc --reset",
+        ),
+        (
+            "tog-store 1\nextra\n",
+            "a format marker this tog does not know",
+            "tog gc --reset",
+        ),
+    ] {
+        std::fs::write(store.join("format"), marker).unwrap();
+        for args in [&["gc", "--dry-run"][..], &["store", "roots"]] {
+            let out = tog(&home.0, &home.0, args);
+            let stderr = text(&out.stderr);
+            assert_eq!(out.status.code(), Some(1), "{marker:?} {args:?}: {stderr}");
+            assert!(stderr.contains(expected), "{marker:?} {args:?}: {stderr}");
+            assert!(
+                stderr.ends_with(&format!("tog:     fix: {fix}\n")),
+                "{marker:?} {args:?}: {stderr}"
+            );
+        }
+        let out = tog(&home.0, &home.0, &["store", "path"]);
+        assert_eq!(out.status.code(), Some(0), "{marker:?}");
+        assert!(
+            text(&out.stderr).contains(&format!("tog:     fix: {fix}\n")),
+            "{marker:?}: {}",
+            text(&out.stderr)
+        );
+        assert_eq!(
+            std::fs::read_to_string(store.join("format")).unwrap(),
+            marker,
+            "the marker was rewritten"
+        );
+        assert!(object.join("payload").is_file(), "{marker:?}");
+    }
+}
+
+/// A marker that exists and cannot be read is refused like an unknown one,
+/// and takes no recovery verb with it: `store path` still prints the path
+/// with the warning, `doctor` reports a failing store row and `gc --reset`
+/// still empties the store.
+#[test]
+fn an_unreadable_format_marker_leaves_every_way_out_working() {
+    let home = TempDir::boundary("cli-format-unreadable");
+    let store = home.0.join("store");
+    fresh_store(&store);
+    let store = store.canonicalize().unwrap();
+    let object = publish_certified_object(&store, "unreadable-env");
+    let marker = store.join("format");
+    std::fs::set_permissions(&marker, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::read(&marker).is_ok() {
+        // Root reads a file of any mode: there is nothing to refuse.
+        return;
+    }
+
+    for args in [&["gc", "--dry-run"][..], &["store", "roots"], &["ls"]] {
+        let out = tog(&home.0, &home.0, args);
+        let stderr = text(&out.stderr);
+        assert_eq!(out.status.code(), Some(1), "{args:?}: {stderr}");
+        assert!(
+            stderr.contains("a format marker this tog cannot read"),
+            "{args:?}: {stderr}"
+        );
+        assert!(
+            stderr.ends_with("tog:     fix: tog gc --reset\n"),
+            "{args:?}: {stderr}"
+        );
+        assert!(object.join("payload").is_file(), "{args:?}");
+    }
+
+    let out = tog(&home.0, &home.0, &["store", "path"]);
+    let stderr = text(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{stderr}");
+    assert_eq!(text(&out.stdout).trim_end(), store.to_str().unwrap());
+    assert!(
+        stderr.starts_with("tog: warning: the store at "),
+        "{stderr}"
+    );
+    assert!(stderr.contains("cannot read"), "{stderr}");
+    assert!(
+        stderr.contains("tog:     fix: tog gc --reset\n"),
+        "{stderr}"
+    );
+
+    let out = tog(&home.0, &home.0, &["doctor"]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    let stdout = text(&out.stdout);
+    let row = stdout
+        .lines()
+        .find(|line| line.contains(" store "))
+        .unwrap_or_else(|| panic!("no store row: {stdout}"));
+    assert!(row.starts_with("fail"), "{row}");
+    assert!(row.contains("cannot read"), "{row}");
+    assert!(row.contains("run 'tog gc --reset'"), "{row}");
+
+    let out = tog(&home.0, &home.0, &["gc", "--reset", "--dry-run"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(text(&out.stderr).contains("would remove"));
+    assert!(object.join("payload").is_file());
+
+    let out = tog(&home.0, &home.0, &["gc", "--reset"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(!object.exists(), "reset kept an object");
+    assert_eq!(std::fs::read_to_string(&marker).unwrap(), "tog-store 1\n");
+    let out = tog(&home.0, &home.0, &["store", "roots"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+}
+
+/// `gc --reset --dry-run` on a store tog refuses: it lists what a reset
+/// would remove and changes nothing, so the store is still refused after.
+#[test]
+fn gc_reset_dry_run_lists_what_it_would_remove_and_writes_nothing() {
+    let home = TempDir::boundary("cli-reset-dry-run");
+    let (store, object) = pre_epoch_store(&home.0);
+
+    let out = tog(&home.0, &home.0, &["gc", "--reset", "--dry-run"]);
+    let stderr = text(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{stderr}");
+    assert!(text(&out.stdout).is_empty(), "{}", text(&out.stdout));
+    for name in ["objects", "meta", "roots"] {
+        assert!(
+            stderr.contains(&format!("tog: would remove {}", store.join(name).display())),
+            "{name}: {stderr}"
+        );
+    }
+    assert!(stderr.contains("would remove 1 staging entry"), "{stderr}");
+    assert!(
+        !stderr.contains(&store.join("cache").display().to_string()),
+        "{stderr}"
+    );
+    assert!(
+        !stderr.contains(&store.join("backups").display().to_string()),
+        "{stderr}"
+    );
+    assert!(stderr.contains("would free"), "{stderr}");
+
+    assert!(
+        object.join("payload").is_file(),
+        "a dry run removed an object"
+    );
+    assert!(store.join("tmp/stage-old").is_dir());
+    assert!(store.join("roots").join("a".repeat(40)).is_file());
+    assert!(!store.join("format").exists(), "a dry run wrote the marker");
+    let out = tog(&home.0, &home.0, &["gc", "--dry-run"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(text(&out.stderr).contains("has no format marker"));
+}
+
+/// `gc --reset` takes no other option: a reset that also swept, registered
+/// or forgot would be two commands' worth of deletion under one name.
+#[test]
+fn gc_reset_refuses_every_other_gc_option() {
+    let home = TempDir::boundary("cli-reset-alone");
+    let (store, object) = pre_epoch_store(&home.0);
+    for args in [
+        &["gc", "--reset", "--keep-days", "0"][..],
+        &["gc", "--reset", "--project"],
+        &["gc", "--reset", "--register", "."],
+        &["gc", "--reset", "--forget", &"a".repeat(40)],
+        &[
+            "gc",
+            "--reset",
+            "--drop-object",
+            &format!("{}-x-1", "a".repeat(40)),
+        ],
+    ] {
+        let out = tog(&home.0, &home.0, args);
+        let stderr = text(&out.stderr);
+        assert_eq!(out.status.code(), Some(1), "{args:?}: {stderr}");
+        assert!(
+            stderr.contains("--reset cannot be combined with other gc options"),
+            "{args:?}: {stderr}"
+        );
+        assert!(object.join("payload").is_file(), "{args:?}");
+        assert!(!store.join("format").exists(), "{args:?}");
+    }
+}
+
+/// The way out, end to end: `gc --reset` empties a store tog refused, keeps
+/// the downloads and the backups, and leaves a store that works: it opens,
+/// takes a new object and a root, sweeps, and `doctor` passes its row.
+#[test]
+fn gc_reset_empties_a_refused_store_and_normal_use_resumes() {
+    let home = TempDir::boundary("cli-reset");
+    let (store, object) = pre_epoch_store(&home.0);
+    let download = store.join("cache/sha256").join("c".repeat(64));
+
+    let out = tog(&home.0, &home.0, &["gc", "--reset"]);
+    let stderr = text(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{stderr}");
+    assert!(
+        stderr.contains(&format!("tog: removed {}", store.join("objects").display())),
+        "{stderr}"
+    );
+    assert!(stderr.contains("kept the download cache"), "{stderr}");
+    assert!(stderr.contains("run 'tog' in each project"), "{stderr}");
+
+    assert_eq!(
+        std::fs::read_to_string(store.join("format")).unwrap(),
+        "tog-store 1\n"
+    );
+    assert!(!object.exists(), "the reset kept an object");
+    for name in ["objects", "meta", "roots"] {
+        assert_eq!(
+            std::fs::read_dir(store.join(name)).unwrap().count(),
+            0,
+            "{name} is not empty"
+        );
+    }
+    assert!(!store.join("tmp/stage-old").exists());
+    assert_eq!(std::fs::read(&download).unwrap(), b"download");
+    assert_eq!(
+        std::fs::read(store.join("backups/venv-old/kept")).unwrap(),
+        b"mine"
+    );
+
+    // Normal use. The store opens with nothing to say.
+    let out = tog(&home.0, &home.0, &["store", "path"]);
+    assert_eq!(out.status.code(), Some(0));
+    assert!(text(&out.stderr).is_empty(), "{}", text(&out.stderr));
+    let out = tog(&home.0, &home.0, &["store", "roots"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(text(&out.stdout).is_empty(), "{}", text(&out.stdout));
+
+    // A project publishes an object and registers its root, as a sync does.
+    let project = home.0.join("project");
+    std::fs::create_dir_all(project.join(".tog/closures")).unwrap();
+    let env_object = publish_certified_object(&store, "after-reset-env");
+    std::fs::write(
+        project.join(".tog/closures/python.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema": "closure/1",
+            "ecosystem": "python",
+            "body": {"env_object": env_object.display().to_string()},
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let out = tog(
+        &home.0,
+        &home.0,
+        &[
+            "gc",
+            "--register",
+            project.to_str().unwrap(),
+            "--keep-days",
+            "0",
+        ],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(
+        env_object.join("payload").is_file(),
+        "the sweep took a rooted object"
+    );
+    // The kept download is an ordinary unreferenced artifact again: the
+    // sweep ages it out like any other, it is not pinned by the reset.
+    let out = tog(&home.0, &home.0, &["gc", "--dry-run"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(registered_root_keys(&home.0, &home.0).len(), 1);
+
+    let out = tog(&home.0, &home.0, &["doctor"]);
+    let stdout = text(&out.stdout);
+    let row = stdout
+        .lines()
+        .find(|line| line.contains(" store "))
+        .unwrap_or_else(|| panic!("no store row: {stdout}"));
+    assert!(row.starts_with("ok"), "{row}");
+
+    // A second reset on a healthy store is the same operation.
+    let out = tog(&home.0, &home.0, &["gc", "--reset"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(!env_object.exists());
+    assert_eq!(std::fs::read(&download).ok().is_some(), download.exists());
+    assert_eq!(
+        std::fs::read_to_string(store.join("format")).unwrap(),
+        "tog-store 1\n"
+    );
 }
 
 #[test]
@@ -1675,7 +2061,7 @@ fn x_clean_refuses_a_symlinked_x_directory_or_a_relative_home() {
 fn x_clean_removes_a_root_without_a_request_record_only_when_unfiltered() {
     let home = TempDir::boundary("cli-x-clean-unrecorded-home");
     let project = TempDir::boundary("cli-x-clean-unrecorded-project");
-    std::fs::create_dir_all(home.0.join("store")).unwrap();
+    fresh_store(&home.0.join("store"));
     let store = home.0.join("store").canonicalize().unwrap();
     let object = publish_certified_object(&store, "unrecorded-env");
     let npm_root = home.0.join(".tog/x/npm-prettier-0123456789abcdef");
@@ -1814,6 +2200,7 @@ fn cached_x_root_with_exception(home: &Path) -> PathBuf {
     // canonicalized root, so the fixture has to canonicalize too: on macOS the
     // temp dir sits under /var, a symlink to /private/var, and an
     // uncanonicalized path here compares unequal to `store.object_path`.
+    fresh_store(&home.join("store"));
     std::fs::create_dir_all(home.join("store/objects/test-env/bin")).unwrap();
     let store = home.join("store").canonicalize().unwrap();
     let object = store.join("objects/test-env");
@@ -2007,7 +2394,7 @@ fn registered_x_environment(home: &Path, store_root: &Path) -> (PathBuf, String)
     // Same reason as `cached_x_root_with_exception`: tog records object
     // paths under the store's canonicalized root, so the fixture must too
     // (on macOS the temp dir is under /var, a symlink to /private/var).
-    std::fs::create_dir_all(store_root).unwrap();
+    fresh_store(store_root);
     let store_root = store_root.canonicalize().unwrap();
     let store_root = store_root.as_path();
     let root = home.join(".tog/x/py-ruff-test");
@@ -2197,6 +2584,496 @@ fn failed_x_cleanup_retains_the_root_record() {
         registered_root_keys(&home.0, &home.0).contains(&key),
         "failed cleanup gave up the root record"
     );
+}
+
+/// `x --clean` finds an environment's store from the environment's own
+/// records: its request record, or with none, the object paths in its
+/// closure. A store found either way that this tog does not read (no
+/// format marker, or one it does not know) is not acted on: the environment
+/// is skipped, and it and the store's record of it stay.
+#[test]
+fn x_clean_skips_an_environment_whose_store_this_tog_does_not_read() {
+    for (case, with_request_record, marker) in [
+        ("record-unmarked", true, None),
+        ("record-unknown", true, Some("tog-store one\n")),
+        ("closure-unmarked", false, None),
+        ("closure-unknown", false, Some("tog-store one\n")),
+    ] {
+        let home = TempDir::boundary(&format!("cli-x-clean-refused-{case}"));
+        let store_a = home.0.join("store");
+        let store_b = home.0.join("store-b");
+        let (root, key) = registered_x_environment(&home.0, &store_a);
+        let out = tog(
+            &home.0,
+            &home.0,
+            &["gc", "--register", root.to_str().unwrap()],
+        );
+        assert_eq!(out.status.code(), Some(0), "{case}: {}", text(&out.stderr));
+        let record = store_a.join("roots").join(&key);
+        assert!(record.is_file(), "{case}: the fixture was not registered");
+        if !with_request_record {
+            std::fs::remove_file(root.join(".tog/x.json")).unwrap();
+        }
+        match marker {
+            Some(line) => std::fs::write(store_a.join("format"), line).unwrap(),
+            None => std::fs::remove_file(store_a.join("format")).unwrap(),
+        }
+        let untouched = |when: &str, out: &std::process::Output| {
+            assert!(
+                root.join(".tog/closures/python.json").is_file(),
+                "{case} {when}: the environment was removed: {}",
+                text(&out.stdout)
+            );
+            assert!(
+                record.is_file(),
+                "{case} {when}: the root record was dropped"
+            );
+            assert_eq!(
+                std::fs::read(store_a.join("format")).ok(),
+                marker.map(|line| line.as_bytes().to_vec()),
+                "{case} {when}: the marker changed"
+            );
+        };
+
+        // From another store: the refused one is the environment's, so the
+        // environment is skipped and the run is not a failure.
+        let out = tog_at(&home.0, &home.0, &store_b, &["x", "--clean"]);
+        let stdout = text(&out.stdout);
+        assert_eq!(out.status.code(), Some(0), "{case}: {}", text(&out.stderr));
+        assert!(
+            stdout.contains("its originating store is not one this tog reads"),
+            "{case}: {stdout}"
+        );
+        // The fix is for the environment's store, not the selected one: a
+        // bare `tog gc --reset` here would empty store B.
+        let store_a = store_a.canonicalize().unwrap();
+        assert!(
+            stdout.contains(&format!(
+                "; fix: TOG_STORE={} tog gc --reset)",
+                store_a.display()
+            )),
+            "{case}: {stdout}"
+        );
+        assert!(stdout.contains("skipped 1"), "{case}: {stdout}");
+        untouched("from another store", &out);
+
+        // From the refused store itself: the same, and there the bare
+        // command is the right one.
+        let out = tog(&home.0, &home.0, &["x", "--clean"]);
+        assert_eq!(out.status.code(), Some(0), "{case}: {}", text(&out.stderr));
+        assert!(
+            text(&out.stdout).contains("; fix: tog gc --reset)"),
+            "{case}: {}",
+            text(&out.stdout)
+        );
+        untouched("from its own store, unfiltered", &out);
+        let out = tog(&home.0, &home.0, &["x", "--clean", "ruff"]);
+        assert_eq!(out.status.code(), Some(0), "{case}: {}", text(&out.stderr));
+        untouched("from its own store", &out);
+        assert!(
+            !text(&out.stdout).contains("removed x environment"),
+            "{case}: {}",
+            text(&out.stdout)
+        );
+    }
+}
+
+/// The fix `x --clean` prints for an environment whose store is refused is
+/// a command for that store. Pasted as printed, in a shell where
+/// `TOG_STORE` selects another, healthy store, it empties the refused one
+/// and leaves the selected one alone. The refused store's path has a space
+/// and an apostrophe in it, so the command only works if it is quoted.
+#[test]
+fn the_fix_x_clean_prints_resets_the_refused_store_and_no_other() {
+    let home = TempDir::boundary("cli-x-clean-fix");
+    let store_a = home.0.join("it's a store");
+    let store_b = home.0.join("store-b");
+    let (root, _) = registered_x_environment(&home.0, &store_a);
+    let store_a = store_a.canonicalize().unwrap();
+    let out = tog_at(
+        &home.0,
+        &home.0,
+        &store_a,
+        &["gc", "--register", root.to_str().unwrap()],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let object_a = std::fs::read_dir(store_a.join("objects"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .next()
+        .unwrap();
+    std::fs::remove_file(store_a.join("format")).unwrap();
+
+    // Store B: healthy, selected, and holding an object and a root of its
+    // own, which a reset aimed at it would remove.
+    fresh_store(&store_b);
+    let store_b = store_b.canonicalize().unwrap();
+    let object_b = publish_certified_object(&store_b, "kept-env");
+    let out = tog_at(&home.0, &home.0, &store_b, &["store", "roots"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    std::fs::write(store_b.join("roots/note"), b"mine").unwrap();
+
+    let out = tog_at(&home.0, &home.0, &store_b, &["x", "--clean"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let stdout = text(&out.stdout);
+    let fix = stdout
+        .lines()
+        .find_map(|line| line.split_once("; fix: "))
+        .and_then(|(_, rest)| rest.strip_suffix(')'))
+        .unwrap_or_else(|| panic!("no fix: {stdout}"));
+    assert_eq!(
+        fix,
+        format!(
+            "TOG_STORE='{}' tog gc --reset",
+            store_a.to_str().unwrap().replace('\'', "'\\''")
+        )
+    );
+
+    // Paste it: `tog` on PATH, TOG_STORE still naming store B.
+    let out = paste_fix(fix, &home.0, &home.0, &store_b);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+
+    // Store A was emptied and is a store again.
+    assert!(!object_a.exists(), "the fix did not reset store A");
+    assert_eq!(
+        std::fs::read_to_string(store_a.join("format")).unwrap(),
+        "tog-store 1\n"
+    );
+    let out = tog_at(&home.0, &home.0, &store_a, &["store", "roots"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    // Store B is as it was.
+    assert!(
+        object_b.join("payload").is_file(),
+        "the fix emptied store B"
+    );
+    assert_eq!(std::fs::read(store_b.join("roots/note")).unwrap(), b"mine");
+    assert_eq!(
+        std::fs::read_to_string(store_b.join("format")).unwrap(),
+        "tog-store 1\n"
+    );
+
+    // And the environment can now be cleaned.
+    let out = tog_at(&home.0, &home.0, &store_b, &["x", "--clean"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(!root.exists(), "{}", text(&out.stdout));
+}
+
+/// Run a fix line as it would be pasted: by `/bin/sh` in `cwd`, with `tog`
+/// on PATH and `TOG_STORE` exported as `selected`, the way the shell that
+/// printed it had it.
+fn paste_fix(fix: &str, cwd: &Path, home: &Path, selected: &Path) -> std::process::Output {
+    let bin = home.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    if !bin.join("tog").exists() {
+        std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_tog"), bin.join("tog")).unwrap();
+    }
+    common::command_for(Path::new("/bin/sh"), cwd, home, selected)
+        .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+        .arg("-c")
+        .arg(fix)
+        .output()
+        .unwrap()
+}
+
+/// A relative `TOG_STORE` names a different store from every directory.
+/// `tog -C project` resolves it under `project`, and the shell that pastes
+/// the fix resolves it where the shell is. So the fix for the store under
+/// `project` names that store, absolute, and pasting it leaves the store
+/// beside the shell alone.
+#[test]
+fn the_fix_for_a_relatively_selected_store_resets_that_store_from_anywhere() {
+    let home = TempDir::boundary("cli-format-relative");
+    let work = home.0.join("work");
+    std::fs::create_dir_all(work.join("project")).unwrap();
+    let work = work.canonicalize().unwrap();
+    // `work/store`: healthy, and what `TOG_STORE=store` means in `work`.
+    fresh_store(&work.join("store"));
+    let kept = publish_certified_object(&work.join("store"), "kept-env");
+    // `work/project/store`: written before the marker existed.
+    let refused = work.join("project/store");
+    std::fs::create_dir_all(refused.join("objects")).unwrap();
+    std::fs::create_dir_all(refused.join("meta")).unwrap();
+    let old = publish_certified_object(&refused, "old-env");
+    assert!(!refused.join("format").exists());
+
+    let relative = Path::new("store");
+    let out = tog_at(&work, &home.0, relative, &["-C", "project", "ls"]);
+    let stderr = text(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    assert!(stderr.contains("has no format marker"), "{stderr}");
+    let fix = stderr
+        .lines()
+        .find_map(|line| line.strip_prefix("tog:     fix: "))
+        .unwrap_or_else(|| panic!("no fix line: {stderr}"));
+    assert_eq!(
+        fix,
+        format!("TOG_STORE={} tog gc --reset", refused.display())
+    );
+    // The same from inside the project, with no `-C`: still relative, so
+    // still spelled out.
+    let out = tog_at(&work.join("project"), &home.0, relative, &["ls"]);
+    assert!(
+        text(&out.stderr).contains(&format!("tog:     fix: {fix}\n")),
+        "{}",
+        text(&out.stderr)
+    );
+    // `store path` and `doctor` print the same command.
+    let out = tog_at(
+        &work,
+        &home.0,
+        relative,
+        &["-C", "project", "store", "path"],
+    );
+    assert!(
+        text(&out.stderr).contains(&format!("tog:     fix: {fix}\n")),
+        "{}",
+        text(&out.stderr)
+    );
+    let out = tog_at(&work, &home.0, relative, &["-C", "project", "doctor"]);
+    assert!(
+        text(&out.stdout).contains(&format!("; run '{fix}'")),
+        "{}",
+        text(&out.stdout)
+    );
+
+    // Pasted in the shell at `work`, where `store` is the healthy store.
+    let out = paste_fix(fix, &work, &home.0, relative);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(!old.exists(), "the fix did not reset the refused store");
+    assert_eq!(
+        std::fs::read_to_string(refused.join("format")).unwrap(),
+        "tog-store 1\n"
+    );
+    assert!(
+        kept.join("payload").is_file(),
+        "the fix emptied the store beside the shell"
+    );
+
+    // An absolute selection of the refused store is the one case with a
+    // bare fix: it means the same store wherever it is pasted.
+    std::fs::remove_file(refused.join("format")).unwrap();
+    let out = tog_at(&work, &home.0, &refused, &["-C", "project", "ls"]);
+    assert!(
+        text(&out.stderr).ends_with("tog:     fix: tog gc --reset\n"),
+        "{}",
+        text(&out.stderr)
+    );
+}
+
+/// A store path that is not UTF-8 cannot be written in a `String`, and the
+/// nearest text (U+FFFD for each bad byte) is another path. The fix spells
+/// the path's own bytes, so pasting it resets the refused store and not a
+/// store that happens to sit at the look-alike path.
+#[test]
+fn the_fix_for_a_store_whose_path_is_not_utf8_resets_that_store() {
+    use std::os::unix::ffi::OsStrExt as _;
+    let home = TempDir::boundary("cli-format-bytes");
+    let base = home.0.canonicalize().unwrap();
+    // Store A at `st<ff>`: refused. Store R at `st<U+FFFD>`: healthy, and
+    // where a lossy spelling of A would point. Store B: selected.
+    let store_a = base.join(std::ffi::OsStr::from_bytes(b"st\xff"));
+    if std::fs::create_dir(&store_a).is_err() {
+        // A filesystem that takes only UTF-8 names (APFS) has no such store.
+        return;
+    }
+    assert_eq!(
+        store_a.to_string_lossy(),
+        base.join("st\u{fffd}").to_string_lossy()
+    );
+    let store_r = base.join("st\u{fffd}");
+    let store_b = base.join("store-b");
+    for sub in ["objects", "meta"] {
+        std::fs::create_dir_all(store_a.join(sub)).unwrap();
+    }
+    let object_a = publish_certified_object(&store_a, "old-env");
+    fresh_store(&store_r);
+    let object_r = publish_certified_object(&store_r, "look-alike-env");
+    fresh_store(&store_b);
+    let object_b = publish_certified_object(&store_b, "selected-env");
+
+    // An x environment recorded against store A, through a symlink whose
+    // own name is text: a request record is JSON and holds only text.
+    let link = base.join("link-to-a");
+    std::os::unix::fs::symlink(&store_a, &link).unwrap();
+    let root = home.0.join(".tog/x/py-ruff-test");
+    std::fs::create_dir_all(root.join(".tog/closures")).unwrap();
+    std::fs::write(
+        root.join(".tog/x.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema": "x-request/2",
+            "ecosystem": "python",
+            "package": "ruff",
+            "version": serde_json::Value::Null,
+            "state": "ready",
+            "store_root": link.to_str().unwrap(),
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let out = tog_at(&home.0, &home.0, &store_b, &["x", "--clean"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let stdout = text(&out.stdout);
+    let fix = stdout
+        .lines()
+        .find_map(|line| line.split_once("; fix: "))
+        .and_then(|(_, rest)| rest.strip_suffix(')'))
+        .unwrap_or_else(|| panic!("no fix: {stdout}"));
+    assert!(
+        fix.starts_with("TOG_STORE=\"$(printf '/") && fix.ends_with("/st\\377')\" tog gc --reset"),
+        "{fix}"
+    );
+    assert!(!fix.contains('\u{fffd}'), "{fix}");
+
+    let out = paste_fix(fix, &home.0, &home.0, &store_b);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(!object_a.exists(), "the fix did not reset store A");
+    assert_eq!(
+        std::fs::read_to_string(store_a.join("format")).unwrap(),
+        "tog-store 1\n"
+    );
+    assert!(
+        object_r.join("payload").is_file(),
+        "the fix emptied the store at the look-alike path"
+    );
+    assert!(
+        object_b.join("payload").is_file(),
+        "the fix emptied the selected store"
+    );
+
+    // Selected directly and absolutely, the bare command is right, and it
+    // is the only spelling that needs no path at all.
+    std::fs::remove_file(store_a.join("format")).unwrap();
+    let out = tog_at(&home.0, &home.0, &store_a, &["ls"]);
+    assert!(
+        text(&out.stderr).ends_with("tog:     fix: tog gc --reset\n"),
+        "{}",
+        text(&out.stderr)
+    );
+}
+
+/// `tog doctor` does not wait behind a job that holds the store
+/// exclusively (a sweep, a reset). It says the store is in use, as a
+/// warning, and still reports everything that needs no store.
+#[test]
+fn doctor_reports_a_busy_store_and_runs_its_other_checks() {
+    use std::os::unix::io::AsRawFd;
+    let home = TempDir::boundary("cli-doctor-busy");
+    let store = home.0.join("store");
+    fresh_store(&store);
+    let out = tog(&home.0, &home.0, &["store", "roots"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let free = tog(&home.0, &home.0, &["doctor"]);
+    let free_rows = text(&free.stdout);
+
+    // What a sweep holds: the exclusive flock on `activity.lock`.
+    let held = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(store.join("activity.lock"))
+        .unwrap();
+    assert_eq!(unsafe { libc::flock(held.as_raw_fd(), libc::LOCK_EX) }, 0);
+    // Let go after a while whatever happens, so a doctor that waits fails
+    // this test (by the row it then prints) and does not hang it.
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    let holder = std::thread::spawn(move || {
+        let _ = released.recv_timeout(std::time::Duration::from_secs(60));
+        drop(held);
+    });
+
+    let out = tog(&home.0, &home.0, &["doctor"]);
+    let stdout = text(&out.stdout);
+    let json = tog(&home.0, &home.0, &["doctor", "--json"]);
+    release.send(()).unwrap();
+    holder.join().unwrap();
+
+    let row = |rows: &str, name: &str| {
+        rows.lines()
+            .find(|line| line.split_whitespace().nth(1) == Some(name))
+            .map(str::to_string)
+    };
+    let store_row = row(&stdout, "store").unwrap_or_else(|| panic!("no store row: {stdout}"));
+    assert!(store_row.starts_with("warn"), "{store_row}");
+    assert!(
+        store_row.contains("a Tog job is using the store at"),
+        "{store_row}"
+    );
+    // The rows that read the store are left out, and every other row is
+    // what it was when the store was free.
+    for name in ["disk", "toolchains"] {
+        assert!(row(&free_rows, name).is_some(), "{name}: {free_rows}");
+        assert!(row(&stdout, name).is_none(), "{name}: {stdout}");
+    }
+    for name in ["platform", "policy", "project"] {
+        assert_eq!(row(&stdout, name), row(&free_rows, name), "{name}");
+        assert!(row(&stdout, name).is_some(), "{name}: {stdout}");
+    }
+    // A busy store is not a failure: the exit status is what it was.
+    assert_eq!(out.status.code(), free.status.code(), "{stdout}");
+
+    // The same row under `--json`.
+    let json: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    let busy = json["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|check| check["name"] == "store")
+        .unwrap_or_else(|| panic!("no store check: {json}"));
+    assert_eq!(busy["level"], "warn", "{busy}");
+    assert!(
+        busy["detail"]
+            .as_str()
+            .unwrap()
+            .contains("a Tog job is using the store at"),
+        "{busy}"
+    );
+}
+
+/// A tog that finds another tog creating or emptying the store says what it
+/// is waiting for before it waits, and goes on when the store is released.
+#[test]
+fn a_tog_waiting_for_the_store_root_says_so() {
+    use std::io::BufRead as _;
+    use std::os::unix::io::AsRawFd;
+    let home = TempDir::boundary("cli-root-wait");
+    let store = home.0.join("store");
+    fresh_store(&store);
+    // What a reset holds while it works: an exclusive flock on the root.
+    let held = std::fs::File::open(&store).unwrap();
+    assert_eq!(unsafe { libc::flock(held.as_raw_fd(), libc::LOCK_EX) }, 0);
+    // Released when the test says so, or after a while on its own, so a
+    // tog that waits without a word fails the test and does not hang it.
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    let holder = std::thread::spawn(move || {
+        let _ = released.recv_timeout(std::time::Duration::from_secs(60));
+        drop(held);
+    });
+
+    let mut child = command(&home.0, &home.0, &store)
+        .args(["store", "roots"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stderr = std::io::BufReader::new(child.stderr.take().unwrap());
+    let mut line = String::new();
+    stderr.read_line(&mut line).unwrap();
+    assert_eq!(
+        line,
+        format!(
+            "tog: waiting for another tog that is creating or emptying the store at {}\n",
+            store.canonicalize().unwrap().display()
+        )
+    );
+    assert!(
+        child.try_wait().unwrap().is_none(),
+        "tog did not wait for the held store"
+    );
+    release.send(()).unwrap();
+    holder.join().unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(out.status.code(), Some(0));
 }
 
 /// Cleanup recovers the originating store from the `x.json` request record

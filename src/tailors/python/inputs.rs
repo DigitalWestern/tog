@@ -574,9 +574,7 @@ mod tests {
         let outside = temp.0.join("outside");
         std::fs::create_dir_all(outside.join(".tog")).unwrap();
         std::os::unix::fs::symlink(outside.join(".tog"), project.join(".tog")).unwrap();
-        let store = store::Store {
-            root: temp.0.join("absent-store"),
-        };
+        let store = store::Store::for_test(temp.0.join("absent-store"));
         let root = ProjectRoot::open(&project).unwrap();
         let e = read_plan(
             &root,
@@ -609,9 +607,7 @@ mod tests {
         for sub in ["objects", "meta", "cache/sha256", "tmp"] {
             std::fs::create_dir_all(root.join(sub)).unwrap();
         }
-        let store = store::Store {
-            root: root.canonicalize().unwrap(),
-        };
+        let store = store::Store::for_test(root.canonicalize().unwrap());
         crate::tailors::install_kinds();
         let host = Platform::host().unwrap();
         let pin = python::uv_pins()
@@ -702,7 +698,7 @@ mod tests {
         // stand-in for "egg_info cannot run here".
         let store_root = temp.0.join("not-a-store");
         std::fs::write(&store_root, b"").unwrap();
-        let store = store::Store { root: store_root };
+        let store = store::Store::for_test(store_root);
 
         // Prime the plan cache under the key the fallback text produces, so
         // planning finishes offline. A cache hit is itself the assertion:
@@ -769,9 +765,7 @@ mod tests {
         let outside = temp.0.join("outside");
         std::fs::create_dir_all(&outside).unwrap();
         std::os::unix::fs::symlink(&outside, project_dir.join(".tog")).unwrap();
-        let store = store::Store {
-            root: temp.0.join("absent-store"),
-        };
+        let store = store::Store::for_test(temp.0.join("absent-store"));
 
         let project = ProjectRoot::open(&project_dir).unwrap();
         let error = read_plan(

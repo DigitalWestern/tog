@@ -15,8 +15,7 @@ use super::*;
 //
 // A dry run stops after `plan` and prints it. That is what makes the preview
 // and the real sweep agree: they are the same three phases over the same
-// snapshot, with the same frozen decision time, and the real sweep's
-// maintenance phase has already run before the snapshot is taken.
+// snapshot, with the same frozen decision time.
 // ===========================================================================
 
 #[derive(Debug, Default)]
@@ -50,19 +49,12 @@ pub(super) fn collect_roots<W: Write>(
             // unmounted, or deleted project retains exactly the durable
             // references recorded here.
             state.object_ids.extend(record.objects.iter().cloned());
-            state
-                .project_keep
-                .extend(
-                    record
-                        .projections
-                        .iter()
-                        .map(|projection| match projection.base {
-                            store::ProjectionBase::Forests
-                            | store::ProjectionBase::Backups
-                            | store::ProjectionBase::LegacyForests
-                            | store::ProjectionBase::LegacyBackups => projection.path(store),
-                        }),
-                );
+            state.project_keep.extend(
+                record
+                    .projections
+                    .iter()
+                    .map(|projection| projection.path(store)),
+            );
             continue;
         }
         // A root whose project cannot be resolved is a safety stop, not a
@@ -189,18 +181,11 @@ pub(super) fn read_closures<W: Write>(
                 state
                     .project_keep
                     .push(store.root.join("forests").join(&key).join(projection_id));
-                // A legacy closure may still point at the sibling namespace;
-                // retain that candidate too, but never make it sweepable.
-                if let Some(home) = store.root.parent() {
-                    state
-                        .project_keep
-                        .push(home.join("forests").join(key).join(projection_id));
-                }
             }
         }
     }
-    // A currently projected symlink is also an active forest even in a legacy
-    // closure that predates projection_id.
+    // A currently projected symlink is also an active forest, even when
+    // the closure does not name it.
     for name in ["node_modules", ".venv"] {
         let path = project.join(name);
         if let Ok(target) = fs::read_link(&path) {
@@ -263,20 +248,8 @@ pub(super) fn collect_project_paths(
     match value {
         serde_json::Value::String(text) => {
             let path = Path::new(text);
-            let Some(home) = store.root.parent() else {
-                return;
-            };
-            let store_forests = store.root.join("forests");
-            let store_backups = store.root.join("backups");
-            let legacy_forests = home.join("forests");
-            let legacy_backups = home.join("backups");
-            if path.is_absolute()
-                && (path.starts_with(&store_forests)
-                    || path.starts_with(&store_backups)
-                    || path.starts_with(&legacy_forests)
-                    || path.starts_with(&legacy_backups))
-            {
-                paths.push(path.to_path_buf());
+            if path.is_absolute() {
+                collect_project_path(path, store, paths);
             }
         }
         serde_json::Value::Array(values) => {
@@ -294,17 +267,7 @@ pub(super) fn collect_project_paths(
 }
 
 pub(super) fn collect_project_path(path: &Path, store: &Store, paths: &mut Vec<PathBuf>) {
-    let Some(home) = store.root.parent() else {
-        return;
-    };
-    let store_forests = store.root.join("forests");
-    let store_backups = store.root.join("backups");
-    let legacy_forests = home.join("forests");
-    let legacy_backups = home.join("backups");
-    if path.starts_with(&store_forests)
-        || path.starts_with(&store_backups)
-        || path.starts_with(&legacy_forests)
-        || path.starts_with(&legacy_backups)
+    if path.starts_with(store.root.join("forests")) || path.starts_with(store.root.join("backups"))
     {
         paths.push(path.to_path_buf());
     }
@@ -359,12 +322,6 @@ pub(super) struct ObjectEntry {
     pub(super) stat: libc::stat,
     pub(super) meta_name: String,
     pub(super) meta_stat: libc::stat,
-    /// Bytes the record occupies once maintenance has published it. For a
-    /// dry run the record has not been written yet, so the size is taken
-    /// from the overlay the real sweep would have written — otherwise the
-    /// preview's freed-byte total would differ from the sweep's for exactly
-    /// the records migration touched.
-    pub(super) meta_size: u64,
 }
 
 pub(super) struct CacheEntry {
@@ -401,7 +358,6 @@ pub struct Snapshot {
     pub(super) forests: Vec<DirEntrySnapshot>,
     pub(super) backups: Vec<DirEntrySnapshot>,
     pub(super) dirs: Dirs,
-    pub(super) legacy_projection_note: Option<String>,
 }
 
 pub(super) const CACHE_ALGORITHMS: [(&str, usize); 3] =
@@ -413,7 +369,6 @@ fn read_objects(
     objects_path: &Path,
     objects: &HeldDir,
     meta_dir: &HeldDir,
-    upgrades: &BTreeMap<String, serde_json::Value>,
 ) -> io::Result<Vec<ObjectEntry>> {
     let mut object_entries = Vec::new();
     for entry in fs::read_dir(objects_path)? {
@@ -441,10 +396,6 @@ fn read_objects(
                     ),
                 )
             })?;
-        let meta_size = match upgrades.get(&id) {
-            Some(value) => serde_json::to_vec_pretty(value)?.len() as u64,
-            None => file_size_of(&meta_stat),
-        };
         object_entries.push(ObjectEntry {
             id,
             name,
@@ -452,7 +403,6 @@ fn read_objects(
             stat,
             meta_name,
             meta_stat,
-            meta_size,
         });
     }
     Ok(object_entries)
@@ -543,7 +493,6 @@ struct Projections {
     forests: Vec<DirEntrySnapshot>,
     backups_dir: Option<HeldDir>,
     backups: Vec<DirEntrySnapshot>,
-    legacy_projection_note: Option<String>,
 }
 
 /// Enumerate the project projections, holding each project directory and
@@ -599,14 +548,6 @@ fn read_projections(store: &Store) -> io::Result<Projections> {
         }
         read.backups_dir = Some(held);
     }
-    if let Some(home) = store.root.parent() {
-        if home.join("forests").is_dir() || home.join("backups").is_dir() {
-            read.legacy_projection_note = Some(format!(
-                "legacy project projections under {} are shared by sibling stores",
-                home.display()
-            ));
-        }
-    }
     Ok(read)
 }
 
@@ -619,15 +560,13 @@ pub(super) fn read<W: Write>(
     store: &Store,
     activity: &StoreActivity,
     options: &Options,
-    upgrades: &BTreeMap<String, serde_json::Value>,
     out: &mut W,
 ) -> io::Result<Snapshot> {
     store.require_exclusive_activity(activity, "garbage collection")?;
     let now = SystemTime::now();
     let (roots, crash_temps) = store.roots_for_sweep()?;
     let state = collect_roots(store, &roots, options, out)?;
-    let mut meta = crate::kernel::objmeta::MetaIndex::read(store)?;
-    meta.apply(upgrades)?;
+    let meta = read_records(store)?;
 
     // Every descriptor below is held from here through execution, so the
     // acquisition order and the set held are part of the contract.
@@ -636,7 +575,7 @@ pub(super) fn read<W: Write>(
     let meta_dir = open_held(&store.root.join("meta"), "meta")?;
     let tmp = open_held(&store.root.join("tmp"), "tmp")?;
 
-    let object_entries = read_objects(&objects_path, &objects, &meta_dir, upgrades)?;
+    let object_entries = read_objects(&objects_path, &objects, &meta_dir)?;
     let (cache_dirs, cache_entries) = read_cache(store)?;
     let stages = read_stages(store, &tmp)?;
     let projections = if options.project {
@@ -663,8 +602,74 @@ pub(super) fn read<W: Write>(
             forest_projects: projections.forest_projects,
             backups: projections.backups_dir,
         },
-        legacy_projection_note: projections.legacy_projection_note,
     })
+}
+
+/// Read every metadata record, or refuse naming every record that cannot be
+/// read.
+///
+/// A record nothing can parse cannot prove what the object it describes
+/// still needs, so one is enough to stop the sweep. All of them are found in
+/// the one pass and each is reported with the command that clears it, so a
+/// store with several is repaired in one round rather than one refusal at a
+/// time.
+fn read_records(store: &Store) -> io::Result<crate::kernel::objmeta::MetaIndex> {
+    let (meta, unusable) = crate::kernel::objmeta::MetaIndex::read_reporting_unusable(store)?;
+    if unusable.is_empty() {
+        return Ok(meta);
+    }
+    let blocked: Vec<String> = unusable
+        .iter()
+        .map(|(file, reason)| unusable_record_advice(store, file, reason))
+        .collect();
+    Err(blockage(&blocked))
+}
+
+/// What to do about one record the sweep cannot read: drop the object, or
+/// remove the record by hand (and then drop the object that leaves behind).
+fn unusable_record_advice(store: &Store, file: &str, reason: &str) -> String {
+    let stem = file.strip_suffix(".json").unwrap_or(file);
+    // The same rule drop applies: the id must be one drop accepts, and the
+    // record a regular file or gone. Drop refuses a symlink or directory
+    // under meta/, so naming it there would send the operator in a circle.
+    let droppable = store::is_object_id(stem)
+        && match fs::symlink_metadata(store.root.join("meta").join(file)) {
+            Ok(metadata) => metadata.file_type().is_file(),
+            Err(error) => error.kind() == io::ErrorKind::NotFound,
+        };
+    let advice = if droppable {
+        format!(
+            "drop it with `tog gc --drop-object {stem}` (the next sync that needs the object \
+             rebuilds it), or restore the file from a backup"
+        )
+    } else if store::is_object_id(stem) && fs::symlink_metadata(store.object_path(stem)).is_ok() {
+        // Removing the record alone leaves an object with no record, which
+        // the sweep refuses; drop takes that object once the record is gone.
+        format!(
+            "remove it with `{}`, then drop the object it leaves behind with `tog gc \
+             --drop-object {stem}`, or restore the file from a backup",
+            remove_record_line(store, file)
+        )
+    } else {
+        format!(
+            "remove it with `{}`, or restore the file from a backup",
+            remove_record_line(store, file)
+        )
+    };
+    format!("metadata record meta/{file} is unusable ({reason}); {advice}")
+}
+
+/// The shell line that removes an unusable record: `rm`, or `rm -r` for a
+/// directory (which `rm -r` removes; a symlink is removed, not followed).
+pub(super) fn remove_record_line(store: &Store, file: &str) -> String {
+    let path = store.root.join("meta").join(file);
+    let is_dir = fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.is_dir());
+    let path = path.display().to_string();
+    if is_dir {
+        crate::kernel::ui::shell_line(&["rm", "-r", &path])
+    } else {
+        crate::kernel::ui::shell_line(&["rm", &path])
+    }
 }
 
 pub(super) fn open_held(path: &Path, label: &str) -> io::Result<HeldDir> {

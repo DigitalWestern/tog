@@ -75,6 +75,18 @@ pub fn warm_store(temp: &TempDir) -> PathBuf {
         .unwrap_or_else(|| temp.0.join("store"))
 }
 
+/// Make `root` a store of the current format, for a suite that lays its
+/// store out by hand: the directory and its format marker, nothing else. A
+/// hand-built store without the marker is one tog refuses to open.
+pub fn fresh_store(root: &Path) {
+    std::fs::create_dir_all(root).unwrap();
+    std::fs::write(
+        root.join(tog::kernel::store::FORMAT_FILE),
+        tog::kernel::store::StoreFormat::current_line(),
+    )
+    .unwrap();
+}
+
 /// `warm_store`, opened in this process. A test that drives the kernel
 /// directly calls this instead of `Store::open()`, which without
 /// `TOG_STORE` is the developer's real `~/.tog/store`: the test would write

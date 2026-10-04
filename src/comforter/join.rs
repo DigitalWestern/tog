@@ -1578,7 +1578,7 @@ mod tests {
             move |ecosystem: &str, project: &ProjectRoot| {
                 if ecosystem == ECO {
                     let (sender, receiver) = std::sync::mpsc::channel();
-                    let store = Store { root: root.clone() };
+                    let store = Store::for_test(root.clone());
                     let project = project.try_clone()?;
                     *handle.lock().unwrap() = Some(std::thread::spawn(move || {
                         let lock = store.project_lock_in(&project).unwrap();

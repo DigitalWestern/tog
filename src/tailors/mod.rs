@@ -20,7 +20,7 @@ pub mod ruby;
 use crate::comforter::status::State;
 use crate::kernel::context::Context;
 use crate::kernel::fsroot::ProjectRoot;
-use crate::kernel::objmeta::KindAdapter;
+use crate::kernel::objmeta::ObjectKind;
 use crate::kernel::platform::Platform;
 use crate::kernel::resolve::ResolutionDoor;
 use crate::kernel::toolchain::{Catalog, Selected};
@@ -331,7 +331,7 @@ pub trait Tailor: Sync {
     /// legacy-migration identity grammars plus metadata adapters (`objmeta`).
     /// Every kind a tailor commits must have a row here or GC refuses to
     /// certify its records.
-    fn object_kinds(&self) -> &'static [KindAdapter] {
+    fn object_kinds(&self) -> &'static [ObjectKind] {
         &[]
     }
 
@@ -700,7 +700,7 @@ pub fn for_closure(name: &str) -> Option<&'static dyn Tailor> {
 }
 
 /// Every tailor's object-kind rows, in registry order.
-pub fn kind_adapters() -> impl Iterator<Item = &'static KindAdapter> {
+pub fn kind_adapters() -> impl Iterator<Item = &'static ObjectKind> {
     registry()
         .iter()
         .flat_map(|tailor| tailor.object_kinds().iter())
@@ -1479,9 +1479,7 @@ mod tests {
         for sub in ["objects", "meta"] {
             std::fs::create_dir_all(root.join(sub)).unwrap();
         }
-        crate::kernel::store::Store {
-            root: root.canonicalize().unwrap(),
-        }
+        crate::kernel::store::Store::for_test(root.canonicalize().unwrap())
     }
 
     #[test]

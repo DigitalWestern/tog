@@ -878,9 +878,7 @@ mod realization_tests {
         for sub in ["objects", "meta", "cache/sha256", "tmp"] {
             std::fs::create_dir_all(store_root.join(sub)).unwrap();
         }
-        crate::kernel::store::Store {
-            root: store_root.canonicalize().unwrap(),
-        }
+        crate::kernel::store::Store::for_test(store_root.canonicalize().unwrap())
     }
 
     #[test]

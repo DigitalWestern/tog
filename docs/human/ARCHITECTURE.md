@@ -612,14 +612,127 @@ freetype, cairo, ...) with prefixes relocated at staging; the set id is an
 input of every derivation that mounts it. macOS arm64 has no native pin yet
 and fails closed.
 
+## Store format
+
+A store says which format it is in: `<store>/format` holds one line,
+`tog-store 1` (`src/kernel/store/format.rs`). This tog reads format 1 and
+nothing else. There is no migration code: a store it cannot read is
+refused, and the fix is to empty it.
+
+- No directory, or an empty one: a new store is created, marker first.
+- The marker says `tog-store 1`: the store opens.
+- Store directories but no marker: a store written before the marker
+  existed, or one a reset did not finish. Refused.
+- A higher number: a newer tog wrote it. Refused, and the fix is to update
+  this tog.
+- Anything else in the marker, or a marker that cannot be read (its mode,
+  an I/O error): refused.
+
+The marker is read twice. `Store::open` reads it when a command starts, and
+every activity lease (`Store::activity`, `Store::try_activity_exclusive`)
+reads it again once the lease is held, before the operation reads any
+record. The second read is the one that counts: a command can open the
+store, wait for its lease behind a `tog gc --reset`, and get the lease on a
+store that has changed underneath it. Only a reset removes a marker, and a
+reset needs the exclusive lease, so a marker read under a lease stays true
+for as long as the lease is held. A `Store` made without the check
+(`Store::handle`, for a store an x environment's own records name) is
+validated the same way at its lease; `tests/architecture.rs` lists the
+functions allowed to make one.
+
+Creating a store and emptying one both hold an exclusive `flock` on the
+store root directory. `Store::open` holds it while it reads the marker and
+creates what is missing, so two togs creating one store take turns, and
+neither creates namespaces inside a store a reset is emptying. A tog that
+finds the root held prints one line saying what it is waiting for, then
+waits. The store therefore has to be on a filesystem where a directory can
+be locked with `flock`, which local Linux and macOS filesystems allow.
+Where it cannot, opening or resetting the store fails before anything is
+deleted, and the error says to point `TOG_STORE` at a local disk. Not
+before anything is written: an open may already have created the root
+directory, and a reset may already have created its lock files and `tmp/`.
+There is no fallback lock.
+
+The one reader that takes no lock is `tog store path`, which only prints
+the path and reads the marker to say whether the store is refused. It reads
+the marker a second time before it calls namespaces without a marker an old
+store, because a store being created publishes the marker before its first
+namespace. During a reset it can report the store as having no marker. That
+is true at that moment, and it stops when the reset finishes. `tog doctor`
+is not such a reader: it opens the store (waiting for the root lock like
+any other command, and saying so) and then takes a shared lease without
+waiting. So behind a sweep or a sync it reports the store as in use, as a
+warning, and still runs every check that needs no store. Behind a reset
+that holds the root lock it waits until the reset is done.
+
+A refusal is an error whose message says why and whose fix is a separate
+`tog:     fix:` line (a `"fix"` key under `--json`): `tog gc --reset`, or
+`tog update --self` for a store a newer tog wrote. Moving the directory
+aside works too. A reset empties whichever store the command selects, so
+the fix acts on the store that was refused when it is pasted into the
+environment the refused command ran in (the same `HOME` and `TOG_STORE`,
+and no store symlink moved in between). The bare command is
+printed only when it selects that store from any directory: `TOG_STORE` is
+unset or absolute, and names it. Otherwise the line reads
+`TOG_STORE=<that store> tog gc --reset` with the absolute path. That
+covers `tog x --clean`, which meets other stores, and a relative
+`TOG_STORE`, which `tog -C <dir>` resolves from `<dir>` and the shell
+that pastes the fix resolves from wherever it is. The path is spelled
+exactly for a POSIX shell: bare, in single quotes, or, for a path that is
+not UTF-8 or holds control characters, as `"$(printf '...')"` with its
+bytes in octal. `tog gc --reset` (`src/kernel/gc/reset.rs`) locates the
+root without reading the marker, takes the exclusive lease, and then:
+
+1. unlinks the marker and fsyncs the root directory, so the removal is on
+   disk before anything else is deleted;
+2. removes `objects/`, `meta/`, `roots/`, `records/`, `resolve/`,
+   `forests/`, `root-locks/` and staging;
+3. recreates the namespaces and fsyncs them;
+4. publishes the new marker: written to a temporary file, fsynced, renamed
+   into place, and the root directory fsynced.
+
+A reset can be interrupted at any point, by a killed process or a power
+failure. What the next command finds:
+
+| Interrupted | The store afterwards |
+|---|---|
+| Before the marker is unlinked | Unchanged: accepted or refused as before. |
+| After the unlink, before the root fsync (step 1) | A killed process leaves no marker. A power failure may bring the old marker back, and nothing has been deleted yet, so the store is whole. |
+| During steps 2 and 3, or while the new marker's temporary file is written | No marker, durably. Refused, and running the reset again finishes the job. |
+| After the rename, before the last fsync (step 4) | A killed process leaves the new marker. A power failure leaves either no marker or the new one. |
+| After the last fsync | The new marker, durably. |
+
+So an interrupted reset leaves one of two things: a store with no marker,
+which is refused until the reset is run again, or a store with the current
+marker over a reset that had already finished its work. Both are safe,
+because the old marker's removal is on disk before anything is deleted and
+the fresh namespaces are on disk before the new marker is published. What
+it never leaves is a marked store holding half of its old records. It keeps `cache/` (downloads are
+stored under their own digest and are checked again on every use, so no
+store format reads them wrong), `backups/` (the user's own moved-aside
+directories) and `run-homes/`. The next `tog` in a project finds its objects
+gone and syncs again, mostly from the kept cache.
+
+On a refused store, every command that would read or write the store stops
+with that error. Three still work: `tog store path` prints the path with a
+warning and the fix, `tog doctor` reports the store row as `fail` with the
+fix, and `tog gc --reset` empties it. `tog doctor` opens and leases the
+store once and hands the pair to its checks, so the store rows are either
+all read under that lease or replaced by one row: failing for a store it
+could not open, a warning for one that is in use. Commands that never open a store
+(`--help`, `version`) are unaffected. `tog x --clean` is the one command
+that meets stores other than the configured one: an environment whose own
+store is refused is skipped and reported, and nothing in that store changes.
+
 ## GC root safety
 
 The store's `roots/<sha1>` registry records every project whose closure can
 protect store objects. New `root/2` records contain the complete object set
 and typed projection references, so GC never opens the project's diagnostic
 path: a moved, unmounted, or deleted project keeps its tools protected.
-Legacy pathname-only records stay conservative: if the project cannot be
-read, the whole sweep stops before any deletion, dry run included.
+A pathname-only record, which holds a project path and nothing else, stays
+conservative: if the project cannot be read, the whole sweep stops before
+any deletion, dry run included.
 `tog store roots` prints each key beside its path. `tog gc --forget
 <key>` is the explicit recovery valve: it removes only the registry file, and
 a root is never removed implicitly.
@@ -634,41 +747,38 @@ it, so preview and sweep are the same phases over the same snapshot.
 
 Whether an object may be deleted is decided by `meta/<id>.json`
 (`object-meta/2`): explicit dependency object ids, algorithm-qualified cache
-digests, and an `evidence` marker, `"explicit"` or `"adapted:<kind>@<n>"`.
+digests, and the `evidence` marker `"explicit"`.
 Explicit evidence names what the realization actually read, which can be
 less than its identity names: a node env's identity carries every declared
 artifact and provisioned download the plan could use, but only the ones an
 install script was given are cache dependencies, because a commit refuses to
 claim a cache entry that is not present.
-Adapters in `src/kernel/objmeta.rs` upgrade legacy records to this form; each is a
-pure function of one record plus a read-only index, dispatched on the
-(kind, schema) pair, and never guesses from a current default pin. Unknown
-or incomplete metadata blocks deletion. A legacy record whose evidence cannot
-be fully accounted for stays legacy, and on a store whose records cannot all
-be adapted, the sweep refuses and names what to fix. The containment guard
-keeps migration sound: a proposed dependency set is checked against what the
-old reader retained, and one that would narrow retention keeps legacy
-protection instead of being published.
+A record is the whole of the evidence: the sweep reads it without knowing
+the object's kind, so an object of a kind or schema this tog no longer
+produces is kept or collected like any other. A record the sweep cannot read
+(no schema, another schema, any other evidence marker, an identity that does
+not hash to its id, a malformed dependency) blocks deletion: the sweep
+refuses, lists every such record, and names `tog gc --drop-object <id>` for
+each.
 
-Each row in that (kind, schema) coverage matrix declares two input grammars.
-Its `grammar` is the migration grammar, which remains compatible with legacy
-records. Its `live_required` and `live_optional` fields describe the inputs
-the current producer writes, including dynamic prefixes for conditional
-package entries. Where identity shape has collection or platform semantics,
+Every (kind, schema) pair a producer commits has a row (`ObjectKind`, in the
+tailor's `objects.rs`). Its `live_required` and `live_optional` fields
+describe the inputs the current producer writes, including dynamic prefixes
+for conditional package entries. Where identity shape has collection or platform semantics,
 the tailor owns a `live_contract` beside the producer's identity constructor
 in `objects.rs`; it receives the whole `Identity` and validates count fields,
 paired keys, and platform-conditional inputs. The live check validates
 required names and the live key whitelist before calling that contract.
 Debug builds enforce all three at the one publication choke point,
-`Store::commit_internal_impl`, so a producer that starts writing a new input,
+`Store::commit_internal`, so a producer that starts writing a new input,
 drops a required one, or emits an impossible partial group fails at the commit
-that drifts rather than years later during migration.
+that drifts.
 A panic there means the producer and its row disagree: restore the producer if
 the drift is accidental (a dropped input like `artifact_sha256` would let
 distinct artifacts share an object id); update the row only for an intentional,
 compatible addition; introduce a new schema value when identity semantics
-change. A kind or schema with no registered row is rejected at commit time and
-also fails closed at sweep time. Public tailor realization entry points call
+change. A kind or schema with no registered row is rejected at commit time.
+Public tailor realization entry points call
 `tailors::install_kinds()` before they can publish, while commands call it
 through `commands::dispatch`; direct kernel callers install it explicitly.
 Release builds skip the check; it catches developer error, it is not a store
@@ -725,9 +835,8 @@ selection changes the value and never the shape.
 A new schema reissues every object id of its kind. Nothing caches the old id:
 a re-sync computes the successor identity, misses the store, and realizes
 fresh, and the orphaned old-schema objects are swept as ordinary garbage
-when nothing roots them. Their rows stay registered, marked `superseded_by`,
-so a pre-`object-meta/2` record of the old layout still migrates rather than
-blocking the sweep; publishing a superseded schema is refused at commit.
+when nothing roots them. The old schema's row is deleted with its producer,
+so publishing it again is refused at commit.
 
 ## Store concurrency
 
@@ -824,7 +933,8 @@ and build inputs tailors share, so no tailor reaches into another):
     policy.rs       permissive/strict exception policy and the [signing] trust chain
     signing.rs      Ed25519 closure signing: key files, canonical bytes, verify
     gc/             store garbage collection: read.rs snapshot, plan.rs
-                    validate + plan, sweep.rs execute, migrate.rs maintenance
+                    validate + plan, sweep.rs execute, drop.rs --drop-object,
+                    reset.rs --reset
     objmeta.rs      object-meta/2 records; kind rows are installed by
                     commands::dispatch or public tailor entry points
     activity.rs     store activity leases
@@ -864,8 +974,8 @@ folder has `tailor.rs` (its `impl Tailor`, the one blueprint every
 ecosystem answers: detect, preflight, plan, sync, build, run_env,
 refused_command, listing, closure_state, sbom_components, object_kinds,
 toolchain_kinds) and `objects.rs` (the store
-object kinds it produces, with their live and migration identity grammars and
-legacy-metadata adapters); `src/tailors/mod.rs` holds the trait and the registry the
+object kinds it produces, with their identity grammars);
+`src/tailors/mod.rs` holds the trait and the registry the
 commands iterate. See docs/human/ADDING-A-TAILOR.md. A command file never
 spells a tailor's name as a string: `tests/architecture.rs` fails on a
 literal in `src/commands/` that is a tailor id, lock ecosystem, or registry

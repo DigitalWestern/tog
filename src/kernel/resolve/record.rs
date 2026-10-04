@@ -1351,9 +1351,7 @@ mod tests {
         for sub in ["objects", "meta", "cache/sha256", "tmp"] {
             fs::create_dir_all(temp.0.join(sub)).unwrap();
         }
-        let store = Store {
-            root: temp.0.clone(),
-        };
+        let store = Store::for_test(temp.0.clone());
         (temp, store)
     }
 

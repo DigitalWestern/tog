@@ -454,9 +454,7 @@ mod tests {
         let project = ProjectRoot::open(&dir).unwrap();
         let mut manifest = discover(platform, &project, python_version).unwrap();
         assert!(manifest.requires_setup(), "fixture is not a setup.py tree");
-        let store = Store {
-            root: root.0.join("absent-store"),
-        };
+        let store = Store::for_test(root.0.join("absent-store"));
         let lease = crate::kernel::testutil::detached_lease();
         let activity = &lease.1;
         let error = manifest

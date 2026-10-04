@@ -49,10 +49,8 @@ pub fn drop_objects<W: Write>(
     for (index, id) in ids.iter().enumerate() {
         // The CLI already checks the shape, but this is the layer that turns
         // an id into a path under `objects/`, so it is the layer that must
-        // never take one on trust. A legacy id (a label with `..`) is
-        // accepted here and nowhere else: a store may still hold one, and
-        // this is the only command that can remove it.
-        if !store::is_object_id(id) && !store::is_legacy_object_id(id) {
+        // never take one on trust.
+        if !store::is_object_id(id) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!("{id:?} is not a store object id"),
@@ -110,20 +108,15 @@ pub fn drop_objects<W: Write>(
         writeln!(out, "tog: dropped object {} ({})", entry.id, entry.reason)?;
         dropped += 1;
     }
-    if !dry_run {
-        // The store just changed in the operator's favour. Whatever the last
-        // deferral said, it is now stale, so the next command re-evaluates.
-        clear_deferral_marker(store)?;
-    }
     Ok(dropped)
 }
 
 /// Classify every requested id, or refuse.
 ///
 /// The rules run in one fixed order, and the first that matches wins: an
-/// unusable record, a legacy record migration could not prove, a record
-/// whose object is gone, an object whose record is gone. A record that is
-/// readable, certified and paired with its object is the one case this
+/// unusable record, a record whose object is gone, an object whose record
+/// is gone. A record that is readable and paired with its object is the one
+/// case this
 /// command will not touch — the sweep is the thing that decides whether
 /// such an object is still needed, and it can decide it.
 fn eligible(
@@ -163,12 +156,6 @@ fn eligible(
             continue;
         }
         match index.get(id) {
-            Some(record) if record.evidence == crate::kernel::objmeta::Evidence::Legacy => {
-                droppable.insert(
-                    id.clone(),
-                    "pre-object-meta/2 metadata that migration could not prove".to_string(),
-                );
-            }
             Some(_) if !object_present => {
                 droppable.insert(id.clone(), "metadata for a missing object".to_string());
             }
@@ -366,9 +353,9 @@ mod drop_tests {
     }
 
     /// Every shape that would turn an id into a path outside `objects/`, or
-    /// into more than one entry inside it, or that is neither an object id
-    /// nor a legacy one: the prefix is 40 hex (lowercase, when the label
-    /// has `..`), byte 40 is `-`, and the label is `[A-Za-z0-9._-]`.
+    /// into more than one entry inside it, or that is not an object id: the
+    /// prefix is 40 hex, byte 40 is `-`, and the label is `[A-Za-z0-9._-]`
+    /// with no `..`.
     fn hostile() -> Vec<String> {
         let hex = "0".repeat(40);
         let valid = test_identity("valid", None).object_id();
@@ -406,49 +393,11 @@ mod drop_tests {
             format!("{hex}-a..b 1"),
             format!("{hex}-nam\u{e9}-1"),
             format!("{hex}-a..b-\u{e9}"),
-        ]
-    }
-
-    /// Well-formed legacy ids: past the shape check, so an absent one is
-    /// refused as absent, not as hostile.
-    fn legacy_shapes() -> Vec<String> {
-        let hex = "0".repeat(40);
-        let valid = test_identity("valid", None).object_id();
-        vec![
             format!("{hex}-name..version"),
             format!("{valid}.."),
             format!("{hex}-a..b-1"),
             format!("{hex}-..."),
         ]
-    }
-
-    /// Publish an object under a legacy id, the way a store written before
-    /// `sanitize` split dot runs holds one: read-only tree, and a record
-    /// filed under the same id.
-    fn legacy(store: &Store, name: &str) -> String {
-        let identity = test_identity(name, None);
-        let id = format!("{}-a..b-1", &identity.object_id()[..40]);
-        assert!(!store::is_object_id(&id) && store::is_legacy_object_id(&id));
-        let object = store.object_path(&id);
-        fs::create_dir_all(&object).unwrap();
-        fs::write(object.join("payload"), name).unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        let mut permissions = fs::metadata(&object).unwrap().permissions();
-        permissions.set_mode(permissions.mode() & !0o222);
-        fs::set_permissions(&object, permissions).unwrap();
-        fs::write(
-            record_path(store, &id),
-            serde_json::to_vec_pretty(&serde_json::json!({
-                "id": id,
-                "identity": identity,
-                "created": 0,
-                "exceptions": [],
-                "refs": [],
-            }))
-            .unwrap(),
-        )
-        .unwrap();
-        id
     }
 
     /// The reason `wedge`'s record is unusable, as the drop prints it.
@@ -503,15 +452,6 @@ mod drop_tests {
                     intact(&store, &wedged) && objects.is_dir(),
                     "{batch:?} removed something before its shape was refused"
                 );
-            }
-        }
-        for id in legacy_shapes() {
-            let expected = (io::ErrorKind::NotFound, format!("no such object {id}"));
-            for batch in [vec![id.clone()], vec![wedged.clone(), id.clone()]] {
-                let (result, text) = exclusive(&store, &batch, false);
-                assert_eq!(refusal(result), expected, "{batch:?}");
-                assert!(text.is_empty(), "{batch:?}: {text}");
-                assert!(intact(&store, &wedged), "{batch:?} removed something");
             }
         }
         // The control: the same first id, with nothing hostile after it,
@@ -586,74 +526,27 @@ mod drop_tests {
         let temp = TempStore::new("drop-dry-run");
         let store = temp.store();
         let wedged = wedge(&store, "wedged");
-        let old = legacy(&store, "legacy");
         let bare = bare(&store, "bare");
         let files = [
             store.object_path(&wedged).join("payload"),
             record_path(&store, &wedged),
-            store.object_path(&old).join("payload"),
-            record_path(&store, &old),
             store.object_path(&bare).join("payload"),
         ];
         let before: Vec<Vec<u8>> = files.iter().map(|file| fs::read(file).unwrap()).collect();
 
-        let batch = [wedged.clone(), old.clone(), bare.clone()];
+        let batch = [wedged.clone(), bare.clone()];
         let (count, text) = exclusive(&store, &batch, true);
-        assert_eq!(count.unwrap(), 3, "{text}");
+        assert_eq!(count.unwrap(), 2, "{text}");
         assert_eq!(
             text,
             format!(
                 "tog: would drop object {wedged} ({})\n\
-                 tog: would drop object {old} (object metadata id {old:?} is malformed)\n\
                  tog: would drop object {bare} (object without metadata)\n",
                 mismatch(&wedged)
             )
         );
         let after: Vec<Vec<u8>> = files.iter().map(|file| fs::read(file).unwrap()).collect();
         assert_eq!(before, after);
-    }
-
-    /// A legacy `..` object wedges the sweep, `--drop-object` accepts its
-    /// id and removes both halves, and the sweep then runs.
-    #[test]
-    fn a_legacy_dot_run_object_is_dropped_and_unwedges_the_sweep() {
-        let temp = TempStore::new("drop-legacy");
-        let store = temp.store();
-        let id = legacy(&store, "legacy");
-        register_objects(&store, &temp.root.join("project"), &[]);
-
-        let (result, text) = sweep(&store);
-        assert_eq!(
-            refusal(result.map(|_| 0)),
-            (
-                io::ErrorKind::InvalidData,
-                "refusing to sweep: metadata maintenance left 1 unresolved record(s); nothing \
-                 was deleted. Run `tog gc --migrate-metadata` for the full list, then repair \
-                 the records it names or drop the ones you cannot with `tog gc --drop-object \
-                 <id>`"
-                    .to_string()
-            )
-        );
-        assert!(
-            text.contains(&format!(
-                "metadata record unusable: meta/{id}.json \u{2014} object metadata id {id:?} is \
-                 malformed. Drop it with `tog gc --drop-object {id}`"
-            )),
-            "{text}"
-        );
-        assert!(intact(&store, &id), "the refused sweep removed something");
-
-        let (count, text) = exclusive(&store, std::slice::from_ref(&id), false);
-        assert_eq!(count.unwrap(), 1, "{text}");
-        assert_eq!(
-            text,
-            format!("tog: dropped object {id} (object metadata id {id:?} is malformed)\n")
-        );
-        assert!(!store.object_path(&id).exists(), "{text}");
-        assert!(!record_path(&store, &id).exists(), "{text}");
-
-        let (report, text) = sweep(&store);
-        report.unwrap_or_else(|error| panic!("{error}: {text}"));
     }
 
     /// A record that is a symlink or a directory is one drop refuses, so
@@ -664,7 +557,7 @@ mod drop_tests {
     fn a_record_drop_would_refuse_is_not_advised_as_a_drop() {
         let temp = TempStore::new("drop-advice");
         let store = temp.store();
-        let id = legacy(&store, "legacy");
+        let id = wedge(&store, "wedged");
         register_objects(&store, &temp.root.join("project"), &[]);
         let record = record_path(&store, &id);
         let file = format!("{id}.json");
@@ -677,47 +570,31 @@ mod drop_tests {
                 fs::create_dir(&record).unwrap();
             }
             let (result, text) = sweep(&store);
-            assert!(result.is_err(), "{shape}: {text}");
-            assert!(
-                text.contains(&format!("metadata record unusable: meta/{file} \u{2014} ")),
-                "{shape}: {text}"
-            );
-            assert!(
-                text.contains(&format!(
-                    "Delete meta/{file} by hand, then drop the object it leaves behind with \
-                     `tog gc --drop-object {id}`, or restore the file from a backup."
-                )),
-                "{shape}: {text}"
-            );
-            assert!(!text.contains("Drop it with"), "{shape}: {text}");
-            let activity = store.activity(ActivityMode::Exclusive).unwrap();
-            let mut automatic = Vec::new();
-            super::super::migrate::migrate_metadata_locked(
-                &store,
-                &activity,
-                true,
-                &mut automatic,
-                true,
-            )
-            .unwrap();
-            drop(activity);
-            let automatic = String::from_utf8(automatic).unwrap();
-            assert!(
-                automatic.contains(&format!(
-                    "{} && tog gc --drop-object {id}",
-                    super::super::migrate::remove_record_line(&store, &file)
-                )),
-                "{shape}: {automatic}"
+            let error = result.expect_err(&text).to_string();
+            let line = crate::kernel::ui::shell_line(
+                &rm.split(' ')
+                    .chain([record.display().to_string().as_str()])
+                    .collect::<Vec<_>>(),
             );
             assert_eq!(
-                super::super::migrate::remove_record_line(&store, &file),
-                crate::kernel::ui::shell_line(
-                    &rm.split(' ')
-                        .chain([record.display().to_string().as_str()])
-                        .collect::<Vec<_>>()
-                ),
+                super::super::remove_record_line(&store, &file),
+                line,
                 "{shape}"
             );
+            assert!(
+                error.contains(&format!(
+                    "blocked: metadata record meta/{file} is unusable ("
+                )),
+                "{shape}: {error}"
+            );
+            assert!(
+                error.contains(&format!(
+                    "remove it with `{line}`, then drop the object it leaves behind with `tog \
+                     gc --drop-object {id}`, or restore the file from a backup"
+                )),
+                "{shape}: {error}"
+            );
+            assert!(!error.contains("drop it with"), "{shape}: {error}");
             if shape == "symlink" {
                 fs::remove_file(&record).unwrap();
             } else {
@@ -736,12 +613,13 @@ mod drop_tests {
         // With no object left behind, removing the record is the whole fix.
         fs::create_dir(&record).unwrap();
         let (result, text) = sweep(&store);
-        assert!(result.is_err(), "{text}");
+        let error = result.expect_err(&text).to_string();
         assert!(
-            text.contains(&format!(
-                "Delete meta/{file} by hand, or restore the file from a backup."
+            error.contains(&format!(
+                "remove it with `{}`, or restore the file from a backup",
+                super::super::remove_record_line(&store, &file)
             )),
-            "{text}"
+            "{error}"
         );
         fs::remove_dir(&record).unwrap();
     }

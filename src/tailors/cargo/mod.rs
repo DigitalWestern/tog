@@ -483,42 +483,6 @@ fn shell_double_quote(path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
-
-    /// Drift check: the legacy adapter must reconstruct exactly what this
-    /// producer supplies at commit, or a migrated record stops matching what
-    /// a re-sync publishes and every later cache hit becomes a hard error.
-    #[test]
-    fn legacy_adapter_recovers_the_pinned_rust_components() {
-        for platform in Platform::ALL {
-            let components = rust_components(*platform).unwrap();
-            let mut expected: Vec<String> = components
-                .iter()
-                .map(|component| format!("sha256:{}", component.sha256))
-                .collect();
-            expected.sort();
-            expected.dedup();
-            assert_eq!(
-                recovered_cache(rust_identity(*platform, &components)),
-                expected
-            );
-        }
-    }
-
-    fn recovered_cache(identity: crate::kernel::types::Identity) -> Vec<String> {
-        match crate::kernel::objmeta::adapt_identity_for_test(identity, Vec::new()) {
-            crate::kernel::objmeta::Adaptation::Proven(deps) => {
-                assert!(
-                    deps.objects.is_empty(),
-                    "a pinned artifact has no object deps"
-                );
-                deps.cache
-                    .iter()
-                    .map(|digest| format!("{}:{}", digest.algo(), digest.hex()))
-                    .collect()
-            }
-            crate::kernel::objmeta::Adaptation::Unresolved(reason) => panic!("{reason}"),
-        }
-    }
     use super::*;
     use crate::kernel::toolchain::Component as BundleComponent;
     use sha2::{Digest as _, Sha256};
@@ -954,9 +918,7 @@ checksum = "{hash_b}"
     fn realization_refuses_a_foreign_selection_and_an_unknown_recipe() {
         use crate::kernel::toolchain::fixtures;
         let temp = TempDir::named("rust-refusals");
-        let store = Store {
-            root: temp.0.join("absent-store"),
-        };
+        let store = Store::for_test(temp.0.join("absent-store"));
         let lease = crate::kernel::testutil::detached_lease();
         let activity = &lease.1;
         let platform = Platform::host().unwrap();
@@ -1611,9 +1573,7 @@ checksum = "{hash_b}"
         for sub in ["objects", "meta", "cache/sha256", "tmp", "roots"] {
             fs::create_dir_all(store_root.join(sub)).unwrap();
         }
-        let store = Store {
-            root: store_root.canonicalize().unwrap(),
-        };
+        let store = Store::for_test(store_root.canonicalize().unwrap());
         let lease = store
             .activity(crate::kernel::activity::ActivityMode::Shared)
             .unwrap();

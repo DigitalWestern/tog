@@ -92,7 +92,10 @@ the program's status through. Which files tog reads per ecosystem:
   setup.py probe's `egg_info`, `tog audit` over recorded exceptions); the
   command starts in the same column either way. A line with nothing for
   you to do is progress, not a warning. A
-  failure is `tog: error: <what failed>`. `--quiet` silences the first two
+  failure is `tog: error: <what failed>`. A store this tog refuses to open
+  is the one failure with a single command that clears it, so that error
+  is followed by the same `tog:     fix: <command>` line (under `--json`,
+  a `"fix"` key beside `"error"`). `--quiet` silences the first two
   and never the third. `gc` narrates, so every line it prints — registered,
   forgot, would free, freed, cleanup skipped — is stderr and `--quiet`
   silences all of it.
@@ -503,6 +506,11 @@ something else (`tog x --from httpie http`). Sharp edges of `x --clean`:
   0 whenever cleanup completed, and `nothing to clean` prints only when no
   candidate matched — a root skipped as in use is reported.
 - A running tool is left in place, reported as in use; retry after it exits.
+- An environment made under a store this tog refuses to open (see "Store
+  format" in ARCHITECTURE.md) is left in place and reported as skipped,
+  with the fix for that store: `TOG_STORE=<that store> tog gc --reset`
+  unless it is the store an absolute or unset `TOG_STORE` selects, so
+  pasting the fix never empties another store. Nothing in that store is read or changed.
 - An environment is keyed on the runtime it runs on as well as the tool, so
   a project with a toolchain lock gets the tool on the locked runtime and an
   `update --toolchain` gives the next run a fresh environment. An
@@ -760,7 +768,12 @@ this build against the newest release (the first row, `warn` with `run 'tog
 update --self'` when one is newer, `ok` with `not checked` when the manifest
 is unreachable: offline is not unhealthy), then platform, store, sandbox,
 host C toolchain, and realized toolchains, each line `ok`/`warn`/`fail`
-(lowercase, in text and in JSON) with the fix; exit 1 on any fail.
+(lowercase, in text and in JSON) with the fix; exit 1 on any fail. It does
+not wait for a store another Tog job (a `gc`, a sync) is using: the store
+row is `warn`, says so, and every check that needs no store still runs.
+The one wait is behind a `gc --reset` that is emptying the store: doctor
+says what it is waiting for, like every other command, and goes on when
+the reset is done.
 
 **--version** prints `tog <crate version> (<short commit> <commit date>)`,
 stamped at build time from the checkout (`tog 0.1.0 (7688cfd 2026-09-21)`);
@@ -914,33 +927,31 @@ concurrent sync cannot lose one. Sharp edges:
 - `--dry-run` prints the same plan a sweep would execute — `would remove …`,
   `blocked: …` with the recovery action, `skipped: …` — and writes nothing;
   it refuses alongside `--register`, which would have to write a record.
-- Any object whose recorded evidence cannot be certified stops the sweep
-  rather than being guessed at — `--collect-legacy` never overrides that —
-  as does an unavailable legacy pathname-only record; restore it or forget
-  its key.
-- `--migrate-metadata` upgrades provable legacy object metadata to
-  `object-meta/2` and stops without sweeping (`N upgraded, M unresolved`);
-  it is incompatible with the registry and collection options. It never
-  deletes anything: its job is to list every record that stops the sweep,
-  including the ones nothing can read, each with the command that clears it.
-  The same migration also runs automatically before the first
-  resource-consuming job. When it is deferred because records are
-  unresolved, the warning is printed once per store and again whenever the
-  list of records changes, since it would otherwise precede every command
-  until someone acted on it; `tog gc --migrate-metadata` repeats it on
-  demand. A deferral because another Tog job owns the store is transient
-  and still prints every time.
+- Any object whose record cannot be read stops the sweep rather than being
+  guessed at, and the refusal lists every such record with the command that
+  clears it. A pathname-only root record whose project is unavailable stops
+  it too; restore the project or forget its key.
 - `--drop-object <id>...` removes an object and its record outright, for the
-  records the sweep cannot use: unusable, still legacy after migration, or
-  missing their object (and an object missing its record). Everything in the
+  records the sweep cannot use: unusable, or missing their object (and an
+  object missing its record). Everything in the
   store is content-addressed, so the next sync that needs the object rebuilds
   it at the same id. It refuses an object whose record is readable and
   certified — that is the sweep's decision, reached by forgetting the roots
   that protect it — and it refuses to leave a readable record naming an
   object it removed, naming the whole set that has to go together instead.
   It takes `--dry-run` and nothing else.
-- `--project` also collects old unused project forests and backups; legacy
-  sibling-home forests are never swept and are reported as skipped.
+- `--project` also collects old unused project forests and backups.
+- `--reset` empties the store and starts it again in the current format. It
+  is the fix for a store this tog refuses to open: one written before the
+  format marker existed, or one whose marker it does not know or cannot
+  read (see "Store format" in ARCHITECTURE.md). It removes every object,
+  record, root and forest, and keeps the download cache, `backups/` and the
+  run homes, so the next sync in each project rebuilds from the cache
+  rather than the network where it can. It never reads the marker, so it
+  works on any store, readable or not. It refuses while another Tog job is
+  using the store, takes `--dry-run` (which lists what it would remove and
+  writes nothing) and no other option. A reset that is interrupted leaves
+  a store with no marker, which is still refused: run it again.
 
 **attest** `[<ecosystem>...]` gives existing locks a signed resolution
 record without changing them. For each named ecosystem (all detected ones
@@ -982,7 +993,8 @@ moves one ledger.
 **keygen** `<path>` creates a closure-signing key (see **audit** above) and
 prints the `[signing]` table to paste into the machine policy.
 **store** prints the store root (`store path`) or every registered project
-root (`store roots`). **version** prints `tog 0.1.0`.
+root (`store roots`). `store path` also answers for a store tog refuses to
+open, with a `warning:` and the `fix:` on stderr. **version** prints `tog 0.1.0`.
 
 ## Open questions
 

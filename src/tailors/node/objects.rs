@@ -1,72 +1,21 @@
-//! Object kinds the Node tailor produces. Each row has a migration grammar
-//! for legacy records and a separate live grammar for current commits, plus
-//! the `object-meta/2` dependency adapter. Every row is proven by the metadata
-//! goldens in `kernel/objmeta.rs`.
+//! Object kinds the Node tailor produces: one row per (kind, schema) pair,
+//! naming the identity inputs its producer writes. Debug builds check every
+//! commit against its row (`objmeta::check_identity_grammar`).
 
-use crate::kernel::objmeta::{
-    add_digest, add_object, artifact_sha256, input, parse_digest, Algo, Grammar, KindAdapter,
-    MetaIndex, Record,
-};
-use crate::kernel::store::ObjectDeps;
+use crate::kernel::objmeta::ObjectKind;
 use crate::kernel::types::Identity;
 
-pub static KINDS: &[KindAdapter] = &[
-    KindAdapter {
+pub static KINDS: &[ObjectKind] = &[
+    ObjectKind {
         kind: "nodejs",
         schema: None,
-        superseded_by: None,
         live_required: &["artifact_sha256", "platform"],
         live_optional: &[],
-        legacy_only: &[],
         live_contract: None,
-        grammar: Grammar {
-            required: &["artifact_sha256"],
-            optional: &["platform"],
-            groups: &[],
-        },
-        adapt: artifact_sha256,
     },
-    KindAdapter {
-        kind: "node-env",
-        schema: Some("node-env/3"),
-        superseded_by: Some("node-env/4"),
-        live_required: &["schema", "store_root", "nodejs", "workspaces"],
-        live_optional: &["layout", "native_libs", "pkg:", "provisioned:", "artifact:"],
-        legacy_only: &[],
-        live_contract: Some(node_env_contract),
-        grammar: Grammar {
-            required: &["schema", "nodejs"],
-            optional: &["store_root", "layout", "workspaces", "native_libs"],
-            groups: &[("pkg:", None), ("provisioned:", None), ("artifact:", None)],
-        },
-        adapt: node_env_v3,
-    },
-    KindAdapter {
-        kind: "node-env",
-        schema: Some("node-env/4"),
-        superseded_by: Some("node-env/5"),
-        live_required: &[
-            "schema",
-            "store_root",
-            "nodejs",
-            "workspaces",
-            "plan_digest",
-            "native",
-        ],
-        live_optional: &["layout", "native_libs", "pkg:", "provisioned:", "artifact:"],
-        legacy_only: &[],
-        live_contract: Some(node_env_v4_contract),
-        grammar: Grammar {
-            required: &["schema", "nodejs", "plan_digest", "native"],
-            optional: &["store_root", "layout", "workspaces", "native_libs"],
-            groups: &[("pkg:", None), ("provisioned:", None), ("artifact:", None)],
-        },
-        adapt: node_env_v4,
-    },
-    KindAdapter {
+    ObjectKind {
         kind: "node-env",
         schema: Some("node-env/5"),
-        superseded_by: None,
         live_required: &[
             "schema",
             "store_root",
@@ -77,14 +26,7 @@ pub static KINDS: &[KindAdapter] = &[
             "gyp_python",
         ],
         live_optional: &["layout", "native_libs", "pkg:", "provisioned:", "artifact:"],
-        legacy_only: &[],
         live_contract: Some(node_env_v5_contract),
-        grammar: Grammar {
-            required: &["schema", "nodejs", "plan_digest", "native", "gyp_python"],
-            optional: &["store_root", "layout", "workspaces", "native_libs"],
-            groups: &[("pkg:", None), ("provisioned:", None), ("artifact:", None)],
-        },
-        adapt: node_env_v5,
     },
 ];
 
@@ -191,7 +133,7 @@ fn node_env_v4_contract(identity: &Identity) -> Result<(), String> {
 }
 
 /// `node-env/5` adds one unconditional input to the `/4` shape: `gyp_python`,
-/// the object id of the CPython node-gyp runs on. The legacy `/4` schema,
+/// the object id of the CPython node-gyp runs on. The earlier `/4` schema,
 /// which no producer writes any more, named that interpreter nowhere: it was
 /// the shipped pin, so a pin change could rebuild a native addon under an
 /// unchanged id. Under `/5` it is the project's locked Python (or the
@@ -230,134 +172,4 @@ fn is_cpython_object_id(value: &str) -> bool {
 fn package_name_and_version(value: &str) -> Option<(&str, &str)> {
     let name_version = value.split(':').nth(2)?;
     name_version.rsplit_once('@')
-}
-
-/// `node-env/3`: Node and the native library set are direct object ids; a
-/// registry package contributes the SRI digest embedded in its `pkg:` entry
-/// (in the algorithm npm published, which may be sha1, sha256 or sha512); a
-/// git package contributes its realized `git-source` object.
-fn node_env_v3(record: &Record, index: &MetaIndex) -> Result<ObjectDeps, String> {
-    node_env_inner(
-        record,
-        index,
-        &[
-            "schema",
-            "store_root",
-            "nodejs",
-            "layout",
-            "workspaces",
-            "native_libs",
-        ],
-    )
-}
-
-/// `node-env/4`: the same byte sources. `plan_digest` and `native` are drift
-/// guards over entries already named here, so neither adds a dependency.
-///
-/// Every object of this schema was committed with explicit evidence,
-/// so legacy migration cannot reach it in practice; the metadata
-/// goldens in `kernel/objmeta.rs` are what exercise this adapter.
-fn node_env_v4(record: &Record, index: &MetaIndex) -> Result<ObjectDeps, String> {
-    node_env_inner(
-        record,
-        index,
-        &[
-            "schema",
-            "store_root",
-            "nodejs",
-            "layout",
-            "workspaces",
-            "native_libs",
-            "plan_digest",
-            "native",
-        ],
-    )
-}
-
-/// `node-env/5`: the `/4` byte sources, plus `gyp_python` when this store
-/// still has that interpreter. The producer records it as a dependency only
-/// when an install script ran with it available (a script can leave a
-/// symlink or wrapper to `$PYTHON`, or link libpython), and whether one ran
-/// is not recoverable from the identity. Claiming it whenever it exists is
-/// the same deliberate superset as the `provisioned:` digests below; an
-/// interpreter already collected cannot have been retained by anything.
-fn node_env_v5(record: &Record, index: &MetaIndex) -> Result<ObjectDeps, String> {
-    let gyp_python = input(record, "gyp_python")?;
-    let mut deps = node_env_inner(
-        record,
-        index,
-        &[
-            "schema",
-            "store_root",
-            "nodejs",
-            "layout",
-            "workspaces",
-            "native_libs",
-            "plan_digest",
-            "native",
-            "gyp_python",
-        ],
-    )?;
-    if index.contains(gyp_python) {
-        add_object(&mut deps, gyp_python, index, "gyp_python")?;
-    }
-    Ok(deps)
-}
-
-/// `provisioned:` and `artifact:` digests are claimed unconditionally, which
-/// is a deliberate superset of what the producer now records (only the ones
-/// an install script was given; see `run_install_scripts`). Whether a script
-/// consumed one is not recoverable from the identity, and dropping a digest
-/// whose file is cached would narrow what the legacy reader retained, so the
-/// containment guard would refuse the upgrade anyway. Naming an absent
-/// digest retains nothing, so the superset costs nothing.
-fn node_env_inner(
-    record: &Record,
-    index: &MetaIndex,
-    scalars: &[&str],
-) -> Result<ObjectDeps, String> {
-    let mut deps = ObjectDeps::new();
-    add_object(&mut deps, input(record, "nodejs")?, index, "nodejs")?;
-    if let Some(native_libs) = record.identity.inputs.get("native_libs") {
-        add_object(&mut deps, native_libs, index, "native_libs")?;
-    }
-    for (key, value) in &record.identity.inputs {
-        if let Some(path) = key.strip_prefix("pkg:") {
-            match value.strip_prefix("git:") {
-                Some(rest) => {
-                    let (id, _) = rest.split_once(':').ok_or_else(|| {
-                        format!("package {path} git entry {value:?} has no name field")
-                    })?;
-                    add_object(&mut deps, id, index, &format!("package {path}"))?;
-                }
-                None => {
-                    // "<algo>:<hex>:<name>@<version>:patch[..]:bin[..]"
-                    let (algo, rest) = value.split_once(':').ok_or_else(|| {
-                        format!("package {path} entry {value:?} has no integrity algorithm")
-                    })?;
-                    let (hex, _) = rest.split_once(':').ok_or_else(|| {
-                        format!("package {path} entry {value:?} has no integrity digest")
-                    })?;
-                    let digest = parse_digest(algo, hex)
-                        .map_err(|reason| format!("package {path}: {reason}"))?;
-                    deps.cache_digest(digest);
-                }
-            }
-        } else if let Some(path) = key.strip_prefix("provisioned:") {
-            let (_, sha256) = value.rsplit_once(':').ok_or_else(|| {
-                format!("provisioned artifact {path} entry {value:?} has no sha256")
-            })?;
-            add_digest(
-                &mut deps,
-                Algo::Sha256,
-                sha256,
-                &format!("provisioned {path}"),
-            )?;
-        } else if let Some(path) = key.strip_prefix("artifact:") {
-            add_digest(&mut deps, Algo::Sha256, value, &format!("artifact {path}"))?;
-        } else if !scalars.contains(&key.as_str()) {
-            return Err(format!("unexpected identity input {key}"));
-        }
-    }
-    Ok(deps)
 }

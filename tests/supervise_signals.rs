@@ -31,7 +31,7 @@ use tog::kernel::supervise;
 
 mod common;
 
-use common::{command, TempDir};
+use common::{command, fresh_store, TempDir};
 
 /// Every wait in this file is bounded. A blown deadline fails the case with
 /// the output collected so far rather than hanging the suite.
@@ -53,6 +53,7 @@ impl TempStore {
     fn new(label: &str) -> Self {
         let temp = TempDir::new(&format!("supervise-{label}"));
         let root = temp.0.join("store");
+        fresh_store(&root);
         for sub in [
             "objects",
             "meta",
@@ -611,9 +612,7 @@ fn supervisor_harness() {
         int_counter();
     }
     let root = PathBuf::from(std::env::var_os("TOG_SUPERVISE_STORE").unwrap());
-    let store = Store {
-        root: root.canonicalize().unwrap(),
-    };
+    let store = Store::open_at(&root).unwrap();
     let activity = store.activity(ActivityMode::Shared).unwrap();
     let code = run_scenario(&scenario, &activity);
     drop(activity);
