@@ -52,6 +52,12 @@ After the proxy: the test-suite audit (#351) and then the quality review
 
 ## Open work, each its own pull request
 
+- **#462: tests: fsroot socket fixture renames across filesystems under a long TMPDIR.** fsroot test socket fixture crosses filesystems with a long TMPDIR. Pick: bind through the held directory fd alias.
+- **#463: tests: sandbox socket fixtures fail before assertions under a long TMPDIR.** sandbox socket fixtures exceed SUN_LEN with a long TMPDIR. Pick: a shared Linux fd-alias binding helper, batched with required sandbox work.
+- **#464: macOS supervision: deferred notification-pipe initialization and validation.** macOS supervision initialization and validation. Deferred by the owner on 2026-10-04.
+- **#465: heavy: audit shared state before allowing parallel ignored suites.** audit shared state before running ignored suites in parallel. Keep --test-threads=1 until local evidence supports removal.
+- **#466: ci: GitHub Actions job startup blocked by account billing or spending limit.** Actions jobs cannot start because of account billing or spending-limit restrictions. Pick: owner repairs account access, use documented local checks meanwhile.
+
 - **The action's fixture wakes the heavy suite (#426).** A change under
   `tests/fixtures/action-demo/` runs the e2e job. Pick: move the fixture
   out of `tests/`.
