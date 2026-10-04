@@ -75,7 +75,8 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   through the descriptor (`fchdir`), not the path. Some things still go by path. A sandboxed
   child (the `setup.py` probe) has the project bound in by path, a confined resolution
   snapshots the project after opening it by path again, and a path handed to a tool as an
-  argument (`--manifest-path`, `-r <requirements>`) is one the tool opens itself. So a
+  argument (`--manifest-path`, `-r <requirements>`) or an environment variable
+  (`BUNDLE_GEMFILE`) is one the tool opens itself. So a
   same-user process that renames the directory away, puts another project at its path, and
   puts the original back while one of those runs can make it read or write the replacement.
   Loud when the tool's output is read back (a lock it wrote is missing from the held
