@@ -32,8 +32,11 @@
 //! `local_output`, which refuse a dependency tool (it goes through
 //! `kernel::resolve`'s door).
 
+mod pipes;
+
 use crate::kernel::activity::StoreActivity;
 use crate::kernel::resolve::confine;
+use pipes::{drain, note_abandoned_output, wait_readable, DRAIN_AFTER_EXIT};
 use std::cell::{Cell, UnsafeCell};
 use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, RawFd};
@@ -1138,45 +1141,6 @@ fn status_relayed(
 /// The bytes of a child's stderr kept for the sandbox failure classifier.
 const CLASSIFIER_PREFIX: usize = 4096;
 
-/// How long output is still read once the direct child is reaped. A process
-/// the command left running (a compiler server, an MSBuild node) can hold
-/// the pipe open for good, and tog must not wait on it.
-const DRAIN_AFTER_EXIT: std::time::Duration = std::time::Duration::from_secs(2);
-
-/// Say that a command's leftover process kept its output open, once.
-fn note_abandoned_output(command: &Command) {
-    crate::kernel::ui::note(&format!(
-        "{} exited, but a process it started still holds its output open; stopped reading \
-         {} s after it exited",
-        command.get_program().to_string_lossy(),
-        DRAIN_AFTER_EXIT.as_secs()
-    ));
-}
-
-/// Wait up to `timeout` for `fd` to be readable (or closed). `false` when
-/// the time ran out first.
-fn wait_readable(fd: RawFd, timeout: std::time::Duration) -> io::Result<bool> {
-    let mut descriptor = libc::pollfd {
-        fd,
-        events: libc::POLLIN,
-        revents: 0,
-    };
-    let millis = libc::c_int::try_from(timeout.as_millis()).unwrap_or(libc::c_int::MAX);
-    // SAFETY: descriptor is one valid pollfd for the duration of the call.
-    match unsafe { libc::poll(&mut descriptor, 1, millis) } {
-        0 => Ok(false),
-        count if count > 0 => Ok(true),
-        _ => {
-            let error = io::Error::last_os_error();
-            if error.kind() == io::ErrorKind::Interrupted {
-                Ok(false)
-            } else {
-                Err(error)
-            }
-        }
-    }
-}
-
 /// Where a relayed stream goes.
 enum Sink {
     Stdout,
@@ -1347,24 +1311,6 @@ fn relay(
     };
     pass_on(scrubber.finish());
     result.map(|stopped| (kept, stopped))
-}
-
-fn drain<R: Read>(reader: &mut Option<R>, destination: &mut Vec<u8>) -> io::Result<bool> {
-    let Some(reader) = reader else {
-        return Ok(false);
-    };
-    let mut buffer = [0u8; 16 * 1024];
-    loop {
-        match reader.read(&mut buffer) {
-            Ok(0) => {
-                return Ok(true);
-            }
-            Ok(count) => destination.extend_from_slice(&buffer[..count]),
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(false),
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-            Err(error) => return Err(error),
-        }
-    }
 }
 
 /// Spawn a command, drain captured stdout/stderr without waiting on a full
@@ -1711,6 +1657,28 @@ mod tests {
         let error = result.unwrap_err();
         assert!(error.contains("relay panicked"), "{error}");
         assert!(elapsed < std::time::Duration::from_secs(60), "{elapsed:?}");
+    }
+
+    #[test]
+    fn a_continuously_readable_stream_yields_to_other_supervisor_work() {
+        struct ContinuousOutput(usize);
+        impl Read for ContinuousOutput {
+            fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+                self.0 += 1;
+                if self.0 >= 1024 {
+                    return Err(io::Error::other("stream monopolized the supervisor"));
+                }
+                buffer[0] = b'x';
+                Ok(1)
+            }
+        }
+        let mut stream = Some(ContinuousOutput(0));
+        let mut captured = Vec::new();
+        assert!(!drain(&mut stream, &mut captured).unwrap());
+        assert!(!captured.is_empty());
+        // Returning permits reaping, signal forwarding, deadline checks,
+        // and draining the other output pipe even without EOF/WouldBlock.
+        assert!(stream.unwrap().0 < 1024);
     }
 
     /// A command that leaves a process holding its output open (a compiler
