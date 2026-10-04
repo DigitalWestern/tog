@@ -177,7 +177,7 @@ pub(super) fn read_closures<W: Write>(
             Some("node-forest/1" | "node-forest/2")
         ) {
             if let Some(projection_id) = body["projection_id"].as_str() {
-                let key = short_sha256(project.as_os_str().as_bytes(), 32);
+                let key = Store::forest_project_key(project);
                 state
                     .project_keep
                     .push(store.root.join("forests").join(&key).join(projection_id));

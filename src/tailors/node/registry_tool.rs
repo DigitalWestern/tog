@@ -13,10 +13,8 @@ use crate::tailors::node;
 use crate::tailors::node::tailor::encoded_workspace;
 use crate::tailors::{RegistryTool, ToolEnv};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use std::fs;
 use std::io;
-use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 pub struct NodeTool;
@@ -93,7 +91,7 @@ impl RegistryTool for NodeTool {
         if projection_id.is_empty() || !projection_id.bytes().all(|b| b.is_ascii_hexdigit()) {
             return Ok(false);
         }
-        let project_key = hex::encode(Sha256::digest(root.canonicalize()?.as_os_str().as_bytes()));
+        let project_key = Store::forest_project_key(&root.canonicalize()?);
         // New projections are owned by the originating store. Keep a
         // read-only compatibility candidate for pre-root/2 x records, whose
         // forest lived beside the store under tog home.
@@ -107,7 +105,7 @@ impl RegistryTool for NodeTool {
         let workspaces = closure["workspaces"].as_array();
         Ok(forest_bases
             .into_iter()
-            .map(|base| base.join(&project_key[..32]).join(projection_id))
+            .map(|base| base.join(&project_key).join(projection_id))
             .any(|projection| {
                 let Some(expected) = projection.join("node_modules").canonicalize().ok() else {
                     return false;

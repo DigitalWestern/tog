@@ -17,9 +17,7 @@ use crate::kernel::ui;
 use crate::tailors::node::{self as node, inputs};
 use crate::tailors::{ClosureListing, PackageRow, RegistryTool, SyncRequest, Tailor};
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 use std::io;
-use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -467,8 +465,7 @@ fn node_projection_state(project: &ProjectRoot, body: &Value) -> State {
         let Some(home) = store_home_from_object(Path::new(env_text)) else {
             return State::ProjectionMissing("node_modules".into());
         };
-        let project_key =
-            hex::encode(Sha256::digest(project.path().as_os_str().as_bytes()))[..32].to_string();
+        let project_key = crate::kernel::store::Store::forest_project_key(project.path());
         home.join("forests").join(project_key).join(projection_id)
     };
     let Some(expected) = expected_root.join("node_modules").canonicalize().ok() else {
@@ -642,7 +639,9 @@ mod tests {
             inputs::input_records(&project, &["package.json", "package-lock.json"]).unwrap();
         assert_eq!(
             records[1].sha256,
-            hex::encode(Sha256::digest(lock("original").as_bytes()))
+            hex::encode(<sha2::Sha256 as sha2::Digest>::digest(
+                lock("original").as_bytes()
+            ))
         );
     }
 

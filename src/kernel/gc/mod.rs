@@ -229,11 +229,6 @@ fn size(bytes: u64) -> String {
     }
 }
 
-fn short_sha256(bytes: &[u8], hex_len: usize) -> String {
-    use sha2::{Digest, Sha256};
-    hex::encode(Sha256::digest(bytes))[..hex_len].to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
