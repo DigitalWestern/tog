@@ -23,8 +23,9 @@ the largest gap in what tog promises. Design: `docs/agent/DESIGNS.md` §6
 
 1. **#204 (PR 6): Node.** npm and pnpm. Absorbs #212 (npm notifier and
    audit requests).
-2. **#205 (PR 7): Python.** uv. Absorbs #210 (`uv pip compile` ignores
-   `UV_PYTHON`).
+2. **#205 (PR 7): Python.** uv. Every uv call already passes
+   `--python <store python>` (#210); the forced row's own `--python` then
+   replaces it.
 3. **#206 (PR 8): Ruby and Elixir.** Bundler and Hex mirrors. Absorbs
    #211 (`bundle add` installs).
 4. **#207 (PR 9): .NET.** The `nuget.config` mirror.

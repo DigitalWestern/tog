@@ -38,6 +38,19 @@ pub use crate::kernel::provider::cpython::{
     shipped_newest, shipped_selection, toolchain_catalog, uv_pins, PinnedPython, PinnedUv,
 };
 
+/// The interpreter a store-uv run builds sdists on, realized: tog's
+/// CPython for `selected`. uv takes it as `--python` on every invocation,
+/// because `uv pip compile` ignores `UV_PYTHON` and would otherwise build
+/// an sdist's metadata on whatever `python3` is first on PATH (#210).
+pub(crate) fn uv_interpreter(
+    store: &Store,
+    activity: &StoreActivity,
+    platform: Platform,
+    selected: &Selected,
+) -> io::Result<PathBuf> {
+    Ok(realize_runtime(store, activity, platform, selected)?.join("bin/python3"))
+}
+
 /// Realize the CPython this selection names (interpreter at
 /// `<path>/bin/python3`); see `kernel::provider::cpython::realize_runtime`.
 pub fn realize_runtime(

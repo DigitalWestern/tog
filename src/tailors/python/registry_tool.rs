@@ -110,6 +110,7 @@ impl RegistryTool for PythonTool {
         ui::note(&format!("resolving {} with the store uv...", spec.trim()));
         // The bundle names the uv build this environment resolves with.
         let uv = python::realize_uv(store, activity, platform, toolchain)?.join("uv");
+        let python = python::uv_interpreter(store, activity, platform, toolchain)?;
         let mut uv_spec = DelegateSpec::new(uv);
         uv_spec
             .args(["pip", "compile"])
@@ -120,6 +121,9 @@ impl RegistryTool for PythonTool {
         }
         uv_spec
             .args(["--python-version", pin.version])
+            .arg("--python")
+            .arg(&python)
+            .env("UV_PYTHON_DOWNLOADS", "never")
             .args(["--index-url", "https://pypi.org/simple"])
             .arg("-o")
             .arg(&output)

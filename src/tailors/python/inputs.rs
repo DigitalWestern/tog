@@ -415,6 +415,7 @@ pub fn locked_requirements(
     ));
     // Store-pinned uv, not host uv: a bare machine needs only tog.
     let uv = python::realize_uv(door.store(), door.lease(), door.platform(), selected)?.join("uv");
+    let python = python::uv_interpreter(door.store(), door.lease(), door.platform(), selected)?;
     let compile_input = compile_path.and_then(|path| path.to_str()).unwrap_or(input);
     let mut spec = DelegateSpec::new(&uv);
     spec.args(["pip", "compile", compile_input, "--generate-hashes"]);
@@ -422,6 +423,9 @@ pub fn locked_requirements(
         spec.arg("--quiet");
     }
     spec.args(["--python-version", pyver])
+        .arg("--python")
+        .arg(&python)
+        .env("UV_PYTHON_DOWNLOADS", "never")
         // Manifest index directives and ambient pip/uv index variables are
         // never trusted. Resolution is explicitly public PyPI only.
         .args(["--index-url", "https://pypi.org/simple"])
@@ -599,7 +603,8 @@ mod tests {
     }
 
     /// Plant the pinned uv as a script that writes the lock uv would have
-    /// produced. `ensure_uv_for` returns a store object it already has, so
+    /// produced, and an empty stand-in for the CPython uv is given as
+    /// `--python`. Realization returns store objects it already has, so
     /// `locked_requirements` reaches its stamp write with no network.
     fn store_with_stub_uv(root: &Path) -> store::Store {
         use std::os::unix::fs::PermissionsExt as _;
@@ -618,13 +623,29 @@ mod tests {
         let uv = staged.join("uv");
         std::fs::write(
             &uv,
-            "#!/bin/sh\necho 'six==1.17.0 --hash=sha256:aaaa' > requirements.lock.txt\n",
+            "#!/bin/sh\necho \"$@\" > uv-args.txt\n\
+             echo 'six==1.17.0 --hash=sha256:aaaa' > requirements.lock.txt\n",
         )
         .unwrap();
         std::fs::set_permissions(&uv, std::fs::Permissions::from_mode(0o755)).unwrap();
         store
             .commit_with_deps(
                 &python::uv_identity(pin),
+                &staged,
+                &[],
+                &store::ObjectDeps::new(),
+            )
+            .unwrap();
+        let cpython = python::pythons()
+            .unwrap()
+            .iter()
+            .find(|pin| pin.platform == host && pin.version == pyselect::DEFAULT_VERSION)
+            .unwrap();
+        let staged = store.stage().unwrap();
+        std::fs::create_dir_all(staged.join("bin")).unwrap();
+        store
+            .commit_with_deps(
+                &python::cpython_identity(cpython),
                 &staged,
                 &[],
                 &store::ObjectDeps::new(),
@@ -661,6 +682,18 @@ mod tests {
         assert!(error.contains("not a real directory"), "{error}");
         // uv's own lock landed in the project; only tog's stamp was refused.
         assert!(project_dir.join("requirements.lock.txt").is_file());
+        // uv builds any sdist on tog's CPython, named explicitly: `uv pip
+        // compile` ignores UV_PYTHON (#210).
+        let python = store
+            .object_path(
+                &python::cpython_object_id(&selected(), Platform::host().unwrap()).unwrap(),
+            )
+            .join("bin/python3");
+        let args = std::fs::read_to_string(project_dir.join("uv-args.txt")).unwrap();
+        assert!(
+            args.contains(&format!("--python {}", python.display())),
+            "{args}"
+        );
         assert!(
             std::fs::read_dir(&outside).unwrap().next().is_none(),
             "wrote the lock stamp through the symlinked .tog"
