@@ -658,117 +658,21 @@ pub(super) fn validate_cached_dependency_evidence(
     id: &str,
     candidate: &ObjectDeps,
 ) -> io::Result<()> {
-    let path = root.join("meta").join(format!("{id}.json"));
-    let bytes = fs::read(&path)?;
-    let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|error| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("parse object metadata {}: {error}", path.display()),
-        )
-    })?;
-    let schema = value
-        .get("schema")
-        .ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("object metadata {id} has no schema"),
-            )
-        })?
-        .as_str()
-        .ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("object metadata {id} has an invalid schema"),
-            )
-        })?;
-    if schema != "object-meta/2" {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("object {id} has unknown metadata schema {schema}"),
-        ));
-    }
-    let mut objects = BTreeSet::new();
-    for value in value
-        .get("dependencies")
-        .and_then(serde_json::Value::as_array)
-        .ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("object metadata {id} has no explicit dependencies"),
-            )
-        })?
-    {
-        let value = value.as_str().ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("object metadata {id} has a non-string dependency"),
-            )
-        })?;
-        if !is_object_id(value) || !objects.insert(value.to_string()) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("object metadata {id} has malformed or duplicate dependency"),
-            ));
-        }
-    }
-    let mut cache = BTreeSet::new();
-    for value in value
-        .get("cache_digests")
-        .and_then(serde_json::Value::as_array)
-        .ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("object metadata {id} has no explicit cache digests"),
-            )
-        })?
-    {
-        let object = value.as_object().ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("object metadata {id} has a malformed cache digest"),
-            )
-        })?;
-        let algo = object
-            .get("algo")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("object metadata {id} cache digest has no algorithm"),
-                )
-            })?;
-        let hex = object
-            .get("hex")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("object metadata {id} cache digest has no hex"),
-                )
-            })?;
-        let digest = crate::kernel::objmeta::parse_digest(algo, hex).map_err(|reason| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("object metadata {id}: {reason}"),
-            )
-        })?;
-        if !cache.insert(format!("{}:{}", digest.algo(), digest.hex())) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("object metadata {id} has duplicate cache digest"),
-            ));
-        }
-    }
-    let candidate_cache: BTreeSet<_> = candidate
-        .cache
-        .iter()
-        .map(|digest| format!("{}:{}", digest.algo(), digest.hex()))
-        .collect();
-    let winner_cache = cache;
-    if objects != candidate.objects || winner_cache != candidate_cache {
+    let record =
+        crate::kernel::objmeta::read_record_at(&root.join("meta").join(format!("{id}.json")))?;
+    if record.dependencies != candidate.objects || record.cache != candidate.cache {
+        let names = |cache: &BTreeSet<crate::kernel::digest::Digest>| {
+            cache
+                .iter()
+                .map(|digest| format!("{}:{}", digest.algo(), digest.hex()))
+                .collect::<BTreeSet<_>>()
+        };
         return Err(io::Error::other(format!(
-            "object {id} was published concurrently with different dependency evidence; winner objects: {objects:?}, staged objects: {:?}, winner cache: {winner_cache:?}, staged cache: {candidate_cache:?}; re-run 'tog'",
-            candidate.objects
+            "object {id} was published concurrently with different dependency evidence; winner objects: {:?}, staged objects: {:?}, winner cache: {:?}, staged cache: {:?}; re-run 'tog'",
+            record.dependencies,
+            candidate.objects,
+            names(&record.cache),
+            names(&candidate.cache),
         )));
     }
     Ok(())
