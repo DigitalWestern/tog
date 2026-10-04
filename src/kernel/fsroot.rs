@@ -56,6 +56,10 @@ pub enum Entry {
 /// A project directory held open as a descriptor.
 #[derive(Debug)]
 pub struct ProjectRoot {
+    /// Set for a root `open` made: while it lives, a child started in its
+    /// path starts in this directory (`start_in`). Declared before `dir`
+    /// so its row leaves the table before the descriptor closes.
+    _held: Option<HeldEntry>,
     dir: fs::File,
     path: PathBuf,
 }
@@ -81,7 +85,12 @@ impl ProjectRoot {
             )
         })?;
         let dir = walk_from_root(&path)?;
-        Ok(Self { dir, path })
+        let held = HeldEntry::register(&path, &dir);
+        Ok(Self {
+            dir,
+            path,
+            _held: Some(held),
+        })
     }
 
     /// The canonical project path, for messages. Every operation goes
@@ -544,6 +553,7 @@ impl ProjectRoot {
         Ok(Self {
             dir: self.dir.try_clone()?,
             path: self.path.clone(),
+            _held: None,
         })
     }
 
@@ -692,7 +702,11 @@ impl ProjectRoot {
             .as_ref()
             .map_or(self.dir.as_raw_fd(), AsRawFd::as_raw_fd);
         match open_directory_at(parent_fd, name.as_bytes(), &display, "read") {
-            Ok(dir) => Ok(Some(ProjectRoot { dir, path: display })),
+            Ok(dir) => Ok(Some(ProjectRoot {
+                dir,
+                path: display,
+                _held: None,
+            })),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(error) => Err(error),
         }
@@ -711,6 +725,7 @@ impl ProjectRoot {
         ) {
             Ok(dir) => Ok(Some(ProjectRoot {
                 dir,
+                _held: None,
                 path: if relative == Path::new(".") {
                     self.path.clone()
                 } else {
@@ -992,6 +1007,114 @@ fn split_relative(relative: &Path) -> io::Result<(Vec<&OsStr>, &OsStr)> {
     Ok((components, name))
 }
 
+/// The project directories open `ProjectRoot`s hold, by canonical path. A
+/// tool tog starts "in the project" is given a path (`DelegateSpec`'s lock
+/// root), and a process's working directory is only a path until the child
+/// enters it: a project swapped and restored between tog's open and that
+/// chdir would start the tool in the other directory. With this table the
+/// child enters the directory tog holds instead (`held_dir_for`).
+static HELD: std::sync::Mutex<Vec<(u64, PathBuf, RawFd)>> = std::sync::Mutex::new(Vec::new());
+
+/// One `HELD` row, removed when its root is dropped. The row names the
+/// root's own descriptor, not a duplicate: `ProjectRoot` drops this before
+/// its `dir`, and every use of the descriptor happens under the table's
+/// lock, so a row is never read after its descriptor closes.
+#[derive(Debug)]
+struct HeldEntry(u64);
+
+impl HeldEntry {
+    fn register(path: &Path, dir: &fs::File) -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        held_table().push((id, path.to_path_buf(), dir.as_raw_fd()));
+        Self(id)
+    }
+}
+
+impl Drop for HeldEntry {
+    fn drop(&mut self) {
+        held_table().retain(|(id, _, _)| *id != self.0);
+    }
+}
+
+fn held_table() -> std::sync::MutexGuard<'static, Vec<(u64, PathBuf, RawFd)>> {
+    HELD.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// The directory a child started in `path` should run in, opened from the
+/// held project root `path` lies in (the deepest one, the earliest opened
+/// on a tie): `None` when no held root contains it, the directory below
+/// the root cannot be opened or the root was deleted, and the child then
+/// enters `path` itself. A directory under the root is resolved like a
+/// project input (`input_subdir`): a symlink the project contains is
+/// followed.
+fn held_dir_for(path: &Path) -> Option<fs::File> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir().ok()?.join(path)
+    };
+    let table = held_table();
+    let (fd, below) = held_match(&table, &absolute)
+        .or_else(|| held_match(&table, &absolute.canonicalize().ok()?))?;
+    // A held root tog removed itself (a stage it deleted and made again)
+    // is no place to start a child: the path is the directory now.
+    if fd_stat(fd).ok()?.st_nlink == 0 {
+        return None;
+    }
+    let name = if below.as_os_str().is_empty() {
+        b".".to_vec()
+    } else {
+        input_name(&below).ok()?
+    };
+    open_file_at(
+        fd,
+        &name,
+        libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+        0,
+    )
+    .ok()
+}
+
+/// Start `command` in `dir`. When `dir` lies in a project root tog holds
+/// open, the child enters the held directory (`fchdir`, after std's chdir
+/// by path), so a project swapped since tog opened it does not redirect the
+/// tool. The descriptor is close-on-exec: the tool never inherits it.
+pub(crate) fn start_in(command: &mut std::process::Command, dir: &Path) {
+    use std::os::unix::process::CommandExt as _;
+    command.current_dir(dir);
+    let Some(held) = held_dir_for(dir) else {
+        return;
+    };
+    // SAFETY: the closure makes one async-signal-safe call (fchdir) in the
+    // post-fork child, on a descriptor the closure owns.
+    unsafe {
+        command.pre_exec(move || {
+            if libc::fchdir(held.as_raw_fd()) != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+}
+
+fn held_match(table: &[(u64, PathBuf, RawFd)], path: &Path) -> Option<(RawFd, PathBuf)> {
+    table
+        .iter()
+        .filter_map(|(id, root, fd)| {
+            let below = path.strip_prefix(root).ok()?;
+            Some((
+                root.components().count(),
+                std::cmp::Reverse(*id),
+                *fd,
+                below,
+            ))
+        })
+        .max_by_key(|(depth, id, _, _)| (*depth, *id))
+        .map(|(_, _, fd, below)| (fd, below.to_path_buf()))
+}
+
 /// A project-input name for `openat` from the held descriptor: not empty,
 /// not absolute, no NUL. Unlike `split_relative` it may climb or repeat a
 /// separator, since it is resolved by the kernel the way a pathname
@@ -1184,6 +1307,44 @@ mod tests {
         let dir = temp.0.join("proj");
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// A child started in a held project's path enters the held directory:
+    /// a project swapped for another between tog's open and the spawn does
+    /// not redirect it, nor does one in a held root's subdirectory. Once
+    /// the root is dropped (or deleted), the path is used again.
+    #[test]
+    fn a_child_started_in_a_held_root_enters_the_held_directory() {
+        let temp = TempDir::named("held-cwd");
+        let dir = project(&temp);
+        fs::create_dir_all(dir.join("member")).unwrap();
+        fs::write(dir.join("marker"), "held").unwrap();
+        fs::write(dir.join("member/marker"), "held member").unwrap();
+        let root = ProjectRoot::open(&dir).unwrap();
+        let canonical = dir.canonicalize().unwrap();
+        fs::rename(&canonical, temp.0.join("moved")).unwrap();
+        fs::create_dir_all(canonical.join("member")).unwrap();
+        fs::write(canonical.join("marker"), "swapped").unwrap();
+        fs::write(canonical.join("member/marker"), "swapped member").unwrap();
+        // Reviewed site: a test child, run to see which directory it is in.
+        #[allow(clippy::disallowed_methods)]
+        let read = |dir: &Path| {
+            let mut command = std::process::Command::new("/bin/cat");
+            command.arg("marker");
+            start_in(&mut command, dir);
+            String::from_utf8(command.output().unwrap().stdout).unwrap()
+        };
+        assert_eq!(read(&canonical), "held");
+        assert_eq!(read(&canonical.join("member")), "held member");
+        drop(root);
+        assert_eq!(read(&canonical), "swapped");
+
+        let again = ProjectRoot::open(&canonical).unwrap();
+        fs::remove_dir_all(&canonical).unwrap();
+        fs::create_dir_all(&canonical).unwrap();
+        fs::write(canonical.join("marker"), "remade").unwrap();
+        assert_eq!(read(&canonical), "remade");
+        drop(again);
     }
 
     /// A listening socket at `path`. A socket's path must fit in

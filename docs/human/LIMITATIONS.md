@@ -70,14 +70,18 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   root and the per-project lock are keyed on the canonical path the project was opened at,
   never resolved again, and the sync refuses once that path stops naming the held directory
   (after the store wait, before each ecosystem, before a root is registered, and after the
-  closure is renamed into place). Three things still go by path. The ecosystem tools a sync
-  starts (uv, npm, cargo, go, mix, bundle, dotnet, a `setup.py` probe) run in the project by
-  path, so a same-user process that renames the directory away, puts another project at its
-  path, and puts the original back while one of them runs can make that tool read or write
-  the replacement. Loud when the tool's output is read back (a lock it wrote is missing from
-  the held directory); silent otherwise. Files above the project (a Cargo workspace root, a
-  parent `go.work`, .NET `Directory.*` files, a parent `.tog/policy.toml`, the machine
-  policy) are read by path. Commands that do not sync (`status`, `doctor`, `run`'s
+  closure is renamed into place). The ecosystem tools a sync starts unsandboxed (uv, npm,
+  cargo, go, mix, bundle, dotnet, git) start in the held directory: the child enters it
+  through the descriptor (`fchdir`), not the path. Some things still go by path. A sandboxed
+  child (the `setup.py` probe) has the project bound in by path, a confined resolution
+  snapshots the project after opening it by path again, and a path handed to a tool as an
+  argument (`--manifest-path`, `-r <requirements>`) is one the tool opens itself. So a
+  same-user process that renames the directory away, puts another project at its path, and
+  puts the original back while one of those runs can make it read or write the replacement.
+  Loud when the tool's output is read back (a lock it wrote is missing from the held
+  directory); silent otherwise. Files above the project (a Cargo workspace root, a parent
+  `go.work`, .NET `Directory.*` files, a parent `.tog/policy.toml`, the machine policy) are
+  read by path. Commands that do not sync (`status`, `doctor`, `run`'s
   environment, `gc --register`) open the project by path.
 - **CLI exit status is 0 / 1 / 2** (success / command failed / usage error); `run`, `x` and
   `fmt` pass the program's status through. A tool argument that is spelled like one of tog's
