@@ -769,8 +769,11 @@ update --self'` when one is newer, `ok` with `not checked` when the manifest
 is unreachable: offline is not unhealthy), then platform, store, sandbox,
 host C toolchain, and realized toolchains, each line `ok`/`warn`/`fail`
 (lowercase, in text and in JSON) with the fix; exit 1 on any fail. It does
-not wait for a store another Tog job (a `gc`, a reset) is using: the store
+not wait for a store another Tog job (a `gc`, a sync) is using: the store
 row is `warn`, says so, and every check that needs no store still runs.
+The one wait is behind a `gc --reset` that is emptying the store: doctor
+says what it is waiting for, like every other command, and goes on when
+the reset is done.
 
 **--version** prints `tog <crate version> (<short commit> <commit date>)`,
 stamped at build time from the checkout (`tog 0.1.0 (7688cfd 2026-09-21)`);

@@ -644,15 +644,18 @@ store, because a store being created publishes the marker before its first
 namespace. During a reset it can report the store as having no marker. That
 is true at that moment, and it stops when the reset finishes. `tog doctor`
 is not such a reader: it opens the store (waiting for the root lock like
-any other command) and takes a shared lease without waiting. Behind a
-sweep or a reset it reports the store as in use, as a warning, and still
-runs every check that needs no store.
+any other command, and saying so) and then takes a shared lease without
+waiting. So behind a sweep or a sync it reports the store as in use, as a
+warning, and still runs every check that needs no store. Behind a reset
+that holds the root lock it waits until the reset is done.
 
 A refusal is an error whose message says why and whose fix is a separate
 `tog:     fix:` line (a `"fix"` key under `--json`): `tog gc --reset`, or
 `tog update --self` for a store a newer tog wrote. Moving the directory
 aside works too. A reset empties whichever store the command selects, so
-the fix always acts on the store that was refused. The bare command is
+the fix acts on the store that was refused when it is pasted into the
+environment the refused command ran in (the same `HOME` and `TOG_STORE`,
+and no store symlink moved in between). The bare command is
 printed only when it selects that store from any directory: `TOG_STORE` is
 unset or absolute, and names it. Otherwise the line reads
 `TOG_STORE=<that store> tog gc --reset` with the absolute path. That
