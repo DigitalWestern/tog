@@ -363,7 +363,7 @@ impl DelegateSpec {
         let mut command = Command::new(&self.program);
         command.args(&self.args);
         if let Some(dir) = &self.lock_root {
-            command.current_dir(dir);
+            crate::kernel::fsroot::start_in(&mut command, dir);
         }
         if self.env_clear {
             command.env_clear();

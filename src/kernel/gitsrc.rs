@@ -251,7 +251,7 @@ fn configure_git(command: &mut Command, args: &[&str], cwd: Option<&Path>) {
     }
     command.args(args);
     if let Some(cwd) = cwd {
-        command.current_dir(cwd);
+        crate::kernel::fsroot::start_in(command, cwd);
     }
     // A prompt would hang a background sync forever.
     command.env("GIT_TERMINAL_PROMPT", "0");

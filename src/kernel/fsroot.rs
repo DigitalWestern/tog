@@ -56,6 +56,10 @@ pub enum Entry {
 /// A project directory held open as a descriptor.
 #[derive(Debug)]
 pub struct ProjectRoot {
+    /// Set for a root `open` made: while it lives, a child started in its
+    /// path starts in this directory (`start_in`). Declared before `dir`
+    /// so its row leaves the table before the descriptor closes.
+    _held: Option<HeldEntry>,
     dir: fs::File,
     path: PathBuf,
 }
@@ -81,7 +85,12 @@ impl ProjectRoot {
             )
         })?;
         let dir = walk_from_root(&path)?;
-        Ok(Self { dir, path })
+        let held = HeldEntry::register(&path, &dir);
+        Ok(Self {
+            dir,
+            path,
+            _held: Some(held),
+        })
     }
 
     /// The canonical project path, for messages. Every operation goes
@@ -541,9 +550,12 @@ impl ProjectRoot {
     /// A second descriptor for the same held directory, for a holder that
     /// outlives the borrow it was handed (the toolchain-input guard).
     pub fn try_clone(&self) -> io::Result<Self> {
+        let dir = self.dir.try_clone()?;
+        let held = HeldEntry::register(&self.path, &dir);
         Ok(Self {
-            dir: self.dir.try_clone()?,
+            dir,
             path: self.path.clone(),
+            _held: Some(held),
         })
     }
 
@@ -692,7 +704,14 @@ impl ProjectRoot {
             .as_ref()
             .map_or(self.dir.as_raw_fd(), AsRawFd::as_raw_fd);
         match open_directory_at(parent_fd, name.as_bytes(), &display, "read") {
-            Ok(dir) => Ok(Some(ProjectRoot { dir, path: display })),
+            Ok(dir) => {
+                let held = HeldEntry::register(&display, &dir);
+                Ok(Some(ProjectRoot {
+                    dir,
+                    path: display,
+                    _held: Some(held),
+                }))
+            }
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(error) => Err(error),
         }
@@ -709,14 +728,19 @@ impl ProjectRoot {
             libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
             0,
         ) {
-            Ok(dir) => Ok(Some(ProjectRoot {
-                dir,
-                path: if relative == Path::new(".") {
+            Ok(dir) => {
+                let path = if relative == Path::new(".") {
                     self.path.clone()
                 } else {
                     self.path.join(relative)
-                },
-            })),
+                };
+                let held = HeldEntry::register(&path, &dir);
+                Ok(Some(ProjectRoot {
+                    dir,
+                    path,
+                    _held: Some(held),
+                }))
+            }
             Err(error)
                 if error.kind() == io::ErrorKind::NotFound
                     || error.raw_os_error() == Some(libc::ENOTDIR) =>
@@ -992,6 +1016,126 @@ fn split_relative(relative: &Path) -> io::Result<(Vec<&OsStr>, &OsStr)> {
     Ok((components, name))
 }
 
+/// The project directories open `ProjectRoot`s hold, by canonical path. A
+/// tool tog starts "in the project" is given a path (`DelegateSpec`'s lock
+/// root), and a process's working directory is only a path until the child
+/// enters it: a project swapped and restored between tog's open and that
+/// chdir would start the tool in the other directory. With this table the
+/// child enters the directory tog holds instead (`held_dir_for`).
+static HELD: std::sync::Mutex<Vec<(u64, PathBuf, RawFd)>> = std::sync::Mutex::new(Vec::new());
+
+/// One `HELD` row, removed when its root is dropped. The row names the
+/// root's own descriptor, not a duplicate: `ProjectRoot` drops this before
+/// its `dir`, and every use of the descriptor happens under the table's
+/// lock, so a row is never read after its descriptor closes.
+#[derive(Debug)]
+struct HeldEntry(u64);
+
+impl HeldEntry {
+    fn register(path: &Path, dir: &fs::File) -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        held_table().push((id, path.to_path_buf(), dir.as_raw_fd()));
+        Self(id)
+    }
+}
+
+impl Drop for HeldEntry {
+    fn drop(&mut self) {
+        held_table().retain(|(id, _, _)| *id != self.0);
+    }
+}
+
+fn held_table() -> std::sync::MutexGuard<'static, Vec<(u64, PathBuf, RawFd)>> {
+    HELD.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Resolve a child's cwd through every held root containing the requested
+/// path. All matching roots must identify the same directory. A failed or
+/// conflicting held lookup refuses execution instead of falling back to a
+/// replacement pathname. Paths outside all held roots keep normal behavior.
+fn held_dir_for(path: &Path) -> io::Result<Option<fs::File>> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    let table = held_table();
+    let mut matches = held_matches(&table, &absolute);
+    if matches.is_empty() {
+        if let Ok(canonical) = absolute.canonicalize() {
+            matches = held_matches(&table, &canonical);
+        }
+    }
+    let mut selected: Option<(fs::File, libc::stat)> = None;
+    for (fd, below) in matches {
+        if fd_stat(fd)?.st_nlink == 0 {
+            return Err(io::Error::from_raw_os_error(libc::ESTALE));
+        }
+        let name = if below.as_os_str().is_empty() {
+            b".".to_vec()
+        } else {
+            input_name(&below)?
+        };
+        #[cfg(target_os = "linux")]
+        let flags = libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC;
+        #[cfg(not(target_os = "linux"))]
+        let flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC;
+        let directory = open_file_at(fd, &name, flags, 0)?;
+        let identity = fd_stat(directory.as_raw_fd())?;
+        if let Some((_, first)) = &selected {
+            if first.st_dev != identity.st_dev || first.st_ino != identity.st_ino {
+                return Err(io::Error::from_raw_os_error(libc::ESTALE));
+            }
+        } else {
+            selected = Some((directory, identity));
+        }
+    }
+    Ok(selected.map(|(directory, _)| directory))
+}
+
+/// Enter a held cwd directly in the child, without first resolving its old
+/// pathname. The descriptor belongs to the command and closes on exec.
+/// A held lookup refusal becomes a spawn error. The post-fork hooks only
+/// make async-signal-safe calls and construct raw errno errors.
+pub(crate) fn start_in(command: &mut std::process::Command, dir: &Path) {
+    use std::os::unix::process::CommandExt as _;
+    match held_dir_for(dir) {
+        Ok(Some(held)) => {
+            // std performs this chdir before pre_exec. It must not touch
+            // the replaceable project path or require that path to exist.
+            command.current_dir("/");
+            // SAFETY: fchdir is async-signal-safe and the closure owns its fd.
+            unsafe {
+                command.pre_exec(move || {
+                    if libc::fchdir(held.as_raw_fd()) != 0 {
+                        return Err(io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
+        }
+        Ok(None) => {
+            command.current_dir(dir);
+        }
+        Err(error) => {
+            let errno = error.raw_os_error().unwrap_or(libc::ESTALE);
+            // SAFETY: this hook returns a raw errno without allocation.
+            unsafe {
+                command.pre_exec(move || Err(io::Error::from_raw_os_error(errno)));
+            }
+        }
+    }
+}
+
+fn held_matches(table: &[(u64, PathBuf, RawFd)], path: &Path) -> Vec<(RawFd, PathBuf)> {
+    table
+        .iter()
+        .filter_map(|(_, root, fd)| Some((*fd, path.strip_prefix(root).ok()?.to_path_buf())))
+        .collect()
+}
+
 /// A project-input name for `openat` from the held descriptor: not empty,
 /// not absolute, no NUL. Unlike `split_relative` it may climb or repeat a
 /// separator, since it is resolved by the kernel the way a pathname
@@ -1184,6 +1328,95 @@ mod tests {
         let dir = temp.0.join("proj");
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// A child started in a held project's path enters the held directory:
+    /// a project swapped for another between tog's open and the spawn does
+    /// not redirect it, nor does one in a held root's subdirectory. Once
+    /// the root is dropped, the path is used again. Deleted held roots,
+    /// missing held members and conflicting roots refuse execution.
+    #[test]
+    #[allow(clippy::disallowed_methods)]
+    fn a_child_started_in_a_held_root_enters_the_held_directory() {
+        let temp = TempDir::named("held-cwd");
+        let dir = project(&temp);
+        fs::create_dir_all(dir.join("member")).unwrap();
+        fs::write(dir.join("marker"), "held").unwrap();
+        fs::write(dir.join("member/marker"), "held member").unwrap();
+        let root = ProjectRoot::open(&dir).unwrap();
+        let canonical = dir.canonicalize().unwrap();
+        fs::rename(&canonical, temp.0.join("moved")).unwrap();
+        // Reviewed site: a test child, run to see which directory it is in.
+        #[allow(clippy::disallowed_methods)]
+        let read = |dir: &Path| {
+            let mut command = std::process::Command::new("/bin/cat");
+            command.arg("marker");
+            start_in(&mut command, dir);
+            String::from_utf8(command.output().unwrap().stdout).unwrap()
+        };
+        assert_eq!(read(&canonical), "held");
+        assert_eq!(read(&canonical.join("member")), "held member");
+        fs::create_dir_all(canonical.join("member")).unwrap();
+        fs::write(canonical.join("marker"), "swapped").unwrap();
+        fs::write(canonical.join("member/marker"), "swapped member").unwrap();
+        assert_eq!(read(&canonical), "held");
+        let replacement = ProjectRoot::open(&canonical).unwrap();
+        let mut conflict = std::process::Command::new("/bin/true");
+        start_in(&mut conflict, &canonical);
+        assert_eq!(
+            conflict.status().unwrap_err().raw_os_error(),
+            Some(libc::ESTALE)
+        );
+        drop(replacement);
+        fs::remove_dir_all(temp.0.join("moved/member")).unwrap();
+        let mut missing = std::process::Command::new("/bin/true");
+        start_in(&mut missing, &canonical.join("member"));
+        assert_eq!(
+            missing.status().unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
+        drop(root);
+        assert_eq!(read(&canonical), "swapped");
+
+        let again = ProjectRoot::open(&canonical).unwrap();
+        fs::remove_dir_all(&canonical).unwrap();
+        fs::create_dir_all(&canonical).unwrap();
+        fs::write(canonical.join("marker"), "remade").unwrap();
+        let mut deleted = std::process::Command::new("/bin/true");
+        start_in(&mut deleted, &canonical);
+        assert_eq!(
+            deleted.status().unwrap_err().raw_os_error(),
+            Some(libc::ESTALE)
+        );
+        drop(again);
+        assert_eq!(read(&canonical), "remade");
+    }
+
+    #[test]
+    #[allow(clippy::disallowed_methods)]
+    fn cloned_and_member_roots_keep_their_cwd_binding() {
+        let temp = TempDir::named("held-cwd-clones");
+        let dir = project(&temp);
+        fs::create_dir(dir.join("member")).unwrap();
+        fs::write(dir.join("marker"), "held").unwrap();
+        fs::write(dir.join("member/marker"), "member held").unwrap();
+        let original = ProjectRoot::open(&dir).unwrap();
+        let cloned = original.try_clone().unwrap();
+        drop(original);
+        fs::rename(&dir, temp.0.join("moved")).unwrap();
+        fs::create_dir_all(dir.join("member")).unwrap();
+        fs::write(dir.join("marker"), "replacement").unwrap();
+        fs::write(dir.join("member/marker"), "replacement member").unwrap();
+        let mut read = std::process::Command::new("/bin/cat");
+        read.arg("marker");
+        start_in(&mut read, cloned.path());
+        assert_eq!(read.output().unwrap().stdout, b"held");
+        let member = cloned.input_subdir(Path::new("member")).unwrap().unwrap();
+        drop(cloned);
+        let mut read = std::process::Command::new("/bin/cat");
+        read.arg("marker");
+        start_in(&mut read, member.path());
+        assert_eq!(read.output().unwrap().stdout, b"member held");
     }
 
     /// A listening socket at `path`. A socket's path must fit in
