@@ -1233,13 +1233,6 @@ pub fn project_go_env(
     let modcache_obj = modcache_obj.canonicalize()?;
     let store = crate::comforter::store_from_object_path(&go_obj)
         .ok_or_else(|| err("Go object is not in a Tog store"))?;
-    let object_ref = |path: &Path| -> io::Result<serde_json::Value> {
-        let id = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .ok_or_else(|| err(format!("object path has no UTF-8 id: {}", path.display())))?;
-        Ok(serde_json::json!({"path": path.display().to_string(), "id": id}))
-    };
     let mut refs = crate::comforter::ClosureRefs::new();
     // The runtime object and `go_object` are the same object; the direct
     // reference is what keeps it alive across a GC.
@@ -1252,12 +1245,12 @@ pub fn project_go_env(
     for objects in ledgers {
         for id in [&objects.ledger, &objects.diagnostics] {
             refs.object_id(&store, activity, id)?;
-            ledger_refs.push(object_ref(&store.object_path(id))?);
+            ledger_refs.push(crate::comforter::object_ref(&store.object_path(id))?);
         }
     }
     let mut body = serde_json::json!({
-        "go_object": object_ref(&go_obj.canonicalize()?)?,
-        "modcache_object": object_ref(&modcache_obj.canonicalize()?)?,
+        "go_object": crate::comforter::object_ref(&go_obj.canonicalize()?)?,
+        "modcache_object": crate::comforter::object_ref(&modcache_obj.canonicalize()?)?,
         "go_sum_sha256": gosum_sha256,
         "plan": plan,
         "resolution_ledgers": ledger_refs,
@@ -1269,14 +1262,10 @@ pub fn project_go_env(
     // The Go object is this ecosystem's runtime: the record names the bundle
     // it came from and refers to it directly, so a later catalog refresh
     // cannot re-pair these modules with another toolchain.
-    if let (Some(body), Some(record)) = (
-        body.as_object_mut(),
-        crate::comforter::toolchain::closure_record(toolchain, &go_obj).as_object(),
-    ) {
-        for (key, value) in record {
-            body.insert(key.clone(), value.clone());
-        }
-    }
+    crate::comforter::merge_record(
+        &mut body,
+        crate::comforter::toolchain::closure_record(toolchain, &go_obj),
+    );
     crate::comforter::write_closure(project, "go", body, &store, activity, refs, attribution)
 }
 

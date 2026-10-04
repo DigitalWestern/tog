@@ -499,9 +499,7 @@ fn python_closure_body(
         "inputs": inputs,
     });
     if let Some(record) = runtime_record {
-        for (key, value) in record.as_object().into_iter().flatten() {
-            body[key] = value.clone();
-        }
+        crate::comforter::merge_record(&mut body, record);
     }
     body
 }

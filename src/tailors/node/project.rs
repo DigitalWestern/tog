@@ -998,9 +998,7 @@ pub fn project_node_env_recorded(
     );
     record_unprojected(&mut body, &tracked, &workspaces);
     if let Some(record) = runtime_record {
-        for (key, value) in record.as_object().into_iter().flatten() {
-            body[key] = value.clone();
-        }
+        crate::comforter::merge_record(&mut body, record);
     }
     #[cfg(test)]
     if !strict_refs {

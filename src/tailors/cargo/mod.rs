@@ -214,15 +214,6 @@ fn reject_user_config(args: &[String]) -> io::Result<()> {
     Ok(())
 }
 
-/// Fold the two toolchain entries into a closure body being built.
-pub(crate) fn merge_record(body: &mut serde_json::Value, record: serde_json::Value) {
-    if let (Some(body), Some(record)) = (body.as_object_mut(), record.as_object()) {
-        for (key, value) in record {
-            body.insert(key.clone(), value.clone());
-        }
-    }
-}
-
 /// Project Cargo with a writable home, forced directory-source replacement,
 /// and provenance for the exact toolchain/vendor closure. `toolchain` is the
 /// selection the run honored: the closure records it so the release this
@@ -281,19 +272,9 @@ pub fn project_cargo_env(
         0o755,
     )?;
 
-    let object_ref = |path: &Path| -> io::Result<serde_json::Value> {
-        let id = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .ok_or_else(|| err(format!("object path has no UTF-8 id: {}", path.display())))?;
-        Ok(serde_json::json!({
-            "path": path.display().to_string(),
-            "id": id,
-        }))
-    };
     let mut body = serde_json::json!({
-        "rust_object": object_ref(&rust_obj)?,
-        "vendor_object": object_ref(&vendor_obj)?,
+        "rust_object": crate::comforter::object_ref(&rust_obj)?,
+        "vendor_object": crate::comforter::object_ref(&vendor_obj)?,
         "cargo_lock_sha256": lock_digest,
         "plan": plan,
     });
@@ -304,7 +285,7 @@ pub fn project_cargo_env(
     // The Rust object is this ecosystem's runtime: the record names the
     // bundle it came from and refers to it directly, so a later catalog
     // refresh cannot re-pair these dependencies with another compiler.
-    merge_record(
+    crate::comforter::merge_record(
         &mut body,
         crate::comforter::toolchain::closure_record(toolchain, &rust_obj),
     );

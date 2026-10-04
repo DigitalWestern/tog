@@ -1726,16 +1726,9 @@ fn closure_body(
     spec: &BeamSpec,
     selected: &Selected,
 ) -> io::Result<serde_json::Value> {
-    let object_ref = |path: &Path| -> io::Result<serde_json::Value> {
-        let id = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .ok_or_else(|| err(format!("object path has no UTF-8 id: {}", path.display())))?;
-        Ok(serde_json::json!({"path": path.display().to_string(), "id": id}))
-    };
     let mut body = serde_json::json!({
-        "beam_object": object_ref(beam_obj)?,
-        "deps_object": object_ref(deps_obj)?,
+        "beam_object": crate::comforter::object_ref(beam_obj)?,
+        "deps_object": crate::comforter::object_ref(deps_obj)?,
         "deps_projection": proj_dir.display().to_string(),
         "mutable_state": "unattested",
         "mix_lock_sha256": lock_sha256,
@@ -1743,11 +1736,7 @@ fn closure_body(
         "plan": plan,
     });
     let record = crate::comforter::toolchain::closure_record(selected, beam_obj);
-    if let (Some(body), Some(record)) = (body.as_object_mut(), record.as_object()) {
-        for (key, value) in record {
-            body.insert(key.clone(), value.clone());
-        }
-    }
+    crate::comforter::merge_record(&mut body, record);
     Ok(body)
 }
 

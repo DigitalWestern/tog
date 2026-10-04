@@ -832,6 +832,27 @@ pub fn move_reserved_backup(
     Ok(())
 }
 
+/// How a closure body names a store object: its path and its id (the path's
+/// last component).
+pub(crate) fn object_ref(path: &Path) -> io::Result<serde_json::Value> {
+    let id = path.file_name().and_then(|n| n.to_str()).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("object path has no UTF-8 id: {}", path.display()),
+        )
+    })?;
+    Ok(serde_json::json!({"path": path.display().to_string(), "id": id}))
+}
+
+/// Copy every field of a toolchain `record` into a closure `body`.
+pub(crate) fn merge_record(body: &mut serde_json::Value, record: serde_json::Value) {
+    if let (Some(body), Some(record)) = (body.as_object_mut(), record.as_object()) {
+        for (key, value) in record {
+            body.insert(key.clone(), value.clone());
+        }
+    }
+}
+
 /// Recover the store from an explicit realized object path.  This is a
 /// narrow path-shape check for producer APIs. It never infers provenance by
 /// reading JSON.
