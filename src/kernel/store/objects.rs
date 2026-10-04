@@ -746,15 +746,12 @@ pub(super) fn validate_cached_dependency_evidence(
                     format!("object metadata {id} cache digest has no hex"),
                 )
             })?;
-        let digest = match algo {
-            "sha1" => crate::kernel::digest::Digest::sha1(hex),
-            "sha256" => crate::kernel::digest::Digest::sha256(hex),
-            "sha512" => crate::kernel::digest::Digest::sha512(hex),
-            other => Err(io::Error::new(
+        let digest = crate::kernel::objmeta::parse_digest(algo, hex).map_err(|reason| {
+            io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("object metadata {id} uses unsupported cache algorithm {other}"),
-            )),
-        }?;
+                format!("object metadata {id}: {reason}"),
+            )
+        })?;
         if !cache.insert(format!("{}:{}", digest.algo(), digest.hex())) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,

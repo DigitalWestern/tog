@@ -198,19 +198,7 @@ fn yarn_integrity_with(
     record: &mut impl FnMut(&str, &str, &str) -> io::Result<()>,
 ) -> io::Result<String> {
     if let Some(integrity) = integrity {
-        let selected = integrity
-            .split_whitespace()
-            .find(|value| value.starts_with("sha512-"))
-            .or_else(|| {
-                integrity
-                    .split_whitespace()
-                    .find(|value| value.starts_with("sha256-"))
-            })
-            .or_else(|| {
-                integrity
-                    .split_whitespace()
-                    .find(|value| value.starts_with("sha1-"))
-            })
+        let selected = crate::kernel::digest::strongest_sri(&integrity)
             .ok_or_else(|| err(format!("{path}: malformed Yarn integrity")))?;
         integrity_policy_with(path, selected, record)?;
         Digest::from_sri(selected)?;

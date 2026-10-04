@@ -67,15 +67,44 @@ impl Digest {
             )
         })?;
         let hex = hex::encode(bytes);
-        match algo {
-            "sha1" => Digest::sha1(&hex),
-            "sha256" => Digest::sha256(&hex),
-            "sha512" => Digest::sha512(&hex),
-            other => Err(io::Error::new(
+        match algo_named(algo) {
+            Some(algo) => Digest::validated(algo, &hex),
+            None => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("unsupported integrity algorithm: {other}"),
+                format!("unsupported integrity algorithm: {algo}"),
             )),
         }
+    }
+
+    /// A digest from an algorithm name and its hex, as object records and
+    /// cache paths spell them.
+    pub fn from_parts(algo: &str, hex: &str) -> io::Result<Digest> {
+        match algo_named(algo) {
+            Some(algo) => Digest::validated(algo, hex),
+            None => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("unsupported digest algorithm {algo}"),
+            )),
+        }
+    }
+}
+
+/// The strongest entry tog supports in an SRI list such as
+/// `"sha512-... sha1-..."` (npm, pnpm and yarn all write lists), or `None`
+/// when no entry names sha512, sha256 or sha1.
+pub fn strongest_sri(list: &str) -> Option<&str> {
+    list.split_whitespace()
+        .filter_map(|entry| Some((algo_named(entry.split_once('-')?.0)?, entry)))
+        .max_by_key(|(algo, _)| *algo)
+        .map(|(_, entry)| entry)
+}
+
+fn algo_named(name: &str) -> Option<Algo> {
+    match name {
+        "sha1" => Some(Algo::Sha1),
+        "sha256" => Some(Algo::Sha256),
+        "sha512" => Some(Algo::Sha512),
+        _ => None,
     }
 }
 
@@ -102,5 +131,23 @@ mod tests {
         assert!(d.hex().starts_with("9b71d224bd62f378"));
         assert!(Digest::from_sri("md5-abc").is_err());
         assert!(Digest::from_sri("nodash").is_err());
+    }
+
+    #[test]
+    fn the_strongest_supported_sri_in_a_list_wins() {
+        assert_eq!(strongest_sri("sha1-a sha512-b sha256-c"), Some("sha512-b"));
+        assert_eq!(strongest_sri("  sha256-c\tsha1-a "), Some("sha256-c"));
+        assert_eq!(strongest_sri("sha384-x sha1-a"), Some("sha1-a"));
+        assert_eq!(strongest_sri("sha384-x md5-y"), None);
+        assert_eq!(strongest_sri(""), None);
+    }
+
+    #[test]
+    fn from_parts_names_the_algorithm_it_does_not_know() {
+        let hex = "a".repeat(64);
+        assert_eq!(Digest::from_parts("sha256", &hex).unwrap().hex(), hex);
+        let error = Digest::from_parts("md5", &hex).unwrap_err();
+        assert_eq!(error.to_string(), "unsupported digest algorithm md5");
+        assert!(Digest::from_parts("sha1", &hex).is_err());
     }
 }

@@ -416,6 +416,8 @@ fn entry_integrity(
             "{path}: missing 'integrity' (regenerate the lockfile)"
         ))
     })?;
+    // npm writes a list when a package was published with several hashes.
+    let integrity = crate::kernel::digest::strongest_sri(integrity).unwrap_or(integrity);
     let digest = Digest::from_sri(integrity)?; // validate early
     if digest.algo() == "sha1" {
         if let Err(policy_error) = record(
@@ -733,6 +735,23 @@ mod lock_shape_tests {
         )
         .unwrap();
         assert_eq!(plan.packages[0].integrity, TEST_SRI);
+    }
+
+    /// A list of hashes plans with its strongest entry, whatever the order.
+    #[test]
+    fn an_integrity_list_plans_with_its_strongest_entry() {
+        let _attribution_lock = crate::kernel::policy::attribution_test_lock();
+        for list in [
+            format!("{SHA1_SRI} {TEST_SRI}"),
+            format!("{TEST_SRI} {SHA1_SRI}"),
+        ] {
+            let plan = plan_npm(
+                Platform::X86_64UnknownLinuxGnu,
+                &entry("node_modules/a", "https://r/a.tgz", &list),
+            )
+            .unwrap();
+            assert_eq!(plan.packages[0].integrity, TEST_SRI);
+        }
     }
 
     #[test]
