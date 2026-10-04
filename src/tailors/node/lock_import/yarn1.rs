@@ -198,19 +198,7 @@ fn yarn_integrity_with(
     record: &mut impl FnMut(&str, &str, &str) -> io::Result<()>,
 ) -> io::Result<String> {
     if let Some(integrity) = integrity {
-        let selected = integrity
-            .split_whitespace()
-            .find(|value| value.starts_with("sha512-"))
-            .or_else(|| {
-                integrity
-                    .split_whitespace()
-                    .find(|value| value.starts_with("sha256-"))
-            })
-            .or_else(|| {
-                integrity
-                    .split_whitespace()
-                    .find(|value| value.starts_with("sha1-"))
-            })
+        let selected = crate::kernel::digest::strongest_sri(&integrity)
             .ok_or_else(|| err(format!("{path}: malformed Yarn integrity")))?;
         integrity_policy_with(path, selected, record)?;
         Digest::from_sri(selected)?;
@@ -235,7 +223,7 @@ fn yarn_integrity_with(
     } else {
         return Err(err(format!("{path}: malformed yarn sha1 fragment")));
     };
-    let sri = format!("sha1-{}", crate::kernel::digest::base64_encode(&bytes));
+    let sri = format!("sha1-{}", crate::kernel::base64::encode(&bytes));
     integrity_policy_with(path, &sri, record)?;
     Ok(sri)
 }
@@ -931,6 +919,17 @@ mod lock_shape_tests {
             yarn_integrity(fragment, Some(SRI.to_string()), "yarn:0").unwrap(),
             SRI
         );
+    }
+
+    #[test]
+    fn yarn_keeps_the_first_digest_when_the_strongest_algorithm_is_tied() {
+        let second = format!("sha512-{}", crate::kernel::base64::encode(&[1; 64]));
+        for (first, next) in [(SRI, second.as_str()), (second.as_str(), SRI)] {
+            let selected =
+                yarn_integrity("https://r/a.tgz", Some(format!("{first} {next}")), "yarn:0")
+                    .unwrap();
+            assert_eq!(selected, first);
+        }
     }
 
     #[test]

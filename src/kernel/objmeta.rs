@@ -299,13 +299,10 @@ pub fn read_record_value(id: &str, value: serde_json::Value) -> io::Result<Recor
 }
 
 pub(crate) fn parse_digest(algo: &str, hex: &str) -> Result<Digest, String> {
-    let digest = match algo {
-        "sha1" => Digest::sha1(hex),
-        "sha256" => Digest::sha256(hex),
-        "sha512" => Digest::sha512(hex),
-        other => return Err(format!("unsupported cache algorithm {other}")),
-    };
-    digest.map_err(|error| error.to_string())
+    if !matches!(algo, "sha1" | "sha256" | "sha512") {
+        return Err(format!("unsupported cache algorithm {algo}"));
+    }
+    Digest::from_parts(algo, hex).map_err(|error| error.to_string())
 }
 
 // ---------------------------------------------------------------------------

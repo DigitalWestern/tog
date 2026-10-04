@@ -1102,8 +1102,10 @@ pub(super) fn pnpm_nodes(
                 "packages entry {raw_key:?} has no name@version identity"
             )));
         };
+        // pnpm keeps npm's list when a package has several hashes.
         let integrity = resolution
             .and_then(|resolution| yaml_str(resolution.get("integrity")))
+            .map(|list| crate::kernel::digest::strongest_sri(list).unwrap_or(list))
             .unwrap_or_default()
             .to_string();
         let external = source_error(&name, resolution);

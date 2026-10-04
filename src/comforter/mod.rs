@@ -14,14 +14,13 @@ use crate::kernel::activity::StoreActivity;
 use crate::kernel::fsroot::{Entry, ProjectRoot};
 use crate::kernel::platform::Platform;
 use crate::kernel::signing::SigningKey;
-use crate::kernel::store::{ProjectionBase, ProjectionRef, Store};
+use crate::kernel::store::{open_real_directory, ProjectionBase, ProjectionRef, Store};
 use crate::kernel::ui;
 use std::collections::BTreeSet;
-use std::fs::{self, OpenOptions};
+use std::fs;
 use std::io;
 use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 /// The closure-signing key for this invocation: `Some(None)` once preflight
@@ -829,25 +828,6 @@ pub fn move_reserved_backup(
         &ui::shell_line(&["rm", "-rf", &destination.display().to_string()]),
     );
     Ok(())
-}
-
-fn open_real_directory(path: &Path, label: &str) -> io::Result<fs::File> {
-    let metadata = fs::symlink_metadata(path).map_err(|error| {
-        io::Error::new(
-            error.kind(),
-            format!("open {label} {}: {error}", path.display()),
-        )
-    })?;
-    if metadata.file_type().is_symlink() || !metadata.is_dir() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("{label} {} is not a real directory", path.display()),
-        ));
-    }
-    OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
-        .open(path)
 }
 
 /// Recover the store from an explicit realized object path.  This is a

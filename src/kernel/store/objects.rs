@@ -264,7 +264,7 @@ impl Store {
                 // Looks like a crashed publication. The parent descriptor and
                 // inode check make this cleanup safe if an entry was replaced
                 // between the completeness read and removal.
-                let objects = open_store_directory(&self.root.join("objects"), "objects")?;
+                let objects = open_real_directory(&self.root.join("objects"), "objects")?;
                 let name = id.as_bytes();
                 let expected = match stat_at(objects.as_raw_fd(), name) {
                     Ok(expected) => expected,
@@ -411,7 +411,7 @@ impl Store {
         // An old record must stop certifying this id before a replacement
         // becomes visible. Persist that invalidation even when the object
         // is already gone, as after an interrupted GC.
-        let metadata = open_store_directory(&self.root.join("meta"), "meta")?;
+        let metadata = open_real_directory(&self.root.join("meta"), "meta")?;
         let meta_name = format!("{id}.json");
         match stat_at(metadata.as_raw_fd(), meta_name.as_bytes()) {
             Ok(stat) => {
@@ -429,7 +429,7 @@ impl Store {
         // Under the lock, anything at dest is a crashed leftover (a live
         // publication can't be mid-window, and a complete object returned
         // above): sweep it so the rename lands.
-        let objects = open_store_directory(&self.root.join("objects"), "objects")?;
+        let objects = open_real_directory(&self.root.join("objects"), "objects")?;
         if let Ok(expected) = stat_at(objects.as_raw_fd(), id.as_bytes()) {
             if !remove_tree_entry_if_same(objects.as_raw_fd(), id.as_bytes(), &expected)? {
                 return Err(io::Error::new(
@@ -529,7 +529,7 @@ fn publish_completion(
     name: &str,
     value: &serde_json::Value,
 ) -> io::Result<()> {
-    let tmp = open_store_directory(&store.root.join("tmp"), "tmp")?;
+    let tmp = open_real_directory(&store.root.join("tmp"), "tmp")?;
     let bytes = serde_json::to_vec_pretty(value)?;
     for _ in 0..16 {
         let candidate = format!("meta-{}-{}.json", std::process::id(), nanos());
@@ -758,120 +758,21 @@ pub(super) fn validate_cached_dependency_evidence(
     id: &str,
     candidate: &ObjectDeps,
 ) -> io::Result<()> {
-    let path = root.join("meta").join(format!("{id}.json"));
-    let bytes = fs::read(&path)?;
-    let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|error| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("parse object metadata {}: {error}", path.display()),
-        )
-    })?;
-    let schema = value
-        .get("schema")
-        .ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("object metadata {id} has no schema"),
-            )
-        })?
-        .as_str()
-        .ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("object metadata {id} has an invalid schema"),
-            )
-        })?;
-    if schema != "object-meta/2" {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("object {id} has unknown metadata schema {schema}"),
-        ));
-    }
-    let mut objects = BTreeSet::new();
-    for value in value
-        .get("dependencies")
-        .and_then(serde_json::Value::as_array)
-        .ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("object metadata {id} has no explicit dependencies"),
-            )
-        })?
-    {
-        let value = value.as_str().ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("object metadata {id} has a non-string dependency"),
-            )
-        })?;
-        if !is_object_id(value) || !objects.insert(value.to_string()) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("object metadata {id} has malformed or duplicate dependency"),
-            ));
-        }
-    }
-    let mut cache = BTreeSet::new();
-    for value in value
-        .get("cache_digests")
-        .and_then(serde_json::Value::as_array)
-        .ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("object metadata {id} has no explicit cache digests"),
-            )
-        })?
-    {
-        let object = value.as_object().ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("object metadata {id} has a malformed cache digest"),
-            )
-        })?;
-        let algo = object
-            .get("algo")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("object metadata {id} cache digest has no algorithm"),
-                )
-            })?;
-        let hex = object
-            .get("hex")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("object metadata {id} cache digest has no hex"),
-                )
-            })?;
-        let digest = match algo {
-            "sha1" => crate::kernel::digest::Digest::sha1(hex),
-            "sha256" => crate::kernel::digest::Digest::sha256(hex),
-            "sha512" => crate::kernel::digest::Digest::sha512(hex),
-            other => Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("object metadata {id} uses unsupported cache algorithm {other}"),
-            )),
-        }?;
-        if !cache.insert(format!("{}:{}", digest.algo(), digest.hex())) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("object metadata {id} has duplicate cache digest"),
-            ));
-        }
-    }
-    let candidate_cache: BTreeSet<_> = candidate
-        .cache
-        .iter()
-        .map(|digest| format!("{}:{}", digest.algo(), digest.hex()))
-        .collect();
-    let winner_cache = cache;
-    if objects != candidate.objects || winner_cache != candidate_cache {
+    let record =
+        crate::kernel::objmeta::read_record_at(&root.join("meta").join(format!("{id}.json")))?;
+    if record.dependencies != candidate.objects || record.cache != candidate.cache {
+        let names = |cache: &BTreeSet<crate::kernel::digest::Digest>| {
+            cache
+                .iter()
+                .map(|digest| format!("{}:{}", digest.algo(), digest.hex()))
+                .collect::<BTreeSet<_>>()
+        };
         return Err(io::Error::other(format!(
-            "object {id} was published concurrently with different dependency evidence; winner objects: {objects:?}, staged objects: {:?}, winner cache: {winner_cache:?}, staged cache: {candidate_cache:?}; re-run 'tog'",
-            candidate.objects
+            "object {id} was published concurrently with different dependency evidence; winner objects: {:?}, staged objects: {:?}, winner cache: {:?}, staged cache: {:?}; re-run 'tog'",
+            record.dependencies,
+            candidate.objects,
+            names(&record.cache),
+            names(&candidate.cache),
         )));
     }
     Ok(())

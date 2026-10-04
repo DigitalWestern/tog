@@ -4,6 +4,7 @@
 
 pub mod activity;
 pub mod archive;
+pub mod base64;
 pub mod context;
 pub mod cyclonedx;
 pub mod digest;

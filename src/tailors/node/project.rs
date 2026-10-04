@@ -573,7 +573,7 @@ fn forest_paths(
         .to_string();
     // The held root's path is already canonical: keying on it rather than
     // re-canonicalizing the pathname keeps a renamed project on its own key.
-    let project_key = &hex::encode(Sha256::digest(project.path().as_os_str().as_bytes()))[..32];
+    let project_key = Store::forest_project_key(project.path());
     let nm_root = store.root.join("forests").join(project_key);
     let proj_dir = nm_root.join(&proj_id);
     let forest = proj_dir.join("node_modules");

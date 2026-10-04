@@ -1643,8 +1643,9 @@ fn publish_output(
     let bin = output
         .parent()
         .ok_or_else(|| err("output directory has no bin parent"))?;
-    let new = bin.join(format!(".tog-{fingerprint}.new.{}", std::process::id()));
-    let old = bin.join(format!(".tog-{fingerprint}.old.{}", std::process::id()));
+    let suffix = crate::kernel::fsroot::random_suffix()?;
+    let new = bin.join(format!(".tog-{fingerprint}.new.{suffix}"));
+    let old = bin.join(format!(".tog-{fingerprint}.old.{suffix}"));
     for path in [&new, &old] {
         if fs::symlink_metadata(path).is_ok() {
             return Err(err(format!(
@@ -1655,7 +1656,7 @@ fn publish_output(
     }
     match fs::rename(staged, &new) {
         Ok(()) => {}
-        Err(e) if e.raw_os_error() == Some(18) => {
+        Err(e) if e.raw_os_error() == Some(libc::EXDEV) => {
             let cloned = match activity {
                 Some(activity) => {
                     crate::kernel::store::clone_tree_with_activity(activity, staged, &new, platform)
@@ -2834,11 +2835,11 @@ mod tests {
         )
         .unwrap();
         assert_eq!(fs::read_to_string(output.join("artifact")).unwrap(), "new");
-        assert!(!publish_project
-            .join(format!(".tog-fp.new.{}", std::process::id()))
-            .exists());
-        assert!(!publish_project
-            .join(format!(".tog-fp.old.{}", std::process::id()))
-            .exists());
+        let leftovers: Vec<_> = fs::read_dir(output.parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .filter(|name| name.to_string_lossy().starts_with(".tog-fp."))
+            .collect();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
     }
 }

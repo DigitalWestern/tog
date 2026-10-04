@@ -46,7 +46,7 @@ impl Store {
     /// Open `relative` under the store root one component at a time, never
     /// following a symlink. `None` when a component is absent.
     fn open_namespace(&self, relative: &[&str]) -> io::Result<Option<fs::File>> {
-        let mut dir = open_store_directory(&self.root, "store root")?;
+        let mut dir = open_real_directory(&self.root, "store root")?;
         for component in relative {
             match open_file_at(
                 dir.as_raw_fd(),

@@ -260,7 +260,7 @@ impl Store {
     /// there the marker is what tells its namespaces from an older tog's.)
     pub(crate) fn reinitialize(&self) -> io::Result<()> {
         Self::create_namespaces(&self.root, false)?;
-        let root = open_store_directory(&self.root, "store root")?;
+        let root = open_real_directory(&self.root, "store root")?;
         // `cache` is the one namespace with directories below it: its own
         // entries, then the root's.
         fs::File::open(self.root.join("cache"))?.sync_all()?;
@@ -306,10 +306,19 @@ impl Store {
         self.root.join("objects").join(id)
     }
 
-    /// The short per-project key under `forests/` and `run-homes/`: hex of
-    /// the first 8 bytes of SHA-256 over the canonical project path. Every
-    /// store path derived from a project goes through here so the
-    /// namespaces agree on which project a key names.
+    /// The directory under `forests/` that holds one project's forests: the
+    /// first 32 hex digits of SHA-256 over its canonical path, which the
+    /// caller passes already canonical (a held root's path is). The tailors
+    /// that write forests and gc's liveness walk all derive it here: if they
+    /// disagreed, gc would delete a live forest.
+    pub fn forest_project_key(canonical_project: &Path) -> String {
+        use sha2::{Digest, Sha256};
+        hex::encode(Sha256::digest(canonical_project.as_os_str().as_bytes()))[..32].to_string()
+    }
+
+    /// The short per-project key under `run-homes/` (and elixir's build
+    /// roots): hex of the first 8 bytes of SHA-256 over the canonical
+    /// project path.
     pub fn project_key(project_dir: &Path) -> io::Result<String> {
         use sha2::{Digest, Sha256};
         let canonical = project_dir.canonicalize()?;

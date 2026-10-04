@@ -245,22 +245,12 @@ fn running_binary() -> io::Result<PathBuf> {
 }
 
 /// A name no other process, and no earlier run of this one, could have
-/// left behind: pid, a nanosecond clock, and a per-process counter. Every
+/// left behind: 32 random hex digits (`fsroot::random_suffix`). Every
 /// path below is created with `create_new` on top of that, so a name that
 /// does exist (a stale file, or one planted by another user in a shared
 /// temporary directory) is refused rather than opened.
-fn unique_suffix() -> String {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static SEQ: AtomicU64 = AtomicU64::new(0);
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_nanos())
-        .unwrap_or(0);
-    format!(
-        "{}.{nanos}.{}",
-        std::process::id(),
-        SEQ.fetch_add(1, Ordering::Relaxed)
-    )
+fn unique_suffix() -> io::Result<String> {
+    crate::kernel::fsroot::random_suffix()
 }
 
 /// A scratch directory in the system temporary directory, created fresh
@@ -271,7 +261,7 @@ struct Scratch(PathBuf);
 impl Scratch {
     fn new() -> io::Result<Scratch> {
         use std::os::unix::fs::DirBuilderExt;
-        let path = std::env::temp_dir().join(format!("tog-update-{}", unique_suffix()));
+        let path = std::env::temp_dir().join(format!("tog-update-{}", unique_suffix()?));
         fs::DirBuilder::new()
             .mode(0o700)
             .create(&path)
@@ -306,7 +296,7 @@ impl Stage {
         let dir = target.parent().ok_or_else(|| {
             io::Error::other(format!("{} has no parent directory", target.display()))
         })?;
-        let path = dir.join(format!(".tog.update.{}", unique_suffix()));
+        let path = dir.join(format!(".tog.update.{}", unique_suffix()?));
         match fs::OpenOptions::new()
             .write(true)
             .create_new(true)

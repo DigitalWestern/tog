@@ -583,7 +583,7 @@ fn read_line_bytes(stream: &mut impl Read) -> String {
 /// `Proxy-Authorization` carrying `token`.
 #[cfg(test)]
 pub(crate) fn proxy_authorization(token: &str) -> String {
-    let encoded = crate::kernel::digest::base64_encode(format!("tog:{token}").as_bytes());
+    let encoded = crate::kernel::base64::encode(format!("tog:{token}").as_bytes());
     format!("Proxy-Authorization: Basic {encoded}\r\n")
 }
 
