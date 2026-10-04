@@ -363,6 +363,9 @@ pub struct Snapshot {
     /// be mid-publication (commit writes the object first), so each is the
     /// residue of a removal that stopped between the object and its record.
     pub(super) stray_records: Vec<DirEntrySnapshot>,
+    // Retain parsed file descriptors so an unlinked inode cannot be reused
+    // by a replacement directory before execution checks its identity.
+    pub(super) _stray_files: Vec<fs::File>,
     pub(super) dirs: Dirs,
 }
 
@@ -416,19 +419,50 @@ fn read_objects(
 
 /// Every readable record with no object under `objects/`, stated through
 /// the held `meta/` descriptor the removal will be relative to.
-fn read_stray_records(
+pub(super) fn read_stray_records(
     meta: &crate::kernel::objmeta::MetaIndex,
     objects: &[ObjectEntry],
     meta_dir: &HeldDir,
-) -> io::Result<Vec<DirEntrySnapshot>> {
+) -> io::Result<(Vec<DirEntrySnapshot>, Vec<fs::File>)> {
     let present: HashSet<&str> = objects.iter().map(|entry| entry.id.as_str()).collect();
     let mut strays = Vec::new();
-    for (id, _) in meta.iter() {
+    let mut files = Vec::new();
+    for (id, expected) in meta.iter() {
         if present.contains(id.as_str()) {
             continue;
         }
         let name = OsString::from(format!("{id}.json"));
-        let stat = store::stat_at(meta_dir.file.as_raw_fd(), name.as_bytes())?;
+        let file = store::open_file_at(
+            meta_dir.file.as_raw_fd(),
+            name.as_bytes(),
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
+            0,
+        )?;
+        let stat = store::fd_stat(file.as_raw_fd())?;
+        if stat.st_mode & libc::S_IFMT != libc::S_IFREG {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "stray metadata is not a regular file",
+            ));
+        }
+        let value = serde_json::from_reader(std::io::BufReader::new(&file))
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        let record = crate::kernel::objmeta::read_record_value(id, value)?;
+        let named = store::stat_at(meta_dir.file.as_raw_fd(), name.as_bytes())?;
+        if !store::same_inode(&stat, &named)
+            || record.identity.kind != expected.identity.kind
+            || record.identity.name != expected.identity.name
+            || record.identity.version != expected.identity.version
+            || record.identity.inputs != expected.identity.inputs
+            || record.dependencies != expected.dependencies
+            || record.cache != expected.cache
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "stray metadata changed during snapshot",
+            ));
+        }
+        files.push(file);
         strays.push(DirEntrySnapshot {
             path: Path::new("meta").join(&name),
             name,
@@ -436,7 +470,7 @@ fn read_stray_records(
             stat,
         });
     }
-    Ok(strays)
+    Ok((strays, files))
 }
 
 /// Enumerate every cache namespace, holding each one open. The returned
@@ -655,7 +689,7 @@ pub(super) fn read<W: Write>(
     let tmp = open_held(&store.root.join("tmp"), "tmp")?;
 
     let object_entries = read_objects(&objects_path, &objects, &meta_dir)?;
-    let stray_records = read_stray_records(&meta, &object_entries, &meta_dir)?;
+    let (stray_records, stray_files) = read_stray_records(&meta, &object_entries, &meta_dir)?;
     let (cache_dirs, cache_entries) = read_cache(store)?;
     let stages = read_stages(store, &tmp)?;
     let projections = if options.project {
@@ -675,6 +709,7 @@ pub(super) fn read<W: Write>(
         forests: projections.forests,
         backups: projections.backups,
         stray_records,
+        _stray_files: stray_files,
         dirs: Dirs {
             objects,
             meta: meta_dir,

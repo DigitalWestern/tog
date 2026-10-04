@@ -122,10 +122,29 @@ impl Store {
         use std::os::unix::fs::PermissionsExt;
         let meta_path = self.root.join("meta").join(format!("{id}.json"));
         let meta = fs::symlink_metadata(&meta_path);
-        let record_is_whole = || match fs::read(&meta_path) {
-            Ok(bytes) => serde_json::from_slice::<serde_json::Value>(&bytes)
-                .is_ok_and(|value| value.is_object()),
-            Err(_) => true,
+        let record_is_whole = || {
+            use std::os::unix::fs::OpenOptionsExt;
+            if publication_failpoint("before-completeness-open").is_err() {
+                return true;
+            }
+            let file = match fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+                .open(&meta_path)
+            {
+                Ok(file) => file,
+                Err(error) if error.raw_os_error() == Some(libc::ELOOP) => return false,
+                Err(_) => return true,
+            };
+            match file.metadata() {
+                Ok(meta) if !meta.is_file() => return false,
+                Err(_) => return true,
+                _ => {}
+            }
+            match serde_json::from_reader::<_, serde_json::Value>(std::io::BufReader::new(file)) {
+                Ok(value) => value.is_object(),
+                Err(error) => error.is_io(),
+            }
         };
         Some(
             !md.file_type().is_symlink()
@@ -376,6 +395,7 @@ impl Store {
         if self.has_with_activity(activity, &id)? {
             return self.cache_hit(&id, &dest, staged, exceptions, deps);
         }
+        publication_failpoint("after-lookup")?;
         // Read-only BEFORE publication (contents; APFS can't rename a
         // read-only dir, so the root is locked right after the rename —
         // the only window is top-level entry creation, never mutation).
@@ -388,6 +408,24 @@ impl Store {
         if self.is_complete(&id) == Some(true) {
             return self.cache_hit(&id, &dest, staged, exceptions, deps);
         }
+        // An old record must stop certifying this id before a replacement
+        // becomes visible. Persist that invalidation even when the object
+        // is already gone, as after an interrupted GC.
+        let metadata = open_real_directory(&self.root.join("meta"), "meta")?;
+        let meta_name = format!("{id}.json");
+        match stat_at(metadata.as_raw_fd(), meta_name.as_bytes()) {
+            Ok(stat) => {
+                if !unlink_if_same(metadata.as_raw_fd(), meta_name.as_bytes(), &stat, 0)? {
+                    return Err(io::Error::new(
+                        io::ErrorKind::Interrupted,
+                        "completion record changed during recovery",
+                    ));
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        fsync_directory(metadata.as_raw_fd())?;
         // Under the lock, anything at dest is a crashed leftover (a live
         // publication can't be mid-window, and a complete object returned
         // above): sweep it so the rename lands.
@@ -428,16 +466,10 @@ impl Store {
         // `objects/`, then the record's bytes, then its name under `meta/`.
         // A power loss can then never leave a record whose object or bytes
         // did not survive.
+        publication_failpoint("before-sync-tree")?;
         sync_tree(&dest)?;
         fsync_directory(objects.as_raw_fd())?;
-        let meta_tmp = self.root.join("tmp").join(format!("meta-{id}.json"));
-        {
-            let mut file = fs::File::create(&meta_tmp)?;
-            io::Write::write_all(&mut file, &serde_json::to_vec_pretty(&meta)?)?;
-            file.sync_all()?;
-        }
-        fs::rename(&meta_tmp, self.root.join("meta").join(format!("{id}.json")))?;
-        fsync_directory(open_real_directory(&self.root.join("meta"), "meta")?.as_raw_fd())?;
+        publish_completion(self, &metadata, &meta_name, &meta)?;
         // The stage directory may have been built for hours. Refresh the
         // published object's activity marker while publication is still
         // protected by the lock, before GC can inspect it.
@@ -489,6 +521,74 @@ impl Store {
             }),
         }
     }
+}
+
+fn publish_completion(
+    store: &Store,
+    metadata: &fs::File,
+    name: &str,
+    value: &serde_json::Value,
+) -> io::Result<()> {
+    let tmp = open_real_directory(&store.root.join("tmp"), "tmp")?;
+    let bytes = serde_json::to_vec_pretty(value)?;
+    for _ in 0..16 {
+        let candidate = format!("meta-{}-{}.json", std::process::id(), nanos());
+        let mut file = match open_file_at(
+            tmp.as_raw_fd(),
+            candidate.as_bytes(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            0o644,
+        ) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        };
+        let expected = fd_stat(file.as_raw_fd())?;
+        let result = (|| {
+            io::Write::write_all(&mut file, &bytes)?;
+            file.sync_all()?;
+            if !same_inode(&stat_at(tmp.as_raw_fd(), candidate.as_bytes())?, &expected) {
+                return Err(io::Error::new(
+                    io::ErrorKind::Interrupted,
+                    "completion temporary was replaced",
+                ));
+            }
+            rename_between(
+                tmp.as_raw_fd(),
+                candidate.as_bytes(),
+                metadata.as_raw_fd(),
+                name.as_bytes(),
+            )?;
+            fsync_directory(metadata.as_raw_fd())
+        })();
+        if result.is_err() {
+            let _ = unlink_if_same(tmp.as_raw_fd(), candidate.as_bytes(), &expected, 0);
+        }
+        return result;
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "completion temporary names are occupied",
+    ))
+}
+
+#[cfg(test)]
+thread_local! {
+    pub(super) static PUBLICATION_FAILPOINT: std::cell::RefCell<Option<Box<dyn FnMut(&str) -> io::Result<()>>>> =
+        std::cell::RefCell::new(None);
+}
+
+#[cfg(test)]
+fn publication_failpoint(at: &str) -> io::Result<()> {
+    PUBLICATION_FAILPOINT.with(|slot| match slot.borrow_mut().as_mut() {
+        Some(hook) => hook(at),
+        None => Ok(()),
+    })
+}
+
+#[cfg(not(test))]
+fn publication_failpoint(_at: &str) -> io::Result<()> {
+    Ok(())
 }
 
 /// What commit does to a staged tree, for tests outside the store.
