@@ -9,7 +9,7 @@ file and the binary differ, fix this file.*
 tog 0.1.0 — one command for every package manager
 
 USAGE:
-  tog                        set up this project, then show this help
+  tog                        set up this project
   tog <command> [<args>...]  run a command ('tog help <command>' explains it)
   tog <script> [<args>...]   run a package.json script (like 'npm run')
 
@@ -185,17 +185,19 @@ the first word when a package.json is present.
 `cargo build`, every command that needs the environment brings it current on
 the way in. Inside a project a bare `tog` discovers every ecosystem present
 in the current directory, realizes each locked plan into the store, projects
-it (`.venv`, `node_modules`, `.tog/...`), and then prints what `tog help`
-prints; outside a project it prints that help and exits 0. A manifest with
-no dependencies syncs an interpreter-only environment. The help only follows
-a sync that succeeded, so a failure stays the last thing on screen.
+it (`.venv`, `node_modules`, `.tog/...`), and then prints a short footer:
+the commands most likely to come next (`run`, `add`, `build`, `doctor`) and
+`tog --help` for the full list. Outside a project it prints what `tog help`
+prints and exits 0. A manifest with no dependencies syncs an
+interpreter-only environment. The footer only follows a sync that
+succeeded, so a failure stays the last thing on screen.
 
-It takes three flags, and with any of them the help is not printed and a
+It takes three flags, and with any of them the footer is not printed and a
 directory with no project is a failure (exit 1) rather than orientation, so
 a CI job pointed at the wrong directory goes red: `tog --frozen` validates
 the locks without writing them (below), `tog --fresh` drops project-local
 caches and rebuilds, and `tog --strict` refuses every policy exception.
-Inside a project `tog -q` is a sync with no narration and no help. `--fresh`
+Inside a project `tog -q` is a sync with no narration and no footer. `--fresh`
 stays on the bare form: rebuilding before every command is never what
 someone means, so `tog --fresh status` is a usage error. `--frozen` and
 `--strict` are global options, accepted before the verb and after it where
@@ -775,10 +777,55 @@ also makes the gate stronger than a file check: the sync itself fails on a
 denied exception, so the policy is enforced while the environment is built
 rather than inspected afterwards.
 
-The install step below uses the one-line installer, which works once
-`v0.1.0` is tagged and the repository is public; until then, build tog
-from source in that step (`cargo install --git
-https://github.com/DigitalWestern/tog --locked`).
+The short form is the tog GitHub Action (`action.yml` at the root of this
+repository). One step installs a released tog (checksum verified), makes
+the Linux sandbox usable on the runner, sets the policy, runs
+`tog --frozen`, `tog audit` and `tog sbom`, and uploads the SBOM:
+
+```yaml
+name: tog
+on: [pull_request]
+
+jobs:
+  tog:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DigitalWestern/tog@main
+```
+
+The action is newer than `v0.1.0`, so that tag does not carry it: name
+`@main` until the next release is tagged, then the tag. Which tog it
+installs is the `version` input, not the ref after the `@`.
+
+`--frozen` writes nothing, so `tog-toolchain.toml` and the lockfiles have to
+be committed first: run `tog` once on your machine and commit what it wrote.
+`tog` stays on `PATH` and `TOG_POLICY` stays set for the rest of the job, so
+a later step can `tog run` the tests under the same policy. Its inputs:
+
+| input | default | what it does |
+|---|---|---|
+| `version` | `latest` | release to install, as a tag (`v0.1.0`) |
+| `token` | the job's token | reads the release; while this repository is private, a job in another repository has to pass a token that can read it |
+| `working-directory` | `.` | the project to set up |
+| `policy` | *(empty)* | empty: the company deny list (`docs/human/policy-company.toml`); `none`: sets none (a policy already on the runner or in the project still applies); otherwise the path of a policy file in the workspace |
+| `frozen` | `true` | `false` runs a plain `tog`, which may write the locks |
+| `strict` | `false` | `true` adds `--strict` |
+| `audit` | `true` | `signed` runs `tog audit --signed`; `false` skips the audit |
+| `signing-key` | *(empty)* | contents of a `tog keygen` file, from a secret; on disk only while the sync runs (see "Which jobs may hold the key") |
+| `sbom` | `sbom.json` | where the SBOM is written; empty skips it |
+| `upload-sbom` | `true` | upload it as the artifact named by `sbom-artifact` (`sbom`) |
+| `sandbox` | `true` | install bubblewrap when missing, and the AppArmor profile `tog doctor` names where Ubuntu 24.04 denies bwrap a user namespace |
+
+The outputs are `version` (what `tog --version` prints) and `sbom` (the
+SBOM's path). The gate with trusted keys is `policy: ci/tog-policy.toml`,
+`audit: signed` and `signing-key: ${{ secrets.TOG_SIGNING_KEY }}`.
+
+The same job written out by hand, for a runner the action does not cover
+or a step that has to differ. Its install step uses the one-line installer,
+which needs the repository to be public; until then, build tog from source
+in that step (`cargo install --git https://github.com/DigitalWestern/tog
+--locked`).
 
 ```yaml
 name: tog
