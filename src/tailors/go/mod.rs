@@ -1488,6 +1488,22 @@ mod tests {
             "{error}"
         );
 
+        // A Go bundle assigned to another ecosystem must be refused before
+        // its artifact recipe is considered or any store is opened.
+        let mislabeled = Selected {
+            helpers: Default::default(),
+            ecosystem: "node".into(),
+            bundle: fixtures::bundle("go-9.9.9", "go", "9.9.9", Platform::ALL),
+            lock_sha256: None,
+            source: Source::Lock,
+        };
+        let error = realize_runtime(&store, activity, platform, &mislabeled).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(error
+            .to_string()
+            .contains("selected toolchain is node (go)"));
+        assert!(!store.root.exists());
+
         let unknown = Selected {
             helpers: Default::default(),
             ecosystem: "go".into(),

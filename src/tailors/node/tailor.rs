@@ -668,6 +668,53 @@ mod tests {
     }
 
     #[test]
+    fn optional_run_env_callers_propagate_damaged_held_closures() {
+        let _lock = crate::kernel::store::STORE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let temp = TempDir::new();
+        let old = std::env::var_os("TOG_STORE");
+        std::env::set_var("TOG_STORE", temp.0.join("store"));
+        let _guard = StoreEnv(old);
+        let ctx = Context::open(Platform::host().unwrap()).unwrap();
+        for ecosystem in ["go", "ruby", "elixir"] {
+            let dir = temp.0.join(ecosystem);
+            fs::create_dir_all(dir.join(".tog/closures")).unwrap();
+            let project = ProjectRoot::open(&dir).unwrap();
+            let tailor = crate::tailors::by_id(ecosystem).unwrap();
+            let mut command = Command::new("unused");
+            assert!(tailor
+                .run_env(&ctx, &project, project.path(), &[], &mut command)
+                .unwrap()
+                .is_empty());
+            assert_eq!(command.get_envs().count(), 0);
+            for bytes in [b"{not JSON".as_slice(), b"\xff\xfe".as_slice()] {
+                fs::write(dir.join(format!(".tog/closures/{ecosystem}.json")), bytes).unwrap();
+                let mut command = Command::new("unused");
+                assert_eq!(
+                    tailor
+                        .run_env(&ctx, &project, project.path(), &[], &mut command)
+                        .unwrap_err()
+                        .kind(),
+                    io::ErrorKind::InvalidData,
+                    "{ecosystem}"
+                );
+                assert_eq!(command.get_envs().count(), 0);
+            }
+            let moved = temp.0.join(format!("moved-{ecosystem}"));
+            fs::rename(&dir, &moved).unwrap();
+            fs::create_dir(&dir).unwrap();
+            let mut command = Command::new("unused");
+            assert!(
+                tailor
+                    .run_env(&ctx, &project, project.path(), &[], &mut command)
+                    .is_err(),
+                "{ecosystem} reopened the replacement project"
+            );
+        }
+    }
+
+    #[test]
     fn cargo_environment_uses_the_held_home_after_detachment_and_replacement() {
         let _lock = crate::kernel::store::STORE_ENV_LOCK
             .lock()

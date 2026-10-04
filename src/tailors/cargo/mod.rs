@@ -482,9 +482,9 @@ mod tests {
         std::fs::write(project.join("Cargo.lock"), "").unwrap();
         let present = scratch.0.join("rust");
         std::fs::create_dir_all(&present).unwrap();
-        let body = |vendor: &Path| {
+        let body = |rust: &Path, vendor: &Path| {
             serde_json::json!({
-                "rust_object": {"path": present.display().to_string()},
+                "rust_object": {"path": rust.display().to_string()},
                 "vendor_object": {"path": vendor.display().to_string()},
                 "cargo_lock_sha256": hex::encode(Sha256::digest(b"")),
             })
@@ -495,10 +495,14 @@ mod tests {
                 .closure_state(Platform::X86_64UnknownLinuxGnu, &held, "cargo", body)
                 .unwrap()
         };
-        assert_eq!(state(&body(&present)), State::Synced);
+        assert_eq!(state(&body(&present, &present)), State::Synced);
         assert_eq!(
-            state(&body(&scratch.0.join("gone"))),
+            state(&body(&present, &scratch.0.join("gone"))),
             State::ProjectionMissing("vendor_object object".into())
+        );
+        assert_eq!(
+            state(&body(&scratch.0.join("gone"), &present)),
+            State::ProjectionMissing("rust_object object".into())
         );
     }
 
