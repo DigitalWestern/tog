@@ -868,7 +868,7 @@ pub(super) fn path_wire(path: &Path) -> PathWire {
         },
         Err(_) => PathWire {
             encoding: "base64".into(),
-            value: base64_encode(bytes),
+            value: crate::kernel::digest::base64_encode(bytes),
         },
     }
 }
@@ -1466,30 +1466,10 @@ pub(super) fn path_under_objects(store: &Store, path: &Path) -> bool {
     path.starts_with(store.root.join("objects"))
 }
 
-pub(super) fn base64_encode(bytes: &[u8]) -> String {
-    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut output = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    for chunk in bytes.chunks(3) {
-        let first = chunk[0] as u32;
-        let second = chunk.get(1).copied().unwrap_or(0) as u32;
-        let third = chunk.get(2).copied().unwrap_or(0) as u32;
-        let value = (first << 16) | (second << 8) | third;
-        output.push(TABLE[((value >> 18) & 63) as usize] as char);
-        output.push(TABLE[((value >> 12) & 63) as usize] as char);
-        output.push(if chunk.len() > 1 {
-            TABLE[((value >> 6) & 63) as usize] as char
-        } else {
-            '='
-        });
-        output.push(if chunk.len() > 2 {
-            TABLE[(value & 63) as usize] as char
-        } else {
-            '='
-        });
-    }
-    output
-}
-
+/// Strict base64 for stored path bytes: the length must stay a multiple
+/// of four, so only padded output the registry itself wrote is accepted.
+/// SRI values use the shared permissive decoder instead, which also
+/// accepts the unpadded form registries publish.
 pub(super) fn base64_decode(value: &str) -> Option<Vec<u8>> {
     let bytes = value.as_bytes();
     if !bytes.len().is_multiple_of(4) {

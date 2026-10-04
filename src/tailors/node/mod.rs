@@ -1438,34 +1438,6 @@ mod tests {
         );
     }
 
-    /// Minimal base64 for building an SRI out of raw digest bytes; the
-    /// kernel's encoder is private to the store module.
-    fn sri_base64(bytes: &[u8]) -> String {
-        const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-        let mut out = String::new();
-        for chunk in bytes.chunks(3) {
-            let b = [
-                chunk[0],
-                *chunk.get(1).unwrap_or(&0),
-                *chunk.get(2).unwrap_or(&0),
-            ];
-            let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
-            out.push(ALPHABET[(n >> 18) as usize & 63] as char);
-            out.push(ALPHABET[(n >> 12) as usize & 63] as char);
-            out.push(if chunk.len() > 1 {
-                ALPHABET[(n >> 6) as usize & 63] as char
-            } else {
-                '='
-            });
-            out.push(if chunk.len() > 2 {
-                ALPHABET[n as usize & 63] as char
-            } else {
-                '='
-            });
-        }
-        out
-    }
-
     /// Characterization of the COLD realization path, offline: the tarball is
     /// seeded into the download cache by digest, so the fetch is a cache hit
     /// and no network is touched. Pins extraction, bin-link creation, the
@@ -1538,7 +1510,7 @@ mod tests {
         let bytes = fs::read(&tarball).unwrap();
         use sha2::Digest as _;
         let raw = sha2::Sha512::digest(&bytes);
-        let sri = format!("sha512-{}", sri_base64(&raw));
+        let sri = format!("sha512-{}", crate::kernel::digest::base64_encode(&raw));
         fs::write(store.cache_path("sha512", &hex::encode(raw)), &bytes).unwrap();
 
         let plan = NpmPlan {
