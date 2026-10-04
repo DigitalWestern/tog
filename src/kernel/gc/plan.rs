@@ -39,6 +39,7 @@ pub(super) enum Counter {
     Stages,
     Forests,
     Backups,
+    Records,
 }
 
 /// A fully-formed deletion plan plus everything retention deliberately kept.
@@ -58,6 +59,7 @@ impl SweepPlan {
                 Counter::Stages => report.stages += 1,
                 Counter::Forests => report.forests += 1,
                 Counter::Backups => report.backups += 1,
+                Counter::Records => report.records += 1,
             }
         }
         report
@@ -72,26 +74,15 @@ impl SweepPlan {
 pub(super) fn validate<'a>(snapshot: &'a Snapshot) -> io::Result<Validated<'a>> {
     let mut blocked: Vec<String> = Vec::new();
 
-    // Every object must have a record, and every record must have an object.
+    // Every object must have a record. A record without its object is
+    // removed by the plan, unless something retained still needs that
+    // object (checked after the marking walk below).
     for entry in &snapshot.objects {
         if snapshot.meta.get(&entry.id).is_none() {
             blocked.push(format!(
                 "object {} has no usable metadata; restore meta/{}.json, or drop the object \
                  with `tog gc --drop-object {}` and let the next sync rebuild it",
                 entry.id, entry.id, entry.id
-            ));
-        }
-    }
-    let present: HashSet<&str> = snapshot
-        .objects
-        .iter()
-        .map(|entry| entry.id.as_str())
-        .collect();
-    for (id, _) in snapshot.meta.iter() {
-        if !present.contains(id.as_str()) {
-            blocked.push(format!(
-                "metadata for missing object {id}; restore the object, or drop the stray \
-                 record with `tog gc --drop-object {id}`"
             ));
         }
     }
@@ -140,6 +131,17 @@ pub(super) fn validate<'a>(snapshot: &'a Snapshot) -> io::Result<Validated<'a>> 
             }
         }
     }
+    // The walk follows records, so a needed object that is gone but left
+    // its record behind is only visible here.
+    for stray in &snapshot.stray_records {
+        let id = stray_id(stray);
+        if live.contains(id) {
+            blocked.push(format!(
+                "metadata for missing object {id}, which a retained object or root still \
+                 needs; restore the object, or rebuild what needs it"
+            ));
+        }
+    }
     if !blocked.is_empty() {
         return Err(blockage(&blocked));
     }
@@ -160,6 +162,33 @@ pub(super) fn validate<'a>(snapshot: &'a Snapshot) -> io::Result<Validated<'a>> 
         root_live,
         referenced_cache,
     })
+}
+
+/// Every record whose object is gone. Validation proved no retained object
+/// needs one.
+fn stray_record_removals(snapshot: &Snapshot) -> impl Iterator<Item = Removal> + '_ {
+    snapshot.stray_records.iter().map(|stray| Removal {
+        parent: stray.parent,
+        name: stray.name.clone(),
+        stat: stray.stat,
+        companion: None,
+        label: format!("record meta/{}", stray.name.to_string_lossy()),
+        display: format!(
+            "record {} (its object is already gone)",
+            stray.path.display()
+        ),
+        bytes: file_size_of(&stray.stat),
+        counter: Counter::Records,
+    })
+}
+
+/// The object id a stray record names: its file name without `.json`.
+fn stray_id(stray: &DirEntrySnapshot) -> &str {
+    let name = stray
+        .name
+        .to_str()
+        .expect("record names are UTF-8 object ids");
+    name.strip_suffix(".json").unwrap_or(name)
 }
 
 /// The transitive closure of `seeds` over proven dependencies. A seed or
@@ -204,7 +233,7 @@ pub(super) fn retained_by_policy(now: SystemTime, entry: &ObjectEntry) -> bool {
 /// Phase 3. Build the complete deletion plan. Nothing is removed here.
 pub(super) fn plan(validated: &Validated, options: &Options) -> io::Result<SweepPlan> {
     let snapshot = validated.snapshot;
-    let mut removals = Vec::new();
+    let mut removals: Vec<Removal> = stray_record_removals(snapshot).collect();
     let mut skips = Vec::new();
 
     for entry in &snapshot.objects {

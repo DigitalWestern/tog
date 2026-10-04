@@ -68,6 +68,7 @@ pub(super) fn execute<W: Write>(
                 Counter::Stages => report.stages += 1,
                 Counter::Forests => report.forests += 1,
                 Counter::Backups => report.backups += 1,
+                Counter::Records => report.records += 1,
             }
             if let Some((meta_name, meta_stat)) = &removal.companion {
                 unlink_snapshot_entry(
@@ -81,9 +82,8 @@ pub(super) fn execute<W: Write>(
                     io::Error::new(
                         error.kind(),
                         format!(
-                            "{error}; the record meta/{meta_name} is orphaned and blocks the \
-                             next sweep — restore the removed object, or drop the stray record \
-                             with `tog gc --drop-object {stray}`"
+                            "{error}; the record meta/{meta_name} is orphaned: the next `tog \
+                             gc` removes it, or drop it now with `tog gc --drop-object {stray}`"
                         ),
                     )
                 })?;
@@ -95,12 +95,13 @@ pub(super) fn execute<W: Write>(
                 writeln!(
                     out,
                     "stopped after an error; deletions already completed: {} objects, {} cached \
-                     artifacts, {} stages, {} forests, {} backups, {} freed",
+                     artifacts, {} stages, {} forests, {} backups, {} records, {} freed",
                     report.objects,
                     report.cached_artifacts,
                     report.stages,
                     report.forests,
                     report.backups,
+                    report.records,
                     size(report.freed_bytes)
                 )?;
             }

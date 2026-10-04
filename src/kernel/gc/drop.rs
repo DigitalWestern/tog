@@ -93,8 +93,9 @@ pub fn drop_objects<W: Write>(
     //     without metadata", and every record that is still there still has
     //     its object.
     //   objects first: a readable record naming an id with nothing under
-    //     `objects/`, which blocks the sweep and — if something else in the
-    //     batch already proved it a dependency — cannot be rebuilt, because
+    //     `objects/`. The sweep removes that record only while nothing
+    //     needs the object, and if something else in the batch already
+    //     proved it a dependency it cannot be rebuilt either, because
     //     the dependent's id is unchanged and a sync would take the cache
     //     hit.
     //

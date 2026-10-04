@@ -120,7 +120,6 @@ After the proxy: the test-suite audit (#351) and then the quality review
   the 09-20 to 09-24 run. #264 holds the work order and the overall verdict.
   Each line is one issue and one PR, in order:
   - #238 http: pypi, rubygems, dotnet and deps call ureq directly, bypassing kernel::fetch.
-  - #241 store: object commit never fsyncs; a power loss can leave an empty completion record.
   - #242 gc: crashed download temp files in tmp/ are never removed.
   - #240 store: a CacheLease holds gc.lock exclusively, so separate tog processes download one at a time.
   - #244 supervise: waits forever for stderr EOF if the child leaves a background process.
@@ -224,3 +223,5 @@ After the proxy: the test-suite audit (#351) and then the quality review
 - **Tool-opened absolute inputs (#499).** Delegated tools can reopen absolute arguments and environment paths, including `BUNDLE_GEMFILE`. Choose a held input or an immutable snapshot for each such input.
 
 - **Machine policy descriptor (#500).** Read and identify `TOG_POLICY` or the home policy from one opened file, so replacement cannot mix policy bytes with another inode during deduplication. See `src/kernel/policy.rs`.
+
+- **External requirements consistency (#501).** Select external absolute Python requirements once across command stages, using held input descriptors or immutable snapshots. Preserve existing supported external requirements. See `src/comforter/status.rs` and `src/tailors/python/inputs.rs`.
