@@ -633,6 +633,8 @@ const BLOCKED_ELEMENTS: &[(&str, &str)] = &[
     ("IntermediateOutputPath", "moves obj away from scratch"),
     ("BaseOutputPath", "moves build output away from scratch"),
     ("OutputPath", "moves build output away from scratch"),
+    ("OutDir", "moves build output away from scratch"),
+    ("PublishDir", "moves publish output away from scratch"),
 ];
 
 /// The csproj text with every comment and CDATA section replaced by a
@@ -820,14 +822,15 @@ fn validate_csproj(project: &ProjectRoot, rel: &Path) -> io::Result<()> {
 
 /// What a v1 packages.lock.json pins: its targets in lock order and one
 /// package per case-insensitive id and version, sorted by that key.
+#[derive(Debug)]
 struct ParsedLock {
     targets: Vec<String>,
     packages: Vec<NugetPackage>,
 }
 
-/// The one reader of packages.lock.json: preflight and planning both call
-/// it, so every refusal of a lock has one text and a lock preflight accepts
-/// is one planning can use.
+/// The one reader of packages.lock.json. Preflight calls it once and hands
+/// planning what it read, so every refusal of a lock has one text and the
+/// lock preflight accepts is the one planning uses.
 fn parse_lock(text: &str) -> io::Result<ParsedLock> {
     let v: serde_json::Value =
         serde_json::from_str(text).map_err(|e| err(format!("packages.lock.json: {e}")))?;
@@ -897,14 +900,22 @@ fn parse_lock(text: &str) -> io::Result<ParsedLock> {
     })
 }
 
-/// Central v0 trust-boundary validation. The tuple is the canonical project
-/// file and its lock path (the latter may not exist until delegated planning).
+/// What preflight checked: the canonical project file, and the lock's text
+/// and parse when the project has one (it may not exist until delegated
+/// planning writes it).
+#[derive(Debug)]
+pub struct Preflight {
+    pub csproj: PathBuf,
+    lock: Option<(String, ParsedLock)>,
+}
+
+/// Central v0 trust-boundary validation.
 ///
 /// Project files are read through the held descriptor (a held root is a
 /// directory by construction); the returned paths are for messages and
 /// child-process arguments. Ancestors lie outside the project and are
 /// still inspected by path.
-pub fn preflight(project: &ProjectRoot, sdk_version: &str) -> io::Result<(PathBuf, PathBuf)> {
+pub fn preflight(project: &ProjectRoot, sdk_version: &str) -> io::Result<Preflight> {
     let project_dir = project.path();
     let csproj_rel = find_project(project)?;
     let csproj = project_dir.join(&csproj_rel);
@@ -914,7 +925,6 @@ pub fn preflight(project: &ProjectRoot, sdk_version: &str) -> io::Result<(PathBu
     validate_csproj(project, &csproj_rel)?;
 
     let lock_rel = Path::new(LOCK_FILE);
-    let lock_path = project_dir.join(lock_rel);
     regular_file_if_present(project, lock_rel, "packages.lock.json")?;
     regular_file_if_present(project, Path::new("global.json"), "global.json")?;
     check_global_json(project, sdk_version)?;
@@ -946,10 +956,14 @@ pub fn preflight(project: &ProjectRoot, sdk_version: &str) -> io::Result<(PathBu
             )));
         }
     }
-    if project.is_input_file(lock_rel) {
-        parse_lock(&read_input_text(project, lock_rel)?)?;
-    }
-    Ok((csproj, lock_path))
+    let lock = if project.is_input_file(lock_rel) {
+        let text = read_input_text(project, lock_rel)?;
+        let parsed = parse_lock(&text)?;
+        Some((text, parsed))
+    } else {
+        None
+    };
+    Ok(Preflight { csproj, lock })
 }
 
 const LOCK_FILE: &str = "packages.lock.json";
@@ -1013,10 +1027,10 @@ pub fn generate_lock(
 pub fn plan_dotnet(project: &ProjectRoot, selected: &Selected) -> io::Result<(DotnetPlan, String)> {
     let lock_rel = Path::new(LOCK_FILE);
     let sdk_version = selected.version("dotnet-sdk")?.to_string();
-    let (csproj, _) = preflight(project, &sdk_version)?;
-    require_lock(project)?;
-    let lock = read_input_text(project, lock_rel)?;
-    let ParsedLock { targets, packages } = parse_lock(&lock)?;
+    let Preflight { csproj, lock } = preflight(project, &sdk_version)?;
+    let Some((lock, ParsedLock { targets, packages })) = lock else {
+        return Err(crate::tailors::missing_lock(project, LOCK_FILE));
+    };
     let plan = DotnetPlan {
         // The SDK this plan was restored under is the selected one.
         sdk_version: sdk_version.clone(),
@@ -1691,7 +1705,7 @@ pub fn build_sandboxed(
 ) -> io::Result<()> {
     validate_build_args(args)?;
     let sdk_spec = sdk_spec(platform, selected)?;
-    let (csproj, _) = preflight(project, &sdk_spec.version)?;
+    let csproj = preflight(project, &sdk_spec.version)?.csproj;
     let project_dir = project.path().to_path_buf();
     let sdk_obj = sdk_obj.canonicalize()?;
     let packages_obj = packages_obj.canonicalize()?;
@@ -2625,6 +2639,8 @@ mod tests {
             in_project("<!-- <OutputPath>bin/elsewhere</OutputPath> -->"),
             in_project("<!-- an Import, a ProjectReference and a UsingTask -->"),
             in_project("<Description>$(OutputPath) is where it lands</Description>"),
+            in_project("<OutDirSuffix>x</OutDirSuffix>"),
+            in_project("<PublishDirName>x</PublishDirName>"),
             "<!-- lead --><Project Sdk=\"Microsoft.NET.Sdk\"><!-- Sdk=\"Other\" --></Project>"
                 .into(),
             in_project("<![CDATA[<OutputPath>]]>"),
@@ -2639,6 +2655,8 @@ mod tests {
             in_project("<outputpath>x</outputpath>"),
             in_project("<OUTPUTPATH>x</OUTPUTPATH>"),
             in_project("<BaseOutputPath>x</BaseOutputPath>"),
+            in_project("<OutDir>x</OutDir>"),
+            in_project("<PublishDir Condition=\"true\">x</PublishDir>"),
             in_project("<IntermediateOutputPath>x</IntermediateOutputPath>"),
             in_project("<BaseIntermediateOutputPath>x</BaseIntermediateOutputPath>"),
             in_project("<MSBuildProjectExtensionsPath>x</MSBuildProjectExtensionsPath>"),
@@ -2692,7 +2710,7 @@ mod tests {
             find_project(&root).unwrap(),
             PathBuf::from("original.csproj")
         );
-        let (csproj, _) = preflight(&root, SDK_VERSION).unwrap();
+        let csproj = preflight(&root, SDK_VERSION).unwrap().csproj;
         assert_eq!(csproj, root.path().join("original.csproj"));
         // The replacement at the old path is what a path read would see.
         assert!(preflight(&ProjectRoot::open(&project).unwrap(), SDK_VERSION).is_err());
