@@ -92,8 +92,8 @@ fn main() {
             cli::EXIT_FAILURE
         }
     };
-    if bare && code == 0 && !ui::quiet() {
-        print!("\n{}", cli::sync_footer());
+    if let Some(footer) = cli::after_command(bare, code, ui::quiet()) {
+        print!("{footer}");
     }
     exit(code);
 }

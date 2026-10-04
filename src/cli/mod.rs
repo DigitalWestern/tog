@@ -20,7 +20,7 @@
 //!   never syncs refuses them instead of accepting and ignoring them;
 //! - a bare `tog` and an unknown first word are *not* decided here: the
 //!   dispatcher turns a bare `tog` into `sync` inside a project (and prints
-//!   `sync_footer()` after a sync that succeeded, so the first word a
+//!   `sync_footer()` after a sync that succeeded (`after_command`), so the first word a
 //!   newcomer types also shows them what comes next), into the help outside
 //!   one, and an unknown first word into a package.json script run when
 //!   one matches.
@@ -40,8 +40,8 @@ mod x;
 pub use self::completions::completions;
 pub use self::parse::{option_spellings, parse, suggest};
 pub use self::spec::{
-    canonical_name, help, spec, sync_footer, usage, BUILD_WORDS, COMMANDS, LS_WORDS, SHELL_WORDS,
-    SYNC_ALIASES,
+    after_command, canonical_name, help, spec, sync_footer, usage, BUILD_WORDS, COMMANDS, LS_WORDS,
+    SHELL_WORDS, SYNC_ALIASES,
 };
 
 use std::path::PathBuf;

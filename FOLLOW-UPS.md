@@ -73,9 +73,10 @@ After the proxy: the test-suite audit (#351) and then the quality review
   across users, the activity lease across uids, and the trust boundary a
   shared store changes.
 - **An offline fixture where a sync succeeds (#147).** Every green-sync
-  test downloads a toolchain and is ignored, so "bare `tog`, then the
-  footer" and anything else that runs after a successful sync is verified by
-  hand. That includes `tog build` syncing a stale ecosystem first; the
+  test downloads a toolchain and is ignored, so anything that runs after a
+  successful sync is verified by hand. The bare-`tog` footer decision is now
+  a unit-tested function (`cli::after_command`); the end-to-end path is not.
+  That includes `tog build` syncing a stale ecosystem first; the
   ignored e2e suites could drop their explicit `sync` step to cover it.
 
 - **Resolution proxy PR 5 review leftovers (#428).** One checklist issue
