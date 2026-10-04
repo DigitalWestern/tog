@@ -3293,7 +3293,7 @@ fn synced_python_closure_with_exception(home: &Path, project: &Path, kind: &str)
         "body": {
             "env_object": env,
             "python": {"version": "3.12.14"},
-            "plan": {"packages": []},
+            "plan": {"python_version": "3.12.14", "packages": []},
             "inputs": [{"path": "requirements.txt", "sha256": requirements}],
             "toolchain": {"bundle_id": bundle_id},
             "exceptions": [{
