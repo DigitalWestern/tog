@@ -1742,9 +1742,6 @@ mod tests {
             eprintln!("skipping production patch snapshot test: /usr/bin/patch is absent");
             return;
         }
-        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
         let _store_lock = crate::kernel::store::STORE_ENV_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
@@ -1815,9 +1812,6 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn a_sandbox_failure_ends_the_sync_instead_of_becoming_an_exception() {
-        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
         let _attribution_lock = crate::kernel::policy::exception_guard();
         let attribution = crate::kernel::policy::Attribution::open("node").unwrap();
         let (_lease_store, activity) = crate::kernel::testutil::detached_lease();

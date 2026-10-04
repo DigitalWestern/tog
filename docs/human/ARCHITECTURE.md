@@ -845,8 +845,11 @@ lock (`tmp/.publish.lock`), so a concurrent `has()` never mistakes a
 mid-publication object for a crashed one. Store-consuming operations hold an
 activity lease (`src/kernel/activity.rs`), shared or exclusive, with a fixed
 ordering: activity, then x-root, then the toolchain-input lock, then project
-transaction, then cache, then publication. Each process supervises at most one awaited store-consuming
-child (`src/kernel/supervise.rs`) and forwards TERM to it. A helper that runs
+transaction, then cache, then publication. Each operation supervises its own awaited
+store-consuming child (`src/kernel/supervise.rs`) and forwards TERM to it; any number run at
+once. The signal handlers are installed once per process and never removed: each supervision
+registers with them, keeps its own cursors into the signal counts, and with none registered
+the handler acts as the disposition tog inherited. A helper that runs
 such a child takes the caller's `&StoreActivity` rather than taking a lease of
 its own, so the lease that protects a stage directory is visibly the one held
 across its children and its commit (`tests/architecture.rs` lists the few raw

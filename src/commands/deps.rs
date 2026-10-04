@@ -719,9 +719,6 @@ mod tests {
     /// through a real package manager, which needs the network.
     #[test]
     fn discarding_the_edit_scope_leaves_no_exception_pending() {
-        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
         let _store_lock = crate::kernel::store::STORE_ENV_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());

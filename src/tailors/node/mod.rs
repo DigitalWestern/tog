@@ -1446,9 +1446,6 @@ mod tests {
     fn realize_node_env_cold_path_extracts_and_links_bins() {
         // Extraction runs `tar` through the supervisor, which owns
         // process-wide signal dispositions: one supervised child at a time.
-        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
         let scratch = TempDir::named("npm-cold");
         let root = scratch.0.clone();
         for subdir in ["objects", "meta", "cache/sha512", "tmp"] {
@@ -3150,9 +3147,6 @@ mod tests {
     #[test]
     fn a_package_that_needs_a_workspace_package_is_projected_as_a_copy() {
         // The copy is made by a supervised `cp`.
-        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let _attribution_lock = crate::kernel::policy::attribution_test_lock();
         let scratch = TempDir::named("npm-workspace-peer");
         let (project, env) = workspace_peer_fixture(&scratch.0, None);
@@ -3217,9 +3211,6 @@ mod tests {
     #[test]
     fn a_workspace_link_is_not_planted_over_a_directory_the_package_ships() {
         // The copy is made by a supervised `cp`.
-        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let _attribution_lock = crate::kernel::policy::attribution_test_lock();
         for ships in ["directory", "symlink"] {
             let scratch = TempDir::named("npm-workspace-peer-bundled");
@@ -3242,9 +3233,6 @@ mod tests {
     /// leaves the forest of links alone.
     #[test]
     fn a_yarn_plan_reads_the_workspace_dependency_from_the_package_manifest() {
-        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let _attribution_lock = crate::kernel::policy::attribution_test_lock();
         let needs_core = r#"{"name":"plugin","peerDependencies":{"core":"*"}}"#;
         let needs_other = r#"{"name":"plugin","peerDependencies":{"other":"*"}}"#;

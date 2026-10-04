@@ -667,9 +667,6 @@ mod tests {
         let _store_env = crate::kernel::store::STORE_ENV_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
         let scratch = TempDir::named("rustfmt-no-record");
         let root = scratch.0.clone();
         let previous_store = std::env::var_os("TOG_STORE");
@@ -841,9 +838,6 @@ mod tests {
         // Staging extracts through a supervised child, and the supervisor
         // owns process-wide signal dispositions: one supervised child at a
         // time, as in every other test that can reach one.
-        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
         let platform = Platform::host().unwrap();
         let version = "1.0.0";
         let root = format!("rustfmt-{version}-{}", platform.triple());

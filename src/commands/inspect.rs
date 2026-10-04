@@ -2232,8 +2232,7 @@ mod tests {
 
     #[test]
     fn doctor_cleans_up_its_probe_and_finds_no_project_in_a_bare_dir() {
-        // Process-global test state follows env -> supervision -> store ->
-        // attribution (see the comment on `commands::sync`'s
+        // Process-global test state follows env -> store -> attribution (see the comment on `commands::sync`'s
         // failed_tailor_sync test). `doctor`'s policy check reads
         // TOG_POLICY and $HOME, so the env lock is taken first.
         let _env = crate::kernel::policy::test_env_lock();

@@ -856,11 +856,7 @@ mod tests {
         use crate::kernel::toolchain::{input, Source};
         // `commit` installs a process-global guard and dropping it clears
         // that guard, so this test cannot run beside one that is reading
-        // it. The order is the one this file documents: supervision, then
-        // attribution.
-        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        // it. Every closure writer holds the attribution lock.
         let _attribution = policy::attribution_test_lock();
         let temp = TempDir::new();
         let project = temp.0.join("project");
@@ -1017,9 +1013,6 @@ mod tests {
         let home = temp.0.join("home");
         std::fs::create_dir_all(&home).unwrap();
         let _policy_env = PolicyEnv::enter(&home);
-        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
         let _store_lock = store::STORE_ENV_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
@@ -1147,9 +1140,6 @@ mod tests {
     fn a_synced_build_still_checks_the_whole_project() {
         // `commit` installs a process-global guard; same locks as
         // `first_sync_preflight_selects_and_commit_writes_the_lock`.
-        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
         let _attribution = policy::attribution_test_lock();
         let temp = TempDir::new();
         let project = temp.0.join("project");
@@ -1273,21 +1263,16 @@ mod tests {
 
     #[test]
     fn failed_tailor_sync_clears_its_unpublished_exceptions() {
-        // Process-global test state follows env -> supervision -> store ->
-        // attribution. Every multi-guard holder takes them in this order:
-        // commands::deps (supervision -> store -> attribution),
-        // commands::inspect's doctor tests (env -> store), the comforter
-        // writer tests (supervision -> attribution), kernel::gitsrc and the
-        // tailors (supervision). One shared total order, so no holder can
-        // wait on a lock another holder has taken after an earlier one.
+        // Process-global test state follows env -> store -> attribution.
+        // Every multi-guard holder takes them in this order: commands::deps
+        // (store -> attribution), commands::inspect's doctor tests (env ->
+        // store). One shared total order, so no holder can wait on a lock
+        // another holder has taken after an earlier one.
         let _env_lock = policy::test_env_lock();
         let temp = TempDir::new();
         let home = temp.0.join("home");
         std::fs::create_dir_all(&home).unwrap();
         let _policy_env = PolicyEnv::enter(&home);
-        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
         let _store_lock = store::STORE_ENV_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
@@ -1444,9 +1429,6 @@ mod tests {
         let home = temp.0.join("home");
         std::fs::create_dir_all(&home).unwrap();
         let _policy_env = PolicyEnv::enter(&home);
-        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
         let _store_lock = store::STORE_ENV_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
@@ -1509,9 +1491,6 @@ mod tests {
         let home = temp.0.join("home");
         std::fs::create_dir_all(&home).unwrap();
         let _policy_env = PolicyEnv::enter(&home);
-        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
         let _store_lock = store::STORE_ENV_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());

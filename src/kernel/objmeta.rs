@@ -670,9 +670,6 @@ mod tests {
     }
 
     pub(super) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
-        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
         let mut cases = vec![
             crate::kernel::gitsrc::live_identity_for_test(),
             crate::kernel::resolve::transaction::live_identity_for_test(),

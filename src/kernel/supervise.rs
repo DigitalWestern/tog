@@ -1,11 +1,11 @@
 //! Common child-process waiting for store-consuming commands.
 //!
 //! The supervisor is deliberately small, but it owns the complete spawn-to-
-//! reap interval. A process-directed TERM is delivered to a self-pipe by an
-//! async-signal-safe handler and forwarded by the ordinary Rust event loop to
-//! the live direct child. INT/QUIT/HUP are observed so the parent waits and
-//! restores its dispositions, while terminal process-group delivery remains
-//! the mechanism that reaches the child for those signals.
+//! reap interval. A process-directed TERM is counted by an async-signal-safe
+//! handler and forwarded by the ordinary Rust event loop to the live direct
+//! child. INT/QUIT/HUP are observed so the parent waits for its child,
+//! while terminal process-group delivery remains the mechanism that reaches
+//! the child for those signals.
 //!
 //! Any of those four arriving while a child runs is a request to stop tog,
 //! not a verdict on the child: once the child is reaped, `status`,
@@ -14,35 +14,33 @@
 //! that turns a child's failure into something softer (a recorded policy
 //! exception, a fallback) must let that kind through as an error.
 //!
+//! Each call is its own signal session, and any number of them may run at
+//! once on different threads. `sigaction` is process-wide, so sessions do
+//! not own the dispositions: the first session in the process installs one
+//! handler per signal and it stays for the life of the process. The handler
+//! counts each signal, and with no session live it acts as the disposition
+//! tog inherited would have (`act_as_inherited`), so outside supervision a
+//! TERM still kills tog. Every live session sees every TERM and forwards it
+//! to its own child. Correctness never depends on a wakeup: the counts live
+//! in atomics, a self-pipe only shortens the wait, and the wait is bounded
+//! by a short tick (`tick_ms`). Design: `docs/human/ARCHITECTURE.md` "Store
+//! concurrency" and the history in #57.
+//!
 //! The three primitives are unrestricted, so clippy refuses them outside
 //! the reviewed kernel sites (`clippy.toml`). Everything else starts a
 //! child through `local_status`, `local_status_with_stderr` or
 //! `local_output`, which refuse a dependency tool (it goes through
 //! `kernel::resolve`'s door).
 
-/// Serializes tests that supervise a child process.
-///
-/// A single process-wide signal session owns the temporary dispositions and
-/// the child-pid slot, so `status`/`output` reject a second concurrent child
-/// in the same process rather than waiting for the first (see the session
-/// lock below). Production paths run their children sequentially under one
-/// lease, but the unit-test harness runs tests in parallel threads inside one
-/// binary, so any test that realizes an object through a child must hold this
-/// guard. Same convention, and same reason, as `store::STORE_ENV_LOCK`.
-///
-/// Poison is ignored deliberately: one panicking test must not cascade into
-/// every other holder.
-#[cfg(test)]
-pub(crate) static SUPERVISION_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
 use crate::kernel::activity::StoreActivity;
 use crate::kernel::resolve::confine;
+use std::cell::{Cell, UnsafeCell};
 use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
-use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
+use std::sync::Mutex;
 
 const SIGNAL_COUNT: usize = 5;
 const SIGNALS: [libc::c_int; SIGNAL_COUNT] = [
@@ -50,35 +48,86 @@ const SIGNALS: [libc::c_int; SIGNAL_COUNT] = [
     libc::SIGINT,
     libc::SIGHUP,
     libc::SIGQUIT,
-    // SIGCHLD wakes the supervisor: it carries no forwarding semantics, it
-    // only makes the wait event-driven instead of a timer. Unlike the other
-    // signals here it is handled even when inherited as SIG_IGN, because an
-    // ignored SIGCHLD makes the kernel auto-reap the child and its exit
-    // status is lost (`Session::install`). A SIGCHLD blocked by the
-    // inherited mask still cannot reach the handler; `child_events` records
-    // that, and the wait falls back to a timeout then.
+    // SIGCHLD wakes a supervisor: it carries no forwarding semantics, it
+    // only shortens the wait. Unlike the other signals here it is handled
+    // even when inherited as SIG_IGN, because an ignored SIGCHLD makes the
+    // kernel auto-reap the child and its exit status is lost
+    // (`install_handlers`). A SIGCHLD blocked by the mask still cannot
+    // reach the handler; the tick bounds the wait then.
     libc::SIGCHLD,
 ];
 
-static SESSION_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-static NOTIFY_FD: AtomicI32 = AtomicI32::new(-1);
-static CHILD_PID: AtomicI32 = AtomicI32::new(-1);
-/// TERMs not yet forwarded to the child; `forward_pending` consumes it.
-static TERM_COUNT: AtomicU32 = AtomicU32::new(0);
-/// Every terminating signal the session has caught, one bit each (see
-/// `signal_bit`). Unlike `TERM_COUNT`, forwarding never clears it, so it
-/// still says after the reap that tog was asked to stop.
-static RECEIVED: AtomicU32 = AtomicU32::new(0);
-/// Set by the SIGCHLD handler and cleared only by the waiter. This is
-/// deliberately **not** the self-pipe byte: `forward_pending` drains the pipe
-/// between `try_wait` and the poll, so a notification that lived only in the
-/// pipe could be swallowed there and leave an infinite poll with nothing left
-/// to wake it. The flag survives that drain.
-static CHILD_EVENT: AtomicBool = AtomicBool::new(false);
+/// One live session, in [`SESSION_TERM`]'s high half.
+const ONE_SESSION: u64 = 1 << 32;
+/// The high 32 bits count live sessions; the low 32 bits count TERMs
+/// received (wrapping: only differences are used). Packing both into one
+/// atomic makes the handler's question "was any session live?" and its
+/// count one step, and the same for a session registering or leaving, so
+/// every TERM falls either before the last session left (that session
+/// accounts for it) or after (the handler acts as inherited). No window
+/// between the two exists for a TERM to be lost in.
+static SESSION_TERM: AtomicU64 = AtomicU64::new(0);
+/// Plain monotonic counts: no session re-raises these, so they need no
+/// link to the live count.
+static INT_RECEIVED: AtomicU32 = AtomicU32::new(0);
+static HUP_RECEIVED: AtomicU32 = AtomicU32::new(0);
+static QUIT_RECEIVED: AtomicU32 = AtomicU32::new(0);
+static CHLD_RECEIVED: AtomicU32 = AtomicU32::new(0);
+/// The global self-pipe, created at the first install and never closed, so
+/// the handler never writes into a reused descriptor.
+static NOTIFY_READ: AtomicI32 = AtomicI32::new(-1);
+static NOTIFY_WRITE: AtomicI32 = AtomicI32::new(-1);
 static SIGNAL_BYTE: u8 = 1;
 
-fn session_lock() -> &'static Mutex<()> {
-    SESSION_LOCK.get_or_init(|| Mutex::new(()))
+/// The disposition each of [`SIGNALS`] had before tog's handler replaced
+/// it. Slot `i` is written once, under [`REGISTRY`], before bit `i` of
+/// [`RECORDED`] is set and before the handler for it is installed; after
+/// that it is only read, by the handler and by `prepare_child`.
+struct InheritedActions(UnsafeCell<[libc::sigaction; SIGNAL_COUNT]>);
+// SAFETY: every slot is written once before it is published through
+// RECORDED, and only read afterwards.
+unsafe impl Sync for InheritedActions {}
+// SAFETY: an all-zero sigaction is a valid (SIG_DFL, empty) value.
+static INHERITED: InheritedActions =
+    InheritedActions(UnsafeCell::new(unsafe { std::mem::zeroed() }));
+/// Bit `i` set: `INHERITED[i]` is recorded.
+static RECORDED: AtomicU32 = AtomicU32::new(0);
+/// Bit `i` set: tog's handler is installed for `SIGNALS[i]`, for good.
+static INSTALLED: AtomicU32 = AtomicU32::new(0);
+
+/// Bookkeeping shared by sessions. Held only for the first install and a
+/// session's arrival and departure, never across a child's lifetime, a
+/// `poll`, or a blocking syscall: a lock held for a child's lifetime is an
+/// unbounded silent wait, which is why the old one-session-per-process
+/// rule refused a second session instead of queueing it. The handler never
+/// touches it.
+struct Registry {
+    /// A session left with TERMs it could not forward (its child was
+    /// already reaped). The last session to leave re-raises one TERM for
+    /// them, so a TERM nobody delivered still stops tog.
+    term_orphaned: bool,
+}
+
+static REGISTRY: Mutex<Registry> = Mutex::new(Registry {
+    term_orphaned: false,
+});
+
+fn registry() -> std::sync::MutexGuard<'static, Registry> {
+    // A panicking session still deregisters in `Drop`; the bookkeeping
+    // stays consistent, so poison is ignored.
+    REGISTRY.lock().unwrap_or_else(|error| error.into_inner())
+}
+
+fn signal_index(signal: libc::c_int) -> Option<usize> {
+    SIGNALS.iter().position(|number| *number == signal)
+}
+
+fn live_sessions(packed: u64) -> u64 {
+    packed >> 32
+}
+
+fn term_count(packed: u64) -> u32 {
+    packed as u32
 }
 
 /// The terminating signals in the order an error names them when more than
@@ -163,29 +212,37 @@ fn errno_location() -> *mut libc::c_int {
     }
 }
 
-/// Only atomics, a raw write, and errno preservation are permitted here.
-extern "C" fn signal_handler(signal: libc::c_int) {
+/// Only atomics, a raw write, errno preservation, and `act_as_inherited`
+/// are permitted here.
+extern "C" fn signal_handler(
+    signal: libc::c_int,
+    info: *mut libc::siginfo_t,
+    context: *mut libc::c_void,
+) {
     // SAFETY: errno_location points at this signal-handler thread's errno.
     let saved_errno = unsafe { *errno_location() };
-    match signal {
-        libc::SIGTERM => {
-            TERM_COUNT.fetch_add(1, Ordering::SeqCst);
-            RECEIVED.fetch_or(signal_bit(signal), Ordering::SeqCst);
+    let live = match signal {
+        libc::SIGTERM => live_sessions(SESSION_TERM.fetch_add(1, Ordering::SeqCst)) != 0,
+        libc::SIGINT | libc::SIGHUP | libc::SIGQUIT | libc::SIGCHLD => {
+            let counter = match signal {
+                libc::SIGINT => &INT_RECEIVED,
+                libc::SIGHUP => &HUP_RECEIVED,
+                libc::SIGQUIT => &QUIT_RECEIVED,
+                _ => &CHLD_RECEIVED,
+            };
+            counter.fetch_add(1, Ordering::SeqCst);
+            live_sessions(SESSION_TERM.load(Ordering::SeqCst)) != 0
         }
-        libc::SIGINT | libc::SIGHUP | libc::SIGQUIT => {
-            RECEIVED.fetch_or(signal_bit(signal), Ordering::SeqCst);
-        }
-        libc::SIGCHLD => {
-            CHILD_EVENT.store(true, Ordering::SeqCst);
-        }
-        _ => {}
+        _ => true,
+    };
+    if !live {
+        act_as_inherited(signal, info, context);
     }
-    let fd = NOTIFY_FD.load(Ordering::SeqCst);
+    let fd = NOTIFY_WRITE.load(Ordering::SeqCst);
     if fd >= 0 {
         // SAFETY: SIGNAL_BYTE is a process-lifetime one-byte buffer and fd is
-        // published only after the self-pipe has been created. O_NONBLOCK
-        // makes a full pipe a harmless coalescing case; the atomics retain
-        // the notification in that event.
+        // the never-closed global self-pipe. O_NONBLOCK makes a full pipe a
+        // harmless coalescing case; the counters retain the signal.
         unsafe {
             let _ = libc::write(fd, &SIGNAL_BYTE as *const u8 as *const libc::c_void, 1);
         }
@@ -194,6 +251,58 @@ extern "C" fn signal_handler(signal: libc::c_int) {
     unsafe { *errno_location() = saved_errno };
 }
 
+/// With no session live, do what the disposition tog inherited would have
+/// done. `SIG_DFL` for TERM/INT/HUP/QUIT puts the default back and raises
+/// the signal again, so it is delivered with its default action (tog dies)
+/// as soon as the handler returns. An inherited function is called, with
+/// `siginfo` when it asked for it; its other flags are not emulated. A
+/// default or ignored SIGCHLD needs nothing. `sigaction`, `raise` and a
+/// plain call are async-signal-safe.
+fn act_as_inherited(signal: libc::c_int, info: *mut libc::siginfo_t, context: *mut libc::c_void) {
+    let Some(index) = signal_index(signal) else {
+        return;
+    };
+    if RECORDED.load(Ordering::SeqCst) & (1 << index) == 0 {
+        return;
+    }
+    // SAFETY: the slot was written before RECORDED published it and is never
+    // written again.
+    let action = unsafe { &(*INHERITED.0.get())[index] };
+    match action.sa_sigaction {
+        libc::SIG_IGN => {}
+        libc::SIG_DFL => {
+            if signal == libc::SIGCHLD {
+                return;
+            }
+            // SAFETY: zeroed is followed by sigemptyset; SIG_DFL is a valid
+            // disposition, and raise targets this thread, where the signal
+            // stays blocked until the handler returns.
+            unsafe {
+                let mut default: libc::sigaction = std::mem::zeroed();
+                libc::sigemptyset(&mut default.sa_mask);
+                default.sa_sigaction = libc::SIG_DFL;
+                libc::sigaction(signal, &default, std::ptr::null_mut());
+                libc::raise(signal);
+            }
+        }
+        function => {
+            if action.sa_flags & libc::SA_SIGINFO != 0 {
+                // SAFETY: the inherited action was installed with SA_SIGINFO,
+                // so its handler takes the three-argument form.
+                let handler: extern "C" fn(libc::c_int, *mut libc::siginfo_t, *mut libc::c_void) =
+                    unsafe { std::mem::transmute(function) };
+                handler(signal, info, context);
+            } else {
+                // SAFETY: an action without SA_SIGINFO holds a one-argument
+                // handler.
+                let handler: extern "C" fn(libc::c_int) = unsafe { std::mem::transmute(function) };
+                handler(signal);
+            }
+        }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
 fn set_cloexec(fd: RawFd) -> io::Result<()> {
     // SAFETY: fcntl operates on the caller-owned descriptor.
     let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
@@ -220,223 +329,272 @@ fn set_nonblocking(fd: RawFd) -> io::Result<()> {
     Ok(())
 }
 
-fn pipe_pair() -> io::Result<(RawFd, RawFd)> {
+/// The global self-pipe, both ends close-on-exec and nonblocking. Linux
+/// sets both flags atomically. macOS has no `pipe2`, so a child forked by
+/// another thread between `pipe` and `fcntl` can inherit an end, once per
+/// process: with the read end it can drain wake bytes (a session waits one
+/// tick), with the write end it can send spurious wakes (one `try_wait`
+/// each). Neither can lose or forge a signal, because signals live in the
+/// counters.
+fn create_notify_pipe() -> io::Result<(RawFd, RawFd)> {
     let mut fds = [0; 2];
-    // SAFETY: fds points to two writable c_int slots for libc to initialize.
-    if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
-        return Err(io::Error::last_os_error());
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: fds points to two writable c_int slots for libc to initialize.
+        if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC | libc::O_NONBLOCK) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
     }
-    for fd in fds {
-        if let Err(error) = set_cloexec(fd).and_then(|_| set_nonblocking(fd)) {
-            // SAFETY: both descriptors were returned by pipe and remain owned
-            // by this setup path.
-            unsafe {
-                libc::close(fds[0]);
-                libc::close(fds[1]);
+    #[cfg(not(target_os = "linux"))]
+    {
+        // SAFETY: fds points to two writable c_int slots for libc to initialize.
+        if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        for fd in fds {
+            if let Err(error) = set_cloexec(fd).and_then(|_| set_nonblocking(fd)) {
+                // SAFETY: both descriptors were returned by pipe and are
+                // owned by this setup path.
+                unsafe {
+                    libc::close(fds[0]);
+                    libc::close(fds[1]);
+                }
+                return Err(error);
             }
-            return Err(error);
         }
     }
     Ok((fds[0], fds[1]))
 }
 
-fn close_fd(fd: RawFd) {
-    if fd >= 0 {
-        // SAFETY: the descriptor is owned by the session.
-        unsafe {
-            libc::close(fd);
+/// Install tog's handler for every signal that does not have it yet. Runs
+/// under [`REGISTRY`]. Each signal's inherited disposition is recorded
+/// first, so from the moment the handler is installed it can act as that
+/// disposition; nothing is ever uninstalled, so there is no restore and no
+/// rollback. A failed `sigaction` leaves the handlers already installed in
+/// place (harmless with no session live) and the next session installs the
+/// rest.
+fn install_handlers(_registry: &mut Registry) -> io::Result<()> {
+    if NOTIFY_WRITE.load(Ordering::SeqCst) < 0 {
+        let (read, write) = create_notify_pipe()?;
+        NOTIFY_READ.store(read, Ordering::SeqCst);
+        NOTIFY_WRITE.store(write, Ordering::SeqCst);
+    }
+    let mut calls = 0usize;
+    for (index, number) in SIGNALS.into_iter().enumerate() {
+        let bit = 1u32 << index;
+        if INSTALLED.load(Ordering::SeqCst) & bit != 0 {
+            continue;
+        }
+        if RECORDED.load(Ordering::SeqCst) & bit == 0 {
+            // SAFETY: zeroed is a valid output slot that sigaction fills.
+            let mut old: libc::sigaction = unsafe { std::mem::zeroed() };
+            // SAFETY: a null new action only queries the current one.
+            if unsafe { libc::sigaction(number, std::ptr::null(), &mut old) } != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            // SAFETY: the slot is unpublished (RECORDED bit clear) and this
+            // runs under REGISTRY, so nothing else reads or writes it.
+            unsafe { (*INHERITED.0.get())[index] = old };
+            RECORDED.fetch_or(bit, Ordering::SeqCst);
+        }
+        // SAFETY: published above or by an earlier install, never rewritten.
+        let inherited = unsafe { (*INHERITED.0.get())[index] };
+        // An inherited SIG_IGN is kept for TERM/INT/HUP/QUIT: whoever
+        // started tog asked for it not to be interrupted by them. SIGCHLD
+        // is the exception. With SIGCHLD ignored (or SA_NOCLDWAIT set,
+        // which the replacement below also clears) the kernel reaps the
+        // child itself, `try_wait` fails with ECHILD, and the exit status
+        // tog exists to report is gone. `prepare_child` hands the child the
+        // inherited SIG_IGN back. While the handler is installed, a child
+        // of this process that exits without being waited for becomes a
+        // zombie instead of being auto-reaped, exactly what the default
+        // disposition does to it; production code waits for every child it
+        // spawns.
+        if inherited.sa_sigaction == libc::SIG_IGN && number != libc::SIGCHLD {
+            continue;
+        }
+        calls += 1;
+        failpoint_before_sigaction(calls)?;
+        // SAFETY: zeroed is followed by sigemptyset and all fields used by
+        // sigaction are initialized below.
+        let mut replacement: libc::sigaction = unsafe { std::mem::zeroed() };
+        // SAFETY: replacement is writable and the call initializes its mask.
+        if unsafe { libc::sigemptyset(&mut replacement.sa_mask) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        replacement.sa_flags = libc::SA_SIGINFO | libc::SA_RESTART;
+        replacement.sa_sigaction = signal_handler as *const () as usize;
+        // SAFETY: replacement contains a valid async-signal-safe handler.
+        if unsafe { libc::sigaction(number, &replacement, std::ptr::null_mut()) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        INSTALLED.fetch_or(bit, Ordering::SeqCst);
+        failpoint_after_sigaction(calls);
+    }
+    Ok(())
+}
+
+/// Test-only knobs, read only in debug builds: `TOG_SUPERVISE_FAILPOINT`
+/// is `fail-sigaction-<k>` (the k-th handler install of the process fails,
+/// once) or `pause-after-sigaction-<k>` (after the k-th install, print
+/// `FAILPOINT PAUSED <k>` and block until `TOG_SUPERVISE_FAILPOINT_FIFO`
+/// is written).
+#[cfg(debug_assertions)]
+fn failpoint(kind: &str) -> Option<usize> {
+    let value = std::env::var("TOG_SUPERVISE_FAILPOINT").ok()?;
+    value.strip_prefix(kind)?.strip_prefix('-')?.parse().ok()
+}
+
+#[cfg(debug_assertions)]
+static FAILPOINT_SPENT: AtomicBool = AtomicBool::new(false);
+
+fn failpoint_before_sigaction(_call: usize) -> io::Result<()> {
+    #[cfg(debug_assertions)]
+    if failpoint("fail-sigaction") == Some(_call) && !FAILPOINT_SPENT.swap(true, Ordering::SeqCst) {
+        return Err(io::Error::other(format!(
+            "failpoint: sigaction {_call} failed"
+        )));
+    }
+    Ok(())
+}
+
+fn failpoint_after_sigaction(_call: usize) {
+    #[cfg(debug_assertions)]
+    if failpoint("pause-after-sigaction") == Some(_call)
+        && !FAILPOINT_SPENT.swap(true, Ordering::SeqCst)
+    {
+        let mut out = io::stdout().lock();
+        let _ = writeln!(out, "FAILPOINT PAUSED {_call}");
+        let _ = out.flush();
+        drop(out);
+        if let Some(fifo) = std::env::var_os("TOG_SUPERVISE_FAILPOINT_FIFO") {
+            let _ = std::fs::read(fifo);
         }
     }
 }
 
-struct SavedSignal {
-    number: libc::c_int,
-    action: libc::sigaction,
-    installed: bool,
+/// How long a wait may go without a wakeup. A lone session is woken by the
+/// signal itself; the tick only matters when concurrent sessions take each
+/// other's wake bytes, and it bounds the wait when SIGCHLD is blocked. It
+/// never decides correctness. Debug builds read `TOG_SUPERVISE_TICK_MS`.
+fn tick_ms() -> libc::c_int {
+    const DEFAULT: libc::c_int = 20;
+    #[cfg(debug_assertions)]
+    {
+        static TICK: std::sync::OnceLock<libc::c_int> = std::sync::OnceLock::new();
+        *TICK.get_or_init(|| {
+            std::env::var("TOG_SUPERVISE_TICK_MS")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(DEFAULT)
+        })
+    }
+    #[cfg(not(debug_assertions))]
+    DEFAULT
 }
 
-/// One serialized process-local signal session. A separate Tog process
-/// has its own session, so this only serializes concurrent sessions within
-/// one process.
+fn drain_notifications() {
+    let fd = NOTIFY_READ.load(Ordering::SeqCst);
+    if fd < 0 {
+        return;
+    }
+    let mut bytes = [0u8; 64];
+    // SAFETY: bytes is a valid writable buffer and fd is the global,
+    // nonblocking, never-closed pipe end.
+    while unsafe { libc::read(fd, bytes.as_mut_ptr() as *mut libc::c_void, bytes.len()) } > 0 {}
+}
+
+/// One supervised child's signal session: a registration among any number
+/// of live ones, with its own cursors into the global counters. Owned by
+/// the thread that supervises the child.
 struct Session {
-    _serial: MutexGuard<'static, ()>,
-    read_fd: RawFd,
-    write_fd: RawFd,
-    old_actions: Vec<SavedSignal>,
+    /// The direct child, or -1 before spawn and after the reap. Only this
+    /// thread reaps the child and only this thread forwards to it, so a
+    /// reaped (possibly recycled) pid is never signalled.
+    child_pid: Cell<i32>,
+    term_cursor: Cell<u32>,
+    int_cursor: Cell<u32>,
+    hup_cursor: Cell<u32>,
+    quit_cursor: Cell<u32>,
+    /// `CHLD_RECEIVED` when the current wait round began (`begin_round`).
+    chld_seen: Cell<u32>,
+    /// TERMs this session saw and has not yet forwarded or turned into a
+    /// pre-spawn rejection.
+    unconsumed_terms: Cell<u32>,
+    /// Every terminating signal this session saw, one bit each
+    /// (`signal_bit`). Forwarding never clears it, so it still says after
+    /// the reap that tog was asked to stop.
+    received: Cell<u32>,
+    /// The spawning thread's mask, which the child execs with.
     old_mask: libc::sigset_t,
-    old_mask_saved: bool,
-    /// True only when a SIGCHLD handler was actually installed for this
-    /// session and SIGCHLD is not blocked by the mask the parent restores.
-    /// When false the child transition cannot reach the self-pipe, so the
-    /// wait keeps a timeout rather than blocking forever.
-    child_events: bool,
     active: bool,
 }
 
 impl Session {
     fn new() -> io::Result<Self> {
-        // A single process-wide signal session owns the temporary signal
-        // dispositions and child-pid slot, so only one child in this process
-        // can be supervised at a time. Report that as busy rather than
-        // waiting for it. Independent operations must not queue behind a
-        // process-global mutex, and contention across the store's locks is
-        // always a named outcome: an unbounded wait here would be
-        // the same silent self-deadlock shape as a shared helper called under
-        // its own exclusive lease, with no error and no timeout to end it.
-        // No production path supervises two children at once — every entry
-        // point runs its children sequentially through one lease — so this
-        // rejects a genuine programming error rather than a normal race.
-        let serial = match session_lock().try_lock() {
-            Ok(guard) => guard,
-            // A poisoned session means a previous supervisor panicked. Its
-            // dispositions were restored by `Drop` either way, so adopt the
-            // guard instead of refusing every later child in the process.
-            Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
-            Err(std::sync::TryLockError::WouldBlock) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::WouldBlock,
-                    "another child is already being supervised in this process; \
-                     supervision owns process-wide signal dispositions, so its \
-                     children are run one at a time",
-                ));
-            }
-        };
-        let (read_fd, write_fd) = pipe_pair()?;
-        let mut session = Self {
-            _serial: serial,
-            read_fd,
-            write_fd,
-            old_actions: Vec::with_capacity(SIGNAL_COUNT),
-            // SAFETY: sigset_t is an opaque C value initialized by
-            // sigprocmask below before it is read.
+        let mut registry = registry();
+        install_handlers(&mut registry)?;
+        #[cfg(debug_assertions)]
+        assert_term_handler_is_tog_s();
+        let packed = SESSION_TERM.fetch_add(ONE_SESSION, Ordering::SeqCst);
+        // Read just after registering: a signal counted in between is
+        // attributed to this session, which errs toward rejecting a spawn.
+        let session = Self {
+            child_pid: Cell::new(-1),
+            term_cursor: Cell::new(term_count(packed)),
+            int_cursor: Cell::new(INT_RECEIVED.load(Ordering::SeqCst)),
+            hup_cursor: Cell::new(HUP_RECEIVED.load(Ordering::SeqCst)),
+            quit_cursor: Cell::new(QUIT_RECEIVED.load(Ordering::SeqCst)),
+            chld_seen: Cell::new(CHLD_RECEIVED.load(Ordering::SeqCst)),
+            unconsumed_terms: Cell::new(0),
+            received: Cell::new(0),
+            // SAFETY: sigset_t is an opaque C value filled by
+            // pthread_sigmask below before it is read.
             old_mask: unsafe { std::mem::zeroed() },
-            old_mask_saved: false,
-            child_events: false,
             active: true,
         };
-        if let Err(error) = session.install() {
-            session.teardown();
-            return Err(error);
+        drop(registry);
+        let mut session = session;
+        // SAFETY: a null set queries this thread's mask into the slot.
+        let queried = unsafe {
+            libc::pthread_sigmask(libc::SIG_SETMASK, std::ptr::null(), &mut session.old_mask)
+        };
+        if queried != 0 {
+            return Err(io::Error::from_raw_os_error(queried));
         }
         Ok(session)
     }
 
-    fn install(&mut self) -> io::Result<()> {
-        // Query, rather than replace, the current mask. We do not change it
-        // for the parent after teardown; saving it makes restoration
-        // explicit. The temporary block closes the setup interval between
-        // publishing the self-pipe and installing the handlers: a pending
-        // signal is delivered to the new handler when the old mask is
-        // restored below instead of hitting the old disposition or the
-        // default action.
-        // SAFETY: a null set asks libc to copy the current process mask into
-        // the initialized output slot.
-        if unsafe { libc::sigprocmask(libc::SIG_SETMASK, std::ptr::null(), &mut self.old_mask) }
-            != 0
-        {
-            return Err(io::Error::last_os_error());
+    /// Fold every signal counted since the last look into this session.
+    fn reconcile(&self) {
+        let terms = term_count(SESSION_TERM.load(Ordering::SeqCst));
+        let new_terms = terms.wrapping_sub(self.term_cursor.get());
+        if new_terms != 0 {
+            self.term_cursor.set(terms);
+            self.unconsumed_terms
+                .set(self.unconsumed_terms.get().wrapping_add(new_terms));
+            self.received
+                .set(self.received.get() | signal_bit(libc::SIGTERM));
         }
-        self.old_mask_saved = true;
-
-        // SAFETY: sigset_t is an opaque C value; sigemptyset initializes it
-        // below before anything reads it.
-        let mut blocked: libc::sigset_t = unsafe { std::mem::zeroed() };
-        // SAFETY: libc initializes blocked's empty set.
-        if unsafe { libc::sigemptyset(&mut blocked) } != 0 {
-            return Err(io::Error::last_os_error());
-        }
-        for number in SIGNALS {
-            // SAFETY: blocked is a valid signal set.
-            if unsafe { libc::sigaddset(&mut blocked, number) } != 0 {
-                return Err(io::Error::last_os_error());
+        for (counter, cursor, signal) in [
+            (&INT_RECEIVED, &self.int_cursor, libc::SIGINT),
+            (&HUP_RECEIVED, &self.hup_cursor, libc::SIGHUP),
+            (&QUIT_RECEIVED, &self.quit_cursor, libc::SIGQUIT),
+        ] {
+            let now = counter.load(Ordering::SeqCst);
+            if now != cursor.get() {
+                cursor.set(now);
+                self.received.set(self.received.get() | signal_bit(signal));
             }
         }
-        // SAFETY: blocked is initialized and old_mask was saved above.
-        if unsafe { libc::sigprocmask(libc::SIG_BLOCK, &blocked, std::ptr::null_mut()) } != 0 {
-            return Err(io::Error::last_os_error());
-        }
-
-        NOTIFY_FD.store(self.write_fd, Ordering::SeqCst);
-        CHILD_PID.store(-1, Ordering::SeqCst);
-        TERM_COUNT.store(0, Ordering::SeqCst);
-        RECEIVED.store(0, Ordering::SeqCst);
-
-        for number in SIGNALS {
-            // SAFETY: zeroed is the conventional initialization for the
-            // output sigaction which libc fills.
-            let mut old: libc::sigaction = unsafe { std::mem::zeroed() };
-            // SAFETY: number is one of the `SIGNALS` constants and old is a
-            // writable output slot.
-            if unsafe { libc::sigaction(number, std::ptr::null(), &mut old) } != 0 {
-                return Err(io::Error::last_os_error());
-            }
-            let ignored = old.sa_sigaction == libc::SIG_IGN;
-            self.old_actions.push(SavedSignal {
-                number,
-                action: old,
-                installed: false,
-            });
-            // An inherited SIG_IGN is kept for TERM/INT/HUP/QUIT: whoever
-            // started tog asked for it not to be interrupted by them. SIGCHLD
-            // is the exception. With SIGCHLD ignored (or SA_NOCLDWAIT set,
-            // which the replacement below also clears) the kernel reaps the
-            // child itself, `try_wait` fails with ECHILD, and the exit status
-            // tog exists to report is gone. The handler replaces it for the
-            // session only: `prepare_child` hands the child the inherited
-            // SIG_IGN back and teardown restores the saved action. One
-            // difference remains. While the handler is installed, any other
-            // child of this process (say, spawned by another thread) that
-            // exits without being waited for becomes a zombie instead of
-            // being auto-reaped, and restoring SIG_IGN afterwards does not
-            // reap it. The default disposition does exactly that to the
-            // same child anyway, so this only makes the inherited-SIG_IGN
-            // case behave like the default one during a session. Such a
-            // zombie is cleared when tog exits, and production code waits
-            // for every child it spawns.
-            if ignored && number != libc::SIGCHLD {
-                continue;
-            }
-            if number == libc::SIGCHLD {
-                // SAFETY: old_mask was filled by sigprocmask above.
-                let blocked_in_restored_mask =
-                    unsafe { libc::sigismember(&self.old_mask, libc::SIGCHLD) } == 1;
-                self.child_events = !blocked_in_restored_mask;
-            }
-            // SAFETY: zeroed is followed by sigemptyset and all fields used
-            // by sigaction are initialized below.
-            let mut replacement: libc::sigaction = unsafe { std::mem::zeroed() };
-            // SAFETY: replacement is writable and the call initializes its
-            // signal mask.
-            if unsafe { libc::sigemptyset(&mut replacement.sa_mask) } != 0 {
-                return Err(io::Error::last_os_error());
-            }
-            replacement.sa_flags = 0;
-            replacement.sa_sigaction = signal_handler as *const () as usize;
-            // SAFETY: replacement contains a valid async-signal-safe handler.
-            if unsafe { libc::sigaction(number, &replacement, std::ptr::null_mut()) } != 0 {
-                return Err(io::Error::last_os_error());
-            }
-            self.old_actions
-                .last_mut()
-                .expect("just pushed signal action")
-                .installed = true;
-        }
-        // Unblock only after every non-ignored disposition is installed and
-        // all global session state is initialized. A signal which arrived
-        // during setup is now pending for the temporary handler and will be
-        // observed by reject_pending_before_spawn or the first wait loop.
-        // SAFETY: old_mask was captured before the temporary block.
-        if unsafe { libc::sigprocmask(libc::SIG_SETMASK, &self.old_mask, std::ptr::null_mut()) }
-            != 0
-        {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(())
     }
 
     fn reject_pending_before_spawn(&self) -> io::Result<()> {
-        self.drain_notifications();
-        if RECEIVED.load(Ordering::SeqCst) != 0 {
+        self.reconcile();
+        if self.received.get() != 0 {
+            // The rejection is what these TERMs did: nothing is left to
+            // forward or re-raise.
+            self.unconsumed_terms.set(0);
             return Err(io::Error::new(
                 io::ErrorKind::Interrupted,
                 "cancellation arrived before the child was spawned",
@@ -445,17 +603,23 @@ impl Session {
         Ok(())
     }
 
-    /// The child must never exec with the supervisor's temporary handlers or
-    /// a caller's accidentally inherited blocked signal mask. Every signal
-    /// goes back to what tog inherited: SIG_IGN stays ignored (including a
-    /// SIGCHLD the session handled anyway), and anything else becomes
-    /// SIG_DFL, which is what exec would make of an inherited handler. The
-    /// post-fork hook is restricted to libc signal operations.
+    /// The child must never exec with tog's handlers or a caller's
+    /// accidentally inherited blocked signal mask. Every signal goes back
+    /// to what tog inherited: SIG_IGN stays ignored (including a SIGCHLD
+    /// the handler takes anyway), and anything else becomes SIG_DFL, which
+    /// is what exec would make of an inherited handler. The post-fork hook
+    /// is restricted to libc signal operations on copied values.
     fn prepare_child(&self, command: &mut Command) {
-        let actions: Vec<(libc::c_int, bool)> = self
-            .old_actions
-            .iter()
-            .map(|saved| (saved.number, saved.action.sa_sigaction == libc::SIG_IGN))
+        let recorded = RECORDED.load(Ordering::SeqCst);
+        let actions: Vec<(libc::c_int, bool)> = SIGNALS
+            .into_iter()
+            .enumerate()
+            .filter(|(index, _)| recorded & (1 << index) != 0)
+            .map(|(index, number)| {
+                // SAFETY: published through RECORDED, never rewritten.
+                let action = unsafe { (*INHERITED.0.get())[index] };
+                (number, action.sa_sigaction == libc::SIG_IGN)
+            })
             .collect();
         let old_mask = self.old_mask;
         // SAFETY: the closure performs only async-signal-safe libc operations
@@ -495,33 +659,30 @@ impl Session {
         if pid <= 0 {
             return Err(io::Error::other("child did not publish a positive pid"));
         }
-        // Store the pid before inspecting pending signals. A TERM in the
-        // fork/exec interval is therefore either rejected before spawn or
-        // forwarded after this publication.
-        CHILD_PID.store(pid, Ordering::SeqCst);
+        // Store the pid before reconciling. A TERM in the fork/exec interval
+        // is therefore either rejected before spawn or forwarded now.
+        self.child_pid.set(pid);
         self.forward_pending()
     }
 
     fn clear_child(&self) {
-        CHILD_PID.store(-1, Ordering::SeqCst);
+        self.child_pid.set(-1);
     }
 
     fn forward_pending(&self) -> io::Result<()> {
-        self.drain_notifications();
-        if TERM_COUNT.load(Ordering::SeqCst) == 0 {
+        self.reconcile();
+        let terms = self.unconsumed_terms.get();
+        // With no live child the TERMs stay unconsumed: a child published
+        // later in this session still receives them, and one that never
+        // comes makes them orphans that `finish` re-raises.
+        let pid = self.child_pid.get();
+        if terms == 0 || pid <= 0 {
             return Ok(());
         }
-        // Read the pid slot before consuming the count. With no live child
-        // the cancellation stays pending instead of being swallowed: the
-        // next child published in this session still receives it, and a
-        // reaped pid is never signalled.
-        let pid = CHILD_PID.load(Ordering::SeqCst);
-        if pid <= 0 {
-            return Ok(());
-        }
-        let terms = TERM_COUNT.swap(0, Ordering::SeqCst);
+        self.unconsumed_terms.set(0);
         for _ in 0..terms {
-            // SAFETY: pid was published from Child::id and remains positive.
+            // SAFETY: pid was published from Child::id and this thread has
+            // not reaped it.
             if unsafe { libc::kill(pid, libc::SIGTERM) } != 0 {
                 let error = io::Error::last_os_error();
                 // A child that exited between try_wait and forwarding cannot
@@ -534,10 +695,23 @@ impl Session {
         Ok(())
     }
 
+    /// Start a wait round: empty the pipe, then note the SIGCHLD count.
+    /// Called before `try_wait`, so a child exit after it either moves the
+    /// count (`wait_for_event` sees it and does not block) or writes a byte
+    /// into the emptied pipe (the poll wakes on it). The same holds for a
+    /// TERM after `forward_pending`'s reconcile.
+    fn begin_round(&self) {
+        drain_notifications();
+        self.chld_seen.set(CHLD_RECEIVED.load(Ordering::SeqCst));
+    }
+
     fn wait_for_event(&self, output_fds: &[RawFd]) -> io::Result<()> {
+        if CHLD_RECEIVED.load(Ordering::SeqCst) != self.chld_seen.get() {
+            return Ok(());
+        }
         let mut descriptors = Vec::with_capacity(output_fds.len() + 1);
         descriptors.push(libc::pollfd {
-            fd: self.read_fd,
+            fd: NOTIFY_READ.load(Ordering::SeqCst),
             events: libc::POLLIN,
             revents: 0,
         });
@@ -546,130 +720,67 @@ impl Session {
             events: libc::POLLIN,
             revents: 0,
         }));
-        loop {
-            // A child transition observed since the last check is a wakeup in
-            // its own right. Consuming it here — before blocking — closes the
-            // window where `forward_pending` drained the pipe byte after the
-            // caller's `try_wait` said the child was still alive. Without this
-            // the poll below would have nothing left to wake it.
-            if CHILD_EVENT.swap(false, Ordering::SeqCst) {
-                self.drain_notifications();
-                return Ok(());
-            }
-            // SAFETY: descriptors points at a valid contiguous pollfd array.
-            let result = unsafe {
-                libc::poll(
-                    descriptors.as_mut_ptr(),
-                    descriptors.len() as libc::nfds_t,
-                    // Block indefinitely when the child transition can reach
-                    // the self-pipe: every event that matters writes it from
-                    // the signal handler, so there is nothing left for a timer
-                    // to discover. A signal arriving between the check above
-                    // and this call still wakes it, because the handler writes
-                    // the pipe after setting the flag and nothing drains it in
-                    // between. When SIGCHLD is blocked by the inherited
-                    // mask, no such wakeup exists and the former timeout is
-                    // the only thing that would notice the exit, so keep it.
-                    if self.child_events { -1 } else { 100 },
-                )
-            };
-            if result >= 0 {
-                self.drain_notifications();
-                return Ok(());
-            }
+        // SAFETY: descriptors points at a valid contiguous pollfd array.
+        let result = unsafe {
+            libc::poll(
+                descriptors.as_mut_ptr(),
+                descriptors.len() as libc::nfds_t,
+                tick_ms(),
+            )
+        };
+        if result < 0 {
             let error = io::Error::last_os_error();
-            if error.kind() == io::ErrorKind::Interrupted {
-                continue;
+            // A signal interrupted the wait: that is a wakeup.
+            if error.kind() != io::ErrorKind::Interrupted {
+                return Err(error);
             }
-            return Err(error);
         }
+        Ok(())
     }
 
-    fn drain_notifications(&self) {
-        let mut bytes = [0u8; 64];
-        loop {
-            // SAFETY: bytes is a valid writable buffer and read_fd is the
-            // session-owned nonblocking pipe end.
-            let read = unsafe {
-                libc::read(
-                    self.read_fd,
-                    bytes.as_mut_ptr() as *mut libc::c_void,
-                    bytes.len(),
-                )
-            };
-            if read > 0 {
-                continue;
-            }
-            if read == 0 {
-                return;
-            }
-            if io::Error::last_os_error().kind() == io::ErrorKind::WouldBlock {
-                return;
-            }
-            return;
-        }
-    }
-
-    /// Restore everything the session changed and return the terminating
-    /// signals it caught. The mask is read after the handlers are blocked,
-    /// so a signal is either counted here or arrives once the inherited
-    /// disposition is back and acts on tog itself; none falls between.
-    fn teardown(&mut self) -> u32 {
+    /// Deregister and return the terminating signals the session saw. A
+    /// TERM this session saw but could not forward marks the registry; the
+    /// last session to leave re-raises one TERM if any session left such a
+    /// TERM, or if a TERM arrived after its own last look. That TERM then
+    /// meets the handler with no session live and acts as inherited (by
+    /// default, tog dies of it). A TERM every session forwarded does not
+    /// re-raise: the child decides what it means.
+    fn finish(&mut self) -> u32 {
         if !self.active {
             return 0;
         }
-        // Prevent a signal from running the temporary handler while the
-        // global pid/fd and dispositions are being dismantled.
-        if self.old_mask_saved {
-            // SAFETY: set is initialized before use and contains the
-            // temporary handler signals.
-            let mut blocked: libc::sigset_t = unsafe { std::mem::zeroed() };
-            // SAFETY: libc initializes blocked's empty set.
-            if unsafe { libc::sigemptyset(&mut blocked) } == 0 {
-                for number in SIGNALS {
-                    // SAFETY: blocked is a valid signal set.
-                    unsafe {
-                        libc::sigaddset(&mut blocked, number);
-                    }
-                }
-                // SAFETY: blocked is valid; the old mask is already saved.
-                unsafe {
-                    libc::sigprocmask(libc::SIG_BLOCK, &blocked, std::ptr::null_mut());
-                }
-            }
-        }
-        self.clear_child();
-        NOTIFY_FD.store(-1, Ordering::SeqCst);
-        TERM_COUNT.store(0, Ordering::SeqCst);
-        let received = RECEIVED.swap(0, Ordering::SeqCst);
-        for saved in self.old_actions.iter().rev() {
-            if saved.installed {
-                // SAFETY: saved.action came from sigaction and is restored
-                // for the same signal number.
-                unsafe {
-                    libc::sigaction(saved.number, &saved.action, std::ptr::null_mut());
-                }
-            }
-        }
-        if self.old_mask_saved {
-            // SAFETY: old_mask came from sigprocmask and is restored verbatim.
-            unsafe {
-                libc::sigprocmask(libc::SIG_SETMASK, &self.old_mask, std::ptr::null_mut());
-            }
-        }
-        close_fd(self.read_fd);
-        close_fd(self.write_fd);
-        self.read_fd = -1;
-        self.write_fd = -1;
         self.active = false;
-        received
+        self.clear_child();
+        self.reconcile();
+        let mut registry = registry();
+        if self.unconsumed_terms.get() != 0 {
+            registry.term_orphaned = true;
+        }
+        let packed = SESSION_TERM.fetch_sub(ONE_SESSION, Ordering::SeqCst);
+        let unseen = term_count(packed) != self.term_cursor.get();
+        if unseen {
+            self.received
+                .set(self.received.get() | signal_bit(libc::SIGTERM));
+        }
+        let mut reraise = false;
+        if live_sessions(packed) == 1 {
+            reraise = registry.term_orphaned || unseen;
+            registry.term_orphaned = false;
+        }
+        drop(registry);
+        if reraise {
+            // SAFETY: raise targets this thread; the handler, with no session
+            // live, gives the TERM its inherited behavior.
+            unsafe { libc::raise(libc::SIGTERM) };
+        }
+        self.received.get()
     }
 
     /// End the session for a reaped child: `value` when no terminating
     /// signal arrived, the interruption otherwise. A signal that arrives
     /// after a clean exit still counts, since it asked tog to stop too.
     fn conclude<T>(mut self, status: ExitStatus, value: T) -> io::Result<T> {
-        let received = self.teardown();
+        let received = self.finish();
         match TERMINATING
             .into_iter()
             .find(|signal| received & signal_bit(*signal) != 0)
@@ -685,7 +796,30 @@ impl Session {
 
 impl Drop for Session {
     fn drop(&mut self) {
-        let _ = self.teardown();
+        let _ = self.finish();
+    }
+}
+
+/// Supervision forwards TERM only while tog's handler holds it. Code that
+/// installs its own TERM handler after tog's first session silently ends
+/// that, so debug builds check at each registration.
+#[cfg(debug_assertions)]
+fn assert_term_handler_is_tog_s() {
+    let Some(index) = signal_index(libc::SIGTERM) else {
+        return;
+    };
+    if INSTALLED.load(Ordering::SeqCst) & (1 << index) == 0 {
+        return;
+    }
+    // SAFETY: zeroed is a valid output slot; a null new action only queries.
+    let mut current: libc::sigaction = unsafe { std::mem::zeroed() };
+    // SAFETY: as above.
+    if unsafe { libc::sigaction(libc::SIGTERM, std::ptr::null(), &mut current) } == 0 {
+        assert_eq!(
+            current.sa_sigaction, signal_handler as *const () as usize,
+            "something replaced tog's SIGTERM handler after its first supervised child; \
+             supervision would stop forwarding TERM"
+        );
     }
 }
 
@@ -720,6 +854,7 @@ pub fn status(command: &mut Command, activity: &StoreActivity) -> io::Result<Exi
         return Err(error);
     }
     loop {
+        session.begin_round();
         match child.try_wait() {
             Ok(Some(status)) => {
                 session.clear_child();
@@ -796,14 +931,14 @@ fn status_relayed(
     let mut readers = Vec::with_capacity(2);
     let started: io::Result<()> = (|| {
         if let Some(pipe) = child.stderr.take() {
-            let wake = RelayWake::new(session.write_fd, &failed)?;
+            let wake = RelayWake::new(NOTIFY_WRITE.load(Ordering::SeqCst), &failed)?;
             readers.push((
                 true,
                 spawn_relay(pipe, stderr_sink, secrets, CLASSIFIER_PREFIX, wake)?,
             ));
         }
         if let Some(pipe) = child.stdout.take() {
-            let wake = RelayWake::new(session.write_fd, &failed)?;
+            let wake = RelayWake::new(NOTIFY_WRITE.load(Ordering::SeqCst), &failed)?;
             readers.push((false, spawn_relay(pipe, stdout_sink, secrets, 0, wake)?));
         }
         Ok(())
@@ -811,6 +946,7 @@ fn status_relayed(
     let waited = match started {
         Err(error) => Err(error),
         Ok(()) => loop {
+            session.begin_round();
             if failed.load(Ordering::SeqCst) {
                 break Err(io::Error::other("a child output relay failed"));
             }
@@ -822,9 +958,10 @@ fn status_relayed(
             if let Err(error) = session.forward_pending() {
                 break Err(error);
             }
-            // Checked again after `forward_pending` drained the self-pipe:
-            // a reader that failed before this sees the flag, one that
-            // fails after it writes a byte the poll below wakes on.
+            // Checked again after `forward_pending`: a reader that failed
+            // before this sees the flag, one that fails after it writes a
+            // byte the poll below wakes on (`begin_round` emptied the pipe
+            // before the first check).
             if failed.load(Ordering::SeqCst) {
                 break Err(io::Error::other("a child output relay failed"));
             }
@@ -918,7 +1055,7 @@ struct RelayWake {
 impl RelayWake {
     fn new(write_fd: RawFd, failed: &std::sync::Arc<AtomicBool>) -> io::Result<Self> {
         use std::os::fd::FromRawFd;
-        // SAFETY: write_fd is the session's open self-pipe write end; the
+        // SAFETY: write_fd is the global self-pipe's write end, never closed; the
         // duplicate is owned here and closed when the wake is dropped.
         let fd = unsafe { libc::fcntl(write_fd, libc::F_DUPFD_CLOEXEC, 0) };
         if fd < 0 {
@@ -1071,6 +1208,7 @@ pub fn output(command: &mut Command, activity: &StoreActivity) -> io::Result<Out
     let mut stderr_bytes = Vec::new();
     let mut status = None;
     loop {
+        session.begin_round();
         if status.is_none() {
             match child.try_wait() {
                 Ok(next) => {
@@ -1189,8 +1327,6 @@ mod tests {
     use std::path::Path;
     use std::sync::Mutex;
 
-    static TEST_SESSION: Mutex<()> = Mutex::new(());
-
     fn test_store(label: &str) -> (Store, TempDir) {
         let dir = TempDir::named(&format!("supervise-{label}"));
         let root = dir.0.clone();
@@ -1215,10 +1351,6 @@ mod tests {
     #[allow(clippy::disallowed_methods)]
     #[test]
     fn status_preserves_a_numeric_exit_across_sequential_children() {
-        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        let _test_session = TEST_SESSION.lock().unwrap();
         let (store, _root) = test_store("status");
         let activity = store.activity(ActivityMode::Shared).unwrap();
         let mut command = Command::new("/bin/sh");
@@ -1235,10 +1367,6 @@ mod tests {
     /// the supervisor.
     #[test]
     fn local_supervise_refuses_resolver_programs() {
-        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        let _test_session = TEST_SESSION.lock().unwrap();
         let (store, _root) = test_store("local");
         let activity = store.activity(ActivityMode::Shared).unwrap();
         // The resolver named by a path that does not exist: had it been
@@ -1305,12 +1433,6 @@ mod tests {
         let script = script.to_string();
         let (sender, receiver) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            let _test_session = TEST_SESSION
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
             let (store, _root) = test_store("relay");
             let activity = store.activity(ActivityMode::Shared).unwrap();
             let stdout = std::sync::Arc::new(Mutex::new(Vec::new()));
@@ -1344,12 +1466,6 @@ mod tests {
     fn a_failing_relay_wakes_the_supervisor_and_the_child_is_reaped() {
         let (sender, receiver) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            let _test_session = TEST_SESSION
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
             let (store, _root) = test_store("relay-fail");
             let activity = store.activity(ActivityMode::Shared).unwrap();
             // `exec`: the sleep is the direct child, so killing it closes
@@ -1462,10 +1578,6 @@ mod tests {
     #[allow(clippy::disallowed_methods)]
     #[test]
     fn output_drains_both_pipes_before_reaping() {
-        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        let _test_session = TEST_SESSION.lock().unwrap();
         let (store, _root) = test_store("output");
         let activity = store.activity(ActivityMode::Shared).unwrap();
         let mut command = Command::new("/bin/sh");

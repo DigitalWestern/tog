@@ -475,7 +475,6 @@ mod tests {
     use super::*;
     use crate::kernel::activity::StoreActivity;
     use crate::kernel::store;
-    use crate::kernel::supervise;
 
     /// A lease on `store` itself, for the case that runs a child against it.
     /// The other cases use a store that is absent or not a directory on
@@ -636,9 +635,6 @@ mod tests {
 
     #[test]
     fn lock_stamp_behind_a_symlinked_tog_is_refused() {
-        let _supervision = supervise::SUPERVISION_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
         let temp = crate::kernel::testutil::TempDir::new();
         let project_dir = temp.0.join("proj");
         std::fs::create_dir_all(&project_dir).unwrap();

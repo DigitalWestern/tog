@@ -709,9 +709,6 @@ mod tests {
     #[test]
     fn closure_refs_name_every_object_this_producer_created() {
         use std::os::unix::fs::PermissionsExt;
-        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
         let _attribution_lock = crate::kernel::policy::attribution_test_lock();
         let mut attribution = crate::kernel::policy::Attribution::open("python").unwrap();
         let (_store_dir, store) = test_store("closure-refs");
@@ -1097,9 +1094,6 @@ mod tests {
 
     #[test]
     fn fast_sdist_parent_input_keeps_the_legacy_identity() {
-        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
         let (_store_dir, store) = test_store("fast-golden");
         let activity = &store
             .activity(crate::kernel::activity::ActivityMode::Shared)
@@ -1185,9 +1179,6 @@ mod tests {
 
     #[test]
     fn isolated_sdist_build_environment_changes_parent_identity() {
-        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
         let (_store_dir, store) = test_store("isolated-input");
         let activity = &store
             .activity(crate::kernel::activity::ActivityMode::Shared)
@@ -1242,9 +1233,6 @@ mod tests {
 
     #[test]
     fn planned_and_realized_env_id_match_for_a_native_sdist() {
-        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
         let (_store_dir, store) = test_store("native-sdist-identity");
         let activity = &store
             .activity(crate::kernel::activity::ActivityMode::Shared)
