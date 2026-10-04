@@ -176,30 +176,6 @@ pub(super) fn parse_yarn_entries(lock: &str) -> io::Result<Vec<YarnEntry>> {
     Ok(entries)
 }
 
-pub(super) fn base64_encode(bytes: &[u8]) -> String {
-    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut output = String::new();
-    for chunk in bytes.chunks(3) {
-        let a = chunk[0] as u32;
-        let b = chunk.get(1).copied().unwrap_or(0) as u32;
-        let c = chunk.get(2).copied().unwrap_or(0) as u32;
-        let value = (a << 16) | (b << 8) | c;
-        output.push(TABLE[((value >> 18) & 63) as usize] as char);
-        output.push(TABLE[((value >> 12) & 63) as usize] as char);
-        output.push(if chunk.len() > 1 {
-            TABLE[((value >> 6) & 63) as usize] as char
-        } else {
-            '='
-        });
-        output.push(if chunk.len() > 2 {
-            TABLE[(value & 63) as usize] as char
-        } else {
-            '='
-        });
-    }
-    output
-}
-
 pub(super) fn yarn_integrity(
     resolved: &str,
     integrity: Option<String>,
@@ -259,7 +235,7 @@ fn yarn_integrity_with(
     } else {
         return Err(err(format!("{path}: malformed yarn sha1 fragment")));
     };
-    let sri = format!("sha1-{}", base64_encode(&bytes));
+    let sri = format!("sha1-{}", crate::kernel::digest::base64_encode(&bytes));
     integrity_policy_with(path, &sri, record)?;
     Ok(sri)
 }
