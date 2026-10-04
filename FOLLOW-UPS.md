@@ -59,6 +59,8 @@ After the proxy: the test-suite audit (#351) and then the quality review
 - **#465: heavy: audit shared state before allowing parallel ignored suites.** audit shared state before running ignored suites in parallel. Keep --test-threads=1 until local evidence supports removal.
 - **#466: ci: GitHub Actions job startup blocked by account billing or spending limit.** Actions jobs cannot start because of account billing or spending-limit restrictions. Pick: owner repairs account access, use documented local checks meanwhile.
 - **#487: registry tools outside locked project ecosystems.** Use a shipped primary runtime when that ecosystem is absent, while honoring project build helpers and preserving missing-section refusals for detected ecosystems.
+- **#494: first Python lock and setup constraints.** Include safely parsed setup.cfg and literal setup.py Python constraints in first-lock selection and freshness checks. Preserve explicit versions and existing locks.
+- **#495: explicit Python package sources.** Define per-package source and metadata-build trust rules for PyTorch-style indexes. Keep undeclared indexes refused until that design ships.
 - **#480: searchable project ancestors.** Let descriptor traversal and publication revalidation use search access without requiring ancestor directory listings. Pick: O_PATH for intermediate Linux components while preserving identity checks.
 - **#469: root removal identity.** Carry the decoded record's device/inode and held directory through deletion. Refuse replacements, including directory entries.
 
@@ -165,7 +167,6 @@ After the proxy: the test-suite audit (#351) and then the quality review
   issue has the options and the pick.
   - #188 npm: realize `file:` packages as tog-owned trees.
   - #191 provider object-kind rows still live in the tailors' `objects.rs`.
-  - #215 python: sdists that need Rust at build time (stable-diffusion-webui).
   - #216 python: `uv pip compile` fails for vllm and MetaGPT; classifier label.
   - #219 descriptor: delegated tools a sync starts still run with a path cwd.
   - #220 descriptor: files above the project (Cargo workspace, `go.work`, .NET `Directory.*`) read by path.

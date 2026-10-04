@@ -857,7 +857,7 @@ mod tests {
         let reason = check_identity_grammar(&native_libs_darwin).unwrap_err();
         assert!(reason.contains("native-libs platform contract"), "{reason}");
 
-        let sdist_rust = case_with_input(&linux, "sdist-build", Some("sdist-build/4"), "rust");
+        let sdist_rust = case_with_input(&linux, "sdist-build", Some("sdist-build/5"), "rust");
         assert_relation_breaks(
             &sdist_rust,
             &["rust", "vendor"],
@@ -1067,7 +1067,7 @@ mod tests {
     #[test]
     fn sdist_build_rust_vendor_dropped_is_detected() {
         let linux = live_identity_cases(Platform::X86_64UnknownLinuxGnu);
-        let rust = case_with_input(&linux, "sdist-build", Some("sdist-build/4"), "rust");
+        let rust = case_with_input(&linux, "sdist-build", Some("sdist-build/5"), "rust");
         let mut dropped = rust.clone();
         dropped.inputs.remove("rust");
         dropped.inputs.remove("vendor");
