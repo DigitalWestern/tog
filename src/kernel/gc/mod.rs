@@ -1671,6 +1671,61 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn restricted_resolution_trash_is_removed_without_mutating_a_dry_run() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = TempStore::new("restricted-resolution-trash");
+        let store = temp.store();
+        register_objects(&store, &temp.root.join("project"), &[]);
+        let stage = store.root.join("tmp/resolve-0-0-crashed");
+        let blocked = stage.join("blocked");
+        let search_only = stage.join("search-only");
+        fs::create_dir_all(&blocked).unwrap();
+        fs::create_dir_all(&search_only).unwrap();
+        fs::write(blocked.join("payload"), "trash").unwrap();
+        fs::write(search_only.join("payload"), "trash").unwrap();
+        let outside = temp.root.join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("keep"), "user data").unwrap();
+        std::os::unix::fs::symlink(&outside, blocked.join("escape")).unwrap();
+        let held_root = fs::File::open(&stage).unwrap();
+        let held_blocked = fs::File::open(&blocked).unwrap();
+        let held_search = fs::File::open(&search_only).unwrap();
+        age(&stage);
+        fs::set_permissions(&blocked, fs::Permissions::from_mode(0o0)).unwrap();
+        fs::set_permissions(&search_only, fs::Permissions::from_mode(0o100)).unwrap();
+        fs::set_permissions(&stage, fs::Permissions::from_mode(0o0)).unwrap();
+        let (dry, text) = sweep(
+            &store,
+            Options {
+                dry_run: true,
+                ..Options::default()
+            },
+        );
+        assert_eq!(dry.unwrap().stages, 1, "{text}");
+        assert!(text.contains("at least"), "{text}");
+        assert_eq!(
+            held_root.metadata().unwrap().permissions().mode() & 0o777,
+            0
+        );
+        assert_eq!(
+            held_blocked.metadata().unwrap().permissions().mode() & 0o777,
+            0
+        );
+        assert_eq!(
+            held_search.metadata().unwrap().permissions().mode() & 0o777,
+            0o100
+        );
+        let (real, text) = sweep(&store, Options::default());
+        assert_eq!(real.unwrap().stages, 1, "{text}");
+        assert!(!stage.exists(), "{text}");
+        assert_eq!(
+            fs::read_to_string(outside.join("keep")).unwrap(),
+            "user data"
+        );
+    }
+
     /// A dry run writes nothing: no record, no root, no timestamp.
     #[test]
     fn dry_run_removes_no_root_rewrites_no_record_and_refreshes_no_timestamp() {
