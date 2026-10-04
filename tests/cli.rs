@@ -846,7 +846,7 @@ fn a_first_scoped_build_explains_why_another_ecosystem_stops_it() {
     let stderr = text(&out.stderr);
     assert!(
         stderr.contains("creating tog-toolchain.toml selects a toolchain for every ecosystem")
-            && stderr.contains("change the python version request"),
+            && stderr.contains("fix the python toolchain error above"),
         "{stderr}"
     );
     assert!(!project.0.join("tog-toolchain.toml").exists());
