@@ -415,6 +415,7 @@ impl ViewSkeleton {
         use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
         static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let base = fs::canonicalize(std::env::temp_dir())?;
+        sweep_stale_skeletons(&base);
         loop {
             let sequence = SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             // `RandomState` is seeded from the operating system's random
@@ -423,7 +424,7 @@ impl ViewSkeleton {
             let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
             hasher.write_u64(sequence);
             let path = base.join(format!(
-                "tog-host-view-{}-{:016x}",
+                "{SKELETON_PREFIX}{}-{:016x}",
                 std::process::id(),
                 hasher.finish()
             ));
@@ -452,6 +453,74 @@ impl Drop for ViewSkeleton {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.0);
     }
+}
+
+/// Every skeleton's name: this prefix, the creating tog's pid, a dash, and a
+/// 16-hex-digit nonce.
+const SKELETON_PREFIX: &str = "tog-host-view-";
+
+/// How long a skeleton whose tog is gone is left alone before a later run
+/// removes it. The pid check alone would do on one machine, but a tog in
+/// another pid namespace sharing this TMPDIR (a container) has a pid that
+/// means nothing here; a day is far longer than any build.
+const STALE_SKELETON_AGE: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+
+/// Remove the skeletons a killed tog left in `base` (issue #335): `Drop`
+/// never ran for a SIGKILL. Only a real directory this user owns, named
+/// like a skeleton, whose tog is no longer running and which has not
+/// changed for `STALE_SKELETON_AGE` is removed. Anything else, and any
+/// failure, is left as it is: a leftover is inert, so the sweep never
+/// stops a build.
+fn sweep_stale_skeletons(base: &Path) {
+    use std::os::unix::fs::MetadataExt as _;
+    let Ok(entries) = fs::read_dir(base) else {
+        return;
+    };
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    let uid = unsafe { libc::geteuid() };
+    for entry in entries.flatten() {
+        let Some(pid) = entry.file_name().to_str().and_then(skeleton_pid) else {
+            continue;
+        };
+        if pid == std::process::id() || process_exists(pid) {
+            continue;
+        }
+        let path = entry.path();
+        let Ok(metadata) = fs::symlink_metadata(&path) else {
+            continue;
+        };
+        let stale = metadata
+            .modified()
+            .ok()
+            .and_then(|modified| modified.elapsed().ok())
+            .is_some_and(|age| age >= STALE_SKELETON_AGE);
+        if metadata.is_dir() && metadata.uid() == uid && stale {
+            let _ = fs::remove_dir_all(&path);
+        }
+    }
+}
+
+/// The pid in a skeleton's name, or `None` for any other name.
+fn skeleton_pid(name: &str) -> Option<u32> {
+    let (pid, nonce) = name.strip_prefix(SKELETON_PREFIX)?.split_once('-')?;
+    if nonce.len() != 16 || !nonce.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    pid.parse()
+        .ok()
+        .filter(|pid| *pid > 0 && i32::try_from(*pid).is_ok())
+}
+
+/// Whether a process with this pid exists. EPERM means it exists under
+/// another user.
+fn process_exists(pid: u32) -> bool {
+    let Ok(pid) = i32::try_from(pid) else {
+        return false;
+    };
+    // SAFETY: signal 0 only checks the pid; `skeleton_pid` never yields 0
+    // or a negative pid, which would address a process group.
+    let result = unsafe { libc::kill(pid, 0) };
+    result == 0 || io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
 /// The mounts that turn the full system root `system_root_args` binds into
@@ -1198,6 +1267,76 @@ mod tests {
         let elapsed = started.elapsed();
         assert_eq!(host_build_inputs().unwrap(), first);
         eprintln!("host build inputs {first} in {elapsed:?}");
+    }
+
+    /// A pid no process has: a child that has already been reaped.
+    fn dead_pid() -> u32 {
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let pid = child.id();
+        child.wait().unwrap();
+        pid
+    }
+
+    fn age(path: &Path, seconds: u64) {
+        let then = std::time::SystemTime::now() - std::time::Duration::from_secs(seconds);
+        fs::File::open(path).unwrap().set_modified(then).unwrap();
+    }
+
+    /// A skeleton a killed tog left is removed by a later run once it is a
+    /// day old; one whose tog still runs, a fresh one, anything not named
+    /// like a skeleton, and a symlink are all left (#335).
+    #[test]
+    fn stale_skeletons_of_gone_runs_are_swept() {
+        let temp = temp_dir("skeleton-sweep");
+        let base = temp.0.as_path();
+        let dead = dead_pid();
+        let nonce = "0123456789abcdef";
+        let make = |name: &str, seconds: u64| {
+            let path = base.join(name);
+            fs::create_dir(&path).unwrap();
+            fs::create_dir(path.join("usr")).unwrap();
+            fs::write(path.join("usr/placeholder"), "").unwrap();
+            age(&path, seconds);
+            path
+        };
+        let stale = make(&format!("{SKELETON_PREFIX}{dead}-{nonce}"), 2 * 86_400);
+        let fresh = make(&format!("{SKELETON_PREFIX}{dead}-{}", "f".repeat(16)), 60);
+        let running = make(
+            &format!("{SKELETON_PREFIX}{}-{nonce}", std::process::id()),
+            2 * 86_400,
+        );
+        let other = make(&format!("{SKELETON_PREFIX}{dead}-short"), 2 * 86_400);
+        let unrelated = make("tog-something-else", 2 * 86_400);
+        let target = make("target", 2 * 86_400);
+        let link = base.join(format!("{SKELETON_PREFIX}{dead}-{}", "a".repeat(16)));
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        sweep_stale_skeletons(base);
+
+        assert!(!stale.exists(), "the stale skeleton was kept");
+        for kept in [&fresh, &running, &other, &unrelated, &target] {
+            assert!(kept.join("usr/placeholder").exists(), "{}", kept.display());
+        }
+        assert!(fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
+
+    #[test]
+    fn skeleton_names_carry_a_pid() {
+        assert_eq!(skeleton_pid("tog-host-view-42-0123456789abcdef"), Some(42));
+        for name in [
+            "tog-host-view-0-0123456789abcdef",
+            "tog-host-view--1-0123456789abcdef",
+            "tog-host-view-4294967295-0123456789abcdef",
+            "tog-host-view-42-0123456789abcdeg",
+            "tog-host-view-42-0123",
+            "tog-host-view-42",
+            "tog-other-42-0123456789abcdef",
+        ] {
+            assert_eq!(skeleton_pid(name), None, "{name}");
+        }
     }
 
     /// The skeleton root is 0700 whatever the umask left.
