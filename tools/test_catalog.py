@@ -776,6 +776,10 @@ class Node(Base):
         os.makedirs(os.environ["GNUPGHOME"], mode=0o700)
         catalog.TODAY = datetime.date(2026, 6, 1)
         self.net.bodies[self.KEYRING] = self.keyring
+        self.releasers_saved = catalog.NODE_RELEASERS
+        catalog.NODE_RELEASERS = os.path.join(self.scratch.name, "node-releasers.txt")
+        with open(catalog.NODE_RELEASERS, "w") as f:
+            f.write(f"# the test releaser\n{self.release_key}  # Test Node Releaser\n")
         self.net.json(self.SCHEDULE, {
             "v20": {"start": "2023-04-18", "end": "2026-04-30"},
             "v22": {"start": "2024-04-24", "end": "2027-04-30"},
@@ -785,6 +789,7 @@ class Node(Base):
         self.index = []
 
     def tearDown(self):
+        catalog.NODE_RELEASERS = self.releasers_saved
         if self.home is None:
             os.environ.pop("GNUPGHOME", None)
         else:
@@ -887,6 +892,35 @@ class Node(Base):
         self.assertTrue(str(cm.exception).startswith(
             "node 24.9.0: SHASUMS256.txt signature does not verify:\n"), str(cm.exception))
 
+    def test_a_stranger_who_replaces_both_keyring_and_shasums_is_refused(self):
+        self.publish("24.9.0")
+        self.net.bodies[self.KEYRING] = subprocess.run(
+            self.gpg + ["--export", self.stranger], check=True, capture_output=True).stdout
+        body = self.net.bodies["https://nodejs.org/dist/v24.9.0/SHASUMS256.txt"]
+        self.net.bodies["https://nodejs.org/dist/v24.9.0/SHASUMS256.txt.sig"] = self.sign(body, self.stranger)
+        with self.assertRaises(catalog.Failure) as cm:
+            self.generate([])
+        self.assertEqual(str(cm.exception),
+                         f"node 24.9.0: SHASUMS256.txt is signed by {self.stranger}, which is not a "
+                         f"releaser pinned in {os.path.relpath(catalog.NODE_RELEASERS, catalog.REPO)}")
+
+    def test_the_pinned_releasers_file_must_name_fingerprints(self):
+        for body in ("# nothing pinned\n", "abc  # not a fingerprint\n"):
+            with self.subTest(body=body):
+                with open(catalog.NODE_RELEASERS, "w") as f:
+                    f.write(body)
+                with self.assertRaises(catalog.Failure) as cm:
+                    catalog.node_fingerprints()
+                self.assertIn("malformed or no fingerprints", str(cm.exception))
+
+    def test_the_checked_in_releasers_are_the_node_readme_keys(self):
+        catalog.NODE_RELEASERS = self.releasers_saved
+        pins = catalog.node_fingerprints()
+        self.assertEqual(len(pins), 29)
+        # Two current releasers, as the nodejs/node README lists them.
+        self.assertLessEqual({"C0D6248439F1D5604AAFFB4021D900FFDB233756",
+                              "DD8F2338BAE7501E3DD5AC78C273792F7D83545D"}, pins)
+
     def test_a_shipped_release_whose_shasums_no_longer_verify_is_an_error(self):
         self.publish("24.9.0")
         existing = self.shipped("24.9.0")
@@ -966,6 +1000,7 @@ class Python(Base):
     GitHub's asset digests; uv rides along from the default release."""
 
     UV = "0.12.7"
+    UV_RELEASE = f"https://api.github.com/repos/astral-sh/uv/releases/tags/{UV}"
 
     def setUp(self):
         super().setUp()
@@ -978,6 +1013,10 @@ class Python(Base):
         for platform in (DARWIN, LINUX):
             url = f"https://github.com/astral-sh/uv/releases/download/{self.UV}/uv-{platform}.tar.gz"
             self.net.bodies[url + ".sha256"] = f"{sha256(url.encode())}  uv-{platform}.tar.gz\n"
+        self.net.json(self.UV_RELEASE, {"assets": [
+            {"name": f"uv-{platform}.tar.gz", "digest": "sha256:" + sha256(
+                f"https://github.com/astral-sh/uv/releases/download/{self.UV}/uv-{platform}.tar.gz".encode())}
+            for platform in (DARWIN, LINUX)] + [{"name": "uv-installer.sh", "digest": None}]})
         self.sync()
 
     def sync(self):
@@ -1132,7 +1171,7 @@ class Python(Base):
             with self.subTest(platform=platform):
                 url = f"https://github.com/astral-sh/uv/releases/download/{self.UV}/uv-{platform}.tar.gz"
                 good = self.net.bodies[url + ".sha256"]
-                self.net.bodies[url + ".sha256"] = "0" * 64 + "  x\n"
+                self.net.bodies[url + ".sha256"] = "0" * 64 + f"  uv-{platform}.tar.gz\n"
                 try:
                     with self.assertRaises(catalog.Failure) as cm:
                         self.generate(existing)
@@ -1140,6 +1179,59 @@ class Python(Base):
                     self.net.bodies[url + ".sha256"] = good
                 self.assertEqual(str(cm.exception), f"uv uv-{platform}.tar.gz .sha256: "
                                                     f"sha256:{'0' * 64} != sha256:{sha256(url.encode())}")
+
+    def uv_asset(self, platform, **change):
+        """The uv release's asset for `platform` changed by `change`, or
+        removed when `change` is empty."""
+        release = json.loads(self.net.bodies[self.UV_RELEASE])
+        name = f"uv-{platform}.tar.gz"
+        release["assets"] = [dict(a, **change) if a["name"] == name else a
+                             for a in release["assets"] if change or a["name"] != name]
+        self.net.json(self.UV_RELEASE, release)
+
+    def test_a_uv_github_digest_that_disagrees_is_an_error(self):
+        existing = self.shipped()
+        url = f"https://github.com/astral-sh/uv/releases/download/{self.UV}/uv-{LINUX}.tar.gz"
+        self.uv_asset(LINUX, digest="sha256:" + "0" * 64)
+        with self.assertRaises(catalog.Failure) as cm:
+            self.generate(existing)
+        self.assertEqual(str(cm.exception), f"uv uv-{LINUX}.tar.gz GitHub digest: "
+                                            f"sha256:{'0' * 64} != sha256:{sha256(url.encode())}")
+
+    def test_a_uv_asset_github_does_not_list_is_an_error_and_one_without_a_digest_is_not(self):
+        existing = self.shipped()
+        self.uv_asset(DARWIN, digest=None)
+        out, _ = self.generate(existing)
+        self.assertEqual(list(out), ["cpython-3.12.1"])
+        self.uv_asset(DARWIN)
+        with self.assertRaises(catalog.Failure) as cm:
+            self.generate(existing)
+        self.assertEqual(str(cm.exception), f"uv {self.UV} release has no asset uv-{DARWIN}.tar.gz")
+
+    def test_a_uv_sha256_file_that_is_not_one_line_naming_the_asset_is_an_error(self):
+        existing = self.shipped()
+        url = f"https://github.com/astral-sh/uv/releases/download/{self.UV}/uv-{LINUX}.tar.gz"
+        good = self.net.bodies[url + ".sha256"]
+        digest = sha256(url.encode())
+        source = f"uv {self.UV} uv-{LINUX}.tar.gz.sha256"
+        for body, message in (
+            ("", f"{source}: expected exactly one line naming uv-{LINUX}.tar.gz, got []"),
+            (f"{digest}  uv-other.tar.gz\n",
+             f"{source}: expected exactly one line naming uv-{LINUX}.tar.gz, "
+             f"got [('{digest}', 'uv-other.tar.gz')]"),
+            (good + good, f"{source}: expected exactly one line naming uv-{LINUX}.tar.gz, "
+                          f"got [('{digest}', 'uv-{LINUX}.tar.gz'), ('{digest}', 'uv-{LINUX}.tar.gz')]"),
+            (digest + "\n", f"{source}: malformed checksum line {digest!r}"),
+        ):
+            with self.subTest(body=body):
+                self.net.bodies[url + ".sha256"] = body
+                with self.assertRaises(catalog.Failure) as cm:
+                    self.generate(existing)
+                self.assertEqual(str(cm.exception), message)
+        # Binary mode and an upper-case digest are the same file.
+        self.net.bodies[url + ".sha256"] = f"{digest.upper()} *uv-{LINUX}.tar.gz\n"
+        out, _ = self.generate(existing)
+        self.assertEqual(list(out), ["cpython-3.12.1"])
 
     def test_a_shipped_row_differing_in_any_field_but_its_digest_is_an_error(self):
         assert_every_field_is_checked(self, "python", self.shipped(), self.generate)

@@ -441,7 +441,8 @@ def generate_go(existing, report):
 
 # --------------------------------------------------------------------------
 # Node: nodejs.org's index, and each release's SHASUMS256.txt, whose
-# detached signature is checked against the nodejs/release-keys keyring.
+# detached signature is checked against the nodejs/release-keys keyring and
+# must chain to a releaser pinned in tools/keys/node-releasers.txt.
 # Supported lines are the ones the nodejs/Release schedule has started and
 # not yet ended.
 
@@ -460,21 +461,46 @@ def scratch_file(name, body):
     return path
 
 
+# The keyring comes from GitHub, so it only supplies key material: a
+# signature counts only when it chains to a primary key pinned in
+# tools/keys/node-releasers.txt, so whoever could replace both the keyring
+# and SHASUMS256.txt still cannot pass.
+NODE_RELEASERS = os.path.join(REPO, "tools", "keys", "node-releasers.txt")
+
+
+def node_fingerprints():
+    """The pinned releasers' primary-key fingerprints."""
+    with open(NODE_RELEASERS) as f:
+        lines = [line.split("#", 1)[0].strip() for line in f]
+    pins = {line for line in lines if line}
+    bad = sorted(p for p in pins if not re.fullmatch(r"[0-9A-F]{40}", p))
+    if bad or not pins:
+        raise Failure(f"{NODE_RELEASERS}: malformed or no fingerprints: {bad}")
+    return pins
+
+
 def node_keyring():
     body = fetch("https://raw.githubusercontent.com/nodejs/release-keys/main/gpg/pubring.kbx")
     return scratch_file("node-release-keys.kbx", body)
 
 
-def node_shasums(version, keyring):
+def node_shasums(version, keyring, pins):
     base = f"https://nodejs.org/dist/v{version}/"
     text = fetch(base + "SHASUMS256.txt")
     sig = fetch(base + "SHASUMS256.txt.sig")
     text_path = scratch_file(f"node-{version}-SHASUMS256.txt", text)
     sig_path = scratch_file(f"node-{version}-SHASUMS256.txt.sig", sig)
-    result = subprocess.run(["gpgv", "--keyring", keyring, sig_path, text_path],
+    result = subprocess.run(["gpgv", "--status-fd", "1", "--keyring", keyring, sig_path, text_path],
                             capture_output=True, text=True)
-    if result.returncode != 0:
+    # VALIDSIG <signing-key fpr> ... <primary-key fpr>: the last field is the
+    # primary key the signature chains to, which a subkey signature names too.
+    valid = [line.split() for line in result.stdout.splitlines()
+             if line.startswith("[GNUPG:] VALIDSIG ")]
+    if result.returncode != 0 or not valid:
         raise Failure(f"node {version}: SHASUMS256.txt signature does not verify:\n{result.stderr}")
+    if valid[0][-1] not in pins:
+        raise Failure(f"node {version}: SHASUMS256.txt is signed by {valid[0][-1]}, "
+                      f"which is not a releaser pinned in {os.path.relpath(NODE_RELEASERS, REPO)}")
     return {name: digest for digest, name in checksum_lines(f"node {version}: SHASUMS256.txt", text.decode())}
 
 
@@ -498,9 +524,9 @@ def generate_node(existing, report):
         if datetime.date.fromisoformat(span["start"]) <= TODAY < datetime.date.fromisoformat(span["end"])
     }
     wanted = [r["version"][1:] for r in index if r["version"][1:].split(".")[0] in lines]
-    keyring = node_keyring()
+    keyring, pins = node_keyring(), node_fingerprints()
     versions = sorted({rel["components"][0]["version"] for rel in existing} | set(wanted), key=version_key)
-    sums = dict(zip(versions, parallel(lambda v: node_shasums(v, keyring), versions)))
+    sums = dict(zip(versions, parallel(lambda v: node_shasums(v, keyring, pins), versions)))
     out = {}
     for rel in existing:
         version = rel["components"][0]["version"]
@@ -635,10 +661,24 @@ def generate_python(existing, report, default_key):
             if recorded is not None:
                 expect_equal(f"python {name} GitHub digest", recorded, a["digest"])
     # uv: its own published .sha256, and GitHub's digest.
+    uv_digests = {}
     for a in uv:
         name = a["url"].rsplit("/", 1)[1]
-        text = fetch_text(a["url"] + ".sha256").split()[0]
-        expect_equal(f"uv {name} .sha256", "sha256:" + text, a["digest"])
+        tag = a["build"]
+        source = f"uv {tag} {name}.sha256"
+        lines = checksum_lines(source, fetch_text(a["url"] + ".sha256"))
+        if [listed for _, listed in lines] != [name]:
+            raise Failure(f"{source}: expected exactly one line naming {name}, got {lines!r}")
+        expect_equal(f"uv {name} .sha256", "sha256:" + lines[0][0].lower(), a["digest"])
+        if tag not in uv_digests:
+            uv_digests[tag] = asset_digests(github_release("astral-sh/uv", tag))
+        if name not in uv_digests[tag]:
+            raise Failure(f"uv {tag} release has no asset {name}")
+        # As for CPython: an asset GitHub recorded no digest for is still
+        # verified by its .sha256 (above).
+        recorded = uv_digests[tag][name]
+        if recorded is not None:
+            expect_equal(f"uv {name} GitHub digest", recorded, a["digest"])
     return out
 
 
