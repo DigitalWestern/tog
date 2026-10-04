@@ -27,10 +27,12 @@ pub mod registry_tool;
 pub mod run_refusal;
 pub mod tailor;
 
+mod bins;
 mod plan;
 mod project;
 mod realize;
 
+use bins::*;
 pub use plan::*;
 pub use project::*;
 pub use realize::*;
@@ -761,6 +763,9 @@ pub fn parse_tog_config(pkg_json: &str) -> io::Result<TogConfig> {
             let url = item["url"].as_str().unwrap_or_default();
             let sha256 = item["sha256"].as_str().unwrap_or_default();
             let path = item["path"].as_str().unwrap_or_default();
+            if url_credentials(url) {
+                return Err(url_credentials_refusal("tog.artifacts", url));
+            }
             if !url.starts_with("https://") {
                 return Err(err(format!("tog.artifacts: url must be https ({url:?})")));
             }
@@ -3382,6 +3387,21 @@ mod tests {
             r#"{"tog":{"artifacts":[{"url":"https://x/y","sha256":"0000000000000000000000000000000000000000000000000000000000000000","path":"../evil"}]}}"#,
             "unsafe path \"../evil\"",
         );
+        // A URL with credentials is refused without echoing them, whatever
+        // its scheme.
+        for url in [
+            "https://user:secret@x/y",
+            "http://user:secret@x/y",
+            "https:user:secret@x/y",
+        ] {
+            let error = parse_tog_config(&format!(
+                r#"{{"tog":{{"artifacts":[{{"url":"{url}","sha256":"00","path":"p"}}]}}}}"#
+            ))
+            .unwrap_err()
+            .to_string();
+            assert!(error.contains("carries URL credentials"), "{error}");
+            assert!(!error.contains("secret"), "{error}");
+        }
     }
 
     #[test]

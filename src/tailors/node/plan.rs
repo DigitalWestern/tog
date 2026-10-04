@@ -92,28 +92,108 @@ pub(crate) fn tarball_url_detail(url: &str, not_https: &str) -> Option<String> {
     })
 }
 
-/// `text` for a message, with any URL userinfo replaced by `***`. Text the
-/// fetcher cannot parse is withheld whole when an `@` follows its `://`,
-/// since where its credentials end cannot be told; other text (a plain
-/// version) is returned as written.
+/// `text` for a message, with any URL userinfo replaced by `***`. Text that
+/// may carry credentials ([`url_credentials`]) but is not one URL the
+/// fetcher can parse (an identity with a URL inside it, `https:u:p@host`) is
+/// withheld whole, since where its credentials end cannot be told; other
+/// text (a plain version) is returned as written.
 pub(crate) fn redact_url_userinfo(text: &str) -> String {
+    let withheld = |withhold: bool| match withhold {
+        true => "<URL withheld: it may carry credentials>".to_string(),
+        false => text.to_string(),
+    };
     let Some(parsed) = fetcher_url(text) else {
-        return match text.split_once("://") {
-            Some((_, rest)) if rest.contains('@') => {
-                "<URL withheld: it may carry credentials>".to_string()
-            }
-            _ => text.to_string(),
-        };
+        let embedded = text
+            .split_once("://")
+            .is_some_and(|(_, rest)| rest.contains('@'));
+        return withheld(embedded || url_credentials(text));
     };
     let mut url = parsed.as_url().clone();
     if url.username().is_empty() && url.password().is_none() {
-        return text.to_string();
+        return withheld(url_credentials(text));
     }
     let _ = url.set_username("***");
     if url.password().is_some() {
         let _ = url.set_password(Some("***"));
     }
     url.to_string()
+}
+
+/// The refusal for a lockfile or manifest string that carries URL
+/// credentials: the file named, the string redacted.
+pub(crate) fn url_credentials_refusal(source: &str, text: &str) -> io::Error {
+    err(format!(
+        "{source}: {} carries URL credentials (user:pass@ before its host); tog will not read \
+         a file that holds them",
+        redact_url_userinfo(text)
+    ))
+}
+
+/// Refuse `value`, a parsed `source`, if any string in it (a key or a
+/// value, at any depth) carries URL credentials. Every importer runs this
+/// on what it read before anything else, so no URL with credentials reaches
+/// a plan, a closure, the store's metadata or an error message.
+pub(crate) fn refuse_json_url_credentials(
+    source: &str,
+    value: &serde_json::Value,
+) -> io::Result<()> {
+    match value {
+        serde_json::Value::String(text) if url_credentials(text) => {
+            Err(url_credentials_refusal(source, text))
+        }
+        serde_json::Value::Array(items) => items
+            .iter()
+            .try_for_each(|item| refuse_json_url_credentials(source, item)),
+        serde_json::Value::Object(map) => map.iter().try_for_each(|(key, item)| {
+            if url_credentials(key) {
+                return Err(url_credentials_refusal(source, key));
+            }
+            refuse_json_url_credentials(source, item)
+        }),
+        _ => Ok(()),
+    }
+}
+
+/// Whether `text` holds a URL with credentials anywhere in it: a version, an
+/// identity (`a@https://u:p@host/a.tgz`) or a selector as much as a URL.
+/// An http(s) URL (`git+` or not) with any userinfo counts, read the way
+/// Node's URL parser reads one: slashes and backslashes after the scheme
+/// are skipped, so `https:u:p@host` and `https:\\u:p@host` name a host with
+/// credentials. Any other `scheme://` counts only with a password, so the
+/// `git@` of `git+ssh://git@github.com/o/r.git` is an ssh user, not one.
+pub(crate) fn url_credentials(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    let authority = |rest: &str| -> String {
+        rest.chars()
+            .take_while(|c| !matches!(c, '/' | '\\' | '?' | '#') && !c.is_whitespace())
+            .collect()
+    };
+    for (at, _) in lower.match_indices("http") {
+        let tail = &lower[at..];
+        let Some(rest) = tail
+            .strip_prefix("https:")
+            .or_else(|| tail.strip_prefix("http:"))
+        else {
+            continue;
+        };
+        // A scheme starts the text or follows what cannot end one: `xhttps:`
+        // is another scheme, `git+https:` and `a@https:` are not.
+        if lower[..at]
+            .chars()
+            .next_back()
+            .is_some_and(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+        {
+            continue;
+        }
+        if authority(rest.trim_start_matches(['/', '\\'])).contains('@') {
+            return true;
+        }
+    }
+    lower.match_indices("://").any(|(at, _)| {
+        let host = authority(&lower[at + 3..]);
+        host.split_once('@')
+            .is_some_and(|(userinfo, _)| userinfo.contains(':'))
+    })
 }
 
 /// Why a git dependency that is not pinned to a full commit cannot be
@@ -558,6 +638,7 @@ fn plan_npm_recording(
 ) -> io::Result<NpmPlan> {
     let v: serde_json::Value =
         serde_json::from_str(lock_json).map_err(|e| err(format!("package-lock.json: {e}")))?;
+    refuse_json_url_credentials("package-lock.json", &v)?;
     let lockfile_version = v["lockfileVersion"].as_u64().unwrap_or(0);
     if lockfile_version != 2 && lockfile_version != 3 {
         return Err(err(format!(
@@ -804,10 +885,18 @@ mod lock_shape_tests {
             "HTTPS://user:secret@r/a.tgz",
         ] {
             let error = refused(&entry("node_modules/a", resolved, TEST_SRI));
-            assert_eq!(
-                error.to_string(),
-                "node_modules/a: tarball URL carries credentials (user:pass@ before its host); tog will not record them",
-                "{resolved}"
+            let message = error.to_string();
+            assert!(
+                message.starts_with("package-lock.json: ")
+                    && message.ends_with(
+                        " carries URL credentials (user:pass@ before its host); tog will not \
+                         read a file that holds them"
+                    ),
+                "{resolved}: {message}"
+            );
+            assert!(
+                !message.contains("secret") && !message.contains("token"),
+                "{message}"
             );
             assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         }
@@ -836,16 +925,72 @@ mod lock_shape_tests {
         assert_eq!(plan.packages[0].url, scoped);
     }
 
-    /// A URL the fetcher cannot parse is non-https, and shown withheld when
-    /// it might carry credentials.
+    /// A URL the fetcher cannot parse is still refused for its credentials,
+    /// and shown withheld.
     #[test]
     fn an_unparseable_credentialed_url_is_withheld() {
         let error = refused(&entry("node_modules/a", "http://user:secret@", TEST_SRI));
         assert_eq!(
             error.to_string(),
-            "node_modules/a: only https registry tarballs supported (v0), got <URL withheld: it may carry credentials>"
+            "package-lock.json: <URL withheld: it may carry credentials> carries URL credentials \
+             (user:pass@ before its host); tog will not read a file that holds them"
         );
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+
+    /// Every http(s) userinfo counts, in the spellings Node's parser accepts
+    /// (no slashes, extra slashes, backslashes); another scheme counts only
+    /// with a password, so `git+ssh://git@host` is a plain git URL.
+    #[test]
+    fn url_credentials_are_found_in_every_spelling() {
+        for text in [
+            "https://user:secret@r/a.tgz",
+            "https://secret@r/a.tgz",
+            "HTTP://u:secret@r",
+            "https:user:secret@r/a.tgz",
+            "https:\\\\user:secret@r/a.tgz",
+            "https:///user:secret@r/a.tgz",
+            "git+https://user:secret@github.com/o/r.git#abc",
+            "a@https://user:secret@r/a.tgz",
+            "git+ssh://user:secret@github.com/o/r.git",
+            "see https://u:secret@r here",
+        ] {
+            assert!(url_credentials(text), "{text}");
+        }
+        for text in [
+            "https://r/a.tgz",
+            "https://r/@s/a.tgz",
+            "https://r?by=a@b",
+            "https://r#a@b",
+            "git+ssh://git@github.com/o/r.git",
+            "ssh://git@github.com/o/r.git",
+            "xhttps://u@r",
+            "user@example.com",
+            "^1.2.3",
+        ] {
+            assert!(!url_credentials(text), "{text}");
+        }
+    }
+
+    /// A lockfile is refused for credentials anywhere in it, not only in a
+    /// tarball URL: a git dependency, a key, a dependency spec, and the
+    /// spellings Node's parser accepts. The secret is never echoed.
+    #[test]
+    fn credentials_anywhere_in_package_lock_are_refused_without_the_secret() {
+        for packages in [
+            r#""node_modules/a":{"version":"1.0.0","resolved":"git+https://user:secret@github.com/o/a.git#0123456789012345678901234567890123456789"}"#,
+            r#""node_modules/a":{"version":"1.0.0","resolved":"https:user:secret@r/a.tgz"}"#,
+            r#""node_modules/a":{"version":"1.0.0","resolved":"https:\\user:secret@r/a.tgz"}"#,
+            r#""node_modules/a":{"version":"1.0.0","dependencies":{"b":"https://user:secret@r/b.tgz"}}"#,
+            r#""node_modules/https://user:secret@r":{"version":"1.0.0"}"#,
+        ] {
+            let error = refused(&lock(packages));
+            let message = error.to_string();
+            assert!(message.starts_with("package-lock.json: "), "{message}");
+            assert!(message.contains(" carries URL credentials "), "{message}");
+            assert!(!message.contains("secret"), "{message}");
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        }
     }
 
     /// Messages show a URL with its userinfo replaced; a plain version and
