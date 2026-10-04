@@ -349,9 +349,25 @@ pub(crate) const NPM_RESOLVE_ONLY: &[&str] = &[
 /// The same three settings for anything npm starts, which reads the
 /// environment rather than npm's argv.
 pub(crate) fn quiet_npm(spec: &mut crate::kernel::resolve::DelegateSpec) {
-    spec.env("npm_config_audit", "false")
-        .env("npm_config_fund", "false")
-        .env("npm_config_update_notifier", "false");
+    const KEYS: [&str; 3] = [
+        "NPM_CONFIG_AUDIT",
+        "NPM_CONFIG_FUND",
+        "NPM_CONFIG_UPDATE_NOTIFIER",
+    ];
+    // npm rewrites lowercase false values to empty strings for its child
+    // processes, which then ignore them and restore the defaults. Uppercase
+    // values survive. Drop inherited aliases so they cannot shadow these.
+    for (name, _) in std::env::vars_os() {
+        if name
+            .to_str()
+            .is_some_and(|name| KEYS.iter().any(|key| name.eq_ignore_ascii_case(key)))
+        {
+            spec.env_remove(name);
+        }
+    }
+    for key in KEYS {
+        spec.env(key, "false");
+    }
 }
 
 /// Realize the Node this selection names (interpreter at <obj>/bin/node).

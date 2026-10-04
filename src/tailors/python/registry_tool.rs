@@ -35,14 +35,18 @@ impl RegistryTool for PythonTool {
         &["rust"]
     }
 
-    fn helper_object_id(
+    fn helper_cache_key(
         &self,
         platform: Platform,
         helper: &str,
         selected: &Selected,
     ) -> io::Result<String> {
         match helper {
-            "rust" => crate::kernel::provider::rust::runtime_object_id(platform, selected),
+            "rust" => Ok(format!(
+                "{};selection:{}",
+                crate::kernel::provider::rust::runtime_object_id(platform, selected)?,
+                selected.bundle_id()
+            )),
             other => Err(io::Error::other(format!(
                 "PyPI tools have no {other} helper"
             ))),
