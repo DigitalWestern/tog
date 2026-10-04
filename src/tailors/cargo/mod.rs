@@ -1355,10 +1355,13 @@ checksum = "{hash_b}"
 
     #[test]
     fn realizes_vendor_and_writes_complete_checksums() {
-        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
         with_temp_store(|store, root| {
+            // The store lock (with_temp_store's) first, then the supervision
+            // lock: the order the rustfmt tests take them in, so neither
+            // test holds one while waiting on the other.
+            let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
             let activity = &store
                 .activity(crate::kernel::activity::ActivityMode::Shared)
                 .unwrap();
@@ -1396,10 +1399,13 @@ checksum = "{hash_b}"
 
     #[test]
     fn rejects_symlinked_crate_entries() {
-        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
         with_temp_store(|store, root| {
+            // The store lock (with_temp_store's) first, then the supervision
+            // lock: the order the rustfmt tests take them in, so neither
+            // test holds one while waiting on the other.
+            let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
             let activity = &store
                 .activity(crate::kernel::activity::ActivityMode::Shared)
                 .unwrap();
