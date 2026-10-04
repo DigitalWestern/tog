@@ -4,6 +4,18 @@
 use super::parse::{non_empty, reject, separate_value};
 use super::spec::X_REGISTRIES;
 use super::{Command, UsageError};
+// The argument rules live with the command, which re-checks them; the
+// parser calls the same functions so a bad spelling exits 2.
+use crate::commands::x::{request_version, split_version, validate_from_bin, validate_package};
+
+fn usage(error: std::io::Error) -> UsageError {
+    UsageError::new(error.to_string(), Some("x"))
+}
+
+/// A `--from` value: a package, perhaps with `@version`.
+fn validate_x_package(value: &str) -> Result<(), UsageError> {
+    validate_package("package", split_version(value).0).map_err(usage)
+}
 
 pub(super) fn parse_x(args: &[String]) -> Result<Option<Command>, UsageError> {
     let mut ecosystem = None;
@@ -75,15 +87,16 @@ pub(super) fn parse_x(args: &[String]) -> Result<Option<Command>, UsageError> {
     if tool.is_empty() {
         return Err(UsageError::new("x: empty tool name", Some("x")));
     }
+    let (bin, tool_version) = split_version(&tool);
     if from.is_some() {
-        let (bin, _) = split_x_version(&tool);
-        validate_x_bin(bin)?;
+        validate_from_bin(bin).map_err(usage)?;
     } else {
         // Without --from the tool is also the package name, so npm scoped
         // names such as @scope/cli legitimately contain one slash.
-        validate_x_text("tool", &tool, true)?;
+        validate_package("tool", bin).map_err(usage)?;
     }
-    validate_x_version_pair(from.as_deref(), &tool)?;
+    let from_version = from.as_deref().and_then(|value| split_version(value).1);
+    request_version(tool_version, from_version).map_err(usage)?;
     if clean {
         return Ok(Some(Command::XClean {
             ecosystem,
@@ -107,87 +120,4 @@ fn x_registry_flag(arg: &str) -> Option<&'static str> {
         .iter()
         .find(|(id, word)| name == *id || name == *word)
         .map(|(id, _)| *id)
-}
-
-fn split_x_version(value: &str) -> (&str, Option<&str>) {
-    match value.rfind('@') {
-        Some(0) | None => (value, None),
-        Some(index) => (&value[..index], Some(&value[index + 1..])),
-    }
-}
-
-fn validate_x_version_pair(from: Option<&str>, tool: &str) -> Result<(), UsageError> {
-    let (_, tool_version) = split_x_version(tool);
-    let from_version = from.and_then(|value| split_x_version(value).1);
-    for version in [from_version, tool_version].into_iter().flatten() {
-        if version.is_empty()
-            || version
-                .bytes()
-                .any(|byte| matches!(byte, b'\r' | b'\n' | 0))
-            || version.chars().any(char::is_whitespace)
-            || version.starts_with('-')
-        {
-            return Err(UsageError::new("x: invalid version", Some("x")));
-        }
-    }
-    if let (Some(from), Some(tool)) = (from_version, tool_version) {
-        if from != tool {
-            return Err(UsageError::new(
-                "x: --from package version conflicts with the tool version; specify only one or use the same version",
-                Some("x"),
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn validate_x_text(label: &str, value: &str, allow_slash: bool) -> Result<(), UsageError> {
-    if value.is_empty()
-        || value.bytes().any(|byte| matches!(byte, b'\r' | b'\n' | 0))
-        || value.chars().any(char::is_whitespace)
-        || value.starts_with('-')
-        || (!allow_slash && (value.contains('/') || value.contains('\\')))
-    {
-        return Err(UsageError::new(
-            format!("x: invalid {label} '{value}'"),
-            Some("x"),
-        ));
-    }
-    Ok(())
-}
-
-fn validate_x_package(value: &str) -> Result<(), UsageError> {
-    // A scoped npm package contains one slash, but a filesystem path must
-    // never be accepted as a package name. Version text is checked by
-    // `validate_x_version_pair`; these checks keep argv errors at exit 2.
-    validate_x_text("package", value, true)?;
-    if value.starts_with('/')
-        || value.starts_with("./")
-        || value.starts_with("../")
-        || value.contains("/../")
-        || value.ends_with("/..")
-        || value.contains('\\')
-    {
-        return Err(UsageError::new(
-            format!("x: invalid package '{value}'"),
-            Some("x"),
-        ));
-    }
-    Ok(())
-}
-
-fn validate_x_bin(value: &str) -> Result<(), UsageError> {
-    if value.is_empty()
-        || value == "."
-        || value == ".."
-        || !value
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || ".-_".contains(ch))
-    {
-        return Err(UsageError::new(
-            "x: --from requires a single safe executable name",
-            Some("x"),
-        ));
-    }
-    Ok(())
 }

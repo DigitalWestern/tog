@@ -6,12 +6,12 @@
 //! projection and its closure, which registers it as a gc root like any
 //! other project.
 
-use std::ffi::{CString, OsString};
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
-use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
+use std::os::unix::io::{AsRawFd, RawFd};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::rc::Rc;
@@ -29,6 +29,13 @@ use crate::kernel::resolve::{DoorKind, ResolutionDoor};
 use crate::kernel::store::{self, RootEntry, Store};
 use crate::kernel::toolchain::runtime::Selected;
 use crate::kernel::ui;
+
+mod cleanup;
+mod lock;
+
+pub use cleanup::clean;
+
+use lock::*;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Request {
@@ -259,362 +266,6 @@ fn ensure_x_metadata_dir(root: &Path) -> io::Result<()> {
     Ok(())
 }
 
-fn ensure_x_locks_dir(x_dir: &Path) -> io::Result<PathBuf> {
-    if let Ok(metadata) = fs::symlink_metadata(x_dir) {
-        if metadata.file_type().is_symlink() || !metadata.is_dir() {
-            return Err(other(format!(
-                "x: environment directory {} is not a private directory",
-                x_dir.display()
-            )));
-        }
-    } else {
-        fs::create_dir_all(x_dir)?;
-    }
-    let locks = x_dir.join(X_LOCKS_DIR);
-    if let Ok(metadata) = fs::symlink_metadata(&locks) {
-        if metadata.file_type().is_symlink() || !metadata.is_dir() {
-            return Err(other(format!(
-                "x: lock directory {} is not a private directory",
-                locks.display()
-            )));
-        }
-    } else {
-        match fs::create_dir(&locks) {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-            Err(error) => return Err(error),
-        }
-    }
-    let mut permissions = fs::metadata(&locks)?.permissions();
-    permissions.set_mode(0o700);
-    fs::set_permissions(&locks, permissions)?;
-    locks.canonicalize()
-}
-
-fn fd_set_cloexec(fd: RawFd, enabled: bool) -> io::Result<()> {
-    // SAFETY: fcntl operates on the caller-owned descriptor.
-    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
-    if flags < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    let flags = if enabled {
-        flags | libc::FD_CLOEXEC
-    } else {
-        flags & !libc::FD_CLOEXEC
-    };
-    // SAFETY: fcntl operates on the caller-owned descriptor.
-    if unsafe { libc::fcntl(fd, libc::F_SETFD, flags) } < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(())
-}
-
-fn fd_identity(file: &fs::File) -> io::Result<(u64, u64)> {
-    let metadata = file.metadata()?;
-    Ok((metadata.dev(), metadata.ino()))
-}
-
-fn stat_at(dirfd: RawFd, name: &[u8]) -> io::Result<libc::stat> {
-    let name = CString::new(name).map_err(|_| {
-        other(
-            "x: directory entry contains NUL; refusing to clean; \
-             remove the offending entry from ~/.tog/x by hand",
-        )
-    })?;
-    // SAFETY: stat is initialized by fstatat before it is read, and name is
-    // NUL-terminated for the duration of the call.
-    let mut stat = unsafe { std::mem::zeroed() };
-    // SAFETY: dirfd is borrowed for the duration of this call.
-    if unsafe { libc::fstatat(dirfd, name.as_ptr(), &mut stat, libc::AT_SYMLINK_NOFOLLOW) } != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(stat)
-}
-
-// `st_dev` is a u64 on Linux but an i32 on macOS: the cast is a no-op
-// here and needed there, and clippy only sees the target it runs on.
-#[allow(clippy::unnecessary_cast)]
-fn stat_identity(stat: &libc::stat) -> (u64, u64) {
-    (stat.st_dev as u64, stat.st_ino as u64)
-}
-
-fn stat_is_real_directory(stat: &libc::stat) -> bool {
-    (stat.st_mode & libc::S_IFMT) == libc::S_IFDIR
-}
-
-fn open_directory_at(dirfd: RawFd, name: &[u8]) -> io::Result<fs::File> {
-    let name = CString::new(name).map_err(|_| {
-        other(
-            "x: directory entry contains NUL; refusing to clean; \
-             remove the offending entry from ~/.tog/x by hand",
-        )
-    })?;
-    // SAFETY: name is NUL-terminated for this call and dirfd is borrowed.
-    let fd = unsafe {
-        libc::openat(
-            dirfd,
-            name.as_ptr(),
-            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-        )
-    };
-    if fd < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: fd is newly opened and ownership moves to the File.
-    Ok(unsafe { fs::File::from_raw_fd(fd) })
-}
-
-/// Open an absolute directory one component at a time, refusing symlinks at
-/// every component. The final identity is checked by the caller against the
-/// directory that was validated before this open.
-fn open_directory_path(path: &Path) -> io::Result<fs::File> {
-    if !path.is_absolute() {
-        return Err(other(format!(
-            "x: cleanup directory {} is not absolute; refusing to clean",
-            path.display()
-        )));
-    }
-    let root = CString::new("/").expect("literal has no NUL");
-    // SAFETY: root is NUL-terminated and the flags request a directory fd
-    // that cannot follow a symlink.
-    let fd = unsafe {
-        libc::open(
-            root.as_ptr(),
-            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-        )
-    };
-    if fd < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: fd is newly opened and ownership moves to the File.
-    let mut directory = unsafe { fs::File::from_raw_fd(fd) };
-    for component in path.components() {
-        let Component::Normal(name) = component else {
-            if matches!(component, Component::RootDir) {
-                continue;
-            }
-            return Err(other(format!(
-                "x: cleanup directory {} contains an unsupported path component",
-                path.display()
-            )));
-        };
-        let next = open_directory_at(directory.as_raw_fd(), name.as_bytes())?;
-        directory = next;
-    }
-    Ok(directory)
-}
-
-fn ensure_x_locks_dir_at(x_dir_fd: RawFd) -> io::Result<fs::File> {
-    let locks = match stat_at(x_dir_fd, X_LOCKS_DIR.as_bytes()) {
-        Ok(stat) => {
-            if !stat_is_real_directory(&stat) {
-                return Err(other(
-                    "x: lock directory is not a private directory; refusing to clean",
-                ));
-            }
-            open_directory_at(x_dir_fd, X_LOCKS_DIR.as_bytes())?
-        }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            let name = CString::new(X_LOCKS_DIR).expect("literal has no NUL");
-            // SAFETY: x_dir_fd is borrowed and name is NUL-terminated.
-            if unsafe { libc::mkdirat(x_dir_fd, name.as_ptr(), 0o700) } != 0 {
-                let error = io::Error::last_os_error();
-                if error.kind() != io::ErrorKind::AlreadyExists {
-                    return Err(error);
-                }
-            }
-            open_directory_at(x_dir_fd, X_LOCKS_DIR.as_bytes())?
-        }
-        Err(error) => return Err(error),
-    };
-    // SAFETY: the descriptor is owned by the returned File.
-    if unsafe { libc::fchmod(locks.as_raw_fd(), 0o700) } != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(locks)
-}
-
-fn x_root_lock_name(root_name: &OsString) -> io::Result<CString> {
-    CString::new(format!("{}.lock", root_name.to_string_lossy()))
-        .map_err(|_| other("x: environment root has an invalid lock name"))
-}
-
-/// A successful cleanup unlinks the lock file it holds, so `.locks` stays
-/// bounded. That means a waiter can be handed a lock on an inode the lock
-/// pathname no longer names, which would protect nothing. Every acquisition
-/// therefore re-checks the pathname against the locked inode and retries.
-const LOCK_ATTEMPTS: usize = 8;
-
-/// Open the stable per-environment advisory lock relative to an already-open
-/// x directory. Cleanup uses this path so renaming the pathname cannot make
-/// its lock refer to a different environment.
-fn lock_x_root_at(
-    x_dir_fd: RawFd,
-    root_name: &OsString,
-    exclusive: bool,
-    nonblocking: bool,
-) -> io::Result<Option<fs::File>> {
-    let lock_name = x_root_lock_name(root_name)?;
-    for _ in 0..LOCK_ATTEMPTS {
-        let locks = ensure_x_locks_dir_at(x_dir_fd)?;
-        // SAFETY: the name is NUL-terminated and locks is owned by this loop.
-        let fd = unsafe {
-            libc::openat(
-                locks.as_raw_fd(),
-                lock_name.as_ptr(),
-                libc::O_CREAT | libc::O_RDWR | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-                0o600,
-            )
-        };
-        if fd < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        // SAFETY: fd is newly opened and ownership moves to the File.
-        let file = unsafe { fs::File::from_raw_fd(fd) };
-        // SAFETY: the descriptor is owned by file.
-        if unsafe { libc::fchmod(file.as_raw_fd(), 0o600) } != 0 {
-            return Err(io::Error::last_os_error());
-        }
-        let mut operation = if exclusive {
-            libc::LOCK_EX
-        } else {
-            libc::LOCK_SH
-        };
-        if nonblocking {
-            operation |= libc::LOCK_NB;
-        }
-        // SAFETY: flock operates on the owned lock descriptor.
-        if unsafe { libc::flock(file.as_raw_fd(), operation) } != 0 {
-            let error = io::Error::last_os_error();
-            if nonblocking
-                && matches!(
-                    error.raw_os_error(),
-                    Some(errno) if errno == libc::EAGAIN || errno == libc::EWOULDBLOCK
-                )
-            {
-                return Ok(None);
-            }
-            return Err(error);
-        }
-        match stat_at(locks.as_raw_fd(), lock_name.to_bytes()) {
-            Ok(stat) if stat_identity(&stat) == fd_identity(&file)? => return Ok(Some(file)),
-            Ok(_) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
-        }
-        drop(file);
-    }
-    Err(other(format!(
-        "x: lock file for environment {} kept being replaced while it was acquired; retry later",
-        root_name.to_string_lossy()
-    )))
-}
-
-/// Drop the per-environment lock file after its environment is gone. Called
-/// while the exclusive lock is still held; a later runner recreates the file,
-/// and the identity re-check in the lock helpers keeps that safe.
-fn remove_x_root_lock_at(x_dir_fd: RawFd, root_name: &OsString) -> io::Result<()> {
-    let locks = ensure_x_locks_dir_at(x_dir_fd)?;
-    let lock_name = x_root_lock_name(root_name)?;
-    // SAFETY: locks is an open directory and the name is NUL-terminated.
-    if unsafe { libc::unlinkat(locks.as_raw_fd(), lock_name.as_ptr(), 0) } != 0 {
-        let error = io::Error::last_os_error();
-        if error.kind() != io::ErrorKind::NotFound {
-            return Err(error);
-        }
-    }
-    Ok(())
-}
-
-/// Open the stable per-environment advisory lock. A shared lock remains
-/// close-on-exec during resolution and realization; run clears that flag only
-/// immediately before exec so a running tool keeps cleanup out.
-fn lock_x_root(root: &Path, exclusive: bool, nonblocking: bool) -> io::Result<Option<fs::File>> {
-    let x_dir = root.parent().ok_or_else(|| {
-        other(format!(
-            "x: environment root {} has no parent",
-            root.display()
-        ))
-    })?;
-    let locks = ensure_x_locks_dir(x_dir)?;
-    let root_name = root.file_name().ok_or_else(|| {
-        other(format!(
-            "x: environment root {} has no name",
-            root.display()
-        ))
-    })?;
-    let path = locks.join(format!("{}.lock", root_name.to_string_lossy()));
-    for _ in 0..LOCK_ATTEMPTS {
-        if let Ok(metadata) = fs::symlink_metadata(&path) {
-            if metadata.file_type().is_symlink() {
-                return Err(other(format!(
-                    "x: lock file {} is a symlink; refusing to use it",
-                    path.display()
-                )));
-            }
-        }
-        let file = fs::OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .open(&path)?;
-        let mut permissions = file.metadata()?.permissions();
-        permissions.set_mode(0o600);
-        fs::set_permissions(&path, permissions)?;
-        let mut operation = if exclusive {
-            libc::LOCK_EX
-        } else {
-            libc::LOCK_SH
-        };
-        if nonblocking {
-            operation |= libc::LOCK_NB;
-        }
-        // SAFETY: flock operates on the owned lock descriptor.
-        if unsafe { libc::flock(file.as_raw_fd(), operation) } != 0 {
-            let error = io::Error::last_os_error();
-            if nonblocking
-                && matches!(
-                    error.raw_os_error(),
-                    Some(errno) if errno == libc::EAGAIN || errno == libc::EWOULDBLOCK
-                )
-            {
-                return Ok(None);
-            }
-            return Err(io::Error::new(
-                error.kind(),
-                format!("lock {}: {error}", path.display()),
-            ));
-        }
-        fd_set_cloexec(file.as_raw_fd(), true)?;
-        // A cleanup that removed this environment unlinked its lock file
-        // while holding the lock. Waking up on an unlinked inode would
-        // protect nothing, so acquire again against the current file.
-        match fs::symlink_metadata(&path) {
-            Ok(metadata) if (metadata.dev(), metadata.ino()) == fd_identity(&file)? => {
-                return Ok(Some(file));
-            }
-            Ok(_) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
-        }
-        drop(file);
-    }
-    Err(other(format!(
-        "x: lock file {} kept being replaced while it was acquired; retry later",
-        path.display()
-    )))
-}
-
-fn acquire_x_root(root: &Path) -> io::Result<fs::File> {
-    let lock =
-        lock_x_root(root, false, false)?.expect("blocking shared x lock always returns a file");
-    // The lock is acquired before inspecting or creating the projection. A
-    // cleanup that won the race can therefore remove the old root safely.
-    ensure_x_metadata_dir(root)?;
-    Ok(lock)
-}
-
 #[cfg(test)]
 fn write_x_request(
     root: &Path,
@@ -773,6 +424,10 @@ fn choose_from_project(request: &Request, present: &[&str]) -> io::Result<&'stat
     }
 }
 
+// The `x` argument rules. The parser (`cli/x.rs`) calls these same
+// functions, so a bad spelling is a usage error (exit 2) before anything
+// runs, and `launch` re-checks what a library caller hands it.
+
 fn validate_text(label: &str, value: &str) -> io::Result<()> {
     if value.is_empty()
         || value.bytes().any(|byte| matches!(byte, b'\r' | b'\n' | 0))
@@ -784,15 +439,27 @@ fn validate_text(label: &str, value: &str) -> io::Result<()> {
     Ok(())
 }
 
-fn validate_package(ecosystem: &str, package: &str) -> io::Result<()> {
-    validate_text("package", package)?;
+/// A package name, spelled as `label` in the message (`tool` when the tool
+/// is also the package). One slash is allowed for a scoped npm name, never
+/// a path: no leading `/`, no `\\`, no empty, `.` or `..` part.
+pub fn validate_package(label: &str, package: &str) -> io::Result<()> {
+    validate_text(label, package)?;
     if package.starts_with('/')
         || package.contains('\\')
         || package
             .split('/')
             .any(|part| part.is_empty() || part == "." || part == "..")
-        || (package.contains('/') && !registry_tool(ecosystem)?.scoped_packages())
     {
+        return Err(other(format!("x: invalid {label} '{package}'")));
+    }
+    Ok(())
+}
+
+/// [`validate_package`], and a scoped name only from a registry that has
+/// scopes. That half needs the ecosystem, which the parser may not know.
+fn validate_package_for(ecosystem: &str, package: &str) -> io::Result<()> {
+    validate_package("package", package)?;
+    if package.contains('/') && !registry_tool(ecosystem)?.scoped_packages() {
         return Err(other(format!("x: invalid package '{package}'")));
     }
     Ok(())
@@ -802,7 +469,26 @@ fn validate_version(version: &str) -> io::Result<()> {
     validate_text("version", version)
 }
 
-fn validate_from_bin(bin: &str) -> io::Result<()> {
+/// The version a request asks for: the tool's (`ruff@0.6.1`) or the
+/// `--from` package's, each checked, and refused when both are given and
+/// differ.
+pub fn request_version<'a>(
+    tool_version: Option<&'a str>,
+    from_version: Option<&'a str>,
+) -> io::Result<Option<&'a str>> {
+    for version in [tool_version, from_version].into_iter().flatten() {
+        validate_version(version)?;
+    }
+    match (from_version, tool_version) {
+        (Some(from), Some(tool)) if from != tool => Err(other(
+            "x: --from package version conflicts with the tool version; specify only one or use the same version",
+        )),
+        (Some(from), _) => Ok(Some(from)),
+        (_, tool) => Ok(tool),
+    }
+}
+
+pub fn validate_from_bin(bin: &str) -> io::Result<()> {
     if bin.is_empty()
         || bin == "."
         || bin == ".."
@@ -909,26 +595,6 @@ struct XRecord {
     store_root: Option<PathBuf>,
 }
 
-#[derive(Debug)]
-struct CleanFilter {
-    ecosystem: Option<String>,
-    package: Option<String>,
-    version: Option<String>,
-}
-
-struct XCandidate {
-    path: PathBuf,
-    name: OsString,
-    /// The shared `~/.tog/x` descriptor, not a per-candidate clone. It is
-    /// the same directory for every candidate and is only ever read from, so
-    /// cloning it per entry cost one extra descriptor each and put a large
-    /// `~/.tog/x` against the process descriptor limit before cleanup had
-    /// removed anything.
-    x_dir: Rc<fs::File>,
-    directory: fs::File,
-    identity: (u64, u64),
-}
-
 fn read_x_request(root: &Path) -> Option<XRecord> {
     let path = root.join(X_REQUEST_FILE);
     let file = fs::OpenOptions::new()
@@ -964,308 +630,6 @@ fn read_x_request(root: &Path) -> Option<XRecord> {
     })
 }
 
-fn clean_filter(request: CleanRequest) -> io::Result<CleanFilter> {
-    let Some(tool) = request.tool else {
-        if request.from.is_some() {
-            return Err(other("x: --clean --from requires a tool name"));
-        }
-        return Ok(CleanFilter {
-            ecosystem: request.ecosystem,
-            package: None,
-            version: None,
-        });
-    };
-    let (tool, tool_version) = split_version(&tool);
-    let (package, from_version) = request.from.as_deref().map_or((tool, None), split_version);
-    let version = match (from_version, tool_version) {
-        (Some(from), Some(tool)) if from != tool => {
-            return Err(other(
-                "x: --from package version conflicts with the tool version; specify only one or use the same version",
-            ));
-        }
-        (Some(from), _) => Some(from),
-        (_, tool) => tool,
-    };
-    Ok(CleanFilter {
-        ecosystem: request.ecosystem,
-        package: Some(package.to_string()),
-        version: version.map(str::to_string),
-    })
-}
-
-fn safe_x_root(root: &Path, x_dir: &Path) -> Option<PathBuf> {
-    let metadata = fs::symlink_metadata(root).ok()?;
-    if !metadata.is_dir() || metadata.file_type().is_symlink() {
-        return None;
-    }
-    let metadata_dir = root.join(".tog");
-    let metadata = fs::symlink_metadata(&metadata_dir).ok()?;
-    if !metadata.is_dir() || metadata.file_type().is_symlink() {
-        return None;
-    }
-    let canonical = root.canonicalize().ok()?;
-    if canonical.parent() != Some(x_dir) {
-        return None;
-    }
-    Some(canonical)
-}
-
-/// Resolve a user-controlled ancestor of the cleanup anchor. `$HOME` and
-/// `~/.tog` are routinely symlinks (the usual "move the cache off the
-/// root disk" setup) and `tog x` follows them when it creates and
-/// registers a root, so cleanup follows them too — otherwise it could never
-/// remove what the runner just made. Containment is carried by the no-follow
-/// component walk below the resolved anchor and by the descriptor identity
-/// checks, not by refusing a symlinked ancestor.
-fn canonical_real_directory(path: &Path, label: &str) -> io::Result<Option<PathBuf>> {
-    let canonical = match path.canonicalize() {
-        Ok(canonical) => canonical,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => {
-            return Err(other(format!(
-                "x: could not resolve {label} {}: {error}",
-                path.display()
-            )));
-        }
-    };
-    let metadata = fs::symlink_metadata(&canonical).map_err(|error| {
-        other(format!(
-            "x: could not inspect {label} {}: {error}",
-            canonical.display()
-        ))
-    })?;
-    if !metadata.is_dir() {
-        return Err(other(format!(
-            "x: {label} {} is not a directory; refusing to clean",
-            path.display()
-        )));
-    }
-    Ok(Some(canonical))
-}
-
-/// The final `x` component is checked without following it, matching the
-/// runner's own `ensure_x_locks_dir` check, so both commands accept and
-/// refuse exactly the same layouts.
-fn existing_real_directory(path: &Path, label: &str) -> io::Result<bool> {
-    match fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_symlink() => Err(other(format!(
-            "x: {label} {} is a symlink; refusing to clean",
-            path.display()
-        ))),
-        Ok(metadata) if !metadata.is_dir() => Err(other(format!(
-            "x: {label} {} is not a directory; refusing to clean",
-            path.display()
-        ))),
-        Ok(_) => Ok(true),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(other(format!(
-            "x: could not inspect {label} {}: {error}",
-            path.display()
-        ))),
-    }
-}
-
-/// A cleanup anchor that passed validation: its canonical path and an open
-/// descriptor for that exact directory.
-#[derive(Debug)]
-struct ValidatedXDir {
-    path: PathBuf,
-    directory: fs::File,
-}
-
-/// Return the canonical cleanup anchor. The home chain (`$HOME` and
-/// `~/.tog`) is resolved the way the runner resolves it and the result
-/// must be a real directory; the final `x` component is never followed.
-/// Missing `.tog` or `x` means there is nothing to clean; an existing
-/// unsafe component is an error.
-fn validated_x_dir(x_dir: &Path) -> io::Result<Option<ValidatedXDir>> {
-    if !x_dir.is_absolute() {
-        return Err(other(format!(
-            "x: cleanup directory {} is not absolute; refusing to clean",
-            x_dir.display()
-        )));
-    }
-    let tog_dir = x_dir.parent().ok_or_else(|| {
-        other(format!(
-            "x: cleanup directory {} has no .tog parent; refusing to clean",
-            x_dir.display()
-        ))
-    })?;
-    let home_dir = tog_dir.parent().ok_or_else(|| {
-        other(format!(
-            "x: cleanup directory {} has no HOME parent; refusing to clean",
-            x_dir.display()
-        ))
-    })?;
-    let tog_name = tog_dir.file_name().ok_or_else(|| {
-        other(format!(
-            "x: cleanup directory {} has no .tog parent; refusing to clean",
-            x_dir.display()
-        ))
-    })?;
-    let x_name = x_dir.file_name().ok_or_else(|| {
-        other(format!(
-            "x: cleanup directory {} has no name; refusing to clean",
-            x_dir.display()
-        ))
-    })?;
-    let Some(home_canonical) = canonical_real_directory(home_dir, "HOME")? else {
-        return Err(other(format!(
-            "x: HOME directory {} does not exist; refusing to clean",
-            home_dir.display()
-        )));
-    };
-    let Some(tog_canonical) =
-        canonical_real_directory(&home_canonical.join(tog_name), "$HOME/.tog")?
-    else {
-        return Ok(None);
-    };
-    // Below the resolved home chain nothing is followed: the `x` component
-    // must be a real directory and `open_directory_path` walks the canonical
-    // path one no-follow component at a time.
-    let canonical = tog_canonical.join(x_name);
-    if !existing_real_directory(&canonical, "$HOME/.tog/x")? {
-        return Ok(None);
-    }
-    let expected = fs::symlink_metadata(&canonical)?;
-    let directory = open_directory_path(&canonical)?;
-    let actual = fd_identity(&directory)?;
-    if actual != (expected.dev(), expected.ino()) {
-        return Err(other(format!(
-            "x: cleanup directory {} changed while it was being opened; retry later",
-            canonical.display()
-        )));
-    }
-    Ok(Some(ValidatedXDir {
-        path: canonical,
-        directory,
-    }))
-}
-
-fn has_safe_closures(root: &Path) -> bool {
-    fs::symlink_metadata(root.join(".tog/closures"))
-        .map(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
-        .unwrap_or(false)
-}
-
-fn x_candidates(x_dir: &Path) -> io::Result<Vec<XCandidate>> {
-    let Some(validated) = validated_x_dir(x_dir)? else {
-        return Ok(Vec::new());
-    };
-    let mut candidates = Vec::new();
-    let shared_x_dir = Rc::new(validated.directory);
-    for name in store::read_dir_names_at(shared_x_dir.as_raw_fd())? {
-        if name.as_bytes().first() == Some(&b'.') {
-            continue;
-        }
-        let path = validated.path.join(&name);
-        let metadata = match stat_at(shared_x_dir.as_raw_fd(), name.as_bytes()) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(error),
-        };
-        if !stat_is_real_directory(&metadata) {
-            continue;
-        }
-        let Some(canonical) = safe_x_root(&path, &validated.path) else {
-            continue;
-        };
-        let directory = match open_directory_at(shared_x_dir.as_raw_fd(), name.as_bytes()) {
-            Ok(directory) => directory,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
-            Err(error) if error.raw_os_error() == Some(libc::ELOOP) => continue,
-            Err(error) => return Err(error),
-        };
-        if fd_identity(&directory)? != stat_identity(&metadata) {
-            continue;
-        }
-        let marker = match stat_at(directory.as_raw_fd(), b".tog") {
-            Ok(marker) if stat_is_real_directory(&marker) => true,
-            Ok(_) => false,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => false,
-            Err(error) => return Err(error),
-        };
-        if !marker {
-            continue;
-        }
-        // The marker is written before realization, so it is also ownership
-        // evidence for a root that failed before it could write a closure or
-        // register itself with a store.
-        if read_x_request(&canonical).is_none() && !has_safe_closures(&canonical) {
-            continue;
-        }
-        candidates.push(XCandidate {
-            path: canonical,
-            name,
-            x_dir: Rc::clone(&shared_x_dir),
-            directory,
-            identity: stat_identity(&metadata),
-        });
-    }
-    Ok(candidates)
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CandidateMatch {
-    Match,
-    NoMatch,
-}
-
-/// The ecosystem whose registry tool names cache directories with the
-/// prefix `name` starts with (`py-ruff-…`).
-fn ecosystem_from_name(name: &str) -> Option<&'static str> {
-    registry_tools()
-        .into_iter()
-        .find(|(_, tool)| {
-            name.strip_prefix(tool.cache_prefix())
-                .is_some_and(|rest| rest.starts_with('-'))
-        })
-        .map(|(id, _)| id)
-}
-
-fn record_matches(record: &XRecord, filter: &CleanFilter) -> bool {
-    filter
-        .ecosystem
-        .as_deref()
-        .is_none_or(|ecosystem| ecosystem == record.ecosystem)
-        && filter
-            .package
-            .as_deref()
-            .is_none_or(|package| package == record.package)
-        && filter
-            .version
-            .as_deref()
-            .is_none_or(|version| Some(version) == record.version.as_deref())
-}
-
-/// Best-effort ecosystem of a candidate, used only to word the summary. The
-/// recorded request wins, then the generated name prefix.
-fn candidate_ecosystem(path: &Path) -> Option<&'static str> {
-    if let Some(record) = read_x_request(path) {
-        return registry_tools()
-            .into_iter()
-            .map(|(id, _)| id)
-            .find(|id| *id == record.ecosystem);
-    }
-    ecosystem_from_name(path.file_name().and_then(|name| name.to_str())?)
-}
-
-/// Whether `filter` selects `candidate`. Only the request record says what
-/// a root was made for, so a root without one matches only a clean with no
-/// filter at all: a filtered clean leaves it alone, and the bare
-/// `tog x --clean` removes it.
-fn candidate_matches(candidate: &XCandidate, filter: &CleanFilter) -> CandidateMatch {
-    let matched = match read_x_request(&candidate.path) {
-        Some(record) => record_matches(&record, filter),
-        None => filter.ecosystem.is_none() && filter.package.is_none() && filter.version.is_none(),
-    };
-    if matched {
-        CandidateMatch::Match
-    } else {
-        CandidateMatch::NoMatch
-    }
-}
-
 /// Decide whether a cached root can be executed as it stands. A `true` answer
 /// means the cached projection has already been fully validated here,
 /// including its policy exceptions: callers must not validate it a second
@@ -1295,415 +659,6 @@ fn x_request_is_ready(
     Ok(true)
 }
 
-enum Registration {
-    Found {
-        store: Store,
-        // Boxed so the enum is not as large as its one big variant.
-        entry: Box<RootEntry>,
-    },
-    NotFound,
-    #[cfg(test)]
-    Unknown,
-}
-
-/// Which store owns an x root, as cleanup must know it to unregister the
-/// root under that store's lease.
-enum Origin {
-    /// The store the request record names, or else the one store every
-    /// object the root's closures reference lives in.
-    Store(Store),
-    /// No closure at all: a shell a run left before it wrote one, which
-    /// references nothing and was never registered with its objects.
-    Empty,
-    /// The closures name objects, but no single available store can be
-    /// recovered from them. Removing the root would orphan its registration.
-    Unknown(String),
-}
-
-/// The store that owns `root`: the request record's `store_root` when it
-/// has one, otherwise the store its closures' object references
-/// (`runtime_object`, `env_object`) live in. Only cleanup asks this. A root
-/// without a request record is never a cache hit, but deleting one under
-/// the wrong store would leave the owner's registration keeping its
-/// objects forever.
-fn originating_store(root: &Path) -> io::Result<Origin> {
-    let marker = root.join(X_REQUEST_FILE);
-    let marker_present = match fs::symlink_metadata(&marker) {
-        Ok(metadata) => {
-            if metadata.file_type().is_symlink() || !metadata.is_file() {
-                return Err(other(format!(
-                    "x: explicit request marker {} is not a regular file",
-                    marker.display()
-                )));
-            }
-            true
-        }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => false,
-        Err(error) => return Err(error),
-    };
-    if marker_present {
-        let record = read_x_request(root).ok_or_else(|| {
-            other(format!(
-                "x: explicit request marker {} is malformed",
-                marker.display()
-            ))
-        })?;
-        if let Some(store_root) = record.store_root {
-            let store_root = store_root.canonicalize().map_err(|error| {
-                other(format!(
-                    "x: recorded originating store {} is unavailable: {error}",
-                    store_root.display()
-                ))
-            })?;
-            let root_stat = fs::symlink_metadata(&store_root)?;
-            let objects = store_root.join("objects");
-            let objects_stat = fs::symlink_metadata(&objects)?;
-            if root_stat.file_type().is_symlink()
-                || !root_stat.is_dir()
-                || objects_stat.file_type().is_symlink()
-                || !objects_stat.is_dir()
-            {
-                return Err(other(format!(
-                    "x: recorded originating store {} is not a real store",
-                    store_root.display()
-                )));
-            }
-            // A handle only: `clean` takes the exclusive lease on it before
-            // it reads or removes anything, and the lease validates the
-            // store's format marker.
-            return Ok(Origin::Store(Store::handle(store_root)));
-        }
-    }
-    closure_owner(root)
-}
-
-/// The one store every closure under `root` references objects in, read
-/// with the same no-follow rules as the rest of the x root. A closure
-/// directory or file that cannot be read leaves the owner unknown, so
-/// cleanup skips that root and goes on with the rest.
-fn closure_owner(root: &Path) -> io::Result<Origin> {
-    Ok(read_closure_owner(root).unwrap_or_else(|error| {
-        Origin::Unknown(format!("its closures could not be read: {error}"))
-    }))
-}
-
-fn read_closure_owner(root: &Path) -> io::Result<Origin> {
-    let closures = root.join(".tog/closures");
-    let entries = match fs::read_dir(&closures) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Origin::Empty),
-        Err(error) => return Err(error),
-    };
-    let mut found: Option<Store> = None;
-    let mut any = false;
-    for entry in entries {
-        let entry = entry?;
-        let path = entry.path();
-        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
-            continue;
-        }
-        let stat = fs::symlink_metadata(&path)?;
-        if stat.file_type().is_symlink() || !stat.is_file() {
-            return Ok(Origin::Unknown(format!(
-                "closure {} is not a regular file",
-                path.display()
-            )));
-        }
-        any = true;
-        let file = fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .open(&path)?;
-        let Ok(value) = serde_json::from_reader::<_, serde_json::Value>(file) else {
-            return Ok(Origin::Unknown(format!(
-                "closure {} is unreadable",
-                path.display()
-            )));
-        };
-        let body = &value["body"];
-        let mut objects: Vec<PathBuf> = Vec::new();
-        let runtime = &body["runtime_object"];
-        if !runtime.is_null() {
-            match (runtime["id"].as_str(), runtime["path"].as_str()) {
-                (Some(id), Some(object))
-                    if store::is_object_id(id)
-                        && Path::new(object).file_name() == Some(id.as_ref()) =>
-                {
-                    objects.push(PathBuf::from(object));
-                }
-                _ => {
-                    return Ok(Origin::Unknown(format!(
-                        "closure {} has a malformed runtime_object",
-                        path.display()
-                    )))
-                }
-            }
-        }
-        if let Some(env) = body["env_object"].as_str() {
-            objects.push(PathBuf::from(env));
-        }
-        if objects.is_empty() {
-            return Ok(Origin::Unknown(format!(
-                "closure {} names no store object",
-                path.display()
-            )));
-        }
-        for object in objects {
-            let Some(store) = comforter::store_from_object_path(&object) else {
-                return Ok(Origin::Unknown(format!(
-                    "the store holding {} is unavailable",
-                    object.display()
-                )));
-            };
-            match &found {
-                Some(previous) if previous.root != store.root => {
-                    return Ok(Origin::Unknown(
-                        "its closures name objects in more than one store".into(),
-                    ))
-                }
-                Some(_) => {}
-                None => found = Some(store),
-            }
-        }
-    }
-    Ok(match found {
-        Some(store) => Origin::Store(store),
-        None if any => Origin::Unknown("its closures name no store object".into()),
-        None => Origin::Empty,
-    })
-}
-
-fn registration_for_store(root: &Path, store: Store) -> io::Result<Registration> {
-    let canonical = root.canonicalize()?;
-    let entry = store.roots()?.into_iter().find(|entry| {
-        entry
-            .path
-            .canonicalize()
-            .is_ok_and(|path| path == canonical)
-    });
-    Ok(
-        entry.map_or(Registration::NotFound, |entry| Registration::Found {
-            store,
-            entry: Box::new(entry),
-        }),
-    )
-}
-
-#[cfg(test)]
-fn registration_for(root: &Path) -> io::Result<Registration> {
-    match originating_store(root)? {
-        Origin::Store(store) => registration_for_store(root, store),
-        Origin::Empty | Origin::Unknown(_) => Ok(Registration::Unknown),
-    }
-}
-
-/// Remove cached x projections. The store objects remain available for the
-/// ordinary GC pass; deleting a projection is deliberately not object GC.
-// Reviewed site (tests/architecture.rs): operation boundary: command entry point.
-#[allow(clippy::disallowed_methods)]
-/// The exclusive lease `clean` removes one environment under, or `None`
-/// with the skip already printed. The lease validates the store's format
-/// marker. A recorded store this tog does not read is not ours to change:
-/// its registration stays, so the root that registration protects stays
-/// too. It is a skip rather than a failure because the store named may not
-/// be the configured one, and the fix belongs to that store.
-fn clean_lease(origin_store: &Store, environment: &Path) -> io::Result<Option<StoreActivity>> {
-    match origin_store.try_activity_exclusive() {
-        Ok(Some(activity)) => Ok(Some(activity)),
-        Ok(None) => {
-            println!(
-                "tog: skipped x environment {} (in use by a running tool; retry later; originating store is busy)",
-                environment.display()
-            );
-            Ok(None)
-        }
-        Err(error) => match store::refusal_fix(&error) {
-            Some(fix) => {
-                println!(
-                    "tog: skipped x environment {} (its originating store is not one this tog reads: {error}; fix: {fix})",
-                    environment.display()
-                );
-                Ok(None)
-            }
-            None => Err(error),
-        },
-    }
-}
-
-pub fn clean(request: CleanRequest) -> io::Result<()> {
-    let filter = clean_filter(request)?;
-    let x_dir = home()?.join(".tog/x");
-    let candidates = x_candidates(&x_dir)?;
-    let mut matched = 0usize;
-    let mut removed = 0usize;
-    let mut skipped = 0usize;
-    let mut notes: Vec<&'static str> = Vec::new();
-    for candidate in candidates {
-        match candidate_matches(&candidate, &filter) {
-            CandidateMatch::Match => {}
-            CandidateMatch::NoMatch => continue,
-        }
-        matched += 1;
-        let ecosystem = candidate_ecosystem(&candidate.path);
-        // Origin metadata is only a hint until the originating store is
-        // protected. The root is removed and unregistered under the store
-        // that owns it, never the caller's: a root whose owner cannot be
-        // recovered is skipped, because removing it would leave that store's
-        // registration keeping its objects. An empty shell references
-        // nothing, so the x-root lock below is its whole guard and the
-        // caller's store only lends the lease.
-        let origin = match originating_store(&candidate.path)? {
-            Origin::Unknown(why) => {
-                println!(
-                    "tog: skipped x environment {} (its owning store could not be recovered: {why}; remove the directory yourself once you know nothing is using it)",
-                    candidate.path.display()
-                );
-                skipped += 1;
-                continue;
-            }
-            origin => origin,
-        };
-        let origin_store = match &origin {
-            Origin::Store(store) => store.clone(),
-            Origin::Empty | Origin::Unknown(_) => Store::open()?,
-        };
-        let Some(activity) = clean_lease(&origin_store, &candidate.path)? else {
-            skipped += 1;
-            continue;
-        };
-        let Some(_lock) = lock_x_root_at(candidate.x_dir.as_raw_fd(), &candidate.name, true, true)?
-        else {
-            println!(
-                "tog: skipped x environment {} (in use by a running tool; retry later)",
-                candidate.path.display()
-            );
-            skipped += 1;
-            continue;
-        };
-        let _project_lock = origin_store.project_lock(&candidate.path)?;
-        // Re-read the untrusted origin after both guards. A changed marker or
-        // closure is a race, not permission to remove the candidate. An
-        // empty shell must still be empty: gaining a claim while it was
-        // being locked is the same race.
-        match (&origin, originating_store(&candidate.path)?) {
-            (Origin::Store(_), Origin::Store(revalidated_store)) => {
-                if revalidated_store.root != origin_store.root {
-                    println!(
-                        "tog: skipped x environment {} (originating store changed while it was being locked; retry later)",
-                        candidate.path.display()
-                    );
-                    skipped += 1;
-                    continue;
-                }
-            }
-            (Origin::Empty, Origin::Empty) => {}
-            _ => {
-                println!(
-                    "tog: skipped x environment {} (origin changed while it was being locked; retry later)",
-                    candidate.path.display()
-                );
-                skipped += 1;
-                continue;
-            }
-        }
-        let registration = registration_for_store(&candidate.path, origin_store.clone())?;
-        let current = match stat_at(candidate.x_dir.as_raw_fd(), candidate.name.as_bytes()) {
-            Ok(current) => current,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                println!(
-                    "tog: skipped x environment {} (it disappeared or changed; retry later)",
-                    candidate.path.display()
-                );
-                skipped += 1;
-                continue;
-            }
-            Err(error) => return Err(error),
-        };
-        if stat_identity(&current) != candidate.identity || !stat_is_real_directory(&current) {
-            println!(
-                "tog: skipped x environment {} (it disappeared or changed; retry later)",
-                candidate.path.display()
-            );
-            skipped += 1;
-            continue;
-        }
-        // The candidate descriptor belongs to the directory that passed the
-        // containment checks. Removing by pathname here would let a rename
-        // followed by a symlink replacement redirect deletion elsewhere.
-        store::remove_tree_at(candidate.directory.as_raw_fd())?;
-        let current = stat_at(candidate.x_dir.as_raw_fd(), candidate.name.as_bytes())?;
-        if stat_identity(&current) != candidate.identity || !stat_is_real_directory(&current) {
-            println!(
-                "tog: skipped x environment {} (it disappeared or changed; retry later)",
-                candidate.path.display()
-            );
-            skipped += 1;
-            continue;
-        }
-        let name = CString::new(candidate.name.as_bytes())
-            .map_err(|_| other("x: environment root has an invalid name"))?;
-        // SAFETY: candidate.x_dir is an open directory and name is
-        // NUL-terminated for this call.
-        if unsafe {
-            libc::unlinkat(
-                candidate.x_dir.as_raw_fd(),
-                name.as_ptr(),
-                libc::AT_REMOVEDIR,
-            )
-        } != 0
-        {
-            return Err(io::Error::last_os_error());
-        }
-        if let Some(note) = ecosystem
-            .and_then(|ecosystem| registry_tool(ecosystem).ok())
-            .and_then(|tool| tool.clean_note())
-        {
-            if !notes.contains(&note) {
-                notes.push(note);
-            }
-        }
-        match registration {
-            Registration::Found { store, entry } => {
-                store.remove_root_entry_with_activity(&activity, &entry)?;
-                println!(
-                    "tog: removed x environment {}",
-                    candidate.path.display()
-                );
-            }
-            Registration::NotFound => println!(
-                "tog: removed x environment {} (no matching registry entry in its originating store)",
-                candidate.path.display()
-            ),
-            #[cfg(test)]
-            Registration::Unknown => println!(
-                "tog: removed x environment {} (registry entry could not be dropped: originating store not found)",
-                candidate.path.display()
-            ),
-        }
-        // Only now has the environment stopped existing anywhere: the tree is
-        // gone and so is its registry entry. Unlinking the lock before the
-        // registry removal left a window in which a fresh runner could take a
-        // new lock on the same name while the originating store still listed
-        // the environment as registered. This still runs under the exclusive
-        // lock taken above, so `.locks` stays bounded; a later runner
-        // recreates the file.
-        remove_x_root_lock_at(candidate.x_dir.as_raw_fd(), &candidate.name)?;
-        removed += 1;
-    }
-    if matched == 0 {
-        println!("tog: x clean: nothing to clean");
-    } else {
-        // A removed node environment also orphans its
-        // forests/<project-key>/<projection-id> node_modules forest in the
-        // originating store, which plain `tog gc` never visits.
-        let forests: String = notes.iter().map(|note| format!(", and {note}")).collect();
-        println!(
-            "tog: x clean removed {removed} environment(s), skipped {skipped}; store objects remain until the next 'tog gc'{forests}"
-        );
-    }
-    Ok(())
-}
-
 /// `tog x`: `x` has its own cached projection path and therefore does
 /// not pass through sync's policy initialization. Load the cwd policy,
 /// including all applicable ancestors, before realization or any cache-hit
@@ -1724,22 +679,8 @@ pub fn launch(
     let ecosystem = choose_ecosystem(&request, cwd)?;
     let (tool, tool_version) = split_version(&request.tool);
     let (package, from_version) = request.from.as_deref().map_or((tool, None), split_version);
-    validate_package(ecosystem, package)?;
-    if let Some(version) = tool_version {
-        validate_version(version)?;
-    }
-    if let Some(version) = from_version {
-        validate_version(version)?;
-    }
-    let version = match (from_version, tool_version) {
-        (Some(from), Some(tool)) if from != tool => {
-            return Err(other(
-                "x: --from package version conflicts with the tool version; specify only one or use the same version",
-            ));
-        }
-        (Some(from), _) => Some(from),
-        (_, tool) => tool,
-    };
+    validate_package_for(ecosystem, package)?;
+    let version = request_version(tool_version, from_version)?;
     let bin = if request.from.is_some() {
         validate_from_bin(tool)?;
         tool
@@ -1827,11 +768,7 @@ pub fn launch(
     ui::trace_command(&command);
     let status =
         crate::kernel::supervise::child_status(run_installed_tool(&mut command, activity))?;
-    use std::os::unix::process::ExitStatusExt;
-    Ok(status
-        .code()
-        .or_else(|| status.signal().map(|signal| 128 + signal))
-        .unwrap_or(1))
+    Ok(crate::commands::shared::child_status_code(&status))
 }
 
 /// Run the executable `tog x` installed, with the user's arguments. The
@@ -1962,6 +899,7 @@ fn cached_tool_hit(
 
 #[cfg(test)]
 mod tests {
+    use super::cleanup::*;
     use super::*;
     use crate::kernel::testutil::TempDir;
     use std::sync::mpsc;
@@ -2216,7 +1154,7 @@ mod tests {
 
     #[test]
     fn package_bin_and_version_inputs_are_validated() {
-        let error = validate_package("python", "/tmp/tool").unwrap_err();
+        let error = validate_package_for("python", "/tmp/tool").unwrap_err();
         assert!(error.to_string().contains("invalid package"), "{error}");
         assert!(validate_from_bin("../tool").is_err());
         assert!(validate_version("1.0\n--index-url evil").is_err());
@@ -2457,7 +1395,7 @@ mod tests {
 
         let validated = validated_x_dir(&x_dir).unwrap().expect("x directory");
         let root_fd =
-            open_directory_at(validated.directory.as_raw_fd(), b"py-victim-test").unwrap();
+            store::open_directory_at(validated.directory.as_raw_fd(), b"py-victim-test").unwrap();
         fs::rename(&x_dir, x_dir.with_extension("old")).unwrap();
         std::os::unix::fs::symlink(&victim, &x_dir).unwrap();
 
@@ -2685,7 +1623,7 @@ mod tests {
         let x_dir = home.join(".tog/x");
         std::os::unix::fs::symlink(&elsewhere, &x_dir).unwrap();
 
-        let runner = ensure_x_locks_dir(&x_dir).unwrap_err();
+        let runner = open_x_dir(&x_dir).unwrap_err();
         assert!(
             runner.to_string().contains("is not a private directory"),
             "{runner}"
@@ -2733,7 +1671,7 @@ mod tests {
             let lock = lock_x_root(&waiter_root, true, false)
                 .unwrap()
                 .expect("blocking lock");
-            let identity = fd_identity(&lock).unwrap();
+            let identity = store::fd_identity(&lock).unwrap();
             ready_tx.send(identity).unwrap();
             lock
         });

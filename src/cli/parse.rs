@@ -2181,6 +2181,19 @@ mod tests {
             }
         );
         assert!(message(&["x", "--", "--weird-tool"]).contains("x: invalid tool"));
+        // The parser and the command share one package rule, so a path-like
+        // name is a usage error here, never a run-time exit 1 (#249).
+        for name in ["a//b", "a/./b", "a/../b", "/abs", "a\\b"] {
+            assert!(
+                message(&["x", name]).contains(&format!("x: invalid tool '{name}'")),
+                "{name}"
+            );
+            assert!(
+                message(&["x", "--from", name, "tool"])
+                    .contains(&format!("x: invalid package '{name}'")),
+                "{name}"
+            );
+        }
         assert!(message(&["x"]).starts_with("x: no tool given"));
         assert_eq!(message(&["x", "--from"]), "--from needs a package name");
         // `--from six@1` and `six@2` name two different versions for one
