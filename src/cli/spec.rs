@@ -644,14 +644,14 @@ Follows every registered project closure, removes store objects nothing
 references, drops cached artifacts older than the retention window, and
 cleans stale staging directories. Objects touched in the last ten minutes
 are always kept so a concurrent sync cannot lose one. Ordinary gc never
-deletes inside project projections; --project collects old unused forests
-and backups. A root record says for itself what its project needs, so it
-keeps protecting those objects even when the project directory is gone;
-give the protection up with --forget. Cleanup is skipped while another Tog
-job is using this store. A record that cannot be read stops the sweep
-rather than being guessed at: the refusal lists every one, and
---drop-object removes the ones that cannot be repaired. Usable on a copied
-store from any host.
+deletes inside project projections; --project collects old unused forests,
+backups, and run homes no registered project owns. A root record says for
+itself what its project needs, so it keeps protecting those objects even
+when the project directory is gone; give the protection up with --forget.
+Cleanup is skipped while another Tog job is using this store. A record
+that cannot be read stops the sweep rather than being guessed at: the
+refusal lists every one, and --drop-object removes the ones that cannot be
+repaired. Usable on a copied store from any host.
 
 --reset empties the store and starts it again: every object, record, root
 and project forest goes, and the downloads in the cache stay, so the next
@@ -661,7 +661,7 @@ older tog in a format it no longer reads.",
         examples: &[
             ("tog gc --dry-run", "what would be collected, without collecting it"),
             ("tog gc", "collect unreferenced store objects"),
-            ("tog gc --project", "also collect old project forests and backups"),
+            ("tog gc --project", "also collect old project forests, backups and run homes"),
             ("tog gc --reset", "empty the store, keeping its downloads"),
         ],
         options: &[
@@ -670,7 +670,10 @@ older tog in a format it no longer reads.",
                 "report what would be removed without removing it or writing any record",
             ),
             ("--keep-days <n>", "retain cached artifacts used within <n> days"),
-            ("--project", "also collect old unused project forests and backups"),
+            (
+                "--project",
+                "also collect old unused project forests, backups and run homes",
+            ),
             (
                 "--drop-object <id>...",
                 "drop an object whose metadata is unusable or missing, together with its \

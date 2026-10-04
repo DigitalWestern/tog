@@ -68,6 +68,7 @@ pub(super) fn execute<W: Write>(
                 Counter::Stages => report.stages += 1,
                 Counter::Forests => report.forests += 1,
                 Counter::Backups => report.backups += 1,
+                Counter::RunHomes => report.run_homes += 1,
                 Counter::Records => report.records += 1,
             }
             if let Some((meta_name, meta_stat)) = &removal.companion {
@@ -95,12 +96,13 @@ pub(super) fn execute<W: Write>(
                 writeln!(
                     out,
                     "stopped after an error; deletions already completed: {} objects, {} cached \
-                     artifacts, {} stages, {} forests, {} backups, {} records, {} freed",
+                     artifacts, {} stages, {} forests, {} backups, {} run homes, {} records, {} freed",
                     report.objects,
                     report.cached_artifacts,
                     report.stages,
                     report.forests,
                     report.backups,
+                    report.run_homes,
                     report.records,
                     size(report.freed_bytes)
                 )?;

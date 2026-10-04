@@ -325,11 +325,14 @@ impl Store {
     /// roots): hex of the first 8 bytes of SHA-256 over the canonical
     /// project path.
     pub fn project_key(project_dir: &Path) -> io::Result<String> {
+        Ok(Self::canonical_project_key(&project_dir.canonicalize()?))
+    }
+
+    /// [`Store::project_key`] for a path that is already canonical, such as
+    /// the project path a root record holds, which may no longer exist.
+    pub fn canonical_project_key(canonical_project: &Path) -> String {
         use sha2::{Digest, Sha256};
-        let canonical = project_dir.canonicalize()?;
-        Ok(hex::encode(
-            &Sha256::digest(canonical.as_os_str().as_bytes())[..8],
-        ))
+        hex::encode(&Sha256::digest(canonical_project.as_os_str().as_bytes())[..8])
     }
 
     /// The HOME a `tog run` child of `ecosystem` gets for this project:

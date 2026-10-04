@@ -23,6 +23,8 @@ pub(super) struct RootState {
     pub(super) object_ids: HashSet<String>,
     pub(super) project_paths: Vec<PathBuf>,
     pub(super) project_keep: Vec<PathBuf>,
+    /// The `run-homes/` keys of every project a surviving root names.
+    pub(super) run_home_keys: HashSet<String>,
 }
 
 pub(super) fn collect_roots(
@@ -48,6 +50,9 @@ pub(super) fn collect_roots(
             // unmounted, or deleted project retains exactly the durable
             // references recorded here.
             state.object_ids.extend(record.objects.iter().cloned());
+            state
+                .run_home_keys
+                .insert(Store::canonical_project_key(&record.project_path));
             state.project_keep.extend(
                 record
                     .projections
@@ -92,6 +97,9 @@ pub(super) fn collect_roots(
             .canonicalize()
             .map_err(|error| unresolvable_root(root, &error))?;
         state.project_paths.push(project.clone());
+        state
+            .run_home_keys
+            .insert(Store::canonical_project_key(&project));
         // A registered project owns at least one closure: registration
         // happens when one is written. None at all means either that they
         // were removed, or that this pathname no longer resolves to the
@@ -286,6 +294,7 @@ pub(super) enum Parent {
     Tmp,
     ForestProject(usize),
     Backups,
+    RunHomes,
     Meta,
 }
 
@@ -296,6 +305,7 @@ pub(super) struct Dirs {
     pub(super) tmp: HeldDir,
     pub(super) forest_projects: Vec<HeldDir>,
     pub(super) backups: Option<HeldDir>,
+    pub(super) run_homes: Option<HeldDir>,
 }
 
 impl Dirs {
@@ -310,6 +320,10 @@ impl Dirs {
                 .backups
                 .as_ref()
                 .expect("a backup candidate implies a held backups descriptor"),
+            Parent::RunHomes => self
+                .run_homes
+                .as_ref()
+                .expect("a run home candidate implies a held run-homes descriptor"),
         }
     }
 }
@@ -356,6 +370,8 @@ pub struct Snapshot {
     pub(super) stages: Vec<DirEntrySnapshot>,
     pub(super) forests: Vec<DirEntrySnapshot>,
     pub(super) backups: Vec<DirEntrySnapshot>,
+    /// `run-homes/<project key>` directories.
+    pub(super) run_homes: Vec<DirEntrySnapshot>,
     /// Records whose object is gone. Under the exclusive lease nothing can
     /// be mid-publication (commit writes the object first), so each is the
     /// residue of a removal that stopped between the object and its record.
@@ -569,10 +585,12 @@ struct Projections {
     forests: Vec<DirEntrySnapshot>,
     backups_dir: Option<HeldDir>,
     backups: Vec<DirEntrySnapshot>,
+    run_homes_dir: Option<HeldDir>,
+    run_homes: Vec<DirEntrySnapshot>,
 }
 
-/// Enumerate the project projections, holding each project directory and
-/// the backups directory open. Only a `--project` sweep calls this: a sweep
+/// Enumerate the project projections, holding each project directory, the
+/// backups directory and the run-homes directory open. Only a `--project` sweep calls this: a sweep
 /// that will not touch them must not hold their descriptors either.
 fn read_projections(store: &Store) -> io::Result<Projections> {
     let mut read = Projections::default();
@@ -604,27 +622,40 @@ fn read_projections(store: &Store) -> io::Result<Projections> {
             read.forest_projects.push(held);
         }
     }
-    let backups_path = store.root.join("backups");
-    validate_projection_namespace(&backups_path, "backups")?;
-    if backups_path.is_dir() {
-        let held = open_held(&backups_path, "backups")?;
-        for entry in fs::read_dir(&backups_path)? {
-            let entry = entry?;
-            let name = entry.file_name();
-            let stat = store::stat_at(held.file.as_raw_fd(), name.as_bytes())?;
-            if (stat.st_mode & libc::S_IFMT) != libc::S_IFDIR {
-                continue;
-            }
-            read.backups.push(DirEntrySnapshot {
-                name,
-                path: entry.path(),
-                parent: Parent::Backups,
-                stat,
-            });
-        }
-        read.backups_dir = Some(held);
-    }
+    (read.backups_dir, read.backups) = read_directories(store, "backups", Parent::Backups)?;
+    (read.run_homes_dir, read.run_homes) = read_directories(store, "run-homes", Parent::RunHomes)?;
     Ok(read)
+}
+
+/// Every directory directly under the store's `namespace`, with that
+/// namespace held open; nothing when it does not exist.
+fn read_directories(
+    store: &Store,
+    namespace: &str,
+    parent: Parent,
+) -> io::Result<(Option<HeldDir>, Vec<DirEntrySnapshot>)> {
+    let path = store.root.join(namespace);
+    validate_projection_namespace(&path, namespace)?;
+    if !path.is_dir() {
+        return Ok((None, Vec::new()));
+    }
+    let held = open_held(&path, namespace)?;
+    let mut entries = Vec::new();
+    for entry in fs::read_dir(&path)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let stat = store::stat_at(held.file.as_raw_fd(), name.as_bytes())?;
+        if (stat.st_mode & libc::S_IFMT) != libc::S_IFDIR {
+            continue;
+        }
+        entries.push(DirEntrySnapshot {
+            name,
+            path: entry.path(),
+            parent,
+            stat,
+        });
+    }
+    Ok((Some(held), entries))
 }
 
 /// Phase 1. Read the whole deletion surface.
@@ -670,6 +701,7 @@ pub(super) fn read(
         stages,
         forests: projections.forests,
         backups: projections.backups,
+        run_homes: projections.run_homes,
         stray_records,
         dirs: Dirs {
             objects,
@@ -678,6 +710,7 @@ pub(super) fn read(
             tmp,
             forest_projects: projections.forest_projects,
             backups: projections.backups_dir,
+            run_homes: projections.run_homes_dir,
         },
     })
 }
