@@ -883,9 +883,6 @@ mod realization_tests {
 
     #[test]
     fn realizes_a_commit_and_strips_git_metadata() {
-        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
         let root = TempDir::named("gitsrc-realize");
         let (url, commit) = fixture_repo(&root.0);
         let store = store_at(&root.0);
@@ -917,9 +914,6 @@ mod realization_tests {
 
     #[test]
     fn a_wrong_commit_is_refused() {
-        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
         let root = TempDir::named("gitsrc-wrong");
         let (url, _) = fixture_repo(&root.0);
         let store = store_at(&root.0);
@@ -978,9 +972,6 @@ mod realization_tests {
     /// `refs/pull/*` ref that is neither branch nor tag.
     #[test]
     fn a_commit_reachable_only_from_a_non_default_ref_is_realized_by_the_ref_fallback() {
-        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
         struct Reset;
         impl Drop for Reset {
             fn drop(&mut self) {
@@ -1009,9 +1000,6 @@ mod realization_tests {
     /// fallback that fetches every ref (not just branches and tags) has it.
     #[test]
     fn a_refused_sha_fetch_falls_back_to_every_advertised_ref() {
-        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
         struct Reset;
         impl Drop for Reset {
             fn drop(&mut self) {
@@ -1057,9 +1045,6 @@ mod realization_tests {
     /// server setting is involved.
     #[test]
     fn an_unreferenced_commit_is_fetched_by_sha() {
-        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
         let root = TempDir::named("gitsrc-anysha");
         let (url, _) = fixture_repo(&root.0);
         let commit = off_branch_commit(&url, "dangling.txt");
@@ -1072,9 +1057,6 @@ mod realization_tests {
 
     #[test]
     fn a_commit_no_ref_reaches_is_named_as_missing() {
-        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
         let root = TempDir::named("gitsrc-missing");
         let (url, _) = fixture_repo(&root.0);
         // A pin that names no commit (NextChat's lock once produced one from
@@ -1089,9 +1071,6 @@ mod realization_tests {
 
     #[test]
     fn an_unpinned_ref_is_refused_and_resolve_ref_pins_it() {
-        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
         let root = TempDir::named("gitsrc-ref");
         let (url, commit) = fixture_repo(&root.0);
         let store = store_at(&root.0);
@@ -1113,9 +1092,6 @@ mod realization_tests {
 
     #[test]
     fn checkout_rejects_attribute_transformed_content() {
-        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
         let root = TempDir::named("gitsrc-attributes");
         let repo = root.0.join("repo");
         fs::create_dir_all(&repo).unwrap();
@@ -1149,9 +1125,6 @@ mod realization_tests {
 
     #[test]
     fn pack_keeps_safe_links_empty_dirs_and_verbatim_names() {
-        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
         let root = TempDir::named("gitsrc-pack");
         let checkout = root.0.join("checkout");
         fs::create_dir_all(checkout.join("empty")).unwrap();
@@ -1227,9 +1200,6 @@ mod realization_tests {
 
     #[test]
     fn pack_rejects_paths_and_links_that_no_ustar_header_can_hold() {
-        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
         let platform = crate::kernel::platform::Platform::host().unwrap();
 
         // bsdtar drops an overlong path and still exits 0, so relying on the

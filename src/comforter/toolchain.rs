@@ -595,19 +595,14 @@ mod tests {
     use crate::tailors::Tailor;
 
     /// The process-global guard `commit` installs is read by every closure
-    /// writer, so these tests take the same two locks the one signing-key
-    /// test takes, in the order sync's tests document: supervision, then
-    /// attribution. No closure writer can run beside them.
+    /// writer, so these tests take the lock every closure writer and the
+    /// one signing-key test take. No closure writer can run beside them.
     struct Serialized {
-        _supervision: std::sync::MutexGuard<'static, ()>,
         _attribution: std::sync::MutexGuard<'static, ()>,
     }
 
     fn serialized() -> Serialized {
         Serialized {
-            _supervision: crate::kernel::supervise::SUPERVISION_TEST_LOCK
-                .lock()
-                .unwrap_or_else(|error| error.into_inner()),
             _attribution: crate::kernel::policy::attribution_test_lock(),
         }
     }

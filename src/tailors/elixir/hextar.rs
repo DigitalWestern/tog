@@ -240,9 +240,6 @@ mod tests {
             let staged = self.temp.0.join("staged");
             fs::create_dir_all(&scratch).unwrap();
             fs::create_dir_all(&staged).unwrap();
-            let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
             let unpacked = unpack_verified(&activity, tar, &scratch, &staged, &self.dep);
             drop(lease);
             unpacked

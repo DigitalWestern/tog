@@ -259,8 +259,8 @@ pub fn realize_runtime(
 
 #[cfg(test)]
 fn extract_sdk_archive(tarball: &Path, staged: &Path) -> io::Result<()> {
-    // No activity lease: test threads run in parallel and supervision runs
-    // its children one at a time process-wide.
+    // No activity lease: the extraction is test-only and writes scratch
+    // directories outside any store.
     crate::kernel::archive::extract_with_options(
         tarball,
         staged,

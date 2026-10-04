@@ -670,9 +670,6 @@ mod tests {
     }
 
     pub(super) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
-        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
         let mut cases = vec![
             crate::kernel::gitsrc::live_identity_for_test(),
             crate::kernel::resolve::transaction::live_identity_for_test(),
@@ -1537,11 +1534,15 @@ mod record_value_tests {
             "object metadata id \"not-an-id\" is malformed"
         );
 
-        // A socket cannot be opened at all. Linux only: macOS's temporary
-        // directory is too deep for a 104-byte socket path.
+        // A socket cannot be opened at all. Bind through the held directory's
+        // short Linux fd alias so a long TMPDIR cannot exceed sockaddr_un's
+        // pathname limit. The socket still lives at `meta` and is read there.
         #[cfg(target_os = "linux")]
         {
-            let listener = std::os::unix::net::UnixListener::bind(&meta).unwrap();
+            use std::os::fd::AsRawFd;
+            let directory = fs::File::open(&temp.0).unwrap();
+            let alias = format!("/proc/self/fd/{}/{id}.json", directory.as_raw_fd());
+            let listener = std::os::unix::net::UnixListener::bind(alias).unwrap();
             let error = read_record_at(&meta).map(drop).unwrap_err();
             assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{error}");
             assert_eq!(

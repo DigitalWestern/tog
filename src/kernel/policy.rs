@@ -1118,7 +1118,7 @@ pub(crate) fn check_exception_set(id: &str, exceptions: &[Exception]) -> io::Res
 /// "Read" includes reading them indirectly: `audit` through `policy::load`,
 /// `doctor` through `inspect`'s policy check, and the sandbox tests that
 /// open or write under `$HOME`. The whole-crate guard order is
-/// env -> supervision -> store -> attribution: see the comment on
+/// env -> store -> attribution: see the comment on
 /// `commands::sync`'s failed_tailor_sync test.
 #[cfg(test)]
 pub(crate) fn test_env_lock() -> std::sync::MutexGuard<'static, ()> {
@@ -1127,8 +1127,8 @@ pub(crate) fn test_env_lock() -> std::sync::MutexGuard<'static, ()> {
 }
 
 /// Tests that open an `Attribution` frame here, then start from an empty
-/// pending list. The whole-crate guard order is env -> supervision ->
-/// store -> attribution: see the comment on `commands::sync`'s
+/// pending list. The whole-crate guard order is env -> store ->
+/// attribution: see the comment on `commands::sync`'s
 /// failed_tailor_sync test.
 ///
 /// Every test that records or opens a token uses this same lock. The frame

@@ -1358,9 +1358,6 @@ mod tests {
     /// nothing, so every existing `sdist-build/4` id is kept.
     #[test]
     fn a_locked_rust_selection_is_the_rust_an_sdist_builds_with() {
-        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
         crate::tailors::install_kinds();
         let platform = crate::kernel::platform::Platform::host().unwrap();
         let (_store_dir, store) = super::test_store("locked-rust");
@@ -1494,9 +1491,6 @@ mod tests {
     fn local_sdist_fixtures_are_reproducible_across_stores() {
         // Planning inspects the archive through a supervised child; the
         // process supervises one child at a time.
-        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
         let (_first_dir, first_store) = super::test_store("repro-first");
         let first_store_activity = &first_store
             .activity(crate::kernel::activity::ActivityMode::Shared)
@@ -1590,9 +1584,6 @@ mod tests {
 
     #[test]
     fn darwin_sdist_identity_unchanged() {
-        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
         let pkg = LockedPackage {
             name: "docopt".into(),
             version: "0.6.2".into(),
@@ -1616,9 +1607,6 @@ mod tests {
 
     #[test]
     fn darwin_native_sdist_identity_does_not_realize_native_libs() {
-        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
         let (_store_dir, store) = test_store("darwin-native");
         let activity = &store
             .activity(crate::kernel::activity::ActivityMode::Shared)
@@ -1657,9 +1645,6 @@ mod tests {
 
     #[test]
     fn isolated_identity_has_schema_four_and_build_env() {
-        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
         let pkg = LockedPackage {
             name: "example".into(),
             version: "1.0".into(),
@@ -1697,9 +1682,6 @@ mod tests {
     /// see — losing both halves of a pair — is a contract error under `/4`.
     #[test]
     fn isolated_identity_goldens_and_dropped_pairs() {
-        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
         crate::tailors::install_kinds();
         let pkg = LockedPackage {
             name: "example".into(),
@@ -1774,9 +1756,6 @@ mod tests {
 
     #[test]
     fn recursion_cap_is_loud() {
-        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
         let pkg = LockedPackage {
             name: "example".into(),
             version: "1.0".into(),
@@ -1809,9 +1788,6 @@ mod tests {
     /// cross-platform build fails without touching the store or the network.
     #[test]
     fn a_foreign_platform_is_refused_before_any_fetch() {
-        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
         let host = Platform::host().unwrap();
         let foreign = if host == Platform::Aarch64AppleDarwin {
             Platform::X86_64UnknownLinuxGnu
@@ -1852,9 +1828,6 @@ mod tests {
 
     #[test]
     fn build_sdist_preserves_unsupported_kind() {
-        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
         let pkg = LockedPackage {
             name: "example".into(),
             version: "1.0".into(),

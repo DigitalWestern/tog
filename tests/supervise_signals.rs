@@ -611,6 +611,19 @@ fn supervisor_harness() {
     if scenario == "int-counter" {
         int_counter();
     }
+    #[cfg(target_os = "linux")]
+    if scenario == "report-fds" {
+        for entry in std::fs::read_dir("/proc/self/fd").unwrap().flatten() {
+            if let Ok(target) = std::fs::read_link(entry.path()) {
+                say(&format!(
+                    "{} {}",
+                    entry.file_name().to_string_lossy(),
+                    target.display()
+                ));
+            }
+        }
+        std::process::exit(0);
+    }
     let root = PathBuf::from(std::env::var_os("TOG_SUPERVISE_STORE").unwrap());
     let store = Store::open_at(&root).unwrap();
     let activity = store.activity(ActivityMode::Shared).unwrap();
@@ -752,8 +765,146 @@ fn tog_command(args: &[&str]) -> Command {
     command
 }
 
+static RECORDED_SIGNALS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+extern "C" fn record_one(_: libc::c_int) {
+    RECORDED_SIGNALS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Install a handler that only counts `number`, as code that ran before
+/// tog's first session might.
+fn record_signal(number: libc::c_int) {
+    // SAFETY: zeroed is followed by sigemptyset; the handler only touches
+    // an atomic.
+    unsafe {
+        let mut action: libc::sigaction = std::mem::zeroed();
+        libc::sigemptyset(&mut action.sa_mask);
+        action.sa_flags = libc::SA_RESTART;
+        action.sa_sigaction = record_one as extern "C" fn(libc::c_int) as *const () as usize;
+        assert_eq!(libc::sigaction(number, &action, std::ptr::null_mut()), 0);
+    }
+}
+
+fn signal_named(name: &str) -> libc::c_int {
+    match name {
+        "TERM" => libc::SIGTERM,
+        "INT" => libc::SIGINT,
+        "HUP" => libc::SIGHUP,
+        "QUIT" => libc::SIGQUIT,
+        other => panic!("unknown signal {other}"),
+    }
+}
+
+/// A child that leaves a grandchild holding its stdout and stderr open on a
+/// `read < fifo`, writes its own pid to `<fifo>.pid`, and exits: it is
+/// reaped while `output` still drains its pipes.
+fn drained_child(fifo: &str) -> Command {
+    shell(&format!(
+        r#"(read line < "{fifo}") &
+           printf "%d\n" $$ > "{fifo}.pid.tmp"
+           mv "{fifo}.pid.tmp" "{fifo}.pid"
+           exit 0"#
+    ))
+}
+
 fn run_scenario(scenario: &str, activity: &StoreActivity) -> i32 {
     match scenario {
+        "boundary" => {
+            match supervise::status(&mut shell("printf 'BOUNDARY_CHILD\\n'; exit 7"), activity) {
+                Ok(status) => say(&format!("BOUNDARY_OK {}", code_of(status))),
+                Err(error) => say(&format!("BOUNDARY_ERR {:?}", error.kind())),
+            }
+            say("DONE");
+            0
+        }
+        "blocked-orphan" => {
+            let fifo = std::env::var("TOG_SUPERVISE_FIFO").unwrap();
+            let result = supervise::output(&mut drained_child(&fifo), activity);
+            assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::Interrupted);
+            let next = supervise::status(&mut shell("printf 'UNEXPECTED_CHILD\\n'"), activity);
+            assert_eq!(next.unwrap_err().kind(), std::io::ErrorKind::Interrupted);
+            say("PENDING_REFUSED");
+            // SAFETY: unblock the signal this scenario's debug failpoint blocked.
+            unsafe {
+                let mut set = std::mem::zeroed();
+                libc::sigemptyset(&mut set);
+                libc::sigaddset(&mut set, libc::SIGTERM);
+                assert_eq!(
+                    libc::pthread_sigmask(libc::SIG_UNBLOCK, &set, std::ptr::null_mut()),
+                    0
+                );
+            }
+            panic!("the pending inherited TERM should terminate the process");
+        }
+        "oneshot-inherited" => {
+            record_signal(libc::SIGTERM);
+            // SAFETY: query the action just installed and make it one-shot.
+            unsafe {
+                let mut action = std::mem::zeroed();
+                assert_eq!(
+                    libc::sigaction(libc::SIGTERM, std::ptr::null(), &mut action),
+                    0
+                );
+                action.sa_flags |= libc::SA_RESETHAND;
+                assert_eq!(
+                    libc::sigaction(libc::SIGTERM, &action, std::ptr::null_mut()),
+                    0
+                );
+            }
+            supervise::status(&mut shell("exit 0"), activity).unwrap();
+            // SAFETY: signal the current thread with a valid signal number.
+            unsafe { libc::raise(libc::SIGTERM) };
+            say(&format!(
+                "HANDLED {}",
+                RECORDED_SIGNALS.load(std::sync::atomic::Ordering::SeqCst)
+            ));
+            unsafe { libc::raise(libc::SIGTERM) };
+            panic!("the one-shot handler should reset to the default");
+        }
+        "inherited-no-restart" => {
+            record_signal(libc::SIGTERM);
+            // SAFETY: query the action just installed and disable syscall restart.
+            unsafe {
+                let mut action = std::mem::zeroed();
+                assert_eq!(
+                    libc::sigaction(libc::SIGTERM, std::ptr::null(), &mut action),
+                    0
+                );
+                action.sa_flags &= !libc::SA_RESTART;
+                assert_eq!(
+                    libc::sigaction(libc::SIGTERM, &action, std::ptr::null_mut()),
+                    0
+                );
+            }
+            supervise::status(&mut shell("exit 0"), activity).unwrap();
+            let (reader, _writer) = std::os::unix::net::UnixStream::pair().unwrap();
+            let done = std::sync::atomic::AtomicBool::new(false);
+            // SAFETY: the calling thread stays live until the signal sender joins.
+            let target = unsafe { libc::pthread_self() } as usize;
+            std::thread::scope(|scope| {
+                scope.spawn(|| {
+                    let deadline = Instant::now() + DEADLINE;
+                    // Repeated signal injection is the stimulus. It covers a
+                    // delivery just before read starts without a timing guess.
+                    while !done.load(std::sync::atomic::Ordering::SeqCst) {
+                        assert!(Instant::now() < deadline, "read was not interrupted");
+                        // SAFETY: target is a live thread and TERM has a recording handler.
+                        unsafe { libc::pthread_kill(target as libc::pthread_t, libc::SIGTERM) };
+                        std::thread::yield_now();
+                    }
+                });
+                let mut byte = 0u8;
+                // SAFETY: reader is owned here and byte is a writable one-byte buffer.
+                let count =
+                    unsafe { libc::read(reader.as_raw_fd(), (&mut byte as *mut u8).cast(), 1) };
+                let error = std::io::Error::last_os_error();
+                done.store(true, std::sync::atomic::Ordering::SeqCst);
+                assert_eq!(count, -1);
+                assert_eq!(error.kind(), std::io::ErrorKind::Interrupted);
+            });
+            say("READ_INTERRUPTED");
+            0
+        }
         // Announces its pid, traps TERM, and blocks inside the trap on a FIFO
         // so the case can inspect the world mid-termination.
         "term-during-wait" => {
@@ -808,33 +959,314 @@ fn run_scenario(scenario: &str, activity: &StoreActivity) -> i32 {
             say(&format!("AFTER {}", code_of(after)));
             code
         }
-        // A second supervisory session while one is live. The holder's child
-        // announces itself on the FIFO, so the second attempt is made while
-        // the first child is provably still running.
-        "session-busy" => {
-            let fifo = std::env::var("TOG_SUPERVISE_FIFO").unwrap();
-            let mut outcome = String::new();
-            std::thread::scope(|scope| {
-                let holder = scope.spawn(|| {
-                    supervise::status(
-                        &mut shell(&format!("printf 'HOLDING\\n' > {fifo}; sleep 1")),
-                        activity,
-                    )
-                    .unwrap()
-                });
-                // Opening the FIFO for read blocks until the held child writes,
-                // so this is a rendezvous with the child's own progress rather
-                // than a delay.
-                std::fs::read_to_string(&fifo).unwrap();
-                outcome = match supervise::status(&mut shell("exit 0"), activity) {
-                    Ok(status) => format!("ACCEPTED {}", code_of(status)),
-                    Err(error) => format!("REJECTED {:?}", error.kind()),
-                };
-                assert!(holder.join().unwrap().success());
+        // Two sessions at once. Each child waits until the other has
+        // started, so both are provably running together; each exits with
+        // its own code.
+        "concurrent" => {
+            let dir = std::env::var("TOG_SUPERVISE_HOME").unwrap();
+            let child = |me: &str, other: &str, code: i32| {
+                shell(&format!(
+                    r#"touch "{dir}/{me}"
+                       i=0
+                       while [ ! -e "{dir}/{other}" ]; do
+                         i=$((i+1)); [ $i -gt 3000 ] && exit 99
+                         sleep 0.01
+                       done
+                       exit {code}"#
+                ))
+            };
+            let (a, b) = std::thread::scope(|scope| {
+                let a = scope.spawn(|| supervise::status(&mut child("a", "b", 11), activity));
+                let b = scope.spawn(|| supervise::status(&mut child("b", "a", 12), activity));
+                (a.join().unwrap(), b.join().unwrap())
             });
-            say(&outcome);
+            say(&format!(
+                "CONCURRENT {} {}",
+                code_of(a.unwrap()),
+                code_of(b.unwrap())
+            ));
             say("DONE");
             0
+        }
+        // Two live sessions whose children trap TERM; one TERM to the
+        // supervisor must reach both.
+        "term-two" => {
+            let child = |name: &str| {
+                shell(&format!(
+                    r#"trap 'printf "CHILD_TERM {name}\n"; exit 45' TERM
+                       printf "READY {name}\n"
+                       while : ; do sleep 0.05 ; done"#
+                ))
+            };
+            let (a, b) = std::thread::scope(|scope| {
+                let a = scope.spawn(|| report(supervise::status(&mut child("A"), activity)));
+                let b = scope.spawn(|| report(supervise::status(&mut child("B"), activity)));
+                (a.join().unwrap(), b.join().unwrap())
+            });
+            if a == 45 && b == 45 {
+                45
+            } else {
+                1
+            }
+        }
+        // A's child is inside its TERM trap when B registers; B's child
+        // must not inherit that TERM.
+        "late-session" => {
+            let fifo = std::env::var("TOG_SUPERVISE_FIFO").unwrap();
+            let gate = format!("{fifo}-gate");
+            std::thread::scope(|scope| {
+                let a = scope.spawn(|| {
+                    let mut command = shell(&format!(
+                        r#"trap 'printf "CHILD_TERM\n"; read line < "{fifo}"; exit 45' TERM
+                           printf "READY\n"
+                           while : ; do sleep 0.05 ; done"#
+                    ));
+                    report(supervise::status(&mut command, activity))
+                });
+                std::fs::read_to_string(&gate).unwrap();
+                match supervise::status(&mut shell("exit 0"), activity) {
+                    Ok(status) => say(&format!("B EXIT {}", code_of(status))),
+                    Err(error) => say(&format!("B ERR {error}")),
+                }
+                a.join().unwrap();
+            });
+            say("DONE");
+            0
+        }
+        // How a signal acts once no session is live. TOG_SUPERVISE_INNER is
+        // `<TERM|INT|HUP|QUIT>-<default|handler>`: with `handler` the
+        // supervisor installs a recording handler before its first session
+        // and then signals itself; with `default` it waits for the case to
+        // signal it, and should die of it.
+        "inherited-after" => {
+            let inner = std::env::var("TOG_SUPERVISE_INNER").unwrap();
+            let (name, mode) = inner.split_once('-').unwrap();
+            let number = signal_named(name);
+            if mode == "handler" {
+                record_signal(number);
+            }
+            let status = supervise::status(&mut shell("exit 0"), activity).unwrap();
+            say(&format!("SESSION {}", code_of(status)));
+            if mode == "handler" {
+                // SAFETY: a plain kill(2) of this process.
+                unsafe { libc::kill(libc::getpid(), number) };
+                let deadline = Instant::now() + DEADLINE;
+                while RECORDED_SIGNALS.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+                    assert!(Instant::now() < deadline, "the recording handler never ran");
+                    std::thread::sleep(TICK);
+                }
+                say(&format!(
+                    "HANDLED {}",
+                    RECORDED_SIGNALS.load(std::sync::atomic::Ordering::SeqCst)
+                ));
+                say("DONE");
+                return 0;
+            }
+            say("READY");
+            loop {
+                std::thread::park_timeout(Duration::from_millis(50));
+            }
+        }
+        // A child that is reaped while a grandchild still holds its output
+        // pipe open, so `output` keeps draining after the reap. Its pid goes
+        // to `<fifo>.pid` so the case can tell when it has been reaped.
+        "term-after-reap" => {
+            let fifo = std::env::var("TOG_SUPERVISE_FIFO").unwrap();
+            let mut command = drained_child(&fifo);
+            let result = supervise::output(&mut command, activity);
+            say(&format!(
+                "RETURNED {:?}",
+                result
+                    .map(|output| code_of(output.status))
+                    .map_err(|error| error.to_string())
+            ));
+            say("DONE");
+            0
+        }
+        // A as in `term-after-reap` (its TERM can only be orphaned), B with
+        // a live child that traps TERM. TOG_SUPERVISE_INNER says nothing;
+        // the case decides which session ends first.
+        "orphan-two" => {
+            let base = std::env::var("TOG_SUPERVISE_FIFO").unwrap();
+            let fifo_a = format!("{base}-a");
+            let fifo_b = format!("{base}-b");
+            std::thread::scope(|scope| {
+                let a = scope.spawn(|| {
+                    let result = supervise::output(&mut drained_child(&fifo_a), activity);
+                    say(&format!(
+                        "A RETURNED {:?}",
+                        result
+                            .map(|output| code_of(output.status))
+                            .map_err(|error| error.to_string())
+                    ));
+                });
+                let b = scope.spawn(|| {
+                    let mut command = shell(&format!(
+                        r#"trap 'printf "B_TERM\n"; read line < "{fifo_b}"; exit 45' TERM
+                           printf "B READY\n"
+                           while : ; do sleep 0.05 ; done"#
+                    ));
+                    let result = supervise::status(&mut command, activity);
+                    say(&format!(
+                        "B RETURNED {:?}",
+                        result.map(code_of).map_err(|error| error.to_string())
+                    ));
+                });
+                a.join().unwrap();
+                b.join().unwrap();
+            });
+            say("DONE");
+            0
+        }
+        // A sees TOG_SUPERVISE_INNER (INT, HUP or QUIT) and ends; then an
+        // unrelated child exit, and B, which must spawn normally.
+        "old-signal" => {
+            let fifo = std::env::var("TOG_SUPERVISE_FIFO").unwrap();
+            let mut command = shell(&format!(
+                r#"printf "CHILDPID %d\nREADY\n" $$
+                   read line < "{fifo}"
+                   exit 0"#
+            ));
+            report(supervise::status(&mut command, activity));
+            let unrelated = Command::new("/bin/sh").args(["-c", "exit 0"]).status();
+            assert!(unrelated.unwrap().success());
+            match supervise::status(&mut shell("exit 7"), activity) {
+                Ok(status) => say(&format!("AFTER {}", code_of(status))),
+                Err(error) => say(&format!("AFTER_ERR {error}")),
+            }
+            say("DONE");
+            0
+        }
+        // Fifteen children on each of two threads at the default tick.
+        "concurrent-latency" => {
+            std::thread::scope(|scope| {
+                for name in ["A", "B"] {
+                    scope.spawn(move || {
+                        let start = Instant::now();
+                        for _ in 0..15 {
+                            let status =
+                                supervise::status(&mut shell("sleep 0.105"), activity).unwrap();
+                            assert!(status.success(), "child did not exit cleanly");
+                        }
+                        say(&format!("TOTAL {name} {}", start.elapsed().as_millis()));
+                    });
+                }
+            });
+            say("DONE");
+            0
+        }
+        // Eight threads of fifty short children with their own exit codes,
+        // and a ninth listing the descriptors its children hold.
+        "churn" => {
+            let count_fds = || std::fs::read_dir("/proc/self/fd").unwrap().count();
+            let pipes = || -> std::collections::BTreeSet<String> {
+                std::fs::read_dir("/proc/self/fd")
+                    .unwrap()
+                    .flatten()
+                    .filter_map(|entry| std::fs::read_link(entry.path()).ok())
+                    .map(|target| target.to_string_lossy().into_owned())
+                    .filter(|target| target.starts_with("pipe:"))
+                    .collect()
+            };
+            let inherited_pipes = pipes();
+            // Warm-up: the first session creates the process's one pipe.
+            supervise::status(&mut shell("exit 0"), activity).unwrap();
+            let before = count_fds();
+            let own_pipes: std::collections::BTreeSet<_> =
+                pipes().difference(&inherited_pipes).cloned().collect();
+            assert_eq!(
+                own_pipes.len(),
+                1,
+                "warm-up must create the notification pipe"
+            );
+            let wrong = std::sync::atomic::AtomicUsize::new(0);
+            let leaked = std::sync::Mutex::new(Vec::new());
+            std::thread::scope(|scope| {
+                for thread in 0..8 {
+                    let wrong = &wrong;
+                    scope.spawn(move || {
+                        for index in 0..50 {
+                            let code = (thread * 31 + index) % 250;
+                            let status =
+                                supervise::status(&mut shell(&format!("exit {code}")), activity)
+                                    .unwrap();
+                            if code_of(status) != code {
+                                wrong.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            }
+                        }
+                    });
+                }
+                scope.spawn(|| {
+                    for _ in 0..10 {
+                        let mut probe = Command::new(std::env::current_exe().unwrap());
+                        probe
+                            .args(["--exact", "supervisor_harness", "--ignored", "--nocapture"])
+                            .env("TOG_SUPERVISE_SCENARIO", "report-fds");
+                        let listing = supervise::output(&mut probe, activity).unwrap();
+                        for line in String::from_utf8_lossy(&listing.stdout).lines() {
+                            let Some((fd, target)) = line.split_once(' ') else {
+                                continue;
+                            };
+                            let fd: i32 = fd.parse().unwrap_or(-1);
+                            if fd > 2 && own_pipes.contains(target) {
+                                leaked.lock().unwrap().push(line.to_string());
+                            }
+                        }
+                    }
+                });
+            });
+            let after = count_fds();
+            say(&format!(
+                "CHURN wrong={} before={before} after={after} leaked={:?}",
+                wrong.load(std::sync::atomic::Ordering::SeqCst),
+                leaked.lock().unwrap()
+            ));
+            say("DONE");
+            0
+        }
+        // The first install fails (TOG_SUPERVISE_FAILPOINT); with
+        // TOG_SUPERVISE_INNER `session` a second session follows. Then the
+        // supervisor waits for the case's TERM.
+        "install-fail" => {
+            match supervise::status(&mut shell("exit 0"), activity) {
+                Ok(status) => say(&format!("FIRST_OK {}", code_of(status))),
+                Err(error) => say(&format!("FIRST_ERR {error}")),
+            }
+            if std::env::var("TOG_SUPERVISE_INNER").as_deref() == Ok("session") {
+                let second = supervise::status(&mut shell("exit 7"), activity).unwrap();
+                say(&format!("SECOND {}", code_of(second)));
+            }
+            say("READY");
+            loop {
+                std::thread::park_timeout(Duration::from_millis(50));
+            }
+        }
+        // The first install pauses after one of its `sigaction` calls
+        // (TOG_SUPERVISE_FAILPOINT); the case sends TERM then.
+        "install-pause" => {
+            let status = supervise::status(&mut shell("exit 0"), activity).unwrap();
+            say(&format!("SURVIVED {}", code_of(status)));
+            0
+        }
+        // Two `int-counter` children at once under a terminal.
+        "int-two" => {
+            let counter = || {
+                let mut command = Command::new(std::env::current_exe().unwrap());
+                command
+                    .args(["--exact", "supervisor_harness", "--ignored", "--nocapture"])
+                    .env("TOG_SUPERVISE_SCENARIO", "int-counter");
+                command
+            };
+            let (a, b) = std::thread::scope(|scope| {
+                let a = scope.spawn(|| report(supervise::status(&mut counter(), activity)));
+                let b = scope.spawn(|| report(supervise::status(&mut counter(), activity)));
+                (a.join().unwrap(), b.join().unwrap())
+            });
+            if a == 48 && b == 48 {
+                48
+            } else {
+                1
+            }
         }
         // Fifteen children that each outlive one former poll tick. Event-driven
         // waiting costs each child only its own lifetime; a 100 ms tick rounds
@@ -1201,28 +1633,6 @@ fn sequential_children_report_numeric_and_signal_wait_statuses() {
     store.wait_until_free();
 }
 
-/// Supervision owns process-wide signal dispositions, so a second
-/// concurrent session in one process is refused as busy instead of waiting on
-/// a process-global mutex.
-///
-/// The rejection is deliberate: unit tests that supervise children from
-/// sibling threads serialize on `SUPERVISION_TEST_LOCK`. If supervision ever
-/// becomes per-operation, delete this case.
-#[test]
-fn a_second_supervisory_session_is_refused_rather_than_queued() {
-    let store = TempStore::new("session-busy");
-    let fifo = store.fifo("session-busy-fifo");
-    let mut harness = spawn_harness("session-busy", &store, None, Some(&fifo));
-    harness.markers.wait_for("DONE");
-    let text = harness.markers.text();
-    assert!(
-        text.contains("REJECTED WouldBlock"),
-        "a concurrent session should report busy, got: {text}"
-    );
-    assert_eq!(harness.finish().code(), Some(0));
-    store.wait_until_free();
-}
-
 /// The wait is driven by the child transition itself, not by a timer.
 /// Under the former 100 ms poll every reap was rounded up to the next tick,
 /// so fifteen children that each live just past one tick paid roughly a
@@ -1235,7 +1645,10 @@ fn a_second_supervisory_session_is_refused_rather_than_queued() {
 #[test]
 fn a_child_exit_wakes_the_supervisor_without_waiting_for_a_poll_tick() {
     let store = TempStore::new("reap-latency");
-    let mut harness = spawn_harness("reap-latency", &store, None, None);
+    // A one-minute tick: only the signal's own wake can meet the bound.
+    let mut harness = spawn_harness_with("reap-latency", &store, None, None, |command| {
+        command.env("TOG_SUPERVISE_TICK_MS", "60000");
+    });
     harness.markers.wait_for("DONE");
     let text = harness.markers.text();
     let total: u128 = text
@@ -1524,7 +1937,7 @@ fn a_nested_read_only_command_completes() {
 /// status. POSIX lets the kernel reap the children of a process that
 /// ignores SIGCHLD, so without the session's own handler `try_wait` finds no
 /// child (ECHILD) and the status is lost. The child still execs with the
-/// SIG_IGN tog inherited, and tog has it back once the session ends.
+/// SIG_IGN tog inherited.
 #[test]
 fn inherited_sigchld_ignore_still_reports_the_exit_status() {
     let store = TempStore::new("sigchld-ignored");
@@ -1550,10 +1963,9 @@ fn inherited_sigchld_ignore_still_reports_the_exit_status() {
         "the child did not get the inherited SIG_IGN back: {text}"
     );
     assert!(text.contains("PROBE 0"), "{text}");
-    assert!(
-        text.contains("AFTER ignored"),
-        "the session did not restore the inherited SIG_IGN: {text}"
-    );
+    // The handler stays once installed (supervision never uninstalls it),
+    // so tog's later unsupervised children keep their exit status too.
+    assert!(text.contains("AFTER handler"), "{text}");
     assert_eq!(harness.finish().code(), Some(0));
     store.wait_until_free();
 }
@@ -1572,10 +1984,476 @@ fn inherited_sigchld_nocldwait_still_reports_the_exit_status() {
     assert!(text.contains("OUTPUT 43 out"), "{text}");
     assert!(text.contains("CHILD_SIGCHLD default"), "{text}");
     assert!(text.contains("PROBE 0"), "{text}");
-    assert!(
-        text.contains("AFTER handler-nocldwait"),
-        "the session did not restore the inherited SA_NOCLDWAIT handler: {text}"
-    );
+    assert!(text.contains("AFTER handler"), "{text}");
+    assert!(!text.contains("AFTER handler-nocldwait"), "{text}");
     assert_eq!(harness.finish().code(), Some(0));
     store.wait_until_free();
+}
+
+/// Two sessions in one process each supervise their own child at the same
+/// time and each gets its own child's exit code back.
+#[test]
+fn concurrent_sessions_each_supervise_their_own_child() {
+    let store = TempStore::new("concurrent");
+    let mut harness = spawn_harness("concurrent", &store, None, None);
+    harness.markers.wait_for("DONE");
+    let text = harness.markers.text();
+    assert!(text.contains("CONCURRENT 11 12"), "{text}");
+    assert_eq!(harness.finish().code(), Some(0));
+    store.wait_until_free();
+}
+
+/// One TERM reaches the child of every live session. Each child handled
+/// it, so nothing is re-raised: the supervisor exits with their code.
+#[test]
+fn parent_term_reaches_every_live_child() {
+    let store = TempStore::new("term-two");
+    let mut harness = spawn_harness("term-two", &store, None, None);
+    harness.markers.wait_for("READY A");
+    harness.markers.wait_for("READY B");
+    signal(harness.pid(), libc::SIGTERM);
+    let status = harness.finish();
+    harness.markers.settle();
+    let text = harness.markers.text();
+    assert!(text.contains("CHILD_TERM A"), "{text}");
+    assert!(text.contains("CHILD_TERM B"), "{text}");
+    assert_eq!(text.matches("INTERRUPTED 15").count(), 2, "{text}");
+    assert_eq!(status.code(), Some(45), "{text}");
+    store.wait_until_free();
+}
+
+/// A session that registers after a TERM was counted does not inherit it.
+#[test]
+fn a_session_registered_after_term_does_not_inherit_it() {
+    let store = TempStore::new("late-session");
+    let fifo = store.fifo("late");
+    let gate = store.fifo("late-gate");
+    let mut harness = spawn_harness("late-session", &store, None, Some(&fifo));
+    harness.markers.wait_for("READY");
+    signal(harness.pid(), libc::SIGTERM);
+    harness.markers.wait_for("CHILD_TERM");
+    release_fifo(&gate);
+    harness.markers.wait_for("B ");
+    release_fifo(&fifo);
+    harness.markers.wait_for("DONE");
+    let text = harness.markers.text();
+    assert!(text.contains("B EXIT 0"), "{text}");
+    assert!(text.contains("INTERRUPTED 15"), "{text}");
+    assert!(text.contains("EXIT 45"), "{text}");
+    assert_eq!(harness.finish().code(), Some(0), "{text}");
+    store.wait_until_free();
+}
+
+/// After a session ends, each of TERM/INT/HUP/QUIT acts as the disposition
+/// tog inherited: the default kills tog, and a handler installed before
+/// the first session runs once and tog carries on.
+#[test]
+fn dispositions_act_as_inherited_whenever_no_session_is_live() {
+    for name in ["TERM", "INT", "HUP", "QUIT"] {
+        let number = signal_named(name);
+        let store = TempStore::new(&format!("inherited-{name}"));
+        let mut harness = spawn_harness(
+            &format!("inherited-after:{name}-default"),
+            &store,
+            None,
+            None,
+        );
+        harness.markers.wait_for("READY");
+        signal(harness.pid(), number);
+        let status = harness.finish();
+        assert_eq!(
+            status.signal(),
+            Some(number),
+            "{name}: inherited default, {status:?}; output:\n{}",
+            harness.markers.text()
+        );
+        store.wait_until_free();
+
+        let mut harness = spawn_harness(
+            &format!("inherited-after:{name}-handler"),
+            &store,
+            None,
+            None,
+        );
+        harness.markers.wait_for("DONE");
+        let text = harness.markers.text();
+        assert!(text.contains("SESSION 0"), "{name}: {text}");
+        assert!(text.contains("HANDLED 1"), "{name}: {text}");
+        assert_eq!(harness.finish().code(), Some(0), "{name}: {text}");
+        store.wait_until_free();
+    }
+}
+
+/// A TERM that arrives after the child is reaped but while `output` still
+/// drains its pipes reaches no child, so it is re-raised when the session
+/// ends and tog dies of it, as it would with no session at all.
+#[test]
+fn term_after_reap_but_before_the_pipes_close_is_not_swallowed() {
+    let store = TempStore::new("term-after-reap");
+    let fifo = store.fifo("drain");
+    let mut harness = spawn_harness("term-after-reap", &store, None, Some(&fifo));
+    wait_until_reaped(&fifo);
+    signal(harness.pid(), libc::SIGTERM);
+    #[cfg(target_os = "linux")]
+    wait_until_delivered(harness.pid(), libc::SIGTERM);
+    // The grandchild still reads the FIFO; releasing it closes the pipes
+    // and ends the session.
+    release_fifo(&fifo);
+    let status = harness.finish();
+    harness.markers.settle();
+    assert_eq!(
+        status.signal(),
+        Some(libc::SIGTERM),
+        "{status:?}; output:\n{}",
+        harness.markers.text()
+    );
+    store.wait_until_free();
+}
+
+/// One TERM while two sessions are live: B forwards it to its child, A's
+/// child was already reaped. A's copy is an orphan, so whichever session
+/// ends last re-raises it and tog dies of TERM, in either order.
+#[test]
+fn a_term_orphaned_by_one_session_reraises_though_another_consumed_it() {
+    for a_first in [true, false] {
+        let store = TempStore::new(if a_first { "orphan-a" } else { "orphan-b" });
+        let base = store.temp.0.join("orphan");
+        let fifo_a = store.fifo("orphan-a");
+        let fifo_b = store.fifo("orphan-b");
+        let mut harness = spawn_harness("orphan-two", &store, None, Some(&base));
+        wait_until_reaped(&fifo_a);
+        harness.markers.wait_for("B READY");
+        signal(harness.pid(), libc::SIGTERM);
+        harness.markers.wait_for("B_TERM");
+        if a_first {
+            release_fifo(&fifo_a);
+            harness.markers.wait_for("A RETURNED");
+            release_fifo(&fifo_b);
+        } else {
+            release_fifo(&fifo_b);
+            harness.markers.wait_for("B RETURNED");
+            release_fifo(&fifo_a);
+        }
+        let status = harness.finish();
+        harness.markers.settle();
+        assert_eq!(
+            status.signal(),
+            Some(libc::SIGTERM),
+            "a_first={a_first}: {status:?}; output:\n{}",
+            harness.markers.text()
+        );
+        store.wait_until_free();
+    }
+}
+
+/// A TERM at A's final counter check stays orphaned while B finishes.
+#[test]
+fn a_term_during_departure_is_not_lost_by_a_nonfinal_session() {
+    let store = TempStore::new("orphan-departure");
+    let base = store.temp.0.join("orphan");
+    let fifo_a = store.fifo("orphan-a");
+    let fifo_b = store.fifo("orphan-b");
+    let gate = store.fifo("departure");
+    let mut harness = spawn_harness_with("orphan-two", &store, None, Some(&base), |command| {
+        command
+            .env("TOG_SUPERVISE_FAILPOINT", "before-deregister")
+            .env("TOG_SUPERVISE_FAILPOINT_FIFO", &gate);
+    });
+    wait_until_reaped(&fifo_a);
+    harness.markers.wait_for("B READY");
+    release_fifo(&fifo_a);
+    harness
+        .markers
+        .wait_for("FAILPOINT PAUSED before-deregister");
+    signal(harness.pid(), libc::SIGTERM);
+    harness.markers.wait_for("B_TERM");
+    release_fifo(&gate);
+    harness.markers.wait_for("A RETURNED");
+    release_fifo(&fifo_b);
+    assert_eq!(harness.finish().signal(), Some(libc::SIGTERM));
+    store.wait_until_free();
+}
+
+/// Every non-TERM interrupt is retained across both session boundaries.
+#[test]
+fn interrupts_at_registration_and_departure_are_reported() {
+    for boundary in ["after-register", "before-deregister"] {
+        for name in ["INT", "HUP", "QUIT"] {
+            let store = TempStore::new(&format!("boundary-{boundary}-{name}"));
+            let gate = store.fifo("boundary");
+            let mut harness = spawn_harness_with("boundary", &store, None, None, |command| {
+                command
+                    .env("TOG_SUPERVISE_FAILPOINT", boundary)
+                    .env("TOG_SUPERVISE_FAILPOINT_FIFO", &gate)
+                    .env("TOG_SUPERVISE_BOUNDARY_SIGNAL", name);
+            });
+            harness
+                .markers
+                .wait_for(&format!("FAILPOINT PAUSED {boundary}"));
+            release_fifo(&gate);
+            harness.markers.wait_for("DONE");
+            let text = harness.markers.text();
+            assert!(
+                text.contains("BOUNDARY_ERR Interrupted"),
+                "{boundary}/{name}: {text}"
+            );
+            assert_eq!(
+                text.contains("BOUNDARY_CHILD"),
+                boundary == "before-deregister",
+                "{text}"
+            );
+            assert_eq!(harness.finish().code(), Some(0));
+            store.wait_until_free();
+        }
+    }
+}
+
+/// A caller blocking TERM cannot pass a pending replay to a later child.
+#[test]
+fn a_blocked_orphaned_term_closes_admission_until_inherited_delivery() {
+    let store = TempStore::new("blocked-orphan");
+    let fifo = store.fifo("drain");
+    let gate = store.fifo("reraise");
+    let mut harness = spawn_harness_with("blocked-orphan", &store, None, Some(&fifo), |command| {
+        command
+            .env("TOG_SUPERVISE_FAILPOINT", "before-reraise")
+            .env("TOG_SUPERVISE_FAILPOINT_FIFO", &gate);
+    });
+    wait_until_reaped(&fifo);
+    signal(harness.pid(), libc::SIGTERM);
+    #[cfg(target_os = "linux")]
+    wait_until_delivered(harness.pid(), libc::SIGTERM);
+    release_fifo(&fifo);
+    harness.markers.wait_for("FAILPOINT PAUSED before-reraise");
+    release_fifo(&gate);
+    let status = harness.finish();
+    harness.markers.settle();
+    let text = harness.markers.text();
+    assert!(text.contains("PENDING_REFUSED"), "{text}");
+    assert!(!text.contains("UNEXPECTED_CHILD"), "{text}");
+    assert_eq!(status.signal(), Some(libc::SIGTERM), "{text}");
+    store.wait_until_free();
+}
+
+#[test]
+fn an_inherited_one_shot_handler_resets_after_its_first_delivery() {
+    let store = TempStore::new("oneshot");
+    let mut harness = spawn_harness("oneshot-inherited", &store, None, None);
+    let status = harness.finish();
+    harness.markers.settle();
+    assert!(harness.markers.text().contains("HANDLED 1"));
+    assert_eq!(status.signal(), Some(libc::SIGTERM));
+    store.wait_until_free();
+}
+
+#[test]
+fn an_inherited_handler_without_restart_still_interrupts_a_read() {
+    let store = TempStore::new("no-restart");
+    let mut harness = spawn_harness("inherited-no-restart", &store, None, None);
+    let status = harness.finish();
+    harness.markers.settle();
+    assert!(harness.markers.text().contains("READ_INTERRUPTED"));
+    assert_eq!(status.code(), Some(0));
+    store.wait_until_free();
+}
+
+/// An INT, HUP or QUIT one session saw is not reported again to a session
+/// that registers after it ended.
+#[cfg(target_os = "linux")]
+#[test]
+fn an_old_signal_is_not_reported_to_a_later_session() {
+    for name in ["INT", "HUP", "QUIT"] {
+        let number = signal_named(name);
+        let store = TempStore::new(&format!("old-{name}"));
+        let fifo = store.fifo("old");
+        let mut harness = spawn_harness("old-signal", &store, None, Some(&fifo));
+        harness.markers.wait_for("READY");
+        signal(harness.pid(), number);
+        wait_until_delivered(harness.pid(), number);
+        release_fifo(&fifo);
+        harness.markers.wait_for("DONE");
+        let text = harness.markers.text();
+        assert!(
+            text.contains(&format!("INTERRUPTED {number}")),
+            "{name}: {text}"
+        );
+        assert!(text.contains("AFTER 7"), "{name}: {text}");
+        assert_eq!(harness.finish().code(), Some(0), "{name}: {text}");
+        store.wait_until_free();
+    }
+}
+
+/// Two threads reaping fifteen short children each stay within the bound a
+/// lone session meets: the tick only bounds how late a wake byte another
+/// session took is noticed.
+#[test]
+fn concurrent_reap_latency_is_bounded_by_the_tick() {
+    let store = TempStore::new("concurrent-latency");
+    let mut harness = spawn_harness("concurrent-latency", &store, None, None);
+    harness.markers.wait_for("DONE");
+    let text = harness.markers.text();
+    for name in ["A", "B"] {
+        let total: u128 = text
+            .lines()
+            .find_map(|line| line.trim().strip_prefix(&format!("TOTAL {name} ")))
+            .unwrap_or_else(|| panic!("no TOTAL {name} in {text}"))
+            .trim()
+            .parse()
+            .unwrap();
+        assert!(total < 2400, "thread {name} took {total} ms:\n{text}");
+    }
+    assert_eq!(harness.finish().code(), Some(0));
+    store.wait_until_free();
+}
+
+/// Four hundred children across eight threads all report their own exit
+/// code, the process ends with the descriptors it started with, and no
+/// child holds an end of the supervisor's pipes.
+#[cfg(target_os = "linux")]
+#[test]
+fn session_churn_loses_no_exit_and_leaks_no_descriptor() {
+    let store = TempStore::new("churn");
+    let mut harness = spawn_harness_with("churn", &store, None, None, |command| {
+        // Deliberately inherit a launcher pipe above stderr. The leak check
+        // must distinguish this descriptor from the supervisor's own pipe.
+        // SAFETY: fcntl only duplicates the post-fork child's stdout.
+        unsafe {
+            command.pre_exec(|| {
+                if libc::fcntl(1, libc::F_DUPFD, 100) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    });
+    harness.markers.wait_for("DONE");
+    let text = harness.markers.text();
+    let line = text
+        .lines()
+        .find(|line| line.starts_with("CHURN "))
+        .unwrap_or_else(|| panic!("no CHURN line in {text}"));
+    assert!(line.contains("wrong=0 "), "{line}");
+    let field = |name: &str| -> usize {
+        line.split_whitespace()
+            .find_map(|part| part.strip_prefix(&format!("{name}=")))
+            .unwrap()
+            .parse()
+            .unwrap()
+    };
+    assert_eq!(field("before"), field("after"), "{line}");
+    assert!(line.ends_with("leaked=[]"), "{line}");
+    assert_eq!(harness.finish().code(), Some(0));
+    store.wait_until_free();
+}
+
+/// A first install that fails at its k-th `sigaction` returns an error,
+/// leaves TERM acting as inherited, and the next session installs the rest
+/// and supervises normally.
+#[test]
+fn a_failed_first_install_leaves_signals_behaving_as_inherited() {
+    for call in 1..=5 {
+        for then in ["term", "session"] {
+            let store = TempStore::new(&format!("install-fail-{call}-{then}"));
+            let mut harness = spawn_harness_with(
+                &format!("install-fail:{then}"),
+                &store,
+                None,
+                None,
+                |command| {
+                    command.env("TOG_SUPERVISE_FAILPOINT", format!("fail-sigaction-{call}"));
+                },
+            );
+            harness.markers.wait_for("READY");
+            let text = harness.markers.text();
+            assert!(text.contains("FIRST_ERR"), "{call}/{then}: {text}");
+            if then == "session" {
+                assert!(text.contains("SECOND 7"), "{call}/{then}: {text}");
+            }
+            signal(harness.pid(), libc::SIGTERM);
+            let status = harness.finish();
+            assert_eq!(
+                status.signal(),
+                Some(libc::SIGTERM),
+                "{call}/{then}: {status:?}; output:\n{text}"
+            );
+            store.wait_until_free();
+        }
+    }
+}
+
+/// A TERM that arrives part-way through the first install, with no session
+/// registered yet, acts as inherited: tog dies of it.
+#[test]
+fn a_term_during_first_install_acts_as_inherited() {
+    for call in 1..=5 {
+        let store = TempStore::new(&format!("install-pause-{call}"));
+        let fifo = store.fifo("pause");
+        let mut harness = spawn_harness_with("install-pause", &store, None, None, |command| {
+            command
+                .env(
+                    "TOG_SUPERVISE_FAILPOINT",
+                    format!("pause-after-sigaction-{call}"),
+                )
+                .env("TOG_SUPERVISE_FAILPOINT_FIFO", &fifo);
+        });
+        harness
+            .markers
+            .wait_for(&format!("FAILPOINT PAUSED {call}"));
+        signal(harness.pid(), libc::SIGTERM);
+        let status = harness.finish();
+        assert_eq!(
+            status.signal(),
+            Some(libc::SIGTERM),
+            "{call}: {status:?}; output:\n{}",
+            harness.markers.text()
+        );
+        store.wait_until_free();
+    }
+}
+
+/// Terminal INT reaches each of two concurrent children exactly once,
+/// through the terminal's group delivery.
+#[test]
+fn terminal_interrupt_reaches_every_concurrent_child() {
+    let store = TempStore::new("pty-int-two");
+    let pty = Pty::open();
+    let mut harness = spawn_harness("int-two", &store, Some(&pty), None);
+    let deadline = Instant::now() + DEADLINE;
+    while harness.markers.text().matches("READY").count() < 2 {
+        assert!(
+            Instant::now() < deadline,
+            "both children never started:\n{}",
+            harness.markers.text()
+        );
+        harness.markers.pump();
+        harness.markers.poll_once(50);
+    }
+    pty.write_control(0x03); // ^C
+    let status = harness.finish();
+    harness.markers.settle();
+    let text = harness.markers.text();
+    assert_eq!(text.matches("INTCOUNT 1").count(), 2, "{text}");
+    assert_eq!(text.matches("INTSEEN").count(), 2, "{text}");
+    assert_eq!(text.matches("INTERRUPTED 2").count(), 2, "{text}");
+    assert_eq!(status.code(), Some(48), "{text}");
+    store.wait_until_free();
+}
+
+/// The pid a `drained_child` wrote, once its supervisor has reaped it.
+fn wait_until_reaped(fifo: &Path) -> i32 {
+    let pidfile = PathBuf::from(format!("{}.pid", fifo.display()));
+    let deadline = Instant::now() + DEADLINE;
+    loop {
+        if let Ok(text) = std::fs::read_to_string(&pidfile) {
+            let pid: i32 = text.trim().parse().unwrap();
+            if !alive(pid) {
+                return pid;
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the drained child was never reaped"
+        );
+        std::thread::sleep(TICK);
+    }
 }

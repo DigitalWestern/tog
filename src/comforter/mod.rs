@@ -71,9 +71,9 @@ pub fn signing_key() -> Option<std::sync::Arc<SigningKey>> {
 }
 
 /// Replace the process signing key. The one test that sets a key holds
-/// both `SUPERVISION_TEST_LOCK` and `attribution_test_lock` across the
-/// set, the write, and the reset; every other closure-writing test holds
-/// at least one of those, so none can observe the test key.
+/// `attribution_test_lock` across the set, the write, and the reset; every
+/// other closure-writing test holds it too, so none can observe the test
+/// key.
 #[cfg(test)]
 pub(crate) fn set_signing_key_for_test(key: Option<std::sync::Arc<SigningKey>>) {
     *SIGNING_KEY
@@ -946,9 +946,7 @@ mod tests {
 
     #[test]
     fn foreign_platform_closure_is_refused_and_legacy_is_accepted() {
-        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let _attribution_lock = crate::kernel::policy::attribution_test_lock();
         let host = Platform::host().unwrap();
         let foreign = Platform::ALL.iter().copied().find(|p| *p != host).unwrap();
         let temp = TempDir::named("closure-plat");
@@ -1002,9 +1000,6 @@ mod tests {
 
     #[test]
     fn strict_publication_writes_the_durable_root_record() {
-        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
         let _attribution_lock = crate::kernel::policy::attribution_test_lock();
         let mut attribution = crate::kernel::policy::Attribution::open("python").unwrap();
         let temp = TempDir::named("closure-durable");
@@ -1147,9 +1142,6 @@ mod tests {
     /// made read-only so the closure write fails after the record write.
     #[test]
     fn publication_persists_the_record_before_the_closure() {
-        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
         let _attribution_lock = crate::kernel::policy::attribution_test_lock();
         // SAFETY: geteuid has no preconditions.
         if unsafe { libc::geteuid() } == 0 {
@@ -1201,9 +1193,6 @@ mod tests {
     /// changes nothing: the pathname record stays as it was.
     #[test]
     fn sync_imports_all_legacy_ecosystems_before_switching_one() {
-        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
         let _attribution_lock = crate::kernel::policy::attribution_test_lock();
         let (_store_dir, store) = test_store("sync-imports-legacy");
         let project_dir = unique_project("sync-imports-legacy");
@@ -1294,9 +1283,6 @@ mod tests {
     /// imported from either.
     #[test]
     fn root_publication_imports_closures_only_through_the_held_project() {
-        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
         let _attribution_lock = crate::kernel::policy::attribution_test_lock();
         let (_store_dir, store) = test_store("held-import");
         let project_dir = unique_project("held-import");
@@ -1358,9 +1344,6 @@ mod tests {
 
     #[test]
     fn non_object_body_is_rejected_before_attribution_claim() {
-        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
         let _attribution_lock = crate::kernel::policy::attribution_test_lock();
         let mut attribution = crate::kernel::policy::Attribution::open("python").unwrap();
         crate::kernel::policy::record(
@@ -1396,9 +1379,6 @@ mod tests {
     /// The failure is injected deterministically.
     #[test]
     fn write_failure_after_claim_leaves_the_next_attribution_clean() {
-        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
         let _attribution_lock = crate::kernel::policy::attribution_test_lock();
         let mut attribution = crate::kernel::policy::Attribution::open("python").unwrap();
         crate::kernel::policy::record(
@@ -1446,9 +1426,6 @@ mod tests {
 
     #[test]
     fn write_closure_succeeds_for_normal_directories() {
-        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
         let _attribution_lock = crate::kernel::policy::attribution_test_lock();
         let mut attribution = crate::kernel::policy::Attribution::open("python").unwrap();
         let temp = TempDir::named("closure-normal");
@@ -1478,9 +1455,6 @@ mod tests {
 
     #[test]
     fn write_closure_signs_with_the_configured_key() {
-        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
         let _attribution_lock = crate::kernel::policy::attribution_test_lock();
         let temp = TempDir::named("closure-signed");
         let project = &temp.0;
@@ -1543,9 +1517,6 @@ mod tests {
 
     #[test]
     fn write_closure_rejects_symlinked_tog_without_creating_outside_closures() {
-        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
         let _attribution_lock = crate::kernel::policy::attribution_test_lock();
         let mut attribution = crate::kernel::policy::Attribution::open("python").unwrap();
         let temp = TempDir::named("closure-tog-symlink");
@@ -1573,9 +1544,6 @@ mod tests {
 
     #[test]
     fn write_closure_rejects_a_symlinked_destination_without_writing_through_it() {
-        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
         let _attribution_lock = crate::kernel::policy::attribution_test_lock();
         let mut attribution = crate::kernel::policy::Attribution::open("python").unwrap();
         let temp = TempDir::named("closure-dest-symlink");
@@ -1617,9 +1585,6 @@ mod tests {
 
     #[test]
     fn write_closure_rejects_symlinked_closures_without_writing_outside() {
-        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
         let _attribution_lock = crate::kernel::policy::attribution_test_lock();
         let mut attribution = crate::kernel::policy::Attribution::open("python").unwrap();
         let temp = TempDir::named("closure-closures-symlink");

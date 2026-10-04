@@ -1251,15 +1251,11 @@ mod tests {
     /// Everything the closure writer's side of the join needs: the lookup,
     /// the policy, and the supplied records, reset when the test ends.
     struct Writer {
-        _supervision: std::sync::MutexGuard<'static, ()>,
         _attribution: std::sync::MutexGuard<'static, ()>,
     }
 
     impl Writer {
         fn new(policy: Policy, supplied: Vec<SuppliedRecord>) -> Self {
-            let supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
             let attribution = policy::attribution_test_lock();
             set_resolution_files_for_test(Some(Arc::new(|ecosystem: &str, _: &ProjectRoot| {
                 Ok((ecosystem == ECO).then(files))
@@ -1267,7 +1263,6 @@ mod tests {
             set_policy_for_test(Some(policy));
             set_supplied_for_test(supplied);
             Self {
-                _supervision: supervision,
                 _attribution: attribution,
             }
         }

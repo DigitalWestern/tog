@@ -56,9 +56,13 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   (at-least-once). Parent-only INT/QUIT/HUP are caught and waited on after startup, not
   forwarded — terminal process-group delivery (`^C`) is the supported path. A cancellation
   across the spawn boundary is never dropped. `128 + signal` is a shell-visible exit code, not
-  a wait status. An inherited ignored SIGCHLD (`SIG_IGN` or `SA_NOCLDWAIT`) is overridden while
-  a child is supervised, so its exit status is not auto-reaped away; the child still execs with
-  the inherited `SIG_IGN`.
+  a wait status. An inherited ignored SIGCHLD (`SIG_IGN` or `SA_NOCLDWAIT`) is overridden from
+  tog's first supervised child on, for the life of the process, so no exit status is
+  auto-reaped away; the child still execs with the inherited `SIG_IGN`. A TERM that reaches no
+  child (it arrives after the child was reaped, while its output still drains) is re-raised
+  when the last supervision ends, so tog stops as the inherited disposition says. Code that
+  installs its own TERM/INT/HUP/QUIT handler after tog's first supervised child replaces tog's
+  for good, and supervision stops forwarding that signal (debug builds assert against it).
 - **The tools a sync runs find the project by pathname.** A sync holds the project
   directory open from its first read to its last write: detection, the project's own
   `.tog/policy.toml`, manifests, locks, closures (including the ones root registration
@@ -133,9 +137,11 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   reads or writes the store. `tog store path` and `tog doctor` still report on it, and
   `tog gc --reset` empties it (the download cache is kept), after which every project
   syncs again. Nothing carries old objects across a format change.
-- **`cargo test -- --ignored` must run single-threaded**: the supervisor owns process-wide
-  signal dispositions and rejects a second concurrent child (`--test-threads=1`; the offline
-  suite holds `SUPERVISION_TEST_LOCK`).
+- **`cargo test -- --ignored` still runs single-threaded** (`--test-threads=1` in README.md
+  and heavy.yml). The supervisor no longer needs it: any number of children can be supervised
+  at once in one process (#57). No parallel run of the end-to-end suites has yet checked
+  whether they share other state (`$HOME`, registries, scratch stores), so the flag stays
+  until one has.
 - **Unpinned host build inputs.** The Linux host C toolchain (gcc, binutils, glibc headers)
   and the macOS Xcode/clang/SDK are not in build identity — two hosts can produce different
   "identical" objects. The Linux OTP artifact needs glibc 2.43 and host `libcrypto.so.3`.

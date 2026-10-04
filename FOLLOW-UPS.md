@@ -78,21 +78,10 @@ After the proxy: the test-suite audit (#351) and then the quality review
   hand. That includes `tog build` syncing a stale ecosystem first; the
   ignored e2e suites could drop their explicit `sync` step to cover it.
 
-- **Supervision redesign: one signal session per operation.** Today one
-  process supervises at most one child; a second concurrent session is
-  rejected with a named busy error (`Session::new` in
-  `src/kernel/supervise.rs`). That follows from process-wide `sigaction`
-  state, not from a design choice. Two alternatives were tried and rejected,
-  so do not retry them: a hard rejection enforced in tests turned a green
-  suite red because parallel test threads legitimately supervise at once,
-  and a blocking lock reintroduces an unbounded silent wait. The interim
-  workaround is `SUPERVISION_TEST_LOCK` plus `--test-threads=1` for
-  `--ignored` targets. Design: `docs/agent/DESIGNS.md` §5 "Per-operation
-  signal sessions" (#57); implementation follows its review.
 - **Resolution proxy PR 5 review leftovers (#428).** One checklist issue
   per theme:
   - #430 signing key: other TOML parsers quote the failing line, and the no-store sandbox relay is unscrubbed.
-  - #431 cargo confinement edges: a symlinked spelling of the root, grandchild-held pipes (fixed with #57), an offline git-dependency test.
+  - #431 cargo confinement edges: a symlinked spelling of the root, grandchild-held pipes (left open by #57), an offline git-dependency test.
   - #432 resolution ledger: `content_query_keys` never recorded, and `tog plan`'s sdist ledgers unrooted.
 - **Test-suite audit of 2026-09-27 (#351).** Nine reviewers, one per
   area, looked for tests that stay green when the code they name is
@@ -217,12 +206,14 @@ After the proxy: the test-suite audit (#351) and then the quality review
   first.
 - **macOS arm64 gate (#66). Last, by the owner's choice.** The suites
   below and the two-machine lock diff passed on the Mac on 2026-09-25
-  (after #305); #57 and the Mach allow-list are what is left. Run on the Mac:
+  (after #305); `tests/supervise_signals.rs` (#57) and the Mach allow-list
+  are what is left. Run on the Mac:
   `cargo test`, `cargo test --test gc -- --ignored`,
   `cargo test --test cli audit`, and
   `cargo test --test toolchain_lock -- --ignored`, including the
   case-insensitive-filesystem paths the root-key code relies on. Darwin
-  identity goldens must stay byte-identical. It also covers the per-operation signal sessions
-  implementation (#57) once that lands, and the resolution proxy's Mach
-  allow-list (`tools/proxy_spike/macos_mach.sh`). Nothing Linux-side
+  identity goldens must stay byte-identical. It also covers
+  `cargo test --test supervise_signals` for the per-operation signal
+  sessions (#57; everything but the `/proc` cases runs there), and the
+  resolution proxy's Mach allow-list (`tools/proxy_spike/macos_mach.sh`). Nothing Linux-side
   clears this.

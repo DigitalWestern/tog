@@ -2654,9 +2654,6 @@ mod tests {
         // The changed selection below reaches the re-plan path, which runs
         // the store go through the supervisor: one supervised child at a
         // time (see `plan_cache_key_covers_the_go_sources`).
-        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
         let temp = TempDir::new();
         let project = temp.0.join("proj");
         let (_, gosum, plan) = plan_fixture(&project);
@@ -2961,9 +2958,6 @@ mod tests {
         // which owns process-wide signal dispositions: one supervised child
         // at a time, so every test that can reach a supervised child holds
         // this (same convention as kernel::gitsrc's realization tests).
-        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
         let temp = TempDir::new();
         let project = temp.0.join("proj");
         let (gomod, gosum, plan) = plan_fixture(&project);

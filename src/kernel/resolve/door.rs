@@ -951,9 +951,6 @@ get() {
         policy: Policy,
         adjust: impl FnOnce(&mut ConfinedSpec<'_>),
     ) -> Outcome {
-        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
         let _serial = policy::attribution_test_lock();
         RELAY_FOR_TEST.with(|slot| *slot.borrow_mut() = relay);
         SKIP_SCAN_FOR_TEST.with(|skip| skip.set(true));
