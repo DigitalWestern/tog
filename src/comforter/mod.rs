@@ -695,10 +695,21 @@ pub fn closure_object(
     if closure[key]["path"].as_str().map(Path::new) != Some(path.as_path()) {
         return Err(bad("recorded path disagrees with the store"));
     }
-    if !probe.is_empty() && !path.join(probe).is_file() {
+    if !probe.is_empty() && !probe_is_inside(&path, probe) {
         return Err(bad("object is missing its expected content"));
     }
     Ok(path)
+}
+
+/// Whether `probe` names a regular file that stays inside `object` once
+/// every link is followed. `is_file` alone follows links anywhere, so an
+/// object carrying `bin/go -> /usr/bin/true` would pass and land on PATH.
+/// Links within the object (`bin/python3 -> python3.12`) still pass.
+fn probe_is_inside(object: &Path, probe: &str) -> bool {
+    let (Ok(root), Ok(target)) = (object.canonicalize(), object.join(probe).canonicalize()) else {
+        return false;
+    };
+    target.starts_with(&root) && fs::metadata(&target).is_ok_and(|meta| meta.is_file())
 }
 
 /// Reserve a store-owned backup destination without moving the user's
@@ -1006,6 +1017,12 @@ mod tests {
     }
 
     pub(super) fn complete_object(store: &Store, name: &str) -> String {
+        object_with(store, name, |_| {})
+    }
+
+    /// A published test object whose staging `fill` populates beyond its
+    /// `payload` file.
+    pub(super) fn object_with(store: &Store, name: &str, fill: impl FnOnce(&Path)) -> String {
         let activity = &store
             .activity(crate::kernel::activity::ActivityMode::Shared)
             .unwrap();
@@ -1019,6 +1036,7 @@ mod tests {
         let id = identity.object_id();
         let staged = store.stage_with_activity(activity).unwrap();
         fs::write(staged.join("payload"), name).unwrap();
+        fill(&staged);
         store
             .commit_with_activity_and_deps(
                 activity,
@@ -1723,7 +1741,7 @@ mod tests {
 /// that must not reach the child.
 #[cfg(test)]
 mod closure_object_tests {
-    use super::tests::{complete_object, test_store};
+    use super::tests::{complete_object, object_with, test_store};
     use super::*;
     use crate::kernel::activity::ActivityMode;
     use crate::kernel::testutil::TempDir;
@@ -1864,6 +1882,49 @@ mod closure_object_tests {
             refusal(&store, closure_for(&store, &id), "."),
             "object is missing its expected content",
         );
+    }
+
+    /// The probe is followed through links, but only within the object: a
+    /// link out of it, to a directory, or to nothing is not the content.
+    #[test]
+    fn a_probe_link_must_stay_inside_the_object() {
+        use std::os::unix::fs::symlink;
+        let (_dir, store) = test_store("closure-object-probe-links");
+        let outside = store.root.join("outside-tool");
+        fs::write(&outside, "x").unwrap();
+        let id = object_with(&store, "linked", |staged| {
+            fs::create_dir(staged.join("bin")).unwrap();
+            fs::write(staged.join("bin/tool-1.2"), "x").unwrap();
+            symlink("tool-1.2", staged.join("bin/tool")).unwrap();
+            symlink("../bin", staged.join("bin/up")).unwrap();
+            symlink(&outside, staged.join("bin/escape")).unwrap();
+            symlink("../../..", staged.join("bin/root")).unwrap();
+            symlink("nothing", staged.join("bin/dangling")).unwrap();
+            symlink("bin", staged.join("dirlink")).unwrap();
+        });
+        let activity = store.activity(ActivityMode::Shared).unwrap();
+        for probe in ["bin/tool", "bin/up/tool", "dirlink/tool-1.2"] {
+            let path = closure_object(
+                &store,
+                &activity,
+                &closure_for(&store, &id),
+                "runtime_object",
+                probe,
+            );
+            assert_eq!(path.unwrap(), store.object_path(&id), "{probe}");
+        }
+        let outside_name = outside.file_name().unwrap().to_str().unwrap();
+        for probe in [
+            "bin/escape".to_owned(),
+            format!("bin/root/{outside_name}"),
+            "bin/dangling".to_owned(),
+            "dirlink".to_owned(),
+        ] {
+            assert_refused(
+                refusal(&store, closure_for(&store, &id), &probe),
+                "object is missing its expected content",
+            );
+        }
     }
 
     fn closure_for(store: &Store, id: &str) -> serde_json::Value {
