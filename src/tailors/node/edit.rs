@@ -524,9 +524,10 @@ fn npm_edit(edit: &ManifestEdit<'_>, door: &mut ResolutionDoor<'_>) -> io::Resul
     if !ui::verbose() {
         spec.arg("--silent");
     }
+    super::quiet_npm(&mut spec);
     match verb {
         EditVerb::Add => {
-            spec.args(["install", "--package-lock-only", "--ignore-scripts"]);
+            spec.arg("install").args(super::NPM_RESOLVE_ONLY);
             if dev {
                 spec.arg("--save-dev");
             }
@@ -535,13 +536,13 @@ fn npm_edit(edit: &ManifestEdit<'_>, door: &mut ResolutionDoor<'_>) -> io::Resul
             }
         }
         EditVerb::Remove => {
-            spec.args(["uninstall", "--package-lock-only", "--ignore-scripts"]);
+            spec.arg("uninstall").args(super::NPM_RESOLVE_ONLY);
             if !texts.is_empty() {
                 spec.arg("--").args(texts);
             }
         }
         EditVerb::Update => {
-            spec.args(["update", "--package-lock-only", "--ignore-scripts"]);
+            spec.arg("update").args(super::NPM_RESOLVE_ONLY);
             if !texts.is_empty() {
                 spec.arg("--").args(texts);
             }

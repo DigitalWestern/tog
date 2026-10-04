@@ -260,6 +260,13 @@ pub fn runtime_object_id(platform: Platform, selected: &Selected) -> io::Result<
     Ok(node_identity_of(&spec, platform).object_id())
 }
 
+/// The identity `realize_runtime` commits, for a test that plants a
+/// stand-in Node object.
+#[cfg(test)]
+pub(crate) fn runtime_identity(selected: &Selected, platform: Platform) -> io::Result<Identity> {
+    Ok(node_identity_of(&node_row(selected, platform)?, platform))
+}
+
 /// The Node object identity, from the row the selection names. It is
 /// byte-identical to the one the catalog row produced: the row carries the
 /// same version and the same artifact digest.
@@ -325,6 +332,26 @@ pub fn ensure_node_for(
     platform: Platform,
 ) -> io::Result<PathBuf> {
     realize_runtime(store, activity, platform, &shipped_selection()?)
+}
+
+/// How every store npm resolution runs: it writes the lock and nothing
+/// else, runs no lifecycle script, and makes no request beyond the
+/// resolution itself. npm otherwise POSTs the tree to the audit endpoint
+/// and fetches its update notifier on every install (#212).
+pub(crate) const NPM_RESOLVE_ONLY: &[&str] = &[
+    "--package-lock-only",
+    "--ignore-scripts",
+    "--no-audit",
+    "--no-fund",
+    "--no-update-notifier",
+];
+
+/// The same three settings for anything npm starts, which reads the
+/// environment rather than npm's argv.
+pub(crate) fn quiet_npm(spec: &mut crate::kernel::resolve::DelegateSpec) {
+    spec.env("npm_config_audit", "false")
+        .env("npm_config_fund", "false")
+        .env("npm_config_update_notifier", "false");
 }
 
 /// Realize the Node this selection names (interpreter at <obj>/bin/node).
