@@ -1,0 +1,82 @@
+schema_version = 1
+tog_version = "0.1.0"
+
+[toolchain.node]
+runtime = "node"
+release = "node-24.20.0"
+bundle_id = "sha256:3cb38df3f844d50b4e80ae966910f7a50e6356e95e8760f7ec7a9189f86c54f3"
+primary = "node"
+components = ["node"]
+[toolchain.node.component.node]
+version = "24.20.0"
+[[toolchain.node.inputs]]
+path = ".node-version"
+field = "version"
+absent = true
+[[toolchain.node.inputs]]
+path = "package.json"
+field = "engines.node"
+absent = true
+sha256 = "d44283f22832b980f7dfb3995d2b168939cb7f584dd25138b77cce27b868c1c8"
+[toolchain.node.platforms."aarch64-apple-darwin".artifacts.node]
+provider = "nodejs.org"
+build = "24.20.0"
+recipe = "nodejs/legacy"
+url = "https://nodejs.org/dist/v24.20.0/node-v24.20.0-darwin-arm64.tar.gz"
+digest = "sha256:40e5607e5ecb3db9192723776da2d75d966260fc74a7a9e731c1bd67dda96bc8"
+[toolchain.node.platforms."x86_64-unknown-linux-gnu".artifacts.node]
+provider = "nodejs.org"
+build = "24.20.0"
+recipe = "nodejs/legacy"
+url = "https://nodejs.org/dist/v24.20.0/node-v24.20.0-linux-x64.tar.gz"
+digest = "sha256:855d581f8a4eb1a8117e3426de25fe02770592febcfb31369aee1ffbfee9e8ec"
+
+[toolchain.python]
+runtime = "cpython"
+release = "cpython-3.12.14"
+bundle_id = "sha256:52bb0de6ef3004a212f6885a9f08682c1bc041c554f3cdcd7f08fd966ae52537"
+primary = "cpython"
+components = ["cpython", "uv"]
+[toolchain.python.helpers]
+rust = "1.98.1"
+[toolchain.python.component.cpython]
+version = "3.12.14"
+[toolchain.python.component.uv]
+version = "0.12.7"
+[[toolchain.python.inputs]]
+path = ".python-version"
+field = "version"
+absent = true
+[[toolchain.python.inputs]]
+path = "pyproject.toml"
+field = "project.requires-python"
+absent = true
+[[toolchain.python.inputs]]
+path = "pyproject.toml"
+field = "tool.poetry.dependencies.python"
+absent = true
+[toolchain.python.platforms."aarch64-apple-darwin".artifacts.cpython]
+provider = "python-build-standalone"
+build = "20260825"
+recipe = "cpython/legacy"
+url = "https://github.com/astral-sh/python-build-standalone/releases/download/20260825/cpython-3.12.14%2B20260825-aarch64-apple-darwin-install_only.tar.gz"
+digest = "sha256:62eef3fcf48fa4f792d0d6d267c140b81aaea0edca4ae0641d8021854314f966"
+[toolchain.python.platforms."aarch64-apple-darwin".artifacts.uv]
+provider = "uv"
+build = "0.12.7"
+recipe = "uv/legacy"
+url = "https://github.com/astral-sh/uv/releases/download/0.12.7/uv-aarch64-apple-darwin.tar.gz"
+digest = "sha256:127ebdda7ad953cdf198e964b570ea5771b85467ea93eb7cb6d6f8e6f55408f3"
+[toolchain.python.platforms."x86_64-unknown-linux-gnu".artifacts.cpython]
+provider = "python-build-standalone"
+build = "20260825"
+recipe = "cpython/legacy"
+url = "https://github.com/astral-sh/python-build-standalone/releases/download/20260825/cpython-3.12.14%2B20260825-x86_64-unknown-linux-gnu-install_only.tar.gz"
+digest = "sha256:cbdd2f0cf02f941bc5c81e546f377275e322733abffe805ac29d2b7e8a58f7e3"
+[toolchain.python.platforms."x86_64-unknown-linux-gnu".artifacts.uv]
+provider = "uv"
+build = "0.12.7"
+recipe = "uv/legacy"
+url = "https://github.com/astral-sh/uv/releases/download/0.12.7/uv-x86_64-unknown-linux-gnu.tar.gz"
+digest = "sha256:788f18abea7c5f55d6216e4f5613fd89d4d59b631efeec117b2b07fe72f1da21"
+
