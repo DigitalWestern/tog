@@ -1284,6 +1284,58 @@ fn read_only_reports_never_create_the_store() {
     );
 }
 
+#[test]
+fn successful_reports_ignore_store_permissions_and_the_gc_lease() {
+    use tog::kernel::activity::ActivityMode;
+    use tog::kernel::store::Store;
+
+    let home = TempDir::boundary("cli-readonly-success-home");
+    let project = TempDir::boundary("cli-readonly-success-project");
+    synced_python_closure_with_exception(&home.0, &project.0, "git-dependency");
+    let store = Store::open_at(&home.0.join("store")).unwrap();
+    drop(store.activity(ActivityMode::Exclusive).unwrap());
+    let lock = store.root.join("activity.lock");
+    let before = common::snapshot(&store.root);
+
+    let check_reports = || {
+        for args in [["status", "--json"].as_slice(), ["sbom"].as_slice()] {
+            let mut child = command(&project.0, &home.0, &store.root)
+                .args(args)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while child.try_wait().unwrap().is_none() {
+                if std::time::Instant::now() >= deadline {
+                    child.kill().unwrap();
+                    child.wait().unwrap();
+                    panic!("{args:?} waited for the GC lease");
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            let out = child.wait_with_output().unwrap();
+            assert!(out.status.success(), "{args:?}: {}", text(&out.stderr));
+            let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+            if args[0] == "status" {
+                assert_eq!(value["synced"], true);
+            } else {
+                assert_eq!(value["bomFormat"], "CycloneDX");
+            }
+        }
+        assert_eq!(common::snapshot(&store.root), before);
+    };
+
+    std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o444)).unwrap();
+    std::fs::set_permissions(&store.root, std::fs::Permissions::from_mode(0o555)).unwrap();
+    check_reports();
+    std::fs::set_permissions(&store.root, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+    let _gc = store.activity(ActivityMode::Exclusive).unwrap();
+    check_reports();
+}
+
 /// A closure whose inputs were never recorded cannot be compared with the
 /// files on disk, so `status` must not report it synced or exit 0: a CI
 /// gate that trusts that word would admit any closure old enough.
