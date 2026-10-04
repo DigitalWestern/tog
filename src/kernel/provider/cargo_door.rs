@@ -576,7 +576,7 @@ pub(crate) fn member_dirs(root: &ProjectRoot) -> io::Result<Members> {
     let placed = place_members(root.path(), &manifest)?;
     let left_out = |dir: &Path| placed.excluded(root.path(), dir);
     for pattern in &placed.inside {
-        let expanded = expand(root.path(), pattern)?;
+        let expanded = expand_or_literal(root.path(), pattern)?;
         for dir in expanded.dirs {
             if !left_out(&dir)
                 && root.is_input_file(&dir.join("Cargo.toml"))
@@ -678,7 +678,7 @@ fn external_members(root: &Path, manifest: &toml::Table) -> io::Result<Vec<PathB
             dirs.push(literal);
             continue;
         }
-        let expanded = expand(&literal, &rest.join("/"))?;
+        let expanded = expand_or_literal(&literal, &rest.join("/"))?;
         dirs.extend(
             expanded
                 .dirs
@@ -814,6 +814,59 @@ pub(crate) struct Expanded {
     /// Directories it matches, or may match below, through a symlink to a
     /// directory: not followed.
     through_symlinks: Vec<PathBuf>,
+    /// Whether the whole pattern matched anything at all, a file
+    /// included: cargo falls back to the literal path only when it matched
+    /// nothing ([`expand_or_literal`]).
+    matched: bool,
+}
+
+/// [`expand`], with cargo's fallback (`WorkspaceRootConfig::members_paths`
+/// in 1.98): a pattern that matches nothing is taken as a literal path, so
+/// `crates/a[1]` names the directory `crates/a[1]` when no `crates/a1`
+/// exists. The literal path gets the walk's own rules: reached through a
+/// symlinked directory it is reported as such, and one that is missing or
+/// not a directory names nothing (cargo would report it).
+fn expand_or_literal(root: &Path, pattern: &str) -> io::Result<Expanded> {
+    let mut expanded = expand(root, pattern)?;
+    if pattern.is_empty()
+        || expanded.matched
+        || !expanded.dirs.is_empty()
+        || !expanded.through_symlinks.is_empty()
+    {
+        return Ok(expanded);
+    }
+    let literal = PathBuf::from(pattern);
+    let mut at = PathBuf::new();
+    for part in literal.components() {
+        at.push(part);
+        let path = root.join(&at);
+        let meta = match std::fs::symlink_metadata(&path) {
+            Ok(meta) => meta,
+            Err(error)
+                if error.kind() == io::ErrorKind::NotFound
+                    || error.raw_os_error() == Some(libc::ENOTDIR) =>
+            {
+                return Ok(expanded)
+            }
+            Err(error) => {
+                return Err(io::Error::new(
+                    error.kind(),
+                    format!("read {}: {error}", path.display()),
+                ))
+            }
+        };
+        if meta.file_type().is_symlink() {
+            if path.is_dir() {
+                expanded.through_symlinks.push(at);
+            }
+            return Ok(expanded);
+        }
+        if !meta.is_dir() {
+            return Ok(expanded);
+        }
+    }
+    expanded.dirs.push(literal);
+    Ok(expanded)
 }
 
 /// One `/`-separated part of a members glob.
@@ -897,6 +950,9 @@ pub(crate) fn expand(root: &Path, pattern: &str) -> io::Result<Expanded> {
                         .is_some_and(|name| pattern.matches_with(name, glob::MatchOptions::new()));
                     if !matches {
                         continue;
+                    }
+                    if index + 1 == parts.len() {
+                        out.matched = true;
                     }
                     index + 1
                 }

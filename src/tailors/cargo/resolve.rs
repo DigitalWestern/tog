@@ -463,6 +463,116 @@ mod tests {
         );
     }
 
+    /// cargo's fallback (checked against `cargo metadata` on 1.98.1): a
+    /// members glob that matches nothing is its literal path, so
+    /// `crates/a[1]` names that directory, while `crates/b[2]` names
+    /// `crates/b2` when it exists and a pattern that matched only a file
+    /// names nothing. The literal member is an output: a receipt signed
+    /// over the workspace goes stale when its manifest changes.
+    #[test]
+    fn a_members_glob_that_matches_nothing_is_its_literal_path() {
+        use crate::kernel::resolve::record::{
+            self, file_digests, Isolation, Judgment, LedgerSummary, RecordDoor, RecordFacts,
+            ResolutionFiles, ResolutionRecord, Tool,
+        };
+        let temp = TempDir::named("cargo-literal-member");
+        let root = temp.0.join("ws");
+        for (dir, name) in [
+            ("crates/a[1]", "alit"),
+            ("crates/b[2]", "blit"),
+            ("crates/b2", "btwo"),
+            ("files/c[1]", "clit"),
+        ] {
+            package(&root.join(dir), name);
+        }
+        fs::write(root.join("files/c1"), "").unwrap();
+        fs::write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"crates/a[1]\", \"crates/b[2]\", \"files/c[1]\"]\n",
+        )
+        .unwrap();
+        fs::write(root.join("Cargo.lock"), "version = 4\n").unwrap();
+        let held = ProjectRoot::open(&root).unwrap();
+        let outputs = resolution_outputs(&held).unwrap();
+        assert_eq!(
+            outputs,
+            [
+                "Cargo.toml",
+                "Cargo.lock",
+                "crates/a[1]/Cargo.toml",
+                "crates/b2/Cargo.toml"
+            ]
+            .map(PathBuf::from)
+            .to_vec()
+        );
+
+        // A receipt over the workspace as it is attests it, and goes stale
+        // when the literal member's manifest changes.
+        let files = ResolutionFiles {
+            outputs,
+            inputs: resolution_inputs(&held).unwrap(),
+        };
+        let key_path = temp.0.join("key");
+        crate::kernel::signing::generate(&key_path).unwrap();
+        let key = crate::kernel::signing::SigningKey::load(&key_path).unwrap();
+        let mut ledger =
+            crate::kernel::resolve::ledger::PortableLedger::new("cargo", "edit").unwrap();
+        ledger.insert(crate::kernel::resolve::ledger::Entry {
+            class: "metadata".into(),
+            method: "GET".into(),
+            url: "https://index.crates.io/3/i/itoa".into(),
+            status: 200,
+            sha256: Some(record::sha256_hex(b"index")),
+            claimed: None,
+            verified: false,
+            freshness: None,
+            redirected_to: None,
+        });
+        let record = ResolutionRecord::new(RecordFacts {
+            ecosystem: "cargo".into(),
+            door: RecordDoor::Edit,
+            tool: Tool {
+                name: "cargo".into(),
+                version: "1.98.1".into(),
+            },
+            command: vec!["add".into(), "itoa".into()],
+            outputs: file_digests(&held, &files.outputs).unwrap(),
+            inputs: file_digests(&held, &files.inputs).unwrap(),
+            ledger: LedgerSummary::of(&ledger.identity().object_id(), &ledger),
+            isolation: Isolation::Confined,
+            exceptions: vec![],
+        })
+        .unwrap();
+        let bytes = record::envelope_bytes(&record.envelope(Some(&key)).unwrap()).unwrap();
+        let trusted: crate::kernel::signing::KeySet = [key.public_key()].into_iter().collect();
+        let judge = || record::judge("receipt", &bytes, "cargo", &trusted, &files, &held).unwrap();
+        assert!(matches!(judge(), Judgment::Attests(_)));
+        fs::write(
+            root.join("crates/a[1]/Cargo.toml"),
+            "[package]\nname = \"alit\"\nversion = \"0.2.0\"\n",
+        )
+        .unwrap();
+        match judge() {
+            Judgment::Unrecorded(finding) => {
+                let detail = finding.describe();
+                assert!(
+                    detail.contains("stale-outputs") && detail.contains("crates/a[1]/Cargo.toml"),
+                    "{detail}"
+                );
+            }
+            Judgment::Attests(_) => panic!("an edited member manifest still attests"),
+        }
+
+        // The literal path follows the walk's rules: through a symlinked
+        // directory it is refused by name.
+        fs::rename(root.join("crates/a[1]"), temp.0.join("moved")).unwrap();
+        std::os::unix::fs::symlink(temp.0.join("moved"), root.join("crates/a[1]")).unwrap();
+        let error = cargo_door::refuse_unlisted_members(&held)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("crates/a[1]"), "{error}");
+    }
+
     use crate::kernel::platform::Platform;
     use crate::kernel::policy::{self, Attribution, Exception, Policy};
     use crate::kernel::provider::crates_index::{DOWNLOAD_HOST, INDEX_HOST};
