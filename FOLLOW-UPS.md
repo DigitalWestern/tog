@@ -38,6 +38,15 @@ The macOS door (Seatbelt rules, the Mach allow-list from one run of
 `tools/proxy_spike/macos_mach.sh` on a Mac, tree freeze) is not one of
 these; it waits with the macOS gate below.
 
+Leftovers from PR 5's review (#428), each a checklist issue:
+
+- #430 signing key: other TOML parsers quote the failing line, and the
+  no-store sandbox relay is unscrubbed.
+- #431 cargo confinement edges: a symlinked spelling of the root,
+  grandchild-held pipes (fixed with #57), an offline git-dependency test.
+- #432 resolution ledger: `content_query_keys` never recorded, and
+  `tog plan`'s sdist ledgers unrooted.
+
 After the proxy: the test-suite audit (#351) and then the quality review
 (#264), both under "Open work", each in its listed order.
 
