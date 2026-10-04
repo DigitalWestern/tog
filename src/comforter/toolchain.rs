@@ -162,6 +162,21 @@ fn choose(
     Ok(select_for(&entry.catalog, ecosystem, rows)?.clone())
 }
 
+/// A selection that failed while creating the lock, with the reason the
+/// failing ecosystem matters even to a command scoped to another one: the
+/// lock describes the whole project, so a first `tog build cargo` still
+/// selects for a Python pin (#180).
+fn first_lock_needs_every(ecosystem: &str, error: io::Error) -> io::Error {
+    io::Error::new(
+        error.kind(),
+        format!(
+            "{error}\n(creating tog-toolchain.toml selects a toolchain for every ecosystem \
+             in the project, {ecosystem} included, so every sync and build here waits on \
+             this; fix the {ecosystem} toolchain error above, then run `tog`)"
+        ),
+    )
+}
+
 /// One selection read from a committed section, checked against the host.
 fn from_section(
     entry: &EcosystemInput,
@@ -329,7 +344,8 @@ pub fn resolve(
                 for entry in &inputs {
                     let ecosystem = entry.lock_ecosystem.as_str();
                     let rows = rows_of(&discovered, ecosystem);
-                    let bundle = choose(root, platform, entry, rows)?;
+                    let bundle = choose(root, platform, entry, rows)
+                        .map_err(|error| first_lock_needs_every(ecosystem, error))?;
                     next.set_ecosystem(ecosystem, &bundle, rows)?;
                     next.set_helpers(ecosystem, &entry.helper_pins)?;
                     entries.insert(
@@ -709,6 +725,34 @@ mod tests {
             mode,
             false,
         )
+    }
+
+    #[test]
+    fn a_first_lock_preserves_a_missing_local_rust_toolchain_error() {
+        let temp = TempDir::new();
+        let dir = temp.0.join("crate");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(
+            dir.join("rust-toolchain.toml"),
+            "[toolchain]\npath = \"missing-rust\"\n",
+        )
+        .unwrap();
+        let root = ProjectRoot::open(&dir).unwrap();
+        let original = resolve_rust(&root, Mode::ReadOnly).unwrap_err();
+        let first = resolve_rust(&root, Mode::Writable).unwrap_err();
+        assert_eq!(original.kind(), io::ErrorKind::NotFound);
+        assert_eq!(first.kind(), original.kind());
+        let message = first.to_string();
+        assert!(message.starts_with(&original.to_string()), "{message}");
+        assert!(
+            message.contains("fix the rust toolchain error above"),
+            "{message}"
+        );
+        assert!(
+            !message.contains("change the rust version request"),
+            "{message}"
+        );
+        assert!(!dir.join(LOCK_PATH).exists());
     }
 
     /// `targets` and `components` are lock rows: editing either stales the

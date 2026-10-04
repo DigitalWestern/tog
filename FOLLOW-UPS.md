@@ -57,6 +57,7 @@ After the proxy: the test-suite audit (#351) and then the quality review
 - **#464: macOS supervision: deferred notification-pipe initialization and validation.** macOS supervision initialization and validation. Deferred by the owner on 2026-10-04.
 - **#465: heavy: audit shared state before allowing parallel ignored suites.** audit shared state before running ignored suites in parallel. Keep --test-threads=1 until local evidence supports removal.
 - **#466: ci: GitHub Actions job startup blocked by account billing or spending limit.** Actions jobs cannot start because of account billing or spending-limit restrictions. Pick: owner repairs account access, use documented local checks meanwhile.
+- **#480: searchable project ancestors.** Let descriptor traversal and publication revalidation use search access without requiring ancestor directory listings. Pick: O_PATH for intermediate Linux components while preserving identity checks.
 - **#469: root removal identity.** Carry the decoded record's device/inode and held directory through deletion. Refuse replacements, including directory entries.
 
 - **The action's fixture wakes the heavy suite (#426).** A change under
@@ -160,7 +161,6 @@ After the proxy: the test-suite audit (#351) and then the quality review
   - #333 ruby: host-fallback fingerprint is stat-based, not content-based (accepted).
 - **Smaller open issues from the 2026-09-23/24 run.** One line each; the
   issue has the options and the pick.
-  - #180 build: first build with no lock still needs a catalog row for every ecosystem.
   - #183 `status`/`doctor` create and lease the store; add a read-only context mode.
   - #188 npm: realize `file:` packages as tog-owned trees.
   - #190 `tog x` py: tools in a Rust-locked project build sdists on shipped Rust.

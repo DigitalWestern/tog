@@ -822,6 +822,36 @@ fn run_and_env_sync_a_project_before_reading_it() {
     }
 }
 
+/// The first build in a project with no toolchain lock creates the lock
+/// for every ecosystem (#180), so a Python pin no catalog carries stops
+/// `tog build cargo` too. The error says why, and what clears it.
+/// Offline: selection fails before the store is written or anything is
+/// fetched.
+#[test]
+fn a_first_scoped_build_explains_why_another_ecosystem_stops_it() {
+    let home = TempDir::boundary("cli-first-build-home");
+    let project = TempDir::boundary("cli-first-build-project");
+    std::fs::write(
+        project.0.join("Cargo.toml"),
+        "[package]\nname = \"p\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        project.0.join("pyproject.toml"),
+        "[project]\nname = \"fixture\"\nversion = \"0.1.0\"\nrequires-python = \"==0.0.1\"\n",
+    )
+    .unwrap();
+    let out = tog(&project.0, &home.0, &["build", "cargo"]);
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = text(&out.stderr);
+    assert!(
+        stderr.contains("creating tog-toolchain.toml selects a toolchain for every ecosystem")
+            && stderr.contains("fix the python toolchain error above"),
+        "{stderr}"
+    );
+    assert!(!project.0.join("tog-toolchain.toml").exists());
+}
+
 /// `tog env` prints the environment `tog run` would give a child, so the
 /// shell that evals it sees exactly what a tog-run command sees. Offline:
 /// the `.venv` symlink and a closure record are the whole projection the
