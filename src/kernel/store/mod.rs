@@ -544,6 +544,49 @@ mod tests {
         path
     }
 
+    /// A crash leaves one of three half-published shapes: a writable object
+    /// (before the chmod), an object with no record (before the record's
+    /// rename), or a record a power loss left empty. Each reads as absent,
+    /// the lookup clears the object, and the next commit publishes a whole
+    /// object and record over what is left.
+    #[test]
+    fn a_crashed_publication_reads_as_absent_and_the_next_commit_replaces_it() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = temp_store();
+        let store = Store {
+            root: temp.0.canonicalize().unwrap(),
+        };
+        let identity = identity();
+        let id = identity.object_id();
+        let record = store.root.join("meta").join(format!("{id}.json"));
+        for crash in ["writable object", "no record", "empty record"] {
+            store
+                .commit_with_deps(&identity, &staged(&store), &[], &ObjectDeps::new())
+                .unwrap();
+            assert!(store.has(&id).unwrap(), "{crash}");
+            match crash {
+                "writable object" => {
+                    let object = store.object_path(&id);
+                    let mut perms = fs::metadata(&object).unwrap().permissions();
+                    perms.set_mode(0o755);
+                    fs::set_permissions(&object, perms).unwrap();
+                }
+                "no record" => fs::remove_file(&record).unwrap(),
+                _ => fs::write(&record, b"").unwrap(),
+            }
+            assert!(!store.has(&id).unwrap(), "{crash}");
+            assert!(!store.object_path(&id).exists(), "{crash}");
+
+            store
+                .commit_with_deps(&identity, &staged(&store), &[], &ObjectDeps::new())
+                .unwrap();
+            assert!(store.has(&id).unwrap(), "{crash}");
+            crate::kernel::objmeta::read_record_at(&record).unwrap();
+            remove_tree(&store.object_path(&id)).unwrap();
+            fs::remove_file(&record).unwrap();
+        }
+    }
+
     /// A record is written under a temporary name and renamed into place,
     /// so the add leaves only the record and the registry marker behind,
     /// with no temporary file in `roots/` or `tmp/`. The rename being atomic

@@ -289,6 +289,7 @@ pub(super) enum Parent {
     Tmp,
     ForestProject(usize),
     Backups,
+    Meta,
 }
 
 pub(super) struct Dirs {
@@ -306,6 +307,7 @@ impl Dirs {
             Parent::Objects => &self.objects,
             Parent::Cache(index) => &self.cache[index].1,
             Parent::Tmp => &self.tmp,
+            Parent::Meta => &self.meta,
             Parent::ForestProject(index) => &self.forest_projects[index],
             Parent::Backups => self
                 .backups
@@ -357,6 +359,10 @@ pub struct Snapshot {
     pub(super) stages: Vec<DirEntrySnapshot>,
     pub(super) forests: Vec<DirEntrySnapshot>,
     pub(super) backups: Vec<DirEntrySnapshot>,
+    /// Records whose object is gone. Under the exclusive lease nothing can
+    /// be mid-publication (commit writes the object first), so each is the
+    /// residue of a removal that stopped between the object and its record.
+    pub(super) stray_records: Vec<DirEntrySnapshot>,
     pub(super) dirs: Dirs,
 }
 
@@ -406,6 +412,31 @@ fn read_objects(
         });
     }
     Ok(object_entries)
+}
+
+/// Every readable record with no object under `objects/`, stated through
+/// the held `meta/` descriptor the removal will be relative to.
+fn read_stray_records(
+    meta: &crate::kernel::objmeta::MetaIndex,
+    objects: &[ObjectEntry],
+    meta_dir: &HeldDir,
+) -> io::Result<Vec<DirEntrySnapshot>> {
+    let present: HashSet<&str> = objects.iter().map(|entry| entry.id.as_str()).collect();
+    let mut strays = Vec::new();
+    for (id, _) in meta.iter() {
+        if present.contains(id.as_str()) {
+            continue;
+        }
+        let name = OsString::from(format!("{id}.json"));
+        let stat = store::stat_at(meta_dir.file.as_raw_fd(), name.as_bytes())?;
+        strays.push(DirEntrySnapshot {
+            path: Path::new("meta").join(&name),
+            name,
+            parent: Parent::Meta,
+            stat,
+        });
+    }
+    Ok(strays)
 }
 
 /// Enumerate every cache namespace, holding each one open. The returned
@@ -576,6 +607,7 @@ pub(super) fn read<W: Write>(
     let tmp = open_held(&store.root.join("tmp"), "tmp")?;
 
     let object_entries = read_objects(&objects_path, &objects, &meta_dir)?;
+    let stray_records = read_stray_records(&meta, &object_entries, &meta_dir)?;
     let (cache_dirs, cache_entries) = read_cache(store)?;
     let stages = read_stages(store, &tmp)?;
     let projections = if options.project {
@@ -594,6 +626,7 @@ pub(super) fn read<W: Write>(
         stages,
         forests: projections.forests,
         backups: projections.backups,
+        stray_records,
         dirs: Dirs {
             objects,
             meta: meta_dir,

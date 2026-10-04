@@ -73,6 +73,8 @@ pub struct Report {
     pub stages: usize,
     pub forests: usize,
     pub backups: usize,
+    /// Records left without their object by an interrupted removal.
+    pub records: usize,
     /// Resolution-proxy metadata cache entries unused for the retention
     /// window (and sidecar index entries whose sidecar is gone).
     pub resolve_metadata: usize,
@@ -1545,30 +1547,63 @@ mod tests {
             "the recovery path is not named: {error}"
         );
 
-        // The leftover record does wedge the next sweep, and the named
-        // recovery path is the thing that clears it.
+        // The next sweep clears the leftover record on its own.
         drop(activity);
-        let (result, _) = sweep(&store, Options::default());
-        assert!(result.is_err(), "a stray record did not block the sweep");
-        let activity = store.activity(ActivityMode::Exclusive).unwrap();
-        let mut out = Vec::new();
-        let dropped = drop_objects(
-            &store,
-            &activity,
-            std::slice::from_ref(&dead),
-            false,
-            &mut out,
-        )
-        .unwrap();
-        drop(activity);
-        assert_eq!(dropped, 1, "{}", String::from_utf8_lossy(&out));
+        let (result, text) = sweep(&store, Options::default());
+        assert_eq!(result.unwrap().records, 1, "{text}");
         assert!(
             !meta_dir.join(format!("{dead}.json")).exists(),
-            "the stray record survived: {}",
-            String::from_utf8_lossy(&out)
+            "the stray record survived: {text}"
         );
-        let (result, _) = sweep(&store, Options::default());
-        result.unwrap();
+    }
+
+    /// A record whose object is gone is the residue of a removal that
+    /// stopped halfway. Nothing needs it, so the sweep removes it (a dry run
+    /// only reports it) rather than refusing until an operator drops it.
+    #[test]
+    fn a_record_without_its_object_is_swept_when_nothing_needs_it() {
+        let temp = TempStore::new("stray-record");
+        let store = temp.store();
+        let gone = commit(&store, "gone", None);
+        store::remove_tree(&store.object_path(&gone)).unwrap();
+        let record = store.root.join("meta").join(format!("{gone}.json"));
+        register_objects(&store, &temp.root.join("project"), &[]);
+
+        let dry = Options {
+            dry_run: true,
+            ..Options::default()
+        };
+        let (result, text) = sweep(&store, dry);
+        assert_eq!(result.unwrap().records, 1, "{text}");
+        assert!(record.is_file(), "a dry run removed the record: {text}");
+
+        let (result, text) = sweep(&store, Options::default());
+        assert_eq!(result.unwrap().records, 1, "{text}");
+        assert!(!record.exists(), "the stray record survived: {text}");
+    }
+
+    /// A record whose object is gone while a rooted object still depends on
+    /// it is a real loss, not residue: the sweep refuses and keeps it.
+    #[test]
+    fn a_record_without_its_object_blocks_the_sweep_while_something_needs_it() {
+        let temp = TempStore::new("needed-stray-record");
+        let store = temp.store();
+        let child = commit(&store, "child", None);
+        let parent = commit(&store, "parent", Some(&child));
+        register_objects(&store, &temp.root.join("project"), &[&parent]);
+        store::remove_tree(&store.object_path(&child)).unwrap();
+
+        let (result, text) = sweep(&store, Options::default());
+        let error = result.unwrap_err().to_string();
+        assert!(
+            error.contains(&format!("metadata for missing object {child}")),
+            "{error}\n{text}"
+        );
+        assert!(store
+            .root
+            .join("meta")
+            .join(format!("{child}.json"))
+            .is_file());
     }
 
     /// A dry run writes nothing: no record, no root, no timestamp.
@@ -2551,8 +2586,8 @@ mod tests {
         assert!(!store.object_path(&dependent).exists(), "{text}");
     }
 
-    /// The two half-gone shapes. Either one blocks the sweep on its own, and
-    /// neither has any evidence left worth protecting.
+    /// The two half-gone shapes. Neither has any evidence left worth
+    /// protecting, so drop takes both.
     #[test]
     fn a_record_without_its_object_and_an_object_without_its_record_are_droppable() {
         let temp = TempStore::new("drop-halves");

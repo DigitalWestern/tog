@@ -242,6 +242,44 @@ pub(crate) fn fsync_directory(dirfd: RawFd) -> io::Result<()> {
     }
 }
 
+/// Make a just-published tree's contents durable before anything records it
+/// as complete. Linux flushes the tree's whole filesystem with one
+/// `syncfs`, far cheaper than one fsync per file of a large object; other
+/// platforms fsync every file and directory in the tree. Symlinks are not
+/// followed.
+pub(crate) fn sync_tree(path: &Path) -> io::Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        let dir = fs::File::open(path)?;
+        loop {
+            // SAFETY: the descriptor is borrowed for the duration of the call.
+            if unsafe { libc::syncfs(dir.as_raw_fd()) } == 0 {
+                return Ok(());
+            }
+            let error = io::Error::last_os_error();
+            if error.kind() != io::ErrorKind::Interrupted {
+                return Err(error);
+            }
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let metadata = fs::symlink_metadata(path)?;
+        if metadata.file_type().is_symlink() {
+            return Ok(());
+        }
+        let file = fs::File::open(path)?;
+        if metadata.is_dir() {
+            for entry in fs::read_dir(path)? {
+                sync_tree(&entry?.path())?;
+            }
+            fsync_directory(file.as_raw_fd())
+        } else {
+            file.sync_all()
+        }
+    }
+}
+
 pub(crate) fn stat_at(dirfd: RawFd, name: &[u8]) -> io::Result<libc::stat> {
     let name = CString::new(name)
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "directory entry contains NUL"))?;

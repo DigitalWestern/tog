@@ -112,17 +112,29 @@ impl Store {
 
     /// Completeness check without sweeping (safe to call while holding the
     /// publish lock).
+    ///
+    /// The record must also parse: one a crash left empty or cut short is a
+    /// crashed publication too, so the next lookup clears the object and the
+    /// next commit writes a whole record over it. A record that cannot be
+    /// read for another reason (a permission) is not evidence of a crash.
     pub(super) fn is_complete(&self, id: &str) -> Option<bool> {
         let md = fs::symlink_metadata(self.object_path(id)).ok()?;
         use std::os::unix::fs::PermissionsExt;
-        let meta = fs::symlink_metadata(self.root.join("meta").join(format!("{id}.json")));
+        let meta_path = self.root.join("meta").join(format!("{id}.json"));
+        let meta = fs::symlink_metadata(&meta_path);
+        let record_is_whole = || match fs::read(&meta_path) {
+            Ok(bytes) => serde_json::from_slice::<serde_json::Value>(&bytes)
+                .is_ok_and(|value| value.is_object()),
+            Err(_) => true,
+        };
         Some(
             !md.file_type().is_symlink()
                 && md.is_dir()
                 && md.permissions().mode() & 0o222 == 0
                 && meta
                     .as_ref()
-                    .is_ok_and(|metadata| !metadata.file_type().is_symlink() && metadata.is_file()),
+                    .is_ok_and(|metadata| !metadata.file_type().is_symlink() && metadata.is_file())
+                && record_is_whole(),
         )
     }
 
@@ -412,9 +424,20 @@ impl Store {
         // Meta is the completion marker: write via tmp + atomic rename so a
         // crash mid-write can never leave a partial file that has() would
         // accept as complete.
+        // Durable in order: the object's contents and its name under
+        // `objects/`, then the record's bytes, then its name under `meta/`.
+        // A power loss can then never leave a record whose object or bytes
+        // did not survive.
+        sync_tree(&dest)?;
+        fsync_directory(objects.as_raw_fd())?;
         let meta_tmp = self.root.join("tmp").join(format!("meta-{id}.json"));
-        fs::write(&meta_tmp, serde_json::to_vec_pretty(&meta)?)?;
+        {
+            let mut file = fs::File::create(&meta_tmp)?;
+            io::Write::write_all(&mut file, &serde_json::to_vec_pretty(&meta)?)?;
+            file.sync_all()?;
+        }
         fs::rename(&meta_tmp, self.root.join("meta").join(format!("{id}.json")))?;
+        fsync_directory(open_store_directory(&self.root.join("meta"), "meta")?.as_raw_fd())?;
         // The stage directory may have been built for hours. Refresh the
         // published object's activity marker while publication is still
         // protected by the lock, before GC can inspect it.
