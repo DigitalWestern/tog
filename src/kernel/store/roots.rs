@@ -880,7 +880,7 @@ pub(super) fn path_wire(path: &Path) -> PathWire {
         },
         Err(_) => PathWire {
             encoding: "base64".into(),
-            value: crate::kernel::digest::base64_encode(bytes),
+            value: crate::kernel::base64::encode(bytes),
         },
     }
 }
@@ -888,7 +888,7 @@ pub(super) fn path_wire(path: &Path) -> PathWire {
 pub(super) fn path_from_wire(wire: &PathWire, label: &str) -> io::Result<PathBuf> {
     let bytes = match wire.encoding.as_str() {
         "utf8" => wire.value.as_bytes().to_vec(),
-        "base64" => base64_decode(&wire.value).ok_or_else(|| {
+        "base64" => crate::kernel::base64::decode_padded(&wire.value).ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("{label} contains invalid base64 path bytes"),
@@ -1483,54 +1483,6 @@ pub(super) fn validate_object_reference(store: &Store, id: &str, path: &Path) ->
 
 pub(super) fn path_under_objects(store: &Store, path: &Path) -> bool {
     path.starts_with(store.root.join("objects"))
-}
-
-/// Strict base64 for stored path bytes: the input length must be a
-/// multiple of four, so unpadded input is refused. SRI values use the
-/// shared permissive decoder instead, which also accepts the unpadded
-/// form registries publish.
-pub(super) fn base64_decode(value: &str) -> Option<Vec<u8>> {
-    let bytes = value.as_bytes();
-    if !bytes.len().is_multiple_of(4) {
-        return None;
-    }
-    let decode = |byte: u8| -> Option<u32> {
-        match byte {
-            b'A'..=b'Z' => Some((byte - b'A') as u32),
-            b'a'..=b'z' => Some((byte - b'a' + 26) as u32),
-            b'0'..=b'9' => Some((byte - b'0' + 52) as u32),
-            b'+' => Some(62),
-            b'/' => Some(63),
-            _ => None,
-        }
-    };
-    let mut output = Vec::with_capacity(bytes.len() / 4 * 3);
-    for chunk in bytes.chunks(4) {
-        let a = decode(chunk[0])?;
-        let b = decode(chunk[1])?;
-        let c = if chunk[2] == b'=' {
-            0
-        } else {
-            decode(chunk[2])?
-        };
-        let d = if chunk[3] == b'=' {
-            0
-        } else {
-            decode(chunk[3])?
-        };
-        if chunk[2] == b'=' && chunk[3] != b'=' {
-            return None;
-        }
-        let joined = (a << 18) | (b << 12) | (c << 6) | d;
-        output.push((joined >> 16) as u8);
-        if chunk[2] != b'=' {
-            output.push((joined >> 8) as u8);
-        }
-        if chunk[3] != b'=' {
-            output.push(joined as u8);
-        }
-    }
-    Some(output)
 }
 
 pub(super) fn root_key(project_dir: &Path) -> String {

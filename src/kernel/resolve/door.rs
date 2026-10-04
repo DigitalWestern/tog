@@ -978,9 +978,8 @@ get() {
         confined.proxy = Some(&fx.harness.proxy);
         confined.policy = Some(policy);
         confined.wire = Some(Box::new(|wire: &Wire<'_>| {
-            let auth = crate::kernel::digest::base64_encode(
-                format!("tog:{}", wire.address.token()).as_bytes(),
-            );
+            let auth =
+                crate::kernel::base64::encode(format!("tog:{}", wire.address.token()).as_bytes());
             Ok(Wiring {
                 args: with_forced(wire.args, wire.forced_args),
                 env: vec![

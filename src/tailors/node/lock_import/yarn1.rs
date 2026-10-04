@@ -235,7 +235,7 @@ fn yarn_integrity_with(
     } else {
         return Err(err(format!("{path}: malformed yarn sha1 fragment")));
     };
-    let sri = format!("sha1-{}", crate::kernel::digest::base64_encode(&bytes));
+    let sri = format!("sha1-{}", crate::kernel::base64::encode(&bytes));
     integrity_policy_with(path, &sri, record)?;
     Ok(sri)
 }

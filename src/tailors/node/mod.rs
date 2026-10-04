@@ -1533,7 +1533,7 @@ mod tests {
         let bytes = fs::read(&tarball).unwrap();
         use sha2::Digest as _;
         let raw = sha2::Sha512::digest(&bytes);
-        let sri = format!("sha512-{}", crate::kernel::digest::base64_encode(&raw));
+        let sri = format!("sha512-{}", crate::kernel::base64::encode(&raw));
         fs::write(store.cache_path("sha512", &hex::encode(raw)), &bytes).unwrap();
 
         let plan = NpmPlan {

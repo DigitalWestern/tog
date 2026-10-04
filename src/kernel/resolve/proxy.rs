@@ -803,7 +803,7 @@ fn authenticated(state: &State, headers: &Headers) -> bool {
     if !scheme.eq_ignore_ascii_case("basic") {
         return false;
     }
-    let Some(decoded) = crate::kernel::digest::base64_decode(encoded.trim()) else {
+    let Some(decoded) = crate::kernel::base64::decode(encoded.trim()) else {
         return false;
     };
     let Ok(text) = String::from_utf8(decoded) else {

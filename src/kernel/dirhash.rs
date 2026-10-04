@@ -71,10 +71,7 @@ fn hash1(mut files: Vec<(String, String)>) -> String {
     for (name, hex) in &files {
         hasher.update(format!("{hex}  {name}\n").as_bytes());
     }
-    format!(
-        "h1:{}",
-        crate::kernel::digest::base64_encode(&hasher.finalize())
-    )
+    format!("h1:{}", crate::kernel::base64::encode(&hasher.finalize()))
 }
 
 #[cfg(test)]
