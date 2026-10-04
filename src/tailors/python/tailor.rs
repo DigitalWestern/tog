@@ -1,12 +1,12 @@
 //! The Python tailor's `Tailor` implementation: what `sync`, `plan`, `run`,
 //! `ls`, `status`, and `sbom` do for a Python project.
 
-use crate::comforter::status::{recorded_inputs_state, string, symlink_target, State};
+use crate::comforter::status::{recorded_inputs_state, string, State};
 use crate::kernel::context::Context;
 use crate::kernel::cyclonedx::{
     component, list, purl_encode, push_hash, required, toolchain_component, version_of,
 };
-use crate::kernel::fsroot::ProjectRoot;
+use crate::kernel::fsroot::{Entry, ProjectRoot};
 use crate::kernel::objmeta::ObjectKind;
 use crate::kernel::platform::Platform;
 use crate::kernel::resolve::{DoorKind, ResolutionDoor};
@@ -156,14 +156,15 @@ impl Tailor for Python {
     fn run_env(
         &self,
         _ctx: &Context,
-        dir: &Path,
+        project: &ProjectRoot,
         _cwd: &Path,
         _cmd: &[String],
         command: &mut Command,
     ) -> io::Result<Vec<String>> {
+        let dir = project.path();
         let mut prefix = Vec::new();
         let venv = dir.join(".venv");
-        if venv.exists() {
+        if project.input_entry(Path::new(".venv"))? != Entry::Absent {
             prefix.push(venv.join("bin").to_string_lossy().into_owned());
             command.env("VIRTUAL_ENV", &venv);
             command.env("PYTHONDONTWRITEBYTECODE", "1"); // site-packages is read-only
@@ -197,18 +198,19 @@ impl Tailor for Python {
     fn closure_state(
         &self,
         _platform: Platform,
-        dir: &Path,
+        project: &ProjectRoot,
         _ecosystem: &str,
         body: &Value,
     ) -> io::Result<State> {
-        let venv = dir.join(".venv");
         let env_object = string(&body["env_object"]);
-        let target = symlink_target(&venv);
+        let target = project.read_link(Path::new(".venv")).ok().flatten();
         Ok(
-            if target.as_deref() != Some(Path::new(&env_object)) || !venv.join("bin").is_dir() {
+            if target.as_deref() != Some(Path::new(&env_object))
+                || !project.is_input_dir(Path::new(".venv/bin"))
+            {
                 State::ProjectionMissing(".venv".into())
             } else {
-                recorded_inputs_state(dir, body)?
+                recorded_inputs_state(project, body)?
             },
         )
     }

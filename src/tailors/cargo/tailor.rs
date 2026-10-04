@@ -8,7 +8,7 @@ use crate::kernel::context::Context;
 use crate::kernel::cyclonedx::{
     component, list, purl_encode, push_hash, required, toolchain_component, version_of,
 };
-use crate::kernel::fsroot::ProjectRoot;
+use crate::kernel::fsroot::{Entry, ProjectRoot};
 use crate::kernel::objmeta::ObjectKind;
 use crate::kernel::platform::Platform;
 use crate::kernel::resolve::ResolutionDoor;
@@ -234,16 +234,17 @@ impl Tailor for Cargo {
     fn run_env(
         &self,
         ctx: &Context,
-        dir: &Path,
+        project: &ProjectRoot,
         _cwd: &Path,
         _cmd: &[String],
         command: &mut Command,
     ) -> io::Result<Vec<String>> {
+        let dir = project.path();
         let activity = &ctx.activity;
         let mut prefix = Vec::new();
         let cargo_home = dir.join(".tog/cargo-home");
-        if cargo_home.exists() {
-            let closure = comforter::read_closure(dir, "cargo")?;
+        if project.input_entry(Path::new(".tog/cargo-home"))? != Entry::Absent {
+            let closure = comforter::read_closure_in(project, "cargo")?;
             // Store-contained resolution: a project-editable closure must never
             // inject arbitrary executable paths.
             let rust_obj = comforter::closure_object(
@@ -292,16 +293,16 @@ impl Tailor for Cargo {
     fn closure_state(
         &self,
         _platform: Platform,
-        dir: &Path,
+        project: &ProjectRoot,
         ecosystem: &str,
         body: &Value,
     ) -> io::Result<State> {
         Ok(match ecosystem {
             "cargo" => {
-                if !dir.join(".tog/cargo-home").is_dir() {
+                if !project.is_input_dir(Path::new(".tog/cargo-home")) {
                     State::ProjectionMissing(".tog/cargo-home".into())
                 } else {
-                    lock_state(dir, "Cargo.lock", &string(&body["cargo_lock_sha256"]))?
+                    lock_state(project, "Cargo.lock", &string(&body["cargo_lock_sha256"]))?
                 }
             }
             _ => State::Unchecked("unknown ecosystem".into()),

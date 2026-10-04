@@ -67,6 +67,7 @@
 use crate::cli;
 use crate::commands::inspect::{self, ClosureFile, State};
 use crate::commands::shared::project_dir;
+use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::platform::Platform;
 use crate::kernel::policy::{self, Exception, Policy, PolicySource, SourceOrigin};
 use crate::kernel::signing::{self, KeySet, PublicKey, Verification};
@@ -393,7 +394,7 @@ fn check_shape(closure: &ClosureFile) -> io::Result<()> {
 /// `key` is `under_key` for the mode, spliced into the fix line.
 fn freshness(
     platform: Platform,
-    dir: &Path,
+    project: Option<&ProjectRoot>,
     closure: &ClosureFile,
     present: &[&str],
     key: &str,
@@ -412,8 +413,13 @@ fn freshness(
             "closure records no platform; run 'tog' once{key}, then commit"
         )));
     }
+    let Some(project) = project else {
+        return Ok(Freshness::Stale(
+            "the project directory is gone; the closure is orphaned".into(),
+        ));
+    };
     Ok(freshness_from_state(inspect::locked_closure_state(
-        platform, dir, closure,
+        platform, project, closure,
     )?))
 }
 
@@ -504,6 +510,8 @@ pub fn evaluate(
 ) -> io::Result<Vec<Verdict>> {
     let trusted = trusted_keys(policy);
     let key = under_key(trusted.is_some());
+    // Held once: every freshness read is of this one directory.
+    let project = inspect::open_project(dir)?;
     let mut verdicts = Vec::new();
     for closure in closures {
         let signature = judge_signature(closure, trusted, sources);
@@ -513,7 +521,7 @@ pub fn evaluate(
             verdicts.push(Verdict::not_evaluated(closure, signature));
             continue;
         }
-        let mut freshness = freshness(platform, dir, closure, present, key)?;
+        let mut freshness = freshness(platform, project.as_ref(), closure, present, key)?;
         let mut denied = Vec::new();
         let mut unknown = Vec::new();
         let mut permitted = BTreeMap::new();
@@ -2077,7 +2085,7 @@ mod tests {
             body,
         )];
         assert_eq!(
-            inspect::closure_state(host(), dir, &closures[0]).unwrap(),
+            inspect::closure_state(host(), &ProjectRoot::open(dir).unwrap(), &closures[0]).unwrap(),
             State::Unchecked(
                 "inputs were not recorded by this sync; run 'tog' once to enable checks".into()
             )
@@ -3134,30 +3142,38 @@ mod tests {
             )
         };
         let closure = go(go_resolution(dir));
-        assert_eq!(inspect::resolution_state(dir, &closure), None);
+        assert_eq!(
+            inspect::resolution_state(&ProjectRoot::open(dir).unwrap(), &closure),
+            None
+        );
         fs::write(
             dir.join("go.mod"),
             "module example.com/m\n\ngo 1.22\n\nrequire golang.org/x/text v0.14.0\n",
         )
         .unwrap();
         assert_eq!(
-            inspect::resolution_state(dir, &closure),
+            inspect::resolution_state(&ProjectRoot::open(dir).unwrap(), &closure),
             Some(State::Changed(vec!["go.mod".into()]))
         );
         // A lock file the record never named is a change too.
         fs::remove_file(dir.join("go.sum")).unwrap();
         let closure = go(go_resolution(dir));
-        assert_eq!(inspect::resolution_state(dir, &closure), None);
+        assert_eq!(
+            inspect::resolution_state(&ProjectRoot::open(dir).unwrap(), &closure),
+            None
+        );
         fs::write(dir.join("go.sum"), "golang.org/x/text v0.14.0 h1:x=\n").unwrap();
         assert_eq!(
-            inspect::resolution_state(dir, &closure),
+            inspect::resolution_state(&ProjectRoot::open(dir).unwrap(), &closure),
             Some(State::Changed(vec!["go.sum".into()]))
         );
         // A record whose digests cannot be read is unchecked for this
         // closure alone, not an error for the whole audit.
         let mut broken = go_resolution(dir);
         broken["outputs"] = json!({"go.mod": "not a digest"});
-        let Some(State::Unchecked(why)) = inspect::resolution_state(dir, &go(broken)) else {
+        let Some(State::Unchecked(why)) =
+            inspect::resolution_state(&ProjectRoot::open(dir).unwrap(), &go(broken))
+        else {
             panic!("a malformed record is unchecked");
         };
         assert!(why.contains("malformed resolution record"), "{why}");
@@ -3201,7 +3217,8 @@ mod tests {
         assert!(text.contains("run 'tog', then audit again"), "{text}");
         // `tog status` reads the same check and agrees.
         assert_eq!(
-            inspect::locked_closure_state(host(), dir, &closures[0]).unwrap(),
+            inspect::locked_closure_state(host(), &ProjectRoot::open(dir).unwrap(), &closures[0])
+                .unwrap(),
             State::Changed(vec!["extra.lock".into()])
         );
     }
@@ -3273,7 +3290,8 @@ mod tests {
         let temp = python_project("audit-readers");
         let dir = &temp.0;
         let plain = with_exceptions(dir, &[]);
-        let plain_state = inspect::closure_state(host(), dir, &plain).unwrap();
+        let plain_state =
+            inspect::closure_state(host(), &ProjectRoot::open(dir).unwrap(), &plain).unwrap();
         let store_dir = TempDir::named("audit-readers-store");
         let store = crate::kernel::store::Store::for_test(store_dir.0.clone());
         let plain_root = format!("{:?}", store.root_record_from_project(dir));
@@ -3286,7 +3304,7 @@ mod tests {
         assert_eq!(joined.body["resolution"]["door"], "edit");
         assert_eq!(inspect::closures(dir).unwrap().len(), 1);
         assert_eq!(
-            inspect::closure_state(host(), dir, &joined).unwrap(),
+            inspect::closure_state(host(), &ProjectRoot::open(dir).unwrap(), &joined).unwrap(),
             plain_state
         );
         inspect::status(host(), dir).unwrap();

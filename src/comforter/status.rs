@@ -2,6 +2,7 @@
 //! answers with, and the input/lock/object checks the answers are built
 //! from. Ecosystem-neutral; the per-ecosystem rules live in each tailor.
 
+use crate::kernel::fsroot::ProjectRoot;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -28,8 +29,9 @@ pub fn sha256_file(path: &Path) -> io::Result<String> {
     Ok(hex::encode(Sha256::digest(fs::read(path)?)))
 }
 
-/// Compare recorded `inputs` (python, node) with the files on disk.
-fn changed_inputs(dir: &Path, inputs: &[Value]) -> io::Result<Vec<String>> {
+/// Compare recorded `inputs` (python, node) with the files in the held
+/// project.
+fn changed_inputs(project: &ProjectRoot, inputs: &[Value]) -> io::Result<Vec<String>> {
     let mut changed = Vec::new();
     for input in inputs {
         let path = string(&input["path"]);
@@ -37,29 +39,37 @@ fn changed_inputs(dir: &Path, inputs: &[Value]) -> io::Result<Vec<String>> {
         if path.is_empty() {
             continue;
         }
-        let file = dir.join(&path);
-        if !file.is_file() {
-            changed.push(format!("{path} (removed)"));
-        } else if sha256_file(&file)? != recorded {
-            changed.push(path);
+        match input_sha256(project, Path::new(&path))? {
+            None => changed.push(format!("{path} (removed)")),
+            Some(current) if current != recorded => changed.push(path),
+            Some(_) => {}
         }
     }
     Ok(changed)
 }
 
-/// Compare a single recorded lock hash with the file on disk.
-fn changed_lock(dir: &Path, lock: &str, recorded: &str) -> io::Result<Vec<String>> {
-    let file = dir.join(lock);
-    let current = if file.is_file() {
-        sha256_file(&file)?
-    } else {
-        // `go.sum` may be legitimately absent; the go tailor records the
-        // hash of the empty string, so match it.
-        hex::encode(Sha256::digest(b""))
-    };
+/// The sha256 of a project input, read through the held descriptor;
+/// `None` when it is absent or not a regular file.
+fn input_sha256(project: &ProjectRoot, relative: &Path) -> io::Result<Option<String>> {
+    if !project.is_input_file(relative) {
+        return Ok(None);
+    }
+    Ok(project
+        .read_input(relative)?
+        .map(|bytes| hex::encode(Sha256::digest(bytes))))
+}
+
+/// Compare a single recorded lock hash with the file in the held project.
+fn changed_lock(project: &ProjectRoot, lock: &str, recorded: &str) -> io::Result<Vec<String>> {
+    let found = input_sha256(project, Path::new(lock))?;
+    // `go.sum` may be legitimately absent; the go tailor records the hash
+    // of the empty string, so match it.
+    let current = found
+        .clone()
+        .unwrap_or_else(|| hex::encode(Sha256::digest(b"")));
     Ok(if recorded.is_empty() || current == recorded {
         Vec::new()
-    } else if file.is_file() {
+    } else if found.is_some() {
         vec![lock.to_string()]
     } else {
         vec![format!("{lock} (removed)")]
@@ -99,10 +109,10 @@ pub fn object_liveness_state(body: &Value, fields: &[&str]) -> Option<State> {
     missing_object_path(body, fields).map(State::ProjectionMissing)
 }
 
-pub fn recorded_inputs_state(dir: &Path, body: &Value) -> io::Result<State> {
+pub fn recorded_inputs_state(project: &ProjectRoot, body: &Value) -> io::Result<State> {
     match body["inputs"].as_array() {
         Some(inputs) if !inputs.is_empty() => {
-            let changed = changed_inputs(dir, inputs)?;
+            let changed = changed_inputs(project, inputs)?;
             Ok(if changed.is_empty() {
                 State::Synced
             } else {
@@ -115,11 +125,11 @@ pub fn recorded_inputs_state(dir: &Path, body: &Value) -> io::Result<State> {
     }
 }
 
-pub fn lock_state(dir: &Path, lock: &str, recorded: &str) -> io::Result<State> {
+pub fn lock_state(project: &ProjectRoot, lock: &str, recorded: &str) -> io::Result<State> {
     if recorded.is_empty() {
         return Ok(State::Unchecked(format!("{lock} hash not recorded")));
     }
-    let changed = changed_lock(dir, lock, recorded)?;
+    let changed = changed_lock(project, lock, recorded)?;
     Ok(if changed.is_empty() {
         State::Synced
     } else {

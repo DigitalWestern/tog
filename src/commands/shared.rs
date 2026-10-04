@@ -53,9 +53,12 @@ pub(crate) fn projected_env(
     cmd: &[String],
     command: &mut std::process::Command,
 ) -> io::Result<Vec<String>> {
+    // Held once: every closure and projection the environment is built
+    // from is read through this descriptor.
+    let project = crate::kernel::fsroot::ProjectRoot::open(dir)?;
     let mut prefix = Vec::new();
     for tailor in crate::tailors::registry() {
-        prefix.extend(tailor.run_env(ctx, dir, cwd, cmd, command)?);
+        prefix.extend(tailor.run_env(ctx, &project, cwd, cmd, command)?);
     }
     Ok(prefix)
 }

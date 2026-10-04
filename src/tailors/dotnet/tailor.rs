@@ -173,14 +173,15 @@ impl Tailor for Dotnet {
     fn run_env(
         &self,
         ctx: &Context,
-        dir: &Path,
+        project: &ProjectRoot,
         _cwd: &Path,
         cmd: &[String],
         command: &mut Command,
     ) -> io::Result<Vec<String>> {
+        let dir = project.path();
         let activity = &ctx.activity;
         let mut prefix = Vec::new();
-        if dir.join(".tog/closures/dotnet.json").exists() {
+        if comforter::has_closure(project, "dotnet") {
             // This prevents accidental unsandboxed builds, not deliberate bypasses
             // through wrappers such as `sh -c`; during realization and build,
             // tog never evaluates project code outside its sandbox. Missing-lock
@@ -188,7 +189,7 @@ impl Tailor for Dotnet {
             if let Some(reason) = dotnet::refused_run_command(cmd) {
                 return Err(io::Error::new(io::ErrorKind::InvalidInput, reason));
             }
-            let closure = comforter::read_closure(dir, "dotnet")?;
+            let closure = comforter::read_closure_in(project, "dotnet")?;
             let sdk =
                 comforter::closure_object(&ctx.store, activity, &closure, "sdk_object", "dotnet")?;
             let packages =
@@ -230,13 +231,13 @@ impl Tailor for Dotnet {
     fn closure_state(
         &self,
         _platform: Platform,
-        dir: &Path,
+        project: &ProjectRoot,
         _ecosystem: &str,
         body: &Value,
     ) -> io::Result<State> {
         Ok(
             object_liveness_state(body, &["sdk_object", "packages_object"]).unwrap_or(lock_state(
-                dir,
+                project,
                 "packages.lock.json",
                 &string(&body["packages_lock_sha256"]),
             )?),
@@ -310,7 +311,7 @@ mod tests {
         let prefix = Dotnet
             .run_env(
                 &ctx,
-                &project,
+                &ProjectRoot::open(&project).unwrap(),
                 &project,
                 &build,
                 &mut Command::new("dotnet"),
@@ -324,7 +325,7 @@ mod tests {
         let error = Dotnet
             .run_env(
                 &ctx,
-                &project,
+                &ProjectRoot::open(&project).unwrap(),
                 &project,
                 &build,
                 &mut Command::new("dotnet"),
@@ -338,7 +339,7 @@ mod tests {
         let error = Dotnet
             .run_env(
                 &ctx,
-                &project,
+                &ProjectRoot::open(&project).unwrap(),
                 &project,
                 &cmd(&["dotnet", "exec", "app.dll"]),
                 &mut Command::new("dotnet"),

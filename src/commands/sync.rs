@@ -1114,11 +1114,11 @@ mod tests {
         fn closure_state(
             &self,
             platform: Platform,
-            dir: &Path,
+            project: &ProjectRoot,
             ecosystem: &str,
             body: &serde_json::Value,
         ) -> io::Result<crate::comforter::status::State> {
-            Self::real().closure_state(platform, dir, ecosystem, body)
+            Self::real().closure_state(platform, project, ecosystem, body)
         }
         fn sbom_components(
             &self,
@@ -1398,11 +1398,11 @@ mod tests {
         fn closure_state(
             &self,
             platform: Platform,
-            dir: &Path,
+            project: &ProjectRoot,
             ecosystem: &str,
             body: &serde_json::Value,
         ) -> io::Result<crate::comforter::status::State> {
-            HostlessPython::real().closure_state(platform, dir, ecosystem, body)
+            HostlessPython::real().closure_state(platform, project, ecosystem, body)
         }
         fn sbom_components(
             &self,
