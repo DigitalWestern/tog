@@ -147,6 +147,17 @@ impl Store {
 
     pub fn open() -> io::Result<Store> {
         let (root, from_env) = Self::configured_root();
+        Self::open_root(root, from_env)
+    }
+
+    /// `open` for a store at a path the caller names, whatever `TOG_STORE`
+    /// says. A test that opens a store in-process uses this to stay out of
+    /// the developer's own store without changing the process environment.
+    pub fn open_at(root: &Path) -> io::Result<Store> {
+        Self::open_root(root.to_path_buf(), true)
+    }
+
+    fn open_root(root: PathBuf, from_env: bool) -> io::Result<Store> {
         fs::create_dir_all(&root).map_err(|error| open_error(&root, from_env, error))?;
         let root = root
             .canonicalize()

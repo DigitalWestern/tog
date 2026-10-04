@@ -537,7 +537,7 @@ pub fn run(ctx: &Context, request: Request, no_sync: bool) -> io::Result<()> {
 ///
 /// `edit` records exceptions of its own, outside any ecosystem's closure: on
 /// a warm store every `ensure_*_for` replays cached-object exceptions
-/// through `policy::check_cached`. Those belong to the edit, not to whichever
+/// through `policy::check_cached_with_activity`. Those belong to the edit, not to whichever
 /// ecosystem `sync` happens to realize first. `discard` clears them before
 /// sync; `Drop` covers errors, panics, and `--no-sync`. Enforcement already
 /// happened during the edit, and the owning tailor re-records the applicable

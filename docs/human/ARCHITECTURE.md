@@ -177,7 +177,8 @@ refuse a lock that disagrees with the package.json files it was generated
 from, as `npm ci` and `--frozen-lockfile` installs do: npm's per-manifest
 dependency maps (the root's and each workspace member's), pnpm's importer
 specifiers, and Yarn classic's `name@spec` selectors (with no entry left
-that nothing depends on). A `file:`/`link:` dependency is a
+that nothing depends on; a `link:` dependency, which Yarn classic never
+locks, is linked to its directory inside the project). A `file:`/`link:` dependency is a
 symlink into the user's source, so nothing is ever placed beneath one: a
 target that is itself an importer gets its dependencies from its own
 projected `node_modules` (as pnpm installs it), and any other local package

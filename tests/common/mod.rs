@@ -75,6 +75,15 @@ pub fn warm_store(temp: &TempDir) -> PathBuf {
         .unwrap_or_else(|| temp.0.join("store"))
 }
 
+/// `warm_store`, opened in this process. A test that drives the kernel
+/// directly calls this instead of `Store::open()`, which without
+/// `TOG_STORE` is the developer's real `~/.tog/store`: the test would write
+/// there, and could pass on objects an earlier run cached rather than on
+/// the work it claims to prove.
+pub fn open_store(temp: &TempDir) -> tog::kernel::store::Store {
+    tog::kernel::store::Store::open_at(&warm_store(temp)).expect("store")
+}
+
 /// The binary, configured to run in `cwd` against `store` with `home` as
 /// its `HOME`. Every `TOG_*` variable of the developer's session is dropped
 /// first, so the machine policy is `home/.tog/policy.toml` (absent unless

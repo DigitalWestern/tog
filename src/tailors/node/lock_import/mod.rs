@@ -2032,33 +2032,175 @@ b@2.0.0:
     }
 
     /// Yarn classic never locks a `link:` dependency, so its absence from
-    /// the lock is not a stale lock. An optional one is skipped; a required
-    /// one is refused as an unresolvable dependency, not as a lock that
-    /// disagrees with the manifest (link: support is tracked in #349).
+    /// the lock is not a stale lock. It is planned as the link Yarn makes:
+    /// a symlink in the naming manifest's `node_modules` to a directory read
+    /// relative to the directory holding yarn.lock, required or optional
+    /// alike.
     #[test]
-    fn an_unlocked_yarn_link_is_skipped_when_optional_and_unresolvable_when_required() {
+    fn an_unlocked_yarn_link_is_planned_as_a_link_to_its_directory() {
+        fn links(dir: &TempDir, package_json: &str) -> io::Result<Vec<(String, String)>> {
+            plan_yarn(
+                Platform::X86_64UnknownLinuxGnu,
+                "# yarn lockfile v1\n",
+                package_json,
+                &held(&dir.0),
+                node_version(),
+            )
+            .map(|plan| {
+                assert!(plan.packages.is_empty(), "{:?}", plan.packages);
+                plan.links
+                    .into_iter()
+                    .map(|link| (link.path, link.target))
+                    .collect()
+            })
+        }
         let dir = project();
-        let error = plan_yarn(
-            Platform::X86_64UnknownLinuxGnu,
-            "# yarn lockfile v1\n",
-            r#"{"optionalDependencies":{"local":"link:./vendor/local"}}"#,
-            &held(&dir.0),
-            node_version(),
-        );
-        assert!(error.is_ok(), "{error:?}");
-        let error = plan_yarn(
-            Platform::X86_64UnknownLinuxGnu,
-            "# yarn lockfile v1\n",
-            r#"{"dependencies":{"local":"link:./vendor/local"}}"#,
-            &held(&dir.0),
-            node_version(),
+        fs::create_dir_all(dir.0.join("vendor/local")).unwrap();
+        let local = vec![("node_modules/local".to_string(), "vendor/local".to_string())];
+        for field in ["dependencies", "devDependencies", "optionalDependencies"] {
+            for spec in ["link:./vendor/local", "link:vendor/local"] {
+                let package = format!(r#"{{"{field}":{{"local":"{spec}"}}}}"#);
+                assert_eq!(links(&dir, &package).unwrap(), local, "{field} {spec}");
+            }
+        }
+
+        // A workspace member's link lands in the member's node_modules, and
+        // is still read from the project root, as Yarn reads it: not from
+        // the member's own directory, where the same words would name
+        // packages/lib/vendor/local.
+        fs::create_dir_all(dir.0.join("packages/lib/vendor/local")).unwrap();
+        fs::write(
+            dir.0.join("packages/lib/package.json"),
+            r#"{"name":"lib","version":"1.0.0","dependencies":{"local":"link:vendor/local"}}"#,
         )
-        .unwrap_err()
-        .to_string();
+        .unwrap();
         assert_eq!(
-            error,
-            "local: missing yarn selector local@link:./vendor/local"
+            links(&dir, r#"{"private":true,"workspaces":["packages/*"]}"#).unwrap(),
+            vec![
+                ("node_modules/lib".to_string(), "packages/lib".to_string()),
+                (
+                    "packages/lib/node_modules/local".to_string(),
+                    "vendor/local".to_string()
+                ),
+            ]
         );
+        fs::remove_file(dir.0.join("packages/lib/package.json")).unwrap();
+
+        // The directory must be inside the project, and must be named.
+        for (spec, words) in [
+            (
+                "link:../outside",
+                r#"workspace link target "../outside" is outside the project"#,
+            ),
+            (
+                "link:/etc",
+                r#"workspace link target "/etc" is outside the project"#,
+            ),
+            (
+                "link:",
+                "package.json dependencies local: link: names no directory",
+            ),
+        ] {
+            let package = format!(r#"{{"dependencies":{{"local":"{spec}"}}}}"#);
+            let error = links(&dir, &package).unwrap_err().to_string();
+            assert!(error.contains(words), "{spec}: {error}");
+        }
+
+        // Any other spec the lock does not hold is still a stale lock.
+        let error = links(&dir, r#"{"dependencies":{"local":"file:./vendor/local"}}"#)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("yarn.lock"), "{error}");
+    }
+
+    /// Yarn reads a linked directory's package.json and locks its
+    /// `dependencies` and `optionalDependencies` (never its
+    /// `devDependencies`), so the plan installs them, their lock entries
+    /// are not leftovers, and the linked manifest is held to the lock like
+    /// the project's own. A link inside a linked package is followed too.
+    #[test]
+    fn a_yarn_linked_package_brings_its_locked_dependencies() {
+        let dir = project();
+        fs::create_dir_all(dir.0.join("vendor/local")).unwrap();
+        fs::create_dir_all(dir.0.join("vendor/inner")).unwrap();
+        let write = |local: &str| {
+            fs::write(dir.0.join("vendor/local/package.json"), local).unwrap();
+        };
+        fs::write(
+            dir.0.join("vendor/inner/package.json"),
+            r#"{"name":"inner","version":"1.0.0","optionalDependencies":{"deep":"^2.0.0"}}"#,
+        )
+        .unwrap();
+        let lock = format!(
+            r#"# yarn lockfile v1
+dep@^1.0.0:
+  version "1.0.0"
+  resolved "https://registry.yarnpkg.com/dep/-/dep-1.0.0.tgz"
+  integrity {SRI}
+deep@^2.0.0:
+  version "2.0.0"
+  resolved "https://registry.yarnpkg.com/deep/-/deep-2.0.0.tgz"
+  integrity {SRI}
+"#
+        );
+        let plan = |lock: &str| {
+            plan_yarn(
+                Platform::X86_64UnknownLinuxGnu,
+                lock,
+                r#"{"dependencies":{"local":"link:vendor/local"}}"#,
+                &held(&dir.0),
+                node_version(),
+            )
+        };
+        write(
+            r#"{"name":"local","version":"1.0.0","dependencies":{"dep":"^1.0.0","inner":"link:vendor/inner"},"devDependencies":{"unlocked":"9.9.9"}}"#,
+        );
+        let planned = plan(&lock).unwrap();
+        let mut packages: Vec<(&str, &str)> = planned
+            .packages
+            .iter()
+            .map(|package| (package.path.as_str(), package.version.as_str()))
+            .collect();
+        packages.sort();
+        assert_eq!(
+            packages,
+            [
+                ("node_modules/deep", "2.0.0"),
+                ("node_modules/dep", "1.0.0")
+            ]
+        );
+        let mut links: Vec<(&str, &str)> = planned
+            .links
+            .iter()
+            .map(|link| (link.path.as_str(), link.target.as_str()))
+            .collect();
+        links.sort();
+        assert_eq!(
+            links,
+            [
+                ("node_modules/inner", "vendor/inner"),
+                ("node_modules/local", "vendor/local")
+            ]
+        );
+
+        // The linked manifest asks for something the lock does not hold.
+        write(r#"{"name":"local","version":"1.0.0","dependencies":{"dep":"^3.0.0"}}"#);
+        let error = plan(&lock).unwrap_err().to_string();
+        assert!(
+            error.starts_with("vendor/local/package.json dependencies disagree with yarn.lock"),
+            "{error}"
+        );
+        // The linked manifest stopped asking for what the lock holds.
+        write(r#"{"name":"local","version":"1.0.0"}"#);
+        let error = plan(&lock).unwrap_err().to_string();
+        assert!(
+            error.starts_with("yarn.lock locks de") && error.contains("no package.json depends on"),
+            "{error}"
+        );
+        // A linked manifest that does not parse is named.
+        write("{");
+        let error = plan(&lock).unwrap_err().to_string();
+        assert!(error.starts_with("vendor/local/package.json: "), "{error}");
     }
 
     #[test]

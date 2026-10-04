@@ -2,6 +2,8 @@
 //! pinned artifacts — and proves store + fetch + cpython + wheel + projection
 //! work end to end. Heavy (downloads CPython on cold store), so #[ignore]d;
 //! run: cargo test --test kernel_smoke -- --ignored
+//! The store is a scratch one unless TOG_STORE names another, never the
+//! developer's own.
 
 // Tests spawn fixtures and take leases freely (see clippy.toml).
 #![allow(clippy::disallowed_methods)]
@@ -16,18 +18,19 @@ use std::process::Command;
 use tog::kernel::platform::Platform;
 #[cfg(debug_assertions)]
 use tog::kernel::store::ObjectDeps;
+#[cfg(debug_assertions)]
 use tog::kernel::store::Store;
 use tog::kernel::types::*;
 
 mod common;
 
-#[cfg(debug_assertions)]
 use common::TempDir;
 
 #[test]
 #[ignore]
 fn realize_env_and_run_python() {
-    let store = Store::open().expect("store");
+    let temp = TempDir::new("kernel-smoke-store");
+    let store = common::open_store(&temp);
     let activity = &store
         .activity(tog::kernel::activity::ActivityMode::Shared)
         .unwrap();
