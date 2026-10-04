@@ -117,7 +117,7 @@ pub fn collect_with_activity<W: Write>(
     let _gc_lock = store.gc_lock()?;
     let _publish_lock = store.publish_lock()?;
 
-    let snapshot = read(store, activity, &options, out)?;
+    let snapshot = read(store, activity, &options)?;
     let validated = validate(&snapshot)?;
     let plan = plan(&validated, &options)?;
     let window = keep_age(options.keep_days);
@@ -900,8 +900,7 @@ mod tests {
         options: &Options,
         snapshot: &mut Option<Snapshot>,
     ) -> SweepPlan {
-        let mut out = Vec::new();
-        *snapshot = Some(read(store, activity, options, &mut out).unwrap());
+        *snapshot = Some(read(store, activity, options).unwrap());
         let taken = snapshot.as_ref().unwrap();
         let validated = validate(taken).unwrap();
         plan(&validated, options).unwrap()
@@ -2470,8 +2469,7 @@ mod tests {
         assert!(store.object_path(&id).is_dir());
         plant(&store);
         let activity = store.try_activity_exclusive().unwrap().unwrap();
-        let mut out = Vec::new();
-        match read(&store, &activity, &Options::default(), &mut out) {
+        match read(&store, &activity, &Options::default()) {
             Ok(_) => panic!("the read phase accepted a malformed store"),
             Err(error) => error.to_string(),
         }

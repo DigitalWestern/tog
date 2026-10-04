@@ -5,7 +5,9 @@
 //! [`Selected`] is the result carried through sync, run, build and `x`, so
 //! nothing after this point reopens a catalog or re-decides a version.
 
-use super::{invalid, qualified, Bundle, Catalog, Request};
+#[cfg(test)]
+use super::qualified;
+use super::{invalid, Bundle, Catalog, Request};
 use crate::kernel::digest::Digest;
 use crate::kernel::platform::Platform;
 use std::collections::BTreeMap;
@@ -185,6 +187,7 @@ impl Selected {
         )
     }
 
+    #[cfg(test)]
     /// The algorithm-qualified digest of one component's bytes on one
     /// platform, the spelling a lock row and a bundle id share.
     pub fn qualified_digest(&self, platform: Platform, component: &str) -> io::Result<String> {

@@ -10,8 +10,17 @@
 #![cfg_attr(test, allow(clippy::disallowed_methods))]
 
 pub mod cli;
+#[cfg(not(tog_dead_code))]
 pub mod comforter;
+#[cfg(tog_dead_code)]
+mod comforter;
+#[cfg(not(tog_dead_code))]
 pub mod kernel;
+#[cfg(tog_dead_code)]
+mod kernel;
+#[cfg(not(tog_dead_code))]
 pub mod tailors;
+#[cfg(tog_dead_code)]
+mod tailors;
 
 pub mod commands;

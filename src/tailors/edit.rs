@@ -118,7 +118,8 @@ pub struct CachedTool {
     pub root: PathBuf,
     /// The root's shared lifecycle lock. `tog x --clean` removes a root
     /// under the exclusive lock, so the caller holds this for as long as it
-    /// uses the root.
+    /// uses the root. Held, never read: dropping it releases the lock.
+    #[allow(dead_code)]
     pub lock: fs::File,
     /// Whether this call realized it (a cache hit realizes nothing).
     pub realized: bool,

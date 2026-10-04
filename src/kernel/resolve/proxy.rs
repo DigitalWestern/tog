@@ -220,11 +220,7 @@ impl Session {
         self.state.token()
     }
 
-    /// Every address this session was advertised at.
-    pub fn addresses(&self) -> &[ProxyAddress] {
-        &self.addresses
-    }
-
+    #[cfg(test)]
     /// Listen on TCP at `bind` (normally `127.0.0.1:0`). The tool reaches
     /// the proxy at the bound address.
     pub fn listen_tcp(&mut self, bind: SocketAddr) -> io::Result<ProxyAddress> {

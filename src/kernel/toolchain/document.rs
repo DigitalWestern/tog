@@ -15,7 +15,9 @@
 //! test can hold every shipped file to `render(parse(file)) == file` and a
 //! hand edit in any other spelling is caught.
 
-use super::{invalid, parse_qualified, qualified, ArtifactRow, Bundle, Catalog, Component};
+#[cfg(test)]
+use super::qualified;
+use super::{invalid, parse_qualified, ArtifactRow, Bundle, Catalog, Component};
 use crate::kernel::platform::Platform;
 use serde::Deserialize;
 use std::io;
@@ -142,6 +144,7 @@ impl Document {
         Catalog::new(&self.ecosystem, self.bundles.clone())?.with_default(&self.default)
     }
 
+    #[cfg(test)]
     /// The canonical spelling: the bytes `tools/catalog.py` writes for the
     /// same releases. Releases are ordered newest primary version first
     /// (ties keep document order), components keep bundle order, and
@@ -221,6 +224,7 @@ impl Document {
     }
 }
 
+#[cfg(test)]
 /// A TOML basic string. Catalog fields are URLs, versions and hex, so only
 /// the two characters TOML reserves need escaping; anything else a
 /// generator emitted would fail [`Document::parse`] or the endpoint policy.
@@ -301,11 +305,6 @@ impl Shipped {
         bundle
             .artifact(platform, component)
             .ok_or_else(|| crate::kernel::platform::no_pin(component, platform))
-    }
-
-    /// The raw bytes, for the canonical-form test.
-    pub fn text(&self) -> &'static str {
-        self.text
     }
 }
 

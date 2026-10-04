@@ -1460,8 +1460,6 @@ const RAW_CHILD_SITES: &[(&str, &str, usize)] = &[
     ("src/kernel/archive.rs", "list_names", 1),
     ("src/kernel/archive.rs", "status_for", 1),
     ("src/kernel/sandbox.rs", "bwrap_preflight_with_activity", 2),
-    // `git ls-remote`: a network query with no working directory.
-    ("src/kernel/gitsrc.rs", "run_git", 1),
     // Unmanaged sandbox entry points, for callers that consume no store.
     ("src/kernel/sandbox.rs", "run_bwrap_with_stdout", 1),
     ("src/kernel/sandbox.rs", "run_seatbelt_status", 1),

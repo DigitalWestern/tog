@@ -35,7 +35,9 @@ use crate::kernel::resolve::ResolutionDoor;
 use crate::kernel::sandbox::BuildSpec;
 use crate::kernel::store::Store;
 use crate::kernel::toolchain::document::Shipped;
-use crate::kernel::toolchain::{ArtifactRow, ArtifactSpec, Catalog, Selected, Source};
+#[cfg(test)]
+use crate::kernel::toolchain::Source;
+use crate::kernel::toolchain::{ArtifactRow, ArtifactSpec, Catalog, Selected};
 use crate::kernel::types::Identity;
 use crate::kernel::ui;
 use serde::{Deserialize, Serialize};
@@ -98,6 +100,7 @@ fn go_pin_rows() -> io::Result<Vec<GoPin>> {
     Ok(rows)
 }
 
+#[cfg(test)]
 fn go_pin(platform: Platform, version: &str) -> io::Result<GoPin> {
     let rows = go_pin_rows()?;
     if let Some(pin) = rows
@@ -285,6 +288,7 @@ pub fn realize_runtime(
         .map(|(path, _)| path)
 }
 
+#[cfg(test)]
 /// The shipped catalog's release for one exact Go version, as a selection.
 /// This is what a caller outside any project gets: there is no lock to
 /// honor, so the compiled pin table is both the catalog and the answer. The
@@ -312,6 +316,7 @@ fn shipped_selection(platform: Platform, version: &str) -> io::Result<Selected> 
     })
 }
 
+#[cfg(test)]
 /// Ensure the shipped Go toolchain is realized in the store, for callers
 /// with no project selection to honor (`tog deps`, tests). A run inside a
 /// project realizes through [`realize_runtime`] with the toolchain its lock
@@ -320,6 +325,7 @@ pub fn ensure_go(store: &Store, activity: &StoreActivity, version: &str) -> io::
     ensure_go_for(store, activity, Platform::host()?, version)
 }
 
+#[cfg(test)]
 pub fn ensure_go_for(
     store: &Store,
     activity: &StoreActivity,
@@ -829,6 +835,7 @@ fn verified_module(
     }))
 }
 
+#[cfg(test)]
 /// Plan the module closure. Network-permitted delegation to the store Go in
 /// a DISPOSABLE copy (go mod download can rewrite go.mod/go.sum), followed
 /// by tog-owned verification of every artifact. Cached in

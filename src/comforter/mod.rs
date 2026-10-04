@@ -147,18 +147,6 @@ impl ClosureRefs {
         Ok(self)
     }
 
-    pub fn optional_object_id(
-        &mut self,
-        store: &Store,
-        activity: &crate::kernel::activity::StoreActivity,
-        id: Option<&str>,
-    ) -> io::Result<&mut Self> {
-        if let Some(id) = id {
-            self.object_id(store, activity, id)?;
-        }
-        Ok(self)
-    }
-
     pub fn forest(
         &mut self,
         store: &Store,
@@ -177,6 +165,7 @@ impl ClosureRefs {
         self.projection(store, activity, ProjectionBase::Backups, path)
     }
 
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.objects.is_empty() && self.projections.is_empty()
     }
@@ -250,19 +239,6 @@ pub(crate) fn write_closure_with_project_lock(
         Some(project_lock),
         attribution,
     )
-}
-
-/// Alias for `write_closure`.
-pub fn write_closure_with_refs(
-    project: &ProjectRoot,
-    ecosystem: &str,
-    body: serde_json::Value,
-    store: &Store,
-    activity: &crate::kernel::activity::StoreActivity,
-    refs: ClosureRefs,
-    attribution: &mut crate::kernel::policy::Attribution,
-) -> io::Result<()> {
-    write_closure(project, ecosystem, body, store, activity, refs, attribution)
 }
 
 /// Persist the producer's complete root union before a project projection or

@@ -908,10 +908,6 @@ impl Attribution {
         })
     }
 
-    pub fn ecosystem(&self) -> &str {
-        &self.ecosystem
-    }
-
     /// The exceptions recorded into this frame so far, without claiming
     /// them. For diagnostics and tests; publication goes through `claim`.
     pub fn recorded(&self) -> Vec<Exception> {

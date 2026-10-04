@@ -218,20 +218,6 @@ pub(crate) fn live_identity_for_test() -> Identity {
     })
 }
 
-/// Git with no store lease, so only for runs that touch no store path. The
-/// one production caller is `resolve_ref`'s `ls-remote`: a network query
-/// with no working directory. Every run against a staged or published tree
-/// goes through `run_git_with_activity`.
-// Reviewed site (tests/architecture.rs): `git ls-remote`, a network query with no store path.
-#[allow(clippy::disallowed_methods)]
-fn run_git(args: &[&str], cwd: Option<&Path>) -> io::Result<std::process::Output> {
-    let mut command = Command::new(GIT);
-    configure_git(&mut command, args, cwd);
-    command
-        .output()
-        .map_err(|e| io::Error::new(e.kind(), format!("run {GIT} {}: {e}", args.join(" "))))
-}
-
 fn configure_git(command: &mut Command, args: &[&str], cwd: Option<&Path>) {
     let ssh_auth_sock = std::env::var_os("SSH_AUTH_SOCK");
     // Git reads a surprisingly large ambient surface: global/system config,
@@ -468,20 +454,6 @@ fn tracked_repositories_inside(
     Ok(false)
 }
 
-fn git_ok(args: &[&str], cwd: Option<&Path>, what: &str) -> io::Result<String> {
-    let output = run_git(args, cwd)?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let tail: Vec<&str> = stderr.lines().rev().take(6).collect();
-        return Err(err(format!(
-            "{what} failed ({}): {}",
-            output.status,
-            tail.into_iter().rev().collect::<Vec<_>>().join(" | ")
-        )));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-}
-
 fn git_ok_with_activity(
     args: &[&str],
     cwd: Option<&Path>,
@@ -499,49 +471,6 @@ fn git_ok_with_activity(
         )));
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-}
-
-/// Resolve a branch/tag/short ref to a full commit. Needs the network; used at
-/// plan time so the commit can be recorded before anything is realized.
-pub fn resolve_ref(url: &str, reference: &str) -> io::Result<String> {
-    if is_full_commit(reference) {
-        return Ok(reference.to_ascii_lowercase());
-    }
-    // Before normalization: `-oProxyCommand=x:repo` would otherwise be
-    // read as an scp-style spelling and come out as an ssh:// URL.
-    if url.trim_start().starts_with('-') {
-        return Err(err(format!("refusing git URL {url:?}")));
-    }
-    let url = normalize_url(url);
-    if !ALLOWED_SCHEMES.iter().any(|s| url.starts_with(s)) || option_looking_authority(&url) {
-        return Err(err(format!("refusing git URL {url:?}")));
-    }
-    if reference.starts_with('-') || reference.contains(char::is_whitespace) {
-        return Err(err(format!("refusing git ref {reference:?}")));
-    }
-    let out = git_ok(
-        &["ls-remote", &url, reference],
-        None,
-        &format!("git ls-remote {url} {reference}"),
-    )?;
-    commit_from_ls_remote(&url, reference, &out)
-}
-
-/// The commit in a `git ls-remote <url> <ref>` listing: the first field of
-/// the first line, which must be a full hash. An empty listing means the
-/// remote has no such ref.
-fn commit_from_ls_remote(url: &str, reference: &str, listing: &str) -> io::Result<String> {
-    let commit = listing
-        .lines()
-        .next()
-        .and_then(|line| line.split_whitespace().next())
-        .ok_or_else(|| err(format!("{url}: ref {reference} not found")))?;
-    if !is_full_commit(commit) {
-        return Err(err(format!(
-            "{url}: ref {reference} resolved to {commit:?}"
-        )));
-    }
-    Ok(commit.to_ascii_lowercase())
 }
 
 fn remove_git_dirs(root: &Path) -> io::Result<()> {
@@ -1067,6 +996,30 @@ mod realization_tests {
     use super::*;
     use crate::kernel::testutil::TempDir;
 
+    /// Git with no store lease, for building fixture repositories outside
+    /// any store. Production runs go through `run_git_with_activity`.
+    fn run_git(args: &[&str], cwd: Option<&Path>) -> io::Result<std::process::Output> {
+        let mut command = Command::new(GIT);
+        configure_git(&mut command, args, cwd);
+        command
+            .output()
+            .map_err(|e| io::Error::new(e.kind(), format!("run {GIT} {}: {e}", args.join(" "))))
+    }
+
+    fn git_ok(args: &[&str], cwd: Option<&Path>, what: &str) -> io::Result<String> {
+        let output = run_git(args, cwd)?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let tail: Vec<&str> = stderr.lines().rev().take(6).collect();
+            return Err(err(format!(
+                "{what} failed ({}): {}",
+                output.status,
+                tail.into_iter().rev().collect::<Vec<_>>().join(" | ")
+            )));
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    }
+
     /// A local repository with one commit; `file://` keeps this offline.
     fn fixture_repo(root: &Path) -> (String, String) {
         let repo = root.join("repo");
@@ -1285,9 +1238,9 @@ mod realization_tests {
     }
 
     #[test]
-    fn an_unpinned_ref_is_refused_and_resolve_ref_pins_it() {
+    fn an_unpinned_ref_is_refused() {
         let root = TempDir::named("gitsrc-ref");
-        let (url, commit) = fixture_repo(&root.0);
+        let (url, _) = fixture_repo(&root.0);
         let store = store_at(&root.0);
         let activity = &store
             .activity(crate::kernel::activity::ActivityMode::Shared)
@@ -1301,8 +1254,6 @@ mod realization_tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("full commit"), "{error}");
-        assert_eq!(resolve_ref(&normalize_url(&url), "main").unwrap(), commit);
-        assert_eq!(resolve_ref(&normalize_url(&url), &commit).unwrap(), commit);
     }
 
     #[test]
@@ -1831,100 +1782,6 @@ mod refusal_tests {
                 validate_source(&source(url, COMMIT, Some(subdirectory))).unwrap();
             }
         }
-    }
-
-    #[test]
-    fn resolve_ref_refuses_a_bad_url_or_ref_before_running_git() {
-        // A pinned reference is answered without a lookup, lowercased.
-        let upper = COMMIT.to_ascii_uppercase();
-        assert_eq!(
-            resolve_ref("http://never.contacted/repo", &upper).unwrap(),
-            COMMIT
-        );
-        // A leading dash is refused before normalization, which would
-        // otherwise read `-o...:repo` as an scp-style URL.
-        for url in [
-            "-oProxyCommand=touch:repo",
-            "  -oProxyCommand=touch:repo",
-            "--upload-pack=touch",
-        ] {
-            assert_eq!(
-                resolve_ref(url, "main").unwrap_err().to_string(),
-                format!("refusing git URL {url:?}"),
-                "{url}"
-            );
-        }
-        // Otherwise the URL is normalized, then checked against the
-        // allow-list and for an option-looking host. Port 9 answers
-        // nothing, so a lookup would fail differently.
-        for (url, normalized) in [
-            ("http://127.0.0.1:9/repo", "http://127.0.0.1:9/repo"),
-            (
-                "git+http://127.0.0.1:9/repo#egg=x",
-                "http://127.0.0.1:9/repo",
-            ),
-            ("ftp://127.0.0.1:9/repo", "ftp://127.0.0.1:9/repo"),
-            (
-                "git+ssh://-oProxyCommand=touch/repo",
-                "ssh://-oProxyCommand=touch/repo",
-            ),
-            ("ssh://git@-host/repo", "ssh://git@-host/repo"),
-        ] {
-            assert_eq!(
-                resolve_ref(url, "main").unwrap_err().to_string(),
-                format!("refusing git URL {normalized:?}"),
-                "{url}"
-            );
-        }
-        for reference in [
-            "-oProxyCommand=touch /tmp/pwned",
-            "--upload-pack=touch",
-            "main --upload-pack=touch",
-            "main\tmaster",
-            "main\n",
-        ] {
-            assert_eq!(
-                resolve_ref("https://127.0.0.1:9/repo", reference)
-                    .unwrap_err()
-                    .to_string(),
-                format!("refusing git ref {reference:?}"),
-                "{reference}"
-            );
-        }
-    }
-
-    #[test]
-    fn an_ls_remote_listing_without_a_full_hash_is_refused() {
-        let url = "https://example.invalid/repo";
-        for listing in ["", "\n\n"] {
-            assert_eq!(
-                commit_from_ls_remote(url, "main", listing)
-                    .unwrap_err()
-                    .to_string(),
-                "https://example.invalid/repo: ref main not found",
-                "{listing:?}"
-            );
-        }
-        for listing in ["abc123\trefs/heads/main\n", "warning: something\n"] {
-            let first = listing.split_whitespace().next().unwrap();
-            assert_eq!(
-                commit_from_ls_remote(url, "main", listing)
-                    .unwrap_err()
-                    .to_string(),
-                format!("https://example.invalid/repo: ref main resolved to {first:?}"),
-                "{listing:?}"
-            );
-        }
-        // Control: the first field of the first line, lowercased.
-        let listing = format!(
-            "{}\trefs/heads/main\n{}\trefs/tags/v1\n",
-            COMMIT.to_ascii_uppercase(),
-            "f".repeat(40)
-        );
-        assert_eq!(
-            commit_from_ls_remote(url, "main", &listing).unwrap(),
-            COMMIT
-        );
     }
 
     fn link(target: &str, at: &Path) {

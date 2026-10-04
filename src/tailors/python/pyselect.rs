@@ -117,6 +117,7 @@ pub fn matches_specifier(specifier: &str, version: &str) -> io::Result<bool> {
     crate::tailors::python::pep440::matches_specifier(specifier, version)
 }
 
+#[cfg(test)]
 /// Select a pinned CPython from already-collected declared constraints. With
 /// no constraints this deliberately returns the historical 3.12.14 pin.
 pub fn select_python(
@@ -821,6 +822,7 @@ fn strip_setup_cfg_comment(line: &str) -> &str {
         .unwrap_or(line)
 }
 
+#[cfg(test)]
 pub fn extract_setup_cfg_python_requires(text: &str) -> Option<String> {
     parse_setup_cfg(text).python_requires
 }

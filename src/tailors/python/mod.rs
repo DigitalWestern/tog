@@ -33,9 +33,11 @@ use std::path::PathBuf;
 
 #[cfg(test)]
 pub(crate) use crate::kernel::provider::cpython::uv_identity;
+#[cfg(test)]
+pub use crate::kernel::provider::cpython::uv_pins;
 pub use crate::kernel::provider::cpython::{
     cpython_identity, cpython_identity_input, cpython_object_id, pythons, runtime_object_id,
-    shipped_newest, shipped_selection, toolchain_catalog, uv_pins, PinnedPython, PinnedUv,
+    shipped_newest, shipped_selection, toolchain_catalog, PinnedPython,
 };
 
 /// The error for a failed store-uv run: `what` failed, then the tail of
@@ -276,17 +278,6 @@ pub fn preflight(platform: Platform, version: &str) -> io::Result<()> {
     lookup(platform, version)
         .map(|_| ())
         .ok_or_else(|| no_pin(&format!("cpython {version}"), platform))
-}
-
-/// Realize a pinned CPython for a caller that holds no selection: the
-/// shipped catalog row for that pin's version.
-pub fn ensure_python_for(
-    store: &Store,
-    activity: &StoreActivity,
-    pin: &PinnedPython,
-    platform: Platform,
-) -> io::Result<PathBuf> {
-    realize_runtime(store, activity, platform, &shipped_selection(pin.version)?)
 }
 
 #[cfg(test)]

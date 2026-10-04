@@ -172,9 +172,8 @@ pub struct PublishFacts<'f> {
     pub portable: &'f PortableLedger,
     /// The sha256 of the portable ledger's bytes.
     pub ledger_sha256: &'f str,
-    /// `confined` or `isolated`, and the engine.
+    /// `confined` or `isolated`.
     pub isolation: &'static str,
-    pub engine: &'static str,
     /// The exceptions this run recorded.
     pub exceptions: &'f [Fact],
     snapshot: &'f Snapshot,
@@ -280,7 +279,6 @@ pub(super) fn run(
         portable: &ran.session.ledger,
         ledger_sha256: &ledger_sha256,
         isolation: ran.outcome.tier.isolation(),
-        engine: ran.outcome.tier.engine.name(),
         exceptions: &facts,
         snapshot: &snapshot,
     };

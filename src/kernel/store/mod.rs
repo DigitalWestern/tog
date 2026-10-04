@@ -28,7 +28,7 @@ use env::home;
 pub(crate) use env::STORE_ENV_LOCK;
 pub(crate) use format::lock_root;
 pub(crate) use format::RESET_REMOVES;
-pub use format::{refusal_fix, Refused, StoreFormat, FORMAT_FILE, STORE_FORMAT};
+pub use format::{refusal_fix, StoreFormat, FORMAT_FILE};
 pub use fsops::*;
 pub use objects::*;
 pub use projection::*;

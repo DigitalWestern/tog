@@ -16,7 +16,9 @@
 //! the host the tunnel was opened for.
 
 use rustls::crypto::CryptoProvider;
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+#[cfg(test)]
+use rustls::pki_types::CertificateDer;
+use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
 use rustls::server::{ClientHello, ResolvesServerCert};
 use rustls::sign::CertifiedKey;
 use std::collections::HashMap;
@@ -90,11 +92,13 @@ impl Authority {
         &self.pem
     }
 
+    #[cfg(test)]
     /// The certificate itself.
     pub fn certificate(&self) -> &CertificateDer<'static> {
         self.cert.der()
     }
 
+    #[cfg(test)]
     /// A root set holding only this authority, for a client in tog's own
     /// tests that plays the tool.
     pub fn roots(&self) -> rustls::RootCertStore {

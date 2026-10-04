@@ -18,16 +18,17 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-pub use crate::kernel::provider::crates::{
-    lock_digest, plan_cargo, vendor_object_id, CargoCrate, CargoGitReference, CargoGitSource,
-    CargoPlan,
-};
+pub use crate::kernel::provider::crates::{lock_digest, plan_cargo, CargoPlan};
 pub(crate) use crate::kernel::provider::crates::{
     plan_git_sources, project_git_sources, tog_config_text_for,
 };
 pub use crate::kernel::provider::rust::{
-    preflight_platform, project_extras, project_extras_in, resolve_toolchain, runtime_object_id,
-    rust_object_id, toolchain_catalog, Extras,
+    preflight_platform, project_extras_in, runtime_object_id, toolchain_catalog, Extras,
+};
+#[cfg(test)]
+pub use crate::kernel::provider::{
+    crates::CargoCrate,
+    rust::{resolve_toolchain, rust_object_id},
 };
 
 /// Realize the base Rust toolchain `selected` names; see
@@ -297,21 +298,9 @@ pub fn project_cargo_env(
                 .is_some_and(crate::kernel::store::is_object_id)
         });
     if !valid_objects {
-        #[cfg(test)]
-        {
-            return crate::comforter::write_closure_legacy(
-                &project_dir,
-                "cargo",
-                body,
-                attribution,
-            );
-        }
-        #[cfg(not(test))]
-        {
-            return Err(err(
-                "Cargo closure references must name complete store objects",
-            ));
-        }
+        return Err(err(
+            "Cargo closure references must name complete store objects",
+        ));
     }
     let mut refs = crate::comforter::ClosureRefs::new();
     // The runtime object and `rust_object` are the same object; the direct
@@ -1438,24 +1427,45 @@ checksum = "{hash_b}"
 
     #[test]
     fn projects_cargo_config_wrapper_and_closure() {
+        let _store_env = STORE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _attribution_lock = crate::kernel::policy::attribution_test_lock();
         let mut attribution = crate::kernel::policy::Attribution::open("cargo").unwrap();
         let temp = TempDir::named("cargo-project");
-        let project = temp.0.join("project");
-        let rust = temp.0.join("objects/rust-id");
-        let vendor = temp.0.join("objects/vendor-id");
-        fs::create_dir_all(&project).unwrap();
+        let store_root = temp.0.join("store");
+        for sub in ["objects", "meta", "cache/sha256", "tmp", "roots"] {
+            fs::create_dir_all(store_root.join(sub)).unwrap();
+        }
+        let store = Store::for_test(store_root.canonicalize().unwrap());
+        let lease = store
+            .activity(crate::kernel::activity::ActivityMode::Shared)
+            .unwrap();
+        let activity = &lease;
+        let rust_id = format!("{}-rust-{RUST_VERSION}", "1".repeat(40));
+        let vendor_id = format!("{}-vendor-0", "2".repeat(40));
+        let rust = store.object_path(&rust_id);
+        let vendor = store.object_path(&vendor_id);
         fs::create_dir_all(rust.join("bin")).unwrap();
-        fs::create_dir_all(&vendor).unwrap();
         fs::write(rust.join("bin/cargo"), "fake cargo").unwrap();
+        for (id, object) in [(&rust_id, &rust), (&vendor_id, &vendor)] {
+            fs::create_dir_all(object).unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = fs::metadata(object).unwrap().permissions();
+            permissions.set_mode(permissions.mode() & !0o222);
+            fs::set_permissions(object, permissions).unwrap();
+            fs::write(
+                store.root.join("meta").join(format!("{id}.json")),
+                serde_json::to_vec_pretty(&serde_json::json!({ "id": id })).unwrap(),
+            )
+            .unwrap();
+        }
+        let project = temp.0.join("project");
+        fs::create_dir_all(&project).unwrap();
         let plan = CargoPlan {
             rust_version: "1.96.1".into(),
             crates: vec![],
             members: vec!["app".into()],
         };
         let digest = lock_digest("version = 4\n");
-        let lease = crate::kernel::testutil::detached_lease();
-        let activity = &lease.1;
         project_cargo_env(
             activity,
             &ProjectRoot::open(&project).unwrap(),
@@ -1495,8 +1505,8 @@ checksum = "{hash_b}"
         }
 
         let closure = crate::comforter::read_closure(&project, "cargo").unwrap();
-        assert_eq!(closure["rust_object"]["id"], "rust-id");
-        assert_eq!(closure["vendor_object"]["id"], "vendor-id");
+        assert_eq!(closure["rust_object"]["id"], rust_id.as_str());
+        assert_eq!(closure["vendor_object"]["id"], vendor_id.as_str());
         assert_eq!(closure["cargo_lock_sha256"], digest);
         assert_eq!(closure["plan"]["members"][0], "app");
         // The closure states the selection it was realized from and refers
@@ -1508,7 +1518,7 @@ checksum = "{hash_b}"
         assert_eq!(closure["toolchain"]["ecosystem"], "cargo");
         assert_eq!(closure["toolchain"]["release"], selected.bundle.release);
         assert_eq!(closure["toolchain"]["versions"]["rustc"], RUST_VERSION);
-        assert_eq!(closure["runtime_object"]["id"], "rust-id");
+        assert_eq!(closure["runtime_object"]["id"], rust_id.as_str());
         assert_eq!(
             closure["runtime_object"]["id"],
             closure["rust_object"]["id"]

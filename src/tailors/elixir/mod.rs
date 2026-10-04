@@ -140,6 +140,7 @@ fn beam_spec(platform: Platform, selected: &Selected) -> io::Result<BeamSpec> {
     })
 }
 
+#[cfg(test)]
 /// The shipped catalog's BEAM, for callers with no project selection to
 /// honor. Inside a project every caller realizes from the lock instead.
 fn shipped_selection() -> io::Result<Selected> {
@@ -891,23 +892,6 @@ fn extract_otp(
             destination.display()
         ))
     })
-}
-
-/// Ensure the composite BEAM toolchain object: otp/ + elixir/ (separate
-/// roots — never merge their trees) + archives/ (unpacked Hex) +
-/// rebar3 escript.
-pub fn ensure_beam(store: &Store, activity: &StoreActivity) -> io::Result<PathBuf> {
-    ensure_beam_for(store, activity, Platform::host()?)
-}
-
-/// The shipped BEAM, for callers with no project selection: tests and the
-/// host-side work that precedes a project's first sync.
-pub fn ensure_beam_for(
-    store: &Store,
-    activity: &StoreActivity,
-    platform: Platform,
-) -> io::Result<PathBuf> {
-    realize_runtime(store, activity, platform, &shipped_selection()?)
 }
 
 /// Realize the BEAM the selection names: OTP, Elixir, Hex and rebar3, each

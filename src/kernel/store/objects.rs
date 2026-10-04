@@ -314,20 +314,8 @@ impl Store {
         }
     }
 
-    /// Atomically move a staged dir into the store under `identity`, write
-    /// metadata, and mark the tree read-only. Returns the object path and the
-    /// exceptions stored with the object.
-    /// If the object already exists the staged dir is discarded (cache hit).
-    /// Publish an object with explicit dependency and cache evidence.
-    ///
-    /// This is the only publication entry point. There is deliberately no
-    /// convenience form that infers a dependency set from the identity map:
-    /// an inferred set is a guess, and `commit_internal` stamps what it
-    /// is given as `evidence: "explicit"`. Certifying a guess as explicit is
-    /// exactly the failure this explicit-evidence boundary prevents.
-    ///
-    /// Test-only, like `has`: production uses
-    /// `commit_with_activity_and_deps`.
+    /// Test-only, like `has`: [`Store::commit_with_activity_and_deps`]
+    /// under a shared lease of its own.
     #[cfg(test)]
     pub fn commit_with_deps(
         &self,
@@ -340,18 +328,18 @@ impl Store {
         self.commit_with_activity_and_deps(&activity, identity, staged, exceptions, deps)
     }
 
+    /// Atomically move a staged dir into the store under `identity`, write
+    /// metadata, and mark the tree read-only. Returns the object path and the
+    /// exceptions stored with the object. If the object already exists the
+    /// staged dir is discarded (cache hit).
+    ///
+    /// This is the only publication entry point, and its dependency and
+    /// cache evidence is explicit. There is deliberately no convenience form
+    /// that infers a dependency set from the identity map: an inferred set
+    /// is a guess, and this stamps what it is given as `evidence:
+    /// "explicit"`. Certifying a guess as explicit is exactly the failure
+    /// this boundary prevents.
     pub fn commit_with_activity_and_deps(
-        &self,
-        activity: &StoreActivity,
-        identity: &Identity,
-        staged: &Path,
-        exceptions: &[Exception],
-        deps: &ObjectDeps,
-    ) -> io::Result<(PathBuf, Vec<Exception>)> {
-        self.commit_internal(activity, identity, staged, exceptions, deps)
-    }
-
-    pub(super) fn commit_internal(
         &self,
         activity: &StoreActivity,
         identity: &Identity,

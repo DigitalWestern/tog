@@ -115,18 +115,6 @@ impl MetaIndex {
     pub fn iter(&self) -> impl Iterator<Item = (&String, &Record)> {
         self.entries.iter()
     }
-
-    pub fn len(&self) -> usize {
-        self.entries.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
-    }
-
-    pub fn contains(&self, id: &str) -> bool {
-        self.entries.contains_key(id)
-    }
 }
 
 /// Parse and validate one metadata file. Shared by the index and by the

@@ -108,6 +108,7 @@ fn ruby_spec(platform: Platform, selected: &Selected) -> io::Result<RubySpec> {
     })
 }
 
+#[cfg(test)]
 /// The shipped catalog's Ruby, for callers with no project selection to
 /// honor. Inside a project every caller realizes from the lock instead.
 fn shipped_selection() -> io::Result<Selected> {
@@ -283,21 +284,6 @@ fn extract_ruby_bottle_for_test(tarball: &Path, staged: &Path) -> io::Result<()>
     )
     .map_err(|e| io::Error::new(e.kind(), format!("extract portable-ruby bottle: {e}")))?;
     validate_ruby_layout(staged)
-}
-
-/// Ensure the shipped portable Ruby is realized (interpreter at
-/// <obj>/bin/ruby). For callers with no project selection: tests and the
-/// host-side lock generation `tog add` runs before a sync exists.
-pub fn ensure_ruby(store: &Store, activity: &StoreActivity) -> io::Result<PathBuf> {
-    ensure_ruby_for(store, activity, Platform::host()?)
-}
-
-pub fn ensure_ruby_for(
-    store: &Store,
-    activity: &StoreActivity,
-    platform: Platform,
-) -> io::Result<PathBuf> {
-    realize_runtime(store, activity, platform, &shipped_selection()?)
 }
 
 /// Realize the Ruby the selection names: its bytes, its version, its
