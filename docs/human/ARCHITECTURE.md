@@ -852,7 +852,12 @@ transaction, then cache, then publication. Each operation supervises its own awa
 store-consuming child (`src/kernel/supervise.rs`) and forwards TERM to it; any number run at
 once. The signal handlers are installed once per process and never removed: each supervision
 registers with them, keeps its own cursors into the signal counts, and with none registered
-the handler acts as the disposition tog inherited. A helper that runs
+the handler acts as the disposition tog inherited, including handler masks,
+syscall restart behavior and one-shot handlers. Cancellation caught by the
+reap boundary carries the child's exit status. A TERM caught after that
+boundary is re-raised when the last session leaves. New operations cannot
+register while that inherited delivery is pending, including when the caller
+blocks TERM. A helper that runs
 such a child takes the caller's `&StoreActivity` rather than taking a lease of
 its own, so the lease that protects a stage directory is visibly the one held
 across its children and its commit (`tests/architecture.rs` lists the few raw
