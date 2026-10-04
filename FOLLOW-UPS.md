@@ -92,7 +92,6 @@ After the proxy: the test-suite audit (#351) and then the quality review
   - #348 tests: security and integrity checks with no offline test.
   - #349 product and CI problems found by the audit.
   - #367 tests: the artifact size caps in kernel::fetch (8 GiB artifact, 256 MiB text) have no test (from the #363 review).
-  - #369 python: wheel entry-point and entry-name validation leftovers (from the #368 review).
   - #418 fmt: a never-synced project whose only closure is the retired rustfmt.json never self-heals, and `gc --register` refuses it (from #409).
   - #371 comforter: closure_object probe follows symlinks out of the object (from the #370 review).
   - #373 sandbox: host-socket scan leftovers (from the #372 review).

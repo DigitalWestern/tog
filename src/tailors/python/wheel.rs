@@ -351,13 +351,11 @@ fn invalid_data(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.into())
 }
 
+/// A leading `/` or `\\` (or a drive letter) is refused by
+/// `normalized_relative_path`; this adds a `..` component under either
+/// separator, which that function would resolve rather than refuse.
 fn validate_entry_name(name: &str) -> io::Result<()> {
-    if name
-        .as_bytes()
-        .first()
-        .is_some_and(|byte| *byte == b'/' || *byte == b'\\')
-        || name.split(['/', '\\']).any(|component| component == "..")
-    {
+    if name.split(['/', '\\']).any(|component| component == "..") {
         return Err(invalid_data(format!("unsafe zip entry: {name}")));
     }
     let _ = normalized_relative_path(name)?;
@@ -482,8 +480,13 @@ fn parse_entry_points(text: &str) -> io::Result<Vec<(String, String, String)>> {
         let attr = attr.trim();
         // Both sides become `from {module} import {attr}` in the launcher,
         // so every dotted component must be a Python identifier or the
-        // generated script is a SyntaxError at run time.
-        if !module.split('.').all(is_identifier) || !attr.split('.').all(is_identifier) {
+        // generated script is a SyntaxError at run time. So is a
+        // `from __future__ import` that is not the script's first
+        // statement, as it would be after the launcher's own imports.
+        if !module.split('.').all(is_identifier)
+            || !attr.split('.').all(is_identifier)
+            || nfkc(module) == "__future__"
+        {
             return Err(invalid_data(format!("invalid entry point value: {value}")));
         }
         entries.push((name.to_string(), module.to_string(), attr.to_string()));
@@ -491,58 +494,72 @@ fn parse_entry_points(text: &str) -> io::Result<Vec<(String, String, String)>> {
     Ok(entries)
 }
 
-/// The ASCII shape of a Python identifier: not empty, not a keyword, no
-/// leading ASCII digit, and no ASCII byte outside `[A-Za-z0-9_]`. Non-ASCII
-/// characters pass through untouched: Python decides those by XID class
-/// after NFKC normalisation, and reproducing that table here would reject
-/// names Python accepts.
+/// Whether Python reads `part` as an identifier in an import statement,
+/// by its tokenizer's rule (`_PyUnicode_ScanIdentifier`): the characters as
+/// written, before any normalization, start with `_` or an XID_Start
+/// character and continue with XID_Continue characters, and the spelling
+/// as written is not a keyword. So `a²` is refused although it normalizes
+/// to `a2`, and fullwidth `ｃｌａｓｓ` is accepted (checked against CPython
+/// 3.14). `__debug__` is refused in its NFKC form too, a safe superset.
 fn is_identifier(part: &str) -> bool {
-    const KEYWORDS: &[&str] = &[
-        "False",
-        "None",
-        "True",
-        "and",
-        "as",
-        "assert",
-        "async",
-        "await",
-        "break",
-        "class",
-        "continue",
-        "def",
-        "del",
-        "elif",
-        "else",
-        "except",
-        "finally",
-        "for",
-        "from",
-        "global",
-        "if",
-        "import",
-        "in",
-        "is",
-        "lambda",
-        "nonlocal",
-        "not",
-        "or",
-        "pass",
-        "raise",
-        "return",
-        "try",
-        "while",
-        "with",
-        "yield",
-        "__debug__",
-    ];
-    let ascii_shape = |c: char| !c.is_ascii() || c == '_' || c.is_ascii_alphanumeric();
+    use icu_properties::props::{XidContinue, XidStart};
+    use icu_properties::CodePointSetData;
+    let start = CodePointSetData::new::<XidStart>();
+    let rest = CodePointSetData::new::<XidContinue>();
     let mut chars = part.chars();
     chars
         .next()
-        .is_some_and(|first| !first.is_ascii_digit() && ascii_shape(first))
-        && chars.all(ascii_shape)
-        && !KEYWORDS.contains(&part)
+        .is_some_and(|first| first == '_' || start.contains(first))
+        && chars.all(|c| rest.contains(c))
+        && !PYTHON_KEYWORDS.contains(&part)
+        && nfkc(part) != "__debug__"
 }
+
+fn nfkc(text: &str) -> String {
+    use unicode_normalization::UnicodeNormalization as _;
+    text.nfkc().collect()
+}
+
+/// Python's hard keywords: an import of any of them is a SyntaxError.
+/// The soft keywords (`match`, `case`, `type`, `_`) are ordinary names there.
+const PYTHON_KEYWORDS: &[&str] = &[
+    "False",
+    "None",
+    "True",
+    "and",
+    "as",
+    "assert",
+    "async",
+    "await",
+    "break",
+    "class",
+    "continue",
+    "def",
+    "del",
+    "elif",
+    "else",
+    "except",
+    "finally",
+    "for",
+    "from",
+    "global",
+    "if",
+    "import",
+    "in",
+    "is",
+    "lambda",
+    "nonlocal",
+    "not",
+    "or",
+    "pass",
+    "raise",
+    "return",
+    "try",
+    "while",
+    "with",
+    "yield",
+    "__debug__",
+];
 
 #[cfg(unix)]
 fn set_mode(path: &Path, mode: u32) -> io::Result<()> {
@@ -1158,6 +1175,16 @@ mod entry_guard_tests {
             "pkg.class:main",
             "pkg:Cli.class",
             "pkg:__debug__",
+            // Non-identifier characters as Python's tokenizer reads them,
+            // before NFKC (#369).
+            "pkg:main\u{1F680}",
+            "pkg:a\u{B2}",
+            "pkg:\u{B7}x",
+            "pkg:\u{301}x",
+            "pkg:\u{FF3F}x",
+            // A future import after the launcher's own imports.
+            "__future__:annotations",
+            "_\u{FF3F}future\u{FF3F}\u{FF3F}:annotations",
         ] {
             let text = format!("[console_scripts]\ntog = {value}\n");
             let error = parse_entry_points(&text).unwrap_err();
@@ -1167,6 +1194,36 @@ mod entry_guard_tests {
                 format!("invalid entry point value: {}", value.trim()),
                 "{value:?}"
             );
+        }
+    }
+
+    /// Names Python accepts in `from {module} import {attr}`, checked
+    /// against CPython 3.14: non-ASCII letters, Other_ID_Start, letter
+    /// numbers, combining marks after the first character, soft keywords,
+    /// and compatibility forms of keywords, which the tokenizer reads as
+    /// written (#369).
+    #[test]
+    fn unicode_identifiers_python_accepts_are_accepted() {
+        for value in [
+            "caf\u{E9}:main",
+            "paquet.\u{E9}t\u{E9}:main",
+            "pkg:_private",
+            "pkg:match",
+            "pkg:type",
+            "pkg:\u{FB01}le",
+            "pkg:\u{FF43}\u{FF4C}\u{FF41}\u{FF53}\u{FF53}",
+            "pkg:x\u{B7}y",
+            "pkg:\u{2115}",
+            "pkg:\u{2118}x",
+            "pkg:\u{2170}",
+            "pkg:x\u{301}",
+            "pkg:x\u{FF3F}",
+            "pkg.cli:Main.run",
+        ] {
+            let text = format!("[console_scripts]\ntog = {value}\n");
+            let entries =
+                parse_entry_points(&text).unwrap_or_else(|error| panic!("{value:?}: {error}"));
+            assert_eq!(entries.len(), 1, "{value:?}");
         }
     }
 
