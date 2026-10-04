@@ -1095,60 +1095,29 @@ mod tests {
 
     // -- Row 1-3: pinned single-artifact toolchains ------------------------
 
+    /// Every single-artifact toolchain row (1-3, 7, 9) recovers its one
+    /// pinned download as a cache dependency and no objects.
     #[test]
-    fn adapter_cpython_v1_recovers_the_expected_dependencies() {
-        let artifact = sha256('1');
-        let (objects, cache) = proven(
-            ident(
-                "cpython",
-                "cpython",
-                "3.11.9",
-                &[
-                    ("artifact_sha256", &artifact),
-                    ("platform", "x86_64-unknown-linux-gnu"),
-                ],
-            ),
-            vec![],
-        );
-        assert!(objects.is_empty());
-        assert_eq!(cache, vec![format!("sha256:{artifact}")]);
-    }
-
-    #[test]
-    fn adapter_uv_v1_recovers_the_expected_dependencies() {
-        let artifact = sha256('2');
-        let (objects, cache) = proven(
-            ident(
-                "uv",
-                "uv",
-                "0.9.7",
-                &[
-                    ("artifact_sha256", &artifact),
-                    ("platform", "x86_64-unknown-linux-gnu"),
-                ],
-            ),
-            vec![],
-        );
-        assert!(objects.is_empty());
-        assert_eq!(cache, vec![format!("sha256:{artifact}")]);
-    }
-
-    #[test]
-    fn adapter_nodejs_v1_recovers_the_expected_dependencies() {
-        let artifact = sha256('3');
-        let (_, cache) = proven(
-            ident(
-                "nodejs",
-                "nodejs",
-                "24.20.0",
-                &[
-                    ("artifact_sha256", &artifact),
-                    ("platform", "x86_64-unknown-linux-gnu"),
-                ],
-            ),
-            vec![],
-        );
-        assert_eq!(cache, vec![format!("sha256:{artifact}")]);
+    fn adapter_single_artifact_toolchains_recover_the_expected_dependencies() {
+        for (kind, version, schema, byte) in [
+            ("cpython", "3.11.9", None, '1'),
+            ("uv", "0.9.7", None, '2'),
+            ("nodejs", "24.20.0", None, '3'),
+            ("go", "1.25.3", Some("go-toolchain/1"), '4'),
+            ("ruby", "3.4.7", Some("ruby-toolchain/1"), '8'),
+        ] {
+            let artifact = sha256(byte);
+            let mut inputs = vec![
+                ("artifact_sha256", artifact.as_str()),
+                ("platform", "x86_64-unknown-linux-gnu"),
+            ];
+            if let Some(schema) = schema {
+                inputs.push(("schema", schema));
+            }
+            let (objects, cache) = proven(ident(kind, kind, version, &inputs), vec![]);
+            assert!(objects.is_empty(), "{kind}");
+            assert_eq!(cache, vec![format!("sha256:{artifact}")], "{kind}");
+        }
     }
 
     #[test]
@@ -1433,14 +1402,6 @@ mod tests {
     }
 
     #[test]
-    fn adapter_go_go_toolchain_1_recovers_the_expected_dependencies() {
-        let artifact = sha256('4');
-        let (objects, cache) = proven(go_record("1.25.3", &artifact).identity, vec![]);
-        assert!(objects.is_empty());
-        assert_eq!(cache, vec![format!("sha256:{artifact}")]);
-    }
-
-    #[test]
     fn adapter_go_modcache_go_modcache_1_recovers_the_expected_dependencies() {
         let artifact = sha256('4');
         let go = go_record("1.25.3", &artifact);
@@ -1525,25 +1486,6 @@ mod tests {
     }
 
     // -- Rows 9-10: Ruby ----------------------------------------------------
-
-    #[test]
-    fn adapter_ruby_ruby_toolchain_1_recovers_the_expected_dependencies() {
-        let artifact = sha256('8');
-        let (_, cache) = proven(
-            ident(
-                "ruby",
-                "ruby",
-                "3.4.7",
-                &[
-                    ("schema", "ruby-toolchain/1"),
-                    ("artifact_sha256", &artifact),
-                    ("platform", "x86_64-unknown-linux-gnu"),
-                ],
-            ),
-            vec![],
-        );
-        assert_eq!(cache, vec![format!("sha256:{artifact}")]);
-    }
 
     #[test]
     fn adapter_ruby_gems_ruby_gems_1_recovers_the_expected_dependencies() {
@@ -2875,18 +2817,6 @@ mod tests {
         assert!(reason.contains("depth"), "{reason}");
     }
 
-    /// A kind absent from every row is rejected at commit time, including
-    /// after the shipped tailor rows have been installed.
-    #[test]
-    fn commit_time_grammar_check_rejects_an_unlisted_kind() {
-        let synthetic = ident("not-a-shipped-kind", "x", "1", &[("anything", "goes")]);
-        let reason = check_identity_grammar(&synthetic).unwrap_err();
-        assert!(
-            reason.contains("no registered object-kind grammar row"),
-            "{reason}"
-        );
-    }
-
     #[test]
     fn commit_time_grammar_check_rejects_schema_drift() {
         let mut schema_removed = ident(
@@ -2920,12 +2850,17 @@ mod tests {
         assert!(reason.contains("Some(\"cpython/1\")"), "{reason}");
         assert!(reason.contains("None"), "{reason}");
 
-        let unknown = ident("not-a-shipped-kind", "x", "1", &[("schema", "future/1")]);
-        let reason = check_identity_grammar(&unknown).unwrap_err();
-        assert!(
-            reason.contains("no registered object-kind grammar row"),
-            "{reason}"
-        );
+        // A kind absent from every row is rejected at commit time, with or
+        // without a schema, including after the shipped tailor rows have
+        // been installed.
+        for inputs in [[("schema", "future/1")], [("anything", "goes")]] {
+            let unknown = ident("not-a-shipped-kind", "x", "1", &inputs);
+            let reason = check_identity_grammar(&unknown).unwrap_err();
+            assert!(
+                reason.contains("no registered object-kind grammar row"),
+                "{inputs:?}: {reason}"
+            );
+        }
     }
 
     #[test]

@@ -1,0 +1,81 @@
+# When heavy.yml goes green on a pull request it ran for, take the `heavy`
+# label off that PR. The label runs the hour-long suite on every push while
+# it is on (heavy.yml's `gate`); one green run is what it was added for, so
+# a forgotten label stops costing a run per push. Add it again to rerun.
+#
+# A run counts only if its acceptance job passed: a `labeled` event for
+# some other label also finishes green, with every heavy job skipped, and
+# that proved nothing. The weekly and by-hand runs have no PR and are left
+# alone.
+#
+# GitHub runs a `workflow_run` workflow from the default branch's copy, so
+# a change to this file takes effect once it is on main.
+name: heavy-unlabel
+
+on:
+  workflow_run:
+    workflows: [heavy]
+    types: [completed]
+
+permissions:
+  contents: read
+
+jobs:
+  unlabel:
+    if: >-
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-22.04
+    permissions:
+      actions: read
+      pull-requests: write
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          RUN: ${{ github.event.workflow_run.id }}
+          RUN_STARTED: ${{ github.event.workflow_run.run_started_at }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          PR: ${{ github.event.workflow_run.pull_requests[0].number }}
+          HEAD_OWNER: ${{ github.event.workflow_run.head_repository.owner.login }}
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+        run: |
+          set -euo pipefail
+          acceptance=$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$RUN/jobs" \
+            --jq '.jobs[] | select(.name == "acceptance") | .conclusion')
+          if [ "$acceptance" != success ]; then
+            echo "acceptance did not pass in run $RUN ('$acceptance'); the label stays"
+            exit 0
+          fi
+          # GitHub leaves pull_requests empty in some cases; find the PR by
+          # its branch then.
+          if [ -z "$PR" ]; then
+            PR=$(gh api --method GET "repos/$GITHUB_REPOSITORY/pulls" \
+              -f state=open -f "head=$HEAD_OWNER:$HEAD_BRANCH" \
+              --jq ".[] | select(.head.ref == \"$HEAD_BRANCH\") | .number" | head -n 1)
+          fi
+          if [ -z "$PR" ]; then
+            echo "no open pull request for $HEAD_OWNER:$HEAD_BRANCH"
+            exit 0
+          fi
+          # The green run vouches for one commit and one label request. A
+          # push since, or the label added again after the run started,
+          # asks for a new run: leave the label for that one.
+          head=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" --jq .head.sha)
+          if [ "$head" != "$HEAD_SHA" ]; then
+            echo "#$PR moved from $HEAD_SHA to $head since run $RUN; the label stays"
+            exit 0
+          fi
+          labels=$(gh api --paginate "repos/$GITHUB_REPOSITORY/issues/$PR/labels" --jq '.[].name')
+          if ! grep -qx heavy <<< "$labels"; then
+            echo "#$PR has no heavy label"
+            exit 0
+          fi
+          labeled=$(gh api --paginate "repos/$GITHUB_REPOSITORY/issues/$PR/events" \
+            --jq '.[] | select(.event == "labeled" and .label.name == "heavy") | .created_at' | tail -n 1)
+          # Both are UTC ISO 8601 with a Z, so they compare as strings.
+          if [[ "$labeled" > "$RUN_STARTED" ]]; then
+            echo "heavy was added again at $labeled, after run $RUN started at $RUN_STARTED; the label stays"
+            exit 0
+          fi
+          gh api -X DELETE "repos/$GITHUB_REPOSITORY/issues/$PR/labels/heavy" > /dev/null
+          echo "removed the heavy label from #$PR after green run $RUN"

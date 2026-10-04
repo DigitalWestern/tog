@@ -122,3 +122,21 @@ pub(crate) fn base64_decode(s: &str) -> Option<Vec<u8>> {
     }
     Some(out)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sri_roundtrip() {
+        // echo -n hello | shasum -a 512 -> base64 of raw digest
+        let d = Digest::from_sri(
+            "sha512-m3HSJL1i83hdltRq0+o9czGb+8KJDKra4t/3JRXMui/CET1IEDrHK6nHYbdEaGL/uhPMbuF3AGkGxXTVpn3ETw==",
+        )
+        .unwrap();
+        assert_eq!(d.algo(), "sha512");
+        assert!(d.hex().starts_with("9b71d224bd62f378"));
+        assert!(Digest::from_sri("md5-abc").is_err());
+        assert!(Digest::from_sri("nodash").is_err());
+    }
+}

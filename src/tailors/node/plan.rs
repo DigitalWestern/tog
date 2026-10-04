@@ -121,7 +121,7 @@ pub(crate) fn redact_url_userinfo(text: &str) -> String {
 /// is recorded as `git-dependency` exception detail in closures and store
 /// object metadata, and a cache hit compares exceptions exactly, so rewording
 /// it would make existing store objects refuse with "published concurrently
-/// with different exceptions". `tests/hitrate.py` also matches it.
+/// with different exceptions". `tools/hitrate.py` also matches it.
 pub(crate) fn git_dependency_detail(name: &str, url: &str) -> Option<String> {
     let (repo, commit) = git_repo_and_commit(url)?;
     Some(format!(

@@ -3,10 +3,8 @@
 //! respective tailors.
 
 use crate::comforter::{self, toolchain::EcosystemInput};
-use crate::commands::inspect;
 use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::platform::Platform;
-use crate::kernel::store::Store;
 use crate::kernel::toolchain::{lock, runtime, Selected};
 use crate::tailors::RegistryTool;
 use std::io;
@@ -63,57 +61,16 @@ pub(crate) fn projected_env(
 }
 
 /// What toolchain resolution needs to know about each detected ecosystem:
-/// its shipped catalog, what a closure written before the lock existed
-/// proves (`comforter::toolchain::legacy_evidence`), checked against the
-/// active store's objects, its local-toolchain reader, and the helper
+/// its shipped catalog, its local-toolchain reader, and the helper
 /// releases its lock section pins.
-pub(crate) fn ecosystem_inputs(
-    dir: &Path,
-    present: &[&dyn Tailor],
-) -> io::Result<Vec<EcosystemInput>> {
-    inputs_from_closures(inspect::closures(dir)?, present)
-}
-
-/// `ecosystem_inputs` for a project the caller holds: the pre-lock closures
-/// are read through its descriptor, as sync reads everything else.
-pub(crate) fn ecosystem_inputs_in(
-    project: &ProjectRoot,
-    present: &[&dyn Tailor],
-) -> io::Result<Vec<EcosystemInput>> {
-    inputs_from_closures(inspect::closures_in(project)?, present)
-}
-
-fn inputs_from_closures(
-    closures: Vec<inspect::ClosureFile>,
-    present: &[&dyn Tailor],
-) -> io::Result<Vec<EcosystemInput>> {
-    // Only a present tailor's own pre-lock closure looks anything up, and
-    // then read-only: the store is located, never created or leased.
-    let store = if present.iter().any(|tailor| {
-        closures.iter().any(|closure| {
-            closure.ecosystem == tailor.id()
-                && comforter::toolchain::needs_seeding(&closure.envelope)
-        })
-    }) {
-        Store::existing()?
-    } else {
-        None
-    };
+pub(crate) fn ecosystem_inputs(present: &[&dyn Tailor]) -> io::Result<Vec<EcosystemInput>> {
     let mut out = Vec::new();
     for tailor in present {
-        let legacy = closures
-            .iter()
-            .find(|closure| closure.ecosystem == tailor.id())
-            .and_then(|closure| {
-                comforter::toolchain::legacy_evidence(*tailor, &closure.envelope, store.as_ref())
-            });
         out.push(EcosystemInput {
             lock_ecosystem: tailor.lock_ecosystem().to_string(),
             catalog: tailor.toolchain_catalog()?,
-            legacy,
             external: tailor.external_toolchain(),
             helper_pins: tailor.helper_pins()?,
-            legacy_helper_pins: tailor.legacy_helper_pins(),
             declared_helpers: tailor.helpers().iter().map(|h| h.to_string()).collect(),
         });
     }
@@ -122,8 +79,9 @@ fn inputs_from_closures(
 
 /// The toolchain a command that realizes a runtime outside `sync` uses
 /// (`x`, and the delegated `add`/`remove`/`update` edits): the committed
-/// lock of the nearest project at or above `cwd` when there is one, seeded
-/// from a pre-lock closure or the shipped catalog otherwise. Nothing here
+/// lock of the nearest project at or above `cwd` when there is one, the
+/// catalog's selection for that project's sources or the shipped default
+/// otherwise. Nothing here
 /// chooses a version of its own or writes a lock, and a stale lock refuses
 /// exactly as a sync would.
 pub(crate) fn selected_toolchain(
@@ -144,14 +102,14 @@ pub(crate) fn selected_toolchain(
         // must not fall through to the shipped default. A `.tog` directory
         // is an explicit project boundary too, so an outer checkout's lock
         // never decides an inner project's runtime; resolving there honors
-        // the project's own sources and a pre-lock closure.
+        // the project's own sources.
         let lock_entry = dir.join(lock::LOCK_PATH).symlink_metadata().is_ok();
         if lock_entry || dir.join(".tog").is_dir() {
             let root = ProjectRoot::open(dir)?;
             let resolved = comforter::toolchain::resolve(
                 &root,
                 platform,
-                ecosystem_inputs(dir, &[tailor])?,
+                ecosystem_inputs(&[tailor])?,
                 comforter::toolchain::Mode::ReadOnly,
                 false,
             )?;
@@ -303,7 +261,7 @@ mod tests {
         let created = comforter::toolchain::resolve(
             &root,
             platform,
-            ecosystem_inputs(&locked, &[python]).unwrap(),
+            ecosystem_inputs(&[python]).unwrap(),
             comforter::toolchain::Mode::Writable,
             false,
         )

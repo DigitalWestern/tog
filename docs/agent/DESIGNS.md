@@ -47,7 +47,7 @@ The toolchain lock shipped on Linux on 2026-09-21: exact selection, the
 shipped-table adapter and catalogs, the lock core, runtime propagation, and
 activation with `tog update --toolchain`. Its behavior is documented in
 `docs/human/ARCHITECTURE.md` "Toolchain lock" (file, staleness rule,
-selection order, catalogs, legacy seeding, `x/3` keys) and "Store
+selection order, catalogs, `x/3` keys) and "Store
 concurrency" (lock order), `docs/human/CLI.md` (`--frozen`, `tog update
 --toolchain`), and `docs/human/LIMITATIONS.md` (one toolchain per lock
 root). The full reviewed design, with its reasoning, is in git history:
@@ -71,8 +71,9 @@ itself (at most ten, `https://` only) and authorizes each `Location`
 before requesting it. The policy is `SourcePolicy::shipped()`
 (`src/kernel/toolchain/source.rs`), built once per process. Still open:
 operator configuration of the policy, and sending an endpoint's credential,
-which waits on the owner decision in #72; no shipped endpoint names one
-and retrieval sends none. Integrity does not depend on the policy: every
+which follows the key and credential policy decided in #72 (§2 "Key and
+credential policy", built under #404 and #405); no shipped endpoint names one and retrieval sends
+none. Integrity does not depend on the policy: every
 artifact is still checked against its pinned digest.
 
 ### Every toolchain archive through the extractor (#236)
@@ -288,18 +289,49 @@ them; `LIMITATIONS.md` carries one honest row per TOFU source.
   both have the smallest surface and already have toolchain-file resolution
   (`go.mod` `toolchain`, `rust-toolchain.toml`). Pick whichever PR 0 shows has
   verifiable signing material covering the exact artifact tog downloads.
-- **Trusted key management needs the owner.** Where keys live, who rotates
-  them, and what revocation means operationally are policy decisions, not
-  implementation details. *Do not invent a key policy.* The owner's standing
-  direction (2026-09-09) is that the mechanism must accommodate a company's own
-  internal publisher, so design the storage and rotation story for "one
-  enterprise key alongside or instead of the upstream ones" from the start,
-  rather than for upstream publishers only.
+- **Trusted key management: decided, see "Key and credential policy"
+  below (#72).** The owner's standing direction (2026-09-09) still holds:
+  the mechanism accommodates a company's own internal publisher, "one
+  enterprise key alongside or instead of the upstream ones", from the
+  start.
 - **WP3 owns shared policy/trust infrastructure; WP5 owns the remaining
   ecosystem credential adapters and enforcement coverage.** Keep one source
   configuration model, with distinct authentication and authorization checks.
   Move the mandatory-loading prerequisite here rather than creating a cycle
   in which WP3 waits for WP5 and WP5 waits for WP3.
+
+#### Key and credential policy (owner decision, 2026-10-03, #72)
+
+- **Where keys live.** A trusted key is an entry in a file of the policy
+  chain: the machine/home scope declares the set, and a project or
+  `--policy` file can only narrow it. This is the shape the closure
+  signing keys already have (the `[signing] trusted` list,
+  `src/kernel/policy.rs`); publisher keys, including a company's own
+  internal publisher, use the same chain. No key is compiled into tog: the
+  shipped upstream keys are default contents of that list.
+- **Rotation.** Rotating a key is a policy commit: add the new key, then
+  remove the old one once nothing still needs it. (Derived, not in the
+  owner's text: whoever owns the machine/home policy file rotates, which
+  for a company is whoever manages that file.)
+- **Revocation.** Revoking a key is removing its entry from the list.
+  From then on any record or catalog row that key signed is untrusted:
+  `tog audit` fails it, and a locked replay or cache hit refuses it with a
+  trust error, distinct from stale project inputs. Removal takes effect
+  against the local policy, offline included. Remove the key's entry,
+  never the whole `[signing]` table: with no table, signatures are not
+  checked at all, so revoking the last key leaves `trusted = []`.
+- **Still open, before activation.** The approval does not settle
+  snapshot expiry, rollback rejection, or how fresh the local policy must
+  be offline; the trust configuration rules above require them before
+  authenticated policy is activated, so WP3 PR 1 (#404) proposes them for
+  the owner.
+- **Credentials.** A credential is a reference scoped to an endpoint and
+  audience in the same policy chain, never lock contents, never forwarded
+  to another redirect origin. The test account for the authenticated fetch
+  paths is a GitHub Packages registry under the DigitalWestern org; CI can
+  read it with the workflow's own `GITHUB_TOKEN`, so no personal
+  credential is needed. The local authenticated fixture still covers
+  everything that does not need a real registry.
 
 
 ---
@@ -355,10 +387,11 @@ has proven a model for compiled tools. Cargo today stores vendored sources;
 **4b-5. `fmt` for the remaining ecosystems** under the WP1 contract: Python
 (ruff format via `x`), Go (gofmt is already in the toolchain), then the rest.
 Each keeps the WP1 rules: named command, script precedence, `--eco` escape
-hatch, own store object with a closure/GC reference, exit-status pass-through.
+hatch, own store object pinned by the lock's release row (no closure record,
+so nothing roots it between runs; #386), exit-status pass-through.
 
 **4b-6. One real project per fixture-only ecosystem** (Cargo, Go, Ruby,
-Elixir, .NET), recorded in `docs/agent/HITRATE.md`. Extend `tests/hitrate.py` to measure
+Elixir, .NET), recorded in `docs/agent/HITRATE.md`. Extend `tools/hitrate.py` to measure
 a build/test/format command, not only `sync`. Measured on both machines and
 recorded as two columns.
 
@@ -1835,7 +1868,7 @@ key-file and policy syntax). The record has no timestamps, port, token,
 platform, isolation engine, or store object ids other than the ledger's,
 and the ledger id is itself portable (see "Store identity"). The key is
 `TOG_SIGNING_KEY`, the same key that signs closures. The door loads it at
-preflight, as `sync` and `fmt` do, and that loading extends to `add`,
+preflight, as `sync` does, and that loading extends to `add`,
 `remove`, `update`, `x`, and the new `tog attest`. When `TOG_SIGNING_KEY`
 is unset in the running process, the record has no `signature` field (the
 unsigned closure convention). Such a record is honest but unattested.
@@ -3293,7 +3326,9 @@ and `--reap`, `tog doctor --isolation`), with the survivor and
 concurrent-session tests. The macOS VM backend follows the
 `aarch64-unknown-linux-gnu` platform rows and is not in this PR. Until it lands, a host without the native
 sandbox fails with the missing-capability message, which is the
-fail-closed outcome.
+fail-closed outcome. **Built after PR 9, before PR 10** (decided
+2026-10-03): PR 4 shipped Go confined without it, so no ecosystem PR
+depends on it, and only PR 10's removal of `Legacy` needs the fallback.
 
 **PR 4: Go end to end, attestation, and the join.** Switch the Go rows to
 the proxied mode (mirror plus sumdb), including the planner doors that

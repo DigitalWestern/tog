@@ -1077,14 +1077,6 @@ pub fn object_exceptions() -> Vec<Exception> {
 }
 
 /// Refuse a cached object when its recorded exceptions are denied now.
-/// Test-only: production borrows its caller's lease through
-/// `check_cached_with_activity`.
-#[cfg(test)]
-pub fn check_cached(store: &Store, id: &str) -> io::Result<()> {
-    let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
-    check_cached_with_activity(store, &activity, id)
-}
-
 pub fn check_cached_with_activity(
     store: &Store,
     activity: &crate::kernel::activity::StoreActivity,
@@ -1448,16 +1440,6 @@ deny = ["git-dependency"]"#,
         release_tx.send(()).unwrap();
         owner.join().unwrap();
         Attribution::open("node").unwrap().discard();
-    }
-
-    #[test]
-    fn drain_clears() {
-        let _guard = exception_guard();
-        let attribution = Attribution::open("test").unwrap();
-        record_with(&Policy::default(), "x", "s", "d").unwrap();
-        assert_eq!(drain().len(), 1);
-        assert!(drain().is_empty());
-        attribution.discard();
     }
 
     #[test]

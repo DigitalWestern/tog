@@ -4,13 +4,13 @@ How often a bare `tog` works with zero configuration on popular real
 repositories. It is a measurement, not a gate, but run it before merging
 anything that touches npm projection or the store's real-directory checks.
 
-**Method.** `python3 tests/hitrate.py --repos tests/fixtures/hitrate-repos.lock`
+**Method.** `python3 tools/hitrate.py --repos tools/hitrate/hitrate-repos.lock`
 takes 30 top-starred Python and 30 top-starred npm repositories pinned to
 fixed commits, shallow-clones each, and runs `tog sync` (the bare form's hidden alias,
 so no help screen lands in the log) against a
 throwaway store with a 600 s cap. Each failure is classified by the
-`RULES` regexes in `tests/hitrate.py`. Raw results are dated CSVs under
-`tests/fixtures/`; they are historical records and are never rewritten. A
+`RULES` regexes in `tools/hitrate.py`. Raw results are dated CSVs under
+`tools/hitrate/`; they are historical records and are never rewritten. A
 full 60-repo run takes about 95 minutes on the Linux box.
 
 **Three numbers per ecosystem**, all derived from one permissive run:
@@ -29,7 +29,7 @@ Only Python and npm are measured. Earlier runs (2026-09-02 macOS,
 ## Linux x86_64 — 2026-09-23 (m6-fedora, tog 4720e12, pinned 60)
 
 Same command and method as 2026-09-11 below. Raw data:
-`tests/fixtures/hitrate-linux-2026-09-23.csv`.
+`tools/hitrate/hitrate-linux-2026-09-23.csv`.
 
 | ecosystem | permissive | company-policy | strict | 2026-09-11 permissive |
 |---|---|---|---|---|
@@ -71,15 +71,15 @@ not a company-policy ok. `bun`'s postinstall still fails in the sandbox
 
 ## Linux x86_64 — 2026-09-11 (m6-fedora, tog fb8b1d6, pinned 60)
 
-Command: `cargo build --release`, then `python3 tests/hitrate.py --repos
-tests/fixtures/hitrate-repos.lock --work … --out … --timeout 600 --keep`,
+Command: `cargo build --release`, then `python3 tools/hitrate.py --repos
+tools/hitrate/hitrate-repos.lock --work … --out … --timeout 600 --keep`,
 followed by the same with `--strict`. Raw data:
-`tests/fixtures/hitrate-linux-2026-09-11.csv` (permissive). The strict CSV
+`tools/hitrate/hitrate-linux-2026-09-11.csv` (permissive). The strict CSV
 is derived: strict adds refusals only, so strict ok = permissive ok with zero
 recorded exceptions; the literal `--strict` pass was run to confirm that.
 
 Three numbers per ecosystem, all from the one permissive run (the harness
-prints them; `COMPANY_DENY` in `tests/hitrate.py` defines "company-policy",
+prints them; `COMPANY_DENY` in `tools/hitrate.py` defines "company-policy",
 matching `docs/human/policy-company.toml`):
 
 | ecosystem | permissive | company-policy | strict | 2026-09-05 permissive |

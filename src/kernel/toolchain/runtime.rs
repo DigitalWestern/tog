@@ -19,8 +19,6 @@ pub enum Source {
     Lock,
     /// Selected now for a project that has no lock; a lock is pending.
     Created,
-    /// Recovered from a closure written before the lock existed.
-    Seeded,
     /// Re-selected by `tog update --toolchain`.
     Updated,
     /// The shipped default, for work with no project lock to honor.

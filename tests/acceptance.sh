@@ -9,8 +9,7 @@ WORK="$(mktemp -d "${TMPDIR:-/tmp}/tog-accept.XXXXXX")"
 export TOG_STORE="$WORK/store"
 trap 'chmod -R u+w "$WORK" 2>/dev/null; rm -rf "$WORK"' EXIT
 # A throwaway home, so the developer's or runner's ~/.tog is never read or
-# written. cargo keeps the real one: rustup and the registry cache live there.
-REAL_HOME="$HOME"
+# written.
 export HOME="$WORK/home"
 mkdir -p "$HOME"
 # audit trusts only signed closures: every sync here signs with a throwaway
@@ -106,20 +105,6 @@ if (cd "$WORK/c" && "$TOG" sync); then
   [ "$OUT" = "0.6.2" ] && ok "sdist built + importable ($OUT)" || bad "docopt import: $OUT"
 else
   bad "sdist sync failed"
-fi
-
-echo "== 9. a build that attempts network access fails (evil sdist fixture)"
-if (cd "$(dirname "$0")/.." && HOME="$REAL_HOME" cargo test --quiet --test sandbox_deny -- --ignored) ; then
-  ok "network egress during build was denied"
-else
-  bad "evil build did not fail as required"
-fi
-
-echo "== 9b. npm install scripts: sandboxed, network access fails closed"
-if (cd "$(dirname "$0")/.." && HOME="$REAL_HOME" cargo test --quiet --test npm_scripts -- --ignored) ; then
-  ok "install scripts run hermetically; network egress denied"
-else
-  bad "npm script sandbox tests failed"
 fi
 
 echo "== 10. npm: lockfile -> immutable node_modules, store-provisioned node"

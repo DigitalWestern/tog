@@ -17,7 +17,7 @@
 #![allow(clippy::disallowed_methods)]
 
 use sha2::{Digest as Sha2Digest, Sha256, Sha512};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use tog::kernel::fetch::Digest;
 use tog::kernel::platform::Platform;
 use tog::kernel::policy;
@@ -26,7 +26,8 @@ use tog::tailors::node::{self, DeclaredArtifact, NpmPackage, NpmPlan};
 
 mod common;
 
-use common::{tar_create, TempDir};
+use common::node_stub::{sandbox_or_skip, seed_gyp_python, stub_node_selection, tar};
+use common::TempDir;
 
 fn store_at(dir: &Path) -> Store {
     let root = dir.join("store");
@@ -65,58 +66,6 @@ fn b64(data: &[u8]) -> String {
     out
 }
 
-/// Tar `dir/<top>` into `dir/<top>.tgz`.
-fn tar(dir: &Path, top: &str) -> PathBuf {
-    let tarball = dir.join(format!("{top}.tgz"));
-    let status = tar_create()
-        .arg("-czf")
-        .arg(&tarball)
-        .arg("-C")
-        .arg(dir)
-        .arg(top)
-        .status()
-        .unwrap();
-    assert!(status.success());
-    tarball
-}
-
-/// A Node release stub with exactly the layout `realize_runtime` checks, and
-/// a selection whose host row names it by digest. The row keeps its shipped
-/// nodejs.org URL, which the source policy admits, and the stub is seeded
-/// into the verified cache under that digest, so realizing it is a cache
-/// hit and never reaches the network.
-fn stub_node_selection(
-    dir: &Path,
-    store: &Store,
-    activity: &tog::kernel::activity::StoreActivity,
-    platform: Platform,
-) -> tog::kernel::toolchain::Selected {
-    let root = dir.join("node-stub");
-    for (relative, contents) in [
-        ("bin/node", "#!/bin/sh\nexit 1\n"),
-        ("include/node/node.h", ""),
-        ("lib/node_modules/npm/bin/npm-cli.js", ""),
-        (
-            "lib/node_modules/npm/node_modules/node-gyp/bin/node-gyp.js",
-            "",
-        ),
-    ] {
-        let path = root.join(relative);
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(path, contents).unwrap();
-    }
-    let tarball = tar(dir, "node-stub");
-    let (sha256, _) = tog::kernel::fetch::cache_insert(store, activity, &tarball).unwrap();
-    let mut selected = node::shipped_selection().unwrap();
-    let row = selected
-        .bundle
-        .artifacts
-        .iter_mut()
-        .find(|row| row.platform == platform && row.component == "node")
-        .expect("the shipped Node release has a host row");
-    row.digest = Digest::sha256(&sha256).unwrap();
-    selected
-}
 fn recorded_cache_digests(store: &Store, env: &Path) -> Vec<String> {
     let id = env.file_name().unwrap().to_str().unwrap();
     let meta: serde_json::Value = serde_json::from_slice(
@@ -184,43 +133,6 @@ fn seed_electron_shasums(store: &Store, platform: Platform, version: &str, zip_s
         format!("{zip_sha256} *electron-v{version}-{os}-{arch}.zip\n"),
     )
     .unwrap();
-}
-
-/// Publish a stub of the CPython node-gyp would use under the exact id
-/// `ensure_gyp_python` looks up, so lifecycle setup finds it cached instead
-/// of downloading the real interpreter. No script here calls it.
-fn seed_gyp_python(store: &Store, platform: Platform) {
-    let activity = &store
-        .activity(tog::kernel::activity::ActivityMode::Shared)
-        .unwrap();
-    tog::tailors::install_kinds();
-    let selected = tog::tailors::python::shipped_selection("3.12").unwrap();
-    let spec = selected.artifact(platform, "cpython").unwrap();
-    let identity = tog::kernel::types::Identity {
-        kind: "cpython".into(),
-        name: "cpython".into(),
-        version: spec.version.clone(),
-        inputs: std::collections::BTreeMap::from([
-            ("artifact_sha256".to_string(), spec.digest.hex().to_string()),
-            ("platform".to_string(), platform.triple().to_string()),
-        ]),
-    };
-    assert_eq!(
-        identity.object_id(),
-        tog::tailors::python::runtime_object_id(platform, &selected).unwrap(),
-        "the stub is published under the id the producer looks up"
-    );
-    let staged = store.stage_with_activity(activity).unwrap();
-    std::fs::create_dir_all(staged.join("bin")).unwrap();
-    store
-        .commit_with_activity_and_deps(
-            activity,
-            &identity,
-            &staged,
-            &[],
-            &tog::kernel::store::ObjectDeps::new(),
-        )
-        .unwrap();
 }
 
 fn plan_of(selected: &tog::kernel::toolchain::Selected, package: NpmPackage) -> NpmPlan {
@@ -320,21 +232,6 @@ fn an_unplanted_declared_artifact_is_not_claimed_as_a_cache_dependency() {
         "the never-planted declared artifact is not evidence: {recorded:?}"
     );
     assert!(recorded.contains(&tarball));
-}
-
-/// `TOG_SANDBOX_TESTS=required` (any non-empty value) turns a missing
-/// sandbox from a skip into a failure, as in tests/sandbox_deny.rs.
-fn sandbox_or_skip(test_name: &str, platform: Platform) -> bool {
-    match tog::kernel::sandbox::probe(platform) {
-        Ok(_) => true,
-        Err(error) => {
-            if matches!(std::env::var_os("TOG_SANDBOX_TESTS"), Some(value) if !value.is_empty()) {
-                panic!("required sandbox test {test_name} unavailable: {error}");
-            }
-            eprintln!("skip {test_name}: sandbox unavailable: {error}");
-            false
-        }
-    }
 }
 
 /// The consumed side: electron with an install script gets its zip

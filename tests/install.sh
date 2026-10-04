@@ -1,15 +1,18 @@
 #!/bin/bash
 # End-to-end test of install.sh with no network: package the locally built
 # binary the way release.yml does, serve it from a local HTTP server, and run
-# the installer into throwaway HOMEs. Run after `cargo build --release`:
+# the installer into throwaway HOMEs. Run after `cargo build`:
 #
 #   bash tests/install.sh
+#
+# The binary under test is the debug build, the one `cargo build` and
+# `cargo test` keep current. A leftover target/release/tog is never picked up
+# on its own: name another binary with TOG_BIN (release.yml's build does).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-BIN="${TOG_BIN:-$ROOT/target/release/tog}"
-[ -x "$BIN" ] || BIN="$ROOT/target/debug/tog"
-[ -x "$BIN" ] || { echo "no tog binary: run cargo build first" >&2; exit 1; }
+BIN="${TOG_BIN:-$ROOT/target/debug/tog}"
+[ -x "$BIN" ] || { echo "no tog binary at $BIN: run cargo build first, or set TOG_BIN" >&2; exit 1; }
 
 # Resolved, because the installer prints resolved paths and macOS's TMPDIR
 # sits under /var, a symlink to /private/var.

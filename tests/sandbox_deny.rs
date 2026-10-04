@@ -1,8 +1,9 @@
 //! Acceptance: a build that attempts undeclared network access MUST fail.
 //!
 //! Heavy (realizes CPython + build toolchain on first run), so #[ignore]d;
-//! tests/acceptance.sh runs it with a shared TOG_STORE:
+//! the heavy workflow (.github/workflows/heavy.yml) runs it:
 //!     cargo test --test sandbox_deny -- --ignored
+//! Without TOG_STORE the store is a scratch one, never the developer's own.
 
 // Tests spawn fixtures and take leases freely (see clippy.toml).
 #![allow(clippy::disallowed_methods)]
@@ -104,7 +105,7 @@ const CONNECT_PROBE: &str = "import socket\n\
 #[ignore]
 fn network_access_during_build_fails() {
     let temp = TempDir::new("sandbox-deny");
-    let store = Store::open().expect("store");
+    let store = common::open_store(&temp);
     let activity = &store
         .activity(tog::kernel::activity::ActivityMode::Shared)
         .unwrap();

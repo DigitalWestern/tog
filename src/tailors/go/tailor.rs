@@ -12,7 +12,7 @@ use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::objmeta::KindAdapter;
 use crate::kernel::platform::Platform;
 use crate::kernel::resolve::{DoorKind, ResolutionDoor};
-use crate::kernel::toolchain::{Catalog, LegacyEvidence, Selected};
+use crate::kernel::toolchain::{Catalog, Selected};
 use crate::kernel::ui;
 use crate::tailors::go::{self as go, inputs};
 use crate::tailors::{ClosureListing, DoctorCheck, PackageRow, SyncRequest, Tailor};
@@ -236,16 +236,6 @@ impl Tailor for Go {
 
     fn toolchain_catalog(&self) -> io::Result<Catalog> {
         go::toolchain_catalog()
-    }
-
-    fn legacy_toolchain_evidence(
-        &self,
-        _ecosystem: &str,
-        platform: Option<Platform>,
-        body: &Value,
-        store: Option<&crate::kernel::store::Store>,
-    ) -> LegacyEvidence {
-        go::legacy_toolchain_evidence(platform, body, store)
     }
 
     fn listing(&self, _ecosystem: &str, body: &Value) -> ClosureListing {

@@ -220,14 +220,6 @@ const ALLOWED: &[(&str, &str, &str)] = &[
         "commands::deps::validate_spec",
         "argv validation",
     ),
-    // Legacy seeding asks a tailor what its pre-lock closure proves; the
-    // command layer passes that tailor in, and the trait is the only thing
-    // named. Resolution itself never looks a tailor up.
-    (
-        "comforter/toolchain.rs",
-        "tailors::Tailor",
-        "legacy seeding",
-    ),
 ];
 
 /// Whether `path`, named in `relative`, is one of the listed exceptions.

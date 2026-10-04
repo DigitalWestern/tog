@@ -1,9 +1,12 @@
 //! Acceptance: npm install scripts run in the sandbox; strict mode rejects a
 //! network attempt while permissive mode retains it as a cached exception.
 //!
-//! Heavy (realizes Node on first run), so #[ignore]d; tests/acceptance.sh
-//! runs it with a shared TOG_STORE:
+//! The cases that need a real Node (or a real network to deny) realize the
+//! pinned release on first run, so they are #[ignore]d and run in the heavy
+//! workflow:
 //!     cargo test --test npm_scripts -- --ignored
+//! The rest run offline on every PR: Node and node-gyp's CPython are stubs
+//! (tests/common/node_stub.rs), so their install scripts are plain `sh`.
 
 // Tests spawn fixtures and take leases freely (see clippy.toml).
 #![allow(clippy::disallowed_methods)]
@@ -20,6 +23,7 @@ use tog::tailors::node::{self, NpmPackage, NpmPlan};
 
 mod common;
 
+use common::node_stub::{sandbox_or_skip, seed_gyp_python, seed_shipped_node, stub_node_selection};
 use common::{tar_create, tog, TempDir};
 
 /// Build a one-package tarball whose postinstall runs `script`.
@@ -135,6 +139,41 @@ fn plan_named(tarball: &std::path::Path, sri: &str, name: &str) -> NpmPlan {
     plan.packages[0].name = name.to_string();
     plan.packages[0].path = format!("node_modules/{name}");
     plan
+}
+
+/// Realize `plan` against a stub Node and node-gyp CPython, so the case
+/// needs no network: the plan's Node version is the stub selection's. A
+/// script that fails is only an exception in permissive mode, so the env is
+/// checked to carry none, and a broken script reads as itself rather than
+/// as a missing output file.
+fn realize_offline(dir: &Path, platform: Platform, mut plan: NpmPlan) -> PathBuf {
+    let store = store_at(dir);
+    let activity = &store
+        .activity(tog::kernel::activity::ActivityMode::Shared)
+        .unwrap();
+    let selected = stub_node_selection(dir, &store, activity, platform);
+    seed_gyp_python(&store, platform);
+    plan.node_version = selected.version("node").unwrap().to_string();
+    let env = node::realize_node_env_for(
+        &store,
+        activity,
+        platform,
+        &plan,
+        &[],
+        &selected,
+        &node::shipped_gyp_python().unwrap(),
+    )
+    .expect("realize");
+    let exceptions = store
+        .exceptions(env.file_name().unwrap().to_str().unwrap())
+        .unwrap();
+    assert!(
+        exceptions
+            .iter()
+            .all(|exception| exception.kind != policy::INSTALL_SCRIPT_FAILED),
+        "the install script failed: {exceptions:?}"
+    );
+    env
 }
 
 /// `policy`'s pending-exception list is process-global, so tests that record
@@ -396,23 +435,20 @@ fn permissive_install_script_is_cached_but_rejected_strict() {
 }
 
 #[test]
-#[ignore]
 fn benign_install_script_runs_and_output_is_captured() {
+    let platform = Platform::host().expect("host platform");
+    if !sandbox_or_skip(
+        "benign_install_script_runs_and_output_is_captured",
+        platform,
+    ) {
+        return;
+    }
     let _policy_guard = policy_guard();
     let _attribution = policy::Attribution::open("node").expect("test attribution");
-    let platform = Platform::host().expect("host platform");
     let temp = TempDir::new("good-npm");
     let dir = temp.path();
-    let (tarball, sri) = make_pkg_tarball(
-        dir,
-        "node -e \"require('fs').writeFileSync('built.txt','ok')\"",
-    );
-    let store = store_at(dir);
-    let activity = &store
-        .activity(tog::kernel::activity::ActivityMode::Shared)
-        .unwrap();
-    let env = node::realize_node_env(&store, activity, platform, &plan_for(&tarball, &sri), &[])
-        .expect("realize");
+    let (tarball, sri) = make_pkg_tarball(dir, "printf ok > built.txt");
+    let env = realize_offline(dir, platform, plan_for(&tarball, &sri));
     let built = env.join("node_modules/fixture-pkg/built.txt");
     assert_eq!(std::fs::read_to_string(built).unwrap(), "ok");
 }
@@ -614,8 +650,13 @@ console.log('linux-npm-roundtrip-ok');
 }
 
 #[test]
-#[ignore]
 fn skip_download_switch_is_injected_and_recorded() {
+    if !sandbox_or_skip(
+        "skip_download_switch_is_injected_and_recorded",
+        Platform::host().expect("host platform"),
+    ) {
+        return;
+    }
     let _policy_guard = policy_guard();
     let attribution = policy::Attribution::open("node").expect("test attribution");
     // puppeteer's installer reads PUPPETEER_SKIP_DOWNLOAD (verified against the
@@ -628,20 +669,9 @@ fn skip_download_switch_is_injected_and_recorded() {
     let (tarball, sri) = make_named_pkg_tarball(
         dir,
         "puppeteer",
-        "node -e \"if(process.env.PUPPETEER_SKIP_DOWNLOAD!=='true'){process.exit(3)};require('fs').writeFileSync('skipped.txt','ok')\"",
+        "[ \"$PUPPETEER_SKIP_DOWNLOAD\" = true ] || exit 3; printf ok > skipped.txt",
     );
-    let store = store_at(dir);
-    let activity = &store
-        .activity(tog::kernel::activity::ActivityMode::Shared)
-        .unwrap();
-    let env = node::realize_node_env(
-        &store,
-        activity,
-        platform,
-        &plan_named(&tarball, &sri, "puppeteer"),
-        &[],
-    )
-    .expect("realize");
+    let env = realize_offline(dir, platform, plan_named(&tarball, &sri, "puppeteer"));
     assert_eq!(
         std::fs::read_to_string(env.join("node_modules/puppeteer/skipped.txt")).unwrap(),
         "ok"
@@ -663,8 +693,13 @@ fn skip_download_switch_is_injected_and_recorded() {
 }
 
 #[test]
-#[ignore]
 fn prebuilt_downloader_is_told_to_build_from_source() {
+    if !sandbox_or_skip(
+        "prebuilt_downloader_is_told_to_build_from_source",
+        Platform::host().expect("host platform"),
+    ) {
+        return;
+    }
     let _policy_guard = policy_guard();
     let _attribution = policy::Attribution::open("test").expect("test attribution");
     // A prebuild-install style script: with the network denied the download can
@@ -675,20 +710,9 @@ fn prebuilt_downloader_is_told_to_build_from_source() {
     let (tarball, sri) = make_named_pkg_tarball(
         dir,
         "fake-prebuilt",
-        "node -e \"if(process.env.npm_config_build_from_source!=='true'){process.exit(3)};require('fs').writeFileSync('compiled.txt','ok')\" # prebuild-install",
+        "[ \"$npm_config_build_from_source\" = true ] || exit 3; printf ok > compiled.txt # prebuild-install",
     );
-    let store = store_at(dir);
-    let activity = &store
-        .activity(tog::kernel::activity::ActivityMode::Shared)
-        .unwrap();
-    let env = node::realize_node_env(
-        &store,
-        activity,
-        platform,
-        &plan_named(&tarball, &sri, "fake-prebuilt"),
-        &[],
-    )
-    .expect("realize");
+    let env = realize_offline(dir, platform, plan_named(&tarball, &sri, "fake-prebuilt"));
     assert_eq!(
         std::fs::read_to_string(env.join("node_modules/fake-prebuilt/compiled.txt")).unwrap(),
         "ok"
@@ -837,7 +861,6 @@ NAPI_MODULE(NODE_GYP_MODULE_NAME, init)
 /// outer bwrap but not the sandboxed script (bwrap starts it in a new
 /// session), so the case sends SIGINT to tog's own group the same way.
 #[test]
-#[ignore]
 fn interrupt_during_install_script_stops_the_sync() {
     let _policy_guard = policy_guard();
     if !cfg!(target_os = "linux") {
@@ -850,7 +873,6 @@ fn interrupt_during_install_script_stops_the_sync() {
 /// A TERM sent to tog alone, as `kill <pid>` or a service manager sends it,
 /// is forwarded to bwrap and stops the sync the same way.
 #[test]
-#[ignore]
 fn terminate_during_install_script_stops_the_sync() {
     let _policy_guard = policy_guard();
     if !cfg!(target_os = "linux") {
@@ -886,8 +908,12 @@ fn assert_signal_mid_script_stops_the_sync(signal: libc::c_int, whole_group: boo
     use std::os::unix::process::CommandExt;
     use std::time::{Duration, Instant};
 
+    let platform = Platform::host().expect("host platform");
+    if !sandbox_or_skip("a signal mid-script", platform) {
+        return;
+    }
     let temp = TempDir::new("npm-interrupt");
-    let store_root = common::warm_store(&temp);
+    let store_root = temp.0.join("store");
     for sub in ["objects", "meta", "cache/sha256", "tmp"] {
         std::fs::create_dir_all(store_root.join(sub)).unwrap();
     }
@@ -927,6 +953,10 @@ fn assert_signal_mid_script_stops_the_sync(signal: libc::c_int, whole_group: boo
         &[("index.js", b"module.exports = 1;\n")],
     );
     seed_verified_fixture(&store, &tarball, &sri);
+    // The binary realizes the shipped Node and node-gyp's CPython; stubs
+    // published under their ids keep the sync offline.
+    seed_shipped_node(&store, platform);
+    seed_gyp_python(&store, platform);
     add_fixture_dependency(&project, "fixture-sleeper", &sri);
 
     let mut command = common::command(&project, &temp.0, &store.root);
@@ -965,8 +995,7 @@ fn assert_signal_mid_script_stops_the_sync(signal: libc::c_int, whole_group: boo
         text
     });
 
-    // A cold store realizes Node first, so the script can take a while to
-    // start; it is the marker, never a sleep, that decides when to signal.
+    // It is the marker, never a sleep, that decides when to signal.
     let mut stdout_text = String::new();
     let start_deadline = Instant::now() + Duration::from_secs(900);
     loop {

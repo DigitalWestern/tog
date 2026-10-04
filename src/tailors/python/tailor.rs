@@ -10,7 +10,7 @@ use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::objmeta::KindAdapter;
 use crate::kernel::platform::Platform;
 use crate::kernel::resolve::{DoorKind, ResolutionDoor};
-use crate::kernel::toolchain::{Catalog, LegacyEvidence, Selected};
+use crate::kernel::toolchain::{Catalog, Selected};
 use crate::kernel::ui;
 use crate::tailors::python::{self as python, inputs, manifest, pyselect};
 use crate::tailors::{ClosureListing, PackageRow, RegistryTool, SyncRequest, Tailor};
@@ -66,15 +66,6 @@ impl Tailor for Python {
             "rust".to_string(),
             rust.version("rustc")?.to_string(),
         )]))
-    }
-
-    /// Before sections pinned it, that default was Rust
-    /// [`LEGACY_SDIST_RUST`](super::build::LEGACY_SDIST_RUST).
-    fn legacy_helper_pins(&self) -> std::collections::BTreeMap<String, String> {
-        std::collections::BTreeMap::from([(
-            "rust".to_string(),
-            super::build::LEGACY_SDIST_RUST.to_string(),
-        )])
     }
 
     fn registry_tool(&self) -> io::Result<&'static dyn RegistryTool> {
@@ -176,16 +167,6 @@ impl Tailor for Python {
 
     fn toolchain_catalog(&self) -> io::Result<Catalog> {
         python::toolchain_catalog()
-    }
-
-    fn legacy_toolchain_evidence(
-        &self,
-        _ecosystem: &str,
-        platform: Option<Platform>,
-        body: &Value,
-        store: Option<&crate::kernel::store::Store>,
-    ) -> LegacyEvidence {
-        python::legacy_toolchain_evidence(platform, body, store)
     }
 
     fn listing(&self, _ecosystem: &str, body: &Value) -> ClosureListing {

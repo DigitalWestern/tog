@@ -1541,7 +1541,7 @@ mod patch_hash_tests {
     }
 
     /// The exact sample from the hit-rate run
-    /// (`tests/fixtures/hitrate-linux-2026-09-11.csv`): `paperclipai/paperclip`
+    /// (`tools/hitrate/hitrate-linux-2026-09-11.csv`): `paperclipai/paperclip`
     /// at commit ad0ad43 declares `fymctidcjqjhi4cj72qtivlxry` for
     /// `patches/@agentclientprotocol__claude-agent-acp@0.70.0.patch`. That file
     /// has sha256 `823c105c…d6c` (what tog printed as "got" when it hashed
