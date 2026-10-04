@@ -198,7 +198,7 @@ mod tests {
         let npm = staged.join("bin/npm");
         std::fs::write(
             &npm,
-            "#!/bin/sh\necho \"$@\" > npm-args.txt\nenv | grep '^npm_config_' > npm-env.txt\n\
+            "#!/bin/sh\necho \"$@\" > npm-args.txt\nenv | grep -i '^npm_config_' > npm-env.txt\n\
              echo '{\"lockfileVersion\":3,\"packages\":{}}' > package-lock.json\n",
         )
         .unwrap();
@@ -241,9 +241,9 @@ mod tests {
         }
         let env = std::fs::read_to_string(project_dir.join("npm-env.txt")).unwrap();
         for line in [
-            "npm_config_audit=false",
-            "npm_config_fund=false",
-            "npm_config_update_notifier=false",
+            "NPM_CONFIG_AUDIT=false",
+            "NPM_CONFIG_FUND=false",
+            "NPM_CONFIG_UPDATE_NOTIFIER=false",
         ] {
             assert!(env.lines().any(|l| l == line), "{env}");
         }
