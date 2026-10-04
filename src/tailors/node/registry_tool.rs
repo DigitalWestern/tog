@@ -11,7 +11,7 @@ use crate::kernel::toolchain::Selected;
 use crate::kernel::ui;
 use crate::tailors::node;
 use crate::tailors::node::tailor::encoded_workspace;
-use crate::tailors::{LegacyPackage, RegistryTool, ToolEnv};
+use crate::tailors::{RegistryTool, ToolEnv};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -137,22 +137,6 @@ impl RegistryTool for NodeTool {
                     })
                 })
             }))
-    }
-
-    /// The dependencies of the `package.json` an older `x` wrote.
-    fn legacy_packages(&self, root: &Path) -> Option<Vec<LegacyPackage>> {
-        let text = fs::read_to_string(root.join("package.json")).ok()?;
-        let value: Value = serde_json::from_str(&text).ok()?;
-        let dependencies = value.get("dependencies")?.as_object()?;
-        let mut packages = Vec::with_capacity(dependencies.len());
-        for (package, version) in dependencies {
-            let version = version.as_str()?.to_string();
-            packages.push(LegacyPackage {
-                package: package.clone(),
-                version: Some(version),
-            });
-        }
-        Some(packages)
     }
 
     fn clean_note(&self) -> Option<&'static str> {

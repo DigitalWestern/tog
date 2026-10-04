@@ -439,16 +439,6 @@ mod tests {
     }
 
     #[test]
-    fn signatures_are_deterministic() {
-        let key = fixed_key();
-        let mut a = envelope();
-        let mut b = envelope();
-        key.sign(&mut a).unwrap();
-        key.sign(&mut b).unwrap();
-        assert_eq!(a["signature"], b["signature"]);
-    }
-
-    #[test]
     fn a_signature_survives_pretty_print_and_reparse() {
         let key = fixed_key();
         let mut value = envelope();

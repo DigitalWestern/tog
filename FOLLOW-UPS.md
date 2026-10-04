@@ -14,7 +14,34 @@ by position.
 
 ## Next up, in order
 
-Nothing queued; the next item comes from "Open work" below.
+The resolution proxy (#68), then the cleanup. Today only Go resolves
+confined through the proxy (PRs 1 to 4: #198, #199, #200, #202). Every
+other ecosystem's `add`, `remove`, `update`, and missing-lock generation
+runs through the door's unsandboxed `Legacy` mode with network, the
+largest gap in what tog promises. Design: `docs/agent/DESIGNS.md` §6
+(#196), evidence in #209. One pull request each, in this order:
+
+1. **#203 (PR 5): interception.** The session CA, TLS termination, the
+   git row; cargo and the sdist `cargo generate-lockfile` switch.
+2. **#204 (PR 6): Node.** npm and pnpm. Absorbs #212 (npm notifier and
+   audit requests).
+3. **#205 (PR 7): Python.** uv. Absorbs #210 (`uv pip compile` ignores
+   `UV_PYTHON`).
+4. **#206 (PR 8): Ruby and Elixir.** Bundler and Hex mirrors. Absorbs
+   #211 (`bundle add` installs).
+5. **#207 (PR 9): .NET.** The `nuget.config` mirror.
+6. **#201 (PR 3b): the container backend and `tog-isolate`.** Moved after
+   the doors: Go shipped confined without it, so no door waits on it. It
+   must land before #208, because removing `Legacy` leaves a host without
+   the native sandbox with no way to resolve.
+7. **#208 (PR 10): remove `Legacy`.**
+
+The macOS door (Seatbelt rules, the Mach allow-list from one run of
+`tools/proxy_spike/macos_mach.sh` on a Mac, tree freeze) is not one of
+these; it waits with the macOS gate below.
+
+After the proxy: the test-suite audit (#351) and then the quality review
+(#264), both under "Open work", each in its listed order.
 
 ## Decisions waiting on the owner
 
@@ -22,6 +49,16 @@ Nothing queued; the next item comes from "Open work" below.
   followed by the full help screen, which can scroll the sync result away.
   Watch daily use; the candidates are a short footer, the full screen only
   when nothing needed syncing, or leaving it.
+- **Plain `tog audit` in CI without keys (#395).** Since #394 it judges
+  records with signatures unchecked instead of exiting 2; `--signed` is the
+  fail-closed form and CLI.md has the migration note. Open: also refuse
+  when `CI` is set unless `--unsigned` is passed. Pick: leave it until tog
+  has an outside user. `v0.1.0` (2026-10-03) is private, so no released
+  caller can be broken yet.
+- **Store-format epoch (#414).** #259 decided that the store metadata
+  migration goes at the tag, and `v0.1.0` shipped before #408 merged. So
+  a format marker ships first and the migration code goes at the next tag.
+  Open: migrate your own store once or reset it. Pick: reset.
 - **First outside target.** Cheapest visible artifact: a GitHub Action
   running `tog --frozen` under the company policy plus `tog sbom`, which
   should work on GitHub-hosted Ubuntu runners if unprivileged user
@@ -30,14 +67,13 @@ Nothing queued; the next item comes from "Open work" below.
   #173 (the sandbox mirrors the host's `/bin` and `/lib` layout, so Ubuntu
   22.04 can sandbox) and its follow-up #175 is closed. Un-parking #70 is the
   owner's call.
-- **Key and credential policy for the trust work.** Where trusted publisher
-  keys live, who rotates them, and what revocation means (including a
-  company's own internal publisher); a test account for private-registry
-  credentials. Blocks the authenticated parts of `docs/agent/DESIGNS.md`
-  §2 and §4 (#72).
 
 ## Open work, each its own pull request
 
+- **Leftover `rustfmt.json` from an older tog (#416).** A lone record is
+  never cleaned up by `tog fmt`, and `tog gc --register` on such a project
+  gives an unhelpful message. Pick: gc forgets a root whose only closure is
+  retired.
 - **Record `skipped-optional` as an informational closure field (#71).**
   Decided 2026-09-23: an optional group the user did not request is a
   choice, not an exception. Record it as `optional_groups_skipped` so
@@ -66,33 +102,23 @@ Nothing queued; the next item comes from "Open work" below.
   workaround is `SUPERVISION_TEST_LOCK` plus `--test-threads=1` for
   `--ignored` targets. Design: `docs/agent/DESIGNS.md` §5 "Per-operation
   signal sessions" (#57); implementation follows its review.
-- **The resolution proxy (#68).** Design: `docs/agent/DESIGNS.md` §6
-  (#196). PR 0, the measured evidence, shipped in #209. PRs 1 to 4 (#198
-  the door type, #199 the proxy core, #200 confinement and the transaction,
-  #202 Go end to end, attestation, and the join) are built on Linux: Go
-  resolves confined through the proxy and every other delegated tool still
-  runs through the door's unsandboxed `Legacy` mode. Still open, in order:
-  #201 (PR 3b, the container backend and `tog-isolate`), #203, #204, #205,
-  #206, #207, #208 (PR 10, remove `Legacy`). The macOS door (Seatbelt rules,
-  Mach allow-list from one run of `tools/proxy_spike/macos_mach.sh` on a
-  Mac, tree freeze) is not built. Found by PR 0 and slotted into those:
-  #210 (uv ignores `UV_PYTHON`), #211 (`bundle add` installs), #212 (npm
-  notifier and audit requests).
 - **Test-suite audit of 2026-09-27 (#351).** Nine reviewers, one per
   area, looked for tests that stay green when the code they name is
   broken. The fake passes were fixed in #351; what remains is grouped by
   theme, one issue and one PR (or one per file block) each:
   - #348 tests: security and integrity checks with no offline test.
   - #349 product and CI problems found by the audit.
-  - #350 tests: duplicate and trivial tests to delete or merge, and ignored tests to promote.
   - #355 store: a path inside a local object is treated as foreign during closure import (from the #354 review).
   - #359 elixir: Hex metadata cross-check matches substrings, not the top-level app/version (from the #358 review).
   - #367 tests: the artifact size caps in kernel::fetch (8 GiB artifact, 256 MiB text) have no test (from the #363 review).
   - #369 python: wheel entry-point and entry-name validation leftovers (from the #368 review).
+  - #418 fmt: a never-synced project whose only closure is the retired rustfmt.json never self-heals, and `gc --register` refuses it (from #409).
   - #371 comforter: closure_object probe follows symlinks out of the object (from the #370 review).
   - #373 sandbox: host-socket scan leftovers (from the #372 review).
   - #375 store: metadata readers and record writer leftovers (from the #374 review).
   - #377 catalog: uv GitHub digest unchecked, uv .sha256 parse, Node signer not pinned (from the #348 Tooling review).
+  - #410 ci: eight test files skip sandboxed tests silently because the main test step doesn't require the sandbox (from the #400 review).
+  - #411 tests: an objmeta socket test fails under a long TMPDIR, path over SUN_LEN (found during #400).
   - #380 python markers: platform_release/platform_version, extras `in` versus uv, and documented divergences from packaging (from the #348 Python markers block).
   - #382 node: credentials in lockfile URLs beyond tarballs, mutable-mode hoisting, bin case collisions (from the #348 Lockfile shapes block).
   - #387 gc: `--drop-object` recovery leftovers: the sweep's refusal names no fix, rooted objects, the advice's shell line untested (from the #384 review).
@@ -108,8 +134,8 @@ Nothing queued; the next item comes from "Open work" below.
   - #245 kernel: consolidate duplicated primitives (base64, SRI, metadata parser, forest key, file hash, temp names).
   - #246 tailors: shared closure_state, checked_artifact, object_ref and merge_record helpers; cargo status misses GC'd objects.
   - #248 sandbox and gitsrc: collapse the _with_activity twin of every entry point.
-  - #259 legacy: drop pre-release legacy toolchain seeding and x legacy roots now.
   - #249 x.rs: reuse kernel fsops, one lock, one name validator, and split the file.
+  - #413 x clean: delete before unregister, corrupt registry entries, pathname ownership reads (from the #408 review). Do it with #249.
   - #250 python manifest: four requirements include walkers; uv.lock silently drops edges; pypi host check is a substring.
   - #261 perf: every sync parses every metadata record before starting.
   - #251 commands: one project-discovery function; tog <script> and tog run <script> disagree.
@@ -133,6 +159,9 @@ Nothing queued; the next item comes from "Open work" below.
 - **Found in the #327 work (2026-09-26).** One issue and one PR each:
   - #328 sandbox: opt Python sdist builds and npm addons into HostView::RuntimeOnly.
   - #329 ruby: give native gem builds tog's pinned native-libs set.
+- **Found in the #399 release work (2026-10-03).** One issue and one PR each:
+  - #402 selfupdate: `update --self`, `doctor` and `install.sh` cannot read a release while the repository is private.
+  - #403 doctor: suggests an update the release has no asset for on this machine.
   - #334 sandbox: RuntimeOnly setup costs ~2 s per native gem; measure on the runner.
   - #330 sandbox: HostView::RuntimeOnly is a no-op on macOS.
   - #332 hostview: LD_LIBRARY_PATH outranks DT_RUNPATH for relocated host libraries.
@@ -165,7 +194,6 @@ Nothing queued; the next item comes from "Open work" below.
   - #295 tests: four sandbox tests fail instead of skipping when bubblewrap is missing.
   - #297 python: two PEP 440 grammars; hoist `pep440.rs` into the kernel.
   - #300 heavy: the Elixir end-to-end test cannot run on ubuntu-22.04 (OTP needs glibc 2.43).
-  - #301 acceptance.sh: steps 9 and 9b re-run two ignored suites the heavy workflow already runs, one multi-threaded.
   - #302 acceptance.sh: step 13 carries its own copy of the closure signing format.
   - #307 archive: a tarball with macOS AppleDouble (`._name`) members is refused on macOS but extracted on Linux. The extraction carries `--no-mac-metadata`; the listing carries no restore flag (bsdtar documents them for other modes). On the Mac, try `/usr/bin/tar --no-mac-metadata -tf` on such a tarball: if it accepts the flag and prints the `._` members, add it to `TAR_LIST_FLAGS` and close.
 - **GC loose ends from #162.** Three small `src/kernel/store/roots.rs`
@@ -191,6 +219,15 @@ Nothing queued; the next item comes from "Open work" below.
   rerun. The panic messages were not captured. Two `supervise_signals`
   timeouts under a loaded machine (2026-09-25) are captured on #65. Capture
   the rest the same way before changing anything.
+- **The release catalog and the company layer (#404, #405).** Key and
+  credential policy decided 2026-10-03 (#72): trusted keys are entries in
+  the files of the machine/home policy chain, rotation is a commit to that
+  policy, and revocation is removal from the list, after which `tog audit`
+  fails any record the removed key signed. The private-registry test
+  account is a GitHub Packages registry under the DigitalWestern org. This
+  unblocks the authenticated parts of `docs/agent/DESIGNS.md` §2 (WP3,
+  #404) and §4 (WP5, #405); §2 PR 0, the provider evidence spike, comes
+  first.
 - **macOS arm64 gate (#66). Last, by the owner's choice.** The suites
   below and the two-machine lock diff passed on the Mac on 2026-09-25
   (after #305); #57 and the Mach allow-list are what is left. Run on the Mac:

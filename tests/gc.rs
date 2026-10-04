@@ -51,13 +51,6 @@ fn ok_narration(output: Output, label: &str) -> String {
     String::from_utf8(output.stderr).unwrap()
 }
 
-fn age(path: &Path) {
-    let old = SystemTime::now()
-        .checked_sub(Duration::from_secs(2 * 24 * 60 * 60))
-        .unwrap();
-    fs::File::open(path).unwrap().set_modified(old).unwrap();
-}
-
 /// Parse `tog store roots` output: one "<key>  <path>" line per root.
 fn roots_listing(text: &str) -> Vec<(String, String)> {
     text.lines()
@@ -206,85 +199,6 @@ fn gc_keeps_deleted_node_project_until_forgotten() {
         tog(&python, home, &["run", "python", "-c", "import six"]),
         "python after gc",
     );
-}
-
-/// Upgrade scenario: objects and closure files can predate the roots
-/// registry, while the project's root entry was never written. A default GC
-/// must refuse to sweep before migration, regardless of --keep-days.
-#[test]
-#[ignore]
-fn gc_upgrade_does_not_collect_unregistered_legacy_project() {
-    let temp = TempDir::new("gc-e2e");
-    let store = temp.0.join("store");
-    for sub in ["objects", "meta", "cache/sha256", "tmp"] {
-        fs::create_dir_all(store.join(sub)).unwrap();
-    }
-    let id = format!("{}-legacy", "a".repeat(40));
-    let object = store.join("objects").join(&id);
-    fs::create_dir_all(&object).unwrap();
-    fs::write(object.join("payload"), b"pre-registry object").unwrap();
-    fs::write(
-        store.join("meta").join(format!("{id}.json")),
-        serde_json::json!({
-            "id": id,
-            "identity": {"kind": "legacy-project", "inputs": {}}
-        })
-        .to_string(),
-    )
-    .unwrap();
-    age(&object);
-
-    let project = temp.0.join("never-resynced");
-    fs::create_dir_all(project.join(".tog/closures")).unwrap();
-    fs::write(
-        project.join(".tog/closures/python.json"),
-        serde_json::json!({
-            "schema": "closure/1",
-            "ecosystem": "python",
-            "body": {"env_object": object.display().to_string()}
-        })
-        .to_string(),
-    )
-    .unwrap();
-
-    let home = temp.path();
-    let refused = tog(&project, home, &["gc", "--keep-days", "0"]);
-    assert!(
-        !refused.status.success(),
-        "uninitialized GC unexpectedly ran"
-    );
-    let stderr = String::from_utf8_lossy(&refused.stderr);
-    assert!(
-        stderr.contains("refusing to sweep"),
-        "unexpected error: {stderr}"
-    );
-    assert!(
-        stderr.contains("--register"),
-        "migration hint missing: {stderr}"
-    );
-    assert!(object.is_dir(), "default upgrade GC deleted the old object");
-
-    let registered = tog(
-        &project,
-        home,
-        &["gc", "--register", project.to_str().unwrap()],
-    );
-    assert!(
-        !registered.status.success(),
-        "registration unexpectedly started a sweep with uncertified metadata"
-    );
-    assert!(
-        String::from_utf8_lossy(&registered.stderr).contains("--migrate-metadata"),
-        "unresolved metadata recovery hint missing: {}",
-        String::from_utf8_lossy(&registered.stderr)
-    );
-    assert!(
-        fs::read_dir(store.join("roots"))
-            .unwrap()
-            .any(|entry| entry.unwrap().file_name() != ".initialized"),
-        "explicit root registration was not durable before migration refusal"
-    );
-    assert!(object.is_dir(), "registered legacy object was collected");
 }
 
 #[test]

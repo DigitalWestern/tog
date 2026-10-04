@@ -5,16 +5,16 @@
 #
 #   file <non-test lines> <path>
 #   fn <lines> <path>::<name>[#<nth occurrence in the file>]
-file 2029 src/commands/x.rs
+file 1936 src/commands/x.rs
 file 1594 src/kernel/store/roots.rs
-file 1927 src/tailors/dotnet/mod.rs
-file 2013 src/tailors/elixir/mod.rs
+file 1870 src/tailors/dotnet/mod.rs
+file 1919 src/tailors/elixir/mod.rs
 file 1777 src/tailors/node/lock_import/pnpm.rs
 file 1673 src/tailors/node/realize.rs
-fn 176 src/comforter/toolchain.rs::resolve
+fn 170 src/comforter/toolchain.rs::resolve
 fn 163 src/commands/audit.rs::render
 fn 167 src/commands/mod.rs::dispatch
-fn 191 src/commands/x.rs::clean
+fn 177 src/commands/x.rs::clean
 fn 166 src/kernel/archive.rs::read_entries
 fn 172 src/kernel/gc/migrate.rs::migrate_metadata_locked
 fn 169 src/kernel/gc/plan.rs::plan

@@ -14,7 +14,7 @@ use sha2::{Digest, Sha256};
 
 mod common;
 
-use common::{command, text, tog, tog_env, TempDir};
+use common::{command, text, tog, tog_at, tog_env, tog_offline, TempDir};
 
 /// The signing key under `home`, generated on first use and trusted by
 /// `home`'s machine policy (`~/.tog/policy.toml`, created with an empty
@@ -147,6 +147,9 @@ fn help_goes_to_stdout_and_exits_0() {
             stdout.contains("tog [--frozen] [--fresh] [--strict]"),
             "{args:?}: {stdout}"
         );
+        // `tog install <pkg>` is refused with a pointer to this screen,
+        // which must name the verb that does take a package.
+        assert!(stdout.contains("tog add <package>"), "{args:?}: {stdout}");
     }
     let inputs = text(&tog(&home.0, &home.0, &["help", "inputs"]).stdout);
     assert!(inputs.starts_with("tog inputs — "), "{inputs}");
@@ -338,8 +341,9 @@ fn fmt_is_named_and_typos_are_usage_errors() {
     }
 }
 
-/// `tog ls` prints a `rustfmt` row for the closure `tog fmt` writes,
-/// so `tog ls rustfmt` must be a legal filter rather than a usage error.
+/// `tog ls` accepts exactly the ecosystem names it can print. `tog fmt`
+/// writes no closure, so a `rustfmt.json` an older tog left is not listed
+/// and `rustfmt` is not a filter word.
 #[test]
 fn ls_accepts_every_ecosystem_name_it_can_print() {
     let home = TempDir::boundary("cli-ls-words-home");
@@ -353,7 +357,6 @@ fn ls_accepts_every_ecosystem_name_it_can_print() {
                     "rustfmt_object":{"path":"/store/objects/f","id":"f"}}}"#,
     )
     .unwrap();
-    // A second closure, so the filter has something to leave out.
     std::fs::write(
         project.0.join(".tog/closures/python.json"),
         r#"{"schema":"closure/1","ecosystem":"python","projected_at":0,
@@ -362,43 +365,35 @@ fn ls_accepts_every_ecosystem_name_it_can_print() {
                                          "filename":"six-1.17.0-py2.py3-none-any.whl"}]}}}"#,
     )
     .unwrap();
-    let everything = text(&tog(&project.0, &home.0, &["ls"]).stdout);
+    let out = tog(&project.0, &home.0, &["ls"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let everything = text(&out.stdout);
     assert!(
-        everything.contains("rustfmt 1.96.1") && everything.contains("six  1.17.0"),
+        everything.contains("six  1.17.0") && !everything.contains("rustfmt"),
         "{everything}"
     );
-
-    let out = tog(&project.0, &home.0, &["ls", "rustfmt"]);
-    assert_eq!(
-        out.status.code(),
-        Some(0),
-        "stdout:\n{}\nstderr:\n{}",
-        text(&out.stdout),
-        text(&out.stderr)
-    );
-    let filtered = text(&out.stdout);
-    assert!(filtered.contains("rustfmt 1.96.1"), "{filtered}");
-    assert!(
-        !filtered.contains("six") && !filtered.contains("python"),
-        "the rustfmt filter listed another closure:\n{filtered}"
-    );
+    let out = tog(&project.0, &home.0, &["ls", "python"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(text(&out.stdout).contains("six  1.17.0"));
 
     // The help text names the same set the parser accepts.
     let help = tog(&project.0, &home.0, &["ls", "-h"]);
     assert_eq!(help.status.code(), Some(0));
     assert!(
-        text(&help.stdout).contains("rustfmt"),
+        !text(&help.stdout).contains("rustfmt"),
         "{}",
         text(&help.stdout)
     );
 
-    let out = tog(&project.0, &home.0, &["ls", "npm"]);
-    assert_eq!(out.status.code(), Some(2));
-    assert!(
-        text(&out.stderr).contains("unknown ecosystem 'npm'"),
-        "{}",
-        text(&out.stderr)
-    );
+    for word in ["npm", "rustfmt"] {
+        let out = tog(&project.0, &home.0, &["ls", word]);
+        assert_eq!(out.status.code(), Some(2));
+        assert!(
+            text(&out.stderr).contains(&format!("unknown ecosystem '{word}'")),
+            "{}",
+            text(&out.stderr)
+        );
+    }
 }
 
 /// A global option is the same option wherever it is typed. `tog ls -v` in
@@ -408,15 +403,6 @@ fn global_options_work_after_the_command() {
     let home = TempDir::boundary("cli-globals-home");
     let project = TempDir::boundary("cli-globals-project");
     std::fs::create_dir_all(project.0.join(".tog/closures")).unwrap();
-    std::fs::write(
-        project.0.join(".tog/closures/rustfmt.json"),
-        r#"{"schema":"closure/1","ecosystem":"rustfmt","projected_at":0,
-            "body":{"rust_version":"1.96.1",
-                    "rust_object":{"path":"/store/objects/r","id":"r"},
-                    "rustfmt_object":{"path":"/store/objects/f","id":"f"}}}"#,
-    )
-    .unwrap();
-
     std::fs::write(
         project.0.join(".tog/closures/python.json"),
         r#"{"schema":"closure/1","ecosystem":"python","projected_at":0,
@@ -431,7 +417,6 @@ fn global_options_work_after_the_command() {
     let out = tog(&project.0, &home.0, &["ls", "-v"]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     let verbose = text(&out.stdout);
-    assert!(verbose.contains("rustfmt"), "{verbose}");
     assert!(
         verbose.contains("six  1.17.0  six-1.17.0-py2.py3-none-any.whl"),
         "{verbose}"
@@ -640,45 +625,6 @@ fn fmt_reports_ecosystem_and_project_errors_offline() {
     assert!(text(&out.stderr).contains("fmt for python is not implemented yet"));
 }
 
-/// A package.json `fmt` script wins over rustfmt, and like every script it
-/// is run through `tog run`, which syncs a never-synced project first. The
-/// second manifest pins a CPython no catalog has, so that sync refuses
-/// offline, before any download: the evidence is the sync line, not a
-/// realized Node.
-#[test]
-fn fmt_script_precedence_syncs_instead_of_trying_rustfmt() {
-    let home = TempDir::boundary("cli-fmt-script-home");
-    let project = TempDir::boundary("cli-fmt-script-project");
-    std::fs::write(
-        project.0.join("package.json"),
-        r#"{"name":"p","scripts":{"fmt":"sh -c 'echo script-fmt; exit 7'"}}"#,
-    )
-    .unwrap();
-    std::fs::write(
-        project.0.join("pyproject.toml"),
-        "[project]\nname = \"fixture\"\nversion = \"0.1.0\"\nrequires-python = \"==0.0.1\"\n",
-    )
-    .unwrap();
-    let out = tog(&project.0, &home.0, &["fmt"]);
-    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
-    let stderr = text(&out.stderr);
-    assert!(stderr.contains("syncing first: "), "{stderr}");
-    assert!(stderr.contains("node not synced"), "{stderr}");
-    assert!(stderr.contains("no pinned CPython"), "{stderr}");
-    assert!(
-        !stderr.contains("script-fmt"),
-        "script ran without an environment: {stderr}"
-    );
-    assert!(!stderr.contains("rust toolchain"), "{stderr}");
-    // Opening the store creates its directories; nothing was realized in it.
-    let objects = home.0.join("store/objects");
-    assert!(
-        !objects.is_dir() || std::fs::read_dir(&objects).unwrap().next().is_none(),
-        "an object was realized offline"
-    );
-    assert!(!project.0.join(".tog/closures/rustfmt.json").exists());
-}
-
 /// `--eco` is tog's own selector: in a polyglot root whose package.json
 /// has a `fmt` script, `--eco rust` must reach the Rust path instead of
 /// running the script with a meaningless trailing `--eco rust`. The fixture
@@ -741,6 +687,7 @@ fn fmt_eco_selects_the_ecosystem_and_never_delegates_to_the_script() {
     );
     assert!(!stderr.contains("script-fmt"), "{stderr}");
     assert!(!project.0.join("script-ran.txt").exists());
+    assert!(!project.0.join(".tog/closures/rustfmt.json").exists());
     // Opening the store creates its directories; nothing was realized in it.
     let objects = home.0.join("store/objects");
     assert!(
@@ -983,42 +930,6 @@ fn store_path_honors_the_store_variable() {
 }
 
 // --- bare `tog`, aliases, the script shortcut, inspect verbs ---
-
-#[test]
-fn install_alias_reaches_sync() {
-    let home = TempDir::boundary("cli-alias");
-    let project = TempDir::boundary("cli-alias-project");
-    for args in [&["install"][..], &["i"], &["sync"]] {
-        let out = tog(&project.0, &home.0, args);
-        assert_eq!(out.status.code(), Some(1), "{args:?}");
-        assert!(
-            text(&out.stderr).contains("nothing to sync here"),
-            "{args:?}"
-        );
-    }
-}
-
-/// `tog install <pkg>` is what a pip or npm user types first, and
-/// `install` is a hidden alias of the bare `tog`, which takes no package. Every
-/// spelling must name `tog add` rather than reject the word.
-#[test]
-fn installing_a_package_by_name_points_at_add() {
-    let home = TempDir::boundary("cli-install-pkg");
-    let project = TempDir::boundary("cli-install-pkg-project");
-    for verb in ["install", "i", "sync"] {
-        let out = tog(&project.0, &home.0, &[verb, "requests"]);
-        assert_eq!(out.status.code(), Some(2), "{verb}");
-        let stderr = text(&out.stderr);
-        assert!(stderr.contains("tog add requests"), "{verb}: {stderr}");
-        assert!(
-            stderr.contains("Run 'tog help setup' for usage."),
-            "{stderr}"
-        );
-    }
-    // The help the error sends them to names the verb too.
-    let help = text(&tog(&project.0, &home.0, &["help", "setup"]).stdout);
-    assert!(help.contains("tog add <package>"), "{help}");
-}
 
 /// A projected environment is immutable, so the habits that mutate one are
 /// refused with the tog verb that replaces them — before the projection is
@@ -1755,108 +1666,145 @@ fn x_clean_refuses_a_symlinked_x_directory_or_a_relative_home() {
     assert!(relative_victim.is_dir(), "relative HOME target was removed");
 }
 
-/// A projection that claims store objects whose store cannot be recovered is
-/// never removed, however empty the caller's own store happens to be. The
-/// caller's `TOG_STORE` is not evidence about someone else's projection.
+/// A root with no request record (`.tog/x.json`), as a tog before x/4 left
+/// one, is a cache nothing reuses. A filtered clean cannot tell what it was
+/// made for and leaves it alone without a word. The bare clean removes it
+/// under the store its closure's objects live in, and skips one whose
+/// store cannot be recovered rather than orphan that store's registration.
 #[test]
-fn x_clean_keeps_a_projection_whose_originating_store_is_unrecoverable() {
-    let home = TempDir::boundary("cli-x-clean-foreign-home");
-    let project = TempDir::boundary("cli-x-clean-foreign-project");
-    let victim = home.0.join(".tog/x/py-foreign");
-    std::fs::create_dir_all(victim.join(".tog/closures")).unwrap();
-    // A closure naming an object in a store this invocation knows nothing
-    // about — the shape a projection has after the machine's real store was
-    // moved, or when TOG_STORE points somewhere new.
-    std::fs::write(
-        victim.join(".tog/closures/python.json"),
-        r#"{"schema":"closure/1","ecosystem":"python","body":{"env_object":"/somewhere/else/store/objects/0000000000000000000000000000000000000000-python.env-9"}}"#,
-    )
-    .unwrap();
-
-    let out = tog(&project.0, &home.0, &["x", "--clean"]);
-    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
-    let stdout = text(&out.stdout);
-    assert!(
-        victim.is_dir(),
-        "a projection with an unrecoverable originating store was deleted: {stdout}"
-    );
-    assert!(
-        stdout.contains("originating store could not be recovered"),
-        "the skip was not narrated: {stdout}"
-    );
-}
-
-/// Legacy roots (no `x.json`) must obey the ecosystem filter, and a
-/// successful removal must leave nothing behind in `.locks`. Nothing here
-/// needs the network or a realized object, so it belongs in the offline
-/// suite: `HOME` and `TOG_STORE` are per-child temp directories.
-#[test]
-fn x_clean_py_leaves_legacy_npm_root() {
-    let home = TempDir::boundary("cli-x-clean-legacy-home");
-    let project = TempDir::boundary("cli-x-clean-legacy-project");
-
-    let npm_root = home.0.join(".tog/x/npm-legacy");
+fn x_clean_removes_a_root_without_a_request_record_only_when_unfiltered() {
+    let home = TempDir::boundary("cli-x-clean-unrecorded-home");
+    let project = TempDir::boundary("cli-x-clean-unrecorded-project");
+    std::fs::create_dir_all(home.0.join("store")).unwrap();
+    let store = home.0.join("store").canonicalize().unwrap();
+    let object = publish_certified_object(&store, "unrecorded-env");
+    let npm_root = home.0.join(".tog/x/npm-prettier-0123456789abcdef");
     std::fs::create_dir_all(npm_root.join(".tog/closures")).unwrap();
     std::fs::write(
         npm_root.join("package.json"),
         r#"{"dependencies":{"prettier":"1.0.0"}}"#,
     )
     .unwrap();
-    let py_root = home.0.join(".tog/x/py-legacy");
+    let py_root = home.0.join(".tog/x/py-ruff-0123456789abcdef");
     std::fs::create_dir_all(py_root.join(".tog/closures")).unwrap();
     std::fs::write(py_root.join("requirements.in"), "ruff\n").unwrap();
+    std::fs::write(
+        py_root.join(".tog/closures/python.json"),
+        serde_json::json!({
+            "schema": "closure/1",
+            "ecosystem": "python",
+            "body": {"env_object": object.display().to_string()},
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let foreign = home.0.join(".tog/x/py-black-0123456789abcdef");
+    std::fs::create_dir_all(foreign.join(".tog/closures")).unwrap();
+    std::fs::write(
+        foreign.join(".tog/closures/python.json"),
+        r#"{"schema":"closure/1","ecosystem":"python","body":{"env_object":"/somewhere/else/store/objects/0000000000000000000000000000000000000000-python.env-9"}}"#,
+    )
+    .unwrap();
 
-    let out = tog(&project.0, &home.0, &["x", "--clean", "--py"]);
-    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
-    assert!(!py_root.exists(), "legacy Python root was not removed");
-    assert!(
-        npm_root.exists(),
-        "legacy npm root was removed by --py cleanup"
-    );
-    let stdout = text(&out.stdout);
-    assert!(
-        !stdout.contains("gc --project"),
-        "a python-only cleanup mentioned the node forests: {stdout}"
-    );
-    // The per-root lock is unlinked while it is still held, so `.locks`
-    // cannot collect one stale file per environment ever created.
-    assert!(
-        !home.0.join(".tog/x/.locks/py-legacy.lock").exists(),
-        "cleanup left the per-root lock file behind"
-    );
+    for filter in [&["--py"][..], &["ruff"], &["--npm", "prettier"]] {
+        let mut args = vec!["x", "--clean"];
+        args.extend_from_slice(filter);
+        let out = tog(&project.0, &home.0, &args);
+        assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+        let stdout = text(&out.stdout);
+        assert_eq!(stdout, "tog: x clean: nothing to clean\n", "{filter:?}");
+        assert!(
+            py_root.is_dir() && npm_root.is_dir() && foreign.is_dir(),
+            "{filter:?}"
+        );
+    }
 
     let out = tog(&project.0, &home.0, &["x", "--clean"]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
-    assert!(!npm_root.exists(), "legacy npm root cleanup did not work");
     let stdout = text(&out.stdout);
-    // A removed node root also orphans its ~/.tog/forests projection,
-    // which plain `tog gc` never sweeps.
-    assert!(stdout.contains("tog gc --project"), "{stdout}");
+    assert!(!py_root.exists(), "{stdout}");
+    assert!(!npm_root.exists(), "{stdout}");
     assert!(
-        !home.0.join(".tog/x/.locks/npm-legacy.lock").exists(),
-        "cleanup left the per-root lock file behind"
-    );
-}
-
-#[test]
-fn x_clean_that_skips_every_candidate_does_not_claim_nothing_to_clean() {
-    let home = TempDir::boundary("cli-x-clean-unrecoverable");
-    let root = home.0.join(".tog/x/mystery");
-    std::fs::create_dir_all(root.join(".tog/closures")).unwrap();
-
-    let out = tog(&home.0, &home.0, &["x", "--clean", "ruff"]);
-    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
-    let stdout = text(&out.stdout);
-    assert!(stdout.contains("skipped x environment"), "{stdout}");
-    assert!(
-        !stdout.contains("nothing to clean"),
-        "a run that skipped a candidate reported nothing to clean: {stdout}"
+        foreign.is_dir(),
+        "a root with no recoverable owner was removed"
     );
     assert!(
-        stdout.contains("removed 0 environment(s), skipped 1"),
+        stdout.contains("its owning store could not be recovered"),
         "{stdout}"
     );
-    assert!(root.is_dir(), "an unrecoverable root was removed");
+    assert!(
+        stdout.contains("x clean removed 2 environment(s), skipped 1"),
+        "{stdout}"
+    );
+    // The generated name still says which one was a node environment, and
+    // a removed node root orphans its ~/.tog/forests projection.
+    assert!(stdout.contains("tog gc --project"), "{stdout}");
+    // The per-root lock is unlinked while it is still held, so `.locks`
+    // cannot collect one stale file per environment ever created.
+    for name in ["py-ruff-0123456789abcdef", "npm-prettier-0123456789abcdef"] {
+        assert!(
+            !home.0.join(format!(".tog/x/.locks/{name}.lock")).exists(),
+            "cleanup left the per-root lock file behind"
+        );
+    }
+}
+
+/// A record-less root that store A registered, cleaned by a caller whose
+/// `TOG_STORE` is B: cleanup recovers A from the closure, removes the root
+/// under A's lease and drops A's record, so A's next `tog gc` really
+/// reclaims the objects the root kept alive.
+#[test]
+fn x_clean_unregisters_a_record_less_root_from_its_own_store() {
+    let home = TempDir::boundary("cli-x-clean-two-stores");
+    let store_a = home.0.join("store");
+    let store_b = home.0.join("store-b");
+    let (root, key) = registered_x_environment(&home.0, &store_a);
+    std::fs::remove_file(root.join(".tog/x.json")).unwrap();
+    let out = tog(
+        &home.0,
+        &home.0,
+        &["gc", "--register", root.to_str().unwrap()],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(registered_root_keys(&home.0, &home.0).contains(&key));
+    let object = std::fs::read_dir(store_a.join("objects"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .next()
+        .unwrap();
+    // Old enough that only a root keeps it (gc's active window is ten
+    // minutes), and no age-based retention: the record alone decides.
+    std::fs::File::open(&object)
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(11 * 60))
+        .unwrap();
+    let gc = ["gc", "--keep-days", "0"];
+    // While registered, A's gc keeps the object.
+    let out = tog(&home.0, &home.0, &gc);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(object.is_dir(), "gc collected an object a root keeps");
+
+    std::fs::create_dir_all(&store_b).unwrap();
+    let out = tog_at(&home.0, &home.0, &store_b, &["x", "--clean"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let stdout = text(&out.stdout);
+    assert!(!root.exists(), "{stdout}");
+    assert!(
+        stdout.contains("tog: removed x environment") && !stdout.contains("no matching registry"),
+        "{stdout}"
+    );
+    assert!(
+        !registered_root_keys(&home.0, &home.0).contains(&key),
+        "store A still registers the removed root: {stdout}"
+    );
+
+    let out = tog(&home.0, &home.0, &gc);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(
+        !object.exists(),
+        "store A kept the removed root's object: {}",
+        text(&out.stdout)
+    );
 }
 
 /// Build a cached, `ready` python `x` root for `home` whose store object
@@ -1917,6 +1865,20 @@ fn cached_x_root_with_exception(home: &Path) -> PathBuf {
         .to_string(),
     )
     .unwrap();
+    // A run that finished: only a root recorded `ready` is a cache hit.
+    std::fs::write(
+        root.join(".tog/x.json"),
+        serde_json::json!({
+            "schema": "x-request/2",
+            "ecosystem": "python",
+            "package": "fake",
+            "version": serde_json::Value::Null,
+            "state": "ready",
+            "store_root": store.display().to_string(),
+        })
+        .to_string(),
+    )
+    .unwrap();
     root
 }
 
@@ -1942,6 +1904,33 @@ fn cached_x_rechecks_object_exceptions_under_project_policy() {
         "{}",
         text(&out.stderr)
     );
+}
+
+/// The same complete projection without its request record (a root a tog
+/// before x/4 left) is not a cache hit: `tog x` starts a fresh realization
+/// in that directory instead of running the executable it finds there. The
+/// network is cut, so the realization fails and the cached tool never runs.
+#[test]
+fn cached_x_without_a_request_record_is_rebuilt_not_run() {
+    let home = TempDir::boundary("cli-x-unrecorded-home");
+    let project = TempDir::boundary("cli-x-unrecorded-project");
+    let root = cached_x_root_with_exception(&home.0);
+    std::fs::remove_file(root.join(".tog/x.json")).unwrap();
+
+    let out = tog_offline(
+        &project.0,
+        &home.0,
+        &["x", "--py", "--from", "fake", "ruff"],
+    );
+    assert_ne!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(
+        !text(&out.stderr).contains("cached test exception"),
+        "the record-less root was validated as a cache hit: {}",
+        text(&out.stderr)
+    );
+    let record: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(root.join(".tog/x.json")).unwrap()).unwrap();
+    assert_eq!(record["state"], "realizing", "{record}");
 }
 
 /// A cache hit validates the projection once. When the validation ran twice
@@ -2210,41 +2199,65 @@ fn failed_x_cleanup_retains_the_root_record() {
     );
 }
 
-/// Cleanup must recover the originating store from either spelling —
-/// the explicit `x.json` marker, or a legacy environment's closure records —
-/// and act on that store's registry, never on the caller's `TOG_STORE`.
+/// Cleanup recovers the originating store from the `x.json` request record
+/// and acts on that store's registry.
 #[test]
-fn x_cleanup_revalidates_explicit_or_legacy_origin() {
-    for spelling in ["explicit", "legacy"] {
-        let home = TempDir::boundary(&format!("cli-x-clean-origin-{spelling}"));
-        let store_root = home.0.join("store");
-        let (root, key) = registered_x_environment(&home.0, &store_root);
-        if spelling == "legacy" {
-            // A pre-`x-request/2` environment: the origin is only derivable
-            // from the store object its closure names.
-            std::fs::remove_file(root.join(".tog/x.json")).unwrap();
-        }
+fn x_cleanup_revalidates_the_recorded_origin() {
+    let home = TempDir::boundary("cli-x-clean-origin-explicit");
+    let store_root = home.0.join("store");
+    let (root, key) = registered_x_environment(&home.0, &store_root);
 
-        let out = tog(
-            &home.0,
-            &home.0,
-            &["gc", "--register", root.to_str().unwrap()],
-        );
-        assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
-        assert!(registered_root_keys(&home.0, &home.0).contains(&key));
+    let out = tog(
+        &home.0,
+        &home.0,
+        &["gc", "--register", root.to_str().unwrap()],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(registered_root_keys(&home.0, &home.0).contains(&key));
 
-        let out = tog(&home.0, &home.0, &["x", "--clean"]);
-        let stdout = text(&out.stdout);
-        assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
-        assert!(
-            !root.exists(),
-            "{spelling} origin was not resolved, so nothing was cleaned: {stdout}"
-        );
-        assert!(
-            !registered_root_keys(&home.0, &home.0).contains(&key),
-            "{spelling}: successful cleanup left the root record behind: {stdout}"
-        );
-    }
+    let out = tog(&home.0, &home.0, &["x", "--clean"]);
+    let stdout = text(&out.stdout);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(
+        !root.exists(),
+        "the origin was not resolved, so nothing was cleaned: {stdout}"
+    );
+    assert!(
+        !registered_root_keys(&home.0, &home.0).contains(&key),
+        "successful cleanup left the root record behind: {stdout}"
+    );
+}
+
+/// `tog gc` learns about x environments only as registered roots, like any
+/// project. One with no request record, or whose closure no longer parses,
+/// neither stops nor fails a sweep: gc never reads `.tog/x.json`.
+#[test]
+fn gc_sweeps_past_an_x_root_without_a_request_record() {
+    let home = TempDir::boundary("cli-x-gc-unrecorded");
+    let store_root = home.0.join("store");
+    let (root, key) = registered_x_environment(&home.0, &store_root);
+    std::fs::remove_file(root.join(".tog/x.json")).unwrap();
+    let out = tog(
+        &home.0,
+        &home.0,
+        &["gc", "--register", root.to_str().unwrap()],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(registered_root_keys(&home.0, &home.0).contains(&key));
+
+    let out = tog(&home.0, &home.0, &["gc"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+
+    std::fs::write(root.join(".tog/closures/python.json"), "{").unwrap();
+    let out = tog(&home.0, &home.0, &["gc"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(root.is_dir(), "gc removed an x environment directory");
+
+    // A record-less root the bare clean removed under another store leaves
+    // that store's record pointing at nothing: gc still sweeps.
+    std::fs::remove_dir_all(&root).unwrap();
+    let out = tog(&home.0, &home.0, &["gc"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
 }
 
 // --- CLI.md: `tog audit`, the CI admission gate over recorded exceptions ---
@@ -2772,104 +2785,54 @@ fn audit_is_stale_when_the_toolchain_lock_does_not_describe_the_closure() {
     );
 }
 
-/// Write the `rustfmt` closure `tog fmt` would write for `project` with
-/// this binary's pins, after `edit` changes its body.
-fn write_rustfmt_closure(
-    home: &Path,
-    project: &Path,
-    edit: impl FnOnce(&mut serde_json::Value),
-) -> PathBuf {
+/// An older `tog fmt` left `.tog/closures/rustfmt.json` beside the
+/// project's closures. Nothing reads it any more: `audit`, `status`, and
+/// `ls` answer as they would without it, rather than reporting an orphaned
+/// or unknown record (`sbom` skips it too; its unit test covers that).
+#[test]
+fn a_leftover_rustfmt_record_is_ignored_by_every_reader() {
+    let home = TempDir::boundary("cli-leftover-fmt-home");
+    let project = TempDir::boundary("cli-leftover-fmt-project");
+    synced_python_closure_with_exception(&home.0, &project.0, "git-dependency");
     let platform = tog::kernel::platform::Platform::host().unwrap();
-    let mut body = tog::tailors::cargo::rustfmt::pinned_record(platform, project, "").unwrap();
-    body["exceptions"] = serde_json::json!([]);
-    edit(&mut body);
-    let closures = project.join(".tog/closures");
-    std::fs::create_dir_all(&closures).unwrap();
-    let path = closures.join("rustfmt.json");
     let mut envelope = serde_json::json!({
         "schema": "closure/1",
         "ecosystem": "rustfmt",
         "platform": platform.triple(),
         "projected_at": 1,
-        "body": body,
+        "body": {
+            "rust_version": "1.96.1",
+            "rust_object": {"path": "/store/objects/r", "id": "r"},
+            "rustfmt_object": {"path": "/store/objects/f", "id": "f"},
+            "exceptions": [],
+        },
     });
-    signing_key(home).sign(&mut envelope).unwrap();
-    std::fs::write(&path, serde_json::to_vec_pretty(&envelope).unwrap()).unwrap();
-    path
-}
-
-/// The `rustfmt` record passes audit only when it names the rustfmt this
-/// binary pins for the project; one made by another rustfmt is stale, and
-/// one from before the record carried inputs is outdated.
-#[test]
-fn audit_compares_the_rustfmt_record_to_its_pin() {
-    let home = TempDir::boundary("cli-audit-rustfmt-home");
-    let project = TempDir::boundary("cli-audit-rustfmt-project");
-    std::fs::write(project.0.join("Cargo.toml"), "[package]\nname = \"p\"\n").unwrap();
-    // A toolchain file naming rustfmt makes `sync` record an exception; the
-    // read-only audit must resolve the same pin without recording one.
+    signing_key(&home.0).sign(&mut envelope).unwrap();
     std::fs::write(
-        project.0.join("rust-toolchain.toml"),
-        "[toolchain]\nchannel = \"stable\"\ncomponents = [\"rustfmt\"]\n",
+        project.0.join(".tog/closures/rustfmt.json"),
+        serde_json::to_vec_pretty(&envelope).unwrap(),
     )
     .unwrap();
 
-    // The rustfmt record itself is clean; the report still fails because
-    // the Cargo project it belongs to has no cargo.json (never synced), and
-    // the optional rustfmt record is no substitute for it.
-    write_rustfmt_closure(&home.0, &project.0, |_| {});
-    let out = tog(&project.0, &home.0, &["audit"]);
-    assert_eq!(
-        out.status.code(),
-        Some(1),
-        "stdout:\n{}\nstderr:\n{}",
-        text(&out.stdout),
-        text(&out.stderr)
-    );
-    assert!(
-        text(&out.stdout).contains("rustfmt  clean")
-            && text(&out.stdout).contains("cargo    missing"),
-        "{}",
-        text(&out.stdout)
-    );
     let out = tog(&project.0, &home.0, &["audit", "--json"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(value["closures"][0]["verdict"], "clean");
-    assert_eq!(value["closures"][0]["passed"], true);
-    assert_eq!(value["closures"][0]["signature"]["state"], "trusted");
-    assert_eq!(value["missing"], serde_json::json!(["cargo"]));
-    assert_eq!(value["passed"], false);
+    assert_eq!(value["closures"].as_array().unwrap().len(), 1, "{value}");
+    assert_eq!(value["closures"][0]["ecosystem"], "python");
+    assert_eq!(value["missing"], serde_json::json!([]));
+    assert_eq!(value["passed"], true);
 
-    let older = format!("{}-rustfmt-1.95.0", "0".repeat(40));
-    write_rustfmt_closure(&home.0, &project.0, |body| {
-        body["inputs"]["rustfmt_object"] = serde_json::json!(older);
-        body["rustfmt_object"]["id"] = serde_json::json!(older);
-    });
-    let out = tog(&project.0, &home.0, &["audit"]);
-    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stdout));
-    assert!(
-        text(&out.stdout).contains("rustfmt  stale")
-            && text(&out.stdout).contains(&older)
-            && text(&out.stdout).contains("run 'tog fmt'"),
-        "{}",
-        text(&out.stdout)
-    );
-
-    write_rustfmt_closure(&home.0, &project.0, |body| {
-        body.as_object_mut().unwrap().remove("inputs");
-    });
-    let out = tog(&project.0, &home.0, &["audit", "--json"]);
-    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
-    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(value["passed"], false);
-    assert_eq!(value["closures"][0]["freshness"], "outdated");
-    assert!(
-        value["closures"][0]["freshness_detail"]
-            .as_str()
-            .unwrap()
-            .contains("tog fmt"),
-        "{value}"
-    );
+    for args in [&["status"][..], &["ls"]] {
+        let out = tog(&project.0, &home.0, args);
+        assert!(
+            !text(&out.stdout).contains("rustfmt") && !text(&out.stderr).contains("rustfmt"),
+            "{args:?}\nstdout:\n{}\nstderr:\n{}",
+            text(&out.stdout),
+            text(&out.stderr)
+        );
+    }
+    let out = tog(&project.0, &home.0, &["status"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stdout));
 }
 
 // APFS rejects non-UTF-8 filenames with EILSEQ. The filesystem case runs
@@ -2886,15 +2849,28 @@ fn audit_json_handles_non_utf8_project_and_closure_paths() {
         b'p', b'r', b'o', b'j', b'e', b'c', b't', b'-', 0xff,
     ]));
     std::fs::create_dir_all(&project).unwrap();
-    std::fs::write(project.join("Cargo.toml"), "[package]\nname = \"p\"\n").unwrap();
-    let closure = write_rustfmt_closure(&home.0, &project, |_| {});
+    // A signed python record whose inputs were never recorded: the gate
+    // reads and reports it (not current, so exit 1), which is all the path
+    // rendering below needs.
+    std::fs::write(project.join("requirements.txt"), "six==1.17.0\n").unwrap();
+    let closures = project.join(".tog/closures");
+    std::fs::create_dir_all(&closures).unwrap();
+    let closure = closures.join("python.json");
+    let mut envelope = serde_json::json!({
+        "schema": "closure/1",
+        "ecosystem": "python",
+        "platform": tog::kernel::platform::Platform::host().unwrap().triple(),
+        "projected_at": 1,
+        "body": {"plan": {"packages": []}, "exceptions": []},
+    });
+    signing_key(&home.0).sign(&mut envelope).unwrap();
+    std::fs::write(&closure, serde_json::to_vec_pretty(&envelope).unwrap()).unwrap();
 
     let out = tog(&project, &home.0, &["audit", "--json"]);
-    // Exit 1: the Cargo project has no cargo.json (see the pin test above).
     assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
     let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(value["closures"][0]["passed"], true);
-    assert_eq!(value["missing"], serde_json::json!(["cargo"]));
+    assert_eq!(value["closures"][0]["ecosystem"], "python");
+    assert_eq!(value["missing"], serde_json::json!([]));
     assert_eq!(value["project"], project.to_string_lossy().as_ref());
     assert_eq!(
         value["project_bytes"],
@@ -3244,15 +3220,15 @@ fn audit_is_an_offline_admission_gate_over_recorded_exceptions() {
     let path = synced_python_closure_with_exception(&home.0, &mismatch.0, "git-dependency");
     let body = std::fs::read_to_string(&path).unwrap().replacen(
         "\"ecosystem\": \"python\"",
-        "\"ecosystem\": \"rustfmt\"",
+        "\"ecosystem\": \"node\"",
         1,
     );
-    assert!(body.contains("\"ecosystem\": \"rustfmt\""), "{body}");
+    assert!(body.contains("\"ecosystem\": \"node\""), "{body}");
     std::fs::write(&path, body).unwrap();
     let out = tog(&mismatch.0, &home.0, &["audit"]);
     assert_eq!(out.status.code(), Some(1));
     assert!(
-        text(&out.stderr).contains(r#"claims ecosystem "rustfmt" but is named "python""#),
+        text(&out.stderr).contains(r#"claims ecosystem "node" but is named "python""#),
         "{}",
         text(&out.stderr)
     );
@@ -3346,38 +3322,21 @@ fn keygen_writes_a_private_key_and_prints_the_policy_table() {
     let project = TempDir::boundary("cli-keygen-project");
     std::fs::create_dir_all(home.0.join(".tog")).unwrap();
     std::fs::write(home.0.join(".tog/policy.toml"), &stdout).unwrap();
-    std::fs::write(project.0.join("Cargo.toml"), "[package]\nname = \"p\"\n").unwrap();
-    let platform = tog::kernel::platform::Platform::host().unwrap();
-    let mut body = tog::tailors::cargo::rustfmt::pinned_record(platform, &project.0, "").unwrap();
-    body["exceptions"] = serde_json::json!([]);
-    let mut envelope = serde_json::json!({
-        "schema": "closure/1",
-        "ecosystem": "rustfmt",
-        "platform": platform.triple(),
-        "projected_at": 1,
-        "body": body,
-    });
+    // The record is written under a scratch home (its own key and policy)
+    // and re-signed with the key keygen made.
+    let scratch = TempDir::boundary("cli-keygen-scratch");
+    let closure = synced_python_closure_with_exception(&scratch.0, &project.0, "git-dependency");
+    let mut envelope: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&closure).unwrap()).unwrap();
+    envelope.as_object_mut().unwrap().remove("signature");
     key.sign(&mut envelope).unwrap();
-    let closures = project.0.join(".tog/closures");
-    std::fs::create_dir_all(&closures).unwrap();
-    std::fs::write(
-        closures.join("rustfmt.json"),
-        serde_json::to_vec_pretty(&envelope).unwrap(),
-    )
-    .unwrap();
-    // cargo.json is required for the detected Cargo project: the optional
-    // rustfmt record alone is `missing` for cargo.
+    std::fs::write(&closure, serde_json::to_vec_pretty(&envelope).unwrap()).unwrap();
     let out = tog(&project.0, &home.0, &["audit", "--json"]);
-    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(value["closures"][0]["verdict"], "clean");
-    assert_eq!(value["missing"], serde_json::json!(["cargo"]));
-    let out = tog(&project.0, &home.0, &["audit"]);
-    assert!(
-        text(&out.stdout).contains("cargo    missing       no closure for the cargo inputs"),
-        "{}",
-        text(&out.stdout)
-    );
+    assert_eq!(value["closures"][0]["signature"]["state"], "trusted");
+    assert_eq!(value["missing"], serde_json::json!([]));
 }
 
 #[test]
@@ -3401,7 +3360,6 @@ fn a_bad_signing_key_fails_every_closure_writer_before_the_store_is_touched() {
     ] {
         for args in [
             &["sync"][..],
-            &["fmt", "--eco", "rust", "--check"],
             &["build"],
             &["run", "true"],
             &["env"],

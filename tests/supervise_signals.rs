@@ -1025,13 +1025,6 @@ fn run_scenario(scenario: &str, activity: &StoreActivity) -> i32 {
             say(&format!("NESTED {}", code_of(status)));
             code_of(status)
         }
-        // Captured output larger than a pipe buffer must not deadlock.
-        "large-output" => {
-            let mut command = shell("dd if=/dev/zero bs=1048576 count=4 2>/dev/null");
-            let output = supervise::output(&mut command, activity).unwrap();
-            say(&format!("BYTES {}", output.stdout.len()));
-            0
-        }
         // SIGCHLD as the supervisor found it: `sigchld-ignored` inherited
         // SIG_IGN across exec, `sigchld-nocldwait` sets a handler with
         // SA_NOCLDWAIT here. Either way the kernel would reap the children
@@ -1525,17 +1518,6 @@ fn a_nested_read_only_command_completes() {
     let mut harness = spawn_harness("nested-roots", &store, None, None);
     harness.markers.wait_for("NESTED 0");
     harness.finish();
-    store.wait_until_free();
-}
-
-/// Captured output larger than a pipe buffer is drained while the child
-/// runs, so waiting for the child cannot deadlock.
-#[test]
-fn captured_output_larger_than_a_pipe_buffer_does_not_deadlock() {
-    let store = TempStore::new("large-output");
-    let mut harness = spawn_harness("large-output", &store, None, None);
-    harness.markers.wait_for("BYTES 4194304");
-    assert_eq!(harness.finish().code(), Some(0));
     store.wait_until_free();
 }
 

@@ -2,7 +2,7 @@
 """Hit-rate measurement: does `tog` work, zero
 config, on a random popular real project?
 
-    python3 tests/hitrate.py [--n 30] [--out hitrate.csv] [--timeout 600]
+    python3 tools/hitrate.py [--n 30] [--out hitrate.csv] [--timeout 600]
 
 Picks the top-starred non-archived GitHub repos per ecosystem that carry a
 manifest (python: requirements.txt/pyproject.toml/setup.cfg/setup.py; npm:

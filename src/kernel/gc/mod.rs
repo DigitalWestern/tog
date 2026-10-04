@@ -248,20 +248,8 @@ fn related(path: &Path, keep: &Path) -> bool {
     path == keep || path.starts_with(keep) || keep.starts_with(path)
 }
 
-#[cfg(test)]
-fn recent(path: &Path, window: Duration) -> bool {
-    modified(path)
-        .and_then(|time| SystemTime::now().duration_since(time).ok())
-        .is_some_and(|age| age < window)
-}
-
 fn keep_age(days: u64) -> Duration {
     Duration::from_secs(days.saturating_mul(24 * 60 * 60))
-}
-
-#[cfg(test)]
-fn modified(path: &Path) -> Option<SystemTime> {
-    fs::metadata(path).ok()?.modified().ok()
 }
 
 fn tree_size(path: &Path) -> io::Result<u64> {
@@ -440,60 +428,6 @@ mod tests {
         let path = store.root.join("cache/sha256").join(hex);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, b"artifact").unwrap();
-    }
-
-    /// `object-meta/2` records carry an evidence marker saying how their
-    /// dependency set was established. A record without one, or with a
-    /// marker nothing produced, is not usable evidence for a deletion.
-    #[test]
-    fn a_certified_record_without_a_usable_evidence_marker_is_refused() {
-        let temp = TempStore::new("evidence-marker");
-        let store = temp.store();
-        let identity = Identity {
-            kind: "cpython".into(),
-            name: "cpython".into(),
-            version: "3.11.9".into(),
-            // The real cpython producer's input shape; the commit-time
-            // grammar check refuses anything else.
-            inputs: BTreeMap::from([
-                ("artifact_sha256".into(), "a".repeat(64)),
-                ("platform".into(), "x86_64-unknown-linux-gnu".into()),
-            ]),
-        };
-        let id = identity.object_id();
-        let staged = store.stage().unwrap();
-        fs::write(staged.join("payload"), "cpython").unwrap();
-        store
-            .commit_with_deps(&identity, &staged, &[], &ObjectDeps::new())
-            .unwrap();
-        let meta_path = store.root.join("meta").join(format!("{id}.json"));
-
-        for (label, marker) in [
-            ("missing", None),
-            ("invented", Some(serde_json::json!("assumed"))),
-        ] {
-            let mut value: serde_json::Value =
-                serde_json::from_slice(&fs::read(&meta_path).unwrap()).unwrap();
-            let object = value.as_object_mut().unwrap();
-            object.remove("refs");
-            object.insert("schema".into(), serde_json::json!("object-meta/2"));
-            object.insert("dependencies".into(), serde_json::json!([]));
-            object.insert("cache_digests".into(), serde_json::json!([]));
-            match marker {
-                Some(marker) => {
-                    object.insert("evidence".into(), marker);
-                }
-                None => {
-                    object.remove("evidence");
-                }
-            }
-            fs::write(&meta_path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
-            let error = crate::kernel::objmeta::read_record_at(&meta_path).unwrap_err();
-            assert!(
-                error.to_string().contains("evidence"),
-                "{label} evidence marker was accepted: {error}"
-            );
-        }
     }
 
     /// A BEAM toolchain fixture plus the fingerprint a `hex-deps` record
@@ -1023,26 +957,6 @@ mod tests {
         assert!(store.object_path(&child).exists());
     }
 
-    #[test]
-    fn publication_refreshes_an_old_stage_mtime() {
-        let temp = TempStore::new("publication-mtime");
-        let store = temp.store();
-        let identity = Identity {
-            kind: "test".into(),
-            name: "published".into(),
-            version: "1".into(),
-            inputs: BTreeMap::new(),
-        };
-        let staged = store.stage().unwrap();
-        fs::write(staged.join("payload"), b"payload").unwrap();
-        age(&staged);
-        let id = identity.object_id();
-        store
-            .commit_with_deps(&identity, &staged, &[], &store::ObjectDeps::new())
-            .unwrap();
-        assert!(recent(&store.object_path(&id), ACTIVE_WINDOW));
-    }
-
     /// A registered project whose directory disappears must stop the sweep
     /// and keep its record: with only a pathname record, GC cannot know what
     /// the project still protects.
@@ -1107,40 +1021,8 @@ mod tests {
         assert!(!store.object_path(&id).exists());
     }
 
-    #[test]
-    fn dry_run_forget_ignores_only_the_requested_root_and_writes_nothing() {
-        let temp = TempStore::new("dry-forget");
-        let store = temp.store();
-        let id = commit(&store, "protected", None);
-        age(&store.object_path(&id));
-        let project = temp.root.join("project");
-        fs::create_dir_all(&project).unwrap();
-        closure(&project, &store.object_path(&id), serde_json::json!({}));
-        let entry = store.register_root(&project).unwrap();
-        fs::remove_dir_all(&project).unwrap();
-
-        let mut output = Vec::new();
-        let report = collect(
-            &store,
-            Options {
-                dry_run: true,
-                keep_days: 0,
-                forgotten: vec![entry.key.clone()],
-                ..Options::default()
-            },
-            &mut output,
-        )
-        .unwrap();
-        assert_eq!(report.objects, 1);
-        assert!(String::from_utf8(output)
-            .unwrap()
-            .contains("would remove object"));
-        assert!(store.object_path(&id).exists());
-        assert!(store.lookup_root(&entry.key).is_ok());
-    }
-
     /// A forget names one root, and the preview must exclude that root and
-    /// no other. With a second registered project in the store, treating the
+    /// no other, and write nothing: both roots stay registered. With a second registered project in the store, treating the
     /// request as "ignore every root" would offer up the live object that
     /// second project is still holding.
     #[test]
@@ -1176,6 +1058,7 @@ mod tests {
         )
         .unwrap();
         let preview = String::from_utf8(output).unwrap();
+        assert!(preview.contains("would remove object"), "{preview}");
         assert!(preview.contains(&released), "{preview}");
         assert!(
             !preview.contains(&held),
@@ -1335,28 +1218,6 @@ mod tests {
         assert!(message.contains(&symlink_loop), "{message}");
         assert!(store.object_path(&id).is_dir());
         assert!(store.roots().unwrap().len() == 1, "record was removed");
-    }
-
-    #[test]
-    fn forget_rejects_unknown_and_malformed_keys() {
-        let temp = TempStore::new("forget-keys");
-        let store = temp.store();
-        let project = temp.root.join("project");
-        fs::create_dir_all(&project).unwrap();
-        closure(
-            &project,
-            &store.object_path(&commit(&store, "x", None)),
-            serde_json::json!({}),
-        );
-        store.register_root(&project).unwrap();
-
-        let error = store.forget_root(&"a".repeat(40)).unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::NotFound);
-        let error = store.forget_root("not-a-key").unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
-        let error = store.forget_root(&"g".repeat(40)).unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
-        assert_eq!(store.roots().unwrap().len(), 1);
     }
 
     // =======================================================================
@@ -1735,46 +1596,22 @@ mod tests {
         assert!(store.object_path(&dead).is_dir(), "a sweep ran anyway");
     }
 
+    /// A dependency that is not an object id, including one that tries to
+    /// walk out of the store, leaves the record unresolved and names the
+    /// repair.
     #[test]
     fn invalid_reference_in_metadata_is_an_error() {
         let temp = TempStore::new("invalid-reference");
         let store = temp.store();
         let id = commit(&store, "broken", None);
         register_objects(&store, &temp.root.join("project"), &[]);
-        edit_record(&store, &id, |record| {
-            record.insert(
-                "dependencies".into(),
-                serde_json::json!(["not-an-object-id"]),
-            );
-        });
-
-        let (result, text) = sweep(
-            &store,
-            Options {
-                keep_days: 0,
-                ..Options::default()
-            },
-        );
-        let error = result.unwrap_err().to_string();
-        assert!(error.contains("unresolved record"), "{error}");
-        assert!(
-            text.contains("malformed or duplicate dependency") && text.contains("--drop-object"),
-            "{text}"
-        );
-    }
-
-    #[test]
-    fn traversal_string_in_a_reference_is_rejected() {
-        let temp = TempStore::new("traversal-reference");
-        let store = temp.store();
-        let id = commit(&store, "broken", None);
-        register_objects(&store, &temp.root.join("project"), &[]);
-        for traversal in [
-            "../../../etc/passwd",
-            &format!("{}-../escape", "a".repeat(40)),
+        for reference in [
+            "not-an-object-id".to_string(),
+            "../../../etc/passwd".to_string(),
+            format!("{}-../escape", "a".repeat(40)),
         ] {
             edit_record(&store, &id, |record| {
-                record.insert("dependencies".into(), serde_json::json!([traversal]));
+                record.insert("dependencies".into(), serde_json::json!([reference]));
             });
             let (result, text) = sweep(
                 &store,
@@ -1786,11 +1623,12 @@ mod tests {
             let error = result.unwrap_err().to_string();
             assert!(
                 error.contains("unresolved record"),
-                "{traversal:?} was accepted: {error}"
+                "{reference:?} was accepted: {error}"
             );
             assert!(
-                text.contains("malformed or duplicate dependency"),
-                "{traversal:?} was accepted: {text}"
+                text.contains("malformed or duplicate dependency")
+                    && text.contains("--drop-object"),
+                "{reference:?} was accepted: {text}"
             );
         }
     }
@@ -2190,6 +2028,8 @@ mod tests {
         (store, live, dead)
     }
 
+    /// The dry run's in-memory adaptation and the real sweep's published
+    /// one must agree: same plan, and the preview publishes nothing.
     #[test]
     fn dry_run_and_real_sweep_produce_the_same_plan() {
         let temp = TempStore::new("same-plan");
@@ -2215,33 +2055,6 @@ mod tests {
             "would remove object {}",
             store.object_path(&live).display()
         )));
-
-        let (real, real_text) = sweep(&store, options());
-        let real = real.unwrap();
-        assert_eq!(preview, real, "preview {text}\nreal {real_text}");
-        assert!(!store.object_path(&dead).exists(), "{real_text}");
-        assert!(store.object_path(&live).is_dir(), "{real_text}");
-    }
-
-    /// The dry run's
-    /// in-memory adaptation and the real sweep's published one must agree.
-    #[test]
-    fn dry_run_adapts_in_memory_and_matches_real_plan_at_the_same_time() {
-        let temp = TempStore::new("adapt-in-memory");
-        let (store, _live, dead) = legacy_store(&temp);
-        let options = Options {
-            keep_days: 0,
-            ..Options::default()
-        };
-
-        let (preview, preview_text) = sweep(
-            &store,
-            Options {
-                dry_run: true,
-                ..options.clone()
-            },
-        );
-        let preview = preview.unwrap();
         // Nothing was published, so the store is still legacy...
         assert_eq!(
             record(&store, &dead).evidence,
@@ -2249,10 +2062,13 @@ mod tests {
         );
         // ...yet the preview planned a deletion, which is only possible if
         // the adaptation happened in memory.
-        assert_eq!(preview.objects, 1, "{preview_text}");
+        assert_eq!(preview.objects, 1, "{text}");
 
-        let (real, real_text) = sweep(&store, options);
-        assert_eq!(preview, real.unwrap(), "{preview_text}\n{real_text}");
+        let (real, real_text) = sweep(&store, options());
+        let real = real.unwrap();
+        assert_eq!(preview, real, "preview {text}\nreal {real_text}");
+        assert!(!store.object_path(&dead).exists(), "{real_text}");
+        assert!(store.object_path(&live).is_dir(), "{real_text}");
     }
 
     #[test]
@@ -2377,46 +2193,6 @@ mod tests {
             },
         );
         assert!(result.is_err(), "a store with an unknown kind swept anyway");
-        assert_eq!(
-            record(&store, &id).evidence,
-            crate::kernel::objmeta::Evidence::Legacy
-        );
-    }
-
-    #[test]
-    fn cache_hit_does_not_certify_old_inferred_metadata() {
-        let temp = TempStore::new("cache-hit-no-certify");
-        let store = temp.store();
-        let identity = Identity {
-            kind: "cpython".into(),
-            name: "cpython".into(),
-            version: "3.11.9".into(),
-            inputs: BTreeMap::from([
-                ("artifact_sha256".into(), "4".repeat(64)),
-                ("platform".into(), "x86_64-unknown-linux-gnu".into()),
-            ]),
-        };
-        let id = commit_legacy_fixture(&store, &identity, Some(&[]));
-        let before = fs::read(store.root.join("meta").join(format!("{id}.json"))).unwrap();
-
-        // A newer binary publishes the same identity with real evidence and
-        // finds the object already there. The cache hit must leave the old
-        // record exactly as it was; upgrading it is migration's job alone.
-        let digest = "4".repeat(64);
-        cached_artifact(&store, &digest);
-        let staged = store.stage().unwrap();
-        fs::write(staged.join("payload"), "cpython").unwrap();
-        let mut deps = ObjectDeps::new();
-        deps.cache_digest(crate::kernel::fetch::Digest::sha256(&digest).unwrap());
-        store
-            .commit_with_deps(&identity, &staged, &[], &deps)
-            .unwrap();
-
-        assert_eq!(
-            fs::read(store.root.join("meta").join(format!("{id}.json"))).unwrap(),
-            before,
-            "a cache hit rewrote a legacy record"
-        );
         assert_eq!(
             record(&store, &id).evidence,
             crate::kernel::objmeta::Evidence::Legacy

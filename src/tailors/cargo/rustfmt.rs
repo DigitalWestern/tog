@@ -5,29 +5,29 @@
 //! (`toolchain.path`) is used as it is, so its rustfmt is the one in its
 //! tree, and the imported Rust object is also the formatter object.
 
-use crate::comforter::status::State;
 use crate::kernel::activity::StoreActivity;
 use crate::kernel::fetch::download_toolchain_artifact_held;
+use crate::kernel::fsroot::{Entry, ProjectRoot};
 use crate::kernel::platform::{no_pin, Platform};
 use crate::kernel::sandbox::BuildSpec;
 use crate::kernel::store::Store;
 use crate::kernel::toolchain::{ArtifactSpec, Selected};
 use crate::kernel::types::Identity;
 use crate::tailors::cargo;
-use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::kernel::provider::rust::RUSTFMT_RECIPE;
 #[cfg(test)]
-use crate::kernel::provider::rust::RUST_VERSION;
-use crate::kernel::provider::rust::{shipped_selection, RUSTFMT_RECIPE};
+use crate::kernel::provider::rust::{shipped_selection, RUST_VERSION};
 use crate::kernel::provider::rust_path;
 
 /// The shipped release's rustfmt row for Rust `rust_version`: every release
 /// in the catalog carries the rustfmt of the same version.
+#[cfg(test)]
 fn shipped_row(platform: Platform, rust_version: &str) -> io::Result<ArtifactSpec> {
     let selected = shipped_selection(rust_version)?;
     rustfmt_row(platform, &selected).map_err(|_| no_pin("rustfmt component", platform))
@@ -43,6 +43,9 @@ pub fn preflight_platform(platform: Platform) -> io::Result<()> {
         .ok_or_else(|| no_pin("rustfmt component", platform))
 }
 
+/// The identity of the shipped rustfmt paired with `rust_object`, for the
+/// drift and golden checks below.
+#[cfg(test)]
 fn rustfmt_identity(
     platform: Platform,
     rust_version: &str,
@@ -103,180 +106,40 @@ fn rustfmt_row(platform: Platform, selected: &Selected) -> io::Result<ArtifactSp
     Ok(row)
 }
 
-/// The `inputs` a `rustfmt` closure records. `rustfmt_object` is the id of
-/// the rustfmt object the run formatted with: it hashes the rustfmt version,
-/// the pinned component sha256, the platform, and the paired Rust object,
-/// and ends in the version. `resolved_from` is the directory the toolchain
-/// file was looked up from, relative to the workspace root the closure is
-/// written in.
-pub fn record_inputs(rustfmt_object: &str, resolved_from: &str) -> Value {
-    json!({
-        "rustfmt_object": rustfmt_object,
-        "resolved_from": resolved_from,
-    })
-}
+/// Where tog 0.x wrote the `rustfmt` closure, relative to the workspace root.
+/// `tog fmt` no longer writes one: the lock's Rust row pins the rustfmt
+/// archive by sha256, so the formatter that runs is the pinned one by
+/// construction, and a record of it proved nothing the lock did not.
+const LEGACY_RECORD: &str = ".tog/closures/rustfmt.json";
 
-/// Records written before sync provisioned every requested component also
-/// carried `unavailable_components`: what the toolchain file asked for that
-/// tog did not ship. Nothing is unavailable any more (a sync provisions a
-/// component or refuses it by name), so an empty list is what a run writes
-/// now by omitting the key, and a non-empty one is a record of a toolchain
-/// this tog would not build: left in place, it compares as changed.
-const LEGACY_UNAVAILABLE: &str = "unavailable_components";
-
-fn current_inputs(recorded: &Value) -> Value {
-    let mut inputs = recorded.clone();
-    if let Some(map) = inputs.as_object_mut() {
-        if map
-            .get(LEGACY_UNAVAILABLE)
-            .and_then(Value::as_array)
-            .is_some_and(Vec::is_empty)
-        {
-            map.remove(LEGACY_UNAVAILABLE);
-        }
-    }
-    inputs
-}
-
-/// The fields of a `rustfmt` closure that say which rustfmt made it, as
-/// this binary would write them for a run in `root.join(resolved_from)` now.
-/// Computed from the lock and the pins alone: no store, no network, no
-/// policy record.
-pub fn pinned_record(platform: Platform, root: &Path, resolved_from: &str) -> io::Result<Value> {
-    // `tog fmt` formats with the lock's Rust selection, so the record it
-    // writes is judged against that selection, whatever release it pins.
-    if let Some(selected) = locked_selection(root)? {
-        return record_for(platform, &selected, resolved_from);
-    }
-    // No lock: the toolchain file, or the catalog default without one.
-    let version = cargo::resolve_toolchain_quiet(platform, &root.join(resolved_from))?;
-    let rust_object = cargo::rust_object_id(platform, version)?;
-    let rustfmt_object = rustfmt_identity(platform, version, Path::new(&rust_object))?.object_id();
-    Ok(json!({
-        "rust_version": version,
-        "rust_object": { "id": rust_object },
-        "rustfmt_object": { "id": rustfmt_object },
-        "inputs": record_inputs(&rustfmt_object, resolved_from),
-    }))
-}
-
-/// The record a `tog fmt` run under `selected` writes. A local toolchain
-/// has no pin: the lock's row is its identity, and its own tree is the
-/// formatter. A catalog release pairs its base Rust object with its own
-/// rustfmt row.
-fn record_for(platform: Platform, selected: &Selected, resolved_from: &str) -> io::Result<Value> {
-    let rust_object = cargo::runtime_object_id(platform, selected)?;
-    let rustfmt_object = if rust_path::is_path(selected) {
-        rust_object.clone()
-    } else {
-        let row = rustfmt_row(platform, selected)?;
-        identity_from(
-            platform,
-            &row.version,
-            row.digest.hex(),
-            Path::new(&rust_object),
-        )?
-        .object_id()
+/// Delete a `rustfmt` record an older `tog fmt` left in `project`, so the
+/// workspace heals itself on the next run. The record was a single envelope
+/// (its signature is inside it), so there is nothing beside it to remove.
+/// An absent record is fine; a symlink or directory in its place is refused
+/// rather than followed, like every other write under `.tog`.
+///
+/// It stays when it is the project's only closure (a directory or symlink
+/// under a closure name is not one, since gc skips it too): the older `tog fmt`
+/// also registered a gc root for the project, and a root whose closures
+/// directory is empty stops every `tog gc` sweep. Forgetting that root needs
+/// the store's exclusive lease, which a formatter run does not take, so the
+/// file waits for the project's first sync (or `tog gc --forget`).
+pub fn remove_legacy_record(project: &ProjectRoot) -> io::Result<()> {
+    let closures = Path::new(".tog/closures");
+    let Some(names) = project.read_dir(closures)? else {
+        return Ok(());
     };
-    Ok(json!({
-        "rust_version": selected.version("rustc")?,
-        "rust_object": { "id": rust_object },
-        "rustfmt_object": { "id": rustfmt_object },
-        "inputs": record_inputs(&rustfmt_object, resolved_from),
-    }))
-}
-
-/// The committed lock's Rust selection at `root`. A lock that cannot be
-/// read, or that names no Rust, is not one: `status` reports a broken lock
-/// on its own row, and this record is then judged against the toolchain
-/// file as before.
-fn locked_selection(root: &Path) -> io::Result<Option<Selected>> {
-    use crate::kernel::toolchain::lock::ToolchainLock;
-    let Ok(Some(lock)) = crate::kernel::fsroot::ProjectRoot::open(root)
-        .and_then(|project| ToolchainLock::read_via(&project))
-    else {
-        return Ok(None);
-    };
-    let Some(section) = lock.ecosystem("rust") else {
-        return Ok(None);
-    };
-    let selected = Selected {
-        helpers: Default::default(),
-        ecosystem: "rust".into(),
-        bundle: section.bundle()?,
-        lock_sha256: None,
-        source: crate::kernel::toolchain::Source::Lock,
-    };
-    Ok(Some(selected))
-}
-
-/// Whether a `rustfmt` closure in `dir` was made by the rustfmt this binary
-/// would use for the same run now. A record without inputs predates them and
-/// is unchecked. A record has changed when any field `pinned_record` writes
-/// disagrees, when the directory it was resolved from is not a plain
-/// subdirectory of `dir`, or when this binary pins no rustfmt for it.
-pub fn closure_state(platform: Platform, dir: &Path, body: &Value) -> io::Result<State> {
-    if body.get("inputs").is_none() {
-        return Ok(State::Unchecked(
-            "rustfmt inputs were not recorded by this run; run 'tog fmt' once to record them"
-                .into(),
-        ));
-    }
-    let mut body = body.clone();
-    body["inputs"] = current_inputs(&body["inputs"]);
-    let body = &body;
-    let field = |value: &Value, pointer: &str| value.pointer(pointer).cloned().unwrap_or_default();
-    // `fmt` records the canonical invocation directory relative to the
-    // canonical workspace root, so only that exact spelling of a directory
-    // inside `dir` (no symlink out, no `..`, no extra separators) is accepted.
-    let resolved_from = body["inputs"]["resolved_from"].as_str();
-    let resolved_from = resolved_from.filter(|recorded| {
-        let (Ok(root), Ok(target)) = (dir.canonicalize(), dir.join(recorded).canonicalize()) else {
-            return false;
-        };
-        target.is_dir()
-            && target
-                .strip_prefix(&root)
-                .ok()
-                .and_then(Path::to_str)
-                .is_some_and(|relative| relative == *recorded)
+    let legacy = Path::new(LEGACY_RECORD);
+    let others = names.iter().any(|name| {
+        let path = closures.join(name);
+        path != legacy
+            && crate::kernel::store::is_closure_file(&path)
+            && matches!(project.entry(&path), Ok(Entry::Regular))
     });
-    let Some(resolved_from) = resolved_from else {
-        return Ok(State::Changed(vec![format!(
-            "rustfmt record /inputs/resolved_from ({} is not a directory of this workspace)",
-            field(body, "/inputs/resolved_from")
-        )]));
-    };
-    let pinned = match pinned_record(platform, dir, resolved_from) {
-        Ok(pinned) => pinned,
-        Err(error) => {
-            return Ok(State::Changed(vec![format!(
-                "rustfmt pin (recorded {}, but this tog pins none here: {error})",
-                field(body, "/inputs/rustfmt_object")
-            )]))
-        }
-    };
-    let changed: Vec<String> = [
-        "/inputs",
-        "/rustfmt_object/id",
-        "/rust_object/id",
-        "/rust_version",
-    ]
-    .into_iter()
-    .filter(|pointer| field(body, pointer) != field(&pinned, pointer))
-    .map(|pointer| {
-        format!(
-            "rustfmt record {pointer} (recorded {}, this tog uses {})",
-            field(body, pointer),
-            field(&pinned, pointer)
-        )
-    })
-    .collect();
-    Ok(if changed.is_empty() {
-        State::Synced
-    } else {
-        State::Changed(changed)
-    })
+    if !others {
+        return Ok(());
+    }
+    project.remove_file(legacy)
 }
 
 /// The identity realization builds from a selection's row, for the drift
@@ -788,7 +651,7 @@ mod tests {
             fs::create_dir_all(project.join(".tog/closures")).unwrap();
             fs::write(
                 project.join(".tog/closures/cargo.json"),
-                serde_json::to_vec(&json!({
+                serde_json::to_vec(&serde_json::json!({
                     "schema": "closure/1",
                     "ecosystem": "cargo",
                     "body": {},
@@ -807,97 +670,6 @@ mod tests {
                 assert!(!scratch.exists(), "{}: {text}", scratch.display());
             }
         });
-    }
-
-    /// Under a lock naming a local toolchain, the record `status` expects
-    /// names the import as both the Rust and the formatter object.
-    #[test]
-    fn a_local_toolchain_record_names_the_import_twice() {
-        use crate::kernel::toolchain::input::InputRow;
-        use crate::kernel::toolchain::lock::{ToolchainLock, LOCK_PATH};
-        let temp = crate::kernel::testutil::TempDir::new();
-        let root = temp.0.as_path();
-        let platform = Platform::X86_64UnknownLinuxGnu;
-        let selected = cargo::path_selection_for_test(platform);
-        let mut lock = ToolchainLock::new("0.1.0");
-        let rows = [InputRow {
-            path: PathBuf::from("rust-toolchain.toml"),
-            field: "toolchain.path".into(),
-            value: Some("/custom/rust".into()),
-            absent: false,
-            sha256: Some("0".repeat(64)),
-        }];
-        lock.set_ecosystem("rust", &selected.bundle, &rows).unwrap();
-        fs::write(root.join(LOCK_PATH), lock.canonical_bytes()).unwrap();
-        let record = pinned_record(platform, root, "").unwrap();
-        let import = rust_path::identity(platform, &selected)
-            .unwrap()
-            .object_id();
-        assert_eq!(record["rust_object"]["id"], import.as_str());
-        assert_eq!(record["rustfmt_object"]["id"], import.as_str());
-        assert_eq!(record["rust_version"], "1.96.1");
-        assert_eq!(record["inputs"]["rustfmt_object"], import.as_str());
-    }
-
-    /// A lock pinned to a release other than the catalog default: the
-    /// record `status` and `audit` expect is the one `tog fmt` writes under
-    /// that lock, so it stays fresh. The expected ids are built from the
-    /// shipped release of that version, not through the lock.
-    #[test]
-    fn a_lock_pinned_to_a_non_default_release_is_the_expected_record() {
-        use crate::kernel::toolchain::input::InputRow;
-        use crate::kernel::toolchain::lock::{ToolchainLock, LOCK_PATH};
-        let temp = crate::kernel::testutil::TempDir::new();
-        let root = temp.0.as_path();
-        let platform = Platform::X86_64UnknownLinuxGnu;
-        let default = crate::kernel::toolchain::shipped(&cargo::toolchain_catalog().unwrap())
-            .unwrap()
-            .version("rustc")
-            .unwrap()
-            .to_string();
-        let pinned = "1.90.0";
-        assert_ne!(
-            pinned, default,
-            "the fixture release must not be the default"
-        );
-        let selected = shipped_selection(pinned).unwrap();
-        let mut lock = ToolchainLock::new("0.1.0");
-        let rows = [InputRow {
-            path: PathBuf::from("rust-toolchain.toml"),
-            field: "toolchain.channel".into(),
-            value: Some(pinned.into()),
-            absent: false,
-            sha256: Some("0".repeat(64)),
-        }];
-        lock.set_ecosystem("rust", &selected.bundle, &rows).unwrap();
-        fs::write(root.join(LOCK_PATH), lock.canonical_bytes()).unwrap();
-
-        let record = pinned_record(platform, root, "").unwrap();
-        let rust_id = cargo::rust_object_id(platform, pinned).unwrap();
-        let rustfmt_id = object_id_for(platform, pinned, &rust_id).unwrap();
-        assert!(rust_id.ends_with(&format!("-rust-{pinned}")), "{rust_id}");
-        assert!(
-            rustfmt_id.ends_with(&format!("-rustfmt-{pinned}")),
-            "{rustfmt_id}"
-        );
-        assert_eq!(record["rust_version"], pinned);
-        assert_eq!(record["rust_object"]["id"], rust_id.as_str());
-        assert_eq!(record["rustfmt_object"]["id"], rustfmt_id.as_str());
-        assert_eq!(record["inputs"], record_inputs(&rustfmt_id, ""));
-        assert!(matches!(
-            closure_state(platform, root, &record).unwrap(),
-            State::Synced
-        ));
-
-        // Without the lock, the same directory expects the default release,
-        // so the pinned record reads as changed rather than silently fresh.
-        fs::remove_file(root.join(LOCK_PATH)).unwrap();
-        let unlocked = pinned_record(platform, root, "").unwrap();
-        assert_eq!(unlocked["rust_version"], default.as_str());
-        assert!(matches!(
-            closure_state(platform, root, &record).unwrap(),
-            State::Changed(_)
-        ));
     }
 
     #[test]
@@ -919,14 +691,14 @@ mod tests {
         assert_eq!(link, PathBuf::from(format!("../{rust_id}/lib")));
     }
 
-    /// The durable root/2 record `tog fmt` publishes (the producer lives in
-    /// `tailor.rs`; the test sits here for the private identity helpers)
-    /// names exactly the Rust object and the rustfmt object it realized:
-    /// nothing inferred from the closure JSON, nothing missing. Both objects
-    /// are cache hits with stub `cargo` and `cargo-fmt` scripts, so nothing
-    /// is downloaded.
+    /// `tog fmt` writes no closure and registers no root: the pinned
+    /// formatter is guaranteed by the lock, not by a record. A
+    /// `.tog/closures/rustfmt.json` left by an older tog is deleted on the
+    /// run, so the workspace heals itself; `--check` leaves it, since a
+    /// check changes no file. Both objects are cache hits with
+    /// stub `cargo` and `cargo-fmt` scripts, so nothing is downloaded.
     #[test]
-    fn closure_refs_name_every_object_this_producer_created() {
+    fn fmt_publishes_nothing_and_removes_a_legacy_record_unless_checking() {
         use crate::tailors::Tailor;
         use std::os::unix::fs::PermissionsExt;
         let _store_env = crate::kernel::store::STORE_ENV_LOCK
@@ -935,9 +707,7 @@ mod tests {
         let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        let _attribution_lock = crate::kernel::policy::attribution_test_lock();
-        let mut attribution = crate::kernel::policy::Attribution::open("rustfmt").unwrap();
-        let scratch = TempDir::named("rustfmt-closure-refs");
+        let scratch = TempDir::named("rustfmt-no-record");
         let root = scratch.0.clone();
         let previous_store = std::env::var_os("TOG_STORE");
         std::env::set_var("TOG_STORE", root.join("store"));
@@ -980,35 +750,126 @@ mod tests {
             fs::set_permissions(&object, fs::Permissions::from_mode(0o555)).unwrap();
             fs::write(
                 store.root.join("meta").join(format!("{id}.json")),
-                serde_json::to_vec_pretty(&json!({ "id": id, "exceptions": [] })).unwrap(),
+                serde_json::to_vec_pretty(&serde_json::json!({ "id": id, "exceptions": [] }))
+                    .unwrap(),
             )
             .unwrap();
         }
         let project = root.join("project");
-        fs::create_dir_all(&project).unwrap();
+        fs::create_dir_all(project.join(".tog/closures")).unwrap();
         fs::write(
             project.join("Cargo.toml"),
             "[package]\nname = \"app\"\nversion = \"0.1.0\"\n",
         )
         .unwrap();
+        let legacy = project.join(".tog/closures/rustfmt.json");
+        fs::write(
+            &legacy,
+            br#"{"schema":"closure/1","ecosystem":"rustfmt","body":{}}"#,
+        )
+        .unwrap();
+        fs::write(
+            project.join(".tog/closures/cargo.json"),
+            br#"{"schema":"closure/1","ecosystem":"cargo","body":{}}"#,
+        )
+        .unwrap();
 
-        // The root is published before the formatter runs, so the record is
-        // checked whatever the sandboxed stub run returns on this host.
-        let _ = cargo::tailor::Cargo.fmt(&ctx, &project, true, &[], &selected, &mut attribution);
-        attribution.finish(true).unwrap();
-        let roots = store.roots().unwrap();
-        assert_eq!(roots.len(), 1, "no durable root record was published");
-        let record = roots[0].record.as_ref().expect("root/2 record");
-        assert_eq!(record.objects, BTreeSet::from([rust_id, rustfmt_id]));
-        assert!(record.projections.is_empty(), "{:?}", record.projections);
+        // The legacy record is removed before the formatter runs, so this
+        // holds whatever the sandboxed stub run returns on this host.
+        let _ = cargo::tailor::Cargo.fmt(&ctx, &project, true, &[], &selected);
+        assert!(legacy.is_file(), "fmt --check changed the checkout");
+        let _ = cargo::tailor::Cargo.fmt(&ctx, &project, false, &[], &selected);
+        assert!(
+            !legacy.exists(),
+            "the legacy rustfmt record was left behind"
+        );
+        assert!(
+            project.join(".tog/closures").is_dir(),
+            "only the record goes, not the closures directory"
+        );
+        assert!(store.roots().unwrap().is_empty(), "fmt registered a root");
+    }
 
-        // `gc --register` rebuilds the same record from this closure alone.
-        // Registration takes the exclusive lease, so the context's shared
-        // one goes first.
-        drop(ctx);
-        let reimported = crate::kernel::store::reimport_root_for_test(&store, &project).unwrap();
-        assert_eq!(reimported.objects, record.objects);
-        assert_eq!(reimported.projections, record.projections);
+    /// The legacy record is removed through the held project when another
+    /// closure stays beside it: an absent one is fine, and a symlink in its
+    /// place is refused rather than followed.
+    #[test]
+    fn removing_the_legacy_record_keeps_a_lone_one_and_refuses_a_symlink() {
+        let temp = TempDir::named("rustfmt-legacy-remove");
+        let project = temp.0.join("project");
+        fs::create_dir_all(project.join(".tog/closures")).unwrap();
+        let held = crate::kernel::fsroot::ProjectRoot::open(&project).unwrap();
+        remove_legacy_record(&held).unwrap();
+        let legacy = project.join(".tog/closures/rustfmt.json");
+        fs::write(&legacy, b"{}").unwrap();
+        // The only closure stays: removing it would leave the old root
+        // record over an empty closures directory.
+        remove_legacy_record(&held).unwrap();
+        assert!(legacy.is_file());
+        fs::write(project.join(".tog/closures/cargo.json"), b"{}").unwrap();
+        remove_legacy_record(&held).unwrap();
+        assert!(!legacy.exists());
+        assert!(project.join(".tog/closures/cargo.json").is_file());
+        let outside = temp.0.join("outside.json");
+        fs::write(&outside, b"{}").unwrap();
+        std::os::unix::fs::symlink(&outside, &legacy).unwrap();
+        assert!(remove_legacy_record(&held).is_err());
+        assert!(outside.is_file());
+    }
+
+    /// A directory or symlink under a closure name is no closure (gc skips
+    /// it), so the legacy record beside one is still the only closure and
+    /// stays, and the project's root keeps sweeping.
+    #[test]
+    fn a_sibling_that_is_not_a_regular_file_keeps_the_legacy_record() {
+        super::super::tests::with_temp_store(|store, root| {
+            let project = root.join("project");
+            let closures = project.join(".tog/closures");
+            fs::create_dir_all(&closures).unwrap();
+            let legacy = closures.join("rustfmt.json");
+            fs::write(
+                &legacy,
+                br#"{"schema":"closure/1","ecosystem":"rustfmt","body":{}}"#,
+            )
+            .unwrap();
+            store.register_root(&project).unwrap();
+            let held = crate::kernel::fsroot::ProjectRoot::open(&project).unwrap();
+            fs::create_dir(closures.join("cargo.json")).unwrap();
+            remove_legacy_record(&held).unwrap();
+            assert!(legacy.is_file(), "a directory sibling counted as a closure");
+            fs::remove_dir(closures.join("cargo.json")).unwrap();
+            let outside = root.join("outside.json");
+            fs::write(&outside, b"{}").unwrap();
+            std::os::unix::fs::symlink(&outside, closures.join("cargo.json")).unwrap();
+            remove_legacy_record(&held).unwrap();
+            assert!(legacy.is_file(), "a symlink sibling counted as a closure");
+            let mut out = Vec::new();
+            crate::kernel::gc::collect(store, crate::kernel::gc::Options::default(), &mut out)
+                .unwrap();
+        });
+    }
+
+    /// A project an older `tog fmt` registered and never synced holds only
+    /// the legacy record. Keeping it keeps the project's root readable, so
+    /// `tog gc` still sweeps; an empty closures directory would refuse.
+    #[test]
+    fn a_lone_legacy_record_keeps_gc_sweeping() {
+        super::super::tests::with_temp_store(|store, root| {
+            let project = root.join("project");
+            fs::create_dir_all(project.join(".tog/closures")).unwrap();
+            fs::write(
+                project.join(".tog/closures/rustfmt.json"),
+                br#"{"schema":"closure/1","ecosystem":"rustfmt","body":{}}"#,
+            )
+            .unwrap();
+            store.register_root(&project).unwrap();
+            let held = crate::kernel::fsroot::ProjectRoot::open(&project).unwrap();
+            remove_legacy_record(&held).unwrap();
+            assert!(project.join(".tog/closures/rustfmt.json").is_file());
+            let mut out = Vec::new();
+            crate::kernel::gc::collect(store, crate::kernel::gc::Options::default(), &mut out)
+                .unwrap();
+        });
     }
 
     /// The validated extractor unpacks the whole component into a scratch

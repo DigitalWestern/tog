@@ -17,7 +17,8 @@ are defined in the six-row table at the top of [the README](../../README.md).
 
 ## 1. Install
 
-No release is tagged yet, so build tog from source. With a Rust toolchain
+The repository is private, so the released binary cannot be downloaded
+yet: build tog from source. With a Rust toolchain
 from [rustup](https://rustup.rs):
 
 ```sh
@@ -32,8 +33,8 @@ clone needs your GitHub access. `tog completions zsh` (or `bash`, `fish`)
 prints shell completions if you want them; the
 [README](../../README.md#install) has the details.
 
-Once `v0.1.0` is tagged, and the repository can be read without logging
-in, a one-line installer replaces all of that:
+Once the repository can be read without logging in, a one-line installer
+replaces all of that on Linux x86_64:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/DigitalWestern/tog/main/install.sh | sh
@@ -78,7 +79,7 @@ ok    project      python found; not synced yet: python (run 'tog')
 Nine rows, exit 0 when none says `fail`. The first row is the build you
 are running and whether a newer release exists (`warn`, with `tog update
 --self` as the fix; `not checked` when offline or, as here, while GitHub
-answers 404: no release is tagged, or the repository is private). This is the command to run
+answers 404 because the repository is private). This is the command to run
 before you file a bug and the output to paste into it. The `store` row
 answers "where does all this go": one directory per machine, shared by every
 project on it, created the first time something needs it.

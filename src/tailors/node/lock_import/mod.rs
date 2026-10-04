@@ -1605,6 +1605,21 @@ snapshots:
             .packages
             .iter()
             .any(|package| { package.path == "node_modules/c" && package.version == "2.0.0" }));
+        // The root keeps its own version, and the plan lists paths in order.
+        assert!(plan
+            .packages
+            .iter()
+            .any(|package| { package.path == "node_modules/c" && package.version == "1.0.0" }));
+        let paths: Vec<_> = plan
+            .packages
+            .iter()
+            .map(|package| package.path.as_str())
+            .collect();
+        assert_eq!(paths, {
+            let mut sorted = paths.clone();
+            sorted.sort();
+            sorted
+        });
     }
 
     #[test]
@@ -1657,63 +1672,6 @@ snapshots: {}
                 .starts_with("npm_git_dep: git-optional: repo https://example.invalid/a"),
             "{exceptions:?}"
         );
-    }
-
-    #[test]
-    fn hoisting_has_one_root_and_one_nested_version() {
-        let dir = project();
-        let lock = format!(
-            r#"lockfileVersion: '9.0'
-importers:
-  .:
-    dependencies:
-      a:
-        specifier: 1
-        version: 1.0.0
-      b:
-        specifier: 1
-        version: 1.0.0
-packages:
-  a@1.0.0:
-    resolution: {{integrity: {SRI}}}
-  b@1.0.0:
-    resolution: {{integrity: {SRI}}}
-  c@1.0.0:
-    resolution: {{integrity: {SRI}}}
-  c@2.0.0:
-    resolution: {{integrity: {SRI}}}
-snapshots:
-  a@1.0.0:
-    dependencies:
-      c: 1.0.0
-  b@1.0.0:
-    dependencies:
-      c: 2.0.0
-  c@1.0.0: {{}}
-  c@2.0.0: {{}}
-"#
-        );
-        let plan = plan_pnpm(
-            Platform::X86_64UnknownLinuxGnu,
-            &lock,
-            &held(&dir.0),
-            node_version(),
-        )
-        .unwrap();
-        let paths: Vec<_> = plan
-            .packages
-            .iter()
-            .map(|package| package.path.as_str())
-            .collect();
-        assert!(paths.contains(&"node_modules/c"));
-        assert!(paths
-            .iter()
-            .any(|path| path.contains("node_modules/b/node_modules/c")));
-        assert_eq!(paths, {
-            let mut sorted = paths.clone();
-            sorted.sort();
-            sorted
-        });
     }
 
     #[test]
