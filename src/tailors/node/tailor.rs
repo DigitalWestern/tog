@@ -474,6 +474,17 @@ fn node_projection_state(dir: &Path, body: &Value) -> State {
             let Some(workspace) = workspace.as_str() else {
                 return State::ProjectionMissing("workspace node_modules".into());
             };
+            // A member whose node_modules git tracks was left unprojected
+            // on purpose (#174): its own directory is what belongs there.
+            if body["unprojected_workspaces"]
+                .as_array()
+                .is_some_and(|kept| kept.iter().any(|kept| kept == workspace))
+            {
+                if replaced_by_a_real_directory(&dir.join(workspace).join("node_modules")) {
+                    continue;
+                }
+                return State::ProjectionMissing("workspace node_modules".into());
+            }
             let Some(encoded) = encoded_workspace(workspace) else {
                 return State::ProjectionMissing("workspace node_modules".into());
             };
@@ -527,6 +538,54 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
+    }
+
+    /// A member whose node_modules git tracks keeps its own directory
+    /// (#174). `status` takes that directory as the member's projection,
+    /// and still reports the member missing once the directory is gone.
+    #[test]
+    fn an_unprojected_member_keeps_its_own_directory_and_is_synced() {
+        let temp = TempDir::new();
+        let dir = temp.0.join("project");
+        let root = temp.0.join("forest");
+        let env = temp.0.join("env");
+        for path in [
+            root.join("node_modules"),
+            root.join("workspaces/packages%2Fbuilt/node_modules"),
+            dir.join("packages/fixture/node_modules"),
+            dir.join("packages/built"),
+            env.clone(),
+        ] {
+            fs::create_dir_all(path).unwrap();
+        }
+        std::os::unix::fs::symlink(root.join("node_modules"), dir.join("node_modules")).unwrap();
+        std::os::unix::fs::symlink(
+            root.join("workspaces/packages%2Fbuilt/node_modules"),
+            dir.join("packages/built/node_modules"),
+        )
+        .unwrap();
+        let body = |kept: Value| {
+            json!({
+                "env_object": env,
+                "projection_id": "p",
+                "forest_path": root.join("node_modules"),
+                "workspaces": ["packages/built", "packages/fixture"],
+                "unprojected_workspaces": kept,
+            })
+        };
+        assert_eq!(
+            node_projection_state(&dir, &body(json!(["packages/fixture"]))),
+            State::Synced
+        );
+        assert!(matches!(
+            node_projection_state(&dir, &body(Value::Null)),
+            State::ProjectionMissing(_)
+        ));
+        fs::remove_dir(dir.join("packages/fixture/node_modules")).unwrap();
+        assert!(matches!(
+            node_projection_state(&dir, &body(json!(["packages/fixture"]))),
+            State::ProjectionMissing(_)
+        ));
     }
 
     /// A sync holds the project open: once the directory is renamed and a
