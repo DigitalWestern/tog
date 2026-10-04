@@ -2092,6 +2092,28 @@ files = [{ file = "old.whl", hash = "sha256:dddddddddddddddddddddddddddddddddddd
     }
 
     #[test]
+    fn setup_hash_tracks_contents_of_a_symlinked_input_file() {
+        let dir = temp_project("setup-file-symlink");
+        let outside = temp_project("setup-file-target");
+        let target = outside.0.join("requirements-data.txt");
+        fs::write(&target, "six==1.16.0\n").unwrap();
+        fs::write(
+            dir.0.join("setup.py"),
+            "from setuptools import setup\nsetup()\n",
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(&target, dir.0.join("requirements-data.txt")).unwrap();
+        let hash = || setup_tree_hash(&ProjectRoot::open(&dir.0).unwrap()).unwrap();
+        let first = hash();
+        fs::write(&target, "six==1.17.0\n").unwrap();
+        assert_ne!(
+            first,
+            hash(),
+            "cached metadata must notice changed file inputs"
+        );
+    }
+
+    #[test]
     fn setup_cfg_empty_requires_probe_when_setup_py_declares_install_requires() {
         let dir = temp_project("setupcfg-probe");
         fs::write(dir.0.join("setup.cfg"), "[options]\ninstall_requires =\n").unwrap();
