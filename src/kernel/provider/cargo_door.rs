@@ -723,16 +723,18 @@ pub(crate) struct Expanded {
 enum Part {
     /// `**`: any number of directories, none included.
     AnyDepth,
-    /// A name pattern: `*`, `?` and `[...]` (`[!...]` negated, `a-z`
-    /// ranges, a `]` first taken literally), everything else literal.
-    Name(Vec<char>),
+    /// One name, matched by the `glob` crate's own pattern (`*`, `?`,
+    /// `[...]` with `[!...]` and ranges; `[**]` a class of `*`).
+    Name(glob::Pattern),
 }
 
 /// The directories under `root` a members entry names, the way cargo's
 /// `glob` crate (default options) expands it: `*` and `?` and classes
 /// within one name, `**` across directories, a leading `.` matched by a
-/// wildcard, no directory skipped. A pattern the `glob` crate would refuse
-/// (`**` inside a name, an unclosed `[`) is an error, as it is for cargo.
+/// wildcard, no directory skipped. Each name is matched by
+/// [`glob::Pattern`] with cargo's options, so the syntax is the crate's
+/// own; a part it refuses (`**` inside a name, an unclosed `[`) is an
+/// error, as it is for cargo. Only the walk is tog's.
 /// Symlinks are not followed, so the walk ends on any tree; a symlinked
 /// directory it would enter is reported instead
 /// ([`Expanded::through_symlinks`]).
@@ -749,12 +751,8 @@ pub(crate) fn expand(root: &Path, pattern: &str) -> io::Result<Expanded> {
             parts.push(Part::AnyDepth);
             continue;
         }
-        if part.contains("**") {
-            return Err(invalid("`**` must be a whole path component"));
-        }
-        let chars: Vec<char> = part.chars().collect();
-        check_classes(&chars).map_err(invalid)?;
-        parts.push(Part::Name(chars));
+        let name = glob::Pattern::new(part).map_err(|error| invalid(&error.to_string()))?;
+        parts.push(Part::Name(name));
     }
     let mut out = Expanded::default();
     let mut seen: std::collections::BTreeSet<(PathBuf, usize)> = Default::default();
@@ -794,9 +792,13 @@ pub(crate) fn expand(root: &Path, pattern: &str) -> io::Result<Expanded> {
             let child = relative.join(&name);
             let next = match part {
                 Part::AnyDepth => index,
-                Part::Name(chars) => {
-                    let name: Vec<char> = name.to_string_lossy().chars().collect();
-                    if !name_matches(chars, &name) {
+                Part::Name(pattern) => {
+                    // As the `glob` crate: a name that is not UTF-8 matches
+                    // no pattern.
+                    let matches = name
+                        .to_str()
+                        .is_some_and(|name| pattern.matches_with(name, glob::MatchOptions::new()));
+                    if !matches {
                         continue;
                     }
                     index + 1
@@ -814,70 +816,6 @@ pub(crate) fn expand(root: &Path, pattern: &str) -> io::Result<Expanded> {
         }
     }
     Ok(out)
-}
-
-/// Every `[` in a name pattern is closed, as the `glob` crate requires.
-fn check_classes(pattern: &[char]) -> Result<(), &'static str> {
-    let mut index = 0;
-    while index < pattern.len() {
-        if pattern[index] == '[' {
-            match class_end(pattern, index) {
-                Some(end) => index = end + 1,
-                None => return Err("a `[` is not closed"),
-            }
-        } else {
-            index += 1;
-        }
-    }
-    Ok(())
-}
-
-/// The index of the `]` closing the class that opens at `open`: one may
-/// follow `[` or `[!` and be taken literally.
-fn class_end(pattern: &[char], open: usize) -> Option<usize> {
-    let mut index = open + 1;
-    if pattern.get(index) == Some(&'!') {
-        index += 1;
-    }
-    if pattern.get(index) == Some(&']') {
-        index += 1;
-    }
-    (index..pattern.len()).find(|&at| pattern[at] == ']')
-}
-
-/// Whether `name` matches the name pattern `pattern` (`glob` crate rules,
-/// case-sensitive, a leading `.` not special).
-fn name_matches(pattern: &[char], name: &[char]) -> bool {
-    match pattern.first() {
-        None => name.is_empty(),
-        Some('*') => (0..=name.len()).any(|skip| name_matches(&pattern[1..], &name[skip..])),
-        Some('?') => !name.is_empty() && name_matches(&pattern[1..], &name[1..]),
-        Some('[') => {
-            let Some(end) = class_end(pattern, 0) else {
-                return false;
-            };
-            let Some(&first) = name.first() else {
-                return false;
-            };
-            let (negated, body) = match pattern.get(1) {
-                Some('!') => (true, &pattern[2..end]),
-                _ => (false, &pattern[1..end]),
-            };
-            let mut hit = false;
-            let mut at = 0;
-            while at < body.len() {
-                if at + 2 < body.len() && body[at + 1] == '-' {
-                    hit |= body[at] <= first && first <= body[at + 2];
-                    at += 3;
-                } else {
-                    hit |= body[at] == first;
-                    at += 1;
-                }
-            }
-            hit != negated && name_matches(&pattern[end + 1..], &name[1..])
-        }
-        Some(&literal) => name.first() == Some(&literal) && name_matches(&pattern[1..], &name[1..]),
-    }
 }
 
 /// The `ConfinedSpec` of `run`, through the process proxy with TLS

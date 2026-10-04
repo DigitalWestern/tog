@@ -318,7 +318,8 @@ mod tests {
     /// (which an explicit member, or one under it, overrides), as cargo
     /// 1.98.1 lists them (checked against `cargo metadata`): a
     /// wildcard matches a hidden directory and `target`, a class matches
-    /// its letters, `**` reaches any depth. An absolute entry or one with
+    /// its letters (`[**]` a class of `*`, not a recursive wildcard), `**`
+    /// reaches any depth. An absolute entry or one with
     /// `.` or `..` is placed lexically, and refused by name when it lands
     /// outside the root. A directory with no manifest is not listed.
     #[test]
@@ -332,6 +333,12 @@ mod tests {
             ("crates/b", "b"),
             ("crates/skipped", "skipped"),
             ("kept", "kept"),
+            ("stars/*", "star"),
+            ("stars/x", "notstar"),
+            (
+                "deepest/1/2/3/4/5/6/7/8/9/10/11/12/13/14/15/16/17/18/19/20/m",
+                "m",
+            ),
             ("abs", "abs"),
             ("dotdot", "dotdot"),
             ("dot/inner", "dotinner"),
@@ -352,7 +359,8 @@ mod tests {
             format!(
                 "[workspace]\nmembers = [\"./app/\", \"crates/*\", \"letters/[ab]\", \
                  \"nested/**/c\", \"target/*\", \"kept\", \"sub\", \"sub/i*\", \
-                 \"{}/abs\", \"x/../dotdot\", \"dot/./inner\", \"../ws/app\"]\n\
+                 \"{}/abs\", \"x/../dotdot\", \"dot/./inner\", \"../ws/app\", \"stars/[**]\", \
+                 \"deepest/**/m\"]\n\
                  exclude = [\"crates/skipped\", \"kept\", \"sub/inner\"]\n",
                 root.display()
             ),
@@ -374,12 +382,15 @@ mod tests {
                 "crates/.hidden/Cargo.toml".to_string(),
                 "crates/a/Cargo.toml".to_string(),
                 "crates/b/Cargo.toml".to_string(),
+                "deepest/1/2/3/4/5/6/7/8/9/10/11/12/13/14/15/16/17/18/19/20/m/Cargo.toml"
+                    .to_string(),
                 "dot/inner/Cargo.toml".to_string(),
                 "dotdot/Cargo.toml".to_string(),
                 "kept/Cargo.toml".to_string(),
                 "letters/a/Cargo.toml".to_string(),
                 "letters/b/Cargo.toml".to_string(),
                 format!("{deep}/Cargo.toml"),
+                "stars/*/Cargo.toml".to_string(),
                 "sub/Cargo.toml".to_string(),
                 "sub/inner/Cargo.toml".to_string(),
                 "target/t/Cargo.toml".to_string(),
@@ -398,6 +409,7 @@ mod tests {
         // A pattern the glob crate refuses is refused here too.
         assert!(cargo_door::expand(&root, "crates/[ab").is_err());
         assert!(cargo_door::expand(&root, "crates/a**").is_err());
+        assert!(cargo_door::expand(&root, "crates/***").is_err());
         // A member tog cannot place inside the root is refused by name,
         // before anything runs or is signed: never dropped.
         fs::write(
