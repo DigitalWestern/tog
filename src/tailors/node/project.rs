@@ -392,8 +392,9 @@ fn git_tracked_node_modules(
     let tracked = crate::kernel::gitsrc::tracked_among(project_dir, &candidates, activity)?;
     if tracked.iter().any(|path| path == "node_modules") {
         return Err(err(
-            "node_modules holds files git tracks; tog will not move committed \
-             source aside to project dependencies there (git ls-files node_modules)",
+            "node_modules holds files git tracks (git ls-files node_modules), and \
+             tog will not move committed source aside to project dependencies \
+             there; untrack them (git rm -r --cached node_modules) and run `tog` again",
         ));
     }
     let mut members = Vec::new();
@@ -411,6 +412,16 @@ fn git_tracked_node_modules(
         members.push(member);
     }
     Ok(members)
+}
+
+/// Name in the closure the members `git_tracked_node_modules` kept back:
+/// `status` checks every other member's link, and these keep their own
+/// directory by design.
+fn record_unprojected(body: &mut serde_json::Value, tracked: &[String], workspaces: &[String]) {
+    let kept: Vec<&String> = tracked.iter().filter(|m| workspaces.contains(m)).collect();
+    if !kept.is_empty() {
+        body["unprojected_workspaces"] = serde_json::json!(kept);
+    }
 }
 
 /// Where this projection lives: its id and the forest paths derived from it.
@@ -985,6 +996,7 @@ pub fn project_node_env_recorded(
         &reasons,
         inputs,
     );
+    record_unprojected(&mut body, &tracked, &workspaces);
     if let Some(record) = runtime_record {
         for (key, value) in record.as_object().into_iter().flatten() {
             body[key] = value.clone();
