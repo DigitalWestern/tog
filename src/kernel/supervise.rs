@@ -32,8 +32,11 @@
 //! `local_output`, which refuse a dependency tool (it goes through
 //! `kernel::resolve`'s door).
 
+mod pipes;
+
 use crate::kernel::activity::StoreActivity;
 use crate::kernel::resolve::confine;
+use pipes::{drain, note_abandoned_output, wait_readable, DRAIN_AFTER_EXIT};
 use std::cell::{Cell, UnsafeCell};
 use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, RawFd};
@@ -1041,18 +1044,29 @@ fn status_relayed(
     // A reader that fails (a read error, a panic) wakes it through the
     // session's self-pipe, as a signal does ([`RelayWake`]).
     let failed = std::sync::Arc::new(AtomicBool::new(false));
+    let deadline = std::sync::Arc::new(std::sync::OnceLock::new());
     let mut readers = Vec::with_capacity(2);
     let started: io::Result<()> = (|| {
         if let Some(pipe) = child.stderr.take() {
             let wake = RelayWake::new(NOTIFY_WRITE.load(Ordering::SeqCst), &failed)?;
             readers.push((
                 true,
-                spawn_relay(pipe, stderr_sink, secrets, CLASSIFIER_PREFIX, wake)?,
+                spawn_relay(
+                    pipe,
+                    stderr_sink,
+                    secrets,
+                    CLASSIFIER_PREFIX,
+                    wake,
+                    deadline.clone(),
+                )?,
             ));
         }
         if let Some(pipe) = child.stdout.take() {
             let wake = RelayWake::new(NOTIFY_WRITE.load(Ordering::SeqCst), &failed)?;
-            readers.push((false, spawn_relay(pipe, stdout_sink, secrets, 0, wake)?));
+            readers.push((
+                false,
+                spawn_relay(pipe, stdout_sink, secrets, 0, wake, deadline.clone())?,
+            ));
         }
         Ok(())
     })();
@@ -1088,15 +1102,21 @@ fn status_relayed(
     }
     // The direct child is reaped: no forwarded signal may reach its pid
     // again while the pipes drain. Both readers are joined on every path,
-    // before the session and the activity borrow end. A grandchild that
-    // keeps a pipe open keeps its reader waiting (a known limitation).
+    // before the session and the activity borrow end. A process the child
+    // left holding a pipe gets `DRAIN_AFTER_EXIT`, then its reader stops.
     session.clear_child();
+    let _ = deadline.set(std::time::Instant::now() + DRAIN_AFTER_EXIT);
     let mut stderr_bytes = Ok(Vec::new());
     let mut relay_error = None;
+    let mut abandoned = false;
     for (is_stderr, reader) in readers {
         match join_relay(reader) {
-            Ok(bytes) if is_stderr => stderr_bytes = Ok(bytes),
-            Ok(_) => {}
+            Ok((bytes, stopped)) => {
+                abandoned |= stopped;
+                if is_stderr {
+                    stderr_bytes = Ok(bytes);
+                }
+            }
             Err(error) => {
                 if relay_error.is_none() {
                     relay_error = Some(io::Error::new(error.kind(), error.to_string()));
@@ -1106,6 +1126,9 @@ fn status_relayed(
                 }
             }
         }
+    }
+    if abandoned {
+        note_abandoned_output(command);
     }
     let status = match (waited, relay_error) {
         (_, Some(error)) => return Err(error),
@@ -1206,22 +1229,28 @@ impl Drop for RelayWake {
     }
 }
 
-type RelayHandle = std::thread::JoinHandle<io::Result<Vec<u8>>>;
+/// A relay's kept prefix, and whether it stopped at the drain deadline
+/// rather than at end of file.
+type RelayHandle = std::thread::JoinHandle<io::Result<(Vec<u8>, bool)>>;
+
+/// Set once the direct child is reaped: when a relay stops reading.
+type DrainDeadline = std::sync::Arc<std::sync::OnceLock<std::time::Instant>>;
 
 /// Relay `pipe` to `sink` on a thread of its own ([`relay`]), reporting a
 /// failure through `wake`.
-fn spawn_relay<R: Read + Send + 'static>(
+fn spawn_relay<R: Read + AsRawFd + Send + 'static>(
     pipe: R,
     sink: Sink,
     secrets: &[Vec<u8>],
     keep: usize,
     wake: RelayWake,
+    deadline: DrainDeadline,
 ) -> io::Result<RelayHandle> {
     let scrubber = confine::Scrubber::new(secrets.to_vec());
     std::thread::Builder::new()
         .name("tog-relay".into())
         .spawn(move || {
-            let result = relay(pipe, &sink, scrubber, keep);
+            let result = relay(pipe, &sink, scrubber, keep, &deadline);
             if result.is_ok() {
                 wake.done();
             }
@@ -1229,7 +1258,7 @@ fn spawn_relay<R: Read + Send + 'static>(
         })
 }
 
-fn join_relay(handle: RelayHandle) -> io::Result<Vec<u8>> {
+fn join_relay(handle: RelayHandle) -> io::Result<(Vec<u8>, bool)> {
     handle
         .join()
         .map_err(|_| io::Error::other("a child output relay panicked"))?
@@ -1238,16 +1267,19 @@ fn join_relay(handle: RelayHandle) -> io::Result<Vec<u8>> {
 /// Pass a child's output stream on to `sink` with the signing key's secret
 /// replaced: a tool's parse error quotes the line it failed on, and a
 /// project file can be the key under another name. Blocking reads until the
-/// child closes its end; the [`confine::Scrubber`] holds back only bytes
-/// that could still be part of a secret, never on a pause. Returns the
-/// first `keep` bytes passed on, scrubbed like the rest: a caller that
-/// quotes them in an error cannot carry the key either.
+/// child closes its end, or until `deadline` once it is set; the
+/// [`confine::Scrubber`] holds back only bytes that could still be part of
+/// a secret, never on a pause. Returns the first `keep` bytes passed on,
+/// scrubbed like the rest: a caller that quotes them in an error cannot
+/// carry the key either. The flag says the deadline, not end of file,
+/// stopped it.
 fn relay(
-    mut pipe: impl Read,
+    mut pipe: impl Read + AsRawFd,
     sink: &Sink,
     mut scrubber: confine::Scrubber,
     keep: usize,
-) -> io::Result<Vec<u8>> {
+    deadline: &std::sync::OnceLock<std::time::Instant>,
+) -> io::Result<(Vec<u8>, bool)> {
     let mut kept = Vec::new();
     let mut pass_on = |bytes: Vec<u8>| {
         let room = keep.saturating_sub(kept.len()).min(bytes.len());
@@ -1255,34 +1287,30 @@ fn relay(
         sink.write(&bytes);
     };
     let mut buffer = [0u8; 16 * 1024];
+    // Short waits, so a deadline set while the pipe is quiet is seen.
+    const TICK: std::time::Duration = std::time::Duration::from_millis(50);
     let result = loop {
+        let wait = match deadline.get() {
+            Some(at) => match at.checked_duration_since(std::time::Instant::now()) {
+                Some(left) if !left.is_zero() => left.min(TICK),
+                _ => break Ok(true),
+            },
+            None => TICK,
+        };
+        match wait_readable(pipe.as_raw_fd(), wait) {
+            Ok(false) => continue,
+            Ok(true) => {}
+            Err(error) => break Err(error),
+        }
         match pipe.read(&mut buffer) {
-            Ok(0) => break Ok(()),
+            Ok(0) => break Ok(false),
             Ok(count) => pass_on(scrubber.push(&buffer[..count])),
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
             Err(error) => break Err(error),
         }
     };
     pass_on(scrubber.finish());
-    result.map(|()| kept)
-}
-
-fn drain<R: Read>(reader: &mut Option<R>, destination: &mut Vec<u8>) -> io::Result<bool> {
-    let Some(reader) = reader else {
-        return Ok(false);
-    };
-    let mut buffer = [0u8; 16 * 1024];
-    loop {
-        match reader.read(&mut buffer) {
-            Ok(0) => {
-                return Ok(true);
-            }
-            Ok(count) => destination.extend_from_slice(&buffer[..count]),
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(false),
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-            Err(error) => return Err(error),
-        }
-    }
+    result.map(|stopped| (kept, stopped))
 }
 
 /// Spawn a command, drain captured stdout/stderr without waiting on a full
@@ -1320,6 +1348,7 @@ pub fn output(command: &mut Command, activity: &StoreActivity) -> io::Result<Out
     let mut stdout_bytes = Vec::new();
     let mut stderr_bytes = Vec::new();
     let mut status = None;
+    let mut reaped_at = None;
     loop {
         session.begin_round();
         if status.is_none() {
@@ -1331,6 +1360,7 @@ pub fn output(command: &mut Command, activity: &StoreActivity) -> io::Result<Out
                         // pipes drain, and a forwarded signal must never
                         // reach a reaped — possibly recycled — pid.
                         session.clear_child();
+                        reaped_at = Some(std::time::Instant::now());
                     }
                     status = next;
                 }
@@ -1361,6 +1391,15 @@ pub fn output(command: &mut Command, activity: &StoreActivity) -> io::Result<Out
             stderr = None;
         }
         if let Some(status) = status {
+            // A process the child left holding a pipe gets
+            // `DRAIN_AFTER_EXIT`; then the pipe is dropped.
+            if (stdout.is_some() || stderr.is_some())
+                && reaped_at.is_some_and(|at: std::time::Instant| at.elapsed() >= DRAIN_AFTER_EXIT)
+            {
+                note_abandoned_output(command);
+                stdout = None;
+                stderr = None;
+            }
             if stdout.is_none() && stderr.is_none() {
                 session.clear_child();
                 return session.conclude(
@@ -1618,6 +1657,87 @@ mod tests {
         let error = result.unwrap_err();
         assert!(error.contains("relay panicked"), "{error}");
         assert!(elapsed < std::time::Duration::from_secs(60), "{elapsed:?}");
+    }
+
+    #[test]
+    fn a_continuously_readable_stream_yields_to_other_supervisor_work() {
+        struct ContinuousOutput(usize);
+        impl Read for ContinuousOutput {
+            fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+                self.0 += 1;
+                if self.0 >= 1024 {
+                    return Err(io::Error::other("stream monopolized the supervisor"));
+                }
+                buffer[0] = b'x';
+                Ok(1)
+            }
+        }
+        let mut stream = Some(ContinuousOutput(0));
+        let mut captured = Vec::new();
+        assert!(!drain(&mut stream, &mut captured).unwrap());
+        assert!(!captured.is_empty());
+        // Returning permits reaping, signal forwarding, deadline checks,
+        // and draining the other output pipe even without EOF/WouldBlock.
+        assert!(stream.unwrap().0 < 1024);
+    }
+
+    /// A command that leaves a process holding its output open (a compiler
+    /// server, an MSBuild node) does not hang tog: once the direct child is
+    /// reaped, both supervisors read for `DRAIN_AFTER_EXIT` more, then stop
+    /// and keep what they read.
+    // Reviewed site (tests/architecture.rs): the supervisor's own tests of its primitives.
+    #[allow(clippy::disallowed_methods)]
+    #[test]
+    fn a_leftover_process_holding_the_output_does_not_hang_the_supervisor() {
+        let script = "printf 'early\\n' >&2; sleep 60 >&2 & echo $!";
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let (store, _root) = test_store("leftover");
+            let activity = store.activity(ActivityMode::Shared).unwrap();
+            let started = std::time::Instant::now();
+            let mut command = Command::new("/bin/sh");
+            command.args(["-c", script]);
+            let captured = output(&mut command, &activity).unwrap();
+            let captured_after = started.elapsed();
+
+            let stdout = std::sync::Arc::new(Mutex::new(Vec::new()));
+            let stderr = std::sync::Arc::new(Mutex::new(Vec::new()));
+            let started = std::time::Instant::now();
+            let mut command = Command::new("/bin/sh");
+            command.args(["-c", script]);
+            let (status, prefix) = status_relayed(
+                &mut command,
+                &activity,
+                Sink::Buffer(stdout.clone()),
+                Sink::Buffer(stderr.clone()),
+                &[],
+            )
+            .unwrap();
+            let relayed_after = started.elapsed();
+            drop(activity);
+            let relayed_pid = stdout.lock().unwrap().clone();
+            let _ = sender.send((
+                captured,
+                captured_after,
+                status,
+                prefix,
+                relayed_pid,
+                relayed_after,
+            ));
+        });
+        let (captured, captured_after, status, prefix, relayed_pid, relayed_after) = receiver
+            .recv_timeout(std::time::Duration::from_secs(40))
+            .expect("the supervisor waited on the leftover process");
+        for pid in [&captured.stdout, &relayed_pid] {
+            let pid = String::from_utf8_lossy(pid).trim().to_string();
+            let _ = Command::new("kill").arg(&pid).status();
+        }
+        assert!(captured.status.success());
+        assert_eq!(captured.stderr, b"early\n");
+        assert!(captured_after >= DRAIN_AFTER_EXIT, "{captured_after:?}");
+        assert!(status.success());
+        assert_eq!(prefix, b"early\n");
+        assert!(relayed_after >= DRAIN_AFTER_EXIT, "{relayed_after:?}");
     }
 
     /// No piece of the secret 10 characters or longer is in `text`.
