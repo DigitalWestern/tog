@@ -28,15 +28,81 @@ pub(crate) fn edit_tailors() -> Vec<(&'static dyn Tailor, PackageRegistry)> {
         .collect()
 }
 
-/// Nearest ancestor that is a tog projection: every tailor writes
-/// `.tog/closures/<eco>.json`, so that directory is the proof. A plain
-/// `node_modules` or `.venv` in a subdirectory (a docs site, a vendored
-/// tool) is NOT a projection and must not stop the walk-up.
-pub(crate) fn projected_root(cwd: &Path) -> PathBuf {
-    cwd.ancestors()
-        .find(|d| d.join(".tog/closures").is_dir())
-        .unwrap_or(cwd)
-        .to_path_buf()
+/// The project a command run at some directory belongs to
+/// ([`project_for`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProjectLocation {
+    pub root: PathBuf,
+    /// tog has marked `root` as a project: it holds a `.tog` directory or
+    /// a toolchain lock entry. An unmarked root only has manifests.
+    pub marked: bool,
+    /// The ecosystems whose inputs are at `root` (`inspect::detected`).
+    pub detected: Vec<&'static str>,
+}
+
+/// Which project am I in? The one answer every command uses: `run`,
+/// `sync`, `tog <script>`, `fmt`, `add`, `x` and toolchain selection.
+///
+/// 1. The nearest ancestor tog has marked: a `.tog` directory (closures,
+///    the journal, the resolution record) or a toolchain lock entry, a
+///    dangling symlink included, so a lock that cannot be read refuses
+///    instead of being skipped. A marked root wins over a nearer manifest,
+///    so a nested `package.json` under a synced root (a docs site) keeps
+///    belonging to that root, and an outer checkout never decides an inner
+///    project's runtime. `$HOME/.tog` is tog's own home, not a project.
+/// 2. Otherwise the nearest ancestor with any project input, so `tog run`
+///    from `src/` of a never-synced project finds the project.
+/// 3. Otherwise none.
+pub(crate) fn project_for(cwd: &Path) -> io::Result<Option<ProjectLocation>> {
+    project_for_in(cwd, std::env::var_os("HOME").map(PathBuf::from).as_deref())
+}
+
+fn project_for_in(cwd: &Path, home: Option<&Path>) -> io::Result<Option<ProjectLocation>> {
+    let marked = cwd.ancestors().find(|dir| {
+        dir.join(lock::LOCK_PATH).symlink_metadata().is_ok()
+            || (dir.join(".tog").is_dir() && home != Some(*dir))
+    });
+    if let Some(root) = marked {
+        return Ok(Some(ProjectLocation {
+            root: root.to_path_buf(),
+            marked: true,
+            detected: crate::commands::inspect::detected(root)?,
+        }));
+    }
+    for dir in cwd.ancestors() {
+        let detected = crate::commands::inspect::detected(dir)?;
+        if !detected.is_empty() {
+            return Ok(Some(ProjectLocation {
+                root: dir.to_path_buf(),
+                marked: false,
+                detected,
+            }));
+        }
+    }
+    Ok(None)
+}
+
+/// The directory a command at `cwd` works in: its project's root, or `cwd`
+/// itself outside any project.
+pub(crate) fn project_root(cwd: &Path) -> io::Result<PathBuf> {
+    Ok(project_for(cwd)?.map_or_else(|| cwd.to_path_buf(), |location| location.root))
+}
+
+/// The steps of the `package.json` script `name` at `root`, before any
+/// sync: `None` when there is no `package.json` or no such script. `tog
+/// <script>` and `tog fmt` ask this to decide whether a word is a script;
+/// `tog run` reads the projected `package.json` once synced.
+pub(crate) fn package_script(
+    root: &Path,
+    name: &str,
+    args: &[String],
+) -> io::Result<Option<Vec<(String, String)>>> {
+    let package_json = root.join("package.json");
+    if !package_json.is_file() {
+        return Ok(None);
+    }
+    let json = std::fs::read_to_string(&package_json)?;
+    crate::tailors::node::script_commands_from_package(&json, name, args)
 }
 
 /// What a projection under `dir` contributes to a child environment: the
@@ -98,26 +164,19 @@ pub(crate) fn selected_toolchain(
             format!("unsupported ecosystem '{ecosystem}'"),
         )
     })?;
-    for dir in cwd.ancestors() {
-        // Any entry under the lock's name decides where to look, a dangling
-        // symlink or a directory included: reading through the held root
-        // descriptor is what refuses those, and a lock that cannot be read
-        // must not fall through to the shipped default. A `.tog` directory
-        // is an explicit project boundary too, so an outer checkout's lock
-        // never decides an inner project's runtime; resolving there honors
-        // the project's own sources.
-        let lock_entry = dir.join(lock::LOCK_PATH).symlink_metadata().is_ok();
-        if lock_entry || dir.join(".tog").is_dir() {
-            let root = ProjectRoot::open(dir)?;
-            let resolved = comforter::toolchain::resolve(
-                &root,
-                platform,
-                ecosystem_inputs(&[tailor])?,
-                comforter::toolchain::Mode::ReadOnly,
-                false,
-            )?;
-            return resolved.get(tailor.lock_ecosystem()).cloned();
-        }
+    // The project's committed lock when it has one, and the catalog's
+    // selection for its sources otherwise. A lock that cannot be read
+    // refuses here: it must not fall through to the shipped default.
+    if let Some(location) = project_for(cwd)? {
+        let root = ProjectRoot::open(&location.root)?;
+        let resolved = comforter::toolchain::resolve(
+            &root,
+            platform,
+            ecosystem_inputs(&[tailor])?,
+            comforter::toolchain::Mode::ReadOnly,
+            false,
+        )?;
+        return resolved.get(tailor.lock_ecosystem()).cloned();
     }
     runtime::shipped(&tailor.toolchain_catalog()?)
 }
@@ -139,10 +198,9 @@ pub(crate) fn selected_helpers(
             format!("unsupported ecosystem '{ecosystem}'"),
         )
     })?;
-    // The project boundary `selected_toolchain` stops at.
-    let project = cwd.ancestors().find(|dir| {
-        dir.join(lock::LOCK_PATH).symlink_metadata().is_ok() || dir.join(".tog").is_dir()
-    });
+    // The project `selected_toolchain` reads.
+    let location = project_for(cwd)?;
+    let project = location.as_ref().map(|location| location.root.as_path());
     let present = match project {
         Some(dir) => crate::tailors::detected(dir)?,
         None => Vec::new(),
@@ -298,16 +356,77 @@ mod tests {
     }
 
     #[test]
-    fn projected_root_skips_plain_node_modules() {
+    fn project_for_prefers_a_marked_root_then_the_nearest_manifest() {
         let t = TempDir::new();
+        let none = |dir: &Path| project_for_in(dir, None).unwrap();
+        // A synced root keeps a plain node_modules and a nested manifest
+        // below it (a docs site).
         let root = t.0.join("proj");
         std::fs::create_dir_all(root.join(".tog/closures")).unwrap();
-        let sub = root.join("docs");
-        std::fs::create_dir_all(sub.join("node_modules")).unwrap();
-        assert_eq!(projected_root(&sub), root);
-        assert_eq!(projected_root(&root), root);
+        let docs = root.join("docs");
+        std::fs::create_dir_all(docs.join("node_modules")).unwrap();
+        std::fs::write(docs.join("package.json"), "{}").unwrap();
+        assert_eq!(none(&docs).unwrap().root, root);
+        assert!(none(&root).unwrap().marked);
+        // A lock entry marks a project too, a dangling symlink included.
+        let locked = t.0.join("locked");
+        std::fs::create_dir_all(locked.join("src")).unwrap();
+        std::os::unix::fs::symlink("missing", locked.join(lock::LOCK_PATH)).unwrap();
+        assert_eq!(none(&locked.join("src")).unwrap().root, locked);
+        // Unmarked: the nearest manifest above.
+        let fresh = t.0.join("fresh");
+        std::fs::create_dir_all(fresh.join("src/deep")).unwrap();
+        std::fs::write(fresh.join("package.json"), "{}").unwrap();
+        let location = none(&fresh.join("src/deep")).unwrap();
+        assert_eq!(location.root, fresh);
+        assert!(!location.marked);
+        assert_eq!(location.detected, ["node"]);
+        // Nothing at all.
         let outside = t.0.join("elsewhere");
         std::fs::create_dir_all(&outside).unwrap();
-        assert_eq!(projected_root(&outside), outside);
+        assert_eq!(none(&outside), None);
+        assert_eq!(project_root(&outside).unwrap(), outside);
+    }
+
+    #[test]
+    fn the_tog_home_is_not_a_project() {
+        let t = TempDir::new();
+        let home = t.0.join("home");
+        std::fs::create_dir_all(home.join(".tog/store")).unwrap();
+        let work = home.join("work");
+        std::fs::create_dir_all(work.join("src")).unwrap();
+        assert_eq!(
+            project_for_in(&work.join("src"), Some(&home)).unwrap(),
+            None
+        );
+        std::fs::write(work.join("package.json"), "{}").unwrap();
+        assert_eq!(
+            project_for_in(&work.join("src"), Some(&home))
+                .unwrap()
+                .unwrap()
+                .root,
+            work
+        );
+        // Without the home rule the walk would stop at `~`.
+        assert_eq!(
+            project_for_in(&work.join("src"), None)
+                .unwrap()
+                .unwrap()
+                .root,
+            home
+        );
+    }
+
+    #[test]
+    fn package_script_reads_the_root_package_json() {
+        let t = TempDir::new();
+        assert_eq!(package_script(&t.0, "test", &[]).unwrap(), None);
+        std::fs::write(
+            t.0.join("package.json"),
+            r#"{"scripts":{"test":"node t.js"}}"#,
+        )
+        .unwrap();
+        assert!(package_script(&t.0, "test", &[]).unwrap().is_some());
+        assert_eq!(package_script(&t.0, "lint", &[]).unwrap(), None);
     }
 }

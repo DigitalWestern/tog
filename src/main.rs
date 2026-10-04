@@ -79,7 +79,16 @@ fn main() {
     // only) suppresses it, which is what CI would use.
     let bare = matches!(pending, commands::Pending::Implicit);
     let command = match commands::resolve(pending) {
-        Ok(command) => command,
+        Ok(commands::Resolved::Command(command)) => command,
+        Ok(commands::Resolved::Help { note }) => {
+            ui::note(&note);
+            print!("{}", cli::usage());
+            exit(0);
+        }
+        Ok(commands::Resolved::Usage(rendered)) => {
+            eprint!("{rendered}");
+            exit(cli::EXIT_USAGE);
+        }
         Err(error) => {
             report_failure(&error);
             exit(cli::EXIT_FAILURE);

@@ -3,7 +3,7 @@
 //! registry.
 
 use crate::comforter::toolchain::{self as project_toolchain, Mode, ProjectToolchain};
-use crate::commands::shared::{ecosystem_inputs, no_inputs, projected_root};
+use crate::commands::shared::{ecosystem_inputs, no_inputs, project_root};
 use crate::kernel::context::{self, Context};
 use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::platform::Platform;
@@ -202,7 +202,7 @@ fn recover_resolution(platform: Platform, dir: &Path) -> io::Result<Option<Conte
 /// Sync with a context the caller already opened (`add`/`remove`/`update`
 /// after their manifest edit).
 pub fn run(ctx: &Context, fresh: bool) -> io::Result<()> {
-    run_in(ctx, &ctx.project_dir(), fresh, false)
+    run_in(ctx, &project_root(&ctx.project_dir())?, fresh, false)
 }
 
 /// The same sync of one named directory: the projected root a command
@@ -260,7 +260,7 @@ pub(crate) fn ensure_current_for(
     only: Option<&str>,
     frozen: bool,
 ) -> io::Result<PathBuf> {
-    let dir = sync_root(cwd)?;
+    let dir = project_root(cwd)?;
     let rows = crate::commands::inspect::status(ctx.platform, &dir)?;
     let stale: Vec<String> = rows
         .iter()
@@ -281,7 +281,7 @@ pub(crate) fn ensure_current_for(
         // refuses the build exactly as the scoped sync would have.
         check_whole_project(ctx.platform, &dir)?;
     }
-    Ok(projected_root(cwd))
+    Ok(dir)
 }
 
 /// The half of `preflight_detected` no scope narrows, for a command that
@@ -335,24 +335,6 @@ fn scope_to<'a>(present: &[&'a dyn Tailor], scope: Scope<'_>) -> Vec<&'a dyn Tai
         .filter(|tailor| scope.covers(**tailor))
         .copied()
         .collect()
-}
-
-/// The directory a command's sync belongs to: the nearest projected
-/// ancestor, as `run` has always found it, and otherwise the nearest
-/// ancestor with a manifest, so `tog run` from `src/` of a never-synced
-/// project finds the project. The projected walk comes first, so a nested
-/// package.json under an already-synced root (a docs site) keeps
-/// belonging to that root.
-fn sync_root(cwd: &Path) -> io::Result<PathBuf> {
-    if let Some(projected) = cwd.ancestors().find(|d| d.join(".tog/closures").is_dir()) {
-        return Ok(projected.to_path_buf());
-    }
-    for dir in cwd.ancestors() {
-        if !crate::commands::inspect::detected(dir)?.is_empty() {
-            return Ok(dir.to_path_buf());
-        }
-    }
-    Ok(cwd.to_path_buf())
 }
 
 /// Why one ecosystem is about to be synced, in the words `tog status`
@@ -1042,8 +1024,8 @@ mod tests {
         // From a subdirectory the manifest above is the project.
         let error = ensure_current(&ctx, &nested, false).unwrap_err();
         assert!(error.to_string().contains("no pinned CPython"), "{error}");
-        assert_eq!(sync_root(&nested).unwrap(), project);
-        assert_eq!(sync_root(&bare).unwrap(), bare);
+        assert_eq!(project_root(&nested).unwrap(), project);
+        assert_eq!(project_root(&bare).unwrap(), bare);
     }
 
     /// The build's sync realizes the built ecosystem only: with two

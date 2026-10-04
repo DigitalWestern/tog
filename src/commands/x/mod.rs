@@ -19,7 +19,6 @@ use std::rc::Rc;
 use sha2::{Digest, Sha256};
 
 use crate::comforter;
-use crate::commands::inspect;
 use crate::commands::shared::{registry_tool, registry_tools, CachedTool};
 use crate::kernel::activity::StoreActivity;
 use crate::kernel::context::Context;
@@ -354,17 +353,9 @@ fn choose_ecosystem(request: &Request, cwd: &Path) -> io::Result<&'static str> {
     if request.ecosystem.is_some() {
         return choose_from_project(request, &[]);
     }
-    for dir in cwd.ancestors() {
-        let present = inspect::detected(dir)?;
-        if !present.is_empty() {
-            return choose_from_project(request, &present);
-        }
-        // An existing tog metadata directory is an explicit project
-        // boundary, even when the project currently has no manifest. This
-        // prevents an unrelated package in an outer checkout from deciding
-        // `x`'s registry.
-        if dir.join(".tog").is_dir() {
-            break;
+    if let Some(location) = crate::commands::shared::project_for(cwd)? {
+        if !location.detected.is_empty() {
+            return choose_from_project(request, &location.detected);
         }
     }
     Err(say_which_registry(&request.tool))

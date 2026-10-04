@@ -1091,6 +1091,15 @@ fn unknown_first_word_runs_a_package_json_script_or_errors() {
     assert!(stderr.contains("syncing first: "), "{stderr}");
     assert!(stderr.contains("node not synced"), "{stderr}");
     assert!(stderr.contains("no pinned CPython"), "{stderr}");
+    // From a subdirectory of the never-synced project, `tog dev` finds the
+    // script `tog run dev` would (#251), instead of "unknown command".
+    let src = project.0.join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    let out = tog(&src, &home.0, &["dev", "--port", "3000"]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    let stderr = text(&out.stderr);
+    assert!(stderr.contains("syncing first: "), "{stderr}");
+    assert!(stderr.contains("no pinned CPython"), "{stderr}");
     // A built-in verb always wins over a same-named script. `build` syncs
     // only for the ecosystem it builds, so the stale node and python
     // environments here start no sync in front of its own refusal.
