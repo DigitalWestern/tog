@@ -58,6 +58,7 @@ After the proxy: the test-suite audit (#351) and then the quality review
 - **#464: macOS supervision: deferred notification-pipe initialization and validation.** macOS supervision initialization and validation. Deferred by the owner on 2026-10-04.
 - **#465: heavy: audit shared state before allowing parallel ignored suites.** audit shared state before running ignored suites in parallel. Keep --test-threads=1 until local evidence supports removal.
 - **#466: ci: GitHub Actions job startup blocked by account billing or spending limit.** Actions jobs cannot start because of account billing or spending-limit restrictions. Pick: owner repairs account access, use documented local checks meanwhile.
+- **#487: registry tools outside locked project ecosystems.** Use a shipped primary runtime when that ecosystem is absent, while honoring project build helpers and preserving missing-section refusals for detected ecosystems.
 - **#480: searchable project ancestors.** Let descriptor traversal and publication revalidation use search access without requiring ancestor directory listings. Pick: O_PATH for intermediate Linux components while preserving identity checks.
 - **#469: root removal identity.** Carry the decoded record's device/inode and held directory through deletion. Refuse replacements, including directory entries.
 
