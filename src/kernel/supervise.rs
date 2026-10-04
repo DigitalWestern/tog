@@ -884,7 +884,8 @@ fn join_relay(relay: Option<std::thread::JoinHandle<io::Result<Vec<u8>>>>) -> io
 /// project file can be the key under another name. Blocking reads until the
 /// child closes its end; the [`confine::Scrubber`] holds back only bytes
 /// that could still be part of a secret, never on a pause. Returns the
-/// first `keep` bytes as read.
+/// first `keep` bytes passed on, scrubbed like the rest: a caller that
+/// quotes them in an error cannot carry the key either.
 fn relay(
     mut pipe: impl Read,
     sink: &Sink,
@@ -892,25 +893,22 @@ fn relay(
     keep: usize,
 ) -> io::Result<Vec<u8>> {
     let mut kept = Vec::new();
+    let mut pass_on = |bytes: Vec<u8>| {
+        let room = keep.saturating_sub(kept.len()).min(bytes.len());
+        kept.extend_from_slice(&bytes[..room]);
+        sink.write(&bytes);
+    };
     let mut buffer = [0u8; 16 * 1024];
-    loop {
+    let result = loop {
         match pipe.read(&mut buffer) {
-            Ok(0) => {
-                sink.write(&scrubber.finish());
-                return Ok(kept);
-            }
-            Ok(count) => {
-                let room = keep.saturating_sub(kept.len()).min(count);
-                kept.extend_from_slice(&buffer[..room]);
-                sink.write(&scrubber.push(&buffer[..count]));
-            }
+            Ok(0) => break Ok(()),
+            Ok(count) => pass_on(scrubber.push(&buffer[..count])),
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-            Err(error) => {
-                sink.write(&scrubber.finish());
-                return Err(error);
-            }
+            Err(error) => break Err(error),
         }
-    }
+    };
+    pass_on(scrubber.finish());
+    result.map(|()| kept)
 }
 
 fn drain<R: Read>(reader: &mut Option<R>, destination: &mut Vec<u8>) -> io::Result<bool> {
@@ -1194,7 +1192,9 @@ mod tests {
     const RELAY_SEED: &str = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
 
     /// Run `script` under `status_relayed` with both streams collected and
-    /// `RELAY_SEED` as the secret, on a thread, failing after `limit`.
+    /// `RELAY_SEED` as the secret, on a thread, failing after `limit`. The
+    /// stderr prefix it returns for the classifier must be the start of
+    /// what was passed on, scrubbed the same way.
     fn relayed(script: &str, limit: std::time::Duration) -> (ExitStatus, Vec<u8>, Vec<u8>) {
         let script = script.to_string();
         let (sender, receiver) = std::sync::mpsc::channel();
@@ -1211,7 +1211,7 @@ mod tests {
             let stderr = std::sync::Arc::new(Mutex::new(Vec::new()));
             let mut command = Command::new("/bin/sh");
             command.args(["-c", &script]);
-            let (status, _) = status_relayed(
+            let (status, prefix) = status_relayed(
                 &mut command,
                 &activity,
                 Sink::Buffer(stdout.clone()),
@@ -1221,11 +1221,14 @@ mod tests {
             .unwrap();
             drop(activity);
             let take = |buffer: std::sync::Arc<Mutex<Vec<u8>>>| buffer.lock().unwrap().clone();
-            let _ = sender.send((status, take(stdout), take(stderr)));
+            let _ = sender.send((status, take(stdout), take(stderr), prefix));
         });
-        receiver
+        let (status, stdout, stderr, prefix) = receiver
             .recv_timeout(limit)
-            .expect("the relayed child did not finish in time")
+            .expect("the relayed child did not finish in time");
+        assert_eq!(prefix.len(), stderr.len().min(CLASSIFIER_PREFIX));
+        assert_eq!(prefix, stderr[..prefix.len()]);
+        (status, stdout, stderr)
     }
 
     /// No piece of the secret 10 characters or longer is in `text`.

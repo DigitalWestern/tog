@@ -3557,7 +3557,10 @@ interception and the cargo switch, each the flexible option:
       releases bytes only when they can no longer match, or at EOF. Never
       on a timer or a pause. A gutter longer than 16 bytes ends a match,
       which bounds the hold. Per-stream order is kept. The order between
-      stdout and stderr is not promised. One visible effect: a line that
+      stdout and stderr is not promised. The 4096-byte stderr prefix
+      returned for the sandbox failure classifier is taken from the
+      scrubbed bytes, so an error that quotes it cannot carry the key
+      either. One visible effect: a line that
       ends in hex characters is held until more output or EOF. The scrub
       moved to `resolve/keyscrub.rs` (confine.rs was over its size budget),
       re-exported from `confine`.
