@@ -3412,7 +3412,9 @@ interception and the cargo switch, each the flexible option:
   `.cargo/config` so each gets its forced provider.
 - **The lock root is the workspace root.** Outputs are the root
   manifest, `Cargo.lock`, and every member manifest the `[workspace]`
-  `members` globs name (honoring `exclude`, inside the root only).
+  `members` globs name (`exclude` applied as cargo applies it, each
+  entry placed lexically under the root, one that lands outside refused
+  by name).
   Inputs are the two `.cargo` config spellings. A member edit runs at the
   root with `--manifest-path`. `target/` is excluded from the snapshot.
 - **Path dependencies outside the root are read roots.** Found from every
@@ -3540,6 +3542,54 @@ interception and the cargo switch, each the flexible option:
       include, the toolchain files for `add`, the hidden-deep and
       symlinked members) runs in `cargo_e2e` against the real toolchain
       and asserts the refusal text, or success, and no seed byte.
+  - *Fourth Sol pass (2026-10-03).*
+    - *The relay is one blocking reader per pipe.* The `Relay` above
+      drained each pipe until `WouldBlock`, stderr first, and flushed its
+      held line on any pause, so a secret written a few characters per
+      line with sleeps between went out whole, and a child flooding
+      stderr while its stdout pipe was full hung. Now
+      `supervise::status_with_stderr` starts a thread per pipe, each
+      blocking on its own stream, and the supervising thread keeps the
+      child and the signals as `status` does. Each stream has its own
+      `keyscrub::Scrubber`, which matches as a stream: it holds back only
+      the tail that could still be part of a match (at most a secret's
+      length with its gutters), keeps what it passed on as context, and
+      releases bytes only when they can no longer match, or at EOF. Never
+      on a timer or a pause. A gutter longer than 16 bytes ends a match,
+      which bounds the hold. Per-stream order is kept. The order between
+      stdout and stderr is not promised. One visible effect: a line that
+      ends in hex characters is held until more output or EOF. The scrub
+      moved to `resolve/keyscrub.rs` (confine.rs was over its size budget),
+      re-exported from `confine`.
+    - *An explicit member wins over `exclude`.* `cargo_door::excluded` is
+      cargo's `WorkspaceRootConfig::is_excluded`: a member is left out when
+      its manifest's path is under an `exclude` entry and under no
+      `members` entry, each entry as written and joined to the root,
+      compared a whole component at a time. `members = ["a"]` with
+      `exclude = ["a"]` keeps `a`, and an explicit `sub` keeps a
+      glob-reached `sub/inner` that `exclude` names (checked against
+      `cargo metadata`).
+    - *Members entries are placed, not dropped.* `member_pattern`
+      normalizes an entry the way cargo does (joined to the root,
+      lexically: absolute taken as is, `.` dropped, `..` taking off the
+      part before it). Inside the root it is expanded. Outside it, or with
+      a `..` that would take off a wildcard (only the disk could resolve
+      that), it is refused with every such entry named, before any cargo
+      runs or anything is signed. Before, these entries vanished from the
+      outputs silently.
+    - *Glob parts are the `glob` crate's.* The third pass kept a
+      hand-written matcher to avoid a dependency. It refused `[**]`, which
+      cargo reads as a class holding `*`. Each name part is now a
+      `glob::Pattern` (rust-lang/glob 0.3, cargo's own) matched with
+      cargo's options. The walk stays tog's and follows no symlink. The
+      repo has no cargo-deny or audit config to update.
+    - *The e2e test asserts every step.* No result is ignored. The
+      linked member's committed-lock sync must succeed. The deep
+      member's sync must be refused by name, because sync reads every
+      member manifest for its digest. fmt and `fmt --all` must succeed
+      and format the fixture's one-line `main.rs`. Every output is
+      checked for any 10-character piece of the seed, not only the whole
+      seed.
   - *Config includes.* `include = [...]` (paths or `{ path, optional }`,
     relative to the including file, transitive) is expanded from the
     bounded files: every registry declared there gets the forced
