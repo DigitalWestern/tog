@@ -953,10 +953,14 @@ fn store_path_honors_the_store_variable() {
     let out = tog(&home.0, &home.0, &["store", "path"]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     let printed = PathBuf::from(text(&out.stdout).trim());
-    assert_eq!(printed, home.0.join("store").canonicalize().unwrap());
+    assert_eq!(printed, home.0.join("store"));
     let out = tog(&home.0, &home.0, &["store", "roots"]);
     assert_eq!(out.status.code(), Some(0));
     assert!(out.stdout.is_empty());
+    // Once the store exists, its canonical root.
+    let out = tog(&home.0, &home.0, &["store", "path"]);
+    let printed = PathBuf::from(text(&out.stdout).trim());
+    assert_eq!(printed, home.0.join("store").canonicalize().unwrap());
 }
 
 // --- bare `tog`, aliases, the script shortcut, inspect verbs ---
@@ -1266,7 +1270,8 @@ fn inspect_verbs_offline() {
     assert_eq!(out.status.code(), Some(2));
 }
 
-/// `status` and `sbom` read the project, never the store (#183): they
+/// `status`, `sbom`, `ls` and `store path` read the project, never the
+/// store (#183, #252): they
 /// create no store where there was none, so they work with a store that
 /// cannot be written, and take no lease a GC sweep could make them wait on.
 #[test]
@@ -1290,6 +1295,56 @@ fn read_only_reports_never_create_the_store() {
     assert!(
         !home.0.join("store").exists(),
         "a read-only report created the store"
+    );
+
+    // A closure committed from the other OS: `sbom` and `ls` describe what
+    // it records (#252), still without a store.
+    let host = tog::kernel::platform::Platform::host().unwrap();
+    let foreign = tog::kernel::platform::Platform::ALL
+        .iter()
+        .find(|platform| platform.is_macos() != host.is_macos())
+        .unwrap();
+    std::fs::create_dir_all(project.0.join(".tog/closures")).unwrap();
+    std::fs::write(
+        project.0.join(".tog/closures/python.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema": "closure/1",
+            "ecosystem": "python",
+            "platform": foreign.triple(),
+            "projected_at": 1,
+            "body": {
+                "env_object": "/store/objects/abc",
+                "plan": {
+                    "python_version": "3.12.14",
+                    "packages": [
+                        {"name": "six", "version": "1.17.0", "sha256": "aa".repeat(32)},
+                    ],
+                },
+            },
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let out = tog(&project.0, &home.0, &["sbom"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stdout).contains("pkg:pypi/six@1.17.0"),
+        "{}",
+        text(&out.stdout)
+    );
+    let out = tog(&project.0, &home.0, &["ls"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(text(&out.stdout).contains("six"), "{}", text(&out.stdout));
+    // `store path` answers where the store would be without making it.
+    let out = tog(&project.0, &home.0, &["store", "path"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(
+        text(&out.stdout).trim(),
+        home.0.join("store").display().to_string()
+    );
+    assert!(
+        !home.0.join("store").exists(),
+        "sbom, ls or store path created the store"
     );
 }
 
@@ -1601,7 +1656,7 @@ fn a_new_store_is_created_with_the_format_marker() {
     let home = TempDir::boundary("cli-format-new");
     let store = home.0.join("store");
     assert!(!store.exists());
-    let out = tog(&home.0, &home.0, &["store", "path"]);
+    let out = tog(&home.0, &home.0, &["store", "roots"]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     assert!(text(&out.stderr).is_empty(), "{}", text(&out.stderr));
     assert_eq!(
@@ -1632,9 +1687,9 @@ fn a_store_from_before_the_marker_is_refused_and_the_fix_is_named() {
         &["gc", "--keep-days", "0"],
         &["gc", "--forget", &"a".repeat(40)],
         &["store", "roots"],
-        &["ls"],
+        &["plan"],
         // The fix line is part of the failure: `--quiet` keeps it.
-        &["-q", "ls"],
+        &["-q", "store", "roots"],
         &["x", "ruff", "--version"],
     ] {
         let out = tog(&home.0, &home.0, args);
@@ -1694,7 +1749,7 @@ fn a_store_from_before_the_marker_is_refused_and_the_fix_is_named() {
     assert!(row.contains("run 'tog gc --reset'"), "{row}");
 
     // A command asked for JSON fails in JSON, the fix a key of its own.
-    let out = tog(&home.0, &home.0, &["ls", "--json"]);
+    let out = tog(&home.0, &home.0, &["plan", "--json"]);
     assert_eq!(out.status.code(), Some(1));
     assert!(text(&out.stdout).is_empty(), "{}", text(&out.stdout));
     let failure: serde_json::Value = serde_json::from_slice(&out.stderr)
@@ -1786,7 +1841,7 @@ fn an_unreadable_format_marker_leaves_every_way_out_working() {
         return;
     }
 
-    for args in [&["gc", "--dry-run"][..], &["store", "roots"], &["ls"]] {
+    for args in [&["gc", "--dry-run"][..], &["store", "roots"]] {
         let out = tog(&home.0, &home.0, args);
         let stderr = text(&out.stderr);
         assert_eq!(out.status.code(), Some(1), "{args:?}: {stderr}");
@@ -2863,7 +2918,12 @@ fn the_fix_for_a_relatively_selected_store_resets_that_store_from_anywhere() {
     assert!(!refused.join("format").exists());
 
     let relative = Path::new("store");
-    let out = tog_at(&work, &home.0, relative, &["-C", "project", "ls"]);
+    let out = tog_at(
+        &work,
+        &home.0,
+        relative,
+        &["-C", "project", "store", "roots"],
+    );
     let stderr = text(&out.stderr);
     assert_eq!(out.status.code(), Some(1), "{stderr}");
     assert!(stderr.contains("has no format marker"), "{stderr}");
@@ -2877,7 +2937,12 @@ fn the_fix_for_a_relatively_selected_store_resets_that_store_from_anywhere() {
     );
     // The same from inside the project, with no `-C`: still relative, so
     // still spelled out.
-    let out = tog_at(&work.join("project"), &home.0, relative, &["ls"]);
+    let out = tog_at(
+        &work.join("project"),
+        &home.0,
+        relative,
+        &["store", "roots"],
+    );
     assert!(
         text(&out.stderr).contains(&format!("tog:     fix: {fix}\n")),
         "{}",
@@ -2918,7 +2983,12 @@ fn the_fix_for_a_relatively_selected_store_resets_that_store_from_anywhere() {
     // An absolute selection of the refused store is the one case with a
     // bare fix: it means the same store wherever it is pasted.
     std::fs::remove_file(refused.join("format")).unwrap();
-    let out = tog_at(&work, &home.0, &refused, &["-C", "project", "ls"]);
+    let out = tog_at(
+        &work,
+        &home.0,
+        &refused,
+        &["-C", "project", "store", "roots"],
+    );
     assert!(
         text(&out.stderr).ends_with("tog:     fix: tog gc --reset\n"),
         "{}",
@@ -3010,7 +3080,7 @@ fn the_fix_for_a_store_whose_path_is_not_utf8_resets_that_store() {
     // Selected directly and absolutely, the bare command is right, and it
     // is the only spelling that needs no path at all.
     std::fs::remove_file(store_a.join("format")).unwrap();
-    let out = tog_at(&home.0, &home.0, &store_a, &["ls"]);
+    let out = tog_at(&home.0, &home.0, &store_a, &["store", "roots"]);
     assert!(
         text(&out.stderr).ends_with("tog:     fix: tog gc --reset\n"),
         "{}",

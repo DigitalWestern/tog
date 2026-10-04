@@ -1512,7 +1512,6 @@ const LEASE_BOUNDARIES: &[(&str, &str, usize)] = &[
     // (`Context`), and the commands that open the store without one.
     ("src/kernel/context.rs", "open_with_project_dir", 1),
     ("src/commands/doctor.rs", "run", 1),
-    ("src/commands/ls.rs", "run", 1),
     // `store roots`: the lease its diagnostic read borrows.
     ("src/commands/store.rs", "list_roots", 1),
     ("src/commands/gc.rs", "run", 1),

@@ -9,7 +9,6 @@ use crate::kernel::cyclonedx::err;
 use crate::kernel::ui;
 use crate::tailors;
 use serde_json::{json, Value};
-use std::fs;
 use std::io;
 use std::path::Path;
 
@@ -50,30 +49,30 @@ fn eco_components(eco: &str, body: &Value, out: &mut Vec<Value>) -> io::Result<(
     }
 }
 
-/// Build the CycloneDX document for every closure in the project.
+/// Build the CycloneDX document for every closure in the project. The
+/// closures are read as committed, whichever platform projected them: the
+/// SBOM describes what the record says, so a Linux runner can describe a
+/// closure synced on a Mac. Nothing here opens the store.
 pub fn generate(project_dir: &Path) -> io::Result<Value> {
-    let dir = project_dir.join(".tog/closures");
-    let mut entries: Vec<String> = match fs::read_dir(&dir) {
-        Ok(rd) => rd
-            .filter_map(|e| e.ok())
-            .filter_map(|e| e.file_name().to_str().map(String::from))
-            .filter(|n| {
-                n.ends_with(".json")
-                    && !n.starts_with('.')
-                    && !crate::kernel::store::is_retired_closure(Path::new(n))
-            })
-            .map(|n| n.trim_end_matches(".json").to_string())
-            .collect(),
-        Err(_) => Vec::new(),
-    };
-    entries.sort();
-    if entries.is_empty() {
+    let mut closures = crate::commands::inspect::closures(project_dir)?;
+    closures.sort_by(|a, b| a.ecosystem.cmp(&b.ecosystem));
+    if closures.is_empty() {
         return Err(err("no closures found; run `tog` first"));
     }
     let mut components = Vec::new();
     let mut exception_properties = Vec::new();
-    for eco in &entries {
-        let body = crate::comforter::read_closure(project_dir, eco)?;
+    for closure in &closures {
+        let eco = &closure.ecosystem;
+        let stem = closure.path.file_stem().and_then(|stem| stem.to_str());
+        if closure.envelope["schema"] != "closure/1"
+            || closure.envelope["ecosystem"].as_str() != stem
+        {
+            return Err(err(format!(
+                "{}: unknown closure schema/ecosystem; re-run `tog`",
+                closure.path.display()
+            )));
+        }
+        let body = &closure.body;
         if let Some(exceptions) = body.get("exceptions").and_then(Value::as_array) {
             for exception in exceptions {
                 let kind = exception
@@ -94,7 +93,7 @@ pub fn generate(project_dir: &Path) -> io::Result<Value> {
                 }));
             }
         }
-        eco_components(eco, &body, &mut components)?;
+        eco_components(eco, body, &mut components)?;
     }
     Ok(json!({
         "bomFormat": "CycloneDX",
@@ -130,6 +129,7 @@ pub fn run(output: Option<&Path>) -> io::Result<()> {
 mod tests {
     use super::*;
     use crate::kernel::testutil::TempDir;
+    use std::fs;
 
     #[test]
     fn sbom_from_synthetic_closures() {

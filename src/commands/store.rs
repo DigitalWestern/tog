@@ -31,18 +31,18 @@ fn list_roots(store: &store::Store) -> io::Result<String> {
 }
 
 pub fn path() -> io::Result<i32> {
-    // A store this tog refuses to open still has a path, and the path is
-    // what someone moving it aside needs: print it, and say on stderr why
-    // nothing else will use it.
-    if let Some((root, format)) = store::Store::probe()? {
-        if let Some(refusal) = format.refusal(&root) {
-            println!("{}", root.display());
-            ui::warning(&refusal, &format.fix_for(&root));
-            return Ok(0);
-        }
+    // Nothing is created: for a store not made yet the answer is where the
+    // first sync will make it. A store this tog refuses to open still has a
+    // path, and the path is what someone moving it aside needs: print it,
+    // and say on stderr why nothing else will use it.
+    let Some((root, format)) = store::Store::probe()? else {
+        println!("{}", store::Store::configured_path().display());
+        return Ok(0);
+    };
+    println!("{}", root.display());
+    if let Some(refusal) = format.refusal(&root) {
+        ui::warning(&refusal, &format.fix_for(&root));
     }
-    let store = store::Store::open()?;
-    println!("{}", store.root.display());
     Ok(0)
 }
 
