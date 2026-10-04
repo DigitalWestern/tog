@@ -161,7 +161,6 @@ After the proxy: the test-suite audit (#351) and then the quality review
   - #333 ruby: host-fallback fingerprint is stat-based, not content-based (accepted).
 - **Smaller open issues from the 2026-09-23/24 run.** One line each; the
   issue has the options and the pick.
-  - #183 `status`/`doctor` create and lease the store; add a read-only context mode.
   - #188 npm: realize `file:` packages as tog-owned trees.
   - #190 `tog x` py: tools in a Rust-locked project build sdists on shipped Rust.
   - #191 provider object-kind rows still live in the tailors' `objects.rs`.

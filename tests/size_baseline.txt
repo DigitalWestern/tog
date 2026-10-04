@@ -13,7 +13,7 @@ file 1776 src/tailors/node/lock_import/pnpm.rs
 file 1672 src/tailors/node/realize.rs
 fn 171 src/comforter/toolchain.rs::resolve
 fn 163 src/commands/audit.rs::render
-fn 156 src/commands/mod.rs::dispatch
+fn 160 src/commands/mod.rs::dispatch
 fn 173 src/commands/x.rs::clean
 fn 166 src/kernel/archive.rs::read_entries
 fn 151 src/kernel/gc/plan.rs::plan
