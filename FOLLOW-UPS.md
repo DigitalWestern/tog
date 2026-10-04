@@ -23,8 +23,9 @@ the largest gap in what tog promises. Design: `docs/agent/DESIGNS.md` §6
 
 1. **#204 (PR 6): Node.** npm and pnpm. Absorbs #212 (npm notifier and
    audit requests).
-2. **#205 (PR 7): Python.** uv. Absorbs #210 (`uv pip compile` ignores
-   `UV_PYTHON`).
+2. **#205 (PR 7): Python.** uv. Every uv call already passes
+   `--python <store python>` (#210); the forced row's own `--python` then
+   replaces it.
 3. **#206 (PR 8): Ruby and Elixir.** Bundler and Hex mirrors. Absorbs
    #211 (`bundle add` installs).
 4. **#207 (PR 9): .NET.** The `nuget.config` mirror.
@@ -57,6 +58,7 @@ After the proxy: the test-suite audit (#351) and then the quality review
 - **#464: macOS supervision: deferred notification-pipe initialization and validation.** macOS supervision initialization and validation. Deferred by the owner on 2026-10-04.
 - **#465: heavy: audit shared state before allowing parallel ignored suites.** audit shared state before running ignored suites in parallel. Keep --test-threads=1 until local evidence supports removal.
 - **#466: ci: GitHub Actions job startup blocked by account billing or spending limit.** Actions jobs cannot start because of account billing or spending-limit restrictions. Pick: owner repairs account access, use documented local checks meanwhile.
+- **#487: registry tools outside locked project ecosystems.** Use a shipped primary runtime when that ecosystem is absent, while honoring project build helpers and preserving missing-section refusals for detected ecosystems.
 - **#480: searchable project ancestors.** Let descriptor traversal and publication revalidation use search access without requiring ancestor directory listings. Pick: O_PATH for intermediate Linux components while preserving identity checks.
 - **#469: root removal identity.** Carry the decoded record's device/inode and held directory through deletion. Refuse replacements, including directory entries.
 

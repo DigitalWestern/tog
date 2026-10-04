@@ -468,19 +468,21 @@ fn write_atomic_requirements(path: &Path, contents: &str) -> io::Result<()> {
 }
 
 /// The store uv, run in the project on the project's interpreter, with
-/// the user's index settings removed.
+/// the user's index settings removed. Also returns the interpreter, which
+/// each subcommand is given as `--python`: `uv pip compile` ignores
+/// `UV_PYTHON` (#210).
 fn uv_spec(
     edit: &ManifestEdit<'_>,
     door: &ResolutionDoor<'_>,
-) -> io::Result<(DelegateSpec, String)> {
+) -> io::Result<(DelegateSpec, String, PathBuf)> {
     let (store, activity, platform) = (door.store(), door.lease(), door.platform());
     let toolchain = edit.host.toolchain(edit.project, "python")?;
     let version = toolchain.version("cpython")?.to_string();
     let uv = super::realize_uv(store, activity, platform, &toolchain)?.join("uv");
-    let interpreter = super::realize_runtime(store, activity, platform, &toolchain)?;
+    let interpreter = super::uv_interpreter(store, activity, platform, &toolchain)?;
     let mut spec = DelegateSpec::new(uv);
     spec.lock_root(edit.project)
-        .env("UV_PYTHON", interpreter.join("bin/python3"))
+        .env("UV_PYTHON", &interpreter)
         .env("UV_PYTHON_DOWNLOADS", "never")
         .env_remove("UV_INDEX_URL")
         .env_remove("UV_DEFAULT_INDEX")
@@ -489,7 +491,7 @@ fn uv_spec(
         .env_remove("PIP_EXTRA_INDEX_URL")
         .env_remove("PIP_TRUSTED_HOST")
         .env_remove("PIP_FIND_LINKS");
-    Ok((spec, version))
+    Ok((spec, version, interpreter))
 }
 
 fn uv_compile(
@@ -499,10 +501,12 @@ fn uv_compile(
     output: &Path,
     extra: &[String],
 ) -> io::Result<()> {
-    let (mut spec, version) = uv_spec(edit, door)?;
+    let (mut spec, version, python) = uv_spec(edit, door)?;
     spec.args(["pip", "compile"])
         .arg(input)
-        .arg("--generate-hashes");
+        .arg("--generate-hashes")
+        .arg("--python")
+        .arg(&python);
     if !ui::verbose() {
         spec.arg("--quiet");
     }
@@ -516,10 +520,10 @@ fn uv_compile(
 
 fn python_uv(edit: &ManifestEdit<'_>, door: &mut ResolutionDoor<'_>) -> io::Result<Vec<String>> {
     let texts = &edit.texts();
-    let (mut spec, _) = uv_spec(edit, door)?;
+    let (mut spec, _, python) = uv_spec(edit, door)?;
     match edit.verb {
         EditVerb::Add => {
-            spec.args(["add", "--no-sync"]);
+            spec.args(["add", "--no-sync", "--python"]).arg(&python);
             if edit.dev {
                 spec.arg("--dev");
             }
@@ -528,7 +532,7 @@ fn python_uv(edit: &ManifestEdit<'_>, door: &mut ResolutionDoor<'_>) -> io::Resu
             }
         }
         EditVerb::Remove => {
-            spec.args(["remove", "--no-sync"]);
+            spec.args(["remove", "--no-sync", "--python"]).arg(&python);
             if edit.dev {
                 spec.arg("--dev");
             }
@@ -537,7 +541,7 @@ fn python_uv(edit: &ManifestEdit<'_>, door: &mut ResolutionDoor<'_>) -> io::Resu
             }
         }
         EditVerb::Update => {
-            spec.arg("lock");
+            spec.args(["lock", "--python"]).arg(&python);
             if texts.is_empty() {
                 spec.arg("--upgrade");
             }

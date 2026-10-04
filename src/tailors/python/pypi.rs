@@ -798,6 +798,7 @@ pub(crate) fn lock_requirement_text_with_uv(
     let (store, activity, platform) = (door.store(), door.lease(), door.platform());
     let python_version = selected.version("cpython")?;
     let uv = crate::tailors::python::realize_uv(store, activity, platform, selected)?.join("uv");
+    let python = crate::tailors::python::uv_interpreter(store, activity, platform, selected)?;
     // One lease covers the scratch directory and the uv child.
     let scratch = store.stage_with_activity(activity)?;
     let input = scratch.join("requirements.in");
@@ -818,7 +819,10 @@ pub(crate) fn lock_requirement_text_with_uv(
             // Build requirements are metadata inputs, not permission to run
             // arbitrary backends. Build-only sdists fail loudly instead.
             "--no-build",
-        ]);
+            "--python",
+        ])
+        .arg(&python)
+        .env("UV_PYTHON_DOWNLOADS", "never");
         if constraints.is_some() {
             spec.args([
                 "-c",
