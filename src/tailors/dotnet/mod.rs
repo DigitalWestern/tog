@@ -79,26 +79,8 @@ struct SdkSpec {
 /// recipe that produced it. Microsoft publishes sha512, so the row must
 /// carry one: a sha256 row is a different provenance channel.
 fn sdk_spec(platform: Platform, selected: &Selected) -> io::Result<SdkSpec> {
-    if selected.ecosystem != "dotnet" || selected.runtime() != "dotnet-sdk" {
-        return Err(err(format!(
-            "dotnet: selected toolchain is {} ({}), not dotnet",
-            selected.ecosystem,
-            selected.runtime()
-        )));
-    }
-    let row = selected.artifact(platform, "dotnet-sdk")?;
-    if row.recipe != SDK_RECIPE {
-        return Err(err(format!(
-            "dotnet: recipe {} in tog-toolchain.toml is not known to this tog; upgrade tog",
-            row.recipe
-        )));
-    }
-    if row.digest.algo() != "sha512" {
-        return Err(err(format!(
-            "dotnet: artifact digest must be sha512, got {}",
-            row.digest.algo()
-        )));
-    }
+    selected.require("dotnet", "dotnet-sdk")?;
+    let row = selected.checked_artifact(platform, "dotnet-sdk", SDK_RECIPE, "sha512")?;
     Ok(SdkSpec {
         platform,
         version: row.version,

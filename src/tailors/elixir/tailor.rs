@@ -24,6 +24,41 @@ use std::process::Command;
 
 pub struct Elixir;
 
+/// What `sync` and `build` share: realize the BEAM pair and the Hex deps,
+/// then project them. Projection writes only the store forest and the
+/// closure, which is published through the descriptor the command holds.
+/// Returns the BEAM object and the projection.
+fn realize_and_project(
+    ctx: &Context,
+    project: &ProjectRoot,
+    toolchain: &Selected,
+    fresh: bool,
+    attribution: &mut crate::kernel::policy::Attribution,
+) -> io::Result<(PathBuf, PathBuf)> {
+    let (activity, platform, store) = (&ctx.activity, ctx.platform, &ctx.store);
+    let beam = elixir::realize_runtime(store, activity, platform, toolchain)?;
+    let (plan, lock_sha256) = elixir::plan_elixir(
+        &mut ResolutionDoor::open(store, activity, platform, DoorKind::Planner, attribution)?,
+        project,
+        &beam,
+        toolchain,
+    )?;
+    let deps = elixir::realize_deps(store, activity, platform, &plan, &beam, toolchain)?;
+    let projection = elixir::project_elixir_env(
+        activity,
+        platform,
+        project,
+        &beam,
+        &deps,
+        &plan,
+        &lock_sha256,
+        fresh,
+        toolchain,
+        attribution,
+    )?;
+    Ok((beam, projection))
+}
+
 impl Tailor for Elixir {
     fn package_registry(&self) -> Option<crate::tailors::PackageRegistry> {
         Some(super::edit::REGISTRY)
@@ -89,35 +124,9 @@ impl Tailor for Elixir {
         request: &SyncRequest,
         attribution: &mut crate::kernel::policy::Attribution,
     ) -> io::Result<bool> {
-        let activity = &ctx.activity;
-        let toolchain = request.toolchain;
-        let fresh = request.fresh;
-
-        let platform = ctx.platform;
-        let store = &ctx.store;
         elixir::require_lock(project)?;
-        let beam = elixir::realize_runtime(store, activity, platform, toolchain)?;
-        let (plan, lock_sha256) = elixir::plan_elixir(
-            &mut ResolutionDoor::open(store, activity, platform, DoorKind::Planner, attribution)?,
-            project,
-            &beam,
-            toolchain,
-        )?;
-        let deps = elixir::realize_deps(store, activity, platform, &plan, &beam, toolchain)?;
-        // Projection writes only the store forest and the closure, which is
-        // published through the descriptor this sync holds.
-        let projection = elixir::project_elixir_env(
-            activity,
-            platform,
-            project,
-            &beam,
-            &deps,
-            &plan,
-            &lock_sha256,
-            fresh,
-            toolchain,
-            attribution,
-        )?;
+        let (_, projection) =
+            realize_and_project(ctx, project, request.toolchain, request.fresh, attribution)?;
         ui::synced("hex deps", &projection);
         Ok(true)
     }
@@ -150,31 +159,9 @@ impl Tailor for Elixir {
         attribution: &mut crate::kernel::policy::Attribution,
     ) -> io::Result<()> {
         let project = ProjectRoot::open(root)?;
-        let activity = &ctx.activity;
-        let platform = ctx.platform;
-        let store = &ctx.store;
-        let beam = elixir::realize_runtime(store, activity, platform, toolchain)?;
-        let (plan, lock_sha256) = elixir::plan_elixir(
-            &mut ResolutionDoor::open(store, activity, platform, DoorKind::Planner, attribution)?,
-            &project,
-            &beam,
-            toolchain,
-        )?;
-        let deps = elixir::realize_deps(store, activity, platform, &plan, &beam, toolchain)?;
-        let projection = elixir::project_elixir_env(
-            activity,
-            platform,
-            &project,
-            &beam,
-            &deps,
-            &plan,
-            &lock_sha256,
-            false,
-            toolchain,
-            attribution,
-        )?;
+        let (beam, projection) = realize_and_project(ctx, &project, toolchain, false, attribution)?;
         elixir::build_sandboxed(
-            platform,
+            ctx.platform,
             &ctx.activity,
             root,
             &beam,
@@ -195,9 +182,8 @@ impl Tailor for Elixir {
         let dir = project.path();
         let activity = &ctx.activity;
         let mut prefix = Vec::new();
-        if comforter::has_closure(project, "elixir") {
+        if let Some(closure) = comforter::read_closure_if_present(project, "elixir")? {
             let store = &ctx.store;
-            let closure = comforter::read_closure_in(project, "elixir")?;
             let beam = comforter::closure_object(
                 store,
                 activity,

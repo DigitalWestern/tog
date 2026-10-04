@@ -212,27 +212,8 @@ const NODE_RECIPE: &str = "nodejs/legacy";
 /// The Node row from the selection, checked against the layout this tailor
 /// implements.
 fn node_row(selected: &Selected, platform: Platform) -> io::Result<ArtifactSpec> {
-    if selected.ecosystem != "node" {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("node: asked to realize a {} toolchain", selected.ecosystem),
-        ));
-    }
-    let spec = selected.artifact(platform, "node")?;
-    if spec.recipe != NODE_RECIPE {
-        return Err(err(format!(
-            "node: recipe {} in tog-toolchain.toml is not known to this tog; upgrade tog",
-            spec.recipe
-        )));
-    }
-    if spec.digest.algo() != "sha256" {
-        return Err(err(format!(
-            "node {}: tog realizes Node from a sha256 digest, not {}",
-            spec.version,
-            spec.digest.algo()
-        )));
-    }
-    Ok(spec)
+    selected.require("node", "node")?;
+    selected.checked_artifact(platform, "node", NODE_RECIPE, "sha256")
 }
 
 /// The shipped catalog's default Node release, for work with no project
@@ -1970,7 +1951,7 @@ mod tests {
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "{error}");
         assert_eq!(
             error.to_string(),
-            "ensure node: node: asked to realize a python toolchain"
+            "ensure node: node: selected toolchain is python (cpython), not node (node)"
         );
         assert!(!store.root.exists());
     }
@@ -3629,7 +3610,7 @@ mod toolchain_tests {
         let error = realize_runtime(&store, activity, platform, &python)
             .unwrap_err()
             .to_string();
-        assert!(error.contains("a python toolchain"), "{error}");
+        assert!(error.contains("selected toolchain is python"), "{error}");
         assert!(!store.root.exists(), "a refusal touched the store");
     }
 

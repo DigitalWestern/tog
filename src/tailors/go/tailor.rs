@@ -23,6 +23,44 @@ use std::process::Command;
 
 pub struct Go;
 
+/// What `sync` and `build` share: plan the module, realize its modcache,
+/// and project the closure through the descriptor the command holds.
+/// Returns the Go runtime object and the modcache object.
+fn realize_and_project(
+    ctx: &Context,
+    project: &ProjectRoot,
+    toolchain: &Selected,
+    attribution: &mut crate::kernel::policy::Attribution,
+) -> io::Result<(PathBuf, PathBuf)> {
+    let (activity, platform, store) = (&ctx.activity, ctx.platform, &ctx.store);
+    let inputs = inputs::load_go_inputs(
+        project,
+        toolchain,
+        &mut ResolutionDoor::open(store, activity, platform, DoorKind::Planner, attribution)?,
+    )?;
+    let modcache = go::realize_modcache(
+        store,
+        activity,
+        platform,
+        toolchain,
+        &inputs.plan,
+        &inputs.go_obj,
+    )?;
+    go::project_go_env(
+        activity,
+        project,
+        &inputs.go_obj,
+        &modcache,
+        &inputs.plan,
+        &inputs.gosum_sha256,
+        &inputs.resolution_basis,
+        toolchain,
+        &inputs.ledgers,
+        attribution,
+    )?;
+    Ok((inputs.go_obj, modcache))
+}
+
 impl Tailor for Go {
     fn package_registry(&self) -> Option<crate::tailors::PackageRegistry> {
         Some(super::edit::REGISTRY)
@@ -86,36 +124,7 @@ impl Tailor for Go {
         request: &SyncRequest,
         attribution: &mut crate::kernel::policy::Attribution,
     ) -> io::Result<bool> {
-        let activity = &ctx.activity;
-        let toolchain = request.toolchain;
-        let platform = ctx.platform;
-        let store = &ctx.store;
-        let inputs = inputs::load_go_inputs(
-            project,
-            toolchain,
-            &mut ResolutionDoor::open(store, activity, platform, DoorKind::Planner, attribution)?,
-        )?;
-        let modcache = go::realize_modcache(
-            store,
-            &ctx.activity,
-            platform,
-            toolchain,
-            &inputs.plan,
-            &inputs.go_obj,
-        )?;
-        // The closure is published through the descriptor this sync holds.
-        go::project_go_env(
-            activity,
-            project,
-            &inputs.go_obj,
-            &modcache,
-            &inputs.plan,
-            &inputs.gosum_sha256,
-            &inputs.resolution_basis,
-            toolchain,
-            &inputs.ledgers,
-            attribution,
-        )?;
+        let (_, modcache) = realize_and_project(ctx, project, request.toolchain, attribution)?;
         ui::synced("go modcache", &modcache);
         Ok(true)
     }
@@ -166,43 +175,9 @@ impl Tailor for Go {
         toolchain: &Selected,
         attribution: &mut crate::kernel::policy::Attribution,
     ) -> io::Result<()> {
-        let activity = &ctx.activity;
-        let platform = ctx.platform;
-        let store = &ctx.store;
         let project = ProjectRoot::open(root)?;
-        let inputs = inputs::load_go_inputs(
-            &project,
-            toolchain,
-            &mut ResolutionDoor::open(store, activity, platform, DoorKind::Planner, attribution)?,
-        )?;
-        let modcache = go::realize_modcache(
-            store,
-            &ctx.activity,
-            platform,
-            toolchain,
-            &inputs.plan,
-            &inputs.go_obj,
-        )?;
-        go::project_go_env(
-            activity,
-            &project,
-            &inputs.go_obj,
-            &modcache,
-            &inputs.plan,
-            &inputs.gosum_sha256,
-            &inputs.resolution_basis,
-            toolchain,
-            &inputs.ledgers,
-            attribution,
-        )?;
-        go::build_sandboxed(
-            platform,
-            &ctx.activity,
-            root,
-            &inputs.go_obj,
-            &modcache,
-            args,
-        )
+        let (go_obj, modcache) = realize_and_project(ctx, &project, toolchain, attribution)?;
+        go::build_sandboxed(ctx.platform, &ctx.activity, root, &go_obj, &modcache, args)
     }
 
     fn run_env(
@@ -215,8 +190,7 @@ impl Tailor for Go {
     ) -> io::Result<Vec<String>> {
         let activity = &ctx.activity;
         let mut prefix = Vec::new();
-        if comforter::has_closure(project, "go") {
-            let closure = comforter::read_closure_in(project, "go")?;
+        if let Some(closure) = comforter::read_closure_if_present(project, "go")? {
             let go_obj =
                 comforter::closure_object(&ctx.store, activity, &closure, "go_object", "bin/go")?;
             let modcache =

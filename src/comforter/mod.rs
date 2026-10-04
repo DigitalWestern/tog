@@ -545,7 +545,7 @@ pub(crate) fn store_from_closure_body(body: &serde_json::Value) -> Option<Store>
 
 /// Read a tailor's closure body back (for `tog run` and friends).
 pub fn read_closure(project_dir: &Path, ecosystem: &str) -> io::Result<serde_json::Value> {
-    let path = project_dir.join(format!(".tog/closures/{ecosystem}.json"));
+    let path = project_dir.join(closure_relative(ecosystem));
     let text = fs::read_to_string(&path).map_err(|e| {
         io::Error::new(
             e.kind(),
@@ -558,37 +558,54 @@ pub fn read_closure(project_dir: &Path, ecosystem: &str) -> io::Result<serde_jso
 /// Is there a closure record for `ecosystem` in the held project?
 pub fn has_closure(project: &ProjectRoot, ecosystem: &str) -> bool {
     project
-        .entry(Path::new(&format!(".tog/closures/{ecosystem}.json")))
+        .entry(&closure_relative(ecosystem))
         .is_ok_and(|entry| entry != Entry::Absent)
 }
 
 /// `read_closure` through a project the command holds: the record is tog
 /// state, read with the strict no-follow walk.
 pub fn read_closure_in(project: &ProjectRoot, ecosystem: &str) -> io::Result<serde_json::Value> {
-    let relative = PathBuf::from(format!(".tog/closures/{ecosystem}.json"));
-    let path = project.path().join(&relative);
-    let missing = || {
+    read_closure_if_present(project, ecosystem)?.ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::NotFound,
-            format!("read {}: not found; run `tog` first", path.display()),
+            format!(
+                "read {}: not found; run `tog` first",
+                project.path().join(closure_relative(ecosystem)).display()
+            ),
         )
+    })
+}
+
+/// [`read_closure_in`] for a caller that works with or without a
+/// projection: `None` when the project has no record for `ecosystem`. A
+/// record that is there but unreadable or malformed is still an error.
+pub fn read_closure_if_present(
+    project: &ProjectRoot,
+    ecosystem: &str,
+) -> io::Result<Option<serde_json::Value>> {
+    let relative = closure_relative(ecosystem);
+    let path = project.path().join(&relative);
+    let Some(bytes) = project.read_file(&relative).map_err(|e| {
+        io::Error::new(
+            e.kind(),
+            format!("read {}: {e}; run `tog` first", path.display()),
+        )
+    })?
+    else {
+        return Ok(None);
     };
-    let bytes = project
-        .read_file(&relative)
-        .map_err(|e| {
-            io::Error::new(
-                e.kind(),
-                format!("read {}: {e}; run `tog` first", path.display()),
-            )
-        })?
-        .ok_or_else(missing)?;
     let text = String::from_utf8(bytes).map_err(|_| {
         io::Error::new(
             io::ErrorKind::InvalidData,
             format!("parse {}: not UTF-8; run `tog` first", path.display()),
         )
     })?;
-    closure_body(&path, &text, ecosystem)
+    closure_body(&path, &text, ecosystem).map(Some)
+}
+
+/// Where a project keeps its `ecosystem` closure record, relative to its root.
+fn closure_relative(ecosystem: &str) -> PathBuf {
+    PathBuf::from(format!(".tog/closures/{ecosystem}.json"))
 }
 
 /// The body of a closure envelope read from `path`, checked: it parses,

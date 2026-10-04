@@ -126,8 +126,7 @@ impl Tailor for Ruby {
         let dir = project.path();
         let activity = &ctx.activity;
         let mut prefix = Vec::new();
-        if comforter::has_closure(project, "ruby") {
-            let closure = comforter::read_closure_in(project, "ruby")?;
+        if let Some(closure) = comforter::read_closure_if_present(project, "ruby")? {
             let ruby_obj = comforter::closure_object(
                 &ctx.store,
                 activity,

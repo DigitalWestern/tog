@@ -153,27 +153,8 @@ fn runtime_identity(platform: Platform, version: &str, artifact_sha256: &str) ->
 /// fetched: the selection must be a Go one, the platform must have a row,
 /// and the recipe must be one this binary knows how to lay out.
 fn runtime_row(platform: Platform, selected: &Selected) -> io::Result<ArtifactSpec> {
-    if selected.runtime() != "go" {
-        return Err(err(format!(
-            "internal: a {} selection (runtime {}) reached the Go tailor",
-            selected.ecosystem,
-            selected.runtime()
-        )));
-    }
-    let row = selected.artifact(platform, "go")?;
-    if row.recipe != GO_RECIPE {
-        return Err(err(format!(
-            "go: recipe {} in tog-toolchain.toml is not known to this tog; upgrade tog",
-            row.recipe
-        )));
-    }
-    if row.digest.algo() != "sha256" {
-        return Err(err(format!(
-            "go: artifact is a {} digest; this tog realizes Go from sha256 artifacts",
-            row.digest.algo()
-        )));
-    }
-    Ok(row)
+    selected.require("go", "go")?;
+    selected.checked_artifact(platform, "go", GO_RECIPE, "sha256")
 }
 
 fn go_pins(platform: Platform) -> io::Result<Vec<&'static str>> {
@@ -1502,8 +1483,10 @@ mod tests {
         let error = realize_runtime(&store, activity, platform, &foreign)
             .unwrap_err()
             .to_string();
-        assert!(error.contains("node selection"), "{error}");
-        assert!(error.contains("Go tailor"), "{error}");
+        assert!(
+            error.contains("selected toolchain is node (node), not go"),
+            "{error}"
+        );
 
         let unknown = Selected {
             helpers: Default::default(),

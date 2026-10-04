@@ -106,73 +106,37 @@ struct BeamSpec {
 /// an already-installed tree, Linux a make-release tree this tog relocates,
 /// and the relocation recipe is an identity input.
 fn beam_spec(platform: Platform, selected: &Selected) -> io::Result<BeamSpec> {
-    if selected.ecosystem != "elixir" || selected.runtime() != "otp" {
-        return Err(err(format!(
-            "elixir: selected toolchain is {} ({}), not the BEAM pair",
-            selected.ecosystem,
-            selected.runtime()
-        )));
-    }
-    let known = |row: &crate::kernel::toolchain::ArtifactSpec, want: &str| -> io::Result<()> {
-        if row.recipe != want {
-            return Err(err(format!(
-                "elixir: recipe {} in tog-toolchain.toml is not known to this tog; upgrade tog",
-                row.recipe
-            )));
-        }
-        Ok(())
+    selected.require("elixir", "otp")?;
+    let otp_recipe = if platform.is_macos() {
+        BEAM_RECIPE
+    } else {
+        LINUX_RELOCATION_SCHEMA
     };
-    let sha256 = |row: &crate::kernel::toolchain::ArtifactSpec| -> io::Result<String> {
-        if row.digest.algo() != "sha256" {
-            return Err(err(format!(
-                "elixir: {} digest must be sha256, got {}",
-                row.component,
-                row.digest.algo()
-            )));
-        }
-        Ok(row.digest.hex().to_string())
-    };
-    let sha512 = |row: &crate::kernel::toolchain::ArtifactSpec| -> io::Result<String> {
-        if row.digest.algo() != "sha512" {
-            return Err(err(format!(
-                "elixir: {} digest must be sha512, got {}",
-                row.component,
-                row.digest.algo()
-            )));
-        }
-        Ok(row.digest.hex().to_string())
-    };
-
-    let otp = selected.artifact(platform, "otp")?;
+    let otp = selected.checked_artifact(platform, "otp", otp_recipe, "sha256")?;
     let relocation_schema = if platform.is_macos() {
-        known(&otp, BEAM_RECIPE)?;
         String::new()
     } else {
-        known(&otp, LINUX_RELOCATION_SCHEMA)?;
         otp.recipe.clone()
     };
-    let elixir = selected.artifact(platform, "elixir")?;
-    known(&elixir, BEAM_RECIPE)?;
-    let hex = selected.artifact(platform, "hex")?;
-    known(&hex, BEAM_RECIPE)?;
-    let rebar3 = selected.artifact(platform, "rebar3")?;
-    known(&rebar3, BEAM_RECIPE)?;
+    let elixir = selected.checked_artifact(platform, "elixir", BEAM_RECIPE, "sha256")?;
+    let hex = selected.checked_artifact(platform, "hex", BEAM_RECIPE, "sha512")?;
+    let rebar3 = selected.checked_artifact(platform, "rebar3", BEAM_RECIPE, "sha512")?;
 
     Ok(BeamSpec {
         platform,
         relocation_schema,
         otp_version: otp.version.clone(),
         otp_url: otp.url.clone(),
-        otp_sha256: sha256(&otp)?,
+        otp_sha256: otp.digest.hex().to_string(),
         elixir_version: elixir.version.clone(),
         elixir_url: elixir.url.clone(),
-        elixir_sha256: sha256(&elixir)?,
+        elixir_sha256: elixir.digest.hex().to_string(),
         hex_version: hex.version.clone(),
         hex_url: hex.url.clone(),
-        hex_sha512: sha512(&hex)?,
+        hex_sha512: hex.digest.hex().to_string(),
         rebar3_version: rebar3.version.clone(),
         rebar3_url: rebar3.url.clone(),
-        rebar3_sha512: sha512(&rebar3)?,
+        rebar3_sha512: rebar3.digest.hex().to_string(),
     })
 }
 
@@ -2723,7 +2687,7 @@ exit 0
         let mut foreign = shipped_selection().unwrap();
         foreign.ecosystem = "ruby".into();
         let error = beam_spec(LINUX, &foreign).unwrap_err().to_string();
-        assert!(error.contains("not the BEAM pair"), "{error}");
+        assert!(error.contains("not elixir (otp)"), "{error}");
 
         // All four components are required; dropping one is a refusal that
         // names what is missing.

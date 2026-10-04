@@ -97,26 +97,8 @@ struct RubySpec {
 /// The selected Ruby's row for `platform`, refused unless this tog knows
 /// the recipe that produced it.
 fn ruby_spec(platform: Platform, selected: &Selected) -> io::Result<RubySpec> {
-    if selected.ecosystem != "ruby" || selected.runtime() != "ruby" {
-        return Err(err(format!(
-            "ruby: selected toolchain is {} ({}), not ruby",
-            selected.ecosystem,
-            selected.runtime()
-        )));
-    }
-    let row = selected.artifact(platform, "ruby")?;
-    if row.recipe != RUBY_RECIPE {
-        return Err(err(format!(
-            "ruby: recipe {} in tog-toolchain.toml is not known to this tog; upgrade tog",
-            row.recipe
-        )));
-    }
-    if row.digest.algo() != "sha256" {
-        return Err(err(format!(
-            "ruby: artifact digest must be sha256, got {}",
-            row.digest.algo()
-        )));
-    }
+    selected.require("ruby", "ruby")?;
+    let row = selected.checked_artifact(platform, "ruby", RUBY_RECIPE, "sha256")?;
     Ok(RubySpec {
         platform,
         version: row.version,
