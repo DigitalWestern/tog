@@ -1388,7 +1388,9 @@ pub(super) fn import_absolute_reference(
             if is_object_id(id) && path != store.object_path(id) {
                 // Inside one of this store's own objects is a different
                 // mistake from another store's path: say which (#164).
-                let message = if path.starts_with(store.object_path(id)) {
+                let message = if components.contains(&std::path::Component::ParentDir) {
+                    format!("closure object reference {path:?} contains parent-directory traversal")
+                } else if path.starts_with(store.object_path(id)) {
                     format!(
                         "closure object reference {path:?} is inside object {id}, not \
                          an object root or a projection"
