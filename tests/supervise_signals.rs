@@ -611,6 +611,9 @@ fn supervisor_harness() {
     if scenario == "int-counter" {
         int_counter();
     }
+    if scenario == "term-counter" {
+        term_counter();
+    }
     #[cfg(target_os = "linux")]
     if scenario == "report-fds" {
         for entry in std::fs::read_dir("/proc/self/fd").unwrap().flatten() {
@@ -692,6 +695,43 @@ static INTS_SEEN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsiz
 
 extern "C" fn count_int(_: libc::c_int) {
     INTS_SEEN.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+}
+
+static TERMS_SEEN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+extern "C" fn count_term(_: libc::c_int) {
+    TERMS_SEEN.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+}
+
+// Acknowledge each delivery after the native handler returns. A shell trap
+// can discard a TERM received while its previous trap is still executing,
+// even after that trap has printed the acknowledgement.
+fn term_counter() -> ! {
+    // SAFETY: the initialized action points to an atomic-only handler.
+    unsafe {
+        let mut action: libc::sigaction = std::mem::zeroed();
+        libc::sigemptyset(&mut action.sa_mask);
+        action.sa_flags = libc::SA_RESTART;
+        action.sa_sigaction = count_term as extern "C" fn(libc::c_int) as *const () as usize;
+        assert_eq!(
+            libc::sigaction(libc::SIGTERM, &action, std::ptr::null_mut()),
+            0
+        );
+    }
+    say(&format!("CHILDPID {}", std::process::id()));
+    say("READY");
+    let mut reported = 0;
+    loop {
+        let seen = TERMS_SEEN.load(std::sync::atomic::Ordering::SeqCst);
+        if seen != reported {
+            say(&format!("GOT {seen}"));
+            reported = seen;
+        }
+        if seen >= 3 {
+            std::process::exit(46);
+        }
+        std::thread::sleep(TICK);
+    }
 }
 
 /// How long the counting child keeps running after its first INT, so a
@@ -933,12 +973,10 @@ fn run_scenario(scenario: &str, activity: &StoreActivity) -> i32 {
             }
         }
         "repeat-term" => {
-            let mut command = shell(
-                r#"count=0
-                   trap 'count=$((count+1)); printf "GOT %d\n" $count; [ $count -ge 3 ] && exit 46' TERM
-                   printf "CHILDPID %d\nREADY\n" $$
-                   while : ; do sleep 0.05 ; done"#,
-            );
+            let mut command = Command::new(std::env::current_exe().unwrap());
+            command
+                .args(["--exact", "supervisor_harness", "--ignored", "--nocapture"])
+                .env("TOG_SUPERVISE_SCENARIO", "term-counter");
             report(supervise::status(&mut command, activity))
         }
         // A child that never sees the signal: INT sent to the supervisor

@@ -2,6 +2,7 @@
 //! on-disk wire form, registration, lookup, forgetting, and the crash-safe
 //! registry file operations.
 
+use super::roots_lookup::verified_root_spelling;
 use super::*;
 use crate::kernel::fsroot::{Entry, ProjectRoot};
 use crate::kernel::ui;
@@ -647,12 +648,16 @@ impl Store {
     /// including on the corrupt record itself. The key is matched by exact
     /// directory-entry name, so a case-insensitive filesystem cannot answer
     /// with a neighbouring spelling's record.
+    ///
+    /// A case-insensitive filesystem still answers a key typed in another
+    /// case (hex keys differ only in a-f). The entry then carries the
+    /// record's on-disk spelling, so anything that compares keys (the
+    /// `--dry-run --forget` exclusion) compares the one the sweep sees.
     pub fn lookup_root(&self, key: &str) -> io::Result<RootEntry> {
         Self::validate_root_key(key)?;
         let roots = self.root.join("roots");
         ensure_directory_tree(&self.root, Path::new("roots"))?;
         let roots_dir = open_store_directory(&roots, "roots")?;
-        let path = roots.join(key);
         let metadata = match stat_at(roots_dir.as_raw_fd(), key.as_bytes()) {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -666,6 +671,9 @@ impl Store {
             }
             Err(error) => return Err(error),
         };
+        let spelling = verified_root_spelling(roots_dir.as_raw_fd(), key, &metadata)?;
+        let key = spelling.as_str();
+        let path = roots.join(key);
         if is_symlink(&metadata) {
             // Exact-key forgetting is allowed to remove the registry link
             // itself, but it never follows the link or treats its target as
