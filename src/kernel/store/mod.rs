@@ -14,6 +14,7 @@ use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+mod closure_import;
 mod env;
 mod format;
 mod fsops;
@@ -23,6 +24,7 @@ mod records;
 pub(crate) use records::{record_project, RECORDS, RECORD_CAP};
 mod roots;
 
+use closure_import::*;
 use env::home;
 #[cfg(test)]
 pub(crate) use env::STORE_ENV_LOCK;

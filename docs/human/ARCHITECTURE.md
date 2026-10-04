@@ -929,7 +929,8 @@ and build inputs tailors share, so no tailor reaches into another):
     cyclonedx.rs    CycloneDX component builders every tailor's sbom uses
     store/          immutable store: mod.rs Store and locks, objects.rs
                     stage/commit/cache, roots.rs the root registry,
-                    projection.rs projection refs, env.rs TOG_STORE,
+                    closure_import.rs closure references into a root
+                    record, projection.rs projection refs, env.rs TOG_STORE,
                     fsops.rs descriptor-level filesystem helpers
     fetch.rs        verified downloads
     fsroot.rs       ProjectRoot: project files read and published through a

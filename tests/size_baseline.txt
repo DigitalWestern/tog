@@ -5,7 +5,6 @@
 #
 #   file <non-test lines> <path>
 #   fn <lines> <path>::<name>[#<nth occurrence in the file>]
-file 1549 src/kernel/store/roots.rs
 file 1821 src/tailors/dotnet/mod.rs
 file 1740 src/tailors/elixir/mod.rs
 file 1719 src/tailors/node/lock_import/pnpm.rs
