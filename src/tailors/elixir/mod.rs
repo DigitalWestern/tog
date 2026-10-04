@@ -1683,10 +1683,10 @@ pub fn project_elixir_env(
         // crashed clone must never be trusted as a complete forest.
         let parent = proj_dir.parent().unwrap();
         fs::create_dir_all(parent)?;
-        let tmp = parent.join(format!(".hex-deps.tmp.{}", std::process::id()));
-        if tmp.exists() {
-            crate::kernel::store::remove_tree(&tmp)?;
-        }
+        let tmp = parent.join(format!(
+            ".hex-deps.tmp.{}",
+            crate::kernel::fsroot::random_suffix()?
+        ));
         crate::comforter::clone_tree_with_activity(activity, &deps_obj, &tmp, platform)?;
         fs::rename(&tmp, &proj_dir)?;
     }

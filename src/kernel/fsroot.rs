@@ -1330,6 +1330,13 @@ pub fn urandom_bytes(count: usize) -> io::Result<Vec<u8>> {
     Ok(bytes)
 }
 
+/// 32 random hex digits for a temporary's name. Carries no process
+/// identity, so two runs in containers that reuse small pids never pick the
+/// same name, and nobody can guess it ahead of time.
+pub fn random_suffix() -> io::Result<String> {
+    Ok(hex::encode(urandom_bytes(16)?))
+}
+
 /// `.tog-tmp.<32 hex>`: a fresh random name per attempt, so an occupied
 /// name (a crash leftover, or an entry planted at a guessable name) is
 /// stepped around, never unlinked and never written through. The name
@@ -1337,7 +1344,7 @@ pub fn urandom_bytes(count: usize) -> io::Result<Vec<u8>> {
 /// pids never pick the same fixed point. The destination name is not part
 /// of it, so a destination of any valid length publishes.
 fn random_temp_name(_name: &[u8], _attempt: usize) -> io::Result<Vec<u8>> {
-    Ok(format!(".tog-tmp.{}", hex::encode(urandom_bytes(16)?)).into_bytes())
+    Ok(format!(".tog-tmp.{}", random_suffix()?).into_bytes())
 }
 
 #[cfg(test)]
