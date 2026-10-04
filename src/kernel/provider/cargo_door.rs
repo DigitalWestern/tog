@@ -538,7 +538,7 @@ pub(crate) struct Members {
 
 /// The member directories (relative to `root`) its `[workspace]` names:
 /// each `members` entry, a path or a glob, that holds a `Cargo.toml` and is
-/// not under an `exclude` entry, as cargo 1.98.1 lists them. A glob is
+/// not excluded ([`excluded`]), as cargo 1.98.1 lists them. A glob is
 /// expanded the way cargo's `glob` crate does ([`expand`]): `*`, `?` and
 /// `[...]` within a name, `**` across directories, a wildcard matching a
 /// name that starts with `.`, `target` like any other directory. A member
@@ -567,12 +567,24 @@ pub(crate) fn member_dirs(root: &ProjectRoot) -> io::Result<Members> {
             })
             .unwrap_or_default()
     };
-    let exclude: Vec<PathBuf> = list("exclude").iter().map(PathBuf::from).collect();
+    let raw = |key: &str| -> Vec<String> {
+        workspace
+            .and_then(|w| w.get(key))
+            .and_then(|v| v.as_array())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| item.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let (raw_members, raw_exclude) = (raw("members"), raw("exclude"));
+    let left_out = |dir: &Path| excluded(root.path(), dir, &raw_members, &raw_exclude);
     for pattern in list("members") {
         let expanded = expand(root.path(), &pattern)?;
         for dir in expanded.dirs {
-            let excluded = exclude.iter().any(|ex| dir.starts_with(ex));
-            if !excluded
+            if !left_out(&dir)
                 && root.is_input_file(&dir.join("Cargo.toml"))
                 && !members.listed.contains(&dir)
             {
@@ -580,8 +592,7 @@ pub(crate) fn member_dirs(root: &ProjectRoot) -> io::Result<Members> {
             }
         }
         for dir in expanded.through_symlinks {
-            let excluded = exclude.iter().any(|ex| dir.starts_with(ex));
-            if !excluded && !members.through_symlinks.contains(&dir) {
+            if !left_out(&dir) && !members.through_symlinks.contains(&dir) {
                 members.through_symlinks.push(dir);
             }
         }
@@ -589,6 +600,24 @@ pub(crate) fn member_dirs(root: &ProjectRoot) -> io::Result<Members> {
     members.listed.sort();
     members.through_symlinks.sort();
     Ok(members)
+}
+
+/// Whether cargo leaves the member at `dir` (relative to `root`) out, by
+/// cargo 1.98.1's own rule (`WorkspaceRootConfig::is_excluded`): its
+/// manifest's path is under some `exclude` entry and under no `members`
+/// entry, each entry taken as written and joined to the root, compared a
+/// whole component at a time. So an explicit member wins over `exclude`,
+/// as does anything under one (`members = ["sub", "sub/*"]` keeps
+/// `sub/inner` even with `exclude = ["sub/inner"]`), while a member only a
+/// glob reaches is excluded (a wildcard is no prefix of a real path).
+fn excluded(root: &Path, dir: &Path, members: &[String], exclude: &[String]) -> bool {
+    let manifest = root.join(dir).join("Cargo.toml");
+    let under = |entries: &[String]| {
+        entries
+            .iter()
+            .any(|entry| manifest.starts_with(root.join(entry)))
+    };
+    under(exclude) && !under(members)
 }
 
 /// Refuse to attest a workspace with a member reached through a symlinked

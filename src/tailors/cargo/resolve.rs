@@ -314,8 +314,9 @@ mod tests {
     }
 
     /// The outputs are the root's manifest and lock and every member's
-    /// manifest the `[workspace]` names, by path or glob, less `exclude`,
-    /// as cargo 1.98.1 lists them (checked against `cargo metadata`): a
+    /// manifest the `[workspace]` names, by path or glob, less `exclude`
+    /// (which an explicit member, or one under it, overrides), as cargo
+    /// 1.98.1 lists them (checked against `cargo metadata`): a
     /// wildcard matches a hidden directory and `target`, a class matches
     /// its letters, `**` reaches any depth. A member outside the root and a
     /// directory with no manifest are not listed.
@@ -329,6 +330,9 @@ mod tests {
             ("crates/a", "a"),
             ("crates/b", "b"),
             ("crates/skipped", "skipped"),
+            ("kept", "kept"),
+            ("sub", "sub"),
+            ("sub/inner", "inner"),
             ("crates/.hidden", "hidden"),
             ("letters/a", "la"),
             ("letters/b", "lb"),
@@ -342,8 +346,8 @@ mod tests {
         fs::write(
             root.join("Cargo.toml"),
             "[workspace]\nmembers = [\"./app/\", \"crates/*\", \"letters/[ab]\", \
-             \"nested/**/c\", \"target/*\", \"../outside\"]\n\
-             exclude = [\"crates/skipped\"]\n",
+             \"nested/**/c\", \"target/*\", \"../outside\", \"kept\", \"sub\", \"sub/i*\"]\n\
+             exclude = [\"crates/skipped\", \"kept\", \"sub/inner\"]\n",
         )
         .unwrap();
         let held = ProjectRoot::open(&root).unwrap();
@@ -361,9 +365,12 @@ mod tests {
                 "crates/.hidden/Cargo.toml".to_string(),
                 "crates/a/Cargo.toml".to_string(),
                 "crates/b/Cargo.toml".to_string(),
+                "kept/Cargo.toml".to_string(),
                 "letters/a/Cargo.toml".to_string(),
                 "letters/b/Cargo.toml".to_string(),
                 format!("{deep}/Cargo.toml"),
+                "sub/Cargo.toml".to_string(),
+                "sub/inner/Cargo.toml".to_string(),
                 "target/t/Cargo.toml".to_string(),
             ]
         );
