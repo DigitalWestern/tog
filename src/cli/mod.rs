@@ -20,11 +20,12 @@
 //!   never syncs refuses them instead of accepting and ignoring them;
 //! - a bare `tog` and an unknown first word are *not* decided here: the
 //!   dispatcher turns a bare `tog` into `sync` inside a project (and prints
-//!   `usage()` after a sync that succeeded, so the first word a newcomer
-//!   types also shows them the rest), into the help outside one, and an
-//!   unknown first word into a package.json script run when one matches.
+//!   `sync_footer()` after a sync that succeeded, so the first word a
+//!   newcomer types also shows them what comes next), into the help outside
+//!   one, and an unknown first word into a package.json script run when
+//!   one matches.
 //!   A bare `tog` with `--frozen`, `--fresh` or `--strict` is decided here:
-//!   it is `sync` with those flags, and no help follows it. `sync`,
+//!   it is `sync` with those flags, and no footer follows it. `sync`,
 //!   `install` and `i` still parse as that command but are never listed,
 //!   completed, or suggested (`Group::Bare`).
 //!
@@ -39,7 +40,8 @@ mod x;
 pub use self::completions::completions;
 pub use self::parse::{option_spellings, parse, suggest};
 pub use self::spec::{
-    canonical_name, help, spec, usage, BUILD_WORDS, COMMANDS, LS_WORDS, SHELL_WORDS, SYNC_ALIASES,
+    canonical_name, help, spec, sync_footer, usage, BUILD_WORDS, COMMANDS, LS_WORDS, SHELL_WORDS,
+    SYNC_ALIASES,
 };
 
 use std::path::PathBuf;

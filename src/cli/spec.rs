@@ -194,7 +194,7 @@ company policy refuse ('tog attest' makes a receipt). --resolution-record
 'tog attest --record-out'); they are checked the same way and never
 written into the project.",
         examples: &[
-            ("tog", "set up this project, then show the command list"),
+            ("tog", "set up this project, then show what to run next"),
             ("tog --frozen", "CI: check the locks are current without writing them"),
             ("tog --fresh", "rebuild .venv / node_modules from scratch"),
             (
@@ -801,6 +801,25 @@ START HERE:
   tog doctor            check this machine when something looks wrong
 ";
 
+/// What follows a bare `tog` whose sync succeeded: the commands most likely
+/// to come next and where the full list is, short enough that the sync's
+/// own result stays on screen. Hand-written like `START_HERE`, and it
+/// repeats that section's lines after the first, which the person has just
+/// run.
+const SYNC_FOOTER: &str = "\
+NEXT:
+  tog run <command>     run something inside that environment
+  tog add <package>     add a dependency, re-lock, sync
+  tog build             build in the sandbox (cargo | go | elixir | dotnet)
+  tog doctor            check this machine when something looks wrong
+  tog --help            every command and option
+";
+
+/// The footer `main` prints after a bare `tog` that synced.
+pub fn sync_footer() -> &'static str {
+    SYNC_FOOTER
+}
+
 const ENVIRONMENT: &str = "\
 ENVIRONMENT:
   TOG_STORE           store root (default ~/.tog/store)
@@ -899,7 +918,7 @@ pub fn usage() -> String {
     let mut text = format!(
         "tog {VERSION} — one command for every package manager\n\n\
          USAGE:\n  \
-         tog                        set up this project, then show this help\n  \
+         tog                        set up this project\n  \
          tog <command> [<args>...]  run a command ('tog help <command>' explains it)\n  \
          tog <script> [<args>...]   run a package.json script (like 'npm run')\n\n"
     );
@@ -1240,6 +1259,29 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The footer is the START HERE section without the line the person just
+    /// ran, so the two cannot disagree about what a command does. Every
+    /// command it names is a real one, and it says where the rest are.
+    #[test]
+    fn the_sync_footer_repeats_start_here_and_points_at_the_help() {
+        let footer = sync_footer();
+        let mut start_here = START_HERE.lines().skip(1);
+        assert!(start_here.next().unwrap().starts_with("  tog   "));
+        for line in start_here {
+            assert!(footer.contains(line), "the footer lacks {line:?}");
+        }
+        for line in footer.lines().skip(1) {
+            assert!(line.chars().count() <= HELP_WIDTH, "{line:?}");
+            let word = line.split_whitespace().nth(1).unwrap();
+            assert!(
+                word == "--help" || spec(word).is_some(),
+                "the footer names '{word}', which is not a command"
+            );
+        }
+        assert!(footer.contains("  tog --help  "), "{footer}");
+        assert!(footer.lines().count() <= 6, "{footer}");
     }
 
     /// The everyday verbs come first in their group, and the bare form's

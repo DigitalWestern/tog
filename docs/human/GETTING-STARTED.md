@@ -96,19 +96,13 @@ tog: python inputs: requirements.txt
 synced: .venv -> /tmp/tog-demo/store/objects/4002574e4e21aab52a9e4abe4ff2b2c6e9158b48-env-3.12.14
 tog: warning: closures are written unsigned, which is fine until you want 'tog audit' to vouch for them; the fix sets a key for this shell, and a shell profile keeps it. Said once per store
 tog:     fix: tog keygen ~/.tog/signing.key && export TOG_SIGNING_KEY=~/.tog/signing.key
-tog 0.1.0 — one command for every package manager
 
-USAGE:
-  tog                        set up this project, then show this help
-  tog <command> [<args>...]  run a command ('tog help <command>' explains it)
-  tog <script> [<args>...]   run a package.json script (like 'npm run')
-
-START HERE:
-  tog                   set up the project from its lockfiles
+NEXT:
   tog run <command>     run something inside that environment
   tog add <package>     add a dependency, re-lock, sync
+  tog build             build in the sandbox (cargo | go | elixir | dotnet)
   tog doctor            check this machine when something looks wrong
-...
+  tog --help            every command and option
 ```
 
 5.1 seconds from an empty store, most of it downloading CPython. On a
@@ -122,12 +116,12 @@ still judges them and says it did not check signatures, and the line is said
 once per store rather than on every sync — you will not see it again below.
 
 That one word is the whole setup step: it builds the environment from the
-lockfiles and then prints the help screen (cut short above) so you can see
-what else there is. There is no `install` or `sync` to remember, and you
+lockfiles and then prints a short footer: the commands most likely to come
+next, and `tog --help` for the full list. There is no `install` or `sync` to remember, and you
 rarely need even `tog`: `tog run`, `tog env`, `tog build` and
 `tog <script>` set the project up first whenever it is not set up or its
 inputs changed. In CI, `tog --frozen` checks the locks are current without
-writing them, and prints no help after it.
+writing them, and prints no footer after it.
 
 Run something in it:
 
@@ -163,8 +157,8 @@ synced: node_modules -> /tmp/tog-demo/store/objects/9d0333722d78ff1fa9a845b3693f
 
 3.7 seconds, including downloading Node 24.20.0. A directory holding both a
 `requirements.txt` and a `package-lock.json` gets both ecosystems out of one
-`tog`, with no flags and no ordering. (The help screen after it is left out
-of this transcript from here on.)
+`tog`, with no flags and no ordering. (The footer after it is left out of
+this transcript from here on.)
 
 This project's `package.json` declares one script:
 

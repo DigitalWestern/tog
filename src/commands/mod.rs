@@ -41,8 +41,8 @@ use std::process::exit;
 /// What argv asked for, once the grammar has had its say.
 pub enum Pending {
     Command(cli::Command),
-    /// Bare `tog`: sync inside a project (and then the help, printed by
-    /// `main` when the sync succeeded), the help alone outside one.
+    /// Bare `tog`: sync inside a project (and then a short footer, printed
+    /// by `main` when the sync succeeded), the help outside one.
     Implicit,
     /// An unknown first word: a package.json script if one matches. The
     /// sync flags reach `dispatch` beside it, so `tog --frozen <script>`
@@ -54,8 +54,8 @@ pub enum Pending {
     },
 }
 
-/// A bare `tog` inside a project is `sync` (`main` prints the help after a
-/// sync that succeeded); an unknown first word that names a package.json
+/// A bare `tog` inside a project is `sync` (`main` prints a short footer
+/// after a sync that succeeded); an unknown first word that names a package.json
 /// script runs it. Anything else is the usage error the grammar already
 /// prepared (exit 2).
 pub fn resolve(pending: Pending) -> io::Result<cli::Command> {
