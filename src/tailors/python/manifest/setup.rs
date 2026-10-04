@@ -227,6 +227,25 @@ pub(super) fn setup_tree_hash(project: &ProjectRoot) -> io::Result<String> {
         let path = project.path().join(&relative);
         hasher.update(relative.to_string_lossy().as_bytes());
         hasher.update([0]);
+        // A symlink is its target, never what the target holds: a
+        // symlinked directory (vllm's `.claude/skills/*`, #216) is not
+        // walked, and following one could leave the project. A target
+        // inside the project is hashed under its own name anyway. A FIFO,
+        // socket or device is only its name.
+        match project.entry(&relative)? {
+            crate::kernel::fsroot::Entry::Symlink => {
+                let target = project.read_link(&relative)?.unwrap_or_default();
+                hasher.update(b"\0symlink\0");
+                hasher.update(target.as_os_str().as_encoded_bytes());
+                hasher.update([0]);
+                continue;
+            }
+            crate::kernel::fsroot::Entry::Other => {
+                hasher.update(b"\0other\0");
+                continue;
+            }
+            _ => {}
+        }
         let bytes = project
             .read_input(&relative)
             .and_then(|bytes| bytes.ok_or_else(|| io::Error::from_raw_os_error(libc::ENOENT)))

@@ -43,13 +43,16 @@ CLASSES = [
     # Both manifest rows carry two spellings: tog dropped the `no_manifest:`
     # and `unreadable_manifest:` prefixes from the text a user reads (#100),
     # and CSVs recorded before that still have to classify.
+    # Before the manifest rows: tog's uv error now carries uv's own output
+    # (#216), and a dynamic-metadata build failure inside it can mention a
+    # manifest without the manifest being the problem.
+    ("py_uv_resolve_failed", r"uv pip compile failed"),
     ("no_manifest", r"\bno_manifest\b|nothing to sync here"),
     ("unreadable_manifest", r"unreadable_manifest|manifest is broken, or this is a tog bug"),
     ("py_editable", r"editable requirements"),
     ("py_markers", r"environment markers are not supported"),
     ("py_extras", r"extras are not supported"),
     ("py_req_option", r"unsupported option in requirements"),
-    ("py_uv_resolve_failed", r"uv pip compile failed"),
     ("py_sdist_build_failed", r"sdist|build backend|setup\.py|sandbox-exec|bwrap|xcrun|clang|gcc|cc1plus|glibc"),
     ("py_no_wheel", r"no compatible|no wheel|no artifact|manylinux|x86_64-unknown-linux-gnu"),
     ("npm_ws_nested", r"nested inside workspace"),
