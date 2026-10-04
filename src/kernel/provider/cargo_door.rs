@@ -814,25 +814,23 @@ pub(crate) struct Expanded {
     /// Directories it matches, or may match below, through a symlink to a
     /// directory: not followed.
     through_symlinks: Vec<PathBuf>,
-    /// Whether the whole pattern matched anything at all, a file
-    /// included: cargo falls back to the literal path only when it matched
-    /// nothing ([`expand_or_literal`]).
-    matched: bool,
 }
 
-/// [`expand`], with cargo's fallback (`WorkspaceRootConfig::members_paths`
-/// in 1.98): a pattern that matches nothing is taken as a literal path, so
-/// `crates/a[1]` names the directory `crates/a[1]` when no `crates/a1`
-/// exists. The literal path gets the walk's own rules: reached through a
-/// symlinked directory it is reported as such, and one that is missing or
-/// not a directory names nothing (cargo would report it).
+/// [`expand`], and the entry's literal path too: the superset rule.
+/// cargo (`WorkspaceRootConfig::members_paths` in 1.98) takes the literal
+/// path when the glob's unfiltered result is empty, which depends on
+/// files a trailing slash or a directory filter later drops. Rather than
+/// mirror that decision, the literal path of every entry is always
+/// considered: a directory there is listed whether or not the glob matched
+/// anything. Coverage is then never smaller than cargo's member set, and a
+/// manifest cargo does not read can only make a receipt stale early. The
+/// walk lists directories only, so a trailing slash (directories only, in
+/// cargo) changes nothing it lists. The literal path gets the walk's own
+/// rules: through a symlinked directory it is reported as such, and one
+/// that is missing or not a directory names nothing.
 fn expand_or_literal(root: &Path, pattern: &str) -> io::Result<Expanded> {
     let mut expanded = expand(root, pattern)?;
-    if pattern.is_empty()
-        || expanded.matched
-        || !expanded.dirs.is_empty()
-        || !expanded.through_symlinks.is_empty()
-    {
+    if pattern.is_empty() {
         return Ok(expanded);
     }
     let literal = PathBuf::from(pattern);
@@ -856,7 +854,7 @@ fn expand_or_literal(root: &Path, pattern: &str) -> io::Result<Expanded> {
             }
         };
         if meta.file_type().is_symlink() {
-            if path.is_dir() {
+            if path.is_dir() && !expanded.through_symlinks.contains(&at) {
                 expanded.through_symlinks.push(at);
             }
             return Ok(expanded);
@@ -865,7 +863,9 @@ fn expand_or_literal(root: &Path, pattern: &str) -> io::Result<Expanded> {
             return Ok(expanded);
         }
     }
-    expanded.dirs.push(literal);
+    if !expanded.dirs.contains(&literal) {
+        expanded.dirs.push(literal);
+    }
     Ok(expanded)
 }
 
@@ -950,9 +950,6 @@ pub(crate) fn expand(root: &Path, pattern: &str) -> io::Result<Expanded> {
                         .is_some_and(|name| pattern.matches_with(name, glob::MatchOptions::new()));
                     if !matches {
                         continue;
-                    }
-                    if index + 1 == parts.len() {
-                        out.matched = true;
                     }
                     index + 1
                 }

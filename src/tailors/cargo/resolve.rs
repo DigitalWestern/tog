@@ -463,14 +463,18 @@ mod tests {
         );
     }
 
-    /// cargo's fallback (checked against `cargo metadata` on 1.98.1): a
-    /// members glob that matches nothing is its literal path, so
-    /// `crates/a[1]` names that directory, while `crates/b[2]` names
-    /// `crates/b2` when it exists and a pattern that matched only a file
-    /// names nothing. The literal member is an output: a receipt signed
-    /// over the workspace goes stale when its manifest changes.
+    /// The superset rule: every members entry's glob matches and its
+    /// literal path are both covered, so coverage is never smaller than
+    /// cargo's member set (cargo takes the literal path when the glob's
+    /// unfiltered result is empty). `crates/a[1]/` names the directory
+    /// `crates/a[1]` although the file `crates/a1` matches the glob (the
+    /// trailing slash keeps cargo to directories, so it falls back).
+    /// `crates/b[2]` names `crates/b2`, which cargo lists, and the literal
+    /// `crates/b[2]` as well, which it does not: over-covering can only
+    /// make a receipt stale early. A literal member is an output: a receipt
+    /// signed over the workspace goes stale when its manifest changes.
     #[test]
-    fn a_members_glob_that_matches_nothing_is_its_literal_path() {
+    fn every_members_entry_covers_its_glob_matches_and_its_literal_path() {
         use crate::kernel::resolve::record::{
             self, file_digests, Isolation, Judgment, LedgerSummary, RecordDoor, RecordFacts,
             ResolutionFiles, ResolutionRecord, Tool,
@@ -481,14 +485,13 @@ mod tests {
             ("crates/a[1]", "alit"),
             ("crates/b[2]", "blit"),
             ("crates/b2", "btwo"),
-            ("files/c[1]", "clit"),
         ] {
             package(&root.join(dir), name);
         }
-        fs::write(root.join("files/c1"), "").unwrap();
+        fs::write(root.join("crates/a1"), "").unwrap();
         fs::write(
             root.join("Cargo.toml"),
-            "[workspace]\nmembers = [\"crates/a[1]\", \"crates/b[2]\", \"files/c[1]\"]\n",
+            "[workspace]\nmembers = [\"crates/a[1]/\", \"crates/b[2]\"]\n",
         )
         .unwrap();
         fs::write(root.join("Cargo.lock"), "version = 4\n").unwrap();
@@ -500,7 +503,8 @@ mod tests {
                 "Cargo.toml",
                 "Cargo.lock",
                 "crates/a[1]/Cargo.toml",
-                "crates/b2/Cargo.toml"
+                "crates/b2/Cargo.toml",
+                "crates/b[2]/Cargo.toml"
             ]
             .map(PathBuf::from)
             .to_vec()

@@ -3610,7 +3610,8 @@ interception and the cargo switch, each the flexible option:
       checked for any 10-character piece of the seed, not only the whole
       seed.
   - *Fifth Sol pass (2026-10-03).*
-    - *A glob that matches nothing is its literal path.* cargo falls back
+    - *A glob that matches nothing is its literal path* (replaced by the
+      superset rule of the sixth pass, below). cargo falls back
       to the literal path when a members glob matches nothing at all
       (`members_paths` in 1.98). `cargo_door::expand_or_literal` does the
       same, so `members = ["crates/a[1]"]` names the directory
@@ -3636,6 +3637,24 @@ interception and the cargo switch, each the flexible option:
       the activity borrow end. A grandchild that keeps a pipe open still
       keeps its reader waiting. That is an existing limitation, left as
       is.
+  - *Sixth Sol pass (2026-10-03): the superset rule.* The literal-path
+    fallback above was the third glob-fidelity gap in a row: with
+    `members = ["crates/a[1]/"]`, a file `crates/a1` made tog count a
+    match, while cargo's trailing slash keeps it to directories, so cargo
+    fell back to the literal member and the receipt missed it. cargo takes
+    the literal path when the glob's unfiltered result is empty, and it
+    does not check the literal exists (`members_paths` in 1.98). Rather
+    than mirror each decision, the rule is now: **receipt coverage is
+    never smaller than cargo's member set, and covering an extra manifest
+    is acceptable.** `cargo_door::expand_or_literal` lists the glob's
+    directory matches and always also the entry's literal path, when that
+    is a directory holding a `Cargo.toml`, whether or not the glob matched
+    anything. The literal path goes through the same symlink, exclusion
+    and outside-root rules. An over-included manifest is only ever an
+    extra output, so it can make a receipt stale early but never let a
+    change slip through. The walk lists directories only, so a trailing
+    slash changes nothing it lists. The "did the glob match" flag is gone.
+    The fallback decision it fed no longer exists.
   - *Config includes.* `include = [...]` (paths or `{ path, optional }`,
     relative to the including file, transitive) is expanded from the
     bounded files: every registry declared there gets the forced
