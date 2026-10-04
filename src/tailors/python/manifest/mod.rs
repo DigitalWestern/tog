@@ -2068,6 +2068,51 @@ files = [{ file = "old.whl", hash = "sha256:dddddddddddddddddddddddddddddddddddd
         );
     }
 
+    /// A symlink in the tree is hashed by its target (#216): a symlinked
+    /// directory used to be read as a file and refused, which failed the
+    /// whole setup.py probe. Retargeting it changes the hash.
+    #[test]
+    fn setup_hash_takes_a_symlink_as_its_target() {
+        let dir = temp_project("setup-tree-symlink");
+        fs::write(
+            dir.0.join("setup.py"),
+            "from setuptools import setup\nsetup()\n",
+        )
+        .unwrap();
+        fs::create_dir_all(dir.0.join("skills/a")).unwrap();
+        fs::create_dir_all(dir.0.join("skills/b")).unwrap();
+        fs::create_dir_all(dir.0.join(".claude")).unwrap();
+        std::os::unix::fs::symlink("../skills/a", dir.0.join(".claude/skill")).unwrap();
+        let hash = || setup_tree_hash(&ProjectRoot::open(&dir.0).unwrap()).unwrap();
+        let first = hash();
+        assert_eq!(first, hash());
+        fs::remove_file(dir.0.join(".claude/skill")).unwrap();
+        std::os::unix::fs::symlink("../skills/b", dir.0.join(".claude/skill")).unwrap();
+        assert_ne!(first, hash());
+    }
+
+    #[test]
+    fn setup_hash_tracks_contents_of_a_symlinked_input_file() {
+        let dir = temp_project("setup-file-symlink");
+        let outside = temp_project("setup-file-target");
+        let target = outside.0.join("requirements-data.txt");
+        fs::write(&target, "six==1.16.0\n").unwrap();
+        fs::write(
+            dir.0.join("setup.py"),
+            "from setuptools import setup\nsetup()\n",
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(&target, dir.0.join("requirements-data.txt")).unwrap();
+        let hash = || setup_tree_hash(&ProjectRoot::open(&dir.0).unwrap()).unwrap();
+        let first = hash();
+        fs::write(&target, "six==1.17.0\n").unwrap();
+        assert_ne!(
+            first,
+            hash(),
+            "cached metadata must notice changed file inputs"
+        );
+    }
+
     #[test]
     fn setup_cfg_empty_requires_probe_when_setup_py_declares_install_requires() {
         let dir = temp_project("setupcfg-probe");

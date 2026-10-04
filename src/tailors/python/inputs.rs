@@ -420,7 +420,8 @@ pub fn locked_requirements(
     let mut spec = DelegateSpec::new(&uv);
     spec.args(["pip", "compile", compile_input, "--generate-hashes"]);
     if !ui::verbose() {
-        spec.arg("--quiet");
+        // Quiet on success; on failure its words go into tog's error.
+        spec.arg("--quiet").capture();
     }
     spec.args(["--python-version", pyver])
         .arg("--python")
@@ -439,13 +440,16 @@ pub fn locked_requirements(
         .env_remove("PIP_TRUSTED_HOST")
         .env_remove("PIP_FIND_LINKS");
     spec.trace();
-    let status = door
+    let report = door
         .reopen(DoorKind::MissingLock)
         .run(spec)
-        .map_err(|e| io::Error::new(e.kind(), format!("run store uv ({}): {e}", uv.display())))?
-        .status;
-    if !status.success() {
-        return Err(io::Error::other("uv pip compile failed"));
+        .map_err(|e| io::Error::new(e.kind(), format!("run store uv ({}): {e}", uv.display())))?;
+    if !report.status.success() {
+        return Err(python::uv_failure(
+            "uv pip compile failed",
+            report.status,
+            &report.stderr,
+        ));
     }
     // The stamp is the only file tog writes here, and it goes through the
     // held project descriptor, so a `.tog` swapped for a symlink is refused

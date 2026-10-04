@@ -121,7 +121,7 @@ impl RegistryTool for PythonTool {
             .arg(&input)
             .arg("--generate-hashes");
         if !ui::verbose() {
-            uv_spec.arg("--quiet");
+            uv_spec.arg("--quiet").capture();
         }
         uv_spec
             .args(["--python-version", pin.version])
@@ -140,12 +140,13 @@ impl RegistryTool for PythonTool {
             .env_remove("PIP_TRUSTED_HOST")
             .env_remove("PIP_FIND_LINKS");
         uv_spec.trace();
-        let status = door.run(uv_spec)?.status;
-        if !status.success() {
-            return Err(io::Error::other(format!(
-                "could not resolve '{}' from PyPI (uv pip compile exit {status})",
-                spec.trim()
-            )));
+        let report = door.run(uv_spec)?;
+        if !report.status.success() {
+            return Err(python::uv_failure(
+                &format!("could not resolve '{}' from PyPI", spec.trim()),
+                report.status,
+                &report.stderr,
+            ));
         }
         let text = fs::read_to_string(&output)?;
         let plan = pypi::plan_python(platform, &text, pin.version)?;

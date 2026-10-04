@@ -38,6 +38,23 @@ pub use crate::kernel::provider::cpython::{
     shipped_newest, shipped_selection, toolchain_catalog, uv_pins, PinnedPython, PinnedUv,
 };
 
+/// The error for a failed store-uv run: `what` failed, then the tail of
+/// what uv said, so the reason travels with tog's own error line instead
+/// of scrolling past above it (#216). Empty `stderr` (a verbose run whose
+/// output the user already watched) says so.
+pub(crate) fn uv_failure(what: &str, status: std::process::ExitStatus, stderr: &[u8]) -> io::Error {
+    let text = String::from_utf8_lossy(stderr);
+    let lines: Vec<&str> = text
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    if lines.is_empty() {
+        return io::Error::other(format!("{what} ({status}); uv's output is above"));
+    }
+    let tail = &lines[lines.len().saturating_sub(20)..];
+    io::Error::other(format!("{what} ({status}):\n{}", tail.join("\n")))
+}
+
 /// The interpreter a store-uv run builds sdists on, realized: tog's
 /// CPython for `selected`. uv takes it as `--python` on every invocation,
 /// because `uv pip compile` ignores `UV_PYTHON` and would otherwise build
@@ -275,6 +292,28 @@ pub fn ensure_python_for(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A failed uv run's error carries what uv said, its last 20 lines
+    /// with blank ones dropped (#216), and points above when nothing was
+    /// captured.
+    #[test]
+    fn a_uv_failure_carries_the_tail_of_what_uv_said() {
+        use std::os::unix::process::ExitStatusExt as _;
+        let status = std::process::ExitStatus::from_raw(1 << 8);
+        let stderr: String = (1..=25).map(|n| format!("line {n}\n\n")).collect();
+        let error = uv_failure("uv pip compile failed", status, stderr.as_bytes()).to_string();
+        assert!(
+            error.starts_with("uv pip compile failed (exit status: 1):\nline 6\n"),
+            "{error}"
+        );
+        assert!(error.ends_with("line 25"), "{error}");
+        assert!(!error.contains("line 5\n"), "{error}");
+        let error = uv_failure("uv pip compile failed", status, b"").to_string();
+        assert_eq!(
+            error,
+            "uv pip compile failed (exit status: 1); uv's output is above"
+        );
+    }
 
     #[test]
     fn every_cpython_release_has_one_row_per_platform_and_the_default_uv() {

@@ -227,6 +227,36 @@ pub(super) fn setup_tree_hash(project: &ProjectRoot) -> io::Result<String> {
         let path = project.path().join(&relative);
         hasher.update(relative.to_string_lossy().as_bytes());
         hasher.update([0]);
+        // A directory symlink is its target text, never a tree to walk: a
+        // symlinked directory (vllm's `.claude/skills/*`, #216) is not
+        // walked. File symlinks remain authored inputs, just as read_input
+        // permits, so their bytes must invalidate the metadata cache even
+        // when the target is outside this tree. A FIFO, socket or device is
+        // only its name.
+        match project.entry(&relative)? {
+            crate::kernel::fsroot::Entry::Symlink => {
+                let target = project
+                    .read_link(&relative)?
+                    .ok_or_else(|| io::Error::from_raw_os_error(libc::ENOENT))?;
+                hasher.update(b"\0symlink\0");
+                hasher.update(target.as_os_str().as_encoded_bytes());
+                hasher.update([0]);
+                if project.input_entry(&relative)? == crate::kernel::fsroot::Entry::Regular {
+                    let bytes = project
+                        .read_input(&relative)?
+                        .ok_or_else(|| io::Error::from_raw_os_error(libc::ENOENT))?;
+                    hasher.update(b"\0file-content\0");
+                    hasher.update(bytes);
+                    hasher.update([0]);
+                }
+                continue;
+            }
+            crate::kernel::fsroot::Entry::Other => {
+                hasher.update(b"\0other\0");
+                continue;
+            }
+            _ => {}
+        }
         let bytes = project
             .read_input(&relative)
             .and_then(|bytes| bytes.ok_or_else(|| io::Error::from_raw_os_error(libc::ENOENT)))
