@@ -2,7 +2,7 @@
 //! `ls`, `status`, and `sbom` do for a Bundler project.
 
 use crate::comforter;
-use crate::comforter::status::{lock_state, object_liveness_state, string, State};
+use crate::comforter::status::{standard_state, string, State};
 use crate::kernel::context::Context;
 use crate::kernel::cyclonedx::{
     component, list, purl_encode, push_hash, required, toolchain_component, version_of,
@@ -175,12 +175,12 @@ impl Tailor for Ruby {
         _ecosystem: &str,
         body: &Value,
     ) -> io::Result<State> {
-        Ok(
-            object_liveness_state(body, &["ruby_object", "gems_object"]).unwrap_or(lock_state(
-                project,
-                "Gemfile.lock",
-                &string(&body["gemfile_lock_sha256"]),
-            )?),
+        standard_state(
+            project,
+            body,
+            &["ruby_object", "gems_object"],
+            "Gemfile.lock",
+            "gemfile_lock_sha256",
         )
     }
 

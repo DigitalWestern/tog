@@ -3,7 +3,7 @@
 //! pinned formatter `tog fmt` runs.
 
 use crate::comforter;
-use crate::comforter::status::{lock_state, string, State};
+use crate::comforter::status::{lock_state, object_liveness_state, string, State};
 use crate::kernel::context::Context;
 use crate::kernel::cyclonedx::{
     component, list, purl_encode, push_hash, required, toolchain_component, version_of,
@@ -298,13 +298,15 @@ impl Tailor for Cargo {
         body: &Value,
     ) -> io::Result<State> {
         Ok(match ecosystem {
-            "cargo" => {
-                if !project.is_input_dir(Path::new(".tog/cargo-home")) {
+            // An object gc removed is checked before the projection that
+            // points into it.
+            "cargo" => match object_liveness_state(body, &["rust_object", "vendor_object"]) {
+                Some(state) => state,
+                None if !project.is_input_dir(Path::new(".tog/cargo-home")) => {
                     State::ProjectionMissing(".tog/cargo-home".into())
-                } else {
-                    lock_state(project, "Cargo.lock", &string(&body["cargo_lock_sha256"]))?
                 }
-            }
+                None => lock_state(project, "Cargo.lock", &string(&body["cargo_lock_sha256"]))?,
+            },
             _ => State::Unchecked("unknown ecosystem".into()),
         })
     }

@@ -137,6 +137,22 @@ pub fn lock_state(project: &ProjectRoot, lock: &str, recorded: &str) -> io::Resu
     })
 }
 
+/// The state most tailors report: a recorded object gone from the store is
+/// a missing projection, checked first so a lock that cannot be read never
+/// hides it; otherwise the lock file against the hash in `hash_field`.
+pub fn standard_state(
+    project: &ProjectRoot,
+    body: &Value,
+    objects: &[&str],
+    lock: &str,
+    hash_field: &str,
+) -> io::Result<State> {
+    match object_liveness_state(body, objects) {
+        Some(state) => Ok(state),
+        None => lock_state(project, lock, &string(&body[hash_field])),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

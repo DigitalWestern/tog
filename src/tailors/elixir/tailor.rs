@@ -2,7 +2,7 @@
 //! `run`, `ls`, `status`, and `sbom` do for a Mix project.
 
 use crate::comforter;
-use crate::comforter::status::{lock_state, object_liveness_state, string, State};
+use crate::comforter::status::{standard_state, string, State};
 use crate::kernel::context::Context;
 use crate::kernel::cyclonedx::{
     component, list, purl_encode, push_hash, push_property, required, toolchain_component,
@@ -280,12 +280,12 @@ impl Tailor for Elixir {
         _ecosystem: &str,
         body: &Value,
     ) -> io::Result<State> {
-        Ok(
-            object_liveness_state(body, &["beam_object", "deps_object"]).unwrap_or(lock_state(
-                project,
-                "mix.lock",
-                &string(&body["mix_lock_sha256"]),
-            )?),
+        standard_state(
+            project,
+            body,
+            &["beam_object", "deps_object"],
+            "mix.lock",
+            "mix_lock_sha256",
         )
     }
 

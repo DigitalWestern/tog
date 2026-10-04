@@ -2,7 +2,7 @@
 //! `run`, `ls`, `status`, and `sbom` do for a NuGet-locked project.
 
 use crate::comforter;
-use crate::comforter::status::{lock_state, object_liveness_state, string, State};
+use crate::comforter::status::{standard_state, string, State};
 use crate::kernel::context::Context;
 use crate::kernel::cyclonedx::{
     component, list, purl_encode, push_property, required, toolchain_component, version_of,
@@ -235,12 +235,12 @@ impl Tailor for Dotnet {
         _ecosystem: &str,
         body: &Value,
     ) -> io::Result<State> {
-        Ok(
-            object_liveness_state(body, &["sdk_object", "packages_object"]).unwrap_or(lock_state(
-                project,
-                "packages.lock.json",
-                &string(&body["packages_lock_sha256"]),
-            )?),
+        standard_state(
+            project,
+            body,
+            &["sdk_object", "packages_object"],
+            "packages.lock.json",
+            "packages_lock_sha256",
         )
     }
 

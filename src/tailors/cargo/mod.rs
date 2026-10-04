@@ -489,6 +489,38 @@ mod tests {
     use std::collections::BTreeSet;
     use std::process::Command;
 
+    /// After gc removes the Rust or vendor object a closure records, status
+    /// says the projection is missing instead of calling the project synced.
+    #[test]
+    fn status_reports_an_object_gc_removed() {
+        use crate::comforter::status::State;
+        use crate::tailors::Tailor as _;
+        let scratch = crate::kernel::testutil::TempDir::named("cargo-status-gone");
+        let project = scratch.0.join("project");
+        std::fs::create_dir_all(project.join(".tog/cargo-home")).unwrap();
+        std::fs::write(project.join("Cargo.lock"), "").unwrap();
+        let present = scratch.0.join("rust");
+        std::fs::create_dir_all(&present).unwrap();
+        let body = |vendor: &Path| {
+            serde_json::json!({
+                "rust_object": {"path": present.display().to_string()},
+                "vendor_object": {"path": vendor.display().to_string()},
+                "cargo_lock_sha256": hex::encode(Sha256::digest(b"")),
+            })
+        };
+        let held = crate::kernel::fsroot::ProjectRoot::open(&project).unwrap();
+        let state = |body: &serde_json::Value| {
+            super::tailor::Cargo
+                .closure_state(Platform::X86_64UnknownLinuxGnu, &held, "cargo", body)
+                .unwrap()
+        };
+        assert_eq!(state(&body(&present)), State::Synced);
+        assert_eq!(
+            state(&body(&scratch.0.join("gone"))),
+            State::ProjectionMissing("vendor_object object".into())
+        );
+    }
+
     /// The shipped Rust selection: what a run with no lock to honor is
     /// handed, and the only thing these tests need a `Selected` for.
     fn selection() -> Selected {
