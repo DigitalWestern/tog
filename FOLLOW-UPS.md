@@ -115,7 +115,6 @@ After the proxy: the test-suite audit (#351) and then the quality review
   - #246 left: move the recipe checks in `kernel/provider` (cpython, rust, rust_path) onto `Selected::checked_artifact`. Deferred because those files wake the heavy suite.
   - #248 sandbox and gitsrc: collapse the _with_activity twin of every entry point.
   - #413 x clean: delete before unregister, corrupt registry entries, pathname ownership reads (from the #408 review).
-  - #250 python manifest: four requirements include walkers; uv.lock silently drops edges; pypi host check is a substring.
   - #261 perf: every sync parses every metadata record before starting.
   - #251 commands: one project-discovery function; tog <script> and tog run <script> disagree.
   - #252 commands: sbom, ls and store path create the store; sbom refuses closures from another platform.

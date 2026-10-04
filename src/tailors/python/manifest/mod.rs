@@ -662,6 +662,24 @@ source = { registry = "https://pypi.org/simple" }
                 "wheels = [\"not a table\"]\n",
                 "uv.lock six wheel is not a table",
             ),
+            // An edge that does not parse is refused, not dropped: the
+            // environment would silently lack the package.
+            (
+                "dependencies = [{ version = \"1\" }]\n",
+                "uv.lock six.dependencies has an unreadable entry: { version = \"1\" }",
+            ),
+            (
+                "optional-dependencies = { socks = \"pysocks\" }\n",
+                "uv.lock six.optional-dependencies.socks is not an array",
+            ),
+            (
+                "optional-dependencies = { socks = [7] }\n",
+                "uv.lock six.optional-dependencies.socks has an unreadable entry: 7",
+            ),
+            (
+                "optional-dependencies = \"none\"\n",
+                "uv.lock six.optional-dependencies is not a table",
+            ),
         ] {
             let error = parse_uv_lock(&format!("{base}{tail}"))
                 .expect_err(message)
@@ -1973,6 +1991,86 @@ files = [{ file = "old.whl", hash = "sha256:dddddddddddddddddddddddddddddddddddd
         fs::write(&child, "six==2.0\n").unwrap();
         let new = requirements_tree_hash(&ProjectRoot::open(&dir.0).unwrap(), &top).unwrap();
         assert_ne!(old, new);
+    }
+
+    #[test]
+    fn public_pypi_is_an_exact_host() {
+        for url in [
+            "",
+            "https://pypi.org/simple",
+            "https://files.pythonhosted.org/packages/x.whl",
+        ] {
+            assert!(uv::is_public_pypi_url(url), "{url}");
+        }
+        for url in [
+            "https://pypi.org.internal.example/simple",
+            "https://mirror.example/://pypi.org/simple",
+            "https://evilpypi.org/simple",
+            "not a url",
+        ] {
+            assert!(!uv::is_public_pypi_url(url), "{url}");
+        }
+    }
+
+    #[test]
+    fn every_requirements_include_reader_refuses_the_same_broken_includes() {
+        // Discovery and the tree hash walk the same includes, so a missing
+        // file or a bare `-r` is an error in both, not skipped in one.
+        for (top_text, message) in [
+            ("-r missing.txt\n", "included requirements file is missing"),
+            ("-r\n", "requirements include is missing its file argument"),
+            ("-r requirements.txt\n", "requirements include cycle"),
+        ] {
+            let dir = temp_project("broken-includes");
+            let top = dir.0.join("requirements.txt");
+            fs::write(&top, top_text).unwrap();
+            let project = ProjectRoot::open(&dir.0).unwrap();
+            let error = requirements_tree_hash(&project, &top)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(message), "{error}");
+            let error = discover(
+                Platform::X86_64UnknownLinuxGnu,
+                &project,
+                crate::tailors::python::pyselect::DEFAULT_VERSION,
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(error.contains(message), "{error}");
+        }
+    }
+
+    #[test]
+    fn a_file_both_required_and_constrained_lists_its_index_options_once() {
+        let _attribution_lock = crate::kernel::policy::exception_guard();
+        let _attribution = crate::kernel::policy::Attribution::open("python").unwrap();
+        let dir = temp_project("index-options-once");
+        fs::write(
+            dir.0.join("requirements.txt"),
+            "-r shared.txt\n-c shared.txt\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.0.join("shared.txt"),
+            "--extra-index-url https://mirror.example/simple\nsix\n",
+        )
+        .unwrap();
+        let manifest = discover(
+            Platform::X86_64UnknownLinuxGnu,
+            &ProjectRoot::open(&dir.0).unwrap(),
+            crate::tailors::python::pyselect::DEFAULT_VERSION,
+        )
+        .unwrap();
+        assert_eq!(manifest.normalized_requirements_text(), "six\n");
+        assert_eq!(manifest.constraints_text(), "six\n");
+        assert_eq!(
+            drained_records(),
+            [record(
+                crate::kernel::policy::UNATTESTED_INDEX,
+                "--extra-index-url https://mirror.example/simple",
+                "requirements index/find-links options are recorded but never followed"
+            )]
+        );
     }
 
     #[test]
