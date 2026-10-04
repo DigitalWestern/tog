@@ -86,8 +86,10 @@ const SPARSE_SOURCE: &str = "sparse+https://index.crates.io/";
 
 /// Parse the complete Cargo.lock closure into a registry-only vendor plan.
 pub fn plan_cargo(lock_toml: &str, rust_version: &str) -> io::Result<CargoPlan> {
-    let lock =
-        toml::from_str::<CargoLock>(lock_toml).map_err(|e| err(format!("Cargo.lock: {e}")))?;
+    // The lock is read through the project's descriptor, which follows a
+    // symlink: the error names the position only, never the bytes.
+    let lock = toml::from_str::<CargoLock>(lock_toml)
+        .map_err(|e| super::cargo_door::toml_refusal("Cargo.lock", lock_toml, &e))?;
     let version = lock.version.ok_or_else(|| {
         err("Cargo.lock has no version (v1/v2-era lockfile); run cargo update or regenerate the lockfile")
     })?;

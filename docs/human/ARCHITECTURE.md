@@ -232,6 +232,22 @@ but gc's live-set walk skips it, and a `tog fmt` without `--check` deletes it
 once another closure sits beside it (a root over an empty closures
 directory stops every sweep, and forgetting it needs the exclusive lease).
 
+Every cargo run that resolves (`tog add`/`remove`/`update`, a missing
+`Cargo.lock`, `tog attest`, and the `Cargo.lock` of a Python sdist's Rust
+extension) goes through the resolution door, confined, at the workspace
+root (`kernel/provider/cargo_door.rs`). cargo reaches the network only
+through the proxy session, with TLS interception: the proxy terminates
+cargo's tunnels with a leaf from tog's per-process certificate authority,
+serves crates.io through the `crates_index` route (each index line's
+`cksum` is a claim the `.crate` download is verified against), forwards
+git fetches through the git row, and forwards any other host as
+`unattested-index`. The lock records crates.io as
+`registry+https://github.com/rust-lang/crates.io-index` whatever the
+transport, so a lock written through interception is byte-identical to a
+direct run. Cargo's resolution outputs are the root `Cargo.toml` and
+`Cargo.lock` plus every member manifest `[workspace] members` names; its
+inputs are `.cargo/config.toml` and `.cargo/config` at the root.
+
 `targets`, `components` and `profile` in `rust-toolchain(.toml)` are lock
 rows (`toolchain.targets`, `toolchain.components`, `toolchain.profile`):
 lists sorted and deduplicated, each written only when present, so a lock
@@ -830,6 +846,10 @@ and build inputs tailors share, so no tailor reaches into another):
                     the channel manifest), rust_path.rs (a local toolchain
                     directory), crates.rs (Cargo.lock
                     vendoring; sdists with Rust extensions too),
+                    crates_index.rs (crates.io's sparse index as a
+                    resolution-proxy route) and cargo_door.rs (the store
+                    cargo confined through the resolution door, for the
+                    Cargo tailor and Python's sdist Cargo.lock),
                     nativelibs.rs (the Linux native library set), artifacts.rs
                     (install-time artifact policy)
     ui.rs           output conventions: quiet/verbose/color, error channel
@@ -893,6 +913,9 @@ when the two differ.
     cargo/mod.rs           project Cargo env + sandboxed build over
                            kernel/provider/{rust,crates}.rs
     cargo/inputs.rs        toolchain resolution, workspace root, missing-lock generation
+    cargo/edit.rs          `tog add`/`remove`/`update` through the edit door
+    cargo/resolve.rs       resolution outputs and inputs, the missing-lock and
+                           `tog attest` doors at the workspace root
     cargo/rustfmt.rs       pinned formatter component for `tog fmt`
     go/mod.rs              module closure via the pinned Go toolchain
     go/inputs.rs           toolchain selection from go.mod, the GoPlan

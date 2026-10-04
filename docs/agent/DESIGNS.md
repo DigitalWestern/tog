@@ -897,7 +897,7 @@ ledger. "Runs code" is what the tool executes besides itself.
 Not doors: tog's own downloads (`kernel::fetch`, `kernel::gitsrc`, the
 `Tailor::registry_exists` check `tog add` makes) are tog code with tog
 verification. Host-local helpers (`tar`, `getconf`, `id`,
-`cargo locate-project --offline`, the Go module extraction
+the Go module extraction
 `go mod download path@version...` with the full offline environment, the
 Elixir helper's `hexmark` mode, the staged-OTP `erl` probe, the Ruby
 helper's `spec` read of a verified `.gem`) need no network. A planner row that needs
@@ -1698,7 +1698,7 @@ under the seccomp filter.
 |---|---|---|---|
 | npm | `--git=<store git>`, `--script-shell=<store sh>`, `--shell=<store sh>`, `--ignore-scripts`, `--node-options=`, `--node-gyp=` (a nonexistent path), `--editor`, `--browser`, and `--viewer` set to `false` | `git` (the lock-only install of a git dependency runs it). `script-shell`, `shell`, `node-gyp`, `editor`, `browser`, `viewer`, and `node-options` did not fire, and a git dependency's `prepare` script did not run under `--ignore-scripts` | no marker ran, exit 0 |
 | pnpm | `--config.script-shell=<store sh>`, `--config.shell-emulator=false`, `--config.git-shallow-hosts=`, `--ignore-scripts`, `--config.node-options=`, and **added by PR 0**: `--config.pnpmfile=.pnpmfile.cjs`, `--config.global-pnpmfile=`, `--config.manage-package-manager-versions=false` (the last from pnpm's docs: otherwise pnpm may download another pnpm named by `packageManager`). A `.pnpmfile.cjs` is project code pnpm runs by design, so it is left on (turning it off would change the lock) and the tier contains it | `pnpmfile` and `global-pnpmfile` (both name a JavaScript file pnpm loads). `script-shell` and `node-options` did not fire | only the by-design `.pnpmfile.cjs` ran, exit 0 |
-| cargo | `--config build.rustc=<store rustc>`, `build.rustc-wrapper=""`, `build.rustc-workspace-wrapper=""`, `build.rustdoc=<store rustdoc>`, `registry.global-credential-providers=["cargo:token"]`, `registries.<name>.credential-provider=["cargo:token"]` for every registry in the config, `net.git-fetch-with-cli=true` with the forced git below. `target.<triple>.runner` and `.linker` stay unset | `build.rustc`, `build.rustc-wrapper`, and `build.rustc-workspace-wrapper` in `cargo metadata` (it asks rustc for target info), not in `generate-lockfile`. Both credential-provider forms, against a registry whose `config.json` says `auth-required`. `build.rustdoc`, `runner`, and `linker` never fired (proved: resolution never reads them) | no marker ran. The authenticated registry then fails (exit 101, `cargo:token` has no token), which is the intended outcome. Without that dependency, exit 0 |
+| cargo | `--config build.rustc=<store rustc>`, `build.rustc-wrapper=""`, `build.rustc-workspace-wrapper=""`, `build.rustdoc=<store rustdoc>`, `registry.global-credential-providers=["cargo:token"]`, `registry.credential-provider="cargo:token"` (crates.io's own slot), `registries.<name>.credential-provider="cargo:token"` for every registry in the config (strings, since PR 5: cargo concatenates a `--config` array with a config-file array, so an array let the project's provider run after ours; the global slot must stay a list, and a project that sets it, or a per-registry slot, as an array now stops cargo with a merge error, which fails closed), `net.git-fetch-with-cli=true` with the forced git below. `target.<triple>.runner` and `.linker` stay unset | `build.rustc`, `build.rustc-wrapper`, and `build.rustc-workspace-wrapper` in `cargo metadata` (it asks rustc for target info), not in `generate-lockfile`. Both credential-provider forms, against a registry whose `config.json` says `auth-required`. `build.rustdoc`, `runner`, and `linker` never fired (proved: resolution never reads them) | no marker ran. The authenticated registry then fails (exit 101, `cargo:token` has no token), which is the intended outcome. Without that dependency, exit 0 |
 | uv | `--keyring-provider disabled`, `--no-python-downloads`, `--python <store python>` (on both `lock` and `pip compile`, replacing `UV_PYTHON`, which `pip compile` ignores), `--no-config` plus the project's `[tool.uv]` read by tog and passed as flags | `keyring-provider = "subprocess"` in `[tool.uv]` (runs `keyring` from `PATH`), and `python = ...` in `[tool.uv.pip]` (runs the named interpreter). A `.python-version` naming a program did not fire. `--no-config` alone drops `[tool.uv]` settings but keeps `[[tool.uv.index]]` and `[tool.uv.sources]`, so tog must still read those itself | no marker ran, exit 0 |
 | git | carried in `GIT_CONFIG_COUNT`/`KEY`/`VALUE` (the tools start git, so `-c` flags cannot reach it): `credential.helper=`, `core.fsmonitor=false`, `core.hooksPath=/dev/null`, `core.sshCommand=false` with `GIT_SSH_COMMAND` unset, `protocol.allow=never`, `protocol.https.allow=always`, `protocol.file.allow=always`, and **added by PR 0**: `protocol.ext.allow=never`, `protocol.ssh.allow=never`, `protocol.git.allow=never`, `protocol.http.allow=never`, `core.gitProxy=`; also `uploadpack.packObjectsHook=`, `core.askPass=false` with `GIT_ASKPASS` and `SSH_ASKPASS` unset, and `GIT_CONFIG_NOSYSTEM=1` with `GIT_CONFIG_GLOBAL=/dev/null` | `core.fsmonitor` (`status`), `core.sshCommand` (an `ssh://` remote), `core.gitProxy` (a `git://` remote), `credential.helper` and `core.askPass` (a 401 from an https remote), `core.hooksPath` (`commit`), and `protocol.ext.allow=always` (an `ext::` remote runs its command) | the design's set still ran the `ext::` marker: a repository's own `protocol.ext.allow=always` beats `protocol.allow=never`, which is only the default for unlisted protocols. With the per-protocol `never` entries above, no marker ran |
 | go | the census environment is built from empty: `GOFLAGS=-mod=mod`, `GOTOOLCHAIN=local`, `GOVCS=*:off` (modules come only through GOPROXY), `GOPROXY` the mirror with no `direct`, `GONOSUMDB=` and `GOPRIVATE=` unset, `CC` and `CXX` unset with `CGO_ENABLED=0`, and **added by PR 0**: `GOENV=off` (so a user `go.env` cannot set any of these), `GOAUTH=off`, `GOCACHEPROG` unset | `GOCACHEPROG` (go runs it as the build cache), `GOVCS` allowing git with `GOPROXY=direct` (runs `git` from `PATH`), and a `toolchain go1.99.0` line in `go.mod` under `GOTOOLCHAIN=auto` (requests `golang.org/toolchain/@v/v0.0.1-go1.99.0.linux-amd64.zip` from the mirror). `GOFLAGS=-toolexec=...`, `GOAUTH=command ...`, `CC`, and `CXX` did not fire in `go mod tidy`/`download` | no marker ran, no toolchain request, exit 0 |
@@ -2566,8 +2566,9 @@ Contract 1 needs enforcement, not review alone:
   and admits no other, so a caller cannot add `LD_PRELOAD`,
   `LD_LIBRARY_PATH` or a tool setting outside the checked families. The Ruby and Elixir forms check the tailors' own scrub
   lists, which live in the tripwire and which the tailors alias. The
-  forms: `cargo locate-project --workspace --message-format plain
-  --offline` with `RUSTUP_HOME` and `RUSTUP_TOOLCHAIN` removed; `go mod
+  forms (the Cargo tailor's `cargo locate-project` form was removed in
+  PR 5: tog finds the workspace root itself and no cargo runs on the
+  host): `go mod
   download path@version...` with `GOROOT` the program's own toolchain,
   `GOPROXY`, `GOSUMDB`, `GOTOOLCHAIN`, `GOENV`, `GOWORK`, `GOVCS` and
   `GOAUTH` set off or local by the command, `GOFLAGS`, `GONOPROXY`,
@@ -3360,6 +3361,330 @@ lock URLs.
 (`rcgen` and rustls server, `ring` provider pinned), and the git row.
 Switch cargo (interception plus git) and the sdist
 `cargo generate-lockfile` in `tailors/python/build.rs`. Cargo `attest`.
+
+**PR 5 as built (Linux, 2026-10-03).** Decisions made building
+interception and the cargo switch, each the flexible option:
+
+- **One CA per process, written per session.** `kernel/resolve/ca.rs`
+  holds one ECDSA P-256 authority (via `ring`), its key only in memory.
+  Each intercepting session writes the certificate `0600` into its
+  session directory, bound read-only into the sandbox. Leaves are minted
+  per SNI name and cached as rustls server configs, all sharing one leaf
+  key. Validity is one day before today to 30 days after, which only
+  absorbs clock skew (the sandbox shares the host clock). The server
+  offers only `http/1.1` ALPN, with the `ring` provider pinned.
+- **CONNECT is authenticated once per tunnel.** A `CONNECT` without the
+  session token gets 407 with `Proxy-Authenticate: Basic` (git retries
+  with the credentials from `http.proxy`), and the tunnel is bound to
+  that session. The `CONNECT` itself is not a ledger entry; the requests
+  inside it are. `Expect: 100-continue` is answered.
+- **Three classes of intercepted request.** A route host's request
+  passes the route's own grammar (`Route::resolve`): a path the route
+  would serve from another URL, or not at all, is 403, so a tunnel
+  cannot reach paths the mirror form would refuse. Git smart-HTTP
+  fetches (`info/refs?service=git-upload-pack`, `git-upload-pack`, and
+  the `api.github.com` commit lookup cargo makes) are forwarded and
+  recorded as git. Anything else is forwarded and recorded unattested.
+  Redirects for git and unattested requests must stay on the same
+  origin. Every request goes through the same permitted set, ledger,
+  redaction, and SSRF checks as a mirror read.
+- **The git row.** `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null`,
+  `GIT_TERMINAL_PROMPT=0`, and `GIT_CONFIG_COUNT`/`KEY`/`VALUE` carrying
+  `http.proxy` (with the token), `http.sslCAInfo`, `http.sslVerify=true`,
+  `ssh://` to `https://` rewrites for every host plus the scp form for
+  github.com, gitlab.com, bitbucket.org, and codeberg.org, and the
+  `protocol.*.allow` set (`https` and `file` always, everything else
+  never). A `git-dependency` exception is denied only by policy at run
+  time, as before.
+- **Cargo's protocol and door live in the kernel provider**
+  (`kernel/provider/crates_index.rs`, `kernel/provider/cargo_door.rs`),
+  because both the cargo tailor and the Python sdist build use them and
+  one tailor may not name another. The crates route serves
+  `index.crates.io` (sparse index, `config.json`) and
+  `static.crates.io` (downloads), and claims each download by the
+  index line's `cksum`.
+- **The cargo row.** `--config http.proxy`, `--config http.cainfo`, the
+  forced settings (credential providers as strings, see the forced
+  table), `net.git-fetch-with-cli=true`, `CARGO_HOME` in scratch,
+  `CARGO_NET_OFFLINE=false`, `PATH` of the store Rust's `bin` then
+  `/usr/bin:/bin` (host git for git dependencies), `RUSTUP_*` removed.
+  Alternative registries are read from both `.cargo/config.toml` and
+  `.cargo/config` so each gets its forced provider.
+- **The lock root is the workspace root.** Outputs are the root
+  manifest, `Cargo.lock`, and every member manifest the `[workspace]`
+  `members` globs name (`exclude` applied as cargo applies it, each
+  entry placed lexically, one outside the root handled like an
+  out-of-root path dependency).
+  Inputs are the two `.cargo` config spellings. A member edit runs at the
+  root with `--manifest-path`. `target/` is excluded from the snapshot.
+- **Path dependencies outside the root are read roots.** Found from every
+  manifest under the root and, transitively, theirs: the dependency
+  tables (also under `target.*` and `[workspace]`), `[patch]`, and
+  `[replace]`. `[lib]`/`[[bin]]` paths and missing paths are ignored, so
+  cargo reports a missing one itself. The manifest does not choose host
+  directories: each root must lie inside the nearest ancestor holding
+  `.git` (else the lock root's parent), with no hidden component between
+  them, and must not contain the lock root. A bound of `/` or `$HOME` is
+  refused. Each refusal is an error naming the manifest and the path
+  (`path_dependencies_outside_the_boundary_are_refused`). The flexible
+  alternative, any existing directory, would let a cloned project copy
+  `~/.ssh` or `../.cargo/credentials.toml` into the sandbox, where an
+  unattested request could carry it out. `target` is excluded from the
+  snapshot, anchored at the root.
+- **Cargo `attest`** is `cargo metadata --locked --format-version 1` at
+  the workspace root through a verification door that requires the lock
+  and manifests unchanged and publishes nothing. From a member it is
+  refused, naming the root. The closure names its `resolution_basis`
+  (digests of the outputs and inputs, the lock taken from the planned
+  bytes), which the join requires.
+- **The sdist lock goes through the door.** `tailors/python/build.rs`
+  runs `cargo generate-lockfile` confined, `Detached`, in a reopened
+  missing-lock door. Its ledger is kept on the door
+  (`ResolutionDoor::keep_ledger`) and the Python sync roots it under the
+  project. `tog plan`'s sdist ledgers stay unrooted (no sync to root
+  them), and the Python closure does not list them in `ClosureRefs` yet.
+- **Contract 8 is tested.** `cargo_lock_through_interception_matches_direct_run`
+  generates the same lock through the door and through a blind CONNECT
+  forwarder to the same fixture registry, and asserts byte equality.
+  The fixture rows are filtered to the ones whose stored body matches
+  its sha (`testing::stored_rows`): the cargo `ryu` index body and the
+  git upload-pack body were not stored, so a git dependency through
+  cargo has no offline test, only the git row's unit test.
+- **Review fixes (Codex GPT 6.1 Sol, 2026-10-03).** Each the flexible
+  option that still fails closed:
+  - *No cargo runs on the host; the signing key is refused by inode.*
+    The first fix (a `host_preflight` that checked the paths a host
+    `cargo locate-project` would read) kept missing cases: a
+    `Cargo.toml` hard-linked to the key (no symlink, a path inside the
+    repository) and a `CARGO_HOME` config that `include`s the key both
+    passed it, and cargo quoted the key in its TOML error. The fix
+    removes the reader instead of guarding it:
+    - `inputs::locate_cargo_root` is tog's own walk of the manifests,
+      cargo's algorithm (the nearest `Cargo.toml`, then the root its
+      `package.workspace` names, else itself if it holds `[workspace]`,
+      else the nearest ancestor whose `[workspace]` does not exclude it
+      unless it lists it as a member, else its own directory). Sync,
+      edit, attest and fmt call it before realizing anything. Its reads
+      refuse a manifest that is the key by `(dev, ino)` and name a parse
+      error's line and column only.
+    - `host_preflight` is gone, and so is the tripwire's one cargo
+      offline form: `local_*` now refuses every host cargo, the store's
+      included, so no later call site can bring one back unreviewed.
+    - "Is the signing key" is decided by `(dev, ino)` everywhere it is
+      asked (`confine::signing_key_ids`): `cargo_door::Bound`, the
+      manifest walk, and the door's stage, where `Snapshot::build`
+      checks every copied file's inode (any depth, hidden directories
+      included) and refuses the run before the tool starts.
+    - `tog fmt` runs `cargo-fmt` in the workspace itself, in a sandbox
+      that mounts the workspace and the store objects only (the user's
+      home is not there, `CARGO_HOME` is scratch). Before it starts,
+      `confine::refuse_key_links_under` walks the whole workspace it
+      mounts (all depths, hidden and `target` included, symlinks not
+      followed) for a hard link to the key, and the config cargo-fmt's
+      cargo reads (the invocation directory up to the workspace root,
+      includes followed) is read through a `Bound`, so a config that is
+      the key or leads out of the workspace is refused by name.
+    - As a last layer, the key's secret is replaced
+      (`confine::scrub_signing_key`) in the cargo stderr tog relays
+      (`run_cargo_checked`, attest's refusal, the sdist lock), in
+      everything `ui` prints (errors, warnings, notes, and panics, which
+      go through the error channel in every mode), and in every byte a
+      sandboxed child writes: `supervise::status_with_stderr` (builds,
+      fmt, inherited-output doors) pipes stdout and stderr and passes
+      both on through a `Relay`, a line at a time, holding each line
+      until the next arrives or the child goes quiet. The match is any
+      run of 10 or more of the secret's characters, with a line break
+      and its gutter (spaces, tabs, `|`) skipped, so a secret cut across
+      reads or split across two lines goes in both parts whatever their
+      length. The secret is read once per process. A probe found
+      tog's own parsers quoting it too: a `rust-toolchain.toml`,
+      `rust-toolchain`, `tog-toolchain.toml` or `.tog/policy.toml` that
+      is a hard link to the key printed it from sync, attest, add and
+      fmt. The scrub covers those; `project_files_hard_linked_to_the_signing_key_never_echo_it`
+      holds it.
+    Sol's three further cases, each decided under that bound: a member
+    in a hidden directory and a member 13 levels deep are copied into
+    the stage like any file and refused there by inode (the stage has no
+    depth limit; `manifests_under`'s depth 12 bounds only the search for
+    out-of-root path dependencies, which a hard link cannot exploit). A
+    member through a symlinked directory is staged as the symlink and
+    its target is not mounted, so the confined cargo cannot read it; it
+    would resolve without the member (a probe showed `tog add` publishing
+    such a lock), so every confined run on that workspace (lock
+    generation, edits, attest, the sdist lock) refuses it by name, and a
+    sync from the committed lock, which runs no cargo, still works.
+    `tog build` and `tog run` still run the
+    project's cargo (they execute the project anyway, sandboxed for
+    build) and are left as they are. A TOML error in tog's own cargo
+    readers names a line and column only (`Cargo.lock` too). Other
+    parsers (policy, Python manifests, the toolchain files) still quote
+    the line they fail on, which the scrub catches for the key; making
+    them position-only too is a follow-up.
+  - *Third Sol pass (2026-10-03).*
+    - *Member globs as cargo expands them.* `cargo_door::expand` follows the
+      `glob` crate's default rules that cargo uses (`*`, `?` and `[...]`
+      within a name, `**` across directories, a wildcard matching a
+      leading `.`, `target` like any directory), checked against
+      `cargo metadata` on 1.98.1. It does not follow symlinks, so it needs
+      no depth limit; a symlinked directory it would enter is reported and
+      refused as above. The earlier matcher skipped hidden directories
+      and stopped at depth 8, silently leaving members out of the record.
+      Adding the `glob` crate itself was the alternative; the matcher is
+      about 100 lines and adds no dependency.
+    - *The path-dependency boundary takes the host as input*
+      (`cargo_door::Host`: the home directory and a ceiling for the
+      `.git` search), so its tests do not depend on a `.git` above the
+      temporary directory.
+    - *The confidentiality tests reach what they test.* The offline CLI
+      test covers the files tog parses before any download and asserts
+      the redaction marker. Everything that needs the toolchain (the
+      symlinked config, the `target/key` alias, the `CARGO_HOME`
+      include, the toolchain files for `add`, the hidden-deep and
+      symlinked members) runs in `cargo_e2e` against the real toolchain
+      and asserts the refusal text, or success, and no seed byte.
+  - *Fourth Sol pass (2026-10-03).*
+    - *The relay is one blocking reader per pipe.* The `Relay` above
+      drained each pipe until `WouldBlock`, stderr first, and flushed its
+      held line on any pause, so a secret written a few characters per
+      line with sleeps between went out whole, and a child flooding
+      stderr while its stdout pipe was full hung. Now
+      `supervise::status_with_stderr` starts a thread per pipe, each
+      blocking on its own stream, and the supervising thread keeps the
+      child and the signals as `status` does. Each stream has its own
+      `keyscrub::Scrubber`, which matches as a stream: it holds back only
+      the tail that could still be part of a match (at most a secret's
+      length with its gutters), keeps what it passed on as context, and
+      releases bytes only when they can no longer match, or at EOF. Never
+      on a timer or a pause. A gutter longer than 16 bytes ends a match,
+      which bounds the hold. Per-stream order is kept. The order between
+      stdout and stderr is not promised. The 4096-byte stderr prefix
+      returned for the sandbox failure classifier is taken from the
+      scrubbed bytes, so an error that quotes it cannot carry the key
+      either. One visible effect: a line that
+      ends in hex characters is held until more output or EOF. The scrub
+      moved to `resolve/keyscrub.rs` (confine.rs was over its size budget),
+      re-exported from `confine`.
+    - *An explicit member wins over `exclude`.* `cargo_door::excluded` is
+      cargo's `WorkspaceRootConfig::is_excluded`: a member is left out when
+      its manifest's path is under an `exclude` entry and under no
+      `members` entry, each entry as written and joined to the root,
+      compared a whole component at a time. `members = ["a"]` with
+      `exclude = ["a"]` keeps `a`, and an explicit `sub` keeps a
+      glob-reached `sub/inner` that `exclude` names (checked against
+      `cargo metadata`).
+    - *Members entries are placed, not dropped.* `member_pattern`
+      normalizes an entry the way cargo does (joined to the root,
+      lexically: absolute taken as is, `.` dropped, `..` taking off the
+      part before it). Inside the root it is expanded. Outside it
+      (`../shared`, an absolute path elsewhere, a glob there) it is an
+      external member, handled exactly like an out-of-root path dependency
+      (the round 1 call): `path_dependency_roots` adds it, so it is held to
+      the same boundary (inside the repository, not hidden, not containing
+      the root) and becomes a read root of the confined doors, which
+      publish without a receipt (`unrecorded-resolution` at sync). A sync
+      from the committed lock works. `tog attest` refuses it by name. It
+      is not an output, since a record names files inside the workspace
+      only. An entry whose `..` would take off a wildcard (only the disk
+      could resolve that) is refused by name before any cargo runs.
+      Before, all of these entries vanished from the outputs silently.
+      `an_external_workspace_member_is_read_like_an_external_path_dependency`
+      runs it with the real toolchain.
+    - *Deferred.* tog canonicalizes the project root, and an entry is
+      placed against that path. An absolute member written through
+      another spelling of the root (a symlinked home, say) is therefore
+      taken as outside the root, so attest refuses it and the doors
+      publish without a receipt, where cargo treats it as an ordinary
+      member. That fails closed. Placing absolute entries against the
+      root as the user spells it too is the follow-up.
+    - *Glob parts are the `glob` crate's.* The third pass kept a
+      hand-written matcher to avoid a dependency. It refused `[**]`, which
+      cargo reads as a class holding `*`. Each name part is now a
+      `glob::Pattern` (rust-lang/glob 0.3, cargo's own) matched with
+      cargo's options. The walk stays tog's and follows no symlink. The
+      repo has no cargo-deny or audit config to update.
+    - *The e2e test asserts every step.* No result is ignored. The
+      linked member's committed-lock sync must succeed. The deep
+      member's sync must be refused by name, because sync reads every
+      member manifest for its digest. fmt and `fmt --all` must succeed
+      and format the fixture's one-line `main.rs`. Every output is
+      checked for any 10-character piece of the seed, not only the whole
+      seed.
+  - *Fifth Sol pass (2026-10-03).*
+    - *A glob that matches nothing is its literal path* (replaced by the
+      superset rule of the sixth pass, below). cargo falls back
+      to the literal path when a members glob matches nothing at all
+      (`members_paths` in 1.98). `cargo_door::expand_or_literal` does the
+      same, so `members = ["crates/a[1]"]` names the directory
+      `crates/a[1]` when there is no `crates/a1`. A pattern that matched
+      only a file names nothing, as in cargo. The literal path is walked
+      under the walk's rules: through a symlinked directory it is refused
+      like any symlinked member. External members get the same fallback,
+      then the path-dependency rules. The test signs a receipt and
+      requires it to go stale when that member's manifest changes.
+    - *No edits from a member outside the root.* An edit runs a confined
+      cargo at the workspace root, which cannot name a member outside it,
+      so without a manifest path it would edit the root package.
+      `edit::member_manifest` refuses an edit run in such a member before
+      anything is realized, naming the member and the workspace. The
+      error says to run cargo in the member directly or to move the
+      member inside the workspace.
+    - *A failed relay wakes the supervisor.* Each reader holds a
+      `RelayWake` (a shared flag and its own copy of the session's
+      self-pipe write end) that fires on a read error or a panic. The
+      loop checks the flag before and after `forward_pending` drains the
+      pipe, so no wakeup is lost. On any failure the child is killed and
+      reaped, and every path joins both readers before the session and
+      the activity borrow end. A grandchild that keeps a pipe open still
+      keeps its reader waiting. That is an existing limitation, left as
+      is.
+  - *Sixth Sol pass (2026-10-03): the superset rule.* The literal-path
+    fallback above was the third glob-fidelity gap in a row: with
+    `members = ["crates/a[1]/"]`, a file `crates/a1` made tog count a
+    match, while cargo's trailing slash keeps it to directories, so cargo
+    fell back to the literal member and the receipt missed it. cargo takes
+    the literal path when the glob's unfiltered result is empty, and it
+    does not check the literal exists (`members_paths` in 1.98). Rather
+    than mirror each decision, the rule is now: **receipt coverage is
+    never smaller than cargo's member set, and covering an extra manifest
+    is acceptable.** `cargo_door::expand_or_literal` lists the glob's
+    directory matches and always also the entry's literal path, when that
+    is a directory holding a `Cargo.toml`, whether or not the glob matched
+    anything. The literal path goes through the same symlink, exclusion
+    and outside-root rules. An over-included manifest is only ever an
+    extra output, so it can make a receipt stale early but never let a
+    change slip through. The walk lists directories only, so a trailing
+    slash changes nothing it lists. The "did the glob match" flag is gone.
+    The fallback decision it fed no longer exists.
+  - *Config includes.* `include = [...]` (paths or `{ path, optional }`,
+    relative to the including file, transitive) is expanded from the
+    bounded files: every registry declared there gets the forced
+    provider, every included file is a receipt input, and an include
+    that leaves the lock root is refused.
+  - *Implicit members.* The outputs walk the path dependencies (with
+    `[patch]` and `[replace]`) of the root package and every listed
+    member, transitively; each inside the workspace is named, so a
+    change there stales the record and an edit there publishes. A path
+    dependency outside the workspace cannot be named by a record (plain
+    project-relative paths only): attest refuses that workspace, and the
+    other doors publish the lock without a receipt. Representing outside
+    inputs in the record is the alternative, deferred because it needs a
+    record format change every verifier must learn.
+  - *Redirect hops are reauthorized.* `Exchange::hop` classifies every
+    hop with the method it would be sent with, as the first request was:
+    a push is refused on any hop, and a hop whose class differs answers
+    to the new class's policy (`git-dependency`, or `unattested-index`,
+    recorded like a first request). Mirror routes keep the permitted set
+    alone. The portable ledger entry gains `redirected_to` (the last hop,
+    redacted), absent without a redirect so existing ledgers keep their
+    bytes and ids.
+  - *No swap between check and copy.* The cargo door hands the snapshot
+    the canonical roots it checked; the snapshot refuses an extra root
+    that no longer resolves to itself and opens every root one component
+    at a time from `/` with `O_NOFOLLOW`.
+  - *The git test proves the body.* The fixture upstream records bodies
+    and can require bytes (400 otherwise): the git-row test requires
+    `ls-refs`' negotiation, and a gzip-encoded POST redirected by 307 to
+    another `upload-pack` reaches both hops byte for byte.
 
 **PR 6: Node.** npm and pnpm (edit, missing lock, `x`, `attest`), with the
 byte-identical-lock tests and the corrected pnpm flags.

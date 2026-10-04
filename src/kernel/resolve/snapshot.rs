@@ -28,6 +28,7 @@
 //! discarded. Anything else, and always a new `.git`, a change under
 //! `.git/hooks`, or a change under `.tog`, fails the door naming the paths.
 
+use super::confine::FileId;
 use crate::kernel::activity::StoreActivity;
 use crate::kernel::store::{self, Store};
 use sha2::{Digest, Sha256};
@@ -168,6 +169,9 @@ pub struct SnapshotSpec<'a> {
     pub extra_roots: &'a [PathBuf],
     /// Paths, relative to each root, that are neither copied nor diffed.
     pub exclude: &'a [PathGlob],
+    /// Files never copied, by identity (`confine::signing_key_ids`): a
+    /// hard link to the signing key anywhere in a root fails the snapshot.
+    pub forbidden: &'a [FileId],
 }
 
 /// One snapshotted tree.
@@ -237,6 +241,7 @@ impl Snapshot {
             let mut walk = Walk {
                 exclude: &snapshot.exclude,
                 entries: &mut snapshot.baseline,
+                forbidden: spec.forbidden,
             };
             walk.copy_root(&real, &staged)?;
             snapshot.roots.push(Root { real, staged });
@@ -283,6 +288,7 @@ impl Snapshot {
             let mut walk = Walk {
                 exclude: &self.exclude,
                 entries: &mut after,
+                forbidden: &[],
             };
             walk.scan_root(&root.real, &root.staged)?;
         }
@@ -510,7 +516,22 @@ fn normalize_roots(lock_root: &Path, extra: &[PathBuf]) -> io::Result<(Vec<PathB
     let lock = canonical(lock_root)?;
     let mut all = vec![lock.clone()];
     for root in extra {
-        all.push(canonical(root)?);
+        // An extra root arrives as the canonical path its caller checked
+        // (the cargo door's path-dependency bound): one that resolves
+        // elsewhere now was swapped after that check.
+        let real = canonical(root)?;
+        if root.is_absolute() && real != *root {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!(
+                    "the extra read root {} now resolves to {}; it changed after it was \
+                     checked, so it is not snapshotted",
+                    root.display(),
+                    real.display()
+                ),
+            ));
+        }
+        all.push(real);
     }
     all.sort();
     all.dedup();
@@ -603,6 +624,37 @@ fn open_dir(path: &Path) -> io::Result<fs::File> {
         .map_err(|error| io::Error::new(error.kind(), format!("open {}: {error}", path.display())))
 }
 
+/// Open the directory the canonical `path` names one component at a time
+/// from `/`, following no symlink anywhere on the way. A root checked by its
+/// canonical path that a concurrent writer then swapped for a symlink
+/// (itself or any directory above it) fails to open rather than lead to
+/// where the symlink points.
+fn open_dir_no_symlinks(path: &Path) -> io::Result<fs::File> {
+    let context = |error: io::Error| {
+        io::Error::new(
+            error.kind(),
+            format!(
+                "open {} without following a symlink: {error}",
+                path.display()
+            ),
+        )
+    };
+    if !path.is_absolute() {
+        return Err(context(io::Error::from(io::ErrorKind::InvalidInput)));
+    }
+    let mut dir = open_dir(Path::new("/")).map_err(context)?;
+    for component in path.components() {
+        match component {
+            Component::RootDir => {}
+            Component::Normal(name) => {
+                dir = open_dir_at(dir.as_raw_fd(), name.as_bytes()).map_err(context)?;
+            }
+            _ => return Err(context(io::Error::from(io::ErrorKind::InvalidInput))),
+        }
+    }
+    Ok(dir)
+}
+
 fn open_dir_at(dirfd: RawFd, name: &[u8]) -> io::Result<fs::File> {
     store::open_file_at(dirfd, name, DIR_FLAGS, 0)
 }
@@ -624,6 +676,8 @@ fn special_kind(mode: libc::mode_t) -> &'static str {
 struct Walk<'a> {
     exclude: &'a [PathGlob],
     entries: &'a mut BTreeMap<PathBuf, EntryState>,
+    /// Files a copy refuses (the signing key, by identity).
+    forbidden: &'a [FileId],
 }
 
 impl Walk<'_> {
@@ -633,7 +687,7 @@ impl Walk<'_> {
 
     /// Copy `real` into `staged` (which must not exist yet).
     fn copy_root(&mut self, real: &Path, staged: &Path) -> io::Result<()> {
-        let source = open_dir(real)?;
+        let source = open_dir_no_symlinks(real)?;
         let mode = store::fd_stat(source.as_raw_fd())?.st_mode as u32 & 0o777;
         let parent = open_dir(staged.parent().expect("staged root has a parent"))?;
         let name = staged.file_name().expect("staged root has a name");
@@ -683,7 +737,9 @@ impl Walk<'_> {
                     self.entries.insert(child_real, EntryState::Dir { mode });
                 }
                 libc::S_IFREG => {
-                    if let Some(sha256) = copy_file(source, target, name, mode, &child_real)? {
+                    let copied =
+                        copy_file(source, target, name, mode, &child_real, self.forbidden)?;
+                    if let Some(sha256) = copied {
                         self.entries
                             .insert(child_real, EntryState::File { mode, sha256 });
                     }
@@ -819,6 +875,7 @@ fn copy_file(
     name: &[u8],
     mode: u32,
     shown: &Path,
+    forbidden: &[FileId],
 ) -> io::Result<Option<[u8; 32]>> {
     let from = store::open_file_at(
         source.as_raw_fd(),
@@ -832,8 +889,22 @@ fn copy_file(
             format!("snapshot {}: {error}", shown.display()),
         )
     })?;
-    if store::fd_stat(from.as_raw_fd())?.st_mode & libc::S_IFMT != libc::S_IFREG {
+    let stat = store::fd_stat(from.as_raw_fd())?;
+    if stat.st_mode & libc::S_IFMT != libc::S_IFREG {
         return Ok(None);
+    }
+    // Decided on the open file itself, so no rename in between can slip
+    // the key past it.
+    if forbidden.contains(&(stat.st_dev, stat.st_ino)) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "{} is the signing key (the same file, by device and inode), so it is not \
+                 copied where the tool could read it; move the key out of the project and \
+                 point TOG_SIGNING_KEY at it",
+                shown.display()
+            ),
+        ));
     }
     let mut to = store::open_file_at(
         target.as_raw_fd(),
@@ -914,6 +985,7 @@ mod tests {
                 lock_root,
                 extra_roots: &[],
                 exclude,
+                forbidden: &[],
             },
         )
         .unwrap()
@@ -1007,6 +1079,46 @@ mod tests {
         fs::create_dir_all(staged(&snapshot, "target")).unwrap();
         fs::write(staged(&snapshot, "target/new"), b"y").unwrap();
         assert!(snapshot.diff().unwrap().is_empty());
+    }
+
+    /// A hard link to the signing key is the key, whatever its name, however
+    /// deep, in a hidden directory or not: the stage is refused before the
+    /// tool could read it, and the refusal never carries its bytes.
+    #[test]
+    fn a_hard_link_to_a_forbidden_file_is_never_staged() {
+        use std::os::unix::fs::MetadataExt;
+        let temp = TempDir::named("snapshot-forbidden");
+        let store = temp_store(&temp);
+        let dir = project(&temp);
+        let key = temp.0.join("signing.key");
+        fs::write(&key, b"ed25519:SEEDBYTES0123456789abcdef\n").unwrap();
+        let meta = fs::metadata(&key).unwrap();
+        let forbidden = [(meta.dev(), meta.ino())];
+        let mut deep = dir.join(".hidden");
+        for level in 0..13 {
+            deep = deep.join(format!("d{level}"));
+        }
+        fs::create_dir_all(&deep).unwrap();
+        fs::hard_link(&key, deep.join("Cargo.toml")).unwrap();
+        let activity = store.activity(ActivityMode::Shared).unwrap();
+        let Err(error) = Snapshot::build(
+            &store,
+            &activity,
+            &SnapshotSpec {
+                lock_root: &dir,
+                extra_roots: &[],
+                exclude: &[],
+                forbidden: &forbidden,
+            },
+        ) else {
+            panic!("a stage holding the key is refused");
+        };
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        let message = error.to_string();
+        assert!(message.contains("is the signing key"), "{message}");
+        assert!(!message.contains("SEEDBYTES"), "{message}");
+        // Nothing else of the project is held back.
+        build(&store, &dir, &[]);
     }
 
     /// A tool that rewrites an undeclared file with different bytes of the
@@ -1228,6 +1340,7 @@ mod tests {
                 lock_root: &dir,
                 extra_roots: &[lib.clone(), inside],
                 exclude: &[],
+                forbidden: &[],
             },
         )
         .unwrap();
@@ -1252,6 +1365,67 @@ mod tests {
             .classify(&changes, &[PathBuf::from("Cargo.toml")], &[])
             .unwrap_err();
         assert!(error.to_string().contains("lib/Cargo.toml"), "{error}");
+    }
+
+    /// An extra root is checked by its canonical path (the cargo door's
+    /// path-dependency bound) and then handed to the snapshot. A writer
+    /// that swaps it, or a directory above it, for a symlink to somewhere
+    /// else in between gets a refusal, never a copy of the elsewhere: the
+    /// root must still be its own canonical path, and it is opened without
+    /// following a symlink at any component.
+    #[test]
+    fn an_extra_root_swapped_for_a_symlink_after_its_check_is_refused() {
+        let temp = TempDir::named("snapshot-swap");
+        let store = temp_store(&temp);
+        let dir = project(&temp);
+        let activity = store.activity(ActivityMode::Shared).unwrap();
+        let outside = temp.0.join("secret");
+        fs::create_dir_all(outside.join("lib")).unwrap();
+        fs::write(outside.join("lib/key"), b"secret").unwrap();
+        let build = |root: &Path| {
+            Snapshot::build(
+                &store,
+                &activity,
+                &SnapshotSpec {
+                    lock_root: &dir,
+                    extra_roots: &[root.to_path_buf()],
+                    exclude: &[],
+                    forbidden: &[],
+                },
+            )
+        };
+
+        // The root itself.
+        let lib = temp.0.join("lib");
+        fs::create_dir_all(&lib).unwrap();
+        let checked = lib.canonicalize().unwrap();
+        fs::rename(&lib, temp.0.join("lib-was")).unwrap();
+        symlink(outside.join("lib"), &lib).unwrap();
+        let error = build(&checked).map(drop).unwrap_err();
+        assert!(
+            error.to_string().contains("changed after it was checked"),
+            "{error}"
+        );
+
+        // A directory above it.
+        let parent = temp.0.join("libs");
+        fs::create_dir_all(parent.join("lib")).unwrap();
+        let checked = parent.join("lib").canonicalize().unwrap();
+        fs::rename(&parent, temp.0.join("libs-was")).unwrap();
+        symlink(&outside, &parent).unwrap();
+        let error = build(&checked).map(drop).unwrap_err();
+        assert!(
+            error.to_string().contains("changed after it was checked"),
+            "{error}"
+        );
+
+        // Opened by component, so a swap after that check fails too.
+        let error = open_dir_no_symlinks(&checked).unwrap_err();
+        assert!(
+            error.to_string().contains("without following a symlink"),
+            "{error}"
+        );
+        open_dir_no_symlinks(&outside.canonicalize().unwrap().join("lib")).unwrap();
     }
 
     #[test]

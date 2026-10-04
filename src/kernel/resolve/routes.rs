@@ -51,6 +51,10 @@ pub enum RequestClass {
     Artifact,
     /// A checksum-database answer the tool verifies itself.
     Sumdb,
+    /// A git smart-HTTP exchange (or GitHub's commit lookup) inside an
+    /// intercepted tunnel: streamed, never cached; the tool checks the
+    /// objects it receives against the commit it locks.
+    Git,
 }
 
 impl RequestClass {
@@ -60,12 +64,13 @@ impl RequestClass {
             RequestClass::Metadata => "metadata",
             RequestClass::Artifact => "artifact",
             RequestClass::Sumdb => "sumdb",
+            RequestClass::Git => "git",
         }
     }
 
     /// Cached in the metadata cache and eligible for last-good.
     pub fn is_metadata(self) -> bool {
-        !matches!(self, RequestClass::Artifact)
+        !matches!(self, RequestClass::Artifact | RequestClass::Git)
     }
 }
 
@@ -116,6 +121,15 @@ impl Permitted {
             }
     }
 
+    /// Exactly one origin: where an intercepted request to a host outside
+    /// every route (a git host, an unattested registry) may be redirected,
+    /// which is nowhere but itself.
+    pub(crate) fn only(host: &str, port: u16) -> Self {
+        Self {
+            origins: BTreeSet::from([(host.to_string(), port)]),
+        }
+    }
+
     /// Tests only: a fixture host on its ephemeral port.
     #[cfg(test)]
     pub(crate) fn with_origin(mut self, host: &str, port: u16) -> Self {
@@ -161,6 +175,18 @@ impl Endpoint {
         })
     }
 
+    /// The host an intercepted tunnel was opened to, when no route serves
+    /// it: a git host (any public https host may serve git) or an
+    /// unattested registry. It carries no credential, and it never enters a
+    /// session's routes, so the permitted set is not asked.
+    pub(crate) fn intercepted(host: &str, port: u16) -> Endpoint {
+        Endpoint {
+            host: host.to_ascii_lowercase(),
+            port,
+            authorization: None,
+        }
+    }
+
     /// Tests only: a fixture host on any port, outside the compiled set. A
     /// session still refuses it unless its permitted set names it.
     #[cfg(test)]
@@ -200,10 +226,17 @@ impl Endpoint {
 
     /// `https://host[:port]`.
     pub fn origin(&self) -> String {
-        if self.port == 443 {
-            format!("https://{}", self.host)
+        // An IPv6 literal (only an intercepted tunnel's host can be one)
+        // takes brackets in a URL.
+        let host = if self.host.contains(':') {
+            format!("[{}]", self.host)
         } else {
-            format!("https://{}:{}", self.host, self.port)
+            self.host.clone()
+        };
+        if self.port == 443 {
+            format!("https://{host}")
+        } else {
+            format!("https://{host}:{}", self.port)
         }
     }
 

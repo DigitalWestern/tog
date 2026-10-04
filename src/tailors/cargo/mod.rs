@@ -5,6 +5,7 @@
 pub mod edit;
 pub mod inputs;
 pub mod objects;
+pub mod resolve;
 pub mod rustfmt;
 pub mod tailor;
 
@@ -233,6 +234,7 @@ pub fn project_cargo_env(
     vendor_obj: &Path,
     plan: &CargoPlan,
     lock_digest: &str,
+    resolution_basis: &crate::comforter::join::Digests,
     toolchain: &Selected,
     attribution: &mut crate::kernel::policy::Attribution,
 ) -> io::Result<()> {
@@ -295,6 +297,10 @@ pub fn project_cargo_env(
         "cargo_lock_sha256": lock_digest,
         "plan": plan,
     });
+    // What the plan read, so the resolution join binds a record to this
+    // generation of the lock and the manifests.
+    body[crate::comforter::join::BASIS_FIELD] =
+        crate::comforter::join::basis_value(resolution_basis);
     // The Rust object is this ecosystem's runtime: the record names the
     // bundle it came from and refers to it directly, so a later catalog
     // refresh cannot re-pair these dependencies with another compiler.
@@ -1349,10 +1355,13 @@ checksum = "{hash_b}"
 
     #[test]
     fn realizes_vendor_and_writes_complete_checksums() {
-        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
         with_temp_store(|store, root| {
+            // The store lock (with_temp_store's) first, then the supervision
+            // lock: the order the rustfmt tests take them in, so neither
+            // test holds one while waiting on the other.
+            let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
             let activity = &store
                 .activity(crate::kernel::activity::ActivityMode::Shared)
                 .unwrap();
@@ -1390,10 +1399,13 @@ checksum = "{hash_b}"
 
     #[test]
     fn rejects_symlinked_crate_entries() {
-        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
         with_temp_store(|store, root| {
+            // The store lock (with_temp_store's) first, then the supervision
+            // lock: the order the rustfmt tests take them in, so neither
+            // test holds one while waiting on the other.
+            let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
             let activity = &store
                 .activity(crate::kernel::activity::ActivityMode::Shared)
                 .unwrap();
@@ -1444,6 +1456,7 @@ checksum = "{hash_b}"
             &temp.0.join("absent-vendor"),
             &plan,
             &lock_digest("version = 4\n"),
+            &Default::default(),
             &selection(),
             &mut attribution,
         )
@@ -1483,6 +1496,7 @@ checksum = "{hash_b}"
             &vendor,
             &plan,
             &digest,
+            &Default::default(),
             &selection(),
             &mut attribution,
         )
@@ -1568,6 +1582,7 @@ checksum = "{hash_b}"
             &vendor,
             &plan,
             "digest",
+            &Default::default(),
             &selection(),
             &mut attribution,
         );
@@ -1632,6 +1647,7 @@ checksum = "{hash_b}"
             &store.object_path(&vendor_id),
             &plan,
             &lock_digest("version = 4\n"),
+            &Default::default(),
             &selection(),
             &mut attribution,
         )

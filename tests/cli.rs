@@ -3396,6 +3396,120 @@ fn a_bad_signing_key_fails_every_closure_writer_before_the_store_is_touched() {
     }
 }
 
+/// A real signing key in `home` and the secret part of its file.
+fn cargo_signing_key(home: &Path) -> (PathBuf, String) {
+    let key = home.join("keys/signing.key");
+    std::fs::create_dir_all(key.parent().unwrap()).unwrap();
+    tog::kernel::signing::generate(&key).unwrap();
+    let contents = std::fs::read_to_string(&key).unwrap();
+    let seed = contents.trim().rsplit(':').next().unwrap().to_string();
+    assert!(seed.len() >= 32, "{contents}");
+    (key, seed)
+}
+
+const CARGO_KEY_COMMANDS: [&[&str]; 4] = [
+    &["sync"],
+    &["attest", "cargo"],
+    &["add", "--no-sync", "cargo:itoa"],
+    &["fmt"],
+];
+
+/// Each command a Cargo project's files reach, run without network with
+/// `key` as the signing key: it fails, and no byte of the key reaches
+/// stdout or stderr. Returns each command's stderr.
+fn cargo_key_runs(project: &Path, home: &Path, key: &Path, seed: &str) -> Vec<String> {
+    CARGO_KEY_COMMANDS
+        .iter()
+        .map(|args| {
+            let out = common::offline_command(project, home, &home.join("store"))
+                .args(*args)
+                .env("TOG_SIGNING_KEY", key)
+                .env("CARGO_HOME", home.join(".cargo"))
+                .output()
+                .expect("spawn tog without network");
+            let (stdout, stderr) = (text(&out.stdout), text(&out.stderr));
+            assert!(!out.status.success(), "{args:?}: {stderr}");
+            assert!(
+                !stdout.contains(seed) && !stderr.contains(seed),
+                "{args:?}: the key reached the output\n{stdout}\n{stderr}"
+            );
+            stderr
+        })
+        .collect()
+}
+
+fn plain_cargo_project(project: &Path) {
+    std::fs::write(
+        project.join("Cargo.toml"),
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+}
+
+/// A cloned Cargo project whose `Cargo.toml` is a hard link to the signing
+/// key (the same inode, no symlink to see): tog's own reads refuse it
+/// before anything is realized, and no
+/// byte of the key reaches stdout or stderr. No cargo runs on the host to
+/// quote it.
+#[test]
+fn a_cargo_manifest_hard_linked_to_the_signing_key_never_echoes_it() {
+    let home = TempDir::boundary("cli-cargo-key-link");
+    let project = TempDir::boundary("cli-cargo-key-link-project");
+    let (key, seed) = cargo_signing_key(&home.0);
+    std::fs::hard_link(&key, project.0.join("Cargo.toml")).unwrap();
+    for (args, stderr) in CARGO_KEY_COMMANDS
+        .iter()
+        .zip(cargo_key_runs(&project.0, &home.0, &key, &seed))
+    {
+        // Refused by name, or (attest lists the workspace's outputs first)
+        // by the position tog's own parser stopped at.
+        let named = stderr.contains("is the signing key")
+            || stderr.contains("Cargo.toml is not valid TOML at line 1");
+        assert!(named, "{args:?}: {stderr}");
+    }
+    // Refused before anything was realized: no store object exists.
+    let objects = home.0.join("store/objects");
+    let realized = std::fs::read_dir(&objects).map_or(0, |entries| entries.count());
+    assert_eq!(realized, 0, "{} holds objects", objects.display());
+}
+
+/// The other files a Cargo project's commands parse before anything is
+/// downloaded (the toolchain files and the project policy), each a hard
+/// link to the signing key: each command reaches the parser that fails on
+/// it (its error quotes the line, so the redaction marker shows), and no
+/// byte of the key reaches stdout or stderr. `attest` never reads
+/// `rust-toolchain` (it runs frozen on `tog-toolchain.toml`), so that pair
+/// is refused for the missing lock instead.
+#[test]
+fn project_files_hard_linked_to_the_signing_key_never_echo_it() {
+    const REDACTED: &str = "[signing key redacted]";
+    for file in [
+        "rust-toolchain.toml",
+        "rust-toolchain",
+        "tog-toolchain.toml",
+        ".tog/policy.toml",
+    ] {
+        let home = TempDir::boundary("cli-key-files");
+        let project = TempDir::boundary("cli-key-files-project");
+        let (key, seed) = cargo_signing_key(&home.0);
+        plain_cargo_project(&project.0);
+        let path = project.0.join(file);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::hard_link(&key, &path).unwrap();
+        let runs = cargo_key_runs(&project.0, &home.0, &key, &seed);
+        for (args, stderr) in CARGO_KEY_COMMANDS.iter().zip(runs) {
+            let expected = match (file, args[0]) {
+                ("rust-toolchain", "attest") => "tog-toolchain.toml is missing",
+                _ => REDACTED,
+            };
+            assert!(
+                stderr.contains(expected),
+                "{file} {args:?}: expected {expected:?}\n{stderr}"
+            );
+        }
+    }
+}
+
 /// `tog attest` refuses offline, before any tool or store, what it cannot
 /// sign: an ecosystem with no lock a resolution door produces, or a project
 /// with none at all.
@@ -3404,15 +3518,15 @@ fn attest_refuses_an_ecosystem_without_a_resolution_door() {
     let home = TempDir::boundary("cli-attest-unsupported");
     let project = TempDir::boundary("cli-attest-unsupported-project");
     std::fs::write(
-        project.0.join("Cargo.toml"),
-        "[package]\nname = \"p\"\nversion = \"0.1.0\"\n",
+        project.0.join("Gemfile"),
+        "source \"https://rubygems.org\"\n",
     )
     .unwrap();
-    let out = tog(&project.0, &home.0, &["attest", "cargo"]);
+    let out = tog(&project.0, &home.0, &["attest", "ruby"]);
     assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
     let stderr = text(&out.stderr);
     assert!(
-        stderr.contains("tog attest does not support cargo"),
+        stderr.contains("tog attest does not support ruby"),
         "{stderr}"
     );
     let out = tog(&project.0, &home.0, &["attest"]);

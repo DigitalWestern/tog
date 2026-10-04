@@ -418,6 +418,7 @@ mod door {
                     lock_root: &self.project,
                     extra_roots: &[],
                     exclude: &[],
+                    forbidden: &[],
                 },
             )
             .unwrap()
@@ -469,6 +470,7 @@ mod door {
                     unconfined_denied: true,
                     snapshot,
                     proxy_socket: &self.proxy,
+                    ca_file: None,
                     executable: Path::new(env!("CARGO_BIN_EXE_tog")),
                     argv,
                     cwd: &snapshot.lock_root().real,

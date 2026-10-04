@@ -95,6 +95,35 @@ fn cargo_sync_build_and_run_again_offline() {
         "rustc reported the wrong host:\n{rustc}"
     );
     assert_ok(tog(&project, &temp.0, &["build"]), "build");
+    // Cargo resolves through a door, so `--strict` wants the lock to carry
+    // a signed resolution record: `tog attest cargo` checks the committed
+    // lock (`cargo metadata --locked`, confined) and signs one with a key
+    // the machine policy trusts.
+    let key = temp.0.join("signing.key");
+    let public = tog::kernel::signing::generate(&key).unwrap();
+    std::fs::create_dir_all(temp.0.join(".tog")).unwrap();
+    std::fs::write(
+        temp.0.join(".tog/policy.toml"),
+        format!("deny = []\n\n[signing]\ntrusted = [\"{public}\"]\n"),
+    )
+    .unwrap();
+    let lock_before = std::fs::read(project.join("Cargo.lock")).unwrap();
+    let attest = command(&project, &temp.0, &store)
+        .env("TOG_SIGNING_KEY", &key)
+        .args(["attest", "cargo"])
+        .output()
+        .unwrap();
+    assert!(
+        attest.status.success(),
+        "attest cargo: {}",
+        String::from_utf8_lossy(&attest.stderr)
+    );
+    assert!(project.join(".tog/resolution/cargo.json").is_file());
+    assert_eq!(
+        std::fs::read(project.join("Cargo.lock")).unwrap(),
+        lock_before,
+        "attest changed the lock"
+    );
     // On a synced project no sync runs in front of the build, so the only
     // policy load is build's own: `--strict` must reach it all the same.
     let strict = tog(&project, &temp.0, &["-v", "--strict", "build"]);
@@ -175,7 +204,15 @@ fn git_dependency_exception_is_published_on_the_cargo_closure_only() {
     let closures = project.join(".tog/closures");
     let cargo: serde_json::Value =
         serde_json::from_slice(&std::fs::read(closures.join("cargo.json")).unwrap()).unwrap();
-    let exceptions = cargo["body"]["exceptions"].as_array().unwrap();
+    // The committed lock carries no resolution record, which Cargo's door
+    // reports as `unrecorded-resolution` on the same closure; it is set
+    // apart here so the git exception is the one traced.
+    let (unrecorded, exceptions): (Vec<_>, Vec<_>) = cargo["body"]["exceptions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .partition(|exception| exception["kind"] == "unrecorded-resolution");
+    assert_eq!(unrecorded.len(), 1, "cargo exceptions: {unrecorded:?}");
     assert_eq!(exceptions.len(), 1, "cargo exceptions: {exceptions:?}");
     assert_eq!(exceptions[0]["kind"], "git-dependency");
     assert_eq!(exceptions[0]["subject"], "gitdep@1.0.0");
@@ -322,15 +359,22 @@ fn toolchain_file_components_and_targets_are_provisioned() {
         .join("target/wasm32-unknown-unknown/debug/cargo-hello.wasm")
         .is_file());
 
-    // Nothing here is an exception any more, on any closure.
+    // Nothing about the toolchain is an exception any more, on any
+    // closure. The committed lock carries no resolution record, which is
+    // `unrecorded-resolution` on the Cargo closure and nothing toolchain.
     for entry in std::fs::read_dir(project.join(".tog/closures")).unwrap() {
         let path = entry.unwrap().path();
         let closure: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        let exceptions = closure["body"]["exceptions"]
+        let exceptions: Vec<_> = closure["body"]["exceptions"]
             .as_array()
             .cloned()
-            .unwrap_or_default();
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|exception| {
+                !(path.ends_with("cargo.json") && exception["kind"] == "unrecorded-resolution")
+            })
+            .collect();
         assert!(exceptions.is_empty(), "{}: {exceptions:?}", path.display());
     }
 
@@ -549,4 +593,271 @@ fn a_local_toolchain_directory_builds_the_project() {
         stderr.contains("changed since tog-toolchain.toml locked it"),
         "{stderr}"
     );
+}
+
+/// Every way a Cargo project or cargo's own home can put the signing key in
+/// front of cargo, with the real toolchain, so each command reaches the
+/// step that reads the file: no piece of the key (10 characters or more)
+/// reaches stdout or stderr of
+/// sync, attest, add or fmt, and each refusal names the file.
+///
+/// - cargo's home config includes a file hard-linked to the key: no cargo
+///   runs on the host and a confined one gets a scratch `CARGO_HOME`, so
+///   every command succeeds.
+/// - `.cargo/config.toml` a symlink to the key outside the project, and the
+///   `target/key` alias (a hard link in `target/`, the config a symlink to
+///   `../target/key`): sync, attest, add and fmt refuse it by name.
+/// - the toolchain files hard-linked to the key: `add` reaches them with
+///   the toolchain realized.
+/// - a workspace member in a hidden directory, 13 levels down, whose
+///   manifest is a hard link to the key: refused by name, sync included.
+/// - a member reached through a symlinked directory that holds a manifest
+///   hard-linked to the key: attest and add refuse the workspace (the
+///   confined cargo would resolve without the member), the committed-lock
+///   sync succeeds, and fmt and `fmt --all` format the project while their
+///   sandbox does not mount the target, so cargo-fmt cannot read it (a host
+///   `cargo fmt --all` there quotes the key).
+#[test]
+#[ignore]
+fn the_signing_key_never_reaches_the_output_through_cargo_files() {
+    let temp = TempDir::new("cargo-e2e-key");
+    let store = temp.0.join("store");
+    let key = temp.0.join("keys/signing.key");
+    std::fs::create_dir_all(key.parent().unwrap()).unwrap();
+    let public = tog::kernel::signing::generate(&key).unwrap();
+    let contents = std::fs::read_to_string(&key).unwrap();
+    let seed = contents.trim().rsplit(':').next().unwrap().to_string();
+    assert!(seed.len() >= 32, "{contents}");
+    std::fs::create_dir_all(temp.0.join(".tog")).unwrap();
+    std::fs::write(
+        temp.0.join(".tog/policy.toml"),
+        format!("deny = []\n\n[signing]\ntrusted = [\"{public}\"]\n"),
+    )
+    .unwrap();
+    let run = |project: &Path, args: &[&str]| -> (bool, String) {
+        let out = command(project, &temp.0, &store)
+            .env("TOG_SIGNING_KEY", &key)
+            .env("CARGO_HOME", temp.0.join(".cargo"))
+            .args(args)
+            .output()
+            .unwrap();
+        let (stdout, stderr) = (
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        );
+        // Not the seed, nor any 10-character piece of it (the scrub's
+        // smallest match).
+        for start in 0..=seed.len() - 10 {
+            let piece = &seed[start..start + 10];
+            assert!(
+                !stdout.contains(piece) && !stderr.contains(piece),
+                "{args:?}: {piece} of the key reached the output\n{stdout}\n{stderr}"
+            );
+        }
+        (out.status.success(), stderr)
+    };
+    let refused = |project: &Path, args: &[&str]| {
+        let (ok, stderr) = run(project, args);
+        assert!(!ok, "{args:?} succeeded: {stderr}");
+        assert!(
+            stderr.contains("is the signing key"),
+            "{args:?} was not refused for the key: {stderr}"
+        );
+    };
+    let fresh = |name: &str| {
+        let project = temp.0.join(name);
+        copy_tree(&fixture("cargo-hello"), &project);
+        project
+    };
+    let commands: [&[&str]; 4] = [
+        &["sync"],
+        &["attest", "cargo"],
+        &["add", "--no-sync", "cargo:itoa"],
+        &["fmt"],
+    ];
+
+    // cargo's home config including the key: nothing reads it.
+    let cargo_home = temp.0.join(".cargo");
+    std::fs::create_dir_all(&cargo_home).unwrap();
+    std::fs::write(cargo_home.join("config.toml"), "include = [\"key.toml\"]\n").unwrap();
+    std::fs::hard_link(&key, cargo_home.join("key.toml")).unwrap();
+    let project = fresh("home-include");
+    for args in commands {
+        let (ok, stderr) = run(&project, args);
+        assert!(ok, "{args:?}: {stderr}");
+    }
+    std::fs::remove_dir_all(&cargo_home).unwrap();
+
+    // The project's config leading to the key: a symlink out of the
+    // project, and the `target/key` alias.
+    for (name, alias) in [("config-symlink", false), ("config-target-alias", true)] {
+        let project = fresh(name);
+        std::fs::create_dir_all(project.join(".cargo")).unwrap();
+        let config = project.join(".cargo/config.toml");
+        if alias {
+            std::fs::create_dir_all(project.join("target")).unwrap();
+            std::fs::hard_link(&key, project.join("target/key")).unwrap();
+            std::os::unix::fs::symlink("../target/key", &config).unwrap();
+        } else {
+            std::os::unix::fs::symlink(&key, &config).unwrap();
+        }
+        // sync reads the config as a resolution input (its digest goes in
+        // the closure), so it refuses too, before any cargo runs.
+        for args in commands {
+            refused(&project, args);
+        }
+    }
+
+    // The toolchain files, read by add after the toolchain is realized.
+    for file in ["rust-toolchain.toml", "rust-toolchain"] {
+        let project = fresh(&format!("toolchain-{file}"));
+        std::fs::hard_link(&key, project.join(file)).unwrap();
+        let (ok, stderr) = run(&project, &["add", "--no-sync", "cargo:itoa"]);
+        assert!(!ok, "{file}: add succeeded");
+        assert!(
+            stderr.contains("is the signing key") || stderr.contains("[signing key redacted]"),
+            "{file}: {stderr}"
+        );
+    }
+
+    // A hidden, deep member hard-linked to the key.
+    let project = fresh("deep-member");
+    let member: PathBuf = std::iter::once(".hidden".to_string())
+        .chain((1..=13).map(|level| level.to_string()))
+        .collect();
+    std::fs::create_dir_all(project.join(&member)).unwrap();
+    std::fs::hard_link(&key, project.join(&member).join("Cargo.toml")).unwrap();
+    let manifest = project.join("Cargo.toml");
+    let mut text = std::fs::read_to_string(&manifest).unwrap();
+    text.push_str(&format!(
+        "\n[workspace]\nmembers = [\"{}\"]\n",
+        member.display()
+    ));
+    std::fs::write(&manifest, text).unwrap();
+    for args in &commands[1..] {
+        refused(&project, args);
+    }
+    // sync names every member manifest as an output and reads it for its
+    // digest: the member that is the key is refused there too.
+    refused(&project, &["sync"]);
+
+    // A member through a symlinked directory.
+    let project = fresh("linked-member");
+    let outside = temp.0.join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::hard_link(&key, outside.join("Cargo.toml")).unwrap();
+    std::os::unix::fs::symlink(&outside, project.join("linked")).unwrap();
+    let manifest = project.join("Cargo.toml");
+    let mut text = std::fs::read_to_string(&manifest).unwrap();
+    text.push_str("\n[workspace]\nmembers = [\"linked\"]\n");
+    std::fs::write(&manifest, text).unwrap();
+    // sync writes tog-toolchain.toml, which attest needs.
+    // A sync from the committed lock runs no cargo: it succeeds.
+    let (ok, stderr) = run(&project, &["sync"]);
+    assert!(ok && stderr.contains("synced: cargo"), "sync: {stderr}");
+    // The confined cargo would not see the member: attest and edits are
+    // refused, naming it.
+    for args in [
+        &["attest", "cargo"][..],
+        &["add", "--no-sync", "cargo:itoa"],
+    ] {
+        let (ok, stderr) = run(&project, args);
+        assert!(
+            !ok && stderr.contains("symlinked directory"),
+            "{args:?}: {stderr}"
+        );
+    }
+    // fmt formats the project's own code (the fixture's one-line main)
+    // and does not reach the linked member's manifest.
+    let main = project.join("src/main.rs");
+    let formatted =
+        "fn main() {\n    println!(\"hello {}\", itoa::Buffer::new().format(128u64));\n}\n";
+    assert_ne!(std::fs::read_to_string(&main).unwrap(), formatted);
+    for args in [&["fmt"][..], &["fmt", "--all"]] {
+        let (ok, stderr) = run(&project, args);
+        assert!(ok && !stderr.contains("error"), "{args:?}: {stderr}");
+        assert_eq!(
+            std::fs::read_to_string(&main).unwrap(),
+            formatted,
+            "{args:?}"
+        );
+    }
+}
+
+/// A workspace member outside the workspace root (`members =
+/// ["../shared"]`, inside the same repository) is handled like an
+/// out-of-root path dependency: a sync from the committed lock works,
+/// `tog attest` refuses the workspace by name, and the missing-lock door
+/// runs cargo confined with the member as a read root and publishes the
+/// lock without a receipt, so the sync records `unrecorded-resolution`.
+#[test]
+#[ignore]
+fn an_external_workspace_member_is_read_like_an_external_path_dependency() {
+    let temp = TempDir::new("cargo-e2e-external-member");
+    let store = temp.0.join("store");
+    let repo = temp.0.join("repo");
+    std::fs::create_dir_all(repo.join(".git")).unwrap();
+    let project = repo.join("project");
+    copy_tree(&fixture("cargo-hello"), &project);
+    let shared = repo.join("shared");
+    std::fs::create_dir_all(shared.join("src")).unwrap();
+    std::fs::write(
+        shared.join("Cargo.toml"),
+        "[package]\nname = \"shared\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\
+         workspace = \"../project\"\n",
+    )
+    .unwrap();
+    std::fs::write(shared.join("src/lib.rs"), "pub fn one() -> u8 { 1 }\n").unwrap();
+    let manifest = project.join("Cargo.toml");
+    let mut text = std::fs::read_to_string(&manifest).unwrap();
+    text.push_str("\n[workspace]\nmembers = [\"../shared\"]\n");
+    std::fs::write(&manifest, text).unwrap();
+    let run = |args: &[&str]| -> (bool, String) {
+        let out = command(&project, &temp.0, &store)
+            .args(args)
+            .output()
+            .unwrap();
+        (
+            out.status.success(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        )
+    };
+
+    // The committed lock: no cargo runs, the sync works.
+    let (ok, stderr) = run(&["sync"]);
+    assert!(ok && stderr.contains("synced: cargo"), "sync: {stderr}");
+    // A record cannot name the member: attest refuses, naming it.
+    let (ok, stderr) = run(&["attest", "cargo"]);
+    assert!(!ok, "attest succeeded: {stderr}");
+    assert!(
+        stderr.contains("members outside it") && stderr.contains("shared"),
+        "attest: {stderr}"
+    );
+    // An edit run in the member is refused, naming it and the workspace:
+    // from the root, cargo would edit the root package instead.
+    let root_manifest = std::fs::read_to_string(&manifest).unwrap();
+    let out = command(&shared, &temp.0, &store)
+        .args(["add", "--no-sync", "cargo:itoa"])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "add from the member: {stderr}");
+    assert!(
+        stderr.contains("lies outside it")
+            && stderr.contains("shared")
+            && stderr.contains("project"),
+        "add from the member: {stderr}"
+    );
+    assert_eq!(std::fs::read_to_string(&manifest).unwrap(), root_manifest);
+    // The missing lock is generated confined, the member read from its
+    // place beside the workspace, and published without a receipt.
+    std::fs::remove_file(project.join("Cargo.lock")).unwrap();
+    let (ok, stderr) = run(&["sync"]);
+    assert!(ok, "sync without a lock: {stderr}");
+    let lock = std::fs::read_to_string(project.join("Cargo.lock")).unwrap();
+    assert!(lock.contains("name = \"shared\""), "{lock}");
+    assert!(stderr.contains("unrecorded-resolution"), "{stderr}");
+    // And the lock it wrote syncs again.
+    let (ok, stderr) = run(&["sync"]);
+    assert!(ok, "sync from the generated lock: {stderr}");
 }

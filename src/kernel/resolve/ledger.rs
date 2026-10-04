@@ -51,8 +51,8 @@ pub enum Freshness {
 /// Entries describe outcomes: a failed attempt at a request the session
 /// also answered is not one (the session drops it).
 ///
-/// `class` is the request class (`index`, `metadata`, `artifact`, `sumdb`),
-/// `local` for an answer the proxy gave itself, `refused` for a request the
+/// `class` is the request class (`index`, `metadata`, `artifact`, `sumdb`,
+/// `git` for a git fetch through an intercepted tunnel), `local` for an answer the proxy gave itself, `refused` for a request the
 /// proxy would not forward, or `offline-miss` for one it could not serve
 /// without the network. `sha256` is the digest of the upstream bytes (never
 /// the rewritten body a tool may have been served), present only for a 2xx
@@ -70,6 +70,12 @@ pub struct Entry {
     pub claimed: Option<String>,
     pub verified: bool,
     pub freshness: Option<Freshness>,
+    /// Where the answer came from when upstream redirected (the last hop,
+    /// redacted): `url` stays what the tool asked for. Absent, and left out
+    /// of the bytes, when there was no redirect, so a ledger without one
+    /// keeps its bytes and its id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redirected_to: Option<String>,
 }
 
 impl Entry {
@@ -562,6 +568,7 @@ mod tests {
             claimed: None,
             verified: false,
             freshness: Some(Freshness::Live),
+            redirected_to: None,
         }
     }
 

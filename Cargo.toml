@@ -38,19 +38,24 @@ caseless = "0.2"
 # (Cc, Cf) instead of a listed set; already in the graph via ureq/url/idna.
 icu_properties = "2"
 # The resolution proxy's upstream TLS client (a pinned root set and the ring
-# provider named explicitly) and the server half its tests terminate. Already
-# in the graph through ureq, with ureq's exact feature set so no second
-# crypto backend is compiled.
+# provider named explicitly) and the server half that terminates intercepted
+# tunnels. Already in the graph through ureq, with ureq's exact feature set
+# so no second crypto backend is compiled.
 rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
 # The production upstream root set; ureq already links it (0.26 re-exports 1).
 webpki-roots = "1"
 # `RegistryProtocol` speaks in parsed URLs; already in the graph via ureq.
 url = "2"
-
-[dev-dependencies]
-# Mints the resolution proxy tests' fixture CA and leaf certificates, so no
-# private key is checked in. The ring backend only (no aws-lc).
+# The resolution proxy's per-process certificate authority and the leaf it
+# mints per intercepted host (ECDSA P-256). The ring backend only (no
+# aws-lc). The tests' fixture CA uses it too, so no private key is checked
+# in.
 rcgen = { version = "0.13", default-features = false, features = ["ring", "pem"] }
+# Cargo workspace `members` globs, matched one path part at a time with the
+# crate cargo itself expands them with (rust-lang/glob), so `[**]`, classes
+# and the rest mean what they mean to cargo. tog walks the directories
+# itself, without following symlinks; only `glob::Pattern` is used.
+glob = "0.3"
 
 # CI runs `cargo clippy --locked --all-targets -- -D warnings`, so every
 # clippy warning fails the build. These few are allowed project-wide.

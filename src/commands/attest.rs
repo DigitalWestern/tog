@@ -411,6 +411,7 @@ mod tests {
             claimed: None,
             verified: false,
             freshness: None,
+            redirected_to: None,
         });
         let record = ResolutionRecord::new(RecordFacts {
             ecosystem: ecosystem.into(),

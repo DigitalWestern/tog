@@ -14,27 +14,25 @@ by position.
 
 ## Next up, in order
 
-The resolution proxy (#68), then the cleanup. Today only Go resolves
-confined through the proxy (PRs 1 to 4: #198, #199, #200, #202). Every
-other ecosystem's `add`, `remove`, `update`, and missing-lock generation
-runs through the door's unsandboxed `Legacy` mode with network, the
-largest gap in what tog promises. Design: `docs/agent/DESIGNS.md` §6
+The resolution proxy (#68), then the cleanup. Today Go and Cargo resolve
+confined through the proxy (PRs 1 to 5: #198, #199, #200, #202, #203).
+Every other ecosystem's `add`, `remove`, `update`, and missing-lock
+generation runs through the door's unsandboxed `Legacy` mode with network,
+the largest gap in what tog promises. Design: `docs/agent/DESIGNS.md` §6
 (#196), evidence in #209. One pull request each, in this order:
 
-1. **#203 (PR 5): interception.** The session CA, TLS termination, the
-   git row; cargo and the sdist `cargo generate-lockfile` switch.
-2. **#204 (PR 6): Node.** npm and pnpm. Absorbs #212 (npm notifier and
+1. **#204 (PR 6): Node.** npm and pnpm. Absorbs #212 (npm notifier and
    audit requests).
-3. **#205 (PR 7): Python.** uv. Absorbs #210 (`uv pip compile` ignores
+2. **#205 (PR 7): Python.** uv. Absorbs #210 (`uv pip compile` ignores
    `UV_PYTHON`).
-4. **#206 (PR 8): Ruby and Elixir.** Bundler and Hex mirrors. Absorbs
+3. **#206 (PR 8): Ruby and Elixir.** Bundler and Hex mirrors. Absorbs
    #211 (`bundle add` installs).
-5. **#207 (PR 9): .NET.** The `nuget.config` mirror.
-6. **#201 (PR 3b): the container backend and `tog-isolate`.** Moved after
+4. **#207 (PR 9): .NET.** The `nuget.config` mirror.
+5. **#201 (PR 3b): the container backend and `tog-isolate`.** Moved after
    the doors: Go shipped confined without it, so no door waits on it. It
    must land before #208, because removing `Legacy` leaves a host without
    the native sandbox with no way to resolve.
-7. **#208 (PR 10): remove `Legacy`.**
+6. **#208 (PR 10): remove `Legacy`.**
 
 The macOS door (Seatbelt rules, the Mach allow-list from one run of
 `tools/proxy_spike/macos_mach.sh` on a Mac, tree freeze) is not one of

@@ -383,29 +383,6 @@ const RUBY_SPEC_SETS: &[&str] = &[
     "PATH",
 ];
 
-/// The Cargo tailor's workspace lookup, argument for argument.
-const CARGO_LOCATE_PROJECT: &[&str] = &[
-    "locate-project",
-    "--workspace",
-    "--message-format",
-    "plain",
-    "--offline",
-];
-
-/// `cargo locate-project` as the Cargo tailor builds it: the store Cargo
-/// with rustup's toolchain selection removed.
-fn cargo_locate_project(run: &Invocation) -> bool {
-    run.args.len() == CARGO_LOCATE_PROJECT.len()
-        && CARGO_LOCATE_PROJECT
-            .iter()
-            .enumerate()
-            .all(|(index, expected)| run.arg(index) == Some(*expected))
-        && run.program_in_store()
-        && run.sets_only(&[])
-        && run.removed("RUSTUP_HOME")
-        && run.removed("RUSTUP_TOOLCHAIN")
-}
-
 /// `go mod download` of module versions as the Go tailor builds it. Every
 /// variable is the command's own edit, never tog's inherited one: pinned
 /// ones set, the rest removed rather than emptied (Go reads an empty value
@@ -535,12 +512,6 @@ fn ruby_spec(run: &Invocation) -> bool {
 }
 
 const OFFLINE_FORMS: &[OfflineForm] = &[
-    // The Cargo tailor's workspace lookup: the store Cargo (a rustup proxy
-    // could install a toolchain the project names), forbidden the network.
-    OfflineForm {
-        program: "cargo",
-        matches: cargo_locate_project,
-    },
     // The Go tailor's module extraction: `go mod download path@version...`
     // by the store Go from a module cache tog staged, with the complete
     // offline environment.
@@ -702,8 +673,20 @@ mod tests {
         }
 
         /// The Cargo tailor's workspace lookup, as it builds it.
+        /// The workspace lookup the Cargo tailor once ran on the host, as
+        /// it ran it: no form admits it any more.
         fn cargo_lookup(&self, program: &str) -> Command {
-            let mut command = command(program, CARGO_LOCATE_PROJECT, &[]);
+            let mut command = command(
+                program,
+                &[
+                    "locate-project",
+                    "--workspace",
+                    "--message-format",
+                    "plain",
+                    "--offline",
+                ],
+                &[],
+            );
             command
                 .env_remove("RUSTUP_HOME")
                 .env_remove("RUSTUP_TOOLCHAIN");
@@ -880,7 +863,6 @@ mod tests {
     fn offline_forms_admit_only_their_own_argv() {
         let fixture = Fixture::new("tripwire-forms");
         let cargo = fixture.program("objects/rust/bin/cargo");
-        fixture.admits(&fixture.cargo_lookup(&cargo));
         fixture.admits(&go_offline(&fixture, &["mod", "download", "a@v1", "b@v2"]));
         fixture.admits(&command("/usr/bin/tar", &["-xf", "a.tar"], &[]));
         fixture.admits(&command("/bin/cp", &["-a", "a", "b"], &[]));
@@ -911,59 +893,22 @@ mod tests {
         }
     }
 
-    /// The workspace lookup runs only as the tailor builds it: the store
-    /// Cargo, the exact argv, and rustup's toolchain selection removed. A
-    /// host `cargo` is a rustup proxy that can install whatever toolchain
-    /// the project names.
+    /// No cargo runs on the host, in any form: the Cargo tailor finds the
+    /// workspace root by its own walk of the manifests, because a host
+    /// cargo reads the project's configuration and quotes the line it
+    /// cannot parse (a project file can be the signing key under another
+    /// name). The store Cargo with the lookup's exact argv is refused like
+    /// any other.
     #[test]
-    fn cargo_form_requires_the_store_cargo_as_built() {
+    fn no_cargo_runs_on_the_host() {
         let fixture = Fixture::new("tripwire-cargo");
         let cargo = fixture.program("objects/rust/bin/cargo");
-        fixture.admits(&fixture.cargo_lookup(&cargo));
+        fixture.refused(&fixture.cargo_lookup(&cargo));
         let outside = Fixture::new("tripwire-cargo-host");
         let host = outside.program("bin/cargo");
         fixture.refused(&fixture.cargo_lookup(&host));
-        fixture.refused(&fixture.cargo_lookup("/nonexistent/tog-test/bin/cargo"));
-        let mut on_path = fixture.cargo_lookup("cargo");
-        on_path.env("PATH", Path::new(&host).parent().unwrap());
-        fixture.refused(&on_path);
-        for key in ["RUSTUP_HOME", "RUSTUP_TOOLCHAIN"] {
-            let mut inherited = command(&cargo, CARGO_LOCATE_PROJECT, &[]);
-            let other = if key == "RUSTUP_HOME" {
-                "RUSTUP_TOOLCHAIN"
-            } else {
-                "RUSTUP_HOME"
-            };
-            inherited.env_remove(other);
-            fixture.refused(&inherited);
-            let mut pinned = fixture.cargo_lookup(&cargo);
-            pinned.env(key, "nightly");
-            fixture.refused(&pinned);
-        }
-        for args in [
-            &["locate-project", "--workspace", "--offline"][..],
-            &[
-                "locate-project",
-                "--workspace",
-                "--message-format",
-                "plain",
-                "--offline",
-                "-Zunstable-options",
-            ],
-            &[
-                "locate-project",
-                "--offline",
-                "--message-format",
-                "plain",
-                "--workspace",
-            ],
-        ] {
-            let mut command = command(&cargo, args, &[]);
-            command
-                .env_remove("RUSTUP_HOME")
-                .env_remove("RUSTUP_TOOLCHAIN");
-            fixture.refused(&command);
-        }
+        fixture.refused(&command(&cargo, &["metadata", "--offline"], &[]));
+        fixture.refused(&command(&cargo, &["generate-lockfile"], &[]));
     }
 
     /// `GOPROXY=off` alone is not offline: go admits only `mod download` of
@@ -1078,16 +1023,22 @@ mod tests {
     #[test]
     fn forms_admit_only_an_absolute_realized_program() {
         let fixture = Fixture::new("tripwire-program");
-        let cargo = fixture.program("objects/rust/bin/cargo");
-        fixture.admits(&fixture.cargo_lookup(&cargo));
-        let staged = fixture.program("tmp/unpacked/bin/cargo");
-        fixture.refused(&fixture.cargo_lookup(&staged));
-        let bin = Path::new(&cargo).parent().unwrap();
-        let mut bare = fixture.cargo_lookup("cargo");
-        bare.env("PATH", bin);
-        fixture.refused(&bare);
+        let args = ["mod", "download", "m@v1"];
+        let realized = fixture.program("objects/go/bin/go");
+        fixture.admits(&go_offline_at(&fixture, &realized, &args));
         let go = fixture.program("tmp/unpacked/go/bin/go");
-        fixture.refused(&go_offline_at(&fixture, &go, &["mod", "download", "m@v1"]));
+        fixture.refused(&go_offline_at(&fixture, &go, &args));
+        let mut bare = go_offline_at(&fixture, &realized, &args);
+        bare.env("PATH", Path::new(&realized).parent().unwrap());
+        let mut by_name = command("go", &[], &[]);
+        by_name.args(bare.get_args());
+        for (key, value) in bare.get_envs() {
+            match value {
+                Some(value) => by_name.env(key, value),
+                None => by_name.env_remove(key),
+            };
+        }
+        fixture.refused(&by_name);
     }
 
     /// A form admits only the variables its call site sets: an added
@@ -1095,17 +1046,13 @@ mod tests {
     #[test]
     fn forms_refuse_a_variable_their_call_site_does_not_set() {
         let fixture = Fixture::new("tripwire-extra-env");
-        let cargo = fixture.program("objects/rust/bin/cargo");
         let go_args = ["mod", "download", "example.com/m@v1.0.0"];
         fixture.admits(&go_offline(&fixture, &go_args));
         for (key, value) in [
             ("LD_PRELOAD", "/tmp/x.so"),
             ("LD_LIBRARY_PATH", "/tmp"),
-            ("CARGO_HOME", "/tmp"),
+            ("GOCACHE", "/tmp"),
         ] {
-            let mut lookup = fixture.cargo_lookup(&cargo);
-            lookup.env(key, value);
-            fixture.refused(&lookup);
             let mut download = go_offline(&fixture, &go_args);
             download.env(key, value);
             fixture.refused(&download);

@@ -362,6 +362,7 @@ mod tests {
                 lock_root: dir,
                 extra_roots: &[],
                 exclude: &[],
+                forbidden: &[],
             },
         )
         .unwrap()

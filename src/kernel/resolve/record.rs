@@ -1333,6 +1333,7 @@ mod tests {
             claimed: None,
             verified: false,
             freshness: None,
+            redirected_to: None,
         }
     }
 

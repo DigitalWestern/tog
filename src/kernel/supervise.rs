@@ -36,6 +36,7 @@
 pub(crate) static SUPERVISION_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 use crate::kernel::activity::StoreActivity;
+use crate::kernel::resolve::confine;
 use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::process::CommandExt;
@@ -741,17 +742,37 @@ pub fn status(command: &mut Command, activity: &StoreActivity) -> io::Result<Exi
     }
 }
 
-/// Spawn a command with inherited stdout and captured stderr, drain stderr
-/// while the child runs, and reap the direct child before returning.  Sandbox
-/// engines use this form so their setup diagnostics can still be classified
-/// without putting a large build log behind a pipe that the child could fill.
-/// The returned stderr is bounded to the same prefix used by the sandbox
-/// classifier; all bytes are also relayed to the caller's stderr.
+/// Spawn a command with stdout and stderr piped, drain both while the child
+/// runs, and reap the direct child before returning.  Sandbox engines use
+/// this form so their setup diagnostics can still be classified without
+/// putting a large build log behind a pipe that the child could fill. The
+/// returned stderr is bounded to the same prefix used by the sandbox
+/// classifier; every byte of both is relayed to the caller's matching
+/// stream by [`relay`], the signing key's secret replaced.
 // Reviewed site (tests/architecture.rs): the supervisor itself: spawns under the caller's lease.
 #[allow(clippy::disallowed_methods)]
 pub fn status_with_stderr(
     command: &mut Command,
     activity: &StoreActivity,
+) -> io::Result<(ExitStatus, Vec<u8>)> {
+    status_relayed(
+        command,
+        activity,
+        Sink::Stdout,
+        Sink::Stderr,
+        confine::signing_key_secrets(),
+    )
+}
+
+/// [`status_with_stderr`] with where each stream goes as an argument, so a
+/// test can collect them.
+#[allow(clippy::disallowed_methods)]
+fn status_relayed(
+    command: &mut Command,
+    activity: &StoreActivity,
+    stdout_sink: Sink,
+    stderr_sink: Sink,
+    secrets: &[Vec<u8>],
 ) -> io::Result<(ExitStatus, Vec<u8>)> {
     let _ = activity.mode();
     let session = Session::new()?;
@@ -759,93 +780,241 @@ pub fn status_with_stderr(
     session.prepare_child(command);
     command
         .stdin(Stdio::null())
-        .stdout(Stdio::inherit())
+        .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let mut child = command.spawn()?;
     if let Err(error) = session.publish_child(&child) {
         reap_after_error(&mut child);
         return Err(error);
     }
-    let mut stderr = child.stderr.take();
-    if let Some(pipe) = stderr.as_ref() {
-        if let Err(error) = set_nonblocking(pipe.as_raw_fd()) {
-            reap_after_error(&mut child);
-            return Err(error);
+    // One reader per pipe, each blocking on its own stream: a child that
+    // floods one while the other's pipe is full cannot stall either. The
+    // supervising thread keeps the child and the signals, as `status` does.
+    // A reader that fails (a read error, a panic) wakes it through the
+    // session's self-pipe, as a signal does ([`RelayWake`]).
+    let failed = std::sync::Arc::new(AtomicBool::new(false));
+    let mut readers = Vec::with_capacity(2);
+    let started: io::Result<()> = (|| {
+        if let Some(pipe) = child.stderr.take() {
+            let wake = RelayWake::new(session.write_fd, &failed)?;
+            readers.push((
+                true,
+                spawn_relay(pipe, stderr_sink, secrets, CLASSIFIER_PREFIX, wake)?,
+            ));
+        }
+        if let Some(pipe) = child.stdout.take() {
+            let wake = RelayWake::new(session.write_fd, &failed)?;
+            readers.push((false, spawn_relay(pipe, stdout_sink, secrets, 0, wake)?));
+        }
+        Ok(())
+    })();
+    let waited = match started {
+        Err(error) => Err(error),
+        Ok(()) => loop {
+            if failed.load(Ordering::SeqCst) {
+                break Err(io::Error::other("a child output relay failed"));
+            }
+            match child.try_wait() {
+                Ok(Some(status)) => break Ok(status),
+                Ok(None) => {}
+                Err(error) => break Err(error),
+            }
+            if let Err(error) = session.forward_pending() {
+                break Err(error);
+            }
+            // Checked again after `forward_pending` drained the self-pipe:
+            // a reader that failed before this sees the flag, one that
+            // fails after it writes a byte the poll below wakes on.
+            if failed.load(Ordering::SeqCst) {
+                break Err(io::Error::other("a child output relay failed"));
+            }
+            if let Err(error) = session.wait_for_event(&[]) {
+                break Err(error);
+            }
+        },
+    };
+    if waited.is_err() {
+        reap_after_error(&mut child);
+    }
+    // The direct child is reaped: no forwarded signal may reach its pid
+    // again while the pipes drain. Both readers are joined on every path,
+    // before the session and the activity borrow end. A grandchild that
+    // keeps a pipe open keeps its reader waiting (a known limitation).
+    session.clear_child();
+    let mut stderr_bytes = Ok(Vec::new());
+    let mut relay_error = None;
+    for (is_stderr, reader) in readers {
+        match join_relay(reader) {
+            Ok(bytes) if is_stderr => stderr_bytes = Ok(bytes),
+            Ok(_) => {}
+            Err(error) => {
+                if relay_error.is_none() {
+                    relay_error = Some(io::Error::new(error.kind(), error.to_string()));
+                }
+                if is_stderr {
+                    stderr_bytes = Err(error);
+                }
+            }
         }
     }
-    let mut stderr_bytes = Vec::new();
-    let mut status = None;
-    loop {
-        if status.is_none() {
-            match child.try_wait() {
-                Ok(next) => {
-                    if next.is_some() {
-                        // The direct child is reaped. Clear the pid slot now,
-                        // not at return: this loop keeps running while the
-                        // pipes drain, and a forwarded signal must never
-                        // reach a reaped — possibly recycled — pid.
-                        session.clear_child();
-                    }
-                    status = next;
-                }
-                Err(error) => {
-                    reap_after_error(&mut child);
-                    return Err(error);
-                }
+    let status = match (waited, relay_error) {
+        (_, Some(error)) => return Err(error),
+        (Err(error), None) => return Err(error),
+        (Ok(status), None) => status,
+    };
+    session.conclude(status, (status, stderr_bytes?))
+}
+
+/// The bytes of a child's stderr kept for the sandbox failure classifier.
+const CLASSIFIER_PREFIX: usize = 4096;
+
+/// Where a relayed stream goes.
+enum Sink {
+    Stdout,
+    Stderr,
+    /// Into a buffer, for tests.
+    #[cfg(test)]
+    Buffer(std::sync::Arc<Mutex<Vec<u8>>>),
+    /// A relay that panics on its first write, for the fault test.
+    #[cfg(test)]
+    Panic,
+}
+
+impl Sink {
+    fn write(&self, bytes: &[u8]) {
+        if bytes.is_empty() {
+            return;
+        }
+        match self {
+            Sink::Stdout => {
+                let mut out = io::stdout().lock();
+                let _ = out.write_all(bytes);
+                let _ = out.flush();
             }
-        }
-        let stderr_eof = match drain_stderr(&mut stderr, &mut stderr_bytes) {
-            Ok(eof) => eof,
-            Err(error) => {
-                reap_after_error(&mut child);
-                return Err(error);
+            Sink::Stderr => {
+                let _ = io::stderr().write_all(bytes);
             }
-        };
-        if stderr_eof {
-            stderr = None;
-        }
-        if let Some(status) = status {
-            if stderr.is_none() {
-                session.clear_child();
-                return session.conclude(status, (status, stderr_bytes));
-            }
-        }
-        if let Err(error) = session.forward_pending() {
-            reap_after_error(&mut child);
-            return Err(error);
-        }
-        let output_fds = stderr
-            .as_ref()
-            .map(|pipe| vec![pipe.as_raw_fd()])
-            .unwrap_or_default();
-        if let Err(error) = session.wait_for_event(&output_fds) {
-            reap_after_error(&mut child);
-            return Err(error);
+            #[cfg(test)]
+            Sink::Buffer(buffer) => buffer
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .extend_from_slice(bytes),
+            #[cfg(test)]
+            Sink::Panic => panic!("injected relay failure"),
         }
     }
 }
 
-fn drain_stderr(
-    reader: &mut Option<std::process::ChildStderr>,
-    destination: &mut Vec<u8>,
-) -> io::Result<bool> {
-    let Some(reader) = reader else {
-        return Ok(true);
-    };
-    let mut buffer = [0u8; 16 * 1024];
-    loop {
-        match reader.read(&mut buffer) {
-            Ok(0) => return Ok(true),
-            Ok(count) => {
-                let keep = count.min(4096usize.saturating_sub(destination.len()));
-                destination.extend_from_slice(&buffer[..keep]);
-                let _ = io::stderr().write_all(&buffer[..count]);
-            }
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(false),
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-            Err(error) => return Err(error),
+/// How a relay thread tells the supervising thread it failed: a shared
+/// flag, and a byte on its own copy of the session's self-pipe, which the
+/// supervision loop polls. Dropped without [`RelayWake::done`] it fires, so
+/// a read error and a panic (the drop runs while unwinding) both reach it.
+struct RelayWake {
+    fd: std::os::fd::OwnedFd,
+    failed: std::sync::Arc<AtomicBool>,
+    done: bool,
+}
+
+impl RelayWake {
+    fn new(write_fd: RawFd, failed: &std::sync::Arc<AtomicBool>) -> io::Result<Self> {
+        use std::os::fd::FromRawFd;
+        // SAFETY: write_fd is the session's open self-pipe write end; the
+        // duplicate is owned here and closed when the wake is dropped.
+        let fd = unsafe { libc::fcntl(write_fd, libc::F_DUPFD_CLOEXEC, 0) };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Self {
+            // SAFETY: fd was just returned by fcntl and nothing else owns it.
+            fd: unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) },
+            failed: failed.clone(),
+            done: false,
+        })
+    }
+
+    /// The relay finished: nothing to report.
+    fn done(mut self) {
+        self.done = true;
+    }
+}
+
+impl Drop for RelayWake {
+    fn drop(&mut self) {
+        if self.done {
+            return;
+        }
+        self.failed.store(true, Ordering::SeqCst);
+        // SAFETY: the byte is a valid one-byte buffer and fd is an open,
+        // nonblocking pipe end (a full pipe already holds a wakeup).
+        unsafe {
+            libc::write(
+                self.fd.as_raw_fd(),
+                &SIGNAL_BYTE as *const u8 as *const libc::c_void,
+                1,
+            );
         }
     }
+}
+
+type RelayHandle = std::thread::JoinHandle<io::Result<Vec<u8>>>;
+
+/// Relay `pipe` to `sink` on a thread of its own ([`relay`]), reporting a
+/// failure through `wake`.
+fn spawn_relay<R: Read + Send + 'static>(
+    pipe: R,
+    sink: Sink,
+    secrets: &[Vec<u8>],
+    keep: usize,
+    wake: RelayWake,
+) -> io::Result<RelayHandle> {
+    let scrubber = confine::Scrubber::new(secrets.to_vec());
+    std::thread::Builder::new()
+        .name("tog-relay".into())
+        .spawn(move || {
+            let result = relay(pipe, &sink, scrubber, keep);
+            if result.is_ok() {
+                wake.done();
+            }
+            result
+        })
+}
+
+fn join_relay(handle: RelayHandle) -> io::Result<Vec<u8>> {
+    handle
+        .join()
+        .map_err(|_| io::Error::other("a child output relay panicked"))?
+}
+
+/// Pass a child's output stream on to `sink` with the signing key's secret
+/// replaced: a tool's parse error quotes the line it failed on, and a
+/// project file can be the key under another name. Blocking reads until the
+/// child closes its end; the [`confine::Scrubber`] holds back only bytes
+/// that could still be part of a secret, never on a pause. Returns the
+/// first `keep` bytes passed on, scrubbed like the rest: a caller that
+/// quotes them in an error cannot carry the key either.
+fn relay(
+    mut pipe: impl Read,
+    sink: &Sink,
+    mut scrubber: confine::Scrubber,
+    keep: usize,
+) -> io::Result<Vec<u8>> {
+    let mut kept = Vec::new();
+    let mut pass_on = |bytes: Vec<u8>| {
+        let room = keep.saturating_sub(kept.len()).min(bytes.len());
+        kept.extend_from_slice(&bytes[..room]);
+        sink.write(&bytes);
+    };
+    let mut buffer = [0u8; 16 * 1024];
+    let result = loop {
+        match pipe.read(&mut buffer) {
+            Ok(0) => break Ok(()),
+            Ok(count) => pass_on(scrubber.push(&buffer[..count])),
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => break Err(error),
+        }
+    };
+    pass_on(scrubber.finish());
+    result.map(|()| kept)
 }
 
 fn drain<R: Read>(reader: &mut Option<R>, destination: &mut Vec<u8>) -> io::Result<bool> {
@@ -1062,8 +1231,8 @@ mod tests {
     }
 
     /// Every `local_*` form refuses a dependency tool before spawning it,
-    /// naming the program and the door, and lets a plain helper and a
-    /// reviewed offline form through to the supervisor.
+    /// naming the program and the door, and lets a plain helper through to
+    /// the supervisor.
     #[test]
     fn local_supervise_refuses_resolver_programs() {
         let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
@@ -1090,8 +1259,8 @@ mod tests {
             assert!(message.contains("npm"), "{message}");
             assert!(message.contains("kernel::resolve"), "{message}");
         }
-        // The offline workspace lookup runs, but only as the store's own
-        // Cargo: the same argv from a host cargo is refused unspawned.
+        // No cargo runs on the host: the workspace lookup it once ran is
+        // refused unspawned, the store's own Cargo included.
         let lookup = |program: &Path| {
             let mut command = Command::new(program);
             command
@@ -1112,10 +1281,11 @@ mod tests {
         );
         assert_eq!(host.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
         let cargo = crate::kernel::testutil::store_program(&store.root, "objects/rust/bin/cargo");
-        assert!(local_output(&mut lookup(&cargo), &activity)
-            .unwrap()
-            .status
-            .success());
+        let store_cargo = local_output(&mut lookup(&cargo), &activity);
+        assert_eq!(
+            store_cargo.unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
         let mut helper = Command::new("/bin/sh");
         helper.args(["-c", "exit 3"]);
         assert_eq!(
@@ -1123,6 +1293,169 @@ mod tests {
             Some(3)
         );
         drop(activity);
+    }
+
+    const RELAY_SEED: &str = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+
+    /// Run `script` under `status_relayed` with both streams collected and
+    /// `RELAY_SEED` as the secret, on a thread, failing after `limit`. The
+    /// stderr prefix it returns for the classifier must be the start of
+    /// what was passed on, scrubbed the same way.
+    fn relayed(script: &str, limit: std::time::Duration) -> (ExitStatus, Vec<u8>, Vec<u8>) {
+        let script = script.to_string();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let _test_session = TEST_SESSION
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let (store, _root) = test_store("relay");
+            let activity = store.activity(ActivityMode::Shared).unwrap();
+            let stdout = std::sync::Arc::new(Mutex::new(Vec::new()));
+            let stderr = std::sync::Arc::new(Mutex::new(Vec::new()));
+            let mut command = Command::new("/bin/sh");
+            command.args(["-c", &script]);
+            let (status, prefix) = status_relayed(
+                &mut command,
+                &activity,
+                Sink::Buffer(stdout.clone()),
+                Sink::Buffer(stderr.clone()),
+                &[RELAY_SEED.as_bytes().to_vec()],
+            )
+            .unwrap();
+            drop(activity);
+            let take = |buffer: std::sync::Arc<Mutex<Vec<u8>>>| buffer.lock().unwrap().clone();
+            let _ = sender.send((status, take(stdout), take(stderr), prefix));
+        });
+        let (status, stdout, stderr, prefix) = receiver
+            .recv_timeout(limit)
+            .expect("the relayed child did not finish in time");
+        assert_eq!(prefix.len(), stderr.len().min(CLASSIFIER_PREFIX));
+        assert_eq!(prefix, stderr[..prefix.len()]);
+        (status, stdout, stderr)
+    }
+
+    /// A relay thread that panics while the child sleeps wakes the
+    /// supervising thread, which kills and reaps the child, joins both
+    /// readers, and returns the failure, well before the child would end.
+    #[test]
+    fn a_failing_relay_wakes_the_supervisor_and_the_child_is_reaped() {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let _test_session = TEST_SESSION
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let (store, _root) = test_store("relay-fail");
+            let activity = store.activity(ActivityMode::Shared).unwrap();
+            // `exec`: the sleep is the direct child, so killing it closes
+            // both pipes (a grandchild holding one is a known limitation).
+            let mut command = Command::new("/bin/sh");
+            command.args(["-c", "printf 'x\\n' >&2; exec sleep 600"]);
+            let started = std::time::Instant::now();
+            let result = status_relayed(
+                &mut command,
+                &activity,
+                Sink::Buffer(std::sync::Arc::new(Mutex::new(Vec::new()))),
+                Sink::Panic,
+                &[],
+            );
+            drop(activity);
+            let _ = sender.send((
+                result.map(drop).map_err(|error| error.to_string()),
+                started.elapsed(),
+            ));
+        });
+        let (result, elapsed) = receiver
+            .recv_timeout(std::time::Duration::from_secs(60))
+            .expect("the supervisor did not wake for a failed relay");
+        let error = result.unwrap_err();
+        assert!(error.contains("relay panicked"), "{error}");
+        assert!(elapsed < std::time::Duration::from_secs(60), "{elapsed:?}");
+    }
+
+    /// No piece of the secret 10 characters or longer is in `text`.
+    fn holds_no_fragment(text: &[u8]) -> bool {
+        let text = String::from_utf8_lossy(text);
+        (0..=RELAY_SEED.len() - 10).all(|start| !text.contains(&RELAY_SEED[start..start + 10]))
+    }
+
+    /// A secret written in 8-character pieces on guttered lines, the child
+    /// pausing between them, never comes out whole or in a 10-character
+    /// piece: the scrubber holds back what could still be part of a match
+    /// however long the pause.
+    #[test]
+    fn a_secret_split_across_paused_lines_is_replaced() {
+        let mut script = String::from("printf 'error: bad TOML\\n1 | ed25519:' >&2; ");
+        for piece in RELAY_SEED.as_bytes().chunks(8) {
+            let piece = std::str::from_utf8(piece).unwrap();
+            script.push_str(&format!("printf '%s\\n  | ' {piece} >&2; sleep 0.03; "));
+        }
+        script.push_str("printf 'done\\n' >&2");
+        let (status, stdout, stderr) = relayed(&script, std::time::Duration::from_secs(60));
+        assert!(status.success());
+        assert!(
+            holds_no_fragment(&stderr),
+            "{}",
+            String::from_utf8_lossy(&stderr)
+        );
+        assert!(String::from_utf8_lossy(&stderr).ends_with("done\n"));
+        assert!(stdout.is_empty());
+        assert!(String::from_utf8_lossy(&stderr).contains("1 | ed25519:"));
+        // Each piece, cut alone, is shorter than a match; together they are
+        // the secret, so every one is replaced.
+        let text = String::from_utf8_lossy(&stderr);
+        assert!(text.contains("[signing key redacted]"), "{text}");
+        for piece in RELAY_SEED.as_bytes().chunks(8) {
+            assert!(
+                !text.contains(std::str::from_utf8(piece).unwrap()),
+                "{text}"
+            );
+        }
+    }
+
+    /// A child that floods stderr while writing 128 KiB to stdout finishes:
+    /// each pipe has its own reader, so neither waits on the other.
+    #[test]
+    fn a_child_flooding_both_streams_does_not_hang() {
+        let script = "dd if=/dev/zero bs=131072 count=1 2>/dev/null & \
+                      dd if=/dev/zero bs=1048576 count=2 >&2 2>/dev/null; wait";
+        let (status, stdout, stderr) = relayed(script, std::time::Duration::from_secs(60));
+        assert!(status.success());
+        assert_eq!(stdout.len(), 131072);
+        assert_eq!(stderr.len(), 2 * 1048576);
+        let script = "dd if=/dev/zero bs=1048576 count=2 >&2 2>/dev/null & \
+                      dd if=/dev/zero bs=131072 count=1 2>/dev/null; wait";
+        let (status, stdout, stderr) = relayed(script, std::time::Duration::from_secs(60));
+        assert!(status.success());
+        assert_eq!(stdout.len(), 131072);
+        assert_eq!(stderr.len(), 2 * 1048576);
+    }
+
+    /// Ordinary output passes through byte for byte, in order on each
+    /// stream, hex and line breaks included.
+    #[test]
+    fn ordinary_output_arrives_intact() {
+        let mut expected = String::new();
+        for line in 0..2000 {
+            expected.push_str(&format!("line {line}: sha 0123abcd 4567 | ok\n"));
+        }
+        std::fs::write(std::env::temp_dir().join("tog-relay-intact.txt"), &expected).unwrap();
+        let script = format!(
+            "cat {0}; cat {0} >&2; printf 'no newline 0123abc'",
+            std::env::temp_dir().join("tog-relay-intact.txt").display()
+        );
+        let (status, stdout, stderr) = relayed(&script, std::time::Duration::from_secs(60));
+        assert!(status.success());
+        assert_eq!(
+            String::from_utf8(stdout).unwrap(),
+            format!("{expected}no newline 0123abc")
+        );
+        assert_eq!(String::from_utf8(stderr).unwrap(), expected);
     }
 
     // Reviewed site (tests/architecture.rs): the supervisor's own tests of its primitives.

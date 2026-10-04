@@ -50,6 +50,30 @@ impl Tailor for Cargo {
         super::edit::edit_manifest(edit, door)
     }
 
+    fn resolution_outputs(&self, project: &ProjectRoot) -> io::Result<Vec<PathBuf>> {
+        super::resolve::resolution_outputs(project)
+    }
+
+    fn resolution_inputs(&self, project: &ProjectRoot) -> io::Result<Vec<PathBuf>> {
+        super::resolve::resolution_inputs(project)
+    }
+
+    /// `cargo metadata --locked` at the workspace root, on the Rust the
+    /// selection names with its components and targets.
+    fn attest_lock(
+        &self,
+        ctx: &Context,
+        project: &ProjectRoot,
+        toolchain: &Selected,
+        door: &mut ResolutionDoor<'_>,
+    ) -> io::Result<(crate::kernel::resolve::record::ResolutionRecord, Vec<u8>)> {
+        let root = inputs::locate_cargo_root(project.path())?;
+        let extras = cargo::project_extras_in(project)?;
+        let rust_obj =
+            cargo::realize_toolchain(&ctx.store, &ctx.activity, ctx.platform, toolchain, &extras)?;
+        super::resolve::attest_project(door, project, &rust_obj, &root, toolchain)
+    }
+
     fn id(&self) -> &'static str {
         "cargo"
     }
@@ -132,6 +156,7 @@ impl Tailor for Cargo {
             &vendor_obj,
             &inputs.plan,
             &inputs.lock_digest,
+            &inputs.resolution_basis,
             toolchain,
             attribution,
         )?;
@@ -192,6 +217,7 @@ impl Tailor for Cargo {
             &vendor_obj,
             &inputs.plan,
             &inputs.lock_digest,
+            &inputs.resolution_basis,
             toolchain,
             attribution,
         )?;
@@ -331,11 +357,10 @@ impl Tailor for Cargo {
         Ok(())
     }
 
-    /// The Cargo workspace root, as the store Cargo locates it.
-    fn fmt_root(&self, ctx: &Context, cwd: &Path, toolchain: &Selected) -> io::Result<PathBuf> {
-        let rust_object =
-            cargo::realize_runtime(&ctx.store, &ctx.activity, ctx.platform, toolchain)?;
-        inputs::locate_cargo_root(&rust_object, cwd, &ctx.activity)?.canonicalize()
+    /// The Cargo workspace root, found by tog's own walk of the manifests
+    /// (no cargo runs on the host).
+    fn fmt_root(&self, _ctx: &Context, cwd: &Path, _toolchain: &Selected) -> io::Result<PathBuf> {
+        inputs::locate_cargo_root(cwd)?.canonicalize()
     }
 
     /// Realize only the Rust toolchain and its paired rustfmt component, then
@@ -353,11 +378,37 @@ impl Tailor for Cargo {
         let activity = &ctx.activity;
         // The formatter rides in the same release bundle as the compiler, so
         // one selection names both, and both are realized from its rows.
+        let workspace_root = inputs::locate_cargo_root(cwd)?.canonicalize()?;
+        // cargo fmt runs in the workspace itself (writable, the user's home
+        // out of sight): a file there that is the signing key under another
+        // name (a hard link) would be read as a manifest or a config and
+        // quoted in cargo's parse error. The whole workspace is mounted,
+        // `target` included (a config can be a symlink to `../target/key`),
+        // so the whole of it is scanned. The formatter's output is relayed
+        // with the key's secret replaced as well (`supervise::Relay`).
+        crate::kernel::resolve::confine::refuse_key_links_under(
+            &workspace_root,
+            &crate::kernel::resolve::confine::signing_key_ids(),
+            &[],
+        )?;
+        // The configuration cargo-fmt's cargo reads, from the invocation
+        // directory up to the workspace root (nothing above it is mounted):
+        // a file there (or one it includes) that is the key, or a symlink
+        // out of the workspace, is refused by name before anything runs.
+        {
+            use crate::kernel::provider::cargo_door;
+            let bound = cargo_door::Bound::new(&workspace_root)?;
+            let invocation = cwd.canonicalize()?;
+            for dir in invocation.ancestors() {
+                if !dir.starts_with(&workspace_root) {
+                    break;
+                }
+                cargo_door::config_files(dir, &bound)?;
+            }
+        }
         let rust_object = cargo::realize_runtime(store, activity, platform, toolchain)?;
         let rustfmt_object =
             rustfmt::ensure_rustfmt(store, activity, platform, toolchain, &rust_object)?;
-        let workspace_root =
-            inputs::locate_cargo_root(&rust_object, cwd, activity)?.canonicalize()?;
         // An older `tog fmt` wrote a `rustfmt` closure here; nothing reads
         // one any more, so a formatting run removes it (unless it is the
         // only closure: see `remove_legacy_record`). `--check` changes

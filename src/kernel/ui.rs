@@ -59,17 +59,14 @@ pub fn init(quiet: bool, verbose: bool, no_color: bool) -> io::Result<()> {
 
 /// A panic must reach the user whatever `--quiet` did to fd 2: the default
 /// hook writes to fd 2, which quiet points at /dev/null, so the process
-/// would exit 101 having printed nothing.
+/// would exit 101 having printed nothing. It goes through the error channel
+/// in every mode, so its message has the signing key's secret replaced like
+/// any other ([`scrub`]); `RUST_BACKTRACE` still adds the backtrace.
 fn install_panic_hook() {
-    let default = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         // A download may be holding the cursor's row. Clear it first, or
         // the panic prints onto the tail of the progress line.
         erase_progress_line();
-        if ERROR_FD.get().is_none() {
-            default(info);
-            return;
-        }
         let payload = info
             .payload()
             .downcast_ref::<&str>()
@@ -80,8 +77,15 @@ fn install_panic_hook() {
             Some(location) => format!(" at {}:{}", location.file(), location.line()),
             None => String::new(),
         };
+        // RUST_BACKTRACE asks for the backtrace, as with the default hook.
+        let wanted = std::env::var_os("RUST_BACKTRACE").is_some_and(|value| value != "0");
+        let backtrace = if wanted {
+            format!("{}\n", std::backtrace::Backtrace::force_capture())
+        } else {
+            String::new()
+        };
         write_error_channel(&format!(
-            "tog: {}: {payload}{where_}\ntog: this is a bug in tog; please report it with the command you ran\n",
+            "tog: {}: {payload}{where_}\ntog: this is a bug in tog; please report it with the command you ran\n{backtrace}",
             paint("internal error", RED)
         ));
     }));
@@ -170,8 +174,17 @@ fn paint(word: &str, code: &str) -> String {
     }
 }
 
-/// Write to the real stderr even under `--quiet`.
+/// `text` with the signing key's secret replaced wherever it appears: a
+/// message can quote a file a parser failed on, and a project file can be
+/// the key under another name.
+fn scrub(text: &str) -> String {
+    crate::kernel::resolve::confine::scrub_signing_key(text)
+}
+
+/// Write to the real stderr even under `--quiet`, the signing key's secret
+/// replaced ([`scrub`]).
 fn write_error_channel(text: &str) {
+    let text = scrub(text);
     match ERROR_FD.get() {
         Some(&fd) => {
             // SAFETY: fd is a valid, open descriptor this module saved and
@@ -222,7 +235,7 @@ pub fn warning(message: &str, fix: &str) {
     if quiet() {
         return;
     }
-    eprint!("{}", warning_lines(message, fix));
+    eprint!("{}", scrub(&warning_lines(message, fix)));
 }
 
 /// Both lines as text, newlines included, for a caller that writes to a
@@ -241,7 +254,7 @@ pub fn warning_next(message: &str, next: &str) {
     if quiet() {
         return;
     }
-    eprint!("{}", warning_next_lines(message, next));
+    eprint!("{}", scrub(&warning_next_lines(message, next)));
 }
 
 /// `warning_next` as text, the way `warning_lines` is `warning`'s.
@@ -284,7 +297,7 @@ pub fn note(message: &str) {
     if quiet() {
         return;
     }
-    eprintln!("tog: {message}");
+    eprintln!("tog: {}", scrub(message));
 }
 
 /// A handle for narration a lower layer renders itself: the store

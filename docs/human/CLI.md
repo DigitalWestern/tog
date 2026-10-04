@@ -953,7 +953,14 @@ before any record is written. With `TOG_SIGNING_KEY` unset it warns and
 writes the record unsigned, which no sync will attest. It reads
 `tog-toolchain.toml` the way `--frozen` does and never writes it, and it
 refuses `--frozen` (exit 2). An ecosystem with no resolution door is
-refused by name.
+refused by name. Today two have one. Go's check is `go mod download -json
+all` then `go mod tidy -diff`. Cargo's is `cargo metadata --locked` at the
+workspace root, run in the sandbox through tog's resolution proxy (TLS
+interception to crates.io), so its fetches are in the record's ledger. Run
+it at the workspace root: from a member crate it is refused, naming the
+root, because the root's `Cargo.lock` is the one the record covers. A
+workspace with a path dependency outside its root is refused too: a
+record names files inside the workspace only, so it could not cover it.
 
 - `--record-out <path>` writes the record outside the checkout instead: to
   `<path>` itself when one ecosystem is named, else `<path>/<ecosystem>.json`.

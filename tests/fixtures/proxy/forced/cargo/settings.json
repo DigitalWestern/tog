@@ -19,6 +19,7 @@
     "--config", "build.rustc-workspace-wrapper=\"\"",
     "--config", "build.rustdoc=\"@RUST@/bin/rustdoc\"",
     "--config", "registry.global-credential-providers=[\"cargo:token\"]",
-    "--config", "registries.evil.credential-provider=[\"cargo:token\"]"
+    "--config", "registry.credential-provider=\"cargo:token\"",
+    "--config", "registries.evil.credential-provider=\"cargo:token\""
   ]
 }

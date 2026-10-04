@@ -541,7 +541,14 @@ fn mixed_cargo_pnpm_edit_keeps_cargo_exception_with_cargo() {
         "mixed pnpm add",
     );
 
-    let cargo_exceptions = closure_exceptions(&project.join(".tog/closures/cargo.json"));
+    // The hand-written lock carries no resolution record, which Cargo's
+    // door reports as `unrecorded-resolution`; it is set apart so the git
+    // exception is the one traced.
+    let (unrecorded, cargo_exceptions): (Vec<_>, Vec<_>) =
+        closure_exceptions(&project.join(".tog/closures/cargo.json"))
+            .into_iter()
+            .partition(|exception| exception["kind"] == "unrecorded-resolution");
+    assert_eq!(unrecorded.len(), 1, "cargo exceptions: {unrecorded:?}");
     assert_eq!(
         cargo_exceptions.len(),
         1,
@@ -926,8 +933,12 @@ fn nested_independent_npm_project_does_not_use_ancestor_pnpm_lock() {
 #[ignore]
 fn cargo_add_update_remove_roundtrip() {
     let temp = scratch("cargo");
-    let project = &temp.0;
-    let store = project.join("store");
+    // The project is its own directory beside home and the store: cargo
+    // runs confined, and the door refuses a project that contains the
+    // signing key under home.
+    let project = &temp.0.join("project");
+    std::fs::create_dir_all(project).unwrap();
+    let store = temp.0.join("store");
     std::fs::write(
         project.join("Cargo.toml"),
         "[package]\nname = \"deps-e2e\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",

@@ -12,8 +12,10 @@
 //! belongs to, and are installed with every other tailor's rows.
 
 pub mod artifacts;
+pub mod cargo_door;
 pub mod cpython;
 pub mod crates;
+pub mod crates_index;
 pub mod nativelibs;
 pub mod rust;
 pub mod rust_channel;

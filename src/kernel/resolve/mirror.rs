@@ -25,7 +25,7 @@ use super::cache::{self, Cached};
 use super::http::{self, Headers};
 use super::ledger::{DiagRequest, Entry, Freshness};
 use super::redact;
-use super::routes::{Claim, LocalAnswer, ProxyAddress, RequestClass, Route};
+use super::routes::{Claim, LocalAnswer, Permitted, ProxyAddress, RequestClass, Route};
 use super::session::{Claimed, Mode, State};
 use crate::kernel::digest::Algo;
 use crate::kernel::fetch::pinned::{PinnedClient, PinnedError, PinnedRequest, PinnedResponse};
@@ -123,6 +123,7 @@ impl Record {
             claimed: self.claimed,
             verified: self.verified,
             freshness: self.freshness,
+            redirected_to: self.hops.last().cloned(),
         };
         let diag = DiagRequest {
             seq: 0,
@@ -262,11 +263,26 @@ pub(crate) struct Exchange<'a> {
     pub address: &'a ProxyAddress,
     pub method: &'a str,
     pub request: &'a Headers,
+    /// The request body, forwarded upstream (a git `upload-pack`
+    /// negotiation); `None` for every registry read.
+    pub body: Option<&'a [u8]>,
+    /// Where a redirect may lead: the session's permitted set, or for a
+    /// host no route serves, only that host.
+    pub permitted: &'a Permitted,
+    /// Authorizes each redirect hop (the next URL and the method it would
+    /// be sent with) after the permitted set allowed it, the way the first
+    /// request was authorized: intercepted traffic is classified again, so
+    /// a hop cannot turn into a push, or into a class policy denies. `None`
+    /// for a mirror route, whose hops the permitted set alone decides.
+    pub hop: Option<&'a HopCheck<'a>>,
     pub keep_alive: bool,
     /// The tool spoke HTTP/1.0: a body of unknown length ends with the
     /// connection, and the connection closes after every response.
     pub http10: bool,
 }
+
+/// [`Exchange::hop`]: `Err(why)` refuses the redirect.
+pub(crate) type HopCheck<'a> = dyn Fn(&Url, &str) -> Result<(), String> + 'a;
 
 impl Exchange<'_> {
     fn redacted(&self, url: &Url) -> String {
@@ -383,20 +399,24 @@ impl Exchange<'_> {
             );
         }
         let class = self.route.protocol.classify(url);
-        if class == RequestClass::Artifact {
-            return self.artifact(url, out);
+        if !class.is_metadata() {
+            return self.artifact(url, class, out);
         }
         self.metadata(url, class, out)
     }
 
     /// The headers sent upstream for `url`: the tool's allowlisted ones,
-    /// `extra`, and the endpoint's own credential when `url` is on it.
+    /// `extra`, and the endpoint's own credential when `url` is on it. A
+    /// request with a body also keeps its `Content-Encoding` (git gzips a
+    /// large negotiation).
     fn upstream_headers(&self, url: &Url, extra: &[(String, String)]) -> Vec<(String, String)> {
         let mut headers: Vec<(String, String)> = self
             .request
             .iter()
             .filter(|(name, _)| {
-                FORWARDED_REQUEST_HEADERS.contains(&name.to_ascii_lowercase().as_str())
+                let name = name.to_ascii_lowercase();
+                FORWARDED_REQUEST_HEADERS.contains(&name.as_str())
+                    || (self.body.is_some() && name == "content-encoding")
             })
             .map(|(name, value)| (name.to_string(), value.to_string()))
             .collect();
@@ -423,11 +443,14 @@ impl Exchange<'_> {
             // only: another location's 304 would answer for a different
             // document than the one cached.
             let headers = self.upstream_headers(&url, if hops.is_empty() { extra } else { &[] });
+            // The body follows the request while its method does (a 303
+            // turns it into a GET, which has none).
+            let body = self.body.filter(|_| method == self.method);
             let sent = self.client.send(&PinnedRequest {
                 method: &method,
                 url: url.as_str(),
                 headers: &headers,
-                body: None,
+                body,
             });
             let response = match sent {
                 Ok(response) => response,
@@ -447,7 +470,7 @@ impl Exchange<'_> {
                 }
             };
             hops.push(self.redacted(&next));
-            if !self.state.config.permitted.allows(&next) {
+            if !self.permitted.allows(&next) {
                 let why = format!(
                     "redirect to {} is not a permitted endpoint",
                     next.origin().ascii_serialization()
@@ -456,6 +479,11 @@ impl Exchange<'_> {
             }
             if response.status == 303 && method != "HEAD" {
                 method = "GET".into();
+            }
+            if let Some(check) = self.hop {
+                if let Err(why) = check(&next, &method) {
+                    return Err((Failure::Redirect(why), hops));
+                }
             }
             url = next;
         }
@@ -696,12 +724,8 @@ impl Exchange<'_> {
         self.reply(out, status, &headers, &body)
     }
 
-    fn artifact(&self, url: &Url, out: &mut dyn Write) -> io::Result<()> {
-        let record = Record::new(
-            RequestClass::Artifact.as_str(),
-            self.method,
-            self.redacted(url),
-        );
+    fn artifact(&self, url: &Url, class: RequestClass, out: &mut dyn Write) -> io::Result<()> {
+        let record = Record::new(class.as_str(), self.method, self.redacted(url));
         match self.state.claimed(url) {
             Claimed::Conflict(why) => {
                 self.state.hard_failure(why.clone());

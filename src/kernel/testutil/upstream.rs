@@ -44,6 +44,11 @@ impl FixtureCa {
         Self { cert, key }
     }
 
+    /// The CA certificate as PEM, for a tool that trusts it directly.
+    pub(crate) fn pem(&self) -> String {
+        self.cert.pem()
+    }
+
     /// The root set that trusts this CA and nothing else.
     pub(crate) fn roots(&self) -> rustls::RootCertStore {
         let mut roots = rustls::RootCertStore::empty();
@@ -99,6 +104,13 @@ pub(crate) enum Behavior {
     /// Accept the request, then drop the connection without an answer: a
     /// transport failure as the proxy sees it.
     Drop,
+    /// Answer `reply` only to a request whose body holds every one of
+    /// `parts` (a git negotiation's commands), and 400 otherwise, so a
+    /// proxy that drops or alters the body fails the exchange.
+    Require {
+        parts: Vec<Vec<u8>>,
+        reply: Reply,
+    },
 }
 
 /// One request the server received.
@@ -109,6 +121,8 @@ pub(crate) struct Seen {
     pub headers: Headers,
     /// The TLS server name the client sent (SNI).
     pub sni: Option<String>,
+    /// The request body, as received.
+    pub body: Vec<u8>,
 }
 
 type Routes = Arc<Mutex<HashMap<String, Behavior>>>;
@@ -210,6 +224,17 @@ impl FixtureUpstream {
         }
     }
 
+    /// Make the answer already set for `target` require a body holding
+    /// every one of `parts`.
+    pub(crate) fn require_body(&self, target: &str, parts: &[&[u8]]) {
+        let mut routes = self.routes.lock().unwrap();
+        let Some(Behavior::Reply(reply)) = routes.get(target).cloned() else {
+            panic!("no reply is set for {target}");
+        };
+        let parts = parts.iter().map(|part| part.to_vec()).collect();
+        routes.insert(target.to_string(), Behavior::Require { parts, reply });
+    }
+
     /// Every request received so far.
     pub(crate) fn seen(&self) -> Vec<Seen> {
         self.seen.lock().unwrap().clone()
@@ -263,11 +288,22 @@ fn serve(
             target: request.target.clone(),
             headers: request.headers.clone(),
             sni: sni.clone(),
+            body: request.body.clone(),
         };
         seen.lock().unwrap().push(record);
         let behavior = routes.lock().unwrap().get(&request.target).cloned();
+        let holds = |part: &Vec<u8>| {
+            request
+                .body
+                .windows(part.len().max(1))
+                .any(|window| window == part.as_slice())
+        };
         let reply = match behavior {
             Some(Behavior::Reply(reply)) => reply,
+            Some(Behavior::Require { parts, reply }) if parts.iter().all(holds) => reply,
+            Some(Behavior::Require { .. }) => {
+                Reply::new(400, b"the request body is not the expected negotiation")
+            }
             Some(Behavior::Drop) => return,
             None => Reply::new(404, b"no such fixture"),
         };

@@ -41,6 +41,9 @@ pub const LISTEN_ADDRESS: &str = "127.0.0.1:8119";
 pub const PROXY_SOCKET: &str = "/run/tog/proxy.sock";
 /// Where the running tog executable is bound inside the sandbox.
 pub const TOG_EXECUTABLE: &str = "/run/tog/tog";
+/// Where an intercepting door binds the proxy's CA certificate (read-only)
+/// inside the sandbox: the file the tool is told to trust.
+pub const CA_FILE: &str = "/run/tog/ca.pem";
 /// The hidden verb.
 pub const VERB: &str = "__resolution-relay";
 /// The descriptor number the exec log arrives on inside the sandbox.
