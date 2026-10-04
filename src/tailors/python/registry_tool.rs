@@ -27,6 +27,28 @@ impl RegistryTool for PythonTool {
         python::runtime_object_id(platform, toolchain)
     }
 
+    /// The Rust a Rust-extension sdist builds on: inside a project that
+    /// locks Rust, the locked one, so its object is part of the key
+    /// (`x/4`). Outside one, the sdist's own toolchain file decides and the
+    /// key stays `x/3`.
+    fn helpers(&self) -> &'static [&'static str] {
+        &["rust"]
+    }
+
+    fn helper_object_id(
+        &self,
+        platform: Platform,
+        helper: &str,
+        selected: &Selected,
+    ) -> io::Result<String> {
+        match helper {
+            "rust" => crate::kernel::provider::rust::runtime_object_id(platform, selected),
+            other => Err(io::Error::other(format!(
+                "PyPI tools have no {other} helper"
+            ))),
+        }
+    }
+
     fn spelling(&self) -> &'static str {
         "py"
     }
@@ -64,7 +86,7 @@ impl RegistryTool for PythonTool {
         package: &str,
         version: Option<&str>,
         toolchain: &Selected,
-        _helpers: &std::collections::BTreeMap<String, Selected>,
+        helpers: &std::collections::BTreeMap<String, Selected>,
     ) -> io::Result<()> {
         let (store, activity, platform) = (door.store(), door.lease(), door.platform());
         fs::create_dir_all(root)?;
@@ -119,7 +141,7 @@ impl RegistryTool for PythonTool {
         }
         let text = fs::read_to_string(&output)?;
         let plan = pypi::plan_python(platform, &text, pin.version)?;
-        let env = env::realize_env_for(door, &plan, toolchain)?;
+        let env = env::realize_env_with(door, &plan, toolchain, helpers.get("rust"))?;
         env::project_env_with_selection(
             activity,
             &crate::kernel::fsroot::ProjectRoot::open(root)?,

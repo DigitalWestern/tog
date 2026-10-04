@@ -2069,9 +2069,11 @@ mod tests {
     /// earlier tog made. The toolchain is a fixed bundle, not the shipped
     /// catalog, so a catalog bump does not move these goldens.
     ///
-    /// `py:` has no helpers and keeps its `x/3` name. `npm:` keys on its
-    /// node-gyp Python under `x/4`; the helper-less spelling of the same
-    /// request is still the `x/3` golden, so only the helper moved it.
+    /// `py:` outside a project that locks Rust has no helper and keeps its
+    /// `x/3` name; inside one it keys on the locked Rust under `x/4` (#190).
+    /// `npm:` keys on its node-gyp Python under `x/4`; the helper-less
+    /// spelling of the same request is still the `x/3` golden, so only the
+    /// helper moved it.
     #[test]
     fn x_root_names_are_byte_identical_goldens() {
         let store = Store::for_test(PathBuf::from("/home/golden/.tog/store"));
@@ -2092,7 +2094,22 @@ mod tests {
             .unwrap(),
             "py-ruff-215b4362097370ce"
         );
-        assert!(registry_tool("python").unwrap().helpers().is_empty());
+        assert_eq!(registry_tool("python").unwrap().helpers(), ["rust"]);
+        let py = |rust: &str| {
+            x_root_name(
+                &store,
+                platform,
+                "python",
+                "ruff",
+                Some("0.6.1"),
+                &python,
+                "cpython-object",
+                &[("rust".to_string(), rust.to_string())],
+            )
+            .unwrap()
+        };
+        assert_eq!(py("rust-object"), "py-ruff-d22c85ac801414bf");
+        assert_ne!(py("other-rust-object"), py("rust-object"));
         assert_eq!(
             x_root_name(
                 &store,

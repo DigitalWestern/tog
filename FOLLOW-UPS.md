@@ -154,7 +154,6 @@ After the proxy: the test-suite audit (#351) and then the quality review
 - **Smaller open issues from the 2026-09-23/24 run.** One line each; the
   issue has the options and the pick.
   - #188 npm: realize `file:` packages as tog-owned trees.
-  - #190 `tog x` py: tools in a Rust-locked project build sdists on shipped Rust.
   - #191 provider object-kind rows still live in the tailors' `objects.rs`.
   - #215 python: sdists that need Rust at build time (stable-diffusion-webui).
   - #216 python: `uv pip compile` fails for vllm and MetaGPT; classifier label.
