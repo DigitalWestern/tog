@@ -1,6 +1,7 @@
 # Runs the tog GitHub Action (action.yml at the repository root) the way an
 # outside repository would, against .github/action-demo: install the
-# latest release, sync under the company policy, audit, SBOM.
+# latest release, sync under the company policy, audit, SBOM. One leg
+# keeps the store in the cache, one runs the signed gate.
 #
 # Only when the action or something it reads changes, or by hand
 # (`gh workflow run action`): it tests the released binary, not the code in
@@ -27,29 +28,70 @@ permissions:
 jobs:
   demo:
     # 22.04 lets bwrap have a user namespace as it comes; 24.04 does not,
-    # so that leg is the one that needs the action's AppArmor profile.
+    # so that leg is the one that needs the action's AppArmor profile. The
+    # 22.04 leg also keeps the store in the cache: its first run saves it,
+    # the next one restores it. The signed leg runs the gate with trusted
+    # keys: a throwaway key, a policy that trusts it, and `audit: signed`.
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, ubuntu-24.04]
+        include:
+          - os: ubuntu-22.04
+            cache: "true"
+          - os: ubuntu-24.04
+          - os: ubuntu-24.04
+            signed: true
+    name: demo (${{ matrix.os }}${{ matrix.signed && ', signed' || '' }})
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      # A key made here, not with `tog keygen`: tog is not installed until
+      # the action runs. The key file is `ed25519:<seed hex>`, the policy
+      # names `ed25519:<public key hex>`, and openssl's DER forms end in
+      # those 32 bytes.
+      - name: A throwaway signing key, and a policy that trusts it
+        id: key
+        if: matrix.signed
+        run: |
+          set -euo pipefail
+          der="$RUNNER_TEMP/key.der"
+          openssl genpkey -algorithm ed25519 -outform DER -out "$der"
+          seed=$(tail -c 32 "$der" | od -An -v -tx1 | tr -d ' \n')
+          public=$(openssl pkey -inform DER -in "$der" -pubout -outform DER | tail -c 32 | od -An -v -tx1 | tr -d ' \n')
+          rm -f "$der"
+          echo "::add-mask::$seed"
+          policy="$RUNNER_TEMP/tog-policy.toml"
+          cp docs/human/policy-company.toml "$policy"
+          printf '\n[signing]\ntrusted = ["ed25519:%s"]\n' "$public" >> "$policy"
+          echo "key=ed25519:$seed" >> "$GITHUB_OUTPUT"
+          echo "policy=$policy" >> "$GITHUB_OUTPUT"
       - uses: ./
         id: tog
         with:
           working-directory: .github/action-demo
-          sbom-artifact: sbom-${{ matrix.os }}
+          sbom-artifact: sbom-${{ matrix.os }}${{ matrix.signed && '-signed' || '' }}
+          cache: ${{ matrix.cache || 'false' }}
+          policy: ${{ steps.key.outputs.policy }}
+          audit: ${{ matrix.signed && 'signed' || 'true' }}
+          signing-key: ${{ steps.key.outputs.key }}
       - name: The environment runs, under the policy the action set
         working-directory: .github/action-demo
         env:
           TOG_VERSION_LINE: ${{ steps.tog.outputs.version }}
           TOG_SBOM: ${{ steps.tog.outputs.sbom }}
+          TOG_EXPECTED_POLICY: ${{ steps.key.outputs.policy || format('{0}/docs/human/policy-company.toml', github.workspace) }}
         run: |
           set -euo pipefail
           echo "$TOG_VERSION_LINE"
           case "$TOG_VERSION_LINE" in "tog "*) ;; *) exit 1 ;; esac
-          test "$(realpath "$TOG_POLICY")" = "$(realpath "$GITHUB_WORKSPACE/docs/human/policy-company.toml")"
+          test "$TOG_POLICY" = "$(realpath "$TOG_EXPECTED_POLICY")"
           tog run python -c 'import six; print("six", six.__version__)'
           jq -e '.bomFormat == "CycloneDX"' "$TOG_SBOM"
           tog status
+      - name: Every closure is signed by the trusted key
+        if: matrix.signed
+        working-directory: .github/action-demo
+        run: |
+          set -euo pipefail
+          tog audit --signed --json | jq -e '.passed and (.closures | length > 0) and all(.closures[]; .signature.state == "trusted")'
+          test ! -e "$RUNNER_TEMP/tog-signing.key"

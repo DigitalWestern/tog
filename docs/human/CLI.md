@@ -849,11 +849,38 @@ a later step can `tog run` the tests under the same policy. Its inputs:
 | `signing-key` | *(empty)* | contents of a `tog keygen` file, from a secret; on disk only while the sync runs (see "Which jobs may hold the key") |
 | `sbom` | `sbom.json` | where the SBOM is written; empty skips it |
 | `upload-sbom` | `true` | upload it as the artifact named by `sbom-artifact` (`sbom`) |
+| `cache` | `false` | `true` keeps the store in the Actions cache between runs (see below) |
 | `sandbox` | `true` | install bubblewrap when missing, and the AppArmor profile `tog doctor` names where Ubuntu 24.04 denies bwrap a user namespace |
 
 The outputs are `version` (what `tog --version` prints) and `sbom` (the
 SBOM's path). The gate with trusted keys is `policy: ci/tog-policy.toml`,
 `audit: signed` and `signing-key: ${{ secrets.TOG_SIGNING_KEY }}`.
+
+**The store cache.** Without it every run downloads the toolchains and
+packages again. `cache: true` restores the store an earlier run saved
+(keyed on the tog version and the project's `tog-toolchain.toml` and
+lockfiles, falling back to the newest store of the same version), and saves
+it again after a sync that passed, once `tog gc` has swept what no project
+roots any more. tog checks a store's format when it opens it but does not
+re-hash the objects in it, so a restored store is trusted as if this run
+had built it. GitHub keeps what a pull request's run saves to that pull
+request, so a run on `main` never restores it. Do not turn the cache on in
+a `pull_request_target` workflow: there a fork's code runs with the base
+branch's cache.
+
+**While this repository is private.** A workflow in another repository
+needs two things before `uses: DigitalWestern/tog@main` works:
+
+1. In this repository's Settings, Actions, General, under "Access", allow
+   access from repositories in the `DigitalWestern` organization (if the
+   organization's plan offers the setting). Only repositories in the
+   organization can use the action until this repository is public.
+2. A token that can read this repository's releases, as a secret (a
+   fine-grained token with "Contents: read" on `DigitalWestern/tog`),
+   passed as `token: ${{ secrets.TOG_RELEASES_TOKEN }}`. The job's own
+   token reads only the repository the job runs in.
+
+Neither is needed once the repository is public.
 
 The same job written out by hand, for a runner the action does not cover
 or a step that has to differ. Its install step uses the one-line installer,
