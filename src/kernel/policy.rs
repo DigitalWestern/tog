@@ -305,7 +305,7 @@ fn open_policy(path: &Path, required: bool) -> io::Result<Option<(fs::File, Path
 }
 
 /// The text of a policy file `open_policy` opened.
-fn read_policy(mut file: fs::File, path: &Path) -> io::Result<String> {
+fn read_policy(mut file: &fs::File, path: &Path) -> io::Result<String> {
     let mut text = String::new();
     io::Read::read_to_string(&mut file, &mut text)
         .map_err(|e| io::Error::new(e.kind(), format!("read {}: {e}", path.display())))?;
@@ -501,10 +501,16 @@ pub(crate) fn load_with_sources_from(
     } else {
         std::env::var_os("HOME").map(|home| (PathBuf::from(home).join(".tog/policy.toml"), false))
     };
+    // The open file is kept to the end of the load. While it is open its
+    // device and inode cannot be given to another file, so a project
+    // policy created after the machine file is deleted never compares
+    // equal to it.
     let mut machine_path = None;
+    let mut _machine_held = None;
     if let Some((path, required)) = machine_file {
         if let Some((file, identity)) = open_policy(&path, required)? {
-            let text = read_policy(file, &path)?;
+            let text = read_policy(&file, &path)?;
+            _machine_held = Some(file);
             merge_text(
                 &mut policy,
                 &mut sources,
@@ -526,7 +532,7 @@ pub(crate) fn load_with_sources_from(
                 continue;
             };
             if !is_machine(&identity) {
-                let text = read_policy(file, &path)?;
+                let text = read_policy(&file, &path)?;
                 merge_text(
                     &mut policy,
                     &mut sources,
@@ -1985,7 +1991,7 @@ deny = ["git-dependency"]"#,
         fs::write(&path, "deny = [\"weak-integrity\"]\n").unwrap();
         assert_eq!(identity, (original.dev(), original.ino()));
         assert_eq!(
-            read_policy(file, &path).unwrap(),
+            read_policy(&file, &path).unwrap(),
             "deny = [\"git-dependency\"]\n"
         );
         // A required policy that is missing still refuses, an optional one
