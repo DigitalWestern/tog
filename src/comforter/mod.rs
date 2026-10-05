@@ -703,6 +703,7 @@ pub fn closure_object(
 /// every link is followed. `is_file` alone follows links anywhere, so an
 /// object carrying `bin/go -> /usr/bin/true` would pass and land on PATH.
 /// Links within the object (`bin/python3 -> python3.12`) still pass.
+/// Only the probe is checked: other entries beside it are not walked.
 fn probe_is_inside(object: &Path, probe: &str) -> bool {
     let (Ok(root), Ok(target)) = (object.canonicalize(), object.join(probe).canonicalize()) else {
         return false;
