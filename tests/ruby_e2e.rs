@@ -177,8 +177,9 @@ fn collect_symlinks(root: &Path, out: &mut Vec<PathBuf>) {
 /// glibc sonames the portable bottle, and a gem extension built against the
 /// host C runtime alone, may legitimately need from the host. Nothing else:
 /// the gem sandbox hides every other host library (`HostView::RuntimeOnly`),
-/// so nokogiri's vendored libxml2 finds neither zlib nor liblzma and links
-/// glibc only, on every host (issue #304).
+/// so nokogiri's vendored libxml2 finds neither the host's zlib nor its
+/// liblzma, on every host (issue #304); what it links beyond glibc comes from
+/// tog's native library set (#329).
 fn is_glibc_soname(soname: &str) -> bool {
     [
         "libc.so",
@@ -198,6 +199,26 @@ fn is_glibc_soname(soname: &str) -> bool {
 /// historical provenance (the bottle retains its Homebrew build RUNPATH but
 /// nothing NEEDED lives there). `ldd` then proves what actually resolves.
 fn assert_elf_resolves_from_system(elf: &Path, staging: &Path) {
+    assert_elf_resolves_from(elf, staging, None);
+}
+
+/// `assert_elf_resolves_from_system`, except that a NEEDED library `ldd`
+/// resolves inside `libset`, tog's pinned native library set, is allowed:
+/// a native gem builds with the set mounted and links it through its
+/// RUNPATH (#329).
+fn assert_elf_resolves_from(elf: &Path, staging: &Path, libset: Option<&Path>) {
+    let ldd = tool("ldd", &[], elf);
+    let from_set = |soname: &str| {
+        libset.is_some_and(|set| {
+            ldd.lines().any(|line| {
+                let mut parts = line.trim().split(" => ");
+                parts.next() == Some(soname)
+                    && parts.next().is_some_and(|path| {
+                        Path::new(path.split(' ').next().unwrap()).starts_with(set)
+                    })
+            })
+        })
+    };
     let dynamic = tool("readelf", &["-dW"], elf);
     for line in dynamic.lines() {
         if line.contains("(NEEDED)") {
@@ -208,15 +229,14 @@ fn assert_elf_resolves_from_system(elf: &Path, staging: &Path) {
                 .trim_end_matches(']')
                 .trim();
             assert!(
-                is_glibc_soname(soname),
-                "{} NEEDS a non-glibc library {soname}",
+                is_glibc_soname(soname) || from_set(soname),
+                "{} NEEDS a non-glibc library {soname} from outside the native library set:\n{ldd}",
                 elf.display()
             );
         } else if line.contains("(RUNPATH)") || line.contains("(RPATH)") {
             eprintln!("{}: historical {}", elf.display(), line.trim());
         }
     }
-    let ldd = tool("ldd", &[], elf);
     assert!(
         !ldd.contains("not found"),
         "{} has unresolved libraries:\n{ldd}",
@@ -704,7 +724,10 @@ puts JSON.generate("native" => File.realpath(native), "value" => value,
             "nokogiri loaded outside the committed gem object: {native}"
         );
         assert_no_forbidden_prefix(native, &staging, "nokogiri native library");
-        assert_elf_resolves_from_system(Path::new(native), &staging);
+        // Its vendored libxml2 may link zlib or liblzma from the native
+        // library set the build mounted; nothing from the host.
+        let libset = find_object(&store, "native-libs").map(|(set, _)| set.canonicalize().unwrap());
+        assert_elf_resolves_from(Path::new(native), &staging, libset.as_deref());
     }
     // Without its lock the project is refused under --frozen and left
     // alone; a plan regenerates the lock with the store bundler.
