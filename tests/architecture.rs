@@ -1522,7 +1522,6 @@ const LEASE_BOUNDARIES: &[(&str, &str, usize)] = &[
     ("src/kernel/gc/mod.rs", "collect", 1),
     // Public root-registry calls for callers holding no lease (tests and
     // library users). Each has a `_with_activity` form that production uses.
-    ("src/kernel/store/roots.rs", "register_root", 1),
     ("src/kernel/store/roots.rs", "register_root_record", 1),
     ("src/kernel/store/roots.rs", "register_root_from_project", 1),
     ("src/kernel/store/roots.rs", "remove_root_entry", 1),
@@ -1537,7 +1536,9 @@ const LEASE_BOUNDARIES: &[(&str, &str, usize)] = &[
 /// alias, and `Self { root }` / `Self::handle(` in a file with an
 /// `impl Store` or `impl Trait for Store` block (the scan does not track
 /// which `impl` a function is in, so `Self` counts anywhere in such a
-/// file).
+/// file). Its limit: an alias of an alias (`use Store as A;` then
+/// `type B = A;`) is not followed, so `B { root }` would go unseen. Extend
+/// it if a real miss appears.
 fn unchecked_store_at(tokens: &[(Token, String)], i: usize, names: &Names) -> bool {
     let mut stores = names.stores.clone();
     if is_ident(token_at(tokens, i), "Self") {

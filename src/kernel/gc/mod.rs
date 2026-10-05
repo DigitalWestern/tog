@@ -213,10 +213,8 @@ fn retired_only(project: &Path) -> Option<Vec<String>> {
 /// sweep authority, and producers that write no closure file add to it (the
 /// resolution ledger and diagnostics the door roots, the resolution
 /// originals, backups), so every object and projection it lists must be
-/// named by a retired record. A pathname-only root protects what the closure
-/// files name, here only retired ones, and the forest a `node_modules` or
-/// `.venv` link points into. A run home under the project's key keeps either
-/// kind, and so does a retired record that cannot be read.
+/// named by a retired record. A run home under the project's key keeps the
+/// root, and so does a retired record that cannot be read.
 fn protects_only_retired(
     store: &Store,
     root: &RootEntry,
@@ -244,20 +242,15 @@ fn protects_only_retired(
     if !fs::symlink_metadata(run_home).is_err_and(|error| error.kind() == io::ErrorKind::NotFound) {
         return false;
     }
-    match &root.record {
-        Some(record) => {
-            record.objects.iter().all(|id| ids.contains(id))
-                && record
-                    .projections
-                    .iter()
-                    .all(|projection| paths.contains(&projection.path(store)))
-        }
-        None => {
-            let mut linked = Vec::new();
-            collect_linked_projections(project, store, &mut linked);
-            linked.iter().all(|path| paths.contains(path))
-        }
-    }
+    // Every usable entry is a root/2 record: a pathname-only one is
+    // unusable and never reaches here.
+    root.record.as_ref().is_some_and(|record| {
+        record.objects.iter().all(|id| ids.contains(id))
+            && record
+                .projections
+                .iter()
+                .all(|projection| paths.contains(&projection.path(store)))
+    })
 }
 
 /// The resolution proxy's metadata cache is a cache: entries unused for the
@@ -364,7 +357,6 @@ mod tests {
     use crate::kernel::store::ObjectDeps;
     use crate::kernel::testutil::TempDir;
     use crate::kernel::types::Identity;
-    use sha2::Digest;
     use std::collections::BTreeMap;
 
     pub(super) struct TempStore {
@@ -467,7 +459,7 @@ mod tests {
             &store.object_path(&parent),
             serde_json::json!({"id": parent}),
         );
-        store.register_root(&project).unwrap();
+        store.register_root_from_project(&project).unwrap();
 
         let mut output = Vec::new();
         let report = collect(
@@ -576,7 +568,7 @@ mod tests {
         let project = temp.root.join("project");
         fs::create_dir_all(&project).unwrap();
         closure(&project, &store.object_path(&id), serde_json::json!({}));
-        store.register_root(&project).unwrap();
+        store.register_root_from_project(&project).unwrap();
         let orphan = commit(&store, "orphan", None);
         age(&store.object_path(&orphan));
         let mut output = Vec::new();
@@ -595,63 +587,6 @@ mod tests {
         assert!(output.contains("would remove object"));
         assert!(output.contains("B)"));
         assert!(store.object_path(&orphan).exists());
-    }
-
-    #[test]
-    fn node_forest_v2_workspace_kept_when_root_link_is_missing() {
-        let temp = TempStore::new("forest-v2");
-        let store = temp.store();
-        let project = temp.root.join("project");
-        fs::create_dir_all(project.join(".tog/closures")).unwrap();
-        let project = project.canonicalize().unwrap();
-        let project_key =
-            &hex::encode(sha2::Sha256::digest(project.to_string_lossy().as_bytes()))[..32];
-        let projection_id = "a".repeat(32);
-        // The store's own `forests/`, the namespace the sweep reads: only
-        // the closure's projection id, rebuilt into this path, keeps it.
-        let forest = store
-            .root
-            .join("forests")
-            .join(project_key)
-            .join(&projection_id);
-        let workspace_forest = forest.join("workspaces/packages%2Flib/node_modules");
-        fs::create_dir_all(&workspace_forest).unwrap();
-        fs::create_dir_all(project.join("packages/lib")).unwrap();
-        std::os::unix::fs::symlink(&workspace_forest, project.join("packages/lib/node_modules"))
-            .unwrap();
-        fs::write(
-            project.join(".tog/closures/node.json"),
-            serde_json::to_vec(&serde_json::json!({
-                "schema": "closure/1",
-                "ecosystem": "node",
-                "body": {
-                    "projection_schema": "node-forest/2",
-                    "projection_id": projection_id,
-                    "workspaces": ["packages/lib"]
-                }
-            }))
-            .unwrap(),
-        )
-        .unwrap();
-        store.register_root(&project).unwrap();
-        age(&forest);
-
-        let mut output = Vec::new();
-        let _report = collect(
-            &store,
-            Options {
-                project: true,
-                keep_days: 0,
-                ..Options::default()
-            },
-            &mut output,
-        )
-        .unwrap();
-        assert!(
-            workspace_forest.is_dir(),
-            "{}",
-            String::from_utf8_lossy(&output)
-        );
     }
 
     #[test]
@@ -960,7 +895,7 @@ mod tests {
         // child only through the policy walk over the parent's dependencies.
         let anchor = commit(&store, "anchor", None);
         closure(&project, &store.object_path(&anchor), serde_json::json!({}));
-        store.register_root(&project).unwrap();
+        store.register_root_from_project(&project).unwrap();
 
         let mut output = Vec::new();
         let report = collect(
@@ -979,68 +914,6 @@ mod tests {
         assert!(store.object_path(&child).exists());
     }
 
-    /// A registered project whose directory disappears must stop the sweep
-    /// and keep its record: with only a pathname record, GC cannot know what
-    /// the project still protects.
-    #[test]
-    fn missing_project_blocks_sweep_and_preserves_record() {
-        let temp = TempStore::new("missing-project");
-        let store = temp.store();
-        let id = commit(&store, "protected", None);
-        age(&store.object_path(&id));
-        let project = temp.root.join("project");
-        fs::create_dir_all(&project).unwrap();
-        closure(&project, &store.object_path(&id), serde_json::json!({}));
-        let entry = store.register_root(&project).unwrap();
-        fs::remove_dir_all(&project).unwrap();
-
-        for dry_run in [false, true] {
-            let mut output = Vec::new();
-            let error = collect(
-                &store,
-                Options {
-                    dry_run,
-                    keep_days: 0,
-                    project: false,
-                    forgotten: Vec::new(),
-                },
-                &mut output,
-            )
-            .unwrap_err();
-            let message = error.to_string();
-            assert!(message.contains("refusing to sweep"), "{message}");
-            assert!(message.contains(&entry.key), "{message}");
-            assert!(message.contains("--forget"), "{message}");
-        }
-        assert!(store.object_path(&id).is_dir(), "sweep deleted the object");
-        assert!(
-            store
-                .roots()
-                .unwrap()
-                .iter()
-                .any(|root| root.key == entry.key),
-            "sweep removed the record"
-        );
-
-        // Forgetting the record is the explicit way out; the next sweep then
-        // collects the object nobody protects any more.
-        store.forget_root(&entry.key).unwrap();
-        let mut output = Vec::new();
-        let report = collect(
-            &store,
-            Options {
-                dry_run: false,
-                keep_days: 0,
-                project: false,
-                forgotten: Vec::new(),
-            },
-            &mut output,
-        )
-        .unwrap();
-        assert_eq!(report.objects, 1);
-        assert!(!store.object_path(&id).exists());
-    }
-
     /// A forget names one root, and the preview must exclude that root and
     /// no other, and write nothing: both roots stay registered. With a second registered project in the store, treating the
     /// request as "ignore every root" would offer up the live object that
@@ -1057,12 +930,12 @@ mod tests {
         let gone = temp.root.join("gone");
         fs::create_dir_all(&gone).unwrap();
         closure(&gone, &store.object_path(&released), serde_json::json!({}));
-        let gone_entry = store.register_root(&gone).unwrap();
+        let gone_entry = store.register_root_from_project(&gone).unwrap();
 
         let present = temp.root.join("present");
         fs::create_dir_all(&present).unwrap();
         closure(&present, &store.object_path(&held), serde_json::json!({}));
-        let present_entry = store.register_root(&present).unwrap();
+        let present_entry = store.register_root_from_project(&present).unwrap();
         fs::remove_dir_all(&gone).unwrap();
 
         let mut output = Vec::new();
@@ -1089,39 +962,6 @@ mod tests {
         assert!(store.object_path(&released).is_dir(), "a dry run deleted");
         assert!(store.lookup_root(&present_entry.key).is_ok());
         assert!(store.lookup_root(&gone_entry.key).is_ok());
-    }
-
-    #[test]
-    fn missing_closures_directory_blocks_sweep() {
-        let temp = TempStore::new("missing-closures");
-        let store = temp.store();
-        let id = commit(&store, "protected", None);
-        age(&store.object_path(&id));
-        let project = temp.root.join("project");
-        fs::create_dir_all(&project).unwrap();
-        closure(&project, &store.object_path(&id), serde_json::json!({}));
-        let entry = store.register_root(&project).unwrap();
-        fs::remove_dir_all(project.join(".tog/closures")).unwrap();
-
-        let mut output = Vec::new();
-        let error = collect(
-            &store,
-            Options {
-                dry_run: false,
-                keep_days: 0,
-                project: false,
-                forgotten: Vec::new(),
-            },
-            &mut output,
-        )
-        .unwrap_err();
-        // The refusal names the root and the miss itself. Matching
-        // "closures" would also match the scratch directory's name.
-        let message = error.to_string();
-        let missing = io::Error::from_raw_os_error(libc::ENOENT).to_string();
-        assert!(message.contains(&entry.key), "{message}");
-        assert!(message.contains(&missing), "{message}");
-        assert!(store.object_path(&id).is_dir());
     }
 
     /// A registry no root was ever written to has no `.initialized` marker
@@ -1153,82 +993,6 @@ mod tests {
             assert!(message.contains("registry is not initialized"), "{message}");
         }
         assert!(store.object_path(&id).is_dir(), "sweep deleted the object");
-    }
-
-    /// A root that resolves to a directory holding no closures cannot say
-    /// what it needs. The reachable version of this is a pathname that now
-    /// names something else — the backing directory of an unmounted mount
-    /// point — so it is a safety stop, not an empty contribution.
-    #[test]
-    fn empty_closures_directory_blocks_sweep() {
-        let temp = TempStore::new("empty-closures");
-        let store = temp.store();
-        let id = commit(&store, "protected", None);
-        age(&store.object_path(&id));
-        let project = temp.root.join("project");
-        fs::create_dir_all(&project).unwrap();
-        closure(&project, &store.object_path(&id), serde_json::json!({}));
-        let entry = store.register_root(&project).unwrap();
-        for closure in fs::read_dir(project.join(".tog/closures")).unwrap() {
-            fs::remove_file(closure.unwrap().path()).unwrap();
-        }
-
-        for dry_run in [false, true] {
-            let mut output = Vec::new();
-            let error = collect(
-                &store,
-                Options {
-                    dry_run,
-                    keep_days: 0,
-                    ..Options::default()
-                },
-                &mut output,
-            )
-            .unwrap_err();
-            let message = error.to_string();
-            assert!(message.contains("refusing to sweep"), "{message}");
-            assert!(message.contains(&entry.key), "{message}");
-        }
-        assert!(store.object_path(&id).is_dir(), "sweep deleted the object");
-        assert_eq!(store.roots().unwrap().len(), 1, "sweep removed the record");
-    }
-
-    /// An I/O error other than a clean miss (here: a symlink loop where the
-    /// project used to be) must stop the sweep with the underlying error
-    /// named, never silently delete the record.
-    #[test]
-    fn io_error_on_project_path_blocks_sweep() {
-        let temp = TempStore::new("io-error");
-        let store = temp.store();
-        let id = commit(&store, "protected", None);
-        age(&store.object_path(&id));
-        let project = temp.root.join("project");
-        fs::create_dir_all(&project).unwrap();
-        closure(&project, &store.object_path(&id), serde_json::json!({}));
-        let entry = store.register_root(&project).unwrap();
-        fs::remove_dir_all(&project).unwrap();
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(&project, &project).unwrap();
-
-        let mut output = Vec::new();
-        let error = collect(
-            &store,
-            Options {
-                dry_run: false,
-                keep_days: 0,
-                project: false,
-                forgotten: Vec::new(),
-            },
-            &mut output,
-        )
-        .unwrap_err();
-        let message = error.to_string();
-        let symlink_loop = io::Error::from_raw_os_error(libc::ELOOP).to_string();
-        assert!(message.contains("refusing to sweep"), "{message}");
-        assert!(message.contains(&entry.key), "{message}");
-        assert!(message.contains(&symlink_loop), "{message}");
-        assert!(store.object_path(&id).is_dir());
-        assert!(store.roots().unwrap().len() == 1, "record was removed");
     }
 
     // =======================================================================
@@ -2454,19 +2218,32 @@ mod tests {
         assert!(!store.object_path(&orphan).exists(), "{text}");
     }
 
-    /// A pathname-only record whose project is gone blocks every sweep. Both
-    /// documented resolutions must actually clear it.
+    /// A pathname-only record, the form before root/2, names no store
+    /// objects, so it blocks every sweep. Both documented resolutions must
+    /// actually clear it.
     #[test]
     fn legacy_record_still_blocks_until_registered_or_forgotten() {
-        for resolution in ["forget", "restore"] {
+        for resolution in ["forget", "register"] {
             let temp = TempStore::new(&format!("legacy-blocks-{resolution}"));
             let store = temp.store();
             let dead = commit(&store, "dead", None);
             age(&store.object_path(&dead));
+            let live = commit(&store, "live", None);
+            age(&store.object_path(&live));
             let project = temp.root.join("project");
             fs::create_dir_all(project.join(".tog/closures")).unwrap();
-            let entry = store.register_root(&project).unwrap();
-            fs::remove_dir_all(&project).unwrap();
+            fs::write(
+                project.join(".tog/closures/python.json"),
+                serde_json::json!({
+                    "schema": "closure/1",
+                    "ecosystem": "python",
+                    "body": {"env_object": store.object_path(&live)},
+                })
+                .to_string(),
+            )
+            .unwrap();
+            let entry = store::write_pathname_root_for_test(&store, &project).unwrap();
+            assert!(entry.unusable.is_some(), "{entry:?}");
 
             let (result, _) = sweep(
                 &store,
@@ -2477,30 +2254,18 @@ mod tests {
             );
             assert!(
                 result.is_err(),
-                "an unavailable pathname-only project did not block the sweep"
+                "a pathname-only record did not block the sweep"
             );
             assert!(store.object_path(&dead).is_dir());
 
+            // `forget` gives up the project's protection; `register`, the
+            // command the unusable entry names, records what it holds.
             match resolution {
                 "forget" => {
                     store.forget_root(&entry.key).unwrap();
                 }
                 _ => {
-                    // Restore the project to a state a sweep may run over:
-                    // an empty closures directory does not count — a
-                    // registered project owns at least one closure.
-                    let closure = project.join(".tog/closures/python.json");
-                    fs::create_dir_all(closure.parent().unwrap()).unwrap();
-                    fs::write(
-                        closure,
-                        serde_json::json!({
-                            "schema": "closure/1",
-                            "ecosystem": "python",
-                            "body": {"ok": true}
-                        })
-                        .to_string(),
-                    )
-                    .unwrap();
+                    store.register_root_from_project(&project).unwrap();
                 }
             }
             let (report, text) = sweep(
@@ -2512,8 +2277,14 @@ mod tests {
             );
             assert_eq!(
                 report.unwrap().objects,
-                1,
+                if resolution == "forget" { 2 } else { 1 },
                 "{resolution} did not unblock the sweep: {text}"
+            );
+            assert!(!store.object_path(&dead).exists(), "{text}");
+            assert_eq!(
+                store.object_path(&live).is_dir(),
+                resolution == "register",
+                "{text}"
             );
         }
     }

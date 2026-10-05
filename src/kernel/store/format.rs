@@ -630,22 +630,54 @@ mod tests {
             ),
             (b"/9\x01", "TOG_STORE=\"$(printf '/9\\001')\" env"),
         ];
+        let shells = posix_shells();
         for (bytes, expected) in cases {
             use std::os::unix::ffi::OsStrExt as _;
             let path = Path::new(std::ffi::OsStr::from_bytes(bytes));
             assert_eq!(with_store("env", path), expected, "{path:?}");
-            // A shell that runs it hands the command a TOG_STORE of
-            // exactly these bytes.
-            let command = with_store("sh -c 'printf %s \"$TOG_STORE\"'", path);
-            let out = std::process::Command::new("/bin/sh")
-                .arg("-c")
-                .arg(&command)
-                .env_remove("TOG_STORE")
-                .output()
-                .unwrap();
-            assert!(out.status.success(), "{command}");
-            assert_eq!(out.stdout, bytes, "{command}");
+            // Every shell here that runs it hands the command a TOG_STORE
+            // of exactly these bytes.
+            for shell in &shells {
+                // The same shell reads the variable the prefix set.
+                let inner = format!("{} -c 'printf %s \"$TOG_STORE\"'", shell.join(" "));
+                let command = with_store(&inner, path);
+                let out = std::process::Command::new(&shell[0])
+                    .args(&shell[1..])
+                    .arg("-c")
+                    .arg(&command)
+                    .env_remove("TOG_STORE")
+                    .output()
+                    .unwrap();
+                assert!(out.status.success(), "{shell:?}: {command}");
+                assert_eq!(out.stdout, bytes, "{shell:?}: {command}");
+            }
         }
+    }
+
+    /// The shells the printed commands are checked under: `/bin/sh`, and
+    /// dash, busybox's `sh` and bash wherever they are installed (a
+    /// Fedora `/bin/sh` is bash, an Ubuntu one dash).
+    fn posix_shells() -> Vec<Vec<String>> {
+        let found = |name: &str| {
+            std::env::var_os("PATH").and_then(|path| {
+                std::env::split_paths(&path)
+                    .map(|dir| dir.join(name))
+                    .find(|candidate| candidate.is_file())
+            })
+        };
+        let mut shells = vec![vec!["/bin/sh".to_string()]];
+        for (name, args) in [
+            ("dash", &[][..]),
+            ("busybox", &["sh"][..]),
+            ("bash", &[][..]),
+        ] {
+            if let Some(binary) = found(name) {
+                let mut shell = vec![binary.to_string_lossy().into_owned()];
+                shell.extend(args.iter().map(|arg| (*arg).to_string()));
+                shells.push(shell);
+            }
+        }
+        shells
     }
 
     /// The bare command is printed only for a store a bare `tog` selects

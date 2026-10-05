@@ -332,7 +332,7 @@ fn x_clean_removes_registered_environment_and_running_x_is_busy() {
         "pytest did not reach the readiness handshake"
     );
     let busy = tog_at(&project, &home, &store, &["x", "--clean", "pytest"]);
-    assert_eq!(busy.status.code(), Some(0), "clean while busy failed");
+    assert_eq!(busy.status.code(), Some(1), "a clean that skips exits 1");
     let busy_text = String::from_utf8_lossy(&busy.stdout);
     assert!(
         busy_text.contains("in use by a running tool; retry later"),

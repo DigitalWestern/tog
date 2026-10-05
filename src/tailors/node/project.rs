@@ -267,35 +267,19 @@ fn native_reference_id(reference: &Option<serde_json::Value>) -> io::Result<Opti
 /// The per-project transaction lock held across durable root publication and
 /// the visible closure rename.
 ///
-/// Synthetic unit fixtures use placeholder object paths and the legacy
-/// closure writer. It acquires the transaction lock itself, so do not hold a
-/// second descriptor for that test-only path (Linux flock descriptors are
-/// independently blocking even within one process).
+/// The project's transaction lock, held across the projection switch and
+/// the closure write. Every reference must name a complete store object.
 fn projection_project_lock(
     store: &Store,
     project: &ProjectRoot,
     strict_refs: bool,
-) -> io::Result<Option<fs::File>> {
+) -> io::Result<fs::File> {
     if !strict_refs {
-        #[cfg(not(test))]
-        {
-            return Err(err(
-                "Node closure references must name complete store objects",
-            ));
-        }
+        return Err(err(
+            "Node closure references must name complete store objects",
+        ));
     }
-    #[cfg(test)]
-    {
-        if strict_refs {
-            Ok(Some(store.project_lock_in(project)?))
-        } else {
-            Ok(None)
-        }
-    }
-    #[cfg(not(test))]
-    {
-        Ok(Some(store.project_lock_in(project)?))
-    }
+    store.project_lock_in(project)
 }
 
 /// Reserve a backup name for every real (npm-made) node_modules the new
@@ -922,33 +906,26 @@ pub fn project_node_env_recorded(
         record
     });
     let mut refs = crate::comforter::ClosureRefs::new();
-    if strict_refs {
-        refs.object_path(&store, activity, &env_obj)?;
-        if let Some((_, runtime)) = toolchain {
-            refs.object_path(&store, activity, runtime)?;
-        }
-        if let Some(native_id) = native_id {
-            refs.object_id(&store, activity, native_id)?;
-        }
-        refs.forest(&store, activity, forest)?;
-        for backup in &backup_paths {
-            refs.backup(&store, activity, backup)?;
-        }
+    refs.object_path(&store, activity, &env_obj)?;
+    if let Some((_, runtime)) = toolchain {
+        refs.object_path(&store, activity, runtime)?;
+    }
+    if let Some(native_id) = native_id {
+        refs.object_id(&store, activity, native_id)?;
+    }
+    refs.forest(&store, activity, forest)?;
+    for backup in &backup_paths {
+        refs.backup(&store, activity, backup)?;
     }
     // The root is durable before any stale managed link is removed, any user
     // directory is moved, or the new forest is published.
-    if strict_refs {
-        let project_lock = project_lock
-            .as_ref()
-            .expect("strict Node publication owns a project lock");
-        crate::comforter::persist_root_for_refs_with_project_lock(
-            project,
-            &store,
-            activity,
-            &refs,
-            project_lock,
-        )?;
-    }
+    crate::comforter::persist_root_for_refs_with_project_lock(
+        project,
+        &store,
+        activity,
+        &refs,
+        &project_lock,
+    )?;
     for (source, backup) in pending_backups {
         // Reaching here means the path was a real directory, not tog's
         // symlink: either a project tog has never synced, or one where an
@@ -1003,13 +980,6 @@ pub fn project_node_env_recorded(
     if let Some(record) = runtime_record {
         crate::comforter::merge_record(&mut body, record);
     }
-    #[cfg(test)]
-    if !strict_refs {
-        return crate::comforter::write_closure_legacy(project_dir, "node", body, attribution);
-    }
-    let project_lock = project_lock
-        .as_ref()
-        .expect("strict Node publication owns a project lock");
     crate::comforter::write_closure_with_project_lock(
         project,
         "node",
@@ -1017,7 +987,7 @@ pub fn project_node_env_recorded(
         &store,
         activity,
         refs,
-        project_lock,
+        &project_lock,
         attribution,
     )
 }

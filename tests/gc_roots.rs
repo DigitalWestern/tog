@@ -116,10 +116,22 @@ impl Fixture {
         }
     }
 
-    /// Write a registry record by hand, exactly as `register_root` would.
+    /// Write a `root/2` record by hand naming the protected object, the
+    /// record `gc --register` writes for a live project.
     fn record(&self, project: &Path) -> String {
         let key = tog::kernel::store::Store::root_key(project).unwrap();
-        self.record_as(&key, format!("{}\n", project.display()).as_bytes());
+        let record = serde_json::json!({
+            "schema": "root/2",
+            "key": key,
+            "project_path": {
+                "encoding": "utf8",
+                "value": project.canonicalize().unwrap().to_str().unwrap(),
+            },
+            "objects": [self.protected],
+            "projections": [],
+            "updated": 1,
+        });
+        self.record_as(&key, record.to_string().as_bytes());
         key
     }
 
@@ -246,11 +258,12 @@ fn unreadable_records_block_the_sweep_instead_of_disappearing() {
             "control sweep deleted the object"
         );
 
+        let saved_bytes = fs::read(&record).unwrap();
         fs::remove_file(&record).unwrap();
         match shape {
             "symlink" => {
                 let saved = fixture.base().join("saved-record");
-                fs::write(&saved, format!("{}\n", project.display())).unwrap();
+                fs::write(&saved, &saved_bytes).unwrap();
                 symlink(&saved, &record).unwrap();
             }
             "dangling-symlink" => symlink(fixture.base().join("absent"), &record).unwrap(),
@@ -387,55 +400,6 @@ fn a_pathname_that_is_not_utf8_is_refused() {
     assert!(
         fixture.object().is_dir(),
         "the sweep deleted the live object"
-    );
-}
-
-/// A registered project always owns a closure — registration happens when
-/// one is written. A root that resolves to a directory with none is a
-/// pathname that no longer names the project that was registered, which is
-/// how the review's unmounted mount point deleted a live object: the backing
-/// directory underneath carried an empty `.tog/closures` of its own.
-#[test]
-fn a_root_that_resolves_to_no_closures_blocks_the_sweep() {
-    let fixture = Fixture::new("no-closures");
-    let project = fixture.project("project", true);
-    let key = fixture.record(&project);
-
-    let control = fixture.run(&["gc", "--keep-days=0"]);
-    assert!(control.status.success(), "{}", stderr(&control));
-    assert!(
-        fixture.object().is_dir(),
-        "control sweep deleted the object"
-    );
-
-    fs::remove_file(project.join(".tog/closures/python.json")).unwrap();
-    for args in [
-        vec!["gc", "--project", "--keep-days=0"],
-        vec!["gc", "--dry-run", "--keep-days=0"],
-        vec!["gc", "--keep-days=0"],
-    ] {
-        let sweep = fixture.run(&args);
-        assert!(
-            !sweep.status.success(),
-            "swept a root that protects nothing: {}",
-            stdout(&sweep)
-        );
-        let message = stderr(&sweep);
-        assert!(
-            message.contains("refusing to sweep")
-                && message.contains(&key)
-                && message.contains("--forget"),
-            "unexpected refusal: {message}"
-        );
-    }
-    assert!(
-        fixture.object().is_dir(),
-        "the sweep deleted the live object"
-    );
-    assert_eq!(
-        fixture.record_names(),
-        vec![key],
-        "the sweep dropped the record"
     );
 }
 

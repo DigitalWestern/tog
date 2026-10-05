@@ -68,7 +68,7 @@ mod tests {
         let opened = store::Store::open_at(&temp.0.join("store")).unwrap();
         let project = temp.0.join("project");
         fs::create_dir_all(&project).unwrap();
-        opened.register_root(&project).unwrap();
+        crate::kernel::store::register_empty_root_for_test(&opened, &project).unwrap();
         let listed = list_roots(&opened).unwrap();
         assert!(listed.contains(&project.display().to_string()), "{listed}");
 

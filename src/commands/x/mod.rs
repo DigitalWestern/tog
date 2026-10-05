@@ -1482,16 +1482,16 @@ mod tests {
     }
 
     /// The request record names the originating store, and its registry
-    /// entry is found there even when it was registered through an alias
-    /// of the x directory.
+    /// entry is found there, not in the configured store.
     #[test]
-    fn cleanup_finds_alias_registration_in_the_recorded_store() {
+    fn cleanup_finds_the_registration_in_the_recorded_store() {
         let temp = TempDir::named("x-registry");
         let base = &temp.0;
         let x_dir = base.join("x");
         let root = x_dir.join("py-ruff-registry");
         fs::create_dir_all(base.join("other-store/objects")).unwrap();
         fs::create_dir_all(base.join("other-store/meta")).unwrap();
+        fs::create_dir_all(base.join("other-store/tmp")).unwrap();
         let store = Store::for_test(base.join("other-store").canonicalize().unwrap());
         let object = store.root.join("objects").join("a".repeat(40) + "-env");
         fs::create_dir_all(&object).unwrap();
@@ -1507,14 +1507,7 @@ mod tests {
         )
         .unwrap();
         write_x_request_for_store(&root, &store, "python", "ruff", None, "ready", None).unwrap();
-        let entry = store.register_root(&root).unwrap();
-        let alias = base.join("x-alias");
-        std::os::unix::fs::symlink(&x_dir, &alias).unwrap();
-        fs::write(
-            &entry.registry_path,
-            format!("{}\n", alias.join(root.file_name().unwrap()).display()),
-        )
-        .unwrap();
+        crate::kernel::store::register_empty_root_for_test(&store, &root).unwrap();
 
         match registration_for(&root).unwrap() {
             Registration::Found {

@@ -2187,7 +2187,7 @@ mod tests {
         let scratch = TempDir::named("npm-projection");
         let root = scratch.0.clone();
         let project = root.join("project");
-        let env = root.join("home/store/objects/env");
+        let env = root.join(TEST_ENV);
         fs::create_dir_all(project.join("packages/lib")).unwrap();
         fs::create_dir_all(env.join("node_modules/c")).unwrap();
         fs::create_dir_all(env.join("workspaces/packages%2Flib/node_modules/c")).unwrap();
@@ -2227,8 +2227,8 @@ mod tests {
             path: "package.json".into(),
             sha256: "abc".into(),
         }];
-        let lease = crate::kernel::testutil::detached_lease();
-        let activity = &lease.1;
+        let lease = seal_placeholder_objects(&[&env]);
+        let activity = &lease;
         project_node_env_recorded(
             activity,
             &crate::kernel::fsroot::ProjectRoot::open(&project).unwrap(),
@@ -2320,12 +2320,12 @@ mod tests {
         let scratch = TempDir::named("npm-toolchain-record");
         let root = scratch.0.clone();
         let project = root.join("project");
-        let env = root.join("home/store/objects/env");
+        let env = root.join(TEST_ENV);
         fs::create_dir_all(&project).unwrap();
         fs::create_dir_all(env.join("node_modules")).unwrap();
 
         let selected = shipped_selection().unwrap();
-        let runtime = root.join("home/store/objects/node-object");
+        let runtime = root.join(TEST_RUNTIME);
         let plan = NpmPlan {
             node_version: selected.version("node").unwrap().to_string(),
             packages: Vec::new(),
@@ -2333,8 +2333,8 @@ mod tests {
             workspaces: Vec::new(),
             lock_source: "package-lock.json".into(),
         };
-        let lease = crate::kernel::testutil::detached_lease();
-        let activity = &lease.1;
+        let lease = seal_placeholder_objects(&[&env, &runtime]);
+        let activity = &lease;
         project_node_env_recorded(
             activity,
             &crate::kernel::fsroot::ProjectRoot::open(&project).unwrap(),
@@ -2362,7 +2362,10 @@ mod tests {
             closure["toolchain"]["versions"]["node"],
             plan.node_version.as_str()
         );
-        assert_eq!(closure["runtime_object"]["id"], "node-object");
+        assert_eq!(
+            closure["runtime_object"]["id"],
+            runtime.file_name().unwrap().to_str().unwrap()
+        );
         assert_eq!(
             closure["runtime_object"]["path"],
             runtime.to_string_lossy().into_owned()
@@ -2511,7 +2514,7 @@ mod tests {
         let scratch = TempDir::named("npm-stale-workspace");
         let root = scratch.0.clone();
         let project = root.join("project");
-        let env = root.join("home/store/objects/env");
+        let env = root.join(TEST_ENV);
         fs::create_dir_all(project.join("packages/lib")).unwrap();
         fs::create_dir_all(env.join("node_modules/c")).unwrap();
         fs::create_dir_all(env.join("workspaces/packages%2Flib/node_modules/c")).unwrap();
@@ -2544,8 +2547,8 @@ mod tests {
             workspaces: Vec::new(),
             lock_source: "pnpm-lock.yaml".into(),
         };
-        let lease = crate::kernel::testutil::detached_lease();
-        let activity = &lease.1;
+        let lease = seal_placeholder_objects(&[&env]);
+        let activity = &lease;
         project_node_env(
             activity,
             &crate::kernel::fsroot::ProjectRoot::open(&project).unwrap(),
@@ -2574,8 +2577,8 @@ mod tests {
             lock_source: "pnpm-lock.yaml".into(),
         };
         let mut attribution = crate::kernel::policy::Attribution::open("node").unwrap();
-        let lease = crate::kernel::testutil::detached_lease();
-        let activity = &lease.1;
+        let lease = seal_placeholder_objects(&[&env]);
+        let activity = &lease;
         project_node_env(
             activity,
             &crate::kernel::fsroot::ProjectRoot::open(&project).unwrap(),
@@ -3067,12 +3070,47 @@ mod tests {
         );
     }
 
+    /// Store-relative spellings of the placeholder objects the projection
+    /// fixtures fill by hand under `<scratch>/home/store`.
+    const TEST_ENV: &str = "home/store/objects/4444444444444444444444444444444444444444-npm-env-0";
+    const TEST_RUNTIME: &str = "home/store/objects/5555555555555555555555555555555555555555-node-0";
+
+    /// Make each hand-filled placeholder object complete, the way a commit
+    /// leaves one: its metadata written and its directory read-only. Returns
+    /// a lease on the store they sit in, so a projection can reference them.
+    fn seal_placeholder_objects(objects: &[&Path]) -> crate::kernel::activity::StoreActivity {
+        use std::os::unix::fs::PermissionsExt as _;
+        let store_root = objects[0].parent().unwrap().parent().unwrap();
+        for sub in ["objects", "meta", "tmp", "roots", "forests", "backups"] {
+            fs::create_dir_all(store_root.join(sub)).unwrap();
+        }
+        for object in objects {
+            fs::create_dir_all(object).unwrap();
+            let id = object.file_name().unwrap().to_str().unwrap();
+            fs::write(
+                store_root.join("meta").join(format!("{id}.json")),
+                serde_json::to_vec_pretty(&serde_json::json!({
+                    "id": id,
+                    "identity": {"kind": "test", "name": id, "version": "0", "inputs": {}},
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            let mut permissions = fs::metadata(object).unwrap().permissions();
+            permissions.set_mode(permissions.mode() & !0o222);
+            fs::set_permissions(object, permissions).unwrap();
+        }
+        Store::for_test(store_root.canonicalize().unwrap())
+            .activity(crate::kernel::activity::ActivityMode::Shared)
+            .unwrap()
+    }
+
     /// A fake environment object holding a plugin, a registry `core`, and a
     /// package of the `packages/app` importer; `core_inside_plugin` adds the
     /// directory a bundled copy would leave where the link goes.
     fn workspace_peer_fixture(root: &Path, plugin_ships: Option<&str>) -> (PathBuf, PathBuf) {
         let project = root.join("project");
-        let env = root.join("home/store/objects/env");
+        let env = root.join(TEST_ENV);
         fs::create_dir_all(project.join("packages/core")).unwrap();
         fs::create_dir_all(project.join("packages/app")).unwrap();
         fs::write(project.join("packages/core/package.json"), "{}").unwrap();
@@ -3131,9 +3169,9 @@ mod tests {
 
     fn project_workspace_peer(project: &Path, env: &Path, plan: &NpmPlan) -> io::Result<()> {
         let mut attribution = crate::kernel::policy::Attribution::open("node").unwrap();
-        let lease = crate::kernel::testutil::detached_lease();
+        let lease = seal_placeholder_objects(&[env]);
         let result = project_node_env(
-            &lease.1,
+            &lease,
             &crate::kernel::fsroot::ProjectRoot::open(project).unwrap(),
             env,
             Platform::host().unwrap(),

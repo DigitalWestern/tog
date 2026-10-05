@@ -16,8 +16,8 @@ pub struct Context {
     /// Keeps the operation protected from its first store read through its
     /// final child/projection use, which is what prevents GC from racing a
     /// CLI job. Every store helper borrows this lease as a `&StoreActivity`
-    /// parameter; only the lease-free root-registry calls (`register_root`
-    /// and friends) take their own.
+    /// parameter; only the lease-free root-registry calls
+    /// (`register_root_record` and friends) take their own.
     pub activity: StoreActivity,
 }
 

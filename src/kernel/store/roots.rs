@@ -9,18 +9,18 @@ use crate::kernel::fsroot::ProjectRoot;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RootEntry {
     pub key: String,
-    /// The registered project. Empty when the record is unusable: a record
-    /// nobody can read has no pathname to offer, and guessing one selects
-    /// somebody else's project.
+    /// The registered project, when the record holds one exactly: a root/2
+    /// record, or a pathname-only record (which is still unusable). Empty
+    /// for any other unusable record: a record nobody can read has no
+    /// pathname to offer, and guessing one selects somebody else's project.
     pub path: PathBuf,
     pub registry_path: PathBuf,
     /// Why this record cannot be trusted, if it cannot. The record still
     /// exists: it is listed and can be forgotten, but no sweep may run while
     /// one is present.
     pub unusable: Option<String>,
-    /// A durable root/2 record, when this entry is not a legacy pathname-only
-    /// record.  The pathname remains on RootEntry for diagnostics and for the
-    /// legacy importer; GC treats the record as authoritative when present.
+    /// The root/2 record GC sweeps by. None for every unusable entry, a
+    /// pathname-only one included.
     pub record: Option<RootRecord>,
 }
 
@@ -91,48 +91,7 @@ impl Store {
         Ok(file)
     }
 
-    /// Register a project whose closure was just written. Registry entries
-    /// are keyed by the canonical project path, so moving a project creates a
-    /// new root instead of accidentally retaining the old location.
-    // Reviewed site (tests/architecture.rs): operation boundary: lease-free public API; production uses the `_with_activity` form.
-    #[allow(clippy::disallowed_methods)]
-    pub fn register_root(&self, project_dir: &Path) -> io::Result<RootEntry> {
-        let activity = self.activity(ActivityMode::Exclusive)?;
-        self.register_root_with_activity(&activity, project_dir)
-    }
-
-    /// Compatibility pathname-only registration under an already-held
-    /// operation lease. New closure publication uses `root/2`; this method is
-    /// retained for guarded legacy fixtures and the explicit recovery path.
-    pub(crate) fn register_root_with_activity(
-        &self,
-        activity: &StoreActivity,
-        project_dir: &Path,
-    ) -> io::Result<RootEntry> {
-        self.require_activity(activity, "legacy root registration")?;
-        let project_dir = project_dir.canonicalize()?;
-        // The record must hold the project's pathname exactly: a trailing
-        // space or a non-UTF-8 byte would register one project under
-        // another project's identity. Refuse instead of recording a lossy
-        // spelling.
-        let pathname = record_pathname(&project_dir)?.to_string();
-        let key = root_key(&project_dir);
-        let _project = self.project_lock(&project_dir)?;
-        let roots = self.root.join("roots");
-        ensure_directory_tree(&self.root, Path::new("roots"))?;
-        write_registry_entry(&roots, &key, format!("{pathname}\n").as_bytes())?;
-        Ok(RootEntry {
-            key: key.clone(),
-            path: project_dir,
-            registry_path: roots.join(&key),
-            unusable: None,
-            record: None,
-        })
-    }
-
-    /// Publish a complete root/2 record atomically.  This is deliberately a
-    /// separate entry point from `register_root`, which remains the
-    /// pathname-only compatibility writer used by older callers and tests.
+    /// Publish a complete root/2 record atomically.
     // Reviewed site (tests/architecture.rs): operation boundary: lease-free public API; production uses the `_with_activity` form.
     #[allow(clippy::disallowed_methods)]
     pub fn register_root_record(&self, record: RootRecord) -> io::Result<RootEntry> {
@@ -334,56 +293,6 @@ impl Store {
             ));
         }
         Ok(record)
-    }
-
-    /// Add one just-written closure to the durable root union.  This is the
-    /// transition bridge used by the existing producer API; callers that
-    /// already have a complete `RootRecord` should use
-    /// `register_root_record` directly.
-    pub(crate) fn register_root_with_closure(
-        &self,
-        project: &ProjectRoot,
-        ecosystem: &str,
-        body: &serde_json::Value,
-    ) -> io::Result<RootEntry> {
-        let project_dir = project.path().to_path_buf();
-        let _project = self.project_lock_in(project)?;
-        let key = root_key(&project_dir);
-        let previous = self.read_root_entry_strict(&key)?;
-        let had_root2 = previous
-            .as_ref()
-            .and_then(|entry| entry.record.as_ref())
-            .is_some();
-        let mut record = previous
-            .and_then(|entry| entry.record)
-            .unwrap_or_else(|| RootRecord {
-                key: key.clone(),
-                project_path: project_dir.clone(),
-                objects: BTreeSet::new(),
-                projections: BTreeSet::new(),
-                updated: unix_secs(),
-            });
-        record.project_path = project_dir.clone();
-        let _ = ecosystem;
-        if !had_root2 {
-            // Historical closures are imported best-effort; the body this
-            // producer just wrote is held to the strict rule.
-            import_existing_project_closures(
-                self,
-                project,
-                &mut record,
-                ImportMode::DropUnresolvable,
-            )?;
-        }
-        import_closure_refs(self, body, &mut record, ImportMode::Strict)?;
-        if record.objects.is_empty() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "closure did not contain a complete store object reference",
-            ));
-        }
-        record.updated = unix_secs();
-        self.register_root_record_locked(record)
     }
 
     /// Read the roots registry without validating whether projects still
@@ -1062,17 +971,21 @@ pub(super) fn parse_root_entry(key: &str, path: &Path, bytes: &[u8]) -> io::Resu
             format!("root registry entry {key} is empty"),
         ));
     }
-    // A legacy record is one pathname read back exactly as registered: a
-    // padded or multi-line spelling names a different project than the one
-    // that was registered, so it is refused rather than trimmed into shape
-    // — a trimmed record is protection that silently moves.
+    // A pathname-only record (a project path and nothing else) is the form
+    // before root/2. No tog that writes the store format marker writes one,
+    // so the entry is unusable: it names no objects, and a sweep cannot
+    // tell what the project needs. It still occupies its key, so it stops
+    // every sweep until it is forgotten or the project is registered again
+    // (which replaces it with a root/2 record). Only an exact absolute
+    // pathname is that form. Anything else is a damaged record, refused so
+    // a writer does not take it for one it may replace.
     let raw = bytes.strip_suffix(b"\n").unwrap_or(bytes);
     if raw != trimmed || raw.contains(&b'\n') {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!(
-                "legacy root registry entry {key} is padded or spans lines, so it cannot be \
-                 read back exactly; use `tog gc --forget {key}` to drop the record"
+                "root registry entry {key} is padded or spans lines, so it cannot be read \
+                 back exactly; use `tog gc --forget {key}` to drop the record"
             ),
         ));
     }
@@ -1080,14 +993,22 @@ pub(super) fn parse_root_entry(key: &str, path: &Path, bytes: &[u8]) -> io::Resu
     if !project_path.is_absolute() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("legacy root registry entry {key} is not an absolute path"),
+            format!(
+                "root registry entry {key} is not an absolute path; use `tog gc --forget {key}` \
+                 to drop the record"
+            ),
         ));
     }
     Ok(RootEntry {
         key: key.into(),
+        unusable: Some(format!(
+            "a pathname-only record for {}, the form before root/2, which names no store \
+             objects; run `tog gc --register <project>` to record what the project holds, or \
+             `tog gc --forget {key}` to drop it",
+            project_path.display()
+        )),
         path: project_path,
         registry_path: path.to_path_buf(),
-        unusable: None,
         record: None,
     })
 }
@@ -1280,4 +1201,54 @@ pub(super) fn record_pathname(project_dir: &Path) -> io::Result<&str> {
         ));
     }
     Ok(text)
+}
+
+#[cfg(test)]
+mod tests {
+    /// Only an exact absolute pathname reads as a pathname-only record.
+    /// Corrupt, padded or relative contents are refused, so a writer such
+    /// as `gc --register` stops instead of replacing a damaged record.
+    #[test]
+    fn a_damaged_record_is_refused_not_read_as_pathname_only() {
+        use super::parse_root_entry;
+        use crate::kernel::store::Store;
+        use crate::kernel::testutil::TempDir;
+        use std::{fs, io, path::Path};
+
+        let entry = parse_root_entry("k", Path::new("/r/k"), b"/abs/project\n").unwrap();
+        assert_eq!(entry.path, Path::new("/abs/project"));
+        assert!(entry.unusable.is_some() && entry.record.is_none());
+
+        let damaged: [&[u8]; 6] = [
+            b"\0\0\0\0",
+            b"\xff\n",
+            b" /padded\n",
+            b"/padded \n",
+            b"/one\n/two\n",
+            b"relative/path\n",
+        ];
+        for bytes in damaged {
+            let error = parse_root_entry("k", Path::new("/r/k"), bytes).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{bytes:?}");
+        }
+
+        let temp = TempDir::named("damaged-root");
+        let store = Store::open_at(&temp.0.join("store")).unwrap();
+        let project = temp.0.join("project");
+        fs::create_dir_all(project.join(".tog/closures")).unwrap();
+        let key = Store::root_key(&project).unwrap();
+        let record = temp.0.join("store/roots").join(&key);
+        fs::create_dir_all(record.parent().unwrap()).unwrap();
+        for bytes in damaged {
+            fs::write(&record, bytes).unwrap();
+            let error = store.register_root_from_project(&project).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains(&format!("tog gc --forget {key}")),
+                "{bytes:?}: {error}"
+            );
+            assert_eq!(fs::read(&record).unwrap(), bytes);
+        }
+    }
 }
