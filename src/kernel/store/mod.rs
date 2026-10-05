@@ -781,6 +781,49 @@ mod tests {
         assert_eq!(error.kind(), io::ErrorKind::NotFound);
     }
 
+    /// Removal acts on the entry the caller read. A record replaced at the
+    /// same key after the lookup, file or directory, is refused and left in
+    /// place: it is not the one the caller decided to drop.
+    #[test]
+    fn removal_refuses_an_entry_replaced_after_it_was_read() {
+        let temp = temp_store();
+        let store = Store {
+            root: temp.0.canonicalize().unwrap(),
+        };
+        let project = temp.0.join("project");
+        fs::create_dir_all(&project).unwrap();
+        let registered = register_empty_root_for_test(&store, &project).unwrap();
+        let path = registered.registry_path.clone();
+
+        // A record file swapped for another one.
+        let read = store.lookup_root(&registered.key).unwrap();
+        let replacement = temp.0.join("replacement");
+        fs::copy(&path, &replacement).unwrap();
+        fs::rename(&replacement, &path).unwrap();
+        let error = store.remove_root_entry(&read).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Interrupted, "{error}");
+        assert!(path.is_file(), "the replacement was removed");
+
+        // A directory at the key, swapped for another directory.
+        fs::remove_file(&path).unwrap();
+        fs::create_dir(&path).unwrap();
+        let read = store.lookup_root(&registered.key).unwrap();
+        assert!(read.unusable.is_some());
+        // Made while the original exists, so it cannot reuse its inode.
+        let other = temp.0.join("other");
+        fs::create_dir_all(other.join("kept")).unwrap();
+        fs::remove_dir(&path).unwrap();
+        fs::rename(&other, &path).unwrap();
+        let error = store.remove_root_entry(&read).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Interrupted, "{error}");
+        assert!(path.join("kept").is_dir(), "the replacement was removed");
+
+        // Read again, the same directory goes, contents and all.
+        let read = store.lookup_root(&registered.key).unwrap();
+        store.remove_root_entry(&read).unwrap();
+        assert!(!path.exists());
+    }
+
     #[test]
     fn forget_rejects_unknown_and_malformed_keys() {
         let temp = temp_store();

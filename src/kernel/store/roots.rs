@@ -21,6 +21,11 @@ pub struct RootEntry {
     /// record.  The pathname remains on RootEntry for diagnostics and for the
     /// legacy importer; GC treats the record as authoritative when present.
     pub record: Option<RootRecord>,
+    /// The registry entry's `(dev, ino)` when it was read: the record these
+    /// fields were decoded from. Removal refuses an entry that no longer
+    /// has it, so a record replaced after the read is never removed as if
+    /// it were this one. `None` when nothing could be stat'ed at the key.
+    pub identity: Option<(u64, u64)>,
 }
 
 impl RootEntry {
@@ -121,12 +126,15 @@ impl Store {
         ensure_directory_tree(&self.root, Path::new("roots"))?;
         let _publish = self.publish_lock()?;
         write_root_record(&roots, &record)?;
+        let roots_dir = open_real_directory(&roots, "roots")?;
+        let identity = stat_identity(&stat_at(roots_dir.as_raw_fd(), record.key.as_bytes())?);
         Ok(RootEntry {
             key: record.key.clone(),
             path: record.project_path.clone(),
             registry_path: roots.join(&record.key),
             unusable: None,
             record: Some(record),
+            identity: Some(identity),
         })
     }
 
@@ -502,9 +510,10 @@ impl Store {
     }
 
     /// Exact-key registry removal under an existing exclusive operation
-    /// lease. The registry directory is held by descriptor and the selected
-    /// entry is rechecked by `(dev, ino)` before `unlinkat`; a replaced entry
-    /// is never removed as if it were the one the caller decoded.
+    /// lease. The registry directory is held by descriptor, and what sits at
+    /// the key must still be the entry the caller decoded (`entry.identity`,
+    /// by `(dev, ino)`) before anything is removed: a record replaced after
+    /// the read is refused and left in place, file or directory.
     pub(crate) fn remove_root_entry_with_activity(
         &self,
         activity: &StoreActivity,
@@ -528,19 +537,31 @@ impl Store {
             .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
             .open(&roots_path)?;
         let name = entry.key.as_bytes();
+        let changed = || {
+            io::Error::new(
+                io::ErrorKind::Interrupted,
+                format!(
+                    "root registry entry {} changed since it was read; it was left in place, \
+                     retry later",
+                    entry.key
+                ),
+            )
+        };
         let expected = match stat_at(roots.as_raw_fd(), name) {
             Ok(stat) => stat,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
             Err(error) => return Err(error),
         };
+        if entry.identity != Some(stat_identity(&expected)) {
+            return Err(changed());
+        }
         if is_directory(&expected) {
             // A directory sitting at a key is not a record, but it still
             // occupies that key and still stops every sweep. Forgetting the
             // key has to clear it too, or the escape hatch fails at the
-            // worst case. The (dev, ino) recheck above is the guard: what is
-            // removed is the entry the caller decoded.
-            let path = roots_path.join(&entry.key);
-            fs::remove_dir_all(&path).map_err(|error| {
+            // worst case. It is removed through descriptors, rechecked
+            // against the same identity, never by pathname.
+            if !remove_tree_entry_if_same(roots.as_raw_fd(), name, &expected).map_err(|error| {
                 io::Error::new(
                     error.kind(),
                     format!(
@@ -548,17 +569,13 @@ impl Store {
                         entry.key
                     ),
                 )
-            })?;
+            })? {
+                return Err(changed());
+            }
             return roots.sync_all();
         }
         if !unlink_if_same(roots.as_raw_fd(), name, &expected, 0)? {
-            return Err(io::Error::new(
-                io::ErrorKind::Interrupted,
-                format!(
-                    "root registry entry {} changed during removal; retry later",
-                    entry.key
-                ),
-            ));
+            return Err(changed());
         }
         roots.sync_all()
     }
@@ -614,6 +631,7 @@ impl Store {
                 registry_path: path,
                 unusable: Some("the record is a symlink, not a registry file".into()),
                 record: None,
+                identity: Some(stat_identity(&metadata)),
             });
         }
         if !is_regular_file(&metadata) {
@@ -627,6 +645,7 @@ impl Store {
                 registry_path: path,
                 unusable: Some("the record is not a regular file".into()),
                 record: None,
+                identity: Some(stat_identity(&metadata)),
             });
         }
         match self.read_root_entry_strict(key) {
@@ -637,6 +656,7 @@ impl Store {
                 registry_path: path,
                 unusable: None,
                 record: None,
+                identity: None,
             }),
             // Any read failure (corrupt, unreadable, not a regular file)
             // still yields an entry: `--forget` is the escape hatch every
@@ -648,6 +668,7 @@ impl Store {
                 registry_path: path,
                 unusable: Some(error.to_string()),
                 record: None,
+                identity: Some(stat_identity(&metadata)),
             }),
         }
     }
@@ -750,8 +771,10 @@ impl Store {
         key: &str,
         path: PathBuf,
     ) -> RootEntry {
+        let mut identity = None;
         let outcome = (|| -> io::Result<RootEntry> {
             let stat = stat_at(roots_fd, key.as_bytes())?;
+            identity = Some(stat_identity(&stat));
             if is_symlink(&stat) {
                 return Err(io::Error::other(
                     "the record is a symlink, not a registry file",
@@ -760,8 +783,9 @@ impl Store {
             if !is_regular_file(&stat) {
                 return Err(io::Error::other("the record is not a regular file"));
             }
-            let bytes = read_registry_file_at(roots_fd, key.as_bytes(), &path)?;
-            parse_root_entry(key, &path, &bytes)
+            let (bytes, read) = read_registry_file_at(roots_fd, key.as_bytes(), &path)?;
+            identity = Some(read);
+            parse_root_entry(key, &path, &bytes, read)
         })();
         match outcome {
             Ok(entry) => entry,
@@ -771,6 +795,7 @@ impl Store {
                 registry_path: path,
                 unusable: Some(error.to_string()),
                 record: None,
+                identity,
             },
         }
     }
@@ -791,8 +816,9 @@ impl Store {
                 format!("root registry entry {key} is not a regular file"),
             ));
         }
-        let bytes = read_registry_file_at(roots_dir.as_raw_fd(), key.as_bytes(), &path)?;
-        parse_root_entry(key, &path, &bytes).map(Some)
+        let (bytes, identity) =
+            read_registry_file_at(roots_dir.as_raw_fd(), key.as_bytes(), &path)?;
+        parse_root_entry(key, &path, &bytes, identity).map(Some)
     }
 }
 
@@ -924,7 +950,12 @@ pub(super) fn root_record_from_wire(wire: RootWire, filename: &str) -> io::Resul
     Ok(record)
 }
 
-pub(super) fn parse_root_entry(key: &str, path: &Path, bytes: &[u8]) -> io::Result<RootEntry> {
+pub(super) fn parse_root_entry(
+    key: &str,
+    path: &Path,
+    bytes: &[u8],
+    identity: (u64, u64),
+) -> io::Result<RootEntry> {
     let trimmed = bytes.strip_suffix(b"\n").unwrap_or(bytes).trim_ascii();
     if trimmed.first() == Some(&b'{') {
         let json: serde_json::Value = serde_json::from_slice(trimmed).map_err(|error| {
@@ -967,6 +998,7 @@ pub(super) fn parse_root_entry(key: &str, path: &Path, bytes: &[u8]) -> io::Resu
             registry_path: path.to_path_buf(),
             unusable: None,
             record: Some(record),
+            identity: Some(identity),
         });
     }
     if trimmed.is_empty() {
@@ -999,10 +1031,17 @@ pub(super) fn parse_root_entry(key: &str, path: &Path, bytes: &[u8]) -> io::Resu
              `tog gc --forget {key}` to drop it"
         )),
         record: None,
+        identity: Some(identity),
     })
 }
 
-pub(super) fn read_registry_file_at(dirfd: RawFd, name: &[u8], path: &Path) -> io::Result<Vec<u8>> {
+/// The bytes of one registry file and the `(dev, ino)` of the file they
+/// were read from.
+pub(super) fn read_registry_file_at(
+    dirfd: RawFd,
+    name: &[u8],
+    path: &Path,
+) -> io::Result<(Vec<u8>, (u64, u64))> {
     use std::io::Read as _;
     let file = open_file_at(
         dirfd,
@@ -1016,7 +1055,8 @@ pub(super) fn read_registry_file_at(dirfd: RawFd, name: &[u8], path: &Path) -> i
             format!("read root record {}: {error}", path.display()),
         )
     })?;
-    if !file.metadata()?.is_file() {
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!("root record {} is not a regular file", path.display()),
@@ -1024,7 +1064,8 @@ pub(super) fn read_registry_file_at(dirfd: RawFd, name: &[u8], path: &Path) -> i
     }
     let mut bytes = Vec::new();
     (&file).read_to_end(&mut bytes)?;
-    Ok(bytes)
+    use std::os::unix::fs::MetadataExt as _;
+    Ok((bytes, (metadata.dev(), metadata.ino())))
 }
 
 pub(super) fn write_root_record(roots: &Path, record: &RootRecord) -> io::Result<()> {
