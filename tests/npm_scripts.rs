@@ -320,7 +320,7 @@ fn network_access_during_install_script_fails() {
          .on('connect', () => { console.error('TOG-PROBE connected'); process.exit(0) })\
          .on('error', (e) => { console.error('TOG-PROBE connect failed: ' + e.code); process.exit(1) })\"",
     );
-    let child = Command::new(std::env::current_exe().unwrap())
+    let child = common::child(std::env::current_exe().unwrap(), dir)
         .args([
             "--exact",
             "network_access_during_install_script_fails",
@@ -332,7 +332,6 @@ fn network_access_during_install_script_fails() {
         .env("TOG_NPM_TARBALL", &tarball)
         .env("TOG_NPM_SRI", &sri)
         .env("TOG_STRICT", "1")
-        .env_remove("TOG_POLICY")
         .output()
         .unwrap();
     let stderr = String::from_utf8_lossy(&child.stderr);
@@ -405,7 +404,7 @@ fn permissive_install_script_is_cached_but_rejected_strict() {
     assert_eq!(exceptions.len(), 1);
     assert_eq!(exceptions[0]["kind"], "install-script-failed");
 
-    let child = Command::new(std::env::current_exe().unwrap())
+    let child = common::child(std::env::current_exe().unwrap(), dir)
         .args([
             "--exact",
             "permissive_install_script_is_cached_but_rejected_strict",
@@ -417,7 +416,6 @@ fn permissive_install_script_is_cached_but_rejected_strict() {
         .env("TOG_NPM_TARBALL", &tarball)
         .env("TOG_NPM_SRI", &sri)
         .env("TOG_STRICT", "1")
-        .env_remove("TOG_POLICY")
         .output()
         .unwrap();
     assert!(

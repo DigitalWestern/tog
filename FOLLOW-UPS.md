@@ -126,7 +126,6 @@ After the proxy: the test-suite audit (#351) and then the quality review
   - #246 left: move the recipe checks in `kernel/provider` (cpython, rust, rust_path) onto `Selected::checked_artifact`. Deferred because those files wake the heavy suite.
   - #248 sandbox and gitsrc: collapse the _with_activity twin of every entry point.
   - #413 x clean: delete before unregister, corrupt registry entries, pathname ownership reads (from the #408 review).
-  - #261 perf: every sync parses every metadata record before starting.
   - #256 design: the Tailor trait has 35+ methods, a dozen used by one ecosystem, and its docs have drifted.
   - #255 design: the kernel knows every ecosystem by name, and tog run is hard-wired to Node.
   - #257 design: move process-global state (policy, signing key, input guard, kinds) into Context.
@@ -159,7 +158,6 @@ After the proxy: the test-suite audit (#351) and then the quality review
   - #188 npm: realize `file:` packages as tog-owned trees.
   - #191 provider object-kind rows still live in the tailors' `objects.rs`.
   - #216 python: `uv pip compile` fails for vllm and MetaGPT; classifier label.
-  - #267 tests: non-tog children in npm_scripts and deps_e2e inherit the developer's environment.
   - #272 pnpm freshness: a new workspace member without an importer passes, and overrides match by name only.
   - #277 gc: run homes under `<store>/run-homes` are never reclaimed.
   - #279 node: run refusal misses npm abbreviations and nested installs, and refuses bare `bun`.
