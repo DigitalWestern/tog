@@ -497,11 +497,8 @@ fn scrub_echo(text: &str, path: &str, protocol: &dyn RegistryProtocol) -> String
 /// an absolute path, no empty, `.`, or `..` segment (percent-encoded or
 /// not), no percent-encoded `/`, `\`, or NUL, no backslash, and no URL
 /// inside it. The query is not restricted beyond well-formed escapes.
-pub fn check_route_path(path_and_query: &str) -> Result<(), String> {
-    check_route_path_with(path_and_query, false)
-}
-
-/// [`check_route_path`] for a protocol that accepts a percent-encoded `/`
+///
+/// `encoded_slash` is set for a protocol that accepts a percent-encoded `/`
 /// inside a segment ([`RegistryProtocol::encoded_slash`]): the encoded
 /// slash then counts as a segment boundary for the `.`, `..`, and empty
 /// segment rules, so `/@s%2f..` is refused like `/@s/..`.
@@ -706,7 +703,7 @@ mod tests {
             "/a%25b",
             "/a%2541",
         ] {
-            assert_eq!(check_route_path(good), Ok(()), "{good}");
+            assert_eq!(check_route_path_with(good, false), Ok(()), "{good}");
         }
         for (bad, why) in [
             ("a/b", "absolute path"),
@@ -731,7 +728,7 @@ mod tests {
             ("/a%2500", "double"),
             ("/a%2525", "double"),
         ] {
-            let error = check_route_path(bad).unwrap_err();
+            let error = check_route_path_with(bad, false).unwrap_err();
             assert!(error.contains(why), "{bad}: {error}");
         }
     }
@@ -744,7 +741,7 @@ mod tests {
     fn an_encoded_slash_is_a_segment_boundary_when_a_protocol_allows_it() {
         for good in ["/@types%2fnode", "/@Types%2Fnode", "/@s%2fn/-/n-1.0.0.tgz"] {
             assert_eq!(check_route_path_with(good, true), Ok(()), "{good}");
-            assert!(check_route_path(good).is_err(), "{good}");
+            assert!(check_route_path_with(good, false).is_err(), "{good}");
         }
         for (bad, why) in [
             ("/@s%2f..", ". or .."),

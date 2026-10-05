@@ -41,7 +41,7 @@ pub mod boundary {
     pub use crate::kernel::ui::{error_json_with_fix, error_with_fix, init};
     // tests/npm_scripts.rs
     pub use crate::kernel::fetch::download_verified_digest;
-    pub use crate::tailors::node::{ensure_node_for, realize_node_env};
+    pub use crate::tailors::node::{ensure_node_for, project_node_env, realize_node_env};
     // tests/node_env_evidence.rs
     pub use crate::kernel::gc::collect;
     // tests/native_libs.rs
