@@ -1038,9 +1038,11 @@ fn assert_signal_mid_script_stops_the_sync(signal: libc::c_int, whole_group: boo
     let report = format!("status: {status:?}\nstdout:\n{stdout_text}\nstderr:\n{stderr_text}");
     println!("{report}");
 
-    assert!(
-        !status.success(),
-        "an interrupted sync reported success\n{report}"
+    // The shell's convention for a command a signal stopped: 128 + signal.
+    assert_eq!(
+        status.code(),
+        Some(128 + signal),
+        "an interrupted sync did not exit 128 + signal\n{report}"
     );
     assert!(
         stderr_text.contains("interrupted"),

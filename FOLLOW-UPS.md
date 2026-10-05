@@ -159,7 +159,7 @@ After the proxy: the test-suite audit (#351) and then the quality review
   - #191 provider object-kind rows still live in the tailors' `objects.rs`.
   - #216 python: `uv pip compile` fails for vllm and MetaGPT; classifier label.
   - #476 fetch: state and audit that a cache hit is trusted by its digest's source, not its writer (from #287).
-  - #289 interrupt: the bwrap preflight misreports Ctrl-C as "bwrap unavailable", and an interrupted sync exits 1 rather than 130.
+  - #289 interrupt: the bwrap preflight misreports Ctrl-C as "bwrap unavailable" (`sandbox.rs`, heavy gate). The exit code is fixed.
   - #295 tests: four sandbox tests fail instead of skipping when bubblewrap is missing.
   - #297 python: two PEP 440 grammars; hoist `pep440.rs` into the kernel.
   - #300 heavy: the Elixir end-to-end test cannot run on ubuntu-22.04 (OTP needs glibc 2.43).

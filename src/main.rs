@@ -91,18 +91,28 @@ fn main() {
         }
         Err(error) => {
             report_failure(&error);
-            exit(cli::EXIT_FAILURE);
+            exit(failure_code(&error));
         }
     };
     let code = match commands::dispatch(command, options.sync) {
         Ok(code) => code,
         Err(error) => {
             report_failure(&error);
-            cli::EXIT_FAILURE
+            failure_code(&error)
         }
     };
     if let Some(footer) = cli::after_command(bare, code, ui::quiet()) {
         print!("{footer}");
     }
     exit(code);
+}
+
+/// The exit code for a command that failed with `error`: `128 + signal` when
+/// a signal asked tog to stop (130 for Ctrl-C), the shell's convention and
+/// what `tog run` already passes on from its child, and 1 otherwise.
+fn failure_code(error: &std::io::Error) -> i32 {
+    match tog::kernel::supervise::stop_signal(error) {
+        Some(signal) => 128 + signal,
+        None => cli::EXIT_FAILURE,
+    }
 }
