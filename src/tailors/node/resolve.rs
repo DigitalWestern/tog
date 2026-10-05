@@ -227,12 +227,24 @@ fn expand_workspace_glob(root: &ProjectRoot, pattern: &str) -> io::Result<Vec<St
 }
 
 /// The closure's `resolution_basis`: every resolution file of the lock
-/// root that exists, by the digest of its bytes now, read through the
-/// held descriptor under the project lock the closure writer holds.
-pub(crate) fn resolution_basis(root: &ProjectRoot) -> io::Result<crate::comforter::join::Digests> {
+/// root that exists, by digest, with the lock `lock_name` taken from
+/// `lock_text`, the bytes the plan was built from. Computed at plan time,
+/// so a lock another writer swaps in while the sync realizes does not
+/// become the basis of a closure planned from the old one (the join's
+/// `check_basis` then refuses the closure instead).
+pub(crate) fn resolution_basis(
+    root: &ProjectRoot,
+    lock_name: &str,
+    lock_text: &str,
+) -> io::Result<crate::comforter::join::Digests> {
     let mut listed = resolution_outputs(root)?;
     listed.extend(resolution_inputs(root)?);
-    record::file_digests(root, &listed)
+    let mut basis = record::file_digests(root, &listed)?;
+    basis.insert(
+        lock_name.to_string(),
+        record::sha256_hex(lock_text.as_bytes()),
+    );
+    Ok(basis)
 }
 
 /// Refuse a project whose manifests name a `file:` or `link:` dependency

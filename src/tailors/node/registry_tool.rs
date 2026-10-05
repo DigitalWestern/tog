@@ -207,7 +207,8 @@ impl RegistryTool for NodeTool {
             )
         })?;
         node::resolve::root_x_ledger(door, root, &report)?;
-        let plan = node::plan_npm(platform, &fs::read_to_string(&lock)?)?;
+        let lock_text = fs::read_to_string(&lock)?;
+        let plan = node::plan_npm(platform, &lock_text)?;
         // node-gyp runs on the Python the caller decided: the project's
         // locked one when `x` runs inside a project that has Python, the
         // shipped default otherwise.
@@ -225,7 +226,8 @@ impl RegistryTool for NodeTool {
             &gyp_python,
         )?;
         let project = crate::kernel::fsroot::ProjectRoot::open(root)?;
-        node::project_node_env(
+        let basis = node::resolve::resolution_basis(&project, "package-lock.json", &lock_text)?;
+        node::project_node_env_recorded(
             activity,
             &project,
             &env,
@@ -233,6 +235,10 @@ impl RegistryTool for NodeTool {
             &plan,
             &[],
             false,
+            &[],
+            &basis,
+            None,
+            &serde_json::Value::Null,
             door.attribution(),
         )?;
         ui::synced(&format!("x {package}"), &env);

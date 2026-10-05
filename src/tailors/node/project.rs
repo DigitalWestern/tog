@@ -233,6 +233,11 @@ pub fn project_node_env(
     fresh: bool,
     attribution: &mut crate::kernel::policy::Attribution,
 ) -> io::Result<()> {
+    // No plan-time basis was handed in: the lock root as it reads now, the
+    // lock included. A sync passes the plan-time one instead.
+    let lock = Path::new(&plan.lock_source);
+    let lock_text = project.read_input_string(lock)?.unwrap_or_default();
+    let basis = super::resolve::resolution_basis(project, &plan.lock_source, &lock_text)?;
     project_node_env_recorded(
         activity,
         project,
@@ -242,6 +247,7 @@ pub fn project_node_env(
         mutable,
         fresh,
         &[],
+        &basis,
         None,
         &serde_json::Value::Null,
         attribution,
@@ -845,6 +851,9 @@ pub fn project_node_env_recorded(
     mutable: &[String],
     fresh: bool,
     inputs: &[crate::comforter::InputRecord],
+    // The resolution files by digest at plan time (`resolve::resolution_basis`),
+    // which the join binds the record to.
+    basis: &crate::comforter::join::Digests,
     // On a project path: the bundle this projection was built from and the
     // Node object realized from it, recorded so a later run resolves the
     // same bytes through the closure instead of the pin table.
@@ -968,7 +977,6 @@ pub fn project_node_env_recorded(
     }
 
     project.create_dir_all(Path::new(".tog"))?;
-    let basis = super::resolve::resolution_basis(project)?;
     let mut body = node_closure_body(
         &env_obj,
         &native_reference,
@@ -978,7 +986,7 @@ pub fn project_node_env_recorded(
         &workspaces,
         &reasons,
         inputs,
-        &basis,
+        basis,
     );
     record_unprojected(&mut body, &tracked, &workspaces);
     if let Some(record) = runtime_record {

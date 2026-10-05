@@ -345,6 +345,17 @@ fn check_basis(
     )))
 }
 
+/// [`check_basis`] for a tailor's own test of the basis it computes.
+#[cfg(test)]
+pub(crate) fn check_basis_for_test(
+    project: &ProjectRoot,
+    ecosystem: &str,
+    files: &ResolutionFiles,
+    basis: &Digests,
+) -> io::Result<()> {
+    check_basis(project, ecosystem, files, basis)
+}
+
 /// The paths whose digests differ between `left` and `right`, including a
 /// path only one of them names.
 fn differing(left: &Digests, right: &Digests) -> Vec<String> {

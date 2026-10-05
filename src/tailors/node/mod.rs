@@ -2159,6 +2159,15 @@ mod tests {
     /// package, a workspace link and a recorded input, pinning both the
     /// symlink layout and every field of the closure record so a refactor of
     /// the projection cannot quietly move a value or reorder a step.
+    /// The closure's basis for a test that plans and writes in one step:
+    /// the project's resolution files as they read now.
+    fn basis_for_test(project: &Path, plan: &NpmPlan) -> crate::comforter::join::Digests {
+        let root = crate::kernel::fsroot::ProjectRoot::open(project).unwrap();
+        let lock_text =
+            std::fs::read_to_string(project.join(&plan.lock_source)).unwrap_or_default();
+        super::resolve::resolution_basis(&root, &plan.lock_source, &lock_text).unwrap()
+    }
+
     #[test]
     fn project_node_env_recorded_characterization_pins_the_closure() {
         let _attribution_lock = crate::kernel::policy::attribution_test_lock();
@@ -2217,6 +2226,7 @@ mod tests {
             &[],
             false,
             &inputs,
+            &basis_for_test(&project, &plan),
             None,
             &serde_json::Value::Null,
             &mut attribution,
@@ -2323,6 +2333,7 @@ mod tests {
             &[],
             false,
             &[],
+            &basis_for_test(&project, &plan),
             Some((&selected, runtime.as_path())),
             &serde_json::Value::Null,
             &mut attribution,
@@ -2447,6 +2458,7 @@ mod tests {
             &[],
             false,
             &[],
+            &basis_for_test(&project, &plan),
             Some((&selected, runtime.as_path())),
             &serde_json::Value::Null,
             &mut attribution,

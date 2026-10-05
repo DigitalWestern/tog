@@ -245,7 +245,12 @@ impl Tailor for Node {
         // The Node this sync plans with and realizes is the row the
         // project's toolchain selection names, not the pin table.
         let selected = request.toolchain;
-        let Some(plan) = inputs::load_npm_plan(platform, project, selected)? else {
+        // The plan and the closure's resolution basis come from one read of
+        // the lock: a lock swapped in while this sync realizes is not what
+        // the closure was planned from, and the join refuses it.
+        let Some(inputs::Planned { plan, basis }) =
+            inputs::load_npm_plan_with_basis(platform, project, selected)?
+        else {
             inputs::require_lock(project)?;
             return Ok(false);
         };
@@ -283,6 +288,7 @@ impl Tailor for Node {
             &config.mutable_packages,
             fresh,
             &inputs,
+            &basis,
             Some((selected, runtime.as_path())),
             &crate::tailors::helper_record(self, &helpers),
             attribution,
