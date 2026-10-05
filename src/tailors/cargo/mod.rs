@@ -1318,7 +1318,7 @@ checksum = "{hash_b}"
                 .unwrap(),
             )
             .unwrap();
-            store.register_root(&project).unwrap();
+            crate::kernel::store::register_empty_root_for_test(store, &project).unwrap();
             let mut out = Vec::new();
             let report =
                 crate::kernel::gc::collect(store, crate::kernel::gc::Options::default(), &mut out)

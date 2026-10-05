@@ -733,9 +733,10 @@ The store's `roots/<sha1>` registry records every project whose closure can
 protect store objects. New `root/2` records contain the complete object set
 and typed projection references, so GC never opens the project's diagnostic
 path: a moved, unmounted, or deleted project keeps its tools protected.
-A pathname-only record, which holds a project path and nothing else, stays
-conservative: if the project cannot be read, the whole sweep stops before
-any deletion, dry run included.
+A pathname-only record, the form before `root/2`, holds a project path and
+nothing else, so it names no objects: GC reports it unusable and the whole
+sweep stops before any deletion, dry run included, until `tog gc --register`
+records the project again or `tog gc --forget` drops it.
 `tog store roots` prints each key beside its path. `tog gc --forget
 <key>` is the explicit recovery valve: it removes only the registry file, and
 a root is never removed implicitly.

@@ -545,13 +545,6 @@ pub(crate) fn touch_path(path: &Path) -> io::Result<()> {
     fs::File::open(path)?.set_modified(SystemTime::now())
 }
 
-pub(crate) fn object_id_token(value: &str) -> Option<String> {
-    value
-        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '-' || c == '.' || c == '_'))
-        .find(|token| is_object_id(token))
-        .map(str::to_string)
-}
-
 /// Extract a complete object id from a store object path without accepting a
 /// path-shaped string or a nested child as evidence. The caller still gets
 /// the final existence/metadata check from `validate_object_deps` when the

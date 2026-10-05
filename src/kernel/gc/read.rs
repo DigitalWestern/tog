@@ -21,7 +21,6 @@ use super::*;
 #[derive(Debug, Default)]
 pub(super) struct RootState {
     pub(super) object_ids: HashSet<String>,
-    pub(super) project_paths: Vec<PathBuf>,
     pub(super) project_keep: Vec<PathBuf>,
     /// The `run-homes/` keys of every project a surviving root names.
     pub(super) run_home_keys: HashSet<String>,
@@ -37,10 +36,10 @@ pub(super) fn collect_roots(
         if options.forgotten.iter().any(|key| key == &root.key) {
             continue;
         }
-        // A record this store cannot read is the same safety stop as a
-        // project that cannot be resolved, and for the same reason: the
-        // record exists, so some project is still counting on it, and there
-        // is no way to tell which objects that project needs.
+        // A record this store cannot use (damaged, or the pathname-only
+        // form before root/2) stops the sweep: the record exists, so some
+        // project may still be counting on it, and there is no way to tell
+        // which objects that project needs.
         if let Some(reason) = &root.unusable {
             return Err(unusable_root(root, reason));
         }
@@ -61,78 +60,11 @@ pub(super) fn collect_roots(
             );
             continue;
         }
-        // A root whose project cannot be resolved is a safety stop, not a
-        // cleanup candidate: with only a pathname record there is no way to
-        // know what the project still needs, so dropping the record could
-        // expose its objects to this very sweep. Refuse the whole sweep
-        // until the record is usable, forgotten, or the project returns.
-        if let Err(error) = fs::metadata(&root.path) {
-            return Err(unresolvable_root(root, &error));
-        }
-        if !root.path.is_dir() {
-            return Err(unresolvable_root(
-                root,
-                &io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "the path exists but is not a directory",
-                ),
-            ));
-        }
-        let closures = root.path.join(".tog/closures");
-        match fs::metadata(&closures) {
-            Ok(metadata) if metadata.is_dir() => {}
-            Ok(_) => {
-                return Err(unresolvable_root(
-                    root,
-                    &io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        ".tog/closures is missing (never synced, or removed)",
-                    ),
-                ));
-            }
-            Err(error) => return Err(unresolvable_root(root, &error)),
-        }
-        let project = root
-            .path
-            .canonicalize()
-            .map_err(|error| unresolvable_root(root, &error))?;
-        state.project_paths.push(project.clone());
-        state
-            .run_home_keys
-            .insert(Store::canonical_project_key(&project));
-        // A registered project owns at least one closure: registration
-        // happens when one is written. None at all means either that they
-        // were removed, or that this pathname no longer resolves to the
-        // project that was registered — unmounting a mount point exposes the
-        // backing directory underneath, which can carry an empty
-        // `.tog/closures` of its own and would otherwise be swept as if
-        // the registered project had agreed it needed nothing.
-        if read_closures(store, &project, &mut state)? == 0 {
-            return Err(unresolvable_root(
-                root,
-                &io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    ".tog/closures holds no closure files: they were removed, or the \
-                     path now resolves to a different directory than the one registered \
-                     (the backing directory of an unmounted mount point, for example)",
-                ),
-            ));
-        }
+        // Every entry `roots()` reads is a root/2 record or unusable. One
+        // that is neither names nothing a sweep could keep.
+        return Err(unusable_root(root, "the record names no store objects"));
     }
     Ok(state)
-}
-
-pub(super) fn unresolvable_root(root: &RootEntry, error: &io::Error) -> io::Error {
-    io::Error::other(format!(
-        "refusing to sweep: root {} points at {}, which cannot be resolved ({}). Make the \
-         project available at that path, or give up its protection explicitly with `tog \
-         gc --forget {}`. Dry runs stop here too: the records decide what a real sweep \
-         would keep.",
-        root.key,
-        root.path.display(),
-        error,
-        root.key
-    ))
 }
 
 pub(super) fn unusable_root(root: &RootEntry, reason: &str) -> io::Error {
@@ -145,137 +77,6 @@ pub(super) fn unusable_root(root: &RootEntry, reason: &str) -> io::Error {
         reason,
         root.key
     ))
-}
-
-/// Read a project's closures into the live set, returning how many closure
-/// files it held.
-pub(super) fn read_closures(
-    store: &Store,
-    project: &Path,
-    state: &mut RootState,
-) -> io::Result<usize> {
-    let closures = project.join(".tog/closures");
-    let mut found = 0usize;
-    for entry in fs::read_dir(&closures)? {
-        let entry = entry?;
-        if !entry.file_type()?.is_file()
-            || entry.path().extension().and_then(|s| s.to_str()) != Some("json")
-        {
-            continue;
-        }
-        found += 1;
-        let path = entry.path();
-        let value: serde_json::Value =
-            serde_json::from_reader(fs::File::open(&path)?).map_err(|e| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("parse closure {}: {e}", path.display()),
-                )
-            })?;
-        let body = value.get("body").unwrap_or(&value);
-        collect_object_ids(body, store, &mut state.object_ids);
-        collect_project_paths(body, store, &mut state.project_keep);
-        // Node forests do not record their full path, only the projection id;
-        // reconstruct it from the canonical project path and the closure's
-        // projection schema.
-        if matches!(
-            body["projection_schema"].as_str(),
-            Some("node-forest/1" | "node-forest/2")
-        ) {
-            if let Some(projection_id) = body["projection_id"].as_str() {
-                let key = Store::forest_project_key(project);
-                state
-                    .project_keep
-                    .push(store.root.join("forests").join(&key).join(projection_id));
-            }
-        }
-    }
-    // A currently projected symlink is also an active forest, even when
-    // the closure does not name it.
-    for name in ["node_modules", ".venv"] {
-        let path = project.join(name);
-        if let Ok(target) = fs::read_link(&path) {
-            let target = if target.is_absolute() {
-                target
-            } else {
-                project.join(target)
-            };
-            if let Ok(target) = target.canonicalize() {
-                collect_project_path(&target, store, &mut state.project_keep);
-            }
-        }
-    }
-    Ok(found)
-}
-
-pub(super) fn collect_object_ids(
-    value: &serde_json::Value,
-    store: &Store,
-    ids: &mut HashSet<String>,
-) {
-    match value {
-        serde_json::Value::String(text) => {
-            if let Some(id) = store::object_id_token(text) {
-                ids.insert(id);
-            }
-            let objects = store.root.join("objects");
-            let path = Path::new(text);
-            if path.is_absolute() && path.starts_with(&objects) {
-                if let Ok(relative) = path.strip_prefix(&objects) {
-                    if let Some(component) = relative.components().next() {
-                        let id = component.as_os_str().to_string_lossy();
-                        if let Some(id) = store::object_id_token(&id) {
-                            ids.insert(id);
-                        }
-                    }
-                }
-            }
-        }
-        serde_json::Value::Array(values) => {
-            for value in values {
-                collect_object_ids(value, store, ids);
-            }
-        }
-        serde_json::Value::Object(values) => {
-            for value in values.values() {
-                collect_object_ids(value, store, ids);
-            }
-        }
-        _ => {}
-    }
-}
-
-pub(super) fn collect_project_paths(
-    value: &serde_json::Value,
-    store: &Store,
-    paths: &mut Vec<PathBuf>,
-) {
-    match value {
-        serde_json::Value::String(text) => {
-            let path = Path::new(text);
-            if path.is_absolute() {
-                collect_project_path(path, store, paths);
-            }
-        }
-        serde_json::Value::Array(values) => {
-            for value in values {
-                collect_project_paths(value, store, paths);
-            }
-        }
-        serde_json::Value::Object(values) => {
-            for value in values.values() {
-                collect_project_paths(value, store, paths);
-            }
-        }
-        _ => {}
-    }
-}
-
-pub(super) fn collect_project_path(path: &Path, store: &Store, paths: &mut Vec<PathBuf>) {
-    if path.starts_with(store.root.join("forests")) || path.starts_with(store.root.join("backups"))
-    {
-        paths.push(path.to_path_buf());
-    }
 }
 
 /// A directory the sweep may delete from, held open from read through

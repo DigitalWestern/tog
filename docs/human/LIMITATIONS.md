@@ -43,7 +43,7 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   fails as `unknown` rather than being permitted. Loud.
 - **GC is conservative around what it cannot read.** Store jobs hold a shared activity
   lease; GC skips while work is active (older binaries do not know the protocol). `root/2`
-  records survive moves, but a pathname-only root whose project is gone and an unreadable
+  records survive moves, but a pathname-only root (the form before them) and an unreadable
   object record block the sweep — an unreadable registry record blocks it too. `tog gc
   --forget <key>` and `tog gc --drop-object <id>` are the give-up valves.
 - **The GC safety guarantee has a stated boundary.** It covers cooperating tog processes

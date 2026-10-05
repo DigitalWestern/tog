@@ -979,8 +979,8 @@ concurrent sync cannot lose one. Sharp edges:
   it refuses alongside `--register`, which would have to write a record.
 - Any object whose record cannot be read stops the sweep rather than being
   guessed at, and the refusal lists every such record with the command that
-  clears it. A pathname-only root record whose project is unavailable stops
-  it too; restore the project or forget its key.
+  clears it. A pathname-only root record, the form before `root/2`, names no
+  objects and stops it too; register the project again or forget its key.
 - `--drop-object <id>...` removes an object and its record outright, for the
   records the sweep cannot use: unusable, or missing their object (and an
   object missing its record). Everything in the
