@@ -518,6 +518,102 @@ mod tests {
         assert_eq!(again["signature"]["sig"], FIXED_SIGNATURE);
     }
 
+    /// `tests/acceptance.sh` step 13 re-signs a closure in Python, with
+    /// its own copy of this module's format (#302). This runs that block,
+    /// read out of the script, on a closure this module signed, and
+    /// requires the script's signature to be the one `sign` gives the same
+    /// edited closure. A change to the format (what is signed, the
+    /// canonical JSON, the envelope) fails here, naming the script, rather
+    /// than as a bad signature at the script's audit step.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn acceptance_step_13_signs_closures_the_way_this_module_does() {
+        use std::process::{Command, Stdio};
+        let script =
+            fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/acceptance.sh"))
+                .unwrap();
+        let start = script
+            .find("<<'PLANT'\n")
+            .expect("tests/acceptance.sh has no PLANT block")
+            + "<<'PLANT'\n".len();
+        let end = start
+            + script[start..]
+                .find("\nPLANT\n")
+                .expect("the PLANT block in tests/acceptance.sh never ends");
+        let plant = &script[start..end];
+        for tool in ["python3", "openssl"] {
+            if Command::new(tool)
+                .arg("--version")
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .is_err()
+            {
+                eprintln!("acceptance step 13 check skipped: no {tool} on PATH");
+                return;
+            }
+        }
+
+        let temp = TempDir::named("acceptance-plant");
+        let key_path = temp.0.join("key");
+        generate(&key_path).unwrap();
+        let key = SigningKey::load(&key_path).unwrap();
+        let mut closure = json!({
+            "schema": "closure/1",
+            "ecosystem": "node",
+            "platform": "x86_64-unknown-linux-gnu",
+            "projected_at": 1_700_000_000u64,
+            "body": {
+                "inputs": [{"path": "package-lock.json", "sha256": "ab"}],
+                "packages": [{"name": "is-odd", "note": "snow \u{2603} \"quoted\""}],
+                "exceptions": [],
+            },
+        });
+        key.sign(&mut closure).unwrap();
+        let path = temp.0.join("node.json");
+        fs::write(&path, serde_json::to_string_pretty(&closure).unwrap()).unwrap();
+
+        let mut child = Command::new("python3")
+            .arg("-")
+            .arg(&path)
+            .arg(&key_path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(plant.as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "the PLANT block in tests/acceptance.sh failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let planted: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        let mut expected = closure.clone();
+        expected["body"]["exceptions"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({
+                "kind": "install-script-failed",
+                "subject": "acceptance-plant",
+                "detail": "planted by tests/acceptance.sh step 13",
+            }));
+        key.sign(&mut expected).unwrap();
+        assert_eq!(
+            planted, expected,
+            "tests/acceptance.sh step 13 no longer signs a closure the way \
+             kernel::signing does; update its PLANT block to match"
+        );
+        assert_eq!(verify(&planted), Verification::Valid(key.public_key()));
+    }
+
     #[test]
     fn tampering_anywhere_in_the_value_is_a_bad_signature() {
         let key = fixed_key();
