@@ -11,18 +11,42 @@ pub(super) fn requirements_manifest(
     input: &str,
 ) -> io::Result<Manifest> {
     let source = read_text(project, path)?;
-    validate_requirement_includes(project, path, false, &mut Vec::new(), &mut BTreeSet::new())?;
     let mut requirements = Vec::new();
     let mut constraints = Vec::new();
-    collect_requirement_lines(
-        project,
-        path,
-        &mut Vec::new(),
-        &mut BTreeSet::new(),
-        &mut requirements,
-        &mut constraints,
-        false,
-    )?;
+    let mut index_options = Vec::new();
+    // The mode a file was first reached in. A file reached both as
+    // requirements and as constraints lists its index options once.
+    let mut first_mode = BTreeMap::new();
+    walk_includes(project, path, &mut |step| {
+        match step {
+            IncludeStep::File {
+                file,
+                constraints_only,
+            } => {
+                first_mode
+                    .entry(file.to_path_buf())
+                    .or_insert(constraints_only);
+            }
+            IncludeStep::Line {
+                file,
+                line,
+                constraints_only,
+            } => {
+                if first_mode.get(file) == Some(&constraints_only) {
+                    index_options.extend(pypi::unattested_index_options(line));
+                }
+                if !pypi::is_requirement_option(line) {
+                    let list = if constraints_only {
+                        &mut constraints
+                    } else {
+                        &mut requirements
+                    };
+                    list.push(line.to_string());
+                }
+            }
+        }
+        Ok(())
+    })?;
     let mut filtered = Vec::new();
     let mut has_skippable_specs = false;
     for requirement in requirements {
@@ -38,14 +62,6 @@ pub(super) fn requirements_manifest(
         }
     }
     let requirements = filtered;
-    let mut index_options = Vec::new();
-    collect_index_options(
-        project,
-        path,
-        &mut Vec::new(),
-        &mut BTreeSet::new(),
-        &mut index_options,
-    )?;
     let has_index_options = !index_options.is_empty();
     for option in index_options {
         crate::kernel::policy::record(
@@ -110,12 +126,49 @@ pub(super) fn requirements_directory_candidate(
     Ok(None)
 }
 
-pub(super) fn validate_requirement_includes(
+/// One step of [`walk_includes`].
+pub(super) enum IncludeStep<'a> {
+    /// A file entered for the first time under this `constraints_only`.
+    File {
+        file: &'a Path,
+        constraints_only: bool,
+    },
+    /// One logical line of `file` that is not an include directive.
+    Line {
+        file: &'a Path,
+        line: &'a str,
+        constraints_only: bool,
+    },
+}
+
+/// Walk a requirements file and its `-r`/`-c` include closure depth first,
+/// in file order, calling `visit` for each file and each non-include line.
+/// The one place the include rules live: an include without its file
+/// argument, a missing included file and a cycle are all errors. A file is
+/// visited once per `constraints_only` value, because the same file
+/// reached through `-c` contributes constraints, not requirements.
+pub(super) fn walk_includes(
+    project: &ProjectRoot,
+    path: &Path,
+    visit: &mut dyn FnMut(IncludeStep<'_>) -> io::Result<()>,
+) -> io::Result<()> {
+    walk_from(
+        project,
+        path,
+        false,
+        &mut Vec::new(),
+        &mut BTreeSet::new(),
+        visit,
+    )
+}
+
+fn walk_from(
     project: &ProjectRoot,
     path: &Path,
     constraints_only: bool,
     stack: &mut Vec<(PathBuf, bool)>,
     seen: &mut BTreeSet<(PathBuf, bool)>,
+    visit: &mut dyn FnMut(IncludeStep<'_>) -> io::Result<()>,
 ) -> io::Result<()> {
     let path = path.canonicalize().map_err(|e| unreadable(path, e))?;
     let key = (path.clone(), constraints_only);
@@ -127,6 +180,7 @@ pub(super) fn validate_requirement_includes(
                 stack
                     .iter()
                     .map(|(p, _)| p.display().to_string())
+                    .chain([path.display().to_string()])
                     .collect::<Vec<_>>()
                     .join(" -> ")
             ),
@@ -135,25 +189,35 @@ pub(super) fn validate_requirement_includes(
     if !seen.insert(key.clone()) {
         return Ok(());
     }
+    visit(IncludeStep::File {
+        file: &path,
+        constraints_only,
+    })?;
     stack.push(key);
-    let text = read_text(project, &path)?;
-    for line in pypi::logical_requirement_lines(&text) {
-        if let Some(include) = parse_include_directive(&line) {
-            let target = include.target.ok_or_else(|| {
-                unreadable(&path, "requirements include is missing its file argument")
+    for line in pypi::logical_requirement_lines(&read_text(project, &path)?) {
+        let Some(include) = parse_include_directive(&line) else {
+            visit(IncludeStep::Line {
+                file: &path,
+                line: &line,
+                constraints_only,
             })?;
-            let child = path.parent().unwrap_or(Path::new(".")).join(target.trim());
-            if !is_project_file(project, &child) {
-                return Err(unreadable(&child, "included requirements file is missing"));
-            }
-            validate_requirement_includes(
-                project,
-                &child,
-                constraints_only || include.constraint,
-                stack,
-                seen,
-            )?;
+            continue;
+        };
+        let target = include.target.ok_or_else(|| {
+            unreadable(&path, "requirements include is missing its file argument")
+        })?;
+        let child = path.parent().unwrap_or(Path::new(".")).join(target.trim());
+        if !is_project_file(project, &child) {
+            return Err(unreadable(&child, "included requirements file is missing"));
         }
+        walk_from(
+            project,
+            &child,
+            constraints_only || include.constraint,
+            stack,
+            seen,
+            visit,
+        )?;
     }
     stack.pop();
     Ok(())
@@ -167,16 +231,13 @@ pub(super) fn validate_requirement_includes(
 pub fn requirements_tree_hash(project: &ProjectRoot, path: &Path) -> io::Result<String> {
     let top = path.canonicalize().map_err(|e| unreadable(path, e))?;
     let root = top.parent().unwrap_or(Path::new("."));
-    let mut visited = BTreeSet::new();
     let mut files = BTreeSet::new();
-    collect_requirement_files(
-        project,
-        &top,
-        false,
-        &mut Vec::new(),
-        &mut visited,
-        &mut files,
-    )?;
+    walk_includes(project, &top, &mut |step| {
+        if let IncludeStep::File { file, .. } = step {
+            files.insert(file.to_path_buf());
+        }
+        Ok(())
+    })?;
     let mut hasher = Sha256::new();
     for file in files {
         let relative = file.strip_prefix(root).unwrap_or(&file);
@@ -186,88 +247,6 @@ pub fn requirements_tree_hash(project: &ProjectRoot, path: &Path) -> io::Result<
         hasher.update([0]);
     }
     Ok(hex::encode(hasher.finalize()))
-}
-
-pub(super) fn collect_requirement_files(
-    project: &ProjectRoot,
-    path: &Path,
-    constraints_only: bool,
-    stack: &mut Vec<(PathBuf, bool)>,
-    visited: &mut BTreeSet<(PathBuf, bool)>,
-    files: &mut BTreeSet<PathBuf>,
-) -> io::Result<()> {
-    let path = path.canonicalize().map_err(|e| unreadable(path, e))?;
-    let key = (path.clone(), constraints_only);
-    if stack.contains(&key) {
-        return Err(unreadable(&path, "requirements include cycle"));
-    }
-    if !visited.insert(key.clone()) {
-        return Ok(());
-    }
-    files.insert(path.clone());
-    stack.push(key);
-    for line in pypi::logical_requirement_lines(&read_text(project, &path)?) {
-        if let Some(include) = parse_include_directive(&line) {
-            let Some(target) = include.target else {
-                continue;
-            };
-            let child = path.parent().unwrap_or(Path::new(".")).join(target.trim());
-            collect_requirement_files(
-                project,
-                &child,
-                constraints_only || include.constraint,
-                stack,
-                visited,
-                files,
-            )?;
-        }
-    }
-    stack.pop();
-    Ok(())
-}
-
-pub(super) fn collect_requirement_lines(
-    project: &ProjectRoot,
-    path: &Path,
-    stack: &mut Vec<(PathBuf, bool)>,
-    seen: &mut BTreeSet<(PathBuf, bool)>,
-    output: &mut Vec<String>,
-    constraints: &mut Vec<String>,
-    constraints_only: bool,
-) -> io::Result<()> {
-    let path = path.canonicalize().map_err(|e| unreadable(path, e))?;
-    let key = (path.clone(), constraints_only);
-    if stack.contains(&key) {
-        return Err(unreadable(&path, "requirements include cycle"));
-    }
-    if !seen.insert(key.clone()) {
-        return Ok(());
-    }
-    stack.push(key);
-    for line in pypi::logical_requirement_lines(&read_text(project, &path)?) {
-        if let Some(include) = parse_include_directive(&line) {
-            let target = include.target.ok_or_else(|| {
-                unreadable(&path, "requirements include is missing its file argument")
-            })?;
-            let is_constraint = include.constraint;
-            let child = path.parent().unwrap_or(Path::new(".")).join(target);
-            collect_requirement_lines(
-                project,
-                &child,
-                stack,
-                seen,
-                output,
-                constraints,
-                constraints_only || is_constraint,
-            )?;
-        } else if !constraints_only && !pypi::is_requirement_option(&line) {
-            output.push(line);
-        } else if constraints_only && !pypi::is_requirement_option(&line) {
-            constraints.push(line);
-        }
-    }
-    stack.pop();
-    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -317,35 +296,6 @@ pub(super) fn parse_include_directive(line: &str) -> Option<IncludeDirective> {
         });
     }
     None
-}
-
-pub(super) fn collect_index_options(
-    project: &ProjectRoot,
-    path: &Path,
-    stack: &mut Vec<PathBuf>,
-    seen: &mut BTreeSet<PathBuf>,
-    output: &mut Vec<String>,
-) -> io::Result<()> {
-    let path = path.canonicalize().map_err(|e| unreadable(path, e))?;
-    if stack.contains(&path) {
-        return Err(unreadable(&path, "requirements include cycle"));
-    }
-    if !seen.insert(path.clone()) {
-        return Ok(());
-    }
-    stack.push(path.clone());
-    for line in pypi::logical_requirement_lines(&read_text(project, &path)?) {
-        output.extend(pypi::unattested_index_options(&line));
-        if let Some(include) = parse_include_directive(&line) {
-            let Some(target) = include.target else {
-                continue;
-            };
-            let child = path.parent().unwrap_or(Path::new(".")).join(target.trim());
-            collect_index_options(project, &child, stack, seen, output)?;
-        }
-    }
-    stack.pop();
-    Ok(())
 }
 
 pub(super) fn strip_inline_comment(line: &str) -> &str {

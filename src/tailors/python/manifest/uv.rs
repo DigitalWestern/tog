@@ -37,8 +37,34 @@ pub(super) fn record_uv_sources(value: &toml::Value) -> io::Result<()> {
     Ok(())
 }
 
+/// Whether `url` is public PyPI: https, the default port, and a host that
+/// is exactly `pypi.org` or `files.pythonhosted.org`. A host that only
+/// contains one of those names, `pypi.org.internal.example`, is another
+/// index, and so is `pypi.org` over plain http or on another port. Empty
+/// means the default index, which is PyPI.
 pub(super) fn is_public_pypi_url(url: &str) -> bool {
-    url.is_empty() || url.contains("://pypi.org") || url.contains("://files.pythonhosted.org")
+    if url.is_empty() {
+        return true;
+    }
+    url::Url::parse(url).is_ok_and(|url| {
+        url.scheme() == "https"
+            && url.port().is_none()
+            && matches!(
+                url.host_str(),
+                Some("pypi.org") | Some("files.pythonhosted.org")
+            )
+    })
+}
+
+/// The registry URL of a uv.lock package `source`, as [`UvPackage::source`]
+/// spells it: `{ registry = "https://pypi.org/simple" }`.
+fn uv_registry_url(source: &str) -> Option<String> {
+    let table: toml::Table = toml::from_str(&format!("source = {source}")).ok()?;
+    table
+        .get("source")?
+        .get("registry")?
+        .as_str()
+        .map(str::to_string)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -116,31 +142,19 @@ pub fn parse_uv_lock(text: &str) -> io::Result<Vec<UvPackage>> {
                         format!("uv.lock {name}.dependencies is not an array"),
                     )
                 })? {
-                    let Some(edge) = parse_uv_dependency(dependency) else {
-                        continue;
-                    };
+                    let edge = parse_uv_dependency(dependency).ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!(
+                                "uv.lock {name}.dependencies has an unreadable entry: {dependency}"
+                            ),
+                        )
+                    })?;
                     dependencies.push(edge.name.clone());
                     dependency_edges.push(edge);
                 }
             }
-            let optional_dependencies = table
-                .get("optional-dependencies")
-                .and_then(toml::Value::as_table)
-                .map(|groups| {
-                    groups
-                        .iter()
-                        .map(|(extra, values)| {
-                            let edges = values
-                                .as_array()
-                                .into_iter()
-                                .flatten()
-                                .filter_map(parse_uv_dependency)
-                                .collect::<Vec<_>>();
-                            (extra.to_ascii_lowercase(), edges)
-                        })
-                        .collect::<BTreeMap<_, _>>()
-                })
-                .unwrap_or_default();
+            let optional_dependencies = uv_optional_dependencies(name, table)?;
             let resolution_markers = table
                 .get("resolution-markers")
                 .and_then(toml::Value::as_array)
@@ -200,33 +214,78 @@ pub fn parse_uv_lock(text: &str) -> io::Result<Vec<UvPackage>> {
         .collect()
 }
 
+/// A package's `optional-dependencies`, by lowercased extra. Every group
+/// must be an array of readable edges: one dropped silently would leave the
+/// environment without a package the lock names.
+fn uv_optional_dependencies(
+    name: &str,
+    table: &toml::Table,
+) -> io::Result<BTreeMap<String, Vec<UvDependency>>> {
+    let invalid = |what: String| io::Error::new(io::ErrorKind::InvalidData, what);
+    let Some(groups) = table.get("optional-dependencies") else {
+        return Ok(BTreeMap::new());
+    };
+    let groups = groups.as_table().ok_or_else(|| {
+        invalid(format!(
+            "uv.lock {name}.optional-dependencies is not a table"
+        ))
+    })?;
+    let mut out = BTreeMap::new();
+    for (extra, values) in groups {
+        let values = values.as_array().ok_or_else(|| {
+            invalid(format!(
+                "uv.lock {name}.optional-dependencies.{extra} is not an array"
+            ))
+        })?;
+        let edges = values
+            .iter()
+            .map(|value| {
+                parse_uv_dependency(value).ok_or_else(|| {
+                    invalid(format!(
+                        "uv.lock {name}.optional-dependencies.{extra} has an unreadable entry: {value}"
+                    ))
+                })
+            })
+            .collect::<io::Result<Vec<_>>>()?;
+        out.insert(extra.to_ascii_lowercase(), edges);
+    }
+    Ok(out)
+}
+
 pub(super) fn parse_uv_dependency(value: &toml::Value) -> Option<UvDependency> {
     if let Some(name) = value.as_str() {
         return parse_uv_requirement(name).ok();
     }
     let table = value.as_table()?;
     let name = table.get("name")?.as_str()?;
-    let extras = table
+    // A field of the wrong type is a malformed edge, not an absent field:
+    // dropping `extra = "socks"` or `marker = 1` would change what the
+    // environment holds.
+    let string = |value: &toml::Value| value.as_str().map(str::to_string);
+    let extras = match table
         // uv's lock serializer calls this field `extra` (singular), even
         // though it contains the set of extras requested on the edge.
         .get("extra")
-        .and_then(toml::Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(toml::Value::as_str)
-        .map(str::to_ascii_lowercase)
-        .collect();
+    {
+        Some(extra) => extra
+            .as_array()?
+            .iter()
+            .map(|extra| extra.as_str().map(str::to_ascii_lowercase))
+            .collect::<Option<_>>()?,
+        None => Default::default(),
+    };
+    let marker = match table.get("marker").or_else(|| table.get("markers")) {
+        Some(marker) => Some(string(marker)?),
+        None => None,
+    };
+    let version = match table.get("version") {
+        Some(version) => Some(string(version)?),
+        None => None,
+    };
     Some(UvDependency {
         name: normalize_name(name),
-        marker: table
-            .get("marker")
-            .or_else(|| table.get("markers"))
-            .and_then(toml::Value::as_str)
-            .map(str::to_string),
-        version: table
-            .get("version")
-            .and_then(toml::Value::as_str)
-            .map(str::to_string),
+        marker,
+        version,
         extras,
     })
 }
@@ -500,8 +559,10 @@ fn record_uv_source_exceptions(package: &UvPackage) -> io::Result<bool> {
     }
     if package.source != "registry"
         && package.source.contains("registry")
-        && !package.source.contains("pypi.org")
-        && !package.source.contains("files.pythonhosted.org")
+        // An empty registry is not the default index here: uv always
+        // writes the URL, so an empty one is some other source.
+        && !uv_registry_url(&package.source)
+            .is_some_and(|url| !url.is_empty() && is_public_pypi_url(&url))
     {
         crate::kernel::policy::record(
             crate::kernel::policy::UNATTESTED_INDEX,
