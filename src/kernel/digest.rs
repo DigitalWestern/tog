@@ -95,7 +95,8 @@ impl Digest {
 pub fn strongest_sri(list: &str) -> Option<&str> {
     list.split_whitespace()
         .filter_map(|entry| Some((algo_named(entry.split_once('-')?.0)?, entry)))
-        .max_by_key(|(algo, _)| *algo)
+        // Preserve the first entry on ties, as Yarn did before sharing this.
+        .reduce(|best, next| if next.0 > best.0 { next } else { best })
         .map(|(_, entry)| entry)
 }
 

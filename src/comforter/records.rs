@@ -39,15 +39,23 @@ pub fn closure_files(project: &ProjectRoot) -> io::Result<Vec<ClosureFile>> {
         return Ok(out);
     };
     for name in names {
-        let name = name.to_string_lossy().into_owned();
-        if closure_stem(&name).is_none() {
+        if closure_stem(&name.to_string_lossy()).is_none() {
             continue;
         }
+        let text = name.to_str().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "invalid UTF-8 closure filename in {}",
+                    project.path().join(dir).display()
+                ),
+            )
+        })?;
         let relative = dir.join(&name);
         let Some(bytes) = project.read_file(&relative)? else {
             continue;
         };
-        out.push(closure_file(&name, project.path().join(&relative), &bytes)?);
+        out.push(closure_file(text, project.path().join(&relative), &bytes)?);
     }
     Ok(out)
 }
