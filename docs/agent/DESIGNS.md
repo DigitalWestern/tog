@@ -3447,8 +3447,11 @@ Node doors, each the flexible option that still fails closed:
 - **The forced git and shell are the host's.** The forced table's
   `@GIT@` and `@SH@` are `/usr/bin/git` and `/bin/sh` on the sandbox's
   read-only system roots: tog provisions no git or shell, and cargo's row
-  already starts the host git through `PATH`. A host without them refuses
-  the door by name. pnpm's forced `--ignore-scripts` became
+  already starts the host git through `PATH`. The shell is required (a
+  host without it refuses by name); a host without git gets
+  `/nonexistent/git` as the forced git, so registry-only projects still
+  resolve and only a git dependency fails, the refusal naming the missing
+  git (review round 1). pnpm's forced `--ignore-scripts` became
   `--config.ignore-scripts=true`: PR 0 measured the flag on `install`, and
   `pnpm remove` rejects it; the `--config.` spelling is the one every
   verb's parser takes, and `npm_config_ignore_scripts=true` stays in the
@@ -3475,13 +3478,18 @@ Node doors, each the flexible option that still fails closed:
   rule: coverage is never smaller than the tool's member set, and an
   extra manifest is only an extra output. A member named outside the
   project, or a members list tog cannot read (an anchored
-  `pnpm-workspace.yaml`), is an error rather than a gap. Inputs are
+  `pnpm-workspace.yaml`), is an error rather than a gap, raised in
+  `Tailor::preflight` and before any door realizes a tool, not when the
+  closure is written (review round 1). Inputs are
   `.npmrc`, `pnpm-workspace.yaml`, `.pnpmfile.cjs`, and each member's
   `.npmrc`. `node_modules` at every depth is excluded from the snapshot
   (npm's lock-only install ignores it, pnpm's modules state is in the
   scratch).
 - **A `file:` or `link:` dependency outside the lock root is refused by
-  name** before any tool runs, with the manifest and the resolved path:
+  name** before any tool runs, with the manifest and the resolved path,
+  wherever it stands: the dependency tables, `peerDependencies`, npm's
+  nested `overrides`, and `pnpm.overrides` (transitive manifests and pnpm
+  catalogs are not read):
   the snapshot holds the lock root alone, and a record names files inside
   the project only. The alternative, a read root under cargo's boundary
   rule, is deferred until that rule moves into the kernel for every
@@ -3497,6 +3505,14 @@ Node doors, each the flexible option that still fails closed:
   `EditHost` an edit borrows from its command, since the pinned pnpm
   lives in the `tog x` cache; the host is `commands::shared::CommandHost`
   for both `add` and `attest`.
+- **The closure's `resolution_basis` is taken at plan time.** As built
+  first, it was read from disk when the closure was written, after
+  realization, so a lock another writer swapped in meanwhile would have
+  become the basis of a closure planned from the old one (the case the
+  join's basis check exists for). `inputs::load_npm_plan_with_basis` now
+  takes the basis from the lock bytes the plan read, with the other
+  resolution files at that moment, as Cargo and Go do, and `tog x` passes
+  the basis of the lock its door just wrote (review round 1).
 - **`tog x` is a detached door.** The cache root is the lock root, the
   accepted `package-lock.json` is written back into it, and the ledger is
   rooted under the cache root (`ledger::root`), so GC keeps it with the
