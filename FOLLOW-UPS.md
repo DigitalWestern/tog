@@ -200,3 +200,5 @@ After the proxy: the test-suite audit (#351) and then the quality review
 - **Shared exception parsing (#507).** Add checked exceptions to object metadata records instead of reading that field separately.
 - **SRI alternatives (#508).** Preserve all strongest hash candidates through Node planning and verification. The consolidation preserves first-entry behavior on ties.
 - **Provider selection checks (#509).** Share recipe, runtime, and digest checks in the remaining CPython, Rust, and Rust-path providers.
+- **#524: tests: gaps found in the review of #459 to #496.** e2e children that keep the caller's environment, the tar call-site scan, a subkey signature case, three node tests under `TOG_STRICT=1`. One checklist.
+- **#525: review follow-ups from #474 to #492.** Small hardening items: one Elixir preflight, old project records, `STOPPED_BY`, links in an object's `bin/`, `meta/` listing and read cap, the silent digest skip. One checklist.

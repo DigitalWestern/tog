@@ -72,6 +72,7 @@ pub fn drop_objects<W: Write>(
     let droppable = eligible(store, &index, &unusable, ids)?;
     refuse_if_still_depended_on(&index, ids, &requested)?;
 
+    let resync = rooting_projects(store, &droppable);
     let mut dropped = 0;
     if dry_run {
         for entry in &droppable {
@@ -82,6 +83,7 @@ pub fn drop_objects<W: Write>(
             )?;
             dropped += 1;
         }
+        write_resync(&resync, true, out)?;
         return Ok(dropped);
     }
     // Records first, objects second, across the whole batch rather than per
@@ -109,7 +111,93 @@ pub fn drop_objects<W: Write>(
         writeln!(out, "tog: dropped object {} ({})", entry.id, entry.reason)?;
         dropped += 1;
     }
+    write_resync(&resync, false, out)?;
     Ok(dropped)
+}
+
+/// Who still counts on what a drop removes. Drop is the recovery tool, so a
+/// rooted object is not refused; the operator learns which projects to
+/// resync instead.
+#[derive(Default)]
+struct Resync {
+    /// (project, dropped object ids it roots), by project.
+    projects: BTreeMap<PathBuf, Vec<String>>,
+    /// Roots whose objects could not be read: (key, why).
+    unknown: Vec<(String, String)>,
+    /// Why the root registry itself could not be read, if it could not.
+    registry: Option<String>,
+}
+
+/// The saved project roots that name an object being dropped. A root that
+/// cannot be read does not block the drop (that is often why the operator
+/// is here), and neither does a registry that cannot be read; each is
+/// reported as unknown.
+fn rooting_projects(store: &Store, droppable: &[Droppable]) -> Resync {
+    let mut resync = Resync::default();
+    let roots = match store.roots_for_sweep() {
+        Ok((roots, _)) => roots,
+        Err(error) => {
+            resync.registry = Some(error.to_string());
+            return resync;
+        }
+    };
+    for root in &roots {
+        let mut state = RootState::default();
+        let why = match collect_root(store, root, &mut state) {
+            Ok(()) => {
+                let ids: Vec<String> = droppable
+                    .iter()
+                    .filter(|entry| state.object_ids.contains(&entry.id))
+                    .map(|entry| entry.id.clone())
+                    .collect();
+                if !ids.is_empty() {
+                    let project = root
+                        .record
+                        .as_ref()
+                        .map_or_else(|| root.path.clone(), |record| record.project_path.clone());
+                    resync.projects.entry(project).or_default().extend(ids);
+                }
+                continue;
+            }
+            Err(RootUnreadable::Record(reason)) => format!("its record is unusable: {reason}"),
+            Err(RootUnreadable::Project(error)) => {
+                format!(
+                    "project {} cannot be resolved: {error}",
+                    root.path.display()
+                )
+            }
+            Err(RootUnreadable::Io(error)) => error.to_string(),
+        };
+        resync.unknown.push((root.key.clone(), why));
+    }
+    resync
+}
+
+fn write_resync<W: Write>(resync: &Resync, dry_run: bool, out: &mut W) -> io::Result<()> {
+    let verb = if dry_run { "would lose" } else { "lost" };
+    for (project, ids) in &resync.projects {
+        writeln!(
+            out,
+            "tog: project {} {verb} {}; run `tog sync` there to rebuild",
+            project.display(),
+            ids.join(", ")
+        )?;
+    }
+    for (key, why) in &resync.unknown {
+        writeln!(
+            out,
+            "tog: could not tell whether root {key} needs a dropped object ({why}); if its \
+             project used one, run `tog sync` there"
+        )?;
+    }
+    if let Some(why) = &resync.registry {
+        writeln!(
+            out,
+            "tog: could not tell which projects need a dropped object, because the root \
+             registry could not be read ({why}); run `tog sync` in any project that used one"
+        )?;
+    }
+    Ok(())
 }
 
 /// Classify every requested id, or refuse.
@@ -235,32 +323,11 @@ fn refuse_if_still_depended_on(
     ids: &[String],
     requested: &BTreeSet<String>,
 ) -> io::Result<()> {
-    let mut dependents_of: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
-    for (id, record) in index.iter() {
-        for dependency in &record.dependencies {
-            dependents_of
-                .entry(dependency.as_str())
-                .or_default()
-                .insert(id.as_str());
-        }
-    }
-    let transitive_dependents = |seed: &str| -> BTreeSet<String> {
-        let mut seen: BTreeSet<String> = BTreeSet::new();
-        let mut queue: VecDeque<String> = VecDeque::from([seed.to_string()]);
-        while let Some(id) = queue.pop_front() {
-            for dependent in dependents_of.get(id.as_str()).into_iter().flatten() {
-                if seen.insert((*dependent).to_string()) {
-                    queue.push_back((*dependent).to_string());
-                }
-            }
-        }
-        seen
-    };
-
+    let dependents_of = dependents_of(index);
     let mut whole_set: BTreeSet<String> = requested.clone();
     let mut refusal: Option<(String, usize)> = None;
     for id in ids {
-        let dependents = transitive_dependents(id);
+        let dependents = transitive_dependents(&dependents_of, id);
         let outside = dependents
             .iter()
             .filter(|dependent| !requested.contains(*dependent))
@@ -281,6 +348,39 @@ fn refuse_if_still_depended_on(
             whole_set.into_iter().collect::<Vec<_>>().join(" ")
         ),
     ))
+}
+
+/// Which readable records list each id as a dependency.
+pub(super) fn dependents_of(
+    index: &crate::kernel::objmeta::MetaIndex,
+) -> BTreeMap<&str, BTreeSet<&str>> {
+    let mut dependents_of: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+    for (id, record) in index.iter() {
+        for dependency in &record.dependencies {
+            dependents_of
+                .entry(dependency.as_str())
+                .or_default()
+                .insert(id.as_str());
+        }
+    }
+    dependents_of
+}
+
+/// Every id that depends on `seed`, directly or through another.
+pub(super) fn transitive_dependents(
+    dependents_of: &BTreeMap<&str, BTreeSet<&str>>,
+    seed: &str,
+) -> BTreeSet<String> {
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    let mut queue: VecDeque<String> = VecDeque::from([seed.to_string()]);
+    while let Some(id) = queue.pop_front() {
+        for dependent in dependents_of.get(id.as_str()).into_iter().flatten() {
+            if seen.insert((*dependent).to_string()) {
+                queue.push_back((*dependent).to_string());
+            }
+        }
+    }
+    seen
 }
 
 /// The record half of a drop. `eligible` has already proved the path is a
@@ -341,6 +441,85 @@ mod drop_tests {
         fs::create_dir_all(store.object_path(&id)).unwrap();
         fs::write(store.object_path(&id).join("payload"), name).unwrap();
         id
+    }
+
+    /// A rooted object is still dropped, and the drop names the project
+    /// that roots it; an unrooted one names none. A dry run says the same
+    /// in the conditional.
+    #[test]
+    fn a_rooted_object_is_dropped_and_its_project_named_for_a_resync() {
+        let temp = TempStore::new("drop-rooted");
+        let store = temp.store();
+        let rooted = bare(&store, "rooted");
+        let loose = bare(&store, "loose");
+        register_objects(&store, &temp.root.join("app"), &[rooted.as_str()]);
+        let project = temp.root.join("app").canonicalize().unwrap();
+        let resync = format!(
+            "tog: project {} {{}} {rooted}; run `tog sync` there to rebuild\n",
+            project.display()
+        );
+        let ids = [rooted.clone(), loose.clone()];
+        let (count, text) = exclusive(&store, &ids, true);
+        assert_eq!(count.unwrap(), 2, "{text}");
+        assert!(
+            text.ends_with(&resync.replace("{}", "would lose")),
+            "{text}"
+        );
+        assert!(store.object_path(&rooted).exists());
+        let (count, text) = exclusive(&store, &ids, false);
+        assert_eq!(count.unwrap(), 2, "{text}");
+        assert!(text.ends_with(&resync.replace("{}", "lost")), "{text}");
+        assert!(!text.contains(&format!("lost {loose}")), "{text}");
+        assert!(!store.object_path(&rooted).exists());
+    }
+
+    /// Neither a root nor a registry that cannot be read blocks a drop.
+    /// Each is named with its cause, not with the sweep's refusal, since the
+    /// drop went through.
+    #[test]
+    fn an_unreadable_root_or_registry_does_not_block_a_drop() {
+        let temp = TempStore::new("drop-unreadable-roots");
+        let store = temp.store();
+        let gone = temp.root.join("gone");
+        fs::create_dir_all(&gone).unwrap();
+        let pathname = store.register_root(&gone).unwrap().key;
+        fs::remove_dir_all(&gone).unwrap();
+        let unusable = register_objects(&store, &temp.root.join("app"), &[]);
+        fs::write(store.root.join("roots").join(&unusable), b"garbage").unwrap();
+        let id = bare(&store, "bare");
+        let (count, text) = exclusive(&store, std::slice::from_ref(&id), false);
+        assert_eq!(count.unwrap(), 1, "{text}");
+        let could_not_tell =
+            |key: &str| format!("tog: could not tell whether root {key} needs a dropped object (");
+        assert!(
+            text.contains(&format!("{}project ", could_not_tell(&pathname)))
+                && text.contains(" cannot be resolved: "),
+            "{text}"
+        );
+        assert!(
+            text.contains(&format!(
+                "{}its record is unusable: ",
+                could_not_tell(&unusable)
+            )),
+            "{text}"
+        );
+        assert!(
+            !text.contains("refusing to sweep") && !text.contains("Dry runs"),
+            "{text}"
+        );
+
+        fs::write(store.root.join("roots").join("notes.txt"), b"x").unwrap();
+        let id = bare(&store, "after");
+        let line = "tog: could not tell which projects need a dropped object, because the \
+                    root registry could not be read (unexpected root registry entry \
+                    notes.txt; remove it manually before sweeping); run `tog sync` in any \
+                    project that used one\n";
+        for dry_run in [true, false] {
+            let (count, text) = exclusive(&store, std::slice::from_ref(&id), dry_run);
+            assert_eq!(count.unwrap(), 1, "{text}");
+            assert!(text.ends_with(line), "{text}");
+        }
+        assert!(!store.object_path(&id).exists());
     }
 
     fn refusal(result: io::Result<usize>) -> (io::ErrorKind, String) {

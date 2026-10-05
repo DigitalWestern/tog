@@ -14,7 +14,7 @@ use sha2::{Digest, Sha256};
 
 mod common;
 
-use common::{command, fresh_store, text, tog, tog_at, tog_env, tog_offline, TempDir};
+use common::{command, command_for, fresh_store, text, tog, tog_at, tog_env, tog_offline, TempDir};
 
 /// The signing key under `home`, generated on first use and trusted by
 /// `home`'s machine policy (`~/.tog/policy.toml`, created with an empty
@@ -1697,6 +1697,73 @@ fn an_unreadable_record_stops_the_sweep_and_is_cleared_by_drop_object() {
 
     let out = tog(&home.0, &home.0, &["gc", "--dry-run"]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+}
+
+/// Issue #387. A record replaced by a directory stops the sweep with two
+/// shell commands to run. Run exactly what was printed, through `sh -c`
+/// with `tog` on PATH, and the next sweep succeeds.
+#[test]
+fn the_printed_record_removal_and_drop_clear_the_sweep_when_run() {
+    let home = TempDir::boundary("cli-advised-drop");
+    let store_root = home.0.join("store");
+    fresh_store(&store_root);
+    let canonical_store = store_root.canonicalize().unwrap();
+    let project = home.0.join("project");
+    std::fs::create_dir_all(project.join(".tog/closures")).unwrap();
+    let env_object = publish_certified_object(&canonical_store, "advised-drop-env");
+    std::fs::write(
+        project.join(".tog/closures/python.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema": "closure/1",
+            "ecosystem": "python",
+            "body": {"env_object": env_object.display().to_string()},
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let out = tog(
+        &home.0,
+        &home.0,
+        &["gc", "--register", project.to_str().unwrap()],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+
+    let object = publish_certified_object(&canonical_store, "advised-drop");
+    let id = object.file_name().unwrap().to_str().unwrap().to_string();
+    let record = canonical_store.join("meta").join(format!("{id}.json"));
+    std::fs::remove_file(&record).unwrap();
+    std::fs::create_dir(&record).unwrap();
+
+    let out = tog(&home.0, &home.0, &["gc"]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    let stderr = text(&out.stderr);
+    // "remove it with `<rm line>`, then drop ... with `<drop line>`"
+    let spans: Vec<&str> = stderr
+        .split_once("remove it with `")
+        .unwrap_or_else(|| panic!("no removal advice: {stderr}"))
+        .1
+        .split('`')
+        .collect();
+    let (remove, drop) = (spans[0], spans[2]);
+    assert_eq!(drop, format!("tog gc --drop-object {id}"), "{stderr}");
+
+    let bin = Path::new(env!("CARGO_BIN_EXE_tog")).parent().unwrap();
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let out = command_for(Path::new("sh"), &home.0, &home.0, &store_root)
+        .env("PATH", path)
+        .args(["-c", &format!("{remove} && {drop}")])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(!record.exists() && !object.exists());
+
+    let out = tog(&home.0, &home.0, &["gc"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(env_object.is_dir());
 }
 
 /// A store as a tog from before the format marker left it: namespaces, an
