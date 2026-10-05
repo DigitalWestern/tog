@@ -403,20 +403,36 @@ fn read_objects(
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "object id is not UTF-8"))?
             .to_string();
         let stat = store::stat_at(objects.file.as_raw_fd(), name.as_bytes())?;
-        if !store::is_object_id(&id) || (stat.st_mode & libc::S_IFMT) != libc::S_IFDIR {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("refusing to sweep: invalid object entry {:?}", entry.path()),
-            ));
-        }
         let meta_name = format!("{id}.json");
+        let record_gone = || {
+            store::stat_at(meta_dir.file.as_raw_fd(), meta_name.as_bytes())
+                .is_err_and(|error| error.kind() == io::ErrorKind::NotFound)
+        };
+        // Drop takes an object whose record is gone, whatever its shape, so
+        // that is the fix to name; the next sync that needs it rebuilds it.
+        let drop_fix = |id: &str| format!("drop it with `tog gc --drop-object {id}`");
+        if !store::is_object_id(&id) || (stat.st_mode & libc::S_IFMT) != libc::S_IFDIR {
+            let mut message = format!("refusing to sweep: invalid object entry {:?}", entry.path());
+            if store::is_object_id(&id) && record_gone() {
+                message.push_str(&format!("; it has no record, so {}", drop_fix(&id)));
+            }
+            return Err(io::Error::new(io::ErrorKind::InvalidData, message));
+        }
         let meta_stat =
             store::stat_at(meta_dir.file.as_raw_fd(), meta_name.as_bytes()).map_err(|error| {
+                let fix = if error.kind() == io::ErrorKind::NotFound {
+                    format!(
+                        "{} (the next sync that needs it rebuilds it), or restore \
+                         meta/{id}.json from a backup",
+                        drop_fix(&id)
+                    )
+                } else {
+                    format!("rebuild it or restore meta/{id}.json")
+                };
                 io::Error::new(
                     error.kind(),
                     format!(
-                        "refusing to sweep: object {id} has no readable metadata: {error}; \
-                         rebuild it or restore meta/{id}.json"
+                        "refusing to sweep: object {id} has no readable metadata: {error}; {fix}"
                     ),
                 )
             })?;

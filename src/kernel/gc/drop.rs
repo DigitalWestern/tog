@@ -72,6 +72,7 @@ pub fn drop_objects<W: Write>(
     let droppable = eligible(store, &index, &unusable, ids)?;
     refuse_if_still_depended_on(&index, ids, &requested)?;
 
+    let resync = rooting_projects(store, &droppable)?;
     let mut dropped = 0;
     if dry_run {
         for entry in &droppable {
@@ -82,6 +83,7 @@ pub fn drop_objects<W: Write>(
             )?;
             dropped += 1;
         }
+        write_resync(&resync, true, out)?;
         return Ok(dropped);
     }
     // Records first, objects second, across the whole batch rather than per
@@ -109,7 +111,67 @@ pub fn drop_objects<W: Write>(
         writeln!(out, "tog: dropped object {} ({})", entry.id, entry.reason)?;
         dropped += 1;
     }
+    write_resync(&resync, false, out)?;
     Ok(dropped)
+}
+
+/// Who still counts on what a drop removes. Drop is the recovery tool, so a
+/// rooted object is not refused; the operator learns which projects to
+/// resync instead.
+#[derive(Default)]
+struct Resync {
+    /// (project, dropped object ids it roots), by project.
+    projects: BTreeMap<PathBuf, Vec<String>>,
+    /// Roots whose objects could not be read: (key, why).
+    unknown: Vec<(String, String)>,
+}
+
+/// The saved project roots that name an object being dropped. A root that
+/// cannot be read does not block the drop (that is often why the operator
+/// is here); it is reported as unknown.
+fn rooting_projects(store: &Store, droppable: &[Droppable]) -> io::Result<Resync> {
+    let (roots, _) = store.roots_for_sweep()?;
+    let mut resync = Resync::default();
+    for root in &roots {
+        match collect_roots(store, std::slice::from_ref(root), &Options::default()) {
+            Ok(state) => {
+                let ids: Vec<String> = droppable
+                    .iter()
+                    .filter(|entry| state.object_ids.contains(&entry.id))
+                    .map(|entry| entry.id.clone())
+                    .collect();
+                if !ids.is_empty() {
+                    let project = root
+                        .record
+                        .as_ref()
+                        .map_or_else(|| root.path.clone(), |record| record.project_path.clone());
+                    resync.projects.entry(project).or_default().extend(ids);
+                }
+            }
+            Err(error) => resync.unknown.push((root.key.clone(), error.to_string())),
+        }
+    }
+    Ok(resync)
+}
+
+fn write_resync<W: Write>(resync: &Resync, dry_run: bool, out: &mut W) -> io::Result<()> {
+    let verb = if dry_run { "would lose" } else { "lost" };
+    for (project, ids) in &resync.projects {
+        writeln!(
+            out,
+            "tog: project {} {verb} {}; run `tog sync` there to rebuild",
+            project.display(),
+            ids.join(", ")
+        )?;
+    }
+    for (key, why) in &resync.unknown {
+        writeln!(
+            out,
+            "tog: could not tell whether root {key} needs a dropped object ({why}); if its \
+             project used one, run `tog sync` there"
+        )?;
+    }
+    Ok(())
 }
 
 /// Classify every requested id, or refuse.
@@ -341,6 +403,36 @@ mod drop_tests {
         fs::create_dir_all(store.object_path(&id)).unwrap();
         fs::write(store.object_path(&id).join("payload"), name).unwrap();
         id
+    }
+
+    /// A rooted object is still dropped, and the drop names the project
+    /// that roots it; an unrooted one names none. A dry run says the same
+    /// in the conditional.
+    #[test]
+    fn a_rooted_object_is_dropped_and_its_project_named_for_a_resync() {
+        let temp = TempStore::new("drop-rooted");
+        let store = temp.store();
+        let rooted = bare(&store, "rooted");
+        let loose = bare(&store, "loose");
+        register_objects(&store, &temp.root.join("app"), &[rooted.as_str()]);
+        let project = temp.root.join("app").canonicalize().unwrap();
+        let resync = format!(
+            "tog: project {} {{}} {rooted}; run `tog sync` there to rebuild\n",
+            project.display()
+        );
+        let ids = [rooted.clone(), loose.clone()];
+        let (count, text) = exclusive(&store, &ids, true);
+        assert_eq!(count.unwrap(), 2, "{text}");
+        assert!(
+            text.ends_with(&resync.replace("{}", "would lose")),
+            "{text}"
+        );
+        assert!(store.object_path(&rooted).exists());
+        let (count, text) = exclusive(&store, &ids, false);
+        assert_eq!(count.unwrap(), 2, "{text}");
+        assert!(text.ends_with(&resync.replace("{}", "lost")), "{text}");
+        assert!(!text.contains(&format!("lost {loose}")), "{text}");
+        assert!(!store.object_path(&rooted).exists());
     }
 
     fn refusal(result: io::Result<usize>) -> (io::ErrorKind, String) {
