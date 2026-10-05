@@ -252,6 +252,24 @@ direct run. Cargo's resolution outputs are the root `Cargo.toml` and
 `Cargo.lock` plus every member manifest `[workspace] members` names; its
 inputs are `.cargo/config.toml` and `.cargo/config` at the root.
 
+Every Node run that resolves (`tog add`/`remove`/`update` with npm or the
+pinned pnpm, a missing `package-lock.json`, `tog x`'s npm resolution, and
+`tog attest`) goes through the same door, confined, at the lock root (the
+project, or the pnpm workspace root), with the tool run in the member the
+edit was made in (`tailors/node/door.rs`). Both tools are pointed at the
+session on the command line, where their flags beat `.npmrc`; the proxy
+serves `registry.npmjs.org` through the `npm` route (`tailors/node/
+registry.rs`: each packument's `integrity` is a claim its tarball is
+verified against, a sha1-only `shasum` is `weak-integrity`), git
+dependencies through the git row, and a scoped registry or a direct-URL
+tarball as `unattested-index`. The lock records the registry's own URLs,
+so it is byte-identical to a direct run. Node's resolution outputs are
+`package.json`, the locks, and every workspace member's `package.json`
+from every place a member can be named; its inputs are `.npmrc`,
+`pnpm-workspace.yaml`, `.pnpmfile.cjs`, and each member's `.npmrc`
+(`tailors/node/resolve.rs`). The pinned pnpm runs as `node <script>` from
+the store environment object its `tog x` cache root links into.
+
 `targets`, `components` and `profile` in `rust-toolchain(.toml)` are lock
 rows (`toolchain.targets`, `toolchain.components`, `toolchain.profile`):
 lists sorted and deduplicated, each written only when present, so a lock
@@ -1046,6 +1064,11 @@ when the two differ.
     node/realize.rs        env realization and sandboxed install scripts
     node/project.rs        node_modules projection and workspace links
     node/inputs.rs         missing-lock generation, lockfile importers
+    node/door.rs           npm and the pinned pnpm confined through the
+                           resolution door (interception, the npm route)
+    node/registry.rs       the npm registry as a resolution-proxy route
+    node/resolve.rs        resolution outputs and inputs, the missing-lock
+                           door, `tog attest` for npm and pnpm
     node/registry_tool.rs  `tog x` from npm: npm resolve, env realize, node_modules
     node/run_refusal.rs    `tog run` refusals: npm-family installs over node_modules
     node/lock_import/      pnpm.rs and yarn1.rs importers over yaml.rs;

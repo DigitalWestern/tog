@@ -14,26 +14,27 @@ by position.
 
 ## Next up, in order
 
-The resolution proxy (#68), then the cleanup. Today Go and Cargo resolve
-confined through the proxy (PRs 1 to 5: #198, #199, #200, #202, #203).
-Every other ecosystem's `add`, `remove`, `update`, and missing-lock
-generation runs through the door's unsandboxed `Legacy` mode with network,
-the largest gap in what tog promises. Design: `docs/agent/DESIGNS.md` §6
-(#196), evidence in #209. One pull request each, in this order:
+The resolution proxy (#68), then the cleanup. Today Go, Cargo, and Node
+resolve confined through the proxy (PRs 1 to 6: #198, #199, #200, #202,
+#203, #204). Every other ecosystem's `add`, `remove`, `update`, and
+missing-lock generation runs through the door's unsandboxed `Legacy` mode
+with network, the largest gap in what tog promises. Design:
+`docs/agent/DESIGNS.md` §6 (#196), evidence in #209. One pull request
+each, in this order:
 
-1. **#204 (PR 6): Node.** npm and pnpm. npm already skips its audit,
-   fund and update-notifier requests (#212).
-2. **#205 (PR 7): Python.** uv. Every uv call already passes
+1. **#205 (PR 7): Python.** uv. Every uv call already passes
    `--python <store python>` (#210); the forced row's own `--python` then
-   replaces it.
-3. **#206 (PR 8): Ruby and Elixir.** Bundler and Hex mirrors. Edits
+   replaces it. PR 6 left it `ConfinedSpec::cwd` (a workspace member
+   below the lock root), `door::Publish`, and `door::proxy_env` (the
+   proxy variables and `SSL_CERT_FILE` of an intercepting session).
+2. **#206 (PR 8): Ruby and Elixir.** Bundler and Hex mirrors. Edits
    already resolve without installing (#211).
-4. **#207 (PR 9): .NET.** The `nuget.config` mirror.
-5. **#201 (PR 3b): the container backend and `tog-isolate`.** Moved after
+3. **#207 (PR 9): .NET.** The `nuget.config` mirror.
+4. **#201 (PR 3b): the container backend and `tog-isolate`.** Moved after
    the doors: Go shipped confined without it, so no door waits on it. It
    must land before #208, because removing `Legacy` leaves a host without
    the native sandbox with no way to resolve.
-6. **#208 (PR 10): remove `Legacy`.**
+5. **#208 (PR 10): remove `Legacy`.**
 
 The macOS door (Seatbelt rules, the Mach allow-list from one run of
 `tools/proxy_spike/macos_mach.sh` on a Mac, tree freeze) is not one of
