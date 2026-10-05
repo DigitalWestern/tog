@@ -39,6 +39,13 @@ use std::path::{Path, PathBuf};
 
 const DIRECTORY_FLAGS: libc::c_int =
     libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+/// An ancestor on the walk to a project: held for lookups below it, never
+/// listed, so search permission is enough on Linux (`O_PATH`).
+#[cfg(target_os = "linux")]
+const ANCESTOR_FLAGS: libc::c_int =
+    libc::O_PATH | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+#[cfg(not(target_os = "linux"))]
+const ANCESTOR_FLAGS: libc::c_int = DIRECTORY_FLAGS;
 const TEMP_ATTEMPTS: usize = 8;
 
 /// What a project-relative name resolves to, without following symlinks.
@@ -1262,34 +1269,73 @@ fn input_name(relative: &Path) -> io::Result<Vec<u8>> {
 /// Open an absolute path from `/` one component at a time with O_NOFOLLOW,
 /// taking the components as given: nothing is canonicalized, so a symlink
 /// at any component is refused rather than resolved.
+///
+/// Only the last component is opened for reading. On Linux every ancestor
+/// is held as an `O_PATH` descriptor, which needs search permission alone,
+/// as the kernel's own lookup of the path would: a project under a
+/// search-only (0111) directory opens. Each ancestor is still opened with
+/// O_NOFOLLOW and O_DIRECTORY and checked to be a directory on its
+/// descriptor. Elsewhere every component is opened for reading.
 fn walk_from_root(path: &Path) -> io::Result<fs::File> {
+    let components = path
+        .components()
+        .map(|component| match component {
+            std::path::Component::RootDir => Ok(None),
+            std::path::Component::Normal(name) => Ok(Some(name)),
+            _ => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{} is not a canonical absolute path", path.display()),
+            )),
+        })
+        .collect::<io::Result<Vec<_>>>()?;
+    let names: Vec<&std::ffi::OsStr> = components.into_iter().flatten().collect();
+    if !path.is_absolute() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{} is not a canonical absolute path", path.display()),
+        ));
+    }
     let root = CString::new("/").expect("no NUL");
+    let root_flags = if names.is_empty() {
+        DIRECTORY_FLAGS
+    } else {
+        ANCESTOR_FLAGS
+    };
     // SAFETY: the path is a valid NUL-terminated string and the returned
     // descriptor is owned by the File below.
-    let fd = unsafe { libc::open(root.as_ptr(), DIRECTORY_FLAGS) };
+    let fd = unsafe { libc::open(root.as_ptr(), root_flags) };
     if fd < 0 {
         return Err(io::Error::last_os_error());
     }
     // SAFETY: fd was returned by open and ownership moves into File.
     let mut dir = unsafe { fs::File::from_raw_fd(fd) };
     let mut current = PathBuf::from("/");
-    for component in path.components() {
-        match component {
-            std::path::Component::RootDir => {}
-            std::path::Component::Normal(name) => {
-                current.push(name);
-                dir =
-                    open_directory_at(dir.as_raw_fd(), name.as_bytes(), &current, "open project")?;
-            }
-            _ => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!("{} is not a canonical absolute path", path.display()),
-                ))
-            }
+    for (index, name) in names.iter().enumerate() {
+        current.push(name);
+        let flags = if index + 1 == names.len() {
+            DIRECTORY_FLAGS
+        } else {
+            ANCESTOR_FLAGS
+        };
+        dir = open_directory_with(
+            dir.as_raw_fd(),
+            name.as_bytes(),
+            &current,
+            "open project",
+            flags,
+        )?;
+        if !is_directory_stat(&fd_stat(dir.as_raw_fd())?) {
+            return Err(refusal(format!(
+                "{} is not a real directory; refusing to open project through it",
+                current.display()
+            )));
         }
     }
     Ok(dir)
+}
+
+fn is_directory_stat(stat: &libc::stat) -> bool {
+    stat.st_mode & libc::S_IFMT == libc::S_IFDIR
 }
 
 /// Rename `old` over `new` in one held directory only if `new` does not
@@ -1385,7 +1431,17 @@ fn open_directory_at(
     display: &Path,
     verb: &str,
 ) -> io::Result<fs::File> {
-    open_file_at(parent_fd, name, DIRECTORY_FLAGS, 0).map_err(|error| match error.raw_os_error() {
+    open_directory_with(parent_fd, name, display, verb, DIRECTORY_FLAGS)
+}
+
+fn open_directory_with(
+    parent_fd: RawFd,
+    name: &[u8],
+    display: &Path,
+    verb: &str,
+    flags: libc::c_int,
+) -> io::Result<fs::File> {
+    open_file_at(parent_fd, name, flags, 0).map_err(|error| match error.raw_os_error() {
         Some(libc::ELOOP) | Some(libc::ENOTDIR) => refusal(format!(
             "{} is not a real directory; refusing to {verb} through it",
             display.display()
@@ -1735,6 +1791,42 @@ mod tests {
             error.to_string().contains("not a real directory"),
             "{error}"
         );
+    }
+
+    /// A project under a search-only (0111) directory is reachable by its
+    /// name, as the kernel's own lookup reaches it: it opens, and its
+    /// recorded path still names it at publication.
+    #[test]
+    fn a_project_under_a_search_only_ancestor_opens() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let temp = TempDir::new();
+        let parent = temp.0.join("search-only");
+        let dir = parent.join("proj");
+        fs::create_dir_all(&dir).unwrap();
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o111)).unwrap();
+        let opened = ProjectRoot::open(&dir).and_then(|root| {
+            root.write_file(Path::new(".tog/plan.json"), b"x")?;
+            root.check_still_named()?;
+            root.read_file(Path::new(".tog/plan.json"))
+        });
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(opened.unwrap().as_deref(), Some(&b"x"[..]));
+    }
+
+    /// The walk from `/` holds ancestors without reading them, but never
+    /// through a symlink: a recorded path whose ancestor became one fails.
+    #[test]
+    fn the_walk_refuses_an_ancestor_that_is_a_symlink() {
+        let temp = TempDir::new();
+        let real = temp.0.join("real");
+        fs::create_dir_all(real.join("proj")).unwrap();
+        symlink(&real, temp.0.join("link")).unwrap();
+        let error = walk_from_root(&temp.0.join("link/proj")).unwrap_err();
+        assert!(
+            error.to_string().contains("not a real directory"),
+            "{error}"
+        );
+        walk_from_root(&real.join("proj")).unwrap();
     }
 
     #[test]
