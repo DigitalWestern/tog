@@ -453,10 +453,42 @@ pub(crate) fn replace_project_symlink(
 }
 
 /// Read a tailor's closure body back (for `tog run` and friends).
-/// The request record a `tog x` cache root carries (`commands::x` writes
-/// it before realizing): what marks a closure's directory as a cache
-/// root, which the resolution join leaves alone.
-pub const X_REQUEST_FILE: &str = ".tog/x.json";
+/// The `tog x` cache roots this process realizes into, by canonical path:
+/// what the resolution join leaves alone. `commands::x` marks a root right
+/// before it realizes a tool there, so the fact comes from the command,
+/// never from a file a project could commit.
+static CACHE_ROOTS: std::sync::Mutex<std::collections::BTreeSet<PathBuf>> =
+    std::sync::Mutex::new(std::collections::BTreeSet::new());
+
+/// Mark `root` as a `tog x` cache root of this process. It must exist; the
+/// set holds its canonical path, which [`is_cache_root`] compares exactly.
+pub fn mark_cache_root(root: &Path) -> io::Result<()> {
+    let canonical = fs::canonicalize(root)?;
+    CACHE_ROOTS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(canonical);
+    Ok(())
+}
+
+/// Whether `path` (canonical, as `ProjectRoot::path` is) is a cache root
+/// this process marked.
+pub fn is_cache_root(path: &Path) -> bool {
+    CACHE_ROOTS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .contains(path)
+}
+
+/// Forget every marked cache root. Tests hold `attribution_test_lock`
+/// across a mark and the writes it covers.
+#[cfg(test)]
+pub(crate) fn clear_cache_roots_for_test() {
+    CACHE_ROOTS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clear();
+}
 
 pub fn read_closure(project_dir: &Path, ecosystem: &str) -> io::Result<serde_json::Value> {
     let path = project_dir.join(closure_relative(ecosystem));
