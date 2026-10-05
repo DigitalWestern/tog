@@ -150,35 +150,53 @@ fn strip_setup_cfg_comment(line: &str) -> &str {
 ///
 /// Comments and the insides of other strings are skipped, so a
 /// commented-out line or example code in a docstring is not an assignment,
-/// and neither is a longer name (`extra_python_requires`). A value that is
-/// computed (two strings joined, a format, an escape) is not seen at all:
-/// half of it would be the wrong constraint.
+/// and neither is a longer name (`extra_python_requires`) or an attribute
+/// (`args.python_requires`). A value that is computed (two strings joined,
+/// a format, a comparison, an escape) is not seen at all: half of it would
+/// be the wrong constraint. The value is whole when the argument ends
+/// after it (`,` or `)` inside brackets) or the statement does (outside).
 pub fn extract_setup_py_python_requires(text: &str) -> Option<String> {
     let bytes = text.as_bytes();
     let mut pos = 0;
+    // How many brackets are open: inside them a line end is only spacing.
+    let mut depth = 0usize;
+    // The last byte that was not spacing or a comment, for `x . name`.
+    let mut before = None;
     while let Some(&byte) = bytes.get(pos) {
         if byte == b'#' {
             pos = line_end(bytes, pos);
         } else if byte == b'\'' || byte == b'"' {
             // A string that never closes: not Python a value can be read from.
-            pos = string_span(bytes, pos)?.2;
+            pos = string_end(bytes, pos, is_fstring(bytes, pos))?;
+            before = Some(byte);
         } else if is_name_byte(byte) {
             let start = pos;
             while bytes.get(pos).copied().is_some_and(is_name_byte) {
                 pos += 1;
             }
-            let attribute = start > 0 && bytes[start - 1] == b'.';
+            let attribute = before == Some(b'.');
+            before = Some(byte);
             if &text[start..pos] != "python_requires" || attribute {
                 continue;
             }
-            let equals = skip_blank(bytes, pos);
+            let grouped = depth > 0;
+            let equals = skip_spacing(bytes, pos, grouped);
             if bytes.get(equals) != Some(&b'=') || bytes.get(equals + 1) == Some(&b'=') {
                 continue;
             }
-            if let Some(value) = whole_literal(text, skip_blank(bytes, equals + 1)) {
+            let value = skip_spacing(bytes, equals + 1, grouped);
+            if let Some(value) = whole_literal(text, value, grouped) {
                 return Some(value);
             }
         } else {
+            match byte {
+                b'(' | b'[' | b'{' => depth += 1,
+                b')' | b']' | b'}' => depth = depth.saturating_sub(1),
+                _ => {}
+            }
+            if !byte.is_ascii_whitespace() {
+                before = Some(byte);
+            }
             pos += 1;
         }
     }
@@ -189,11 +207,17 @@ fn is_name_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || byte == b'_' || !byte.is_ascii()
 }
 
-fn skip_blank(bytes: &[u8], mut pos: usize) -> usize {
-    while matches!(bytes.get(pos), Some(b' ' | b'\t')) {
-        pos += 1;
+/// Past spaces and tabs. When `lines` (inside brackets), past line ends
+/// and comments too.
+fn skip_spacing(bytes: &[u8], mut pos: usize, lines: bool) -> usize {
+    loop {
+        match bytes.get(pos) {
+            Some(b' ' | b'\t') => pos += 1,
+            Some(b'\n' | b'\r') if lines => pos += 1,
+            Some(b'#') if lines => pos = line_end(bytes, pos),
+            _ => return pos,
+        }
     }
-    pos
 }
 
 /// The index of the newline ending the line `pos` is on, or the end.
@@ -204,10 +228,25 @@ fn line_end(bytes: &[u8], pos: usize) -> usize {
         .map_or(bytes.len(), |offset| pos + offset)
 }
 
+/// Whether the string whose opening quote is at `pos` has an f-string
+/// prefix (`f"`, `rf"`, `Fr"`).
+fn is_fstring(bytes: &[u8], pos: usize) -> bool {
+    let start = bytes[..pos]
+        .iter()
+        .rposition(|byte| !is_name_byte(*byte))
+        .map_or(0, |index| index + 1);
+    let prefix = &bytes[start..pos];
+    prefix.len() <= 2
+        && prefix.iter().any(|byte| matches!(byte, b'f' | b'F'))
+        && prefix
+            .iter()
+            .all(|byte| matches!(byte, b'f' | b'F' | b'r' | b'R'))
+}
+
 /// The string literal whose opening quote is at `pos`: where its content
 /// starts and ends, and the index after its closing quote. `None` when it
 /// is never closed.
-fn string_span(bytes: &[u8], pos: usize) -> Option<(usize, usize, usize)> {
+fn string_span(bytes: &[u8], pos: usize, fstring: bool) -> Option<(usize, usize, usize)> {
     let quote = bytes[pos];
     let triple = bytes.get(pos + 1) == Some(&quote) && bytes.get(pos + 2) == Some(&quote);
     let width = if triple { 3 } else { 1 };
@@ -220,6 +259,10 @@ fn string_span(bytes: &[u8], pos: usize) -> Option<(usize, usize, usize)> {
             return None;
         } else if byte == quote && (!triple || bytes[at..].starts_with(&[quote; 3])) {
             return Some((start, at, at + width));
+        } else if fstring && byte == b'{' && bytes.get(at + 1) != Some(&b'{') {
+            at = replacement_field_end(bytes, at + 1)?;
+        } else if fstring && byte == b'{' {
+            at += 2;
         } else {
             at += 1;
         }
@@ -227,54 +270,59 @@ fn string_span(bytes: &[u8], pos: usize) -> Option<(usize, usize, usize)> {
     None
 }
 
+fn string_end(bytes: &[u8], pos: usize, fstring: bool) -> Option<usize> {
+    string_span(bytes, pos, fstring).map(|(_, _, after)| after)
+}
+
+/// The index after the `}` closing an f-string replacement field that
+/// opened just before `pos`. The field holds an expression, which may
+/// itself contain strings, with the same quote as the f-string since
+/// Python 3.12: those are skipped whole, so their quotes close nothing.
+fn replacement_field_end(bytes: &[u8], mut pos: usize) -> Option<usize> {
+    let mut depth = 1usize;
+    while let Some(&byte) = bytes.get(pos) {
+        match byte {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(pos + 1);
+                }
+            }
+            b'\'' | b'"' => {
+                pos = string_end(bytes, pos, is_fstring(bytes, pos))?;
+                continue;
+            }
+            _ => {}
+        }
+        pos += 1;
+    }
+    None
+}
+
 /// The string at `pos` when it is the assignment's whole value: one plain
-/// literal with no escape, followed by the end of the argument or of the
-/// statement and not by anything that would extend the expression.
-fn whole_literal(text: &str, pos: usize) -> Option<String> {
+/// literal with no prefix and no escape, after which the argument ends
+/// (`grouped`: the assignment is inside brackets) or the statement does.
+fn whole_literal(text: &str, pos: usize, grouped: bool) -> Option<String> {
     let bytes = text.as_bytes();
     if !matches!(bytes.get(pos), Some(b'\'' | b'"')) {
         return None;
     }
-    let (start, end, after) = string_span(bytes, pos)?;
+    let (start, end, after) = string_span(bytes, pos, false)?;
     let value = &text[start..end];
     if value.contains('\\') {
         return None;
     }
-    let mut next = skip_blank(bytes, after);
+    let mut next = skip_spacing(bytes, after, grouped);
     if bytes.get(next) == Some(&b'#') {
         next = line_end(bytes, next);
     }
-    match bytes.get(next) {
-        None | Some(b',' | b')' | b';') => return Some(value.to_string()),
-        Some(b'\n' | b'\r') => {}
-        Some(_) => return None,
-    }
-    // The line ended. Inside the call's parentheses the expression may go
-    // on below: another string joins this one, an operator extends it.
-    loop {
-        while bytes.get(next).is_some_and(u8::is_ascii_whitespace) {
-            next += 1;
-        }
-        if bytes.get(next) != Some(&b'#') {
-            break;
-        }
-        next = line_end(bytes, next);
-    }
-    let rest = &bytes[next..];
-    let word_end = rest
-        .iter()
-        .position(|byte| !is_name_byte(*byte))
-        .unwrap_or(rest.len());
-    let word = &rest[..word_end];
-    let continues = matches!(
-        rest.first(),
-        Some(b'\'' | b'"' | b'+' | b'%' | b'.' | b'*' | b'[')
-    ) || matches!(word, b"if" | b"or" | b"and" | b"in" | b"not")
-        // A string prefix: `f"..."`, `rb'...'`.
-        || (word.len() <= 2
-            && !word.is_empty()
-            && matches!(rest.get(word_end), Some(b'\'' | b'"')));
-    (!continues).then(|| value.to_string())
+    let ends = match bytes.get(next) {
+        Some(b',' | b')') => grouped,
+        None | Some(b'\n' | b'\r' | b';') => !grouped,
+        Some(_) => false,
+    };
+    ends.then(|| value.to_string())
 }
 
 #[cfg(test)]
@@ -303,6 +351,19 @@ mod tests {
             found("python_requires = \">=3.10\"\nsetup(name=\"x\")\n").as_deref(),
             Some(">=3.10")
         );
+        // The value may start on the line after the `=` inside the call.
+        assert_eq!(
+            found("setup(\n    python_requires=\n        \">=3.12\",\n)\n").as_deref(),
+            Some(">=3.12")
+        );
+        assert_eq!(
+            found("setup(\n    python_requires=\">=3.12\"  # floor\n    # more\n)\n").as_deref(),
+            Some(">=3.12")
+        );
+        assert_eq!(
+            found("kw = {\"a\": [1, 2]}\nsetup(python_requires='>=3.7', **kw)\n").as_deref(),
+            Some(">=3.7")
+        );
         assert_eq!(
             found("setup(python_requires=\"\"\">=3.11\"\"\")").as_deref(),
             Some(">=3.11")
@@ -329,6 +390,26 @@ mod tests {
         assert_eq!(found("setup(extra_python_requires=\">=3.9\")"), None);
         assert_eq!(found("setup(python_requires_extra=\">=3.9\")"), None);
         assert_eq!(found("args.python_requires = \">=3.9\"\n"), None);
+        assert_eq!(
+            found("args. python_requires = \"<3.10\"\nsetup(python_requires=\">=3.12\")\n")
+                .as_deref(),
+            Some(">=3.12")
+        );
+        // A string nested in an f-string's replacement field (Python 3.12)
+        // does not end the f-string.
+        assert_eq!(
+            found(
+                "note = f\"{ \"python_requires='<3.10',\" }\"\nsetup(python_requires=\">=3.12\")\n"
+            )
+            .as_deref(),
+            Some(">=3.12")
+        );
+        assert_eq!(
+            found("note = f\"{{python_requires='<3.10',}}\"\nsetup(python_requires=\">=3.12\")\n")
+                .as_deref(),
+            Some(">=3.12")
+        );
+
         assert_eq!(found("if python_requires == \">=3.9\":\n    pass\n"), None);
     }
 
@@ -347,6 +428,19 @@ mod tests {
         assert_eq!(found("setup(python_requires=MIN)"), None);
         assert_eq!(found("setup(python_requires=\">=3.9\\n\")"), None);
         assert_eq!(found("setup(python_requires=\">=3.9)\n"), None);
+        // An operator on the next line still extends the expression.
+        assert_eq!(
+            found("setup(\n    python_requires=\">=3.9\"\n        == x and \">=3.12\" or \">=3.13\",\n)\n"),
+            None
+        );
+        assert_eq!(
+            found("setup(python_requires=\">=3.9\" if x else \">=3.8\")"),
+            None
+        );
+        assert_eq!(
+            found("python_requires = \">=3.9\" \\\n    \",<3.12\"\n"),
+            None
+        );
         // A later plain assignment is still found after a computed one.
         assert_eq!(
             found("x = dict(python_requires=MIN)\nsetup(python_requires='>=3.9')\n").as_deref(),
