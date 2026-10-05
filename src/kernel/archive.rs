@@ -4,9 +4,10 @@
 //! unpacks into a store stage. tar's own defences differ by implementation
 //! and version, so this module does not trust them: it lists every entry
 //! first and refuses the archive as a whole before a single byte is written
-//! when any entry is an absolute name, contains a `..` component, is a hard
-//! link or a special file, or is a symlink whose target is not lexically
-//! contained in the destination after `--strip-components`. Only a listing
+//! when any entry is an absolute name, contains a `..` component, is a
+//! special file, is a symlink whose target is not lexically contained in
+//! the destination after `--strip-components`, or is a hard link to
+//! anything but an earlier regular file that survives the strip. Only a listing
 //! that passes completely is extracted, and the delegated tar runs with
 //! `TAR_OPTIONS` unset so the user's environment cannot add flags.
 //!
@@ -50,7 +51,9 @@ pub struct Entry {
     /// The member name exactly as stored (directories keep their trailing
     /// `/`), before any `--strip-components`.
     pub name: String,
-    /// Symlink target or hard-link target, when the kind has one.
+    /// Symlink target or hard-link target, when the kind has one. A
+    /// hard-link target is another member's stored name, not a path
+    /// relative to the link.
     pub link: Option<String>,
 }
 
@@ -59,6 +62,8 @@ pub enum EntryKind {
     File,
     Dir,
     Symlink,
+    /// A second name for an earlier regular-file member (tar type `1`).
+    HardLink,
 }
 
 /// How the archive is compressed. The caller passes it explicitly, never
@@ -463,24 +468,25 @@ fn read_entries(
             b'0' | b'\0' => EntryKind::File,
             b'5' => EntryKind::Dir,
             b'2' => EntryKind::Symlink,
-            b'1' => {
-                return Err(err(format!(
-                    "archive entry {name:?} is a hard link (to {link:?}); hard links are refused"
-                )))
-            }
+            b'1' => EntryKind::HardLink,
             other => {
                 // Devices, FIFOs, sockets, contiguous files, GNU sparse and
                 // dump extensions, and anything unallocated. Data may or may
                 // not follow such a header, so the stream is ambiguous from
                 // here: refuse instead of trying to resynchronize.
                 return Err(err(format!(
-                    "archive entry {name:?} is a special file (type {:?}); only files, directories, and contained symlinks are accepted",
+                    "archive entry {name:?} is a special file (type {:?}); only files, directories, contained symlinks and contained hard links are accepted",
                     other as char
                 )));
             }
         };
         if kind == EntryKind::Symlink && link.is_empty() {
             return Err(err(format!("archive entry {name:?}: empty symlink target")));
+        }
+        if kind == EntryKind::HardLink && link.is_empty() {
+            return Err(err(format!(
+                "archive entry {name:?}: empty hard link target"
+            )));
         }
         if kind != EntryKind::File && size != 0 {
             return Err(err(format!(
@@ -490,15 +496,8 @@ fn read_entries(
         if kind == EntryKind::File {
             budget.add(size, &format!("entry {name:?}"))?;
         }
-        take_or_skip(
-            &mut reader,
-            &name,
-            size,
-            kind == EntryKind::File,
-            want,
-            &mut wanted,
-        )?;
-        let link = if kind == EntryKind::Symlink {
+        take_or_skip(&mut reader, &name, size, &kind, want, &mut wanted)?;
+        let link = if matches!(kind, EntryKind::Symlink | EntryKind::HardLink) {
             Some(link)
         } else {
             None
@@ -538,12 +537,17 @@ fn take_or_skip(
     reader: &mut impl Read,
     name: &str,
     size: u64,
-    is_file: bool,
+    kind: &EntryKind,
     want: Option<(&str, u64)>,
     wanted: &mut Option<Vec<u8>>,
 ) -> io::Result<()> {
-    if !is_file {
-        if wanted.is_none() && want.is_some_and(|(member, _)| member == name) {
+    if *kind != EntryKind::File {
+        // A wanted hard link is followed by `read_member`, which reads
+        // again for its target.
+        if *kind != EntryKind::HardLink
+            && wanted.is_none()
+            && want.is_some_and(|(member, _)| member == name)
+        {
             return Err(err(format!(
                 "archive member {name:?} is not a regular file"
             )));
@@ -962,8 +966,8 @@ pub fn validate(entries: &[Entry], strip: usize) -> io::Result<()> {
 pub fn validate_with_options(entries: &[Entry], options: &ExtractOptions) -> io::Result<()> {
     let strip = options.strip;
     let mut kept: Vec<(&Entry, Vec<&str>)> = Vec::new();
-    // Hard links and special files never become entries: the listing
-    // refuses them where it reads their type.
+    // Special files never become entries: the listing refuses them where
+    // it reads their type.
     for entry in entries {
         let components = contained_components(&entry.name)
             .map_err(|reason| err(format!("archive entry {:?}: {reason}", entry.name)))?;
@@ -1030,6 +1034,63 @@ pub fn validate_with_options(entries: &[Entry], options: &ExtractOptions) -> io:
                     entry.name, target
                 ))
             })?;
+        }
+    }
+    hard_links_contained(&kept, strip)
+}
+
+/// A hard link is tar's second name for a member it already extracted, so
+/// it is accepted when that member is an earlier regular file kept after
+/// `--strip-components`. Both tars strip a hard link's target the way they
+/// strip its name, so the target is compared in stripped form. A name
+/// written twice is refused when a hard link names it or is it: whether a
+/// later write replaces the shared file or writes through it differs by
+/// tar, so the two platforms could realize different bytes.
+fn hard_links_contained(kept: &[(&Entry, Vec<&str>)], strip: usize) -> io::Result<()> {
+    let mut writes: BTreeMap<String, usize> = BTreeMap::new();
+    for (_, stripped) in kept {
+        *writes.entry(stripped.join("/")).or_default() += 1;
+    }
+    let mut earlier_files: BTreeSet<String> = BTreeSet::new();
+    for (entry, stripped) in kept {
+        let name = stripped.join("/");
+        match entry.kind {
+            EntryKind::File => {
+                earlier_files.insert(name);
+            }
+            EntryKind::HardLink => {
+                let target = entry.link.as_deref().unwrap_or("");
+                let refuse = |reason: &str| {
+                    err(format!(
+                        "archive hard link {:?} -> {:?}: {reason}",
+                        entry.name, target
+                    ))
+                };
+                let components = contained_components(target).map_err(|reason| refuse(&reason))?;
+                if components.len() <= strip {
+                    return Err(refuse("the target does not survive --strip-components"));
+                }
+                let target_name = components[strip..]
+                    .iter()
+                    .copied()
+                    .filter(|component| *component != ".")
+                    .collect::<Vec<_>>()
+                    .join("/");
+                if target_name == name {
+                    return Err(refuse("the link names itself"));
+                }
+                if !earlier_files.contains(&target_name) {
+                    return Err(refuse(
+                        "the target is not an earlier regular file in the archive",
+                    ));
+                }
+                if writes.get(&name) > Some(&1) || writes.get(&target_name) > Some(&1) {
+                    return Err(refuse(
+                        "the link or its target is written more than once in the archive",
+                    ));
+                }
+            }
+            EntryKind::Dir | EntryKind::Symlink => {}
         }
     }
     Ok(())
@@ -1327,21 +1388,19 @@ fn read_member_inner(
         Some(activity) => list_with_activity(activity, archive, compression)?,
         None => list(archive, compression)?,
     };
-    let file = io::BufReader::new(File::open(archive)?);
-    let (_, wanted) = match compression {
-        Compression::None => read_entries(file, Some((member, cap)))?,
-        Compression::Gzip => read_entries(
-            io::BufReader::new(flate2::read::MultiGzDecoder::new(file)),
-            Some((member, cap)),
-        )?,
-        Compression::Bzip2 => read_entries(
-            io::BufReader::new(bzip2::read::BzDecoder::new(file)),
-            Some((member, cap)),
-        )?,
-        Compression::Xz => read_entries(
-            io::BufReader::new(liblzma::read::XzDecoder::new(file)),
-            Some((member, cap)),
-        )?,
+    let (entries, wanted) = capture(archive, compression, member, cap)?;
+    if let Some(bytes) = wanted {
+        return Ok(bytes);
+    }
+    // A hard link reads as the file it names: one more pass captures that
+    // member, which must itself be a regular file.
+    let target = entries
+        .iter()
+        .find(|entry| entry.name == member && entry.kind == EntryKind::HardLink)
+        .and_then(|entry| entry.link.as_deref());
+    let wanted = match target {
+        Some(target) => capture(archive, compression, target, cap)?.1,
+        None => None,
     };
     wanted.ok_or_else(|| {
         err(format!(
@@ -1349,6 +1408,32 @@ fn read_member_inner(
             archive.display()
         ))
     })
+}
+
+/// One in-process pass over `archive`: its entries, and the data of the
+/// first regular-file member named `member` (at most `cap` bytes).
+fn capture(
+    archive: &Path,
+    compression: Compression,
+    member: &str,
+    cap: u64,
+) -> io::Result<(Vec<Entry>, Option<Vec<u8>>)> {
+    let file = io::BufReader::new(File::open(archive)?);
+    let want = Some((member, cap));
+    match compression {
+        Compression::None => read_entries(file, want),
+        Compression::Gzip => read_entries(
+            io::BufReader::new(flate2::read::MultiGzDecoder::new(file)),
+            want,
+        ),
+        Compression::Bzip2 => {
+            read_entries(io::BufReader::new(bzip2::read::BzDecoder::new(file)), want)
+        }
+        Compression::Xz => read_entries(
+            io::BufReader::new(liblzma::read::XzDecoder::new(file)),
+            want,
+        ),
+    }
 }
 
 /// Pack `work`'s explicit null-delimited `list` into `uncompressed` with
@@ -2805,9 +2890,14 @@ mod tests {
                 "symlink target escapes the destination",
             ),
             (
-                "hard link",
-                ustar("pkg/hard", b'1', "pkg/benign", b""),
-                "hard links are refused",
+                "hard link escapes",
+                ustar("pkg/hard", b'1', "../outside-sentinel", b""),
+                "`..` path component",
+            ),
+            (
+                "hard link to a file outside the archive",
+                ustar("pkg/hard", b'1', "pkg/missing", b""),
+                "not an earlier regular file",
             ),
             (
                 "character device",
@@ -2847,6 +2937,127 @@ mod tests {
             );
             assert_eq!(fs::read(&sentinel).unwrap(), b"untouched", "{label}");
         }
+    }
+
+    #[test]
+    fn a_hard_link_must_name_an_earlier_kept_regular_file() {
+        let file = |name: &str| entry(EntryKind::File, name, None);
+        let dir = |name: &str| entry(EntryKind::Dir, name, None);
+        let hard = |name: &str, target: &str| entry(EntryKind::HardLink, name, Some(target));
+        let symlink = |name: &str, target: &str| entry(EntryKind::Symlink, name, Some(target));
+        // Accepted: an earlier file, named as stored, with or without `./`.
+        validate(&[file("pkg/a"), hard("pkg/b", "pkg/a")], 1).unwrap();
+        validate(&[file("./pkg/a"), hard("./pkg/sub/b", "./pkg/a")], 2).unwrap();
+        validate(&[file("a"), hard("b", "a")], 0).unwrap();
+        let cases: Vec<(Vec<Entry>, usize, &str)> = vec![
+            (
+                vec![hard("pkg/b", "pkg/a"), file("pkg/a")],
+                1,
+                "not an earlier regular file",
+            ),
+            (
+                vec![dir("pkg/d/"), hard("pkg/b", "pkg/d")],
+                1,
+                "not an earlier regular file",
+            ),
+            (
+                vec![symlink("pkg/s", "a"), hard("pkg/b", "pkg/s")],
+                1,
+                "not an earlier regular file",
+            ),
+            (
+                vec![file("pkg/a"), hard("pkg/b", "/etc/passwd")],
+                1,
+                "absolute member name",
+            ),
+            (
+                vec![file("pkg/a"), hard("pkg/b", "pkg/../a")],
+                1,
+                "`..` path component",
+            ),
+            (
+                vec![file("pkg"), hard("pkg/b", "pkg")],
+                1,
+                "does not survive --strip-components",
+            ),
+            (
+                vec![file("pkg/a"), hard("pkg/a", "pkg/a")],
+                1,
+                "names itself",
+            ),
+            (
+                vec![file("pkg/a"), hard("pkg/b", "pkg/a"), file("pkg/a")],
+                1,
+                "written more than once",
+            ),
+            (
+                vec![file("pkg/a"), hard("pkg/b", "pkg/a"), file("pkg/b")],
+                1,
+                "written more than once",
+            ),
+            (
+                vec![
+                    file("pkg/a"),
+                    hard("pkg/b", "pkg/a"),
+                    hard("pkg/b", "pkg/a"),
+                ],
+                1,
+                "written more than once",
+            ),
+        ];
+        for (entries, strip, needle) in cases {
+            refused(&entries, strip, needle);
+        }
+        // The link's own name is held to every other rule: no writing
+        // through an archive symlink.
+        refused(
+            &[
+                symlink("pkg/l", "real"),
+                file("pkg/a"),
+                hard("pkg/l/x", "pkg/a"),
+            ],
+            1,
+            "is written through symlink",
+        );
+    }
+
+    #[test]
+    fn a_contained_hard_link_extracts_as_the_same_file_and_reads_as_its_target() {
+        let temp = temp_dir("hard-link");
+        let archive = temp.0.join("hard.tar");
+        write_tar(
+            &archive,
+            &[
+                ustar("pkg/", b'5', "", b""),
+                ustar("pkg/a", b'0', "", b"shared bytes"),
+                ustar("pkg/sub/", b'5', "", b""),
+                ustar("pkg/sub/b", b'1', "pkg/a", b""),
+            ],
+        );
+        let destination = temp.0.join("dest");
+        fs::create_dir_all(&destination).unwrap();
+        // The extraction lists the archive and cross-checks it against
+        // `tar -t` first, so this also proves tar names the link as stored.
+        let entries = extract(&archive, &destination, 1, Compression::None).unwrap();
+        assert_eq!(entries[3].kind, EntryKind::HardLink);
+        assert_eq!(entries[3].link.as_deref(), Some("pkg/a"));
+        assert_eq!(
+            fs::read(destination.join("sub/b")).unwrap(),
+            b"shared bytes"
+        );
+        {
+            use std::os::unix::fs::MetadataExt;
+            let a = fs::metadata(destination.join("a")).unwrap();
+            let b = fs::metadata(destination.join("sub/b")).unwrap();
+            assert_eq!((a.dev(), a.ino()), (b.dev(), b.ino()));
+        }
+        assert_eq!(
+            read_member(&archive, Compression::None, "pkg/sub/b", 1 << 20).unwrap(),
+            b"shared bytes"
+        );
+        // The target's own size cap still applies through the link.
+        let error = read_member(&archive, Compression::None, "pkg/sub/b", 2).expect_err("cap");
+        assert!(error.to_string().contains("read cap"), "{error}");
     }
 
     #[test]

@@ -85,7 +85,6 @@ None open.
   - #258 design: an error type that separates refusals, staleness, network and bugs. The `detected()` bug is fixed. Left is the `TogError` classes (Refused, Stale, Unsupported, Network, Interrupted) with distinct exit codes, starting with `fsroot::refusal`.
   - #243 sandbox: the macOS Seatbelt profile reads all of /opt, its timezone rule is dead, and CI never runs it.
 - **Found in the #316 review (2026-09-26).** One issue and one PR each:
-  - #317 archive: hard links in registry packages are refused; allow contained ones.
   - #321 tests: kernel_smoke realizes against the developer's own store, so a local run can pass on cached objects.
   - #319 archive: read_member runs a tar -t cross-check it does not need.
 - **Found in the #323 review (2026-09-26).** One issue and one PR each:

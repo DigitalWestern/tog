@@ -625,7 +625,11 @@ fn extract_sdist_inner(
 }
 
 fn validate_extracted_links(root: &Path) -> io::Result<()> {
-    fn walk(root: &Path, path: &Path) -> io::Result<()> {
+    /// Each hard-linked inode met in the walk: its link count, how many of
+    /// its names the walk found, and the first one.
+    type Links = std::collections::BTreeMap<(u64, u64), (u64, u64, std::path::PathBuf)>;
+
+    fn walk(root: &Path, path: &Path, links: &mut Links) -> io::Result<()> {
         let metadata = fs::symlink_metadata(path)?;
         let file_type = metadata.file_type();
         if file_type.is_symlink() {
@@ -641,7 +645,7 @@ fn validate_extracted_links(root: &Path) -> io::Result<()> {
         }
         if file_type.is_dir() {
             for entry in fs::read_dir(path)? {
-                walk(root, &entry?.path())?;
+                walk(root, &entry?.path(), links)?;
             }
             return Ok(());
         }
@@ -650,10 +654,10 @@ fn validate_extracted_links(root: &Path) -> io::Result<()> {
             {
                 use std::os::unix::fs::MetadataExt;
                 if metadata.nlink() > 1 {
-                    return Err(invalid(format!(
-                        "extracted sdist contains a hard link: {}",
-                        path.display()
-                    )));
+                    let slot = links
+                        .entry((metadata.dev(), metadata.ino()))
+                        .or_insert_with(|| (metadata.nlink(), 0, path.to_path_buf()));
+                    slot.1 += 1;
                 }
             }
             return Ok(());
@@ -664,7 +668,21 @@ fn validate_extracted_links(root: &Path) -> io::Result<()> {
         )))
     }
 
-    walk(root, root)
+    let mut links = Links::new();
+    walk(root, root, &mut links)?;
+    // A hard link the archive carried names an earlier member of the same
+    // archive (`archive::validate_with_options`), so every name of its
+    // file is in this tree. A file with a name the walk did not find is
+    // shared with something outside it.
+    for (count, found, path) in links.values() {
+        if found != count {
+            return Err(invalid(format!(
+                "extracted sdist contains a hard link to a file outside it: {}",
+                path.display()
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Resolve a link lexically while following existing symlinks.  This also
@@ -1079,24 +1097,26 @@ mod link_guard_tests {
     }
 
     #[test]
-    fn a_hard_link_is_refused() {
+    fn a_hard_link_inside_the_tree_is_accepted() {
         let (_dir, root) = tree("hard");
         fs::write(root.join("a"), b"a").unwrap();
-        fs::hard_link(root.join("a"), root.join("b")).unwrap();
-        let error = refusal(&root);
-        // Either name is the second link to the same inode.
-        assert!(
-            error
-                == format!(
-                    "extracted sdist contains a hard link: {}",
-                    root.join("a").display()
-                )
-                || error
-                    == format!(
-                        "extracted sdist contains a hard link: {}",
-                        root.join("b").display()
-                    ),
-            "{error}"
+        fs::create_dir_all(root.join("sub")).unwrap();
+        fs::hard_link(root.join("a"), root.join("sub/b")).unwrap();
+        validate_extracted_links(&root).unwrap();
+    }
+
+    #[test]
+    fn a_hard_link_to_a_file_outside_the_tree_is_refused() {
+        let (dir, root) = tree("hard-out");
+        let outside = dir.0.join("outside");
+        fs::write(&outside, b"host").unwrap();
+        fs::hard_link(&outside, root.join("b")).unwrap();
+        assert_eq!(
+            refusal(&root),
+            format!(
+                "extracted sdist contains a hard link to a file outside it: {}",
+                root.join("b").display()
+            )
         );
     }
 
