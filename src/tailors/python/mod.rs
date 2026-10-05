@@ -18,6 +18,7 @@ pub mod tailor;
 pub mod wheel;
 
 use crate::kernel::activity::StoreActivity;
+use crate::kernel::pep440::canonical_release_len;
 use crate::kernel::platform::{no_pin, Platform};
 use crate::kernel::store::Store;
 use crate::kernel::toolchain::Selected;
@@ -104,24 +105,6 @@ pub fn ensure_uv_for(
 
 pub fn lookup(platform: Platform, version: &str) -> Option<&'static PinnedPython> {
     lookup_in_pins(pythons().ok()?, platform, version)
-}
-
-/// Return the number of release components when `version` is written in the
-/// canonical form accepted for CPython selection. Components are decimal and
-/// cannot have leading zeroes; no suffixes, prefixes, or surrounding text are
-/// accepted.
-pub(crate) fn canonical_release_len(version: &str) -> Option<usize> {
-    let pieces: Vec<_> = version.split('.').collect();
-    if !(2..=3).contains(&pieces.len())
-        || pieces.iter().any(|piece| {
-            piece.is_empty()
-                || (piece.len() > 1 && piece.starts_with('0'))
-                || !piece.bytes().all(|byte| byte.is_ascii_digit())
-        })
-    {
-        return None;
-    }
-    Some(pieces.len())
 }
 
 /// Match only a complete pinned version or a major.minor request. The slice
