@@ -378,6 +378,10 @@ fn artifact_name(url: &str) -> &str {
     }
 }
 
+/// What tog calls itself in a request, for the registries that ask callers
+/// to identify themselves (crates.io refuses an anonymous client).
+const USER_AGENT: &str = "tog (https://github.com/DigitalWestern/tog)";
+
 /// Open `url` for reading: a `file://` path (mirrors, tests) or an https
 /// request. `https_only` holds across redirects too, so nothing ever
 /// downgrades to http. The second value is the declared Content-Length,
@@ -394,7 +398,9 @@ fn open_url(
             .map_err(|e| io::Error::new(e.kind(), format!("open {path}: {e}")))?;
         return Ok((Box::new(file), None));
     }
-    let mut builder = ureq::AgentBuilder::new().https_only(true);
+    let mut builder = ureq::AgentBuilder::new()
+        .https_only(true)
+        .user_agent(USER_AGENT);
     if let Some(timeout) = timeout {
         builder = builder.timeout(timeout);
     }
@@ -430,6 +436,48 @@ pub fn fetch_text_within(url: &str, timeout: Option<std::time::Duration>) -> io:
         .read_to_string(&mut text)
         .map_err(|e| io::Error::new(e.kind(), format!("read {url}: {e}")))?;
     Ok(text)
+}
+
+/// Fetch a small text file that may not be there: `None` when the server
+/// answers 404 (a registry asked about a name it has never heard of), the
+/// text otherwise. Every other failure is an error, as from [`fetch_text`].
+pub(crate) fn fetch_text_or_missing(
+    url: &str,
+    timeout: Option<std::time::Duration>,
+) -> io::Result<Option<String>> {
+    match fetch_text_within(url, timeout) {
+        Ok(text) => Ok(Some(text)),
+        Err(error) if http_status(&error) == Some(404) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// Download `url` to `dest` with no hash to check it against, for a file a
+/// later step verifies some other way (a NuGet package, whose content hash
+/// the locked restore checks). Capped at `max` bytes: a longer stream
+/// refuses and removes `dest` rather than keep a truncated file.
+pub(crate) fn download_unpinned(url: &str, dest: &Path, max: u64) -> io::Result<()> {
+    let (reader, _) = open_url(url, "download", None)?;
+    let mut file = fs::File::create(dest)?;
+    let copied = io::copy(&mut reader.take(max + 1), &mut file);
+    drop(file);
+    let refusal = match copied {
+        Ok(copied) if copied <= max => return Ok(()),
+        Ok(_) => io::Error::other(format!("download {url}: longer than {max} bytes; refusing")),
+        Err(e) => io::Error::new(e.kind(), format!("read {url}: {e}")),
+    };
+    let _ = fs::remove_file(dest);
+    Err(refusal)
+}
+
+/// `url` parsed the way the fetcher parses it (ureq, through the `url`
+/// crate), so a check made on a URL and the download of it read one URL.
+/// `None` when the fetcher could not request it at all.
+pub(crate) fn request_url(url: &str) -> Option<url::Url> {
+    ureq::get(url)
+        .request_url()
+        .ok()
+        .map(|parsed| parsed.as_url().clone())
 }
 
 /// Download `url` to `dest`, verifying its sha256 as it streams, without

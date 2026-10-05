@@ -78,7 +78,6 @@ None open.
 - **Quality review of 2026-09-24 (#264).** A whole-codebase review after
   the 09-20 to 09-24 run. #264 holds the work order and the overall verdict.
   Each line is one issue and one PR, in order:
-  - #238 http: pypi, rubygems, dotnet and deps call ureq directly, bypassing kernel::fetch.
   - #240 store: a CacheLease holds gc.lock exclusively, so separate tog processes download one at a time.
   - #247 dead code: the non-heavy part shipped; left are the unused items in heavy-watched files (`fetch.rs`, `archive.rs`, `sandbox.rs`, `provider/`) and the CI job that builds with `--cfg tog_dead_code -D dead_code`.
   - #245 kernel: consolidate duplicated primitives. Left after the first pass: the file hash copy in `provider/crates.rs` and `fetch.rs` (heavy gate), the pid temp names in `fetch.rs`, `validate_object_complete` and `exceptions()` reading records their own way.
@@ -89,7 +88,6 @@ None open.
   - #257 design: move process-global state (policy, signing key, input guard, kinds) into Context.
   - #258 design: an error type that separates refusals, staleness, network and bugs.
   - #243 sandbox: the macOS Seatbelt profile reads all of /opt, its timezone rule is dead, and CI never runs it.
-  - #237 archive: symlink containment compares names case-sensitively.
 - **Found in the #316 review (2026-09-26).** One issue and one PR each:
   - #317 archive: hard links in registry packages are refused; allow contained ones.
   - #321 tests: kernel_smoke realizes against the developer's own store, so a local run can pass on cached objects.
@@ -110,7 +108,6 @@ None open.
 - **Smaller open issues from the 2026-09-23/24 run.** One line each; the
   issue has the options and the pick.
   - #188 npm: realize `file:` packages as tog-owned trees.
-  - #216 python: `uv pip compile` fails for vllm and MetaGPT; classifier label.
   - #476 fetch: state and audit that a cache hit is trusted by its digest's source, not its writer (from #287).
   - #289 interrupt: the bwrap preflight misreports Ctrl-C as "bwrap unavailable" (`sandbox.rs`, heavy gate). The exit code is fixed.
   - #295 tests: four sandbox tests fail instead of skipping when bubblewrap is missing.

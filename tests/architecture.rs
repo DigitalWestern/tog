@@ -8,11 +8,12 @@
 //! ratchet against `tests/size_baseline.txt`: what is over budget today may
 //! shrink, nothing may grow or newly cross a budget.
 //!
-//! Four housekeeping rules are enforced the same way: a test that sets
+//! Five housekeeping rules are enforced the same way: a test that sets
 //! `TOG_STORE` holds `STORE_ENV_LOCK`, comments describe code rather
 //! than cite plan documents or review rounds, narration goes through
-//! `kernel::ui` rather than a raw stderr write, and `docs/agent/` holds only
-//! its two files.
+//! `kernel::ui` rather than a raw stderr write, HTTP goes through
+//! `kernel::fetch` rather than a raw `ureq` call, and `docs/agent/` holds
+//! only its two files.
 
 // Tests spawn fixtures and take leases freely (see clippy.toml).
 #![allow(clippy::disallowed_methods)]
@@ -2049,4 +2050,58 @@ fn the_literal_scan_sees_every_spelling() {
             site("path", "node.json", 1),
         ]
     );
+}
+
+/// The files that may name the HTTP client: `kernel::fetch` and its pinned
+/// resolver. Everything else fetches through them, so https-only, the
+/// redirect and size caps and the user agent hold at every call site.
+const HTTP_CLIENT_FILES: &[&str] = &["src/kernel/fetch.rs", "src/kernel/fetch/pinned.rs"];
+
+/// The production lines of `text` that name the `ureq` crate.
+fn http_client_sites(text: &str) -> Vec<String> {
+    production_tokens(text)
+        .into_iter()
+        .filter(|(token, _)| is_ident(Some(token), "ureq"))
+        .map(|(_, function)| function)
+        .collect()
+}
+
+#[test]
+fn http_goes_through_kernel_fetch() {
+    let mut violations = Vec::new();
+    for (relative, text) in all_sources() {
+        if !relative.starts_with("src/") || HTTP_CLIENT_FILES.contains(&relative.as_str()) {
+            continue;
+        }
+        for function in http_client_sites(&text) {
+            violations.push(format!("{relative}: in fn {function}"));
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "ureq named outside kernel::fetch (use fetch_text, fetch_text_or_missing, \
+         download_file or download_unpinned):\n  {}",
+        violations.join("\n  ")
+    );
+}
+
+#[test]
+fn the_http_client_scan_sees_every_spelling() {
+    let caught = [
+        "fn a() { ureq::get(u).call(); }",
+        "use ureq::Agent;\nfn a() {}",
+        "fn a() { let x = ureq\n    ::AgentBuilder::new(); }",
+        "fn a() -> Option<ureq::RequestUrl> { None }",
+    ];
+    for text in caught {
+        assert!(!http_client_sites(text).is_empty(), "missed: {text}");
+    }
+    let ignored = [
+        "// ureq::get in a comment\nfn a() {}",
+        "fn a() { let s = \"ureq::get\"; }",
+        "#[cfg(test)]\nmod tests { fn t() { ureq::get(u); } }",
+    ];
+    for text in ignored {
+        assert!(http_client_sites(text).is_empty(), "flagged: {text}");
+    }
 }

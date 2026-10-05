@@ -1188,15 +1188,8 @@ pub fn realize_packages(
         let verl = p.version.to_ascii_lowercase();
         let url = format!("https://api.nuget.org/v3-flatcontainer/{idl}/{verl}/{idl}.{verl}.nupkg");
         let tmp = scratch.join(format!("{idl}.{verl}.nupkg"));
-        let agent = ureq::AgentBuilder::new().https_only(true).build();
-        let resp = agent
-            .get(&url)
-            .call()
-            .map_err(|e| err(format!("{}: GET {url}: {e}", p.id)))?;
-        let mut file = fs::File::create(&tmp)?;
-        use std::io::Read;
-        let mut reader = resp.into_reader().take(1 << 30);
-        io::copy(&mut reader, &mut file)?;
+        crate::kernel::fetch::download_unpinned(&url, &tmp, 1 << 30)
+            .map_err(|e| err(format!("{}: {e}", p.id)))?;
         let (raw_sha256, _) = cache_insert(store, activity, &tmp)?;
         raw_hashes.insert(format!("{}@{}", idl, p.version), raw_sha256);
         fs::rename(&tmp, feed.join(format!("{idl}.{verl}.nupkg")))?;
