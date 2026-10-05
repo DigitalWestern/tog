@@ -617,7 +617,7 @@ pub(super) fn project_env_inner(
     // sync.
     replace_project_symlink(project, venv, &env_obj, ".venv")?;
 
-    let body = python_closure_body(
+    let mut body = python_closure_body(
         &env_obj,
         &native_reference,
         &backup,
@@ -626,6 +626,11 @@ pub(super) fn project_env_inner(
         inputs,
         runtime_record,
     );
+    // Present only when the lock names a kernel marker: see
+    // `manifest::kernel_marker_record`.
+    if let Some(kernel) = crate::tailors::python::manifest::kernel_marker_record(project)? {
+        body["host_kernel"] = kernel;
+    }
     write_closure_with_project_lock(
         project,
         "python",

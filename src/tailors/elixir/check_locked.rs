@@ -28,8 +28,9 @@ fn skipped_by_manifest_walk(name: &str) -> bool {
 ///
 /// `None`, so the check runs every time, when the walk cannot vouch for
 /// what mix reads: a symlinked directory or `.exs` below the root (the walk
-/// never follows one), a `path:` dependency outside the project or not
-/// written as a plain string, or a tree the walk cannot read. The root's
+/// never follows one), a `path:` dependency outside the project, in a
+/// directory the walk skips or not written as a plain string, or a tree the
+/// walk cannot read. The root's
 /// own mix.exs is read the way mix reads it, following a symlink.
 pub(super) fn check_locked_inputs(
     project: &ProjectRoot,
@@ -72,12 +73,13 @@ pub(super) fn check_locked_inputs(
                 }
                 // An app reached only through a symlinked directory, or an
                 // `.exs` the walk would have to follow, is one it cannot
-                // vouch for. A symlink to anything else is not mix's input.
+                // vouch for. A symlink to anything else is not mix's input, and
+                // neither is a dangling one: mix cannot read an app there.
                 Entry::Symlink
                     if (lossy.ends_with(".exs") && !(at_root && lossy == "mix.exs"))
                         || (!skipped_by_manifest_walk(&lossy)
                             && fs::metadata(dir.path().join(child))
-                                .map_or(true, |target| target.is_dir())) =>
+                                .is_ok_and(|target| target.is_dir())) =>
                 {
                     return Ok(false);
                 }
@@ -116,7 +118,8 @@ pub(super) fn check_locked_inputs(
 }
 
 /// Whether a mix.exs in `dir` (project-relative) names a `path:` dependency
-/// the walk does not cover: one that leaves the project, or one whose path
+/// the walk does not cover: one that leaves the project, one inside a
+/// directory the walk skips (see [`skipped_by_manifest_walk`]), or one whose path
 /// is not a plain string literal (an interpolation, a sigil, a variable),
 /// since tog never evaluates mix.exs to find out where that points. A
 /// `path:` inside a comment counts too, which only costs a registry check.
@@ -143,14 +146,20 @@ fn path_dependency_escapes(dir: &Path, manifest: &[u8]) -> bool {
         if target.contains("#{") || target.contains('\\') || target.starts_with(['/', '~']) {
             return true;
         }
-        let mut depth = dir.components().count();
+        // Resolve the target the way mix does (lexically, from this
+        // mix.exs's directory). One the walk never enters (`_libs/core`,
+        // `deps/core`, `.vendor/core`) is as unhashed as one outside.
+        let mut resolved: Vec<_> = dir.iter().map(|part| part.to_string_lossy()).collect();
         for part in target.split('/') {
             match part {
                 "" | "." => {}
-                ".." if depth == 0 => return true,
-                ".." => depth -= 1,
-                _ => depth += 1,
+                ".." if resolved.pop().is_none() => return true,
+                ".." => {}
+                _ => resolved.push(part.into()),
             }
+        }
+        if resolved.iter().any(|part| skipped_by_manifest_walk(part)) {
+            return true;
         }
     }
     false
@@ -255,8 +264,11 @@ mod tests {
         fs::write(root.join("config/config.exs"), "import Config").unwrap();
         assert_ne!(hash(&project, beam, "lock"), before);
 
-        // A symlink to a file mix never reads is not an input.
+        // A symlink to a file mix never reads is not an input, and neither
+        // is a dangling one: mix cannot read an app through it.
         std::os::unix::fs::symlink(root.join("lib/app.ex"), root.join("README.md")).unwrap();
+        hash(&project, beam, "lock");
+        std::os::unix::fs::symlink(temp.0.join("nowhere"), root.join("apps/old")).unwrap();
         hash(&project, beam, "lock");
         // An app reached only through a symlinked directory is.
         fs::create_dir_all(temp.0.join("outside/api")).unwrap();
@@ -291,6 +303,11 @@ mod tests {
             r##"{:core, path: "#{root}/core"}"##,
             r#"{:core, path: Path.expand("../core", __DIR__)}"#,
             r#"{:core, path:"../../../x"}"#,
+            // Inside the project, but where the walk never looks.
+            r#"{:core, path: "../../_libs/core"}"#,
+            r#"{:core, path: "../../deps/core"}"#,
+            r#"{:core, path: "./.vendor/core"}"#,
+            r#"{:core, path: "../web/node_modules/core"}"#,
         ] {
             assert!(
                 path_dependency_escapes(inside, manifest.as_bytes()),
@@ -301,5 +318,28 @@ mod tests {
             Path::new(""),
             br#"{:a, path: "../a"}"#
         ));
+        // Leaving a skipped directory again lands where the walk does look.
+        assert!(!path_dependency_escapes(
+            Path::new(""),
+            br#"{:a, path: "_build/../libs/a"}"#
+        ));
+    }
+
+    /// A `path:` dependency in a directory the walk skips is not hashed, so
+    /// the hash refuses to vouch rather than miss an edit to its mix.exs.
+    #[test]
+    fn a_path_dependency_the_walk_skips_is_not_vouched_for() {
+        let temp = TempDir::named("elixir-check-skipped-path");
+        let root = temp.0.join("app");
+        fs::create_dir_all(root.join("_libs/core")).unwrap();
+        fs::write(root.join("_libs/core/mix.exs"), "core").unwrap();
+        fs::write(root.join("mix.exs"), r#"{:core, path: "_libs/core"}"#).unwrap();
+        let project = ProjectRoot::open(&root).unwrap();
+        let beam = PathBuf::from(format!("/store/objects/{}-beam-29", "a".repeat(40)));
+        assert_eq!(check_locked_inputs(&project, &beam, "lock").unwrap(), None);
+        fs::write(root.join("mix.exs"), r#"{:core, path: "libs/core"}"#).unwrap();
+        assert!(check_locked_inputs(&project, &beam, "lock")
+            .unwrap()
+            .is_some());
     }
 }

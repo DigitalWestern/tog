@@ -625,9 +625,10 @@ pub trait RegistryTool: Sync {
         &[]
     }
 
-    /// The store object id of `helper`'s runtime as `selected` names it,
-    /// computed without touching the store, for the cache key.
-    fn helper_object_id(
+    /// The build identity of `helper` as `selected` names it, computed
+    /// without touching the store. Include every selection input that can
+    /// change a build, beyond the base runtime object when necessary.
+    fn helper_cache_key(
         &self,
         _platform: Platform,
         helper: &str,

@@ -980,6 +980,17 @@ mod lock_shape_tests {
     }
 
     #[test]
+    fn yarn_keeps_the_first_digest_when_the_strongest_algorithm_is_tied() {
+        let second = format!("sha512-{}", crate::kernel::base64::encode(&[1; 64]));
+        for (first, next) in [(SRI, second.as_str()), (second.as_str(), SRI)] {
+            let selected =
+                yarn_integrity("https://r/a.tgz", Some(format!("{first} {next}")), "yarn:0")
+                    .unwrap();
+            assert_eq!(selected, first);
+        }
+    }
+
+    #[test]
     fn a_sha1_yarn_integrity_is_recorded_inside_an_attribution() {
         let _attribution_lock = crate::kernel::policy::attribution_test_lock();
         let _attribution = crate::kernel::policy::Attribution::open("node").unwrap();
