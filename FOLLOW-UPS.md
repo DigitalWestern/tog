@@ -58,7 +58,6 @@ After the proxy: the test-suite audit (#351) and then the quality review
 - **#464: macOS supervision: deferred notification-pipe initialization and validation.** macOS supervision initialization and validation. Deferred by the owner on 2026-10-04.
 - **#465: heavy: audit shared state before allowing parallel ignored suites.** audit shared state before running ignored suites in parallel. Keep --test-threads=1 until local evidence supports removal.
 - **#466: ci: GitHub Actions job startup blocked by account billing or spending limit.** Actions jobs cannot start because of account billing or spending-limit restrictions. Pick: owner repairs account access, use documented local checks meanwhile.
-- **#494: first Python lock and setup constraints.** Include safely parsed setup.cfg and literal setup.py Python constraints in first-lock selection and freshness checks. Preserve explicit versions and existing locks.
 - **#495: explicit Python package sources.** Define per-package source and metadata-build trust rules for PyTorch-style indexes. Keep undeclared indexes refused until that design ships.
 - **#469: root removal identity.** Carry the decoded record's device/inode and held directory through deletion. Refuse replacements, including directory entries.
 

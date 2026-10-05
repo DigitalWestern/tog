@@ -22,6 +22,7 @@ pub mod provider;
 pub mod resolve;
 pub mod sandbox;
 pub mod semver;
+pub mod setuptools;
 pub mod signing;
 pub mod store;
 pub mod supervise;
