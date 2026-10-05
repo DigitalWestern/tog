@@ -257,7 +257,12 @@ pub(crate) fn resolution_basis(
 /// cover such a directory either. A path that does not exist is left for
 /// the tool to report.
 pub(crate) fn refuse_external_path_dependencies(root: &ProjectRoot) -> io::Result<()> {
-    const FIELDS: [&str; 3] = ["dependencies", "devDependencies", "optionalDependencies"];
+    const FIELDS: [&str; 4] = [
+        "dependencies",
+        "devDependencies",
+        "optionalDependencies",
+        "peerDependencies",
+    ];
     let real_root = std::fs::canonicalize(root.path())?;
     let mut manifests = vec![PathBuf::from("package.json")];
     manifests.extend(
@@ -275,14 +280,42 @@ pub(crate) fn refuse_external_path_dependencies(root: &ProjectRoot) -> io::Resul
         let dir = root
             .path()
             .join(manifest.parent().unwrap_or_else(|| Path::new("")));
+        // npm's `overrides` nests (a child override under a parent's key)
+        // and pnpm's live under `pnpm.overrides`; both take the same specs.
+        let mut specs: Vec<(String, &str)> = Vec::new();
         for field in FIELDS {
-            let Some(entries) = package.get(field).and_then(|value| value.as_object()) else {
-                continue;
-            };
-            for (name, spec) in entries {
-                let Some(spec) = spec.as_str() else {
-                    continue;
-                };
+            if let Some(entries) = package.get(field).and_then(|value| value.as_object()) {
+                for (name, spec) in entries {
+                    if let Some(spec) = spec.as_str() {
+                        specs.push((name.clone(), spec));
+                    }
+                }
+            }
+        }
+        for overrides in [
+            package.get("overrides"),
+            package.get("pnpm").and_then(|pnpm| pnpm.get("overrides")),
+        ] {
+            let mut stack: Vec<(String, &serde_json::Value)> = overrides
+                .and_then(|value| value.as_object())
+                .into_iter()
+                .flatten()
+                .map(|(name, value)| (name.clone(), value))
+                .collect();
+            while let Some((name, value)) = stack.pop() {
+                match value {
+                    serde_json::Value::String(spec) => specs.push((name, spec)),
+                    serde_json::Value::Object(nested) => stack.extend(
+                        nested
+                            .iter()
+                            .map(|(child, value)| (format!("{name} > {child}"), value)),
+                    ),
+                    _ => {}
+                }
+            }
+        }
+        {
+            for (name, spec) in specs {
                 let Some(target) = path_spec_target(spec) else {
                     continue;
                 };
@@ -656,6 +689,24 @@ mod tests {
             .to_string();
         assert!(error.contains("packages/a/package.json"), "{error}");
         write(&root, "packages/a/package.json", "{}");
+        // peerDependencies, npm overrides (nested) and pnpm.overrides too.
+        for manifest in [
+            r#"{"peerDependencies":{"out":"file:../elsewhere"}}"#,
+            r#"{"overrides":{"parent":{"out":"file:../elsewhere"}}}"#,
+            r#"{"pnpm":{"overrides":{"out":"link:../elsewhere"}}}"#,
+        ] {
+            write(&root, "package.json", manifest);
+            let error = refuse_external_path_dependencies(&held)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("../elsewhere"), "{manifest}: {error}");
+        }
+        write(
+            &root,
+            "package.json",
+            r#"{"overrides":{"a":{"b":"^1.0.0"}},"pnpm":{"overrides":{"c":"2"}}}"#,
+        );
+        refuse_external_path_dependencies(&held).unwrap();
         assert_eq!(path_spec_target("file://../x"), Some("../x"));
         assert_eq!(path_spec_target("link:../x"), Some("../x"));
         assert_eq!(path_spec_target("workspace:*"), None);
