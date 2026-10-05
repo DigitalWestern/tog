@@ -401,7 +401,7 @@ mod door {
                 &self.store,
                 &activity,
                 &SnapshotSpec {
-                    lock_root: &self.project,
+                    lock_root: &tog::kernel::fsroot::ProjectRoot::open(&self.project).unwrap(),
                     extra_roots: &[],
                     exclude: &[],
                     forbidden: &[],
@@ -440,6 +440,18 @@ mod door {
             scan: SocketScan,
             extra: &[(&str, &str)],
         ) -> std::io::Result<ConfinedOutcome> {
+            self.run_at(snapshot, argv, scan, extra, &snapshot.lock_root().real)
+        }
+
+        /// `run_with_env`, with the tool started in `cwd`.
+        fn run_at(
+            &self,
+            snapshot: &Snapshot,
+            argv: &[OsString],
+            scan: SocketScan,
+            extra: &[(&str, &str)],
+            cwd: &Path,
+        ) -> std::io::Result<ConfinedOutcome> {
             let _one = DOOR.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             let activity = self.store.activity(ActivityMode::Shared).unwrap();
             let env: Vec<(OsString, OsString)> = [("PATH", "/usr/bin:/bin")]
@@ -459,7 +471,7 @@ mod door {
                     ca_file: None,
                     executable: Path::new(env!("CARGO_BIN_EXE_tog")),
                     argv,
-                    cwd: &snapshot.lock_root().real,
+                    cwd,
                     env: &env,
                     read_roots: std::slice::from_ref(&self.tools),
                     cache_roots: &[],
@@ -501,6 +513,42 @@ mod door {
         assert_eq!(lines[1], unreachable, "{stdout}");
         assert_eq!(lines[2], unreachable, "{stdout}");
         assert_eq!(door.connections.load(Ordering::SeqCst), 1);
+    }
+
+    /// A working directory below the snapshot root is resolved before it
+    /// is accepted: one that reaches outside the snapshot through a symlink
+    /// the project contains is refused, and a real subdirectory still runs.
+    #[test]
+    fn linux_door_refuses_a_cwd_that_leaves_the_snapshot() {
+        let Some(door) = door("linux_door_refuses_a_cwd_that_leaves_the_snapshot") else {
+            return;
+        };
+        std::os::unix::fs::symlink("/usr", door.project.join("out")).unwrap();
+        std::fs::create_dir(door.project.join("sub")).unwrap();
+        let snapshot = door.snapshot();
+        let argv = door.shell_argv("pwd");
+        let error = door
+            .run_at(
+                &snapshot,
+                &argv,
+                SocketScan::Full,
+                &[],
+                &door.project.join("out"),
+            )
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("is outside the snapshot"),
+            "{error}"
+        );
+        let sub = door.project.join("sub");
+        let outcome = door
+            .run_at(&snapshot, &argv, SocketScan::Full, &[], &sub)
+            .unwrap();
+        assert_eq!(outcome.status, ToolStatus::Code(0));
+        assert_eq!(
+            String::from_utf8(outcome.stdout).unwrap().trim(),
+            sub.to_str().unwrap()
+        );
     }
 
     #[test]

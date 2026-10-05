@@ -331,15 +331,21 @@ pub fn realize_runtime(
 const ENV_REMOVE_PREFIXES: &[&str] = crate::kernel::resolve::tripwire::RUBY_ENV_REMOVE_PREFIXES;
 const ENV_REMOVE: &[&str] = crate::kernel::resolve::tripwire::RUBY_ENV_REMOVE;
 
-fn forced_env(project_dir: &Path, gem_home: &Path) -> Vec<(String, String)> {
+/// The Gemfile and its lock as tog's delegates name them: relative to the
+/// held project directory they start in.
+const GEMFILE: &str = "Gemfile";
+const GEMFILE_LOCK: &str = "Gemfile.lock";
+
+/// The environment every store Ruby tool runs with. `gemfile` is what
+/// Bundler reads: tog's own delegates start inside the held project
+/// directory and name it relatively, so a directory swapped in at the
+/// project's path is never the one evaluated (#499).
+fn forced_env(gemfile: &str, gem_home: &Path) -> Vec<(String, String)> {
     vec![
         ("GEM_HOME".to_string(), gem_home.display().to_string()),
         ("GEM_PATH".to_string(), gem_home.display().to_string()),
         ("BUNDLE_IGNORE_CONFIG".to_string(), "1".to_string()),
-        (
-            "BUNDLE_GEMFILE".to_string(),
-            project_dir.join("Gemfile").display().to_string(),
-        ),
+        ("BUNDLE_GEMFILE".to_string(), gemfile.to_string()),
         ("BUNDLE_FROZEN".to_string(), "true".to_string()),
         ("BUNDLE_DISABLE_SHARED_GEMS".to_string(), "true".to_string()),
         ("BUNDLE_AUTO_INSTALL".to_string(), "false".to_string()),
@@ -353,7 +359,9 @@ fn forced_env(project_dir: &Path, gem_home: &Path) -> Vec<(String, String)> {
     ]
 }
 
-/// Env applied by `tog run` for a projected ruby environment.
+/// Env applied by `tog run` for a projected ruby environment. The user's
+/// command may start in a subdirectory and still needs the root Gemfile,
+/// so here it is named by its full path.
 pub fn run_env(
     project_dir: &Path,
     gems_obj: &Path,
@@ -361,7 +369,7 @@ pub fn run_env(
     (
         ENV_REMOVE_PREFIXES.to_vec(),
         ENV_REMOVE.to_vec(),
-        forced_env(project_dir, gems_obj),
+        forced_env(&project_dir.join(GEMFILE).display().to_string(), gems_obj),
     )
 }
 
@@ -396,7 +404,7 @@ fn run_ruby(
     gem_home: &Path,
     args: &[&str],
 ) -> io::Result<DelegateReport> {
-    run_ruby_with_env(door, ruby_obj, cwd, args, forced_env(cwd, gem_home))
+    run_ruby_with_env(door, ruby_obj, cwd, args, forced_env(GEMFILE, gem_home))
 }
 
 fn run_ruby_edit(
@@ -406,7 +414,7 @@ fn run_ruby_edit(
     gem_home: &Path,
     args: &[&str],
 ) -> io::Result<DelegateReport> {
-    let mut env = forced_env(cwd, gem_home);
+    let mut env = forced_env(GEMFILE, gem_home);
     if let Some((_, value)) = env.iter_mut().find(|(key, _)| key == "BUNDLE_FROZEN") {
         *value = "false".to_string();
     }
@@ -447,7 +455,7 @@ fn gem_spec_command(
     gem_home: &Path,
     args: &[&str],
 ) -> std::process::Command {
-    let mut spec = ruby_tool_spec(ruby_obj, cwd, args, &forced_env(cwd, gem_home));
+    let mut spec = ruby_tool_spec(ruby_obj, cwd, args, &forced_env(GEMFILE, gem_home));
     spec.env("HOME", cwd);
     spec.command()
 }
@@ -808,7 +816,6 @@ pub fn plan_ruby(
     if !project.is_input_file(Path::new("Gemfile")) {
         return Err(err("Gemfile not found"));
     }
-    let lock_path = project_dir.join("Gemfile.lock");
     require_lock(project)?;
     let lock = read_gemfile_lock(project)?;
     // No plan cache in the project: an editable cache with a predictable
@@ -829,16 +836,7 @@ pub fn plan_ruby(
         ruby_obj,
         project_dir,
         &scratch,
-        &[
-            "ruby",
-            helper_path,
-            "check",
-            project_dir
-                .join("Gemfile")
-                .to_str()
-                .ok_or_else(|| err("path not UTF-8"))?,
-            lock_path.to_str().ok_or_else(|| err("path not UTF-8"))?,
-        ],
+        &["ruby", helper_path, "check", GEMFILE, GEMFILE_LOCK],
     )?;
     if !out.status.success() {
         let _ = crate::kernel::store::remove_tree(&scratch);
@@ -853,12 +851,7 @@ pub fn plan_ruby(
         ruby_obj,
         project_dir,
         &scratch,
-        &[
-            "ruby",
-            helper_path,
-            "plan",
-            lock_path.to_str().ok_or_else(|| err("path not UTF-8"))?,
-        ],
+        &["ruby", helper_path, "plan", GEMFILE_LOCK],
     )?;
     let _ = crate::kernel::store::remove_tree(&scratch);
     if !out.status.success() {
@@ -1919,9 +1912,34 @@ mod tests {
         assert!(json.get("digest_from_api").is_none(), "{json}");
     }
 
+    /// tog's own Bundler runs start inside the held project directory and
+    /// name the Gemfile relative to it (#499). `tog run` may start in a
+    /// subdirectory, so it keeps the root Gemfile's full path.
+    #[test]
+    fn delegates_name_the_gemfile_relative_to_the_held_project() {
+        let gemfile = |env: &[(String, String)]| {
+            env.iter()
+                .find(|(key, _)| key == "BUNDLE_GEMFILE")
+                .map(|(_, value)| value.clone())
+        };
+        let spec = ruby_tool_spec(
+            Path::new("/ruby"),
+            Path::new("/p"),
+            &["bundle", "lock"],
+            &forced_env(GEMFILE, Path::new("/g")),
+        );
+        assert!(format!("{:?}", spec.command()).contains("BUNDLE_GEMFILE=\"Gemfile\""));
+        assert_eq!(
+            gemfile(&forced_env(GEMFILE, Path::new("/g"))).as_deref(),
+            Some("Gemfile")
+        );
+        let (_, _, run) = run_env(Path::new("/p"), Path::new("/g"));
+        assert_eq!(gemfile(&run).as_deref(), Some("/p/Gemfile"));
+    }
+
     #[test]
     fn forced_env_covers_bundler_side_doors() {
-        let env = forced_env(Path::new("/p"), Path::new("/g"));
+        let env = forced_env(GEMFILE, Path::new("/g"));
         let keys: Vec<&str> = env.iter().map(|(k, _)| k.as_str()).collect();
         for required in [
             "BUNDLE_IGNORE_CONFIG",
@@ -1937,7 +1955,7 @@ mod tests {
         assert!(ENV_REMOVE_PREFIXES.contains(&"BUNDLE_"));
         // The host-local tripwire checks the spec read against its own copy
         // of the forced list.
-        let env = forced_env(Path::new("/p"), Path::new("/g"));
+        let env = forced_env(GEMFILE, Path::new("/g"));
         let mut keys: Vec<&str> = env.iter().map(|(key, _)| key.as_str()).collect();
         let mut checked = crate::kernel::resolve::tripwire::RUBY_FORCED.to_vec();
         keys.sort_unstable();

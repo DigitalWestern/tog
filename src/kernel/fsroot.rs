@@ -37,8 +37,19 @@ use std::os::fd::{AsRawFd, FromRawFd, RawFd};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 
+mod held;
+pub(crate) use held::start_in;
+use held::{held_root_for, HeldEntry};
+
 const DIRECTORY_FLAGS: libc::c_int =
     libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+/// An ancestor on the walk to a project: held for lookups below it, never
+/// listed, so search permission is enough on Linux (`O_PATH`).
+#[cfg(target_os = "linux")]
+const ANCESTOR_FLAGS: libc::c_int =
+    libc::O_PATH | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+#[cfg(not(target_os = "linux"))]
+const ANCESTOR_FLAGS: libc::c_int = DIRECTORY_FLAGS;
 const TEMP_ATTEMPTS: usize = 8;
 
 /// What a project-relative name resolves to, without following symlinks.
@@ -91,6 +102,25 @@ impl ProjectRoot {
             path,
             _held: Some(held),
         })
+    }
+
+    /// The directory an open root holds at `path` (`None` if none does), as
+    /// a readable root with no cwd binding of its own: a confined door's lock
+    /// root is the tree tog opened, though renamed or replaced since (#498).
+    ///
+    /// The path it returns is canonical, as `open`'s is. A path that climbs
+    /// (`..`), or that reaches below a held root through a symlink, is not
+    /// a held spelling: it is resolved as it stands now and looked up again.
+    pub(crate) fn held_at(path: &Path) -> io::Result<Option<Self>> {
+        let Some((held, path)) = held_root_for(path)? else {
+            return Ok(None);
+        };
+        let dir = open_file_at(held.as_raw_fd(), b".", DIRECTORY_FLAGS, 0)?;
+        Ok(Some(Self {
+            _held: None,
+            dir,
+            path,
+        }))
     }
 
     /// The canonical project path, for messages. Every operation goes
@@ -623,7 +653,10 @@ impl ProjectRoot {
                 self.path.display()
             ))
         };
-        let now = match walk_from_root(&self.path) {
+        // Only the identity is compared, so the directory is not opened
+        // for reading again: a held ancestor that can be searched but not
+        // listed is still checked (#480).
+        let now = match walk_from_root_with(&self.path, ANCESTOR_FLAGS) {
             Ok(now) => now,
             Err(error) => {
                 return Err(moved(format!(
@@ -817,8 +850,20 @@ impl ProjectRoot {
         // The displayed name can become shallower than the actual directory
         // after a move. Only descriptor identity determines the end of a walk.
         let path = self.path.parent().unwrap_or(Path::new("/"));
-        let dir =
-            open_file_at(self.dir.as_raw_fd(), b"..", DIRECTORY_FLAGS, 0).map_err(|error| {
+        // A parent tog may search but not list (0111) is held the way the
+        // walk to a project holds it: files below it open by name, and
+        // nothing here lists it (#480).
+        let dir = open_file_at(self.dir.as_raw_fd(), b"..", DIRECTORY_FLAGS, 0)
+            .or_else(|error| {
+                if error.kind() == io::ErrorKind::PermissionDenied
+                    && ANCESTOR_FLAGS != DIRECTORY_FLAGS
+                {
+                    open_file_at(self.dir.as_raw_fd(), b"..", ANCESTOR_FLAGS, 0)
+                } else {
+                    Err(error)
+                }
+            })
+            .map_err(|error| {
                 io::Error::new(error.kind(), format!("open {}: {error}", path.display()))
             })?;
         if same_inode(&fd_stat(dir.as_raw_fd())?, &fd_stat(self.dir.as_raw_fd())?) {
@@ -1115,126 +1160,6 @@ fn split_relative(relative: &Path) -> io::Result<(Vec<&OsStr>, &OsStr)> {
     Ok((components, name))
 }
 
-/// The project directories open `ProjectRoot`s hold, by canonical path. A
-/// tool tog starts "in the project" is given a path (`DelegateSpec`'s lock
-/// root), and a process's working directory is only a path until the child
-/// enters it: a project swapped and restored between tog's open and that
-/// chdir would start the tool in the other directory. With this table the
-/// child enters the directory tog holds instead (`held_dir_for`).
-static HELD: std::sync::Mutex<Vec<(u64, PathBuf, RawFd)>> = std::sync::Mutex::new(Vec::new());
-
-/// One `HELD` row, removed when its root is dropped. The row names the
-/// root's own descriptor, not a duplicate: `ProjectRoot` drops this before
-/// its `dir`, and every use of the descriptor happens under the table's
-/// lock, so a row is never read after its descriptor closes.
-#[derive(Debug)]
-struct HeldEntry(u64);
-
-impl HeldEntry {
-    fn register(path: &Path, dir: &fs::File) -> Self {
-        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        held_table().push((id, path.to_path_buf(), dir.as_raw_fd()));
-        Self(id)
-    }
-}
-
-impl Drop for HeldEntry {
-    fn drop(&mut self) {
-        held_table().retain(|(id, _, _)| *id != self.0);
-    }
-}
-
-fn held_table() -> std::sync::MutexGuard<'static, Vec<(u64, PathBuf, RawFd)>> {
-    HELD.lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
-
-/// Resolve a child's cwd through every held root containing the requested
-/// path. All matching roots must identify the same directory. A failed or
-/// conflicting held lookup refuses execution instead of falling back to a
-/// replacement pathname. Paths outside all held roots keep normal behavior.
-fn held_dir_for(path: &Path) -> io::Result<Option<fs::File>> {
-    let absolute = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        std::env::current_dir()?.join(path)
-    };
-    let table = held_table();
-    let mut matches = held_matches(&table, &absolute);
-    if matches.is_empty() {
-        if let Ok(canonical) = absolute.canonicalize() {
-            matches = held_matches(&table, &canonical);
-        }
-    }
-    let mut selected: Option<(fs::File, libc::stat)> = None;
-    for (fd, below) in matches {
-        if fd_stat(fd)?.st_nlink == 0 {
-            return Err(io::Error::from_raw_os_error(libc::ESTALE));
-        }
-        let name = if below.as_os_str().is_empty() {
-            b".".to_vec()
-        } else {
-            input_name(&below)?
-        };
-        #[cfg(target_os = "linux")]
-        let flags = libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC;
-        #[cfg(not(target_os = "linux"))]
-        let flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC;
-        let directory = open_file_at(fd, &name, flags, 0)?;
-        let identity = fd_stat(directory.as_raw_fd())?;
-        if let Some((_, first)) = &selected {
-            if first.st_dev != identity.st_dev || first.st_ino != identity.st_ino {
-                return Err(io::Error::from_raw_os_error(libc::ESTALE));
-            }
-        } else {
-            selected = Some((directory, identity));
-        }
-    }
-    Ok(selected.map(|(directory, _)| directory))
-}
-
-/// Enter a held cwd directly in the child, without first resolving its old
-/// pathname. The descriptor belongs to the command and closes on exec.
-/// A held lookup refusal becomes a spawn error. The post-fork hooks only
-/// make async-signal-safe calls and construct raw errno errors.
-pub(crate) fn start_in(command: &mut std::process::Command, dir: &Path) {
-    use std::os::unix::process::CommandExt as _;
-    match held_dir_for(dir) {
-        Ok(Some(held)) => {
-            // std performs this chdir before pre_exec. It must not touch
-            // the replaceable project path or require that path to exist.
-            command.current_dir("/");
-            // SAFETY: fchdir is async-signal-safe and the closure owns its fd.
-            unsafe {
-                command.pre_exec(move || {
-                    if libc::fchdir(held.as_raw_fd()) != 0 {
-                        return Err(io::Error::last_os_error());
-                    }
-                    Ok(())
-                });
-            }
-        }
-        Ok(None) => {
-            command.current_dir(dir);
-        }
-        Err(error) => {
-            let errno = error.raw_os_error().unwrap_or(libc::ESTALE);
-            // SAFETY: this hook returns a raw errno without allocation.
-            unsafe {
-                command.pre_exec(move || Err(io::Error::from_raw_os_error(errno)));
-            }
-        }
-    }
-}
-
-fn held_matches(table: &[(u64, PathBuf, RawFd)], path: &Path) -> Vec<(RawFd, PathBuf)> {
-    table
-        .iter()
-        .filter_map(|(_, root, fd)| Some((*fd, path.strip_prefix(root).ok()?.to_path_buf())))
-        .collect()
-}
-
 /// A project-input name for `openat` from the held descriptor: not empty,
 /// not absolute, no NUL. Unlike `split_relative` it may climb or repeat a
 /// separator, since it is resolved by the kernel the way a pathname
@@ -1262,34 +1187,79 @@ fn input_name(relative: &Path) -> io::Result<Vec<u8>> {
 /// Open an absolute path from `/` one component at a time with O_NOFOLLOW,
 /// taking the components as given: nothing is canonicalized, so a symlink
 /// at any component is refused rather than resolved.
+///
+/// Only the last component is opened for reading. On Linux every ancestor
+/// is held as an `O_PATH` descriptor, which needs search permission alone,
+/// as the kernel's own lookup of the path would: a project under a
+/// search-only (0111) directory opens. Each ancestor is still opened with
+/// O_NOFOLLOW and O_DIRECTORY and checked to be a directory on its
+/// descriptor. Elsewhere every component is opened for reading.
 fn walk_from_root(path: &Path) -> io::Result<fs::File> {
+    walk_from_root_with(path, DIRECTORY_FLAGS)
+}
+
+/// `walk_from_root`, opening the last component with `last_flags`:
+/// `ANCESTOR_FLAGS` for a caller that only identifies the directory.
+fn walk_from_root_with(path: &Path, last_flags: libc::c_int) -> io::Result<fs::File> {
+    let components = path
+        .components()
+        .map(|component| match component {
+            std::path::Component::RootDir => Ok(None),
+            std::path::Component::Normal(name) => Ok(Some(name)),
+            _ => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{} is not a canonical absolute path", path.display()),
+            )),
+        })
+        .collect::<io::Result<Vec<_>>>()?;
+    let names: Vec<&std::ffi::OsStr> = components.into_iter().flatten().collect();
+    if !path.is_absolute() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{} is not a canonical absolute path", path.display()),
+        ));
+    }
     let root = CString::new("/").expect("no NUL");
+    let root_flags = if names.is_empty() {
+        last_flags
+    } else {
+        ANCESTOR_FLAGS
+    };
     // SAFETY: the path is a valid NUL-terminated string and the returned
     // descriptor is owned by the File below.
-    let fd = unsafe { libc::open(root.as_ptr(), DIRECTORY_FLAGS) };
+    let fd = unsafe { libc::open(root.as_ptr(), root_flags) };
     if fd < 0 {
         return Err(io::Error::last_os_error());
     }
     // SAFETY: fd was returned by open and ownership moves into File.
     let mut dir = unsafe { fs::File::from_raw_fd(fd) };
     let mut current = PathBuf::from("/");
-    for component in path.components() {
-        match component {
-            std::path::Component::RootDir => {}
-            std::path::Component::Normal(name) => {
-                current.push(name);
-                dir =
-                    open_directory_at(dir.as_raw_fd(), name.as_bytes(), &current, "open project")?;
-            }
-            _ => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!("{} is not a canonical absolute path", path.display()),
-                ))
-            }
+    for (index, name) in names.iter().enumerate() {
+        current.push(name);
+        let flags = if index + 1 == names.len() {
+            last_flags
+        } else {
+            ANCESTOR_FLAGS
+        };
+        dir = open_directory_with(
+            dir.as_raw_fd(),
+            name.as_bytes(),
+            &current,
+            "open project",
+            flags,
+        )?;
+        if !is_directory_stat(&fd_stat(dir.as_raw_fd())?) {
+            return Err(refusal(format!(
+                "{} is not a real directory; refusing to open project through it",
+                current.display()
+            )));
         }
     }
     Ok(dir)
+}
+
+fn is_directory_stat(stat: &libc::stat) -> bool {
+    stat.st_mode & libc::S_IFMT == libc::S_IFDIR
 }
 
 /// Rename `old` over `new` in one held directory only if `new` does not
@@ -1385,7 +1355,17 @@ fn open_directory_at(
     display: &Path,
     verb: &str,
 ) -> io::Result<fs::File> {
-    open_file_at(parent_fd, name, DIRECTORY_FLAGS, 0).map_err(|error| match error.raw_os_error() {
+    open_directory_with(parent_fd, name, display, verb, DIRECTORY_FLAGS)
+}
+
+fn open_directory_with(
+    parent_fd: RawFd,
+    name: &[u8],
+    display: &Path,
+    verb: &str,
+    flags: libc::c_int,
+) -> io::Result<fs::File> {
+    open_file_at(parent_fd, name, flags, 0).map_err(|error| match error.raw_os_error() {
         Some(libc::ELOOP) | Some(libc::ENOTDIR) => refusal(format!(
             "{} is not a real directory; refusing to {verb} through it",
             display.display()
@@ -1434,6 +1414,92 @@ mod tests {
         let dir = temp.0.join("proj");
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// `held_at` returns a canonical path whatever spelling it is asked
+    /// with: a climbing path is resolved to the held root it names, and a
+    /// path below a held root through a symlink is the symlink's target,
+    /// never a second name for it. A real subdirectory is held by its
+    /// parent's root (#498).
+    #[test]
+    fn held_at_returns_a_canonical_path_for_any_spelling() {
+        let temp = TempDir::named("held-at-spelling");
+        let dir = project(&temp).canonicalize().unwrap();
+        fs::create_dir(dir.join("child")).unwrap();
+        let outside = temp.0.canonicalize().unwrap().join("outside");
+        fs::create_dir(&outside).unwrap();
+        symlink(&outside, dir.join("link")).unwrap();
+        let _holder = ProjectRoot::open(&dir).unwrap();
+        let climbing = ProjectRoot::held_at(&dir.join("child/.."))
+            .unwrap()
+            .unwrap();
+        assert_eq!(climbing.path(), dir.as_path());
+        let child = ProjectRoot::held_at(&dir.join("child")).unwrap().unwrap();
+        assert_eq!(child.path(), dir.join("child").as_path());
+        // The symlink's target is outside every held root: not held, so
+        // the caller opens it by its canonical path as it always did.
+        assert!(ProjectRoot::held_at(&dir.join("link")).unwrap().is_none());
+        let via_link = ProjectRoot::held_at(&dir.join("link/../proj/child"));
+        assert_eq!(
+            via_link.unwrap().unwrap().path(),
+            dir.join("child").as_path()
+        );
+    }
+
+    /// Two held roots at one path that disagree about a directory below it
+    /// (a real directory in one, a symlink in the other) refuse, whichever
+    /// was opened first: the symlink is never resolved in place of the
+    /// directory the other root holds (#498).
+    #[test]
+    fn held_at_refuses_roots_that_disagree_through_a_symlink() {
+        for symlink_first in [false, true] {
+            let temp = TempDir::named("held-at-conflict");
+            let dir = project(&temp).canonicalize().unwrap();
+            let outside = temp.0.canonicalize().unwrap().join("outside");
+            fs::create_dir(&outside).unwrap();
+            let member = |real: bool| {
+                if real {
+                    fs::create_dir(dir.join("member")).unwrap();
+                } else {
+                    symlink(&outside, dir.join("member")).unwrap();
+                }
+            };
+            member(!symlink_first);
+            let _first = ProjectRoot::open(&dir).unwrap();
+            fs::rename(&dir, temp.0.join("moved")).unwrap();
+            fs::create_dir(&dir).unwrap();
+            member(symlink_first);
+            let _second = ProjectRoot::open(&dir).unwrap();
+            let error = ProjectRoot::held_at(&dir.join("member")).unwrap_err();
+            assert_eq!(error.raw_os_error(), Some(libc::ESTALE), "{symlink_first}");
+        }
+    }
+
+    /// `held_at` finds the directory an open root holds at a path, by that
+    /// path's held spelling, even after the project is renamed and another
+    /// put in its place. The root it returns has its own descriptor, so it
+    /// outlives the holder, and adds no binding of its own (#498).
+    #[test]
+    fn held_at_reads_the_held_directory_and_outlives_its_holder() {
+        let temp = TempDir::named("held-at");
+        let dir = project(&temp).canonicalize().unwrap();
+        fs::write(dir.join("marker"), "held").unwrap();
+        assert!(ProjectRoot::held_at(&dir).unwrap().is_none());
+        let holder = ProjectRoot::open(&dir).unwrap();
+        fs::rename(&dir, temp.0.join("moved")).unwrap();
+        fs::create_dir(&dir).unwrap();
+        fs::write(dir.join("marker"), "decoy").unwrap();
+        let found = ProjectRoot::held_at(&dir).unwrap().unwrap();
+        assert_eq!(found.path(), dir.as_path());
+        drop(holder);
+        assert!(ProjectRoot::held_at(&dir).unwrap().is_none());
+        assert_eq!(
+            found
+                .read_input_string(Path::new("marker"))
+                .unwrap()
+                .as_deref(),
+            Some("held")
+        );
     }
 
     /// A child started in a held project's path enters the held directory:
@@ -1735,6 +1801,42 @@ mod tests {
             error.to_string().contains("not a real directory"),
             "{error}"
         );
+    }
+
+    /// A project under a search-only (0111) directory is reachable by its
+    /// name, as the kernel's own lookup reaches it: it opens, and its
+    /// recorded path still names it at publication.
+    #[test]
+    fn a_project_under_a_search_only_ancestor_opens() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let temp = TempDir::new();
+        let parent = temp.0.join("search-only");
+        let dir = parent.join("proj");
+        fs::create_dir_all(&dir).unwrap();
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o111)).unwrap();
+        let opened = ProjectRoot::open(&dir).and_then(|root| {
+            root.write_file(Path::new(".tog/plan.json"), b"x")?;
+            root.check_still_named()?;
+            root.read_file(Path::new(".tog/plan.json"))
+        });
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(opened.unwrap().as_deref(), Some(&b"x"[..]));
+    }
+
+    /// The walk from `/` holds ancestors without reading them, but never
+    /// through a symlink: a recorded path whose ancestor became one fails.
+    #[test]
+    fn the_walk_refuses_an_ancestor_that_is_a_symlink() {
+        let temp = TempDir::new();
+        let real = temp.0.join("real");
+        fs::create_dir_all(real.join("proj")).unwrap();
+        symlink(&real, temp.0.join("link")).unwrap();
+        let error = walk_from_root(&temp.0.join("link/proj")).unwrap_err();
+        assert!(
+            error.to_string().contains("not a real directory"),
+            "{error}"
+        );
+        walk_from_root(&real.join("proj")).unwrap();
     }
 
     #[test]

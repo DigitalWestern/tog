@@ -332,6 +332,7 @@ fn open_by_components(dirfd: RawFd, relative: &Path) -> io::Result<fs::File> {
 mod tests {
     use super::*;
     use crate::kernel::activity::ActivityMode;
+    use crate::kernel::fsroot::ProjectRoot;
     use crate::kernel::resolve::snapshot::SnapshotSpec;
     use crate::kernel::testutil::TempDir;
     use std::os::unix::fs::{symlink, PermissionsExt};
@@ -357,7 +358,7 @@ mod tests {
             store,
             &activity,
             &SnapshotSpec {
-                lock_root: dir,
+                lock_root: &ProjectRoot::open(dir).unwrap(),
                 extra_roots: &[],
                 exclude: &[],
                 forbidden: &[],

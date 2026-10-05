@@ -185,6 +185,20 @@ pub fn read_pyproject_requires_python(bytes: &[u8]) -> io::Result<Option<String>
     }
 }
 
+/// `setup.cfg`: `[options] python_requires = >=3.9`, read by the parser the
+/// Python tailor reads the file with.
+fn read_setup_cfg_python(bytes: &[u8]) -> Option<String> {
+    let text = std::str::from_utf8(bytes).ok()?;
+    crate::kernel::setuptools::parse_setup_cfg(text).python_requires
+}
+
+/// `setup.py`: a literal `python_requires="..."`, found by a static scan.
+/// The file is never run, so a computed value is not seen.
+fn read_setup_py_python(bytes: &[u8]) -> Option<String> {
+    let text = std::str::from_utf8(bytes).ok()?;
+    crate::kernel::setuptools::extract_setup_py_python_requires(text)
+}
+
 /// `pyproject.toml`: `[tool.poetry.dependencies] python = "^3.9"`, or the
 /// table spelling `python = { version = "^3.9" }`. Any other shape is
 /// refused, as Python's own input check refuses it.
@@ -621,6 +635,13 @@ pub fn discover(root: &ProjectRoot, ecosystem: &str) -> io::Result<Vec<InputRow>
                 "tool.poetry.dependencies.python",
                 read_pyproject_poetry_python,
             )?,
+            row_for(
+                root,
+                "setup.cfg",
+                "options.python_requires",
+                read_setup_cfg_python,
+            )?,
+            row_for(root, "setup.py", "python_requires", read_setup_py_python)?,
         ],
         "node" => vec![
             row_for(root, ".node-version", "version", read_node_version)?,
@@ -1223,6 +1244,30 @@ mod tests {
     }
 
     #[test]
+    fn discovery_reads_setuptools_python_requires() {
+        let (temp, root) = project();
+        let dir = temp.0.join("proj");
+        std::fs::write(
+            dir.join("setup.cfg"),
+            "[options]\npython_requires = >=3.9, <3.12\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("setup.py"),
+            "from setuptools import setup\nsetup(name=\"x\", python_requires=\">=3.10\")\n",
+        )
+        .unwrap();
+        let rows = discover(&root, "python").unwrap();
+        let value = |path: &str| {
+            rows.iter()
+                .find(|row| row.path == Path::new(path))
+                .and_then(|row| row.value.clone())
+        };
+        assert_eq!(value("setup.cfg").as_deref(), Some(">=3.9, <3.12"));
+        assert_eq!(value("setup.py").as_deref(), Some(">=3.10"));
+    }
+
+    #[test]
     fn discovery_follows_the_precedence_table() {
         let (_temp, root) = project();
         let consulted = |ecosystem: &str| -> Vec<(String, String)> {
@@ -1243,6 +1288,8 @@ mod tests {
                 (".python-version", "version"),
                 ("pyproject.toml", "project.requires-python"),
                 ("pyproject.toml", "tool.poetry.dependencies.python"),
+                ("setup.cfg", "options.python_requires"),
+                ("setup.py", "python_requires"),
             ])
         );
         assert_eq!(

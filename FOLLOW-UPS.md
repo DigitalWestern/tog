@@ -53,10 +53,7 @@ None open.
 - **#464: macOS supervision: deferred notification-pipe initialization and validation.** macOS supervision initialization and validation. Deferred by the owner on 2026-10-04.
 - **#465: heavy: audit shared state before allowing parallel ignored suites.** audit shared state before running ignored suites in parallel. Keep --test-threads=1 until local evidence supports removal.
 - **#466: ci: GitHub Actions job startup blocked by account billing or spending limit.** Actions jobs cannot start because of account billing or spending-limit restrictions. Pick: owner repairs account access, use documented local checks meanwhile.
-- **#487: registry tools outside locked project ecosystems.** Use a shipped primary runtime when that ecosystem is absent, while honoring project build helpers and preserving missing-section refusals for detected ecosystems.
-- **#494: first Python lock and setup constraints.** Include safely parsed setup.cfg and literal setup.py Python constraints in first-lock selection and freshness checks. Preserve explicit versions and existing locks.
 - **#495: explicit Python package sources.** Define per-package source and metadata-build trust rules for PyTorch-style indexes. Keep undeclared indexes refused until that design ships.
-- **#480: searchable project ancestors.** Let descriptor traversal and publication revalidation use search access without requiring ancestor directory listings. Pick: O_PATH for intermediate Linux components while preserving identity checks.
 - **#469: root removal identity.** Carry the decoded record's device/inode and held directory through deletion. Refuse replacements, including directory entries.
 - **Action leftovers (#427).** Left: the first tag that carries
   `action.yml`. At that tag, change `@main` in `action.yml`'s header and in
@@ -165,10 +162,8 @@ None open.
   clears this.
 
 - **Held project mounts (#497).** Sandbox mounts still resolve project paths. Bind the held directory through a descriptor rather than accepting a replacement at that name. See `src/kernel/sandbox/`.
-- **Held confined snapshots (#498).** Confined snapshot creation still reopens the project path. Carry the held root into the snapshot walk. See `src/kernel/resolve/confine/`.
-- **Tool-opened absolute inputs (#499).** Delegated tools can reopen absolute arguments and environment paths, including `BUNDLE_GEMFILE`. Choose a held input or an immutable snapshot for each such input.
+- **Tool-opened absolute inputs (#499).** Bundler and uv now name project inputs relative to the held directory. Cargo's `--manifest-path` (`src/kernel/provider/crates.rs`) and external absolute requirements files still reopen a path. Name the manifest relative to the held cwd, and give external files a held input or a snapshot.
 
-- **Machine policy descriptor (#500).** Read and identify `TOG_POLICY` or the home policy from one opened file, so replacement cannot mix policy bytes with another inode during deduplication. See `src/kernel/policy.rs`.
 
 - **External requirements consistency (#501).** Select external absolute Python requirements once across command stages, using held input descriptors or immutable snapshots. Preserve existing supported external requirements. See `src/comforter/status.rs` and `src/tailors/python/inputs.rs`.
 
@@ -184,3 +179,4 @@ None open.
 - **Provider selection checks (#509).** Share recipe, runtime, and digest checks in the remaining CPython, Rust, and Rust-path providers.
 - **#524: tests: gaps found in the review of #459 to #496.** e2e children that keep the caller's environment, the tar call-site scan, a subkey signature case, three node tests under `TOG_STRICT=1`. One checklist.
 - **#525: review follow-ups from #474 to #492.** Small hardening items: one Elixir preflight, old project records, `STOPPED_BY`, links in an object's `bin/`, `meta/` listing and read cap, the silent digest skip. One checklist.
+- **#527: tests: gaps found in the review of #526.** Machine policy inode reuse, ecosystems and lock from one root, real uv and Bundler after a swap, detached publication after a rename, the other ancestor walkers under a search-only directory. One checklist.

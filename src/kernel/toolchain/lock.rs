@@ -760,9 +760,13 @@ pub fn stale_rows(recorded: &[InputRow], current: &[InputRow]) -> Vec<StaleRow> 
     }
     for row in current {
         let (path, field) = key(row);
-        if !recorded
-            .iter()
-            .any(|other| key(other) == (path.clone(), field.clone()))
+        // A row the lock never recorded (a source a later tog consults)
+        // changes nothing while it states no value: only one that asks for
+        // something makes the lock stale.
+        if row.value.is_some()
+            && !recorded
+                .iter()
+                .any(|other| key(other) == (path.clone(), field.clone()))
         {
             out.push(StaleRow {
                 path,
@@ -1434,6 +1438,23 @@ digest = "sha256:855d581f8a4eb1a8117e3426de25fe02770592febcfb31369aee1ffbfee9e8e
             None,
         )];
         assert!(stale_rows(&absent, &recorded[1..2]).is_empty());
+        // A source the lock never recorded (one a later tog consults) leaves
+        // the lock fresh while it states nothing, and stales it once it does.
+        let later = [input("setup.py", "python_requires", None, None)];
+        assert!(stale_rows(&recorded[..1], &[&recorded[..1], &later[..]].concat()).is_empty());
+        let stated = [input(
+            "setup.py",
+            "python_requires",
+            Some("<3.12"),
+            Some(&"f".repeat(64)),
+        )];
+        assert_eq!(
+            stale_rows(&recorded[..1], &[&recorded[..1], &stated[..]].concat())
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>(),
+            ["setup.py python_requires: recorded absent, now <3.12"]
+        );
     }
 
     #[test]

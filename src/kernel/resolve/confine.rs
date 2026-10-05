@@ -1074,7 +1074,17 @@ impl Mounts {
         };
         let executable = fs::canonicalize(run.executable)?;
         let scratch = fs::canonicalize(run.snapshot.scratch())?;
-        let cwd = fs::canonicalize(run.cwd)?;
+        // A snapshot root's real path is canonical by construction and only
+        // names the staged copy inside the sandbox: the project it was held
+        // from may have been renamed since (#498), so it is not resolved on
+        // the host again. Only the root itself is taken as given. A path
+        // below one may cross a symlink the project contains, so it is
+        // still canonicalized, and one that leaves the snapshot is refused.
+        let cwd = if snapshot_roots.iter().any(|root| run.cwd == root.as_path()) {
+            run.cwd.to_path_buf()
+        } else {
+            fs::canonicalize(run.cwd)?
+        };
         if !snapshot_roots
             .iter()
             .chain(std::iter::once(&scratch))

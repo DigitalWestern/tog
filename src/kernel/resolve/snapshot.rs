@@ -30,6 +30,7 @@
 
 use super::confine::FileId;
 use crate::kernel::activity::StoreActivity;
+use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::store::{self, Store};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -157,8 +158,10 @@ pub struct Change {
 
 /// What the snapshot is built from.
 pub struct SnapshotSpec<'a> {
-    /// The lock root: the project, or the workspace root.
-    pub lock_root: &'a Path,
+    /// The lock root: the project, or the workspace root. It is copied
+    /// through this held descriptor, so a directory swapped in at its path
+    /// is never the tree snapshotted (#498).
+    pub lock_root: &'a ProjectRoot,
     /// Project-side read roots outside the lock root (an out-of-root path
     /// dependency). Store objects are not snapshotted; they are bound
     /// read-only as they are.
@@ -214,7 +217,7 @@ impl Snapshot {
         spec: &SnapshotSpec<'_>,
     ) -> io::Result<Snapshot> {
         store.require_activity(activity, "resolution snapshot")?;
-        let (reals, lock_root) = normalize_roots(spec.lock_root, spec.extra_roots)?;
+        let (reals, lock_root) = normalize_roots(spec.lock_root.path(), spec.extra_roots)?;
         let stage = create_private_dir(&store.root.join("tmp"), "resolve")?;
         let mut snapshot = Snapshot {
             scratch: stage.join("scratch"),
@@ -227,7 +230,7 @@ impl Snapshot {
         fs::DirBuilder::new()
             .mode(0o700)
             .create(&snapshot.scratch)?;
-        for real in reals {
+        for (index, real) in reals.into_iter().enumerate() {
             let staged = snapshot.staged_path(&real);
             let parent = staged.parent().expect("a staged root has a parent");
             fs::DirBuilder::new()
@@ -239,7 +242,8 @@ impl Snapshot {
                 entries: &mut snapshot.baseline,
                 forbidden: spec.forbidden,
             };
-            walk.copy_root(&real, &staged)?;
+            let held = (index == lock_root).then_some(spec.lock_root);
+            walk.copy_root(&real, held, &staged)?;
             snapshot.roots.push(Root { real, staged });
         }
         Ok(snapshot)
@@ -509,7 +513,9 @@ fn normalize_roots(lock_root: &Path, extra: &[PathBuf]) -> io::Result<(Vec<PathB
             )
         })
     };
-    let lock = canonical(lock_root)?;
+    // The lock root's path is the canonical one its held root was opened
+    // at. It is not resolved again: that would name whatever is there now.
+    let lock = lock_root.to_path_buf();
     let mut all = vec![lock.clone()];
     for root in extra {
         // An extra root arrives as the canonical path its caller checked
@@ -681,9 +687,18 @@ impl Walk<'_> {
         self.exclude.iter().any(|glob| glob.matches(relative))
     }
 
-    /// Copy `real` into `staged` (which must not exist yet).
-    fn copy_root(&mut self, real: &Path, staged: &Path) -> io::Result<()> {
-        let source = open_dir_no_symlinks(real)?;
+    /// Copy `real` into `staged` (which must not exist yet): through
+    /// `held` when the caller holds it, else opened by path.
+    fn copy_root(
+        &mut self,
+        real: &Path,
+        held: Option<&ProjectRoot>,
+        staged: &Path,
+    ) -> io::Result<()> {
+        let source = match held {
+            Some(root) => open_dir_at(root.as_raw_fd(), b".")?,
+            None => open_dir_no_symlinks(real)?,
+        };
         let mode = store::fd_stat(source.as_raw_fd())?.st_mode as u32 & 0o777;
         let parent = open_dir(staged.parent().expect("staged root has a parent"))?;
         let name = staged.file_name().expect("staged root has a name");
@@ -976,7 +991,7 @@ mod tests {
             store,
             &activity,
             &SnapshotSpec {
-                lock_root,
+                lock_root: &ProjectRoot::open(lock_root).unwrap(),
                 extra_roots: &[],
                 exclude,
                 forbidden: &[],
@@ -1099,7 +1114,7 @@ mod tests {
             &store,
             &activity,
             &SnapshotSpec {
-                lock_root: &dir,
+                lock_root: &ProjectRoot::open(&dir).unwrap(),
                 extra_roots: &[],
                 exclude: &[],
                 forbidden: &forbidden,
@@ -1331,7 +1346,7 @@ mod tests {
             &store,
             &activity,
             &SnapshotSpec {
-                lock_root: &dir,
+                lock_root: &ProjectRoot::open(&dir).unwrap(),
                 extra_roots: &[lib.clone(), inside],
                 exclude: &[],
                 forbidden: &[],
@@ -1381,7 +1396,7 @@ mod tests {
                 &store,
                 &activity,
                 &SnapshotSpec {
-                    lock_root: &dir,
+                    lock_root: &ProjectRoot::open(&dir).unwrap(),
                     extra_roots: &[root.to_path_buf()],
                     exclude: &[],
                     forbidden: &[],

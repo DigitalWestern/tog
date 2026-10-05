@@ -1357,19 +1357,12 @@ mod tests {
                 &mut attribution,
             );
             attribution.finish(result.is_ok()).unwrap();
-            if root_case
-                || matches!(
-                    shape,
-                    "renamed-member" | "damaged-member" | "search-only-parent"
-                )
-            {
+            if root_case || matches!(shape, "renamed-member" | "damaged-member") {
                 let error = result.unwrap_err().to_string();
                 let expected = if matches!(shape, "corrupt-index" | "damaged-member") {
                     "cannot check Git-tracked source"
                 } else if shape == "renamed-member" {
                     "the project directory was moved or replaced"
-                } else if shape == "search-only-parent" {
-                    "the project directory was moved or became unreadable"
                 } else {
                     "node_modules holds files git tracks"
                 };

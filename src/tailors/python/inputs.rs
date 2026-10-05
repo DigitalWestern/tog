@@ -21,6 +21,10 @@ pub const PLANNER_SCHEMA: &str = "python-planner/3";
 const PLAN_CACHE: &str = ".tog/plan.json";
 const MANIFEST_REQUIREMENTS: &str = ".tog/manifest-requirements.txt";
 const MANIFEST_CONSTRAINTS: &str = ".tog/manifest-constraints.txt";
+/// How the generated requirements name the constraints beside them: uv reads
+/// a `-c` path relative to the file that names it, so it is the held
+/// project's file (#499).
+const MANIFEST_CONSTRAINTS_NAME: &str = "manifest-constraints.txt";
 const LOCK_STAMP: &str = ".tog/lock-source.hash";
 
 pub fn planner_input_hash(
@@ -205,15 +209,13 @@ pub fn read_plan(
         // refused rather than followed.
         let path = dir.join(MANIFEST_REQUIREMENTS);
         let mut text = if manifest.has_constraints() {
-            let constraints = dir.join(MANIFEST_CONSTRAINTS);
             project.write_file(
                 Path::new(MANIFEST_CONSTRAINTS),
                 manifest.constraints_text().as_bytes(),
             )?;
             format!(
-                "{}-c {}\n",
+                "{}-c {MANIFEST_CONSTRAINTS_NAME}\n",
                 manifest.normalized_requirements_text(),
-                constraints.display()
             )
         } else {
             resolver_source.clone()
@@ -416,7 +418,14 @@ pub fn locked_requirements(
     // Store-pinned uv, not host uv: a bare machine needs only tog.
     let uv = python::realize_uv(door.store(), door.lease(), door.platform(), selected)?.join("uv");
     let python = python::uv_interpreter(door.store(), door.lease(), door.platform(), selected)?;
-    let compile_input = compile_path.and_then(|path| path.to_str()).unwrap_or(input);
+    // uv starts inside the held project directory, so an input in the
+    // project is named relative to it: a directory swapped in at the
+    // project's path is never the one read (#499). An external
+    // requirements file keeps its own path.
+    let compile_input = compile_path
+        .map(|path| path.strip_prefix(dir).unwrap_or(path))
+        .and_then(Path::to_str)
+        .unwrap_or(input);
     let mut spec = DelegateSpec::new(&uv);
     spec.args(["pip", "compile", compile_input, "--generate-hashes"]);
     if !ui::verbose() {
@@ -627,7 +636,7 @@ mod tests {
         let uv = staged.join("uv");
         std::fs::write(
             &uv,
-            "#!/bin/sh\necho \"$@\" > uv-args.txt\n\
+            "#!/bin/sh\necho \"$@\" > uv-args.txt\ncp \"$3\" uv-input.txt\n\
              echo 'six==1.17.0 --hash=sha256:aaaa' > requirements.lock.txt\n",
         )
         .unwrap();
@@ -702,6 +711,41 @@ mod tests {
             std::fs::read_dir(&outside).unwrap().next().is_none(),
             "wrote the lock stamp through the symlinked .tog"
         );
+    }
+
+    /// uv starts inside the held project directory and is handed the
+    /// requirements relative to it, so a directory swapped in at the
+    /// project's path is never the one compiled (#499).
+    #[test]
+    fn uv_compiles_the_held_project_inputs_after_a_swap() {
+        let temp = crate::kernel::testutil::TempDir::new();
+        let project_dir = temp.0.join("proj");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        std::fs::write(project_dir.join("requirements.txt"), "six==1.17.0\n").unwrap();
+        let store = store_with_stub_uv(&temp.0.join("store"));
+        let project = ProjectRoot::open(&project_dir).unwrap();
+        let held = temp.0.join("held");
+        std::fs::rename(&project_dir, &held).unwrap();
+        std::fs::create_dir_all(&project_dir).unwrap();
+        std::fs::write(project_dir.join("requirements.txt"), "decoy==1.0\n").unwrap();
+
+        let _ = read_plan(
+            &project,
+            &selected(),
+            &mut crate::kernel::testutil::DoorScope::new().door(
+                &store,
+                &test_activity(&store),
+                Platform::host().unwrap(),
+                crate::kernel::resolve::DoorKind::Planner,
+            ),
+        );
+        let args = std::fs::read_to_string(held.join("uv-args.txt")).unwrap();
+        assert!(args.starts_with("pip compile requirements.txt "), "{args}");
+        assert_eq!(
+            std::fs::read_to_string(held.join("uv-input.txt")).unwrap(),
+            "six==1.17.0\n"
+        );
+        assert!(!project_dir.join("uv-args.txt").exists());
     }
 
     /// A `setup.py egg_info` probe that cannot run must not abort planning:

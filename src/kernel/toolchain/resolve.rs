@@ -248,6 +248,15 @@ fn engines_node(text: &str) -> io::Result<Vec<VersionRequest>> {
     Ok(vec![VersionRequest::AnyOf(alternatives)])
 }
 
+/// The rows that state a Python version as PEP 440 or Poetry specifiers,
+/// each intersected into the request.
+const PYTHON_SPECIFIER_ROWS: [(&str, &str); 4] = [
+    ("pyproject.toml", "project.requires-python"),
+    ("pyproject.toml", "tool.poetry.dependencies.python"),
+    ("setup.cfg", "options.python_requires"),
+    ("setup.py", "python_requires"),
+];
+
 /// The selection request an ecosystem's consulted rows state. `ecosystem`
 /// is the toolchain-input name (`python`, `node`, `rust`, `go`, `ruby`,
 /// `elixir`, `dotnet`); `rows` come from `input::discover` in its order.
@@ -258,8 +267,8 @@ pub fn request_for(ecosystem: &str, rows: &[InputRow]) -> io::Result<Request> {
             if let Some(text) = value(rows, ".python-version", "version") {
                 request = request.with("cpython", python_version_request(text)?);
             }
-            for field in ["project.requires-python", "tool.poetry.dependencies.python"] {
-                if let Some(text) = value(rows, "pyproject.toml", field) {
+            for (path, field) in PYTHON_SPECIFIER_ROWS {
+                if let Some(text) = value(rows, path, field) {
                     if let Some(specifiers) = python_specifiers(field, text)? {
                         request = request.with("cpython", specifiers);
                     }
@@ -553,6 +562,34 @@ mod tests {
         for text in ["*", " * ", "^3.9 || *"] {
             assert_eq!(request("python", &poetry(text)), "newest", "{text}");
         }
+    }
+
+    /// A setuptools project states its Python in `setup.cfg` or `setup.py`,
+    /// and the first lock honors it (#494) rather than taking the newest.
+    #[test]
+    fn python_honors_setuptools_python_requires() {
+        let catalog = catalog("python", "cpython", &["3.11.9", "3.12.14", "3.13.15"]);
+        for (path, field) in [
+            ("setup.cfg", "options.python_requires"),
+            ("setup.py", "python_requires"),
+        ] {
+            let rows = vec![row(path, field, Some(">=3.9,<3.12"))];
+            assert_eq!(request("python", &rows), "cpython >=3.9,<3.12", "{path}");
+            assert_eq!(
+                select_for(&catalog, "python", &rows).unwrap().release,
+                "cpython-3.11.9",
+                "{path}"
+            );
+        }
+        // An explicit `.python-version` still narrows alongside it.
+        let rows = vec![
+            row(".python-version", "version", Some("3.11")),
+            row("setup.py", "python_requires", Some(">=3.9")),
+        ];
+        assert_eq!(
+            select_for(&catalog, "python", &rows).unwrap().release,
+            "cpython-3.11.9"
+        );
     }
 
     /// The lock reads Python constraints with the grammar interpreter
