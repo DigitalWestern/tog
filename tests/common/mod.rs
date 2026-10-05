@@ -122,12 +122,14 @@ pub fn child(program: impl AsRef<std::ffi::OsStr>, home: &Path) -> Command {
     scrubbed(Command::new(program), home)
 }
 
-/// Drop the developer's `TOG_*` and `GIT_*` variables and point `HOME`
-/// and git's config at the scratch world. `GIT_*` goes whole: under a git
-/// hook `GIT_DIR` and `GIT_INDEX_FILE` aim a fixture's `git commit` at the
-/// developer's own repository, and `GIT_CONFIG_COUNT` or
+/// Drop the developer's `TOG_*` and `GIT_*` variables and `CI` (which
+/// changes what `tog audit` does, and GitHub's runner sets), and point
+/// `HOME` and git's config at the scratch world. `GIT_*` goes whole: under
+/// a git hook `GIT_DIR` and `GIT_INDEX_FILE` aim a fixture's `git commit`
+/// at the developer's own repository, and `GIT_CONFIG_COUNT` or
 /// `GIT_CONFIG_PARAMETERS` carry config no config file setting overrides.
 fn scrubbed(mut command: Command, home: &Path) -> Command {
+    command.env_remove("CI");
     for (name, _) in std::env::vars_os() {
         let leaks = name.to_str().is_some_and(|name| {
             (name.starts_with("TOG_") && name != "TOG_SANDBOX_TESTS") || name.starts_with("GIT_")

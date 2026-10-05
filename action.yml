@@ -17,7 +17,7 @@
 # Linux x86_64 only, the one platform release.yml builds. docs/human/CLI.md
 # "Gating a pull request with sync and audit" explains what each step
 # decides; .github/workflows/action.yml runs this file against
-# tests/fixtures/action-demo.
+# .github/action-demo.
 name: tog
 description: Set up a project with tog under a policy, audit it, and write an SBOM
 author: DigitalWestern
@@ -54,9 +54,10 @@ inputs:
     default: "false"
   audit:
     description: >-
-      'true' runs 'tog audit' after the sync, 'signed' runs 'tog audit
-      --signed' (the policy must then carry a [signing] table), 'false'
-      skips it.
+      'true' runs 'tog audit --allow-unsigned' after the sync (signatures
+      are checked when the policy carries a [signing] table, and not
+      otherwise), 'signed' runs 'tog audit --signed' (the policy must then
+      carry a [signing] table), 'false' skips it.
     default: "true"
   signing-key:
     description: >-
@@ -74,6 +75,14 @@ inputs:
   sbom-artifact:
     description: Name of the uploaded SBOM artifact.
     default: sbom
+  cache:
+    description: >-
+      'true' keeps tog's store (the toolchains and packages it downloaded)
+      in the GitHub Actions cache between runs, keyed on the tog version
+      and the project's lockfiles. tog does not re-hash a store it opens,
+      so turn this on only where every run that can save the cache is
+      trusted: not in a 'pull_request_target' workflow.
+    default: "false"
   sandbox:
     description: >-
       'true' makes the Linux build sandbox usable: installs bubblewrap when
@@ -103,6 +112,7 @@ runs:
         TOG_ACTION_STRICT: ${{ inputs.strict }}
         TOG_ACTION_UPLOAD_SBOM: ${{ inputs.upload-sbom }}
         TOG_ACTION_SANDBOX: ${{ inputs.sandbox }}
+        TOG_ACTION_CACHE: ${{ inputs.cache }}
         TOG_ACTION_AUDIT: ${{ inputs.audit }}
         TOG_ACTION_POLICY: ${{ inputs.policy }}
         TOG_ACTION_SBOM: ${{ inputs.sbom }}
@@ -120,6 +130,7 @@ runs:
         switch strict "$TOG_ACTION_STRICT"
         switch upload-sbom "$TOG_ACTION_UPLOAD_SBOM"
         switch sandbox "$TOG_ACTION_SANDBOX"
+        switch cache "$TOG_ACTION_CACHE"
         case "$TOG_ACTION_AUDIT" in
           true | signed | false) ;;
           *) echo "::error::audit must be 'true', 'signed' or 'false', not '$TOG_ACTION_AUDIT'"; bad=1 ;;
@@ -220,7 +231,40 @@ runs:
           echo "::error::policy file $policy does not exist"
           exit 1
         fi
-        echo "TOG_POLICY=$policy" >> "$GITHUB_ENV"
+        # Under `uses: ./` the action path is spelled `<workspace>/./`.
+        echo "TOG_POLICY=$(realpath "$policy")" >> "$GITHUB_ENV"
+
+    # The store as an earlier run left it. The key names the tog version,
+    # since a store written by another version can be refused, and the
+    # project's toolchain file and lockfiles. Any older store of the same
+    # version is restored when those changed: most of it is still used.
+    # GitHub keeps a pull request's saved caches to that pull request, so
+    # a run on main never restores one.
+    - name: Store cache key
+      id: cache-key
+      if: inputs.cache == 'true'
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        set -euo pipefail
+        version=$(tog --version | tr -cs 'A-Za-z0-9.' '-')
+        prefix="tog-store-$RUNNER_OS-$(uname -m)-${version%-}-"
+        digest=$(find . \( -name .git -o -name node_modules -o -name .venv -o -name target -o -name .tog \) -prune \
+          -o -type f \( -name tog-toolchain.toml -o -name '*.lock' -o -name package-lock.json \
+          -o -name pnpm-lock.yaml -o -name go.sum -o -name 'requirements*.txt' -o -name packages.lock.json \) \
+          -print0 | LC_ALL=C sort -z | xargs -0 -r sha256sum | sha256sum | cut -c1-32)
+        echo "prefix=$prefix" >> "$GITHUB_OUTPUT"
+        echo "key=$prefix$digest" >> "$GITHUB_OUTPUT"
+        echo "path=${TOG_STORE:-$HOME/.tog/store}" >> "$GITHUB_OUTPUT"
+
+    - name: Restore the store
+      id: cache
+      if: inputs.cache == 'true'
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ steps.cache-key.outputs.path }}
+        key: ${{ steps.cache-key.outputs.key }}
+        restore-keys: ${{ steps.cache-key.outputs.prefix }}
 
     # A denied exception fails here, while the environment is built. The
     # key is written under umask 077 and removed whether the sync passed or
@@ -261,9 +305,31 @@ runs:
         set -euo pipefail
         if [ "$TOG_ACTION_AUDIT" = signed ]; then
           tog audit --signed
+        elif tog audit --help | grep -q -- --allow-unsigned; then
+          # Under CI a plain audit with no trusted keys exits 2; 'true'
+          # asked for the audit with signatures optional.
+          tog audit --allow-unsigned
         else
+          # v0.1.0 predates the flag, and judges unsigned records as is.
           tog audit
         fi
+
+    # Saved after a sync and an audit that passed, so a denied build saves
+    # nothing. A store restored from older lockfiles is swept first: what
+    # no project roots any more is not carried into the next run.
+    - name: Sweep the store before saving it
+      if: inputs.cache == 'true' && steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+        tog gc || echo "::warning::'tog gc' could not sweep the store; it is saved as it is"
+
+    - name: Save the store
+      if: inputs.cache == 'true' && steps.cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ steps.cache-key.outputs.path }}
+        key: ${{ steps.cache-key.outputs.key }}
 
     - name: SBOM
       id: sbom

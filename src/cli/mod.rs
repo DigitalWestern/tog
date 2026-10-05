@@ -155,12 +155,15 @@ pub enum Command {
     Status {
         json: bool,
     },
-    /// `audit [--policy <file>] [--signed] [--json]`: judge the recorded
-    /// closures against the policy chain unioned with `policy`. `signed`
-    /// refuses to run unless the machine policy trusts signing keys.
+    /// `audit [--policy <file>] [--signed | --allow-unsigned] [--json]`:
+    /// judge the recorded closures against the policy chain unioned with
+    /// `policy`. `signed` refuses to run unless the machine policy trusts
+    /// signing keys; so does a plain audit under CI, unless
+    /// `allow_unsigned`.
     Audit {
         policy: Option<PathBuf>,
         signed: bool,
+        allow_unsigned: bool,
         json: bool,
     },
     Ls {

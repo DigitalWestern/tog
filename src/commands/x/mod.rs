@@ -55,6 +55,8 @@ pub struct CleanRequest {
 }
 
 const X_REQUEST_FILE: &str = ".tog/x.json";
+/// [`X_REQUEST_FILE`]'s name inside `.tog`.
+const X_REQUEST_NAME: &str = "x.json";
 const X_LOCKS_DIR: &str = ".locks";
 
 fn other(message: impl Into<String>) -> io::Error {
@@ -588,6 +590,25 @@ fn read_x_request(root: &Path) -> Option<XRecord> {
         .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
         .open(&path)
         .ok()?;
+    parse_x_request(file)
+}
+
+/// [`read_x_request`] below a held root directory: `.tog` and the record
+/// are each opened without following a symlink, so a rename of the root's
+/// pathname cannot make this read another root's record.
+fn read_x_request_in(root: &fs::File) -> Option<XRecord> {
+    let tog = store::open_directory_at(root.as_raw_fd(), b".tog").ok()?;
+    let file = store::open_file_at(
+        tog.as_raw_fd(),
+        X_REQUEST_NAME.as_bytes(),
+        libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
+        0,
+    )
+    .ok()?;
+    parse_x_request(file)
+}
+
+fn parse_x_request(file: fs::File) -> Option<XRecord> {
     let stat = file.metadata().ok()?;
     if !stat.is_file() {
         return None;
@@ -1507,7 +1528,7 @@ mod tests {
                 );
                 originating.remove_root_entry(&entry).unwrap();
             }
-            Registration::NotFound | Registration::Unknown => {
+            Registration::NotFound | Registration::Unknown | Registration::Unusable { .. } => {
                 panic!("originating store registration was not found")
             }
         }
@@ -1966,15 +1987,33 @@ mod tests {
         let recorded = base.join("py-recorded");
         ensure_x_metadata_dir(&recorded).unwrap();
         write_x_request(&recorded, "node", "prettier", None, "ready").unwrap();
-        assert_eq!(candidate_ecosystem(&recorded), Some("node"));
+        assert_eq!(
+            candidate_ecosystem(
+                &open_directory_path(&recorded).unwrap(),
+                recorded.file_name().unwrap()
+            ),
+            Some("node")
+        );
 
         let named = base.join("npm-named");
         fs::create_dir_all(named.join(".tog")).unwrap();
-        assert_eq!(candidate_ecosystem(&named), Some("node"));
+        assert_eq!(
+            candidate_ecosystem(
+                &open_directory_path(&named).unwrap(),
+                named.file_name().unwrap()
+            ),
+            Some("node")
+        );
 
         let unknown = base.join("mystery");
         fs::create_dir_all(unknown.join(".tog")).unwrap();
-        assert_eq!(candidate_ecosystem(&unknown), None);
+        assert_eq!(
+            candidate_ecosystem(
+                &open_directory_path(&unknown).unwrap(),
+                unknown.file_name().unwrap()
+            ),
+            None
+        );
     }
 
     /// A pnpm cache root as `realize_cached_tool` leaves it after a finished

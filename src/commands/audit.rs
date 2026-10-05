@@ -1011,17 +1011,35 @@ pub const NO_TRUSTED_KEYS: &str = "no trusted signing keys configured: add a [si
 trusted = [\"ed25519:<64 hex>\"] to the machine policy (TOG_POLICY, or ~/.tog/policy.toml); a project \
 or --policy list can only narrow it. 'tog keygen <path>' prints the table to paste";
 
+/// Whether `CI` names a CI environment, as GitHub Actions, GitLab and
+/// most other services set it: any non-empty value except `false` or `0`.
+pub(crate) fn ci_environment(value: Option<&std::ffi::OsStr>) -> bool {
+    value.is_some_and(|value| {
+        let value = value.to_string_lossy();
+        let value = value.trim();
+        !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
+    })
+}
+
+/// The refusal a plain audit under CI gives when no key is trusted.
+const CI_WITHOUT_TRUSTED_KEYS: &str = "(CI is set, and a CI gate that judges records \
+without signatures would pass an unsigned or hand-edited closure; pass --allow-unsigned \
+to run it anyway)";
+
 /// The command: judge the recorded closures against the policy chain plus
 /// an optional `--policy` file. `signed` is the CI form: it refuses to run
 /// (exit 2, before any record is read) unless the machine policy trusts
 /// signing keys, so a gate whose policy file lost its `[signing]` table
-/// fails loudly instead of passing with signatures unchecked. Needs the
-/// host platform only to tell a foreign-platform closure from a current
-/// one, as `status` does.
+/// fails loudly instead of passing with signatures unchecked. A plain
+/// audit under CI (the `CI` variable) refuses the same way unless
+/// `allow_unsigned`, so a gate written before `--signed` existed still
+/// fails closed. Needs the host platform only to tell a foreign-platform
+/// closure from a current one, as `status` does.
 pub fn run(command: cli::Command) -> io::Result<i32> {
     let cli::Command::Audit {
         policy,
         signed,
+        allow_unsigned,
         json,
     } = command
     else {
@@ -1048,12 +1066,18 @@ pub fn run(command: cli::Command) -> io::Result<i32> {
         project.as_ref(),
         extra.as_ref().map(|(path, extra)| (*path, extra)),
     )?;
-    if signed && trusted_keys(&policy).is_none() {
-        misconfigured(
-            &format!("audit: {NO_TRUSTED_KEYS} (--signed asked for the check)"),
-            json,
-        );
-        return Ok(cli::EXIT_USAGE);
+    if trusted_keys(&policy).is_none() {
+        let why = if signed {
+            Some("(--signed asked for the check)")
+        } else if !allow_unsigned && ci_environment(std::env::var_os("CI").as_deref()) {
+            Some(CI_WITHOUT_TRUSTED_KEYS)
+        } else {
+            None
+        };
+        if let Some(why) = why {
+            misconfigured(&format!("audit: {NO_TRUSTED_KEYS} {why}"), json);
+            return Ok(cli::EXIT_USAGE);
+        }
     }
     let report = audit_under_in(platform, &dir, project.as_ref(), policy, sources)?;
     let trusted = match trusted_keys(&report.policy) {
@@ -1077,6 +1101,23 @@ pub fn run(command: cli::Command) -> io::Result<i32> {
     } else {
         cli::EXIT_FAILURE
     })
+}
+
+#[cfg(test)]
+mod ci_tests {
+    use super::ci_environment;
+    use std::ffi::OsStr;
+
+    #[test]
+    fn ci_is_any_non_empty_value_but_false_or_zero() {
+        for value in ["true", "1", "yes", "TRUE", "woodpecker"] {
+            assert!(ci_environment(Some(OsStr::new(value))), "{value}");
+        }
+        for value in ["", " ", "0", "false", "False", "FALSE"] {
+            assert!(!ci_environment(Some(OsStr::new(value))), "{value:?}");
+        }
+        assert!(!ci_environment(None));
+    }
 }
 
 #[cfg(test)]

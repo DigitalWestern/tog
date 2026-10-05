@@ -14,7 +14,7 @@ use sha2::{Digest, Sha256};
 
 mod common;
 
-use common::{command, fresh_store, text, tog, tog_at, tog_env, tog_offline, TempDir};
+use common::{command, command_for, fresh_store, text, tog, tog_at, tog_env, tog_offline, TempDir};
 
 /// The signing key under `home`, generated on first use and trusted by
 /// `home`'s machine policy (`~/.tog/policy.toml`, created with an empty
@@ -1699,6 +1699,73 @@ fn an_unreadable_record_stops_the_sweep_and_is_cleared_by_drop_object() {
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
 }
 
+/// Issue #387. A record replaced by a directory stops the sweep with two
+/// shell commands to run. Run exactly what was printed, through `sh -c`
+/// with `tog` on PATH, and the next sweep succeeds.
+#[test]
+fn the_printed_record_removal_and_drop_clear_the_sweep_when_run() {
+    let home = TempDir::boundary("cli-advised-drop");
+    let store_root = home.0.join("store");
+    fresh_store(&store_root);
+    let canonical_store = store_root.canonicalize().unwrap();
+    let project = home.0.join("project");
+    std::fs::create_dir_all(project.join(".tog/closures")).unwrap();
+    let env_object = publish_certified_object(&canonical_store, "advised-drop-env");
+    std::fs::write(
+        project.join(".tog/closures/python.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema": "closure/1",
+            "ecosystem": "python",
+            "body": {"env_object": env_object.display().to_string()},
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let out = tog(
+        &home.0,
+        &home.0,
+        &["gc", "--register", project.to_str().unwrap()],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+
+    let object = publish_certified_object(&canonical_store, "advised-drop");
+    let id = object.file_name().unwrap().to_str().unwrap().to_string();
+    let record = canonical_store.join("meta").join(format!("{id}.json"));
+    std::fs::remove_file(&record).unwrap();
+    std::fs::create_dir(&record).unwrap();
+
+    let out = tog(&home.0, &home.0, &["gc"]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    let stderr = text(&out.stderr);
+    // "remove it with `<rm line>`, then drop ... with `<drop line>`"
+    let spans: Vec<&str> = stderr
+        .split_once("remove it with `")
+        .unwrap_or_else(|| panic!("no removal advice: {stderr}"))
+        .1
+        .split('`')
+        .collect();
+    let (remove, drop) = (spans[0], spans[2]);
+    assert_eq!(drop, format!("tog gc --drop-object {id}"), "{stderr}");
+
+    let bin = Path::new(env!("CARGO_BIN_EXE_tog")).parent().unwrap();
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let out = command_for(Path::new("sh"), &home.0, &home.0, &store_root)
+        .env("PATH", path)
+        .args(["-c", &format!("{remove} && {drop}")])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(!record.exists() && !object.exists());
+
+    let out = tog(&home.0, &home.0, &["gc"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(env_object.is_dir());
+}
+
 /// A store as a tog from before the format marker left it: namespaces, an
 /// object with the record shape of that time, a pathname-only root, a
 /// download, a staging leftover and a backup, and no marker. Returns the
@@ -2335,6 +2402,63 @@ fn x_clean_removes_a_root_without_a_request_record_only_when_unfiltered() {
             "cleanup left the per-root lock file behind"
         );
     }
+}
+
+/// Issue #413. The root's own registry entry cannot be read: cleanup finds
+/// it by key anyway, and skips the root rather than deleting what that
+/// entry protects. Once the entry is forgotten, the clean removes it.
+#[test]
+fn x_clean_skips_a_root_whose_registry_entry_is_unusable() {
+    let home = TempDir::boundary("cli-x-clean-unusable-entry");
+    let store = home.0.join("store");
+    let (root, key) = registered_x_environment(&home.0, &store);
+    let out = tog(
+        &home.0,
+        &home.0,
+        &["gc", "--register", root.to_str().unwrap()],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    std::fs::write(store.join("roots").join(&key), b"\xff not a record\n").unwrap();
+
+    let out = tog(&home.0, &home.0, &["x", "--clean"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let stdout = text(&out.stdout);
+    assert!(root.is_dir(), "{stdout}");
+    assert!(
+        stdout.contains(&format!("its registry entry {key} in store "))
+            && stdout.contains(&format!("`tog gc --forget {key}`")),
+        "{stdout}"
+    );
+
+    let out = tog(&home.0, &home.0, &["gc", "--forget", &key]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let out = tog(&home.0, &home.0, &["x", "--clean"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(!root.exists(), "{}", text(&out.stdout));
+}
+
+/// Issue #413. Cleanup unregisters before it deletes, so a registry it
+/// cannot write leaves the root and its registration both in place rather
+/// than a registration for a root that is gone.
+#[test]
+fn x_clean_that_cannot_unregister_keeps_the_root() {
+    let home = TempDir::boundary("cli-x-clean-readonly-roots");
+    let store = home.0.join("store");
+    let (root, key) = registered_x_environment(&home.0, &store);
+    let out = tog(
+        &home.0,
+        &home.0,
+        &["gc", "--register", root.to_str().unwrap()],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let roots = store.join("roots");
+    let mode = std::fs::metadata(&roots).unwrap().permissions().mode();
+    std::fs::set_permissions(&roots, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let out = tog(&home.0, &home.0, &["x", "--clean"]);
+    std::fs::set_permissions(&roots, std::fs::Permissions::from_mode(mode)).unwrap();
+    assert_ne!(out.status.code(), Some(0), "{}", text(&out.stdout));
+    assert!(root.join(".tog/x.json").is_file(), "{}", text(&out.stderr));
+    assert!(registered_root_keys(&home.0, &home.0).contains(&key));
 }
 
 /// A record-less root that store A registered, cleaned by a caller whose
@@ -3452,6 +3576,29 @@ fn audit_without_trusted_keys_judges_records_and_says_so() {
         "{}",
         text(&out.stderr)
     );
+    // Issue #395. Under CI the same audit refuses before judging, as
+    // --signed does, unless --allow-unsigned; CI=false is not CI.
+    for args in [&["audit"][..], &["audit", "--json"]] {
+        let out = tog_env(&project.0, &home.0, args, &[("CI", "true")]);
+        assert_eq!(out.status.code(), Some(2), "{}", text(&out.stderr));
+        let shown = format!("{}{}", text(&out.stdout), text(&out.stderr));
+        assert!(
+            shown.contains("no trusted signing keys configured")
+                && shown.contains("pass --allow-unsigned"),
+            "{shown}"
+        );
+        assert!(!shown.contains("clean"), "{shown}");
+    }
+    let out = tog_env(
+        &project.0,
+        &home.0,
+        &["audit", "--allow-unsigned"],
+        &[("CI", "true")],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(text(&out.stdout).contains("signatures: not checked"));
+    let out = tog_env(&project.0, &home.0, &["audit"], &[("CI", "false")]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     let out = tog(&project.0, &home.0, &["audit", "--json"]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();

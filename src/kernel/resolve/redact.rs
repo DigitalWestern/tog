@@ -121,8 +121,8 @@ fn strip_userinfo(base: &str) -> String {
 }
 
 /// Redact every URL embedded in `text` (a PEP 508 `name @ https://...`, a
-/// `key=https://...`).
-fn embedded_urls(text: &str) -> String {
+/// `key=https://...`), keeping the query values `keep` names.
+fn embedded_urls(text: &str, keep: &[&str]) -> String {
     let mut out = String::new();
     let mut rest = text;
     while let Some(at) = rest.find("://") {
@@ -138,7 +138,7 @@ fn embedded_urls(text: &str) -> String {
             .find(char::is_whitespace)
             .map_or(rest.len(), |i| at + i);
         out.push_str(&rest[..scheme_start]);
-        out.push_str(&url(&rest[scheme_start..end], &[]));
+        out.push_str(&url(&rest[scheme_start..end], keep));
         rest = &rest[end..];
     }
     out.push_str(rest);
@@ -149,7 +149,14 @@ fn embedded_urls(text: &str) -> String {
 /// redacted. Everything the proxy writes into a body, a diagnostic, or a
 /// fact passes through here.
 pub fn text(message: &str) -> String {
-    embedded_urls(message)
+    embedded_urls(message, &[])
+}
+
+/// [`text`] for a URL a protocol already redacted: its content query keys
+/// (`keep`) keep their values, so the ledger records which bytes were
+/// asked for.
+pub fn text_keeping(message: &str, keep: &[&str]) -> String {
+    embedded_urls(message, keep)
 }
 
 /// What the operand after a flag is.
@@ -228,7 +235,7 @@ fn operand_rule(operand: &str) -> (String, Next) {
             return (format!("{key}={REDACTED}"), Next::Plain);
         }
     }
-    (embedded_urls(operand), Next::Plain)
+    (embedded_urls(operand, &[]), Next::Plain)
 }
 
 /// `--config=key=value`'s value half, when the key is credential-bearing.
@@ -239,7 +246,7 @@ fn setting_is_secret(value: &str) -> bool {
 }
 
 fn scrub(text: &str, secrets: &[&str]) -> String {
-    let mut out = embedded_urls(text);
+    let mut out = embedded_urls(text, &[]);
     for secret in secrets {
         if !secret.is_empty() {
             out = out.replace(secret, REDACTED);

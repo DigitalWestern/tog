@@ -165,6 +165,15 @@ impl RegistryTool for NodeTool {
         if lock.exists() {
             fs::remove_file(&lock)?;
         }
+        // A root rebuilt because its request record is gone or not `ready`
+        // still has the last run's `node_modules` projection, a symlink
+        // into a store env object. npm would read that tree and write its
+        // store paths into the new lock, which the plan then refuses. The
+        // projection is tog's own and realization below replaces it.
+        let projection = root.join("node_modules");
+        if fs::symlink_metadata(&projection).is_ok_and(|stat| stat.file_type().is_symlink()) {
+            fs::remove_file(&projection)?;
+        }
         ui::note(&format!(
             "resolving {package}@{} with the store npm...",
             version.unwrap_or("latest")

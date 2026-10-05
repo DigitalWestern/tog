@@ -470,7 +470,8 @@ discovered with the store Cargo tool and Cargo metadata is read with
 dependency resolution, or vendor object. --check returns rustfmt's status.
 The formatter is the one the committed tog-toolchain.toml pins, and the
 run writes no record: a .tog/closures/rustfmt.json an older tog left is
-deleted by a run without --check once the project has another closure.
+deleted by a run without --check once the project has another closure, or
+once gc has forgotten the project's root.
 A package.json script named fmt takes precedence and is run as
 'tog run fmt'. In a polyglot directory use --eco rust: an explicit --eco
 selects the ecosystem, so it formats Rust instead of running that script.
@@ -552,34 +553,37 @@ cargo, go, ruby, elixir, dotnet.",
         name: "audit",
         group: Group::Inspect,
         summary: "would the synced environments pass a policy? (CI gate)",
-        usage: "tog audit [--policy <file>] [--signed] [--json]",
+        usage: "tog audit [--policy <file>] [--signed | --allow-unsigned] [--json]",
         description: "\
-Reads the closure records every sync committed to .tog/closures/*.json and
-judges the exceptions they record against the policy chain (TOG_POLICY or
-~/.tog/policy.toml, every ancestor's .tog/policy.toml, TOG_STRICT) merged
-with --policy <file>. Merging only tightens: the file can add denials but
-never loosen what the machine or project policy says. When the machine
-policy has a [signing] table, each record's signature is verified against
-its trusted keys first (a project .tog/policy.toml or --policy <file> can
-only drop keys, never add one); without one, signatures are not checked,
-the report says so, and --signed makes that a usage error (exit 2) for a
-CI job that must never run unconfigured. Per closure, the first that
-applies: bad-signature (tampered or malformed; find out who changed it),
-untrusted (signed by a key the trusted set does not contain), outdated
-(unsigned while signatures are checked, or predates input, platform, or
-exception recording; run 'tog' once, under a trusted key when signatures
-are checked, then commit), stale (its inputs
-changed since the sync, the same check 'tog status' makes), denied
-(each denied exception's kind, subject, and detail, plus a count of
-permitted ones by kind), unknown (a kind this binary cannot judge), or
-clean. When signatures are checked, a record that is not trusted is not
-evaluated further. A detected ecosystem with no closure is missing.
-Only clean passes. Offline, read-only, no store access, no sandbox
-needed. Exit status 0 when every closure is clean and
-none is missing, 1 otherwise, 2 for an unreadable --policy file or
---signed with no trusted key configured. 'tog keygen' creates a signing
-key; set TOG_SIGNING_KEY where sync runs. A company deny list to start
-from ships as docs/human/policy-company.toml.",
+Reads the closure records every sync committed to .tog/closures/*.json
+and judges the exceptions they record against the policy chain
+(TOG_POLICY or ~/.tog/policy.toml, every ancestor's .tog/policy.toml,
+TOG_STRICT) merged with --policy <file>. Merging only tightens: the file
+can add denials but never loosen what the machine or project policy
+says. When the machine policy has a [signing] table, each record's
+signature is verified against its trusted keys first (a project
+.tog/policy.toml or --policy <file> can only drop keys, never add one);
+without one, signatures are not checked, the report says so, and
+--signed makes that a usage error (exit 2) for a CI job that must never
+run unconfigured. A plain audit under CI (CI set to anything but false
+or 0) refuses the same way, so an older gate never passes with
+signatures unchecked; --allow-unsigned runs it anyway. Per closure, the
+first that applies: bad-signature (tampered or malformed; find out who
+changed it), untrusted (signed by a key the trusted set does not
+contain), outdated (unsigned while signatures are checked, or predates
+input, platform, or exception recording; run 'tog' once, under a trusted
+key when signatures are checked, then commit), stale (its inputs changed
+since the sync, the same check 'tog status' makes), denied (each denied
+exception's kind, subject, and detail, plus a count of permitted ones by
+kind), unknown (a kind this binary cannot judge), or clean. When
+signatures are checked, a record that is not trusted is not evaluated
+further. A detected ecosystem with no closure is missing. Only clean
+passes. Offline, read-only, no store access, no sandbox needed. Exit
+status 0 when every closure is clean and none is missing, 1 otherwise, 2
+for an unreadable --policy file, or for --signed or a plain audit under
+CI with no trusted key configured. 'tog keygen' creates a signing key;
+set TOG_SIGNING_KEY where sync runs. A company deny list to start from
+ships as docs/human/policy-company.toml.",
         examples: &[
             ("tog audit", "does this environment pass my policy?"),
             ("tog audit --signed", "the CI gate: signatures checked, or exit 2"),
@@ -588,6 +592,7 @@ from ships as docs/human/policy-company.toml.",
         options: &[
             ("--policy <file>", "also deny what this policy file denies"),
             ("--signed", "exit 2 unless the machine policy trusts signing keys"),
+            ("--allow-unsigned", "under CI, judge records even with no trusted keys"),
             JSON_OPTION,
             HELP_OPTION,
         ],
@@ -648,6 +653,9 @@ deletes inside project projections; --project collects old unused forests,
 backups, and run homes no registered project owns. A root record says for
 itself what its project needs, so it keeps protecting those objects even
 when the project directory is gone; give the protection up with --forget.
+The one root gc forgets by itself is one whose project holds only retired
+closure records (the rustfmt.json an older tog fmt wrote) and which
+protects nothing those records do not name; a dry run reports it.
 Cleanup is skipped while another Tog job is using this store. A record
 that cannot be read stops the sweep rather than being guessed at: the
 refusal lists every one, and --drop-object removes the ones that cannot be

@@ -104,8 +104,9 @@ the program's status through. Which files tog reads per ecosystem:
   and a failure is one JSON object on stderr: `{"error":"<message>"}`.
   That holds for every failure the command itself reports, whatever its
   exit status: `audit --json` still exits 2 for a misconfigured gate (an
-  unreadable `--policy` file, or `--signed` with no trusted set at machine
-  scope), so CI can tell an operator mistake from a denied build, and
+  unreadable `--policy` file, `--signed` with no trusted set at machine
+  scope, or a plain audit under CI with none and no `--allow-unsigned`),
+  so CI can tell an operator mistake from a denied build, and
   still writes the JSON object rather than prose. Only an argv error is exempt — it is prose at
   exit 2, because argv was wrong before the command that promised JSON
   ever started. `status`, `ls`, `audit`, `doctor` and `plan` take
@@ -398,8 +399,8 @@ comes from (the committed `tog-toolchain.toml` at the Cargo workspace root
 when there is one, so a member directory formats with the same one), and it
 is checked by sha256 like the compiler, so the run writes no record of it. A `.tog/closures/rustfmt.json` that an older tog
 wrote is deleted by a run without `--check` once another closure sits beside
-it (alone, it is what keeps the root the older tog registered readable, so
-it waits for the first sync); every reader but gc skips it. Nothing roots the formatter object, so `gc` can reclaim it between runs
+it, or once `gc` has forgotten the root the older tog registered (until then,
+alone, it is what keeps that root readable); every reader but gc skips it. Nothing roots the formatter object, so `gc` can reclaim it between runs
 and the next run realizes it again. A package.json script named `fmt` wins and runs as
 `tog run fmt`; an explicit `--eco rust` bypasses the script.
 
@@ -688,11 +689,19 @@ exception gets judged at all; a CI job whose policy must trust keys passes
 judged, when the machine policy has no `[signing]` table, so a gate that
 lost its keys fails loudly instead of passing with signatures unchecked.
 
+**Under CI.** When the `CI` environment variable is set to anything but
+`false` or `0` (GitHub Actions, GitLab and most CI services set it), plain
+`tog audit` with no `[signing]` table refuses as `--signed` does: exit 2,
+before any record is judged. A CI job that means to judge records without
+signatures passes `--allow-unsigned`, which changes nothing when a
+`[signing]` table exists. `--signed` and `--allow-unsigned` together are a
+usage error.
+
 **Migrating an existing gate.** Before this mode existed, plain `tog audit`
-exited 2 whenever the machine policy had no `[signing]` table. It now
-judges the records and can exit 0 with signatures unchecked. A CI job that
-relied on the old refusal has to run `tog audit --signed` to keep it;
-nothing else about the job changes.
+exited 2 whenever the machine policy had no `[signing]` table. Under CI it
+still does, so a gate that relied on that refusal keeps it. Outside CI it
+now judges the records and can exit 0 with signatures unchecked; a job that
+does not set `CI` runs `tog audit --signed` to keep the refusal.
 
 Per closure it prints the ecosystem, the record (sha256 of the closure file
 bytes), and the first of these that applies: `bad-signature` (a signature
@@ -757,7 +766,8 @@ change the grammar. Strictness-only sources omit the path. Policy lines
 come first, then verdict lines, then `missing` lines, and `--quiet` leaves
 them in place. Exit 0 when every closure is clean and none is missing, 1
 otherwise, 2 when the gate is misconfigured (an unreadable `--policy` file,
-or `--signed` without trusted keys). A company deny list to start
+`--signed` without trusted keys, or a plain audit under CI without trusted
+keys and without `--allow-unsigned`). A company deny list to start
 from ships as [policy-company.toml](policy-company.toml); every kind it
 names is checked against the binary's kind list by a unit test. Exception
 kind names use one separator, the hyphen (`weak-integrity`,
@@ -779,8 +789,9 @@ either position); the filter word is one of
 **plan** prints what a sync would realize, one JSON document per ecosystem.
 **sbom** emits CycloneDX 1.5 to stdout or `-o <file>`. **doctor** checks
 this build against the newest release (the first row, `warn` with `run 'tog
-update --self'` when one is newer, `ok` with `not checked` when the manifest
-is unreachable: offline is not unhealthy), then platform, store, sandbox,
+update --self'` when one is newer, `ok` with `no build for this machine`
+when the newer one has nothing for this host, `ok` with `not checked` when
+the manifest is unreachable: offline is not unhealthy), then platform, store, sandbox,
 host C toolchain, and realized toolchains, each line `ok`/`warn`/`fail`
 (lowercase, in text and in JSON) with the fix; exit 1 on any fail. It does
 not wait for a store another Tog job (a `gc`, a sync) is using: the store
@@ -842,11 +853,38 @@ a later step can `tog run` the tests under the same policy. Its inputs:
 | `signing-key` | *(empty)* | contents of a `tog keygen` file, from a secret; on disk only while the sync runs (see "Which jobs may hold the key") |
 | `sbom` | `sbom.json` | where the SBOM is written; empty skips it |
 | `upload-sbom` | `true` | upload it as the artifact named by `sbom-artifact` (`sbom`) |
+| `cache` | `false` | `true` keeps the store in the Actions cache between runs (see below) |
 | `sandbox` | `true` | install bubblewrap when missing, and the AppArmor profile `tog doctor` names where Ubuntu 24.04 denies bwrap a user namespace |
 
 The outputs are `version` (what `tog --version` prints) and `sbom` (the
 SBOM's path). The gate with trusted keys is `policy: ci/tog-policy.toml`,
 `audit: signed` and `signing-key: ${{ secrets.TOG_SIGNING_KEY }}`.
+
+**The store cache.** Without it every run downloads the toolchains and
+packages again. `cache: true` restores the store an earlier run saved
+(keyed on the tog version and the project's `tog-toolchain.toml` and
+lockfiles, falling back to the newest store of the same version), and saves
+it again after a sync and an audit that passed, once `tog gc` has swept what no project
+roots any more. tog checks a store's format when it opens it but does not
+re-hash the objects in it, so a restored store is trusted as if this run
+had built it. GitHub keeps what a pull request's run saves to that pull
+request, so a run on `main` never restores it. Do not turn the cache on in
+a `pull_request_target` workflow: there a fork's code runs with the base
+branch's cache.
+
+**While this repository is private.** A workflow in another repository
+needs two things before `uses: DigitalWestern/tog@main` works:
+
+1. In this repository's Settings, Actions, General, under "Access", choose
+   "Accessible from repositories owned by the user 'DigitalWestern'". Only
+   repositories that account owns can use the action until this repository
+   is public.
+2. A token that can read this repository's releases, as a secret (a
+   fine-grained token with "Contents: read" on `DigitalWestern/tog`),
+   passed as `token: ${{ secrets.TOG_RELEASES_TOKEN }}`. The job's own
+   token reads only the repository the job runs in.
+
+Neither is needed once the repository is public.
 
 The same job written out by hand, for a runner the action does not cover
 or a step that has to differ. Its install step uses the one-line installer,
@@ -938,6 +976,12 @@ concurrent sync cannot lose one. Sharp edges:
   as typed including case. It removes only the record, so its objects become
   collectible; it clears even an unusable record without reading any other,
   so a damaged record never blocks recovering from it.
+- The one root a sweep forgets by itself is one whose project holds only
+  retired closure records (the `rustfmt.json` an older `tog fmt` wrote) and
+  which protects nothing those records do not name: no other object or
+  projection in its record, no linked forest, no run home. It prints
+  `forgot root <key> (<path>): its only closures are retired records`, and a
+  dry run prints `would forget …` instead.
 - `--dry-run` prints the same plan a sweep would execute — `would remove …`,
   `blocked: …` with the recovery action, `skipped: …` — and writes nothing;
   it refuses alongside `--register`, which would have to write a record.
