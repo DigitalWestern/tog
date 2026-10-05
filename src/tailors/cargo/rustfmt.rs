@@ -100,12 +100,13 @@ const LEGACY_RECORD: &str = ".tog/closures/rustfmt.json";
 /// rather than followed, like every other write under `.tog`.
 ///
 /// It stays when it is the project's only closure (a directory or symlink
-/// under a closure name is not one, since gc skips it too): the older `tog fmt`
-/// also registered a gc root for the project, and a root whose closures
-/// directory is empty stops every `tog gc` sweep. Forgetting that root needs
-/// the store's exclusive lease, which a formatter run does not take, so the
-/// file waits for the project's first sync (or `tog gc --forget`).
-pub fn remove_legacy_record(project: &ProjectRoot) -> io::Result<()> {
+/// under a closure name is not one, since gc skips it too) and the project
+/// is still `registered`: the older `tog fmt` also registered a gc root for
+/// the project, and a root whose closures directory is empty stops every
+/// `tog gc` sweep. Forgetting that root needs the store's exclusive lease,
+/// which a formatter run does not take. `tog gc` forgets a root whose only
+/// closures are retired, so the next run after a sweep removes the file.
+pub fn remove_legacy_record(project: &ProjectRoot, registered: bool) -> io::Result<()> {
     let closures = Path::new(".tog/closures");
     let Some(names) = project.read_dir(closures)? else {
         return Ok(());
@@ -117,7 +118,7 @@ pub fn remove_legacy_record(project: &ProjectRoot) -> io::Result<()> {
             && crate::kernel::store::is_closure_file(&path)
             && matches!(project.entry(&path), Ok(Entry::Regular))
     });
-    if !others {
+    if !others && registered {
         return Ok(());
     }
     project.remove_file(legacy)
@@ -736,21 +737,21 @@ mod tests {
         let project = temp.0.join("project");
         fs::create_dir_all(project.join(".tog/closures")).unwrap();
         let held = crate::kernel::fsroot::ProjectRoot::open(&project).unwrap();
-        remove_legacy_record(&held).unwrap();
+        remove_legacy_record(&held, true).unwrap();
         let legacy = project.join(".tog/closures/rustfmt.json");
         fs::write(&legacy, b"{}").unwrap();
         // The only closure stays: removing it would leave the old root
         // record over an empty closures directory.
-        remove_legacy_record(&held).unwrap();
+        remove_legacy_record(&held, true).unwrap();
         assert!(legacy.is_file());
         fs::write(project.join(".tog/closures/cargo.json"), b"{}").unwrap();
-        remove_legacy_record(&held).unwrap();
+        remove_legacy_record(&held, true).unwrap();
         assert!(!legacy.exists());
         assert!(project.join(".tog/closures/cargo.json").is_file());
         let outside = temp.0.join("outside.json");
         fs::write(&outside, b"{}").unwrap();
         std::os::unix::fs::symlink(&outside, &legacy).unwrap();
-        assert!(remove_legacy_record(&held).is_err());
+        assert!(remove_legacy_record(&held, true).is_err());
         assert!(outside.is_file());
     }
 
@@ -772,13 +773,13 @@ mod tests {
             store.register_root(&project).unwrap();
             let held = crate::kernel::fsroot::ProjectRoot::open(&project).unwrap();
             fs::create_dir(closures.join("cargo.json")).unwrap();
-            remove_legacy_record(&held).unwrap();
+            remove_legacy_record(&held, true).unwrap();
             assert!(legacy.is_file(), "a directory sibling counted as a closure");
             fs::remove_dir(closures.join("cargo.json")).unwrap();
             let outside = root.join("outside.json");
             fs::write(&outside, b"{}").unwrap();
             std::os::unix::fs::symlink(&outside, closures.join("cargo.json")).unwrap();
-            remove_legacy_record(&held).unwrap();
+            remove_legacy_record(&held, true).unwrap();
             assert!(legacy.is_file(), "a symlink sibling counted as a closure");
             let mut out = Vec::new();
             crate::kernel::gc::collect(store, crate::kernel::gc::Options::default(), &mut out)
@@ -787,25 +788,80 @@ mod tests {
     }
 
     /// A project an older `tog fmt` registered and never synced holds only
-    /// the legacy record. Keeping it keeps the project's root readable, so
-    /// `tog gc` still sweeps; an empty closures directory would refuse.
+    /// the legacy record (#416). fmt keeps it while the root is registered,
+    /// since an empty closures directory would stop the sweep. The sweep
+    /// forgets a root whose only closures are retired (a dry run only says
+    /// so), and the next fmt run then removes the file.
     #[test]
-    fn a_lone_legacy_record_keeps_gc_sweeping() {
+    fn a_lone_legacy_record_is_forgotten_by_gc_then_removed_by_fmt() {
         super::super::tests::with_temp_store(|store, root| {
             let project = root.join("project");
             fs::create_dir_all(project.join(".tog/closures")).unwrap();
+            let legacy = project.join(".tog/closures/rustfmt.json");
             fs::write(
-                project.join(".tog/closures/rustfmt.json"),
+                &legacy,
                 br#"{"schema":"closure/1","ecosystem":"rustfmt","body":{}}"#,
             )
             .unwrap();
-            store.register_root(&project).unwrap();
+            let entry = store.register_root(&project).unwrap();
+            let key =
+                crate::kernel::store::Store::canonical_root_key(&project.canonicalize().unwrap());
+            assert_eq!(entry.key, key);
             let held = crate::kernel::fsroot::ProjectRoot::open(&project).unwrap();
-            remove_legacy_record(&held).unwrap();
-            assert!(project.join(".tog/closures/rustfmt.json").is_file());
+            remove_legacy_record(&held, store.has_root_entry(&key).unwrap()).unwrap();
+            assert!(legacy.is_file());
+
+            let mut out = Vec::new();
+            let dry = crate::kernel::gc::Options {
+                dry_run: true,
+                ..crate::kernel::gc::Options::default()
+            };
+            crate::kernel::gc::collect(store, dry, &mut out).unwrap();
+            let text = String::from_utf8(out).unwrap();
+            assert!(
+                text.contains(&format!("would forget root {key} (")),
+                "{text}"
+            );
+            assert!(store.has_root_entry(&key).unwrap(), "a dry run forgot");
+
             let mut out = Vec::new();
             crate::kernel::gc::collect(store, crate::kernel::gc::Options::default(), &mut out)
                 .unwrap();
+            let text = String::from_utf8(out).unwrap();
+            assert!(
+                text.contains(&format!(
+                    "forgot root {key} ({}): its only closures are retired records \
+                     (rustfmt.json)",
+                    project.canonicalize().unwrap().display()
+                )),
+                "{text}"
+            );
+            assert!(!store.has_root_entry(&key).unwrap());
+
+            remove_legacy_record(&held, store.has_root_entry(&key).unwrap()).unwrap();
+            assert!(!legacy.exists());
+            let mut out = Vec::new();
+            crate::kernel::gc::collect(store, crate::kernel::gc::Options::default(), &mut out)
+                .unwrap();
+        });
+    }
+
+    /// `gc --register` on a project whose only closure is the retired
+    /// record says why it found nothing, and what writes a current one.
+    #[test]
+    fn registering_a_project_with_only_a_retired_record_names_it() {
+        super::super::tests::with_temp_store(|store, root| {
+            let project = root.join("project");
+            fs::create_dir_all(project.join(".tog/closures")).unwrap();
+            fs::write(project.join(".tog/closures/rustfmt.json"), b"{}").unwrap();
+            let error = store.root_record_from_project(&project).unwrap_err();
+            let message = error.to_string();
+            assert!(
+                message.contains(
+                    "contains no supported closure records: rustfmt.json is a retired record"
+                ) && message.contains("run `tog sync` in the project"),
+                "{message}"
+            );
         });
     }
 

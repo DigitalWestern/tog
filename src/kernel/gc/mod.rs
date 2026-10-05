@@ -121,6 +121,8 @@ pub fn collect_with_activity<W: Write>(
     let _gc_lock = store.gc_lock()?;
     let _publish_lock = store.publish_lock()?;
 
+    let mut options = options;
+    forget_retired_roots(store, activity, &mut options, out)?;
     let snapshot = read(store, activity, &options)?;
     let validated = validate(&snapshot)?;
     let plan = plan(&validated, &options)?;
@@ -134,6 +136,70 @@ pub fn collect_with_activity<W: Write>(
     let mut report = execute(&plan, &snapshot, store, activity, out)?;
     sweep_resolve_cache(store, window, false, &mut report, out)?;
     Ok(report)
+}
+
+/// Forget each root whose project holds only retired closure records (the
+/// `rustfmt.json` an older `tog fmt` wrote and registered a root for).
+/// Nothing reads such a record any more, so the root protects nothing a
+/// project still uses; left alone it would keep its objects forever, or
+/// stop every sweep once the record is deleted. A dry run only reports, and
+/// leaves the root out of the plan the way `--dry-run --forget` does.
+fn forget_retired_roots<W: Write>(
+    store: &Store,
+    activity: &StoreActivity,
+    options: &mut Options,
+    out: &mut W,
+) -> io::Result<()> {
+    for root in store.roots()? {
+        if root.unusable.is_some() || options.forgotten.contains(&root.key) {
+            continue;
+        }
+        let project = root
+            .record
+            .as_ref()
+            .map_or(&root.path, |record| &record.project_path);
+        let Some(retired) = retired_only(project) else {
+            continue;
+        };
+        let what = format!(
+            "root {} ({}): its only closures are retired records ({})",
+            root.key,
+            project.display(),
+            retired.join(", ")
+        );
+        if options.dry_run {
+            writeln!(out, "would forget {what}")?;
+        } else {
+            store.remove_root_entry_with_activity(activity, &root)?;
+            writeln!(
+                out,
+                "forgot {what}; `tog sync` there registers the project again"
+            )?;
+        }
+        options.forgotten.push(root.key);
+    }
+    Ok(())
+}
+
+/// The names of a project's closure files when every one is a retired
+/// record, or `None`: a project that cannot be read, holds a live closure,
+/// holds anything else under a closure name, or holds none at all is
+/// judged by the ordinary root rules.
+fn retired_only(project: &Path) -> Option<Vec<String>> {
+    let mut retired = Vec::new();
+    for entry in fs::read_dir(project.join(".tog/closures")).ok()? {
+        let entry = entry.ok()?;
+        let path = entry.path();
+        if path.extension().is_none_or(|ext| ext != "json") {
+            continue;
+        }
+        if !store::is_retired_closure(&path) || !entry.file_type().ok()?.is_file() {
+            return None;
+        }
+        retired.push(entry.file_name().to_string_lossy().into_owned());
+    }
+    retired.sort();
+    (!retired.is_empty()).then_some(retired)
 }
 
 /// The resolution proxy's metadata cache is a cache: entries unused for the

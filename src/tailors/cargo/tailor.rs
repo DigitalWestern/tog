@@ -410,7 +410,12 @@ impl Tailor for Cargo {
         // only closure: see `remove_legacy_record`). `--check` changes
         // no file: a CI check must not leave the checkout dirty.
         if !check {
-            rustfmt::remove_legacy_record(&ProjectRoot::open(&workspace_root)?)?;
+            let key =
+                crate::kernel::store::Store::canonical_root_key(&workspace_root.canonicalize()?);
+            rustfmt::remove_legacy_record(
+                &ProjectRoot::open(&workspace_root)?,
+                store.has_root_entry(&key)?,
+            )?;
         }
         let invocation_dir = cwd.canonicalize()?;
         let status = rustfmt::run_sandboxed(
