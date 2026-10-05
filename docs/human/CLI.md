@@ -786,8 +786,9 @@ either position); the filter word is one of
 **plan** prints what a sync would realize, one JSON document per ecosystem.
 **sbom** emits CycloneDX 1.5 to stdout or `-o <file>`. **doctor** checks
 this build against the newest release (the first row, `warn` with `run 'tog
-update --self'` when one is newer, `ok` with `not checked` when the manifest
-is unreachable: offline is not unhealthy), then platform, store, sandbox,
+update --self'` when one is newer, `ok` with `no build for this machine`
+when the newer one has nothing for this host, `ok` with `not checked` when
+the manifest is unreachable: offline is not unhealthy), then platform, store, sandbox,
 host C toolchain, and realized toolchains, each line `ok`/`warn`/`fail`
 (lowercase, in text and in JSON) with the fix; exit 1 on any fail. It does
 not wait for a store another Tog job (a `gc`, a sync) is using: the store
