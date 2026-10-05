@@ -1077,15 +1077,10 @@ impl Mounts {
         // A snapshot root's real path is canonical by construction and only
         // names the staged copy inside the sandbox: the project it was held
         // from may have been renamed since (#498), so it is not resolved on
-        // the host again. A climbing component still goes through
-        // canonicalization.
-        let plain = run.cwd.components().all(|part| {
-            matches!(
-                part,
-                std::path::Component::RootDir | std::path::Component::Normal(_)
-            )
-        });
-        let cwd = if plain && snapshot_roots.iter().any(|root| run.cwd.starts_with(root)) {
+        // the host again. Only the root itself is taken as given. A path
+        // below one may cross a symlink the project contains, so it is
+        // still canonicalized, and one that leaves the snapshot is refused.
+        let cwd = if snapshot_roots.iter().any(|root| run.cwd == root.as_path()) {
             run.cwd.to_path_buf()
         } else {
             fs::canonicalize(run.cwd)?
