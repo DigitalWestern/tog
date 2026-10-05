@@ -355,6 +355,24 @@ fn kernel_value(name: &str, platform: Platform) -> Result<String, String> {
     kernel_field(name, platform, host, uname)
 }
 
+/// This host's kernel release and version, the two values `kernel_value`
+/// hands a marker. The closure records them when a lock names either, so a
+/// later run under another kernel is seen as a change.
+pub(super) fn host_kernel() -> io::Result<(String, String)> {
+    #[cfg(test)]
+    if let Some((_, release, version)) = TEST_HOST_KERNEL.with(|slot| slot.borrow().clone()) {
+        return Ok((release, version));
+    }
+    uname()
+}
+
+/// Whether a lock's text names a marker variable `kernel_value` answers.
+pub(super) fn names_kernel_marker(lock: &str) -> bool {
+    ["platform_release", "platform_version", "platform.version"]
+        .iter()
+        .any(|name| lock.contains(name))
+}
+
 fn kernel_field(
     name: &str,
     platform: Platform,
@@ -738,6 +756,41 @@ mod marker_tests {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(body));
         TEST_HOST_KERNEL.with(|slot| *slot.borrow_mut() = None);
         result.unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+    }
+
+    /// A project whose `uv.lock` names a kernel marker records the kernel
+    /// it was read under, and one that names none records nothing.
+    #[test]
+    fn a_lock_naming_a_kernel_marker_records_the_host_kernel() {
+        use crate::kernel::fsroot::ProjectRoot;
+        let temp = crate::kernel::testutil::TempDir::new();
+        let project = ProjectRoot::open(&temp.0).unwrap();
+        on_host(LINUX, "7.2.5", "#1 SMP", || {
+            assert_eq!(super::super::kernel_marker_record(&project).unwrap(), None);
+            std::fs::write(
+                temp.0.join("uv.lock"),
+                "marker = \"sys_platform == 'linux'\"\n",
+            )
+            .unwrap();
+            assert_eq!(super::super::kernel_marker_record(&project).unwrap(), None);
+            std::fs::write(
+                temp.0.join("uv.lock"),
+                "marker = \"platform_release == '7.2.5'\"\n",
+            )
+            .unwrap();
+            assert_eq!(
+                super::super::kernel_marker_record(&project).unwrap(),
+                Some(serde_json::json!({"release": "7.2.5", "version": "#1 SMP"}))
+            );
+        });
+        on_host(LINUX, "7.3.0", "#1 SMP", || {
+            assert_eq!(
+                super::super::kernel_marker_record(&project)
+                    .unwrap()
+                    .unwrap()["release"],
+                "7.3.0"
+            );
+        });
     }
 
     /// `platform_release` and `platform_version` are the host kernel's, as

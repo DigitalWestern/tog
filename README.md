@@ -131,7 +131,8 @@ that version, and otherwise downloads the binary for your machine, checks
 the sha256 the release publishes, and renames it over the running one. It
 refuses, naming the directory, when that directory is not writable. `tog
 doctor` says when a newer release exists (one request; "not checked" when
-offline, or while no release can be read), and `tog --version` prints the
+offline, or while no release can be read; an `ok` row naming this machine
+when that release has no build for it), and `tog --version` prints the
 commit and its date, so a stale binary can be told from a current one.
 Nothing checks in the background. While the repository is private, `tog
 update --self` reports that it cannot read the latest release: it asks
