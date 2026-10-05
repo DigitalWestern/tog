@@ -180,7 +180,11 @@ jobs:
       # that test has nothing to prove and fails under TOG_SANDBOX_TESTS.
       - name: Install the Linux sandbox and the host headers the suite needs
         run: sudo apt-get update && sudo apt-get install -y bubblewrap zlib1g-dev
+      # One cache for the four shards and acceptance (#423). The key
+      # is otherwise the job id, so acceptance built cold.
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: heavy
       - run: cargo build --locked
       # Every later step sees these. Scratch stores and toolchains go on
       # the runner's disk rather than /tmp. TOG_STORE is the store for the
@@ -232,10 +236,12 @@ jobs:
     needs: [gate, e2e]
     if: ${{ !cancelled() && needs.e2e.result != 'skipped' && needs.e2e.result != 'cancelled' }}
     name: acceptance
-    # The node shard's group: a newer run's node shard, which starts
-    # with the run, cancels (on a pull request) or waits for this job.
+    # Its own group (#425). Sharing the node shard's group let an older
+    # run's acceptance, queued late, cancel a newer run's node shard. A
+    # newer push still skips this job when it cancels the older shards
+    # (the `if:` above); one already running finishes on the old commit.
     concurrency:
-      group: ${{ github.event_name == 'pull_request' && format('heavy-pr-{0}-node', github.event.pull_request.number) || 'heavy-node' }}
+      group: ${{ github.event_name == 'pull_request' && format('heavy-pr-{0}-acceptance', github.event.pull_request.number) || 'heavy-acceptance' }}
       cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     runs-on: ubuntu-22.04
     # About 3 minutes on the runner (2026-10-03), plus the build.
@@ -248,7 +254,11 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Install the Linux sandbox and the host headers the suite needs
         run: sudo apt-get update && sudo apt-get install -y bubblewrap zlib1g-dev
+      # One cache for the four shards and acceptance (#423). The key
+      # is otherwise the job id, so acceptance built cold.
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: heavy
       - run: cargo build --locked
       - name: Scratch directory on the runner disk
         run: |

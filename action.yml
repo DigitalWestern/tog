@@ -17,7 +17,7 @@
 # Linux x86_64 only, the one platform release.yml builds. docs/human/CLI.md
 # "Gating a pull request with sync and audit" explains what each step
 # decides; .github/workflows/action.yml runs this file against
-# tests/fixtures/action-demo.
+# .github/action-demo.
 name: tog
 description: Set up a project with tog under a policy, audit it, and write an SBOM
 author: DigitalWestern

@@ -58,10 +58,6 @@ None open.
 - **#495: explicit Python package sources.** Define per-package source and metadata-build trust rules for PyTorch-style indexes. Keep undeclared indexes refused until that design ships.
 - **#480: searchable project ancestors.** Let descriptor traversal and publication revalidation use search access without requiring ancestor directory listings. Pick: O_PATH for intermediate Linux components while preserving identity checks.
 - **#469: root removal identity.** Carry the decoded record's device/inode and held directory through deletion. Refuse replacements, including directory entries.
-
-- **The action's fixture wakes the heavy suite (#426).** A change under
-  `tests/fixtures/action-demo/` runs the e2e job. Pick: move the fixture
-  out of `tests/`.
 - **Action leftovers (#427).** The first tag that carries `action.yml`, a
   store cache between runs, and a self-test of the signed path.
 - **Record `skipped-optional` as an informational closure field (#71).**
@@ -95,9 +91,7 @@ None open.
   - #349 product and CI problems found by the audit.
   - #367 tests: the artifact size caps in kernel::fetch (8 GiB artifact, 256 MiB text) have no test (from the #363 review).
   - #373 sandbox: host-socket scan leftovers (from the #372 review).
-  - #410 ci: eight test files skip sandboxed tests silently because the main test step doesn't require the sandbox (from the #400 review).
   - #411 tests: an objmeta socket test fails under a long TMPDIR, path over SUN_LEN (found during #400).
-  - #387 gc: `--drop-object` recovery leftovers: the sweep's refusal names no fix, rooted objects, the advice's shell line untested (from the #384 review).
 - **Quality review of 2026-09-24 (#264).** A whole-codebase review after
   the 09-20 to 09-24 run. #264 holds the work order and the overall verdict.
   Each line is one issue and one PR, in order:
@@ -107,7 +101,6 @@ None open.
   - #245 kernel: consolidate duplicated primitives. Left after the first pass: the file hash copy in `provider/crates.rs` and `fetch.rs` (heavy gate), the pid temp names in `fetch.rs`, `validate_object_complete` and `exceptions()` reading records their own way.
   - #246 left: move the recipe checks in `kernel/provider` (cpython, rust, rust_path) onto `Selected::checked_artifact`. Deferred because those files wake the heavy suite.
   - #248 sandbox and gitsrc: collapse the _with_activity twin of every entry point.
-  - #413 x clean: delete before unregister, corrupt registry entries, pathname ownership reads (from the #408 review).
   - #256 design: the Tailor trait has 35+ methods, a dozen used by one ecosystem, and its docs have drifted.
   - #255 design: the kernel knows every ecosystem by name, and tog run is hard-wired to Node.
   - #257 design: move process-global state (policy, signing key, input guard, kinds) into Context.
@@ -126,7 +119,6 @@ None open.
   - #329 ruby: give native gem builds tog's pinned native-libs set.
 - **Found in the #399 release work (2026-10-03).** One issue and one PR each:
   - #402 selfupdate: `update --self`, `doctor` and `install.sh` cannot read a release while the repository is private.
-  - #403 doctor: suggests an update the release has no asset for on this machine.
   - #334 sandbox: RuntimeOnly setup costs ~2 s per native gem; measure on the runner.
   - #330 sandbox: HostView::RuntimeOnly is a no-op on macOS.
   - #332 hostview: LD_LIBRARY_PATH outranks DT_RUNPATH for relocated host libraries.
