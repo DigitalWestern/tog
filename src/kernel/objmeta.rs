@@ -1534,11 +1534,11 @@ mod record_value_tests {
             "object metadata id \"not-an-id\" is malformed"
         );
 
-        // A socket cannot be opened at all. Linux only: macOS's temporary
-        // directory is too deep for a 104-byte socket path.
+        // A socket cannot be opened at all. Linux only: the helper's macOS
+        // form renames from /tmp, which this test has not been run with.
         #[cfg(target_os = "linux")]
         {
-            let listener = std::os::unix::net::UnixListener::bind(&meta).unwrap();
+            let listener = crate::kernel::testutil::bind_unix_socket(&meta);
             let error = read_record_at(&meta).map(drop).unwrap_err();
             assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{error}");
             assert_eq!(

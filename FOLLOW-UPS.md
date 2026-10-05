@@ -77,7 +77,6 @@ After the proxy: the test-suite audit (#351) and then the quality review
   - #349 product and CI problems found by the audit.
   - #367 tests: the artifact size caps in kernel::fetch (8 GiB artifact, 256 MiB text) have no test (from the #363 review).
   - #373 sandbox: host-socket scan leftovers (from the #372 review).
-  - #411 tests: an objmeta socket test fails under a long TMPDIR, path over SUN_LEN (found during #400).
 - **Quality review of 2026-09-24 (#264).** A whole-codebase review after
   the 09-20 to 09-24 run. #264 holds the work order and the overall verdict.
   Each line is one issue and one PR, in order:

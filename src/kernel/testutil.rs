@@ -49,6 +49,18 @@ impl TempDir {
         )))
     }
 
+    /// A scratch directory directly under /tmp whatever `TMPDIR` says, for
+    /// a path that must stay short: a Unix socket address the code under
+    /// test binds itself, which `bind_unix_socket` cannot shorten.
+    pub fn short(label: &str) -> Self {
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        Self::create(PathBuf::from(format!(
+            "/tmp/tog-{label}-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        )))
+    }
+
     /// A scratch directory at `tog-<name>` with no per-call suffix, for a
     /// fixture whose path enters the result under test and so must be the
     /// same on every call. Callers serialize their use of one name.
@@ -159,5 +171,72 @@ impl DoorScope {
             &mut self.attribution,
         )
         .unwrap()
+    }
+}
+
+/// A listening Unix socket at `path`, however long the path. A socket's
+/// address must fit in `sun_path` (108 bytes on Linux, 104 on macOS), and a
+/// scratch directory under a long `TMPDIR` does not. On Linux the socket is
+/// bound through `/proc/self/fd/<parent>/<name>`, the short alias of its
+/// held parent directory, so it is made in place on the parent's own
+/// filesystem. Elsewhere it is bound at a short name in /tmp and renamed
+/// into place (a rename keeps the socket), which needs /tmp on the same
+/// filesystem as `path`.
+pub(crate) fn bind_unix_socket(path: &std::path::Path) -> std::os::unix::net::UnixListener {
+    use std::os::unix::net::UnixListener;
+    if path.as_os_str().len() < 100 {
+        return UnixListener::bind(path).unwrap();
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::io::AsRawFd;
+        let parent = std::fs::File::open(path.parent().unwrap()).unwrap();
+        let alias = format!(
+            "/proc/self/fd/{}/{}",
+            parent.as_raw_fd(),
+            path.file_name().unwrap().to_str().unwrap()
+        );
+        UnixListener::bind(alias).unwrap()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let short = PathBuf::from(format!(
+            "/tmp/tog-sock-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_file(&short);
+        let listener = UnixListener::bind(&short).unwrap();
+        std::fs::rename(&short, path).unwrap();
+        listener
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::FileTypeExt;
+
+    /// A socket path past `sun_path` is still made where it was asked for,
+    /// a socket and not a copy, with no short name left behind in /tmp.
+    #[test]
+    fn a_socket_path_longer_than_sun_path_is_bound_in_place() {
+        let temp = TempDir::named("long-socket");
+        let dir = temp.0.join("a".repeat(60)).join("b".repeat(60));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("listener.sock");
+        assert!(path.as_os_str().len() > 108, "{}", path.display());
+        let listener = bind_unix_socket(&path);
+        assert!(std::fs::symlink_metadata(&path)
+            .unwrap()
+            .file_type()
+            .is_socket());
+        assert_eq!(
+            std::fs::read_dir(&dir).unwrap().count(),
+            1,
+            "the socket is the directory's only entry"
+        );
+        drop(listener);
     }
 }

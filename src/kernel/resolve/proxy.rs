@@ -1676,7 +1676,10 @@ mod tests {
             .proxy
             .open_session(harness.config(Policy::default(), Mode::Online))
             .unwrap();
-        let path = harness.store.root.join("tmp/proxy.sock");
+        // Production picks a short session directory (`SessionDir`); a
+        // store under a long TMPDIR would not fit in sun_path.
+        let short = crate::kernel::testutil::TempDir::short("proxy-unix");
+        let path = short.0.join("proxy.sock");
         let advertised: SocketAddr = "127.0.0.1:8119".parse().unwrap();
         let address = session.listen_unix(&path, advertised).unwrap();
         assert_eq!(address.address, advertised);
