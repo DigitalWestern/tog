@@ -1127,17 +1127,46 @@ pub fn realize_gems(
                 has_native
             }
         };
-        let native_libs_id = native_libs::identity_id(store, platform, has_native)?;
-        let identity = ruby_gems_identity(&spec, plan, native_libs_id.as_deref());
-        let lookup_inputs = crate::kernel::hostview::host_build_inputs;
-        if let Some(id) = cached_gems_object(store, activity, &identity, lookup_inputs)? {
-            crate::kernel::policy::check_cached_with_activity(store, activity, &id)?;
+        let mut native_libs_id = native_libs::identity_id(store, platform, has_native)?;
+        let mut identity = ruby_gems_identity(&spec, plan, native_libs_id.as_deref());
+        let cached = |identity: &Identity| -> io::Result<Option<PathBuf>> {
+            let lookup_inputs = crate::kernel::hostview::host_build_inputs;
+            match cached_gems_object(store, activity, identity, lookup_inputs)? {
+                Some(id) => {
+                    crate::kernel::policy::check_cached_with_activity(store, activity, &id)?;
+                    Ok(Some(store.object_path(&id)))
+                }
+                None => Ok(None),
+            }
+        };
+        if let Some(path) = cached(&identity)? {
             record_api_digests_on_hit(store, activity, plan, ruby_obj);
-            return Ok(store.object_path(&id));
+            return Ok(path);
         }
         let verified = match verified {
             Some(verified) => verified,
-            None => verify_plan(store, activity, ruby_obj, &scratch, &helper, plan)?,
+            None => {
+                let verified = verify_plan(store, activity, ruby_obj, &scratch, &helper, plan)?;
+                // The identity above came from the store's records; the
+                // gemspecs just read are the authority. When they disagree,
+                // the records were wrong (`verify_plan` has rewritten them),
+                // and the object is built and named by the gemspecs.
+                if let Some(fresh) = stale_native_classification(has_native, &verified) {
+                    ui::note(&format!(
+                        "the store recorded that this plan {} a native gem, but its gemspecs \
+                         say it {}; the record is corrected and the gemspecs decide",
+                        if has_native { "has" } else { "has no" },
+                        if fresh { "has" } else { "has not" },
+                    ));
+                    native_libs_id = native_libs::identity_id(store, platform, fresh)?;
+                    identity = ruby_gems_identity(&spec, plan, native_libs_id.as_deref());
+                    // `verify_plan` recorded this plan's API digests already.
+                    if let Some(path) = cached(&identity)? {
+                        return Ok(path);
+                    }
+                }
+                verified
+            }
         };
         let native_libs = match native_libs_id {
             Some(_) => Some(crate::kernel::provider::nativelibs::ensure_native_libs(
@@ -1169,6 +1198,14 @@ pub fn realize_gems(
 struct VerifiedGems<'p> {
     artifacts: Vec<(&'p RubyGem, PathBuf, bool)>,
     _leases: Vec<CacheLease>,
+}
+
+/// Whether `verified`'s gemspecs say the plan has a native gem, when that
+/// differs from `recorded`, the answer the store's classification records
+/// gave; `None` when they agree.
+fn stale_native_classification(recorded: bool, verified: &VerifiedGems<'_>) -> Option<bool> {
+    let fresh = verified.artifacts.iter().any(|(_, _, native)| *native);
+    (fresh != recorded).then_some(fresh)
 }
 
 /// Download and verify every gem of `plan`, refusing two gems that provide
@@ -1590,6 +1627,36 @@ mod tests {
                 digest_from_api: false,
             }],
         }
+    }
+
+    /// A classification record that disagrees with the gemspecs read on a
+    /// cache miss is caught, and the identity is decided by the gemspecs:
+    /// a gem recorded as pure Ruby that is native names the set.
+    #[test]
+    fn a_stale_native_record_is_overruled_by_the_gemspecs() {
+        let plan = linux_test_plan();
+        let spec = pin_spec(Platform::X86_64UnknownLinuxGnu);
+        let verified = |native: bool| VerifiedGems {
+            artifacts: vec![(&plan.gems[0], PathBuf::from("/cache/rake.gem"), native)],
+            _leases: Vec::new(),
+        };
+        assert_eq!(stale_native_classification(false, &verified(false)), None);
+        assert_eq!(stale_native_classification(true, &verified(true)), None);
+        assert_eq!(
+            stale_native_classification(false, &verified(true)),
+            Some(true)
+        );
+        assert_eq!(
+            stale_native_classification(true, &verified(false)),
+            Some(false)
+        );
+
+        let set = format!("{}-libset-3", "c".repeat(40));
+        let recorded = ruby_gems_identity(&spec, &plan, None);
+        let corrected = ruby_gems_identity(&spec, &plan, Some(&set));
+        assert_eq!(recorded.inputs["native"], native_libs::NATIVE_NONE);
+        assert_eq!(corrected.inputs["native"], native_libs::NATIVE_LIBS_MOUNTED);
+        assert_ne!(recorded.object_id(), corrected.object_id());
     }
 
     #[test]
