@@ -103,8 +103,12 @@ impl ProjectRoot {
     /// The directory an open root holds at `path` (`None` if none does), as
     /// a readable root with no cwd binding of its own: a confined door's lock
     /// root is the tree tog opened, though renamed or replaced since (#498).
+    ///
+    /// The path it returns is canonical, as `open`'s is. A path that climbs
+    /// (`..`), or that reaches below a held root through a symlink, is not
+    /// a held spelling: it is resolved as it stands now and looked up again.
     pub(crate) fn held_at(path: &Path) -> io::Result<Option<Self>> {
-        let Some((held, path)) = held_dir_for(path)? else {
+        let Some((held, path)) = held_root_for(path)? else {
             return Ok(None);
         };
         let dir = open_file_at(held.as_raw_fd(), b".", DIRECTORY_FLAGS, 0)?;
@@ -1218,6 +1222,78 @@ fn held_dir_for(path: &Path) -> io::Result<Option<(fs::File, PathBuf)>> {
     Ok(selected.map(|(directory, _)| (directory, matched)))
 }
 
+/// `held_dir_for` for a caller that keeps the path (`ProjectRoot::held_at`):
+/// the directory a held root has at `path`, with `path` in canonical form.
+/// The spelling given is matched only when it is absolute with no climbing
+/// component and every component below the held root is a real directory.
+/// Any other spelling is canonicalized, which resolves what it names now,
+/// and matched once more. A renamed project still matches by the canonical
+/// path it was opened at, which is the spelling its callers hold.
+fn held_root_for(path: &Path) -> io::Result<Option<(fs::File, PathBuf)>> {
+    let plain = path.is_absolute()
+        && path.components().all(|part| {
+            matches!(
+                part,
+                std::path::Component::RootDir | std::path::Component::Normal(_)
+            )
+        });
+    if plain {
+        if let Some(found) = held_below(path)? {
+            return Ok(Some((found, path.to_path_buf())));
+        }
+    }
+    match path.canonicalize() {
+        Ok(canonical) if canonical != path => {
+            Ok(held_below(&canonical)?.map(|found| (found, canonical)))
+        }
+        Ok(_) => Ok(None),
+        // A plain path nothing holds and nothing names is not held. One
+        // that climbs cannot be compared without resolving it.
+        Err(_) if plain => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// The directory at `path` (canonical in form) under every held root that
+/// contains it, walked from the held descriptor one component at a time
+/// without following a symlink. `None` when no root holds it or a
+/// component below the root is not a real directory. Roots that disagree,
+/// or a held directory since removed, refuse as `held_dir_for` does.
+fn held_below(path: &Path) -> io::Result<Option<fs::File>> {
+    let table = held_table();
+    let mut selected: Option<(fs::File, libc::stat)> = None;
+    for (fd, below) in held_matches(&table, path) {
+        if fd_stat(fd)?.st_nlink == 0 {
+            return Err(io::Error::from_raw_os_error(libc::ESTALE));
+        }
+        let mut directory = open_file_at(fd, b".", ANCESTOR_FLAGS, 0)?;
+        for name in below.iter() {
+            directory =
+                match open_file_at(directory.as_raw_fd(), name.as_bytes(), ANCESTOR_FLAGS, 0) {
+                    Ok(next) => next,
+                    Err(error)
+                        if matches!(
+                            error.raw_os_error(),
+                            Some(libc::ENOTDIR) | Some(libc::ELOOP)
+                        ) =>
+                    {
+                        return Ok(None)
+                    }
+                    Err(error) => return Err(error),
+                };
+        }
+        let identity = fd_stat(directory.as_raw_fd())?;
+        if let Some((_, first)) = &selected {
+            if first.st_dev != identity.st_dev || first.st_ino != identity.st_ino {
+                return Err(io::Error::from_raw_os_error(libc::ESTALE));
+            }
+        } else {
+            selected = Some((directory, identity));
+        }
+    }
+    Ok(selected.map(|(directory, _)| directory))
+}
+
 /// Enter a held cwd directly in the child, without first resolving its old
 /// pathname. The descriptor belongs to the command and closes on exec.
 /// A held lookup refusal becomes a spawn error. The post-fork hooks only
@@ -1507,6 +1583,36 @@ mod tests {
         let dir = temp.0.join("proj");
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// `held_at` returns a canonical path whatever spelling it is asked
+    /// with: a climbing path is resolved to the held root it names, and a
+    /// path below a held root through a symlink is the symlink's target,
+    /// never a second name for it. A real subdirectory is held by its
+    /// parent's root (#498).
+    #[test]
+    fn held_at_returns_a_canonical_path_for_any_spelling() {
+        let temp = TempDir::named("held-at-spelling");
+        let dir = project(&temp).canonicalize().unwrap();
+        fs::create_dir(dir.join("child")).unwrap();
+        let outside = temp.0.canonicalize().unwrap().join("outside");
+        fs::create_dir(&outside).unwrap();
+        symlink(&outside, dir.join("link")).unwrap();
+        let _holder = ProjectRoot::open(&dir).unwrap();
+        let climbing = ProjectRoot::held_at(&dir.join("child/.."))
+            .unwrap()
+            .unwrap();
+        assert_eq!(climbing.path(), dir.as_path());
+        let child = ProjectRoot::held_at(&dir.join("child")).unwrap().unwrap();
+        assert_eq!(child.path(), dir.join("child").as_path());
+        // The symlink's target is outside every held root: not held, so
+        // the caller opens it by its canonical path as it always did.
+        assert!(ProjectRoot::held_at(&dir.join("link")).unwrap().is_none());
+        let via_link = ProjectRoot::held_at(&dir.join("link/../proj/child"));
+        assert_eq!(
+            via_link.unwrap().unwrap().path(),
+            dir.join("child").as_path()
+        );
     }
 
     /// `held_at` finds the directory an open root holds at a path, by that
