@@ -570,12 +570,35 @@ pub fn cache_insert(
         "ins-{}-{hex}",
         crate::kernel::fsroot::random_suffix()?
     ));
-    fs::copy(src, &tmp)?;
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = fs::metadata(&tmp)?.permissions();
-        perms.set_mode(0o444);
-        fs::set_permissions(&tmp, perms)?;
+    // create_new: the name is random, and a file already there (a planted
+    // entry, or a symlink) is refused rather than written through.
+    let mut out = {
+        use std::os::unix::fs::OpenOptionsExt;
+        fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .mode(0o444)
+            .open(&tmp)
+            .map_err(|e| io::Error::new(e.kind(), format!("create {}: {e}", tmp.display())))?
+    };
+    let copied = copy_and_rehash(src, &mut out).and_then(|h| {
+        if h == hex {
+            Ok(())
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "cache insert {}: the file changed while it was copied",
+                    src.display()
+                ),
+            ))
+        }
+    });
+    drop(out);
+    if let Err(e) = copied {
+        let _ = fs::remove_file(&tmp);
+        return Err(e);
     }
     match fs::rename(&tmp, &dest) {
         Ok(()) => {}
@@ -586,6 +609,15 @@ pub fn cache_insert(
     }
     store::touch_path(&dest)?;
     Ok((hex, dest))
+}
+
+/// Copy `src` into `out`, then hash what `out` now holds: the bytes that
+/// will be published, which is what the cache address has to name.
+fn copy_and_rehash(src: &Path, out: &mut fs::File) -> io::Result<String> {
+    use std::io::Seek;
+    io::copy(&mut fs::File::open(src)?, out)?;
+    out.rewind()?;
+    crate::kernel::digest::hash_reader(out, Algo::Sha256)
 }
 
 /// Download `url`, verify its digest, and place it in the store's artifact
@@ -1393,6 +1425,48 @@ mod tests {
             "{error}"
         );
         assert_eq!(requested.len(), 11, "the eleventh redirect was followed");
+    }
+
+    #[test]
+    fn a_cache_insert_steps_around_planted_temporaries_and_leaves_none() {
+        use std::os::unix::fs::PermissionsExt;
+        let scratch = TempDir::named("fetch-insert-test");
+        let root = scratch.0.clone();
+        for sub in ["objects", "meta", "cache/sha256", "tmp"] {
+            fs::create_dir_all(root.join(sub)).unwrap();
+        }
+        let store = Store::for_test(root.clone());
+        let activity = &store
+            .activity(crate::kernel::activity::ActivityMode::Shared)
+            .unwrap();
+        // What a crashed run, or someone guessing at names, leaves behind.
+        let planted = ["dl-0-planted", "ins-0-planted"].map(|n| root.join("tmp").join(n));
+        for path in &planted {
+            fs::write(path, b"planted").unwrap();
+        }
+        let input = root.join("artifact");
+        fs::write(&input, b"module zip").unwrap();
+        let (hex, dest) = cache_insert(&store, activity, &input).unwrap();
+        assert_eq!(
+            hex,
+            crate::kernel::digest::hash_reader(&mut &b"module zip"[..], Algo::Sha256).unwrap()
+        );
+        assert_eq!(fs::read(&dest).unwrap(), b"module zip");
+        assert_eq!(
+            fs::metadata(&dest).unwrap().permissions().mode() & 0o777,
+            0o444
+        );
+        for path in &planted {
+            assert_eq!(fs::read(path).unwrap(), b"planted", "{}", path.display());
+        }
+        let mut left: Vec<_> = fs::read_dir(root.join("tmp"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        left.sort();
+        assert_eq!(left, ["dl-0-planted", "ins-0-planted"]);
+        // A second insert of the same bytes is a verified hit.
+        assert_eq!(cache_insert(&store, activity, &input).unwrap().1, dest);
     }
 
     #[test]
