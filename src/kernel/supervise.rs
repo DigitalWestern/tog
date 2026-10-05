@@ -1165,8 +1165,9 @@ fn status_relayed(
     session.conclude(status, (status, stderr_bytes?))
 }
 
-/// The bytes of a child's stderr kept for the sandbox failure classifier.
-const CLASSIFIER_PREFIX: usize = 4096;
+/// The bytes of a child's stderr kept for the sandbox failure classifier,
+/// by this supervisor and by the sandbox's unmanaged relay alike.
+pub(crate) const CLASSIFIER_PREFIX: usize = 4096;
 
 /// Where a relayed stream goes.
 enum Sink {

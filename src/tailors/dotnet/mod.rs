@@ -13,9 +13,13 @@
 pub mod edit;
 pub mod objects;
 pub mod tailor;
+mod unpack;
+
+#[cfg(test)]
+use unpack::extract_sdk_archive;
+use unpack::extract_sdk_archive_for;
 
 use crate::kernel::activity::StoreActivity;
-use crate::kernel::archive::{Compression, ExtractOptions};
 use crate::kernel::fetch::{cache_insert, download_toolchain_artifact_held, Digest};
 use crate::kernel::fsroot::{Entry, ProjectRoot};
 use crate::kernel::platform::Platform;
@@ -223,44 +227,6 @@ pub fn realize_runtime(
             deps
         })
         .map(|(path, _)| path)
-}
-
-#[cfg(test)]
-fn extract_sdk_archive(tarball: &Path, staged: &Path) -> io::Result<()> {
-    // No activity lease: the extraction is test-only and writes scratch
-    // directories outside any store.
-    crate::kernel::archive::extract_with_options(
-        tarball,
-        staged,
-        &ExtractOptions::platform_build(0),
-        Compression::Gzip,
-    )
-    .map(|_| ())
-    .map_err(|e| io::Error::new(e.kind(), format!("extract dotnet SDK archive: {e}")))?;
-    if !staged.join("dotnet").is_file() {
-        return Err(err("dotnet SDK extraction failed or has unexpected layout"));
-    }
-    Ok(())
-}
-
-fn extract_sdk_archive_for(
-    activity: &StoreActivity,
-    tarball: &Path,
-    staged: &Path,
-) -> io::Result<()> {
-    crate::kernel::archive::extract_with_activity_and_options(
-        activity,
-        tarball,
-        staged,
-        &ExtractOptions::platform_build(0),
-        Compression::Gzip,
-    )
-    .map(|_| ())
-    .map_err(|e| io::Error::new(e.kind(), format!("extract dotnet SDK archive: {e}")))?;
-    if !staged.join("dotnet").is_file() {
-        return Err(err("dotnet SDK extraction failed or has unexpected layout"));
-    }
-    Ok(())
 }
 
 /// global.json gate: it must name the SELECTED SDK exactly, with
@@ -1188,15 +1154,8 @@ pub fn realize_packages(
         let verl = p.version.to_ascii_lowercase();
         let url = format!("https://api.nuget.org/v3-flatcontainer/{idl}/{verl}/{idl}.{verl}.nupkg");
         let tmp = scratch.join(format!("{idl}.{verl}.nupkg"));
-        let agent = ureq::AgentBuilder::new().https_only(true).build();
-        let resp = agent
-            .get(&url)
-            .call()
-            .map_err(|e| err(format!("{}: GET {url}: {e}", p.id)))?;
-        let mut file = fs::File::create(&tmp)?;
-        use std::io::Read;
-        let mut reader = resp.into_reader().take(1 << 30);
-        io::copy(&mut reader, &mut file)?;
+        crate::kernel::fetch::download_unpinned(&url, &tmp, 1 << 30)
+            .map_err(|e| err(format!("{}: {e}", p.id)))?;
         let (raw_sha256, _) = cache_insert(store, activity, &tmp)?;
         raw_hashes.insert(format!("{}@{}", idl, p.version), raw_sha256);
         fs::rename(&tmp, feed.join(format!("{idl}.{verl}.nupkg")))?;
@@ -1250,7 +1209,7 @@ pub fn realize_packages(
         ),
     )?;
     let config = verifier.join("nuget.config").canonicalize()?;
-    let result = crate::kernel::sandbox::run_build_spec_on_with_activity(
+    let result = crate::kernel::sandbox::run_build_spec_on(
         platform,
         &verify_spec(
             &sdk_obj,
@@ -1261,7 +1220,7 @@ pub fn realize_packages(
             &scratch,
             ensure_dotnet_tmp(platform)?,
         ),
-        activity,
+        Some(activity),
     );
     if let Err(e) = result {
         let _ = crate::kernel::store::remove_tree(&scratch);
@@ -1754,18 +1713,16 @@ pub fn build_sandboxed(
         output_scratch: &output_scratch,
     };
     let spec = phase.spec(false, restore, env.clone(), ensure_dotnet_tmp(platform)?);
-    crate::kernel::sandbox::run_build_spec_on_with_activity(platform, &spec, activity).map_err(
-        |e| {
-            io::Error::new(
-                e.kind(),
-                format!(
-                    "offline locked restore failed: {e}; network is denied — \
+    crate::kernel::sandbox::run_build_spec_on(platform, &spec, Some(activity)).map_err(|e| {
+        io::Error::new(
+            e.kind(),
+            format!(
+                "offline locked restore failed: {e}; network is denied — \
                      packages outside the lock, framework packs, or workloads \
                      are unsupported in v0"
-                ),
-            )
-        },
-    )?;
+            ),
+        )
+    })?;
     if !objdir.join("project.assets.json").is_file() {
         let _ = crate::kernel::store::remove_tree(&scratch);
         return Err(err("restore produced no project.assets.json"));
@@ -1785,9 +1742,7 @@ pub fn build_sandboxed(
         "--disable-build-servers".to_string(),
     ]);
     let spec = phase.spec(true, build, env, ensure_dotnet_tmp(platform)?);
-    if let Err(e) =
-        crate::kernel::sandbox::run_build_spec_on_with_activity(platform, &spec, activity)
-    {
+    if let Err(e) = crate::kernel::sandbox::run_build_spec_on(platform, &spec, Some(activity)) {
         let _ = crate::kernel::store::remove_tree(&scratch);
         return Err(io::Error::new(
             e.kind(),

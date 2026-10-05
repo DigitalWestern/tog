@@ -62,7 +62,6 @@ fn component_version(bundle: &'static Bundle, name: &str) -> io::Result<&'static
 pub struct PinnedPython {
     pub platform: Platform,
     pub version: &'static str,
-    pub url: &'static str,
     pub sha256: &'static str,
 }
 
@@ -80,7 +79,6 @@ pub fn pythons() -> io::Result<&'static [PinnedPython]> {
             rows.push(PinnedPython {
                 platform: row.platform,
                 version,
-                url: row.url.as_str(),
                 sha256: row.digest.hex(),
             });
         }
@@ -105,19 +103,20 @@ pub fn toolchain_catalog() -> io::Result<Catalog> {
     CATALOG.catalog()
 }
 
-/// The pinned uv (resolver delegation target) the default release carries:
-/// a single static binary per platform, realized like any toolchain so a
-/// bare machine needs nothing besides tog.
+/// The pinned uv (resolver delegation target) the default release carries.
+#[cfg(test)]
 pub fn uv_version() -> io::Result<&'static str> {
     component_version(CATALOG.default_bundle()?, "uv")
 }
 
+#[cfg(test)]
 pub struct PinnedUv {
     pub platform: Platform,
     pub url: &'static str,
     pub sha256: &'static str,
 }
 
+#[cfg(test)]
 /// The default release's uv rows, one per supported platform.
 pub fn uv_pins() -> io::Result<&'static [PinnedUv]> {
     static PINS: OnceLock<Vec<PinnedUv>> = OnceLock::new();
@@ -166,17 +165,7 @@ pub fn row(
     if selected.ecosystem != "python" {
         return Err(not_python(selected));
     }
-    let spec = selected.artifact(platform, component)?;
-    if spec.recipe != recipe {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!(
-                "python: recipe {} in tog-toolchain.toml is not known to this tog; upgrade tog",
-                spec.recipe
-            ),
-        ));
-    }
-    Ok(spec)
+    selected.checked_artifact(platform, component, recipe, "sha256")
 }
 
 /// The shipped catalog's selection for one CPython version, exact
@@ -296,16 +285,6 @@ pub fn uv_identity(pin: &PinnedUv) -> Identity {
             ("platform".to_string(), pin.platform.triple().to_string()),
         ]),
     }
-}
-
-/// Ensure the shipped uv is realized in the store (binary at <obj>/uv), for
-/// work with no project selection to honor.
-pub fn ensure_uv_for(
-    store: &Store,
-    activity: &StoreActivity,
-    platform: Platform,
-) -> io::Result<PathBuf> {
-    realize_uv(store, activity, platform, &shipped_newest()?)
 }
 
 /// Realize the uv this selection names (binary at <obj>/uv). uv is the

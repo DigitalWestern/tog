@@ -144,6 +144,7 @@ fn version_output(platform: Platform, tree: &Path, binary: &str, flag: &str) -> 
         &scratch,
         &scratch,
         &[],
+        None,
     );
     let read = ran.and_then(|()| fs::read(&answer));
     let _ = fs::remove_dir_all(&scratch);
@@ -535,6 +536,7 @@ impl TreeHasher {
 /// The content hash of the tree at `root`. Two trees hash alike exactly
 /// when they hold the same names, bytes, links and executable bits.
 /// Owners, times and other mode bits are not content.
+#[cfg(test)]
 pub fn tree_digest(root: &Path) -> io::Result<Digest> {
     tree_digest_cached(root, None)
 }
@@ -833,18 +835,7 @@ fn select_with(
 /// The locked row of a path selection, checked before anything is read.
 fn locked_row(platform: Platform, selected: &Selected) -> io::Result<(ArtifactSpec, PathBuf)> {
     let row = selected.artifact(platform, "rustc")?;
-    if row.recipe != PATH_RECIPE {
-        return Err(invalid(format!(
-            "cargo: recipe {} in tog-toolchain.toml is not known to this tog; upgrade tog",
-            row.recipe
-        )));
-    }
-    if row.digest.algo() != "sha256" {
-        return Err(invalid(format!(
-            "cargo: the local Rust toolchain row is a {} digest; this tog hashes trees with sha256",
-            row.digest.algo()
-        )));
-    }
+    row.check("cargo", PATH_RECIPE, "sha256")?;
     let tree = row
         .url
         .strip_prefix(PATH_URL_SCHEME)
@@ -1485,7 +1476,7 @@ mod locked_row_tests {
         let sha512 = Digest::sha512(&"b".repeat(128)).unwrap();
         assert_eq!(
             refusal(&selected(PATH_RECIPE, "file:///opt/rust", sha512)),
-            "cargo: the local Rust toolchain row is a sha512 digest; this tog hashes trees with sha256"
+            "cargo: rustc artifact digest must be sha256, got sha512"
         );
     }
 
@@ -1516,7 +1507,7 @@ mod locked_row_tests {
         let error = refusal(&selected("rust-path/2", "https://x/rust", sha512.clone()));
         assert!(error.starts_with("cargo: recipe rust-path/2"), "{error}");
         let error = refusal(&selected(PATH_RECIPE, "https://x/rust", sha512));
-        assert!(error.contains("is a sha512 digest"), "{error}");
+        assert!(error.contains("must be sha256, got sha512"), "{error}");
     }
 
     #[test]

@@ -164,8 +164,20 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   subdirectory of their library directory, which `ld` does not search, and reached through
   `LD_LIBRARY_PATH`. That variable outranks a program's own `DT_RUNPATH`: a program a gem
   bundles and runs during its build, relying on its RUNPATH for a library with the same
-  soname as a relocated host library, loads the host copy instead. An explicit `-I` or `-L`
-  into a subdirectory the view keeps (such as `/usr/lib64/python3.14`) is not curated. A gem
+  soname as a relocated host library, loads the host copy instead. A library subdirectory
+  with headers, static or libtool archives, `pkgconfig` or `cmake` under it
+  (`/usr/lib64/perl5/CORE`, a Python package's CFFI headers, `/usr/lib64/libnl`) is curated
+  the same way, so an explicit `-I` or `-L` into it finds no development file (#331); the
+  compiler's own `gcc` and `clang` directories are kept whole. Kept files are symlinks into
+  one read-only bind of each whole curated host directory under `/.tog-host-files` (#334),
+  so every file the view hides is still readable there by that path: no default search
+  path, pkg-config directory or symlink in the view names it, but a build that names
+  `/.tog-host-files` on purpose reads the host's development files. Native
+  gems also build with tog's pinned native library set mounted (zlib, openssl, libffi,
+  libxml2, sqlite, ncurses and the rest of `nativelibs.rs`), and load it at run time through
+  their rpath (#329); every Linux gems object with a native gem names that set, so those
+  objects rebuild once after the change. An extconf that ignores pkg-config, `CPATH`,
+  `LIBRARY_PATH` and mkmf's flags does not see the set. A gem
   that needs another host library fails that build, is rebuilt against the whole host, and
   records `host-build-inputs`, which a policy can deny. The build that failed may only have
   left its own gem and extension directories behind; anything else it changed in the gem
@@ -192,10 +204,22 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   outside the curated directories and the compiler) can still make two hosts with the same
   fingerprint build different bytes.
   Pure-Ruby gems compile nothing and install against the whole host. Setting the view up
-  costs about two seconds per native gem on a Fedora 44 workstation, and more on a host with
-  a larger library directory.
-  Python sdist builds and npm addons still see the whole host `/usr` and can link any host
-  library. macOS gem builds are unchanged.
+  costs about a quarter of a second per native gem on a Fedora 44 workstation (about 300
+  mounts), against about ten milliseconds for the whole host.
+  Python sdist builds that compile Rust or mount the native-library set, and npm install
+  scripts, follow the same rule (#328): they run against the C runtime alone first and fall
+  back to the whole host with a `host-build-inputs` exception. A failed sdist attempt's
+  output, log and (for Rust) unpacked source are reset before the retry; a failed npm
+  attempt's package tree and scratch HOME go back to their snapshots. The wheel, and the
+  Python or Node environment holding it, are committed under `host-fallback/1` identities
+  that name what fell back (the sdist; `pkg:` entries for the environment). Every Linux
+  Python environment with such an sdist and every Linux Node environment carries
+  `build_view = "runtime-only/1"`, so the first sync after this change rebuilds them once.
+  One gap: when a build-requirement sdist falls back, its build environment is committed
+  under a host-fallback id, but the wheel built in that environment still names the
+  environment's planned runtime-only id in its own identity (`build_env`), which is planned
+  before any build runs. Python
+  sdists with no native or Rust input, and macOS builds, still see the whole host.
 - **Pinned native-library objects are store-root-specific**: `native-libs/libset/3` includes
   the canonical `TOG_STORE` root in its identity; moving a store requires re-realizing the
   libset. **Linux sandbox roots are canonical paths** (a symlink alias root is invisible).
@@ -218,7 +242,8 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   (`src/kernel/archive.rs`, #236). It reads every entry from the
   archive's own headers (ustar names and the POSIX prefix field, PAX `path`/`linkpath`/`size`,
   GNU long names), cross-checks that listing against `tar -t`, refuses the whole archive on an
-  absolute name, `..`, a hard link, a special file, an escaping symlink, a name that is not
+  absolute name, `..`, a special file, an escaping symlink, a hard link to anything but an
+  earlier regular file that survives `--strip-components` (#317), a name that is not
   UTF-8 or carries a control, bidirectional-override or zero-width character, two names that
   APFS would fold into one (by case or by Unicode normalization; for a per-platform build such
   as a toolchain or conda package, only on macOS, since Linux CPython and ncurses ship

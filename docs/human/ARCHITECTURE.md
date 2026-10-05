@@ -10,10 +10,12 @@ Seven ecosystems are built. Python and JavaScript/npm are proven on real
 projects: Next.js 15 + vitest suites, vite apps (build and dev server),
 prisma, native addons compiled hermetically (better-sqlite3, sharp), FastAPI
 apps with native wheels. Cargo, Go, Ruby, Elixir, and .NET all landed
-2026-08-31 as wrap-hermetically tailors. Tailor cost, measured honestly
-(adapter code excluding tests): Python ~1030 lines (pypi+wheel+python+build),
-npm ~1015, cargo ~690, go ~600, ruby ~540, elixir ~620, dotnet ~540. The
-kernel thesis holds. pnpm v9/v6 and Yarn classic lockfile importers shipped
+2026-08-31 as wrap-hermetically tailors. Tailor cost, measured
+2026-10-05 (non-blank, non-comment lines under `src/tailors/<name>/`,
+excluding test modules): Node ~11.1k, Python ~10.0k, Elixir ~2.6k,
+Go ~2.1k, .NET ~1.9k, Ruby ~1.9k, Cargo ~1.7k. The first estimates
+(~500-1000 lines each) were about 10x low for the two proven tailors:
+real projects needed lock importers, native builds and sandboxed scripts. pnpm v9/v6 and Yarn classic lockfile importers shipped
 2026-09-06 (`src/tailors/node/lock_import/`). Current version: tog 0.1.0.
 
 ## The model
@@ -149,10 +151,17 @@ Rules the Linux port settled, which apply to any future platform:
   static archive and pkg-config file out of the compiler's and linker's
   default search paths and out of pkg-config. Other shared libraries the
   host's tools load move to a `.tog-host-runtime` subdirectory that `ld`
-  never searches, reached through `LD_LIBRARY_PATH`. Ruby gems with native
-  extensions install under `RuntimeOnly`, so a gem object committed under
-  the `runtime-only/1` view does not depend on which `-dev` packages the
-  building host has installed.
+  never searches, reached through `LD_LIBRARY_PATH`. Library subdirectories
+  holding development files are curated the same way. Each curated host
+  directory is bound once at `/.tog-host-files`, and the files the view
+  keeps are symlinks into it, so setting the view up costs a few hundred
+  mounts rather than one per library file. Ruby gems with native
+  extensions, Python sdists that compile Rust or native code, and npm
+  install scripts build under `RuntimeOnly` first, so an object committed
+  under the `runtime-only/1` view does not depend on which `-dev` packages
+  the building host has installed. The retry against the whole host, its
+  `host-build-inputs` record and the `host-fallback/1` identity are shared
+  (`kernel/hostfallback.rs`).
 - **Darwin identity goldens stay byte-identical.** A platform change that
   alters a macOS object id is a bug.
 - **Archive extensions must agree.** GNU tar always prefers the PAX record
@@ -354,8 +363,16 @@ store-commit rename; this bit once). On Linux each gem whose gemspec
 declares native extensions installs against the host C runtime alone
 (`HostView::RuntimeOnly`, recorded in the gem object's identity as
 `build_view`; pure-Ruby gems compile nothing and install against the full
-view); a gem whose native extension needs another host
-library is rebuilt against the whole host after recording
+view). Those builds also get tog's pinned native library set
+(`kernel/provider/nativelibs.rs`, the one Python sdists and npm addons
+use) through pkg-config, gcc's `CPATH`/`LIBRARY_PATH` and mkmf's
+`--with-cppflags`/`--with-ldflags`, which carry its rpath into the
+extension (`ruby/native_libs.rs`, #329). The gems identity says whether
+it did (`native`, and the set's id as `native_libs`); whether a gem is
+native is read from its gemspec once and kept as a store record keyed by
+its sha256, so a warm sync names the set without downloading anything. A
+gem whose native extension needs a library outside the set
+is rebuilt against the whole host after recording
 `host-build-inputs`, which the object carries so a cache hit replays it.
 Before that retry the failed attempt's own gem and extension directories
 are removed from the shared GEM_HOME, and any other change it made refuses
@@ -774,10 +791,11 @@ refuses, lists every such record, and names `tog gc --drop-object <id>` for
 each.
 
 Every (kind, schema) pair a producer commits has a row (`ObjectKind`, in the
-tailor's `objects.rs`). Its `live_required` and `live_optional` fields
+producer's `objects.rs`: the tailor's, or `src/kernel/provider/objects.rs`
+for the toolchains and build inputs the kernel providers make). Its `live_required` and `live_optional` fields
 describe the inputs the current producer writes, including dynamic prefixes
 for conditional package entries. Where identity shape has collection or platform semantics,
-the tailor owns a `live_contract` beside the producer's identity constructor
+the producer's layer owns a `live_contract` beside its rows
 in `objects.rs`; it receives the whole `Identity` and validates count fields,
 paired keys, and platform-conditional inputs. The live check validates
 required names and the live key whitelist before calling that contract.
@@ -973,6 +991,8 @@ and build inputs tailors share, so no tailor reaches into another):
     sandbox.rs      hermetic build sandbox (Seatbelt / bubblewrap)
     hostview.rs     HostView::RuntimeOnly on Linux: the host's runtime files
                     plus the C runtime's development files, nothing else
+    hostfallback.rs C-runtime-first builds: the retry against the whole host,
+                    host-fallback identities and their store records
     provider/       shared toolchain providers, the pinned things more than one
                     tailor realizes: cpython.rs (CPython + uv from
                     cpython.catalog.toml, realization; node-gyp's
@@ -1037,6 +1057,7 @@ when the two differ.
                            requirements.rs, setup.rs, markers.rs
     python/env.rs          venv-shaped env object realization and projection
     python/build.rs        sandboxed sdist-to-wheel builds
+    python/sdist_view.rs   which host view an sdist build runs in, host fallback
     python/build_requires.rs  PEP 517 build requirements
     python/registry_tool.rs  `tog x` from PyPI: uv resolve, env realize, .venv
     python/run_refusal.rs  `tog run` refusals: pip install into a projected .venv
@@ -1044,6 +1065,7 @@ when the two differ.
     node/plan.rs           package-lock.json planning
     node/freshness.rs      lock-vs-package.json checks for npm and pnpm locks
     node/realize.rs        env realization and sandboxed install scripts
+    node/script_view.rs    install scripts: C-runtime-only first, host fallback
     node/project.rs        node_modules projection and workspace links
     node/inputs.rs         missing-lock generation, lockfile importers
     node/registry_tool.rs  `tog x` from npm: npm resolve, env realize, node_modules
@@ -1063,6 +1085,7 @@ when the two differ.
     go/inputs.rs           toolchain selection from go.mod, the GoPlan
     ruby/mod.rs            Bundler-delegated planning, tog-verified gems
     ruby/native.rs         native gems: C-runtime-only first, host fallback identity
+    ruby/native_libs.rs    native gems build with tog's pinned native library set
     ruby/gem_home.rs       what a failed gem build may leave before its retry
     elixir/mod.rs          Mix/Hex, AST-validated lockfile
     elixir/check_locked.rs whether mix deps.get --check-locked must run again

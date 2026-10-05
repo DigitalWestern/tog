@@ -78,25 +78,15 @@ None open.
 - **Quality review of 2026-09-24 (#264).** A whole-codebase review after
   the 09-20 to 09-24 run. #264 holds the work order and the overall verdict.
   Each line is one issue and one PR, in order:
-  - #238 http: pypi, rubygems, dotnet and deps call ureq directly, bypassing kernel::fetch.
-  - #240 store: a CacheLease holds gc.lock exclusively, so separate tog processes download one at a time.
-  - #247 dead code: the non-heavy part shipped; left are the unused items in heavy-watched files (`fetch.rs`, `archive.rs`, `sandbox.rs`, `provider/`) and the CI job that builds with `--cfg tog_dead_code -D dead_code`.
-  - #245 kernel: consolidate duplicated primitives. Left after the first pass: the file hash copy in `provider/crates.rs` and `fetch.rs` (heavy gate), the pid temp names in `fetch.rs`, `validate_object_complete` and `exceptions()` reading records their own way.
-  - #246 left: move the recipe checks in `kernel/provider` (cpython, rust, rust_path) onto `Selected::checked_artifact`. Deferred because those files wake the heavy suite.
-  - #248 sandbox and gitsrc: collapse the _with_activity twin of every entry point.
-  - #256 design: the Tailor trait has 35+ methods, a dozen used by one ecosystem, and its docs have drifted.
-  - #255 design: the kernel knows every ecosystem by name, and tog run is hard-wired to Node.
-  - #257 design: move process-global state (policy, signing key, input guard, kinds) into Context.
-  - #258 design: an error type that separates refusals, staleness, network and bugs.
+  - #245 kernel: consolidate duplicated primitives. Left: `validate_object_complete` and `exceptions()` now share objmeta's open and parse, but not its full record check (identity hash, schema), because about 25 tests write fake records it refuses. Give those tests real records, then call `read_store_record`.
+  - #256 design: the Tailor trait has 35+ methods, a dozen used by one ecosystem. The drifted docs are fixed. Left: split the single-ecosystem methods into optional sub-traits behind accessors (`fn formatter() -> Option<&dyn Formatter>`), before the resolution proxy adds `edit_manifest` (#198).
+  - #255 design: the kernel knows every ecosystem by name. `tog run` now reaches package scripts through `Tailor::project_script` and `projected_script`, and the architecture test refuses a command naming a tailor's module. Left: the toolchain-request parsing in `kernel/toolchain/resolve.rs` and `input.rs` still matches on ecosystem names; move it behind a `Tailor::toolchain_request` hook, then add a scan for ecosystem literals in `src/kernel`.
+  - #257 design: move process-global state (policy, signing key, input guard, kinds) into Context. The input guard now keeps one snapshot per sync, so two projects in one process no longer clear each other's. Left: carry the policy frames, the signing key, the guard and the installed kinds in `Context`, designed with #57's per-operation sessions.
+  - #258 design: an error type that separates refusals, staleness, network and bugs. The `detected()` bug is fixed. Left is the `TogError` classes (Refused, Stale, Unsupported, Network, Interrupted) with distinct exit codes, starting with `fsroot::refusal`.
   - #243 sandbox: the macOS Seatbelt profile reads all of /opt, its timezone rule is dead, and CI never runs it.
-  - #237 archive: symlink containment compares names case-sensitively.
 - **Found in the #316 review (2026-09-26).** One issue and one PR each:
-  - #317 archive: hard links in registry packages are refused; allow contained ones.
   - #321 tests: kernel_smoke realizes against the developer's own store, so a local run can pass on cached objects.
-  - #319 archive: read_member runs a tar -t cross-check it does not need.
 - **Found in the #323 review (2026-09-26).** One issue and one PR each:
-  - #324 ci: adding the heavy label during a path-triggered heavy run restarts it on the same commit.
-  - #325 ci: tailor changes to extraction do not trigger the heavy suite on their own.
 - **Found in the #327 work (2026-09-26).** One issue and one PR each:
   - #328 sandbox: opt Python sdist builds and npm addons into HostView::RuntimeOnly.
   - #329 ruby: give native gem builds tog's pinned native-libs set.
@@ -110,8 +100,6 @@ None open.
 - **Smaller open issues from the 2026-09-23/24 run.** One line each; the
   issue has the options and the pick.
   - #188 npm: realize `file:` packages as tog-owned trees.
-  - #191 provider object-kind rows still live in the tailors' `objects.rs`.
-  - #216 python: `uv pip compile` fails for vllm and MetaGPT; classifier label.
   - #476 fetch: state and audit that a cache hit is trusted by its digest's source, not its writer (from #287).
   - #289 interrupt: the bwrap preflight misreports Ctrl-C as "bwrap unavailable" (`sandbox.rs`, heavy gate). The exit code is fixed.
   - #295 tests: four sandbox tests fail instead of skipping when bubblewrap is missing.
@@ -157,8 +145,6 @@ None open.
 
 - **Unreadable rollback cleanup (#503).** Replace the pathname cleanup helper with held-descriptor removal so mode-000 and search-only directories do not leave rollback or teardown data behind. See `src/kernel/store/fsops.rs::remove_tree`.
 
-- **Shared file hashing (#504).** Unify crate and fetch hashing through one descriptor/reader helper in the digest layer.
-- **Random fetch temporaries (#505).** Share random suffixes for download/install temporaries while preserving exclusive creation and GC prefixes.
 - **Complete reference metadata (#506).** Use the shared semantic parser for referenced objects and replace legitimate minimal fixtures with complete records.
 - **Shared exception parsing (#507).** Add checked exceptions to object metadata records instead of reading that field separately.
 - **SRI alternatives (#508).** Preserve all strongest hash candidates through Node planning and verification. The consolidation preserves first-entry behavior on ties.

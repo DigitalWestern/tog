@@ -127,36 +127,22 @@ pub fn forced_env_edits(
     edits
 }
 
+/// [`run_build_spec_on`] on this host, for a caller that consumes no
+/// store (the integration tests).
 pub fn run_build_spec(spec: &BuildSpec) -> io::Result<()> {
-    run_build_spec_on(Platform::host()?, spec)
+    run_build_spec_on(Platform::host()?, spec, None)
 }
 
-pub(crate) fn run_build_spec_on(platform: Platform, spec: &BuildSpec) -> io::Result<()> {
-    let status = run_build_spec_status_on(platform, spec)?;
-    if status.success() {
-        return Ok(());
-    }
-    Err(io::Error::other(format!(
-        "sandboxed command failed ({status}): {}",
-        crate::kernel::ui::shell_line(&spec.argv)
-    )))
-}
-
-/// Store-consuming counterpart to `run_build_spec_on`. The caller's activity
-/// lease is borrowed through sandbox setup, the child, and its reap.
-pub(crate) fn run_build_spec_on_with_activity(
+/// Run a build specification; a non-zero exit is an error. `activity` is
+/// the caller's store lease, borrowed through sandbox setup, the child and
+/// its reap. `None` is only for a caller that consumes no store.
+pub(crate) fn run_build_spec_on(
     platform: Platform,
     spec: &BuildSpec,
-    activity: &StoreActivity,
+    activity: Option<&StoreActivity>,
 ) -> io::Result<()> {
-    let status = run_build_spec_status_on_with_activity(platform, spec, activity)?;
-    if status.success() {
-        return Ok(());
-    }
-    Err(io::Error::other(format!(
-        "sandboxed command failed ({status}): {}",
-        crate::kernel::ui::shell_line(&spec.argv)
-    )))
+    let status = run_build_spec_status_on(platform, spec, activity)?;
+    succeeded(status, &spec.argv)
 }
 
 /// Run a build specification and return the child status. Sandbox setup
@@ -166,6 +152,7 @@ pub(crate) fn run_build_spec_on_with_activity(
 pub(crate) fn run_build_spec_status_on(
     platform: Platform,
     spec: &BuildSpec,
+    activity: Option<&StoreActivity>,
 ) -> io::Result<std::process::ExitStatus> {
     let argv: Vec<&str> = spec.argv.iter().map(String::as_str).collect();
     let mut write: Vec<&Path> = spec.write.iter().map(PathBuf::as_path).collect();
@@ -182,31 +169,64 @@ pub(crate) fn run_build_spec_status_on(
         &spec.scratch,
         &spec.cwd,
         &spec.env,
+        activity,
     )
 }
 
-pub(crate) fn run_build_spec_status_on_with_activity(
-    platform: Platform,
-    spec: &BuildSpec,
-    activity: &StoreActivity,
+/// `Ok` for a successful exit, else the one "sandboxed command failed"
+/// error every entry point reports.
+fn succeeded<S: AsRef<str>>(status: std::process::ExitStatus, argv: &[S]) -> io::Result<()> {
+    if status.success() {
+        return Ok(());
+    }
+    Err(command_failed(&status, argv))
+}
+
+fn command_failed<S: AsRef<str>>(status: &std::process::ExitStatus, argv: &[S]) -> io::Error {
+    io::Error::other(format!(
+        "sandboxed command failed ({status}): {}",
+        crate::kernel::ui::shell_line(argv)
+    ))
+}
+
+/// Run `command` (its stderr piped) and relay its stderr, under the
+/// supervisor when a store lease is held. Returns the status and the
+/// stderr prefix the setup-failure classifier reads.
+fn status_with_stderr(
+    command: &mut Command,
+    activity: Option<&StoreActivity>,
+) -> io::Result<(std::process::ExitStatus, Vec<u8>)> {
+    match activity {
+        Some(activity) => crate::kernel::supervise::local_status_with_stderr(command, activity),
+        None => {
+            let output = wait_with_stderr_relay(spawn_unmanaged(command)?)?;
+            Ok((output.status, output.stderr))
+        }
+    }
+}
+
+// Reviewed site (tests/architecture.rs): `None` arm of `Option<&StoreActivity>`: no store is involved.
+#[allow(clippy::disallowed_methods)]
+fn spawn_unmanaged(command: &mut Command) -> io::Result<std::process::Child> {
+    command.spawn()
+}
+
+/// The child's status, unless its stderr shows the sandbox itself failed
+/// to start: that is an error of its own, never the command's exit.
+fn refuse_setup_failure(
+    status: std::process::ExitStatus,
+    stderr: &[u8],
+    cmd: &[&str],
 ) -> io::Result<std::process::ExitStatus> {
-    let argv: Vec<&str> = spec.argv.iter().map(String::as_str).collect();
-    let mut write: Vec<&Path> = spec.write.iter().map(PathBuf::as_path).collect();
-    write.push(&spec.scratch);
-    let sandbox = Sandbox {
-        read: spec.read.iter().map(PathBuf::as_path).collect(),
-        write,
-        host_view: spec.host_view,
-    };
-    sandbox.run_in_status_on_with_activity(
-        platform,
-        &argv,
-        &spec.path,
-        &spec.scratch,
-        &spec.cwd,
-        &spec.env,
-        activity,
-    )
+    if let Some(SandboxFailureKind::Setup) = classify_sandbox_failure(&status, stderr) {
+        return Err(sandbox_failure_error(
+            SandboxFailureKind::Setup,
+            &status,
+            stderr,
+            cmd,
+        ));
+    }
+    Ok(status)
 }
 
 pub struct Sandbox<'a> {
@@ -324,25 +344,9 @@ impl Sandbox<'_> {
         .profile())
     }
 
-    /// Run `cmd` inside the sandbox with a scrubbed environment.
-    /// `env_path` becomes PATH; HOME/TMPDIR point into the writable tmp.
-    pub fn run(&self, cmd: &[&str], env_path: &str, tmp: &Path) -> io::Result<()> {
-        self.run_in(cmd, env_path, tmp, tmp, &[])
-    }
-
-    /// Like `run`, but with an explicit working directory and extra
-    /// environment variables (npm lifecycle scripts need npm_config_*).
-    pub fn run_in(
-        &self,
-        cmd: &[&str],
-        env_path: &str,
-        tmp: &Path,
-        cwd: &Path,
-        envs: &[(String, String)],
-    ) -> io::Result<()> {
-        self.run_in_on(Platform::host()?, cmd, env_path, tmp, cwd, envs)
-    }
-
+    /// Run `cmd` in the sandbox; a non-zero exit is an error. `activity` as
+    /// for [`run_build_spec_on`].
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn run_in_on(
         &self,
         platform: Platform,
@@ -351,38 +355,13 @@ impl Sandbox<'_> {
         tmp: &Path,
         cwd: &Path,
         envs: &[(String, String)],
+        activity: Option<&StoreActivity>,
     ) -> io::Result<()> {
-        let status = self.run_in_status_on(platform, cmd, env_path, tmp, cwd, envs)?;
-        if status.success() {
-            return Ok(());
-        }
-        Err(io::Error::other(format!(
-            "sandboxed command failed ({status}): {}",
-            crate::kernel::ui::shell_line(cmd)
-        )))
+        let status = self.run_in_status_on(platform, cmd, env_path, tmp, cwd, envs, activity)?;
+        succeeded(status, cmd)
     }
 
-    pub(crate) fn run_in_on_with_activity(
-        &self,
-        platform: Platform,
-        cmd: &[&str],
-        env_path: &str,
-        tmp: &Path,
-        cwd: &Path,
-        envs: &[(String, String)],
-        activity: &StoreActivity,
-    ) -> io::Result<()> {
-        let status =
-            self.run_in_status_on_with_activity(platform, cmd, env_path, tmp, cwd, envs, activity)?;
-        if status.success() {
-            return Ok(());
-        }
-        Err(io::Error::other(format!(
-            "sandboxed command failed ({status}): {}",
-            crate::kernel::ui::shell_line(cmd)
-        )))
-    }
-
+    #[allow(clippy::too_many_arguments)]
     fn run_in_status_on(
         &self,
         platform: Platform,
@@ -391,35 +370,18 @@ impl Sandbox<'_> {
         tmp: &Path,
         cwd: &Path,
         envs: &[(String, String)],
-    ) -> io::Result<std::process::ExitStatus> {
-        match platform {
-            Platform::Aarch64AppleDarwin => self.run_seatbelt_status(cmd, env_path, tmp, cwd, envs),
-            Platform::X86_64UnknownLinuxGnu => self.run_bwrap_status(cmd, env_path, tmp, cwd, envs),
-        }
-    }
-
-    fn run_in_status_on_with_activity(
-        &self,
-        platform: Platform,
-        cmd: &[&str],
-        env_path: &str,
-        tmp: &Path,
-        cwd: &Path,
-        envs: &[(String, String)],
-        activity: &StoreActivity,
+        activity: Option<&StoreActivity>,
     ) -> io::Result<std::process::ExitStatus> {
         match platform {
             Platform::Aarch64AppleDarwin => {
-                self.run_seatbelt_status_with_activity(cmd, env_path, tmp, cwd, envs, activity)
+                self.run_seatbelt_status(cmd, env_path, tmp, cwd, envs, activity)
             }
             Platform::X86_64UnknownLinuxGnu => {
-                self.run_bwrap_status_with_activity(cmd, env_path, tmp, cwd, envs, activity)
+                self.run_bwrap_status(cmd, env_path, tmp, cwd, envs, activity)
             }
         }
     }
 
-    // Reviewed site (tests/architecture.rs): unmanaged sandbox entry for callers that consume no store.
-    #[allow(clippy::disallowed_methods)]
     fn run_seatbelt_status(
         &self,
         cmd: &[&str],
@@ -427,6 +389,7 @@ impl Sandbox<'_> {
         tmp: &Path,
         cwd: &Path,
         envs: &[(String, String)],
+        activity: Option<&StoreActivity>,
     ) -> io::Result<std::process::ExitStatus> {
         let profile = self.seatbelt_profile(tmp)?;
         let mut command = Command::new("/usr/bin/sandbox-exec");
@@ -444,63 +407,12 @@ impl Sandbox<'_> {
         for (k, v) in envs {
             command.env(k, v);
         }
-        // Keep the historical unmanaged entry point available to tests and
-        // callers that do not consume a store. Production store callers use
-        // the activity-aware sibling below.
-        command.stdin(std::process::Stdio::null());
-        command.stdout(std::process::Stdio::inherit());
-        command.stderr(std::process::Stdio::piped());
-        let child = command.spawn()?;
-        let output = wait_with_stderr_relay(child)?;
-        if let Some(SandboxFailureKind::Setup) =
-            classify_sandbox_failure(&output.status, &output.stderr)
-        {
-            return Err(sandbox_failure_error(
-                SandboxFailureKind::Setup,
-                &output.status,
-                &output.stderr,
-                cmd,
-            ));
-        }
-        Ok(output.status)
-    }
-
-    fn run_seatbelt_status_with_activity(
-        &self,
-        cmd: &[&str],
-        env_path: &str,
-        tmp: &Path,
-        cwd: &Path,
-        envs: &[(String, String)],
-        activity: &StoreActivity,
-    ) -> io::Result<std::process::ExitStatus> {
-        let profile = self.seatbelt_profile(tmp)?;
-        let mut command = Command::new("/usr/bin/sandbox-exec");
         command
-            .arg("-p")
-            .arg(&profile)
-            .args(cmd)
-            .current_dir(cwd) // cwd must be readable in-sandbox (getcwd)
-            .env_clear()
-            .env("PATH", env_path)
-            .env("HOME", tmp)
-            .env("TMPDIR", tmp)
-            .env("LANG", "en_US.UTF-8")
-            .env("SOURCE_DATE_EPOCH", "315532800"); // reproducibility nudge
-        for (k, v) in envs {
-            command.env(k, v);
-        }
-        let (status, stderr) =
-            crate::kernel::supervise::local_status_with_stderr(&mut command, activity)?;
-        if let Some(SandboxFailureKind::Setup) = classify_sandbox_failure(&status, &stderr) {
-            return Err(sandbox_failure_error(
-                SandboxFailureKind::Setup,
-                &status,
-                &stderr,
-                cmd,
-            ));
-        }
-        Ok(status)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::piped());
+        let (status, stderr) = status_with_stderr(&mut command, activity)?;
+        refuse_setup_failure(status, &stderr, cmd)
     }
 
     fn run_bwrap_status(
@@ -510,23 +422,24 @@ impl Sandbox<'_> {
         tmp: &Path,
         cwd: &Path,
         envs: &[(String, String)],
+        activity: Option<&StoreActivity>,
     ) -> io::Result<std::process::ExitStatus> {
-        self.run_bwrap_status_inner(cmd, env_path, tmp, cwd, envs, None)
+        let (mut command, _invocation) = self.bwrap(cmd, env_path, tmp, cwd, envs, activity)?;
+        // stderr is piped so bwrap's own setup errors ("bwrap: ...") can be
+        // classified, but the build's diagnostics must still reach the user:
+        // the relay streams every byte to our stderr and keeps the leading
+        // bytes for classification.
+        command
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::piped());
+        let (status, stderr) = status_with_stderr(&mut command, activity)?;
+        refuse_setup_failure(status, &stderr, cmd)
     }
 
-    fn run_bwrap_status_with_activity(
-        &self,
-        cmd: &[&str],
-        env_path: &str,
-        tmp: &Path,
-        cwd: &Path,
-        envs: &[(String, String)],
-        activity: &StoreActivity,
-    ) -> io::Result<std::process::ExitStatus> {
-        self.run_bwrap_status_inner(cmd, env_path, tmp, cwd, envs, Some(activity))
-    }
-
-    fn run_bwrap_status_inner(
+    /// The bwrap command for `cmd`, after the socket scan and the preflight,
+    /// with the invocation whose host-view skeleton must outlive the child.
+    fn bwrap(
         &self,
         cmd: &[&str],
         env_path: &str,
@@ -534,53 +447,18 @@ impl Sandbox<'_> {
         cwd: &Path,
         envs: &[(String, String)],
         activity: Option<&StoreActivity>,
-    ) -> io::Result<std::process::ExitStatus> {
-        if let Some(activity) = activity {
-            self.reject_host_sockets(cwd, tmp)?;
-            let bwrap = bwrap_preflight_with_activity(Some(activity))?;
-            // Holds the host view's skeleton until the child is reaped.
-            let invocation = self.bwrap_args(cmd, env_path, tmp, cwd, envs)?;
-            let mut command = bwrap_command(bwrap)?;
-            command
-                .args(&invocation.args)
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::inherit())
-                .stderr(std::process::Stdio::piped());
-            let (status, stderr) =
-                crate::kernel::supervise::local_status_with_stderr(&mut command, activity)?;
-            if let Some(SandboxFailureKind::Setup) = classify_sandbox_failure(&status, &stderr) {
-                return Err(sandbox_failure_error(
-                    SandboxFailureKind::Setup,
-                    &status,
-                    &stderr,
-                    cmd,
-                ));
-            }
-            return Ok(status);
-        }
-        let output = self.run_bwrap_with_stdout(
-            cmd,
-            env_path,
-            tmp,
-            cwd,
-            envs,
-            std::process::Stdio::inherit(),
-        )?;
-        if let Some(SandboxFailureKind::Setup) =
-            classify_sandbox_failure(&output.status, &output.stderr)
-        {
-            return Err(sandbox_failure_error(
-                SandboxFailureKind::Setup,
-                &output.status,
-                &output.stderr,
-                cmd,
-            ));
-        }
-        Ok(output.status)
+    ) -> io::Result<(Command, BwrapInvocation)> {
+        self.reject_host_sockets(cwd, tmp)?;
+        let bwrap = bwrap_preflight_with_activity(activity)?;
+        let invocation = self.bwrap_args(cmd, env_path, tmp, cwd, envs)?;
+        let mut command = bwrap_command(bwrap)?;
+        command.args(&invocation.args);
+        Ok((command, invocation))
     }
 
-    // Reviewed site (tests/architecture.rs): unmanaged sandbox entry for callers that consume no store.
-    #[allow(clippy::disallowed_methods)]
+    /// The unmanaged bwrap run with stdout sent to `stdout`, for the tests
+    /// that read what the command printed.
+    #[cfg(test)]
     fn run_bwrap_with_stdout(
         &self,
         cmd: &[&str],
@@ -590,22 +468,12 @@ impl Sandbox<'_> {
         envs: &[(String, String)],
         stdout: std::process::Stdio,
     ) -> io::Result<std::process::Output> {
-        self.reject_host_sockets(cwd, tmp)?;
-        let bwrap = bwrap_preflight()?;
-        // Holds the host view's skeleton until the child is reaped.
-        let invocation = self.bwrap_args(cmd, env_path, tmp, cwd, envs)?;
-        let mut command = bwrap_command(bwrap)?;
-        // stderr is piped so bwrap's own setup errors ("bwrap: ...") can be
-        // classified, but the build's diagnostics must still reach the user:
-        // a relay thread streams every byte to our stderr and keeps the
-        // leading bytes for classification.
-        let child = command
-            .args(&invocation.args)
+        let (mut command, _invocation) = self.bwrap(cmd, env_path, tmp, cwd, envs, None)?;
+        command
             .stdin(std::process::Stdio::null())
             .stdout(stdout)
-            .stderr(std::process::Stdio::piped())
-            .spawn()?;
-        wait_with_stderr_relay(child)
+            .stderr(std::process::Stdio::piped());
+        wait_with_stderr_relay(spawn_unmanaged(&mut command)?)
     }
 
     /// A Unix socket is reachable through a read-only bind as well as a
@@ -796,8 +664,8 @@ struct BwrapInvocation {
 }
 
 /// Longest stderr prefix retained for sandbox setup classification; bwrap's own
-/// setup errors are a single short line.
-const STDERR_PREFIX_LIMIT: usize = 4096;
+/// setup errors are a single short line. The supervisor keeps the same.
+use crate::kernel::supervise::CLASSIFIER_PREFIX as STDERR_PREFIX_LIMIT;
 
 /// Copy a child's stderr to ours as it arrives, retaining the first
 /// `STDERR_PREFIX_LIMIT` bytes. Relay failures (e.g. our stderr closed) are
@@ -952,10 +820,7 @@ fn sandbox_failure_error(
             io::ErrorKind::Unsupported,
             explained_bwrap_stderr(&String::from_utf8_lossy(stderr)),
         ),
-        SandboxFailureKind::Command => io::Error::other(format!(
-            "sandboxed command failed ({status}): {}",
-            crate::kernel::ui::shell_line(cmd)
-        )),
+        SandboxFailureKind::Command => command_failed(status, cmd),
     }
 }
 
@@ -1491,6 +1356,7 @@ mod tests {
             scratch,
             cwd,
             envs,
+            None,
         )
     }
 
@@ -3070,6 +2936,7 @@ echo "PKG_CONFIG_LIBDIR=${PKG_CONFIG_LIBDIR-unset}"
                 &linked,
                 &linked,
                 &[],
+                None,
             )
         };
         write(&linked).unwrap();

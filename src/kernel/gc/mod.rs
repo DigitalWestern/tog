@@ -59,6 +59,7 @@ impl Default for Options {
 }
 
 impl Options {
+    #[cfg(test)]
     pub fn keep_days(days: u64) -> Self {
         Self {
             keep_days: days,

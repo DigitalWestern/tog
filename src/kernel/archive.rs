@@ -4,9 +4,10 @@
 //! unpacks into a store stage. tar's own defences differ by implementation
 //! and version, so this module does not trust them: it lists every entry
 //! first and refuses the archive as a whole before a single byte is written
-//! when any entry is an absolute name, contains a `..` component, is a hard
-//! link or a special file, or is a symlink whose target is not lexically
-//! contained in the destination after `--strip-components`. Only a listing
+//! when any entry is an absolute name, contains a `..` component, is a
+//! special file, is a symlink whose target is not lexically contained in
+//! the destination after `--strip-components`, or is a hard link to
+//! anything but an earlier regular file that survives the strip. Only a listing
 //! that passes completely is extracted, and the delegated tar runs with
 //! `TAR_OPTIONS` unset so the user's environment cannot add flags.
 //!
@@ -35,13 +36,17 @@
 //! identity covers names, bytes and the executable bit, and nothing else
 //! may land in it.
 
-use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::io::{self, Read};
 use std::path::Path;
 use std::process::Command;
 
 use crate::kernel::activity::StoreActivity;
+
+mod validate;
+#[cfg(test)]
+pub use validate::validate;
+pub use validate::validate_with_options;
 
 /// One archive member as the header reader read it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,7 +55,9 @@ pub struct Entry {
     /// The member name exactly as stored (directories keep their trailing
     /// `/`), before any `--strip-components`.
     pub name: String,
-    /// Symlink target or hard-link target, when the kind has one.
+    /// Symlink target or hard-link target, when the kind has one. A
+    /// hard-link target is another member's stored name, not a path
+    /// relative to the link.
     pub link: Option<String>,
 }
 
@@ -59,10 +66,8 @@ pub enum EntryKind {
     File,
     Dir,
     Symlink,
+    /// A second name for an earlier regular-file member (tar type `1`).
     HardLink,
-    /// Block/character device, FIFO, socket, or any type letter this module
-    /// does not know; always refused.
-    Special(char),
 }
 
 /// How the archive is compressed. The caller passes it explicitly, never
@@ -467,24 +472,25 @@ fn read_entries(
             b'0' | b'\0' => EntryKind::File,
             b'5' => EntryKind::Dir,
             b'2' => EntryKind::Symlink,
-            b'1' => {
-                return Err(err(format!(
-                    "archive entry {name:?} is a hard link (to {link:?}); hard links are refused"
-                )))
-            }
+            b'1' => EntryKind::HardLink,
             other => {
                 // Devices, FIFOs, sockets, contiguous files, GNU sparse and
                 // dump extensions, and anything unallocated. Data may or may
                 // not follow such a header, so the stream is ambiguous from
                 // here: refuse instead of trying to resynchronize.
                 return Err(err(format!(
-                    "archive entry {name:?} is a special file (type {:?}); only files, directories, and contained symlinks are accepted",
+                    "archive entry {name:?} is a special file (type {:?}); only files, directories, contained symlinks and contained hard links are accepted",
                     other as char
                 )));
             }
         };
         if kind == EntryKind::Symlink && link.is_empty() {
             return Err(err(format!("archive entry {name:?}: empty symlink target")));
+        }
+        if kind == EntryKind::HardLink && link.is_empty() {
+            return Err(err(format!(
+                "archive entry {name:?}: empty hard link target"
+            )));
         }
         if kind != EntryKind::File && size != 0 {
             return Err(err(format!(
@@ -494,15 +500,8 @@ fn read_entries(
         if kind == EntryKind::File {
             budget.add(size, &format!("entry {name:?}"))?;
         }
-        take_or_skip(
-            &mut reader,
-            &name,
-            size,
-            kind == EntryKind::File,
-            want,
-            &mut wanted,
-        )?;
-        let link = if kind == EntryKind::Symlink {
+        take_or_skip(&mut reader, &name, size, &kind, want, &mut wanted)?;
+        let link = if matches!(kind, EntryKind::Symlink | EntryKind::HardLink) {
             Some(link)
         } else {
             None
@@ -542,12 +541,17 @@ fn take_or_skip(
     reader: &mut impl Read,
     name: &str,
     size: u64,
-    is_file: bool,
+    kind: &EntryKind,
     want: Option<(&str, u64)>,
     wanted: &mut Option<Vec<u8>>,
 ) -> io::Result<()> {
-    if !is_file {
-        if wanted.is_none() && want.is_some_and(|(member, _)| member == name) {
+    if *kind != EntryKind::File {
+        // A wanted hard link is followed by `read_member`, which reads
+        // again for its target.
+        if *kind != EntryKind::HardLink
+            && wanted.is_none()
+            && want.is_some_and(|(member, _)| member == name)
+        {
             return Err(err(format!(
                 "archive member {name:?} is not a regular file"
             )));
@@ -950,198 +954,9 @@ fn invisible(text: &str) -> Option<&'static str> {
     })
 }
 
-/// Refuse anything that could write or point outside the destination once
-/// the first `strip` path components are removed, the way tar's
-/// `--strip-components` removes them. Entries with `strip` or fewer
-/// components are skipped by tar, so only their kind and their name are
-/// still checked: a hard link, a device, an absolute name or a `..`
-/// component is refused wherever it sits.
-pub fn validate(entries: &[Entry], strip: usize) -> io::Result<()> {
-    validate_with_options(entries, &ExtractOptions::stripped(strip))
-}
-
-/// [`validate`] under the extraction's full options: `strip`, and whether
-/// the archive is a per-platform build that only this host's platform
-/// ever extracts (see [`ExtractOptions::platform_specific`]).
-pub fn validate_with_options(entries: &[Entry], options: &ExtractOptions) -> io::Result<()> {
-    let strip = options.strip;
-    let mut kept: Vec<(&Entry, Vec<&str>)> = Vec::new();
-    for entry in entries {
-        match entry.kind {
-            EntryKind::HardLink => {
-                return Err(err(format!(
-                    "archive entry {:?} is a hard link (to {:?}); hard links are refused",
-                    entry.name,
-                    entry.link.as_deref().unwrap_or("")
-                )))
-            }
-            EntryKind::Special(kind) => {
-                return Err(err(format!(
-                    "archive entry {:?} is a special file (type {kind:?}); only files, directories, and contained symlinks are accepted",
-                    entry.name
-                )))
-            }
-            EntryKind::File | EntryKind::Dir | EntryKind::Symlink => {}
-        }
-        let components = contained_components(&entry.name)
-            .map_err(|reason| err(format!("archive entry {:?}: {reason}", entry.name)))?;
-        if components.len() <= strip {
-            continue;
-        }
-        let stripped: Vec<&str> = components[strip..]
-            .iter()
-            .copied()
-            .filter(|component| *component != ".")
-            .collect();
-        kept.push((entry, stripped));
-    }
-    // Two names APFS would treat as one extract as one file there and two
-    // on Linux, so one archive would realize two different trees. Every
-    // prefix counts, since `Lib/a` and `lib/b` share one directory on APFS
-    // and two on Linux. Identical spellings are tar's ordinary
-    // last-one-wins on both.
-    //
-    // A per-platform build is only ever extracted on its own platform, so
-    // there is no second tree to diverge from: Linux keeps both names, as
-    // the archive says. It is still checked on macOS, where APFS would
-    // merge them.
-    let check_folding = !options.platform_specific || cfg!(target_os = "macos");
-    let mut folded: BTreeMap<String, String> = BTreeMap::new();
-    for (_, stripped) in kept.iter().filter(|_| check_folding) {
-        for end in 1..=stripped.len() {
-            let prefix = stripped[..end].join("/");
-            match folded.get(&folded_name(&prefix)) {
-                Some(other) if *other != prefix => {
-                    return Err(err(format!(
-                        "archive entries {other:?} and {prefix:?} are one name on a case-insensitive or normalization-insensitive filesystem; refusing to extract"
-                    )));
-                }
-                Some(_) => {}
-                None => {
-                    folded.insert(folded_name(&prefix), prefix);
-                }
-            }
-        }
-    }
-    // Symlink names are held folded, so a target that walks through `S`
-    // is caught by a link named `s`: on APFS they are the same link.
-    let symlinks: BTreeSet<String> = kept
-        .iter()
-        .filter(|(entry, _)| entry.kind == EntryKind::Symlink)
-        .map(|(_, stripped)| folded_name(&stripped.join("/")))
-        .collect();
-    for (entry, stripped) in &kept {
-        for end in 1..stripped.len() {
-            let ancestor = stripped[..end].join("/");
-            if symlinks.contains(&folded_name(&ancestor)) {
-                return Err(err(format!(
-                    "archive entry {:?} is written through symlink {:?}",
-                    entry.name, ancestor
-                )));
-            }
-        }
-        if entry.kind == EntryKind::Symlink {
-            let target = entry.link.as_deref().unwrap_or("");
-            symlink_contained(stripped, target, &symlinks).map_err(|reason| {
-                err(format!(
-                    "archive symlink {:?} -> {:?}: {reason}",
-                    entry.name, target
-                ))
-            })?;
-        }
-    }
-    Ok(())
-}
-
-/// An approximation of the form under which APFS compares two names:
-/// canonically decomposed (NFD, so `é` and `e` plus a combining acute are
-/// one), full Unicode case-folded (so `SS` and `ß` meet, as do Turkish
-/// dotted/dotless `I` and the Greek final forms), and decomposed again in
-/// case folding composed anything. Go's module zip refuses case collisions
-/// the same way; it does not normalize.
-fn folded_name(name: &str) -> String {
-    use caseless::Caseless;
-    use unicode_normalization::UnicodeNormalization;
-    let decomposed: String = name.nfd().collect();
-    let folded: String = decomposed.chars().default_case_fold().collect();
-    folded.nfd().collect()
-}
-
-/// The name's path components, refusing absolute names, `..`, and empty
-/// components other than a directory's trailing slash. `.` is kept: tar
-/// counts it for `--strip-components`.
-fn contained_components(name: &str) -> Result<Vec<&str>, String> {
-    if name.starts_with('/') {
-        return Err("absolute member name".into());
-    }
-    let trimmed = name.strip_suffix('/').unwrap_or(name);
-    if trimmed.is_empty() {
-        return Err("empty member name".into());
-    }
-    let mut components = Vec::new();
-    for component in trimmed.split('/') {
-        match component {
-            "" => return Err("empty path component".into()),
-            ".." => return Err("`..` path component".into()),
-            other => components.push(other),
-        }
-    }
-    Ok(components)
-}
-
-/// A symlink at `stripped` is contained when its target, resolved lexically
-/// from the link's own directory, never rises above the destination root.
-///
-/// Lexical resolution is only trustworthy while it agrees with what the
-/// filesystem would do, and the two disagree exactly when the walk passes
-/// *through* another symlink: `..` applied to an unresolved name pops the
-/// name, while `..` applied to the real path pops wherever that symlink
-/// pointed. Traversing an archive-defined symlink is therefore refused
-/// outright, which restores the agreement instead of trying to model it.
-///
-/// A symlink as the target's *final* component is not a traversal — nothing
-/// is resolved through it here — and it is contained by its own validation,
-/// so composing the two stays inside.
-/// `symlinks` holds the archive's symlink names in `folded_name` form.
-fn symlink_contained(
-    stripped: &[&str],
-    target: &str,
-    symlinks: &BTreeSet<String>,
-) -> Result<(), String> {
-    if target.is_empty() {
-        return Err("empty symlink target".into());
-    }
-    if target.starts_with('/') {
-        return Err("absolute symlink target".into());
-    }
-    let mut path: Vec<&str> = stripped[..stripped.len().saturating_sub(1)].to_vec();
-    let components: Vec<&str> = target.split('/').collect();
-    for (index, component) in components.iter().enumerate() {
-        match *component {
-            "" | "." => {}
-            ".." => {
-                if path.is_empty() {
-                    return Err("symlink target escapes the destination".into());
-                }
-                path.pop();
-            }
-            name => {
-                path.push(name);
-                if index + 1 < components.len() && symlinks.contains(&folded_name(&path.join("/")))
-                {
-                    return Err(format!(
-                        "symlink target resolves through another symlink in the archive ({:?})",
-                        path.join("/")
-                    ));
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
 /// List, validate, and extract `archive` into `destination`, returning the
 /// validated listing. Nothing is written when validation fails.
+#[cfg(test)]
 pub fn extract(
     archive: &Path,
     destination: &Path,
@@ -1304,61 +1119,31 @@ pub(crate) fn extract_validated_with_activity_and_options(
 }
 
 /// Read one regular-file member's bytes without writing anything to disk:
-/// the `tar -xO` use (a manifest read out of an sdist) without a second
-/// tar invocation whose flags the environment could shift. The archive is
-/// still listed and cross-checked first, so the bytes come from the same
-/// modelled stream an extraction would see. `member` is the exact stored
-/// name from `list`; `cap` bounds the member's declared size.
+/// the `tar -xO` use (a manifest read out of an sdist), entirely in
+/// process. No tar runs, so there is no `tar -t` cross-check either: that
+/// check makes the reader and an extracting tar agree, and nothing is
+/// extracted here. The capturing pass still reads every header and
+/// refuses every layout `list` refuses. `member` is the exact stored name;
+/// `cap` bounds the member's declared size.
 pub fn read_member(
     archive: &Path,
     compression: Compression,
     member: &str,
     cap: u64,
 ) -> io::Result<Vec<u8>> {
-    read_member_inner(archive, compression, member, cap, None)
-}
-
-/// Store-consuming single-member read. The caller's activity lease is
-/// borrowed for the whole read, so GC cannot observe the store as idle.
-pub(crate) fn read_member_with_activity(
-    activity: &StoreActivity,
-    archive: &Path,
-    compression: Compression,
-    member: &str,
-    cap: u64,
-) -> io::Result<Vec<u8>> {
-    read_member_inner(archive, compression, member, cap, Some(activity))
-}
-
-fn read_member_inner(
-    archive: &Path,
-    compression: Compression,
-    member: &str,
-    cap: u64,
-    activity: Option<&StoreActivity>,
-) -> io::Result<Vec<u8>> {
-    // The listing cross-checks the header reader against the tar that
-    // would perform an extraction; a disagreement refuses before any
-    // member bytes are trusted.
-    match activity {
-        Some(activity) => list_with_activity(activity, archive, compression)?,
-        None => list(archive, compression)?,
-    };
-    let file = io::BufReader::new(File::open(archive)?);
-    let (_, wanted) = match compression {
-        Compression::None => read_entries(file, Some((member, cap)))?,
-        Compression::Gzip => read_entries(
-            io::BufReader::new(flate2::read::MultiGzDecoder::new(file)),
-            Some((member, cap)),
-        )?,
-        Compression::Bzip2 => read_entries(
-            io::BufReader::new(bzip2::read::BzDecoder::new(file)),
-            Some((member, cap)),
-        )?,
-        Compression::Xz => read_entries(
-            io::BufReader::new(liblzma::read::XzDecoder::new(file)),
-            Some((member, cap)),
-        )?,
+    let (entries, wanted) = capture(archive, compression, member, cap)?;
+    if let Some(bytes) = wanted {
+        return Ok(bytes);
+    }
+    // A hard link reads as the file it names: one more pass captures that
+    // member, which must itself be a regular file.
+    let target = entries
+        .iter()
+        .find(|entry| entry.name == member && entry.kind == EntryKind::HardLink)
+        .and_then(|entry| entry.link.as_deref());
+    let wanted = match target {
+        Some(target) => capture(archive, compression, target, cap)?.1,
+        None => None,
     };
     wanted.ok_or_else(|| {
         err(format!(
@@ -1366,6 +1151,32 @@ fn read_member_inner(
             archive.display()
         ))
     })
+}
+
+/// One in-process pass over `archive`: its entries, and the data of the
+/// first regular-file member named `member` (at most `cap` bytes).
+fn capture(
+    archive: &Path,
+    compression: Compression,
+    member: &str,
+    cap: u64,
+) -> io::Result<(Vec<Entry>, Option<Vec<u8>>)> {
+    let file = io::BufReader::new(File::open(archive)?);
+    let want = Some((member, cap));
+    match compression {
+        Compression::None => read_entries(file, want),
+        Compression::Gzip => read_entries(
+            io::BufReader::new(flate2::read::MultiGzDecoder::new(file)),
+            want,
+        ),
+        Compression::Bzip2 => {
+            read_entries(io::BufReader::new(bzip2::read::BzDecoder::new(file)), want)
+        }
+        Compression::Xz => read_entries(
+            io::BufReader::new(liblzma::read::XzDecoder::new(file)),
+            want,
+        ),
+    }
 }
 
 /// Pack `work`'s explicit null-delimited `list` into `uncompressed` with
@@ -1536,27 +1347,6 @@ mod tests {
         );
         // `.` components are ordinary and count for strip like tar counts them.
         validate(&[entry(EntryKind::File, "./pkg/x", None)], 1).unwrap();
-    }
-
-    #[test]
-    fn hard_links_and_special_files_are_refused_regardless_of_strip() {
-        refused(
-            &[entry(EntryKind::HardLink, "pkg/hard", Some("pkg/file"))],
-            0,
-            "hard link",
-        );
-        refused(
-            &[entry(EntryKind::HardLink, "pkg/hard", Some("pkg/file"))],
-            5,
-            "hard link",
-        );
-        for kind in ['b', 'c', 'p', 's', 'D', 'M'] {
-            refused(
-                &[entry(EntryKind::Special(kind), "pkg/odd", None)],
-                0,
-                "special file",
-            );
-        }
     }
 
     #[test]
@@ -2843,9 +2633,14 @@ mod tests {
                 "symlink target escapes the destination",
             ),
             (
-                "hard link",
-                ustar("pkg/hard", b'1', "pkg/benign", b""),
-                "hard links are refused",
+                "hard link escapes",
+                ustar("pkg/hard", b'1', "../outside-sentinel", b""),
+                "`..` path component",
+            ),
+            (
+                "hard link to a file outside the archive",
+                ustar("pkg/hard", b'1', "pkg/missing", b""),
+                "not an earlier regular file",
             ),
             (
                 "character device",
@@ -2885,6 +2680,127 @@ mod tests {
             );
             assert_eq!(fs::read(&sentinel).unwrap(), b"untouched", "{label}");
         }
+    }
+
+    #[test]
+    fn a_hard_link_must_name_an_earlier_kept_regular_file() {
+        let file = |name: &str| entry(EntryKind::File, name, None);
+        let dir = |name: &str| entry(EntryKind::Dir, name, None);
+        let hard = |name: &str, target: &str| entry(EntryKind::HardLink, name, Some(target));
+        let symlink = |name: &str, target: &str| entry(EntryKind::Symlink, name, Some(target));
+        // Accepted: an earlier file, named as stored, with or without `./`.
+        validate(&[file("pkg/a"), hard("pkg/b", "pkg/a")], 1).unwrap();
+        validate(&[file("./pkg/a"), hard("./pkg/sub/b", "./pkg/a")], 2).unwrap();
+        validate(&[file("a"), hard("b", "a")], 0).unwrap();
+        let cases: Vec<(Vec<Entry>, usize, &str)> = vec![
+            (
+                vec![hard("pkg/b", "pkg/a"), file("pkg/a")],
+                1,
+                "not an earlier regular file",
+            ),
+            (
+                vec![dir("pkg/d/"), hard("pkg/b", "pkg/d")],
+                1,
+                "not an earlier regular file",
+            ),
+            (
+                vec![symlink("pkg/s", "a"), hard("pkg/b", "pkg/s")],
+                1,
+                "not an earlier regular file",
+            ),
+            (
+                vec![file("pkg/a"), hard("pkg/b", "/etc/passwd")],
+                1,
+                "absolute member name",
+            ),
+            (
+                vec![file("pkg/a"), hard("pkg/b", "pkg/../a")],
+                1,
+                "`..` path component",
+            ),
+            (
+                vec![file("pkg"), hard("pkg/b", "pkg")],
+                1,
+                "does not survive --strip-components",
+            ),
+            (
+                vec![file("pkg/a"), hard("pkg/a", "pkg/a")],
+                1,
+                "names itself",
+            ),
+            (
+                vec![file("pkg/a"), hard("pkg/b", "pkg/a"), file("pkg/a")],
+                1,
+                "written more than once",
+            ),
+            (
+                vec![file("pkg/a"), hard("pkg/b", "pkg/a"), file("pkg/b")],
+                1,
+                "written more than once",
+            ),
+            (
+                vec![
+                    file("pkg/a"),
+                    hard("pkg/b", "pkg/a"),
+                    hard("pkg/b", "pkg/a"),
+                ],
+                1,
+                "written more than once",
+            ),
+        ];
+        for (entries, strip, needle) in cases {
+            refused(&entries, strip, needle);
+        }
+        // The link's own name is held to every other rule: no writing
+        // through an archive symlink.
+        refused(
+            &[
+                symlink("pkg/l", "real"),
+                file("pkg/a"),
+                hard("pkg/l/x", "pkg/a"),
+            ],
+            1,
+            "is written through symlink",
+        );
+    }
+
+    #[test]
+    fn a_contained_hard_link_extracts_as_the_same_file_and_reads_as_its_target() {
+        let temp = temp_dir("hard-link");
+        let archive = temp.0.join("hard.tar");
+        write_tar(
+            &archive,
+            &[
+                ustar("pkg/", b'5', "", b""),
+                ustar("pkg/a", b'0', "", b"shared bytes"),
+                ustar("pkg/sub/", b'5', "", b""),
+                ustar("pkg/sub/b", b'1', "pkg/a", b""),
+            ],
+        );
+        let destination = temp.0.join("dest");
+        fs::create_dir_all(&destination).unwrap();
+        // The extraction lists the archive and cross-checks it against
+        // `tar -t` first, so this also proves tar names the link as stored.
+        let entries = extract(&archive, &destination, 1, Compression::None).unwrap();
+        assert_eq!(entries[3].kind, EntryKind::HardLink);
+        assert_eq!(entries[3].link.as_deref(), Some("pkg/a"));
+        assert_eq!(
+            fs::read(destination.join("sub/b")).unwrap(),
+            b"shared bytes"
+        );
+        {
+            use std::os::unix::fs::MetadataExt;
+            let a = fs::metadata(destination.join("a")).unwrap();
+            let b = fs::metadata(destination.join("sub/b")).unwrap();
+            assert_eq!((a.dev(), a.ino()), (b.dev(), b.ino()));
+        }
+        assert_eq!(
+            read_member(&archive, Compression::None, "pkg/sub/b", 1 << 20).unwrap(),
+            b"shared bytes"
+        );
+        // The target's own size cap still applies through the link.
+        let error = read_member(&archive, Compression::None, "pkg/sub/b", 2).expect_err("cap");
+        assert!(error.to_string().contains("read cap"), "{error}");
     }
 
     #[test]

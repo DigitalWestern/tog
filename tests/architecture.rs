@@ -1,18 +1,20 @@
 //! The layering rules of docs/human/ARCHITECTURE.md ("Layering rules"),
 //! enforced by a source scan: `commands → tailors → comforter → kernel`, one
 //! direction only, and no tailor names another tailor. A command file does
-//! not name a tailor by string either (the tokens scan below).
+//! not name a tailor's module or spell its name as a string either (the
+//! tokens scan below).
 //!
 //! Test code (everything from `#[cfg(test)] mod tests` on) is exempt: tests
 //! may wire the whole crate together. Size budgets (layering rule 5) are a
 //! ratchet against `tests/size_baseline.txt`: what is over budget today may
 //! shrink, nothing may grow or newly cross a budget.
 //!
-//! Four housekeeping rules are enforced the same way: a test that sets
+//! Five housekeeping rules are enforced the same way: a test that sets
 //! `TOG_STORE` holds `STORE_ENV_LOCK`, comments describe code rather
 //! than cite plan documents or review rounds, narration goes through
-//! `kernel::ui` rather than a raw stderr write, and `docs/agent/` holds only
-//! its two files.
+//! `kernel::ui` rather than a raw stderr write, HTTP goes through
+//! `kernel::fetch` rather than a raw `ureq` call, and `docs/agent/` holds
+//! only its two files.
 
 // Tests spawn fixtures and take leases freely (see clippy.toml).
 #![allow(clippy::disallowed_methods)]
@@ -275,6 +277,9 @@ fn layer_violations(relative: &Path, text: &str, tailor_dirs: &[String]) -> (Vec
                             path[1] != own && tailor_dirs.contains(&path[1])
                         }))
             }
+            // A command reaches a tailor through the trait and the
+            // registry, never by its module: tailors::<name>::… (rule 3).
+            "commands" => target == "tailors" && path.len() >= 2 && tailor_dirs.contains(&path[1]),
             "cli" => matches!(
                 target.as_str(),
                 "tailors" | "comforter" | "kernel" | "commands"
@@ -1477,9 +1482,9 @@ const RAW_CHILD_SITES: &[(&str, &str, usize)] = &[
     ("src/kernel/archive.rs", "list_names", 1),
     ("src/kernel/archive.rs", "status_for", 1),
     ("src/kernel/sandbox.rs", "bwrap_preflight_with_activity", 2),
-    // Unmanaged sandbox entry points, for callers that consume no store.
-    ("src/kernel/sandbox.rs", "run_bwrap_with_stdout", 1),
-    ("src/kernel/sandbox.rs", "run_seatbelt_status", 1),
+    // The one unmanaged sandbox spawn: the `None` arm of every sandbox
+    // entry point, for callers that consume no store.
+    ("src/kernel/sandbox.rs", "spawn_unmanaged", 1),
     // Host probes, and the downloaded tog's `--version` before it is
     // installed.
     ("src/commands/selfupdate.rs", "smoke_test", 1),
@@ -2049,4 +2054,135 @@ fn the_literal_scan_sees_every_spelling() {
             site("path", "node.json", 1),
         ]
     );
+}
+
+/// The files that may name the HTTP client: `kernel::fetch` and its pinned
+/// resolver. Everything else fetches through them, so https-only, the
+/// redirect and size caps and the user agent hold at every call site.
+const HTTP_CLIENT_FILES: &[&str] = &["src/kernel/fetch.rs", "src/kernel/fetch/pinned.rs"];
+
+/// The production lines of `text` that name the `ureq` crate.
+fn http_client_sites(text: &str) -> Vec<String> {
+    production_tokens(text)
+        .into_iter()
+        .filter(|(token, _)| is_ident(Some(token), "ureq"))
+        .map(|(_, function)| function)
+        .collect()
+}
+
+#[test]
+fn http_goes_through_kernel_fetch() {
+    let mut violations = Vec::new();
+    for (relative, text) in all_sources() {
+        if !relative.starts_with("src/") || HTTP_CLIENT_FILES.contains(&relative.as_str()) {
+            continue;
+        }
+        for function in http_client_sites(&text) {
+            violations.push(format!("{relative}: in fn {function}"));
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "ureq named outside kernel::fetch (use fetch_text, fetch_text_or_missing, \
+         download_file or download_unpinned):\n  {}",
+        violations.join("\n  ")
+    );
+}
+
+#[test]
+fn the_http_client_scan_sees_every_spelling() {
+    let caught = [
+        "fn a() { ureq::get(u).call(); }",
+        "use ureq::Agent;\nfn a() {}",
+        "fn a() { let x = ureq\n    ::AgentBuilder::new(); }",
+        "fn a() -> Option<ureq::RequestUrl> { None }",
+    ];
+    for text in caught {
+        assert!(!http_client_sites(text).is_empty(), "missed: {text}");
+    }
+    let ignored = [
+        "// ureq::get in a comment\nfn a() {}",
+        "fn a() { let s = \"ureq::get\"; }",
+        "#[cfg(test)]\nmod tests { fn t() { ureq::get(u); } }",
+    ];
+    for text in ignored {
+        assert!(http_client_sites(text).is_empty(), "flagged: {text}");
+    }
+}
+
+/// Whether `relative` may name `kernel::archive`: the kernel itself, a
+/// tailor's `unpack.rs`, and `tog self-update`. heavy.yml's `gate` watches
+/// exactly these, so a change to how anything extracts runs the heavy
+/// suite against real archives (#325).
+fn may_name_archive(relative: &str) -> bool {
+    if relative.starts_with("src/kernel/") || relative == "src/commands/selfupdate.rs" {
+        return true;
+    }
+    relative
+        .strip_prefix("src/tailors/")
+        .and_then(|rest| rest.strip_suffix("/unpack.rs"))
+        .is_some_and(|tailor| !tailor.is_empty() && !tailor.contains('/'))
+}
+
+/// The production paths of `text` (the source of `relative`) into
+/// `kernel::archive`.
+fn archive_sites(relative: &str, text: &str) -> Vec<String> {
+    let module = module_path(Path::new(relative.trim_start_matches("src/")));
+    crate_paths(non_test(text), &module)
+        .into_iter()
+        .filter(|path| path.len() >= 2 && path[0] == "kernel" && path[1] == "archive")
+        .map(|path| path.join("::"))
+        .collect()
+}
+
+#[test]
+fn archive_calls_live_where_the_heavy_gate_looks() {
+    let mut violations = Vec::new();
+    for (relative, text) in all_sources() {
+        if !relative.starts_with("src/") || may_name_archive(&relative) {
+            continue;
+        }
+        for path in archive_sites(&relative, &text) {
+            violations.push(format!("{relative}: crate::{path}"));
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "kernel::archive named outside src/kernel/, src/tailors/<tailor>/unpack.rs \
+         and src/commands/selfupdate.rs; move the call into the tailor's unpack.rs \
+         (heavy.yml watches those files):\n  {}",
+        violations.join("\n  ")
+    );
+}
+
+#[test]
+fn the_archive_scan_sees_every_spelling() {
+    let caught = [
+        "fn a() { crate::kernel::archive::list(p, c); }",
+        "use crate::kernel::archive::{self, Compression};",
+        "use crate::kernel::{archive, store};",
+        "use super::super::kernel::archive::Entry;",
+    ];
+    for text in caught {
+        assert!(
+            !archive_sites("src/tailors/go/mod.rs", text).is_empty(),
+            "{text}"
+        );
+    }
+    let missed = [
+        "fn a() { crate::kernel::fetch::download(u); }",
+        "// see archive::list",
+        "#[cfg(test)]\nmod tests { use crate::kernel::archive::list; }",
+    ];
+    for text in missed {
+        assert!(
+            archive_sites("src/tailors/go/mod.rs", text).is_empty(),
+            "{text}"
+        );
+    }
+    assert!(may_name_archive("src/tailors/go/unpack.rs"));
+    assert!(may_name_archive("src/kernel/provider/rust.rs"));
+    assert!(!may_name_archive("src/tailors/go/mod.rs"));
+    assert!(!may_name_archive("src/tailors/go/x/unpack.rs"));
+    assert!(!may_name_archive("src/commands/sync.rs"));
 }

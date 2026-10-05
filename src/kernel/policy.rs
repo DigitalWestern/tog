@@ -995,7 +995,10 @@ impl Attribution {
     }
 
     /// The exceptions recorded into this frame so far, without claiming
-    /// them. For diagnostics and tests; publication goes through `claim`.
+    /// them. For tests; publication goes through `claim`.
+    // A method cannot sit on lib.rs's `boundary` list: tests/npm_scripts.rs
+    // and tests/git_deps.rs call it.
+    #[cfg_attr(tog_dead_code, allow(dead_code))]
     pub fn recorded(&self) -> Vec<Exception> {
         with_frames(|frames| {
             frames

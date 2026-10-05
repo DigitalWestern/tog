@@ -177,20 +177,11 @@ pub(crate) fn registry_latest(
 }
 
 fn get_json(url: &str) -> io::Result<Option<serde_json::Value>> {
-    let agent = ureq::AgentBuilder::new()
-        .https_only(true)
-        .timeout(std::time::Duration::from_secs(20))
-        .user_agent("tog (https://github.com/DigitalWestern/tog)")
-        .build();
-    match agent.get(url).call() {
-        Ok(response) => {
-            let text = response.into_string()?;
-            serde_json::from_str(&text)
-                .map(Some)
-                .map_err(|error| other(format!("GET {url}: not JSON: {error}")))
-        }
-        Err(ureq::Error::Status(404, _)) => Ok(None),
-        Err(ureq::Error::Status(code, _)) => Err(other(format!("GET {url}: HTTP {code}"))),
-        Err(error) => Err(other(format!("GET {url}: {error}"))),
-    }
+    let timeout = Some(std::time::Duration::from_secs(20));
+    let Some(text) = crate::kernel::fetch::fetch_text_or_missing(url, timeout)? else {
+        return Ok(None);
+    };
+    serde_json::from_str(&text)
+        .map(Some)
+        .map_err(|error| other(format!("GET {url}: not JSON: {error}")))
 }

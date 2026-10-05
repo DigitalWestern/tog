@@ -156,17 +156,13 @@ impl Extras {
 /// The profile that installs only the base toolchain.
 const MINIMAL_PROFILE: &str = "minimal";
 
-/// What the project at `project_dir` asks for, read through the same
+/// What the project asks for, read through the same
 /// discovery the toolchain lock records and is checked against. A run that
 /// honors a lock only gets here after staleness passed, so these are the
 /// lock's own rows; the publication recheck refuses the write if the file
-/// moves after this read.
-pub fn project_extras(project_dir: &Path) -> io::Result<Extras> {
-    project_extras_in(&ProjectRoot::open(project_dir)?)
-}
-
-/// `project_extras` for a project the caller holds (sync): the toolchain
-/// file is read through the held descriptor, never by reopening its path.
+/// moves after this read. The project is one the caller holds (sync): the
+/// toolchain file is read through the held descriptor, never by reopening
+/// its path.
 pub fn project_extras_in(project: &ProjectRoot) -> io::Result<Extras> {
     Ok(Extras::from_rows(&input::discover(project, "rust")?))
 }

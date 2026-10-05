@@ -1,7 +1,9 @@
 //! Content digests (kernel layer): the validated `Digest` value that
 //! artifact verification, cache addressing, and object metadata share.
 
-use std::io;
+use sha1::Sha1;
+use sha2::{Digest as _, Sha256, Sha512};
+use std::io::{self, Read};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Algo {
@@ -89,6 +91,33 @@ impl Digest {
     }
 }
 
+/// The lowercase hex digest of everything `reader` yields, read in 64 KiB
+/// chunks. The one content hasher: a caller holding a descriptor hashes
+/// that descriptor, and `kernel::fetch::hash_file` opens a path for the
+/// rest.
+pub(crate) fn hash_reader(reader: &mut impl Read, algo: Algo) -> io::Result<String> {
+    let mut buf = vec![0u8; 65536];
+    let mut h256 = Sha256::new();
+    let mut h512 = Sha512::new();
+    let mut h1 = Sha1::new();
+    loop {
+        let n = reader.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        match algo {
+            Algo::Sha1 => h1.update(&buf[..n]),
+            Algo::Sha256 => h256.update(&buf[..n]),
+            Algo::Sha512 => h512.update(&buf[..n]),
+        }
+    }
+    Ok(match algo {
+        Algo::Sha1 => hex::encode(h1.finalize()),
+        Algo::Sha256 => hex::encode(h256.finalize()),
+        Algo::Sha512 => hex::encode(h512.finalize()),
+    })
+}
+
 /// The strongest entry tog supports in an SRI list such as
 /// `"sha512-... sha1-..."` (npm, pnpm and yarn all write lists), or `None`
 /// when no entry names sha512, sha256 or sha1.
@@ -120,6 +149,32 @@ pub(super) fn algo_name(a: Algo) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hash_reader_matches_known_digests_for_empty_and_multi_buffer_input() {
+        let empty: &[u8] = b"";
+        assert_eq!(
+            hash_reader(&mut &*empty, Algo::Sha1).unwrap(),
+            "da39a3ee5e6b4b0d3255bfef95601890afd80709"
+        );
+        assert_eq!(
+            hash_reader(&mut &*empty, Algo::Sha256).unwrap(),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        assert!(hash_reader(&mut &*empty, Algo::Sha512)
+            .unwrap()
+            .starts_with("cf83e1357eefb8bd"));
+        // Three and a bit 64 KiB reads: the chunks must add up to one digest.
+        let big = vec![b'a'; 3 * 65536 + 17];
+        let whole = {
+            use sha2::Digest as _;
+            hex::encode(Sha256::digest(&big))
+        };
+        assert_eq!(
+            hash_reader(&mut big.as_slice(), Algo::Sha256).unwrap(),
+            whole
+        );
+    }
 
     #[test]
     fn sri_roundtrip() {

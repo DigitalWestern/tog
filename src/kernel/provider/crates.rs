@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::io::{self, Read};
+use std::io;
 use std::path::{Component, Path, PathBuf};
 
 fn err(msg: impl Into<String>) -> io::Error {
@@ -634,7 +634,13 @@ fn inspect_dir(
                 ))
             })?;
             if relative != ".cargo-checksum.json" {
-                files.insert(relative, hash_file(&path)?);
+                files.insert(
+                    relative,
+                    crate::kernel::digest::hash_reader(
+                        &mut fs::File::open(&path)?,
+                        crate::kernel::digest::Algo::Sha256,
+                    )?,
+                );
             }
         } else {
             return Err(err(format!(
@@ -661,20 +667,6 @@ fn relative_path(root: &Path, path: &Path) -> io::Result<String> {
         })
         .collect::<io::Result<Vec<_>>>()
         .map(|parts| parts.join("/"))
-}
-
-fn hash_file(path: &Path) -> io::Result<String> {
-    let mut file = fs::File::open(path)?;
-    let mut hasher = Sha256::new();
-    let mut buffer = [0u8; 65536];
-    loop {
-        let count = file.read(&mut buffer)?;
-        if count == 0 {
-            break;
-        }
-        hasher.update(&buffer[..count]);
-    }
-    Ok(hex::encode(hasher.finalize()))
 }
 
 /// SHA-256 of the exact Cargo.lock text used for planning.

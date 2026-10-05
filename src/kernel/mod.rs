@@ -13,6 +13,7 @@ pub mod fetch;
 pub mod fsroot;
 pub mod gc;
 pub mod gitsrc;
+pub mod hostfallback;
 pub mod hostview;
 pub mod objmeta;
 pub mod pep440;

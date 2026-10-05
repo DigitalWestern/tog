@@ -1,30 +1,14 @@
 //! node env realization (node tailor): tarball fetch and classification,
 //! the env object's identity, staging, and the sandboxed install scripts.
 
+use super::script_view::{self, PackageScripts, ScriptsFallback};
+use super::unpack::tarball_has_binding_gyp;
 use super::*;
 use sha2::Digest as _;
 use std::fs::OpenOptions;
 use std::io::Write;
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
-
-pub(super) fn tarball_has_binding_gyp(activity: &StoreActivity, path: &Path) -> io::Result<bool> {
-    let entries = crate::kernel::archive::list_with_activity(
-        activity,
-        path,
-        crate::kernel::archive::Compression::Gzip,
-    )
-    .map_err(|e| {
-        io::Error::new(
-            e.kind(),
-            format!("list npm tarball {}: {e}", path.display()),
-        )
-    })?;
-    Ok(entries.iter().any(|entry| {
-        let trimmed = entry.name.trim_end_matches('/');
-        trimmed == "binding.gyp" || trimmed.ends_with("/binding.gyp")
-    }))
-}
 
 pub(super) const ARCHIVE_CLASSIFICATION_SCHEMA: &str = "npm-archive-classification/1";
 
@@ -550,6 +534,9 @@ fn node_env_identity_inner(
     // Written unconditionally: whether any package runs node-gyp is only
     // known after extraction, and the identity is decided before it.
     inputs.insert("gyp_python".into(), gyp_python_id.into());
+    if let Some(view) = script_view::build_view(platform) {
+        inputs.insert("build_view".into(), view.into());
+    }
     Ok(Identity {
         kind: "node-env".into(),
         name: "env".into(),
@@ -824,25 +811,8 @@ fn extract_tarball_packages(
         let dest = env_package_path(staged, &p.path);
         fs::create_dir_all(&dest)
             .map_err(|e| io::Error::new(e.kind(), format!("{}: create dir: {e}", p.path)))?;
-        // Registry tarballs are packed by arbitrary publishers; some
-        // (pngjs, eta 1.x) carry directories with mode 0666. bsdtar
-        // (macOS) descends into them anyway; GNU tar creates the
-        // directory 0666 and then cannot open its children unless
-        // directory modes are applied after extraction. normalize_modes
-        // below rewrites every mode afterwards, so the store content is
-        // identical either way.
-        let options = crate::kernel::archive::ExtractOptions {
-            delay_directory_restore: !platform.is_macos(),
-            ..crate::kernel::archive::ExtractOptions::stripped(1)
-        };
-        crate::kernel::archive::extract_with_activity_and_options(
-            activity,
-            tarball,
-            &dest,
-            &options,
-            crate::kernel::archive::Compression::Gzip,
-        )
-        .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", p.path)))?;
+        super::unpack::extract_npm_package(activity, platform, tarball, &dest)
+            .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", p.path)))?;
         normalize_modes(&dest)
             .map_err(|e| io::Error::new(e.kind(), format!("{}: normalize modes: {e}", p.path)))?;
         if let Some(patch) = &p.patch {
@@ -1030,10 +1000,9 @@ pub(super) fn realize_node_env_with_node_object(
         native_libs_id.as_deref(),
         &gyp_python_id,
     )?;
-    let id = identity.object_id();
-    if store.has_with_activity(activity, &id)? {
-        crate::kernel::policy::check_cached_with_activity(store, activity, &id)?;
-        return Ok(store.object_path(&id));
+    if let Some(cached) = script_view::cached_object(store, activity, &identity)? {
+        crate::kernel::policy::check_cached_with_activity(store, activity, &cached.id)?;
+        return Ok(store.object_path(&cached.id));
     }
 
     let workspaces = workspace_set(plan);
@@ -1064,7 +1033,7 @@ pub(super) fn realize_node_env_with_node_object(
     // Lifecycle setup may fetch declared artifacts and a pinned Python for
     // node-gyp; the package tarballs have already been fully extracted.
     drop(tarballs);
-    run_install_scripts(
+    let fallback = run_install_scripts(
         store,
         activity,
         platform,
@@ -1074,10 +1043,19 @@ pub(super) fn realize_node_env_with_node_object(
         artifacts,
         native_libs.as_ref().map(|set| set.path.as_path()),
         gyp_python,
+        &identity,
         &mut deps,
     )?;
 
-    commit_env_object(store, activity, &identity, &staged, &deps)
+    let object = commit_env_object(
+        store,
+        activity,
+        &fallback.commit_identity(&identity),
+        &staged,
+        &deps,
+    )?;
+    fallback.record(store, activity, &identity);
+    Ok(object)
 }
 
 pub(super) enum LifecycleFailure {
@@ -1129,8 +1107,9 @@ pub(super) fn run_install_scripts(
     artifacts: &[DeclaredArtifact],
     native_libs: Option<&Path>,
     gyp_python: &crate::kernel::toolchain::Selected,
+    identity: &Identity,
     consumed: &mut crate::kernel::store::ObjectDeps,
-) -> io::Result<()> {
+) -> io::Result<ScriptsFallback> {
     // Scratch stage dirs (tool shims, per-package HOMEs, snapshots) are
     // removed on every exit, including the fatal Unsupported paths (missing
     // Linux pin, unavailable sandbox backend) that return early.
@@ -1145,6 +1124,7 @@ pub(super) fn run_install_scripts(
         artifacts,
         native_libs,
         gyp_python,
+        identity,
         consumed,
         &mut cleanup,
     );
@@ -1425,81 +1405,6 @@ fn require_provisioning(
     })
 }
 
-/// Run one package's lifecycle phases in the sandbox, stopping at the first
-/// failure. A failure restores the package from the snapshot and is recorded
-/// as an exception; strict policy turns the record into a hard error.
-#[allow(clippy::too_many_arguments)]
-fn run_package_phases(
-    platform: Platform,
-    staged: &Path,
-    plan: &NpmPlan,
-    p: &NpmPackage,
-    pkg_dir: &Path,
-    snapshot: &Path,
-    tmp: &Path,
-    phases: &[(&str, String)],
-    envs: &[(String, String)],
-    path_env: &str,
-    sandbox: &crate::kernel::sandbox::Sandbox,
-    activity: &crate::kernel::activity::StoreActivity,
-) -> io::Result<()> {
-    for (phase, script) in phases {
-        crate::kernel::ui::note(&format!("{} {}: {phase} (sandboxed)", p.name, p.version));
-        let envs_phase: Vec<(String, String)> = envs
-            .iter()
-            .cloned()
-            .chain([("npm_lifecycle_event".to_string(), phase.to_string())])
-            .collect();
-        let result = sandbox.run_in_on_with_activity(
-            platform,
-            &["/bin/sh", "-c", script],
-            path_env,
-            tmp,
-            pkg_dir,
-            &envs_phase,
-            activity,
-        );
-        // A missing sandbox backend or an interrupt is never a script
-        // failure: neither may become a permissive install-script-failed
-        // exception.
-        let e = match classify_lifecycle_result(result) {
-            Ok(()) => continue,
-            Err(LifecycleFailure::SandboxUnavailable(e)) => return Err(e),
-            Err(LifecycleFailure::Interrupted(e)) => {
-                return Err(io::Error::new(
-                    e.kind(),
-                    format!("{}: {phase}: {e}; the sync stopped here", p.path),
-                ))
-            }
-            Err(LifecycleFailure::Script(e)) => e,
-        };
-        let hint = "If this package downloads files at install time, declare them as verified inputs in package.json — \
-                    \"tog\": {\"artifacts\": [{\"url\", \"sha256\", \"path\"}]} — \
-                    placed where the package's downloader caches them (see README).";
-        let error = e.to_string();
-        let detail = format!(
-            "{phase}: {}. {hint}",
-            error.chars().take(300).collect::<String>()
-        );
-        if let Err(policy_error) = crate::kernel::policy::record(
-            crate::kernel::policy::INSTALL_SCRIPT_FAILED,
-            &p.path,
-            &detail,
-        ) {
-            return Err(err(format!(
-                "{}: {phase} script failed under the network-denied build \
-                 sandbox: {e}. {hint} ({policy_error})",
-                p.path
-            )));
-        }
-        crate::kernel::store::remove_tree(pkg_dir)?;
-        fs::rename(snapshot, pkg_dir)?;
-        remove_dangling_bin_links(staged, plan)?;
-        break;
-    }
-    Ok(())
-}
-
 pub(super) fn run_install_scripts_staged(
     store: &Store,
     activity: &StoreActivity,
@@ -1510,10 +1415,12 @@ pub(super) fn run_install_scripts_staged(
     artifacts: &[DeclaredArtifact],
     native_libs: Option<&Path>,
     gyp_python: &crate::kernel::toolchain::Selected,
+    identity: &Identity,
     consumed: &mut crate::kernel::store::ObjectDeps,
     cleanup: &mut Vec<PathBuf>,
-) -> io::Result<()> {
+) -> io::Result<ScriptsFallback> {
     let pkgs = lifecycle_candidates(plan);
+    let mut fallback = ScriptsFallback::default();
 
     // The shared tool stage dir and the pinned node-gyp Python are realized
     // lazily, on the first package that actually has lifecycle work.
@@ -1561,21 +1468,32 @@ pub(super) fn run_install_scripts_staged(
             .find(|(key, _)| key == "PATH")
             .map(|(_, value)| value.as_str())
             .unwrap_or("/usr/bin:/bin");
+        // The scratch HOME as planted, so a failed runtime-only attempt can
+        // be undone before the retry against the whole host.
+        let tmp_snapshot = snapshot_root.join("home");
+        crate::comforter::clone_tree_with_activity(activity, &tmp, &tmp_snapshot, platform)?;
         // Tools dir is readable+executable but NOT writable in-sandbox.
-        let sandbox = crate::kernel::sandbox::Sandbox {
+        PackageScripts {
+            platform,
+            activity,
+            staged,
+            plan,
+            package: p,
+            pkg_dir: &pkg_dir,
+            snapshot: &snapshot,
+            tmp: &tmp,
+            tmp_snapshot: &tmp_snapshot,
+            phases: &phases,
+            envs: &envs,
+            path_env,
             read: vec![staged, node_obj, &python, &tools_dir]
                 .into_iter()
                 .chain(native_libs)
                 .collect(),
-            write: vec![&pkg_dir, &tmp],
-            host_view: crate::kernel::sandbox::HostView::Full,
-        };
-        run_package_phases(
-            platform, staged, plan, p, &pkg_dir, &snapshot, &tmp, &phases, &envs, path_env,
-            &sandbox, activity,
-        )?;
+        }
+        .run(identity, &mut fallback)?;
     }
-    Ok(())
+    Ok(fallback)
 }
 
 pub(super) fn remove_dangling_bin_links(staged: &Path, plan: &NpmPlan) -> io::Result<()> {
@@ -1781,31 +1699,43 @@ mod tests {
         let envs: Vec<(String, String)> = (0..4000)
             .map(|i| (format!("TOG_FILL_{i}"), "x".to_string()))
             .collect();
-        let sandbox = crate::kernel::sandbox::Sandbox {
-            read: Vec::new(),
-            write: vec![staged.as_path()],
-            host_view: crate::kernel::sandbox::HostView::Full,
+        let tmp_snapshot = temp.0.join("tmp-snapshot");
+        fs::create_dir_all(&tmp_snapshot).unwrap();
+        // The runtime-only view: an unusable sandbox ends the sync at the
+        // first attempt, before any retry against the whole host.
+        let identity = Identity {
+            kind: "node-env".into(),
+            name: "env".into(),
+            version: "24.20.0".into(),
+            inputs: BTreeMap::from([(
+                "build_view".to_string(),
+                crate::kernel::hostfallback::RUNTIME_ONLY_VIEW.to_string(),
+            )]),
         };
-        let error = run_package_phases(
-            Platform::X86_64UnknownLinuxGnu,
-            &staged,
-            &plan,
-            &package,
-            &pkg_dir,
-            &snapshot,
-            &tmp,
-            &[("install", "exit 0".to_string())],
-            &envs,
-            "/usr/bin:/bin",
-            &sandbox,
-            &activity,
-        )
+        let mut fallback = ScriptsFallback::default();
+        let error = PackageScripts {
+            platform: Platform::X86_64UnknownLinuxGnu,
+            activity: &activity,
+            staged: &staged,
+            plan: &plan,
+            package: &package,
+            pkg_dir: &pkg_dir,
+            snapshot: &snapshot,
+            tmp: &tmp,
+            tmp_snapshot: &tmp_snapshot,
+            phases: &[("install", "exit 0".to_string())],
+            envs: &envs,
+            path_env: "/usr/bin:/bin",
+            read: Vec::new(),
+        }
+        .run(&identity, &mut fallback)
         .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::Unsupported, "{error}");
         assert!(!error.to_string().contains("script failed"), "{error}");
         // No exception, and the package was not rolled back to its snapshot
         // as a tolerated script failure would be.
         assert!(crate::kernel::policy::pending().is_empty());
+        assert!(fallback.fell_back.is_empty(), "{fallback:?}");
         assert_eq!(fs::read(pkg_dir.join("state")).unwrap(), b"mid-install");
         assert!(snapshot.join("state").is_file());
         attribution.discard();

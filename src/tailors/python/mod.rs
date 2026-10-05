@@ -14,7 +14,9 @@ pub mod pypi;
 pub mod pyselect;
 pub mod registry_tool;
 pub mod run_refusal;
+mod sdist_view;
 pub mod tailor;
+mod unpack;
 pub mod wheel;
 
 use crate::kernel::activity::StoreActivity;
@@ -33,6 +35,7 @@ use std::path::PathBuf;
 
 #[cfg(test)]
 pub(crate) use crate::kernel::provider::cpython::uv_identity;
+#[cfg(test)]
 #[cfg(test)]
 pub use crate::kernel::provider::cpython::uv_pins;
 pub use crate::kernel::provider::cpython::{
@@ -396,13 +399,11 @@ mod tests {
             PinnedPython {
                 platform: Platform::X86_64UnknownLinuxGnu,
                 version: "3.12.9",
-                url: "https://example.invalid/3.12.9.tar.gz",
                 sha256: "9",
             },
             PinnedPython {
                 platform: Platform::X86_64UnknownLinuxGnu,
                 version: "3.12.14",
-                url: "https://example.invalid/3.12.14.tar.gz",
                 sha256: "14",
             },
         ];

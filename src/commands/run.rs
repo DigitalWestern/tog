@@ -1,14 +1,14 @@
 //! `tog run <cmd>`: run a command inside the projected environment.
 //! Every tailor contributes its PATH prefixes and environment through
-//! `Tailor::run_env`; the package.json script protocol (npm lifecycle
-//! events, `npm_*` variables) is the one ecosystem-specific piece that stays
-//! here, because it decides *how* the command runs, not what it sees.
+//! `Tailor::run_env`. A command that names a project script (a
+//! package.json script) runs as that script's steps instead, with the
+//! variables its tailor's `Tailor::projected_script` names.
 
 use crate::commands::shared::{self, child_status_code};
 use crate::commands::sync;
 use crate::kernel::context::Context;
 use crate::kernel::supervise;
-use crate::tailors::{self, node};
+use crate::tailors::{self, ScriptRun};
 use std::io;
 
 /// Why a resolved package.json script may not run in `dir`: the first
@@ -51,6 +51,21 @@ pub(crate) fn refused_command(cmd: &[String]) -> Option<String> {
         .find_map(|tailor| tailor.refused_command(cmd))
 }
 
+/// The project script `cmd` names in a projection under `dir`: the first
+/// tailor's `Tailor::projected_script`.
+fn projected_script(
+    dir: &std::path::Path,
+    cwd: &std::path::Path,
+    cmd: &[String],
+) -> io::Result<Option<ScriptRun>> {
+    for tailor in tailors::registry() {
+        if let Some(script) = tailor.projected_script(dir, cwd, cmd)? {
+            return Ok(Some(script));
+        }
+    }
+    Ok(None)
+}
+
 pub fn run(ctx: &Context, cmd: &[String], frozen: bool) -> io::Result<i32> {
     let activity = &ctx.activity;
     if cmd.is_empty() {
@@ -73,27 +88,8 @@ pub fn run(ctx: &Context, cmd: &[String], frozen: bool) -> io::Result<i32> {
     // Outside a project this finds nothing to sync and the refusal below
     // explains.
     let dir = sync::ensure_current(ctx, &cwd, frozen)?;
-    let package_json = node::tailor::projected_package_json(&dir, &cwd)?;
-    let script_steps = package_json
-        .as_ref()
-        .map(|(_, json)| node::script_commands_from_package(json, &cmd[0], &cmd[1..]))
-        .transpose()?
-        .flatten();
-    let package_metadata = if script_steps.is_some() {
-        let (_, json) = package_json
-            .as_ref()
-            .expect("script steps require package.json");
-        let package: serde_json::Value = serde_json::from_str(json).map_err(|e| {
-            io::Error::new(io::ErrorKind::InvalidInput, format!("package.json: {e}"))
-        })?;
-        Some((
-            package["name"].as_str().map(str::to_string),
-            package["version"].as_str().map(str::to_string),
-        ))
-    } else {
-        None
-    };
-    if let Some(refusal) = package_script_refusal(&dir, script_steps.is_some()) {
+    let script = projected_script(&dir, &cwd, cmd)?;
+    if let Some(refusal) = package_script_refusal(&dir, script.is_some()) {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, refusal));
     }
     let mut command = std::process::Command::new(&cmd[0]);
@@ -113,24 +109,20 @@ pub fn run(ctx: &Context, cmd: &[String], frozen: bool) -> io::Result<i32> {
     let path = std::env::var("PATH").unwrap_or_default();
     prefix.push(path);
     command.env("PATH", prefix.join(":"));
-    if let Some(steps) = script_steps {
-        let ((package_json_path, _), (package_name, package_version)) = package_json
-            .as_ref()
-            .zip(package_metadata)
-            .expect("script steps require package metadata");
+    if let Some(script) = script {
         let envs: Vec<_> = command
             .get_envs()
             .map(|(key, value)| (key.to_os_string(), value.map(|value| value.to_os_string())))
             .collect();
-        let npm_envs: Vec<_> = std::env::vars_os()
+        let scrubbed: Vec<_> = std::env::vars_os()
             .map(|(key, _)| key)
             .chain(envs.iter().map(|(key, _)| key.clone()))
-            .filter(|key| key.to_string_lossy().starts_with("npm_"))
+            .filter(|key| key.to_string_lossy().starts_with(script.scrubbed_prefix))
             .collect();
-        for (event, script) in steps {
-            crate::kernel::ui::note(&format!("> {event}: {script}"));
+        for (label, text) in &script.steps {
+            crate::kernel::ui::note(&format!("> {label}: {text}"));
             let mut step = std::process::Command::new("/bin/sh");
-            step.arg("-c").arg(script).current_dir(&dir);
+            step.arg("-c").arg(text).current_dir(&dir);
             for (key, value) in &envs {
                 match value {
                     Some(value) => {
@@ -141,18 +133,15 @@ pub fn run(ctx: &Context, cmd: &[String], frozen: bool) -> io::Result<i32> {
                     }
                 }
             }
-            for key in &npm_envs {
+            for key in &scrubbed {
                 step.env_remove(key);
             }
-            step.env("npm_lifecycle_event", &event);
-            if let Some(name) = &package_name {
-                step.env("npm_package_name", name);
+            if let Some(var) = script.step_label_var {
+                step.env(var, label);
             }
-            if let Some(version) = &package_version {
-                step.env("npm_package_version", version);
+            for (key, value) in &script.env {
+                step.env(key, value);
             }
-            step.env("npm_package_json", package_json_path);
-            step.env("INIT_CWD", &cwd);
             let status = match supervise::local_status(&mut step, activity) {
                 Ok(status) => status,
                 // An interrupt ends the chain: the step's own exit code
@@ -165,7 +154,7 @@ pub fn run(ctx: &Context, cmd: &[String], frozen: bool) -> io::Result<i32> {
                     None => {
                         return Err(io::Error::new(
                             error.kind(),
-                            format!("run npm script {event}: {error}"),
+                            format!("run {} {label}: {error}", script.noun),
                         ));
                     }
                 },
