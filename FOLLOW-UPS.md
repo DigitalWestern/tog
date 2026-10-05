@@ -58,8 +58,9 @@ None open.
 - **#495: explicit Python package sources.** Define per-package source and metadata-build trust rules for PyTorch-style indexes. Keep undeclared indexes refused until that design ships.
 - **#480: searchable project ancestors.** Let descriptor traversal and publication revalidation use search access without requiring ancestor directory listings. Pick: O_PATH for intermediate Linux components while preserving identity checks.
 - **#469: root removal identity.** Carry the decoded record's device/inode and held directory through deletion. Refuse replacements, including directory entries.
-- **Action leftovers (#427).** The first tag that carries `action.yml`, a
-  store cache between runs, and a self-test of the signed path.
+- **Action leftovers (#427).** Left: the first tag that carries
+  `action.yml`. At that tag, change `@main` in `action.yml`'s header and in
+  CLI.md to it.
 - **Record `skipped-optional` as an informational closure field (#71).**
   Decided 2026-09-23: an optional group the user did not request is a
   choice, not an exception. Record it as `optional_groups_skipped` so
