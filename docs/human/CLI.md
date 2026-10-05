@@ -399,8 +399,8 @@ comes from (the committed `tog-toolchain.toml` at the Cargo workspace root
 when there is one, so a member directory formats with the same one), and it
 is checked by sha256 like the compiler, so the run writes no record of it. A `.tog/closures/rustfmt.json` that an older tog
 wrote is deleted by a run without `--check` once another closure sits beside
-it (alone, it is what keeps the root the older tog registered readable, so
-it waits for the first sync); every reader but gc skips it. Nothing roots the formatter object, so `gc` can reclaim it between runs
+it, or once `gc` has forgotten the root the older tog registered (until then,
+alone, it is what keeps that root readable); every reader but gc skips it. Nothing roots the formatter object, so `gc` can reclaim it between runs
 and the next run realizes it again. A package.json script named `fmt` wins and runs as
 `tog run fmt`; an explicit `--eco rust` bypasses the script.
 
@@ -949,6 +949,12 @@ concurrent sync cannot lose one. Sharp edges:
   as typed including case. It removes only the record, so its objects become
   collectible; it clears even an unusable record without reading any other,
   so a damaged record never blocks recovering from it.
+- The one root a sweep forgets by itself is one whose project holds only
+  retired closure records (the `rustfmt.json` an older `tog fmt` wrote) and
+  which protects nothing those records do not name: no other object or
+  projection in its record, no linked forest, no run home. It prints
+  `forgot root <key> (<path>): its only closures are retired records`, and a
+  dry run prints `would forget …` instead.
 - `--dry-run` prints the same plan a sweep would execute — `would remove …`,
   `blocked: …` with the recovery action, `skipped: …` — and writes nothing;
   it refuses alongside `--register`, which would have to write a record.

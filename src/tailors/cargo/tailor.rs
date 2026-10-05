@@ -412,7 +412,8 @@ impl Tailor for Cargo {
             rustfmt::ensure_rustfmt(store, activity, platform, toolchain, &rust_object)?;
         // An older `tog fmt` wrote a `rustfmt` closure here; nothing reads
         // one any more, so a formatting run removes it (unless it is the
-        // only closure: see `remove_legacy_record`). `--check` changes
+        // only closure of a registered project: see
+        // `remove_legacy_record`). `--check` changes
         // no file: a CI check must not leave the checkout dirty.
         if !check {
             let key =
