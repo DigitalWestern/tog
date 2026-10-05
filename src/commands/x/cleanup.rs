@@ -656,7 +656,9 @@ pub(super) fn unregister_and_remove(
 
 /// Remove cached x projections. The store objects remain available for the
 /// ordinary GC pass; deleting a projection is deliberately not object GC.
-pub fn clean(request: CleanRequest) -> io::Result<()> {
+/// The exit status is 1 when any matched environment was skipped, so a
+/// script cannot read a partial clean as a full one.
+pub fn clean(request: CleanRequest) -> io::Result<i32> {
     let filter = clean_filter(request)?;
     let x_dir = home()?.join(".tog/x");
     let candidates = x_candidates(&x_dir)?;
@@ -798,5 +800,5 @@ pub fn clean(request: CleanRequest) -> io::Result<()> {
             "tog: x clean removed {removed} environment(s), skipped {skipped}; store objects remain until the next 'tog gc'{forests}"
         );
     }
-    Ok(())
+    Ok(i32::from(skipped > 0))
 }

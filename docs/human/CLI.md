@@ -509,9 +509,11 @@ something else (`tog x --from httpie http`). Sharp edges of `x --clean`:
   tool's (all versions when `@version` is omitted); store objects stay until
   the next `tog gc` — for a node tool the summary names
   `tog gc --project`, the only pass that reclaims the forest.
-- It takes flags and an optional tool, never free arguments; exit status is
-  0 whenever cleanup completed, and `nothing to clean` prints only when no
-  candidate matched — a root skipped as in use is reported.
+- It takes flags and an optional tool, never free arguments. The exit
+  status is 0 when every matched environment was removed (or none
+  matched), and 1 when any was skipped, so a script cannot take a partial
+  clean for a full one. `nothing to clean` prints only when no candidate
+  matched — a root skipped as in use is reported.
 - A running tool is left in place, reported as in use; retry after it exits.
 - An environment made under a store this tog refuses to open (see "Store
   format" in ARCHITECTURE.md) is left in place and reported as skipped,
