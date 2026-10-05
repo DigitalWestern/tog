@@ -326,11 +326,14 @@ impl Store {
     /// roots): hex of the first 8 bytes of SHA-256 over the canonical
     /// project path.
     pub fn project_key(project_dir: &Path) -> io::Result<String> {
+        Ok(Self::canonical_project_key(&project_dir.canonicalize()?))
+    }
+
+    /// [`Store::project_key`] for a path that is already canonical, such as
+    /// the project path a root record holds, which may no longer exist.
+    pub fn canonical_project_key(canonical_project: &Path) -> String {
         use sha2::{Digest, Sha256};
-        let canonical = project_dir.canonicalize()?;
-        Ok(hex::encode(
-            &Sha256::digest(canonical.as_os_str().as_bytes())[..8],
-        ))
+        hex::encode(&Sha256::digest(canonical_project.as_os_str().as_bytes())[..8])
     }
 
     /// The HOME a `tog run` child of `ecosystem` gets for this project:
@@ -364,6 +367,16 @@ impl Store {
         for level in [key.as_str(), ecosystem] {
             path.push(level);
             ensure_private_directory(&path)?;
+            if level == key {
+                // Each use is stamped on the project's directory, the one
+                // `gc --project` ages: its keep window then counts from
+                // the last run, not from the day the home was made, so a
+                // home in daily use that no root record names is kept.
+                // Best effort: a stamp that fails costs a cache, never a
+                // run.
+                let _ = fs::File::open(&path)
+                    .and_then(|dir| dir.set_modified(std::time::SystemTime::now()));
+            }
         }
         Ok(path)
     }
@@ -2141,6 +2154,12 @@ mod tests {
         assert_eq!(mode(&home), 0o700);
         assert_eq!(mode(home.parent().unwrap()), 0o700);
         assert_eq!(store.run_home(&project, "elixir").unwrap(), home);
+        // Every call stamps the project's directory, which gc ages.
+        let key_dir = home.parent().unwrap();
+        let old = std::time::SystemTime::UNIX_EPOCH;
+        fs::File::open(key_dir).unwrap().set_modified(old).unwrap();
+        store.run_home(&project, "elixir").unwrap();
+        assert!(fs::metadata(key_dir).unwrap().modified().unwrap() > old);
     }
 
     /// The project key is the one the forest paths already use: 16 hex

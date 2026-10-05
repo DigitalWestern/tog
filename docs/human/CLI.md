@@ -947,7 +947,11 @@ concurrent sync cannot lose one. Sharp edges:
   that protect it — and it refuses to leave a readable record naming an
   object it removed, naming the whole set that has to go together instead.
   It takes `--dry-run` and nothing else.
-- `--project` also collects old unused project forests and backups.
+- `--project` also collects old unused project forests and backups, and
+  the run home (`<store>/run-homes/<key>`) of any project no root record
+  names once it is older than `--keep-days`. A root record keeps its run
+  home as it keeps its objects, even after the project directory is gone,
+  until `--forget` gives it up.
 - `--reset` empties the store and starts it again in the current format. It
   is the fix for a store this tog refuses to open: one written before the
   format marker existed, or one whose marker it does not know or cannot

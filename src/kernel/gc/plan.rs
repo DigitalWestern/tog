@@ -39,6 +39,7 @@ pub(super) enum Counter {
     Stages,
     Forests,
     Backups,
+    RunHomes,
     Records,
 }
 
@@ -59,6 +60,7 @@ impl SweepPlan {
                 Counter::Stages => report.stages += 1,
                 Counter::Forests => report.forests += 1,
                 Counter::Backups => report.backups += 1,
+                Counter::RunHomes => report.run_homes += 1,
                 Counter::Records => report.records += 1,
             }
         }
@@ -381,65 +383,108 @@ pub(super) fn plan(validated: &Validated, options: &Options) -> io::Result<Sweep
     removals.extend(stale_temporaries(snapshot)?);
 
     if options.project {
-        for entry in &snapshot.forests {
-            if snapshot
-                .state
-                .project_keep
-                .iter()
-                .any(|keep| related(&entry.path, keep))
-            {
-                skips.push(format!(
-                    "forest {} is claimed by a surviving root record",
-                    entry.path.display()
-                ));
-                continue;
-            }
-            if !older_than_at(snapshot.now, &entry.stat, STAGE_WINDOW) {
-                continue;
-            }
-            let bytes = tree_size(&entry.path)?;
-            removals.push(Removal {
-                parent: entry.parent,
-                name: entry.name.clone(),
-                stat: entry.stat,
-                companion: None,
-                label: format!("forest {}", entry.path.display()),
-                display: format!("stale forest {} ({})", entry.path.display(), size(bytes)),
-                bytes,
-                counter: Counter::Forests,
-            });
-        }
-        for entry in &snapshot.backups {
-            if snapshot
-                .state
-                .project_keep
-                .iter()
-                .any(|keep| related(&entry.path, keep))
-            {
-                skips.push(format!(
-                    "backup {} is claimed by a surviving root record",
-                    entry.path.display()
-                ));
-                continue;
-            }
-            if !older_than_at(snapshot.now, &entry.stat, keep_age(options.keep_days)) {
-                continue;
-            }
-            let bytes = tree_size(&entry.path)?;
-            removals.push(Removal {
-                parent: entry.parent,
-                name: entry.name.clone(),
-                stat: entry.stat,
-                companion: None,
-                label: format!("backup {}", entry.path.display()),
-                display: format!("backup {} ({})", entry.path.display(), size(bytes)),
-                bytes,
-                counter: Counter::Backups,
-            });
-        }
+        plan_projections(snapshot, options, &mut removals, &mut skips)?;
     }
 
     Ok(SweepPlan { removals, skips })
+}
+
+/// What a `--project` sweep adds: old forests and backups no surviving root
+/// claims, and run homes of projects no root names.
+fn plan_projections(
+    snapshot: &Snapshot,
+    options: &Options,
+    removals: &mut Vec<Removal>,
+    skips: &mut Vec<String>,
+) -> io::Result<()> {
+    for entry in &snapshot.forests {
+        if snapshot
+            .state
+            .project_keep
+            .iter()
+            .any(|keep| related(&entry.path, keep))
+        {
+            skips.push(format!(
+                "forest {} is claimed by a surviving root record",
+                entry.path.display()
+            ));
+            continue;
+        }
+        if !older_than_at(snapshot.now, &entry.stat, STAGE_WINDOW) {
+            continue;
+        }
+        let bytes = tree_size(&entry.path)?;
+        removals.push(Removal {
+            parent: entry.parent,
+            name: entry.name.clone(),
+            stat: entry.stat,
+            companion: None,
+            label: format!("forest {}", entry.path.display()),
+            display: format!("stale forest {} ({})", entry.path.display(), size(bytes)),
+            bytes,
+            counter: Counter::Forests,
+        });
+    }
+    for entry in &snapshot.backups {
+        if snapshot
+            .state
+            .project_keep
+            .iter()
+            .any(|keep| related(&entry.path, keep))
+        {
+            skips.push(format!(
+                "backup {} is claimed by a surviving root record",
+                entry.path.display()
+            ));
+            continue;
+        }
+        if !older_than_at(snapshot.now, &entry.stat, keep_age(options.keep_days)) {
+            continue;
+        }
+        let bytes = tree_size(&entry.path)?;
+        removals.push(Removal {
+            parent: entry.parent,
+            name: entry.name.clone(),
+            stat: entry.stat,
+            companion: None,
+            label: format!("backup {}", entry.path.display()),
+            display: format!("backup {} ({})", entry.path.display(), size(bytes)),
+            bytes,
+            counter: Counter::Backups,
+        });
+    }
+    // A run home holds a project's Mix, Hex and NuGet caches. It is kept
+    // while any surviving root names its project, however old, and
+    // otherwise once it is older than the keep window.
+    for entry in &snapshot.run_homes {
+        let key = entry.name.to_string_lossy();
+        if snapshot.state.run_home_keys.contains(key.as_ref()) {
+            continue;
+        }
+        if !older_than_at(snapshot.now, &entry.stat, keep_age(options.keep_days)) {
+            skips.push(format!(
+                "run home {} is younger than the keep window",
+                entry.path.display()
+            ));
+            continue;
+        }
+        let bytes = tree_size(&entry.path)?;
+        removals.push(Removal {
+            parent: entry.parent,
+            name: entry.name.clone(),
+            stat: entry.stat,
+            companion: None,
+            label: format!("run home {}", entry.path.display()),
+            display: format!(
+                "run home {} of a project no root names ({})",
+                entry.path.display(),
+                size(bytes)
+            ),
+            bytes,
+            counter: Counter::RunHomes,
+        });
+    }
+    Ok(())
 }
 
 pub(super) fn report_plan<W: Write>(plan: &SweepPlan, out: &mut W) -> io::Result<()> {

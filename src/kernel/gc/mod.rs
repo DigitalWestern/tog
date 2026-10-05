@@ -72,6 +72,8 @@ pub struct Report {
     pub stages: usize,
     pub forests: usize,
     pub backups: usize,
+    /// `run-homes/<project key>` directories no surviving root names.
+    pub run_homes: usize,
     /// Records left without their object by an interrupted removal.
     pub records: usize,
     /// Resolution-proxy metadata cache entries unused for the retention
@@ -524,6 +526,59 @@ mod tests {
             "{}",
             String::from_utf8_lossy(&output)
         );
+    }
+
+    #[test]
+    fn a_project_sweep_reclaims_old_run_homes_no_root_names() {
+        let temp = TempStore::new("run-homes");
+        let store = temp.store();
+        let project = temp.root.join("project");
+        fs::create_dir_all(&project).unwrap();
+        let project = project.canonicalize().unwrap();
+        let kept = store.run_home(&project, "elixir").unwrap();
+        store
+            .register_root_record(store::RootRecord {
+                key: store::Store::root_key(&project).unwrap(),
+                project_path: project.clone(),
+                objects: BTreeSet::new(),
+                projections: BTreeSet::new(),
+                updated: 1,
+            })
+            .unwrap();
+        // The record keeps its run home even once the project is gone, as it
+        // keeps the project's objects.
+        fs::remove_dir_all(&project).unwrap();
+        let run_homes = store.root.join("run-homes");
+        let orphan = run_homes.join("0123456789abcdef");
+        let young = run_homes.join("fedcba9876543210");
+        fs::create_dir_all(orphan.join("dotnet/.nuget")).unwrap();
+        fs::write(orphan.join("dotnet/.nuget/cache"), b"cache").unwrap();
+        fs::create_dir_all(young.join("elixir")).unwrap();
+        age(kept.parent().unwrap());
+        age(&orphan);
+        let sweep = |project| {
+            let mut output = Vec::new();
+            let report = collect(
+                &store,
+                Options {
+                    dry_run: false,
+                    project,
+                    keep_days: 1,
+                    ..Options::default()
+                },
+                &mut output,
+            )
+            .unwrap();
+            (report, String::from_utf8(output).unwrap())
+        };
+        let (report, text) = sweep(false);
+        assert_eq!(report.run_homes, 0, "{text}");
+        assert!(orphan.is_dir(), "only a project sweep reads run homes");
+        let (report, text) = sweep(true);
+        assert_eq!(report.run_homes, 1, "{text}");
+        assert!(!orphan.exists(), "{text}");
+        assert!(young.is_dir(), "{text}");
+        assert!(kept.is_dir(), "{text}");
     }
 
     #[test]
