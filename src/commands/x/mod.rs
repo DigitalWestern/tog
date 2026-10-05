@@ -524,12 +524,7 @@ fn cached_projection(
     let id = path
         .file_name()
         .and_then(|name| name.to_str())
-        .filter(|id| {
-            !id.is_empty()
-                && id
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
-        })
+        .filter(|id| crate::kernel::store::is_object_id(id))
         .map(str::to_owned)
         .ok_or_else(|| {
             other(
@@ -1704,25 +1699,30 @@ mod tests {
 
     /// A published Python `x` root whose environment object carries
     /// `exceptions` in its metadata: (store, root, object).
+    /// The cached projection's object, in the full object-id shape the
+    /// cache check demands.
+    const TEST_ENV: &str = "0123456789abcdef0123456789abcdef01234567-test-env";
+    const TEST_NODE_ENV: &str = "0123456789abcdef0123456789abcdef01234567-test-node-env";
+
     fn ready_python_root(
         base: &Path,
         exceptions: &[serde_json::Value],
     ) -> (Store, PathBuf, PathBuf) {
-        fs::create_dir_all(base.join("store/objects/test-env/bin")).unwrap();
+        fs::create_dir_all(base.join("store/objects").join(TEST_ENV).join("bin")).unwrap();
         fs::create_dir_all(base.join("store/meta")).unwrap();
         // `Store::has_with_activity` takes the publish lock under `tmp/`.
         fs::create_dir_all(base.join("store/tmp")).unwrap();
         // Closures record the store's own canonical object path.
         let store = Store::for_test(base.join("store").canonicalize().unwrap());
-        let object = store.root.join("objects/test-env");
+        let object = store.object_path(TEST_ENV);
         let executable = object.join("bin/ruff");
         fs::write(&executable, "#!/bin/sh\nexit 0\n").unwrap();
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
         // A complete object is a read-only directory with metadata.
         fs::set_permissions(&object, fs::Permissions::from_mode(0o555)).unwrap();
         fs::write(
-            store.root.join("meta/test-env.json"),
-            serde_json::json!({"id": "test-env", "exceptions": exceptions}).to_string(),
+            store.root.join(format!("meta/{TEST_ENV}.json")),
+            serde_json::json!({"id": TEST_ENV, "exceptions": exceptions}).to_string(),
         )
         .unwrap();
 
@@ -1745,6 +1745,34 @@ mod tests {
         .unwrap();
         write_x_request_for_store(&root, &store, "python", "ruff", None, "ready", None).unwrap();
         (store, root, object)
+    }
+
+    /// The cached environment id passes the same shape check the store
+    /// applies: a name a plain character filter allows but no object can
+    /// carry is refused before any store lookup.
+    #[test]
+    fn a_cached_environment_id_must_have_the_object_id_shape() {
+        let _guard = exception_guard();
+        let temp = TempDir::named("x-cached-id-shape");
+        let (store, root, object) = ready_python_root(&temp.0, &[]);
+        let activity = store
+            .activity(crate::kernel::activity::ActivityMode::Shared)
+            .unwrap();
+        assert!(cached_projection(&store, &activity, &root, "python").is_ok());
+        for id in ["test-env", "0123456789abcdef0123456789abcdef01234567-a..b"] {
+            let closure = root.join(".tog/closures/python.json");
+            let mut envelope: serde_json::Value =
+                serde_json::from_str(&fs::read_to_string(&closure).unwrap()).unwrap();
+            envelope["body"]["env_object"] = store.object_path(id).display().to_string().into();
+            fs::write(&closure, envelope.to_string()).unwrap();
+            let error = cached_projection(&store, &activity, &root, "python").unwrap_err();
+            assert!(
+                error.to_string().contains("malformed environment object"),
+                "{id}: {error}"
+            );
+        }
+        drop(activity);
+        fs::set_permissions(&object, fs::Permissions::from_mode(0o755)).unwrap();
     }
 
     /// A cache hit validates the projection exactly once. `x_request_is_ready`
@@ -1813,7 +1841,7 @@ mod tests {
         .unwrap());
         // The minting form the borrowed one replaced cannot even be taken on
         // this thread now.
-        assert!(store.has("test-env").is_err());
+        assert!(store.has(TEST_ENV).is_err());
         drop(exclusive);
         let _ = policy::drain();
         fs::set_permissions(&object, fs::Permissions::from_mode(0o755)).unwrap();
@@ -1954,15 +1982,15 @@ mod tests {
     /// `node-forest/2` projection its `node_modules` links into, and the
     /// `pnpm` executable. Returns (store, root, executable, object).
     fn pnpm_cache_without_record(base: &Path) -> (Store, PathBuf, PathBuf, PathBuf) {
-        fs::create_dir_all(base.join("store/objects/test-node-env")).unwrap();
+        fs::create_dir_all(base.join("store/objects").join(TEST_NODE_ENV)).unwrap();
         fs::create_dir_all(base.join("store/meta")).unwrap();
         fs::create_dir_all(base.join("store/tmp")).unwrap();
         let store = Store::for_test(base.join("store").canonicalize().unwrap());
-        let object = store.root.join("objects/test-node-env");
+        let object = store.object_path(TEST_NODE_ENV);
         fs::set_permissions(&object, fs::Permissions::from_mode(0o555)).unwrap();
         fs::write(
-            store.root.join("meta/test-node-env.json"),
-            serde_json::json!({"id": "test-node-env", "exceptions": []}).to_string(),
+            store.root.join(format!("meta/{TEST_NODE_ENV}.json")),
+            serde_json::json!({"id": TEST_NODE_ENV, "exceptions": []}).to_string(),
         )
         .unwrap();
 

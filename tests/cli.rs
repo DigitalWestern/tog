@@ -2403,9 +2403,12 @@ fn cached_x_root_with_exception(home: &Path) -> PathBuf {
     // temp dir sits under /var, a symlink to /private/var, and an
     // uncanonicalized path here compares unequal to `store.object_path`.
     fresh_store(&home.join("store"));
-    std::fs::create_dir_all(home.join("store/objects/test-env/bin")).unwrap();
+    std::fs::create_dir_all(
+        home.join("store/objects/0123456789abcdef0123456789abcdef01234567-test-env/bin"),
+    )
+    .unwrap();
     let store = home.join("store").canonicalize().unwrap();
-    let object = store.join("objects/test-env");
+    let object = store.join("objects/0123456789abcdef0123456789abcdef01234567-test-env");
     let executable = object.join("bin/ruff");
     std::fs::write(&executable, "#!/bin/sh\nexit 0\n").unwrap();
     std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -2417,8 +2420,8 @@ fn cached_x_root_with_exception(home: &Path) -> PathBuf {
         "detail": "cached test exception"
     });
     std::fs::write(
-        store.join("meta/test-env.json"),
-        serde_json::json!({"id": "test-env", "exceptions": [exception.clone()]}).to_string(),
+        store.join("meta/0123456789abcdef0123456789abcdef01234567-test-env.json"),
+        serde_json::json!({"id": "0123456789abcdef0123456789abcdef01234567-test-env", "exceptions": [exception.clone()]}).to_string(),
     )
     .unwrap();
 
@@ -2489,7 +2492,9 @@ fn cached_x_rechecks_object_exceptions_under_project_policy() {
     );
     assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
     assert!(
-        text(&out.stderr).contains("cached object test-env carries exception"),
+        text(&out.stderr).contains(
+            "cached object 0123456789abcdef0123456789abcdef01234567-test-env carries exception"
+        ),
         "{}",
         text(&out.stderr)
     );
