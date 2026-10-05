@@ -16,9 +16,11 @@ mod hextar;
 pub mod objects;
 pub mod tailor;
 mod tool;
+mod unpack;
+
+use unpack::extract_otp;
 
 use crate::kernel::activity::StoreActivity;
-use crate::kernel::archive::{extract_with_activity_and_options, Compression, ExtractOptions};
 use crate::kernel::fetch::{download_toolchain_artifact_held, download_verified_held, Digest};
 use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::platform::Platform;
@@ -863,37 +865,6 @@ fn extract_otp_archive_for(
     platform: Platform,
 ) -> io::Result<()> {
     extract_otp(Some(activity), archive, destination, platform)
-}
-
-fn extract_otp(
-    activity: Option<&StoreActivity>,
-    archive: &Path,
-    destination: &Path,
-    platform: Platform,
-) -> io::Result<()> {
-    let options = ExtractOptions::platform_build(otp_strip_components(platform) as usize);
-    let extracted = match activity {
-        Some(activity) => extract_with_activity_and_options(
-            activity,
-            archive,
-            destination,
-            &options,
-            Compression::Gzip,
-        ),
-        None => crate::kernel::archive::extract_with_options(
-            archive,
-            destination,
-            &options,
-            Compression::Gzip,
-        ),
-    };
-    extracted.map(|_| ()).map_err(|e| {
-        err(format!(
-            "OTP extraction failed for {} into {}: {e}",
-            archive.display(),
-            destination.display()
-        ))
-    })
 }
 
 /// Realize the BEAM the selection names: OTP, Elixir, Hex and rebar3, each

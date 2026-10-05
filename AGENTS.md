@@ -43,7 +43,8 @@
   - Know whether your change wakes the heavy suite. heavy.yml runs the
     47-minute e2e job on a pull request when it changes any file its
     `gate` job watches: `src/kernel/archive*`, `src/kernel/fetch*`,
-    `src/kernel/sandbox*`, anything under `src/kernel/provider/`, any
+    `src/kernel/sandbox*`, anything under `src/kernel/provider/`, a
+    tailor's `unpack.rs`, `src/commands/selfupdate.rs`, any
     `catalog.toml`, `Cargo.lock`, `heavy.yml`, or `tests/acceptance.sh`.
     It also runs for any file under `tests/` other than a top-level
     `tests/*.rs`, `tests/size_baseline.txt` or `tests/install.sh`

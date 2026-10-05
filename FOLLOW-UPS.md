@@ -87,7 +87,6 @@ None open.
 - **Found in the #316 review (2026-09-26).** One issue and one PR each:
   - #321 tests: kernel_smoke realizes against the developer's own store, so a local run can pass on cached objects.
 - **Found in the #323 review (2026-09-26).** One issue and one PR each:
-  - #325 ci: tailor changes to extraction do not trigger the heavy suite on their own.
 - **Found in the #327 work (2026-09-26).** One issue and one PR each:
   - #328 sandbox: opt Python sdist builds and npm addons into HostView::RuntimeOnly.
   - #329 ruby: give native gem builds tog's pinned native-libs set.

@@ -8,7 +8,6 @@ mod meta;
 
 use super::{err, HexDep};
 use crate::kernel::activity::StoreActivity;
-use crate::kernel::archive::{extract_with_activity_and_options, Compression, ExtractOptions};
 use sha2::{Digest as _, Sha256};
 use std::fs;
 use std::io;
@@ -27,18 +26,12 @@ pub(super) fn unpack_verified(
     // Unpack the OUTER tar (VERSION, metadata.config, contents.tar.gz, CHECKSUM).
     let outer_dir = scratch.join(format!("outer-{}", d.app));
     let app: &str = &d.app;
-    let extract = |archive: &Path, dest: &Path, compression: Compression, what: &str| {
-        extract_with_activity_and_options(
-            activity,
-            archive,
-            dest,
-            &ExtractOptions::stripped(0),
-            compression,
-        )
-        .map_err(|e| io::Error::new(e.kind(), format!("{app}: {what} extraction failed: {e}")))
+    let extract = |archive: &Path, dest: &Path, gzip: bool, what: &str| {
+        super::unpack::extract_hex_tar(activity, archive, dest, gzip)
+            .map_err(|e| io::Error::new(e.kind(), format!("{app}: {what} extraction failed: {e}")))
     };
     fs::create_dir_all(&outer_dir)?;
-    extract(tar, &outer_dir, Compression::None, "outer tar")?;
+    extract(tar, &outer_dir, false, "outer tar")?;
     // Inner checksum per hex spec — over REGULAR outer members only.
     let mut hasher = Sha256::new();
     for part in ["VERSION", "metadata.config", "contents.tar.gz", "CHECKSUM"] {
@@ -78,7 +71,7 @@ pub(super) fn unpack_verified(
     extract(
         &outer_dir.join("contents.tar.gz"),
         &dep_dir,
-        Compression::Gzip,
+        true,
         "contents",
     )?;
     check_dep_tree(&dep_dir, &d.app)?;

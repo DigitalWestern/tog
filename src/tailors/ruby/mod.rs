@@ -14,6 +14,11 @@ mod gem_home;
 mod native;
 pub mod objects;
 pub mod tailor;
+mod unpack;
+
+use unpack::extract_ruby_bottle;
+#[cfg(test)]
+use unpack::extract_ruby_bottle_for_test;
 
 use crate::kernel::activity::StoreActivity;
 use crate::kernel::digest::Algo;
@@ -257,33 +262,6 @@ fn validate_ruby_layout(root: &Path) -> io::Result<()> {
         return Err(err("portable-ruby is missing interpreter headers"));
     }
     Ok(())
-}
-
-fn extract_ruby_bottle(activity: &StoreActivity, tarball: &Path, staged: &Path) -> io::Result<()> {
-    // The verified Linux and Darwin bottles both use
-    // portable-ruby/<version>/<tree>; this is deliberately not Node's
-    // strip count. The archive remains unchanged in the verified cache.
-    crate::kernel::archive::extract_with_activity_and_options(
-        activity,
-        tarball,
-        staged,
-        &crate::kernel::archive::ExtractOptions::platform_build(2),
-        crate::kernel::archive::Compression::Gzip,
-    )
-    .map_err(|e| io::Error::new(e.kind(), format!("extract portable-ruby bottle: {e}")))?;
-    validate_ruby_layout(staged)
-}
-
-#[cfg(test)]
-fn extract_ruby_bottle_for_test(tarball: &Path, staged: &Path) -> io::Result<()> {
-    crate::kernel::archive::extract_with_options(
-        tarball,
-        staged,
-        &crate::kernel::archive::ExtractOptions::platform_build(2),
-        crate::kernel::archive::Compression::Gzip,
-    )
-    .map_err(|e| io::Error::new(e.kind(), format!("extract portable-ruby bottle: {e}")))?;
-    validate_ruby_layout(staged)
 }
 
 /// Realize the Ruby the selection names: its bytes, its version, its

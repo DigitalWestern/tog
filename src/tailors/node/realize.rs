@@ -1,30 +1,13 @@
 //! node env realization (node tailor): tarball fetch and classification,
 //! the env object's identity, staging, and the sandboxed install scripts.
 
+use super::unpack::tarball_has_binding_gyp;
 use super::*;
 use sha2::Digest as _;
 use std::fs::OpenOptions;
 use std::io::Write;
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
-
-pub(super) fn tarball_has_binding_gyp(activity: &StoreActivity, path: &Path) -> io::Result<bool> {
-    let entries = crate::kernel::archive::list_with_activity(
-        activity,
-        path,
-        crate::kernel::archive::Compression::Gzip,
-    )
-    .map_err(|e| {
-        io::Error::new(
-            e.kind(),
-            format!("list npm tarball {}: {e}", path.display()),
-        )
-    })?;
-    Ok(entries.iter().any(|entry| {
-        let trimmed = entry.name.trim_end_matches('/');
-        trimmed == "binding.gyp" || trimmed.ends_with("/binding.gyp")
-    }))
-}
 
 pub(super) const ARCHIVE_CLASSIFICATION_SCHEMA: &str = "npm-archive-classification/1";
 
@@ -824,25 +807,8 @@ fn extract_tarball_packages(
         let dest = env_package_path(staged, &p.path);
         fs::create_dir_all(&dest)
             .map_err(|e| io::Error::new(e.kind(), format!("{}: create dir: {e}", p.path)))?;
-        // Registry tarballs are packed by arbitrary publishers; some
-        // (pngjs, eta 1.x) carry directories with mode 0666. bsdtar
-        // (macOS) descends into them anyway; GNU tar creates the
-        // directory 0666 and then cannot open its children unless
-        // directory modes are applied after extraction. normalize_modes
-        // below rewrites every mode afterwards, so the store content is
-        // identical either way.
-        let options = crate::kernel::archive::ExtractOptions {
-            delay_directory_restore: !platform.is_macos(),
-            ..crate::kernel::archive::ExtractOptions::stripped(1)
-        };
-        crate::kernel::archive::extract_with_activity_and_options(
-            activity,
-            tarball,
-            &dest,
-            &options,
-            crate::kernel::archive::Compression::Gzip,
-        )
-        .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", p.path)))?;
+        super::unpack::extract_npm_package(activity, platform, tarball, &dest)
+            .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", p.path)))?;
         normalize_modes(&dest)
             .map_err(|e| io::Error::new(e.kind(), format!("{}: normalize modes: {e}", p.path)))?;
         if let Some(patch) = &p.patch {

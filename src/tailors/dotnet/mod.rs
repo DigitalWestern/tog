@@ -13,9 +13,13 @@
 pub mod edit;
 pub mod objects;
 pub mod tailor;
+mod unpack;
+
+#[cfg(test)]
+use unpack::extract_sdk_archive;
+use unpack::extract_sdk_archive_for;
 
 use crate::kernel::activity::StoreActivity;
-use crate::kernel::archive::{Compression, ExtractOptions};
 use crate::kernel::fetch::{cache_insert, download_toolchain_artifact_held, Digest};
 use crate::kernel::fsroot::{Entry, ProjectRoot};
 use crate::kernel::platform::Platform;
@@ -223,44 +227,6 @@ pub fn realize_runtime(
             deps
         })
         .map(|(path, _)| path)
-}
-
-#[cfg(test)]
-fn extract_sdk_archive(tarball: &Path, staged: &Path) -> io::Result<()> {
-    // No activity lease: the extraction is test-only and writes scratch
-    // directories outside any store.
-    crate::kernel::archive::extract_with_options(
-        tarball,
-        staged,
-        &ExtractOptions::platform_build(0),
-        Compression::Gzip,
-    )
-    .map(|_| ())
-    .map_err(|e| io::Error::new(e.kind(), format!("extract dotnet SDK archive: {e}")))?;
-    if !staged.join("dotnet").is_file() {
-        return Err(err("dotnet SDK extraction failed or has unexpected layout"));
-    }
-    Ok(())
-}
-
-fn extract_sdk_archive_for(
-    activity: &StoreActivity,
-    tarball: &Path,
-    staged: &Path,
-) -> io::Result<()> {
-    crate::kernel::archive::extract_with_activity_and_options(
-        activity,
-        tarball,
-        staged,
-        &ExtractOptions::platform_build(0),
-        Compression::Gzip,
-    )
-    .map(|_| ())
-    .map_err(|e| io::Error::new(e.kind(), format!("extract dotnet SDK archive: {e}")))?;
-    if !staged.join("dotnet").is_file() {
-        return Err(err("dotnet SDK extraction failed or has unexpected layout"));
-    }
-    Ok(())
 }
 
 /// global.json gate: it must name the SELECTED SDK exactly, with
