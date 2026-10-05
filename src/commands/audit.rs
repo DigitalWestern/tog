@@ -1125,7 +1125,7 @@ mod tests {
     use super::*;
     use crate::kernel::policy::Signing;
     use crate::kernel::policy::{
-        GIT_DEPENDENCY, INSTALL_SCRIPT_FAILED, SKIPPED_OPTIONAL, WEAK_INTEGRITY,
+        GIT_DEPENDENCY, INSTALL_SCRIPT_FAILED, REQUIREMENT_SKIPPED, WEAK_INTEGRITY,
     };
     use crate::kernel::resolve::record;
     use crate::kernel::signing::SigningKey;
@@ -1359,8 +1359,8 @@ mod tests {
         let closures = [with_exceptions(
             &temp.0,
             &[
-                exception(SKIPPED_OPTIONAL, "dev"),
-                exception(SKIPPED_OPTIONAL, "docs"),
+                exception(REQUIREMENT_SKIPPED, "dev"),
+                exception(REQUIREMENT_SKIPPED, "docs"),
             ],
         )];
         let verdicts = judge(&temp.0, &deny(&[GIT_DEPENDENCY]), &closures);
@@ -1373,7 +1373,7 @@ mod tests {
                 .permitted
                 .as_ref()
                 .unwrap()
-                .get(SKIPPED_OPTIONAL),
+                .get(REQUIREMENT_SKIPPED),
             Some(&2)
         );
         assert_eq!(verdicts[0].freshness, Freshness::Current);
@@ -1390,13 +1390,13 @@ mod tests {
         let text = render(&temp.0, &report, false).unwrap();
         assert_eq!(
             text,
-            format!("python  clean         closure {record}: permitted: skipped-optional 2\n")
+            format!("python  clean         closure {record}: permitted: requirement-skipped 2\n")
         );
         let value: Value = serde_json::from_str(&render(&temp.0, &report, true).unwrap()).unwrap();
         assert_eq!(value["passed"], true);
         assert_eq!(value["closures"][0]["passed"], true);
         assert_eq!(value["closures"][0]["freshness"], "current");
-        assert_eq!(value["closures"][0]["permitted"][SKIPPED_OPTIONAL], 2);
+        assert_eq!(value["closures"][0]["permitted"][REQUIREMENT_SKIPPED], 2);
         assert_eq!(
             value["closures"][0]["record_sha256"]
                 .as_str()
@@ -1575,7 +1575,7 @@ mod tests {
             &temp.0,
             &[
                 exception(INSTALL_SCRIPT_FAILED, "sharp@0.33.0"),
-                exception(SKIPPED_OPTIONAL, "fsevents"),
+                exception(REQUIREMENT_SKIPPED, "fsevents"),
                 exception(WEAK_INTEGRITY, "left-pad@1.0.0"),
             ],
         )];
@@ -1594,7 +1594,7 @@ mod tests {
                 .permitted
                 .as_ref()
                 .unwrap()
-                .get(SKIPPED_OPTIONAL),
+                .get(REQUIREMENT_SKIPPED),
             Some(&1)
         );
         let record = record(&verdicts[0]);
@@ -1609,7 +1609,7 @@ mod tests {
         let text = render(&temp.0, &report, false).unwrap();
         assert!(
             text.contains(&format!(
-                "python  denied        closure {record}: 2 denied; permitted: skipped-optional 1\n"
+                "python  denied        closure {record}: 2 denied; permitted: requirement-skipped 1\n"
             )),
             "{text}"
         );
@@ -1631,7 +1631,7 @@ mod tests {
         let temp = python_project("strict");
         let closures = [with_exceptions(
             &temp.0,
-            &[exception(SKIPPED_OPTIONAL, "dev")],
+            &[exception(REQUIREMENT_SKIPPED, "dev")],
         )];
         let strict = Policy {
             strict: true,
@@ -1651,7 +1651,7 @@ mod tests {
             &temp.0,
             &[
                 exception("kind-from-a-newer-tog", "left-pad"),
-                exception(SKIPPED_OPTIONAL, "dev"),
+                exception(REQUIREMENT_SKIPPED, "dev"),
             ],
         )];
         // Neither an empty policy nor one that denies everything it knows
@@ -1682,7 +1682,7 @@ mod tests {
         let text = render(&temp.0, &report, false).unwrap();
         assert!(
             text.contains(&format!(
-                "python  unknown       closure {record}: 1 of unknown kind; permitted: skipped-optional 1\n"
+                "python  unknown       closure {record}: 1 of unknown kind; permitted: requirement-skipped 1\n"
             )),
             "{text}"
         );
@@ -1709,7 +1709,7 @@ mod tests {
             &temp.0,
             &[
                 exception("toolchain-component-unavailable", "clippy"),
-                exception(SKIPPED_OPTIONAL, "dev"),
+                exception(REQUIREMENT_SKIPPED, "dev"),
             ],
         )];
         for policy in [permissive(), deny(policy::KINDS)] {

@@ -58,12 +58,6 @@ None open.
 - **Action leftovers (#427).** Left: the first tag that carries
   `action.yml`. At that tag, change `@main` in `action.yml`'s header and in
   CLI.md to it.
-- **Record `skipped-optional` as an informational closure field (#71).**
-  Decided 2026-09-23: an optional group the user did not request is a
-  choice, not an exception. Record it as `optional_groups_skipped` so
-  `status` and `sbom` still see it, check the python-env identity before
-  assuming no identity impact, then re-run the Python hit rate and add a
-  dated column to `docs/agent/HITRATE.md`.
 - **A shared system store at `/opt/tog/store`: the design round (#69).**
   Decided 2026-09-23: a full design round with independent review, no code
   until it lands. Scope: ownership and permissions on the shared path, GC

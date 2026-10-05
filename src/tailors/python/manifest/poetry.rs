@@ -91,10 +91,10 @@ pub(super) fn poetry_manifest(
         if !present {
             continue;
         }
-        crate::kernel::policy::record(
-            crate::kernel::policy::SKIPPED_OPTIONAL,
+        crate::kernel::policy::skip_optional(
             group,
             "Poetry development dependency group is excluded by default",
+            None,
         )?;
     }
     let lock_path = dir.join("poetry.lock");
@@ -172,11 +172,29 @@ pub(super) fn poetry_requirement(
                         .any(|dep| dep.eq_ignore_ascii_case(name))
             });
             if !active {
-                crate::kernel::policy::record(
-                    crate::kernel::policy::SKIPPED_OPTIONAL,
-                    name,
-                    "Poetry optional dependency was not selected by a requested extra",
-                )?;
+                // Filed under each extra that names it, or on its own when
+                // no extra does (nothing can select it then).
+                let mut groups: Vec<&str> = extras
+                    .iter()
+                    .filter(|(_, deps)| {
+                        deps.as_array()
+                            .into_iter()
+                            .flatten()
+                            .filter_map(toml::Value::as_str)
+                            .any(|dep| dep.eq_ignore_ascii_case(name))
+                    })
+                    .map(|(extra, _)| extra.as_str())
+                    .collect();
+                if groups.is_empty() {
+                    groups.push("(optional, in no extra)");
+                }
+                for group in groups {
+                    crate::kernel::policy::skip_optional(
+                        group,
+                        "Poetry extra, not requested",
+                        Some(name),
+                    )?;
+                }
                 return Ok(None);
             }
         }

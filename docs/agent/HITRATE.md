@@ -20,11 +20,34 @@ full 60-repo run takes about 95 minutes on the Linux box.
    `docs/human/policy-company.toml` denies. Quote this one to a security
    buyer.
 3. **strict ok**: ok with zero exceptions. Not a product number: several
-   exception kinds (`skipped_optional`, `file-collision`,
-   `built_from_source`) are not security findings.
+   exception kinds (`file-collision`, `built_from_source`) are not
+   security findings. `skipped_optional` was one too until 2026-10-05
+   (#71); it is no longer an exception (see that section).
 
 Only Python and npm are measured. Earlier runs (2026-09-02 macOS,
 2026-09-05/06 Linux) are in git history and in their CSVs.
+
+## Linux x86_64 — 2026-10-05: strict without `skipped_optional` (#71)
+
+Not a new run: a re-scoring of the 2026-09-23 CSV. An optional group the
+user did not request is now recorded as `optional_groups_skipped` in the
+closure, not as an exception, so it no longer counts against strict.
+Strict adds refusals only, so strict ok is permissive ok with zero
+recorded exceptions (the method the 2026-09-11 section describes), and
+removing one kind from a permissive CSV gives the strict number a run with
+this change would report. Permissive and company-policy do not move:
+company policy never denied the kind.
+
+| ecosystem | permissive | company-policy | strict | 2026-09-23 strict |
+|---|---|---|---|---|
+| python | 26/30 | 24/30 | **20/30** | 8/30 |
+| npm | 28/30 | 15/30 | **15/30** | 14/30 |
+
+The six Python oks still not strict carry `file-collision` (Deep-Live-Cam,
+odysseus, autoresearch), `requirement-skipped` (TradingAgents,
+gpt_academic), `unattested-index` (autoresearch) and
+`artifact-not-provisioned` (django). npm gains one: ECC's only exceptions
+were seven `skipped_optional` records from its `pyproject.toml`.
 
 ## Linux x86_64 — 2026-09-23 (m6-fedora, tog 4720e12, pinned 60)
 
@@ -161,8 +184,8 @@ confirmation only.
 - The developer number is good and rising: Python 87 percent, npm 67
   percent (77 percent once the workspace fix is in), on the same 60 repos.
 - The strict number is not a product number. Quote the company-policy
-  column, and decide whether `skipped_optional` should be an exception at
-  all.
+  column. (`skipped_optional` stopped being an exception on 2026-10-05,
+  #71.)
 - Five npm regressions slipped past the acceptance suite between 09-06 and
   09-10 because the hit-rate harness is not a gate. It should be run before
   merging anything that touches npm projection or the store's real-directory
