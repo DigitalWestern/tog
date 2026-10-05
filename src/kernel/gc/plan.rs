@@ -175,7 +175,15 @@ fn stale_temporaries(snapshot: &Snapshot) -> io::Result<Vec<Removal>> {
         if !older_than_at(snapshot.now, &entry.stat, STAGE_WINDOW) {
             continue;
         }
-        let bytes = tree_size(&entry.path)?;
+        let (bytes, partial) = temporary_size_at(
+            snapshot.dirs.get(entry.parent).file.as_raw_fd(),
+            entry.name.as_bytes(),
+        )?;
+        let measured = if partial {
+            format!("at least {}", size(bytes))
+        } else {
+            size(bytes)
+        };
         temporaries.push(Removal {
             parent: entry.parent,
             name: entry.name.clone(),
@@ -186,13 +194,52 @@ fn stale_temporaries(snapshot: &Snapshot) -> io::Result<Vec<Removal>> {
                 "stale {} {} ({})",
                 tmp_kind(&entry.name),
                 entry.path.display(),
-                size(bytes)
+                measured
             ),
             bytes,
             counter: Counter::Stages,
         });
     }
     Ok(temporaries)
+}
+
+/// Size private trash without changing permissions during planning. An
+/// unreadable branch contributes zero, making the result a lower bound.
+/// Execution repairs permissions through verified descriptors before removal.
+fn temporary_size_at(parent: std::os::fd::RawFd, name: &[u8]) -> io::Result<(u64, bool)> {
+    let stat = store::stat_at(parent, name)?;
+    if stat.st_mode & libc::S_IFMT != libc::S_IFDIR {
+        return Ok((file_size_of(&stat), false));
+    }
+    let dir = match store::open_file_at(
+        parent,
+        name,
+        libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        0,
+    ) {
+        Ok(dir) => dir,
+        Err(error) if error.kind() == io::ErrorKind::PermissionDenied => return Ok((0, true)),
+        Err(error) => return Err(error),
+    };
+    if !store::same_inode(&stat, &store::fd_stat(dir.as_raw_fd())?) {
+        return Err(io::Error::new(
+            io::ErrorKind::Interrupted,
+            "temporary directory changed while sizing",
+        ));
+    }
+    let mut bytes = 0u64;
+    let mut partial = false;
+    for name in store::read_dir_names_at(dir.as_raw_fd())? {
+        match temporary_size_at(dir.as_raw_fd(), name.as_bytes()) {
+            Ok((child_bytes, child_partial)) => {
+                bytes = bytes.saturating_add(child_bytes);
+                partial |= child_partial;
+            }
+            Err(error) if error.kind() == io::ErrorKind::PermissionDenied => partial = true,
+            Err(error) => return Err(error),
+        }
+    }
+    Ok((bytes, partial))
 }
 
 /// Every record whose object is gone. Validation proved no retained object
