@@ -78,8 +78,9 @@ ok    project      python found; not synced yet: python (run 'tog')
 
 Nine rows, exit 0 when none says `fail`. The first row is the build you
 are running and whether a newer release exists (`warn`, with `tog update
---self` as the fix; `not checked` when offline or, as here, while GitHub
-answers 404 because the repository is private). This is the command to run
+--self` as the fix; `ok` with `no build for this machine` when that release
+has nothing `update --self` could install here; `not checked` when offline
+or, as here, while GitHub answers 404 because the repository is private). This is the command to run
 before you file a bug and the output to paste into it. The `store` row
 answers "where does all this go": one directory per machine, shared by every
 project on it, created the first time something needs it.
