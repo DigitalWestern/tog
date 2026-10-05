@@ -37,7 +37,8 @@ history use them.
 4. The company layer (WP5)
 5. GC-safety leftovers (all shipped)
 6. The resolution proxy (#68): delegated tools confined to a tog-owned registry proxy
-7. Backlog
+7. A shared system store at `/opt/tog/store` (#69)
+8. Backlog
 
 ---
 
@@ -3783,7 +3784,234 @@ Owner decisions, 2026-09-23, choosing the flexible option each time:
 
 ---
 
-## 7. Backlog
+## 7. A shared system store at `/opt/tog/store` (#69)
+
+Decided 2026-09-23 (owner, #69): a full design round, not a deferral. This
+is that design, written 2026-10-05 and not yet independently reviewed. No
+code lands until a review round accepts it (record it in a "Review round"
+subsection here, as §6 does).
+
+### In plain words
+
+Today every user has their own store (`~/.tog/store`). Ten developers on
+one build box download and build the same CPython ten times. A shared store
+lets them share that work. The catch is trust: tog trusts a store object
+because nobody but its owner can write it, and "its owner" is the user
+running tog. If the store were simply group-writable, any one developer
+could replace an object that every other developer then runs. One account
+compromised would mean every account compromised.
+
+So the shared store is not a writable common directory. It is a read-only
+lower layer, like `/usr` on a Linux box: one service account owns it and
+writes it, and every user reads it. Each user keeps their own store on top
+for everything the shared one lacks. A user's tog looks in its own store
+first, then in the system store, and builds into its own store on a miss.
+The users trust the service account the way they already trust root for
+`/usr/bin/python3`.
+
+### Rejected shapes
+
+- **A group-writable store** (every user in a `tog` group writes it). It
+  turns the existing "same-user replacement is undetected" limit into
+  "any-group-member replacement is undetected": cross-user code execution
+  for the price of one compromised account. Refused outright.
+- **Content verification on every use instead of ownership.** Hashing every
+  file of a 2 GB environment at each `tog run` costs seconds, and objects are
+  input-addressed (the id hashes the inputs, not the bytes), so no stored
+  digest to compare against exists yet. Recording a content digest per
+  object is still worth having (backlog row "Store-object content
+  verification on use"), and this design is compatible with it. It is not
+  the trust boundary here.
+
+### Layout and configuration
+
+- **Where.** The machine policy names the system store, nothing else does:
+  `[store] system = "/opt/tog/store"` in `/etc/tog/policy.toml` (the
+  machine-scope file `policy::load` already reads). A project file, an
+  environment variable or a flag cannot name it: a repository must not be
+  able to point every user's tog at a directory of its choosing. `TOG_STORE`
+  keeps naming the per-user store.
+- **Who owns it.** A dedicated account (`tog` on Linux, `_tog` on macOS).
+  The root directory and everything under `objects/`, `meta/`, `records/`
+  and `cache/` are owned by that account and are not group- or
+  other-writable. The marker file gains a second line, `shared <uid>`, so a
+  user's tog reads the owner from the store itself and compares it with the
+  directory's `st_uid` rather than trusting either alone.
+- **What it holds.** The read-only namespaces: `objects/`, `meta/`,
+  `records/`, `cache/`. Never `forests/`, `run-homes/`, `roots/`,
+  `root-locks/` or project transaction locks: those are per-user state and
+  stay in each user's store, which is a normal format-1 store as today.
+- **Format.** Still `tog-store 1`. A per-user store does not change at all.
+  A tog that predates this design and is pointed at a system store through
+  `TOG_STORE` finds `shared <uid>` on the marker's second line and refuses
+  it as an unknown marker, which is the safe outcome.
+
+### Who writes it
+
+Two writers, built in this order.
+
+1. **The service account runs tog itself.** `sudo -u tog tog sync -C <dir>`
+   (or a systemd timer over a list of directories) realizes into the system
+   store exactly as a user's tog realizes into its own: the service account's
+   per-user store *is* the system store. Nothing new in the write path. This
+   is enough for a build box that pre-warms a known set of projects.
+2. **A broker for user-initiated writes** (`tog store serve`, a socket under
+   `/run/tog/`, running as the service account). A user's tog that misses
+   in both layers may ask the broker to realize the object instead of
+   building it locally. The request carries only the *plan*: what the
+   project's lock asks for. The broker re-derives the identity, fetches and
+   verifies every artifact itself, builds in its own sandbox, and commits
+   into the system store. It never accepts bytes or a finished tree from the
+   client. A plan it cannot re-derive (an unlocked manifest, a delegated
+   door) is refused, and the user builds into their own store instead, so
+   the broker is never on the critical path. This is the Nix daemon model
+   with tog's existing realization code on the server side.
+
+Exceptions: an object whose realization records an object exception
+(`object_exceptions()`: install-script-failed, git-dependency, ...) still
+records it in `meta/<id>.json` as today. A user's tog checks a system
+object's recorded exceptions against *that user's* policy chain through
+`check_cached_with_activity`, the same check a cached object gets now, so a
+shared object never smuggles a waived exception past a stricter user.
+
+### Reading it: the trust check
+
+Before a user's tog uses anything from the system store, it proves, through
+descriptors (`fsroot`-style, `O_NOFOLLOW` from the held root):
+
+1. The root is owned by the uid on the marker's `shared` line, and neither
+   the root nor any ancestor up to `/` is writable by anyone but root or
+   that uid (the same ancestor walk `policy::load` does for machine policy
+   files).
+2. Each object directory, its `meta/<id>.json`, and the cache entries it
+   names are owned by that uid and not group- or other-writable. Objects
+   are already committed read-only, and the check reads the modes tog
+   already sets.
+
+A store that fails either check is not used, and the user's tog says why
+once (`ui::warning`, with the fix: the path and mode to correct) and works
+from its own store alone. A failed trust check never fails a sync: the
+per-user layer is always a complete fallback.
+
+What this buys: the system layer is stronger than the per-user store, not
+weaker. A user cannot replace a system object, and the service account is a
+single, auditable writer. The LIMITATIONS row "Store objects are trusted
+from permissions + metadata" gets a second sentence: system-store objects
+are trusted from the service account's ownership, and replacement by that
+account (or root) is undetected.
+
+### Paths inside objects
+
+Most object ids do not include the store root, but many objects embed it
+(venv shebangs, `pyvenv.cfg`, RPATHs; `native-libs/libset/3` already puts
+the root in its identity). So the same id in the system store and in a
+user's store are two realizations of one identity, each correct for its own
+location. Never copy an object between the layers. A user object that
+depends on a system object embeds the system path, which is stable
+because the system store is configured machine-wide. Lookup order is fixed
+(user store, then system store) so a project resolves an id the same way
+on every run. `meta/<id>.json` dependency ids are resolved through the same
+two-layer lookup, and a system object may depend only on system objects (a
+system object can never point into one user's home).
+
+### GC across users
+
+The system store cannot see users' roots: those live in each user's store.
+So users publish **claims**.
+
+- `<system>/claims/` is a sticky, world-writable directory (mode `1777`,
+  like `/tmp`). Each user's tog keeps one file there, `claims/<uid>`, owned
+  by that uid, listing every system object id that user's registered roots
+  reach (directly or through user objects that depend on system objects).
+  It is rewritten atomically (temp file in the same directory, rename),
+  whenever the user's tog registers a root that reaches the system store
+  and at the end of every user GC.
+- The system GC (run by the service account) adds every claimed id to its
+  retained set. A claim file whose owner does not match its name, that is
+  writable by others, or that does not parse blocks the sweep. The sweep
+  refuses with every blocked reason at once, as `meta/` records do today
+  (`gc::validate`). `tog gc --forget-claims <uid>` (service account only)
+  drops one, for a user who left the machine.
+- What a hostile user can do with a claim: keep system objects alive (disk
+  use), or block the system sweep with a malformed file until the admin
+  forgets it. Neither reaches another user's code. `tog store claims` (any
+  user) lists the claim files with their size and age, so the admin sees
+  who holds what.
+
+### The activity lease across uids
+
+The race to close: user A's tog decides to use system object X, the system
+GC deletes X, and A's claim naming X is written too late.
+
+- The system store's `activity.lock` is created by the service account with
+  mode `0644`, not `0600` as `activity::open_lock` creates it now. A user's
+  tog opens it read-only and takes `LOCK_SH`. `flock` works on a read-only
+  descriptor, and a lock taken by one uid is honored by every other.
+- Lock order gains one step, first in the existing chain: system activity
+  (shared), then user activity, then the rest as today. A user operation
+  holds the system lease from its first system-store lookup until its claim
+  file is renamed into place.
+- The system GC takes `LOCK_EX` without waiting, as the user GC does today.
+  If any user holds the shared lease, it skips and says so. A user who holds
+  the lease forever can starve system GC. That is a disk-use problem, and the
+  skip message plus `tog store claims` show it.
+- `tog gc --reset` of the system store is the service account's alone (it
+  needs the root lock and write permission). A user's reset never touches
+  the system store, only the user layer.
+
+### Concurrency with the broker
+
+The broker is one more writer in the service account's store, under the
+existing publication lock (`tmp/.publish.lock`) and the service account's
+own activity lease. Nothing changes for it.
+
+### Failure modes (each fails closed or falls back to the user layer)
+
+| What goes wrong | What happens |
+|---|---|
+| The configured path does not exist, or is not a format-1 store with a `shared` line | Warning once, per-user store only. |
+| Ownership or mode check fails | Warning naming the path and mode, per-user store only. |
+| The system store is mid-reset (no marker) | Treated as absent for that run. |
+| The broker is down or refuses a plan | Build in the user store, no warning beyond one `note`. |
+| A system object referenced by a user object is gone (GC ran with a stale claim) | The user's project reads as `projection-missing` / stale, and the next `tog` rebuilds. The claim protocol makes this a bug, not a mode. |
+| A malformed claim file | System GC refuses and names the file and the `--forget-claims` fix. |
+
+### Implementation plan (PRs, in order)
+
+1. **Read-only layer.** Machine policy `[store] system`, the marker's
+   `shared` line, the ownership/ancestor check, two-layer `has()` and object
+   lookup, `check_cached_with_activity` on system objects, and the warning
+   fallback. Tests: a fixture system store owned by the test uid with a
+   different-uid marker is refused, a group-writable one is refused, and a
+   sound one is used.
+2. **Cross-uid lease and claims.** `0644` lock creation for a shared store,
+   the extra lock-order step (`tests/architecture.rs` lock-order test),
+   claim writing on root registration and user GC, the system GC reading
+   claims, `--forget-claims`, and `tog store claims`.
+3. **Admin path.** `tog store init-system <path>` (creates the root, marker
+   with `shared <uid>`, `claims/` with `1777`), documented as the
+   `sudo -u tog` flow in `docs/human/CLI.md`, plus LIMITATIONS and
+   ARCHITECTURE "Store format" updates.
+4. **The broker** (`tog store serve`): the plan-only request protocol, the
+   identity re-derivation on the server side, and the client fallback.
+   Its own review round first: it is the one new trusted process.
+
+Cross-user tests need two uids. The offline suite runs as one uid and keeps
+to what that allows: refusals by mode and owner using fixtures with a
+foreign-uid marker line. The two-uid path is an `#[ignore]` suite that
+needs `sudo` (heavy CI has it).
+
+### Open questions for the review round
+
+- Should `claims/` hold one file per uid or one per (uid, user-store root)?
+  One user with two `TOG_STORE`s would overwrite their own claim. Current
+  pick: per (uid, sha1 of the user store root), named `<uid>-<hash>`.
+- Is the broker's plan protocol per object or per closure? Per object is
+  simpler to re-derive. Per closure saves round trips.
+
+---
+
+## 8. Backlog
 
 Unranked. "GC Package B/C/D" means the shipped GC-safety work.
 

@@ -58,11 +58,9 @@ None open.
 - **Action leftovers (#427).** Left: the first tag that carries
   `action.yml`. At that tag, change `@main` in `action.yml`'s header and in
   CLI.md to it.
-- **A shared system store at `/opt/tog/store`: the design round (#69).**
-  Decided 2026-09-23: a full design round with independent review, no code
-  until it lands. Scope: ownership and permissions on the shared path, GC
-  across users, the activity lease across uids, and the trust boundary a
-  shared store changes.
+- **A shared system store at `/opt/tog/store`: review, then build (#69).**
+  The design is DESIGNS.md §7 (2026-10-05). Next: an independent review
+  round, then its four implementation PRs in order.
 - **An offline fixture where a sync succeeds (#147).** Every green-sync
   test downloads a toolchain and is ignored, so anything that runs after a
   successful sync is verified by hand. The bare-`tog` footer decision is now
