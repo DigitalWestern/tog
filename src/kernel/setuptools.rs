@@ -145,45 +145,212 @@ fn strip_setup_cfg_comment(line: &str) -> &str {
         .unwrap_or(line)
 }
 
+/// A literal `python_requires="..."` in `setup.py`, found without running
+/// the file: the first assignment whose whole value is one plain string.
+///
+/// Comments and the insides of other strings are skipped, so a
+/// commented-out line or example code in a docstring is not an assignment,
+/// and neither is a longer name (`extra_python_requires`). A value that is
+/// computed (two strings joined, a format, an escape) is not seen at all:
+/// half of it would be the wrong constraint.
 pub fn extract_setup_py_python_requires(text: &str) -> Option<String> {
-    let key = "python_requires";
-    let mut search_from = 0;
-    while let Some(found) = text[search_from..].find(key) {
-        let start = search_from + found + key.len();
-        let mut pos = start;
-        while text
-            .as_bytes()
-            .get(pos)
-            .is_some_and(u8::is_ascii_whitespace)
-        {
-            pos += 1;
-        }
-        if text.as_bytes().get(pos) != Some(&b'=') {
-            search_from = start;
-            continue;
-        }
-        pos += 1;
-        while text
-            .as_bytes()
-            .get(pos)
-            .is_some_and(u8::is_ascii_whitespace)
-        {
-            pos += 1;
-        }
-        let &quote = text.as_bytes().get(pos)?;
-        if quote != b'\'' && quote != b'"' {
-            search_from = pos;
-            continue;
-        }
-        pos += 1;
-        let value_start = pos;
-        while let Some(&byte) = text.as_bytes().get(pos) {
-            if byte == quote {
-                return Some(text[value_start..pos].to_string());
+    let bytes = text.as_bytes();
+    let mut pos = 0;
+    while let Some(&byte) = bytes.get(pos) {
+        if byte == b'#' {
+            pos = line_end(bytes, pos);
+        } else if byte == b'\'' || byte == b'"' {
+            // A string that never closes: not Python a value can be read from.
+            pos = string_span(bytes, pos)?.2;
+        } else if is_name_byte(byte) {
+            let start = pos;
+            while bytes.get(pos).copied().is_some_and(is_name_byte) {
+                pos += 1;
             }
+            let attribute = start > 0 && bytes[start - 1] == b'.';
+            if &text[start..pos] != "python_requires" || attribute {
+                continue;
+            }
+            let equals = skip_blank(bytes, pos);
+            if bytes.get(equals) != Some(&b'=') || bytes.get(equals + 1) == Some(&b'=') {
+                continue;
+            }
+            if let Some(value) = whole_literal(text, skip_blank(bytes, equals + 1)) {
+                return Some(value);
+            }
+        } else {
             pos += 1;
         }
-        return None;
     }
     None
+}
+
+fn is_name_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_' || !byte.is_ascii()
+}
+
+fn skip_blank(bytes: &[u8], mut pos: usize) -> usize {
+    while matches!(bytes.get(pos), Some(b' ' | b'\t')) {
+        pos += 1;
+    }
+    pos
+}
+
+/// The index of the newline ending the line `pos` is on, or the end.
+fn line_end(bytes: &[u8], pos: usize) -> usize {
+    bytes[pos..]
+        .iter()
+        .position(|byte| *byte == b'\n')
+        .map_or(bytes.len(), |offset| pos + offset)
+}
+
+/// The string literal whose opening quote is at `pos`: where its content
+/// starts and ends, and the index after its closing quote. `None` when it
+/// is never closed.
+fn string_span(bytes: &[u8], pos: usize) -> Option<(usize, usize, usize)> {
+    let quote = bytes[pos];
+    let triple = bytes.get(pos + 1) == Some(&quote) && bytes.get(pos + 2) == Some(&quote);
+    let width = if triple { 3 } else { 1 };
+    let start = pos + width;
+    let mut at = start;
+    while let Some(&byte) = bytes.get(at) {
+        if byte == b'\\' {
+            at += 2;
+        } else if byte == b'\n' && !triple {
+            return None;
+        } else if byte == quote && (!triple || bytes[at..].starts_with(&[quote; 3])) {
+            return Some((start, at, at + width));
+        } else {
+            at += 1;
+        }
+    }
+    None
+}
+
+/// The string at `pos` when it is the assignment's whole value: one plain
+/// literal with no escape, followed by the end of the argument or of the
+/// statement and not by anything that would extend the expression.
+fn whole_literal(text: &str, pos: usize) -> Option<String> {
+    let bytes = text.as_bytes();
+    if !matches!(bytes.get(pos), Some(b'\'' | b'"')) {
+        return None;
+    }
+    let (start, end, after) = string_span(bytes, pos)?;
+    let value = &text[start..end];
+    if value.contains('\\') {
+        return None;
+    }
+    let mut next = skip_blank(bytes, after);
+    if bytes.get(next) == Some(&b'#') {
+        next = line_end(bytes, next);
+    }
+    match bytes.get(next) {
+        None | Some(b',' | b')' | b';') => return Some(value.to_string()),
+        Some(b'\n' | b'\r') => {}
+        Some(_) => return None,
+    }
+    // The line ended. Inside the call's parentheses the expression may go
+    // on below: another string joins this one, an operator extends it.
+    loop {
+        while bytes.get(next).is_some_and(u8::is_ascii_whitespace) {
+            next += 1;
+        }
+        if bytes.get(next) != Some(&b'#') {
+            break;
+        }
+        next = line_end(bytes, next);
+    }
+    let rest = &bytes[next..];
+    let word_end = rest
+        .iter()
+        .position(|byte| !is_name_byte(*byte))
+        .unwrap_or(rest.len());
+    let word = &rest[..word_end];
+    let continues = matches!(
+        rest.first(),
+        Some(b'\'' | b'"' | b'+' | b'%' | b'.' | b'*' | b'[')
+    ) || matches!(word, b"if" | b"or" | b"and" | b"in" | b"not")
+        // A string prefix: `f"..."`, `rb'...'`.
+        || (word.len() <= 2
+            && !word.is_empty()
+            && matches!(rest.get(word_end), Some(b'\'' | b'"')));
+    (!continues).then(|| value.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn found(text: &str) -> Option<String> {
+        extract_setup_py_python_requires(text)
+    }
+
+    #[test]
+    fn setup_py_python_requires_is_a_whole_plain_literal() {
+        assert_eq!(
+            found("setup(name='x', python_requires = \">=3.9\")").as_deref(),
+            Some(">=3.9")
+        );
+        assert_eq!(
+            found("setup(\n    python_requires='>=3.9,<3.13',  # supported\n)\n").as_deref(),
+            Some(">=3.9,<3.13")
+        );
+        assert_eq!(
+            found("setup(\n    python_requires=\">=3.9\"\n)\n").as_deref(),
+            Some(">=3.9")
+        );
+        assert_eq!(
+            found("python_requires = \">=3.10\"\nsetup(name=\"x\")\n").as_deref(),
+            Some(">=3.10")
+        );
+        assert_eq!(
+            found("setup(python_requires=\"\"\">=3.11\"\"\")").as_deref(),
+            Some(">=3.11")
+        );
+    }
+
+    /// A commented-out assignment, example code inside a string, a longer
+    /// name, an attribute and a comparison are not the assignment.
+    #[test]
+    fn setup_py_scan_skips_what_is_not_the_assignment() {
+        assert_eq!(
+            found("# python_requires=\"<3.12\"\nsetup(python_requires=\">=3.12\")\n").as_deref(),
+            Some(">=3.12")
+        );
+        assert_eq!(
+            found("\"\"\"Use python_requires=\"<3\" here.\"\"\"\nsetup(python_requires='>=3.8')\n")
+                .as_deref(),
+            Some(">=3.8")
+        );
+        assert_eq!(
+            found("note = 'python_requires=\"<3\"'\nsetup(python_requires='>=3.8')\n").as_deref(),
+            Some(">=3.8")
+        );
+        assert_eq!(found("setup(extra_python_requires=\">=3.9\")"), None);
+        assert_eq!(found("setup(python_requires_extra=\">=3.9\")"), None);
+        assert_eq!(found("args.python_requires = \">=3.9\"\n"), None);
+        assert_eq!(found("if python_requires == \">=3.9\":\n    pass\n"), None);
+    }
+
+    /// A value that is computed is not read, not even its first half.
+    #[test]
+    fn setup_py_scan_does_not_read_a_computed_value() {
+        assert_eq!(found("setup(python_requires=\">=3.9\" + \",<3.12\")"), None);
+        assert_eq!(found("setup(python_requires=\">=3.9\" \",<3.12\")"), None);
+        assert_eq!(
+            found("setup(\n    python_requires=\">=3.9\"\n    \",<3.12\",\n)\n"),
+            None
+        );
+        assert_eq!(found("setup(python_requires=\">=%s\" % MIN)"), None);
+        assert_eq!(found("setup(python_requires=\">={}\".format(MIN))"), None);
+        assert_eq!(found("setup(python_requires=f\">={MIN}\")"), None);
+        assert_eq!(found("setup(python_requires=MIN)"), None);
+        assert_eq!(found("setup(python_requires=\">=3.9\\n\")"), None);
+        assert_eq!(found("setup(python_requires=\">=3.9)\n"), None);
+        // A later plain assignment is still found after a computed one.
+        assert_eq!(
+            found("x = dict(python_requires=MIN)\nsetup(python_requires='>=3.9')\n").as_deref(),
+            Some(">=3.9")
+        );
+    }
 }
