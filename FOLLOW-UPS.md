@@ -64,10 +64,6 @@ None open.
   out of `tests/`.
 - **Action leftovers (#427).** The first tag that carries `action.yml`, a
   store cache between runs, and a self-test of the signed path.
-- **Leftover `rustfmt.json` from an older tog (#416).** A lone record is
-  never cleaned up by `tog fmt`, and `tog gc --register` on such a project
-  gives an unhelpful message. Pick: gc forgets a root whose only closure is
-  retired.
 - **Record `skipped-optional` as an informational closure field (#71).**
   Decided 2026-09-23: an optional group the user did not request is a
   choice, not an exception. Record it as `optional_groups_skipped` so
@@ -98,7 +94,6 @@ None open.
   - #348 tests: security and integrity checks with no offline test.
   - #349 product and CI problems found by the audit.
   - #367 tests: the artifact size caps in kernel::fetch (8 GiB artifact, 256 MiB text) have no test (from the #363 review).
-  - #418 fmt: a never-synced project whose only closure is the retired rustfmt.json never self-heals, and `gc --register` refuses it (from #409).
   - #373 sandbox: host-socket scan leftovers (from the #372 review).
   - #410 ci: eight test files skip sandboxed tests silently because the main test step doesn't require the sandbox (from the #400 review).
   - #411 tests: an objmeta socket test fails under a long TMPDIR, path over SUN_LEN (found during #400).

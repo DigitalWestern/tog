@@ -4,6 +4,9 @@
 //! current working directory. A project becomes a root when a tailor writes a
 //! closure. A root never stops protecting its project: an unavailable project
 //! stops the sweep until it returns or its record is explicitly forgotten.
+//! The one root a sweep forgets by itself is one whose project's closures
+//! are all retired records and which protects nothing those records do not
+//! name; a dry run reports it instead.
 
 use crate::kernel::activity::StoreActivity;
 use crate::kernel::store::{self, open_real_directory, RootEntry, Store};
@@ -121,6 +124,8 @@ pub fn collect_with_activity<W: Write>(
     let _gc_lock = store.gc_lock()?;
     let _publish_lock = store.publish_lock()?;
 
+    let mut options = options;
+    forget_retired_roots(store, activity, &mut options, out)?;
     let snapshot = read(store, activity, &options)?;
     let validated = validate(&snapshot)?;
     let plan = plan(&validated, &options)?;
@@ -134,6 +139,125 @@ pub fn collect_with_activity<W: Write>(
     let mut report = execute(&plan, &snapshot, store, activity, out)?;
     sweep_resolve_cache(store, window, false, &mut report, out)?;
     Ok(report)
+}
+
+/// Forget each root whose project holds only retired closure records (the
+/// `rustfmt.json` an older `tog fmt` wrote and registered a root for) and
+/// that protects nothing those records do not name. Nothing reads such a
+/// record any more; left alone the root would keep its objects forever, or
+/// stop every sweep once the record is deleted. A dry run only reports, and
+/// leaves the root out of the plan the way `--dry-run --forget` does.
+fn forget_retired_roots<W: Write>(
+    store: &Store,
+    activity: &StoreActivity,
+    options: &mut Options,
+    out: &mut W,
+) -> io::Result<()> {
+    for root in store.roots()? {
+        if root.unusable.is_some() || options.forgotten.contains(&root.key) {
+            continue;
+        }
+        let project = root
+            .record
+            .as_ref()
+            .map_or(&root.path, |record| &record.project_path);
+        let Some(retired) = retired_only(project) else {
+            continue;
+        };
+        if !protects_only_retired(store, &root, project, &retired) {
+            continue;
+        }
+        let what = format!(
+            "root {} ({}): its only closures are retired records ({})",
+            root.key,
+            project.display(),
+            retired.join(", ")
+        );
+        if options.dry_run {
+            writeln!(out, "would forget {what}")?;
+        } else {
+            store.remove_root_entry_with_activity(activity, &root)?;
+            writeln!(
+                out,
+                "forgot {what}; `tog sync` there registers the project again"
+            )?;
+        }
+        options.forgotten.push(root.key);
+    }
+    Ok(())
+}
+
+/// The names of a project's closure files when every one is a retired
+/// record, or `None`: a project that cannot be read, holds a live closure,
+/// holds anything else under a closure name, or holds none at all is
+/// judged by the ordinary root rules.
+fn retired_only(project: &Path) -> Option<Vec<String>> {
+    let mut retired = Vec::new();
+    for entry in fs::read_dir(project.join(".tog/closures")).ok()? {
+        let entry = entry.ok()?;
+        let path = entry.path();
+        if path.extension().is_none_or(|ext| ext != "json") {
+            continue;
+        }
+        if !store::is_retired_closure(&path) || !entry.file_type().ok()?.is_file() {
+            return None;
+        }
+        retired.push(entry.file_name().to_string_lossy().into_owned());
+    }
+    retired.sort();
+    (!retired.is_empty()).then_some(retired)
+}
+
+/// Whether forgetting `root` gives up only what the project's `retired`
+/// records name, read with the sweep's own walk. A root/2 record is the
+/// sweep authority, and producers that write no closure file add to it (the
+/// resolution ledger and diagnostics the door roots, the resolution
+/// originals, backups), so every object and projection it lists must be
+/// named by a retired record. A pathname-only root protects what the closure
+/// files name, here only retired ones, and the forest a `node_modules` or
+/// `.venv` link points into. A run home under the project's key keeps either
+/// kind, and so does a retired record that cannot be read.
+fn protects_only_retired(
+    store: &Store,
+    root: &RootEntry,
+    project: &Path,
+    retired: &[String],
+) -> bool {
+    let mut ids = HashSet::new();
+    let mut paths = Vec::new();
+    for name in retired {
+        let path = project.join(".tog/closures").join(name);
+        let Some(value) = fs::read(&path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        else {
+            return false;
+        };
+        let body = value.get("body").unwrap_or(&value);
+        collect_object_ids(body, store, &mut ids);
+        collect_project_paths(body, store, &mut paths);
+    }
+    let run_home = store
+        .root
+        .join("run-homes")
+        .join(Store::canonical_project_key(project));
+    if !fs::symlink_metadata(run_home).is_err_and(|error| error.kind() == io::ErrorKind::NotFound) {
+        return false;
+    }
+    match &root.record {
+        Some(record) => {
+            record.objects.iter().all(|id| ids.contains(id))
+                && record
+                    .projections
+                    .iter()
+                    .all(|projection| paths.contains(&projection.path(store)))
+        }
+        None => {
+            let mut linked = Vec::new();
+            collect_linked_projections(project, store, &mut linked);
+            linked.iter().all(|path| paths.contains(path))
+        }
+    }
 }
 
 /// The resolution proxy's metadata cache is a cache: entries unused for the
@@ -754,6 +878,71 @@ mod tests {
         assert_eq!(report.objects, 1);
         assert!(store.object_path(&protected).exists());
         assert!(!store.object_path(&dead).exists());
+    }
+
+    /// A root/2 record whose project holds only the retired rustfmt record
+    /// is forgotten when that record names everything it protects (#416).
+    /// One that also protects an object no closure file names, such as a
+    /// resolution ledger the door rooted, is kept, and so is the object.
+    #[test]
+    fn a_retired_only_root_is_forgotten_only_when_it_protects_nothing_else() {
+        let temp = TempStore::new("retired-only");
+        let store = temp.store();
+        let rooted = |name: &str, objects: &[&str]| {
+            let project = temp.root.join(name);
+            let key = register_objects(&store, &project, objects);
+            let body = serde_json::json!({ "rustfmt_object": {
+                "id": objects[0],
+                "path": store.object_path(objects[0]).display().to_string(),
+            }});
+            fs::create_dir_all(project.join(".tog/closures")).unwrap();
+            fs::write(
+                project.join(".tog/closures/rustfmt.json"),
+                serde_json::to_vec(&serde_json::json!({
+                    "schema": "closure/1", "ecosystem": "cargo", "body": body,
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            key
+        };
+        let ids: Vec<String> = ["fmt-only", "fmt-ledger", "ledger"]
+            .iter()
+            .map(|name| commit(&store, name, None))
+            .collect();
+        for id in &ids {
+            age(&store.object_path(id));
+        }
+        let (fmt_only, fmt_ledger, ledger) = (&ids[0], &ids[1], &ids[2]);
+        let lone = rooted("lone", &[fmt_only]);
+        let with_ledger = rooted("with-ledger", &[fmt_ledger, ledger]);
+
+        let (_, text) = sweep(
+            &store,
+            Options {
+                dry_run: true,
+                ..Options::default()
+            },
+        );
+        assert!(
+            text.contains(&format!("would forget root {lone} (")),
+            "{text}"
+        );
+        assert!(!text.contains(&with_ledger), "{text}");
+
+        let (report, text) = sweep(
+            &store,
+            Options {
+                keep_days: 0,
+                ..Options::default()
+            },
+        );
+        assert_eq!(report.unwrap().objects, 1, "{text}");
+        assert!(!store.has_root_entry(&lone).unwrap(), "{text}");
+        assert!(!store.object_path(fmt_only).exists(), "{text}");
+        assert!(store.has_root_entry(&with_ledger).unwrap(), "{text}");
+        assert!(store.object_path(ledger).is_dir(), "{text}");
+        assert!(store.object_path(fmt_ledger).is_dir(), "{text}");
     }
 
     #[test]

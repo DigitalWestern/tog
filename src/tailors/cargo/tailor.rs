@@ -412,10 +412,16 @@ impl Tailor for Cargo {
             rustfmt::ensure_rustfmt(store, activity, platform, toolchain, &rust_object)?;
         // An older `tog fmt` wrote a `rustfmt` closure here; nothing reads
         // one any more, so a formatting run removes it (unless it is the
-        // only closure: see `remove_legacy_record`). `--check` changes
+        // only closure of a registered project: see
+        // `remove_legacy_record`). `--check` changes
         // no file: a CI check must not leave the checkout dirty.
         if !check {
-            rustfmt::remove_legacy_record(&ProjectRoot::open(&workspace_root)?)?;
+            let key =
+                crate::kernel::store::Store::canonical_root_key(&workspace_root.canonicalize()?);
+            rustfmt::remove_legacy_record(
+                &ProjectRoot::open(&workspace_root)?,
+                store.has_root_entry(&key)?,
+            )?;
         }
         let invocation_dir = cwd.canonicalize()?;
         let status = rustfmt::run_sandboxed(

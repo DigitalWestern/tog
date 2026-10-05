@@ -285,7 +285,16 @@ impl Store {
             .collect::<io::Result<Vec<_>>>()?;
         files.sort();
         let mut imported_any = false;
+        let mut retired = Vec::new();
         for path in files {
+            if path.is_file() && super::is_retired_closure(&path) {
+                retired.push(
+                    path.file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .into_owned(),
+                );
+            }
             if !path.is_file() || !is_closure_file(&path) {
                 continue;
             }
@@ -298,10 +307,19 @@ impl Store {
             imported_any = true;
         }
         if !imported_any {
+            let why = if retired.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    ": {} is a retired record an older tog wrote, which nothing reads; run \
+                     `tog sync` in the project to write current ones",
+                    retired.join(", ")
+                )
+            };
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
-                    "{} contains no supported closure records",
+                    "{} contains no supported closure records{why}",
                     closures.display()
                 ),
             ));
@@ -768,6 +786,17 @@ impl Store {
         // `root/2` records can hold such paths losslessly.)
         record_pathname(&project_dir)?;
         Ok(root_key(&project_dir))
+    }
+
+    /// Whether the registry holds an entry under `key`, read without
+    /// creating anything, so a caller holding only a shared lease can ask.
+    pub fn has_root_entry(&self, key: &str) -> io::Result<bool> {
+        Self::validate_root_key(key)?;
+        match fs::symlink_metadata(self.root.join("roots").join(key)) {
+            Ok(_) => Ok(true),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error),
+        }
     }
 
     /// The registry key of a project whose canonical path the caller

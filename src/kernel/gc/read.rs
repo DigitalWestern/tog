@@ -209,8 +209,13 @@ pub(super) fn read_closures(
             }
         }
     }
-    // A currently projected symlink is also an active forest, even when
-    // the closure does not name it.
+    collect_linked_projections(project, store, &mut state.project_keep);
+    Ok(found)
+}
+
+/// A currently projected symlink is also an active forest, even when the
+/// closure does not name it.
+pub(super) fn collect_linked_projections(project: &Path, store: &Store, paths: &mut Vec<PathBuf>) {
     for name in ["node_modules", ".venv"] {
         let path = project.join(name);
         if let Ok(target) = fs::read_link(&path) {
@@ -220,11 +225,10 @@ pub(super) fn read_closures(
                 project.join(target)
             };
             if let Ok(target) = target.canonicalize() {
-                collect_project_path(&target, store, &mut state.project_keep);
+                collect_project_path(&target, store, paths);
             }
         }
     }
-    Ok(found)
 }
 
 pub(super) fn collect_object_ids(
