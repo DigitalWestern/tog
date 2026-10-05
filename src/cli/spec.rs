@@ -552,34 +552,37 @@ cargo, go, ruby, elixir, dotnet.",
         name: "audit",
         group: Group::Inspect,
         summary: "would the synced environments pass a policy? (CI gate)",
-        usage: "tog audit [--policy <file>] [--signed] [--json]",
+        usage: "tog audit [--policy <file>] [--signed | --allow-unsigned] [--json]",
         description: "\
-Reads the closure records every sync committed to .tog/closures/*.json and
-judges the exceptions they record against the policy chain (TOG_POLICY or
-~/.tog/policy.toml, every ancestor's .tog/policy.toml, TOG_STRICT) merged
-with --policy <file>. Merging only tightens: the file can add denials but
-never loosen what the machine or project policy says. When the machine
-policy has a [signing] table, each record's signature is verified against
-its trusted keys first (a project .tog/policy.toml or --policy <file> can
-only drop keys, never add one); without one, signatures are not checked,
-the report says so, and --signed makes that a usage error (exit 2) for a
-CI job that must never run unconfigured. Per closure, the first that
-applies: bad-signature (tampered or malformed; find out who changed it),
-untrusted (signed by a key the trusted set does not contain), outdated
-(unsigned while signatures are checked, or predates input, platform, or
-exception recording; run 'tog' once, under a trusted key when signatures
-are checked, then commit), stale (its inputs
-changed since the sync, the same check 'tog status' makes), denied
-(each denied exception's kind, subject, and detail, plus a count of
-permitted ones by kind), unknown (a kind this binary cannot judge), or
-clean. When signatures are checked, a record that is not trusted is not
-evaluated further. A detected ecosystem with no closure is missing.
-Only clean passes. Offline, read-only, no store access, no sandbox
-needed. Exit status 0 when every closure is clean and
-none is missing, 1 otherwise, 2 for an unreadable --policy file or
---signed with no trusted key configured. 'tog keygen' creates a signing
-key; set TOG_SIGNING_KEY where sync runs. A company deny list to start
-from ships as docs/human/policy-company.toml.",
+Reads the closure records every sync committed to .tog/closures/*.json
+and judges the exceptions they record against the policy chain
+(TOG_POLICY or ~/.tog/policy.toml, every ancestor's .tog/policy.toml,
+TOG_STRICT) merged with --policy <file>. Merging only tightens: the file
+can add denials but never loosen what the machine or project policy
+says. When the machine policy has a [signing] table, each record's
+signature is verified against its trusted keys first (a project
+.tog/policy.toml or --policy <file> can only drop keys, never add one);
+without one, signatures are not checked, the report says so, and
+--signed makes that a usage error (exit 2) for a CI job that must never
+run unconfigured. A plain audit under CI (CI set to anything but false
+or 0) refuses the same way, so an older gate never passes with
+signatures unchecked; --allow-unsigned runs it anyway. Per closure, the
+first that applies: bad-signature (tampered or malformed; find out who
+changed it), untrusted (signed by a key the trusted set does not
+contain), outdated (unsigned while signatures are checked, or predates
+input, platform, or exception recording; run 'tog' once, under a trusted
+key when signatures are checked, then commit), stale (its inputs changed
+since the sync, the same check 'tog status' makes), denied (each denied
+exception's kind, subject, and detail, plus a count of permitted ones by
+kind), unknown (a kind this binary cannot judge), or clean. When
+signatures are checked, a record that is not trusted is not evaluated
+further. A detected ecosystem with no closure is missing. Only clean
+passes. Offline, read-only, no store access, no sandbox needed. Exit
+status 0 when every closure is clean and none is missing, 1 otherwise, 2
+for an unreadable --policy file, or for --signed or a plain audit under
+CI with no trusted key configured. 'tog keygen' creates a signing key;
+set TOG_SIGNING_KEY where sync runs. A company deny list to start from
+ships as docs/human/policy-company.toml.",
         examples: &[
             ("tog audit", "does this environment pass my policy?"),
             ("tog audit --signed", "the CI gate: signatures checked, or exit 2"),
@@ -588,6 +591,7 @@ from ships as docs/human/policy-company.toml.",
         options: &[
             ("--policy <file>", "also deny what this policy file denies"),
             ("--signed", "exit 2 unless the machine policy trusts signing keys"),
+            ("--allow-unsigned", "under CI, judge records even with no trusted keys"),
             JSON_OPTION,
             HELP_OPTION,
         ],

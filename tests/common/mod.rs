@@ -122,9 +122,11 @@ pub fn child(program: impl AsRef<std::ffi::OsStr>, home: &Path) -> Command {
     scrubbed(Command::new(program), home)
 }
 
-/// Drop the developer's `TOG_*` variables and point `HOME` and git's
+/// Drop the developer's `TOG_*` variables and `CI` (which changes what
+/// `tog audit` does, and GitHub's runner sets), and point `HOME` and git's
 /// config at the scratch world.
 fn scrubbed(mut command: Command, home: &Path) -> Command {
+    command.env_remove("CI");
     for (name, _) in std::env::vars_os() {
         let leaks = name
             .to_str()

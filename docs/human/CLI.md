@@ -687,11 +687,19 @@ exception gets judged at all; a CI job whose policy must trust keys passes
 judged, when the machine policy has no `[signing]` table, so a gate that
 lost its keys fails loudly instead of passing with signatures unchecked.
 
+**Under CI.** When the `CI` environment variable is set to anything but
+`false` or `0` (GitHub Actions, GitLab and most CI services set it), plain
+`tog audit` with no `[signing]` table refuses as `--signed` does: exit 2,
+before any record is judged. A CI job that means to judge records without
+signatures passes `--allow-unsigned`, which changes nothing when a
+`[signing]` table exists. `--signed` and `--allow-unsigned` together are a
+usage error.
+
 **Migrating an existing gate.** Before this mode existed, plain `tog audit`
-exited 2 whenever the machine policy had no `[signing]` table. It now
-judges the records and can exit 0 with signatures unchecked. A CI job that
-relied on the old refusal has to run `tog audit --signed` to keep it;
-nothing else about the job changes.
+exited 2 whenever the machine policy had no `[signing]` table. Under CI it
+still does, so a gate that relied on that refusal keeps it. Outside CI it
+now judges the records and can exit 0 with signatures unchecked; a job that
+does not set `CI` runs `tog audit --signed` to keep the refusal.
 
 Per closure it prints the ecosystem, the record (sha256 of the closure file
 bytes), and the first of these that applies: `bad-signature` (a signature

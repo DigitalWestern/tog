@@ -603,12 +603,14 @@ fn parse_json_only(args: &[String], name: &'static str) -> Result<Option<bool>, 
 fn parse_audit(args: &[String]) -> Result<Option<Command>, UsageError> {
     let mut policy = None;
     let mut signed = false;
+    let mut allow_unsigned = false;
     let mut json = false;
     let mut index = 0;
     while let Some(arg) = args.get(index).map(String::as_str) {
         match arg {
             "--json" => json = true,
             "--signed" => signed = true,
+            "--allow-unsigned" => allow_unsigned = true,
             "-h" | "--help" => return Ok(None),
             // A mistyped flag (`--policy --json`) is a usage error, not a
             // file name; a policy file whose name starts with a dash is
@@ -629,9 +631,17 @@ fn parse_audit(args: &[String]) -> Result<Option<Command>, UsageError> {
         }
         index += 1;
     }
+    if signed && allow_unsigned {
+        return Err(UsageError::new(
+            "--signed cannot be combined with --allow-unsigned: one requires trusted keys, \
+             the other runs without them",
+            Some("audit"),
+        ));
+    }
     Ok(Some(Command::Audit {
         policy,
         signed,
+        allow_unsigned,
         json,
     }))
 }
@@ -1999,6 +2009,7 @@ mod tests {
             Command::Audit {
                 policy: None,
                 signed: false,
+                allow_unsigned: false,
                 json: false
             }
         );
@@ -2007,6 +2018,7 @@ mod tests {
             Command::Audit {
                 policy: Some("company.toml".into()),
                 signed: false,
+                allow_unsigned: false,
                 json: true
             }
         );
@@ -2015,6 +2027,7 @@ mod tests {
             Command::Audit {
                 policy: Some("company.toml".into()),
                 signed: false,
+                allow_unsigned: false,
                 json: false
             }
         );
@@ -2023,8 +2036,23 @@ mod tests {
             Command::Audit {
                 policy: None,
                 signed: true,
+                allow_unsigned: false,
                 json: false
             }
+        );
+        assert_eq!(
+            command(&["audit", "--allow-unsigned"]),
+            Command::Audit {
+                policy: None,
+                signed: false,
+                allow_unsigned: true,
+                json: false
+            }
+        );
+        assert_eq!(
+            message(&["audit", "--signed", "--allow-unsigned"]),
+            "--signed cannot be combined with --allow-unsigned: one requires trusted keys, the \
+             other runs without them"
         );
         assert_eq!(
             message(&["audit", "--policy"]),
@@ -2042,6 +2070,7 @@ mod tests {
             Command::Audit {
                 policy: Some("--json".into()),
                 signed: false,
+                allow_unsigned: false,
                 json: false
             }
         );
@@ -2059,9 +2088,8 @@ mod tests {
             message(&["audit", "python"]),
             "audit: unexpected argument 'python'"
         );
-        assert!(
-            printed(&["audit", "-h"]).contains("tog audit [--policy <file>] [--signed] [--json]")
-        );
+        assert!(printed(&["audit", "-h"])
+            .contains("tog audit [--policy <file>] [--signed | --allow-unsigned] [--json]"));
         assert_eq!(
             command(&["doctor", "--json"]),
             Command::Doctor { json: true }
