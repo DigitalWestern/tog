@@ -864,7 +864,7 @@ SBOM's path). The gate with trusted keys is `policy: ci/tog-policy.toml`,
 packages again. `cache: true` restores the store an earlier run saved
 (keyed on the tog version and the project's `tog-toolchain.toml` and
 lockfiles, falling back to the newest store of the same version), and saves
-it again after a sync that passed, once `tog gc` has swept what no project
+it again after a sync and an audit that passed, once `tog gc` has swept what no project
 roots any more. tog checks a store's format when it opens it but does not
 re-hash the objects in it, so a restored store is trusted as if this run
 had built it. GitHub keeps what a pull request's run saves to that pull
@@ -875,10 +875,10 @@ branch's cache.
 **While this repository is private.** A workflow in another repository
 needs two things before `uses: DigitalWestern/tog@main` works:
 
-1. In this repository's Settings, Actions, General, under "Access", allow
-   access from repositories in the `DigitalWestern` organization (if the
-   organization's plan offers the setting). Only repositories in the
-   organization can use the action until this repository is public.
+1. In this repository's Settings, Actions, General, under "Access", choose
+   "Accessible from repositories owned by the user 'DigitalWestern'". Only
+   repositories that account owns can use the action until this repository
+   is public.
 2. A token that can read this repository's releases, as a secret (a
    fine-grained token with "Contents: read" on `DigitalWestern/tog`),
    passed as `token: ${{ secrets.TOG_RELEASES_TOKEN }}`. The job's own
