@@ -133,6 +133,28 @@ impl Tailor for Node {
         super::edit::edit_manifest(edit, door)
     }
 
+    fn resolution_outputs(&self, project: &ProjectRoot) -> io::Result<Vec<std::path::PathBuf>> {
+        super::resolve::resolution_outputs(project)
+    }
+
+    fn resolution_inputs(&self, project: &ProjectRoot) -> io::Result<Vec<std::path::PathBuf>> {
+        super::resolve::resolution_inputs(project)
+    }
+
+    /// npm's lock-only install with the lock unchanged, or pnpm's frozen
+    /// lock-only install, at the lock root, on the Node the selection
+    /// names.
+    fn attest_lock(
+        &self,
+        _ctx: &Context,
+        project: &ProjectRoot,
+        toolchain: &Selected,
+        host: &dyn crate::tailors::EditHost,
+        door: &mut ResolutionDoor<'_>,
+    ) -> io::Result<(crate::kernel::resolve::record::ResolutionRecord, Vec<u8>)> {
+        super::resolve::attest_project(door, project, host, toolchain)
+    }
+
     fn id(&self) -> &'static str {
         "node"
     }
@@ -166,8 +188,11 @@ impl Tailor for Node {
         }
     }
 
-    fn preflight(&self, platform: Platform, _project: &ProjectRoot) -> io::Result<()> {
-        node::preflight(platform)
+    fn preflight(&self, platform: Platform, project: &ProjectRoot) -> io::Result<()> {
+        node::preflight(platform)?;
+        // A workspace whose members tog cannot name refuses here, before
+        // anything is realized: the closure writer would refuse it later.
+        super::resolve::check_members_readable(project)
     }
 
     fn prepare(
@@ -223,7 +248,12 @@ impl Tailor for Node {
         // The Node this sync plans with and realizes is the row the
         // project's toolchain selection names, not the pin table.
         let selected = request.toolchain;
-        let Some(plan) = inputs::load_npm_plan(platform, project, selected)? else {
+        // The plan and the closure's resolution basis come from one read of
+        // the lock: a lock swapped in while this sync realizes is not what
+        // the closure was planned from, and the join refuses it.
+        let Some(inputs::Planned { plan, basis }) =
+            inputs::load_npm_plan_with_basis(platform, project, selected)?
+        else {
             inputs::require_lock(project)?;
             return Ok(false);
         };
@@ -261,6 +291,7 @@ impl Tailor for Node {
             &config.mutable_packages,
             fresh,
             &inputs,
+            &basis,
             Some((selected, runtime.as_path())),
             &crate::tailors::helper_record(self, &helpers),
             attribution,

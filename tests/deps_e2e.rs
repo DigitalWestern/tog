@@ -39,6 +39,35 @@ fn run(project: &Path, store: &Path, args: &[&str], temp: &Path) -> Output {
         .expect("spawn tog")
 }
 
+/// `tog attest node` with a key the machine policy trusts: the record is
+/// written and the lock is left byte for byte as it was.
+fn attest_node(project: &Path, store: &Path, temp: &Path, lock: &str) {
+    let home = temp.join("home");
+    let key = home.join("signing.key");
+    let public = tog::kernel::signing::generate(&key).unwrap();
+    std::fs::create_dir_all(home.join(".tog")).unwrap();
+    std::fs::write(
+        home.join(".tog/policy.toml"),
+        format!("deny = []\n\n[signing]\ntrusted = [\"{public}\"]\n"),
+    )
+    .unwrap();
+    let before = std::fs::read(project.join(lock)).unwrap();
+    let attest = command(project, &home, store)
+        .env("TMPDIR", temp.join("tmp"))
+        .env("TOG_SANDBOX_TESTS", "required")
+        .env("TOG_SIGNING_KEY", &key)
+        .args(["attest", "node"])
+        .output()
+        .unwrap();
+    assert_ok(attest, "attest node");
+    assert!(project.join(".tog/resolution/node.json").is_file());
+    assert_eq!(
+        std::fs::read(project.join(lock)).unwrap(),
+        before,
+        "attest changed {lock}"
+    );
+}
+
 fn set_package_manager(project: &Path, value: &str) {
     let path = project.join("package.json");
     let mut package: serde_json::Value =
@@ -273,8 +302,12 @@ fn python_uv_add_update_remove_roundtrip() {
 #[ignore]
 fn npm_add_update_remove_roundtrip() {
     let temp = scratch("npm");
-    let project = &temp.0;
-    let store = project.join("store");
+    // The project is its own directory beside home and the store: npm runs
+    // confined, and the door refuses a project that contains the signing
+    // key under home.
+    let project = &temp.0.join("project");
+    std::fs::create_dir_all(project).unwrap();
+    let store = temp.0.join("store");
     std::fs::write(
         project.join("package.json"),
         "{\"name\":\"deps-e2e\",\"version\":\"1.0.0\"}\n",
@@ -324,15 +357,19 @@ fn npm_add_update_remove_roundtrip() {
     );
     let package = std::fs::read_to_string(project.join("package.json")).unwrap();
     assert!(!package.contains("is-number"), "{package}");
+    // The lock an edit door wrote attests: npm's lock-only install leaves
+    // it unchanged, confined, and the record is signed.
+    assert_ok(run(project, &store, &[], &temp.0), "npm sync");
+    attest_node(project, &store, &temp.0, "package-lock.json");
 }
 
 #[test]
 #[ignore]
 fn pnpm_add_update_remove_roundtrip() {
     let temp = scratch("pnpm");
-    copy_tree(&fixture("proj-pnpm"), &temp.0);
-    let project = &temp.0;
-    let store = project.join("store");
+    let project = &temp.0.join("project");
+    copy_tree(&fixture("proj-pnpm"), project);
+    let store = temp.0.join("store");
     set_package_manager(project, "pnpm@9.12.3");
 
     assert_ok(
@@ -351,6 +388,9 @@ fn pnpm_add_update_remove_roundtrip() {
     let first_env_count = node_env_object_count(&store);
     assert!(first_env_count >= 1);
     assert_status_synced(project, &store, &temp);
+    // The pinned pnpm's frozen lock-only install attests the lock it
+    // wrote, through the same door.
+    attest_node(project, &store, &temp.0, "pnpm-lock.yaml");
 
     let x_root = temp.0.join("home/.tog/x");
     let x_root = std::fs::read_dir(&x_root)
@@ -534,9 +574,9 @@ fn pnpm_add_update_remove_roundtrip() {
 #[ignore]
 fn mixed_cargo_pnpm_edit_keeps_cargo_exception_with_cargo() {
     let temp = scratch("mixed-cargo-pnpm");
-    let project = &temp.0;
-    let store = project.join("store");
-    copy_tree(&fixture("proj-pnpm"), &temp.0);
+    let project = &temp.0.join("project");
+    let store = temp.0.join("store");
+    copy_tree(&fixture("proj-pnpm"), project);
     std::fs::write(
         project.join("Cargo.toml"),
         "[package]\nname = \"mixed-cargo-pnpm\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
@@ -690,9 +730,9 @@ fn install_with_store_pnpm(temp: &TempDir, project: &Path, store: &Path) {
 #[ignore]
 fn pnpm_edits_leave_an_installed_project_untouched() {
     let temp = scratch("pnpm-installed");
-    copy_tree(&fixture("proj-pnpm"), &temp.0);
-    let project = &temp.0;
-    let store = project.join("store");
+    let project = &temp.0.join("project");
+    copy_tree(&fixture("proj-pnpm"), project);
+    let store = temp.0.join("store");
     set_package_manager(project, "pnpm@9.12.3");
 
     // A local dependency whose lifecycle scripts all leave a marker.
@@ -803,10 +843,10 @@ fn pnpm_edits_leave_an_installed_project_untouched() {
 #[ignore]
 fn pnpm_workspace_member_and_root_roundtrip() {
     let temp = scratch("pnpm-workspace");
-    copy_tree(&fixture("proj-pnpm-ws"), &temp.0);
-    let project = &temp.0;
+    let project = &temp.0.join("project");
+    copy_tree(&fixture("proj-pnpm-ws"), project);
     let member = project.join("packages/lib");
-    let store = project.join("store");
+    let store = temp.0.join("store");
     set_package_manager(project, "pnpm@9.12.3");
 
     assert_ok(
@@ -912,9 +952,9 @@ fn pnpm_workspace_member_and_root_roundtrip() {
 #[ignore]
 fn nested_independent_npm_project_does_not_use_ancestor_pnpm_lock() {
     let temp = scratch("pnpm-nested-npm");
-    copy_tree(&fixture("proj-pnpm-ws"), &temp.0);
-    let project = &temp.0;
-    let store = project.join("store");
+    let project = &temp.0.join("project");
+    copy_tree(&fixture("proj-pnpm-ws"), project);
+    let store = temp.0.join("store");
     set_package_manager(project, "pnpm@9.12.3");
     let ancestor_lock = std::fs::read_to_string(project.join("pnpm-lock.yaml")).unwrap();
     let nested = project.join("tools/nested-npm");

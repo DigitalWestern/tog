@@ -1,10 +1,11 @@
 //! From a Node project to its inputs: missing-lock generation through the
-//! store npm and the lockfile-to-`NpmPlan` importers.
+//! store npm (confined, see `super::resolve`) and the lockfile-to-`NpmPlan`
+//! importers.
 
 use crate::comforter::InputRecord;
 use crate::kernel::fsroot::{Entry, ProjectRoot};
 use crate::kernel::platform::Platform;
-use crate::kernel::resolve::{DelegateSpec, ResolutionDoor};
+use crate::kernel::resolve::ResolutionDoor;
 use crate::kernel::toolchain::Selected;
 use crate::kernel::ui;
 use crate::tailors::node;
@@ -43,32 +44,10 @@ pub fn ensure_npm_lock(
     }
     ui::note("no package-lock.json; resolving with the store npm...");
     // Store node's bundled npm, not host npm: a bare machine needs only
-    // tog. npm-cli's shebang is `env node`, so the store bin leads PATH.
-    // The npm that writes this lock is the one bundled in the Node the
-    // project's toolchain selection names.
-    let node = node::realize_runtime(door.store(), door.lease(), door.platform(), selected)?;
-    let path = format!(
-        "{}:{}",
-        node.join("bin").display(),
-        std::env::var("PATH").unwrap_or_default()
-    );
-    let mut spec = DelegateSpec::new(node.join("bin/npm"));
-    spec.arg("install").args(node::NPM_RESOLVE_ONLY);
-    node::quiet_npm(&mut spec);
-    if !ui::verbose() {
-        spec.arg("--silent");
-    }
-    spec.lock_root(dir).env("PATH", path);
-    spec.trace();
-    let report = door.run(spec).map_err(|e| {
-        io::Error::new(
-            e.kind(),
-            format!("run store npm ({}/bin/npm): {e}", node.display()),
-        )
-    })?;
-    if !report.status.success() {
-        return Err(io::Error::other("npm install --package-lock-only failed"));
-    }
+    // tog. The npm that writes this lock is the one bundled in the Node
+    // the project's toolchain selection names, confined through the door,
+    // which publishes the lock with the signed resolution record.
+    node::resolve::generate_lock(door, project, selected)?;
     if let Some(other) = bun_lock {
         // Said once the file exists, with its full path: an automatic sync
         // can run from a subdirectory of the project, where a relative
@@ -93,31 +72,47 @@ pub fn load_npm_plan(
     project: &ProjectRoot,
     selected: &Selected,
 ) -> io::Result<Option<node::NpmPlan>> {
+    Ok(load_npm_plan_with_basis(platform, project, selected)?.map(|planned| planned.plan))
+}
+
+/// A plan with the closure's `resolution_basis`: the lock root's
+/// resolution files by digest, the lock at the bytes the plan read.
+pub struct Planned {
+    pub plan: node::NpmPlan,
+    pub basis: crate::comforter::join::Digests,
+}
+
+/// [`load_npm_plan`] with the `resolution_basis` taken at the same
+/// moment, from the lock bytes the plan was built from.
+pub fn load_npm_plan_with_basis(
+    platform: Platform,
+    project: &ProjectRoot,
+    selected: &Selected,
+) -> io::Result<Option<Planned>> {
     let node_version = selected.version("node")?;
+    let planned = |lock_name: &str, lock_text: &str, plan: node::NpmPlan| -> io::Result<Planned> {
+        Ok(Planned {
+            plan,
+            basis: node::resolve::resolution_basis(project, lock_name, lock_text)?,
+        })
+    };
     if project.is_input_file(Path::new("package-lock.json")) {
-        return Ok(Some(node::plan_npm_with(
-            platform,
-            &read_input(project, "package-lock.json")?,
-            node_version,
-        )?));
+        let text = read_input(project, "package-lock.json")?;
+        let plan = node::plan_npm_with(platform, &text, node_version)?;
+        return planned("package-lock.json", &text, plan).map(Some);
     }
     if project.is_input_file(Path::new("pnpm-lock.yaml")) {
-        return Ok(Some(lock_import::plan_pnpm(
-            platform,
-            &read_input(project, "pnpm-lock.yaml")?,
-            project,
-            node_version,
-        )?));
+        let text = read_input(project, "pnpm-lock.yaml")?;
+        let plan = lock_import::plan_pnpm(platform, &text, project, node_version)?;
+        return planned("pnpm-lock.yaml", &text, plan).map(Some);
     }
     if project.is_input_file(Path::new("yarn.lock")) {
         let package = read_input(project, "package.json")?;
-        return Ok(Some(lock_import::plan_yarn(
-            platform,
-            &read_input(project, "yarn.lock")?,
-            &package,
-            project,
-            node_version,
-        )?));
+        let text = read_input(project, "yarn.lock")?;
+        let plan = lock_import::plan_yarn(platform, &text, &package, project, node_version)?;
+        // yarn.lock is no door's output and no record names it; the basis
+        // covers the manifests (`resolve::resolution_basis` leaves it out).
+        return planned("yarn.lock", &text, plan).map(Some);
     }
     Ok(None)
 }
@@ -166,87 +161,87 @@ pub(crate) fn input_records(project: &ProjectRoot, names: &[&str]) -> io::Result
 
 #[cfg(test)]
 mod tests {
-    use crate::kernel::platform::Platform;
-    use crate::kernel::store;
-
-    /// The store npm resolves a missing lock and does nothing else: no
-    /// audit POST, no update-notifier fetch, no funding lookup (#212). A
-    /// stand-in Node object whose npm records its argv and environment
-    /// keeps the test offline.
+    /// The basis names the lock at the bytes the plan read: a lock swapped
+    /// in afterwards (another tog, an editor) is not what this closure was
+    /// planned from, and the join's `check_basis` refuses it. The old
+    /// closure-time read would have taken the new lock as the basis.
     #[test]
-    fn the_store_npm_only_resolves() {
-        use std::os::unix::fs::PermissionsExt as _;
-        let temp = crate::kernel::testutil::TempDir::named("npm-quiet");
-        let root = temp.0.join("store");
-        for sub in ["objects", "meta", "cache/sha256", "tmp"] {
-            std::fs::create_dir_all(root.join(sub)).unwrap();
-        }
-        let store = store::Store::for_test(root.canonicalize().unwrap());
-        crate::tailors::install_kinds();
-        let platform = Platform::host().unwrap();
-        let selected = crate::tailors::node::shipped_selection().unwrap();
-        let staged = store.stage().unwrap();
-        for file in [
-            "bin/node",
-            "include/node/node.h",
-            "lib/node_modules/npm/bin/npm-cli.js",
-            "lib/node_modules/npm/node_modules/node-gyp/bin/node-gyp.js",
-        ] {
-            std::fs::create_dir_all(staged.join(file).parent().unwrap()).unwrap();
-            std::fs::write(staged.join(file), "").unwrap();
-        }
-        let npm = staged.join("bin/npm");
-        std::fs::write(
-            &npm,
-            "#!/bin/sh\necho \"$@\" > npm-args.txt\nenv | grep -i '^npm_config_' > npm-env.txt\n\
-             echo '{\"lockfileVersion\":3,\"packages\":{}}' > package-lock.json\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&npm, std::fs::Permissions::from_mode(0o755)).unwrap();
-        store
-            .commit_with_deps(
-                &crate::tailors::node::runtime_identity(&selected, platform).unwrap(),
-                &staged,
-                &[],
-                &store::ObjectDeps::new(),
-            )
-            .unwrap();
+    fn the_basis_is_the_planned_lock_not_the_lock_on_disk_later() {
+        use crate::kernel::resolve::record::sha256_hex;
+        let temp = crate::kernel::testutil::TempDir::named("node-basis");
         let project_dir = temp.0.join("project");
         std::fs::create_dir_all(&project_dir).unwrap();
         std::fs::write(project_dir.join("package.json"), r#"{"name":"p"}"#).unwrap();
+        let old_lock = r#"{"lockfileVersion":3,"packages":{"":{"name":"p"}}}"#;
+        std::fs::write(project_dir.join("package-lock.json"), old_lock).unwrap();
+        std::fs::write(project_dir.join(".npmrc"), "fund=false\n").unwrap();
         let project = crate::kernel::fsroot::ProjectRoot::open(&project_dir).unwrap();
-        let activity = store
-            .activity(crate::kernel::activity::ActivityMode::Shared)
-            .unwrap();
-        super::ensure_npm_lock(
+        let selected = crate::tailors::node::shipped_selection().unwrap();
+        let planned = super::load_npm_plan_with_basis(
+            crate::kernel::platform::Platform::X86_64UnknownLinuxGnu,
             &project,
             &selected,
-            &mut crate::kernel::testutil::DoorScope::new().door(
-                &store,
-                &activity,
-                platform,
-                crate::kernel::resolve::DoorKind::MissingLock,
-            ),
         )
+        .unwrap()
         .unwrap();
-        let args = std::fs::read_to_string(project_dir.join("npm-args.txt")).unwrap();
-        for flag in [
-            "--package-lock-only",
-            "--ignore-scripts",
-            "--no-audit",
-            "--no-fund",
-            "--no-update-notifier",
-        ] {
-            assert!(args.split_whitespace().any(|arg| arg == flag), "{args}");
+        let new_lock =
+            r#"{"lockfileVersion":3,"packages":{"":{"name":"p","dependencies":{"x":"1"}}}}"#;
+        std::fs::write(project_dir.join("package-lock.json"), new_lock).unwrap();
+        assert_eq!(
+            planned.basis.get("package-lock.json").map(String::as_str),
+            Some(sha256_hex(old_lock.as_bytes()).as_str())
+        );
+        assert_ne!(
+            planned.basis["package-lock.json"],
+            sha256_hex(new_lock.as_bytes())
+        );
+        assert_eq!(
+            planned.basis.get("package.json").map(String::as_str),
+            Some(sha256_hex(br#"{"name":"p"}"#).as_str())
+        );
+        assert!(planned.basis.contains_key(".npmrc"));
+        assert!(!planned.basis.contains_key("pnpm-lock.yaml"));
+        // The join sees the swap: the disk no longer matches the basis.
+        let files = crate::kernel::resolve::record::ResolutionFiles {
+            outputs: crate::tailors::node::resolve::resolution_outputs(&project).unwrap(),
+            inputs: crate::tailors::node::resolve::resolution_inputs(&project).unwrap(),
+        };
+        let error =
+            crate::comforter::join::check_basis_for_test(&project, "node", &files, &planned.basis)
+                .unwrap_err()
+                .to_string();
+        assert!(error.contains("package-lock.json changed"), "{error}");
+
+        // A yarn project: yarn.lock is no door's output, so it is not in the
+        // basis, and the join's check passes on the manifests alone.
+        let yarn_dir = temp.0.join("yarn");
+        std::fs::create_dir_all(&yarn_dir).unwrap();
+        let fixture =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/proj-yarn1");
+        for name in ["package.json", "yarn.lock"] {
+            std::fs::copy(fixture.join(name), yarn_dir.join(name)).unwrap();
         }
-        let env = std::fs::read_to_string(project_dir.join("npm-env.txt")).unwrap();
-        for line in [
-            "NPM_CONFIG_AUDIT=false",
-            "NPM_CONFIG_FUND=false",
-            "NPM_CONFIG_UPDATE_NOTIFIER=false",
-        ] {
-            assert!(env.lines().any(|l| l == line), "{env}");
-        }
+        let yarn = crate::kernel::fsroot::ProjectRoot::open(&yarn_dir).unwrap();
+        let planned = super::load_npm_plan_with_basis(
+            crate::kernel::platform::Platform::X86_64UnknownLinuxGnu,
+            &yarn,
+            &selected,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(planned.plan.lock_source, "yarn.lock");
+        assert!(
+            !planned.basis.contains_key("yarn.lock"),
+            "{:?}",
+            planned.basis
+        );
+        assert!(planned.basis.contains_key("package.json"));
+        let files = crate::kernel::resolve::record::ResolutionFiles {
+            outputs: crate::tailors::node::resolve::resolution_outputs(&yarn).unwrap(),
+            inputs: crate::tailors::node::resolve::resolution_inputs(&yarn).unwrap(),
+        };
+        crate::comforter::join::check_basis_for_test(&yarn, "node", &files, &planned.basis)
+            .unwrap();
     }
 
     /// A directory with no package.json is not a Node project: nothing to

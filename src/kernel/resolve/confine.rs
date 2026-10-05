@@ -239,7 +239,10 @@ const FORCED: &[ForcedRow] = &[
             "--config.script-shell=@SH@",
             "--config.shell-emulator=false",
             "--config.git-shallow-hosts=",
-            "--ignore-scripts",
+            // `pnpm remove` rejects the `--ignore-scripts` flag PR 0
+            // measured on `install`; the `--config.` spelling is the one
+            // every verb's parser takes.
+            "--config.ignore-scripts=true",
             "--config.node-options=",
             "--config.pnpmfile=.pnpmfile.cjs",
             "--config.global-pnpmfile=",
@@ -1564,8 +1567,16 @@ mod tests {
                     index += 2;
                 }
                 None => {
+                    // A bare flag may be forced in its `--config.<name>=true`
+                    // spelling, the one every pnpm verb's parser takes
+                    // (`pnpm remove` rejects `--ignore-scripts` itself).
+                    let config_spelling = flag
+                        .strip_prefix("--")
+                        .map(|name| format!("--config.{name}=true"));
                     assert!(
-                        rendered.iter().any(|arg| arg == flag),
+                        rendered
+                            .iter()
+                            .any(|arg| arg == flag || Some(arg) == config_spelling.as_ref()),
                         "{tool}: {flag} is not forced: {rendered:?}"
                     );
                     index += 1;

@@ -1424,8 +1424,8 @@ under the seccomp filter.
 
 | Tool | Forced settings (as measured) | Fired in control | Forced run |
 |---|---|---|---|
-| npm | `--git=<store git>`, `--script-shell=<store sh>`, `--shell=<store sh>`, `--ignore-scripts`, `--node-options=`, `--node-gyp=` (a nonexistent path), `--editor`, `--browser`, and `--viewer` set to `false` | `git` (the lock-only install of a git dependency runs it). `script-shell`, `shell`, `node-gyp`, `editor`, `browser`, `viewer`, and `node-options` did not fire, and a git dependency's `prepare` script did not run under `--ignore-scripts` | no marker ran, exit 0 |
-| pnpm | `--config.script-shell=<store sh>`, `--config.shell-emulator=false`, `--config.git-shallow-hosts=`, `--ignore-scripts`, `--config.node-options=`, and **added by PR 0**: `--config.pnpmfile=.pnpmfile.cjs`, `--config.global-pnpmfile=`, `--config.manage-package-manager-versions=false` (the last from pnpm's docs: otherwise pnpm may download another pnpm named by `packageManager`). A `.pnpmfile.cjs` is project code pnpm runs by design, so it is left on (turning it off would change the lock) and the tier contains it | `pnpmfile` and `global-pnpmfile` (both name a JavaScript file pnpm loads). `script-shell` and `node-options` did not fire | only the by-design `.pnpmfile.cjs` ran, exit 0 |
+| npm | `--git=/usr/bin/git` (the host git on the sandbox's read-only system roots; `/nonexistent/git` on a host without one, so only a git dependency fails; PR 6), `--script-shell=/bin/sh`, `--shell=/bin/sh` (the host shell, required), `--ignore-scripts`, `--node-options=`, `--node-gyp=` (a nonexistent path), `--editor`, `--browser`, and `--viewer` set to `false` | `git` (the lock-only install of a git dependency runs it). `script-shell`, `shell`, `node-gyp`, `editor`, `browser`, `viewer`, and `node-options` did not fire, and a git dependency's `prepare` script did not run under `--ignore-scripts` | no marker ran, exit 0 |
+| pnpm | `--config.script-shell=/bin/sh`, `--config.shell-emulator=false`, `--config.git-shallow-hosts=`, `--config.ignore-scripts=true` (PR 0 measured `--ignore-scripts` on `install`; `pnpm remove` rejects the flag, and the `--config.` spelling is the one every verb takes; PR 6), `--config.node-options=`, and **added by PR 0**: `--config.pnpmfile=.pnpmfile.cjs`, `--config.global-pnpmfile=`, `--config.manage-package-manager-versions=false` (the last from pnpm's docs: otherwise pnpm may download another pnpm named by `packageManager`). A `.pnpmfile.cjs` is project code pnpm runs by design, so it is left on (turning it off would change the lock) and the tier contains it | `pnpmfile` and `global-pnpmfile` (both name a JavaScript file pnpm loads). `script-shell` and `node-options` did not fire | only the by-design `.pnpmfile.cjs` ran, exit 0 |
 | cargo | `--config build.rustc=<store rustc>`, `build.rustc-wrapper=""`, `build.rustc-workspace-wrapper=""`, `build.rustdoc=<store rustdoc>`, `registry.global-credential-providers=["cargo:token"]`, `registry.credential-provider="cargo:token"` (crates.io's own slot), `registries.<name>.credential-provider="cargo:token"` for every registry in the config (strings, since PR 5: cargo concatenates a `--config` array with a config-file array, so an array let the project's provider run after ours; the global slot must stay a list, and a project that sets it, or a per-registry slot, as an array now stops cargo with a merge error, which fails closed), `net.git-fetch-with-cli=true` with the forced git below. `target.<triple>.runner` and `.linker` stay unset | `build.rustc`, `build.rustc-wrapper`, and `build.rustc-workspace-wrapper` in `cargo metadata` (it asks rustc for target info), not in `generate-lockfile`. Both credential-provider forms, against a registry whose `config.json` says `auth-required`. `build.rustdoc`, `runner`, and `linker` never fired (proved: resolution never reads them) | no marker ran. The authenticated registry then fails (exit 101, `cargo:token` has no token), which is the intended outcome. Without that dependency, exit 0 |
 | uv | `--keyring-provider disabled`, `--no-python-downloads`, `--python <store python>` (on both `lock` and `pip compile`, replacing `UV_PYTHON`, which `pip compile` ignores), `--no-config` plus the project's `[tool.uv]` read by tog and passed as flags | `keyring-provider = "subprocess"` in `[tool.uv]` (runs `keyring` from `PATH`), and `python = ...` in `[tool.uv.pip]` (runs the named interpreter). A `.python-version` naming a program did not fire. `--no-config` alone drops `[tool.uv]` settings but keeps `[[tool.uv.index]]` and `[tool.uv.sources]`, so tog must still read those itself | no marker ran, exit 0 |
 | git | carried in `GIT_CONFIG_COUNT`/`KEY`/`VALUE` (the tools start git, so `-c` flags cannot reach it): `credential.helper=`, `core.fsmonitor=false`, `core.hooksPath=/dev/null`, `core.sshCommand=false` with `GIT_SSH_COMMAND` unset, `protocol.allow=never`, `protocol.https.allow=always`, `protocol.file.allow=always`, and **added by PR 0**: `protocol.ext.allow=never`, `protocol.ssh.allow=never`, `protocol.git.allow=never`, `protocol.http.allow=never`, `core.gitProxy=`; also `uploadpack.packObjectsHook=`, `core.askPass=false` with `GIT_ASKPASS` and `SSH_ASKPASS` unset, and `GIT_CONFIG_NOSYSTEM=1` with `GIT_CONFIG_GLOBAL=/dev/null` | `core.fsmonitor` (`status`), `core.sshCommand` (an `ssh://` remote), `core.gitProxy` (a `git://` remote), `credential.helper` and `core.askPass` (a 401 from an https remote), `core.hooksPath` (`commit`), and `protocol.ext.allow=always` (an `ext::` remote runs its command) | the design's set still ran the `ext::` marker: a repository's own `protocol.ext.allow=always` beats `protocol.allow=never`, which is only the default for unlisted protocols. With the per-protocol `never` entries above, no marker ran |
@@ -3415,6 +3415,160 @@ interception and the cargo switch, each the flexible option:
 
 **PR 6: Node.** npm and pnpm (edit, missing lock, `x`, `attest`), with the
 byte-identical-lock tests and the corrected pnpm flags.
+
+**PR 6 as built (Linux, 2026-10-05, #204).** Decisions made moving the
+Node doors, each the flexible option that still fails closed:
+
+- **The npm route lives in the tailor** (`tailors/node/registry.rs`),
+  since only the Node tailor runs npm or pnpm: packuments (full and
+  abbreviated; a scoped one as `/@scope%2fname`, `%2F`, or `/@scope/name`)
+  and tarballs on `registry.npmjs.org`, each tarball claimed by its
+  version's strongest `integrity` entry or, failing that, its sha1
+  `shasum` (`weak-integrity`). Everything else on the host is refused,
+  which also covers the audit `POST` and the notifier fetch should a flag
+  ever fail to turn them off.
+- **The route grammar takes an encoded slash only where a protocol says
+  so** (`RegistryProtocol::encoded_slash`, the #428 follow-up). Inside a
+  tunnel the kernel applies the lenient grammar only for a host one such
+  route serves, and the encoded slash then bounds a segment for the `.`,
+  `..`, and empty-segment rules; an encoded `\` or NUL and every double
+  encoding stay refused everywhere.
+- **The tools are pointed at the session on the command line**, where
+  both give flags priority over `.npmrc`: npm's `--proxy`,
+  `--https-proxy`, `--noproxy=`, `--registry=https://registry.npmjs.org/`,
+  `--strict-ssl=true`, `--cafile`, `--update-notifier=false`,
+  `--audit=false`, `--fund=false`, and `--cache` in the scratch; pnpm's
+  `--config.*` spellings of the same (PR 0: `pnpm remove` rejects
+  `--proxy`), with `--config.registry` added (the row listed no registry
+  flag, and a project `.npmrc` must not pick the registry), and its
+  modules state, store, and cache in the scratch. Both get
+  `NODE_EXTRA_CA_CERTS`, `door::proxy_env` (every proxy variable and
+  `SSL_CERT_FILE`, a kernel helper for uv's row), and `NPM_CONFIG_AUDIT`,
+  `FUND`, and `UPDATE_NOTIFIER` off for the child npm pacote starts.
+- **The forced git and shell are the host's.** The forced table's
+  `@GIT@` and `@SH@` are `/usr/bin/git` and `/bin/sh` on the sandbox's
+  read-only system roots: tog provisions no git or shell, and cargo's row
+  already starts the host git through `PATH`. The shell is required (a
+  host without it refuses by name); a host without git gets
+  `/nonexistent/git` as the forced git, so registry-only projects still
+  resolve and only a git dependency fails, the error naming the missing
+  git (review round 1). pnpm's forced `--ignore-scripts` became
+  `--config.ignore-scripts=true`: PR 0 measured the flag on `install`, and
+  `pnpm remove` rejects it; the `--config.` spelling is the one every
+  verb's parser takes, and `npm_config_ignore_scripts=true` stays in the
+  environment beside it. The PR 0 marker fixture
+  (`tests/fixtures/proxy/forced/pnpm/settings.json`) still cites
+  `--ignore-scripts`, and the confine test accepts a bare flag's
+  `--config.<name>=true` spelling, because a fixture edit wakes the heavy
+  suite for no behavior change.
+- **The pinned pnpm runs from the store.** The `tog x` cache root is a
+  projection (`node_modules` links into a forest that links into the
+  environment object), so the door mounts the Node object and the
+  environment object the cache root's closure names, and runs
+  `node <object>/node_modules/pnpm/<bin>` (the `bin` the package's own
+  manifest names, a plain path, its version checked against the pin). The
+  cache root's lifecycle lock is held for the run.
+- **The lock root is the pnpm workspace root, and an edit runs in the
+  member.** `ConfinedSpec::cwd` (kernel, plain components below the lock
+  root, for uv's workspace members too) puts pnpm in the directory the
+  edit was made in, as before, while the snapshot, the transaction, and
+  the record are the root's. An npm edit runs in the project, which is
+  its own lock root.
+- **Resolution outputs are the union of every member source.** The lock
+  root's `package.json`, `package-lock.json`, `npm-shrinkwrap.json`, and
+  `pnpm-lock.yaml`, plus the `package.json` of every workspace member
+  that npm's `workspaces` (each glob expanded, its literal path too, a
+  `!` entry ignored), `pnpm-workspace.yaml`'s `packages`, the pnpm lock's
+  `importers`, or the npm lock's root `workspaces` name. PR 5's superset
+  rule: coverage is never smaller than the tool's member set, and an
+  extra manifest is only an extra output. A member named outside the
+  project, or a members list tog cannot read (an anchored
+  `pnpm-workspace.yaml`), is an error rather than a gap, raised in
+  `Tailor::preflight` and before any door realizes a tool, not when the
+  closure is written (review round 1). Inputs are
+  `.npmrc`, `pnpm-workspace.yaml`, `.pnpmfile.cjs`, and each member's
+  `.npmrc`. `node_modules` at every depth is excluded from the snapshot
+  (npm's lock-only install ignores it, pnpm's modules state is in the
+  scratch).
+- **A `file:` or `link:` dependency outside the lock root is refused by
+  name** before any tool runs, with the manifest and the resolved path,
+  wherever it stands: the dependency tables, `peerDependencies`, npm's
+  nested `overrides`, and `pnpm.overrides` (transitive manifests and pnpm
+  catalogs are not read):
+  the snapshot holds the lock root alone, and a record names files inside
+  the project only. The alternative, a read root under cargo's boundary
+  rule, is deferred until that rule moves into the kernel for every
+  tailor. A scoped registry in `.npmrc` and a direct-URL tarball are
+  fetched through interception and recorded as `unattested-index`, as
+  the policy table says.
+- **`tog attest node`.** npm's `install --package-lock-only` with the
+  kernel's byte-unchanged rule (npm exits 0 either way), pnpm's `install
+  --lockfile-only --frozen-lockfile`, each captured so the refusal quotes
+  the tool. A pnpm workspace member is refused naming the root, a
+  `yarn.lock` is refused (yarn is not a pinned tool), and a project with
+  no lock is told to run `tog` first. `Tailor::attest_lock` gained the
+  `EditHost` an edit borrows from its command, since the pinned pnpm
+  lives in the `tog x` cache; the host is `commands::shared::CommandHost`
+  for both `add` and `attest`.
+- **The closure's `resolution_basis` is taken at plan time.** As built
+  first, it was read from disk when the closure was written, after
+  realization, so a lock another writer swapped in meanwhile would have
+  become the basis of a closure planned from the old one (the case the
+  join's basis check exists for). `inputs::load_npm_plan_with_basis` now
+  takes the basis from the lock bytes the plan read, with the other
+  resolution files at that moment, as Cargo and Go do, and `tog x` passes
+  the basis of the lock its door just wrote (review round 1). `yarn.lock`
+  is no door's output and no record names it, so it is not part of the
+  basis or the record: a yarn project's basis is its manifests alone
+  (review round 2, which found the first form made every yarn sync fail
+  the basis check).
+- **A `tog x` cache root joins nothing.** `commands::x` marks the root
+  (`comforter::mark_cache_root`, by canonical path, in a process-level
+  set) right before it realizes a tool there, from `tog x` and from the
+  cached-tool path an edit or `tog attest` takes, and the join compares
+  the closure's directory with that set exactly. Without this the pinned
+  pnpm realized inside an edit, whose process has the resolution-files
+  lookup installed, recorded `unrecorded-resolution` against the cache
+  root's own lock, which no `x` door can attest (review round 2). The
+  first form keyed on the request record `.tog/x.json` being present,
+  which a project could commit to opt out of the join; round 3 replaced
+  it with the mark, which no project content can forge.
+- **npm keeps its errors.** The resolve-only form passes
+  `--loglevel=error`, not `--silent`, so npm's own error (for a missing
+  git, `npm error syscall spawn /nonexistent/git`) reaches the user's
+  terminal (review round 3). The log level does not touch the lock; the
+  contract 8 test's direct run uses the same flag. The missing-git line
+  in tog's error is decided from the host, not by reading npm's words:
+  the edit, missing-lock and `x` runs inherit stderr, so tog never sees
+  them (review round 4). On a host without git, any failed Node run adds
+  that a git dependency is the likely cause.
+- **`tog x` is a detached door.** The cache root is the lock root, the
+  accepted `package-lock.json` is written back into it, and the ledger is
+  rooted under the cache root (`ledger::root`), so GC keeps it with the
+  root. The x closure's `ClosureRefs` do not list it yet.
+- **Tests.** The named ones, in `tailors/node/door.rs` against the
+  recorded npm and pnpm registries: `npm_add_through_interception_lock_matches_direct_run`
+  and `pnpm_add_through_interception_lock_matches_direct_run` (contract
+  8, through a blind forwarder, the pnpm one with the `--config.` proxy
+  and CA spellings), `npm_url_dependency_is_intercepted_and_recorded`
+  (recorded, and refused when denied), `npm_forced_settings_never_run_the_project_git_or_script_shell`
+  (the fixture's marker `.npmrc` and a `git+file://` dependency with a
+  `prepare` script; a marker that ran would write into the project, an
+  undeclared change), `npm_resolution_makes_only_registry_requests` (a
+  `.npmrc` naming another registry, a proxy, a CA, and audit, fund, and
+  notifier on: every request is a registry read), and attest for both
+  tools (unchanged lock signed, drifted manifest refused). The pinned pnpm
+  is realized over the network into a cache root the test owns, through
+  the tailor's own `RegistryTool::realize`. A stand-in npm that writes
+  its argv and environment into the lock proves the flags and the empty
+  environment offline (`npm_runs_with_the_session_and_forced_flags_only`),
+  replacing `tests/npm_quiet_e2e.rs`, whose loopback registry and
+  inherited `NODE_OPTIONS` no confined run can see. The recorded
+  `git-upload-pack` body was not stored (as for cargo), so a git
+  dependency has no offline test through npm; the forced-settings test
+  covers git from a `file://` repository.
+- **For PR 7.** `ConfinedSpec::cwd`, `door::Publish` (a target with its
+  outputs), and `door::proxy_env` are the kernel pieces uv's row reuses.
 
 **PR 7: Python.** uv (edit, missing lock, build requirements, `x`,
 `attest`), the default index forced on every uv invocation (known gap 2),
