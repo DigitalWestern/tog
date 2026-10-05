@@ -107,16 +107,60 @@ fn json_document(bytes: &[u8], name: &str) -> io::Result<serde_json::Value> {
 /// `X.Y[.Z]`. Anything else is kept verbatim for the caller to refuse.
 pub fn read_python_version(bytes: &[u8]) -> Option<String> {
     let line = first_line(bytes)?;
+    Some(strip_cpython_prefix(&line).to_string())
+}
+
+/// `line` without an explicit CPython prefix (`python3.12`, `cpython-3.12`,
+/// `cpython@3.12`, in any casing) that a version follows.
+fn strip_cpython_prefix(line: &str) -> &str {
     let lower = line.to_ascii_lowercase();
     for prefix in ["cpython-", "cpython@", "python"] {
         let Some(rest) = lower.strip_prefix(prefix) else {
             continue;
         };
         if rest.starts_with(|c: char| c.is_ascii_digit()) {
-            return Some(line[prefix.len()..].to_string());
+            return &line[prefix.len()..];
         }
     }
-    Some(line)
+    line
+}
+
+/// Why a `.python-version` line names no CPython tog can select.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PythonVersionRefusal {
+    /// Another interpreter or build: PyPy, conda, GraalPy, `system`, a
+    /// development or free-threaded build.
+    Unsupported,
+    /// Not a canonical `X.Y` or `X.Y.Z`; the version grammar's reason, when
+    /// it gave one.
+    Invalid(Option<String>),
+}
+
+/// The CPython one `.python-version` line asks for: `X.Y` or `X.Y.Z`,
+/// optionally behind a CPython prefix, and nothing else. The toolchain lock
+/// and interpreter selection both read the file through this, so a line
+/// one of them accepts is never refused by the other (#479).
+pub fn python_version_line(
+    line: &str,
+) -> Result<crate::kernel::pep440::Version, PythonVersionRefusal> {
+    let lower = line.to_ascii_lowercase();
+    if lower.contains("pypy")
+        || lower.contains("miniconda")
+        || lower.contains("graalpy")
+        || lower == "system"
+        || lower.contains("-dev")
+        || lower.ends_with('t')
+        || lower.contains("free-thread")
+        || lower.contains("freethread")
+    {
+        return Err(PythonVersionRefusal::Unsupported);
+    }
+    let numeric = strip_cpython_prefix(line);
+    if crate::kernel::pep440::canonical_release_len(numeric).is_none() {
+        return Err(PythonVersionRefusal::Invalid(None));
+    }
+    crate::kernel::pep440::Version::parse(numeric)
+        .map_err(|why| PythonVersionRefusal::Invalid(Some(why)))
 }
 
 fn malformed(message: &str) -> io::Error {
