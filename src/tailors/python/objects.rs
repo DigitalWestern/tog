@@ -62,6 +62,22 @@ pub static KINDS: &[ObjectKind] = &[
         live_optional: &["rust", "vendor", "native_libs", "native_linker"],
         live_contract: Some(sdist_build_v4_contract),
     },
+    ObjectKind {
+        kind: "sdist-build",
+        schema: Some("sdist-build/5"),
+        live_required: &[
+            "schema",
+            "sdist_sha256",
+            "python",
+            "platform",
+            "build_env",
+            "build_mode",
+            "native_mode",
+            "rust_build_config",
+        ],
+        live_optional: &["rust", "vendor", "native_libs", "native_linker"],
+        live_contract: Some(sdist_build_v5_contract),
+    },
 ];
 
 fn native_libs_contract(identity: &Identity) -> Result<(), String> {
@@ -231,6 +247,22 @@ fn sdist_build_v4_contract(identity: &Identity) -> Result<(), String> {
                  this identity's {key} input implies"
             ));
         }
+    }
+    Ok(())
+}
+
+/// Rust builds add a versioned flag configuration. Plain builds retain /4
+/// and its historical identities, and existing /4 Rust records stay readable.
+fn sdist_build_v5_contract(identity: &Identity) -> Result<(), String> {
+    sdist_build_v4_contract(identity)?;
+    if identity.inputs.get("build_mode").map(String::as_str) != Some(super::build::BUILD_MODE_RUST)
+    {
+        return Err("sdist Rust build configuration: schema /5 requires a Rust build".into());
+    }
+    if identity.inputs.get("rust_build_config").map(String::as_str)
+        != Some(super::build::RUST_BUILD_CONFIG)
+    {
+        return Err("sdist Rust build configuration: unsupported rust_build_config".into());
     }
     Ok(())
 }
