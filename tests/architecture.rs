@@ -1,7 +1,8 @@
 //! The layering rules of docs/human/ARCHITECTURE.md ("Layering rules"),
 //! enforced by a source scan: `commands → tailors → comforter → kernel`, one
 //! direction only, and no tailor names another tailor. A command file does
-//! not name a tailor by string either (the tokens scan below).
+//! not name a tailor's module or spell its name as a string either (the
+//! tokens scan below).
 //!
 //! Test code (everything from `#[cfg(test)] mod tests` on) is exempt: tests
 //! may wire the whole crate together. Size budgets (layering rule 5) are a
@@ -276,6 +277,9 @@ fn layer_violations(relative: &Path, text: &str, tailor_dirs: &[String]) -> (Vec
                             path[1] != own && tailor_dirs.contains(&path[1])
                         }))
             }
+            // A command reaches a tailor through the trait and the
+            // registry, never by its module: tailors::<name>::… (rule 3).
+            "commands" => target == "tailors" && path.len() >= 2 && tailor_dirs.contains(&path[1]),
             "cli" => matches!(
                 target.as_str(),
                 "tailors" | "comforter" | "kernel" | "commands"

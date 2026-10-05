@@ -15,7 +15,7 @@ use crate::kernel::resolve::ResolutionDoor;
 use crate::kernel::toolchain::{Catalog, Selected};
 use crate::kernel::ui;
 use crate::tailors::node::{self as node, inputs};
-use crate::tailors::{ClosureListing, PackageRow, RegistryTool, SyncRequest, Tailor};
+use crate::tailors::{ClosureListing, PackageRow, RegistryTool, ScriptRun, SyncRequest, Tailor};
 use serde_json::{json, Value};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -33,7 +33,7 @@ pub struct Node;
 /// The package.json `tog run` reads scripts from, as (canonical path,
 /// text): only under a `node_modules` projection whose closure reads back,
 /// and only when `dir` has a package.json.
-pub fn projected_package_json(dir: &Path, cwd: &Path) -> io::Result<Option<(PathBuf, String)>> {
+fn projected_package_json(dir: &Path, cwd: &Path) -> io::Result<Option<(PathBuf, String)>> {
     let (node_projected, _) = projected_node_modules(dir, cwd);
     if !node_projected {
         return Ok(None);
@@ -271,6 +271,60 @@ impl Tailor for Node {
 
     fn refused_command(&self, cmd: &[String]) -> Option<String> {
         super::run_refusal::refused_command(cmd)
+    }
+
+    fn project_script(
+        &self,
+        root: &Path,
+        name: &str,
+        args: &[String],
+    ) -> io::Result<Option<Vec<(String, String)>>> {
+        let package_json = root.join("package.json");
+        if !package_json.is_file() {
+            return Ok(None);
+        }
+        let json = std::fs::read_to_string(&package_json)?;
+        node::script_commands_from_package(&json, name, args)
+    }
+
+    fn projected_script(
+        &self,
+        dir: &Path,
+        cwd: &Path,
+        cmd: &[String],
+    ) -> io::Result<Option<ScriptRun>> {
+        let Some((name, args)) = cmd.split_first() else {
+            return Ok(None);
+        };
+        let Some((path, json)) = projected_package_json(dir, cwd)? else {
+            return Ok(None);
+        };
+        let Some(steps) = node::script_commands_from_package(&json, name, args)? else {
+            return Ok(None);
+        };
+        // The npm lifecycle protocol: each step sees which event it is,
+        // the package it belongs to, and where `npm run` was started.
+        let package: Value = serde_json::from_str(&json).map_err(|e| {
+            io::Error::new(io::ErrorKind::InvalidInput, format!("package.json: {e}"))
+        })?;
+        let mut env = Vec::new();
+        for (var, key) in [
+            ("npm_package_name", "name"),
+            ("npm_package_version", "version"),
+        ] {
+            if let Some(value) = package[key].as_str() {
+                env.push((var.to_string(), value.into()));
+            }
+        }
+        env.push(("npm_package_json".to_string(), path.into_os_string()));
+        env.push(("INIT_CWD".to_string(), cwd.as_os_str().to_owned()));
+        Ok(Some(ScriptRun {
+            steps,
+            scrubbed_prefix: "npm_",
+            step_label_var: Some("npm_lifecycle_event"),
+            env,
+            noun: "npm script",
+        }))
     }
 
     fn run_env(
