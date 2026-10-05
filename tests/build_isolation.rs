@@ -248,7 +248,11 @@ fn fastuuid_rust_sdist_builds_offline_after_vendoring() {
     let name = wheel.file_name().unwrap().to_string_lossy();
     assert!(name.starts_with("fastuuid-0.14.0-"), "{name}");
     let inputs = wheel_object_meta(&store, &wheel)["identity"]["inputs"].clone();
-    assert_eq!(inputs["schema"], "sdist-build/4", "{inputs}");
+    assert_eq!(inputs["schema"], "sdist-build/5", "{inputs}");
+    assert_eq!(
+        inputs["rust_build_config"], "rust-lint-cap-warn/1",
+        "{inputs}"
+    );
     for input in ["rust", "vendor", "build_env"] {
         assert!(
             inputs[input].as_str().is_some_and(|id| !id.is_empty()),
