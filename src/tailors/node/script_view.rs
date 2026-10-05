@@ -76,6 +76,20 @@ impl ScriptsFallback {
     }
 }
 
+/// Refuse an exception the policy in force denies, recording nothing: the
+/// check `hostfallback::hermetic_first` makes before it retries against the
+/// whole host, so a denying policy stops the retry before it runs.
+fn refuse_if_denied(kind: &str, subject: &str, detail: &str) -> io::Result<()> {
+    let policy = crate::kernel::policy::effective();
+    match crate::kernel::policy::denied(&policy, kind) {
+        true => Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            crate::kernel::policy::refusal(&policy, kind, subject, detail),
+        )),
+        false => Ok(()),
+    }
+}
+
 /// One package's lifecycle work, ready to run: where it lives, the
 /// snapshots a failed attempt is restored from, and the sandbox mounts and
 /// environment every attempt gets.
@@ -116,7 +130,10 @@ impl PackageScripts<'_> {
                     &p.path,
                     HOST_BUILD_INPUTS_DETAIL,
                     Attempt {
-                        record: crate::kernel::policy::record,
+                        // Checked here, recorded below: a retry that fails
+                        // too leaves the package as it was, built against
+                        // nothing, and its exception is install-script-failed.
+                        record: refuse_if_denied,
                         discard: || self.restore_attempt(),
                         fingerprint: crate::kernel::hostview::host_build_inputs,
                         build,
@@ -127,6 +144,11 @@ impl PackageScripts<'_> {
             };
         let e = match result {
             Ok(Some(host_inputs)) => {
+                crate::kernel::policy::record(
+                    crate::kernel::policy::HOST_BUILD_INPUTS,
+                    &p.path,
+                    HOST_BUILD_INPUTS_DETAIL,
+                )?;
                 hostfallback::same_host_state(&mut fallback.host_inputs, &p.path, host_inputs)?;
                 fallback.fell_back.push(p.path.clone());
                 return Ok(());
