@@ -483,7 +483,7 @@ pub fn load_with_sources(
 /// the directory being synced, whatever its path names by then, and its
 /// ancestors' are those of the directories that contain it. The machine
 /// policy is read by path.
-fn load_with_sources_from(
+pub(crate) fn load_with_sources_from(
     project_dir: &Path,
     project: Option<&ProjectRoot>,
     cli_strict: bool,
@@ -539,35 +539,29 @@ fn load_with_sources_from(
     // path, so they are the directories that contain the project synced.
     for (depth, dir) in project.ancestors().enumerate() {
         let dir = dir?;
+        // A moved project must not acquire a temporarily less restrictive
+        // parent chain. Each opened ancestor must still have its original
+        // name before its policy is used. Once opened, reads stay on that
+        // descriptor even if the directory moves afterward.
+        dir.check_still_named()?;
         let path = dir.path().join(".tog/policy.toml");
         let own = Path::new(".tog/policy.toml");
-        let text = if depth == 0 {
-            // The project's own policy is tog state under `.tog`: read with
-            // the strict no-follow walk, so a symlinked `.tog` or policy
-            // file is refused rather than read through.
-            if is_machine(path_identity(&path)) {
-                continue;
-            }
-            dir.read_file(own)?.map(|bytes| (bytes, path.clone()))
+        // Own state remains strictly no-follow. Dedupe uses the identity
+        // of that same opened file, never a stat of its replaceable path.
+        let file = if depth == 0 {
+            dir.open_file(own)?
         } else {
-            match dir.open_input_file(own)? {
-                Some(mut file) => {
-                    let meta = file.metadata()?;
-                    if is_machine(Some((meta.dev(), meta.ino()))) {
-                        continue;
-                    }
-                    let mut bytes = Vec::new();
-                    io::Read::read_to_end(&mut file, &mut bytes).map_err(|error| {
-                        io::Error::new(error.kind(), format!("read {}: {error}", path.display()))
-                    })?;
-                    Some((bytes, path.clone()))
-                }
-                None => None,
-            }
+            dir.open_input_file(own)?
         };
-        let Some((bytes, path)) = text else {
+        let Some(mut file) = file else { continue };
+        let meta = file.metadata()?;
+        if is_machine(Some((meta.dev(), meta.ino()))) {
             continue;
-        };
+        }
+        let mut bytes = Vec::new();
+        io::Read::read_to_end(&mut file, &mut bytes).map_err(|error| {
+            io::Error::new(error.kind(), format!("read {}: {error}", path.display()))
+        })?;
         let text = String::from_utf8(bytes).map_err(|_| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -1598,9 +1592,8 @@ deny = ["git-dependency"]"#,
         }
     }
 
-    /// An ancestor's policy is the one above the held project: a parent
-    /// renamed away after the project was opened still governs it, and a
-    /// policy-free directory put at the old path does not lift it.
+    /// Replacing an ancestor with a policy-free directory must refuse,
+    /// rather than lifting the original ancestor's restrictions.
     #[test]
     fn an_ancestor_policy_is_read_from_the_directory_holding_the_project() {
         let temp = crate::kernel::testutil::TempDir::new();
@@ -1616,8 +1609,91 @@ deny = ["git-dependency"]"#,
         let root = ProjectRoot::open(&parent.join("project")).unwrap();
         fs::rename(&parent, temp.0.join("moved")).unwrap();
         fs::create_dir_all(parent.join("project")).unwrap();
-        let (policy, _) = load_with_sources_from(root.path(), Some(&root), false).unwrap();
-        assert!(policy.strict);
+        assert!(load_with_sources_from(root.path(), Some(&root), false).is_err());
+    }
+
+    #[test]
+    fn a_deeper_move_cannot_hide_the_policy_before_restoring_the_project() {
+        let temp = crate::kernel::testutil::TempDir::new();
+        let base = temp.0.join("base");
+        let project = base.join("project");
+        let moved = base.join("a/b/c/d/e/f/project");
+        fs::create_dir_all(project.clone()).unwrap();
+        fs::create_dir_all(base.join(".tog")).unwrap();
+        fs::create_dir_all(moved.parent().unwrap()).unwrap();
+        fs::write(base.join(".tog/policy.toml"), "strict = true\n").unwrap();
+        let _env = test_env_lock();
+        let _home = EnvVarGuard::set("HOME", temp.0.as_os_str());
+        let _policy = EnvVarGuard::remove("TOG_POLICY");
+        let root = ProjectRoot::open(&project).unwrap();
+        fs::rename(&project, &moved).unwrap();
+        let result = load_with_sources_from(root.path(), Some(&root), false);
+        fs::rename(&moved, &project).unwrap();
+        root.check_still_named().unwrap();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn moving_outside_a_restricted_parent_is_refused_before_restoration() {
+        let temp = crate::kernel::testutil::TempDir::new();
+        let restricted = temp.0.join("restricted");
+        let project = restricted.join("project");
+        let moved = temp.0.join("unrestricted/project");
+        fs::create_dir_all(&project).unwrap();
+        fs::create_dir_all(restricted.join(".tog")).unwrap();
+        fs::create_dir_all(moved.parent().unwrap()).unwrap();
+        fs::write(restricted.join(".tog/policy.toml"), "strict = true\n").unwrap();
+        let _env = test_env_lock();
+        let _home = EnvVarGuard::set("HOME", temp.0.as_os_str());
+        let _policy = EnvVarGuard::remove("TOG_POLICY");
+        let root = ProjectRoot::open(&project).unwrap();
+        fs::rename(&project, &moved).unwrap();
+        let result = load_with_sources_from(root.path(), Some(&root), false);
+        fs::rename(&moved, &project).unwrap();
+        root.check_still_named().unwrap();
+        assert!(result.is_err());
+        assert!(
+            load_with_sources_from(root.path(), Some(&root), false)
+                .unwrap()
+                .0
+                .strict
+        );
+    }
+
+    #[test]
+    fn a_regular_file_in_place_of_an_ancestor_policy_directory_is_an_error() {
+        let temp = crate::kernel::testutil::TempDir::new();
+        let parent = temp.0.join("parent");
+        let project = parent.join("project");
+        fs::create_dir_all(&project).unwrap();
+        fs::write(parent.join(".tog"), "malformed").unwrap();
+        let _env = test_env_lock();
+        let _home = EnvVarGuard::set("HOME", temp.0.as_os_str());
+        let _policy = EnvVarGuard::remove("TOG_POLICY");
+        let root = ProjectRoot::open(&project).unwrap();
+        assert!(load_with_sources_from(root.path(), Some(&root), false).is_err());
+        assert!(load_with_sources_from(root.path(), None, false).is_err());
+    }
+
+    #[test]
+    fn machine_deduplication_does_not_skip_the_held_projects_policy() {
+        let temp = crate::kernel::testutil::TempDir::new();
+        let project = temp.0.join("project");
+        let machine = temp.0.join("machine.toml");
+        fs::create_dir_all(project.join(".tog")).unwrap();
+        fs::write(&machine, "strict = false\n").unwrap();
+        fs::write(project.join(".tog/policy.toml"), "strict = true\n").unwrap();
+        let _env = test_env_lock();
+        let _home = EnvVarGuard::set("HOME", temp.0.as_os_str());
+        let _policy = EnvVarGuard::set("TOG_POLICY", machine.as_os_str());
+        let root = ProjectRoot::open(&project).unwrap();
+        fs::rename(&project, temp.0.join("moved")).unwrap();
+        fs::create_dir_all(project.join(".tog")).unwrap();
+        fs::hard_link(&machine, project.join(".tog/policy.toml")).unwrap();
+        assert!(
+            load_with_sources_from(root.path(), Some(&root), false).is_err(),
+            "the replacement path must not suppress held policy"
+        );
     }
 
     #[test]

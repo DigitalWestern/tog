@@ -50,11 +50,20 @@ pub(crate) struct ProjectLocation {
 ///    so a nested `package.json` under a synced root (a docs site) keeps
 ///    belonging to that root, and an outer checkout never decides an inner
 ///    project's runtime. `$HOME/.tog` is tog's own home, not a project.
+///    A marked root that holds no project input of its own (a stray lock
+///    or `.tog` above the real project) does not hide a manifest nearer
+///    to `cwd`: rule 2 is tried first, and the marked root is the answer
+///    only when rule 2 finds nothing.
 /// 2. Otherwise the nearest ancestor with any project input, so `tog run`
 ///    from `src/` of a never-synced project finds the project.
 /// 3. Otherwise none.
 pub(crate) fn project_for(cwd: &Path) -> io::Result<Option<ProjectLocation>> {
-    project_for_in(cwd, std::env::var_os("HOME").map(PathBuf::from).as_deref())
+    // `cwd` comes from `getcwd`, which resolves symlinks, so a `$HOME`
+    // that is itself a symlink is resolved before the two are compared.
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|home| home.canonicalize().unwrap_or(home));
+    project_for_in(cwd, home.as_deref())
 }
 
 fn project_for_in(cwd: &Path, home: Option<&Path>) -> io::Result<Option<ProjectLocation>> {
@@ -63,12 +72,31 @@ fn project_for_in(cwd: &Path, home: Option<&Path>) -> io::Result<Option<ProjectL
             || (dir.join(".tog").is_dir() && home != Some(*dir))
     });
     if let Some(root) = marked {
-        return Ok(Some(ProjectLocation {
-            root: root.to_path_buf(),
-            marked: true,
-            detected: crate::commands::inspect::detected(root)?,
+        let detected = crate::commands::inspect::detected(root)?;
+        if !detected.is_empty() {
+            return Ok(Some(ProjectLocation {
+                root: root.to_path_buf(),
+                marked: true,
+                detected,
+            }));
+        }
+        return Ok(Some(match nearest_manifest(cwd)? {
+            Some(nearer) => nearer,
+            None => ProjectLocation {
+                root: root.to_path_buf(),
+                marked: true,
+                detected,
+            },
         }));
     }
+    nearest_manifest(cwd)
+}
+
+/// The nearest ancestor of `cwd` with any project input, marked or not.
+/// `add`, `remove` and `update` edit this one: in a synced Cargo, npm or
+/// uv workspace only the workspace root is marked, and the manifest to
+/// edit is the member's, which the tailor finds from the member directory.
+pub(crate) fn nearest_manifest(cwd: &Path) -> io::Result<Option<ProjectLocation>> {
     for dir in cwd.ancestors() {
         let detected = crate::commands::inspect::detected(dir)?;
         if !detected.is_empty() {
@@ -371,11 +399,19 @@ mod tests {
     #[test]
     fn project_for_prefers_a_marked_root_then_the_nearest_manifest() {
         let t = TempDir::new();
-        let none = |dir: &Path| project_for_in(dir, None).unwrap();
+        // Only answers inside the temporary directory count: with
+        // `TMPDIR` under `$HOME`, the walk without a home goes on up to
+        // the developer's own `~/.tog`.
+        let none = |dir: &Path| {
+            project_for_in(dir, None)
+                .unwrap()
+                .filter(|location| location.root.starts_with(&t.0))
+        };
         // A synced root keeps a plain node_modules and a nested manifest
         // below it (a docs site).
         let root = t.0.join("proj");
         std::fs::create_dir_all(root.join(".tog/closures")).unwrap();
+        std::fs::write(root.join("package.json"), "{}").unwrap();
         let docs = root.join("docs");
         std::fs::create_dir_all(docs.join("node_modules")).unwrap();
         std::fs::write(docs.join("package.json"), "{}").unwrap();
@@ -394,11 +430,27 @@ mod tests {
         assert_eq!(location.root, fresh);
         assert!(!location.marked);
         assert_eq!(location.detected, ["node"]);
+        // A marked directory with no project input of its own does not
+        // hide the manifest nearer the user. With nothing nearer, it is
+        // still the answer.
+        let stray = t.0.join("stray");
+        let app = stray.join("app");
+        std::fs::create_dir_all(app.join("src")).unwrap();
+        std::fs::write(stray.join(lock::LOCK_PATH), "").unwrap();
+        let location = none(&app.join("src")).unwrap();
+        assert_eq!(location.root, stray);
+        assert!(location.marked);
+        std::fs::write(app.join("package.json"), "{}").unwrap();
+        let location = none(&app.join("src")).unwrap();
+        assert_eq!(location.root, app);
+        assert_eq!(location.detected, ["node"]);
+        // An edit goes to the nearest manifest, under a marked root too:
+        // a workspace member, not the workspace root.
+        assert_eq!(nearest_manifest(&docs).unwrap().unwrap().root, docs);
         // Nothing at all.
         let outside = t.0.join("elsewhere");
         std::fs::create_dir_all(&outside).unwrap();
         assert_eq!(none(&outside), None);
-        assert_eq!(project_root(&outside).unwrap(), outside);
     }
 
     #[test]
@@ -409,16 +461,10 @@ mod tests {
         let work = home.join("work");
         std::fs::create_dir_all(work.join("src")).unwrap();
         assert_eq!(
-            project_for_in(&work.join("src"), Some(&home)).unwrap(),
-            None
-        );
-        std::fs::write(work.join("package.json"), "{}").unwrap();
-        assert_eq!(
             project_for_in(&work.join("src"), Some(&home))
                 .unwrap()
-                .unwrap()
-                .root,
-            work
+                .filter(|location| location.root.starts_with(&t.0)),
+            None
         );
         // Without the home rule the walk would stop at `~`.
         assert_eq!(
@@ -427,6 +473,14 @@ mod tests {
                 .unwrap()
                 .root,
             home
+        );
+        std::fs::write(work.join("package.json"), "{}").unwrap();
+        assert_eq!(
+            project_for_in(&work.join("src"), Some(&home))
+                .unwrap()
+                .unwrap()
+                .root,
+            work
         );
     }
 

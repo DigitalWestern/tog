@@ -75,16 +75,19 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   through the descriptor (`fchdir`), not the path. Some things still go by path. A sandboxed
   child (the `setup.py` probe) has the project bound in by path, a confined resolution
   snapshots the project after opening it by path again, and a path handed to a tool as an
-  argument (`--manifest-path`, `-r <requirements>`) is one the tool opens itself. So a
+  argument (`--manifest-path`, `-r <requirements>`) or an environment variable
+  (`BUNDLE_GEMFILE`) is one the tool opens itself. So a
   same-user process that renames the directory away, puts another project at its path, and
   puts the original back while one of those runs can make it read or write the replacement.
   Loud when the tool's output is read back (a lock it wrote is missing from the held
   directory); silent otherwise. Files above the project (a Cargo workspace root, a parent
   `go.work`, .NET `Directory.*` files, a parent `.tog/policy.toml`) are read from the
   directories that contain the held one (`..` from its descriptor), not from the path's
-  parents. The machine policy is read by path. `status`, `doctor` and the environment `run`
-  and `env` build open the project once and read it through that descriptor (`audit` reads
-  through descriptors too, opened per step), but `gc --register` still opens it by path.
+  parents. Policy loading verifies each held ancestor still has its original name and
+  refuses a changed chain, so a temporary move cannot lift a parent policy.
+  The machine policy is read by path. `status`, `doctor` and the environment `run`
+  and `env` build open the project once and read it through that descriptor. `audit` uses the same held project for policy, closures,
+  detection, freshness, and resolution evidence. `gc --register` still opens it by path.
 - **CLI exit status is 0 / 1 / 2** (success / command failed / usage error); `run`, `x` and
   `fmt` pass the program's status through. A tool argument that is spelled like one of tog's
   own options needs `--` first: `-h`/`--help` for all four, and for `fmt` and `x` also the
@@ -297,8 +300,10 @@ Selection covers every patch of each maintained CPython minor that python-build-
   dependencies, and the sync prints a warning naming it (`tog status` counts that member
   synced while its directory is there). A tracked `node_modules` at the project root stops
   the sync instead, even when the only tracked file is a `.gitkeep` or `.gitignore`: untrack
-  it (`git rm -r --cached node_modules`) and sync again. Without git on the host, or outside
-  a repository, nothing counts as tracked.
+  it (`git rm -r --cached node_modules`) and sync again. Each workspace's own repository
+  is checked, including submodules and repositories inside `node_modules`. A failed index
+  read stops sync before projection.
+  Outside a repository nothing counts as tracked, including when Git is unavailable.
 - **A registry package that depends on a workspace package makes `node_modules` a copy.**
   A plugin whose peer dependency is the package the repository itself develops has to
   resolve that package from the project's own source. Node looks dependencies up from a
