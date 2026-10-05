@@ -104,8 +104,9 @@ the program's status through. Which files tog reads per ecosystem:
   and a failure is one JSON object on stderr: `{"error":"<message>"}`.
   That holds for every failure the command itself reports, whatever its
   exit status: `audit --json` still exits 2 for a misconfigured gate (an
-  unreadable `--policy` file, or `--signed` with no trusted set at machine
-  scope), so CI can tell an operator mistake from a denied build, and
+  unreadable `--policy` file, `--signed` with no trusted set at machine
+  scope, or a plain audit under CI with none and no `--allow-unsigned`),
+  so CI can tell an operator mistake from a denied build, and
   still writes the JSON object rather than prose. Only an argv error is exempt — it is prose at
   exit 2, because argv was wrong before the command that promised JSON
   ever started. `status`, `ls`, `audit`, `doctor` and `plan` take
@@ -688,11 +689,19 @@ exception gets judged at all; a CI job whose policy must trust keys passes
 judged, when the machine policy has no `[signing]` table, so a gate that
 lost its keys fails loudly instead of passing with signatures unchecked.
 
+**Under CI.** When the `CI` environment variable is set to anything but
+`false` or `0` (GitHub Actions, GitLab and most CI services set it), plain
+`tog audit` with no `[signing]` table refuses as `--signed` does: exit 2,
+before any record is judged. A CI job that means to judge records without
+signatures passes `--allow-unsigned`, which changes nothing when a
+`[signing]` table exists. `--signed` and `--allow-unsigned` together are a
+usage error.
+
 **Migrating an existing gate.** Before this mode existed, plain `tog audit`
-exited 2 whenever the machine policy had no `[signing]` table. It now
-judges the records and can exit 0 with signatures unchecked. A CI job that
-relied on the old refusal has to run `tog audit --signed` to keep it;
-nothing else about the job changes.
+exited 2 whenever the machine policy had no `[signing]` table. Under CI it
+still does, so a gate that relied on that refusal keeps it. Outside CI it
+now judges the records and can exit 0 with signatures unchecked; a job that
+does not set `CI` runs `tog audit --signed` to keep the refusal.
 
 Per closure it prints the ecosystem, the record (sha256 of the closure file
 bytes), and the first of these that applies: `bad-signature` (a signature
@@ -757,7 +766,8 @@ change the grammar. Strictness-only sources omit the path. Policy lines
 come first, then verdict lines, then `missing` lines, and `--quiet` leaves
 them in place. Exit 0 when every closure is clean and none is missing, 1
 otherwise, 2 when the gate is misconfigured (an unreadable `--policy` file,
-or `--signed` without trusted keys). A company deny list to start
+`--signed` without trusted keys, or a plain audit under CI without trusted
+keys and without `--allow-unsigned`). A company deny list to start
 from ships as [policy-company.toml](policy-company.toml); every kind it
 names is checked against the binary's kind list by a unit test. Exception
 kind names use one separator, the hyphen (`weak-integrity`,

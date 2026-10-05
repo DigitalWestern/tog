@@ -54,9 +54,10 @@ inputs:
     default: "false"
   audit:
     description: >-
-      'true' runs 'tog audit' after the sync, 'signed' runs 'tog audit
-      --signed' (the policy must then carry a [signing] table), 'false'
-      skips it.
+      'true' runs 'tog audit --allow-unsigned' after the sync (signatures
+      are checked when the policy carries a [signing] table, and not
+      otherwise), 'signed' runs 'tog audit --signed' (the policy must then
+      carry a [signing] table), 'false' skips it.
     default: "true"
   signing-key:
     description: >-
@@ -261,7 +262,12 @@ runs:
         set -euo pipefail
         if [ "$TOG_ACTION_AUDIT" = signed ]; then
           tog audit --signed
+        elif tog audit --help | grep -q -- --allow-unsigned; then
+          # Under CI a plain audit with no trusted keys exits 2; 'true'
+          # asked for the audit with signatures optional.
+          tog audit --allow-unsigned
         else
+          # v0.1.0 predates the flag, and judges unsigned records as is.
           tog audit
         fi
 

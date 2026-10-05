@@ -3519,6 +3519,29 @@ fn audit_without_trusted_keys_judges_records_and_says_so() {
         "{}",
         text(&out.stderr)
     );
+    // Issue #395. Under CI the same audit refuses before judging, as
+    // --signed does, unless --allow-unsigned; CI=false is not CI.
+    for args in [&["audit"][..], &["audit", "--json"]] {
+        let out = tog_env(&project.0, &home.0, args, &[("CI", "true")]);
+        assert_eq!(out.status.code(), Some(2), "{}", text(&out.stderr));
+        let shown = format!("{}{}", text(&out.stdout), text(&out.stderr));
+        assert!(
+            shown.contains("no trusted signing keys configured")
+                && shown.contains("pass --allow-unsigned"),
+            "{shown}"
+        );
+        assert!(!shown.contains("clean"), "{shown}");
+    }
+    let out = tog_env(
+        &project.0,
+        &home.0,
+        &["audit", "--allow-unsigned"],
+        &[("CI", "true")],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(text(&out.stdout).contains("signatures: not checked"));
+    let out = tog_env(&project.0, &home.0, &["audit"], &[("CI", "false")]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     let out = tog(&project.0, &home.0, &["audit", "--json"]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
