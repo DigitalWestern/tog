@@ -24,6 +24,8 @@ pub fn is_cargo_here(project: &ProjectRoot) -> bool {
 
 pub struct CargoInputs {
     pub root: PathBuf,
+    /// The same workspace used to read the plan, retained through publication.
+    pub workspace: ProjectRoot,
     pub rust_obj: PathBuf,
     pub plan: cargo::CargoPlan,
     pub lock_digest: String,
@@ -96,10 +98,11 @@ pub(crate) fn locate_held_cargo_root(project: &ProjectRoot) -> io::Result<(PathB
                     ),
                 )
             })?;
-        return Ok((root, held));
+        let held = held.canonicalize_name()?.with_cwd_binding();
+        return Ok((held.path().to_path_buf(), held));
     }
     if table.contains_key("workspace") {
-        return Ok((dir.path().to_path_buf(), dir));
+        return Ok((dir.path().to_path_buf(), dir.with_cwd_binding()));
     }
     for ancestor in dir.ancestors().skip(1) {
         let ancestor = ancestor?;
@@ -111,10 +114,10 @@ pub(crate) fn locate_held_cargo_root(project: &ProjectRoot) -> io::Result<(PathB
             continue;
         };
         if !excludes(ancestor.path(), workspace, &manifest) {
-            return Ok((ancestor.path().to_path_buf(), ancestor));
+            return Ok((ancestor.path().to_path_buf(), ancestor.with_cwd_binding()));
         }
     }
-    Ok((dir.path().to_path_buf(), dir))
+    Ok((dir.path().to_path_buf(), dir.with_cwd_binding()))
 }
 
 /// `path` opened below the nearest directory containing `from` (itself
@@ -233,12 +236,22 @@ pub fn load_cargo_inputs(
     let rust_version = toolchain.version("rustc")?;
     let (rust_obj, root, workspace) =
         locate_workspace(platform, lock_root, project, store, activity, toolchain)?;
+    read_inputs(root, workspace, rust_obj, rust_version)
+}
+
+fn read_inputs(
+    root: PathBuf,
+    workspace: ProjectRoot,
+    rust_obj: PathBuf,
+    rust_version: &str,
+) -> io::Result<CargoInputs> {
     let lock = read_cargo_lock(&workspace)?
         .ok_or_else(|| crate::tailors::missing_lock(&workspace, "Cargo.lock"))?;
     let plan = cargo::plan_cargo(&lock, rust_version)?;
     let resolution_basis = resolution_basis(&workspace, &lock)?;
     Ok(CargoInputs {
         root,
+        workspace,
         rust_obj,
         plan,
         lock_digest: cargo::lock_digest(&lock),
@@ -317,18 +330,6 @@ pub fn ensure_lock(
         ));
     }
     Ok(())
-}
-
-/// The workspace root Cargo reported, held as a descriptor and resolved
-/// from the project's (`held_below`): the project itself, a directory
-/// inside it, or one below a directory that contains it.
-pub(crate) fn workspace_root(project: &ProjectRoot, root: &Path) -> io::Result<ProjectRoot> {
-    held_below(project, root)?.ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::NotFound,
-            format!("workspace root {} is not a directory", root.display()),
-        )
-    })
 }
 
 /// The workspace's Cargo.lock, read through the held descriptor; `None`
@@ -461,6 +462,7 @@ mod tests {
     /// member's descriptor: a workspace renamed away after the open is
     /// still the one returned, not a directory put at its path.
     #[test]
+    #[allow(clippy::disallowed_methods)]
     fn a_held_member_finds_the_workspace_that_contains_it() {
         let temp = TempDir::new();
         let ws = temp.0.canonicalize().unwrap().join("ws");
@@ -482,10 +484,94 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(text.contains("[workspace]"), "{text}");
-        let again = workspace_root(&member, &root).unwrap();
+        let again = held_below(&member, &root).unwrap().unwrap();
         assert!(again.is_input_file(Path::new("Cargo.toml")));
         assert!(again.is_input_dir(Path::new("member")));
         assert!(!ws.join("Cargo.toml").exists());
+        let mut child = std::process::Command::new("/bin/cat");
+        child.arg("Cargo.toml");
+        crate::kernel::fsroot::start_in(&mut child, held.path());
+        let output = child.output().unwrap();
+        assert!(output.status.success(), "{:?}", output);
+        assert!(String::from_utf8(output.stdout)
+            .unwrap()
+            .contains("[workspace]"));
+    }
+
+    #[test]
+    fn loaded_inputs_retain_the_workspace_until_publication() {
+        let temp = TempDir::new();
+        let base = temp.0.canonicalize().unwrap();
+        let member = base.join("member");
+        let workspace = base.join("workspace");
+        std::fs::create_dir_all(&member).unwrap();
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(
+            member.join("Cargo.toml"),
+            "[package]\nname = \"m\"\nworkspace = \"../workspace\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            workspace.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"../member\"]\n",
+        )
+        .unwrap();
+        std::fs::write(workspace.join("Cargo.lock"), "# original\nversion = 4\n").unwrap();
+        let member = ProjectRoot::open(&member).unwrap();
+        let (root, held) = locate_held_cargo_root(&member).unwrap();
+        let inputs = read_inputs(root, held, base.join("rust"), "1.96.1").unwrap();
+        std::fs::rename(&workspace, base.join("moved")).unwrap();
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(workspace.join("Cargo.toml"), "[workspace]\n").unwrap();
+        std::fs::write(workspace.join("Cargo.lock"), "# replacement\nversion = 4\n").unwrap();
+        assert_eq!(
+            read_cargo_lock(&inputs.workspace).unwrap().as_deref(),
+            Some("# original\nversion = 4\n")
+        );
+        assert!(inputs.workspace.check_still_named().is_err());
+        assert!(!workspace.join(".tog").exists());
+        // Reopening would accept the replacement. Publication must use the
+        // root retained with the input bytes, as both sync and build do.
+        ProjectRoot::open(&workspace)
+            .unwrap()
+            .check_still_named()
+            .unwrap();
+    }
+
+    #[test]
+    fn a_named_workspace_alias_keeps_a_verified_canonical_publication_name() {
+        let temp = TempDir::new();
+        let base = temp.0.canonicalize().unwrap();
+        let member = base.join("member");
+        let workspace = base.join("workspace");
+        std::fs::create_dir_all(&member).unwrap();
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(
+            member.join("Cargo.toml"),
+            "[package]\nname = \"m\"\nworkspace = \"../alias\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            workspace.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"../member\"]\n",
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(&workspace, base.join("alias")).unwrap();
+        let member = ProjectRoot::open(&member).unwrap();
+        let (path, held) = locate_held_cargo_root(&member).unwrap();
+        assert_eq!(path, workspace);
+        held.check_still_named().unwrap();
+        let replacement = base.join("replacement");
+        std::fs::create_dir_all(&replacement).unwrap();
+        std::fs::remove_file(base.join("alias")).unwrap();
+        std::os::unix::fs::symlink(replacement, base.join("alias")).unwrap();
+        held.check_still_named().unwrap();
+        held.write_file(Path::new("publication"), b"original")
+            .unwrap();
+        assert_eq!(
+            std::fs::read(workspace.join("publication")).unwrap(),
+            b"original"
+        );
     }
 
     #[test]
@@ -500,7 +586,7 @@ mod tests {
         std::fs::rename(&dir, temp.0.join("moved")).unwrap();
         std::fs::create_dir_all(&dir).unwrap();
         assert!(is_cargo_here(&project));
-        let workspace = workspace_root(&project, project.path()).unwrap();
+        let workspace = project.try_clone().unwrap();
         assert_eq!(
             read_cargo_lock(&workspace).unwrap().as_deref(),
             Some("# original\nversion = 4\n")
