@@ -324,25 +324,6 @@ impl Sandbox<'_> {
         .profile())
     }
 
-    /// Run `cmd` inside the sandbox with a scrubbed environment.
-    /// `env_path` becomes PATH; HOME/TMPDIR point into the writable tmp.
-    pub fn run(&self, cmd: &[&str], env_path: &str, tmp: &Path) -> io::Result<()> {
-        self.run_in(cmd, env_path, tmp, tmp, &[])
-    }
-
-    /// Like `run`, but with an explicit working directory and extra
-    /// environment variables (npm lifecycle scripts need npm_config_*).
-    pub fn run_in(
-        &self,
-        cmd: &[&str],
-        env_path: &str,
-        tmp: &Path,
-        cwd: &Path,
-        envs: &[(String, String)],
-    ) -> io::Result<()> {
-        self.run_in_on(Platform::host()?, cmd, env_path, tmp, cwd, envs)
-    }
-
     pub(crate) fn run_in_on(
         &self,
         platform: Platform,

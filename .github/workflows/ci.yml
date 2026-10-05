@@ -50,6 +50,15 @@ jobs:
       # reviewed, `#[allow]`ed sites. rust-toolchain.toml brings clippy.
       - name: Clippy, with store children borrowing the caller's lease
         run: cargo clippy --locked --all-targets -- -D warnings
+      # With the internal modules private, rustc's dead-code lint sees what
+      # no command reaches; src/lib.rs's `boundary` lists what main.rs and
+      # the integration tests reach from outside. A check, not a build, so
+      # it adds no codegen; its own target dir keeps clippy's cache intact.
+      - name: No dead code
+        env:
+          RUSTFLAGS: --cfg tog_dead_code -D dead_code
+          CARGO_TARGET_DIR: target/dead-code
+        run: cargo check --locked --lib
       # The offline suite skips sandbox checks bwrap cannot run; here a
       # skip is a failure, so CI proves the Linux sandbox works. Set on the
       # whole suite, so a new test file is covered without being listed.

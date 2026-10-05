@@ -59,10 +59,6 @@ pub enum EntryKind {
     File,
     Dir,
     Symlink,
-    HardLink,
-    /// Block/character device, FIFO, socket, or any type letter this module
-    /// does not know; always refused.
-    Special(char),
 }
 
 /// How the archive is compressed. The caller passes it explicitly, never
@@ -953,36 +949,22 @@ fn invisible(text: &str) -> Option<&'static str> {
 /// Refuse anything that could write or point outside the destination once
 /// the first `strip` path components are removed, the way tar's
 /// `--strip-components` removes them. Entries with `strip` or fewer
-/// components are skipped by tar, so only their kind and their name are
-/// still checked: a hard link, a device, an absolute name or a `..`
-/// component is refused wherever it sits.
+/// components are skipped by tar, so only their name is still checked: an
+/// absolute name or a `..` component is refused wherever it sits.
+#[cfg(test)]
 pub fn validate(entries: &[Entry], strip: usize) -> io::Result<()> {
     validate_with_options(entries, &ExtractOptions::stripped(strip))
 }
 
-/// [`validate`] under the extraction's full options: `strip`, and whether
+/// The containment check under the extraction's full options: `strip`, and whether
 /// the archive is a per-platform build that only this host's platform
 /// ever extracts (see [`ExtractOptions::platform_specific`]).
 pub fn validate_with_options(entries: &[Entry], options: &ExtractOptions) -> io::Result<()> {
     let strip = options.strip;
     let mut kept: Vec<(&Entry, Vec<&str>)> = Vec::new();
+    // Hard links and special files never become entries: the listing
+    // refuses them where it reads their type.
     for entry in entries {
-        match entry.kind {
-            EntryKind::HardLink => {
-                return Err(err(format!(
-                    "archive entry {:?} is a hard link (to {:?}); hard links are refused",
-                    entry.name,
-                    entry.link.as_deref().unwrap_or("")
-                )))
-            }
-            EntryKind::Special(kind) => {
-                return Err(err(format!(
-                    "archive entry {:?} is a special file (type {kind:?}); only files, directories, and contained symlinks are accepted",
-                    entry.name
-                )))
-            }
-            EntryKind::File | EntryKind::Dir | EntryKind::Symlink => {}
-        }
         let components = contained_components(&entry.name)
             .map_err(|reason| err(format!("archive entry {:?}: {reason}", entry.name)))?;
         if components.len() <= strip {
@@ -1142,6 +1124,7 @@ fn symlink_contained(
 
 /// List, validate, and extract `archive` into `destination`, returning the
 /// validated listing. Nothing is written when validation fails.
+#[cfg(test)]
 pub fn extract(
     archive: &Path,
     destination: &Path,
@@ -1536,27 +1519,6 @@ mod tests {
         );
         // `.` components are ordinary and count for strip like tar counts them.
         validate(&[entry(EntryKind::File, "./pkg/x", None)], 1).unwrap();
-    }
-
-    #[test]
-    fn hard_links_and_special_files_are_refused_regardless_of_strip() {
-        refused(
-            &[entry(EntryKind::HardLink, "pkg/hard", Some("pkg/file"))],
-            0,
-            "hard link",
-        );
-        refused(
-            &[entry(EntryKind::HardLink, "pkg/hard", Some("pkg/file"))],
-            5,
-            "hard link",
-        );
-        for kind in ['b', 'c', 'p', 's', 'D', 'M'] {
-            refused(
-                &[entry(EntryKind::Special(kind), "pkg/odd", None)],
-                0,
-                "special file",
-            );
-        }
     }
 
     #[test]

@@ -78,7 +78,6 @@ None open.
 - **Quality review of 2026-09-24 (#264).** A whole-codebase review after
   the 09-20 to 09-24 run. #264 holds the work order and the overall verdict.
   Each line is one issue and one PR, in order:
-  - #247 dead code: the non-heavy part shipped; left are the unused items in heavy-watched files (`fetch.rs`, `archive.rs`, `sandbox.rs`, `provider/`) and the CI job that builds with `--cfg tog_dead_code -D dead_code`.
   - #245 kernel: consolidate duplicated primitives. Left: `validate_object_complete` and `exceptions()` now share objmeta's open and parse, but not its full record check (identity hash, schema), because about 25 tests write fake records it refuses. Give those tests real records, then call `read_store_record`.
   - #248 sandbox and gitsrc: collapse the _with_activity twin of every entry point.
   - #256 design: the Tailor trait has 35+ methods, a dozen used by one ecosystem, and its docs have drifted.

@@ -34,6 +34,7 @@ use std::path::PathBuf;
 #[cfg(test)]
 pub(crate) use crate::kernel::provider::cpython::uv_identity;
 #[cfg(test)]
+#[cfg(test)]
 pub use crate::kernel::provider::cpython::uv_pins;
 pub use crate::kernel::provider::cpython::{
     cpython_identity, cpython_identity_input, cpython_object_id, pythons, runtime_object_id,
@@ -396,13 +397,11 @@ mod tests {
             PinnedPython {
                 platform: Platform::X86_64UnknownLinuxGnu,
                 version: "3.12.9",
-                url: "https://example.invalid/3.12.9.tar.gz",
                 sha256: "9",
             },
             PinnedPython {
                 platform: Platform::X86_64UnknownLinuxGnu,
                 version: "3.12.14",
-                url: "https://example.invalid/3.12.14.tar.gz",
                 sha256: "14",
             },
         ];

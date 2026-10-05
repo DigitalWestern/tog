@@ -535,6 +535,7 @@ impl TreeHasher {
 /// The content hash of the tree at `root`. Two trees hash alike exactly
 /// when they hold the same names, bytes, links and executable bits.
 /// Owners, times and other mode bits are not content.
+#[cfg(test)]
 pub fn tree_digest(root: &Path) -> io::Result<Digest> {
     tree_digest_cached(root, None)
 }

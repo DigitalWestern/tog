@@ -601,12 +601,16 @@ impl ToolchainLock {
 
 impl EcoLock {
     /// The component whose version names the runtime: the first primary.
+    // Read by tests/toolchain_lock.rs, outside lib.rs's `boundary` reach.
+    #[cfg_attr(tog_dead_code, allow(dead_code))]
     pub fn runtime(&self) -> &str {
         &self.runtime
     }
 
     /// The catalog release key this section was minted from. Provenance,
     /// never a key honoring the lock looks up.
+    // Read by tests/toolchain_lock.rs, outside lib.rs's `boundary` reach.
+    #[cfg_attr(tog_dead_code, allow(dead_code))]
     pub fn release(&self) -> &str {
         &self.release
     }

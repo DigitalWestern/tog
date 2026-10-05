@@ -59,7 +59,8 @@ glob = "0.3"
 
 [lints.rust]
 # `--cfg tog_dead_code` makes the internal modules private, so rustc's
-# dead-code lint sees what no command reaches (#247).
+# dead-code lint sees what no command reaches (#247). CI's "No dead code"
+# step runs it with `-D dead_code`.
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(tog_dead_code)"] }
 
 # CI runs `cargo clippy --locked --all-targets -- -D warnings`, so every

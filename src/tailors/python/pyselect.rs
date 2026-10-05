@@ -38,9 +38,7 @@ pub struct PythonInputs {
     pub constraints: Vec<ConstraintSource>,
 }
 
-pub use crate::kernel::setuptools::{
-    extract_setup_py_python_requires, parse_setup_cfg, SetupCfgMetadata, SetupCfgPackagesFind,
-};
+pub use crate::kernel::setuptools::{extract_setup_py_python_requires, parse_setup_cfg};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExplicitPython {
@@ -918,13 +916,11 @@ mod tests {
         let newer = PinnedPython {
             platform: Platform::X86_64UnknownLinuxGnu,
             version: "3.11.16",
-            url: "https://example.invalid/3.11.16.tar.gz",
             sha256: "16",
         };
         let older = PinnedPython {
             platform: Platform::X86_64UnknownLinuxGnu,
             version: "3.11.9",
-            url: "https://example.invalid/3.11.9.tar.gz",
             sha256: "9",
         };
         let minor = crate::kernel::pep440::Version::parse("3.11").unwrap();

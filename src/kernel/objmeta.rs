@@ -122,6 +122,7 @@ impl MetaIndex {
 /// sweep reader so a record can never be understood two different ways.
 /// The directory is opened as a real one and the file under it, so neither
 /// a symlinked `meta/` nor a symlinked record redirects the read.
+#[cfg(test)]
 pub fn read_record_at(path: &Path) -> io::Result<Record> {
     let (Some(parent), Some(_)) = (path.parent(), path.file_name()) else {
         return Err(io::Error::new(
