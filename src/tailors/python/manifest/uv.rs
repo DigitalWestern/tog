@@ -37,19 +37,22 @@ pub(super) fn record_uv_sources(value: &toml::Value) -> io::Result<()> {
     Ok(())
 }
 
-/// Whether `url` is public PyPI: its host is exactly `pypi.org` or
-/// `files.pythonhosted.org`. A host that only contains one of those names,
-/// `pypi.org.internal.example`, is another index. Empty means the default
-/// index, which is PyPI.
+/// Whether `url` is public PyPI: https, the default port, and a host that
+/// is exactly `pypi.org` or `files.pythonhosted.org`. A host that only
+/// contains one of those names, `pypi.org.internal.example`, is another
+/// index, and so is `pypi.org` over plain http or on another port. Empty
+/// means the default index, which is PyPI.
 pub(super) fn is_public_pypi_url(url: &str) -> bool {
     if url.is_empty() {
         return true;
     }
     url::Url::parse(url).is_ok_and(|url| {
-        matches!(
-            url.host_str(),
-            Some("pypi.org") | Some("files.pythonhosted.org")
-        )
+        url.scheme() == "https"
+            && url.port().is_none()
+            && matches!(
+                url.host_str(),
+                Some("pypi.org") | Some("files.pythonhosted.org")
+            )
     })
 }
 
@@ -255,27 +258,34 @@ pub(super) fn parse_uv_dependency(value: &toml::Value) -> Option<UvDependency> {
     }
     let table = value.as_table()?;
     let name = table.get("name")?.as_str()?;
-    let extras = table
+    // A field of the wrong type is a malformed edge, not an absent field:
+    // dropping `extra = "socks"` or `marker = 1` would change what the
+    // environment holds.
+    let string = |value: &toml::Value| value.as_str().map(str::to_string);
+    let extras = match table
         // uv's lock serializer calls this field `extra` (singular), even
         // though it contains the set of extras requested on the edge.
         .get("extra")
-        .and_then(toml::Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(toml::Value::as_str)
-        .map(str::to_ascii_lowercase)
-        .collect();
+    {
+        Some(extra) => extra
+            .as_array()?
+            .iter()
+            .map(|extra| extra.as_str().map(str::to_ascii_lowercase))
+            .collect::<Option<_>>()?,
+        None => Default::default(),
+    };
+    let marker = match table.get("marker").or_else(|| table.get("markers")) {
+        Some(marker) => Some(string(marker)?),
+        None => None,
+    };
+    let version = match table.get("version") {
+        Some(version) => Some(string(version)?),
+        None => None,
+    };
     Some(UvDependency {
         name: normalize_name(name),
-        marker: table
-            .get("marker")
-            .or_else(|| table.get("markers"))
-            .and_then(toml::Value::as_str)
-            .map(str::to_string),
-        version: table
-            .get("version")
-            .and_then(toml::Value::as_str)
-            .map(str::to_string),
+        marker,
+        version,
         extras,
     })
 }
@@ -549,7 +559,10 @@ fn record_uv_source_exceptions(package: &UvPackage) -> io::Result<bool> {
     }
     if package.source != "registry"
         && package.source.contains("registry")
-        && !uv_registry_url(&package.source).is_some_and(|url| is_public_pypi_url(&url))
+        // An empty registry is not the default index here: uv always
+        // writes the URL, so an empty one is some other source.
+        && !uv_registry_url(&package.source)
+            .is_some_and(|url| !url.is_empty() && is_public_pypi_url(&url))
     {
         crate::kernel::policy::record(
             crate::kernel::policy::UNATTESTED_INDEX,
