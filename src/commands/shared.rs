@@ -200,6 +200,18 @@ pub(crate) fn selected_toolchain(
     // refuses here: it must not fall through to the shipped default.
     if let Some(location) = project_for(cwd)? {
         let root = ProjectRoot::open(&location.root)?;
+        // A registry tool of an ecosystem this project does not have (a
+        // Python tool in a Cargo project) is not the project's to pin: when
+        // the committed lock has no section for it, it runs on the shipped
+        // runtime. An ecosystem the project has keeps the lock's refusals,
+        // and with no lock the project's own sources decide, as below.
+        let lock_ecosystem = tailor.lock_ecosystem();
+        let has_ecosystem = location.detected.iter().any(|id| {
+            crate::tailors::by_id(id).is_some_and(|found| found.lock_ecosystem() == lock_ecosystem)
+        });
+        if !has_ecosystem && lock_names(&root, lock_ecosystem)? == Some(false) {
+            return runtime::shipped(&tailor.toolchain_catalog()?);
+        }
         let resolved = comforter::toolchain::resolve(
             &root,
             platform,
@@ -210,6 +222,19 @@ pub(crate) fn selected_toolchain(
         return resolved.get(tailor.lock_ecosystem()).cloned();
     }
     runtime::shipped(&tailor.toolchain_catalog()?)
+}
+
+/// Whether the project's committed toolchain lock has a section for
+/// `ecosystem`, or `None` when there is no lock. A lock that cannot be
+/// read refuses.
+fn lock_names(root: &ProjectRoot, ecosystem: &str) -> io::Result<Option<bool>> {
+    lock::ToolchainLock::read_bytes_via(root)?
+        .map(|bytes| {
+            Ok(lock::ToolchainLock::parse(&bytes)?
+                .ecosystem(ecosystem)
+                .is_some())
+        })
+        .transpose()
 }
 
 /// The helper toolchains (`Tailor::helpers`) `ecosystem` builds with at
@@ -330,6 +355,83 @@ mod tests {
             .filter_map(|bundle| bundle.component("cpython").map(|c| c.version.clone()))
             .find(|version| *version != default)
             .expect("the shipped catalog needs a second CPython")
+    }
+
+    /// A registry tool of an ecosystem the project does not have runs on
+    /// that ecosystem's shipped runtime, even beside a lock with no section
+    /// for it. A project that has the ecosystem still refuses a lock
+    /// missing its section, and a section the lock does pin is used.
+    #[test]
+    fn a_tool_outside_the_project_ecosystems_runs_on_the_shipped_runtime() {
+        let platform = Platform::host().unwrap();
+        let t = TempDir::new();
+        let lock_for = |dir: &Path, ecosystems: &[&str]| {
+            let root = ProjectRoot::open(dir).unwrap();
+            let tailors: Vec<_> = ecosystems
+                .iter()
+                .map(|id| crate::tailors::by_id(id).unwrap())
+                .collect();
+            comforter::toolchain::resolve(
+                &root,
+                platform,
+                ecosystem_inputs(&tailors).unwrap(),
+                comforter::toolchain::Mode::Update { only: None },
+                false,
+            )
+            .unwrap()
+            .pending
+            .unwrap()
+            .publish_via(&root)
+            .unwrap();
+        };
+
+        // A Cargo-only project with its Rust lock: Python and Node tools.
+        let cargo = t.0.join("cargo");
+        std::fs::create_dir_all(cargo.join("src")).unwrap();
+        std::fs::write(
+            cargo.join("Cargo.toml"),
+            "[package]\nname = \"demo\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::write(cargo.join("src/main.rs"), "fn main() {}\n").unwrap();
+        lock_for(&cargo, &["cargo"]);
+        for ecosystem in ["python", "node"] {
+            let selected = selected_toolchain(platform, &cargo, ecosystem).unwrap();
+            assert_eq!(
+                selected.source,
+                crate::kernel::toolchain::Source::Shipped,
+                "{ecosystem}"
+            );
+        }
+
+        // A Python project whose lock holds only another section refuses.
+        let python = t.0.join("python");
+        std::fs::create_dir_all(&python).unwrap();
+        std::fs::write(
+            python.join("pyproject.toml"),
+            "[project]\nname = \"demo\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            python.join("Cargo.toml"),
+            std::fs::read(cargo.join("Cargo.toml")).unwrap(),
+        )
+        .unwrap();
+        std::fs::create_dir_all(python.join("src")).unwrap();
+        std::fs::write(python.join("src/main.rs"), "fn main() {}\n").unwrap();
+        lock_for(&python, &["cargo"]);
+        let error = selected_toolchain(platform, &python, "python").unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("has no [toolchain.python] section"),
+            "{error}"
+        );
+
+        // Mixed and locked for both: the lock decides.
+        lock_for(&python, &["cargo", "python"]);
+        let selected = selected_toolchain(platform, &python, "python").unwrap();
+        assert_eq!(selected.source, crate::kernel::toolchain::Source::Lock);
     }
 
     #[test]
