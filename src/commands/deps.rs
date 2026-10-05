@@ -221,10 +221,12 @@ pub fn shape(name: &str) -> Option<Eco> {
         .find(|eco| eco.tailor.claims_package_name(name))
 }
 
-/// The project at or above `cwd` (`shared::project_for`), which must hold
-/// a project input.
+/// The nearest directory from `cwd` upward that holds any project input
+/// (`shared::nearest_manifest`). An edit goes to the manifest nearest the
+/// user, not to the marked root `shared::project_for` answers with: from
+/// a member of a synced workspace, `tog add` edits the member.
 pub fn nearest_project(cwd: &Path) -> io::Result<(PathBuf, Vec<Eco>)> {
-    if let Some(location) = crate::commands::shared::project_for(cwd)? {
+    if let Some(location) = crate::commands::shared::nearest_manifest(cwd)? {
         let present: Vec<Eco> = location
             .detected
             .into_iter()
