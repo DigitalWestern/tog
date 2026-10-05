@@ -51,6 +51,40 @@ fn changed_inputs(project: &ProjectRoot, inputs: &[Value]) -> io::Result<Vec<Str
 /// The sha256 of a project input, read through the held descriptor;
 /// `None` when it is absent or not a regular file.
 fn input_sha256(project: &ProjectRoot, relative: &Path) -> io::Result<Option<String>> {
+    // External Python requirements are recorded as absolute paths. These
+    // intentionally remain external inputs, matching the record writer.
+    if relative.is_absolute() {
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = match fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC)
+            .open(relative)
+        {
+            Ok(file) => file,
+            Err(error)
+                if error.kind() == io::ErrorKind::NotFound
+                    || error.raw_os_error() == Some(libc::ENOTDIR) =>
+            {
+                return Ok(None)
+            }
+            Err(error) => {
+                // Some nonregular entries (Unix sockets) cannot be opened.
+                // A successful read still requires the opened FD's metadata.
+                // Match the previous is_file preflight for paths that
+                // cannot be classified as regular (including symlink loops).
+                if !fs::metadata(relative).is_ok_and(|meta| meta.is_file()) {
+                    return Ok(None);
+                }
+                return Err(error);
+            }
+        };
+        if !file.metadata()?.is_file() {
+            return Ok(None);
+        }
+        let mut bytes = Vec::new();
+        std::io::Read::read_to_end(&mut file, &mut bytes)?;
+        return Ok(Some(hex::encode(Sha256::digest(bytes))));
+    }
     if !project.is_input_file(relative) {
         return Ok(None);
     }
@@ -157,6 +191,126 @@ pub fn standard_state(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn standard_state_reports_a_missing_object_before_an_unreadable_lock() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = crate::kernel::testutil::TempDir::new();
+        let project = ProjectRoot::open(&temp.0).unwrap();
+        let lock = temp.0.join("Gemfile.lock");
+        fs::write(&lock, "locked inputs").unwrap();
+        fs::set_permissions(&lock, fs::Permissions::from_mode(0o000)).unwrap();
+        let object = temp.0.join("runtime");
+        let body = json!({"runtime": {"path": object}, "lock_hash": "recorded"});
+        assert_eq!(
+            lock_state(&project, "Gemfile.lock", "recorded")
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        assert_eq!(
+            standard_state(&project, &body, &["runtime"], "Gemfile.lock", "lock_hash").unwrap(),
+            State::ProjectionMissing("runtime object".into())
+        );
+        fs::create_dir(&object).unwrap();
+        assert_eq!(
+            standard_state(&project, &body, &["runtime"], "Gemfile.lock", "lock_hash")
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::PermissionDenied
+        );
+    }
+
+    #[test]
+    fn external_absolute_requirements_track_unchanged_changed_and_removed_bytes() {
+        let temp = crate::kernel::testutil::TempDir::new();
+        let dir = temp.0.join("project");
+        fs::create_dir_all(&dir).unwrap();
+        let external = temp.0.join("requirements.txt");
+        fs::write(&external, "six==1.17.0\n").unwrap();
+        let body = json!({"inputs": [{"path": external,
+            "sha256": sha256_file(&external).unwrap()}]});
+        let project = ProjectRoot::open(&dir).unwrap();
+        assert_eq!(
+            recorded_inputs_state(&project, &body).unwrap(),
+            State::Synced
+        );
+        fs::write(&external, "six==1.16.0\n").unwrap();
+        assert!(matches!(
+            recorded_inputs_state(&project, &body).unwrap(),
+            State::Changed(_)
+        ));
+        fs::remove_file(&external).unwrap();
+        assert!(matches!(
+            recorded_inputs_state(&project, &body).unwrap(),
+            State::Changed(_)
+        ));
+    }
+
+    #[test]
+    fn absolute_requirements_replaced_by_a_directory_or_fifo_are_changed() {
+        use std::os::unix::ffi::OsStrExt;
+        let temp = crate::kernel::testutil::TempDir::new();
+        let project = ProjectRoot::open(&temp.0).unwrap();
+        let external = temp.0.join("external");
+        let body = json!({"inputs": [{"path": external, "sha256": "old"}]});
+        fs::create_dir(&external).unwrap();
+        assert!(matches!(
+            recorded_inputs_state(&project, &body).unwrap(),
+            State::Changed(_)
+        ));
+        fs::remove_dir(&external).unwrap();
+        let path = std::ffi::CString::new(external.as_os_str().as_bytes()).unwrap();
+        // SAFETY: the NUL-terminated name remains valid for the call.
+        assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+        assert!(matches!(
+            recorded_inputs_state(&project, &body).unwrap(),
+            State::Changed(_)
+        ));
+    }
+
+    #[test]
+    fn absolute_requirements_with_a_file_parent_are_changed() {
+        let temp = crate::kernel::testutil::TempDir::new();
+        let project = ProjectRoot::open(&temp.0).unwrap();
+        fs::write(temp.0.join("parent"), "not a directory").unwrap();
+        let body =
+            json!({"inputs": [{"path": temp.0.join("parent/requirements.txt"), "sha256": "old"}]});
+        assert!(matches!(
+            recorded_inputs_state(&project, &body).unwrap(),
+            State::Changed(_)
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn absolute_requirements_replaced_by_a_unix_socket_are_changed() {
+        use std::os::fd::AsRawFd;
+        let temp = crate::kernel::testutil::TempDir::new();
+        let project = ProjectRoot::open(&temp.0).unwrap();
+        let directory = fs::File::open(&temp.0).unwrap();
+        // Keep the socket pathname short even with a long TMPDIR.
+        let alias = format!("/proc/self/fd/{}/socket", directory.as_raw_fd());
+        let _listener = std::os::unix::net::UnixListener::bind(alias).unwrap();
+        let body = json!({"inputs": [{"path": temp.0.join("socket"), "sha256": "old"}]});
+        assert!(matches!(
+            recorded_inputs_state(&project, &body).unwrap(),
+            State::Changed(_)
+        ));
+    }
+
+    #[test]
+    fn absolute_requirements_replaced_by_a_symlink_loop_are_changed() {
+        let temp = crate::kernel::testutil::TempDir::new();
+        let project = ProjectRoot::open(&temp.0).unwrap();
+        let external = temp.0.join("external");
+        std::os::unix::fs::symlink("external", &external).unwrap();
+        let body = json!({"inputs": [{"path": external, "sha256": "old"}]});
+        assert!(matches!(
+            recorded_inputs_state(&project, &body).unwrap(),
+            State::Changed(_)
+        ));
+    }
 
     /// The helper reports the missing path, not the present one: a `Some`
     /// is always a defect, and `object_liveness_state` turns exactly that

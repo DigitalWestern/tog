@@ -77,15 +77,23 @@ pub fn closures_in(project: &ProjectRoot) -> io::Result<Vec<ClosureFile>> {
         return Ok(out);
     };
     for name in names {
-        let name = name.to_string_lossy().into_owned();
-        if closure_stem(&name).is_none() {
+        if closure_stem(&name.to_string_lossy()).is_none() {
             continue;
         }
+        let text = name.to_str().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "invalid UTF-8 closure filename in {}",
+                    project.path().join(dir).display()
+                ),
+            )
+        })?;
         let relative = dir.join(&name);
         let Some(bytes) = project.read_file(&relative)? else {
             continue;
         };
-        out.push(closure_file(&name, project.path().join(&relative), &bytes)?);
+        out.push(closure_file(text, project.path().join(&relative), &bytes)?);
     }
     out.sort_by_key(|closure| rank(&closure.ecosystem));
     Ok(out)
@@ -1408,14 +1416,27 @@ mod tests {
         let platform = Platform::host().unwrap();
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("requirements.txt"), "six\n").unwrap();
-        write_closure(&dir, "python", platform.triple(), json!({}));
+        let env = temp.0.join("env");
+        fs::create_dir_all(env.join("bin")).unwrap();
+        std::os::unix::fs::symlink(&env, dir.join(".venv")).unwrap();
+        write_closure(
+            &dir,
+            "python",
+            platform.triple(),
+            json!({
+                "env_object": env,
+                "inputs": [{"path": "requirements.txt", "sha256":
+                    crate::kernel::resolve::record::sha256_hex(b"six\n")}],
+                "exceptions": [],
+            }),
+        );
         let project = ProjectRoot::open(&dir).unwrap();
         fs::rename(&dir, temp.0.join("moved")).unwrap();
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("requirements.txt"), "six\n").unwrap();
         let held = status_in(platform, &project).unwrap();
         assert_eq!(held.len(), 1);
-        assert_ne!(held[0].state, State::NotSynced);
+        assert_eq!(held[0].state, State::Synced);
         assert_eq!(closures_in(&project).unwrap().len(), 1);
         assert_eq!(status(platform, &dir).unwrap()[0].state, State::NotSynced);
     }

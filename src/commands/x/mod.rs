@@ -124,7 +124,7 @@ fn runtime_object_id(
 
 /// The helper toolchains an `x` environment of `ecosystem` builds with
 /// (`RegistryTool::helpers`), decided as `sync` decides them for the
-/// project `x` runs in, and each one's runtime object id for the key.
+/// project `x` runs in, and each one's build identity for the key.
 fn x_helpers(
     platform: Platform,
     cwd: &Path,
@@ -142,7 +142,7 @@ fn x_helpers(
         .map(|(helper, selected)| {
             Ok((
                 helper.clone(),
-                tool.helper_object_id(platform, helper, selected)?,
+                tool.helper_cache_key(platform, helper, selected)?,
             ))
         })
         .collect::<io::Result<Vec<_>>>()?;
@@ -334,7 +334,7 @@ fn write_x_request_inner(
     if let Some((toolchain, runtime_object, helper_objects)) = runtime {
         record["bundle_id"] = serde_json::Value::String(toolchain.bundle_id());
         record["runtime_object"] = serde_json::Value::String(runtime_object.to_string());
-        // The helper runtimes the key names (node-gyp's Python), if any.
+        // The helper build identities the key names, if any.
         if !helper_objects.is_empty() {
             record["helpers"] = serde_json::Value::Object(
                 helper_objects
@@ -1206,6 +1206,106 @@ mod tests {
             name(&locks_python, "node", "prettier"),
             name(&node_only, "node", "prettier")
         );
+    }
+
+    #[test]
+    fn a_python_tool_keys_on_the_projects_locked_rust() {
+        let platform = Platform::host().unwrap();
+        let temp = TempDir::named("x-rust");
+        let project = temp.0.join("project");
+        let outside = temp.0.join("outside");
+        fs::create_dir(&project).unwrap();
+        fs::create_dir(&outside).unwrap();
+        fs::write(
+            project.join("Cargo.toml"),
+            "[package]\nname = \"p\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        fs::write(project.join("requirements.txt"), "six==1.17.0\n").unwrap();
+        fs::write(
+            project.join("rust-toolchain.toml"),
+            "[toolchain]\nchannel = \"1.98.0\"\n",
+        )
+        .unwrap();
+        let root = crate::kernel::fsroot::ProjectRoot::open(&project).unwrap();
+        let inputs = crate::commands::shared::ecosystem_inputs(&[
+            crate::tailors::by_id("cargo").unwrap(),
+            crate::tailors::by_id("python").unwrap(),
+        ])
+        .unwrap();
+        let resolved = comforter::toolchain::resolve(
+            &root,
+            platform,
+            inputs,
+            comforter::toolchain::Mode::Writable,
+            false,
+        )
+        .unwrap();
+        let bytes = resolved.pending.unwrap().canonical_bytes();
+        fs::write(project.join("tog-toolchain.toml"), &bytes).unwrap();
+
+        let (helpers, ids) = x_helpers(platform, &project, "python").unwrap();
+        assert_eq!(
+            helpers["rust"].source,
+            crate::kernel::toolchain::Source::Lock
+        );
+        assert_eq!(helpers["rust"].version("rustc").unwrap(), "1.98.0");
+        assert_eq!(
+            ids,
+            vec![(
+                "rust".to_string(),
+                format!(
+                    "{};selection:{}",
+                    crate::kernel::provider::rust::runtime_object_id(platform, &helpers["rust"])
+                        .unwrap(),
+                    helpers["rust"].bundle_id()
+                )
+            )]
+        );
+        let (helpers, ids) = x_helpers(platform, &outside, "python").unwrap();
+        assert!(helpers.is_empty() && ids.is_empty());
+        assert_eq!(fs::read(project.join("tog-toolchain.toml")).unwrap(), bytes);
+    }
+
+    #[test]
+    fn a_python_tool_cache_key_covers_rust_channel_manifest_changes() {
+        let platform = Platform::host().unwrap();
+        let store = Store::for_test(PathBuf::from("/store"));
+        let python = fixed_selection("python", "cpython", "3.12.14");
+        let rust = crate::kernel::toolchain::shipped(
+            &crate::kernel::provider::rust::toolchain_catalog().unwrap(),
+        )
+        .unwrap();
+        let mut changed = rust.clone();
+        let manifest = changed
+            .bundle
+            .artifacts
+            .iter_mut()
+            .find(|row| row.platform == platform && row.component == "channel-manifest")
+            .unwrap();
+        manifest.recipe.push_str("/different");
+        assert_eq!(
+            crate::kernel::provider::rust::runtime_object_id(platform, &rust).unwrap(),
+            crate::kernel::provider::rust::runtime_object_id(platform, &changed).unwrap(),
+        );
+        let name = |selected: &Selected| {
+            let identity = registry_tool("python")
+                .unwrap()
+                .helper_cache_key(platform, "rust", selected)
+                .unwrap();
+            x_root_name(
+                &store,
+                platform,
+                "python",
+                "ruff",
+                Some("0.6.1"),
+                &python,
+                "cpython-object",
+                &[("rust".to_string(), identity)],
+            )
+            .unwrap()
+        };
+        assert_ne!(name(&rust), name(&changed));
     }
 
     #[test]
