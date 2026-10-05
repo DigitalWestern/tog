@@ -14,7 +14,7 @@
   "forced_flags": [
     "--config.script-shell=/bin/sh",
     "--config.shell-emulator=false",
-    "--config.ignore-scripts=true",
+    "--ignore-scripts",
     "--config.node-options=",
     "--config.pnpmfile=.pnpmfile.cjs",
     "--config.global-pnpmfile=",

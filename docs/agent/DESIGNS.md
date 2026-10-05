@@ -3455,7 +3455,11 @@ Node doors, each the flexible option that still fails closed:
   `--config.ignore-scripts=true`: PR 0 measured the flag on `install`, and
   `pnpm remove` rejects it; the `--config.` spelling is the one every
   verb's parser takes, and `npm_config_ignore_scripts=true` stays in the
-  environment beside it.
+  environment beside it. The PR 0 marker fixture
+  (`tests/fixtures/proxy/forced/pnpm/settings.json`) still cites
+  `--ignore-scripts`, and the confine test accepts a bare flag's
+  `--config.<name>=true` spelling, because a fixture edit wakes the heavy
+  suite for no behavior change.
 - **The pinned pnpm runs from the store.** The `tog x` cache root is a
   projection (`node_modules` links into a forest that links into the
   environment object), so the door mounts the Node object and the
