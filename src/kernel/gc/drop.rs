@@ -474,9 +474,12 @@ mod drop_tests {
     fn an_unreadable_root_or_registry_does_not_block_a_drop() {
         let temp = TempStore::new("drop-unreadable-roots");
         let store = temp.store();
-        let pathname = store::write_pathname_root_for_test(&store, &temp.root.join("gone"))
+        let gone = temp.root.join("gone");
+        fs::create_dir_all(&gone).unwrap();
+        let pathname = store::write_pathname_root_for_test(&store, &gone)
             .unwrap()
             .key;
+        fs::remove_dir_all(&gone).unwrap();
         let unusable = register_objects(&store, &temp.root.join("app"), &[]);
         fs::write(store.root.join("roots").join(&unusable), b"garbage").unwrap();
         let id = bare(&store, "bare");
