@@ -13,7 +13,7 @@ pub use crate::comforter::status::{sha256_file, string, State};
 use crate::kernel::activity::StoreActivity;
 use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::platform::Platform;
-use crate::kernel::policy::Exception;
+use crate::kernel::policy::{Exception, OptionalGroupSkipped};
 use crate::kernel::sandbox;
 use crate::kernel::store::{MetaFile, Store};
 use crate::kernel::toolchain::input;
@@ -22,8 +22,8 @@ use crate::tailors;
 
 use crate::comforter::records;
 pub use crate::comforter::records::{
-    exceptions, open_project, recorded_exceptions, resolution_exceptions, ClosureFile,
-    ExceptionList,
+    exceptions, open_project, optional_groups_skipped, recorded_exceptions, resolution_exceptions,
+    ClosureFile, ExceptionList,
 };
 pub use crate::tailors::PackageRow;
 
@@ -186,6 +186,9 @@ pub struct EcosystemStatus {
     /// empty `exceptions` beside this is "unknown", not "none recorded":
     /// the row says so whatever its state is.
     pub exceptions_error: Option<String>,
+    /// Optional groups the sync left out because nobody requested them.
+    /// Informational, never an exception (#71).
+    pub optional_groups_skipped: Vec<OptionalGroupSkipped>,
 }
 
 impl EcosystemStatus {
@@ -236,6 +239,7 @@ pub fn status_in(platform: Platform, project: &ProjectRoot) -> io::Result<Vec<Ec
                 summary: String::new(),
                 exceptions: Vec::new(),
                 exceptions_error: None,
+                optional_groups_skipped: Vec::new(),
             });
             continue;
         };
@@ -255,12 +259,22 @@ pub fn status_in(platform: Platform, project: &ProjectRoot) -> io::Result<Vec<Ec
                 (Vec::new(), Some(error))
             }
         };
+        let optional_groups_skipped = match optional_groups_skipped(closure) {
+            Ok(groups) => groups,
+            Err(error) => {
+                if state == State::Synced {
+                    state = State::Unchecked(error.to_string());
+                }
+                Vec::new()
+            }
+        };
         rows.push(EcosystemStatus {
             ecosystem: ecosystem.into(),
             state,
             summary: summary(closure),
             exceptions,
             exceptions_error,
+            optional_groups_skipped,
         });
     }
     Ok(rows)
@@ -589,6 +603,7 @@ pub fn render_status(dir: &Path, rows: &[EcosystemStatus], json: bool) -> io::Re
                     "summary": row.summary,
                     "exceptions": row.exceptions,
                     "exceptions_error": row.exceptions_error,
+                    "optional_groups_skipped": row.optional_groups_skipped,
                 })
             }).collect::<Vec<_>>(),
         });
@@ -624,6 +639,18 @@ pub fn render_status(dir: &Path, rows: &[EcosystemStatus], json: bool) -> io::Re
             out.push_str(&printable(&format!(
                 "{:width$}    exception   {}  {}",
                 "", exception.kind, exception.subject
+            )));
+            out.push('\n');
+        }
+        for group in &row.optional_groups_skipped {
+            let count = match group.requirements.len() {
+                0 => String::new(),
+                1 => " (1 requirement)".to_string(),
+                n => format!(" ({n} requirements)"),
+            };
+            out.push_str(&printable(&format!(
+                "{:width$}    optional    {}{count} not installed: {}",
+                "", group.group, group.detail
             )));
             out.push('\n');
         }
@@ -1682,10 +1709,18 @@ mod tests {
             host,
             json!({"env_object": env, "python": {"version": "3.12.14"},
                    "plan": {"packages": []},
-                   "inputs": [{"path": "requirements.txt", "sha256": requirements}]}),
+                   "inputs": [{"path": "requirements.txt", "sha256": requirements}],
+                   "exceptions": [],
+                   "optional_groups_skipped": [
+                       {"group": "docs", "detail": "extra, not requested",
+                        "requirements": ["sphinx", "furo"]}]}),
         );
         let rows = status(platform, dir).unwrap();
         assert_eq!(rows[0].state, State::Synced);
+        // An unrequested group is listed under the row, never counted as an
+        // exception (#71).
+        assert!(rows[0].exceptions.is_empty());
+        assert_eq!(rows[0].optional_groups_skipped[0].group, "docs");
         assert_eq!(
             rows[1].state,
             State::ProjectionMissing(".tog/cargo-home".into())
@@ -1696,6 +1731,13 @@ mod tests {
             text.contains("python  synced      (cpython 3.12.14; 0 packages)"),
             "{text}"
         );
+        assert!(
+            text.contains(
+                "          optional    docs (2 requirements) not installed: extra, not requested"
+            ),
+            "{text}"
+        );
+        assert!(!text.contains("policy exception"), "{text}");
         assert!(
             text.contains("cargo   missing     .tog/cargo-home"),
             "{text}"

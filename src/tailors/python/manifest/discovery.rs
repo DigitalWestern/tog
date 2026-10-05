@@ -230,10 +230,10 @@ pub(super) fn setup_or_requirements_manifest(
                 requirements.extend(values.iter().cloned());
             } else {
                 for value in values {
-                    crate::kernel::policy::record(
-                        crate::kernel::policy::SKIPPED_OPTIONAL,
-                        value,
-                        &format!("setup.cfg extra `{extra}` was not requested"),
+                    crate::kernel::policy::skip_optional(
+                        extra,
+                        "setup.cfg extra, not requested",
+                        Some(value),
                     )?;
                 }
             }
@@ -351,20 +351,20 @@ pub(super) fn project_manifest(
                 if active {
                     requirements.push(value.to_string());
                 } else {
-                    crate::kernel::policy::record(
-                        crate::kernel::policy::SKIPPED_OPTIONAL,
-                        value,
-                        &format!("optional dependency group `{extra}` was not requested"),
+                    crate::kernel::policy::skip_optional(
+                        extra,
+                        "[project.optional-dependencies] extra, not requested",
+                        Some(value),
                     )?;
                 }
             }
         }
     }
     if value.get("dependency-groups").is_some() {
-        crate::kernel::policy::record(
-            crate::kernel::policy::SKIPPED_OPTIONAL,
+        crate::kernel::policy::skip_optional(
             "[dependency-groups]",
             "PEP 735 dependency groups are excluded by default",
+            None,
         )?;
     }
     if let Some(dev) = value
@@ -374,10 +374,10 @@ pub(super) fn project_manifest(
         .and_then(toml::Value::as_table)
         .and_then(|pdm| pdm.get("dev-dependencies"))
     {
-        crate::kernel::policy::record(
-            crate::kernel::policy::SKIPPED_OPTIONAL,
+        crate::kernel::policy::skip_optional(
             "[tool.pdm.dev-dependencies]",
             &format!("development dependency group excluded by default ({dev})"),
+            None,
         )?;
     }
     record_uv_sources(value)?;

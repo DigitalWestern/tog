@@ -595,6 +595,14 @@ with the reason, and a row in any other state keeps that state and adds an
 `exceptions_error` (null when the list was read), so an empty `exceptions`
 array never stands for a list that could not be read.
 
+An optional group the project declares and nobody requested (a Python
+extra, `[dependency-groups]`, a Poetry dev group) is not an exception: it
+is a choice, and no policy judges it. `status` lists it under the row as
+`optional <group> (<n> requirements) not installed: <where and why>`, and
+`--json` carries it as `optional_groups_skipped` (`group`, `detail`,
+`requirements`). `sbom` lists it as a `tog:optional-group-skipped`
+metadata property, apart from the `tog:exception:*` ones.
+
 **audit** answers "does this environment pass my policy?": it reads the
 closure records every sync committed to `.tog/closures/*.json`,
 authenticates each one when the machine policy trusts signing keys, and
@@ -717,7 +725,9 @@ were written; run `tog` once, under a trusted key when signatures are
 checked, then commit. A record carrying an exception kind tog has retired is outdated
 too, with the reason and the command that rewrites it (`run 'tog' once`): a closure recording
 `toolchain-component-unavailable` says `closure predates component
-provisioning`), `stale` (the same inputs-changed / projection-missing /
+provisioning`, and one recording `skipped-optional`, retired when
+unrequested optional groups stopped being exceptions, says `closure
+predates optional_groups_skipped`), `stale` (the same inputs-changed / projection-missing /
 other-platform checks `status` makes, made per closure file from that
 file's own record), `denied` (each denied exception's kind, subject, and
 detail), `unknown` (an exception kind this binary cannot judge), or `clean`
@@ -773,7 +783,7 @@ keys and without `--allow-unsigned`). A company deny list to start
 from ships as [policy-company.toml](policy-company.toml); every kind it
 names is checked against the binary's kind list by a unit test. Exception
 kind names use one separator, the hyphen (`weak-integrity`,
-`skipped-optional`, `artifact-not-provisioned`); the older underscore
+`unattested-index`, `artifact-not-provisioned`); the older underscore
 spellings are still read from policy files and from closures written by
 earlier versions, and are judged and printed as the hyphenated name.
 

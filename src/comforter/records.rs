@@ -3,7 +3,7 @@
 //! here judges freshness, which asks the tailors (`commands::inspect`).
 
 use crate::kernel::fsroot::ProjectRoot;
-use crate::kernel::policy::{self, Exception};
+use crate::kernel::policy::{self, Exception, OptionalGroupSkipped};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::io;
@@ -119,6 +119,24 @@ pub fn recorded_exceptions(closure: &ClosureFile) -> io::Result<Option<Vec<Excep
                     ),
                 )
             }),
+    }
+}
+
+/// The optional groups the sync left out because nobody requested them
+/// (`optional_groups_skipped`, #71). Informational: absence means none,
+/// or a closure written before the list existed.
+pub fn optional_groups_skipped(closure: &ClosureFile) -> io::Result<Vec<OptionalGroupSkipped>> {
+    match closure.body.get("optional_groups_skipped") {
+        None | Some(Value::Null) => Ok(Vec::new()),
+        Some(value) => serde_json::from_value(value.clone()).map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "{:?}: malformed optional_groups_skipped: {error}; run 'tog'",
+                    closure.path.to_string_lossy()
+                ),
+            )
+        }),
     }
 }
 
