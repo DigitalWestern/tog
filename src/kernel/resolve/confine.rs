@@ -1567,8 +1567,16 @@ mod tests {
                     index += 2;
                 }
                 None => {
+                    // A bare flag may be forced in its `--config.<name>=true`
+                    // spelling, the one every pnpm verb's parser takes
+                    // (`pnpm remove` rejects `--ignore-scripts` itself).
+                    let config_spelling = flag
+                        .strip_prefix("--")
+                        .map(|name| format!("--config.{name}=true"));
                     assert!(
-                        rendered.iter().any(|arg| arg == flag),
+                        rendered
+                            .iter()
+                            .any(|arg| arg == flag || Some(arg) == config_spelling.as_ref()),
                         "{tool}: {flag} is not forced: {rendered:?}"
                     );
                     index += 1;
