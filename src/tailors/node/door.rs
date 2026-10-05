@@ -54,9 +54,36 @@ pub(crate) const WHY_PNPM: &str = "runs the script-shell program a project's .np
 
 /// The git every npm and pnpm run starts for a git dependency, and the
 /// shell their forced `script-shell` names: the host's, on the sandbox's
-/// read-only system roots (tog provisions neither).
+/// read-only system roots (tog provisions neither). The shell is required
+/// (npm reads `script-shell` whether or not a script runs). A host without
+/// git still resolves registry dependencies: the forced git is then a
+/// path that does not exist, so only a git dependency fails, naming it.
 pub(crate) const HOST_GIT: &str = "/usr/bin/git";
 pub(crate) const HOST_SH: &str = "/bin/sh";
+pub(crate) const NO_GIT: &str = "/nonexistent/git";
+
+/// The programs the forced settings name on this host: `(git, sh)`.
+/// `exists` says whether a path is a regular file (the host's filesystem,
+/// or a test's).
+pub(crate) fn host_programs(
+    exists: impl Fn(&Path) -> bool,
+) -> io::Result<(&'static str, &'static str)> {
+    if !exists(Path::new(HOST_SH)) {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!(
+                "npm and pnpm run their scripts with {HOST_SH} as the forced shell, which this \
+                 host does not have"
+            ),
+        ));
+    }
+    let git = if exists(Path::new(HOST_GIT)) {
+        HOST_GIT
+    } else {
+        NO_GIT
+    };
+    Ok((git, HOST_SH))
+}
 
 /// Which tool a run starts.
 pub(crate) enum NodeTool<'a> {
@@ -202,25 +229,14 @@ pub(crate) fn node_confined<'a>(
     run: &NodeRun<'a>,
     publish: Publish<'a>,
 ) -> io::Result<ConfinedSpec<'a>> {
-    for program in [HOST_GIT, HOST_SH] {
-        if !Path::new(program).is_file() {
-            return Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                format!(
-                    "{} resolves with {program} as its forced git or shell, which this host \
-                     does not have",
-                    run.tool.name()
-                ),
-            ));
-        }
-    }
+    let (git, sh) = host_programs(|path| path.is_file())?;
     let (tool, why) = match &run.tool {
         NodeTool::Npm { .. } => ("npm", WHY_NPM),
         NodeTool::Pnpm { .. } => ("pnpm", WHY_PNPM),
     };
     let mut confined = ConfinedSpec::new("node", tool, why);
-    confined.forced.git = Some(Path::new(HOST_GIT));
-    confined.forced.sh = Some(Path::new(HOST_SH));
+    confined.forced.git = Some(Path::new(git));
+    confined.forced.sh = Some(Path::new(sh));
     confined.store_reads = match &run.tool {
         NodeTool::Npm { node_obj } => vec![node_obj.to_path_buf()],
         NodeTool::Pnpm { node_obj, program } => {
@@ -432,6 +448,16 @@ pub(crate) fn run_node_checked(
     let report = run_node(door, run)?;
     if !report.status.success() {
         let words = confine::scrub_signing_key(String::from_utf8_lossy(&report.stderr).trim());
+        if words.contains(NO_GIT) || (!Path::new(HOST_GIT).is_file() && words.contains("git")) {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!(
+                    "store {name} {args} failed, and this host has no {HOST_GIT}, which a git \
+                     dependency needs (the door runs the host git for one); install git or \
+                     depend on the package from the registry: {words}"
+                ),
+            ));
+        }
         return Err(io::Error::other(if words.is_empty() {
             format!(
                 "store {name} {args} failed (exit status {}); nothing was synced",
@@ -449,6 +475,23 @@ mod tests {
     use super::*;
     use crate::kernel::testutil::TempDir;
     use std::fs;
+
+    /// The shell is required; without a host git the forced git is a path
+    /// that does not exist, so registry-only projects still resolve and a
+    /// git dependency fails by name.
+    #[test]
+    fn a_host_without_git_still_resolves_registry_dependencies() {
+        let both = host_programs(|path| path == Path::new(HOST_GIT) || path == Path::new(HOST_SH));
+        assert_eq!(both.unwrap(), (HOST_GIT, HOST_SH));
+        let no_git = host_programs(|path| path == Path::new(HOST_SH)).unwrap();
+        assert_eq!(no_git, (NO_GIT, HOST_SH));
+        assert!(!Path::new(NO_GIT).exists());
+        let error = host_programs(|_| false).unwrap_err().to_string();
+        assert!(
+            error.contains(HOST_SH) && error.contains("does not have"),
+            "{error}"
+        );
+    }
 
     /// Lexically resolve `base/relative` (`..` pops), the way pnpm's
     /// `path.join` does, to check where a relative setting lands.
