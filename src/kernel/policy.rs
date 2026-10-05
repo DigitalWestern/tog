@@ -1615,6 +1615,38 @@ deny = ["git-dependency"]"#,
         assert!(load_with_sources_from(root.path(), Some(&root), false).is_err());
     }
 
+    /// A project under a search-only (0111) directory loads its policy
+    /// chain: that directory's own policy and the ones above it are reached
+    /// by name through it, which search permission allows (#480).
+    #[cfg(unix)]
+    #[test]
+    fn a_held_project_under_a_search_only_ancestor_loads_every_policy() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let temp = crate::kernel::testutil::TempDir::new();
+        let base = temp.0.join("base");
+        let locked = base.join("search-only");
+        let project = locked.join("project");
+        fs::create_dir_all(&project).unwrap();
+        fs::create_dir_all(base.join(".tog")).unwrap();
+        fs::create_dir_all(locked.join(".tog")).unwrap();
+        fs::write(base.join(".tog/policy.toml"), "strict = true\n").unwrap();
+        fs::write(
+            locked.join(".tog/policy.toml"),
+            "deny = [\"git-dependency\"]\n",
+        )
+        .unwrap();
+        let _env = test_env_lock();
+        let _home = EnvVarGuard::set("HOME", temp.0.join("home").as_os_str());
+        let _policy = EnvVarGuard::remove("TOG_POLICY");
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o111)).unwrap();
+        let result = ProjectRoot::open(&project)
+            .and_then(|root| load_with_sources_from(root.path(), Some(&root), false));
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+        let (merged, _) = result.unwrap();
+        assert!(merged.strict);
+        assert!(merged.deny.contains(GIT_DEPENDENCY));
+    }
+
     #[test]
     fn a_deeper_move_cannot_hide_the_policy_before_restoring_the_project() {
         let temp = crate::kernel::testutil::TempDir::new();

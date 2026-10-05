@@ -649,7 +649,10 @@ impl ProjectRoot {
                 self.path.display()
             ))
         };
-        let now = match walk_from_root(&self.path) {
+        // Only the identity is compared, so the directory is not opened
+        // for reading again: a held ancestor that can be searched but not
+        // listed is still checked (#480).
+        let now = match walk_from_root_with(&self.path, ANCESTOR_FLAGS) {
             Ok(now) => now,
             Err(error) => {
                 return Err(moved(format!(
@@ -843,8 +846,20 @@ impl ProjectRoot {
         // The displayed name can become shallower than the actual directory
         // after a move. Only descriptor identity determines the end of a walk.
         let path = self.path.parent().unwrap_or(Path::new("/"));
-        let dir =
-            open_file_at(self.dir.as_raw_fd(), b"..", DIRECTORY_FLAGS, 0).map_err(|error| {
+        // A parent tog may search but not list (0111) is held the way the
+        // walk to a project holds it: files below it open by name, and
+        // nothing here lists it (#480).
+        let dir = open_file_at(self.dir.as_raw_fd(), b"..", DIRECTORY_FLAGS, 0)
+            .or_else(|error| {
+                if error.kind() == io::ErrorKind::PermissionDenied
+                    && ANCESTOR_FLAGS != DIRECTORY_FLAGS
+                {
+                    open_file_at(self.dir.as_raw_fd(), b"..", ANCESTOR_FLAGS, 0)
+                } else {
+                    Err(error)
+                }
+            })
+            .map_err(|error| {
                 io::Error::new(error.kind(), format!("open {}: {error}", path.display()))
             })?;
         if same_inode(&fd_stat(dir.as_raw_fd())?, &fd_stat(self.dir.as_raw_fd())?) {
@@ -1370,6 +1385,12 @@ fn input_name(relative: &Path) -> io::Result<Vec<u8>> {
 /// O_NOFOLLOW and O_DIRECTORY and checked to be a directory on its
 /// descriptor. Elsewhere every component is opened for reading.
 fn walk_from_root(path: &Path) -> io::Result<fs::File> {
+    walk_from_root_with(path, DIRECTORY_FLAGS)
+}
+
+/// `walk_from_root`, opening the last component with `last_flags`:
+/// `ANCESTOR_FLAGS` for a caller that only identifies the directory.
+fn walk_from_root_with(path: &Path, last_flags: libc::c_int) -> io::Result<fs::File> {
     let components = path
         .components()
         .map(|component| match component {
@@ -1390,7 +1411,7 @@ fn walk_from_root(path: &Path) -> io::Result<fs::File> {
     }
     let root = CString::new("/").expect("no NUL");
     let root_flags = if names.is_empty() {
-        DIRECTORY_FLAGS
+        last_flags
     } else {
         ANCESTOR_FLAGS
     };
@@ -1406,7 +1427,7 @@ fn walk_from_root(path: &Path) -> io::Result<fs::File> {
     for (index, name) in names.iter().enumerate() {
         current.push(name);
         let flags = if index + 1 == names.len() {
-            DIRECTORY_FLAGS
+            last_flags
         } else {
             ANCESTOR_FLAGS
         };
