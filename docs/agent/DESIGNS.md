@@ -3450,7 +3450,7 @@ Node doors, each the flexible option that still fails closed:
   already starts the host git through `PATH`. The shell is required (a
   host without it refuses by name); a host without git gets
   `/nonexistent/git` as the forced git, so registry-only projects still
-  resolve and only a git dependency fails, the refusal naming the missing
+  resolve and only a git dependency fails, the error naming the missing
   git (review round 1). pnpm's forced `--ignore-scripts` became
   `--config.ignore-scripts=true`: PR 0 measured the flag on `install`, and
   `pnpm remove` rejects it; the `--config.` spelling is the one every
@@ -3533,11 +3533,14 @@ Node doors, each the flexible option that still fails closed:
   which a project could commit to opt out of the join; round 3 replaced
   it with the mark, which no project content can forge.
 - **npm keeps its errors.** The resolve-only form passes
-  `--loglevel=error`, not `--silent`: npm's spawn error for the forced
-  git (`npm error syscall spawn /nonexistent/git`) is what names the
-  host's missing git, and `--silent` hid it (review round 3). The log
-  level does not touch the lock; the contract 8 test's direct run uses
-  the same flag.
+  `--loglevel=error`, not `--silent`, so npm's own error (for a missing
+  git, `npm error syscall spawn /nonexistent/git`) reaches the user's
+  terminal (review round 3). The log level does not touch the lock; the
+  contract 8 test's direct run uses the same flag. The missing-git line
+  in tog's error is decided from the host, not by reading npm's words:
+  the edit, missing-lock and `x` runs inherit stderr, so tog never sees
+  them (review round 4). On a host without git, any failed Node run adds
+  that a git dependency is the likely cause.
 - **`tog x` is a detached door.** The cache root is the lock root, the
   accepted `package-lock.json` is written back into it, and the ledger is
   rooted under the cache root (`ledger::root`), so GC keeps it with the

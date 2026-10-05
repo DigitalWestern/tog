@@ -462,6 +462,8 @@ static CACHE_ROOTS: std::sync::Mutex<std::collections::BTreeSet<PathBuf>> =
 
 /// Mark `root` as a `tog x` cache root of this process. It must exist; the
 /// set holds its canonical path, which [`is_cache_root`] compares exactly.
+/// Marks last for the process and are never removed, also after a failed
+/// realization: the path is still that cache root, and tog is one-shot.
 pub fn mark_cache_root(root: &Path) -> io::Result<()> {
     let canonical = fs::canonicalize(root)?;
     CACHE_ROOTS

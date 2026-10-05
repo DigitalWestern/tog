@@ -448,32 +448,37 @@ pub(crate) fn run_node_checked(
     let report = run_node(door, run)?;
     if !report.status.success() {
         let words = confine::scrub_signing_key(String::from_utf8_lossy(&report.stderr).trim());
-        return Err(failure(name, &args, &report.status.to_string(), &words));
+        let git_missing = !Path::new(HOST_GIT).is_file();
+        return Err(failure(
+            name,
+            &args,
+            &report.status.to_string(),
+            &words,
+            git_missing,
+        ));
     }
     Ok(report)
 }
 
-/// The error for a tool that exited nonzero, from its own words. npm's
-/// spawn error for the forced git (`npm error syscall spawn /nonexistent/git`,
-/// shown because the resolve-only form keeps errors) names the path, so
-/// the host's missing git is named; a package merely called
-/// `git-something` is not.
-fn failure(name: &str, args: &str, status: &str, words: &str) -> io::Error {
-    if words.contains(NO_GIT) {
-        return io::Error::new(
-            io::ErrorKind::NotFound,
-            format!(
-                "store {name} {args} failed, and this host has no {HOST_GIT}, which a git \
-                 dependency needs (the door runs the host git for one); install git or \
-                 depend on the package from the registry: {words}"
-            ),
-        );
-    }
-    io::Error::other(if words.is_empty() {
+/// The error for a tool that exited nonzero, from its own words when they
+/// were captured (most runs inherit stderr, so the user has already seen
+/// them and `words` is empty). On a host without git the forced git is
+/// [`NO_GIT`], so the error says that a git dependency is the likely
+/// cause. It is decided from the host, not from the tool's output, which
+/// an inherited run does not return.
+fn failure(name: &str, args: &str, status: &str, words: &str, git_missing: bool) -> io::Error {
+    let mut message = if words.is_empty() {
         format!("store {name} {args} failed ({status}); nothing was synced")
     } else {
         format!("store {name} {args} failed: {words}")
-    })
+    };
+    if git_missing {
+        message.push_str(&format!(
+            "\nthis host has no {HOST_GIT}; if the project has a git dependency, that is why \
+             (install git, or depend on the package from the registry)"
+        ));
+    }
+    io::Error::other(message)
 }
 
 #[cfg(test)]
@@ -497,24 +502,22 @@ mod tests {
             error.contains(HOST_SH) && error.contains("does not have"),
             "{error}"
         );
-        // npm's own spawn error (npm 10 and 11 word it so) names the host's
-        // missing git; a 404 for a package called git-hooks does not.
-        let spawn = "npm error code ENOENT\nnpm error syscall spawn /nonexistent/git\n\
-                     npm error path /p/app\nnpm error errno -2";
-        let hint = failure("npm", "install", "exit status: 1", spawn).to_string();
+        // A failure on a host without git says a git dependency is the
+        // likely cause, whatever the tool printed (most runs inherit stderr,
+        // so tog never sees it); with git it does not.
+        let hint = failure("npm", "install", "exit status: 1", "", true).to_string();
         assert!(hint.contains("this host has no /usr/bin/git"), "{hint}");
-        assert!(hint.contains("spawn /nonexistent/git"), "{hint}");
-        let plain = failure(
-            "npm",
-            "install",
-            "exit status: 1",
-            "npm error 404 git-hooks@1 not found",
-        );
-        assert!(!plain.to_string().contains("this host has no"), "{plain}");
-        let silent = failure("npm", "install", "exit status: 1", "").to_string();
+        assert!(hint.contains("nothing was synced"), "{hint}");
+        let plain = failure("npm", "install", "exit status: 1", "", false).to_string();
+        assert!(!plain.contains("this host has no"), "{plain}");
         assert!(
-            silent.contains("exit status: 1") && silent.contains("nothing was synced"),
-            "{silent}"
+            plain.contains("exit status: 1") && plain.contains("nothing was synced"),
+            "{plain}"
+        );
+        let words = failure("npm", "install", "exit status: 1", "npm error 404", false);
+        assert!(
+            words.to_string().ends_with("failed: npm error 404"),
+            "{words}"
         );
     }
 
