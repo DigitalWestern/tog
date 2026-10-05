@@ -13,8 +13,9 @@
 #     the heavy suite itself). Real toolchain archives carry shapes
 #     no fixture had: #316 was green in ci.yml and broke 15 targets here.
 #   - the PR has the `heavy` label. Adding it starts a run (unless the
-#     files above already started one for this commit), and every later
-#     push to the PR runs again until the label comes off.
+#     files above already woke the suite and that run for this commit is
+#     still queued or going), and every later push to the PR runs again
+#     until the label comes off.
 #     heavy-unlabel.yml takes it off after a green run.
 # A PR that needs neither but edits a test file holding `#[ignore]` tests
 # gets the `changed` job: the ignored tests of just those files, so an
@@ -57,6 +58,9 @@ jobs:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-22.04
     permissions:
+      # actions: read lists this workflow's runs for the head commit
+      # (the `labeled` branch below).
+      actions: read
       pull-requests: read
     outputs:
       run: ${{ steps.decide.outputs.run }}
@@ -69,6 +73,7 @@ jobs:
           ADDED_LABEL: ${{ github.event.label.name }}
           HAS_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'heavy') }}
           PR: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
           # The files whose changes need the heavy suite, as one regex:
@@ -120,23 +125,48 @@ jobs:
               fi
             fi
           }
+          # Says whether another run of this workflow for the head commit
+          # is queued or running. If the API call fails, says no: the
+          # caller then runs, and a missed heavy run is the costlier mistake.
+          other_run_active() {
+            local ids
+            if ! ids=$(gh api --paginate \
+                "repos/$GITHUB_REPOSITORY/actions/workflows/heavy.yml/runs?head_sha=$HEAD_SHA&per_page=100" \
+                --jq ".workflow_runs[] | select(.id != $GITHUB_RUN_ID) | select(.status != \"completed\") | .id"); then
+              echo "::warning::could not list this commit's heavy runs; running the heavy suite"
+              return 1
+            fi
+            [ -n "$ids" ]
+          }
           if [ "$ACTION" = labeled ]; then
             if [ "$ADDED_LABEL" = heavy ]; then
-              # When the files already woke the suite, the push that
-              # brought this commit started it. Running again would
-              # cancel that run (the e2e job's concurrency group) and
-              # restart it on the same commit (#324). Later pushes run it
-              # through HAS_LABEL as usual.
+              # When the files already woke the suite and a run for this
+              # commit is still queued or going, the push that brought the
+              # commit started it. Running again would cancel that run
+              # (the e2e job's concurrency group) and restart it on the
+              # same commit (#324). Otherwise (that run failed, was
+              # cancelled, or is done) adding the label runs it again, as
+              # heavy-unlabel.yml promises. Later pushes run it through
+              # HAS_LABEL as usual.
               by_paths
-              if [ "$listed" = yes ] && [ "$run" = yes ]; then run=no; else run=yes; fi
+              if [ "$listed" = yes ] && [ "$run" = yes ] && other_run_active; then
+                echo "a heavy run for $HEAD_SHA is already queued or running; not starting another"
+                run=no
+              else
+                run=yes
+              fi
               tests=""
             else
               # Some other label was added: nothing about the code changed.
               run=no
             fi
-          elif [ "$HAS_LABEL" = true ]; then
+          elif [ "$HAS_LABEL" = true ] && [ "$ACTION" != opened ]; then
             run=yes
           else
+            # A PR opened with `heavy` already on it also gets a `labeled`
+            # event, and that run starts the suite. Deciding `opened` by
+            # the files alone keeps the two from both running and one
+            # cancelling the other.
             by_paths
           fi
           echo "run=$run tests=$tests"
