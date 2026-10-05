@@ -956,7 +956,9 @@ concurrent sync cannot lose one. Sharp edges:
   home as it keeps its objects, even after the project directory is gone,
   until `--forget` gives it up. It also removes the store records tog keeps
   about one project (the last passing `mix deps.get --check-locked`) once
-  that project's directory is gone.
+  that project's directory is gone. Such a record is only a cache: a project
+  that comes back (a drive mounted again) pays one more registry check on
+  its next sync, and nothing else.
 - `--reset` empties the store and starts it again in the current format. It
   is the fix for a store this tog refuses to open: one written before the
   format marker existed, or one whose marker it does not know or cannot

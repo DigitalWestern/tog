@@ -488,8 +488,9 @@ fn plan_projections(
         });
     }
     // A project record is a cache of work tog did in that project (a
-    // passing `mix deps.get --check-locked`): once the project is gone it
-    // can never match again.
+    // passing `mix deps.get --check-locked`), so removing it loses nothing
+    // tog cannot redo: a project that comes back (a drive mounted again, a
+    // directory restored) pays one more registry check and is recorded anew.
     for entry in &snapshot.orphan_records {
         let bytes = file_size_of(&entry.stat);
         removals.push(Removal {
