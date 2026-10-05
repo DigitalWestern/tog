@@ -398,11 +398,20 @@ fn starts_with_elf_magic(path: &Path) -> bool {
 /// thousands of library entries under bubblewrap's argument limit
 /// (`sandbox::BWRAP_MAX_ARGS`). Built fresh for every run under the
 /// temporary directory and deleted when dropped.
-pub(crate) struct ViewSkeleton(PathBuf);
+pub(crate) struct ViewSkeleton {
+    path: PathBuf,
+    /// The exclusive `flock` on `SKELETON_LOCK` that marks this skeleton
+    /// live for as long as it exists (`sweep_stale_skeletons`). It is
+    /// close-on-exec, as std opens every file: the skeleton lives exactly
+    /// as long as this tog, whose `Drop` removes it, so a sandboxed child
+    /// (or a daemon it left behind) must not keep it marked live after tog
+    /// is gone. `None` only where the filesystem has no `flock`.
+    _lock: Option<fs::File>,
+}
 
 impl ViewSkeleton {
     pub(crate) fn path(&self) -> &Path {
-        &self.0
+        &self.path
     }
 
     /// The root is private (mode 0700, whatever the umask) and its name
@@ -433,8 +442,9 @@ impl ViewSkeleton {
                     // The umask can only narrow the mode `create` asked
                     // for; under `umask 077`-and-stricter it could leave a
                     // root bubblewrap cannot traverse. Set it outright.
-                    let skeleton = Self(path);
+                    let mut skeleton = Self { path, _lock: None };
                     fs::set_permissions(skeleton.path(), fs::Permissions::from_mode(0o700))?;
+                    skeleton._lock = lock_skeleton(skeleton.path())?;
                     return Ok(skeleton);
                 }
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
@@ -451,26 +461,60 @@ impl ViewSkeleton {
 
 impl Drop for ViewSkeleton {
     fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
+        // The lock field drops after this, so the skeleton stays marked
+        // live until it is gone.
+        let _ = fs::remove_dir_all(&self.path);
     }
+}
+
+/// Create a fresh skeleton's lock file and take its exclusive `flock`. A
+/// filesystem with no `flock` leaves the skeleton unlocked: the lock file
+/// it still has keeps every sweep away from it, as no sweep can lock it
+/// either, and a leftover is inert where a refused build is not.
+fn lock_skeleton(root: &Path) -> io::Result<Option<fs::File>> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let path = root.join(SKELETON_LOCK);
+    let file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)
+        .map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!(
+                    "create the sandbox host view lock {}: {error}",
+                    path.display()
+                ),
+            )
+        })?;
+    Ok(file.try_lock().is_ok().then_some(file))
 }
 
 /// Every skeleton's name: this prefix, the creating tog's pid, a dash, and a
 /// 16-hex-digit nonce.
 const SKELETON_PREFIX: &str = "tog-host-view-";
 
+/// The file in a skeleton's root its tog holds an exclusive `flock` on for
+/// the skeleton's whole life. The view mounts only the curated directories
+/// under the root, so the build never sees it.
+const SKELETON_LOCK: &str = ".lock";
+
 /// How long a skeleton whose tog is gone is left alone before a later run
 /// removes it. The pid check alone would do on one machine, but a tog in
 /// another pid namespace sharing this TMPDIR (a container) has a pid that
-/// means nothing here; a day is far longer than any build.
+/// means nothing here. Its skeleton's lock (`SKELETON_LOCK`) is what keeps
+/// a long build's view in place; the age covers a skeleton an older tog
+/// made without one, and the moment before a new one takes its lock.
 const STALE_SKELETON_AGE: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
 
 /// Remove the skeletons a killed tog left in `base` (issue #335): `Drop`
 /// never ran for a SIGKILL. Only a real directory this user owns, named
-/// like a skeleton, whose tog is no longer running and which has not
-/// changed for `STALE_SKELETON_AGE` is removed. Anything else, and any
-/// failure, is left as it is: a leftover is inert, so the sweep never
-/// stops a build.
+/// like a skeleton, whose tog is no longer running, which has not changed
+/// for `STALE_SKELETON_AGE`, and whose lock no one holds is removed; one
+/// with no lock file, made by an older tog, is judged by the rest alone.
+/// Anything else, and any failure, is left as it is: a leftover is inert,
+/// so the sweep never stops a build.
 fn sweep_stale_skeletons(base: &Path) {
     use std::os::unix::fs::MetadataExt as _;
     let Ok(entries) = fs::read_dir(base) else {
@@ -494,9 +538,35 @@ fn sweep_stale_skeletons(base: &Path) {
             .ok()
             .and_then(|modified| modified.elapsed().ok())
             .is_some_and(|age| age >= STALE_SKELETON_AGE);
-        if metadata.is_dir() && metadata.uid() == uid && stale {
-            let _ = fs::remove_dir_all(&path);
+        if !(metadata.is_dir() && metadata.uid() == uid && stale) {
+            continue;
         }
+        // Held while the tree goes, so its owner cannot be mid-setup.
+        let Ok(_lock) = skeleton_unlocked(&path) else {
+            continue;
+        };
+        let _ = fs::remove_dir_all(&path);
+    }
+}
+
+/// The skeleton's lock taken without waiting, `None` for a skeleton with
+/// no lock file, or an error while its tog still holds it (or it cannot be
+/// read). The lock file is opened without following a symlink.
+fn skeleton_unlocked(root: &Path) -> io::Result<Option<fs::File>> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let file = match fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(root.join(SKELETON_LOCK))
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    match file.try_lock() {
+        Ok(()) => Ok(Some(file)),
+        Err(fs::TryLockError::WouldBlock) => Err(io::ErrorKind::WouldBlock.into()),
+        Err(fs::TryLockError::Error(error)) => Err(error),
     }
 }
 
@@ -1282,9 +1352,45 @@ mod tests {
         fs::File::open(path).unwrap().set_modified(then).unwrap();
     }
 
+    /// Age a symlink itself, not what it points at.
+    fn age_link(path: &Path, seconds: u64) {
+        use std::os::unix::ffi::OsStrExt as _;
+        let path = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+        let then = std::time::SystemTime::now() - std::time::Duration::from_secs(seconds);
+        let then = then
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let time = libc::timespec {
+            tv_sec: then.try_into().unwrap(),
+            tv_nsec: 0,
+        };
+        // SAFETY: `path` is a NUL-terminated string and `times` points at
+        // two initialised timespecs, which is what utimensat reads.
+        let result = unsafe {
+            libc::utimensat(
+                libc::AT_FDCWD,
+                path.as_ptr(),
+                [time, time].as_ptr(),
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        };
+        assert_eq!(result, 0, "{}", io::Error::last_os_error());
+    }
+
+    /// A child process that runs until the guard is dropped.
+    struct Running(std::process::Child);
+
+    impl Drop for Running {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
     /// A skeleton a killed tog left is removed by a later run once it is a
     /// day old; one whose tog still runs, a fresh one, anything not named
-    /// like a skeleton, and a symlink are all left (#335).
+    /// like a skeleton, and a symlink, all a day old, are left (#335).
     #[test]
     fn stale_skeletons_of_gone_runs_are_swept() {
         let temp = temp_dir("skeleton-sweep");
@@ -1305,22 +1411,82 @@ mod tests {
             &format!("{SKELETON_PREFIX}{}-{nonce}", std::process::id()),
             2 * 86_400,
         );
+        // Another live process, which only `process_exists` can tell.
+        let other_tog = Running(
+            std::process::Command::new("sleep")
+                .arg("600")
+                .spawn()
+                .unwrap(),
+        );
+        let other_running = make(
+            &format!("{SKELETON_PREFIX}{}-{nonce}", other_tog.0.id()),
+            2 * 86_400,
+        );
         let other = make(&format!("{SKELETON_PREFIX}{dead}-short"), 2 * 86_400);
         let unrelated = make("tog-something-else", 2 * 86_400);
         let target = make("target", 2 * 86_400);
         let link = base.join(format!("{SKELETON_PREFIX}{dead}-{}", "a".repeat(16)));
         std::os::unix::fs::symlink(&target, &link).unwrap();
+        // Only the `is_dir` check can keep the link: it is as old as the rest.
+        age_link(&link, 2 * 86_400);
 
         sweep_stale_skeletons(base);
 
         assert!(!stale.exists(), "the stale skeleton was kept");
-        for kept in [&fresh, &running, &other, &unrelated, &target] {
+        for kept in [
+            &fresh,
+            &running,
+            &other_running,
+            &other,
+            &unrelated,
+            &target,
+        ] {
             assert!(kept.join("usr/placeholder").exists(), "{}", kept.display());
         }
         assert!(fs::symlink_metadata(&link)
             .unwrap()
             .file_type()
             .is_symlink());
+    }
+
+    /// A tog in another pid namespace looks dead from here, and a build can
+    /// outlast a day: its skeleton is kept while its lock is held, and
+    /// swept once it is released.
+    #[test]
+    fn a_locked_skeleton_is_kept_until_its_lock_is_released() {
+        let temp = temp_dir("skeleton-sweep-locked");
+        let base = temp.0.as_path();
+        let path = base.join(format!("{SKELETON_PREFIX}{}-0123456789abcdef", dead_pid()));
+        fs::create_dir(&path).unwrap();
+        fs::create_dir(path.join("usr")).unwrap();
+        let held = lock_skeleton(&path).unwrap().expect("the lock was taken");
+        age(&path, 2 * 86_400);
+
+        sweep_stale_skeletons(base);
+        assert!(path.join("usr").is_dir(), "a locked skeleton was swept");
+
+        drop(held);
+        // Another test thread may be between `fork` and `exec` right now,
+        // and its child holds a copy of the lock's descriptor until the
+        // `exec` closes it: the lock is released a moment after the drop.
+        for _ in 0..200 {
+            sweep_stale_skeletons(base);
+            if !path.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(!path.exists(), "an unlocked stale skeleton was kept");
+    }
+
+    /// A skeleton holds its own lock until it is dropped.
+    #[test]
+    fn a_skeleton_holds_its_lock() {
+        let skeleton = ViewSkeleton::create().unwrap();
+        assert!(matches!(
+            skeleton_unlocked(skeleton.path()),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock
+        ));
     }
 
     #[test]

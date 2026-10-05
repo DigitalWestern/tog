@@ -104,8 +104,9 @@ the program's status through. Which files tog reads per ecosystem:
   and a failure is one JSON object on stderr: `{"error":"<message>"}`.
   That holds for every failure the command itself reports, whatever its
   exit status: `audit --json` still exits 2 for a misconfigured gate (an
-  unreadable `--policy` file, or `--signed` with no trusted set at machine
-  scope), so CI can tell an operator mistake from a denied build, and
+  unreadable `--policy` file, `--signed` with no trusted set at machine
+  scope, or a plain audit under CI with none and no `--allow-unsigned`),
+  so CI can tell an operator mistake from a denied build, and
   still writes the JSON object rather than prose. Only an argv error is exempt — it is prose at
   exit 2, because argv was wrong before the command that promised JSON
   ever started. `status`, `ls`, `audit`, `doctor` and `plan` take
@@ -546,8 +547,9 @@ build in a project with no `tog-toolchain.toml` yet when another
 ecosystem's version request is one no catalog serves (a Python pin no
 release carries stops `tog build cargo`): creating the lock selects every
 ecosystem, the lock is never written with sections missing, and the error
-names the ecosystem to fix. Once the lock exists, only a stale section or a
-malformed request outside the built ecosystem blocks a build. The build
+names the ecosystem to fix. Once the lock exists, a missing, stale, or
+invalid lock section, or a malformed request outside the built ecosystem,
+still blocks a build. The build
 itself never writes one. CI that must not write a lock runs `tog --frozen`
 before it, and the check then finds nothing to do — or goes one step in a
 single command, `tog --frozen build`, whose implicit sync runs frozen.
@@ -764,7 +766,8 @@ change the grammar. Strictness-only sources omit the path. Policy lines
 come first, then verdict lines, then `missing` lines, and `--quiet` leaves
 them in place. Exit 0 when every closure is clean and none is missing, 1
 otherwise, 2 when the gate is misconfigured (an unreadable `--policy` file,
-or `--signed` without trusted keys). A company deny list to start
+`--signed` without trusted keys, or a plain audit under CI without trusted
+keys and without `--allow-unsigned`). A company deny list to start
 from ships as [policy-company.toml](policy-company.toml); every kind it
 names is checked against the binary's kind list by a unit test. Exception
 kind names use one separator, the hyphen (`weak-integrity`,
@@ -786,8 +789,9 @@ either position); the filter word is one of
 **plan** prints what a sync would realize, one JSON document per ecosystem.
 **sbom** emits CycloneDX 1.5 to stdout or `-o <file>`. **doctor** checks
 this build against the newest release (the first row, `warn` with `run 'tog
-update --self'` when one is newer, `ok` with `not checked` when the manifest
-is unreachable: offline is not unhealthy), then platform, store, sandbox,
+update --self'` when one is newer, `ok` with `no build for this machine`
+when the newer one has nothing for this host, `ok` with `not checked` when
+the manifest is unreachable: offline is not unhealthy), then platform, store, sandbox,
 host C toolchain, and realized toolchains, each line `ok`/`warn`/`fail`
 (lowercase, in text and in JSON) with the fix; exit 1 on any fail. It does
 not wait for a store another Tog job (a `gc`, a sync) is using: the store
@@ -967,7 +971,9 @@ concurrent sync cannot lose one. Sharp edges:
   home as it keeps its objects, even after the project directory is gone,
   until `--forget` gives it up. It also removes the store records tog keeps
   about one project (the last passing `mix deps.get --check-locked`) once
-  that project's directory is gone.
+  that project's directory is gone. Such a record is only a cache: a project
+  that comes back (a drive mounted again) pays one more registry check on
+  its next sync, and nothing else.
 - `--reset` empties the store and starts it again in the current format. It
   is the fix for a store this tog refuses to open: one written before the
   format marker existed, or one whose marker it does not know or cannot

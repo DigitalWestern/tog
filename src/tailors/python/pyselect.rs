@@ -8,7 +8,8 @@
 use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::platform::Platform;
 use crate::kernel::provider::cpython::default_version;
-use crate::tailors::python::{canonical_release_len, pythons, PinnedPython};
+use crate::kernel::toolchain::input::{python_version_line, PythonVersionRefusal};
+use crate::tailors::python::{pythons, PinnedPython};
 use std::collections::BTreeMap;
 use std::io;
 use std::path::Path;
@@ -538,43 +539,23 @@ pub fn parse_python_version_file(text: &str, source: &str) -> io::Result<Explici
                 format!("{source}: .python-version has no CPython version"),
             )
         })?;
-    let lower = line.to_ascii_lowercase();
-    if lower.contains("pypy")
-        || lower.contains("miniconda")
-        || lower == "system"
-        || lower.contains("-dev")
-        || lower.ends_with('t')
-        || lower.contains("free-thread")
-        || lower.contains("freethread")
-    {
-        return Err(io::Error::new(
+    let version = python_version_line(line).map_err(|refusal| match refusal {
+        PythonVersionRefusal::Unsupported => io::Error::new(
             io::ErrorKind::Unsupported,
             format!("{source}: unsupported Python interpreter request `{line}`"),
-        ));
-    }
-    let numeric = line
-        .strip_prefix("python")
-        .or_else(|| line.strip_prefix("Python"))
-        .or_else(|| line.strip_prefix("cpython-"))
-        .or_else(|| line.strip_prefix("cpython@"))
-        .or_else(|| line.strip_prefix("CPython-"))
-        .or_else(|| line.strip_prefix("CPython@"))
-        .unwrap_or(line);
-    if canonical_release_len(numeric).is_none() {
-        return Err(io::Error::new(
+        ),
+        PythonVersionRefusal::Invalid(why) => io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("{source}: invalid .python-version request `{line}`"),
-        ));
-    }
+            match why {
+                Some(why) => format!("{source}: invalid .python-version request `{line}`: {why}"),
+                None => format!("{source}: invalid .python-version request `{line}`"),
+            },
+        ),
+    })?;
     Ok(ExplicitPython {
         raw: line.to_string(),
         source: source.to_string(),
-        version: crate::kernel::pep440::Version::parse(numeric).map_err(|why| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("{source}: invalid .python-version request `{line}`: {why}"),
-            )
-        })?,
+        version,
     })
 }
 
@@ -991,6 +972,52 @@ mod tests {
         for text in ["03.11", "3.11.016"] {
             let error = parse_python_version_file(text, ".python-version").unwrap_err();
             assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{text}");
+        }
+    }
+
+    /// The toolchain lock and interpreter selection read `.python-version`
+    /// through one parser, so a line one accepts the other never refuses
+    /// (#479): `tog update --toolchain` must not lock what the sync refuses.
+    #[test]
+    fn python_version_lock_and_selection_agree() {
+        use crate::kernel::toolchain::input::{read_python_version, InputRow};
+        for line in [
+            "3.12",
+            "3.12.4",
+            "python3.12",
+            "Python3.12",
+            "CPYTHON-3.12",
+            "cpython@3.12.4",
+            "3.12.*",
+            ">=3.11",
+            ">3.11",
+            "<=3.13",
+            "^3.9",
+            "~=3.11.2",
+            "3.11 || 3.12",
+            "3.12 3.13",
+            "3.12rc1",
+            "3.12.4+abc",
+            "03.12",
+            "3",
+            "*",
+            "system",
+            "pypy3.10",
+            "graalpy-24",
+            "3.13t",
+            "3.13-dev",
+            "python",
+        ] {
+            let selected = parse_python_version_file(line, ".python-version");
+            let row = InputRow {
+                path: ".python-version".into(),
+                field: "version".to_string(),
+                value: read_python_version(line.as_bytes()),
+                absent: false,
+                sha256: Some("a".repeat(64)),
+            };
+            let locked = crate::kernel::toolchain::resolve::request_for("python", &[row]);
+            assert_eq!(selected.is_ok(), locked.is_ok(), "{line}");
         }
     }
 

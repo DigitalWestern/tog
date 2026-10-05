@@ -67,7 +67,13 @@ pub fn check_lock_freshness(project: &ProjectRoot, plan: &NpmPlan) -> io::Result
         ),
         "pnpm-lock.yaml" => {
             let lock = inputs::read_input(project, PNPM.lock)?;
-            pnpm_members(&lock, &lock_import::pnpm_workspace_members(project)?)?;
+            match lock_import::pnpm_workspace_members(project)? {
+                Some(members) => pnpm_members(&lock, &members)?,
+                None => crate::kernel::ui::note(
+                    "pnpm-workspace.yaml: packages is not a list tog can read; \
+                     not checking pnpm-lock.yaml for members added since it was generated",
+                ),
+            }
             pnpm(&lock, &read_manifests(project, &plan.workspaces)?)
         }
         // plan_yarn resolves every manifest's dependencies through the
@@ -594,7 +600,11 @@ dependencies:
             std::fs::write(dir.join(member).join("package.json"), "{}").unwrap();
         }
         let project = ProjectRoot::open(dir).unwrap();
-        let members = || lock_import::pnpm_workspace_members(&project).unwrap();
+        let members = || {
+            lock_import::pnpm_workspace_members(&project)
+                .unwrap()
+                .unwrap()
+        };
         assert!(members().is_empty(), "no workspace file is one project");
         std::fs::write(
             dir.join("pnpm-workspace.yaml"),
@@ -614,5 +624,46 @@ dependencies:
         assert!(error.to_string().contains("escapes the project"), "{error}");
         std::fs::write(dir.join("pnpm-workspace.yaml"), "catalog:\n  a: ^1.0.0\n").unwrap();
         assert!(members().is_empty(), "settings alone name no members");
+    }
+
+    #[test]
+    fn the_pnpm_freshness_check_refuses_a_new_member_and_skips_an_unread_packages_value() {
+        let scratch = crate::kernel::testutil::TempDir::named("pnpm-fresh-members");
+        let dir = &scratch.0;
+        for member in ["packages/lib", "packages/new"] {
+            std::fs::create_dir_all(dir.join(member)).unwrap();
+            std::fs::write(dir.join(member).join("package.json"), "{}").unwrap();
+        }
+        std::fs::write(dir.join("package.json"), "{}").unwrap();
+        std::fs::write(
+            dir.join("pnpm-lock.yaml"),
+            "lockfileVersion: '9.0'\nimporters:\n  .: {}\n  packages/lib: {}\n",
+        )
+        .unwrap();
+        let plan = NpmPlan {
+            node_version: "22.0.0".into(),
+            packages: Vec::new(),
+            links: Vec::new(),
+            workspaces: vec!["packages/lib".into()],
+            lock_source: "pnpm-lock.yaml".into(),
+        };
+        let project = ProjectRoot::open(dir).unwrap();
+        let check = || check_lock_freshness(&project, &plan);
+        check().unwrap();
+        std::fs::write(
+            dir.join("pnpm-workspace.yaml"),
+            "packages:\n- packages/*\ncatalog: &shared\n  a: ^1\n",
+        )
+        .unwrap();
+        assert_eq!(
+            message(check()),
+            "packages/new/package.json is a pnpm workspace member but pnpm-lock.yaml has no importer for it; regenerate the lock (pnpm install --lockfile-only)"
+        );
+        std::fs::write(
+            dir.join("pnpm-workspace.yaml"),
+            "packages: &all\n  - packages/*\n",
+        )
+        .unwrap();
+        check().unwrap();
     }
 }

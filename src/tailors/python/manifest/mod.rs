@@ -285,6 +285,26 @@ pub(crate) fn read_project_file(project: &ProjectRoot, path: &Path) -> io::Resul
     }
 }
 
+/// The host kernel a `uv.lock` marker was evaluated against, or `None`
+/// when the project's `uv.lock` names no kernel marker (`platform_release`,
+/// `platform_version`). Those two change with the running kernel and no
+/// project file changes with them, so the closure records this beside its
+/// inputs and `tog status` compares it. The check is on the lock's text,
+/// so a lock that only mentions a name elsewhere is recorded too: one
+/// re-sync after a kernel update, never a stale environment.
+pub(crate) fn kernel_marker_record(project: &ProjectRoot) -> io::Result<Option<serde_json::Value>> {
+    let Some(lock) = project.read_input(Path::new("uv.lock")).ok().flatten() else {
+        return Ok(None);
+    };
+    if !markers::names_kernel_marker(&String::from_utf8_lossy(&lock)) {
+        return Ok(None);
+    }
+    let (release, version) = markers::host_kernel()?;
+    Ok(Some(
+        serde_json::json!({"release": release, "version": version}),
+    ))
+}
+
 /// `path.is_file()`, resolved like `read_project_file`.
 pub(crate) fn is_project_file(project: &ProjectRoot, path: &Path) -> bool {
     match project.relative(path) {
@@ -667,6 +687,15 @@ source = { registry = "https://pypi.org/simple" }
             (
                 "dependencies = [{ version = \"1\" }]\n",
                 "uv.lock six.dependencies has an unreadable entry: { version = \"1\" }",
+            ),
+            // A field of the wrong type is refused too, not read as absent.
+            (
+                "dependencies = [{ name = \"requests\", extra = \"socks\" }]\n",
+                "uv.lock six.dependencies has an unreadable entry: { extra = \"socks\", name = \"requests\" }",
+            ),
+            (
+                "dependencies = [{ name = \"requests\", marker = 1 }]\n",
+                "uv.lock six.dependencies has an unreadable entry: { marker = 1, name = \"requests\" }",
             ),
             (
                 "optional-dependencies = { socks = \"pysocks\" }\n",
@@ -2006,6 +2035,10 @@ files = [{ file = "old.whl", hash = "sha256:dddddddddddddddddddddddddddddddddddd
             "https://pypi.org.internal.example/simple",
             "https://mirror.example/://pypi.org/simple",
             "https://evilpypi.org/simple",
+            // The right host over the wrong scheme or port is not PyPI.
+            "http://pypi.org/simple",
+            "https://pypi.org:8443/simple",
+            "file://pypi.org/simple",
             "not a url",
         ] {
             assert!(!uv::is_public_pypi_url(url), "{url}");
@@ -2187,6 +2220,28 @@ files = [{ file = "old.whl", hash = "sha256:dddddddddddddddddddddddddddddddddddd
         fs::remove_file(dir.0.join(".claude/skill")).unwrap();
         std::os::unix::fs::symlink("../skills/b", dir.0.join(".claude/skill")).unwrap();
         assert_ne!(first, hash());
+    }
+
+    #[test]
+    fn setup_hash_tracks_contents_of_a_symlinked_input_file() {
+        let dir = temp_project("setup-file-symlink");
+        let outside = temp_project("setup-file-target");
+        let target = outside.0.join("requirements-data.txt");
+        fs::write(&target, "six==1.16.0\n").unwrap();
+        fs::write(
+            dir.0.join("setup.py"),
+            "from setuptools import setup\nsetup()\n",
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(&target, dir.0.join("requirements-data.txt")).unwrap();
+        let hash = || setup_tree_hash(&ProjectRoot::open(&dir.0).unwrap()).unwrap();
+        let first = hash();
+        fs::write(&target, "six==1.17.0\n").unwrap();
+        assert_ne!(
+            first,
+            hash(),
+            "cached metadata must notice changed file inputs"
+        );
     }
 
     #[test]

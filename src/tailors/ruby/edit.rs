@@ -20,7 +20,12 @@ pub(crate) fn registry_exists(name: &str) -> io::Result<Option<String>> {
     })
 }
 
-/// The Bundler commands one edit runs, in order. Resolution only ever
+/// Bundler's CLI remove unconditionally installs in the shipped release.
+/// Use only its Gemfile editor, then re-lock in a separate delegated run.
+pub(crate) const REMOVE_GEMS: &str =
+    "abort 'no gems requested' if ARGV.empty?; Bundler::Injector.remove(ARGV)";
+
+/// The Ruby and Bundler commands one edit runs, in order. Resolution only ever
 /// writes the Gemfile and Gemfile.lock: `bundle add` and `bundle update`
 /// would also install every gem they resolve into the host's gem paths
 /// (#211), so `add` skips the install and an update is `bundle lock
@@ -42,9 +47,16 @@ fn bundler_runs(verb: EditVerb, texts: &[String], dev: bool) -> Vec<Vec<&str>> {
             })
             .collect(),
         EditVerb::Remove => {
-            let mut args = vec!["bundle", "remove"];
+            let mut args = vec![
+                "ruby",
+                "-rbundler",
+                "-rbundler/injector",
+                "-e",
+                REMOVE_GEMS,
+                "--",
+            ];
             args.extend(texts.iter().map(String::as_str));
-            vec![args]
+            vec![args, vec!["bundle", "lock"]]
         }
         EditVerb::Update => {
             // Bare `bundle lock --update` re-resolves every gem.
@@ -126,7 +138,18 @@ mod tests {
         );
         assert_eq!(
             bundler_runs(EditVerb::Remove, &named, false),
-            [vec!["bundle", "remove", "rack"]]
+            [
+                vec![
+                    "ruby",
+                    "-rbundler",
+                    "-rbundler/injector",
+                    "-e",
+                    REMOVE_GEMS,
+                    "--",
+                    "rack"
+                ],
+                vec!["bundle", "lock"],
+            ]
         );
     }
 }
