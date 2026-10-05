@@ -77,13 +77,22 @@ pub(super) fn identity_id(
 }
 
 /// The environment a native gem's build gets with the set at `set`
-/// mounted: pkg-config sees only the set, and gcc searches its headers and
-/// libraries before the C runtime's.
-pub(super) fn build_env(set: &Path) -> Vec<(String, String)> {
+/// mounted, for an attempt with `host_view`. gcc searches the set's
+/// headers and libraries before the system's in either view (`CPATH` and
+/// `LIBRARY_PATH` come ahead of the default directories). pkg-config
+/// differs: the runtime-only attempt sees only the set
+/// (`PKG_CONFIG_LIBDIR` replaces the default search path), so nothing
+/// else can answer. The whole-host fallback still searches the set first
+/// (`PKG_CONFIG_PATH`) but keeps pkg-config's default directories after
+/// it, so a library the set lacks (ImageMagick for rmagick, say) is found
+/// in the host's `.pc` files, which is what the fallback exists for.
+pub(super) fn build_env(set: &Path, host_view: HostView) -> Vec<(String, String)> {
     let pkgconfig = set.join("lib/pkgconfig").display().to_string();
-    vec![
-        ("PKG_CONFIG_PATH".to_string(), pkgconfig.clone()),
-        ("PKG_CONFIG_LIBDIR".to_string(), pkgconfig),
+    let mut env = vec![("PKG_CONFIG_PATH".to_string(), pkgconfig.clone())];
+    if host_view == HostView::RuntimeOnly {
+        env.push(("PKG_CONFIG_LIBDIR".to_string(), pkgconfig));
+    }
+    env.extend([
         (
             "CPATH".to_string(),
             set.join("include").display().to_string(),
@@ -92,5 +101,38 @@ pub(super) fn build_env(set: &Path) -> Vec<(String, String)> {
             "LIBRARY_PATH".to_string(),
             set.join("lib").display().to_string(),
         ),
-    ]
+    ]);
+    env
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lookup<'a>(env: &'a [(String, String)], key: &str) -> Option<&'a str> {
+        env.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
+    }
+
+    /// The runtime-only attempt's pkg-config sees only the set; the
+    /// whole-host fallback searches the set first and then the host's own
+    /// `.pc` directories, so a library the set lacks is still found there.
+    #[test]
+    fn each_attempt_gets_its_own_pkg_config_search() {
+        let set = Path::new("/store/set");
+        let runtime_only = build_env(set, HostView::RuntimeOnly);
+        let full = build_env(set, HostView::Full);
+        for env in [&runtime_only, &full] {
+            assert_eq!(
+                lookup(env, "PKG_CONFIG_PATH"),
+                Some("/store/set/lib/pkgconfig")
+            );
+            assert_eq!(lookup(env, "CPATH"), Some("/store/set/include"));
+            assert_eq!(lookup(env, "LIBRARY_PATH"), Some("/store/set/lib"));
+        }
+        assert_eq!(
+            lookup(&runtime_only, "PKG_CONFIG_LIBDIR"),
+            Some("/store/set/lib/pkgconfig")
+        );
+        assert_eq!(lookup(&full, "PKG_CONFIG_LIBDIR"), None, "{full:?}");
+    }
 }

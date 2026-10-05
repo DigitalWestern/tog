@@ -105,7 +105,7 @@ impl GemInstall<'_> {
             let mut read = vec![ruby_obj.to_path_buf(), scratch.to_path_buf()];
             if let Some(set) = native_libs {
                 argv.push(set.display().to_string());
-                env.extend(super::native_libs::build_env(set));
+                env.extend(super::native_libs::build_env(set, host_view));
                 read.push(set.to_path_buf());
             }
             let spec = BuildSpec {
