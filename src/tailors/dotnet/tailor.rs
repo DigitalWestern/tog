@@ -185,7 +185,7 @@ impl Tailor for Dotnet {
         let dir = project.path();
         let activity = &ctx.activity;
         let mut prefix = Vec::new();
-        if comforter::has_closure(project, "dotnet") {
+        if comforter::has_closure(project, "dotnet")? {
             // This prevents accidental unsandboxed builds, not deliberate bypasses
             // through wrappers such as `sh -c`; during realization and build,
             // tog never evaluates project code outside its sandbox. Missing-lock

@@ -498,8 +498,11 @@ def node_shasums(version, keyring, pins):
              if line.startswith("[GNUPG:] VALIDSIG ")]
     if result.returncode != 0 or not valid:
         raise Failure(f"node {version}: SHASUMS256.txt signature does not verify:\n{result.stderr}")
-    if valid[0][-1] not in pins:
-        raise Failure(f"node {version}: SHASUMS256.txt is signed by {valid[0][-1]}, "
+    # gpgv exits 0 only when every signature verifies, so any one of them
+    # chaining to a pinned releaser is enough.
+    signers = [line[-1] for line in valid]
+    if not any(signer in pins for signer in signers):
+        raise Failure(f"node {version}: SHASUMS256.txt is signed by {', '.join(signers)}, "
                       f"which is not a releaser pinned in {os.path.relpath(NODE_RELEASERS, REPO)}")
     return {name: digest for digest, name in checksum_lines(f"node {version}: SHASUMS256.txt", text.decode())}
 
@@ -1147,8 +1150,9 @@ def rust_verify(version, manifest, signature, keyring):
     if result.returncode != 0 or not valid:
         raise Failure(f"rust {version}: channel-rust-{version}.toml signature does not verify "
                       f"against the Rust release key:\n{result.stderr.strip()}")
-    if valid[0][-1] != RUST_FINGERPRINT:
-        raise Failure(f"rust {version}: channel-rust-{version}.toml is signed by {valid[0][-1]}, "
+    signers = [line[-1] for line in valid]
+    if RUST_FINGERPRINT not in signers:
+        raise Failure(f"rust {version}: channel-rust-{version}.toml is signed by {', '.join(signers)}, "
                       f"not the Rust release key {RUST_FINGERPRINT}")
 
 

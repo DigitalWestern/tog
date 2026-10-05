@@ -190,14 +190,19 @@ pub(super) fn import_absolute_reference(
                 // (an interpreter's path): it protected that object then,
                 // so the import keeps the object it points into rather
                 // than dropping the reference (#355).
-                let inside = path.starts_with(&root);
+                // A path that climbs with `..` names no one object: it is
+                // refused in its own words and never kept.
+                let traversal = components.contains(&std::path::Component::ParentDir);
+                let inside = !traversal && path.starts_with(&root);
                 if inside && mode == ImportMode::DropUnresolvable {
                     if unresolvable(validate_object_reference(store, id, &root), mode)? {
                         record.objects.insert(id.into());
                     }
                     return Ok(());
                 }
-                let message = if inside {
+                let message = if traversal {
+                    format!("closure object reference {path:?} contains parent-directory traversal")
+                } else if inside {
                     format!(
                         "closure object reference {path:?} is inside object {id}, not \
                          an object root or a projection"
