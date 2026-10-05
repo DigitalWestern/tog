@@ -23,6 +23,7 @@ pub mod freshness;
 pub mod inputs;
 pub mod lock_import;
 pub mod objects;
+pub mod registry;
 pub mod registry_tool;
 pub mod run_refusal;
 pub mod tailor;
