@@ -61,12 +61,6 @@ None open.
 - **A shared system store at `/opt/tog/store`: review, then build (#69).**
   The design is DESIGNS.md §7 (2026-10-05). Next: an independent review
   round, then its four implementation PRs in order.
-- **An offline fixture where a sync succeeds (#147).** Every green-sync
-  test downloads a toolchain and is ignored, so anything that runs after a
-  successful sync is verified by hand. The bare-`tog` footer decision is now
-  a unit-tested function (`cli::after_command`); the end-to-end path is not.
-  That includes `tog build` syncing a stale ecosystem first; the
-  ignored e2e suites could drop their explicit `sync` step to cover it.
 
 - **Resolution proxy PR 5 review leftovers (#428).** One checklist issue
   per theme:
