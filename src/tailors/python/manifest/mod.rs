@@ -668,6 +668,15 @@ source = { registry = "https://pypi.org/simple" }
                 "dependencies = [{ version = \"1\" }]\n",
                 "uv.lock six.dependencies has an unreadable entry: { version = \"1\" }",
             ),
+            // A field of the wrong type is refused too, not read as absent.
+            (
+                "dependencies = [{ name = \"requests\", extra = \"socks\" }]\n",
+                "uv.lock six.dependencies has an unreadable entry: { extra = \"socks\", name = \"requests\" }",
+            ),
+            (
+                "dependencies = [{ name = \"requests\", marker = 1 }]\n",
+                "uv.lock six.dependencies has an unreadable entry: { marker = 1, name = \"requests\" }",
+            ),
             (
                 "optional-dependencies = { socks = \"pysocks\" }\n",
                 "uv.lock six.optional-dependencies.socks is not an array",
@@ -2006,6 +2015,10 @@ files = [{ file = "old.whl", hash = "sha256:dddddddddddddddddddddddddddddddddddd
             "https://pypi.org.internal.example/simple",
             "https://mirror.example/://pypi.org/simple",
             "https://evilpypi.org/simple",
+            // The right host over the wrong scheme or port is not PyPI.
+            "http://pypi.org/simple",
+            "https://pypi.org:8443/simple",
+            "file://pypi.org/simple",
             "not a url",
         ] {
             assert!(!uv::is_public_pypi_url(url), "{url}");
