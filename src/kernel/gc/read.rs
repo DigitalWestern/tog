@@ -37,89 +37,108 @@ pub(super) fn collect_roots(
         if options.forgotten.iter().any(|key| key == &root.key) {
             continue;
         }
-        // A record this store cannot read is the same safety stop as a
-        // project that cannot be resolved, and for the same reason: the
-        // record exists, so some project is still counting on it, and there
-        // is no way to tell which objects that project needs.
-        if let Some(reason) = &root.unusable {
-            return Err(unusable_root(root, reason));
-        }
-        if let Some(record) = &root.record {
-            // root/2 is self-sufficient.  Its diagnostic project path is
-            // intentionally never resolved during a sweep: a moved,
-            // unmounted, or deleted project retains exactly the durable
-            // references recorded here.
-            state.object_ids.extend(record.objects.iter().cloned());
-            state
-                .run_home_keys
-                .insert(Store::canonical_project_key(&record.project_path));
-            state.project_keep.extend(
-                record
-                    .projections
-                    .iter()
-                    .map(|projection| projection.path(store)),
-            );
-            continue;
-        }
-        // A root whose project cannot be resolved is a safety stop, not a
-        // cleanup candidate: with only a pathname record there is no way to
-        // know what the project still needs, so dropping the record could
-        // expose its objects to this very sweep. Refuse the whole sweep
-        // until the record is usable, forgotten, or the project returns.
-        if let Err(error) = fs::metadata(&root.path) {
-            return Err(unresolvable_root(root, &error));
-        }
-        if !root.path.is_dir() {
-            return Err(unresolvable_root(
-                root,
-                &io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "the path exists but is not a directory",
-                ),
-            ));
-        }
-        let closures = root.path.join(".tog/closures");
-        match fs::metadata(&closures) {
-            Ok(metadata) if metadata.is_dir() => {}
-            Ok(_) => {
-                return Err(unresolvable_root(
-                    root,
-                    &io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        ".tog/closures is missing (never synced, or removed)",
-                    ),
-                ));
-            }
-            Err(error) => return Err(unresolvable_root(root, &error)),
-        }
-        let project = root
-            .path
-            .canonicalize()
-            .map_err(|error| unresolvable_root(root, &error))?;
-        state.project_paths.push(project.clone());
-        state
-            .run_home_keys
-            .insert(Store::canonical_project_key(&project));
-        // A registered project owns at least one closure: registration
-        // happens when one is written. None at all means either that they
-        // were removed, or that this pathname no longer resolves to the
-        // project that was registered — unmounting a mount point exposes the
-        // backing directory underneath, which can carry an empty
-        // `.tog/closures` of its own and would otherwise be swept as if
-        // the registered project had agreed it needed nothing.
-        if read_closures(store, &project, &mut state)? == 0 {
-            return Err(unresolvable_root(
-                root,
-                &io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    ".tog/closures holds no closure files: they were removed, or the \
-                     path now resolves to a different directory than the one registered \
-                     (the backing directory of an unmounted mount point, for example)",
-                ),
-            ));
-        }
+        collect_root(store, root, &mut state).map_err(|error| match error {
+            RootUnreadable::Record(reason) => unusable_root(root, &reason),
+            RootUnreadable::Project(error) => unresolvable_root(root, &error),
+            RootUnreadable::Io(error) => error,
+        })?;
     }
     Ok(state)
+}
+
+/// Why one root's objects could not be read. The sweep words the first two
+/// as its refusal; a drop prints the cause as it is.
+pub(super) enum RootUnreadable {
+    /// The registry record is unusable, and why.
+    Record(String),
+    /// A pathname root's project cannot be resolved, and why.
+    Project(io::Error),
+    /// Any other read failed.
+    Io(io::Error),
+}
+
+impl From<io::Error> for RootUnreadable {
+    fn from(error: io::Error) -> Self {
+        Self::Io(error)
+    }
+}
+
+/// Add one root's live set to `state`.
+pub(super) fn collect_root(
+    store: &Store,
+    root: &RootEntry,
+    state: &mut RootState,
+) -> Result<(), RootUnreadable> {
+    // A record this store cannot read is the same safety stop as a
+    // project that cannot be resolved, and for the same reason: the
+    // record exists, so some project is still counting on it, and there
+    // is no way to tell which objects that project needs.
+    if let Some(reason) = &root.unusable {
+        return Err(RootUnreadable::Record(reason.clone()));
+    }
+    if let Some(record) = &root.record {
+        // root/2 is self-sufficient.  Its diagnostic project path is
+        // intentionally never resolved during a sweep: a moved,
+        // unmounted, or deleted project retains exactly the durable
+        // references recorded here.
+        state.object_ids.extend(record.objects.iter().cloned());
+        state
+            .run_home_keys
+            .insert(Store::canonical_project_key(&record.project_path));
+        state.project_keep.extend(
+            record
+                .projections
+                .iter()
+                .map(|projection| projection.path(store)),
+        );
+        return Ok(());
+    }
+    // A root whose project cannot be resolved is a safety stop, not a
+    // cleanup candidate: with only a pathname record there is no way to
+    // know what the project still needs, so dropping the record could
+    // expose its objects to this very sweep. Refuse the whole sweep
+    // until the record is usable, forgotten, or the project returns.
+    if let Err(error) = fs::metadata(&root.path) {
+        return Err(RootUnreadable::Project(error));
+    }
+    if !root.path.is_dir() {
+        return Err(RootUnreadable::Project(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "the path exists but is not a directory",
+        )));
+    }
+    let closures = root.path.join(".tog/closures");
+    match fs::metadata(&closures) {
+        Ok(metadata) if metadata.is_dir() => {}
+        Ok(_) => {
+            return Err(RootUnreadable::Project(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                ".tog/closures is missing (never synced, or removed)",
+            )));
+        }
+        Err(error) => return Err(RootUnreadable::Project(error)),
+    }
+    let project = root.path.canonicalize().map_err(RootUnreadable::Project)?;
+    state.project_paths.push(project.clone());
+    state
+        .run_home_keys
+        .insert(Store::canonical_project_key(&project));
+    // A registered project owns at least one closure: registration
+    // happens when one is written. None at all means either that they
+    // were removed, or that this pathname no longer resolves to the
+    // project that was registered — unmounting a mount point exposes the
+    // backing directory underneath, which can carry an empty
+    // `.tog/closures` of its own and would otherwise be swept as if
+    // the registered project had agreed it needed nothing.
+    if read_closures(store, &project, state)? == 0 {
+        return Err(RootUnreadable::Project(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            ".tog/closures holds no closure files: they were removed, or the path now \
+             resolves to a different directory than the one registered (the backing \
+             directory of an unmounted mount point, for example)",
+        )));
+    }
+    Ok(())
 }
 
 pub(super) fn unresolvable_root(root: &RootEntry, error: &io::Error) -> io::Error {
@@ -396,6 +415,7 @@ fn read_objects(
     objects_path: &Path,
     objects: &HeldDir,
     meta_dir: &HeldDir,
+    meta: &crate::kernel::objmeta::MetaIndex,
 ) -> io::Result<Vec<ObjectEntry>> {
     let mut object_entries = Vec::new();
     for entry in fs::read_dir(objects_path)? {
@@ -413,7 +433,21 @@ fn read_objects(
         };
         // Drop takes an object whose record is gone, whatever its shape, so
         // that is the fix to name; the next sync that needs it rebuilds it.
-        let drop_fix = |id: &str| format!("drop it with `tog gc --drop-object {id}`");
+        // Drop refuses an id a readable record still depends on, so the
+        // command names those dependents too.
+        let drop_fix = |id: &str| {
+            let dependents = transitive_dependents(&dependents_of(meta), id);
+            let mut set: BTreeSet<&str> = dependents.iter().map(String::as_str).collect();
+            set.insert(id);
+            let ids = set.into_iter().collect::<Vec<_>>().join(" ");
+            match dependents.len() {
+                0 => format!("drop it with `tog gc --drop-object {ids}`"),
+                count => format!(
+                    "drop it and the {count} object(s) that depend on it with `tog gc \
+                     --drop-object {ids}`"
+                ),
+            }
+        };
         if !store::is_object_id(&id) || (stat.st_mode & libc::S_IFMT) != libc::S_IFDIR {
             let mut message = format!("refusing to sweep: invalid object entry {:?}", entry.path());
             if store::is_object_id(&id) && record_gone() {
@@ -822,7 +856,7 @@ pub(super) fn read(
     let meta_dir = open_held(&store.root.join("meta"), "meta")?;
     let tmp = open_held(&store.root.join("tmp"), "tmp")?;
 
-    let object_entries = read_objects(&objects_path, &objects, &meta_dir)?;
+    let object_entries = read_objects(&objects_path, &objects, &meta_dir, &meta)?;
     let (stray_records, stray_files) = read_stray_records(&meta, &object_entries, &meta_dir)?;
     let (cache_dirs, cache_entries) = read_cache(store)?;
     let stages = read_stages(store, &tmp)?;
