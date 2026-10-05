@@ -19,7 +19,8 @@ use std::{ffi::OsStr, ops::Deref};
 
 pub mod pinned;
 
-/// A verified cache path with the GC lock held until the caller drops it.
+/// A verified cache path with the GC lock held shared until the caller
+/// drops it.
 /// Keeping this lease alive across extraction closes the verify-to-use race:
 /// GC cannot unlink the artifact while an extractor is still consuming it.
 pub(crate) struct CacheLease {
@@ -31,7 +32,7 @@ pub(crate) struct CacheLease {
     _gc_lock: Arc<fs::File>,
 }
 
-fn acquire_gc_lock(store: &Store) -> io::Result<Arc<fs::File>> {
+fn acquire_cache_lock(store: &Store) -> io::Result<Arc<fs::File>> {
     static LOCKS: OnceLock<Mutex<HashMap<PathBuf, Weak<fs::File>>>> = OnceLock::new();
     let locks = LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
     {
@@ -45,7 +46,7 @@ fn acquire_gc_lock(store: &Store) -> io::Result<Arc<fs::File>> {
     // holding store B's entry from dropping it. Two contenders may briefly
     // open their own descriptors; the second map check below adopts the
     // first winner's descriptor and drops its redundant lock.
-    let candidate = Arc::new(store.gc_lock()?);
+    let candidate = Arc::new(store.cache_lock()?);
     let mut locks = locks.lock().unwrap_or_else(|error| error.into_inner());
     if let Some(lock) = locks.get(&store.root).and_then(Weak::upgrade) {
         drop(candidate);
@@ -117,10 +118,10 @@ pub(crate) fn cache_verified_digest_held(
 ) -> io::Result<CacheLease> {
     store.require_activity(activity, "a cache read")?;
     let activity = activity.clone();
-    let gc_lock = acquire_gc_lock(store)?;
+    let gc_lock = acquire_cache_lock(store)?;
     let path = store.cache_path(digest.algo(), digest.hex());
-    match hash_file(&path, digest.algo) {
-        Ok(h) if h == digest.hex() => {
+    match hash_identified(&path, digest.algo) {
+        Ok((h, _)) if h == digest.hex() => {
             store::touch_path(&path)?;
             Ok(CacheLease {
                 path,
@@ -128,8 +129,8 @@ pub(crate) fn cache_verified_digest_held(
                 _gc_lock: gc_lock,
             })
         }
-        Ok(_) => {
-            let _ = fs::remove_file(&path);
+        Ok((_, seen)) => {
+            remove_poisoned(&path, &seen);
             Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
@@ -167,7 +168,32 @@ pub(crate) fn read_cache_verified_digest(
 /// lease across a long phase can re-verify the bytes immediately before it
 /// uses them: the lease stops a sweep, not a same-user replacement.
 pub(crate) fn hash_file(path: &std::path::Path, algo: Algo) -> io::Result<String> {
+    hash_open(&mut fs::File::open(path)?, algo)
+}
+
+/// `path`'s digest and the file that was hashed, so a mismatch can be
+/// removed with [`remove_poisoned`] without touching a replacement.
+fn hash_identified(path: &Path, algo: Algo) -> io::Result<(String, fs::Metadata)> {
     let mut f = fs::File::open(path)?;
+    let seen = f.metadata()?;
+    Ok((hash_open(&mut f, algo)?, seen))
+}
+
+/// Remove the cache entry at `path` that failed verification, but only if
+/// it is still the file that was hashed (`seen`). Cache leases share
+/// `gc.lock`, so another process may have published good bytes there since:
+/// those are left in place for the lease that holds them. Any entry that is
+/// still wrong is replaced by the next download's rename either way.
+fn remove_poisoned(path: &Path, seen: &fs::Metadata) {
+    use std::os::unix::fs::MetadataExt;
+    if let Ok(now) = fs::symlink_metadata(path) {
+        if now.dev() == seen.dev() && now.ino() == seen.ino() {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
+fn hash_open(f: &mut fs::File, algo: Algo) -> io::Result<String> {
     let mut buf = [0u8; 65536];
     let mut h256 = Sha256::new();
     let mut h512 = Sha512::new();
@@ -568,19 +594,18 @@ pub fn cache_insert(
 ) -> io::Result<(String, PathBuf)> {
     store.require_activity(activity, "a cache insert")?;
     let hex = hash_file(src, Algo::Sha256)?;
-    let _gc_lock = acquire_gc_lock(store)?;
+    let _gc_lock = acquire_cache_lock(store)?;
     let dest = store.cache_path("sha256", &hex);
     if dest.is_file() {
         // Re-verify on hit, like download_verified: a same-user replacement
         // must never ride an old address (poisoned -> drop and re-insert).
-        match hash_file(&dest, Algo::Sha256) {
-            Ok(h) if h == hex => {
+        match hash_identified(&dest, Algo::Sha256) {
+            Ok((h, _)) if h == hex => {
                 store::touch_path(&dest)?;
                 return Ok((hex, dest));
             }
-            _ => {
-                let _ = fs::remove_file(&dest);
-            }
+            Ok((_, seen)) => remove_poisoned(&dest, &seen),
+            Err(_) => {}
         }
     }
     fs::create_dir_all(dest.parent().unwrap())?;
@@ -894,15 +919,15 @@ fn cache_or_download_narrated(
 ) -> io::Result<CacheLease> {
     store.require_activity(activity, "a verified download")?;
     let activity = activity.clone();
-    let gc_lock = acquire_gc_lock(store)?;
+    let gc_lock = acquire_cache_lock(store)?;
     let dest = store.cache_path(digest.algo(), digest.hex());
     if dest.is_file() {
         // Re-verify on every hit: read-only bits stop accidents, not disk
         // corruption or same-user replacement. A concurrent publisher can
         // replace/briefly unlink the entry, so a read race falls through
         // to a fresh download instead of failing.
-        match hash_file(&dest, digest.algo) {
-            Ok(h) if h == digest.hex() => {
+        match hash_identified(&dest, digest.algo) {
+            Ok((h, _)) if h == digest.hex() => {
                 store::touch_path(&dest)?;
                 return Ok(CacheLease {
                     path: dest,
@@ -910,9 +935,7 @@ fn cache_or_download_narrated(
                     _gc_lock: gc_lock,
                 });
             }
-            Ok(_) => {
-                let _ = fs::remove_file(&dest); // poisoned/corrupt: refetch
-            }
+            Ok((_, seen)) => remove_poisoned(&dest, &seen), // corrupt: refetch
             Err(_) => {}
         }
     }
@@ -1551,6 +1574,57 @@ mod integrity_tests {
                  cache entry sha256:{hex} was corrupted (removed)"
             )
         );
+        assert!(!cache.exists());
+    }
+
+    /// A held lease takes `gc.lock` shared. Another tog process (here, a
+    /// second open of the lock, which flock treats the same way) gets its own
+    /// lease at once and downloads beside it, while GC's exclusive lock
+    /// still has to wait for both.
+    #[test]
+    fn a_cache_lease_admits_another_process_but_not_gc() {
+        let (_scratch, store) = scratch_store("fetch-shared-lease");
+        let activity = &store.activity(ActivityMode::Shared).unwrap();
+        let hex = sha256_hex(b"hello");
+        fs::write(store.cache_path("sha256", &hex), b"hello").unwrap();
+        let lease = cache_verified_held(&store, activity, &hex).unwrap();
+
+        let other = store.cache_lock().expect("a second lease must not wait");
+        let gc = fs::File::open(store.root.join("gc.lock")).unwrap();
+        assert!(
+            matches!(gc.try_lock(), Err(fs::TryLockError::WouldBlock)),
+            "GC took gc.lock while leases were held"
+        );
+        drop(other);
+        assert!(
+            matches!(gc.try_lock(), Err(fs::TryLockError::WouldBlock)),
+            "GC took gc.lock while a lease was held"
+        );
+        drop(lease);
+        gc.try_lock()
+            .expect("GC must get gc.lock once every lease is gone");
+    }
+
+    /// A poisoned entry another process replaced with good bytes after it
+    /// was hashed is not removed from under that process's lease.
+    #[test]
+    fn a_poisoned_entry_replaced_since_it_was_hashed_is_left_in_place() {
+        let (_scratch, store) = scratch_store("fetch-poison-race");
+        let hex = sha256_hex(b"hello");
+        let cache = store.cache_path("sha256", &hex);
+        fs::write(&cache, b"hellp").unwrap();
+        let (got, seen) = hash_identified(&cache, Algo::Sha256).unwrap();
+        assert_ne!(got, hex);
+        let good = store.root.join("tmp").join("good");
+        fs::write(&good, b"hello").unwrap();
+        fs::rename(&good, &cache).unwrap();
+
+        remove_poisoned(&cache, &seen);
+        assert_eq!(fs::read(&cache).unwrap(), b"hello");
+
+        // Control: the file that was hashed is removed.
+        let (_, seen) = hash_identified(&cache, Algo::Sha256).unwrap();
+        remove_poisoned(&cache, &seen);
         assert!(!cache.exists());
     }
 
