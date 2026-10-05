@@ -954,6 +954,18 @@ fn store_path_honors_the_store_variable() {
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     let printed = PathBuf::from(text(&out.stdout).trim());
     assert_eq!(printed, home.0.join("store"));
+    // A relative store is read from the directory `-C` names, and the
+    // answer says so: an absolute path, not the variable as typed.
+    std::fs::create_dir(home.0.join("project")).unwrap();
+    let out = tog_env(
+        &home.0,
+        &home.0,
+        &["-C", "project", "store", "path"],
+        &[("TOG_STORE", "relative-store")],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let printed = PathBuf::from(text(&out.stdout).trim());
+    assert_eq!(printed, home.0.join("project/relative-store"));
     let out = tog(&home.0, &home.0, &["store", "roots"]);
     assert_eq!(out.status.code(), Some(0));
     assert!(out.stdout.is_empty());
