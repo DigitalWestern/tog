@@ -158,7 +158,6 @@ After the proxy: the test-suite audit (#351) and then the quality review
   - #188 npm: realize `file:` packages as tog-owned trees.
   - #191 provider object-kind rows still live in the tailors' `objects.rs`.
   - #216 python: `uv pip compile` fails for vllm and MetaGPT; classifier label.
-  - #272 pnpm freshness: a new workspace member without an importer passes, and overrides match by name only.
   - #277 gc: run homes under `<store>/run-homes` are never reclaimed.
   - #279 node: run refusal misses npm abbreviations and nested installs, and refuses bare `bun`.
   - #283 dotnet: block `OutDir` and `PublishDir`, and parse the lock once per sync.

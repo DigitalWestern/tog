@@ -328,6 +328,75 @@ impl Range {
     pub fn satisfies_text(&self, candidate: &str) -> bool {
         SemVer::parse(candidate).is_some_and(|candidate| self.satisfies(&candidate))
     }
+
+    /// node-semver's `subset(self, other)`: every alternative of `self`
+    /// lies inside some alternative of `other`. Each alternative is read as
+    /// the interval its comparators bound, and an empty one is inside
+    /// anything. Prerelease admission is not modeled, so the answer can be
+    /// wider than node-semver's only for ranges that name prereleases.
+    pub fn subset_of(&self, other: &Range) -> bool {
+        self.sets.iter().all(|set| {
+            let (low, high) = interval(set);
+            let empty = match (&low, &high) {
+                (Some(low), Some(high)) => match low.0.cmp(&high.0) {
+                    Ordering::Greater => true,
+                    Ordering::Equal => !(low.1 && high.1),
+                    Ordering::Less => false,
+                },
+                _ => false,
+            };
+            empty
+                || other.sets.iter().any(|outer| {
+                    let (outer_low, outer_high) = interval(outer);
+                    within(&outer_low, &low, Ordering::Less)
+                        && within(&outer_high, &high, Ordering::Greater)
+                })
+        })
+    }
+}
+
+/// One end of an interval: the version and whether it is admitted.
+type Bound = (SemVer, bool);
+
+/// The tightest lower and upper bounds a comparator set imposes, `None`
+/// where it is open.
+fn interval(set: &[Comparator]) -> (Option<Bound>, Option<Bound>) {
+    let mut low: Option<Bound> = None;
+    let mut high: Option<Bound> = None;
+    for comparator in set {
+        let version = comparator.version.clone();
+        let (lower, upper) = match comparator.cmp {
+            Cmp::Gt => (Some((version, false)), None),
+            Cmp::Ge => (Some((version, true)), None),
+            Cmp::Lt => (None, Some((version, false))),
+            Cmp::Le => (None, Some((version, true))),
+            Cmp::Eq => (Some((version.clone(), true)), Some((version, true))),
+        };
+        // A bound that does not admit everything the current one does is
+        // the tighter one.
+        if lower.is_some() && !within(&lower, &low, Ordering::Less) {
+            low = lower;
+        }
+        if upper.is_some() && !within(&upper, &high, Ordering::Greater) {
+            high = upper;
+        }
+    }
+    (low, high)
+}
+
+/// Does the `outer` bound admit everything up to the `inner` one? `loose`
+/// is the direction in which `outer` may lie (`Less` for lower bounds,
+/// `Greater` for upper ones); an open `outer` admits everything, an open
+/// `inner` only an open `outer`.
+fn within(outer: &Option<Bound>, inner: &Option<Bound>, loose: Ordering) -> bool {
+    match (outer, inner) {
+        (None, _) => true,
+        (Some(_), None) => false,
+        (Some(outer), Some(inner)) => match outer.0.cmp(&inner.0) {
+            Ordering::Equal => outer.1 || !inner.1,
+            ordering => ordering == loose,
+        },
+    }
 }
 
 fn numeric(text: &str) -> Option<u64> {
@@ -702,6 +771,36 @@ mod tests {
                 pair[0],
                 pair[1]
             );
+        }
+    }
+
+    #[test]
+    fn subset_reads_each_alternative_as_an_interval() {
+        let subset = |inner: &str, outer: &str| {
+            Range::parse(inner)
+                .unwrap()
+                .subset_of(&Range::parse(outer).unwrap())
+        };
+        for (inner, outer) in [
+            ("^1.2.0", "^1"),
+            ("1.4.0", "^1"),
+            ("~1.2.3", ">=1.2.0 <1.3.0"),
+            ("^1.0.0", "*"),
+            ("^1 || ^2", ">=1"),
+            (">2 <2", "1.0.0"),
+            ("^1", "^1"),
+        ] {
+            assert!(subset(inner, outer), "{inner} within {outer}");
+        }
+        for (inner, outer) in [
+            ("^2", "^1"),
+            ("*", "^1"),
+            (">=1.0.0", "<2"),
+            ("^1", ">1.0.0"),
+            ("^1 || ^3", "^1 || ^2"),
+            ("1.0.0 - 3", "^1 || ^2"),
+        ] {
+            assert!(!subset(inner, outer), "{inner} not within {outer}");
         }
     }
 }

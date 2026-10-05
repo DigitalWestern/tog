@@ -1041,7 +1041,9 @@ when the two differ.
     node/inputs.rs         missing-lock generation, lockfile importers
     node/registry_tool.rs  `tog x` from npm: npm resolve, env realize, node_modules
     node/run_refusal.rs    `tog run` refusals: npm-family installs over node_modules
-    node/lock_import/      pnpm.rs and yarn1.rs importers over yaml.rs
+    node/lock_import/      pnpm.rs and yarn1.rs importers over yaml.rs;
+                           pnpm/record.rs is what the lock says about the
+                           manifests, read by node/freshness.rs
     cargo/mod.rs           project Cargo env + sandboxed build over
                            kernel/provider/{rust,crates}.rs
     cargo/inputs.rs        toolchain resolution, workspace root, missing-lock generation
