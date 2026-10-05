@@ -162,7 +162,6 @@ None open.
   clears this.
 
 - **Held project mounts (#497).** Sandbox mounts still resolve project paths. Bind the held directory through a descriptor rather than accepting a replacement at that name. See `src/kernel/sandbox/`.
-- **Held confined snapshots (#498).** Confined snapshot creation still reopens the project path. Carry the held root into the snapshot walk. See `src/kernel/resolve/confine/`.
 - **Tool-opened absolute inputs (#499).** Bundler and uv now name project inputs relative to the held directory. Cargo's `--manifest-path` (`src/kernel/provider/crates.rs`) and external absolute requirements files still reopen a path. Name the manifest relative to the held cwd, and give external files a held input or a snapshot.
 
 

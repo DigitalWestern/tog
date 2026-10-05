@@ -207,14 +207,22 @@ pub(super) fn run(
             ),
         )
     })?;
-    let lock_root = fs::canonicalize(lock_root)?;
+    // The lock root is the directory an open root already holds there when
+    // there is one (the project this command opened), so a directory
+    // renamed or swapped in at its path is neither snapshotted nor
+    // published into (#498). Otherwise it is opened now, once.
+    let held = match ProjectRoot::held_at(lock_root)? {
+        Some(root) => root,
+        None => ProjectRoot::open(lock_root)?,
+    };
+    let lock_root = held.path().to_path_buf();
     let policy = confined.policy.take().unwrap_or_else(policy::effective);
     let forced_args = preflight(activity, &confined, &policy, &lock_root)?;
     let target = std::mem::replace(&mut confined.target, Target::Detached);
     let (mut hold, receipt) = match target {
         Target::Project { receipt } => {
-            let root = ProjectRoot::open(&lock_root)?;
-            let again = root.try_clone()?;
+            let root = held.try_clone()?;
+            let again = held.try_clone()?;
             let spec = HoldSpec {
                 ecosystem: confined.ecosystem,
                 outputs: &confined.outputs,
@@ -229,7 +237,7 @@ pub(super) fn run(
     // lock root renamed or replaced while the tool runs is not written.
     let detached = match hold {
         Some(_) => None,
-        None => Some(ProjectRoot::open(&lock_root)?),
+        None => Some(held.try_clone()?),
     };
     // The signing key never enters the stage, under any name (a hard link
     // in the project is the key too).
@@ -238,7 +246,7 @@ pub(super) fn run(
         store,
         activity,
         &SnapshotSpec {
-            lock_root: &lock_root,
+            lock_root: &held,
             extra_roots: &confined.extra_roots,
             exclude: &confined.exclude,
             forbidden: &key_ids,
@@ -1387,6 +1395,60 @@ get() {
             .mode()
             & 0o777;
         assert_eq!(mode, crate::kernel::resolve::transaction::new_file_mode());
+    }
+
+    /// The confined door snapshots and publishes into the project this
+    /// command holds, not whatever its path names when the door runs: a
+    /// project renamed and replaced before the run gives the tool the held
+    /// tree's inputs, and the outputs land there (#498).
+    #[test]
+    fn the_snapshot_is_the_held_project_after_a_replacement() {
+        let Some(relay) = relay("the_snapshot_is_the_held_project_after_a_replacement") else {
+            return;
+        };
+        let fx = fixture("door-held-snapshot");
+        let held = ProjectRoot::open(&fx.project).unwrap();
+        let moved = fx.project.with_file_name("moved");
+        fs::rename(&fx.project, &moved).unwrap();
+        fs::create_dir(&fx.project).unwrap();
+        fs::write(fx.project.join("package.json"), PACKAGE_JSON).unwrap();
+        fs::write(fx.project.join("deps.lock"), b"decoy\n").unwrap();
+        let outcome = run_door(
+            &fx,
+            Some(relay),
+            "cat deps.lock > new.lock\n",
+            Policy::default(),
+            |_| {},
+        );
+        outcome.result.unwrap();
+        assert_eq!(fs::read(moved.join("new.lock")).unwrap(), OLD_LOCK);
+        assert!(!fx.project.join("new.lock").exists());
+        assert_eq!(fs::read(fx.project.join("deps.lock")).unwrap(), b"decoy\n");
+        drop(held);
+    }
+
+    /// A held project renamed with nothing put in its place still runs:
+    /// its path no longer resolves, but the door never needed it to.
+    #[test]
+    fn a_renamed_held_project_still_runs_confined() {
+        let Some(relay) = relay("a_renamed_held_project_still_runs_confined") else {
+            return;
+        };
+        let fx = fixture("door-held-renamed");
+        let held = ProjectRoot::open(&fx.project).unwrap();
+        let moved = fx.project.with_file_name("moved");
+        fs::rename(&fx.project, &moved).unwrap();
+        let outcome = run_door(
+            &fx,
+            Some(relay),
+            "echo new > deps.lock\n",
+            Policy::default(),
+            |_| {},
+        );
+        outcome.result.unwrap();
+        assert_eq!(fs::read(moved.join("deps.lock")).unwrap(), b"new\n");
+        assert!(!fx.project.exists());
+        drop(held);
     }
 
     /// A cleanup failure after the commit point keeps what was published:

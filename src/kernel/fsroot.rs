@@ -100,6 +100,21 @@ impl ProjectRoot {
         })
     }
 
+    /// The directory an open root holds at `path` (`None` if none does), as
+    /// a readable root with no cwd binding of its own: a confined door's lock
+    /// root is the tree tog opened, though renamed or replaced since (#498).
+    pub(crate) fn held_at(path: &Path) -> io::Result<Option<Self>> {
+        let Some((held, path)) = held_dir_for(path)? else {
+            return Ok(None);
+        };
+        let dir = open_file_at(held.as_raw_fd(), b".", DIRECTORY_FLAGS, 0)?;
+        Ok(Some(Self {
+            _held: None,
+            dir,
+            path,
+        }))
+    }
+
     /// The canonical project path, for messages. Every operation goes
     /// through the descriptor, not this path.
     pub(crate) fn path(&self) -> &Path {
@@ -1161,17 +1176,19 @@ fn held_table() -> std::sync::MutexGuard<'static, Vec<(u64, PathBuf, RawFd)>> {
 /// path. All matching roots must identify the same directory. A failed or
 /// conflicting held lookup refuses execution instead of falling back to a
 /// replacement pathname. Paths outside all held roots keep normal behavior.
-fn held_dir_for(path: &Path) -> io::Result<Option<fs::File>> {
-    let absolute = if path.is_absolute() {
+/// The path returned is the spelling that matched, never what it names now.
+fn held_dir_for(path: &Path) -> io::Result<Option<(fs::File, PathBuf)>> {
+    let mut matched = if path.is_absolute() {
         path.to_path_buf()
     } else {
         std::env::current_dir()?.join(path)
     };
     let table = held_table();
-    let mut matches = held_matches(&table, &absolute);
+    let mut matches = held_matches(&table, &matched);
     if matches.is_empty() {
-        if let Ok(canonical) = absolute.canonicalize() {
+        if let Ok(canonical) = matched.canonicalize() {
             matches = held_matches(&table, &canonical);
+            matched = canonical;
         }
     }
     let mut selected: Option<(fs::File, libc::stat)> = None;
@@ -1198,7 +1215,7 @@ fn held_dir_for(path: &Path) -> io::Result<Option<fs::File>> {
             selected = Some((directory, identity));
         }
     }
-    Ok(selected.map(|(directory, _)| directory))
+    Ok(selected.map(|(directory, _)| (directory, matched)))
 }
 
 /// Enter a held cwd directly in the child, without first resolving its old
@@ -1208,7 +1225,7 @@ fn held_dir_for(path: &Path) -> io::Result<Option<fs::File>> {
 pub(crate) fn start_in(command: &mut std::process::Command, dir: &Path) {
     use std::os::unix::process::CommandExt as _;
     match held_dir_for(dir) {
-        Ok(Some(held)) => {
+        Ok(Some((held, _))) => {
             // std performs this chdir before pre_exec. It must not touch
             // the replaceable project path or require that path to exist.
             command.current_dir("/");
@@ -1490,6 +1507,33 @@ mod tests {
         let dir = temp.0.join("proj");
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// `held_at` finds the directory an open root holds at a path, by that
+    /// path's held spelling, even after the project is renamed and another
+    /// put in its place. The root it returns has its own descriptor, so it
+    /// outlives the holder, and adds no binding of its own (#498).
+    #[test]
+    fn held_at_reads_the_held_directory_and_outlives_its_holder() {
+        let temp = TempDir::named("held-at");
+        let dir = project(&temp).canonicalize().unwrap();
+        fs::write(dir.join("marker"), "held").unwrap();
+        assert!(ProjectRoot::held_at(&dir).unwrap().is_none());
+        let holder = ProjectRoot::open(&dir).unwrap();
+        fs::rename(&dir, temp.0.join("moved")).unwrap();
+        fs::create_dir(&dir).unwrap();
+        fs::write(dir.join("marker"), "decoy").unwrap();
+        let found = ProjectRoot::held_at(&dir).unwrap().unwrap();
+        assert_eq!(found.path(), dir.as_path());
+        drop(holder);
+        assert!(ProjectRoot::held_at(&dir).unwrap().is_none());
+        assert_eq!(
+            found
+                .read_input_string(Path::new("marker"))
+                .unwrap()
+                .as_deref(),
+            Some("held")
+        );
     }
 
     /// A child started in a held project's path enters the held directory:

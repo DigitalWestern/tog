@@ -401,7 +401,7 @@ mod door {
                 &self.store,
                 &activity,
                 &SnapshotSpec {
-                    lock_root: &self.project,
+                    lock_root: &tog::kernel::fsroot::ProjectRoot::open(&self.project).unwrap(),
                     extra_roots: &[],
                     exclude: &[],
                     forbidden: &[],

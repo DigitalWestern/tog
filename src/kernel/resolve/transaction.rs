@@ -1329,7 +1329,7 @@ mod tests {
             &fx.store,
             &activity,
             &SnapshotSpec {
-                lock_root: &fx.project,
+                lock_root: &ProjectRoot::open(&fx.project).unwrap(),
                 extra_roots: &[],
                 exclude: &[],
                 forbidden: &[],
