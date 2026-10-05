@@ -257,7 +257,7 @@ pub(crate) fn persist_root_for_refs_with_project_lock(
     // The first durable step of a projection switch: a toolchain source
     // that moved during planning is caught here, before a user directory
     // is moved or a visible link replaced, and again by the closure writer.
-    toolchain::recheck_before_publication()?;
+    toolchain::recheck_before_publication(project)?;
     project.check_still_named()?;
     // Registration imports the closures the project already has. A `.tog`
     // that is a symlink, or anything but a real directory, is refused here,
@@ -315,7 +315,7 @@ fn write_closure_inner(
     // The one place every project write passes through: prove the lock and
     // the toolchain source inputs still read the way this command resolved
     // them before anything of this sync becomes visible.
-    toolchain::recheck_before_publication()?;
+    toolchain::recheck_before_publication(project)?;
     if !body.is_object() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,

@@ -6,8 +6,9 @@
 //! strict validation run here, before a store is opened, so a refusal
 //! leaves no trace. `commit` is the only writer: it takes the
 //! toolchain-input lock, re-reads `tog-toolchain.toml` under it, publishes
-//! a pending lock, and installs a process-global guard. Every closure
-//! writer calls `recheck_before_publication` through that guard, so a
+//! a pending lock, and installs a guard for that project in a
+//! process-global list. Every closure writer calls
+//! `recheck_before_publication` with the project it writes, so a
 //! source file edited while a long sync ran aborts instead of pairing new
 //! inputs with old outputs.
 
@@ -391,21 +392,30 @@ struct GuardState {
     inputs: Vec<(String, Vec<InputRow>)>,
 }
 
-static INPUT_GUARD: Mutex<Option<GuardState>> = Mutex::new(None);
+/// One entry per live `InputLockGuard`, keyed by the number `commit`
+/// gave it, so two projects syncing in one process each keep their own
+/// snapshot and dropping one guard leaves the other's in place.
+static INPUT_GUARD: Mutex<Vec<(u64, GuardState)>> = Mutex::new(Vec::new());
+static NEXT_GUARD: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn installed_guards() -> std::sync::MutexGuard<'static, Vec<(u64, GuardState)>> {
+    INPUT_GUARD
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 /// Holds the toolchain-input flock for the whole command. Dropping it
-/// releases the lock and clears the process-global guard, so a later
-/// command in the same process cannot inherit a stale snapshot.
+/// releases the lock and removes its own snapshot from the process-global
+/// guard, so a later command in the same process cannot inherit it.
 #[derive(Debug)]
 pub struct InputLockGuard {
+    id: u64,
     _file: File,
 }
 
 impl Drop for InputLockGuard {
     fn drop(&mut self) {
-        *INPUT_GUARD
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        installed_guards().retain(|(id, _)| *id != self.id);
     }
 }
 
@@ -454,14 +464,14 @@ pub fn commit(
             }
         }
     }
-    *INPUT_GUARD
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(GuardState {
+    let state = GuardState {
         root: root.try_clone()?,
         lock_bytes: toolchain.lock_bytes.clone(),
         inputs: toolchain.inputs.clone(),
-    });
-    Ok(InputLockGuard { _file: file })
+    };
+    let id = NEXT_GUARD.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    installed_guards().push((id, state));
+    Ok(InputLockGuard { id, _file: file })
 }
 
 /// What a created or updated lock says on stderr: the selection first, so
@@ -515,17 +525,23 @@ fn conflict(existing: &[u8], toolchain: &ProjectToolchain) -> io::Error {
 /// resolved them in. Called at the top of the one closure writer, so every
 /// project write is covered without each producer remembering to ask.
 ///
+/// The guards checked are the ones whose project contains `project`, the
+/// directory being written (a workspace member sits under its root).
 /// Everything is read through the descriptor the command held since
 /// preflight, so a project renamed away and replaced by another at the same
 /// path is refused here rather than rechecked in the replacement. Nothing
-/// to prove when no sync guard is installed (a command outside sync).
-pub fn recheck_before_publication() -> io::Result<()> {
-    let guard = INPUT_GUARD
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let Some(state) = guard.as_ref() else {
-        return Ok(());
-    };
+/// to prove when no such guard is installed (a command outside sync).
+pub fn recheck_before_publication(project: &ProjectRoot) -> io::Result<()> {
+    let guards = installed_guards();
+    for (_, state) in guards.iter() {
+        if project.path().starts_with(state.root.path()) {
+            recheck(state)?;
+        }
+    }
+    Ok(())
+}
+
+fn recheck(state: &GuardState) -> io::Result<()> {
     let root = &state.root;
     root.check_still_named()?;
     if ToolchainLock::read_bytes_via(root)? != state.lock_bytes {
@@ -597,10 +613,7 @@ pub fn runtime_object(
 /// Whether a sync's toolchain-input guard is installed in this process.
 #[cfg(test)]
 pub(crate) fn guard_installed_for_test() -> bool {
-    INPUT_GUARD
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .is_some()
+    !installed_guards().is_empty()
 }
 
 #[cfg(test)]
@@ -1176,27 +1189,54 @@ mod tests {
         let root = ProjectRoot::open(&dir).unwrap();
         let mut created = resolve_python(&root, Mode::Writable).unwrap();
         let guard = commit(&root, &mut created, &Mode::Writable).unwrap();
-        recheck_before_publication().unwrap();
+        recheck_before_publication(&root).unwrap();
 
         std::fs::write(dir.join(".python-version"), "3.13.15\n").unwrap();
-        let error = recheck_before_publication().unwrap_err().to_string();
+        let error = recheck_before_publication(&root).unwrap_err().to_string();
         assert!(
             error.contains("project toolchain inputs changed during sync"),
             "{error}"
         );
         assert!(error.contains(".python-version version"), "{error}");
         std::fs::write(dir.join(".python-version"), "3.12.14\n").unwrap();
-        recheck_before_publication().unwrap();
+        recheck_before_publication(&root).unwrap();
 
         std::fs::remove_file(dir.join(LOCK_PATH)).unwrap();
-        let error = recheck_before_publication().unwrap_err().to_string();
+        let error = recheck_before_publication(&root).unwrap_err().to_string();
         assert!(
             error.contains("tog-toolchain.toml changed during sync"),
             "{error}"
         );
         // Dropping the guard puts the process back to having no snapshot.
         drop(guard);
-        recheck_before_publication().unwrap();
+        recheck_before_publication(&root).unwrap();
+    }
+
+    /// #257: two projects committing in one process each keep their own
+    /// snapshot. Dropping the second guard leaves the first in force, and
+    /// a write to one project is checked against its own guard only.
+    #[test]
+    fn two_projects_in_one_process_keep_their_own_guards() {
+        let _serialized = serialized();
+        let (first_temp, second_temp) = (TempDir::new(), TempDir::new());
+        let (first_dir, second_dir) = (project(&first_temp), project(&second_temp));
+        let first = ProjectRoot::open(&first_dir).unwrap();
+        let second = ProjectRoot::open(&second_dir).unwrap();
+        let mut first_toolchain = resolve_python(&first, Mode::Writable).unwrap();
+        let first_guard = commit(&first, &mut first_toolchain, &Mode::Writable).unwrap();
+        let mut second_toolchain = resolve_python(&second, Mode::Writable).unwrap();
+        let second_guard = commit(&second, &mut second_toolchain, &Mode::Writable).unwrap();
+
+        std::fs::write(first_dir.join(".python-version"), "3.13.15\n").unwrap();
+        recheck_before_publication(&second).unwrap();
+        drop(second_guard);
+        let error = recheck_before_publication(&first).unwrap_err().to_string();
+        assert!(
+            error.contains("project toolchain inputs changed during sync"),
+            "{error}"
+        );
+        drop(first_guard);
+        recheck_before_publication(&first).unwrap();
     }
 
     /// #132: the guard holds the descriptor preflight resolved through. A
@@ -1212,7 +1252,7 @@ mod tests {
         let mut created = resolve_python(&root, Mode::Writable).unwrap();
         let guard = commit(&root, &mut created, &Mode::Writable).unwrap();
         drop(root);
-        recheck_before_publication().unwrap();
+        recheck_before_publication(&ProjectRoot::open(&dir).unwrap()).unwrap();
 
         // Rename the checked project away and put a byte-identical copy at
         // its path: identical lock and inputs, a different directory. A
@@ -1223,7 +1263,9 @@ mod tests {
         for name in ["pyproject.toml", ".python-version", LOCK_PATH] {
             std::fs::copy(moved.join(name), dir.join(name)).unwrap();
         }
-        let error = recheck_before_publication().unwrap_err().to_string();
+        let error = recheck_before_publication(&ProjectRoot::open(&dir).unwrap())
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("moved or replaced during sync"), "{error}");
 
         // The guard reads the directory it held, wherever it now is: an
@@ -1233,13 +1275,15 @@ mod tests {
         // Putting the original back is the only way to publish again.
         std::fs::remove_dir_all(&dir).unwrap();
         std::fs::rename(&moved, &dir).unwrap();
-        let error = recheck_before_publication().unwrap_err().to_string();
+        let error = recheck_before_publication(&ProjectRoot::open(&dir).unwrap())
+            .unwrap_err()
+            .to_string();
         assert!(
             error.contains("project toolchain inputs changed during sync"),
             "{error}"
         );
         std::fs::write(dir.join(".python-version"), "3.12.14\n").unwrap();
-        recheck_before_publication().unwrap();
+        recheck_before_publication(&ProjectRoot::open(&dir).unwrap()).unwrap();
         drop(guard);
     }
 
