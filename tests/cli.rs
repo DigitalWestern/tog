@@ -621,8 +621,9 @@ fn fmt_reports_ecosystem_and_project_errors_offline() {
     assert!(text(&out.stderr).contains("no Rust project"));
 
     let out = tog(&empty.0, &home.0, &["fmt", "--eco", "python"]);
-    assert_eq!(out.status.code(), Some(1));
-    assert!(text(&out.stderr).contains("fmt for python is not implemented yet"));
+    assert_eq!(out.status.code(), Some(2));
+    assert!(text(&out.stderr).contains("fmt: --eco python: tog fmt formats rust"));
+    assert!(!home.0.join("store").exists());
 }
 
 /// `--eco` is tog's own selector: in a polyglot root whose package.json
@@ -666,10 +667,10 @@ fn fmt_eco_selects_the_ecosystem_and_never_delegates_to_the_script() {
 
     // A non-Rust ecosystem is still refused here, not handed to the script.
     let out = tog(&project.0, &home.0, &["fmt", "--eco", "python"]);
-    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(out.status.code(), Some(2));
     let stderr = text(&out.stderr);
     assert!(
-        stderr.contains("fmt for python is not implemented yet"),
+        stderr.contains("fmt: --eco python: tog fmt formats rust"),
         "{stderr}"
     );
     assert!(!project.0.join("script-ran.txt").exists());
@@ -2018,7 +2019,7 @@ fn gc_reset_refuses_every_other_gc_option() {
     ] {
         let out = tog(&home.0, &home.0, args);
         let stderr = text(&out.stderr);
-        assert_eq!(out.status.code(), Some(1), "{args:?}: {stderr}");
+        assert_eq!(out.status.code(), Some(2), "{args:?}: {stderr}");
         assert!(
             stderr.contains("--reset cannot be combined with other gc options"),
             "{args:?}: {stderr}"
