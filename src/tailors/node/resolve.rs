@@ -140,6 +140,13 @@ pub(crate) fn workspace_members(root: &ProjectRoot) -> io::Result<Vec<PathBuf>> 
     Ok(members)
 }
 
+/// `Tailor::preflight`'s share: the workspace members can be named, so a
+/// `pnpm-workspace.yaml` tog cannot read refuses the sync before anything
+/// is realized rather than when the closure is written.
+pub(crate) fn check_members_readable(root: &ProjectRoot) -> io::Result<()> {
+    workspace_members(root).map(drop)
+}
+
 /// The `workspaces` patterns of a `package.json`: a list, or the object
 /// form's `packages` list. A `!` pattern narrows npm's set; it is left out
 /// so the record covers what it would exclude too.
@@ -367,6 +374,7 @@ pub(crate) fn generate_lock(
     selected: &Selected,
 ) -> io::Result<()> {
     refuse_external_path_dependencies(project)?;
+    let outputs = resolution_outputs(project)?;
     let node_obj = super::realize_runtime(door.store(), door.lease(), door.platform(), selected)?;
     let args = npm_resolve_args("install", &[]);
     let refs: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -386,7 +394,7 @@ pub(crate) fn generate_lock(
             cwd: None,
             args,
             publish: Publish::Project {
-                outputs: resolution_outputs(project)?,
+                outputs,
                 receipt: Some(record::producer(spec, Default::default())),
             },
             capture: false,
@@ -457,6 +465,7 @@ pub(crate) fn attest_project(
         ));
     }
     refuse_external_path_dependencies(project)?;
+    let outputs = resolution_outputs(project)?;
     let node_obj = super::realize_runtime(door.store(), door.lease(), door.platform(), toolchain)?;
     let tailor = super::tailor::Node;
     let slot = record::RecordSlot::default();
@@ -489,7 +498,7 @@ pub(crate) fn attest_project(
                 cwd: None,
                 args,
                 publish: Publish::Project {
-                    outputs: resolution_outputs(project)?,
+                    outputs: outputs.clone(),
                     receipt: Some(record::producer(spec, slot.clone())),
                 },
                 capture: true,
@@ -512,7 +521,7 @@ pub(crate) fn attest_project(
                 cwd: None,
                 args,
                 publish: Publish::Project {
-                    outputs: resolution_outputs(project)?,
+                    outputs: outputs.clone(),
                     receipt: Some(record::producer(spec, slot.clone())),
                 },
                 capture: true,

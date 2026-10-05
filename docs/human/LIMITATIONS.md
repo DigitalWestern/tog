@@ -333,6 +333,11 @@ Selection covers every patch of each maintained CPython minor that python-build-
   restrictions, so nothing is filtered there at all. pnpm's `supportedArchitectures` setting
   (install optional packages for other platforms too) is not read: an optional package for
   another platform is always left out.
+- **A `pnpm-workspace.yaml` whose `packages` tog cannot read refuses sync, edits, and
+  `attest`** (an anchor, an alias, a block scalar, a mapping item): a resolution record names
+  every workspace member's `package.json`, so a members list tog cannot read would leave a
+  member uncovered. The refusal comes in preflight, before anything is realized; write
+  `packages` as a plain list of patterns.
 - **A pnpm lock is checked against the manifests, but not through `.pnpmfile.cjs`.** Before
   planning, tog refuses a `pnpm-lock.yaml` that is missing a workspace member
   `pnpm-workspace.yaml` names, or whose importers disagree with a package.json, applying the

@@ -420,6 +420,7 @@ fn npm_edit(edit: &ManifestEdit<'_>, door: &mut ResolutionDoor<'_>) -> io::Resul
     let held = ProjectRoot::open(project)?;
     crate::kernel::store::Store::check_registrable(held.path())?;
     super::resolve::refuse_external_path_dependencies(&held)?;
+    let outputs = super::resolve::resolution_outputs(&held)?;
     let node_obj = super::realize_runtime(
         door.store(),
         door.lease(),
@@ -454,7 +455,7 @@ fn npm_edit(edit: &ManifestEdit<'_>, door: &mut ResolutionDoor<'_>) -> io::Resul
             cwd: None,
             args,
             publish: Publish::Project {
-                outputs: super::resolve::resolution_outputs(&held)?,
+                outputs,
                 receipt: Some(record::producer(spec, Default::default())),
             },
             capture: false,
@@ -535,6 +536,7 @@ fn pnpm_edit(
     let workspace = ProjectRoot::open(&lock_root)?;
     crate::kernel::store::Store::check_registrable(workspace.path())?;
     super::resolve::refuse_external_path_dependencies(&workspace)?;
+    let outputs = super::resolve::resolution_outputs(&workspace)?;
     let pinned = pinned_pnpm(door, edit.host, workspace.path(), lock_text)?;
     let node_obj = super::realize_runtime(
         door.store(),
@@ -573,7 +575,7 @@ fn pnpm_edit(
             cwd,
             args,
             publish: Publish::Project {
-                outputs: super::resolve::resolution_outputs(&workspace)?,
+                outputs,
                 receipt: Some(record::producer(spec, Default::default())),
             },
             capture: false,

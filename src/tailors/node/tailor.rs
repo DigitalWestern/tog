@@ -188,8 +188,11 @@ impl Tailor for Node {
         }
     }
 
-    fn preflight(&self, platform: Platform, _project: &ProjectRoot) -> io::Result<()> {
-        node::preflight(platform)
+    fn preflight(&self, platform: Platform, project: &ProjectRoot) -> io::Result<()> {
+        node::preflight(platform)?;
+        // A workspace whose members tog cannot name refuses here, before
+        // anything is realized: the closure writer would refuse it later.
+        super::resolve::check_members_readable(project)
     }
 
     fn prepare(
