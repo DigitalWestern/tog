@@ -822,12 +822,15 @@ fn ruby_gem_needing_a_pinned_library_builds_against_the_native_libs() {
     assert_eq!(extensions.len(), 1, "{extensions:?}");
     let dynamic = tool("readelf", &["-dW"], &extensions[0]);
     assert!(dynamic.contains("[libz.so.1]"), "{dynamic}");
-    let lib = libset.canonicalize().unwrap().join("lib");
+    let libset = libset.canonicalize().unwrap();
+    let lib = libset.join("lib");
     assert!(
         dynamic.contains(&lib.display().to_string()),
         "the extension's RUNPATH does not name the set's lib ({}): {dynamic}",
         lib.display()
     );
+    // And the loader resolves libz there, not from the host.
+    assert_elf_resolves_from(&extensions[0], &store.join("tmp"), Some(&libset));
     let closure = |project: &Path| -> serde_json::Value {
         serde_json::from_slice(&std::fs::read(project.join(".tog/closures/ruby.json")).unwrap())
             .unwrap()
