@@ -263,7 +263,7 @@ pub(crate) struct SdistIdentityPlan {
 }
 
 #[cfg(test)]
-fn test_store(label: &str) -> (crate::kernel::testutil::TempDir, Store) {
+pub(super) fn test_store(label: &str) -> (crate::kernel::testutil::TempDir, Store) {
     let dir = crate::kernel::testutil::TempDir::named(&format!("build-identity-{label}"));
     for sub in ["objects", "meta", "cache/sha256", "tmp"] {
         fs::create_dir_all(dir.0.join(sub)).expect("create Python identity fixture store");
