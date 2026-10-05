@@ -290,12 +290,17 @@ impl State {
     }
 
     /// Record one request: its portable entry and its diagnostics row.
-    pub(crate) fn record(&self, mut entry: Entry, mut diag: DiagRequest) {
-        entry.url = self.clean(&entry.url);
-        entry.redirected_to = entry.redirected_to.map(|hop| self.clean(&hop));
-        diag.url = self.clean(&diag.url);
+    /// `keep` is the route's content query keys: in the URLs those values
+    /// are kept, since they pick which bytes came back. Free text (the
+    /// detail) keeps none.
+    pub(crate) fn record(&self, mut entry: Entry, mut diag: DiagRequest, keep: &[&str]) {
+        let url =
+            |text: &str| redact::text_keeping(text, keep).replace(&self.token, redact::REDACTED);
+        entry.url = url(&entry.url);
+        entry.redirected_to = entry.redirected_to.map(|hop| url(&hop));
+        diag.url = url(&diag.url);
         diag.detail = diag.detail.map(|detail| self.clean(&detail));
-        diag.hops = diag.hops.iter().map(|hop| self.clean(hop)).collect();
+        diag.hops = diag.hops.iter().map(|hop| url(hop)).collect();
         let mut inner = self.inner();
         if inner.closed {
             return;

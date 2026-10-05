@@ -492,9 +492,7 @@ impl RegistryProtocol for GitFetch {
         http::MAX_BODY
     }
 
-    /// Honored where the exchange redacts (the URL a refusal shows), but
-    /// `State::record` still redacts every query value on its way into
-    /// the ledger, so the ledger reads `service=REDACTED` (a follow-up).
+    /// Kept by redaction, in the URL a refusal shows and in the ledger.
     fn content_query_keys(&self) -> &'static [&'static str] {
         &["service"]
     }
@@ -824,8 +822,9 @@ mod tests {
             assert!(
                 git.contains(&(
                     "GET".into(),
-                    // The ledger redacts every query value (`State::record`).
-                    "https://github.com/dtolnay/itoa/info/refs?service=REDACTED".into(),
+                    // `service` names content for the git row, so the
+                    // ledger keeps its value.
+                    "https://github.com/dtolnay/itoa/info/refs?service=git-upload-pack".into(),
                     200
                 )) && git.contains(&(
                     "POST".into(),

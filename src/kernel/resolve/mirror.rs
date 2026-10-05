@@ -83,6 +83,9 @@ pub(crate) struct Record {
     pub bytes: u64,
     pub hops: Vec<String>,
     pub detail: Option<String>,
+    /// The route's content query keys: their values survive into the
+    /// ledger, every other query value is recorded as `REDACTED`.
+    pub keep: &'static [&'static str],
 }
 
 impl Record {
@@ -101,12 +104,20 @@ impl Record {
             bytes: 0,
             hops: Vec::new(),
             detail: None,
+            keep: &[],
         }
     }
 
+    /// Keep the values of `keys` (the route's content query keys).
+    pub(crate) fn keeping(mut self, keys: &'static [&'static str]) -> Record {
+        self.keep = keys;
+        self
+    }
+
     pub(crate) fn commit(self, state: &State) {
+        let keep = self.keep;
         let (entry, diag) = self.into_parts();
-        state.record(entry, diag);
+        state.record(entry, diag, keep);
     }
 
     fn into_parts(self) -> (Entry, DiagRequest) {
@@ -285,8 +296,12 @@ pub(crate) struct Exchange<'a> {
 pub(crate) type HopCheck<'a> = dyn Fn(&Url, &str) -> Result<(), String> + 'a;
 
 impl Exchange<'_> {
+    fn keys(&self) -> &'static [&'static str] {
+        self.route.protocol.content_query_keys()
+    }
+
     fn redacted(&self, url: &Url) -> String {
-        redact::url(url.as_str(), self.route.protocol.content_query_keys())
+        redact::url(url.as_str(), self.keys())
     }
 
     fn head_only(&self) -> bool {
@@ -348,7 +363,8 @@ impl Exchange<'_> {
 
     /// Answer a request the protocol answers itself.
     pub(crate) fn local(&self, answer: LocalAnswer, out: &mut dyn Write) -> io::Result<()> {
-        let mut record = Record::new("local", self.method, self.redacted(&answer.url));
+        let mut record =
+            Record::new("local", self.method, self.redacted(&answer.url)).keeping(self.keys());
         record.status = answer.status;
         record.sha256 = Some(hex::encode(Sha256::digest(&answer.body)));
         record.freshness = Some(Freshness::Live);
@@ -368,7 +384,8 @@ impl Exchange<'_> {
             .iter()
             .find(|name| self.request.count(name) > 1)
         {
-            let record = Record::new("refused", self.method, self.redacted(url));
+            let record =
+                Record::new("refused", self.method, self.redacted(url)).keeping(self.keys());
             let reason = format!("the request repeats {name}, which is forwarded only once");
             return refuse(
                 self.state,
@@ -386,7 +403,8 @@ impl Exchange<'_> {
             FORWARDED_REQUEST_HEADERS.contains(&name.to_ascii_lowercase().as_str())
                 && !http::is_field_value(value)
         }) {
-            let record = Record::new("refused", self.method, self.redacted(url));
+            let record =
+                Record::new("refused", self.method, self.redacted(url)).keeping(self.keys());
             let reason = format!("{name} holds bytes outside visible ASCII");
             return refuse(
                 self.state,
@@ -513,7 +531,8 @@ impl Exchange<'_> {
     }
 
     fn metadata(&self, url: &Url, class: RequestClass, out: &mut dyn Write) -> io::Result<()> {
-        let mut record = Record::new(class.as_str(), self.method, self.redacted(url));
+        let mut record =
+            Record::new(class.as_str(), self.method, self.redacted(url)).keeping(self.keys());
         let forwarded: Vec<(&str, &str)> = self
             .request
             .iter()
@@ -725,7 +744,8 @@ impl Exchange<'_> {
     }
 
     fn artifact(&self, url: &Url, class: RequestClass, out: &mut dyn Write) -> io::Result<()> {
-        let record = Record::new(class.as_str(), self.method, self.redacted(url));
+        let record =
+            Record::new(class.as_str(), self.method, self.redacted(url)).keeping(self.keys());
         match self.state.claimed(url) {
             Claimed::Conflict(why) => {
                 self.state.hard_failure(why.clone());
@@ -1401,6 +1421,34 @@ mod tests {
             .unwrap()
             .count();
         assert_eq!(files, 1, "only the content-keyed URL is cached");
+    }
+
+    #[test]
+    fn the_ledger_keeps_content_query_values_and_redacts_the_rest() {
+        let harness = Harness::new("mirror-query-ledger");
+        let (session, address) = harness.session();
+        harness.upstream.set(
+            "/meta/pkg.json?format=json&sig=s3cr3t",
+            Behavior::Reply(Reply::new(200, b"{}")),
+        );
+        assert_eq!(
+            fetch(&address, "/meta/pkg.json?format=json&sig=s3cr3t").status,
+            200
+        );
+        let report = session.finish();
+        let url = harness.upstream_url("/meta/pkg.json?format=json&sig=REDACTED");
+        assert_eq!(entries_for(&report, &url).len(), 1, "{url}");
+        let bytes = String::from_utf8(report.ledger.bytes()).unwrap();
+        assert!(bytes.contains("format=json&sig=REDACTED"), "{bytes}");
+        assert!(!bytes.contains("s3cr3t"), "{bytes}");
+        assert!(
+            report
+                .diagnostics
+                .requests
+                .iter()
+                .all(|r| !r.url.contains("s3cr3t")),
+            "the diagnostics redact the same way"
+        );
     }
 
     #[test]

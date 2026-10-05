@@ -6,7 +6,7 @@ use crate::commands::shared::{ecosystem_inputs, no_inputs};
 use crate::kernel::context::Context;
 use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::policy;
-use crate::kernel::resolve::{DoorKind, ResolutionDoor};
+use crate::kernel::resolve::{ledger, DoorKind, ResolutionDoor};
 use crate::tailors;
 use std::io;
 
@@ -52,6 +52,12 @@ pub fn run(ctx: &Context, frozen: bool) -> io::Result<()> {
             &mut attribution,
         )?;
         let text = tailor.plan(ctx, &root, selected, &mut door)?;
+        // A plan that generated an sdist's Cargo.lock ran it through a
+        // Detached door: its ledger is the lock's evidence, rooted under
+        // this project while the plan still holds its lease, as sync does.
+        for objects in door.take_kept_ledgers() {
+            ledger::root(&ctx.store, &ctx.activity, &root, &objects)?;
+        }
         if let Some(text) = text {
             println!("{text}");
             any = true;
