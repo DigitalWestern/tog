@@ -148,7 +148,6 @@ After the proxy: the test-suite audit (#351) and then the quality review
   - #334 sandbox: RuntimeOnly setup costs ~2 s per native gem; measure on the runner.
   - #330 sandbox: HostView::RuntimeOnly is a no-op on macOS.
   - #332 hostview: LD_LIBRARY_PATH outranks DT_RUNPATH for relocated host libraries.
-  - #335 hostview: stale view skeletons after SIGKILL.
   - #337 tests: no subprocess test that the view skeleton is 0700 under umask 0777.
   - #331 hostview: kept library subdirectories are bound whole (accepted unless a gem hits it).
   - #333 ruby: host-fallback fingerprint is stat-based, not content-based (accepted).
