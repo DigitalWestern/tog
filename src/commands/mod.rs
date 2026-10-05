@@ -31,12 +31,10 @@ pub use crate::commands::x::environment_name as x_environment_name;
 pub use crate::kernel::context::Context;
 
 use crate::cli;
-use crate::commands::shared::{project_dir, projected_root};
+use crate::commands::shared::{package_script, project_dir, project_for, project_root};
 use crate::kernel::platform::Platform;
 use crate::kernel::ui;
-use crate::tailors::node;
 use std::io;
-use std::process::exit;
 
 /// What argv asked for, once the grammar has had its say.
 pub enum Pending {
@@ -54,62 +52,63 @@ pub enum Pending {
     },
 }
 
+/// What `main` does with a [`Pending`] invocation.
+pub enum Resolved {
+    Command(cli::Command),
+    /// A bare `tog` outside any project: the help on stdout, exit 0,
+    /// after `note` on stderr.
+    Help {
+        note: String,
+    },
+    /// A usage error (exit 2), rendered.
+    Usage(String),
+}
+
 /// A bare `tog` inside a project is `sync` (`main` prints a short footer
 /// after a sync that succeeded); an unknown first word that names a package.json
 /// script runs it. Anything else is the usage error the grammar already
-/// prepared (exit 2).
-pub fn resolve(pending: Pending) -> io::Result<cli::Command> {
+/// prepared (exit 2). Both look for the project from the current directory
+/// up, as `tog run` does ([`project_for`]).
+pub fn resolve(pending: Pending) -> io::Result<Resolved> {
     match pending {
-        Pending::Command(command) => Ok(command),
+        Pending::Command(command) => Ok(Resolved::Command(command)),
         Pending::Implicit => {
             let cwd = project_dir();
-            if !inspect::detected(&cwd)?.is_empty() {
+            if project_for(&cwd)?.is_some_and(|location| !location.detected.is_empty()) {
                 ui::trace("no command given inside a project: running sync");
-                return Ok(cli::Command::Sync {
+                return Ok(Resolved::Command(cli::Command::Sync {
                     fresh: false,
                     records: Vec::new(),
-                });
+                }));
             }
             // Nothing to sync, so the whole invocation is the help: it goes
             // to stdout and exits 0, because someone who typed `tog` alone
             // outside a project asked for orientation, not for an error.
-            // Printed here rather than returned as a command so that
-            // `resolve` keeps one job and `dispatch` stays a table of verbs.
-            ui::note(&format!(
-                "no project in {}: nothing to sync, so here is the help",
-                cwd.display()
-            ));
-            print!("{}", cli::usage());
-            exit(0);
+            Ok(Resolved::Help {
+                note: format!(
+                    "no project in {}: nothing to sync, so here is the help",
+                    cwd.display()
+                ),
+            })
         }
         Pending::Script {
             name,
             args,
             message,
         } => {
-            let cwd = project_dir();
-            let root = projected_root(&cwd);
-            let package_json = root.join("package.json");
-            let has_package_json = package_json.is_file();
-            let is_script = has_package_json
-                && std::fs::read_to_string(&package_json)
-                    .ok()
-                    .and_then(|json| node::script_commands_from_package(&json, &name, &[]).ok())
-                    .flatten()
-                    .is_some();
-            if is_script {
+            let root = project_root(&project_dir())?;
+            if package_script(&root, &name, &[])?.is_some() {
                 ui::trace(&format!("'{name}' is a package.json script: running it"));
                 let mut command = vec![name];
                 command.extend(args);
-                return Ok(cli::Command::Run { command });
+                return Ok(Resolved::Command(cli::Command::Run { command }));
             }
-            let message = if has_package_json {
+            let message = if root.join("package.json").is_file() {
                 format!("{message} (no package.json script named '{name}' here)")
             } else {
                 message
             };
-            eprint!("{}", cli::render_usage_error(&message, None));
-            exit(cli::EXIT_USAGE);
+            Ok(Resolved::Usage(cli::render_usage_error(&message, None)))
         }
     }
 }

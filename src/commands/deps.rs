@@ -14,7 +14,6 @@ use std::fmt;
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
-use crate::commands::inspect;
 use crate::commands::shared::{
     edit_tailors, project_dir, selected_toolchain, CachedTool, DepSpec, EditHost, ManifestEdit,
     PackageRegistry, Tailor,
@@ -222,15 +221,19 @@ pub fn shape(name: &str) -> Option<Eco> {
         .find(|eco| eco.tailor.claims_package_name(name))
 }
 
-/// The nearest directory from `cwd` upward that holds any project input.
+/// The nearest directory from `cwd` upward that holds any project input
+/// (`shared::nearest_manifest`). An edit goes to the manifest nearest the
+/// user, not to the marked root `shared::project_for` answers with: from
+/// a member of a synced workspace, `tog add` edits the member.
 pub fn nearest_project(cwd: &Path) -> io::Result<(PathBuf, Vec<Eco>)> {
-    for dir in cwd.ancestors() {
-        let present: Vec<Eco> = inspect::detected(dir)?
+    if let Some(location) = crate::commands::shared::nearest_manifest(cwd)? {
+        let present: Vec<Eco> = location
+            .detected
             .into_iter()
             .filter_map(Eco::from_name)
             .collect();
         if !present.is_empty() {
-            return Ok((dir.to_path_buf(), present));
+            return Ok((location.root, present));
         }
     }
     Err(io::Error::new(

@@ -5,7 +5,7 @@
 use crate::comforter::toolchain::{self as project_toolchain, Mode};
 use crate::commands::inspect;
 use crate::commands::run;
-use crate::commands::shared::{ecosystem_inputs, project_dir, projected_root};
+use crate::commands::shared::{ecosystem_inputs, package_script, project_dir, project_root};
 use crate::kernel::context::Context;
 use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::platform::Platform;
@@ -13,7 +13,6 @@ use crate::kernel::policy;
 use crate::kernel::toolchain::lock::LOCK_PATH;
 use crate::kernel::toolchain::Selected;
 use crate::kernel::ui;
-use crate::tailors::node;
 use crate::tailors::{self, Tailor};
 use std::io;
 use std::path::Path;
@@ -52,14 +51,7 @@ pub fn run(
             }
         },
         None => {
-            let script_root = projected_root(&cwd);
-            let package_json = script_root.join("package.json");
-            let is_script = package_json.is_file()
-                && std::fs::read_to_string(&package_json)
-                    .ok()
-                    .and_then(|json| node::script_commands_from_package(&json, "fmt", &[]).ok())
-                    .flatten()
-                    .is_some();
+            let is_script = package_script(&project_root(&cwd)?, "fmt", &[])?.is_some();
             if is_script {
                 ui::trace("'fmt' is a package.json script: running it");
                 // `run` syncs a package that has never been synced before
@@ -119,11 +111,7 @@ pub fn run(
         .cloned()
     };
     let cwd_real = cwd.canonicalize()?;
-    let start = cwd_real
-        .ancestors()
-        .find(|dir| dir.join(LOCK_PATH).symlink_metadata().is_ok() || dir.join(".tog").is_dir())
-        .unwrap_or(&cwd_real)
-        .to_path_buf();
+    let start = project_root(&cwd_real)?;
     let first = resolve_at(&start)?;
     // Realizing a toolchain can record policy exceptions (a local
     // toolchain's `external-toolchain`), and a record needs an open frame.
