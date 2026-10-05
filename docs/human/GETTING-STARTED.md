@@ -112,7 +112,8 @@ hash-verified 3.12.14 into the store and built the venv out of it.
 
 The warning is about CI, not about this sync. Records are written unsigned
 until you hand tog a key, the only command that notices is `tog audit`, which
-still judges them and says it did not check signatures, and the line is said
+still judges them and says it did not check signatures (under CI it refuses
+unless you pass `--allow-unsigned`), and the line is said
 once per store rather than on every sync — you will not see it again below.
 
 That one word is the whole setup step: it builds the environment from the

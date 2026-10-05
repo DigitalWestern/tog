@@ -1013,7 +1013,7 @@ or --policy list can only narrow it. 'tog keygen <path>' prints the table to pas
 
 /// Whether `CI` names a CI environment, as GitHub Actions, GitLab and
 /// most other services set it: any non-empty value except `false` or `0`.
-fn ci_environment(value: Option<&std::ffi::OsStr>) -> bool {
+pub(crate) fn ci_environment(value: Option<&std::ffi::OsStr>) -> bool {
     value.is_some_and(|value| {
         let value = value.to_string_lossy();
         let value = value.trim();

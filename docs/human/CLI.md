@@ -104,8 +104,9 @@ the program's status through. Which files tog reads per ecosystem:
   and a failure is one JSON object on stderr: `{"error":"<message>"}`.
   That holds for every failure the command itself reports, whatever its
   exit status: `audit --json` still exits 2 for a misconfigured gate (an
-  unreadable `--policy` file, or `--signed` with no trusted set at machine
-  scope), so CI can tell an operator mistake from a denied build, and
+  unreadable `--policy` file, `--signed` with no trusted set at machine
+  scope, or a plain audit under CI with none and no `--allow-unsigned`),
+  so CI can tell an operator mistake from a denied build, and
   still writes the JSON object rather than prose. Only an argv error is exempt — it is prose at
   exit 2, because argv was wrong before the command that promised JSON
   ever started. `status`, `ls`, `audit`, `doctor` and `plan` take
@@ -765,7 +766,8 @@ change the grammar. Strictness-only sources omit the path. Policy lines
 come first, then verdict lines, then `missing` lines, and `--quiet` leaves
 them in place. Exit 0 when every closure is clean and none is missing, 1
 otherwise, 2 when the gate is misconfigured (an unreadable `--policy` file,
-or `--signed` without trusted keys). A company deny list to start
+`--signed` without trusted keys, or a plain audit under CI without trusted
+keys and without `--allow-unsigned`). A company deny list to start
 from ships as [policy-company.toml](policy-company.toml); every kind it
 names is checked against the binary's kind list by a unit test. Exception
 kind names use one separator, the hyphen (`weak-integrity`,

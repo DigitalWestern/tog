@@ -575,7 +575,8 @@ tree can never vouch for itself. Under a policy with a `[signing]` table,
 before believing any field: `bad-signature`, `untrusted`, and unsigned
 `outdated` records are not evaluated further. Without one it judges every
 record on its contents and reports signatures as not checked (`--signed`
-refuses to run that way); a signature that fails to verify is
+refuses to run that way, and so does a plain audit under CI unless
+`--allow-unsigned` is passed); a signature that fails to verify is
 `bad-signature` either way. A detected ecosystem with no primary closure is
 `missing`. Store identity is
 untouched: the signature lives in the envelope, not in any object's inputs.

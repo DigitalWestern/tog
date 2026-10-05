@@ -44,12 +44,7 @@ After the proxy: the test-suite audit (#351) and then the quality review
 
 ## Decisions waiting on the owner
 
-- **Plain `tog audit` in CI without keys (#395).** Since #394 it judges
-  records with signatures unchecked instead of exiting 2; `--signed` is the
-  fail-closed form and CLI.md has the migration note. Open: also refuse
-  when `CI` is set unless `--unsigned` is passed. Pick: leave it until tog
-  has an outside user. `v0.1.0` (2026-10-03) is private, so no released
-  caller can be broken yet.
+None open.
 
 ## Open work, each its own pull request
 
