@@ -204,9 +204,12 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   Python environment with such an sdist and every Linux Node environment carries
   `build_view = "runtime-only/1"`, so the first sync after this change rebuilds them once.
   One gap: when a build-requirement sdist falls back, its build environment is committed
-  under a host-fallback id, but the wheel built in that environment still names the
-  environment's planned runtime-only id in its own identity (`build_env`), which is planned
-  before any build runs. Python
+  under a host-fallback id, and the wheel built in that environment names that realized id
+  in its own `build_env` input. The parent environment is planned before any build runs, so
+  its `pkg:` entry for the wheel names the planned sdist id, whose `build_env` is the build
+  environment's runtime-only id: no committed wheel has that id. Unless the wheel's own
+  build also fell back, the parent is committed under its runtime-only id, which does not
+  change with the host state the build environment fell back against. Python
   sdists with no native or Rust input, and macOS builds, still see the whole host.
 - **Pinned native-library objects are store-root-specific**: `native-libs/libset/3` includes
   the canonical `TOG_STORE` root in its identity; moving a store requires re-realizing the
