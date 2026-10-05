@@ -79,7 +79,7 @@ None open.
   the 09-20 to 09-24 run. #264 holds the work order and the overall verdict.
   Each line is one issue and one PR, in order:
   - #245 kernel: consolidate duplicated primitives. Left: `validate_object_complete` and `exceptions()` now share objmeta's open and parse, but not its full record check (identity hash, schema), because about 25 tests write fake records it refuses. Give those tests real records, then call `read_store_record`.
-  - #256 design: the Tailor trait has 35+ methods, a dozen used by one ecosystem, and its docs have drifted.
+  - #256 design: the Tailor trait has 35+ methods, a dozen used by one ecosystem. The drifted docs are fixed. Left: split the single-ecosystem methods into optional sub-traits behind accessors (`fn formatter() -> Option<&dyn Formatter>`), before the resolution proxy adds `edit_manifest` (#198).
   - #255 design: the kernel knows every ecosystem by name, and tog run is hard-wired to Node.
   - #257 design: move process-global state (policy, signing key, input guard, kinds) into Context.
   - #258 design: an error type that separates refusals, staleness, network and bugs. The `detected()` bug is fixed. Left is the `TogError` classes (Refused, Stale, Unsupported, Network, Interrupted) with distinct exit codes, starting with `fsroot::refusal`.
