@@ -299,7 +299,10 @@ Selection covers every patch of each maintained CPython minor that python-build-
   lock's `overrides` by pnpm's selector rules (`name@range`, `parent>name`). A
   `.pnpmfile.cjs` `readPackage` hook that rewrites a project's own dependencies is not run,
   since that is project code, so such a lock reads as stale. A member that has only a
-  `package.yaml` or `package.json5` is not found by the member check.
+  `package.yaml` or `package.json5` is not found by the member check. A `pnpm-workspace.yaml`
+  with no `packages` key (one that only holds settings) is read as naming no members, and a
+  `packages` value that is not a plain list (an anchor, an alias) skips the member check with
+  a note.
 - **A workspace member whose `node_modules` holds files git tracks is not projected.** Some
   repositories commit a fixture `node_modules` (vite does). tog moves an npm-made
   `node_modules` into the store's backups before projecting, but moving a tracked one would
