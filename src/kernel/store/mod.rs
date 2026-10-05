@@ -367,6 +367,16 @@ impl Store {
         for level in [key.as_str(), ecosystem] {
             path.push(level);
             ensure_private_directory(&path)?;
+            if level == key {
+                // Each use is stamped on the project's directory, the one
+                // `gc --project` ages: its keep window then counts from
+                // the last run, not from the day the home was made, so a
+                // home in daily use that no root record names is kept.
+                // Best effort: a stamp that fails costs a cache, never a
+                // run.
+                let _ = fs::File::open(&path)
+                    .and_then(|dir| dir.set_modified(std::time::SystemTime::now()));
+            }
         }
         Ok(path)
     }
@@ -2144,6 +2154,12 @@ mod tests {
         assert_eq!(mode(&home), 0o700);
         assert_eq!(mode(home.parent().unwrap()), 0o700);
         assert_eq!(store.run_home(&project, "elixir").unwrap(), home);
+        // Every call stamps the project's directory, which gc ages.
+        let key_dir = home.parent().unwrap();
+        let old = std::time::SystemTime::UNIX_EPOCH;
+        fs::File::open(key_dir).unwrap().set_modified(old).unwrap();
+        store.run_home(&project, "elixir").unwrap();
+        assert!(fs::metadata(key_dir).unwrap().modified().unwrap() > old);
     }
 
     /// The project key is the one the forest paths already use: 16 hex
