@@ -8,7 +8,7 @@
 file 1549 src/kernel/store/roots.rs
 file 1821 src/tailors/dotnet/mod.rs
 file 1856 src/tailors/elixir/mod.rs
-file 1719 src/tailors/node/lock_import/pnpm.rs
+file 1715 src/tailors/node/lock_import/pnpm.rs
 file 1672 src/tailors/node/realize.rs
 fn 171 src/comforter/toolchain.rs::resolve
 fn 163 src/commands/audit.rs::render
