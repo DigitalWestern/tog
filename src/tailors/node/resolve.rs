@@ -409,12 +409,14 @@ pub(crate) fn generate_lock(
     .map(drop)
 }
 
-/// npm's `verb`, lock-only and quiet, with `extra` after the resolve-only
-/// flags and `--` before the operands.
+/// npm's `verb`, lock-only and quiet but for errors, with `extra` after the
+/// resolve-only flags (the caller adds `--` and the operands).
 pub(crate) fn npm_resolve_args(verb: &str, extra: &[&str]) -> Vec<String> {
     let mut args = Vec::new();
+    // Errors stay visible (`--silent` hid npm's own words for a failed
+    // spawn of the forced git); progress and notices are off.
     if !crate::kernel::ui::verbose() {
-        args.push("--silent".to_string());
+        args.push("--loglevel=error".to_string());
     }
     args.push(verb.to_string());
     args.extend(super::NPM_RESOLVE_ONLY.iter().map(|flag| flag.to_string()));
@@ -573,6 +575,21 @@ mod tests {
         let path = root.join(relative);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, text).unwrap();
+    }
+
+    /// npm's words on a failure are kept: the resolve-only form lowers the
+    /// log level to errors rather than silencing npm.
+    #[test]
+    fn npm_resolve_args_keep_errors_visible() {
+        let args = npm_resolve_args("install", &["--save-dev"]);
+        assert!(!args.iter().any(|arg| arg == "--silent"), "{args:?}");
+        assert!(
+            args.contains(&"--loglevel=error".to_string()) || crate::kernel::ui::verbose(),
+            "{args:?}"
+        );
+        assert_eq!(args[args.len() - 1], "--save-dev");
+        assert!(args.contains(&"install".to_string()));
+        assert!(args.contains(&"--package-lock-only".to_string()));
     }
 
     /// The outputs are the lock root's manifest and locks and every

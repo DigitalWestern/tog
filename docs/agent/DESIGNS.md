@@ -3532,6 +3532,12 @@ Node doors, each the flexible option that still fails closed:
   first form keyed on the request record `.tog/x.json` being present,
   which a project could commit to opt out of the join; round 3 replaced
   it with the mark, which no project content can forge.
+- **npm keeps its errors.** The resolve-only form passes
+  `--loglevel=error`, not `--silent`: npm's spawn error for the forced
+  git (`npm error syscall spawn /nonexistent/git`) is what names the
+  host's missing git, and `--silent` hid it (review round 3). The log
+  level does not touch the lock; the contract 8 test's direct run uses
+  the same flag.
 - **`tog x` is a detached door.** The cache root is the lock root, the
   accepted `package-lock.json` is written back into it, and the ledger is
   rooted under the cache root (`ledger::root`), so GC keeps it with the

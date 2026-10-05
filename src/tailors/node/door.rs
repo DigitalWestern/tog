@@ -448,28 +448,32 @@ pub(crate) fn run_node_checked(
     let report = run_node(door, run)?;
     if !report.status.success() {
         let words = confine::scrub_signing_key(String::from_utf8_lossy(&report.stderr).trim());
-        // npm's spawn error names the forced path; a package merely called
-        // `git-something` does not.
-        if words.contains(NO_GIT) {
-            return Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                format!(
-                    "store {name} {args} failed, and this host has no {HOST_GIT}, which a git \
-                     dependency needs (the door runs the host git for one); install git or \
-                     depend on the package from the registry: {words}"
-                ),
-            ));
-        }
-        return Err(io::Error::other(if words.is_empty() {
-            format!(
-                "store {name} {args} failed (exit status {}); nothing was synced",
-                report.status
-            )
-        } else {
-            format!("store {name} {args} failed: {words}")
-        }));
+        return Err(failure(name, &args, &report.status.to_string(), &words));
     }
     Ok(report)
+}
+
+/// The error for a tool that exited nonzero, from its own words. npm's
+/// spawn error for the forced git (`npm error syscall spawn /nonexistent/git`,
+/// shown because the resolve-only form keeps errors) names the path, so
+/// the host's missing git is named; a package merely called
+/// `git-something` is not.
+fn failure(name: &str, args: &str, status: &str, words: &str) -> io::Error {
+    if words.contains(NO_GIT) {
+        return io::Error::new(
+            io::ErrorKind::NotFound,
+            format!(
+                "store {name} {args} failed, and this host has no {HOST_GIT}, which a git \
+                 dependency needs (the door runs the host git for one); install git or \
+                 depend on the package from the registry: {words}"
+            ),
+        );
+    }
+    io::Error::other(if words.is_empty() {
+        format!("store {name} {args} failed ({status}); nothing was synced")
+    } else {
+        format!("store {name} {args} failed: {words}")
+    })
 }
 
 #[cfg(test)]
@@ -492,6 +496,25 @@ mod tests {
         assert!(
             error.contains(HOST_SH) && error.contains("does not have"),
             "{error}"
+        );
+        // npm's own spawn error (npm 10 and 11 word it so) names the host's
+        // missing git; a 404 for a package called git-hooks does not.
+        let spawn = "npm error code ENOENT\nnpm error syscall spawn /nonexistent/git\n\
+                     npm error path /p/app\nnpm error errno -2";
+        let hint = failure("npm", "install", "exit status: 1", spawn).to_string();
+        assert!(hint.contains("this host has no /usr/bin/git"), "{hint}");
+        assert!(hint.contains("spawn /nonexistent/git"), "{hint}");
+        let plain = failure(
+            "npm",
+            "install",
+            "exit status: 1",
+            "npm error 404 git-hooks@1 not found",
+        );
+        assert!(!plain.to_string().contains("this host has no"), "{plain}");
+        let silent = failure("npm", "install", "exit status: 1", "").to_string();
+        assert!(
+            silent.contains("exit status: 1") && silent.contains("nothing was synced"),
+            "{silent}"
         );
     }
 
@@ -979,7 +1002,7 @@ mod tests {
                 "--audit=false",
                 "--fund=false",
                 &format!("--cache={}", temp.0.join("npm-cache").display()),
-                "--silent",
+                "--loglevel=error",
                 "install",
                 "--package-lock-only",
                 "--ignore-scripts",
