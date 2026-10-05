@@ -18,7 +18,9 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   `tog fmt` realizes it again (a download when gc also cleared the archive cache).
 - **`tog audit` vouches for who wrote a record only under a `[signing]` policy.** Without
   a `[signing]` table in the machine policy it judges records on their contents, says that
-  signatures were not checked, and `--signed` refuses to run. With one, a pass proves that
+  signatures were not checked, and `--signed` refuses to run. Under CI (`CI` set, not
+  `false` or `0`) a plain audit refuses too, unless `--allow-unsigned` is passed. With
+  one, a pass proves that
   every closure file in
   the working tree carries a valid signature from a key the machine policy trusts, that
   every detected ecosystem has its primary closure, that each record is current for the
