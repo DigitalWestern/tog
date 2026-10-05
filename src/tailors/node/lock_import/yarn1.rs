@@ -176,6 +176,7 @@ pub(super) fn parse_yarn_entries(lock: &str) -> io::Result<Vec<YarnEntry>> {
     Ok(entries)
 }
 
+#[cfg(test)]
 pub(super) fn yarn_integrity(
     resolved: &str,
     integrity: Option<String>,
@@ -415,6 +416,7 @@ pub(super) fn yarn_workspace_manifests(
         .map_err(|error| err(format!("Yarn workspace {path}: read package.json: {error}")))?;
         let package: JsonValue = serde_json::from_str(&text)
             .map_err(|error| err(format!("Yarn workspace {path}: package.json: {error}")))?;
+        refuse_package_json_url_credentials(&format!("{path}/package.json"), &package)?;
         let name = package["name"].as_str().ok_or_else(|| {
             err(format!(
                 "Yarn workspace {path}: package.json has no string name"
@@ -463,18 +465,76 @@ pub fn plan_yarn(
     project: &ProjectRoot,
     node_version: &str,
 ) -> io::Result<NpmPlan> {
+    let record = &mut crate::kernel::policy::record;
+    plan_yarn_recording(platform, lock, package_json, project, node_version, record)
+}
+
+/// `plan_yarn` with a test's own policy in place of the process one, so a
+/// test's expectations hold under `TOG_STRICT=1`.
+#[cfg(test)]
+pub(super) fn plan_yarn_with_policy(
+    platform: Platform,
+    lock: &str,
+    package_json: &str,
+    project: &ProjectRoot,
+    node_version: &str,
+    policy: &crate::kernel::policy::Policy,
+) -> io::Result<NpmPlan> {
+    let mut record = |kind: &str, subject: &str, detail: &str| {
+        crate::kernel::policy::record_with(policy, kind, subject, detail)
+    };
+    plan_yarn_recording(
+        platform,
+        lock,
+        package_json,
+        project,
+        node_version,
+        &mut record,
+    )
+}
+
+/// Parse yarn.lock and package.json, refusing either when a string that
+/// feeds the plan (any in the lock, a planned field of the manifest)
+/// carries URL credentials, so none reaches a plan or a message.
+fn read_yarn_inputs(lock: &str, package_json: &str) -> io::Result<(Vec<YarnEntry>, JsonValue)> {
     let entries = parse_yarn_entries(lock)?;
     let package: JsonValue = serde_json::from_str(package_json)
         .map_err(|error| err(format!("package.json: {error}")))?;
+    refuse_package_json_url_credentials("package.json", &package)?;
+    for entry in &entries {
+        let fields = [&entry.name, &entry.version, &entry.resolved];
+        let maps = [&entry.dependencies, &entry.optional_dependencies];
+        let texts = (entry
+            .selectors
+            .iter()
+            .chain(fields)
+            .chain(entry.integrity.iter()))
+        .chain(
+            maps.into_iter()
+                .flat_map(|map| map.iter().flat_map(|(k, v)| [k, v])),
+        );
+        if let Some(text) = texts.into_iter().find(|text| url_credentials(text)) {
+            return Err(url_credentials_refusal("yarn.lock", text));
+        }
+    }
+    Ok((entries, package))
+}
+
+fn plan_yarn_recording(
+    platform: Platform,
+    lock: &str,
+    package_json: &str,
+    project: &ProjectRoot,
+    node_version: &str,
+    record: &mut impl FnMut(&str, &str, &str) -> io::Result<()>,
+) -> io::Result<NpmPlan> {
+    let (entries, package) = read_yarn_inputs(lock, package_json)?;
     let mut selector_to_node = BTreeMap::<String, String>::new();
     let mut nodes = BTreeMap::<String, Node>::new();
     for (index, entry) in entries.iter().enumerate() {
         let key = format!("yarn:{index}");
-        let url = entry
-            .resolved
-            .split_once('#')
-            .map(|(url, _)| url)
-            .unwrap_or(entry.resolved.as_str());
+        // The URL without its `#` fragment (`split` always yields one part).
+        let url = entry.resolved.split('#').next().unwrap_or_default();
         // Yarn 1 attests a GitHub archive tarball by the sha1 in its
         // fragment, as it does any other tarball. Those bytes are what the
         // lock pins, so the entry is a verified tarball, not a git checkout
@@ -494,7 +554,7 @@ pub fn plan_yarn(
         let integrity = if git_detail.is_some() || pinned_git.is_some() {
             String::new()
         } else {
-            yarn_integrity(&entry.resolved, entry.integrity.clone(), &key)?
+            yarn_integrity_with(&entry.resolved, entry.integrity.clone(), &key, record)?
         };
         let url = match &pinned_git {
             Some(source) => format!("git+{}#{}", source.url, source.commit),
@@ -606,7 +666,7 @@ pub fn plan_yarn(
             .collect(),
         local_link_deps,
     };
-    build_plan(platform, graph, "yarn.lock", node_version)
+    build_plan_recording(platform, graph, "yarn.lock", node_version, record)
 }
 
 /// The lock entry a manifest's direct dependency names. yarn.lock keys each
@@ -675,6 +735,7 @@ fn yarn_link_dependencies(
             Some(text) => {
                 let package: JsonValue = serde_json::from_str(&text)
                     .map_err(|error| err(format!("{manifest}: {error}")))?;
+                refuse_package_json_url_credentials(&manifest, &package)?;
                 dependencies_of(&package, Some(&target), false)?
             }
         };
@@ -1056,22 +1117,198 @@ mod lock_shape_tests {
                 .map(drop)
                 .unwrap_err();
             assert!(!error.to_string().contains("secret"), "{error}");
-            assert_invalid(
-                error,
-                "a@1.0.0: tarball URL carries credentials (user:pass@ before its host); tog will not record them",
+            assert!(
+                error.to_string().starts_with(
+                    "yarn.lock: https://***:***@r/a-1.0.0.tgz carries URL credentials"
+                ) || error
+                    .to_string()
+                    .starts_with("yarn.lock: http://***:***@r/a-1.0.0.tgz carries URL credentials"),
+                "{error}"
             );
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         }
     }
 
+    /// A selector, a dependency spec or package.json itself carrying
+    /// credentials is refused without the secret, though no tarball URL
+    /// holds them.
     #[test]
-    fn an_optional_entry_with_url_credentials_is_dropped() {
+    fn credentials_outside_the_tarball_url_are_refused_without_the_secret() {
+        let lock = http_lock().replace("http://r/", "https://r/");
+        for (lock, package_json) in [
+            (
+                lock.replace(
+                    "a@1.0.0:",
+                    "\"a@https://user:secret@r/a-1.0.0.tgz\":",
+                ),
+                r#"{"dependencies":{"a":"https://r/a-1.0.0.tgz","b":"1.0.0"}}"#.to_string(),
+            ),
+            (
+                lock.replace(
+                    "  integrity",
+                    "  dependencies:\n    c \"https:user:secret@r/c.tgz\"\n  integrity",
+                ),
+                r#"{"dependencies":{"a":"1.0.0","b":"1.0.0"}}"#.to_string(),
+            ),
+            (
+                lock.clone(),
+                r#"{"dependencies":{"a":"1.0.0","b":"git+https://user:secret@github.com/o/b.git"}}"#
+                    .to_string(),
+            ),
+        ] {
+            let error = plan(&lock, &package_json).map(drop).unwrap_err();
+            assert!(!error.to_string().contains("secret"), "{error}");
+            assert!(error.to_string().contains(" carries URL credentials "), "{error}");
+        }
+    }
+
+    /// Only the package.json fields that feed the plan are held to the
+    /// credentials check: a script naming a token variable and a
+    /// username-only clone URL are not secrets. One in `dependencies` is
+    /// refused, the field named.
+    #[test]
+    fn package_json_credentials_are_checked_in_planned_fields_only() {
+        let lock = http_lock().replace("http://r/", "https://r/");
+        let harmless = r#"{"dependencies":{"a":"1.0.0","b":"1.0.0"},
+            "scripts":{"docs":"git push https://$GH_TOKEN@github.com/o/r.git"},
+            "repository":"https://jane@bitbucket.org/team/repo.git"}"#;
+        plan(&lock, harmless).unwrap();
+        let error = plan(
+            &lock,
+            r#"{"dependencies":{"a":"1.0.0","b":"https://u:secret@r/b-1.0.0.tgz"}}"#,
+        )
+        .map(drop)
+        .unwrap_err();
+        assert_invalid(
+            error,
+            "package.json: dependencies.b: https://***:***@r/b-1.0.0.tgz carries URL credentials \
+             (user:pass@ before its host); tog will not read a file that holds them",
+        );
+    }
+
+    /// A workspace member's and a linked directory's package.json feed the
+    /// plan too, so their planned fields are checked the same way.
+    #[test]
+    fn member_and_linked_package_json_credentials_are_refused() {
+        let dir = members();
+        fs::write(
+            dir.0.join("packages/a/package.json"),
+            r#"{"name":"a","version":"1.0.0","scripts":{"x":"https://$T@h"},
+                "dependencies":{"c":"https://u:secret@r/c.tgz"}}"#,
+        )
+        .unwrap();
+        let error = workspaces(&dir.0, r#"["packages/*"]"#).unwrap_err();
+        assert!(!error.to_string().contains("secret"), "{error}");
+        assert!(
+            error.to_string().starts_with(
+                "packages/a/package.json: dependencies.c: https://***:***@r/c.tgz carries"
+            ),
+            "{error}"
+        );
+
+        let dir = project();
+        fs::create_dir_all(dir.0.join("vendor/local")).unwrap();
+        fs::write(
+            dir.0.join("vendor/local/package.json"),
+            r#"{"name":"local","version":"1.0.0","dependencies":{"c":"https://secret@r/c.tgz"}}"#,
+        )
+        .unwrap();
+        let error = plan_yarn(
+            Platform::X86_64UnknownLinuxGnu,
+            "# yarn lockfile v1\n",
+            r#"{"dependencies":{"local":"link:vendor/local"}}"#,
+            &held(&dir.0),
+            node_version(),
+        )
+        .map(drop)
+        .unwrap_err();
+        assert!(!error.to_string().contains("secret"), "{error}");
+        assert!(
+            error.to_string().starts_with(
+                "vendor/local/package.json: dependencies.c: https://***@r/c.tgz carries"
+            ),
+            "{error}"
+        );
+    }
+
+    /// A yarn.lock of `(name, version, [(dependency, version)])` entries.
+    fn cycle_lock(entries: &[(&str, &str, &[(&str, &str)])]) -> String {
+        let mut lock = "# yarn lockfile v1\n".to_string();
+        for (name, version, deps) in entries {
+            lock.push_str(&format!(
+                "{name}@{version}:\n  version \"{version}\"\n  resolved \"https://r/{name}-{version}.tgz\"\n  integrity {SRI}\n"
+            ));
+            if !deps.is_empty() {
+                lock.push_str("  dependencies:\n");
+            }
+            for (dep, wanted) in *deps {
+                lock.push_str(&format!("    {dep} \"{wanted}\"\n"));
+            }
+        }
+        lock
+    }
+
+    /// `a@1` needing `a@2` needing `a@1` cannot be laid out as a
+    /// node_modules tree: each copy nests beneath the other forever. It is
+    /// refused at the first repeat instead of growing without bound.
+    #[test]
+    fn a_version_cycle_through_one_name_is_refused() {
+        let lock = cycle_lock(&[
+            ("a", "1.0.0", &[("a", "2.0.0")]),
+            ("a", "2.0.0", &[("a", "1.0.0")]),
+        ]);
+        let error = plan(&lock, r#"{"dependencies":{"a":"1.0.0"}}"#)
+            .map(drop)
+            .unwrap_err();
+        assert_invalid(
+            error,
+            "a@2.0.0: would nest beneath its own copy at node_modules/a/node_modules/a; its \
+             dependencies cycle through conflicting versions, which a node_modules tree cannot \
+             hold",
+        );
+    }
+
+    /// A chain that revisits a package without repeating a run ends: the
+    /// inner `x@1` finds the `z@1` above it. It is planned, not refused.
+    #[test]
+    fn a_chain_revisiting_a_package_is_planned() {
+        let lock = cycle_lock(&[
+            ("x", "1.0.0", &[("z", "1.0.0")]),
+            ("x", "2.0.0", &[("w", "1.0.0")]),
+            ("z", "1.0.0", &[("x", "2.0.0")]),
+            ("z", "2.0.0", &[]),
+            ("w", "1.0.0", &[("x", "1.0.0")]),
+            ("w", "2.0.0", &[]),
+        ]);
         let plan = plan(
+            &lock,
+            r#"{"dependencies":{"x":"1.0.0","z":"2.0.0","w":"2.0.0"}}"#,
+        )
+        .unwrap();
+        let x1 = "node_modules/x/node_modules/z/node_modules/x/node_modules/w/node_modules/x";
+        assert!(
+            plan.packages.iter().any(|package| package.path == x1),
+            "{:?}",
+            plan.packages
+        );
+        assert_eq!(plan.packages.len(), 7, "{:?}", plan.packages);
+    }
+
+    /// A lockfile that holds credentials is refused whole when it is read,
+    /// so an optional entry carrying them is refused too, not dropped.
+    #[test]
+    fn an_optional_entry_with_url_credentials_is_refused_too() {
+        let error = plan(
             &credentials_lock(),
             r#"{"dependencies":{"b":"1.0.0"},"optionalDependencies":{"a":"1.0.0"}}"#,
         )
-        .unwrap();
-        let paths: Vec<&str> = plan.packages.iter().map(|p| p.path.as_str()).collect();
-        assert_eq!(paths, vec!["node_modules/b"]);
+        .map(drop)
+        .unwrap_err();
+        assert!(!error.to_string().contains("secret"), "{error}");
+        assert!(
+            error.to_string().contains("carries URL credentials"),
+            "{error}"
+        );
     }
 
     /// A project with members at packages/a, packages/b and packages/deep/c.

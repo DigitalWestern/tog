@@ -9,7 +9,10 @@ use crate::kernel::fetch::Digest;
 use crate::kernel::fsroot::{Entry, ProjectRoot};
 use crate::kernel::platform::Platform;
 use crate::tailors::node::inputs::input_exists;
-use crate::tailors::node::{NpmLink, NpmPackage, NpmPatch, NpmPlan};
+use crate::tailors::node::{
+    refuse_package_json_url_credentials, url_credentials, url_credentials_refusal, NpmLink,
+    NpmPackage, NpmPatch, NpmPlan,
+};
 use serde_json::Value as JsonValue;
 use sha2::{Digest as Sha2Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -79,12 +82,27 @@ struct Graph {
     local_link_deps: BTreeMap<String, Vec<Dependency>>,
 }
 
-fn integrity_policy(path: &str, integrity: &str) -> io::Result<()> {
-    integrity_policy_with(path, integrity, &mut crate::kernel::policy::record)
+/// [`refuse_json_url_credentials`] for a parsed YAML lockfile.
+fn refuse_yaml_url_credentials(source: &str, value: &YamlValue) -> io::Result<()> {
+    match value {
+        YamlValue::Scalar(text) if url_credentials(text) => {
+            Err(url_credentials_refusal(source, text))
+        }
+        YamlValue::Scalar(_) => Ok(()),
+        YamlValue::Seq(items) => items
+            .iter()
+            .try_for_each(|item| refuse_yaml_url_credentials(source, item)),
+        YamlValue::Map(map) => map.iter().try_for_each(|(key, item)| {
+            if url_credentials(key) {
+                return Err(url_credentials_refusal(source, key));
+            }
+            refuse_yaml_url_credentials(source, item)
+        }),
+    }
 }
 
-/// `integrity_policy` recording through `record`, so a test can pass a
-/// policy of its own instead of the process one.
+/// Record a weak-integrity exception for `integrity` through `record`, the
+/// caller's policy.
 fn integrity_policy_with(
     path: &str,
     integrity: &str,
@@ -268,14 +286,15 @@ fn workspace_parent_context(path: &str, workspaces: &BTreeSet<String>) -> String
         .unwrap_or_default()
 }
 
-/// Whoever needs a dependency resolved from a real path in the project: an
-/// importer, or a local `file:` package. `context` is where Node's walk up
+/// Whoever needs a dependency resolved: an importer, a local `file:`
+/// package, or a placed registry package. `context` is where Node's walk up
 /// the projected node_modules starts.
 #[derive(Debug, Clone)]
 struct Requirer {
     who: String,
     context: String,
     local: bool,
+    registry: bool,
 }
 
 /// The first `node_modules/<name>` Node's resolver meets walking up from
@@ -482,7 +501,11 @@ fn realizable_node<'a>(
     }
     // Git sources carry `git:<commit>` instead of an SRI.
     if node_git.is_none() {
-        integrity_policy(&format!("{lock_source}/{node_key}"), &node.integrity)?;
+        integrity_policy_with(
+            &format!("{lock_source}/{node_key}"),
+            &node.integrity,
+            record,
+        )?;
     }
     Ok(Some(node))
 }
@@ -514,7 +537,11 @@ fn place_node_package(
     }
     let blocked_by_nearer_conflict = ancestor.is_err();
     let root = dependency_path("", &dependency.name);
-    let path = if let Some(existing) = occupied.get(&root) {
+    let path = if blocked_by_nearer_conflict && !parent.is_empty() {
+        // The root is out of reach: Node walking up from the parent stops at
+        // the nearer conflict first, so the package nests under its parent.
+        dependency_path(parent, &dependency.name)
+    } else if let Some(existing) = occupied.get(&root) {
         if !blocked_by_nearer_conflict && same_target(existing, &dependency.target, nodes) {
             root
         } else if in_workspace {
@@ -545,6 +572,7 @@ fn place_node_package(
             )));
         }
     } else {
+        refuse_endless_nesting(&path, node_key, node, occupied)?;
         occupied.insert(
             path.clone(),
             Occupied::Package {
@@ -555,6 +583,55 @@ fn place_node_package(
         );
     }
     Ok(path)
+}
+
+/// Nested package directories past which a placement is taken to be
+/// endless: far beyond any installable tree (each level adds at least
+/// `/node_modules/x` to a path PATH_MAX caps at 4096 bytes).
+const MAX_NESTING: usize = 100;
+
+/// Refuse placing `node_key` at `path` when the nesting would never end.
+/// Versions that need each other through one name (`a@1` needing `a@2`
+/// needing `a@1`) nest the same run of packages beneath itself, each copy
+/// below meeting the same conflicts the copy above did: the chain of
+/// packages down to `path` ends in one run twice in a row. A chain that
+/// only revisits a package (`x@1 > z@1 > x@2 > w@1 > x@1`, whose inner
+/// `z@1` is found above it) ends, so it is not refused.
+fn refuse_endless_nesting(
+    path: &str,
+    node_key: &str,
+    node: &Node,
+    occupied: &BTreeMap<String, Occupied>,
+) -> io::Result<()> {
+    let chain: Vec<(&str, Option<&str>)> = path
+        .match_indices("/node_modules/")
+        .map(|(at, _)| &path[..at])
+        .map(|ancestor| match occupied.get(ancestor) {
+            Some(Occupied::Package { node_key, .. }) => (ancestor, Some(node_key.as_str())),
+            _ => (ancestor, None),
+        })
+        .chain([(path, Some(node_key))])
+        .collect();
+    let keys: Vec<Option<&str>> = chain.iter().map(|(_, key)| *key).collect();
+    let n = keys.len();
+    let run = (1..=n / 2).find(|&k| keys[n - 2 * k..n - k] == keys[n - k..]);
+    if let Some(k) = run {
+        return Err(err(format!(
+            "{}@{}: would nest beneath its own copy at {}; its dependencies cycle through \
+             conflicting versions, which a node_modules tree cannot hold",
+            node.name,
+            node.version,
+            chain[n - 1 - k].0
+        )));
+    }
+    if n > MAX_NESTING {
+        return Err(err(format!(
+            "{}@{}: nested more than {MAX_NESTING} packages deep beneath {}; refusing an \
+             endless node_modules tree",
+            node.name, node.version, chain[0].0
+        )));
+    }
+    Ok(())
 }
 
 /// Placement for a workspace link. Same hoisting shape as a package, except
@@ -699,6 +776,7 @@ fn check_links_inside_packages(
 }
 
 /// `build_plan_recording` through the process policy.
+#[cfg(test)]
 fn build_plan(
     platform: Platform,
     graph: Graph,
@@ -752,6 +830,7 @@ fn build_plan_recording(
                 },
                 context: parent.clone(),
                 local: false,
+                registry: false,
             };
             queue.push_back((parent, root.dependency, root.workspace, Some(requirer)));
         }
@@ -833,8 +912,9 @@ fn build_plan_recording(
                 (path, true)
             }
             Target::Link(target) => {
-                // Only a registry package's own dependency has no requirer.
-                if requirer.is_none() && occupied.contains_key(&parent) {
+                if requirer.as_ref().is_some_and(|requirer| requirer.registry)
+                    && occupied.contains_key(&parent)
+                {
                     needs_workspace.insert(parent.clone());
                 }
                 let path = place_workspace_link(
@@ -860,7 +940,13 @@ fn build_plan_recording(
             if expanded.insert((path.clone(), node_key.clone())) {
                 if let Some(node) = graph.nodes.get(&node_key) {
                     for child in &node.deps {
-                        queue.push_back((path.clone(), child.clone(), None, None));
+                        let requirer = Requirer {
+                            who: format!("{}@{} at {path}", node.name, node.version),
+                            context: path.clone(),
+                            local: false,
+                            registry: true,
+                        };
+                        queue.push_back((path.clone(), child.clone(), None, Some(requirer)));
                     }
                 }
             }
@@ -887,6 +973,7 @@ fn build_plan_recording(
                             who: format!("the file: package {target}"),
                             context: context.clone(),
                             local: true,
+                            registry: false,
                         };
                         queue.push_back((context.clone(), child.clone(), None, Some(requirer)));
                     }
@@ -895,28 +982,7 @@ fn build_plan_recording(
         }
     }
 
-    // Node walks up from each requirer's real path and stops at the first
-    // node_modules/<name>; that first hit must be what the lock gave it.
-    for (requirer, dependency) in &requirements {
-        if let Some((path, found)) = first_on_chain(
-            &requirer.context,
-            &dependency.name,
-            &occupied,
-            &workspace_paths,
-        ) {
-            if !same_target(found, &dependency.target, &graph.nodes) {
-                return Err(conflict(
-                    requirer,
-                    dependency,
-                    (&path, found),
-                    &requirements,
-                    &occupied,
-                    &workspace_paths,
-                    &graph.nodes,
-                ));
-            }
-        }
-    }
+    check_requirements(&requirements, &occupied, &workspace_paths, &graph.nodes)?;
     check_links_inside_packages(&links, &occupied, &needs_workspace)?;
     let packages = resolved_packages(platform, occupied, &graph.nodes, &needs_workspace)?;
     check_destinations(&packages, &links)?;
@@ -927,6 +993,37 @@ fn build_plan_recording(
         workspaces: workspace_paths.into_iter().collect(),
         lock_source: lock_source.to_string(),
     })
+}
+
+/// Node walks up from each requirer's real path and stops at the first
+/// node_modules/<name>; that first hit must be what the lock gave it.
+fn check_requirements(
+    requirements: &[(Requirer, Dependency)],
+    occupied: &BTreeMap<String, Occupied>,
+    workspace_paths: &BTreeSet<String>,
+    nodes: &BTreeMap<String, Node>,
+) -> io::Result<()> {
+    for (requirer, dependency) in requirements {
+        if let Some((path, found)) = first_on_chain(
+            &requirer.context,
+            &dependency.name,
+            occupied,
+            workspace_paths,
+        ) {
+            if !same_target(found, &dependency.target, nodes) {
+                return Err(conflict(
+                    requirer,
+                    dependency,
+                    (&path, found),
+                    requirements,
+                    occupied,
+                    workspace_paths,
+                    nodes,
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Check the settled package and link paths together before they become a
@@ -1399,11 +1496,12 @@ snapshots:
   foo@1.0.0: {{}}
 "#
         );
-        let plan = plan_pnpm(
+        let plan = super::pnpm::plan_pnpm_with_policy(
             Platform::X86_64UnknownLinuxGnu,
             &lock,
             &held(&dir.0),
             node_version(),
+            &crate::kernel::policy::Policy::default(),
         )
         .unwrap();
         assert_eq!(
@@ -1430,11 +1528,12 @@ snapshots:
             "pnpm 9 md5 patch hash accepted and verified, but is cryptographically weak; the environment id binds the patch by sha256"
         );
         fs::write(&patch_path, b"changed patch").unwrap();
-        let error = plan_pnpm(
+        let error = super::pnpm::plan_pnpm_with_policy(
             Platform::X86_64UnknownLinuxGnu,
             &lock,
             &held(&dir.0),
             node_version(),
+            &crate::kernel::policy::Policy::default(),
         )
         .unwrap_err();
         // The computed value is reported in the declared encoding.
@@ -1705,11 +1804,12 @@ packages:
     resolution: {type: git, repo: https://example.invalid/a, commit: abc}
 snapshots: {}
 ";
-        let error = plan_pnpm(
+        let error = super::pnpm::plan_pnpm_with_policy(
             Platform::X86_64UnknownLinuxGnu,
             required,
             &held(&dir.0),
             node_version(),
+            &crate::kernel::policy::Policy::default(),
         )
         .unwrap_err();
         assert!(error.to_string().contains("npm_git_dep"));
@@ -1720,11 +1820,12 @@ snapshots: {}
             .replace("dependencies:", "optionalDependencies:")
             .replace("git-required", "git-optional");
         let _attribution = crate::kernel::policy::Attribution::open("node").unwrap();
-        let plan = plan_pnpm(
+        let plan = super::pnpm::plan_pnpm_with_policy(
             Platform::X86_64UnknownLinuxGnu,
             &optional,
             &held(&dir.0),
             node_version(),
+            &crate::kernel::policy::Policy::default(),
         )
         .unwrap();
         assert!(plan.packages.is_empty());
@@ -2218,12 +2319,13 @@ is-number@^6.0.0:
 ";
         // The entry's second key: the first one alone would not serve it.
         let package_json = r#"{"dependencies":{"is-odd":"^3.0.0"}}"#;
-        let plan = plan_yarn(
+        let plan = plan_yarn_with_policy(
             Platform::X86_64UnknownLinuxGnu,
             lock,
             package_json,
             &held(&dir.0),
             node_version(),
+            &crate::kernel::policy::Policy::default(),
         )
         .unwrap();
         assert_eq!(plan.packages.len(), 2);
@@ -2256,12 +2358,13 @@ is-number@^6.0.0:
             );
         }
         let berry = "__metadata:\n  version: 6\n";
-        let error = plan_yarn(
+        let error = plan_yarn_with_policy(
             Platform::X86_64UnknownLinuxGnu,
             berry,
             package_json,
             &held(&dir.0),
             node_version(),
+            &crate::kernel::policy::Policy::default(),
         )
         .unwrap_err();
         assert!(error.to_string().contains("cache-zip checksums"));
@@ -2846,12 +2949,13 @@ plugin@1.0.0:
 "#
         );
         let project = project();
-        let plan = super::plan_yarn(
+        let plan = super::plan_yarn_with_policy(
             crate::kernel::platform::Platform::X86_64UnknownLinuxGnu,
             &lock,
             &format!(r#"{{"dependencies":{{"rt-client":"{url}"}}}}"#),
             &held(&project.0),
             node_version(),
+            &crate::kernel::policy::Policy::default(),
         )
         .unwrap();
         let package = plan
@@ -2881,12 +2985,13 @@ plugin@1.0.0:
                 "# yarn lockfile v1\nplugin@1.0.0:\n  version \"1.0.0\"\n  resolved \"{url}#{sha1}\"\n"
             );
             let dir = project();
-            let plan = super::plan_yarn(
+            let plan = super::plan_yarn_with_policy(
                 crate::kernel::platform::Platform::X86_64UnknownLinuxGnu,
                 &lock,
                 r#"{"dependencies":{"plugin":"1.0.0"}}"#,
                 &held(&dir.0),
                 node_version(),
+                &crate::kernel::policy::Policy::default(),
             );
             let plan = plan.unwrap();
             let package = plan.packages.iter().find(|p| p.name == "plugin").unwrap();
@@ -2899,12 +3004,13 @@ plugin@1.0.0:
                 "# yarn lockfile v1\nplugin@1.0.0:\n  version \"1.0.0\"\n  resolved \"{url}#not-a-hash\"\n"
             );
             let dir = project();
-            let result = super::plan_yarn(
+            let result = super::plan_yarn_with_policy(
                 crate::kernel::platform::Platform::X86_64UnknownLinuxGnu,
                 &lock,
                 r#"{"dependencies":{"plugin":"1.0.0"}}"#,
                 &held(&dir.0),
                 node_version(),
+                &crate::kernel::policy::Policy::default(),
             );
             let error = result.expect_err("malformed fragment refused").to_string();
             assert!(error.contains("malformed yarn sha1 fragment"), "{error}");
@@ -3048,6 +3154,49 @@ mod placement_tests {
                 Vec::new(),
             ),
             "c: root dependencies conflict between c@1.0.0 and c@2.0.0",
+        );
+    }
+
+    /// The workspace's x@2 needs c@1, but the workspace links its own c at
+    /// packages/lib/node_modules/c. Node walking up from x@2's real path
+    /// meets that link before the root, so c@1 must nest under x@2 rather
+    /// than hoist to a free root. Store and mutable projection both plant
+    /// exactly these paths, so the plan is what both modes resolve from.
+    #[test]
+    fn a_dependency_a_workspace_link_shadows_nests_under_its_requirer() {
+        let mut graph = graph(
+            vec![requires("x", Target::Node("x@1.0.0".into()), None)],
+            vec![
+                requires("x", Target::Node("x@2.0.0".into()), Some("packages/lib")),
+                requires("c", Target::Link("vendor/c".into()), Some("packages/lib")),
+            ],
+        );
+        graph.nodes.insert("x@1.0.0".into(), node("x", "1.0.0"));
+        let mut x2 = node("x", "2.0.0");
+        x2.deps.push(Dependency {
+            name: "c".into(),
+            target: c("1.0.0"),
+            optional: false,
+        });
+        graph.nodes.insert("x@2.0.0".into(), x2);
+        let placed = placed(graph).unwrap();
+        assert_eq!(
+            placed,
+            vec![
+                ("node_modules/x".to_string(), "1.0.0".to_string()),
+                (
+                    "packages/lib/node_modules/x".to_string(),
+                    "2.0.0".to_string()
+                ),
+                (
+                    "packages/lib/node_modules/x/node_modules/c".to_string(),
+                    "1.0.0".to_string()
+                ),
+                (
+                    "packages/lib/node_modules/c".to_string(),
+                    "link:vendor/c".to_string()
+                ),
+            ]
         );
     }
 
@@ -3594,6 +3743,22 @@ snapshots:
         }
     }
 
+    /// A patch file that is not there is named, not a bare `NotFound`; so
+    /// is a dangling link where it belongs.
+    #[test]
+    fn a_missing_patch_file_is_named() {
+        let (dir, _outside) = patch_project();
+        std::os::unix::fs::symlink("nowhere.patch", dir.0.join("patches/dangling.patch")).unwrap();
+        for raw in [
+            "patches/missing.patch",
+            "missing/foo.patch",
+            "patches/dangling.patch",
+        ] {
+            let error = patch_path(&held(&dir.0), raw).unwrap_err();
+            assert_invalid(error, &format!("pnpm patch path {raw:?} does not exist"));
+        }
+    }
+
     #[test]
     fn a_project_relative_patch_file_is_accepted() {
         let (dir, _outside) = patch_project();
@@ -3698,38 +3863,39 @@ snapshots:
         )
     }
 
-    /// pnpm tarballs are https-only and carry no credentials, as npm's and
-    /// Yarn's are: a required one is refused, an optional one dropped.
+    /// pnpm tarballs are https-only, as npm's and Yarn's are: a required
+    /// one is refused, an optional one dropped. A lockfile holding URL
+    /// credentials anywhere is refused whole when it is read.
     #[test]
     fn a_non_https_or_credentialed_tarball_is_refused_or_dropped() {
         let dir = project();
-        let credentials =
-            "tarball URL carries credentials (user:pass@ before its host); tog will not record them";
-        for (url, detail) in [
-            (
-                "http://r/x.tgz",
-                "non-https tarball URL http://r/x.tgz".to_string(),
-            ),
-            (
-                "ftp://r/x.tgz",
-                "non-https tarball URL ftp://r/x.tgz".to_string(),
-            ),
-            ("https://u:secret@r/x.tgz", credentials.to_string()),
-            ("https://token@r/x.tgz", credentials.to_string()),
-            ("https://user@r/x.tgz", credentials.to_string()),
-            ("https:///user:secret@r/x.tgz", credentials.to_string()),
-            ("http://user:secret@r/x.tgz", credentials.to_string()),
-            (
-                "http://user:secret@",
-                "non-https tarball URL <URL withheld: it may carry credentials>".to_string(),
-            ),
-        ] {
+        for url in ["http://r/x.tgz", "ftp://r/x.tgz"] {
             let error = refused(&dir.0, &tarball_lock(url, "https://r/o.tgz"));
-            assert!(!error.to_string().contains("secret"), "{error}");
-            assert_invalid(error, &format!("a@1.0.0: {detail}"));
+            assert_invalid(error, &format!("a@1.0.0: non-https tarball URL {url}"));
             let plan = plan(&dir.0, &tarball_lock("https://r/a.tgz", url)).unwrap();
             let paths: Vec<&str> = plan.packages.iter().map(|p| p.path.as_str()).collect();
             assert_eq!(paths, vec!["node_modules/a", "node_modules/b"], "{url}");
+        }
+        for url in [
+            "https://u:secret@r/x.tgz",
+            "https://secret@r/x.tgz",
+            "https://user@r/x.tgz",
+            "https:///user:secret@r/x.tgz",
+            "http://user:secret@r/x.tgz",
+            "http://user:secret@",
+        ] {
+            for lock in [
+                tarball_lock(url, "https://r/o.tgz"),
+                tarball_lock("https://r/a.tgz", url),
+            ] {
+                let error = refused(&dir.0, &lock).to_string();
+                assert!(!error.contains("secret"), "{error}");
+                assert!(
+                    error.starts_with("pnpm-lock.yaml: ")
+                        && error.contains(" carries URL credentials "),
+                    "{url}: {error}"
+                );
+            }
         }
         let upper = plan(&dir.0, &tarball_lock("HTTPS://r/a.tgz", "https://r/o.tgz")).unwrap();
         assert_eq!(upper.packages[0].url, "HTTPS://r/a.tgz");
@@ -3745,8 +3911,8 @@ snapshots:
         );
     }
 
-    /// A tarball identity keeps its URL as the version; the refusal
-    /// names the package without the URL's credentials.
+    /// A tarball identity carrying credentials is refused when the file is
+    /// read, without the credentials.
     #[test]
     fn a_credentialed_tarball_identity_is_refused_without_its_secret() {
         let dir = project();
@@ -3767,21 +3933,18 @@ snapshots:
 "#
             )
         };
-        for (version, expected) in [
-            (
-                "a@https://user:secret@r/a.tgz",
-                "a@https://***:***@r/a.tgz: tarball URL carries credentials (user:pass@ before its host); tog will not record them",
-            ),
-            // The bare URL does not name the snapshot; the miss is
-            // reported without the secret too.
-            (
-                "https://user:secret@r/a.tgz",
-                "a: missing snapshot for a@https://***:***@r/a.tgz",
-            ),
+        for version in [
+            "a@https://user:secret@r/a.tgz",
+            "https://user:secret@r/a.tgz",
         ] {
             let error = refused(&dir.0, &lock(version));
             assert!(!error.to_string().contains("secret"), "{error}");
-            assert_invalid(error, expected);
+            assert!(
+                error
+                    .to_string()
+                    .starts_with("pnpm-lock.yaml: https://***:***@r/a.tgz carries URL credentials"),
+                "{error}"
+            );
         }
     }
 

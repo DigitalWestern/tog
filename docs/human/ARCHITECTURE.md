@@ -1046,7 +1046,8 @@ when the two differ.
     node/run_refusal.rs    `tog run` refusals: npm-family installs over node_modules
     node/lock_import/      pnpm.rs and yarn1.rs importers over yaml.rs;
                            pnpm/record.rs is what the lock says about the
-                           manifests, read by node/freshness.rs
+                           manifests, read by node/freshness.rs;
+                           pnpm/patch.rs reads and hashes patch files
     cargo/mod.rs           project Cargo env + sandboxed build over
                            kernel/provider/{rust,crates}.rs
     cargo/inputs.rs        toolchain resolution, workspace root, missing-lock generation
