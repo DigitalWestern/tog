@@ -36,7 +36,13 @@ pub fn path() -> io::Result<i32> {
     // path, and the path is what someone moving it aside needs: print it,
     // and say on stderr why nothing else will use it.
     let Some((root, format)) = store::Store::probe()? else {
-        println!("{}", store::Store::configured_path().display());
+        // Absolute, as the answer for an existing store is: a relative
+        // `TOG_STORE` is read from the working directory, which `-C` has
+        // already changed, so printed as typed it would point elsewhere.
+        println!(
+            "{}",
+            std::path::absolute(store::Store::configured_path())?.display()
+        );
         return Ok(0);
     };
     println!("{}", root.display());

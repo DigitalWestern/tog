@@ -105,7 +105,8 @@ const LEGACY_RECORD: &str = ".tog/closures/rustfmt.json";
 /// the project, and a root whose closures directory is empty stops every
 /// `tog gc` sweep. Forgetting that root needs the store's exclusive lease,
 /// which a formatter run does not take. `tog gc` forgets a root whose only
-/// closures are retired, so the next run after a sweep removes the file.
+/// closures are retired when it protects nothing they do not name, so the
+/// next run after that sweep removes the file.
 pub fn remove_legacy_record(project: &ProjectRoot, registered: bool) -> io::Result<()> {
     let closures = Path::new(".tog/closures");
     let Some(names) = project.read_dir(closures)? else {

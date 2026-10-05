@@ -1,5 +1,9 @@
 # Working in this repo
 
+- The owner deferred all macOS checks and macOS-only findings on
+  2026-10-04. They do not block review or merge until the owner revisits
+  that decision. Continue required Linux validation.
+
 - The independent review of every pull request is Codex GPT 6.1 Sol at
   high reasoning effort, run through the `codex` MCP server, not the
   `codex exec` CLI: `codex_run` with `kind: "review"` and `cwd` set to

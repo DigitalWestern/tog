@@ -124,6 +124,20 @@ pub fn run_command(
     run_in_mode(platform, fresh, mode, false)
 }
 
+/// The directory `tog sync` run at `cwd` syncs. A directory with project
+/// inputs of its own is synced itself, so a project nested under a synced
+/// root (a docs site with its own `package.json`) can be given its own
+/// environment by syncing it there. Otherwise the project above, as `run`
+/// and the bare `tog` find it, so a sync from `src/` syncs the project,
+/// not `src/`.
+fn sync_dir(cwd: &Path) -> io::Result<PathBuf> {
+    if crate::commands::inspect::detected(cwd)?.is_empty() {
+        project_root(cwd)
+    } else {
+        Ok(cwd.to_path_buf())
+    }
+}
+
 /// The one path from a command line into a sync: preflight before the store
 /// is opened, prove the project directory is still the one preflight
 /// checked, then publish the lock and run the tailors.
@@ -137,9 +151,7 @@ pub(crate) fn run_in_mode(
     mode: Mode,
     stop_after_lock: bool,
 ) -> io::Result<()> {
-    // The project above, as `run` and the bare `tog` find it, so a sync
-    // from `src/` syncs the project, not `src/`.
-    let dir = project_root(&context::project_dir())?;
+    let dir = sync_dir(&context::project_dir())?;
     // An interrupted resolution publication is undone before anything
     // reads the project. Its originals are in the store, so opening the
     // store early leaves no trace a refusal would have avoided.
@@ -278,7 +290,9 @@ pub(crate) fn ensure_current_for(
         // refuses the build exactly as the scoped sync would have.
         check_whole_project(ctx.platform, &dir)?;
     }
-    Ok(dir)
+    // Found again, not assumed (see `ensure_current`): the first sync of a
+    // Cargo workspace member marks the workspace root.
+    project_root(cwd)
 }
 
 /// The half of `preflight_detected` no scope narrows, for a command that
@@ -583,7 +597,10 @@ fn exception_count(project: &ProjectRoot) -> usize {
 }
 
 fn print_exception_summary(project: &ProjectRoot) -> io::Result<()> {
-    if let Some((message, next)) = exception_summary(exception_count(project)) {
+    // The audit's own refusal: CI set and no [signing] table in the chain.
+    let unsigned_refused = !policy::signing_configured()
+        && crate::commands::audit::ci_environment(std::env::var_os("CI").as_deref());
+    if let Some((message, next)) = exception_summary(exception_count(project), unsigned_refused) {
         crate::kernel::ui::warning_next(&message, next);
     }
     Ok(())
@@ -595,14 +612,20 @@ fn print_exception_summary(project: &ProjectRoot) -> io::Result<()> {
 ///
 /// `tog audit` is the `next:` line whether or not a `[signing]` table is
 /// configured: without one it judges the exceptions against the policy and
-/// says that signatures were not checked. `next:`, not `fix:`: the audit
-/// says whether an exception matters under the policy, and the exception
-/// stays recorded either way.
-fn exception_summary(total: usize) -> Option<(String, &'static str)> {
+/// says that signatures were not checked. Under CI with no table a plain
+/// audit exits 2 instead (`unsigned_refused`), so the line adds
+/// `--allow-unsigned`. `next:`, not `fix:`: the audit says whether an
+/// exception matters under the policy, and the exception stays recorded
+/// either way.
+fn exception_summary(total: usize, unsigned_refused: bool) -> Option<(String, &'static str)> {
     (total > 0).then(|| {
         (
             format!("{total} policy exception(s) recorded in .tog/closures/*.json"),
-            "tog audit",
+            if unsigned_refused {
+                "tog audit --allow-unsigned"
+            } else {
+                "tog audit"
+            },
         )
     })
 }
@@ -757,15 +780,21 @@ mod tests {
     /// the sync that recorded them. The summary must not advise it.
     #[test]
     fn the_exception_summary_counts_and_points_at_a_read_command() {
-        assert_eq!(exception_summary(0), None);
-        let (line, next) = exception_summary(3).unwrap();
+        assert_eq!(exception_summary(0, false), None);
+        assert_eq!(exception_summary(0, true), None);
+        let (line, next) = exception_summary(3, false).unwrap();
         assert!(line.starts_with("3 policy exception(s) recorded"), "{line}");
         assert!(line.contains(".tog/closures/*.json"), "{line}");
-        // `tog audit` runs with or without trusted keys now, so the count
-        // always has a command to type.
+        // Outside CI `tog audit` runs with or without trusted keys, so the
+        // count always has a command to type.
         assert_eq!(next, "tog audit");
         assert!(!line.contains("--strict"), "{line}");
         assert!(!line.contains("[signing]"), "{line}");
+        // Under CI with no [signing] table a plain audit exits 2, so the
+        // command to type is the one that runs.
+        let (ci_line, ci_next) = exception_summary(3, true).unwrap();
+        assert_eq!(ci_line, line);
+        assert_eq!(ci_next, "tog audit --allow-unsigned");
     }
 
     /// Closures are tog's own state: sync's exception summary reads them
@@ -1023,6 +1052,26 @@ mod tests {
         assert!(error.to_string().contains("no pinned CPython"), "{error}");
         assert_eq!(project_root(&nested).unwrap(), project);
         assert_eq!(project_root(&bare).unwrap(), bare);
+    }
+
+    /// `tog sync` syncs the directory it is run in when that directory has
+    /// inputs of its own, a project nested under a synced root included,
+    /// and the project above from anywhere else.
+    #[test]
+    fn sync_syncs_a_nested_project_where_it_stands() {
+        let temp = TempDir::new();
+        let root = temp.0.join("repo");
+        let docs = root.join("docs");
+        std::fs::create_dir_all(root.join(".tog/closures")).unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(docs.join("pages")).unwrap();
+        std::fs::write(root.join("Cargo.toml"), "[package]\nname = \"x\"\n").unwrap();
+        std::fs::write(docs.join("package.json"), "{}").unwrap();
+        assert_eq!(sync_dir(&root.join("src")).unwrap(), root);
+        assert_eq!(sync_dir(&docs).unwrap(), docs);
+        // Below the nested project the marked root still answers, as it
+        // does for `run`, until the nested project is synced and marked.
+        assert_eq!(sync_dir(&docs.join("pages")).unwrap(), root);
     }
 
     /// The build's sync realizes the built ecosystem only: with two

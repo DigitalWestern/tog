@@ -20,7 +20,8 @@ use std::io;
 const UPDATE_HINT: &str = "run `tog update --toolchain`";
 
 /// What `.python-version` accepts, spelled the way the refusal spells it.
-const PYTHON_HINT: &str = "put an X.Y, X.Y.Z, or PEP 440 specifier set in .python-version, then run `tog update --toolchain`";
+const PYTHON_HINT: &str =
+    "put an X.Y or X.Y.Z CPython version in .python-version, then run `tog update --toolchain`";
 
 /// The value a row holds, looked up by the (path, field) pair discovery
 /// recorded it under. A row with no value reads the same as no row.
@@ -62,37 +63,26 @@ fn python_specifiers(field: &str, text: &str) -> io::Result<Option<VersionReques
     }))
 }
 
-/// The request `.python-version` states, or the refusal uv's own grammar
-/// would give it.
+/// The request `.python-version` states, read by the one parser interpreter
+/// selection also reads the file with, so a line the lock takes is a line
+/// the sync takes. A fully spelled version is exact, `X.Y` its newest
+/// patch; anything else is refused here rather than locked.
 fn python_version_request(text: &str) -> io::Result<VersionRequest> {
-    let lower = text.to_ascii_lowercase();
-    if lower.contains("pypy")
-        || lower.contains("miniconda")
-        || lower.contains("graalpy")
-        || lower == "system"
-        || lower.contains("-dev")
-        || lower.ends_with('t')
-        || lower.contains("free-thread")
-        || lower.contains("freethread")
-    {
-        return Err(invalid(format!(
+    use super::input::{python_version_line, PythonVersionRefusal};
+    let invalid_request = || {
+        invalid(format!(
+            ".python-version: invalid .python-version request `{text}`; {PYTHON_HINT}"
+        ))
+    };
+    match python_version_line(text) {
+        Ok(version) => Version::parse(version.raw())
+            .map(exact_or_prefix)
+            .map_err(|_| invalid_request()),
+        Err(PythonVersionRefusal::Unsupported) => Err(invalid(format!(
             ".python-version: unsupported Python interpreter request `{text}`; {PYTHON_HINT}"
-        )));
+        ))),
+        Err(PythonVersionRefusal::Invalid(_)) => Err(invalid_request()),
     }
-    if let Some(prefix) = text.strip_suffix(".*") {
-        if let Ok(version) = Version::parse(prefix) {
-            return Ok(VersionRequest::Prefix(version));
-        }
-    }
-    if let Ok(version) = Version::parse(text) {
-        return Ok(exact_or_prefix(version));
-    }
-    if let Ok(Some(request)) = python_specifiers(".python-version", text) {
-        return Ok(request);
-    }
-    Err(invalid(format!(
-        ".python-version: invalid .python-version request `{text}`; {PYTHON_HINT}"
-    )))
 }
 
 /// The refusal every unreadable `engines.node` range gets.
@@ -501,16 +491,11 @@ mod tests {
     }
 
     #[test]
-    fn python_lowers_exact_prefix_and_specifier_sets() {
+    fn python_lowers_exact_and_prefix_versions() {
         let pin = |text: &str| vec![row(".python-version", "version", Some(text))];
         assert_eq!(request("python", &pin("3.12.14")), "cpython ==3.12.14");
         assert_eq!(request("python", &pin("3.12")), "cpython 3.12.*");
-        assert_eq!(request("python", &pin("3.12.*")), "cpython 3.12.*");
-        assert_eq!(
-            request("python", &pin(">=3.11,<3.13")),
-            "cpython >=3.11,<3.13"
-        );
-        assert_eq!(request("python", &pin("~=3.11.2")), "cpython ~=3.11.2");
+        assert_eq!(request("python", &pin("cpython-3.12")), "cpython 3.12.*");
     }
 
     /// Whether the request `rows` state admits CPython `version`.
@@ -623,7 +608,25 @@ mod tests {
             );
             assert!(error.contains(PYTHON_HINT), "{text}: {error}");
         }
-        for text in ["/usr/bin/python3", "not a version", "*"] {
+        // Interpreter selection reads `.python-version` as X.Y or X.Y.Z
+        // only, so the lock refuses every other line rather than lock a
+        // CPython the sync then refuses (#479).
+        for text in [
+            "/usr/bin/python3",
+            "not a version",
+            "*",
+            ">3.11",
+            "<=3.13",
+            "^3.9",
+            "3.11 || 3.12",
+            "3.12 3.13",
+            "3.12rc1",
+            "3.12.4+abc",
+            "3.12.*",
+            ">=3.11,<3.13",
+            "~=3.11.2",
+            "03.12",
+        ] {
             let error = refusal("python", &[row(".python-version", "version", Some(text))]);
             assert!(
                 error.contains("invalid .python-version request"),

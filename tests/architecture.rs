@@ -1943,7 +1943,7 @@ fn tar_runs_only_in_kernel_archive() {
 /// `tar`, `bsdtar`, `gtar` or `gnutar`, or one of the last three bare. A bare
 /// `"tar"` is not matched here: it is also a file extension
 /// (`with_extension`). The scan catches it as a program instead, when it is
-/// the argument of `Command::new` (`command_new_before`).
+/// the argument of `Command::new` (the `program` check in [`tar_sites`]).
 fn names_a_tar(literal: &str) -> bool {
     const TARS: [&str; 4] = ["tar", "bsdtar", "gtar", "gnutar"];
     let base = literal.rsplit('/').next().unwrap_or(literal);

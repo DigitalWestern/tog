@@ -36,35 +36,64 @@ pub(super) fn collect_roots(
         if options.forgotten.iter().any(|key| key == &root.key) {
             continue;
         }
-        // A record this store cannot use (damaged, or the pathname-only
-        // form before root/2) stops the sweep: the record exists, so some
-        // project may still be counting on it, and there is no way to tell
-        // which objects that project needs.
-        if let Some(reason) = &root.unusable {
-            return Err(unusable_root(root, reason));
-        }
-        if let Some(record) = &root.record {
-            // root/2 is self-sufficient.  Its diagnostic project path is
-            // intentionally never resolved during a sweep: a moved,
-            // unmounted, or deleted project retains exactly the durable
-            // references recorded here.
-            state.object_ids.extend(record.objects.iter().cloned());
-            state
-                .run_home_keys
-                .insert(Store::canonical_project_key(&record.project_path));
-            state.project_keep.extend(
-                record
-                    .projections
-                    .iter()
-                    .map(|projection| projection.path(store)),
-            );
-            continue;
-        }
-        // Every entry `roots()` reads is a root/2 record or unusable. One
-        // that is neither names nothing a sweep could keep.
-        return Err(unusable_root(root, "the record names no store objects"));
+        collect_root(store, root, &mut state).map_err(|error| match error {
+            RootUnreadable::Record(reason) => unusable_root(root, &reason),
+            RootUnreadable::Io(error) => error,
+        })?;
     }
     Ok(state)
+}
+
+/// Why one root's objects could not be read. The sweep words the first two
+/// as its refusal; a drop prints the cause as it is.
+pub(super) enum RootUnreadable {
+    /// The registry record is unusable, and why.
+    Record(String),
+    /// Any other read failed.
+    Io(io::Error),
+}
+
+impl From<io::Error> for RootUnreadable {
+    fn from(error: io::Error) -> Self {
+        Self::Io(error)
+    }
+}
+
+/// Add one root's live set to `state`.
+pub(super) fn collect_root(
+    store: &Store,
+    root: &RootEntry,
+    state: &mut RootState,
+) -> Result<(), RootUnreadable> {
+    // A record this store cannot read is the same safety stop as a
+    // project that cannot be resolved, and for the same reason: the
+    // record exists, so some project is still counting on it, and there
+    // is no way to tell which objects that project needs.
+    if let Some(reason) = &root.unusable {
+        return Err(RootUnreadable::Record(reason.clone()));
+    }
+    if let Some(record) = &root.record {
+        // root/2 is self-sufficient.  Its diagnostic project path is
+        // intentionally never resolved during a sweep: a moved,
+        // unmounted, or deleted project retains exactly the durable
+        // references recorded here.
+        state.object_ids.extend(record.objects.iter().cloned());
+        state
+            .run_home_keys
+            .insert(Store::canonical_project_key(&record.project_path));
+        state.project_keep.extend(
+            record
+                .projections
+                .iter()
+                .map(|projection| projection.path(store)),
+        );
+        return Ok(());
+    }
+    // Every entry `roots()` reads is a root/2 record or unusable. One
+    // that is neither names nothing a sweep could keep.
+    Err(RootUnreadable::Record(
+        "the record names no store objects".into(),
+    ))
 }
 
 pub(super) fn unusable_root(root: &RootEntry, reason: &str) -> io::Error {
@@ -77,6 +106,76 @@ pub(super) fn unusable_root(root: &RootEntry, reason: &str) -> io::Error {
         reason,
         root.key
     ))
+}
+
+pub(super) fn collect_object_ids(
+    value: &serde_json::Value,
+    store: &Store,
+    ids: &mut HashSet<String>,
+) {
+    match value {
+        serde_json::Value::String(text) => {
+            if let Some(id) = store::object_id_token(text) {
+                ids.insert(id);
+            }
+            let objects = store.root.join("objects");
+            let path = Path::new(text);
+            if path.is_absolute() && path.starts_with(&objects) {
+                if let Ok(relative) = path.strip_prefix(&objects) {
+                    if let Some(component) = relative.components().next() {
+                        let id = component.as_os_str().to_string_lossy();
+                        if let Some(id) = store::object_id_token(&id) {
+                            ids.insert(id);
+                        }
+                    }
+                }
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                collect_object_ids(value, store, ids);
+            }
+        }
+        serde_json::Value::Object(values) => {
+            for value in values.values() {
+                collect_object_ids(value, store, ids);
+            }
+        }
+        _ => {}
+    }
+}
+
+pub(super) fn collect_project_paths(
+    value: &serde_json::Value,
+    store: &Store,
+    paths: &mut Vec<PathBuf>,
+) {
+    match value {
+        serde_json::Value::String(text) => {
+            let path = Path::new(text);
+            if path.is_absolute() {
+                collect_project_path(path, store, paths);
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                collect_project_paths(value, store, paths);
+            }
+        }
+        serde_json::Value::Object(values) => {
+            for value in values.values() {
+                collect_project_paths(value, store, paths);
+            }
+        }
+        _ => {}
+    }
+}
+
+pub(super) fn collect_project_path(path: &Path, store: &Store, paths: &mut Vec<PathBuf>) {
+    if path.starts_with(store.root.join("forests")) || path.starts_with(store.root.join("backups"))
+    {
+        paths.push(path.to_path_buf());
+    }
 }
 
 /// A directory the sweep may delete from, held open from read through
@@ -182,6 +281,9 @@ pub struct Snapshot {
     /// be mid-publication (commit writes the object first), so each is the
     /// residue of a removal that stopped between the object and its record.
     pub(super) stray_records: Vec<DirEntrySnapshot>,
+    // Retain parsed file descriptors so an unlinked inode cannot be reused
+    // by a replacement directory before execution checks its identity.
+    pub(super) _stray_files: Vec<fs::File>,
     pub(super) dirs: Dirs,
 }
 
@@ -194,6 +296,7 @@ fn read_objects(
     objects_path: &Path,
     objects: &HeldDir,
     meta_dir: &HeldDir,
+    meta: &crate::kernel::objmeta::MetaIndex,
 ) -> io::Result<Vec<ObjectEntry>> {
     let mut object_entries = Vec::new();
     for entry in fs::read_dir(objects_path)? {
@@ -211,7 +314,21 @@ fn read_objects(
         };
         // Drop takes an object whose record is gone, whatever its shape, so
         // that is the fix to name; the next sync that needs it rebuilds it.
-        let drop_fix = |id: &str| format!("drop it with `tog gc --drop-object {id}`");
+        // Drop refuses an id a readable record still depends on, so the
+        // command names those dependents too.
+        let drop_fix = |id: &str| {
+            let dependents = transitive_dependents(&dependents_of(meta), id);
+            let mut set: BTreeSet<&str> = dependents.iter().map(String::as_str).collect();
+            set.insert(id);
+            let ids = set.into_iter().collect::<Vec<_>>().join(" ");
+            match dependents.len() {
+                0 => format!("drop it with `tog gc --drop-object {ids}`"),
+                count => format!(
+                    "drop it and the {count} object(s) that depend on it with `tog gc \
+                     --drop-object {ids}`"
+                ),
+            }
+        };
         if !store::is_object_id(&id) || (stat.st_mode & libc::S_IFMT) != libc::S_IFDIR {
             let mut message = format!("refusing to sweep: invalid object entry {:?}", entry.path());
             if store::is_object_id(&id) && record_gone() {
@@ -251,19 +368,50 @@ fn read_objects(
 
 /// Every readable record with no object under `objects/`, stated through
 /// the held `meta/` descriptor the removal will be relative to.
-fn read_stray_records(
+pub(super) fn read_stray_records(
     meta: &crate::kernel::objmeta::MetaIndex,
     objects: &[ObjectEntry],
     meta_dir: &HeldDir,
-) -> io::Result<Vec<DirEntrySnapshot>> {
+) -> io::Result<(Vec<DirEntrySnapshot>, Vec<fs::File>)> {
     let present: HashSet<&str> = objects.iter().map(|entry| entry.id.as_str()).collect();
     let mut strays = Vec::new();
-    for (id, _) in meta.iter() {
+    let mut files = Vec::new();
+    for (id, expected) in meta.iter() {
         if present.contains(id.as_str()) {
             continue;
         }
         let name = OsString::from(format!("{id}.json"));
-        let stat = store::stat_at(meta_dir.file.as_raw_fd(), name.as_bytes())?;
+        let file = store::open_file_at(
+            meta_dir.file.as_raw_fd(),
+            name.as_bytes(),
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
+            0,
+        )?;
+        let stat = store::fd_stat(file.as_raw_fd())?;
+        if stat.st_mode & libc::S_IFMT != libc::S_IFREG {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "stray metadata is not a regular file",
+            ));
+        }
+        let value = serde_json::from_reader(std::io::BufReader::new(&file))
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        let record = crate::kernel::objmeta::read_record_value(id, value)?;
+        let named = store::stat_at(meta_dir.file.as_raw_fd(), name.as_bytes())?;
+        if !store::same_inode(&stat, &named)
+            || record.identity.kind != expected.identity.kind
+            || record.identity.name != expected.identity.name
+            || record.identity.version != expected.identity.version
+            || record.identity.inputs != expected.identity.inputs
+            || record.dependencies != expected.dependencies
+            || record.cache != expected.cache
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "stray metadata changed during snapshot",
+            ));
+        }
+        files.push(file);
         strays.push(DirEntrySnapshot {
             path: Path::new("meta").join(&name),
             name,
@@ -271,7 +419,7 @@ fn read_stray_records(
             stat,
         });
     }
-    Ok(strays)
+    Ok((strays, files))
 }
 
 /// Enumerate every cache namespace, holding each one open. The returned
@@ -454,49 +602,49 @@ fn read_projections(store: &Store) -> io::Result<Projections> {
 
 /// Every record under `records/<kind>/` that names a project (see
 /// `Store::write_project_record`) whose directory no longer exists. Each
-/// kind is held open; a record is read without following a symlink, and
-/// one that names no project is never a candidate.
+/// kind is held open and every record is opened relative to it, following
+/// no symlink; one that names no project is never a candidate. Records are a
+/// cache, so a kind or a record this cannot read is left alone rather than
+/// failing the sweep.
 fn read_orphan_records(store: &Store, read: &mut Projections) -> io::Result<()> {
-    use std::io::Read as _;
-    use std::os::unix::fs::OpenOptionsExt;
     let records = store.root.join(store::RECORDS);
     validate_projection_namespace(&records, store::RECORDS)?;
     if !records.is_dir() {
         return Ok(());
     }
-    for kind in fs::read_dir(&records)? {
-        let kind = kind?;
-        let kind_stat = fs::symlink_metadata(kind.path())?;
-        if kind_stat.file_type().is_symlink() || !kind_stat.is_dir() {
+    let Ok(records_dir) = open_held(&records, store::RECORDS) else {
+        return Ok(());
+    };
+    let Ok(kinds) = store::read_dir_names_at(records_dir.file.as_raw_fd()) else {
+        return Ok(());
+    };
+    for kind in kinds {
+        let Ok(kind_stat) = store::stat_at(records_dir.file.as_raw_fd(), kind.as_bytes()) else {
+            continue;
+        };
+        if (kind_stat.st_mode & libc::S_IFMT) != libc::S_IFDIR {
             continue;
         }
-        let held = open_held(&kind.path(), "store record kind")?;
+        let Ok(file) = store::open_directory_at(records_dir.file.as_raw_fd(), kind.as_bytes())
+        else {
+            continue;
+        };
+        let held = HeldDir {
+            label: "store record kind".to_string(),
+            file,
+        };
+        let Ok(names) = store::read_dir_names_at(held.file.as_raw_fd()) else {
+            continue;
+        };
         let index = read.record_kinds.len();
-        for entry in fs::read_dir(kind.path())? {
-            let entry = entry?;
-            let name = entry.file_name();
-            let stat = store::stat_at(held.file.as_raw_fd(), name.as_bytes())?;
-            if (stat.st_mode & libc::S_IFMT) != libc::S_IFREG
-                || stat.st_size.max(0) as u64 > store::RECORD_CAP
-            {
-                continue;
-            }
-            let mut bytes = Vec::new();
-            fs::OpenOptions::new()
-                .read(true)
-                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-                .open(entry.path())?
-                .read_to_end(&mut bytes)?;
-            let Some(project) = store::record_project(&bytes) else {
+        let kind_path = records.join(&kind);
+        for name in names {
+            let Some(stat) = orphan_record_at(&held, &name) else {
                 continue;
             };
-            match fs::symlink_metadata(&project) {
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                _ => continue,
-            }
             read.orphan_records.push(DirEntrySnapshot {
+                path: kind_path.join(&name),
                 name,
-                path: entry.path(),
                 parent: Parent::RecordKind(index),
                 stat,
             });
@@ -504,6 +652,35 @@ fn read_orphan_records(store: &Store, read: &mut Projections) -> io::Result<()> 
         read.record_kinds.push(held);
     }
     Ok(())
+}
+
+/// The stat of the record `name` in the held kind directory when it names a
+/// project whose directory is gone; `None` for any other record, or one
+/// that cannot be read.
+fn orphan_record_at(kind: &HeldDir, name: &std::ffi::OsStr) -> Option<libc::stat> {
+    use std::io::Read as _;
+    let stat = store::stat_at(kind.file.as_raw_fd(), name.as_bytes()).ok()?;
+    if (stat.st_mode & libc::S_IFMT) != libc::S_IFREG
+        || stat.st_size.max(0) as u64 > store::RECORD_CAP
+    {
+        return None;
+    }
+    let file = store::open_file_at(
+        kind.file.as_raw_fd(),
+        name.as_bytes(),
+        libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
+        0,
+    )
+    .ok()?;
+    let mut bytes = Vec::new();
+    file.take(store::RECORD_CAP + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    let project = store::record_project(&bytes)?;
+    match fs::symlink_metadata(&project) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Some(stat),
+        _ => None,
+    }
 }
 
 /// Every directory directly under the store's `namespace`, with that
@@ -560,8 +737,8 @@ pub(super) fn read(
     let meta_dir = open_held(&store.root.join("meta"), "meta")?;
     let tmp = open_held(&store.root.join("tmp"), "tmp")?;
 
-    let object_entries = read_objects(&objects_path, &objects, &meta_dir)?;
-    let stray_records = read_stray_records(&meta, &object_entries, &meta_dir)?;
+    let object_entries = read_objects(&objects_path, &objects, &meta_dir, &meta)?;
+    let (stray_records, stray_files) = read_stray_records(&meta, &object_entries, &meta_dir)?;
     let (cache_dirs, cache_entries) = read_cache(store)?;
     let stages = read_stages(store, &tmp)?;
     let projections = if options.project {
@@ -583,6 +760,7 @@ pub(super) fn read(
         run_homes: projections.run_homes,
         orphan_records: projections.orphan_records,
         stray_records,
+        _stray_files: stray_files,
         dirs: Dirs {
             objects,
             meta: meta_dir,
