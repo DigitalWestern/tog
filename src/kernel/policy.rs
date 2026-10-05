@@ -1623,8 +1623,9 @@ deny = ["git-dependency"]"#,
 
     /// A project under a search-only (0111) directory loads its policy
     /// chain: that directory's own policy and the ones above it are reached
-    /// by name through it, which search permission allows (#480).
-    #[cfg(unix)]
+    /// by name through it, which search permission allows (#480). Linux
+    /// only: elsewhere an ancestor is still opened for reading.
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_held_project_under_a_search_only_ancestor_loads_every_policy() {
         use std::os::unix::fs::PermissionsExt as _;
