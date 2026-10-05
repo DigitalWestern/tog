@@ -134,6 +134,18 @@ fn yaml_scalar(raw: &str, line: usize, flow: bool) -> io::Result<String> {
         Some('*') => Err(unsupported(line, &format!("an alias ({word})"))),
         Some('!') => Err(unsupported(line, &format!("a tag ({word})"))),
         Some('|' | '>') => Err(unsupported(line, &format!("a block scalar ({word})"))),
+        // js-yaml refuses a plain scalar that starts with a reserved
+        // indicator or a directive's `%`, so pnpm quotes `'@scope/name':`.
+        Some('@' | '`' | '%') => Err(unsupported(
+            line,
+            &format!("an unquoted scalar starting with a reserved indicator ({word})"),
+        )),
+        // Nor may one start with a flow indicator outside a flow collection,
+        // where the collection reader sees these first.
+        Some(',' | ']' | '}') if !flow => Err(unsupported(
+            line,
+            &format!("an unquoted scalar starting with a flow indicator ({word})"),
+        )),
         Some('[' | '{') => Err(unsupported(
             line,
             &format!("a flow collection that is unclosed or has text after it ({value})"),
@@ -146,13 +158,15 @@ fn yaml_scalar(raw: &str, line: usize, flow: bool) -> io::Result<String> {
     }
 }
 
-/// A plain value holding `: ` mid-value is a mapping in YAML, not a
-/// string. A trailing colon (`catalog:`) is left to the scalar.
+/// A plain value holding `: ` mid-value, or ending in `:`, is a mapping
+/// in YAML, not a string: js-yaml refuses `specifier: catalog:`, so pnpm
+/// writes `'catalog:'`. A colon inside a word (`catalog:react18`) is text.
 fn refuse_plain_mapping(value: &str, line: usize) -> io::Result<()> {
     let mapping = !value.starts_with(['\'', '"'])
-        && value
-            .char_indices()
-            .any(|(index, ch)| ch == ':' && value[index + 1..].starts_with(char::is_whitespace));
+        && value.char_indices().any(|(index, ch)| {
+            let rest = &value[index + 1..];
+            ch == ':' && (rest.is_empty() || rest.starts_with(char::is_whitespace))
+        });
     if mapping {
         return Err(unsupported(
             line,
@@ -379,12 +393,17 @@ pub(super) fn strip_yaml_comment(raw: &str) -> &str {
 
 /// The document a pnpm lock is read from, and how many lines precede it.
 /// `pnpm self-update` writes a prelude document for pnpm itself ahead of
-/// the project's lock, so the project's lock is the last document, and
-/// pnpm never writes a third.
+/// the project's lock, so the project's lock is the last document.
+///
+/// js-yaml's `load` refuses a stream of more than one document, so pnpm
+/// splits the prelude off as text before loading: a third document, or a
+/// second after a first that opened without a `---` marker (pnpm writes
+/// the prelude starting with one), is a lock pnpm would refuse.
 pub(super) fn last_yaml_document(text: &str) -> io::Result<(usize, &str)> {
     let mut start = (0, 0);
     let mut documents = 0;
     let mut open = false;
+    let mut first_marked = false;
     let mut offset = 0;
     for (index, raw) in text.split_inclusive('\n').enumerate() {
         let line = raw.trim_end_matches('\n').trim_end_matches('\r');
@@ -399,6 +418,15 @@ pub(super) fn last_yaml_document(text: &str) -> io::Result<(usize, &str)> {
             documents += 1;
             open = true;
             start = (index + 1, offset);
+            if documents == 1 {
+                first_marked = true;
+            }
+            if documents == 2 && !first_marked {
+                return Err(unsupported(
+                    index + 1,
+                    "a second YAML document after one with no '---' marker",
+                ));
+            }
             if documents > 2 {
                 return Err(unsupported(index + 1, "a third YAML document"));
             }
@@ -643,7 +671,57 @@ mod tests {
             ("lone quote inside single quotes", "a: 'b'c'\n", 1, "after"),
             ("mapping inside a plain value", "a: b: c\n", 1, "mapping"),
             ("empty flow sequence item", "a: [b, ]\n", 1, "empty"),
-            ("third document", "a: 1\n---\nb: 2\n---\nc: 3\n", 4, "third"),
+            (
+                "third document",
+                "---\na: 1\n---\nb: 2\n---\nc: 3\n",
+                5,
+                "third",
+            ),
+            (
+                "second document without a leading marker",
+                "a: 1\n---\nb: 2\n",
+                2,
+                "no '---' marker",
+            ),
+            (
+                "trailing colon in a plain value",
+                "a:\n  b: catalog:\n",
+                2,
+                "mapping",
+            ),
+            (
+                "plain key starting with @",
+                "'a':\n  @s/p: 1\n",
+                2,
+                "reserved",
+            ),
+            ("plain value starting with @", "a: @s/p\n", 1, "reserved"),
+            ("plain value starting with %", "a: %b\n", 1, "reserved"),
+            (
+                "plain key starting with %",
+                "'a':\n  %b: 1\n",
+                2,
+                "reserved",
+            ),
+            (
+                "plain value starting with a comma",
+                "a: ,b\n",
+                1,
+                "flow indicator",
+            ),
+            (
+                "plain value starting with ]",
+                "a: ]b\n",
+                1,
+                "flow indicator",
+            ),
+            ("plain value starting with }", "a: }\n", 1, "flow indicator"),
+            (
+                "plain key starting with a backtick",
+                "`a: 1\n",
+                1,
+                "reserved",
+            ),
         ] {
             let error = parse_yaml(text).expect_err(case).to_string();
             assert!(
@@ -693,8 +771,13 @@ mod tests {
         let error = parse_yaml(text).unwrap_err().to_string();
         assert!(error.starts_with("pnpm-lock.yaml line 5: "), "{error}");
         assert_eq!(
-            parse_yaml("a: 1\r\n---\r\na: 2\r\n").unwrap(),
+            parse_yaml("---\r\na: 1\r\n---\r\na: 2\r\n").unwrap(),
             map(&[("a", scalar("2"))])
+        );
+        // A quoted trailing colon and a scoped key are what pnpm writes.
+        assert_eq!(
+            parse_yaml("a: 'catalog:'\n'@s/p': c:d\n").unwrap(),
+            map(&[("@s/p", scalar("c:d")), ("a", scalar("catalog:"))])
         );
         let error = parse_yaml("a: 1\n--- b: 2\n").unwrap_err().to_string();
         assert!(error.starts_with("pnpm-lock.yaml line 2: "), "{error}");

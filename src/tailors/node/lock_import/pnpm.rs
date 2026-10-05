@@ -23,8 +23,28 @@ pub fn pnpm_lock_importers(lock_yaml: &str) -> io::Result<Vec<String>> {
 /// tog reads, write peer context only in parentheses
 /// (`1.0.0(react@18.0.0)`), so an underscore is an ordinary character of
 /// a version, a `file:` path or a tarball URL.
+///
+/// The suffix is found as pnpm's `indexOfPeersSuffix` finds it: only a
+/// value that ends in `)` has one, and it is the run of balanced groups
+/// read back from the end. So `file:../a(b)c` keeps its parenthesis, and
+/// only the trailing groups of `1.0.0(patch_hash=x)(react@18.0.0)` go.
 pub(super) fn trim_peer_suffix(value: &str) -> &str {
-    value.find('(').map_or(value, |index| &value[..index])
+    if !value.ends_with(')') {
+        return value;
+    }
+    let bytes = value.as_bytes();
+    let mut open = 1i64;
+    for index in (0..bytes.len() - 1).rev() {
+        match bytes[index] {
+            b'(' => open -= 1,
+            b')' => open += 1,
+            // An ASCII byte just before a parenthesis ends a character, so
+            // the cut falls on a boundary.
+            _ if open == 0 => return &value[..index + 1],
+            _ => {}
+        }
+    }
+    value
 }
 
 pub(super) fn split_identity(value: &str) -> Option<(String, String)> {
@@ -489,10 +509,10 @@ pub(super) fn pnpm_patches(
 /// `fastdom@1.0.12(patch_hash=10bad5…)`: the patch pnpm itself applied there.
 ///
 /// The key ends in a run of balanced parenthesized groups (patch hash and
-/// peers, a peer's own groups nested inside it). Only a top-level
-/// `(patch_hash=…)` group is this package's; anything else after the
-/// version, an unbalanced parenthesis, a second marker or an empty or
-/// non-alphanumeric hash makes the key unreadable.
+/// peers, a peer's own groups nested inside it), where `trim_peer_suffix`
+/// cuts it, so `foo@file:../a(b)c` has none. Only a top-level
+/// `(patch_hash=…)` group is this package's; anything else, an unbalanced
+/// parenthesis, a second marker or a bad hash makes the key unreadable.
 pub(super) fn recorded_patch_hash(snapshot_key: &str) -> io::Result<Option<&str>> {
     const MARKER: &str = "patch_hash=";
     let malformed = || {
@@ -500,12 +520,8 @@ pub(super) fn recorded_patch_hash(snapshot_key: &str) -> io::Result<Option<&str>
             "pnpm snapshot {snapshot_key:?} has a malformed suffix after its version"
         ))
     };
-    let Some(open) = snapshot_key.find('(') else {
-        if snapshot_key.contains(')') || snapshot_key.contains(MARKER) {
-            return Err(malformed());
-        }
-        return Ok(None);
-    };
+    let open = trim_peer_suffix(snapshot_key).len();
+    let unbalanced = open == snapshot_key.len() && snapshot_key.ends_with(')');
     let mut depth = 0usize;
     let mut group_start = open;
     let mut found = None;
@@ -535,7 +551,7 @@ pub(super) fn recorded_patch_hash(snapshot_key: &str) -> io::Result<Option<&str>
             _ => {}
         }
     }
-    if depth != 0 || snapshot_key[..open].contains(')') || snapshot_key[..open].contains(MARKER) {
+    if depth != 0 || unbalanced || snapshot_key[..open].contains(MARKER) {
         return Err(malformed());
     }
     Ok(found)
@@ -1660,6 +1676,11 @@ mod identity_tests {
             ("1.0.0_react@18.0.0", "1.0.0_react@18.0.0"),
             ("foo@file:packages/my_pkg", "foo@file:packages/my_pkg"),
             ("evp_bytestokey@1.0.3", "evp_bytestokey@1.0.3"),
+            // Only trailing balanced groups are a suffix, as pnpm reads it.
+            ("file:../a(b)c", "file:../a(b)c"),
+            ("file:../a(b)c(react@18.0.0)", "file:../a(b)c"),
+            ("1.0.0((nested))", "1.0.0"),
+            ("(only-a-group)", "(only-a-group)"),
         ] {
             assert_eq!(trim_peer_suffix(value), expected, "{value}");
         }

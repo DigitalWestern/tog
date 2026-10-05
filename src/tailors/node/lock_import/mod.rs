@@ -1078,7 +1078,7 @@ importers:
   .:
     dependencies:
       is-odd:
-        specifier: catalog:
+        specifier: 'catalog:'
         version: 3.0.1
       lib:
         specifier: workspace:*
@@ -1127,7 +1127,7 @@ snapshots:
         // entry for the dependency.
         for (lock, catalog) in [
             (
-                lock.replace("specifier: catalog:", "specifier: catalog:absent"),
+                lock.replace("specifier: 'catalog:'", "specifier: catalog:absent"),
                 "absent",
             ),
             (
@@ -2755,6 +2755,53 @@ mod git_import_tests {
         let package = plan.packages.iter().find(|p| p.name == "plugin").unwrap();
         assert!(package.git.is_none());
         assert_eq!(package.integrity, SRI);
+    }
+
+    /// A parenthesis inside a tarball URL is part of the key, not a peer or
+    /// patch suffix after the version.
+    #[test]
+    fn a_pnpm_key_with_a_parenthesis_in_its_url_imports() {
+        let lock = format!(
+            "lockfileVersion: '9.0'\n\
+             importers:\n\
+             \x20\x20.:\n\
+             \x20\x20\x20\x20dependencies:\n\
+             \x20\x20\x20\x20\x20\x20foo:\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20specifier: https://r/a(1).tgz\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20version: https://r/a(1).tgz\n\
+             packages:\n\
+             \x20\x20foo@https://r/a(1).tgz:\n\
+             \x20\x20\x20\x20resolution: {{integrity: {SRI}, tarball: https://r/a(1).tgz}}\n\
+             \x20\x20\x20\x20version: 1.0.0\n\
+             snapshots:\n\
+             \x20\x20foo@https://r/a(1).tgz: {{}}\n"
+        );
+        let project = project();
+        let plan = super::plan_pnpm(
+            crate::kernel::platform::Platform::X86_64UnknownLinuxGnu,
+            &lock,
+            &held(&project.0),
+            node_version(),
+        )
+        .unwrap();
+        let package = plan.packages.iter().find(|p| p.name == "foo").unwrap();
+        assert_eq!(package.path, "node_modules/foo");
+        assert_eq!(package.integrity, SRI);
+        // The same holds for a `file:` path, and the suffix after one is read.
+        for (key, hash) in [
+            ("foo@file:../a(b)c", None),
+            ("foo@https://x/a(1).tgz", None),
+            (
+                "foo@file:../a(b)c(patch_hash=abc)(react@18.0.0)",
+                Some("abc"),
+            ),
+        ] {
+            assert_eq!(
+                super::pnpm::recorded_patch_hash(key).unwrap(),
+                hash,
+                "{key}"
+            );
+        }
     }
 
     #[test]
