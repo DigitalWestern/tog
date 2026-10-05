@@ -4,6 +4,8 @@
 //! its outer sha256) happens in `realize_deps`; everything here runs on
 //! bytes already on disk, so tests reach every refusal offline.
 
+mod meta;
+
 use super::{err, HexDep};
 use crate::kernel::activity::StoreActivity;
 use crate::kernel::archive::{extract_with_activity_and_options, Compression, ExtractOptions};
@@ -91,21 +93,55 @@ pub(super) fn unpack_verified(
             )));
         }
     }
-    // Metadata cross-check: the app/version inside metadata.config must
-    // agree with the lock coordinates.
-    let meta = fs::read_to_string(outer_dir.join("metadata.config"))?;
-    let has_kv = |k: &str, v: &str| meta.contains(&format!("{{<<\"{k}\">>,<<\"{v}\">>}}"));
-    if !has_kv("app", &d.app) || !has_kv("version", &d.version) {
-        return Err(err(format!(
-            "{}: hex metadata disagrees with the lock (app/version)",
-            d.app
-        )));
-    }
+    check_metadata(&fs::read_to_string(outer_dir.join("metadata.config"))?, d)?;
     fs::copy(
         outer_dir.join("metadata.config"),
         dep_dir.join("hex_metadata.config"),
     )?;
     Ok(dep_dir)
+}
+
+/// Metadata cross-check: metadata.config, read as Erlang terms, must have
+/// exactly one top-level `app` and one top-level `version`, each a binary
+/// equal to the lock's (#359). A tuple of the same shape nested elsewhere
+/// (a requirement names its own `app`) is not the package's.
+fn check_metadata(text: &str, d: &HexDep) -> io::Result<()> {
+    let entries = meta::top_level_entries(text).map_err(|why| {
+        err(format!(
+            "{}: hex metadata.config is unreadable: {why}",
+            d.app
+        ))
+    })?;
+    for (key, locked) in [("app", &d.app), ("version", &d.version)] {
+        let values: Vec<_> = entries
+            .iter()
+            .filter(|(name, _)| name == key.as_bytes())
+            .map(|(_, value)| value.as_deref())
+            .collect();
+        match values.as_slice() {
+            [Some(value)] if *value == locked.as_bytes() => {}
+            [_] => {
+                return Err(err(format!(
+                    "{}: hex metadata disagrees with the lock (app/version)",
+                    d.app
+                )))
+            }
+            [] => {
+                return Err(err(format!(
+                    "{}: hex metadata has no top-level {key}",
+                    d.app
+                )))
+            }
+            _ => {
+                return Err(err(format!(
+                    "{}: hex metadata declares {key} {} times",
+                    d.app,
+                    values.len()
+                )))
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Extraction containment: regular files and dirs, plus symlinks whose
@@ -325,6 +361,49 @@ mod tests {
                 format!("demo: package ships a reserved {reserved} entry; refusing")
             );
         }
+    }
+
+    /// A decoy tuple nested inside another field, a duplicate key, or a
+    /// missing one is refused; whitespace and line breaks the Erlang
+    /// printer adds are not (#359).
+    #[test]
+    fn metadata_is_read_as_top_level_terms() {
+        let nested = "{<<\"app\">>,<<\"other\">>}.\n\
+            {<<\"requirements\">>,[[{<<\"app\">>,<<\"demo\">>},{<<\"version\">>,<<\"1.0.0\">>}]]}.\n\
+            {<<\"version\">>,<<\"2.0.0\">>}.\n";
+        for (metadata, refusal) in [
+            (
+                nested.to_string(),
+                "demo: hex metadata disagrees with the lock (app/version)",
+            ),
+            (
+                format!("{METADATA}{{<<\"app\">>,<<\"demo\">>}}.\n"),
+                "demo: hex metadata declares app 2 times",
+            ),
+            (
+                "{<<\"app\">>,<<\"demo\">>}.\n".to_string(),
+                "demo: hex metadata has no top-level version",
+            ),
+            (
+                "{<<\"app\">>,<<\"demo\">>}.\n{<<\"version\">>,{<<\"1.0.0\">>}}.\n".to_string(),
+                "demo: hex metadata disagrees with the lock (app/version)",
+            ),
+        ] {
+            let package = Package::new(&[("lib/demo.ex", "")], &metadata);
+            assert_eq!(package.refusal(), refusal, "{metadata}");
+        }
+        let package = Package::new(&[("lib/demo.ex", "")], "{<<\"app\">>,<<\"demo\">>");
+        assert!(
+            package
+                .refusal()
+                .starts_with("demo: hex metadata.config is unreadable: "),
+            "{}",
+            package.refusal()
+        );
+        let spaced = "% printed by Hex\n{<<\"description\">>,\n <<\"A demo.\">>}.\n\
+            { <<\"app\">> ,\n  <<\"demo\">> } .\n{<<\"version\">>,<<\"1.0.0\"/utf8>>}.\n";
+        let package = Package::new(&[("lib/demo.ex", "")], spaced);
+        package.unpack().unwrap();
     }
 
     #[test]
