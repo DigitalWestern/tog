@@ -153,11 +153,33 @@ fn read_record_in(dir: &fs::File, path: &Path) -> io::Result<Record> {
 /// The record of `id` in `store`, opened from the store's held `meta/`
 /// descriptor.
 pub fn read_store_record(store: &store::Store, id: &str) -> io::Result<Record> {
+    let (id, value) = read_store_body(store, id)?;
+    read_record_value(&id, value)
+}
+
+/// The parsed body of `id`'s record in `store`, opened and parsed the way
+/// [`read_store_record`] does, before the record's own fields are checked:
+/// for a reader that wants one field `Record` does not keep (the
+/// exceptions) or only that the record is there and names `id`.
+pub(crate) fn read_store_body(
+    store: &store::Store,
+    id: &str,
+) -> io::Result<(String, serde_json::Value)> {
     let path = store.root.join("meta").join(format!("{id}.json"));
-    read_opened_record(store.open_object_meta(id)?, &path)
+    read_opened_value(store.open_object_meta(id)?, &path)
 }
 
 fn read_opened_record(opened: store::MetaFile, path: &Path) -> io::Result<Record> {
+    let (id, value) = read_opened_value(opened, path)?;
+    read_record_value(&id, value)
+}
+
+/// The id a record's file name gives and the record's parsed body, not yet
+/// validated.
+fn read_opened_value(
+    opened: store::MetaFile,
+    path: &Path,
+) -> io::Result<(String, serde_json::Value)> {
     let file = match opened {
         store::MetaFile::File(file) => file,
         store::MetaFile::NotRegular => {
@@ -201,7 +223,7 @@ fn read_opened_record(opened: store::MetaFile, path: &Path) -> io::Result<Record
                 format!("parse object metadata {}: {error}", path.display()),
             )
         })?;
-    read_record_value(&id, value)
+    Ok((id, value))
 }
 
 /// Validate an already-parsed record body against its id.
