@@ -774,6 +774,12 @@ impl Store {
         Ok(root_key(&project_dir))
     }
 
+    /// The registry key of a project whose canonical path the caller
+    /// already holds, without resolving it by name again.
+    pub fn canonical_root_key(project_dir: &Path) -> String {
+        root_key(project_dir)
+    }
+
     /// Whether a project could be registered at all, without writing
     /// anything. A project tog cannot record is a project it cannot
     /// protect from its own GC, so the work refuses up front instead of

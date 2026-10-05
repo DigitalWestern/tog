@@ -394,6 +394,23 @@ fn pnpm_add_update_remove_roundtrip() {
     assert_eq!(node_env_object_count(&store), first_env_count);
     assert!(temp.0.join("home/.tog/x").is_dir());
 
+    // Issue #413. A root whose request record is gone is never reused: the
+    // delegated pnpm is realized again, and the root ends up `ready`.
+    let record = x_root.join(".tog/x.json");
+    std::fs::remove_file(&record).unwrap();
+    assert_ok(
+        run(
+            project,
+            &store,
+            &["update", "--no-sync", "is-number"],
+            &temp.0,
+        ),
+        "pnpm update after the request record was removed",
+    );
+    let request: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&record).unwrap()).unwrap();
+    assert_eq!(request["state"], "ready", "{request}");
+
     let wrong_digest = {
         let mut value = corepack_sha224.clone().into_bytes();
         value[0] = if value[0] == b'0' { b'1' } else { b'0' };

@@ -1577,7 +1577,7 @@ const UNCHECKED_STORES: &[(&str, &str, usize)] = &[
     // configured one: by its request record here, and by the object paths
     // in its closure in `store_from_object_path`. `x --clean` leases either
     // (validated) before it reads or removes anything.
-    ("src/commands/x/cleanup.rs", "originating_store", 1),
+    ("src/commands/x/cleanup.rs", "originating_store_in", 1),
     ("src/comforter/mod.rs", "store_from_object_path", 1),
     // Names an x environment's directory from the store's path alone, and
     // reads nothing in the store.

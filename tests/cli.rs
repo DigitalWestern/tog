@@ -2340,6 +2340,63 @@ fn x_clean_removes_a_root_without_a_request_record_only_when_unfiltered() {
     }
 }
 
+/// Issue #413. The root's own registry entry cannot be read: cleanup finds
+/// it by key anyway, and skips the root rather than deleting what that
+/// entry protects. Once the entry is forgotten, the clean removes it.
+#[test]
+fn x_clean_skips_a_root_whose_registry_entry_is_unusable() {
+    let home = TempDir::boundary("cli-x-clean-unusable-entry");
+    let store = home.0.join("store");
+    let (root, key) = registered_x_environment(&home.0, &store);
+    let out = tog(
+        &home.0,
+        &home.0,
+        &["gc", "--register", root.to_str().unwrap()],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    std::fs::write(store.join("roots").join(&key), b"\xff not a record\n").unwrap();
+
+    let out = tog(&home.0, &home.0, &["x", "--clean"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let stdout = text(&out.stdout);
+    assert!(root.is_dir(), "{stdout}");
+    assert!(
+        stdout.contains(&format!("its registry entry {key} in store "))
+            && stdout.contains(&format!("`tog gc --forget {key}`")),
+        "{stdout}"
+    );
+
+    let out = tog(&home.0, &home.0, &["gc", "--forget", &key]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let out = tog(&home.0, &home.0, &["x", "--clean"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(!root.exists(), "{}", text(&out.stdout));
+}
+
+/// Issue #413. Cleanup unregisters before it deletes, so a registry it
+/// cannot write leaves the root and its registration both in place rather
+/// than a registration for a root that is gone.
+#[test]
+fn x_clean_that_cannot_unregister_keeps_the_root() {
+    let home = TempDir::boundary("cli-x-clean-readonly-roots");
+    let store = home.0.join("store");
+    let (root, key) = registered_x_environment(&home.0, &store);
+    let out = tog(
+        &home.0,
+        &home.0,
+        &["gc", "--register", root.to_str().unwrap()],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let roots = store.join("roots");
+    let mode = std::fs::metadata(&roots).unwrap().permissions().mode();
+    std::fs::set_permissions(&roots, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let out = tog(&home.0, &home.0, &["x", "--clean"]);
+    std::fs::set_permissions(&roots, std::fs::Permissions::from_mode(mode)).unwrap();
+    assert_ne!(out.status.code(), Some(0), "{}", text(&out.stdout));
+    assert!(root.join(".tog/x.json").is_file(), "{}", text(&out.stderr));
+    assert!(registered_root_keys(&home.0, &home.0).contains(&key));
+}
+
 /// A record-less root that store A registered, cleaned by a caller whose
 /// `TOG_STORE` is B: cleanup recovers A from the closure, removes the root
 /// under A's lease and drops A's record, so A's next `tog gc` really

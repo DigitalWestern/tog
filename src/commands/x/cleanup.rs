@@ -194,10 +194,11 @@ pub(super) fn validated_x_dir(x_dir: &Path) -> io::Result<Option<ValidatedXDir>>
     }))
 }
 
-pub(super) fn has_safe_closures(root: &Path) -> bool {
-    fs::symlink_metadata(root.join(".tog/closures"))
-        .map(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
-        .unwrap_or(false)
+/// Whether the held root has a real `.tog/closures` directory.
+pub(super) fn has_safe_closures(root: &fs::File) -> bool {
+    store::open_directory_at(root.as_raw_fd(), b".tog")
+        .and_then(|tog| store::stat_at(tog.as_raw_fd(), b"closures"))
+        .is_ok_and(|stat| store::is_directory(&stat))
 }
 
 pub(super) fn x_candidates(x_dir: &Path) -> io::Result<Vec<XCandidate>> {
@@ -243,7 +244,7 @@ pub(super) fn x_candidates(x_dir: &Path) -> io::Result<Vec<XCandidate>> {
         // The marker is written before realization, so it is also ownership
         // evidence for a root that failed before it could write a closure or
         // register itself with a store.
-        if read_x_request(&canonical).is_none() && !has_safe_closures(&canonical) {
+        if read_x_request_in(&directory).is_none() && !has_safe_closures(&directory) {
             continue;
         }
         candidates.push(XCandidate {
@@ -290,16 +291,16 @@ pub(super) fn record_matches(record: &XRecord, filter: &CleanFilter) -> bool {
             .is_none_or(|version| Some(version) == record.version.as_deref())
 }
 
-/// Best-effort ecosystem of a candidate, used only to word the summary. The
-/// recorded request wins, then the generated name prefix.
-pub(super) fn candidate_ecosystem(path: &Path) -> Option<&'static str> {
-    if let Some(record) = read_x_request(path) {
+/// Best-effort ecosystem of a held root named `name`, used only to word the
+/// summary. The recorded request wins, then the generated name prefix.
+pub(super) fn candidate_ecosystem(root: &fs::File, name: &OsStr) -> Option<&'static str> {
+    if let Some(record) = read_x_request_in(root) {
         return registry_tools()
             .into_iter()
             .map(|(id, _)| id)
             .find(|id| *id == record.ecosystem);
     }
-    ecosystem_from_name(path.file_name().and_then(|name| name.to_str())?)
+    ecosystem_from_name(name.to_str()?)
 }
 
 /// Whether `filter` selects `candidate`. Only the request record says what
@@ -307,7 +308,7 @@ pub(super) fn candidate_ecosystem(path: &Path) -> Option<&'static str> {
 /// filter at all: a filtered clean leaves it alone, and the bare
 /// `tog x --clean` removes it.
 pub(super) fn candidate_matches(candidate: &XCandidate, filter: &CleanFilter) -> CandidateMatch {
-    let matched = match read_x_request(&candidate.path) {
+    let matched = match read_x_request_in(&candidate.directory) {
         Some(record) => record_matches(&record, filter),
         None => filter.ecosystem.is_none() && filter.package.is_none() && filter.version.is_none(),
     };
@@ -322,6 +323,13 @@ pub(super) enum Registration {
         store: Store,
         // Boxed so the enum is not as large as its one big variant.
         entry: Box<RootEntry>,
+    },
+    /// The root's own entry exists and cannot be read. Removing the root
+    /// would leave that entry behind, so cleanup skips it.
+    Unusable {
+        store: Store,
+        key: String,
+        why: String,
     },
     NotFound,
     #[cfg(test)]
@@ -342,17 +350,27 @@ pub(super) enum Origin {
     Unknown(String),
 }
 
-/// The store that owns `root`: the request record's `store_root` when it
-/// has one, otherwise the store its closures' object references
-/// (`runtime_object`, `env_object`) live in. Only cleanup asks this. A root
-/// without a request record is never a cache hit, but deleting one under
-/// the wrong store would leave the owner's registration keeping its
-/// objects forever.
-pub(super) fn originating_store(root: &Path) -> io::Result<Origin> {
-    let marker = root.join(X_REQUEST_FILE);
-    let marker_present = match fs::symlink_metadata(&marker) {
-        Ok(metadata) => {
-            if metadata.file_type().is_symlink() || !metadata.is_file() {
+/// The store that owns the held root `root` (shown as `display`): the
+/// request record's `store_root` when it has one, otherwise the store its
+/// closures' object references (`runtime_object`, `env_object`) live in.
+/// Only cleanup asks this. A root without a request record is never a
+/// cache hit, but deleting one under the wrong store would leave the
+/// owner's registration keeping its objects forever. Every read goes
+/// through `root`, the descriptor cleanup removes by, so a rename of the
+/// pathname cannot make the ownership check read a different root.
+pub(super) fn originating_store_in(root: &fs::File, display: &Path) -> io::Result<Origin> {
+    let marker = display.join(X_REQUEST_FILE);
+    let tog = match store::open_directory_at(root.as_raw_fd(), b".tog") {
+        Ok(tog) => Some(tog),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error),
+    };
+    let marker_present = match tog
+        .as_ref()
+        .map(|tog| store::stat_at(tog.as_raw_fd(), X_REQUEST_NAME.as_bytes()))
+    {
+        Some(Ok(stat)) => {
+            if stat.st_mode & libc::S_IFMT != libc::S_IFREG {
                 return Err(other(format!(
                     "x: explicit request marker {} is not a regular file",
                     marker.display()
@@ -360,11 +378,11 @@ pub(super) fn originating_store(root: &Path) -> io::Result<Origin> {
             }
             true
         }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => false,
-        Err(error) => return Err(error),
+        Some(Err(error)) if error.kind() != io::ErrorKind::NotFound => return Err(error),
+        Some(Err(_)) | None => false,
     };
     if marker_present {
-        let record = read_x_request(root).ok_or_else(|| {
+        let record = read_x_request_in(root).ok_or_else(|| {
             other(format!(
                 "x: explicit request marker {} is malformed",
                 marker.display()
@@ -396,46 +414,59 @@ pub(super) fn originating_store(root: &Path) -> io::Result<Origin> {
             return Ok(Origin::Store(Store::handle(store_root)));
         }
     }
-    closure_owner(root)
+    Ok(
+        read_closure_owner(tog.as_ref(), display).unwrap_or_else(|error| {
+            Origin::Unknown(format!("its closures could not be read: {error}"))
+        }),
+    )
 }
 
-/// The one store every closure under `root` references objects in, read
-/// with the same no-follow rules as the rest of the x root. A closure
-/// directory or file that cannot be read leaves the owner unknown, so
-/// cleanup skips that root and goes on with the rest.
-pub(super) fn closure_owner(root: &Path) -> io::Result<Origin> {
-    Ok(read_closure_owner(root).unwrap_or_else(|error| {
-        Origin::Unknown(format!("its closures could not be read: {error}"))
-    }))
+/// [`originating_store_in`] for a root named by its path.
+#[cfg(test)]
+pub(super) fn originating_store(root: &Path) -> io::Result<Origin> {
+    originating_store_in(&open_directory_path(root)?, root)
 }
 
-pub(super) fn read_closure_owner(root: &Path) -> io::Result<Origin> {
-    let closures = root.join(".tog/closures");
-    let entries = match fs::read_dir(&closures) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Origin::Empty),
-        Err(error) => return Err(error),
+/// The one store every closure under the held `.tog` directory references
+/// objects in, read with the same no-follow rules as the rest of the x
+/// root. A closure directory or file that cannot be read leaves the owner
+/// unknown, so cleanup skips that root and goes on with the rest.
+fn read_closure_owner(tog: Option<&fs::File>, display: &Path) -> io::Result<Origin> {
+    let closures_path = display.join(".tog/closures");
+    let closures = match tog.map(|tog| store::open_directory_at(tog.as_raw_fd(), b"closures")) {
+        Some(Ok(closures)) => closures,
+        Some(Err(error)) if error.kind() != io::ErrorKind::NotFound => return Err(error),
+        Some(Err(_)) | None => return Ok(Origin::Empty),
     };
+    let mut names = store::read_dir_names_at(closures.as_raw_fd())?;
+    names.sort();
     let mut found: Option<Store> = None;
     let mut any = false;
-    for entry in entries {
-        let entry = entry?;
-        let path = entry.path();
+    for name in names {
+        let path = closures_path.join(&name);
         if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
             continue;
         }
-        let stat = fs::symlink_metadata(&path)?;
-        if stat.file_type().is_symlink() || !stat.is_file() {
+        let stat = store::stat_at(closures.as_raw_fd(), name.as_bytes())?;
+        if stat.st_mode & libc::S_IFMT != libc::S_IFREG {
             return Ok(Origin::Unknown(format!(
                 "closure {} is not a regular file",
                 path.display()
             )));
         }
         any = true;
-        let file = fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .open(&path)?;
+        let file = store::open_file_at(
+            closures.as_raw_fd(),
+            name.as_bytes(),
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
+            0,
+        )?;
+        if !file.metadata()?.is_file() {
+            return Ok(Origin::Unknown(format!(
+                "closure {} is not a regular file",
+                path.display()
+            )));
+        }
         let Ok(value) = serde_json::from_reader::<_, serde_json::Value>(file) else {
             return Ok(Origin::Unknown(format!(
                 "closure {} is unreadable",
@@ -495,26 +526,28 @@ pub(super) fn read_closure_owner(root: &Path) -> io::Result<Origin> {
     })
 }
 
+/// The registry entry of the root at the canonical path `root`, found by
+/// the key that path registers under. Matching on each entry's recorded
+/// path instead would read an unusable entry (which has no path) as "not
+/// registered", and cleanup would delete the root that entry protects.
 pub(super) fn registration_for_store(root: &Path, store: Store) -> io::Result<Registration> {
-    let canonical = root.canonicalize()?;
-    let entry = store.roots()?.into_iter().find(|entry| {
-        entry
-            .path
-            .canonicalize()
-            .is_ok_and(|path| path == canonical)
-    });
-    Ok(
-        entry.map_or(Registration::NotFound, |entry| Registration::Found {
-            store,
-            entry: Box::new(entry),
-        }),
-    )
+    let key = Store::canonical_root_key(root);
+    let Some(entry) = store.roots()?.into_iter().find(|entry| entry.key == key) else {
+        return Ok(Registration::NotFound);
+    };
+    if let Some(why) = entry.unusable.clone() {
+        return Ok(Registration::Unusable { store, key, why });
+    }
+    Ok(Registration::Found {
+        store,
+        entry: Box::new(entry),
+    })
 }
 
 #[cfg(test)]
 pub(super) fn registration_for(root: &Path) -> io::Result<Registration> {
     match originating_store(root)? {
-        Origin::Store(store) => registration_for_store(root, store),
+        Origin::Store(store) => registration_for_store(&root.canonicalize()?, store),
         Origin::Empty | Origin::Unknown(_) => Ok(Registration::Unknown),
     }
 }
@@ -553,6 +586,74 @@ pub(super) fn clean_lease(
     }
 }
 
+/// What became of a candidate [`unregister_and_remove`] was handed.
+pub(super) enum Removal {
+    /// Gone, with the note the summary line carries.
+    Removed(&'static str),
+    /// The directory was not the candidate any more, before or after its
+    /// registration was dropped.
+    Changed { unregistered: bool },
+}
+
+/// Unregister `candidate`, then delete it by its held descriptor. A crash
+/// or failure between the two leaves an unregistered directory, which costs
+/// disk space and which the next bare clean removes. The other order leaves
+/// a registration for a root that is gone, and the owning store keeps its
+/// objects or refuses to sweep.
+pub(super) fn unregister_and_remove(
+    candidate: &XCandidate,
+    registration: Registration,
+    activity: &StoreActivity,
+) -> io::Result<Removal> {
+    let still_candidate = || -> io::Result<Option<libc::stat>> {
+        match store::stat_at(candidate.x_dir.as_raw_fd(), candidate.name.as_bytes()) {
+            Ok(current)
+                if store::stat_identity(&current) == candidate.identity
+                    && store::is_directory(&current) =>
+            {
+                Ok(Some(current))
+            }
+            Ok(_) => Ok(None),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
+    };
+    if still_candidate()?.is_none() {
+        return Ok(Removal::Changed {
+            unregistered: false,
+        });
+    }
+    let note = match registration {
+        Registration::Found { store, entry } => {
+            store.remove_root_entry_with_activity(activity, &entry)?;
+            ""
+        }
+        Registration::NotFound => " (no matching registry entry in its originating store)",
+        Registration::Unusable { .. } => unreachable!("an unusable entry is skipped first"),
+        #[cfg(test)]
+        Registration::Unknown => {
+            " (registry entry could not be dropped: originating store not found)"
+        }
+    };
+    let unregistered = note.is_empty();
+    // The candidate descriptor belongs to the directory that passed the
+    // containment checks. Removing by pathname here would let a rename
+    // followed by a symlink replacement redirect deletion elsewhere.
+    store::remove_tree_at(candidate.directory.as_raw_fd())?;
+    let Some(current) = still_candidate()? else {
+        return Ok(Removal::Changed { unregistered });
+    };
+    if !store::unlink_if_same(
+        candidate.x_dir.as_raw_fd(),
+        candidate.name.as_bytes(),
+        &current,
+        libc::AT_REMOVEDIR,
+    )? {
+        return Ok(Removal::Changed { unregistered });
+    }
+    Ok(Removal::Removed(note))
+}
+
 /// Remove cached x projections. The store objects remain available for the
 /// ordinary GC pass; deleting a projection is deliberately not object GC.
 pub fn clean(request: CleanRequest) -> io::Result<()> {
@@ -569,7 +670,7 @@ pub fn clean(request: CleanRequest) -> io::Result<()> {
             CandidateMatch::NoMatch => continue,
         }
         matched += 1;
-        let ecosystem = candidate_ecosystem(&candidate.path);
+        let ecosystem = candidate_ecosystem(&candidate.directory, &candidate.name);
         // Origin metadata is only a hint until the originating store is
         // protected. The root is removed and unregistered under the store
         // that owns it, never the caller's: a root whose owner cannot be
@@ -577,7 +678,7 @@ pub fn clean(request: CleanRequest) -> io::Result<()> {
         // registration keeping its objects. An empty shell references
         // nothing, so the x-root lock below is its whole guard and the
         // caller's store only lends the lease.
-        let origin = match originating_store(&candidate.path)? {
+        let origin = match originating_store_in(&candidate.directory, &candidate.path)? {
             Origin::Unknown(why) => {
                 println!(
                     "tog: skipped x environment {} (its owning store could not be recovered: {why}; remove the directory yourself once you know nothing is using it)",
@@ -610,7 +711,10 @@ pub fn clean(request: CleanRequest) -> io::Result<()> {
         // closure is a race, not permission to remove the candidate. An
         // empty shell must still be empty: gaining a claim while it was
         // being locked is the same race.
-        match (&origin, originating_store(&candidate.path)?) {
+        match (
+            &origin,
+            originating_store_in(&candidate.directory, &candidate.path)?,
+        ) {
             (Origin::Store(_), Origin::Store(revalidated_store)) => {
                 if revalidated_store.root != origin_store.root {
                     println!(
@@ -631,53 +735,36 @@ pub fn clean(request: CleanRequest) -> io::Result<()> {
                 continue;
             }
         }
-        let registration = registration_for_store(&candidate.path, origin_store.clone())?;
-        let current = match store::stat_at(candidate.x_dir.as_raw_fd(), candidate.name.as_bytes()) {
-            Ok(current) => current,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+        let registration = match registration_for_store(&candidate.path, origin_store.clone())? {
+            Registration::Unusable { store, key, why } => {
                 println!(
-                    "tog: skipped x environment {} (it disappeared or changed; retry later)",
-                    candidate.path.display()
+                    "tog: skipped x environment {} (its registry entry {key} in store {} is unusable: {why}; inspect it with `tog store roots`, drop it with `tog gc --forget {key}` under that store, then clean again)",
+                    candidate.path.display(),
+                    store.root.display()
                 );
                 skipped += 1;
                 continue;
             }
-            Err(error) => return Err(error),
+            registration => registration,
         };
-        if store::stat_identity(&current) != candidate.identity || !store::is_directory(&current) {
-            println!(
-                "tog: skipped x environment {} (it disappeared or changed; retry later)",
-                candidate.path.display()
-            );
-            skipped += 1;
-            continue;
-        }
-        // The candidate descriptor belongs to the directory that passed the
-        // containment checks. Removing by pathname here would let a rename
-        // followed by a symlink replacement redirect deletion elsewhere.
-        store::remove_tree_at(candidate.directory.as_raw_fd())?;
-        let current = store::stat_at(candidate.x_dir.as_raw_fd(), candidate.name.as_bytes())?;
-        if store::stat_identity(&current) != candidate.identity || !store::is_directory(&current) {
-            println!(
-                "tog: skipped x environment {} (it disappeared or changed; retry later)",
-                candidate.path.display()
-            );
-            skipped += 1;
-            continue;
-        }
-        if !store::unlink_if_same(
-            candidate.x_dir.as_raw_fd(),
-            candidate.name.as_bytes(),
-            &current,
-            libc::AT_REMOVEDIR,
-        )? {
-            println!(
-                "tog: skipped x environment {} (it disappeared or changed; retry later)",
-                candidate.path.display()
-            );
-            skipped += 1;
-            continue;
-        }
+        let removed_note = match unregister_and_remove(&candidate, registration, &activity)? {
+            Removal::Removed(note) => note,
+            Removal::Changed { unregistered } => {
+                if unregistered {
+                    println!(
+                        "tog: x environment {} was unregistered, then disappeared or changed before it was removed; delete what is left of it yourself",
+                        candidate.path.display()
+                    );
+                } else {
+                    println!(
+                        "tog: skipped x environment {} (it disappeared or changed; retry later)",
+                        candidate.path.display()
+                    );
+                }
+                skipped += 1;
+                continue;
+            }
+        };
         if let Some(note) = ecosystem
             .and_then(|ecosystem| registry_tool(ecosystem).ok())
             .and_then(|tool| tool.clean_note())
@@ -686,24 +773,10 @@ pub fn clean(request: CleanRequest) -> io::Result<()> {
                 notes.push(note);
             }
         }
-        match registration {
-            Registration::Found { store, entry } => {
-                store.remove_root_entry_with_activity(&activity, &entry)?;
-                println!(
-                    "tog: removed x environment {}",
-                    candidate.path.display()
-                );
-            }
-            Registration::NotFound => println!(
-                "tog: removed x environment {} (no matching registry entry in its originating store)",
-                candidate.path.display()
-            ),
-            #[cfg(test)]
-            Registration::Unknown => println!(
-                "tog: removed x environment {} (registry entry could not be dropped: originating store not found)",
-                candidate.path.display()
-            ),
-        }
+        println!(
+            "tog: removed x environment {}{removed_note}",
+            candidate.path.display()
+        );
         // Only now has the environment stopped existing anywhere: the tree is
         // gone and so is its registry entry. Unlinking the lock before the
         // registry removal left a window in which a fresh runner could take a
