@@ -194,8 +194,20 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   Pure-Ruby gems compile nothing and install against the whole host. Setting the view up
   costs about two seconds per native gem on a Fedora 44 workstation, and more on a host with
   a larger library directory.
-  Python sdist builds and npm addons still see the whole host `/usr` and can link any host
-  library. macOS gem builds are unchanged.
+  Python sdist builds that compile Rust or mount the native-library set, and npm install
+  scripts, follow the same rule (#328): they run against the C runtime alone first and fall
+  back to the whole host with a `host-build-inputs` exception. A failed sdist attempt's
+  output, log and (for Rust) unpacked source are reset before the retry; a failed npm
+  attempt's package tree and scratch HOME go back to their snapshots. The wheel, and the
+  Python or Node environment holding it, are committed under `host-fallback/1` identities
+  that name what fell back (the sdist; `pkg:` entries for the environment). Every Linux
+  Python environment with such an sdist and every Linux Node environment carries
+  `build_view = "runtime-only/1"`, so the first sync after this change rebuilds them once.
+  One gap: when a build-requirement sdist falls back, its build environment is committed
+  under a host-fallback id, but the wheel built in that environment still names the
+  environment's planned runtime-only id in its own identity (`build_env`), which is planned
+  before any build runs. Python
+  sdists with no native or Rust input, and macOS builds, still see the whole host.
 - **Pinned native-library objects are store-root-specific**: `native-libs/libset/3` includes
   the canonical `TOG_STORE` root in its identity; moving a store requires re-realizing the
   libset. **Linux sandbox roots are canonical paths** (a symlink alias root is invisible).
