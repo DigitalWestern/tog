@@ -206,9 +206,12 @@ pub(crate) fn selected_toolchain(
         // runtime. An ecosystem the project has keeps the lock's refusals,
         // and with no lock the project's own sources decide, as below.
         let lock_ecosystem = tailor.lock_ecosystem();
-        let has_ecosystem = location.detected.iter().any(|id| {
-            crate::tailors::by_id(id).is_some_and(|found| found.lock_ecosystem() == lock_ecosystem)
-        });
+        // Detected again through this root, so the ecosystems and the lock
+        // are those of one directory: a project put at the path since
+        // `project_for` looked cannot borrow the earlier answer.
+        let has_ecosystem = crate::tailors::detected_in(&root)?
+            .iter()
+            .any(|found| found.lock_ecosystem() == lock_ecosystem);
         if !has_ecosystem && lock_names(&root, lock_ecosystem)? == Some(false) {
             return runtime::shipped(&tailor.toolchain_catalog()?);
         }
