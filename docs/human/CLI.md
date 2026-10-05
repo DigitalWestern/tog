@@ -539,8 +539,9 @@ build in a project with no `tog-toolchain.toml` yet when another
 ecosystem's version request is one no catalog serves (a Python pin no
 release carries stops `tog build cargo`): creating the lock selects every
 ecosystem, the lock is never written with sections missing, and the error
-names the ecosystem to fix. Once the lock exists, only a stale section or a
-malformed request outside the built ecosystem blocks a build. The build
+names the ecosystem to fix. Once the lock exists, a missing, stale, or
+invalid lock section, or a malformed request outside the built ecosystem,
+still blocks a build. The build
 itself never writes one. CI that must not write a lock runs `tog --frozen`
 before it, and the check then finds nothing to do — or goes one step in a
 single command, `tog --frozen build`, whose implicit sync runs frozen.

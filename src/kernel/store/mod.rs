@@ -21,6 +21,7 @@ mod objects;
 mod projection;
 mod records;
 mod roots;
+mod roots_lookup;
 
 use env::home;
 #[cfg(test)]
@@ -601,6 +602,166 @@ mod tests {
             assert!(store.has(&id).unwrap(), "{crash}");
             crate::kernel::objmeta::read_record_at(&record).unwrap();
             remove_tree(&store.object_path(&id)).unwrap();
+            fs::remove_file(&record).unwrap();
+        }
+    }
+
+    #[test]
+    fn long_supported_object_names_use_short_completion_temporaries() {
+        let temp = temp_store();
+        let store = Store {
+            root: temp.0.canonicalize().unwrap(),
+        };
+        let mut identity = identity();
+        identity.name = "n".repeat(180);
+        identity.version = "1.0".into();
+        let id = identity.object_id();
+        assert_eq!(id.len(), 225);
+        assert!(is_object_id(&id));
+        let (object, _) = store
+            .commit_with_deps(&identity, &staged(&store), &[], &ObjectDeps::new())
+            .unwrap();
+        assert!(object.is_dir());
+        assert_eq!(store.is_complete(&id), Some(true));
+        crate::kernel::objmeta::read_record_at(&store.root.join("meta").join(format!("{id}.json")))
+            .unwrap();
+    }
+
+    fn with_publication_hook<T>(
+        hook: impl FnMut(&str) -> io::Result<()> + 'static,
+        operation: impl FnOnce() -> T,
+    ) -> T {
+        objects::PUBLICATION_FAILPOINT.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+        let result = operation();
+        objects::PUBLICATION_FAILPOINT.with(|slot| *slot.borrow_mut() = None);
+        result
+    }
+
+    #[test]
+    fn commit_replaces_a_crashed_destination_that_appears_after_lookup() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = temp_store();
+        let store = Store {
+            root: temp.0.canonicalize().unwrap(),
+        };
+        let identity = identity();
+        let id = identity.object_id();
+        for crash in ["writable", "missing record", "empty record"] {
+            let object = store.object_path(&id);
+            let record = store.root.join("meta").join(format!("{id}.json"));
+            let old_object = object.clone();
+            let old_record = record.clone();
+            let stage = staged(&store);
+            fs::write(stage.join("replacement"), crash).unwrap();
+            let result = with_publication_hook(
+                move |at| {
+                    if at == "after-lookup" {
+                        fs::create_dir(&old_object)?;
+                        fs::write(old_object.join("old"), "crashed")?;
+                        match crash {
+                            "writable" => fs::write(&old_record, "{}")?,
+                            "empty record" => {
+                                fs::set_permissions(
+                                    &old_object,
+                                    fs::Permissions::from_mode(0o555),
+                                )?;
+                                fs::write(&old_record, "")?;
+                            }
+                            _ => {
+                                fs::set_permissions(&old_object, fs::Permissions::from_mode(0o555))?
+                            }
+                        }
+                    }
+                    Ok(())
+                },
+                || store.commit_with_deps(&identity, &stage, &[], &ObjectDeps::new()),
+            );
+            let (object, _) = result.unwrap();
+            assert_eq!(
+                fs::read_to_string(object.join("replacement")).unwrap(),
+                crash
+            );
+            assert!(!object.join("old").exists());
+            crate::kernel::objmeta::read_record_at(&record).unwrap();
+            remove_tree(&object).unwrap();
+            fs::remove_file(&record).unwrap();
+        }
+    }
+
+    #[test]
+    fn orphan_completion_is_invalidated_before_a_republication_flush_failure() {
+        let temp = temp_store();
+        let store = Store {
+            root: temp.0.canonicalize().unwrap(),
+        };
+        let identity = identity();
+        let id = identity.object_id();
+        store
+            .commit_with_deps(&identity, &staged(&store), &[], &ObjectDeps::new())
+            .unwrap();
+        let record = store.root.join("meta").join(format!("{id}.json"));
+        remove_tree(&store.object_path(&id)).unwrap();
+        assert!(record.is_file());
+        let stage = staged(&store);
+        let result = with_publication_hook(
+            |at| {
+                if at == "before-sync-tree" {
+                    return Err(io::Error::other("injected flush failure"));
+                }
+                Ok(())
+            },
+            || store.commit_with_deps(&identity, &stage, &[], &ObjectDeps::new()),
+        );
+        assert!(result.is_err());
+        assert!(
+            !record.exists(),
+            "old record still certifies the unfinished replacement"
+        );
+        assert_eq!(store.is_complete(&id), Some(false));
+        store
+            .commit_with_deps(&identity, &staged(&store), &[], &ObjectDeps::new())
+            .unwrap();
+        assert_eq!(store.is_complete(&id), Some(true));
+    }
+
+    #[test]
+    fn completeness_rechecks_a_record_replaced_after_its_stat() {
+        use std::os::unix::ffi::OsStrExt;
+        let temp = temp_store();
+        let store = Store {
+            root: temp.0.canonicalize().unwrap(),
+        };
+        let identity = identity();
+        let id = identity.object_id();
+        store
+            .commit_with_deps(&identity, &staged(&store), &[], &ObjectDeps::new())
+            .unwrap();
+        let record = store.root.join("meta").join(format!("{id}.json"));
+        let valid = fs::read(&record).unwrap();
+        for fifo in [true, false] {
+            fs::write(&record, &valid).unwrap();
+            let replaced = record.clone();
+            let outside = temp.0.join("outside.json");
+            fs::write(&outside, "{}").unwrap();
+            let complete = with_publication_hook(
+                move |at| {
+                    if at == "before-completeness-open" {
+                        fs::remove_file(&replaced)?;
+                        if fifo {
+                            let name = CString::new(replaced.as_os_str().as_bytes()).unwrap();
+                            // SAFETY: the NUL-terminated name lives through the call.
+                            if unsafe { libc::mkfifo(name.as_ptr(), 0o600) } != 0 {
+                                return Err(io::Error::last_os_error());
+                            }
+                        } else {
+                            std::os::unix::fs::symlink(&outside, &replaced)?;
+                        }
+                    }
+                    Ok(())
+                },
+                || store.is_complete(&id),
+            );
+            assert_eq!(complete, Some(false));
             fs::remove_file(&record).unwrap();
         }
     }
