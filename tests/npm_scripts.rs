@@ -531,8 +531,18 @@ fn install_script_needing_host_headers_falls_back_once() {
         1,
         "the fallback was not recorded"
     );
-    // The record leads the next realization to the same object; with the
-    // tarball gone a rebuild could not even start.
+    // The record leads the next realization to the same object, never a
+    // rebuild: with the tarball gone from disk and from the store's
+    // artifact cache (the archive classification is persisted, so the
+    // lookup itself reads neither), a rebuild could not even start.
+    let cached = store.cache_path(
+        "sha512",
+        &format!("{:x}", Sha512::digest(std::fs::read(&tarball).unwrap())),
+    );
+    assert!(cached.exists(), "the tarball is not in the artifact cache");
+    tog::kernel::store::remove_tree(&cached)
+        .or_else(|_| std::fs::remove_file(&cached))
+        .unwrap();
     std::fs::remove_file(&tarball).unwrap();
     assert_eq!(realize(), env);
 }
