@@ -256,11 +256,9 @@ mod tests {
         let add = refusal(&["pnpm", "add", "is-odd"]).expect("pnpm add is refused");
         assert!(add.starts_with("'pnpm add' would replace"), "{add}");
         assert!(add.contains("edit dependencies through tog"), "{add}");
-        // Bare `yarn` and bare `bun` install; bare `npm`/`pnpm` print help.
-        for bare in [["yarn"], ["bun"]] {
-            let message = refusal(&bare).unwrap_or_else(|| panic!("{bare:?} is refused"));
-            assert!(message.contains("node_modules"), "{bare:?}: {message}");
-        }
+        // Bare `yarn` installs; bare `npm`, `pnpm` and `bun` print help.
+        let message = refusal(&["yarn"]).expect("bare yarn is refused");
+        assert!(message.contains("node_modules"), "{message}");
         assert!(refusal(&["yarn", "remove", "is-odd"]).is_some());
     }
 
@@ -281,7 +279,6 @@ mod tests {
             (vec!["yarn", "--cwd", "."], "yarn"),
             (vec!["yarn", "--silent"], "yarn"),
             (vec!["bun", "--cwd", ".", "install"], "bun install"),
-            (vec!["bun", "--cwd", "."], "bun"),
             (vec!["bun", "--cwd=.", "a", "x"], "bun a"),
             (
                 vec!["/x/bin/npm", "--prefix", ".", "install"],
@@ -290,6 +287,48 @@ mod tests {
             // An option's value that spells a subcommand is read as one. That
             // fails safe: a harmless command is refused, an install never runs.
             (vec!["npm", "--prefix", "install", "run"], "npm install"),
+            // npm reads camelCase as kebab-case and a unique prefix as the
+            // command it starts.
+            (vec!["npm", "installTest"], "npm install-test"),
+            (vec!["npm", "dedu"], "npm dedupe"),
+            (vec!["npm", "upd"], "npm update"),
+            (vec!["npm", "cleanInstall"], "npm clean-install"),
+            // A harmless command named by abbreviation may be an option's
+            // value, so the scan reads on for an install.
+            (vec!["npm", "--prefix", "doc", "install"], "npm install"),
+            // An install another command runs.
+            (vec!["npm", "exec", "--", "npm", "install"], "npm install"),
+            (vec!["npm", "x", "-c", "cd web && npm ci"], "npm ci"),
+            (vec!["npx", "-p", "npm", "npm", "i", "x"], "npm i"),
+            (vec!["npx", "yarn", "add", "x"], "yarn add"),
+            (vec!["pnpm", "dlx", "npm", "install"], "npm install"),
+            (
+                vec!["yarn", "dlx", "-p", "pnpm", "pnpm", "add", "x"],
+                "pnpm add",
+            ),
+            (vec!["bunx", "/x/bin/bun", "install"], "bun install"),
+            // A program named with its version is the same program.
+            (vec!["npx", "npm@10", "install"], "npm install"),
+            (vec!["npx", "pnpm@9", "install"], "pnpm install"),
+            (vec!["pnpm", "dlx", "pnpm@9", "install"], "pnpm install"),
+            (vec!["npx", "yarn@1", "add", "x"], "yarn add"),
+            // A shell line given as an option's value, or glued to `&&`.
+            (vec!["npm", "exec", "--call=npm ci"], "npm ci"),
+            (vec!["npx", "--call=npm ci"], "npm ci"),
+            (vec!["npx", "--call=yarn"], "yarn"),
+            (vec!["npm", "exec", "-c", "cd web&&npm ci"], "npm ci"),
+            (vec!["npx", "-c", "true;(pnpm i)"], "pnpm i"),
+            (vec!["npx", "-c", "CI=1 npm ci"], "npm ci"),
+            // A runner named by abbreviation is not lost to a later exact
+            // word (`x` is npm's own `exec` alias).
+            (vec!["npm", "exe", "--", "bun", "a", "x"], "bun a"),
+            // A subcommand whose remaining words are the program's own again.
+            (
+                vec!["yarn", "workspaces", "foreach", "-A", "install"],
+                "yarn install",
+            ),
+            (vec!["yarn", "workspaces", "focus"], "yarn focus"),
+            (vec!["pnpm", "with", "current", "add", "x"], "pnpm add"),
         ] {
             let message = refusal(&words).unwrap_or_else(|| panic!("{words:?} is refused"));
             assert!(
@@ -348,6 +387,28 @@ mod tests {
             vec!["bun", "--version"],
             vec!["bun", "--help"],
             vec!["bun", "--cwd", ".", "--help"],
+            // Bare bun prints its help.
+            vec!["bun"],
+            vec!["bun", "--cwd", "."],
+            // npm abbreviations of harmless commands, and an ambiguous one.
+            vec!["npm", "outd"],
+            vec!["npm", "runScript", "build"],
+            vec!["npm", "d"],
+            // A runner that runs something other than an install.
+            vec!["npx", "eslint", "--fix", "."],
+            vec!["npm", "exec", "--", "tsc", "-p", "."],
+            vec!["npx", "-c", "npm run build"],
+            vec!["pnpm", "dlx", "create-vite", "app"],
+            // Only the word in the program's place is a program: the words
+            // after it are its own arguments.
+            vec!["npx", "create-turbo@latest", "-m", "yarn"],
+            vec!["npx", "--yes", "create-turbo", "-m", "yarn"],
+            vec!["npm", "exec", "--", "create-vite", "app", "--pm", "pnpm"],
+            vec!["npx", "--package=yarn", "yarn", "--version"],
+            vec!["npx", "-p", "yarn", "yarn", "--version"],
+            vec!["yarn", "workspaces", "foreach", "-A", "run", "build"],
+            vec!["yarn", "workspaces", "list"],
+            vec!["yarn", "workspaces"],
             // A script or a file to run is not a bare install either.
             vec!["yarn", "build"],
             vec!["yarn", "--cwd", ".", "build"],

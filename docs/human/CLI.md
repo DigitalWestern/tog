@@ -436,11 +436,14 @@ the projection is even looked up:
   `tog run <command>` *is* the activation, per command rather than per
   shell.
 - `npm`/`pnpm`/`yarn`/`bun` with an installing subcommand (`install`, `ci`,
-  `add`, `remove`, `update`, `link`, `dedupe`, …), plus bare `yarn` and bare
-  `bun`, which install. `install` and `ci` are answered with the bare `tog`,
-  which sets `node_modules` up from the lockfile (`tog --fresh` rebuilds
-  it); the verbs that change the
-  lockfile are answered with `tog add` / `tog remove` / `tog update`.
+  `add`, `remove`, `update`, `link`, `dedupe`, …), plus bare `yarn`, which
+  installs. npm's own spellings count: camelCase (`installTest`) and any
+  prefix only one command starts with (`dedu`). So does an install another
+  command runs: `npm exec -- npm install`, `npx yarn add x`, `pnpm dlx npm
+  ci`, `yarn workspaces foreach -A install`. `install` and `ci` are
+  answered with the bare `tog`, which sets `node_modules` up from the
+  lockfile (`tog --fresh` rebuilds it); the verbs that change the lockfile
+  are answered with `tog add` / `tog remove` / `tog update`.
 
 Reading an environment is not changing it, so `pip list`, `pip freeze`,
 `pip show`, `pip check`, `pip download` and `npm ls` run normally, as does

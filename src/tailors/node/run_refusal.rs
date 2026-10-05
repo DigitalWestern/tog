@@ -18,6 +18,15 @@ struct Manager {
     others: &'static [&'static str],
     /// Whether the program installs when given no subcommand at all.
     bare_installs: bool,
+    /// Whether a camelCase word or any prefix only one subcommand starts
+    /// with names that subcommand, as npm reads its command line.
+    abbreviates: bool,
+    /// The subcommands that run another command (`npm exec`, `pnpm dlx`),
+    /// which may itself be an install.
+    runs: &'static [&'static str],
+    /// The subcommands whose remaining words are this program's command
+    /// line again (`yarn workspaces foreach -A install`).
+    reenters: &'static [&'static str],
     /// The global options that take the next word as their value, so
     /// `yarn --cwd .` is a bare install rather than a script named `.`.
     /// Only a program that installs bare needs them.
@@ -160,6 +169,9 @@ const NPM: Manager = Manager {
         "whoami",
     ],
     bare_installs: false,
+    abbreviates: true,
+    runs: &["exec", "x"],
+    reenters: &[],
     value_options: &[],
 };
 
@@ -297,13 +309,16 @@ const PNPM: Manager = Manager {
         "help",
     ],
     bare_installs: false,
+    abbreviates: false,
+    runs: &["exec", "dlx"],
+    reenters: &["with"],
     value_options: &[],
 };
 
 /// yarn's commands, classic (`yarn help`) and berry. `workspace` is left
 /// out on purpose: it prefixes a workspace name and another command
 /// (`yarn workspace web add x`), so the scan reads past both to that
-/// command.
+/// command. `focus` is berry's `yarn workspaces focus`, an install.
 const YARN: Manager = Manager {
     installs: &[
         "install",
@@ -316,6 +331,7 @@ const YARN: Manager = Manager {
         "unlink",
         "dedupe",
         "unplug",
+        "focus",
     ],
     others: &[
         "access",
@@ -364,6 +380,9 @@ const YARN: Manager = Manager {
         "workspaces",
     ],
     bare_installs: true,
+    abbreviates: false,
+    runs: &["exec", "dlx"],
+    reenters: &["workspaces"],
     value_options: &[
         "--cwd",
         "--use-yarnrc",
@@ -387,7 +406,8 @@ const YARN: Manager = Manager {
 };
 
 /// bun's commands and aliases, as `bun --help` lists them. `bun upgrade`
-/// upgrades bun itself; `bun update` is the one that installs.
+/// upgrades bun itself; `bun update` is the one that installs. A bare
+/// `bun` prints its help.
 const BUN: Manager = Manager {
     installs: &[
         "install", "i", "add", "a", "remove", "rm", "update", "link", "unlink", "dedupe", "prune",
@@ -397,26 +417,14 @@ const BUN: Manager = Manager {
         "run", "test", "x", "repl", "exec", "audit", "outdated", "publish", "pm", "info", "why",
         "build", "init", "create", "c", "upgrade", "help",
     ],
-    bare_installs: true,
-    value_options: &[
-        "--cwd",
-        "-c",
-        "--config",
-        "-F",
-        "--filter",
-        "--elide-lines",
-        "--shell",
-        "-r",
-        "--preload",
-        "--require",
-        "--import",
-        "--env-file",
-        "--tsconfig-override",
-    ],
+    bare_installs: false,
+    abbreviates: false,
+    runs: &["x", "exec"],
+    reenters: &[],
+    value_options: &[],
 };
 
-/// The options that make a bare yarn or bun do something other than
-/// install: print its version or help, or evaluate a script.
+/// The options that make a bare yarn do something other than install: print its version or help, or evaluate a script.
 const NOT_AN_INSTALL: &[&str] = &[
     "-v",
     "--version",
@@ -456,6 +464,10 @@ const NODE_REINSTALL_VERBS: &[&str] = &[
     "sit",
 ];
 
+/// The programs that only run another command: `npx npm install` is the
+/// install it runs.
+const RUNNERS: &[&str] = &["npx", "pnpx", "bunx"];
+
 fn manager(program: &str) -> Option<&'static Manager> {
     match program {
         "npm" => Some(&NPM),
@@ -466,13 +478,160 @@ fn manager(program: &str) -> Option<&'static Manager> {
     }
 }
 
-/// The program's subcommand: the first word that is one, wherever it sits
-/// among the global options.
-fn subcommand<'a>(manager: &Manager, cmd: &'a [String]) -> Option<&'a str> {
-    cmd.iter()
-        .skip(1)
-        .map(String::as_str)
-        .find(|word| manager.installs.contains(word) || manager.others.contains(word))
+/// The subcommand `word` names, and whether it names it outright rather
+/// than by abbreviation. An abbreviating program reads it as npm's `deref`
+/// (`lib/utils/cmd-list.js`) does: camelCase as kebab-case (`installTest`
+/// is `install-test`), then an exact command or alias, then a prefix that
+/// only one command or alias starts with (`dedu`, `upd`).
+fn resolve(manager: &Manager, word: &str) -> Option<(&'static str, bool)> {
+    let words = || manager.installs.iter().chain(manager.others).copied();
+    let kebab: String;
+    let word = if manager.abbreviates && word.contains(|c: char| c.is_ascii_uppercase()) {
+        kebab = word
+            .chars()
+            .flat_map(|c| match c.is_ascii_uppercase() {
+                true => vec!['-', c.to_ascii_lowercase()],
+                false => vec![c],
+            })
+            .collect();
+        &kebab
+    } else {
+        word
+    };
+    if let Some(exact) = words().find(|candidate| *candidate == word) {
+        return Some((exact, true));
+    }
+    if !manager.abbreviates || word.is_empty() {
+        return None;
+    }
+    let mut prefixed = words().filter(|candidate| candidate.starts_with(word));
+    match (prefixed.next(), prefixed.next()) {
+        (Some(only), None) => Some((only, false)),
+        _ => None,
+    }
+}
+
+/// The program's subcommand and its position: the first word that is one,
+/// wherever it sits among the global options. A harmless subcommand named
+/// only by abbreviation may be an option's value (`npm --prefix doc
+/// install`), so the scan reads on past it for one named outright or for
+/// an install.
+fn subcommand(manager: &Manager, cmd: &[String]) -> Option<(&'static str, usize)> {
+    let mut abbreviated = None;
+    for (index, word) in cmd.iter().enumerate().skip(1) {
+        let Some((verb, exact)) = resolve(manager, word) else {
+            continue;
+        };
+        if exact || manager.installs.contains(&verb) {
+            return Some((verb, index));
+        }
+        abbreviated.get_or_insert((verb, index));
+    }
+    abbreviated
+}
+
+/// The position of a runner named by abbreviation before `before`
+/// (`npm exe -- bun a x`). The scan above reads on past it to the exact `x`,
+/// but it may be the real subcommand, so what it would run is checked too.
+fn abbreviated_runner(manager: &Manager, cmd: &[String], before: usize) -> Option<usize> {
+    (1..before).find(|&index| {
+        matches!(resolve(manager, &cmd[index]), Some((verb, false)) if manager.runs.contains(&verb))
+    })
+}
+
+/// The options of a runner (`npx`, `npm exec`, `pnpm dlx`, `bunx`) that take
+/// no value, so the word after one is the program it runs. After any other
+/// option the next word may be that option's value (`npx -p npm npm i`).
+const RUNNER_FLAGS: &[&str] = &[
+    "-y",
+    "--yes",
+    "--no",
+    "-q",
+    "--quiet",
+    "-s",
+    "--silent",
+    "--bun",
+    "--no-install",
+    "--ignore-existing",
+    "--prefer-offline",
+    "--offline",
+    "--shell-auto-fallback",
+];
+
+/// The runner options whose value is a shell command line (`npm exec -c
+/// 'npm ci'`).
+const CALL_OPTIONS: &[&str] = &["-c", "--call"];
+
+/// The characters that end one shell command and start the next
+/// (`cd web&&npm ci`, `(npm ci)`).
+const SHELL_SEPARATORS: &[char] = &[';', '&', '|', '(', ')'];
+
+/// The program a word names: its last path segment without a version
+/// (`/x/bin/npm`, `npm@10`), a leading `@` kept for a scoped name.
+fn program_name(word: &str) -> &str {
+    let name = word.rsplit('/').next().unwrap_or(word);
+    match name.get(1..).and_then(|rest| rest.find('@')) {
+        Some(at) => &name[..at + 1],
+        None => name,
+    }
+}
+
+/// The install inside a command another one runs (`npm exec -- npm
+/// install`, `npx yarn add x`, `pnpm dlx npm ci`). The program is the first
+/// word after the runner's own options, or the word after `--`; the words
+/// after it are its own (`npx create-turbo -m yarn` runs create-turbo). A
+/// bare word after an option may be that option's value, so it is checked
+/// and the scan reads on. A word holding spaces or shell separators is a
+/// shell command line of its own (`npm exec -c 'cd web&&npm ci'`), and so
+/// is the value of `--call=`.
+fn nested(words: &[String]) -> Option<String> {
+    let mut maybe_value = false;
+    for (index, word) in words.iter().enumerate() {
+        if word == "--" {
+            return refused_command(&words[index + 1..]);
+        }
+        if word.starts_with('-') {
+            if let Some((option, value)) = word.split_once('=') {
+                if CALL_OPTIONS.contains(&option) || is_shell_line(value) {
+                    if let Some(refusal) = shell_line(value) {
+                        return Some(refusal);
+                    }
+                }
+            }
+            maybe_value = !word.contains('=') && !RUNNER_FLAGS.contains(&word.as_str());
+            continue;
+        }
+        if is_shell_line(word) {
+            if let Some(refusal) = shell_line(word) {
+                return Some(refusal);
+            }
+            maybe_value = false;
+            continue;
+        }
+        let refusal = refused_command(&words[index..]);
+        if refusal.is_some() || !maybe_value {
+            return refusal;
+        }
+        maybe_value = false;
+    }
+    None
+}
+
+fn is_shell_line(word: &str) -> bool {
+    word.contains(|c: char| c.is_whitespace() || SHELL_SEPARATORS.contains(&c))
+}
+
+/// The install among the commands of a shell line: each command's first
+/// word, past any `NAME=value` assignments, is its program.
+fn shell_line(line: &str) -> Option<String> {
+    line.split(SHELL_SEPARATORS).find_map(|command| {
+        let words: Vec<String> = command
+            .split_whitespace()
+            .skip_while(|word| !word.starts_with('-') && word.contains('='))
+            .map(str::to_string)
+            .collect();
+        refused_command(&words)
+    })
 }
 
 /// With no subcommand, yarn and bun install unless asked about themselves
@@ -503,13 +662,30 @@ fn bare_install(manager: &Manager, cmd: &[String]) -> bool {
 /// is refused with the verb that replaces it. Only the installing verbs
 /// are refused: reading the environment with `npm ls` is fine.
 pub fn refused_command(cmd: &[String]) -> Option<String> {
-    let program = cmd.first()?.rsplit('/').next()?;
+    let program = program_name(cmd.first()?);
+    if RUNNERS.contains(&program) {
+        return nested(&cmd[1..]);
+    }
     let manager = manager(program)?;
-    let verb = match subcommand(manager, cmd) {
-        Some(verb) if manager.installs.contains(&verb) => verb,
+    let found = subcommand(manager, cmd);
+    let runner = found.and_then(|(_, index)| abbreviated_runner(manager, cmd, index));
+    if let Some(refusal) = runner.and_then(|index| nested(&cmd[index + 1..])) {
+        return Some(refusal);
+    }
+    let verb = match found {
+        Some((verb, _)) if manager.installs.contains(&verb) => verb,
+        Some((verb, index)) if manager.runs.contains(&verb) => return nested(&cmd[index + 1..]),
+        Some((verb, index)) if manager.reenters.contains(&verb) => {
+            let again: Vec<String> = std::iter::once(cmd[0].clone())
+                .chain(cmd[index + 1..].iter().cloned())
+                .collect();
+            return match subcommand(manager, &again) {
+                Some(_) => refused_command(&again),
+                None => None,
+            };
+        }
         Some(_) => return None,
-        // Bare `yarn` and bare `bun` install; bare `npm` and `pnpm` print
-        // help.
+        // Bare `yarn` installs; bare `npm`, `pnpm` and `bun` print help.
         None if bare_install(manager, cmd) => "",
         None => return None,
     };
