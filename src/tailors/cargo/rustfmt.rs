@@ -605,7 +605,7 @@ mod tests {
                 .unwrap(),
             )
             .unwrap();
-            store.register_root(&project).unwrap();
+            crate::kernel::store::register_empty_root_for_test(store, &project).unwrap();
             let mut out = Vec::new();
             let report =
                 crate::kernel::gc::collect(store, crate::kernel::gc::Options::default(), &mut out)
@@ -771,7 +771,7 @@ mod tests {
                 br#"{"schema":"closure/1","ecosystem":"rustfmt","body":{}}"#,
             )
             .unwrap();
-            store.register_root(&project).unwrap();
+            crate::kernel::store::register_empty_root_for_test(store, &project).unwrap();
             let held = crate::kernel::fsroot::ProjectRoot::open(&project).unwrap();
             fs::create_dir(closures.join("cargo.json")).unwrap();
             remove_legacy_record(&held, true).unwrap();
@@ -804,7 +804,8 @@ mod tests {
                 br#"{"schema":"closure/1","ecosystem":"rustfmt","body":{}}"#,
             )
             .unwrap();
-            let entry = store.register_root(&project).unwrap();
+            let entry =
+                crate::kernel::store::register_empty_root_for_test(store, &project).unwrap();
             let key =
                 crate::kernel::store::Store::canonical_root_key(&project.canonicalize().unwrap());
             assert_eq!(entry.key, key);

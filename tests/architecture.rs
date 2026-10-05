@@ -1522,7 +1522,6 @@ const LEASE_BOUNDARIES: &[(&str, &str, usize)] = &[
     ("src/kernel/gc/mod.rs", "collect", 1),
     // Public root-registry calls for callers holding no lease (tests and
     // library users). Each has a `_with_activity` form that production uses.
-    ("src/kernel/store/roots.rs", "register_root", 1),
     ("src/kernel/store/roots.rs", "register_root_record", 1),
     ("src/kernel/store/roots.rs", "register_root_from_project", 1),
     ("src/kernel/store/roots.rs", "remove_root_entry", 1),

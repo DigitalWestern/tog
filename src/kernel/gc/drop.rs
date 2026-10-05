@@ -160,12 +160,6 @@ fn rooting_projects(store: &Store, droppable: &[Droppable]) -> Resync {
                 continue;
             }
             Err(RootUnreadable::Record(reason)) => format!("its record is unusable: {reason}"),
-            Err(RootUnreadable::Project(error)) => {
-                format!(
-                    "project {} cannot be resolved: {error}",
-                    root.path.display()
-                )
-            }
             Err(RootUnreadable::Io(error)) => error.to_string(),
         };
         resync.unknown.push((root.key.clone(), why));
@@ -482,7 +476,9 @@ mod drop_tests {
         let store = temp.store();
         let gone = temp.root.join("gone");
         fs::create_dir_all(&gone).unwrap();
-        let pathname = store.register_root(&gone).unwrap().key;
+        let pathname = store::write_pathname_root_for_test(&store, &gone)
+            .unwrap()
+            .key;
         fs::remove_dir_all(&gone).unwrap();
         let unusable = register_objects(&store, &temp.root.join("app"), &[]);
         fs::write(store.root.join("roots").join(&unusable), b"garbage").unwrap();
@@ -492,8 +488,10 @@ mod drop_tests {
         let could_not_tell =
             |key: &str| format!("tog: could not tell whether root {key} needs a dropped object (");
         assert!(
-            text.contains(&format!("{}project ", could_not_tell(&pathname)))
-                && text.contains(" cannot be resolved: "),
+            text.contains(&format!(
+                "{}its record is unusable: a pathname-only record",
+                could_not_tell(&pathname)
+            )),
             "{text}"
         );
         assert!(

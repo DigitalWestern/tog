@@ -545,6 +545,42 @@ pub(crate) fn reimport_root_for_test(store: &Store, project: &Path) -> io::Resul
         .ok_or_else(|| io::Error::other("registration wrote no root/2 record"))
 }
 
+/// Register `project` with an empty root/2 record, for tests about the
+/// registry itself (keys, lookup, forget) that need no store objects.
+#[cfg(test)]
+pub(crate) fn register_empty_root_for_test(store: &Store, project: &Path) -> io::Result<RootEntry> {
+    let project = project.canonicalize()?;
+    store.register_root_record(RootRecord {
+        key: Store::root_key(&project)?,
+        project_path: project,
+        objects: BTreeSet::new(),
+        projections: BTreeSet::new(),
+        updated: 1,
+    })
+}
+
+/// Write the pathname-only registry entry (a project path and a newline)
+/// that tog wrote before root/2, so a test can show how such an entry is
+/// read today. Nothing outside tests writes one. The registry is marked
+/// initialized, as every registration then left it.
+#[cfg(test)]
+pub(crate) fn write_pathname_root_for_test(store: &Store, project: &Path) -> io::Result<RootEntry> {
+    use std::os::unix::ffi::OsStrExt as _;
+    let project = project.canonicalize()?;
+    let key = Store::canonical_root_key(&project);
+    let roots = store.root.join("roots");
+    fs::create_dir_all(&roots)?;
+    let mut bytes = project.as_os_str().as_bytes().to_vec();
+    bytes.push(b'\n');
+    fs::write(roots.join(&key), bytes)?;
+    fs::write(roots.join(roots::ROOTS_INITIALIZED), b"")?;
+    store
+        .roots()?
+        .into_iter()
+        .find(|entry| entry.key == key)
+        .ok_or_else(|| io::Error::other("the written entry is not listed"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -792,12 +828,15 @@ mod tests {
         };
         let project = temp.0.join("project");
         fs::create_dir_all(&project).unwrap();
-        let root = store.register_root(&project).unwrap();
+        let root = register_empty_root_for_test(&store, &project).unwrap();
         assert_eq!(store.roots().unwrap(), vec![root.clone()]);
-        assert_eq!(
-            fs::read_to_string(&root.registry_path).unwrap().trim(),
-            project.canonicalize().unwrap().display().to_string()
+        assert!(
+            fs::read_to_string(&root.registry_path)
+                .unwrap()
+                .contains("\"schema\": \"root/2\""),
+            "the registry file is not a root/2 record"
         );
+        assert_eq!(root.path, project.canonicalize().unwrap());
         let names = |dir: &str| -> BTreeSet<String> {
             fs::read_dir(store.root.join(dir))
                 .unwrap()
@@ -808,14 +847,21 @@ mod tests {
             names("roots"),
             BTreeSet::from([root.key.clone(), roots::ROOTS_INITIALIZED.to_string()])
         );
-        assert!(names("tmp").is_empty(), "{:?}", names("tmp"));
+        // The publish lock stays; no temporary record file does.
+        assert_eq!(
+            names("tmp"),
+            BTreeSet::from([".publish.lock".to_string()]),
+            "{:?}",
+            names("tmp")
+        );
         store.remove_root_entry(&root).unwrap();
         assert!(store.roots().unwrap().is_empty());
     }
 
-    /// A project whose pathname a record cannot hold exactly is refused
-    /// before anything is written: recording a lossy spelling files one
-    /// project under another project's identity.
+    /// A project whose pathname a record cannot hold exactly fails the
+    /// preflight gates (`check_registrable`, `Store::root_key`) that sync
+    /// and registration run before writing anything: recording a lossy
+    /// spelling files one project under another project's identity.
     #[test]
     fn registration_refuses_a_pathname_no_record_can_hold() {
         let temp = temp_store();
@@ -825,7 +871,7 @@ mod tests {
         let padded = temp.0.join("project ");
         fs::create_dir_all(&padded).unwrap();
         assert_eq!(
-            store.register_root(&padded).unwrap_err().kind(),
+            Store::check_registrable(&padded).unwrap_err().kind(),
             io::ErrorKind::InvalidInput
         );
         assert_eq!(
@@ -842,7 +888,7 @@ mod tests {
             let lossy = PathBuf::from(OsString::from_vec(raw));
             fs::create_dir_all(&lossy).unwrap();
             assert_eq!(
-                store.register_root(&lossy).unwrap_err().kind(),
+                Store::check_registrable(&lossy).unwrap_err().kind(),
                 io::ErrorKind::InvalidInput
             );
         }
@@ -859,7 +905,7 @@ mod tests {
         };
         let project = temp.0.join("project");
         fs::create_dir_all(&project).unwrap();
-        let entry = store.register_root(&project).unwrap();
+        let entry = register_empty_root_for_test(&store, &project).unwrap();
 
         for contents in [
             b"".as_slice(),
@@ -890,7 +936,7 @@ mod tests {
         };
         let project = temp.0.join("project");
         fs::create_dir_all(&project).unwrap();
-        let entry = store.register_root(&project).unwrap();
+        let entry = register_empty_root_for_test(&store, &project).unwrap();
 
         // Forgetting resolves the key against the registry only, so a record
         // stays forgettable after its project is gone.
@@ -915,7 +961,7 @@ mod tests {
         };
         let project = temp.0.join("project");
         fs::create_dir_all(&project).unwrap();
-        store.register_root(&project).unwrap();
+        register_empty_root_for_test(&store, &project).unwrap();
 
         let error = store.forget_root(&"a".repeat(40)).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::NotFound);
@@ -979,7 +1025,7 @@ mod tests {
         };
         let project = temp.0.join("project");
         fs::create_dir_all(&project).unwrap();
-        let entry = store.register_root(&project).unwrap();
+        let entry = register_empty_root_for_test(&store, &project).unwrap();
         let roots = store.root.join("roots");
 
         let broken = ["a", "b", "c", "d", "e"].map(|c| c.repeat(40));
@@ -2093,7 +2139,10 @@ mod tests {
         let utf8 = utf8.canonicalize().unwrap();
         let expected = hex::encode(sha1::Sha1::digest(utf8.to_str().unwrap().as_bytes()));
         assert_eq!(Store::root_key(&utf8).unwrap(), expected);
-        assert_eq!(store.register_root(&utf8).unwrap().key, expected);
+        assert_eq!(
+            register_empty_root_for_test(&store, &utf8).unwrap().key,
+            expected
+        );
 
         let lossy = PathBuf::from(format!("{}/project-\u{fffd}", store.root.display()));
         let raw = PathBuf::from(OsString::from_vec(

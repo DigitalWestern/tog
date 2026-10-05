@@ -209,7 +209,7 @@ pub fn write_closure(
         body,
         store,
         activity,
-        Some(refs),
+        refs,
         None,
         attribution,
     )
@@ -236,7 +236,7 @@ pub(crate) fn write_closure_with_project_lock(
         body,
         store,
         activity,
-        Some(refs),
+        refs,
         Some(project_lock),
         attribution,
     )
@@ -286,40 +286,13 @@ pub(crate) fn persist_root_for_refs_with_project_lock(
         .map(|_| ())
 }
 
-/// Compatibility writer for old synthetic unit fixtures. It is not available
-/// to production builds, so a producer cannot silently fall back to inferred
-/// JSON references.
-#[cfg(test)]
-pub(crate) fn write_closure_legacy(
-    project_dir: &Path,
-    ecosystem: &str,
-    body: serde_json::Value,
-    attribution: &mut crate::kernel::policy::Attribution,
-) -> io::Result<()> {
-    let store = match store_from_closure_body(&body) {
-        Some(store) => store,
-        None => Store::open()?,
-    };
-    let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
-    write_closure_inner(
-        &ProjectRoot::open(project_dir)?,
-        ecosystem,
-        body,
-        &store,
-        &activity,
-        None,
-        None,
-        attribution,
-    )
-}
-
 fn write_closure_inner(
     project: &ProjectRoot,
     ecosystem: &str,
     mut body: serde_json::Value,
     store: &Store,
     activity: &crate::kernel::activity::StoreActivity,
-    mut explicit_refs: Option<ClosureRefs>,
+    mut refs: ClosureRefs,
     supplied_project_lock: Option<&fs::File>,
     attribution: &mut crate::kernel::policy::Attribution,
 ) -> io::Result<()> {
@@ -333,7 +306,7 @@ fn write_closure_inner(
     // generation paired with a closure from another. A caller that already
     // holds the lock supplies it: a second `project_lock_in` from this
     // process would wait on it forever.
-    let owned_project_lock = if explicit_refs.is_some() && supplied_project_lock.is_none() {
+    let owned_project_lock = if supplied_project_lock.is_none() {
         Some(store.project_lock_in(project)?)
     } else {
         None
@@ -355,7 +328,6 @@ fn write_closure_inner(
     // on: the lock, the record key and the registrability check never
     // resolve it again.
     project.check_still_named()?;
-    let project_dir = project.path().to_path_buf();
     // Writing closures for a project that cannot be registered would leave
     // provenance behind for a project no root record can protect.
     Store::check_registrable_in(project)?;
@@ -371,7 +343,7 @@ fn write_closure_inner(
         &mut body,
         store,
         activity,
-        explicit_refs.as_mut(),
+        Some(&mut refs),
     )?;
 
     // Hold the project directory open and publish through it. Every
@@ -399,30 +371,17 @@ fn write_closure_inner(
     let platform = Platform::host()?.triple();
     check_closure_destination(project, &closure_path)?;
     // Protect the complete object set before publishing the visible closure.
-    // The compatibility writer below is retained only for old synthetic
-    // callers whose placeholder paths predate full object ids; real producer
-    // closures enter the durable root/2 path here.
-    let durable_root = match explicit_refs {
-        Some(refs) => {
-            let (objects, projections) = refs.into_record_parts();
-            let project_lock = project_lock
-                .as_ref()
-                .expect("strict closure publication owns a project lock");
-            store.register_root_parts_with_project_lock(
-                activity,
-                project,
-                objects,
-                projections,
-                project_lock,
-            )?;
-            true
-        }
-        None => match store.register_root_with_closure(project, ecosystem, &body) {
-            Ok(_) => true,
-            Err(error) if error.kind() == io::ErrorKind::InvalidData => false,
-            Err(error) => return Err(error),
-        },
-    };
+    let (objects, projections) = refs.into_record_parts();
+    let project_lock = project_lock
+        .as_ref()
+        .expect("closure publication owns a project lock");
+    store.register_root_parts_with_project_lock(
+        activity,
+        project,
+        objects,
+        projections,
+        project_lock,
+    )?;
     let mut envelope = serde_json::json!({
         "schema": "closure/1",
         "ecosystem": ecosystem,
@@ -442,9 +401,6 @@ fn write_closure_inner(
     // renamed into the held directory: prove the path still names it, so a
     // swap in that window fails the sync instead of passing silently.
     project.check_still_named()?;
-    if !durable_root {
-        store.register_root_with_activity(activity, &project_dir)?;
-    }
     attribution.mark_published()?;
     Ok(())
 }
@@ -494,30 +450,6 @@ pub(crate) fn replace_project_symlink(
     label: &str,
 ) -> io::Result<()> {
     project.replace_symlink(relative, target, label)
-}
-
-#[cfg(test)]
-pub(crate) fn store_from_closure_body(body: &serde_json::Value) -> Option<Store> {
-    fn find(value: &serde_json::Value) -> Option<Store> {
-        match value {
-            serde_json::Value::String(text) if Path::new(text).is_absolute() => {
-                let path = Path::new(text);
-                for ancestor in path.ancestors() {
-                    if ancestor.file_name().and_then(|name| name.to_str()) == Some("objects") {
-                        let root = ancestor.parent()?.to_path_buf();
-                        if root.join("objects").is_dir() {
-                            return Some(Store::for_test(root));
-                        }
-                    }
-                }
-                None
-            }
-            serde_json::Value::Array(values) => values.iter().find_map(find),
-            serde_json::Value::Object(values) => values.values().find_map(find),
-            _ => None,
-        }
-    }
-    find(body)
 }
 
 /// Read a tailor's closure body back (for `tog run` and friends).
@@ -1015,6 +947,30 @@ mod tests {
         serde_json::json!({"store_object": store.object_path("closure-test")})
     }
 
+    /// Publish a closure for `project` through `write_closure`, naming one
+    /// complete test object, as a producer would.
+    fn publish_test_closure(
+        project: &Path,
+        ecosystem: &str,
+        store: &Store,
+        attribution: &mut crate::kernel::policy::Attribution,
+    ) -> io::Result<String> {
+        let id = complete_object(store, &format!("closure-test-{ecosystem}"));
+        let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
+        let mut refs = ClosureRefs::new();
+        refs.object_id(store, &activity, &id)?;
+        super::write_closure(
+            &crate::kernel::fsroot::ProjectRoot::open(project)?,
+            ecosystem,
+            serde_json::json!({"store_object": store.object_path(&id)}),
+            store,
+            &activity,
+            refs,
+            attribution,
+        )?;
+        Ok(id)
+    }
+
     pub(super) fn complete_object(store: &Store, name: &str) -> String {
         object_with(store, name, |_| {})
     }
@@ -1358,7 +1314,7 @@ mod tests {
             "node",
             serde_json::json!({"env_object": store.object_path(&node)}),
         );
-        let legacy = store.register_root(project).unwrap();
+        let legacy = crate::kernel::store::write_pathname_root_for_test(&store, project).unwrap();
         let legacy_bytes = fs::read(&legacy.registry_path).unwrap();
 
         // A closure the importer cannot read stops the switch before any
@@ -1545,13 +1501,7 @@ mod tests {
         let squatter = closures.join("python.json");
         fs::create_dir_all(&squatter).unwrap();
 
-        let error = super::write_closure_legacy(
-            project,
-            "python",
-            closure_test_body(&store),
-            &mut attribution,
-        )
-        .unwrap_err();
+        let error = publish_test_closure(project, "python", &store, &mut attribution).unwrap_err();
         assert!(squatter.is_dir(), "the squatter was replaced: {error}");
         assert!(
             fs::read_dir(&closures)
@@ -1581,13 +1531,7 @@ mod tests {
         let (_store_dir, store) = test_store("closure-normal");
         fs::create_dir_all(project).unwrap();
 
-        super::write_closure_legacy(
-            project,
-            "python",
-            closure_test_body(&store),
-            &mut attribution,
-        )
-        .unwrap();
+        let id = publish_test_closure(project, "python", &store, &mut attribution).unwrap();
         attribution.finish(true).unwrap();
 
         let closure: serde_json::Value =
@@ -1596,7 +1540,7 @@ mod tests {
         assert_eq!(closure["ecosystem"], "python");
         assert_eq!(
             closure["body"]["store_object"].as_str(),
-            Some(store.object_path("closure-test").to_str().unwrap())
+            Some(store.object_path(&id).to_str().unwrap())
         );
         assert!(project.join(".tog/closures").is_dir());
     }
@@ -1614,12 +1558,7 @@ mod tests {
         set_signing_key_for_test(Some(key));
         let mut attribution = crate::kernel::policy::Attribution::open("python").unwrap();
         crate::kernel::policy::record("skipped-optional", "dev", "not requested").unwrap();
-        let written = super::write_closure_legacy(
-            project,
-            "python",
-            closure_test_body(&store),
-            &mut attribution,
-        );
+        let written = publish_test_closure(project, "python", &store, &mut attribution);
         set_signing_key_for_test(None);
         written.unwrap();
         attribution.finish(true).unwrap();
@@ -1646,13 +1585,7 @@ mod tests {
         );
         // Without a key the same writer produces an unsigned record.
         let mut attribution = crate::kernel::policy::Attribution::open("python").unwrap();
-        super::write_closure_legacy(
-            project,
-            "python",
-            closure_test_body(&store),
-            &mut attribution,
-        )
-        .unwrap();
+        publish_test_closure(project, "python", &store, &mut attribution).unwrap();
         attribution.finish(true).unwrap();
         let closure: serde_json::Value =
             serde_json::from_slice(&fs::read(project.join(".tog/closures/python.json")).unwrap())
@@ -1676,13 +1609,7 @@ mod tests {
         fs::create_dir_all(&outside).unwrap();
         symlink(&outside, project.join(".tog")).unwrap();
 
-        let error = super::write_closure_legacy(
-            &project,
-            "python",
-            closure_test_body(&store),
-            &mut attribution,
-        )
-        .unwrap_err();
+        let error = publish_test_closure(&project, "python", &store, &mut attribution).unwrap_err();
         assert!(error.to_string().contains(".tog"), "{error}");
         assert!(error.to_string().contains("real directory"), "{error}");
         assert!(fs::read_dir(&outside).unwrap().next().is_none());
@@ -1703,13 +1630,7 @@ mod tests {
         fs::write(&outside, b"untouched").unwrap();
         symlink(&outside, project.join(".tog/closures/python.json")).unwrap();
 
-        let error = super::write_closure_legacy(
-            &project,
-            "python",
-            closure_test_body(&store),
-            &mut attribution,
-        )
-        .unwrap_err();
+        let error = publish_test_closure(&project, "python", &store, &mut attribution).unwrap_err();
         assert!(error.to_string().contains("is a symlink"), "{error}");
         assert!(
             error.to_string().contains("run 'tog' again"),
@@ -1744,13 +1665,7 @@ mod tests {
         fs::create_dir_all(&outside).unwrap();
         symlink(&outside, project.join(".tog/closures")).unwrap();
 
-        let error = super::write_closure_legacy(
-            &project,
-            "python",
-            closure_test_body(&store),
-            &mut attribution,
-        )
-        .unwrap_err();
+        let error = publish_test_closure(&project, "python", &store, &mut attribution).unwrap_err();
         assert!(error.to_string().contains(".tog/closures"), "{error}");
         assert!(error.to_string().contains("real directory"), "{error}");
         assert!(fs::read_dir(&outside).unwrap().next().is_none());
