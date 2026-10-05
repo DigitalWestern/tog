@@ -1249,14 +1249,27 @@ mod tests {
         let platform = Platform::host().unwrap();
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("requirements.txt"), "six\n").unwrap();
-        write_closure(&dir, "python", platform.triple(), json!({}));
+        let env = temp.0.join("env");
+        fs::create_dir_all(env.join("bin")).unwrap();
+        std::os::unix::fs::symlink(&env, dir.join(".venv")).unwrap();
+        write_closure(
+            &dir,
+            "python",
+            platform.triple(),
+            json!({
+                "env_object": env,
+                "inputs": [{"path": "requirements.txt", "sha256":
+                    crate::kernel::resolve::record::sha256_hex(b"six\n")}],
+                "exceptions": [],
+            }),
+        );
         let project = ProjectRoot::open(&dir).unwrap();
         fs::rename(&dir, temp.0.join("moved")).unwrap();
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("requirements.txt"), "six\n").unwrap();
         let held = status_in(platform, &project).unwrap();
         assert_eq!(held.len(), 1);
-        assert_ne!(held[0].state, State::NotSynced);
+        assert_eq!(held[0].state, State::Synced);
         assert_eq!(closures_in(&project).unwrap().len(), 1);
         assert_eq!(status(platform, &dir).unwrap()[0].state, State::NotSynced);
     }
