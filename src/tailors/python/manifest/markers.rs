@@ -302,7 +302,7 @@ impl Environment<'_> {
             _ => {}
         }
         let as_versions =
-            crate::tailors::python::pep440::marker_version_matches(op, &right_value, &left_value)?;
+            crate::kernel::pep440::marker_version_matches(op, &right_value, &left_value)?;
         match (as_versions, op) {
             (Some(result), _) => Ok(result),
             (None, "==") => Ok(left_value == right_value),

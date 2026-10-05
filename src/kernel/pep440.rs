@@ -8,6 +8,24 @@
 use std::cmp::Ordering;
 use std::io;
 
+/// Return the number of release components when `version` is written in the
+/// canonical form accepted for CPython selection. Components are decimal and
+/// cannot have leading zeroes; no suffixes, prefixes, or surrounding text are
+/// accepted.
+pub fn canonical_release_len(version: &str) -> Option<usize> {
+    let pieces: Vec<_> = version.split('.').collect();
+    if !(2..=3).contains(&pieces.len())
+        || pieces.iter().any(|piece| {
+            piece.is_empty()
+                || (piece.len() > 1 && piece.starts_with('0'))
+                || !piece.bytes().all(|byte| byte.is_ascii_digit())
+        })
+    {
+        return None;
+    }
+    Some(pieces.len())
+}
+
 /// Equality is PEP 440's, the same answer `Ord` gives: `1.0 == 1.0.0` and
 /// `1.0A1 == 1.0a1`. The spelling in `raw` is not part of it.
 #[derive(Clone, Debug)]
@@ -414,7 +432,7 @@ enum Operator {
     BareEqual,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum Clause {
     Any,
     Literal(String),
@@ -423,7 +441,7 @@ enum Clause {
     PrefixNotEqual { epoch: u64, prefix: Vec<u64> },
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SpecifierSet {
     alternatives: Vec<Vec<Clause>>,
 }
@@ -450,6 +468,14 @@ impl SpecifierSet {
             return false;
         }
         self.matches_raw(version)
+    }
+
+    /// True when some alternative admits every version (`*`, an empty set,
+    /// `^3.9 || *`): the set then states nothing.
+    pub fn admits_everything(&self) -> bool {
+        self.alternatives
+            .iter()
+            .any(|clauses| clauses.iter().all(|clause| matches!(clause, Clause::Any)))
     }
 
     fn matches_raw(&self, version: &Version) -> bool {
@@ -636,7 +662,9 @@ fn expand_clause(
                     "~= needs at least two release segments",
                 );
             }
-            let upper = compatible_upper(&version);
+            let Some(upper) = compatible_upper(&version) else {
+                return invalid_specifier(source, full_text, "version is too large");
+            };
             Ok(vec![
                 Clause::Compare(Operator::GreaterEqual, version),
                 Clause::PrefixEqual {
@@ -685,16 +713,18 @@ fn expand_clause(
     }
 }
 
-fn compatible_upper(version: &Version) -> (Vec<u64>, Version) {
+/// The release prefix `~=` keeps and the first version past it, or `None`
+/// when the last kept segment has no successor.
+fn compatible_upper(version: &Version) -> Option<(Vec<u64>, Version)> {
     let prefix_len = version.release_len.saturating_sub(1).max(1);
     let prefix = version.release[..prefix_len].to_vec();
     let mut upper = prefix.clone();
     let index = upper.len() - 1;
-    upper[index] += 1;
-    (
+    upper[index] = upper[index].checked_add(1)?;
+    Some((
         prefix,
         Version::from_release_with_epoch(upper, version.epoch),
-    )
+    ))
 }
 
 fn clause_matches(clause: &Clause, version: &Version) -> bool {
@@ -1167,5 +1197,16 @@ mod rejection_tests {
             "{error}"
         );
         assert!(matches_specifier(">=1.0", "1.0-1").unwrap());
+        // A bound with no successor is refused, not wrapped.
+        for text in ["~=18446744073709551615.0", "~=1.18446744073709551615.0"] {
+            let error = matches_specifier(text, "1.0").unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{error}");
+            assert!(
+                error.to_string().ends_with(&format!(
+                    "invalid PEP 440 specifier `{text}`: version is too large"
+                )),
+                "{error}"
+            );
+        }
     }
 }

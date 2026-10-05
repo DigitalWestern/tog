@@ -636,7 +636,7 @@ pub(super) fn select_uv_package<'a>(
                 .iter()
                 .map(|variant| variant.version.as_str())
                 .collect::<Vec<_>>();
-            crate::tailors::python::pep440::matches_specifiers_with_candidates(
+            crate::kernel::pep440::matches_specifiers_with_candidates(
                 &specifiers,
                 &package.version,
                 &candidates,

@@ -101,8 +101,9 @@ impl fmt::Display for Version {
     }
 }
 
-/// The comparison operators a range request may use: the supported subset
-/// of PEP 440 (`>=`, `<`, `==`, `~=`, `!=`).
+/// The comparison operators the non-Python readers lower a range to
+/// (`engines.node`, `go.mod`, `global.json`). Python constraints keep their
+/// full PEP 440 grammar instead, as [`VersionRequest::Pep440`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Op {
     Ge,
@@ -161,6 +162,14 @@ pub enum VersionRequest {
     /// request: an alternative that states nothing makes the whole
     /// disjunction unconstrained, and the reader lowers that to no request.
     AnyOf(Vec<Vec<VersionRequest>>),
+    /// A Python specifier set in the full PEP 440 grammar (with Poetry's
+    /// `^`, `~` and `||`), read by the same parser interpreter selection
+    /// uses, so the lock and the sync agree on what `requires-python`
+    /// admits. `text` is the trimmed spelling, kept for display.
+    Pep440 {
+        text: String,
+        set: crate::kernel::pep440::SpecifierSet,
+    },
 }
 
 impl VersionRequest {
@@ -174,6 +183,10 @@ impl VersionRequest {
             VersionRequest::AnyOf(alternatives) => alternatives
                 .iter()
                 .any(|all| all.iter().all(|request| request.matches(candidate))),
+            VersionRequest::Pep440 { set, .. } => {
+                crate::kernel::pep440::Version::parse(&candidate.to_string())
+                    .is_ok_and(|version| set.matches(&version))
+            }
         }
     }
 }
@@ -209,6 +222,7 @@ impl fmt::Display for VersionRequest {
                     .collect();
                 f.write_str(&parts.join(" || "))
             }
+            VersionRequest::Pep440 { text, .. } => f.write_str(text),
         }
     }
 }

@@ -956,6 +956,9 @@ and build inputs tailors share, so no tailor reaches into another):
     objmeta.rs      object-meta/2 records; kind rows are installed by
                     commands::dispatch or public tailor entry points
     activity.rs     store activity leases
+    pep440.rs       PEP 440 versions and specifiers: Python interpreter
+                    selection, Python locks, markers, and the toolchain
+                    lock's Python constraints all read them here
     supervise.rs    supervised child processes
     platform.rs     the only module that knows the host
     toolchain/      release-bundle catalog: mod.rs types + validation + bundle id,
@@ -1025,7 +1028,6 @@ when the two differ.
     python/pypi.rs         Python planner (adapter)
     python/wheel.rs        PEP 427 wheel installer
     python/pyselect.rs     CPython constraint parsing and selection
-    python/pep440.rs       PEP 440 versions and specifiers
     python/manifest/       manifest discovery (discovery.rs), poetry.rs, uv.rs,
                            requirements.rs, setup.rs, markers.rs
     python/env.rs          venv-shaped env object realization and projection

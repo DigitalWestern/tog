@@ -8,7 +8,8 @@
 use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::platform::Platform;
 use crate::kernel::provider::cpython::default_version;
-use crate::tailors::python::{canonical_release_len, pythons, PinnedPython};
+use crate::kernel::toolchain::input::{python_version_line, PythonVersionRefusal};
+use crate::tailors::python::{pythons, PinnedPython};
 use std::collections::BTreeMap;
 use std::io;
 use std::path::Path;
@@ -62,7 +63,7 @@ pub struct SetupCfgPackagesFind {
 pub struct ExplicitPython {
     pub raw: String,
     pub source: String,
-    version: crate::tailors::python::pep440::Version,
+    version: crate::kernel::pep440::Version,
 }
 
 #[derive(Clone, Debug)]
@@ -114,7 +115,7 @@ impl PythonSelection {
 
 /// Pure PEP 440/Poetry matching helper for a pinned X.Y.Z candidate.
 pub fn matches_specifier(specifier: &str, version: &str) -> io::Result<bool> {
-    crate::tailors::python::pep440::matches_specifier(specifier, version)
+    crate::kernel::pep440::matches_specifier(specifier, version)
 }
 
 #[cfg(test)]
@@ -192,11 +193,8 @@ pub fn locked(
         .constraints
         .iter()
         .map(|constraint| {
-            crate::tailors::python::pep440::SpecifierSet::parse(
-                &constraint.text,
-                &constraint.source,
-            )
-            .map(|set| (constraint, set))
+            crate::kernel::pep440::SpecifierSet::parse(&constraint.text, &constraint.source)
+                .map(|set| (constraint, set))
         })
         .collect::<io::Result<Vec<_>>>()?
         .into_iter()
@@ -241,7 +239,7 @@ pub fn locked(
 pub fn check_project_inputs(project: &ProjectRoot) -> io::Result<()> {
     let inputs = collect_project_inputs(project)?;
     for constraint in &inputs.constraints {
-        crate::tailors::python::pep440::SpecifierSet::parse(&constraint.text, &constraint.source)?;
+        crate::kernel::pep440::SpecifierSet::parse(&constraint.text, &constraint.source)?;
     }
     Ok(())
 }
@@ -259,11 +257,8 @@ pub fn select_python_with_inputs(
         .constraints
         .iter()
         .map(|constraint| {
-            crate::tailors::python::pep440::SpecifierSet::parse(
-                &constraint.text,
-                &constraint.source,
-            )
-            .map(|set| (constraint, set))
+            crate::kernel::pep440::SpecifierSet::parse(&constraint.text, &constraint.source)
+                .map(|set| (constraint, set))
         })
         .collect::<io::Result<Vec<_>>>()?;
     let constraint_text = if inputs.constraints.is_empty() {
@@ -388,7 +383,7 @@ pub fn select_python_with_inputs(
 /// constructing its `Version`.
 fn select_explicit_pin<'a>(
     pins: &[&'a PinnedPython],
-    requested: &crate::tailors::python::pep440::Version,
+    requested: &crate::kernel::pep440::Version,
     default_version: &str,
 ) -> Option<&'a PinnedPython> {
     match requested.release_len() {
@@ -525,8 +520,8 @@ fn no_exact_satisfying_pin(
     )
 }
 
-fn pinned_version(text: &str) -> Option<crate::tailors::python::pep440::Version> {
-    let version = crate::tailors::python::pep440::Version::parse(text).ok()?;
+fn pinned_version(text: &str) -> Option<crate::kernel::pep440::Version> {
+    let version = crate::kernel::pep440::Version::parse(text).ok()?;
     (version.release_len() == 3 && !version.has_epoch() && !version.is_prerelease())
         .then_some(version)
 }
@@ -544,43 +539,23 @@ pub fn parse_python_version_file(text: &str, source: &str) -> io::Result<Explici
                 format!("{source}: .python-version has no CPython version"),
             )
         })?;
-    let lower = line.to_ascii_lowercase();
-    if lower.contains("pypy")
-        || lower.contains("miniconda")
-        || lower == "system"
-        || lower.contains("-dev")
-        || lower.ends_with('t')
-        || lower.contains("free-thread")
-        || lower.contains("freethread")
-    {
-        return Err(io::Error::new(
+    let version = python_version_line(line).map_err(|refusal| match refusal {
+        PythonVersionRefusal::Unsupported => io::Error::new(
             io::ErrorKind::Unsupported,
             format!("{source}: unsupported Python interpreter request `{line}`"),
-        ));
-    }
-    let numeric = line
-        .strip_prefix("python")
-        .or_else(|| line.strip_prefix("Python"))
-        .or_else(|| line.strip_prefix("cpython-"))
-        .or_else(|| line.strip_prefix("cpython@"))
-        .or_else(|| line.strip_prefix("CPython-"))
-        .or_else(|| line.strip_prefix("CPython@"))
-        .unwrap_or(line);
-    if canonical_release_len(numeric).is_none() {
-        return Err(io::Error::new(
+        ),
+        PythonVersionRefusal::Invalid(why) => io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("{source}: invalid .python-version request `{line}`"),
-        ));
-    }
+            match why {
+                Some(why) => format!("{source}: invalid .python-version request `{line}`: {why}"),
+                None => format!("{source}: invalid .python-version request `{line}`"),
+            },
+        ),
+    })?;
     Ok(ExplicitPython {
         raw: line.to_string(),
         source: source.to_string(),
-        version: crate::tailors::python::pep440::Version::parse(numeric).map_err(|why| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("{source}: invalid .python-version request `{line}`: {why}"),
-            )
-        })?,
+        version,
     })
 }
 
@@ -1000,6 +975,52 @@ mod tests {
         }
     }
 
+    /// The toolchain lock and interpreter selection read `.python-version`
+    /// through one parser, so a line one accepts the other never refuses
+    /// (#479): `tog update --toolchain` must not lock what the sync refuses.
+    #[test]
+    fn python_version_lock_and_selection_agree() {
+        use crate::kernel::toolchain::input::{read_python_version, InputRow};
+        for line in [
+            "3.12",
+            "3.12.4",
+            "python3.12",
+            "Python3.12",
+            "CPYTHON-3.12",
+            "cpython@3.12.4",
+            "3.12.*",
+            ">=3.11",
+            ">3.11",
+            "<=3.13",
+            "^3.9",
+            "~=3.11.2",
+            "3.11 || 3.12",
+            "3.12 3.13",
+            "3.12rc1",
+            "3.12.4+abc",
+            "03.12",
+            "3",
+            "*",
+            "system",
+            "pypy3.10",
+            "graalpy-24",
+            "3.13t",
+            "3.13-dev",
+            "python",
+        ] {
+            let selected = parse_python_version_file(line, ".python-version");
+            let row = InputRow {
+                path: ".python-version".into(),
+                field: "version".to_string(),
+                value: read_python_version(line.as_bytes()),
+                absent: false,
+                sha256: Some("a".repeat(64)),
+            };
+            let locked = crate::kernel::toolchain::resolve::request_for("python", &[row]);
+            assert_eq!(selected.is_ok(), locked.is_ok(), "{line}");
+        }
+    }
+
     #[test]
     fn explicit_version_precedes_declared_constraints_and_warns() {
         let inputs = PythonInputs {
@@ -1084,7 +1105,7 @@ mod tests {
             url: "https://example.invalid/3.11.9.tar.gz",
             sha256: "9",
         };
-        let minor = crate::tailors::python::pep440::Version::parse("3.11").unwrap();
+        let minor = crate::kernel::pep440::Version::parse("3.11").unwrap();
         for pins in [[&older, &newer], [&newer, &older]] {
             assert_eq!(
                 select_explicit_pin(&pins, &minor, "3.12.14")
@@ -1102,7 +1123,7 @@ mod tests {
         }
 
         let pins = [&older, &newer];
-        let exact = crate::tailors::python::pep440::Version::parse("3.11.9").unwrap();
+        let exact = crate::kernel::pep440::Version::parse("3.11.9").unwrap();
         assert_eq!(
             select_explicit_pin(&pins, &exact, "3.11.16")
                 .unwrap()
@@ -1110,7 +1131,7 @@ mod tests {
             "3.11.9"
         );
 
-        let unavailable = crate::tailors::python::pep440::Version::parse("3.11.4").unwrap();
+        let unavailable = crate::kernel::pep440::Version::parse("3.11.4").unwrap();
         assert!(select_explicit_pin(&pins, &unavailable, "3.11.16").is_none());
     }
 

@@ -10,7 +10,6 @@ pub mod env;
 pub mod inputs;
 pub mod manifest;
 pub mod objects;
-pub mod pep440;
 pub mod pypi;
 pub mod pyselect;
 pub mod registry_tool;
@@ -19,6 +18,7 @@ pub mod tailor;
 pub mod wheel;
 
 use crate::kernel::activity::StoreActivity;
+use crate::kernel::pep440::canonical_release_len;
 use crate::kernel::platform::{no_pin, Platform};
 use crate::kernel::store::Store;
 use crate::kernel::toolchain::Selected;
@@ -107,24 +107,6 @@ pub fn lookup(platform: Platform, version: &str) -> Option<&'static PinnedPython
     lookup_in_pins(pythons().ok()?, platform, version)
 }
 
-/// Return the number of release components when `version` is written in the
-/// canonical form accepted for CPython selection. Components are decimal and
-/// cannot have leading zeroes; no suffixes, prefixes, or surrounding text are
-/// accepted.
-pub(crate) fn canonical_release_len(version: &str) -> Option<usize> {
-    let pieces: Vec<_> = version.split('.').collect();
-    if !(2..=3).contains(&pieces.len())
-        || pieces.iter().any(|piece| {
-            piece.is_empty()
-                || (piece.len() > 1 && piece.starts_with('0'))
-                || !piece.bytes().all(|byte| byte.is_ascii_digit())
-        })
-    {
-        return None;
-    }
-    Some(pieces.len())
-}
-
 /// Match only a complete pinned version or a major.minor request. The slice
 /// is supplied by the caller so matching remains independent of the table's
 /// row order and can be tested with synthetic pin tables.
@@ -134,7 +116,7 @@ fn lookup_in_pins<'a>(
     version: &str,
 ) -> Option<&'a PinnedPython> {
     let release_len = canonical_release_len(version)?;
-    let requested = crate::tailors::python::pep440::Version::parse(version).ok()?;
+    let requested = crate::kernel::pep440::Version::parse(version).ok()?;
     if requested.has_epoch() || requested.is_prerelease() || requested.has_local() {
         return None;
     }
@@ -160,8 +142,8 @@ fn lookup_in_pins<'a>(
     }
 }
 
-fn parse_pinned_version(version: &str) -> Option<crate::tailors::python::pep440::Version> {
-    let parsed = crate::tailors::python::pep440::Version::parse(version).ok()?;
+fn parse_pinned_version(version: &str) -> Option<crate::kernel::pep440::Version> {
+    let parsed = crate::kernel::pep440::Version::parse(version).ok()?;
     (parsed.release_len() == 3
         && !parsed.has_epoch()
         && !parsed.is_prerelease()

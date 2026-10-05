@@ -161,18 +161,9 @@ After the proxy: the test-suite audit (#351) and then the quality review
   - #476 fetch: state and audit that a cache hit is trusted by its digest's source, not its writer (from #287).
   - #289 interrupt: the bwrap preflight misreports Ctrl-C as "bwrap unavailable" (`sandbox.rs`, heavy gate). The exit code is fixed.
   - #295 tests: four sandbox tests fail instead of skipping when bubblewrap is missing.
-  - #297 python: two PEP 440 grammars; hoist `pep440.rs` into the kernel.
   - #300 heavy: the Elixir end-to-end test cannot run on ubuntu-22.04 (OTP needs glibc 2.43).
   - #302 acceptance.sh: step 13 carries its own copy of the closure signing format.
   - #307 archive: a tarball with macOS AppleDouble (`._name`) members is refused on macOS but extracted on Linux. The extraction carries `--no-mac-metadata`; the listing carries no restore flag (bsdtar documents them for other modes). On the Mac, try `/usr/bin/tar --no-mac-metadata -tf` on such a tarball: if it accepts the flag and prints the `._` members, add it to `TAR_LIST_FLAGS` and close.
-- **Two PEP 440 version grammars (#297).** `src/kernel/toolchain/select.rs` has
-  the small numeric `Version`/specifier subset the toolchain selector needs;
-  `src/tailors/python/pep440.rs` has the full grammar. The toolchain lock's
-  Python source reader (`src/kernel/toolchain/resolve.rs`) parses
-  `requires-python` with the kernel subset while `pyselect` uses the full
-  grammar, and the kernel cannot import the tailor's copy. Hoist
-  `pep440.rs` into `src/kernel/` and have the selector use it, in its own
-  PR.
 - **Unreproduced test flakes (#65).**
   `kernel::gitsrc::realization_tests::realizes_a_commit_and_strips_git_metadata`
   (2026-09-12) and `tailors::cargo::tests::rejects_symlinked_crate_entries`

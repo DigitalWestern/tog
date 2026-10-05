@@ -15,6 +15,7 @@ pub mod gc;
 pub mod gitsrc;
 pub mod hostview;
 pub mod objmeta;
+pub mod pep440;
 pub mod platform;
 pub mod policy;
 pub mod provider;
