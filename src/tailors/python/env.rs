@@ -649,6 +649,11 @@ pub(super) fn project_env_inner(
             })
             .collect();
     }
+    // Present only when the lock names a kernel marker: see
+    // `manifest::kernel_marker_record`.
+    if let Some(kernel) = crate::tailors::python::manifest::kernel_marker_record(project)? {
+        body["host_kernel"] = kernel;
+    }
     write_closure_with_project_lock(
         project,
         "python",

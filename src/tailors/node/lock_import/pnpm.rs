@@ -272,10 +272,10 @@ pub(super) fn pnpm_patches(
 /// `fastdom@1.0.12(patch_hash=10bad5…)`: the patch pnpm itself applied there.
 ///
 /// The key ends in a run of balanced parenthesized groups (patch hash and
-/// peers, a peer's own groups nested inside it). Only a top-level
-/// `(patch_hash=…)` group is this package's; anything else after the
-/// version, an unbalanced parenthesis, a second marker or an empty or
-/// non-alphanumeric hash makes the key unreadable.
+/// peers, a peer's own groups nested inside it), where `trim_peer_suffix`
+/// cuts it, so `foo@file:../a(b)c` has none. Only a top-level
+/// `(patch_hash=…)` group is this package's; anything else, an unbalanced
+/// parenthesis, a second marker or a bad hash makes the key unreadable.
 pub(super) fn recorded_patch_hash(snapshot_key: &str) -> io::Result<Option<&str>> {
     const MARKER: &str = "patch_hash=";
     let malformed = || {
@@ -283,12 +283,8 @@ pub(super) fn recorded_patch_hash(snapshot_key: &str) -> io::Result<Option<&str>
             "pnpm snapshot {snapshot_key:?} has a malformed suffix after its version"
         ))
     };
-    let Some(open) = snapshot_key.find('(') else {
-        if snapshot_key.contains(')') || snapshot_key.contains(MARKER) {
-            return Err(malformed());
-        }
-        return Ok(None);
-    };
+    let open = trim_peer_suffix(snapshot_key).len();
+    let unbalanced = open == snapshot_key.len() && snapshot_key.ends_with(')');
     let mut depth = 0usize;
     let mut group_start = open;
     let mut found = None;
@@ -318,7 +314,7 @@ pub(super) fn recorded_patch_hash(snapshot_key: &str) -> io::Result<Option<&str>
             _ => {}
         }
     }
-    if depth != 0 || snapshot_key[..open].contains(')') || snapshot_key[..open].contains(MARKER) {
+    if depth != 0 || unbalanced || snapshot_key[..open].contains(MARKER) {
         return Err(malformed());
     }
     Ok(found)

@@ -134,11 +134,17 @@ fn yaml_scalar(raw: &str, line: usize, flow: bool) -> io::Result<String> {
         Some('*') => Err(unsupported(line, &format!("an alias ({word})"))),
         Some('!') => Err(unsupported(line, &format!("a tag ({word})"))),
         Some('|' | '>') => Err(unsupported(line, &format!("a block scalar ({word})"))),
-        // js-yaml reserves both and refuses a plain scalar that starts
-        // with one, so pnpm quotes `'@scope/name':`.
-        Some('@' | '`') => Err(unsupported(
+        // js-yaml refuses a plain scalar that starts with a reserved
+        // indicator or a directive's `%`, so pnpm quotes `'@scope/name':`.
+        Some('@' | '`' | '%') => Err(unsupported(
             line,
             &format!("an unquoted scalar starting with a reserved indicator ({word})"),
+        )),
+        // Nor may one start with a flow indicator outside a flow collection,
+        // where the collection reader sees these first.
+        Some(',' | ']' | '}') if !flow => Err(unsupported(
+            line,
+            &format!("an unquoted scalar starting with a flow indicator ({word})"),
         )),
         Some('[' | '{') => Err(unsupported(
             line,
@@ -690,6 +696,26 @@ mod tests {
                 "reserved",
             ),
             ("plain value starting with @", "a: @s/p\n", 1, "reserved"),
+            ("plain value starting with %", "a: %b\n", 1, "reserved"),
+            (
+                "plain key starting with %",
+                "'a':\n  %b: 1\n",
+                2,
+                "reserved",
+            ),
+            (
+                "plain value starting with a comma",
+                "a: ,b\n",
+                1,
+                "flow indicator",
+            ),
+            (
+                "plain value starting with ]",
+                "a: ]b\n",
+                1,
+                "flow indicator",
+            ),
+            ("plain value starting with }", "a: }\n", 1, "flow indicator"),
             (
                 "plain key starting with a backtick",
                 "`a: 1\n",

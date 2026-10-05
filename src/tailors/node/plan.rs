@@ -112,6 +112,19 @@ pub(crate) fn redact_url_userinfo(text: &str) -> String {
     if url.username().is_empty() && url.password().is_none() {
         return withheld(url_credentials(text));
     }
+    // Only the userinfo is redacted, so a second URL in the path, query or
+    // fragment (`?next=https://u:p@h`, or one after a space the parser
+    // escaped) would be shown as written: such text is withheld whole. An
+    // escape (`%20`) reads as a space, so the URL after it still starts one.
+    let tail = format!(
+        "{}?{}#{}",
+        url.path(),
+        url.query().unwrap_or_default(),
+        url.fragment().unwrap_or_default()
+    );
+    if url_credentials(&unescaped_for_scan(&tail)) {
+        return withheld(true);
+    }
     let _ = url.set_username("***");
     if url.password().is_some() {
         let _ = url.set_password(Some("***"));
@@ -119,12 +132,42 @@ pub(crate) fn redact_url_userinfo(text: &str) -> String {
     url.to_string()
 }
 
+/// `text` with every `%XX` escape replaced by a space, for
+/// [`url_credentials`] only: what the escape stood for does not matter,
+/// only that a scheme after it is not glued to the text before it.
+fn unescaped_for_scan(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find('%') {
+        out.push_str(&rest[..at]);
+        let after = &rest[at + 1..];
+        let escape = after
+            .get(..2)
+            .filter(|hex| hex.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        out.push(if escape.is_some() { ' ' } else { '%' });
+        rest = &after[escape.map_or(0, str::len)..];
+    }
+    out.push_str(rest);
+    out
+}
+
 /// The refusal for a lockfile or manifest string that carries URL
 /// credentials: the file named, the string redacted.
 pub(crate) fn url_credentials_refusal(source: &str, text: &str) -> io::Error {
+    url_credentials_refusal_at(source, "", text)
+}
+
+/// [`url_credentials_refusal`] naming where in the file the string sits
+/// (`dependencies.b`, `packages["node_modules/a"].resolved`), when `path`
+/// is not empty.
+fn url_credentials_refusal_at(source: &str, path: &str, text: &str) -> io::Error {
+    let at = match path {
+        "" => String::new(),
+        path => format!("{path}: "),
+    };
     err(format!(
-        "{source}: {} carries URL credentials (user:pass@ before its host); tog will not read \
-         a file that holds them",
+        "{source}: {at}{} carries URL credentials (user:pass@ before its host); tog will not \
+         read a file that holds them",
         redact_url_userinfo(text)
     ))
 }
@@ -137,18 +180,84 @@ pub(crate) fn refuse_json_url_credentials(
     source: &str,
     value: &serde_json::Value,
 ) -> io::Result<()> {
+    refuse_json_url_credentials_at(source, &mut String::new(), value)
+}
+
+/// The fields of a package.json that become dependencies, fetches or tog
+/// settings. Only these are held to [`url_credentials`]: a `scripts` entry
+/// naming `https://$TOKEN@host` or a username-only `repository` clone URL
+/// holds no secret and never reaches a plan.
+const PACKAGE_JSON_PLANNED_FIELDS: [&str; 8] = [
+    "dependencies",
+    "devDependencies",
+    "optionalDependencies",
+    "peerDependencies",
+    "resolutions",
+    "overrides",
+    "workspaces",
+    "tog",
+];
+
+/// [`refuse_json_url_credentials`] for a package.json `source` (the
+/// project's, a workspace member's or a linked directory's), over the
+/// fields that feed the plan only.
+pub(crate) fn refuse_package_json_url_credentials(
+    source: &str,
+    package: &serde_json::Value,
+) -> io::Result<()> {
+    PACKAGE_JSON_PLANNED_FIELDS.iter().try_for_each(|field| {
+        let Some(value) = package.get(field) else {
+            return Ok(());
+        };
+        refuse_json_url_credentials_at(source, &mut field.to_string(), value)
+    })
+}
+
+/// [`refuse_json_url_credentials`] for `value`, found at `path` in the file.
+fn refuse_json_url_credentials_at(
+    source: &str,
+    path: &mut String,
+    value: &serde_json::Value,
+) -> io::Result<()> {
+    // Descend into `segment` for `walk`, then restore `path`.
+    fn within(
+        path: &mut String,
+        segment: String,
+        walk: impl FnOnce(&mut String) -> io::Result<()>,
+    ) -> io::Result<()> {
+        let len = path.len();
+        path.push_str(&segment);
+        let result = walk(path);
+        path.truncate(len);
+        result
+    }
     match value {
         serde_json::Value::String(text) if url_credentials(text) => {
-            Err(url_credentials_refusal(source, text))
+            Err(url_credentials_refusal_at(source, path, text))
         }
-        serde_json::Value::Array(items) => items
-            .iter()
-            .try_for_each(|item| refuse_json_url_credentials(source, item)),
+        serde_json::Value::Array(items) => items.iter().enumerate().try_for_each(|(at, item)| {
+            within(path, format!("[{at}]"), |path| {
+                refuse_json_url_credentials_at(source, path, item)
+            })
+        }),
         serde_json::Value::Object(map) => map.iter().try_for_each(|(key, item)| {
             if url_credentials(key) {
-                return Err(url_credentials_refusal(source, key));
+                return Err(url_credentials_refusal_at(source, path, key));
             }
-            refuse_json_url_credentials(source, item)
+            // A key that reads as a name is joined with a dot; any other is
+            // quoted, so `node_modules/a` cannot be read as two segments.
+            let plain = !key.is_empty()
+                && key
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '$'));
+            let segment = match (plain, path.is_empty()) {
+                (true, true) => key.clone(),
+                (true, false) => format!(".{key}"),
+                (false, _) => format!("[{key:?}]"),
+            };
+            within(path, segment, |path| {
+                refuse_json_url_credentials_at(source, path, item)
+            })
         }),
         _ => Ok(()),
     }
@@ -161,8 +270,14 @@ pub(crate) fn refuse_json_url_credentials(
 /// are skipped, so `https:u:p@host` and `https:\\u:p@host` name a host with
 /// credentials. Any other `scheme://` counts only with a password, so the
 /// `git@` of `git+ssh://git@github.com/o/r.git` is an ssh user, not one.
+/// Tab, CR and LF are dropped first, as both parsers drop them anywhere in
+/// a URL, so `ht\ttps://to\tken@host` is `https://token@host`.
 pub(crate) fn url_credentials(text: &str) -> bool {
-    let lower = text.to_ascii_lowercase();
+    let lower: String = text
+        .chars()
+        .filter(|c| !matches!(c, '\t' | '\r' | '\n'))
+        .collect::<String>()
+        .to_ascii_lowercase();
     let authority = |rest: &str| -> String {
         rest.chars()
             .take_while(|c| !matches!(c, '/' | '\\' | '?' | '#') && !c.is_whitespace())
@@ -932,8 +1047,9 @@ mod lock_shape_tests {
         let error = refused(&entry("node_modules/a", "http://user:secret@", TEST_SRI));
         assert_eq!(
             error.to_string(),
-            "package-lock.json: <URL withheld: it may carry credentials> carries URL credentials \
-             (user:pass@ before its host); tog will not read a file that holds them"
+            "package-lock.json: packages[\"node_modules/a\"].resolved: <URL withheld: it may \
+             carry credentials> carries URL credentials (user:pass@ before its host); tog will \
+             not read a file that holds them"
         );
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
     }
@@ -954,6 +1070,11 @@ mod lock_shape_tests {
             "a@https://user:secret@r/a.tgz",
             "git+ssh://user:secret@github.com/o/r.git",
             "see https://u:secret@r here",
+            // Both parsers drop tab, CR and LF anywhere in a URL.
+            "https://to\tken@r/x",
+            "ht\ttps://token@r/x",
+            "https://to\r\nken@r/x",
+            "https:\n//token@r/x",
         ] {
             assert!(url_credentials(text), "{text}");
         }
@@ -1016,6 +1137,58 @@ mod lock_shape_tests {
         ] {
             assert_eq!(redact_url_userinfo(text), shown, "{text}");
         }
+    }
+
+    /// Redacting the userinfo leaves the rest of a URL as written, so a
+    /// second credentialed URL after the host (in the query, the fragment,
+    /// or after a space) withholds the whole text.
+    #[test]
+    fn a_second_credentialed_url_after_the_host_is_withheld() {
+        for text in [
+            "https://tok@r/a.tgz?next=https://u:secret@h",
+            "https://tok@r/a.tgz#https://secret@h",
+            "https://u:p@r/a.tgz https://x:secret@y",
+            "https://u:p@r/a.tgz https://secret@y",
+            "https://u:p@r/a.tgz%20https://secret@y",
+            "https://u:p@r/a/https://secret@y",
+        ] {
+            let shown = redact_url_userinfo(text);
+            assert_eq!(shown, "<URL withheld: it may carry credentials>", "{text}");
+            let message = url_credentials_refusal("package-lock.json", text).to_string();
+            assert!(!message.contains("secret"), "{message}");
+        }
+        // A scoped path or a plain query is still shown, redacted.
+        for (text, shown) in [
+            ("https://u:p@r/@s/a.tgz", "https://***:***@r/@s/a.tgz"),
+            ("https://u@r/a.tgz?x=1%20y", "https://***@r/a.tgz?x=1%20y"),
+        ] {
+            assert_eq!(redact_url_userinfo(text), shown, "{text}");
+        }
+    }
+
+    /// A refusal names the JSON path of the string, keys quoted when they
+    /// are not plain names, without the secret.
+    #[test]
+    fn a_credentials_refusal_names_where_the_string_sits() {
+        let error = refused(&lock(
+            r#""node_modules/a":{"version":"1.0.0","dependencies":{"b":"https://user:secret@r/b.tgz"}}"#,
+        ));
+        assert!(
+            error.to_string().starts_with(
+                "package-lock.json: packages[\"node_modules/a\"].dependencies.b: \
+                 https://***:***@r/b.tgz carries URL credentials"
+            ),
+            "{error}"
+        );
+        let package: serde_json::Value =
+            serde_json::from_str(r#"{"workspaces":["a","https://u:secret@r"]}"#).unwrap();
+        let error = refuse_package_json_url_credentials("package.json", &package).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .starts_with("package.json: workspaces[1]: https://***:***@r/ carries"),
+            "{error}"
+        );
     }
 
     /// `node_modules/Foo` and `node_modules/foo` are distinct lock paths but
