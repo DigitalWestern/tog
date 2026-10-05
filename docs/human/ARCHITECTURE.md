@@ -174,7 +174,9 @@ pinned in `kernel/provider/cpython.rs`; interpreter selection happens before loc
 (`.python-version` wins, then `requires-python`). Wheels install into the
 env object; sdists build in a network-denied sandbox (legacy setuptools
 records keep `sdist-build/2`, PEP 517 uses `sdist-build/4` with an immutable
-build environment). Environments are immutable: no activate scripts, pip
+build environment. Rust builds use `sdist-build/5`, adding a versioned Rust
+flag configuration. Plain builds keep their existing identities, and old
+Rust `/4` records remain readable). Environments are immutable: no activate scripts, pip
 cannot mutate them.
 
 **npm** (`tailors/node/`: `plan.rs`, `realize.rs`, `project.rs`, `lock_import/`). `package-lock.json` is parsed
@@ -230,7 +232,9 @@ can reclaim it between runs. A `.tog/closures/rustfmt.json` an older tog
 wrote is a retired name (`store::RETIRED_CLOSURES`): every closure reader
 but gc's live-set walk skips it, and a `tog fmt` without `--check` deletes it
 once another closure sits beside it (a root over an empty closures
-directory stops every sweep, and forgetting it needs the exclusive lease).
+directory stops every sweep, and forgetting it needs the exclusive lease),
+or once gc has forgotten the project's root. gc forgets a root whose only
+closures are retired records when it protects nothing they do not name.
 
 Every cargo run that resolves (`tog add`/`remove`/`update`, a missing
 `Cargo.lock`, `tog attest`, and the `Cargo.lock` of a Python sdist's Rust
@@ -465,9 +469,11 @@ and the realized runtime object, so a changed bundle component gives a
 fresh environment. A registry tool
 that builds with helpers (npm's node-gyp Python, a `py:` tool's Rust for
 sdists with a Rust extension) keys on `x/4` instead: the `x/3` fields plus
-`<helper>=<object id>` for each, decided as above for the project `x` runs
-in and written to the request record's `helpers`. Python has no default
-Rust, so a `py:` tool outside a project that locks Rust has no helper,
+`<helper>=<build identity>` for each, decided as above for the project `x`
+runs in and written to the request record's `helpers`. Python's Rust helper
+identity includes both its base runtime object id and its full selection
+fingerprint, covering channel manifests and extension components. Python has
+no default Rust, so a `py:` tool outside a project that locks Rust has no helper,
 keeps its `x/3` name, and its sdists build on what their own toolchain
 file picks; inside one they build on the locked Rust. The key only names the
 directory. A run reuses it only when the request record it wrote there
@@ -571,7 +577,8 @@ tree can never vouch for itself. Under a policy with a `[signing]` table,
 before believing any field: `bad-signature`, `untrusted`, and unsigned
 `outdated` records are not evaluated further. Without one it judges every
 record on its contents and reports signatures as not checked (`--signed`
-refuses to run that way); a signature that fails to verify is
+refuses to run that way, and so does a plain audit under CI unless
+`--allow-unsigned` is passed); a signature that fails to verify is
 `bad-signature` either way. A detected ecosystem with no primary closure is
 `missing`. Store identity is
 untouched: the signature lives in the envelope, not in any object's inputs.
@@ -601,8 +608,9 @@ project also locks Python, the shipped 3.12 otherwise. Its object id is the
 environment. Likewise a Python sdist with a Rust extension compiles with the
 project's locked Rust when the lock has a `rust` section, and with the shipped
 Rust its toolchain file resolves to otherwise (the Python section's pinned Rust
-when the file names no channel); `sdist-build/4` already commits
-to that Rust object id through its `rust` input. Both helpers come from
+when the file names no channel); `sdist-build/5` commits
+to that Rust object id through its `rust` input and to the Rust flag policy
+through `rust_build_config`. Both helpers come from
 `kernel/provider/`. This is a cooperative network-denial build sandbox, not
 hostile-code containment. Packages that download binaries at install time
 get them via declared artifacts: the project pins `url` + `sha256`, tog
@@ -806,6 +814,7 @@ successor together, accepting one store-wide rebuild of those kinds:
 | `python-env` | `python-env/3` | `package_digest` over every `pkg:` entry, and a `native` decision | a one-wheel plan that lost its only `pkg:` key became the empty environment; a native sdist could lose `native_libs` |
 | `node-env` | `node-env/4` | `plan_digest` over every `pkg:` and `artifact:` entry, and a `native` decision | a multi-package plan could lose one package, or a declared `artifact:` or Linux `native_libs` key |
 | `sdist-build` | `sdist-build/4` | `build_mode` and `native_mode` | dropping *both* halves of `rust`/`vendor` or `native_libs`/`native_linker` left the valid shape that never had one |
+| Rust `sdist-build` | `sdist-build/5` | `rust_build_config` | changed Rust flags could reuse a wheel built with the previous environment. Plain builds retain `/4` |
 
 Each added input is written unconditionally, including in the empty case, and
 the producer derives it from the *plan* — the locked package list, the
@@ -852,7 +861,12 @@ transaction, then cache, then publication. Each operation supervises its own awa
 store-consuming child (`src/kernel/supervise.rs`) and forwards TERM to it; any number run at
 once. The signal handlers are installed once per process and never removed: each supervision
 registers with them, keeps its own cursors into the signal counts, and with none registered
-the handler acts as the disposition tog inherited. A helper that runs
+the handler acts as the disposition tog inherited, including handler masks,
+syscall restart behavior and one-shot handlers. Cancellation caught by the
+reap boundary carries the child's exit status. A TERM caught after that
+boundary is re-raised when the last session leaves. New operations cannot
+register while that inherited delivery is pending, including when the caller
+blocks TERM. A helper that runs
 such a child takes the caller's `&StoreActivity` rather than taking a lease of
 its own, so the lease that protects a stage directory is visibly the one held
 across its children and its commit (`tests/architecture.rs` lists the few raw

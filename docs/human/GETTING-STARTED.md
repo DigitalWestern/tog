@@ -78,8 +78,9 @@ ok    project      python found; not synced yet: python (run 'tog')
 
 Nine rows, exit 0 when none says `fail`. The first row is the build you
 are running and whether a newer release exists (`warn`, with `tog update
---self` as the fix; `not checked` when offline or, as here, while GitHub
-answers 404 because the repository is private). This is the command to run
+--self` as the fix; `ok` with `no build for this machine` when that release
+has nothing `update --self` could install here; `not checked` when offline
+or, as here, while GitHub answers 404 because the repository is private). This is the command to run
 before you file a bug and the output to paste into it. The `store` row
 answers "where does all this go": one directory per machine, shared by every
 project on it, created the first time something needs it.
@@ -112,7 +113,8 @@ hash-verified 3.12.14 into the store and built the venv out of it.
 
 The warning is about CI, not about this sync. Records are written unsigned
 until you hand tog a key, the only command that notices is `tog audit`, which
-still judges them and says it did not check signatures, and the line is said
+still judges them and says it did not check signatures (under CI it refuses
+unless you pass `--allow-unsigned`), and the line is said
 once per store rather than on every sync — you will not see it again below.
 
 That one word is the whole setup step: it builds the environment from the
