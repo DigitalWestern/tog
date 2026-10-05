@@ -269,6 +269,10 @@ Selection covers every patch of each maintained CPython minor that python-build-
   **Project-level `uv pip compile` in `src/commands/shared.rs` can still execute resolve-time metadata
   builds outside the sandbox** — sdist build-requirement resolution rejects build-time sdists
   instead.
+- **Entry-point names are checked against tog's Unicode version, not the interpreter's.** The
+  identifier tables come from the ICU data tog is built with, so a letter added in a newer
+  Unicode than the target CPython knows is accepted by tog and is a SyntaxError in the
+  generated launcher.
 
 ## JavaScript / npm
 
