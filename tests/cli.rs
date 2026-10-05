@@ -89,6 +89,130 @@ fn quiet_outside_a_project_keeps_the_help_and_drops_the_note() {
     assert!(out.stderr.is_empty(), "{}", text(&out.stderr));
 }
 
+/// A stand-in for a local Rust toolchain directory (`[toolchain] path`):
+/// `rustc -vV` and `cargo -V` print what real ones print for this host,
+/// the sandboxed `cargo --frozen --config <file> build` succeeds, and the
+/// tree has the layout
+/// a Rust object needs. A local tree is imported, not fetched, so a Cargo
+/// project with no dependencies on it is the one sync that goes green with
+/// no network (#147). The same stand-in as `tests/toolchain_lock.rs`, plus
+/// the `build` case.
+fn offline_rust_project(label: &str) -> (TempDir, TempDir) {
+    let home = TempDir::boundary(&format!("{label}-home"));
+    let project = TempDir::boundary(&format!("{label}-project"));
+    let tree = home.0.join("local-rust");
+    let host = tog::kernel::platform::Platform::host().unwrap().triple();
+    std::fs::create_dir_all(tree.join("bin")).unwrap();
+    std::fs::create_dir_all(tree.join(format!("lib/rustlib/{host}/lib"))).unwrap();
+    let script = |name: &str, body: String| {
+        let path = tree.join("bin").join(name);
+        std::fs::write(&path, format!("#!/bin/sh\n{body}")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    };
+    script(
+        "rustc",
+        format!(
+            "printf 'rustc 1.97.0 (0123abcde 2026-06-26)\\nbinary: rustc\\n\
+             commit-hash: 0123abcde\\nhost: {host}\\nrelease: 1.97.0\\n'\n"
+        ),
+    );
+    script(
+        "cargo",
+        "case \"$1\" in\n\
+         -V) printf 'cargo 1.97.0 (4567fedcb 2026-06-26)\\n' ;;\n\
+         --frozen) [ \"$4\" = build ] || exit 1 ;;\n\
+         *) echo \"fake cargo: $*\" >&2; exit 1 ;;\n\
+         esac\n"
+            .to_string(),
+    );
+    std::fs::write(
+        tree.join(format!("lib/rustlib/{host}/lib/libstd.rlib")),
+        b"std",
+    )
+    .unwrap();
+    let tree = tree.canonicalize().unwrap();
+    std::fs::write(
+        project.0.join("Cargo.toml"),
+        "[package]\nname = \"p\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        project.0.join("Cargo.lock"),
+        "version = 3\n\n[[package]]\nname = \"p\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        project.0.join("rust-toolchain.toml"),
+        format!("[toolchain]\npath = \"{}\"\n", tree.display()),
+    )
+    .unwrap();
+    (home, project)
+}
+
+/// The main case of the bare `tog`: a sync that succeeds, then the footer
+/// that says what to do next, on stdout, exit 0; `-q` keeps the sync and
+/// drops the footer. `tog --frozen` and `tog --fresh` against the lock
+/// that sync wrote go green without rewriting it.
+#[test]
+fn a_bare_tog_whose_sync_succeeds_prints_the_footer() {
+    let (home, project) = offline_rust_project("cli-bare-ok");
+    let out = tog_offline(&project.0, &home.0, &[]);
+    let stderr = text(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{stderr}");
+    assert!(project.0.join(".tog/closures/cargo.json").is_file());
+    assert!(project.0.join("tog-toolchain.toml").is_file());
+    let stdout = text(&out.stdout);
+    assert!(stdout.starts_with("\nNEXT:\n"), "{stdout}");
+    assert!(stdout.contains("tog run <command>"), "{stdout}");
+    // The footer is not the help screen.
+    assert!(!stdout.contains("USAGE:"), "{stdout}");
+
+    let lock = std::fs::read(project.0.join("tog-toolchain.toml")).unwrap();
+    for flag in ["--frozen", "--fresh"] {
+        let out = tog_offline(&project.0, &home.0, &[flag]);
+        let stderr = text(&out.stderr);
+        assert_eq!(out.status.code(), Some(0), "{flag}: {stderr}");
+        assert_eq!(
+            std::fs::read(project.0.join("tog-toolchain.toml")).unwrap(),
+            lock,
+            "{flag} rewrote the lock"
+        );
+    }
+
+    let out = tog_offline(&project.0, &home.0, &["-q"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(out.stdout.is_empty(), "{}", text(&out.stdout));
+}
+
+/// `tog build` syncs a stale build ecosystem first (`ensure_current_for`):
+/// with no closure yet it says so, syncs, and then builds.
+#[test]
+fn build_syncs_a_stale_ecosystem_before_building() {
+    let platform = tog::kernel::platform::Platform::host().unwrap();
+    if !common::node_stub::sandbox_or_skip(
+        "build_syncs_a_stale_ecosystem_before_building",
+        platform,
+    ) {
+        return;
+    }
+    let (home, project) = offline_rust_project("cli-build-syncs");
+    assert!(!project.0.join(".tog/closures/cargo.json").exists());
+    let out = tog_offline(&project.0, &home.0, &["build"]);
+    let stderr = text(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{stderr}");
+    assert!(
+        stderr.contains("syncing first: cargo not synced"),
+        "{stderr}"
+    );
+    assert!(project.0.join(".tog/closures/cargo.json").is_file());
+
+    // Synced now: a second build does not sync again.
+    let out = tog_offline(&project.0, &home.0, &["build"]);
+    let stderr = text(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{stderr}");
+    assert!(!stderr.contains("syncing first"), "{stderr}");
+}
+
 /// The footer follows a sync that worked. A sync that failed has already
 /// said why, and nothing is printed under the error.
 #[test]
