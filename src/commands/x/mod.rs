@@ -54,7 +54,9 @@ pub struct CleanRequest {
     pub tool: Option<String>,
 }
 
-const X_REQUEST_FILE: &str = ".tog/x.json";
+/// The request record, named by the comforter too: the resolution join
+/// skips a directory that carries one.
+const X_REQUEST_FILE: &str = crate::comforter::X_REQUEST_FILE;
 /// [`X_REQUEST_FILE`]'s name inside `.tog`.
 const X_REQUEST_NAME: &str = "x.json";
 const X_LOCKS_DIR: &str = ".locks";

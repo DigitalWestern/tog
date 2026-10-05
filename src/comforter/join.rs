@@ -42,7 +42,10 @@ static LOOKUP: Mutex<Option<Arc<ResolutionFilesLookup>>> = Mutex::new(None);
 /// Install the lookup for this process. The command layer calls it once,
 /// before any verb that writes a project closure; the first install wins,
 /// like the object-kind rows. A process that never installs one (`tog x`,
-/// whose closures describe cache roots, not projects) joins nothing.
+/// whose closures describe cache roots, not projects) joins nothing, and
+/// a cache root written by any other process (the pinned pnpm a dependency
+/// edit realizes) is recognized by its request record and joins nothing
+/// either ([`join_for_closure`]).
 pub fn install_resolution_files(lookup: Arc<ResolutionFilesLookup>) {
     let mut slot = LOOKUP
         .lock()
@@ -231,6 +234,13 @@ pub(crate) fn join_for_closure(
         .as_object_mut()
         .expect("the closure writer validated the body object");
     object.remove("resolution");
+    // A `tog x` cache root is not a project: no door leaves a record in it
+    // (an `x` door writes none), so joining it would only record
+    // `unrecorded-resolution` against its own lock, in the process that
+    // realized it for an edit or a lock check.
+    if project.is_input_file(Path::new(crate::comforter::X_REQUEST_FILE)) {
+        return Ok(());
+    }
     let Some(lookup) = lookup() else {
         return Ok(());
     };
@@ -1359,6 +1369,32 @@ mod tests {
             closure["body"]["exceptions"],
             json!([exception(UNCONFINED_RESOLUTION, "host")])
         );
+    }
+
+    /// A `tog x` cache root (its request record present) joins nothing:
+    /// under a policy denying `unrecorded-resolution`, publishing its
+    /// closure succeeds with no record and no exception, where the same
+    /// directory without the record is refused.
+    #[test]
+    fn a_cache_root_with_a_request_record_joins_nothing() {
+        let temp = project("join-x-root");
+        let denying = Policy {
+            deny: [policy::UNRECORDED_RESOLUTION.to_string()].into(),
+            ..Policy::default()
+        };
+        let _writer = Writer::new(denying, Vec::new());
+        let (_store_dir, store) = test_store("join-x-root");
+        let refused = publish(&temp.0, &store).unwrap_err().to_string();
+        assert!(refused.contains("unrecorded-resolution"), "{refused}");
+        fs::create_dir_all(temp.0.join(".tog")).unwrap();
+        fs::write(
+            temp.0.join(crate::comforter::X_REQUEST_FILE),
+            r#"{"state":"realizing"}"#,
+        )
+        .unwrap();
+        let closure = publish(&temp.0, &store).unwrap();
+        assert!(closure["body"].get("resolution").is_none());
+        assert_eq!(closure["body"]["exceptions"], json!([]));
     }
 
     #[test]

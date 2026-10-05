@@ -453,6 +453,11 @@ pub(crate) fn replace_project_symlink(
 }
 
 /// Read a tailor's closure body back (for `tog run` and friends).
+/// The request record a `tog x` cache root carries (`commands::x` writes
+/// it before realizing): what marks a closure's directory as a cache
+/// root, which the resolution join leaves alone.
+pub const X_REQUEST_FILE: &str = ".tog/x.json";
+
 pub fn read_closure(project_dir: &Path, ecosystem: &str) -> io::Result<serde_json::Value> {
     let path = project_dir.join(closure_relative(ecosystem));
     let text = fs::read_to_string(&path).map_err(|e| {

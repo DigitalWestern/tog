@@ -3521,6 +3521,12 @@ Node doors, each the flexible option that still fails closed:
   basis or the record: a yarn project's basis is its manifests alone
   (review round 2, which found the first form made every yarn sync fail
   the basis check).
+- **A `tog x` cache root joins nothing.** The join skips a directory that
+  carries the x request record (`comforter::X_REQUEST_FILE`), in every
+  process: the pinned pnpm a dependency edit or `tog attest` realizes is
+  written in a process whose resolution-files lookup is installed, and
+  without this it recorded `unrecorded-resolution` against the cache
+  root's own lock, which no `x` door can attest (review round 2).
 - **`tog x` is a detached door.** The cache root is the lock root, the
   accepted `package-lock.json` is written back into it, and the ledger is
   rooted under the cache root (`ledger::root`), so GC keeps it with the
