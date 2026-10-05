@@ -652,6 +652,73 @@ mod tests {
         );
     }
 
+    /// A record or a record kind the sweep cannot read is left alone: records
+    /// are a cache, and before them `tog gc --project` never read records/.
+    #[test]
+    fn an_unreadable_record_does_not_fail_a_project_sweep() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = TempStore::new("unreadable-records");
+        let store = temp.store();
+        let gone = temp.root.join("gone");
+        fs::create_dir_all(&gone).unwrap();
+        let gone = gone.canonicalize().unwrap();
+        store
+            .register_root_record(store::RootRecord {
+                key: store::Store::root_key(&temp.root).unwrap(),
+                project_path: temp.root.canonicalize().unwrap(),
+                objects: BTreeSet::new(),
+                projections: BTreeSet::new(),
+                updated: 1,
+            })
+            .unwrap();
+        let activity = store
+            .activity(crate::kernel::activity::ActivityMode::Shared)
+            .unwrap();
+        let value = serde_json::json!({"input_hash": "x"});
+        for kind in ["demo-locked", "demo-sealed", "demo-check"] {
+            store
+                .write_project_record(&activity, kind, &gone, &value)
+                .unwrap();
+        }
+        drop(activity);
+        fs::remove_dir_all(&gone).unwrap();
+        let records = store.root.join(store::RECORDS);
+        let locked = fs::read_dir(records.join("demo-locked"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let mode = |path: &Path, mode| {
+            fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap()
+        };
+        mode(&locked, 0o000);
+        mode(&records.join("demo-sealed"), 0o000);
+        let mut output = Vec::new();
+        let report = collect(
+            &store,
+            Options {
+                dry_run: false,
+                project: true,
+                ..Options::default()
+            },
+            &mut output,
+        );
+        mode(&records.join("demo-sealed"), 0o700);
+        mode(&locked, 0o600);
+        let text = String::from_utf8(output).unwrap();
+        assert_eq!(report.unwrap().project_records, 1, "{text}");
+        assert!(locked.is_file(), "{text}");
+        assert!(store
+            .read_project_record("demo-sealed", &gone)
+            .unwrap()
+            .is_some());
+        assert_eq!(
+            store.read_project_record("demo-check", &gone).unwrap(),
+            None
+        );
+    }
+
     #[test]
     fn root2_keeps_objects_after_the_project_disappears() {
         let temp = TempStore::new("root2-moved-project");
@@ -1683,6 +1750,27 @@ mod tests {
         assert!(!record.exists(), "the stray record survived: {text}");
     }
 
+    #[test]
+    fn a_directory_replacing_a_parsed_orphan_record_is_never_swept() {
+        let temp = TempStore::new("orphan-directory-replacement");
+        let store = temp.store();
+        let gone = commit(&store, "gone", None);
+        store::remove_tree(&store.object_path(&gone)).unwrap();
+        let (index, unusable) =
+            crate::kernel::objmeta::MetaIndex::read_reporting_unusable(&store).unwrap();
+        assert!(unusable.is_empty());
+        let record = store.root.join("meta").join(format!("{gone}.json"));
+        fs::remove_file(&record).unwrap();
+        fs::create_dir(&record).unwrap();
+        fs::write(record.join("user-data"), "keep").unwrap();
+        let held = read::open_held(&store.root.join("meta"), "meta").unwrap();
+        assert!(read::read_stray_records(&index, &[], &held).is_err());
+        assert_eq!(
+            fs::read_to_string(record.join("user-data")).unwrap(),
+            "keep"
+        );
+    }
+
     /// A record whose object is gone while a rooted object still depends on
     /// it is a real loss, not residue: the sweep refuses and keeps it.
     #[test]
@@ -1749,6 +1837,61 @@ mod tests {
         for path in &fresh {
             assert!(path.exists(), "{} was removed: {text}", path.display());
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn restricted_resolution_trash_is_removed_without_mutating_a_dry_run() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = TempStore::new("restricted-resolution-trash");
+        let store = temp.store();
+        register_objects(&store, &temp.root.join("project"), &[]);
+        let stage = store.root.join("tmp/resolve-0-0-crashed");
+        let blocked = stage.join("blocked");
+        let search_only = stage.join("search-only");
+        fs::create_dir_all(&blocked).unwrap();
+        fs::create_dir_all(&search_only).unwrap();
+        fs::write(blocked.join("payload"), "trash").unwrap();
+        fs::write(search_only.join("payload"), "trash").unwrap();
+        let outside = temp.root.join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("keep"), "user data").unwrap();
+        std::os::unix::fs::symlink(&outside, blocked.join("escape")).unwrap();
+        let held_root = fs::File::open(&stage).unwrap();
+        let held_blocked = fs::File::open(&blocked).unwrap();
+        let held_search = fs::File::open(&search_only).unwrap();
+        age(&stage);
+        fs::set_permissions(&blocked, fs::Permissions::from_mode(0o0)).unwrap();
+        fs::set_permissions(&search_only, fs::Permissions::from_mode(0o100)).unwrap();
+        fs::set_permissions(&stage, fs::Permissions::from_mode(0o0)).unwrap();
+        let (dry, text) = sweep(
+            &store,
+            Options {
+                dry_run: true,
+                ..Options::default()
+            },
+        );
+        assert_eq!(dry.unwrap().stages, 1, "{text}");
+        assert!(text.contains("at least"), "{text}");
+        assert_eq!(
+            held_root.metadata().unwrap().permissions().mode() & 0o777,
+            0
+        );
+        assert_eq!(
+            held_blocked.metadata().unwrap().permissions().mode() & 0o777,
+            0
+        );
+        assert_eq!(
+            held_search.metadata().unwrap().permissions().mode() & 0o777,
+            0o100
+        );
+        let (real, text) = sweep(&store, Options::default());
+        assert_eq!(real.unwrap().stages, 1, "{text}");
+        assert!(!stage.exists(), "{text}");
+        assert_eq!(
+            fs::read_to_string(outside.join("keep")).unwrap(),
+            "user data"
+        );
     }
 
     /// A dry run writes nothing: no record, no root, no timestamp.

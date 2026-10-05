@@ -124,6 +124,20 @@ pub fn run_command(
     run_in_mode(platform, fresh, mode, false)
 }
 
+/// The directory `tog sync` run at `cwd` syncs. A directory with project
+/// inputs of its own is synced itself, so a project nested under a synced
+/// root (a docs site with its own `package.json`) can be given its own
+/// environment by syncing it there. Otherwise the project above, as `run`
+/// and the bare `tog` find it, so a sync from `src/` syncs the project,
+/// not `src/`.
+fn sync_dir(cwd: &Path) -> io::Result<PathBuf> {
+    if crate::commands::inspect::detected(cwd)?.is_empty() {
+        project_root(cwd)
+    } else {
+        Ok(cwd.to_path_buf())
+    }
+}
+
 /// The one path from a command line into a sync: preflight before the store
 /// is opened, prove the project directory is still the one preflight
 /// checked, then publish the lock and run the tailors.
@@ -137,9 +151,7 @@ pub(crate) fn run_in_mode(
     mode: Mode,
     stop_after_lock: bool,
 ) -> io::Result<()> {
-    // The project above, as `run` and the bare `tog` find it, so a sync
-    // from `src/` syncs the project, not `src/`.
-    let dir = project_root(&context::project_dir())?;
+    let dir = sync_dir(&context::project_dir())?;
     // An interrupted resolution publication is undone before anything
     // reads the project. Its originals are in the store, so opening the
     // store early leaves no trace a refusal would have avoided.
@@ -278,7 +290,9 @@ pub(crate) fn ensure_current_for(
         // refuses the build exactly as the scoped sync would have.
         check_whole_project(ctx.platform, &dir)?;
     }
-    Ok(dir)
+    // Found again, not assumed (see `ensure_current`): the first sync of a
+    // Cargo workspace member marks the workspace root.
+    project_root(cwd)
 }
 
 /// The half of `preflight_detected` no scope narrows, for a command that
@@ -1023,6 +1037,26 @@ mod tests {
         assert!(error.to_string().contains("no pinned CPython"), "{error}");
         assert_eq!(project_root(&nested).unwrap(), project);
         assert_eq!(project_root(&bare).unwrap(), bare);
+    }
+
+    /// `tog sync` syncs the directory it is run in when that directory has
+    /// inputs of its own, a project nested under a synced root included,
+    /// and the project above from anywhere else.
+    #[test]
+    fn sync_syncs_a_nested_project_where_it_stands() {
+        let temp = TempDir::new();
+        let root = temp.0.join("repo");
+        let docs = root.join("docs");
+        std::fs::create_dir_all(root.join(".tog/closures")).unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(docs.join("pages")).unwrap();
+        std::fs::write(root.join("Cargo.toml"), "[package]\nname = \"x\"\n").unwrap();
+        std::fs::write(docs.join("package.json"), "{}").unwrap();
+        assert_eq!(sync_dir(&root.join("src")).unwrap(), root);
+        assert_eq!(sync_dir(&docs).unwrap(), docs);
+        // Below the nested project the marked root still answers, as it
+        // does for `run`, until the nested project is synced and marked.
+        assert_eq!(sync_dir(&docs.join("pages")).unwrap(), root);
     }
 
     /// The build's sync realizes the built ecosystem only: with two
