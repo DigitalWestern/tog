@@ -9,18 +9,18 @@ use crate::kernel::fsroot::ProjectRoot;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RootEntry {
     pub key: String,
-    /// The registered project. Empty when the record is unusable: a record
-    /// nobody can read has no pathname to offer, and guessing one selects
-    /// somebody else's project.
+    /// The registered project, when the record holds one exactly: a root/2
+    /// record, or a pathname-only record (which is still unusable). Empty
+    /// for any other unusable record: a record nobody can read has no
+    /// pathname to offer, and guessing one selects somebody else's project.
     pub path: PathBuf,
     pub registry_path: PathBuf,
     /// Why this record cannot be trusted, if it cannot. The record still
     /// exists: it is listed and can be forgotten, but no sweep may run while
     /// one is present.
     pub unusable: Option<String>,
-    /// A durable root/2 record, when this entry is not a legacy pathname-only
-    /// record.  The pathname remains on RootEntry for diagnostics and for the
-    /// legacy importer; GC treats the record as authoritative when present.
+    /// The root/2 record GC sweeps by. None for every unusable entry, a
+    /// pathname-only one included.
     pub record: Option<RootRecord>,
 }
 
@@ -976,24 +976,39 @@ pub(super) fn parse_root_entry(key: &str, path: &Path, bytes: &[u8]) -> io::Resu
     // so the entry is unusable: it names no objects, and a sweep cannot
     // tell what the project needs. It still occupies its key, so it stops
     // every sweep until it is forgotten or the project is registered again
-    // (which replaces it with a root/2 record).
+    // (which replaces it with a root/2 record). Only an exact absolute
+    // pathname is that form. Anything else is a damaged record, refused so
+    // a writer does not take it for one it may replace.
     let raw = bytes.strip_suffix(b"\n").unwrap_or(bytes);
+    if raw != trimmed || raw.contains(&b'\n') {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "root registry entry {key} is padded or spans lines, so it cannot be read \
+                 back exactly; use `tog gc --forget {key}` to drop the record"
+            ),
+        ));
+    }
     let project_path = PathBuf::from(OsString::from_vec(trimmed.to_vec()));
-    let exact = raw == trimmed && !raw.contains(&b'\n') && project_path.is_absolute();
-    let named = if exact {
-        format!(" for {}", project_path.display())
-    } else {
-        String::new()
-    };
+    if !project_path.is_absolute() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "root registry entry {key} is not an absolute path; use `tog gc --forget {key}` \
+                 to drop the record"
+            ),
+        ));
+    }
     Ok(RootEntry {
         key: key.into(),
-        path: if exact { project_path } else { PathBuf::new() },
-        registry_path: path.to_path_buf(),
         unusable: Some(format!(
-            "a pathname-only record{named}, the form before root/2, which names no store \
+            "a pathname-only record for {}, the form before root/2, which names no store \
              objects; run `tog gc --register <project>` to record what the project holds, or \
-             `tog gc --forget {key}` to drop it"
+             `tog gc --forget {key}` to drop it",
+            project_path.display()
         )),
+        path: project_path,
+        registry_path: path.to_path_buf(),
         record: None,
     })
 }
@@ -1186,4 +1201,54 @@ pub(super) fn record_pathname(project_dir: &Path) -> io::Result<&str> {
         ));
     }
     Ok(text)
+}
+
+#[cfg(test)]
+mod tests {
+    /// Only an exact absolute pathname reads as a pathname-only record.
+    /// Corrupt, padded or relative contents are refused, so a writer such
+    /// as `gc --register` stops instead of replacing a damaged record.
+    #[test]
+    fn a_damaged_record_is_refused_not_read_as_pathname_only() {
+        use super::parse_root_entry;
+        use crate::kernel::store::Store;
+        use crate::kernel::testutil::TempDir;
+        use std::{fs, io, path::Path};
+
+        let entry = parse_root_entry("k", Path::new("/r/k"), b"/abs/project\n").unwrap();
+        assert_eq!(entry.path, Path::new("/abs/project"));
+        assert!(entry.unusable.is_some() && entry.record.is_none());
+
+        let damaged: [&[u8]; 6] = [
+            b"\0\0\0\0",
+            b"\xff\n",
+            b" /padded\n",
+            b"/padded \n",
+            b"/one\n/two\n",
+            b"relative/path\n",
+        ];
+        for bytes in damaged {
+            let error = parse_root_entry("k", Path::new("/r/k"), bytes).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{bytes:?}");
+        }
+
+        let temp = TempDir::named("damaged-root");
+        let store = Store::open_at(&temp.0.join("store")).unwrap();
+        let project = temp.0.join("project");
+        fs::create_dir_all(project.join(".tog/closures")).unwrap();
+        let key = Store::root_key(&project).unwrap();
+        let record = temp.0.join("store/roots").join(&key);
+        fs::create_dir_all(record.parent().unwrap()).unwrap();
+        for bytes in damaged {
+            fs::write(&record, bytes).unwrap();
+            let error = store.register_root_from_project(&project).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains(&format!("tog gc --forget {key}")),
+                "{bytes:?}: {error}"
+            );
+            assert_eq!(fs::read(&record).unwrap(), bytes);
+        }
+    }
 }
