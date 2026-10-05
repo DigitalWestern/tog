@@ -448,7 +448,9 @@ pub(crate) fn run_node_checked(
     let report = run_node(door, run)?;
     if !report.status.success() {
         let words = confine::scrub_signing_key(String::from_utf8_lossy(&report.stderr).trim());
-        if words.contains(NO_GIT) || (!Path::new(HOST_GIT).is_file() && words.contains("git")) {
+        // npm's spawn error names the forced path; a package merely called
+        // `git-something` does not.
+        if words.contains(NO_GIT) {
             return Err(io::Error::new(
                 io::ErrorKind::NotFound,
                 format!(
