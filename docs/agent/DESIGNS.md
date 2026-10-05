@@ -3825,18 +3825,28 @@ The users trust the service account the way they already trust root for
 
 ### Layout and configuration
 
-- **Where.** The machine policy names the system store, nothing else does:
-  `[store] system = "/opt/tog/store"` in `/etc/tog/policy.toml` (the
-  machine-scope file `policy::load` already reads). A project file, an
-  environment variable or a flag cannot name it: a repository must not be
-  able to point every user's tog at a directory of its choosing. `TOG_STORE`
-  keeps naming the per-user store.
+- **Where.** A new admin-owned file names the system store, nothing else
+  does: `[store] system = "/opt/tog/store"` and `owner = "tog"` in
+  `/etc/tog/store.toml`. This file does not exist today and is part of
+  PR 1. It cannot be the "machine" policy file `policy::load` reads now:
+  that is `$TOG_POLICY` or `$HOME/.tog/policy.toml`, both chosen and
+  writable by the user, so naming the store there would let any user (or
+  anything that can write their HOME) point their tog at a directory they
+  control. tog reads `/etc/tog/store.toml` only at that fixed path (no
+  variable overrides it), and only if it and every ancestor are owned by
+  root and not group- or other-writable. A project file, an environment
+  variable or a flag cannot name the store either: a repository must not
+  be able to point every user's tog at a directory of its choosing.
+  `TOG_STORE` keeps naming the per-user store.
 - **Who owns it.** A dedicated account (`tog` on Linux, `_tog` on macOS).
   The root directory and everything under `objects/`, `meta/`, `records/`
   and `cache/` are owned by that account and are not group- or
-  other-writable. The marker file gains a second line, `shared <uid>`, so a
-  user's tog reads the owner from the store itself and compares it with the
-  directory's `st_uid` rather than trusting either alone.
+  other-writable. The marker file gains a second line, `shared <uid>`. The
+  trusted uid comes from `/etc/tog/store.toml`'s `owner`, never from the
+  store: a directory an attacker owns can carry a marker naming the
+  attacker's uid and pass a marker-versus-`st_uid` comparison. The marker
+  line must agree with the configured owner and the directory's `st_uid`;
+  it catches a misconfigured path, not a hostile one.
 - **What it holds.** The read-only namespaces: `objects/`, `meta/`,
   `records/`, `cache/`. Never `forests/`, `run-homes/`, `roots/`,
   `root-locks/` or project transaction locks: those are per-user state and
@@ -3879,10 +3889,11 @@ shared object never smuggles a waived exception past a stricter user.
 Before a user's tog uses anything from the system store, it proves, through
 descriptors (`fsroot`-style, `O_NOFOLLOW` from the held root):
 
-1. The root is owned by the uid on the marker's `shared` line, and neither
-   the root nor any ancestor up to `/` is writable by anyone but root or
-   that uid (the same ancestor walk `policy::load` does for machine policy
-   files).
+1. The root is owned by the uid `/etc/tog/store.toml` names (and the
+   marker's `shared` line agrees), and neither the root nor any ancestor up
+   to `/` is writable by anyone but root or that uid. This ancestor walk is
+   new code: the walk `policy::load` does over project policy files checks
+   names (`check_still_named`), not ownership or writability.
 2. Each object directory, its `meta/<id>.json`, and the cache entries it
    names are owned by that uid and not group- or other-writable. Objects
    are already committed read-only, and the check reads the modes tog
@@ -3933,8 +3944,16 @@ So users publish **claims**.
   (`gc::validate`). `tog gc --forget-claims <uid>` (service account only)
   drops one, for a user who left the machine.
 - What a hostile user can do with a claim: keep system objects alive (disk
-  use), or block the system sweep with a malformed file until the admin
-  forgets it. Neither reaches another user's code. `tog store claims` (any
+  use), block the system sweep with a malformed file until the admin
+  forgets it, or squat another user's claim name. In a sticky `1777`
+  directory a hostile user can create `claims/<victim-uid>` first; the
+  sticky bit then stops the victim renaming over it, and
+  `fs.protected_regular` (on by default on Ubuntu and Debian) refuses even
+  an `O_CREAT` open of it. The victim's claims then never land, and the
+  system GC may delete objects the victim uses. None of these reaches
+  another user's code, but the squat breaks the GC protocol, so the flat
+  `1777` layout, and what a user's tog does when its claim rename fails,
+  are open questions below. `tog store claims` (any
   user) lists the claim files with their size and age, so the admin sees
   who holds what.
 
@@ -3978,14 +3997,15 @@ own activity lease. Nothing changes for it.
 
 ### Implementation plan (PRs, in order)
 
-1. **Read-only layer.** Machine policy `[store] system`, the marker's
-   `shared` line, the ownership/ancestor check, two-layer `has()` and object
+1. **Read-only layer.** The root-owned `/etc/tog/store.toml` and its
+   ownership check, the marker's `shared` line, the ownership/ancestor check, two-layer `has()` and object
    lookup, `check_cached_with_activity` on system objects, and the warning
    fallback. Tests: a fixture system store owned by the test uid with a
    different-uid marker is refused, a group-writable one is refused, and a
    sound one is used.
 2. **Cross-uid lease and claims.** `0644` lock creation for a shared store,
-   the extra lock-order step (`tests/architecture.rs` lock-order test),
+   the extra lock-order step (with a new `tests/architecture.rs`
+   lock-order test; none exists today),
    claim writing on root registration and user GC, the system GC reading
    claims, `--forget-claims`, and `tog store claims`.
 3. **Admin path.** `tog store init-system <path>` (creates the root, marker
@@ -4006,6 +4026,17 @@ needs `sudo` (heavy CI has it).
 - Should `claims/` hold one file per uid or one per (uid, user-store root)?
   One user with two `TOG_STORE`s would overwrite their own claim. Current
   pick: per (uid, sha1 of the user store root), named `<uid>-<hash>`.
+- How are claims kept from being squatted (see "GC across users")?
+  Options: (a) per-uid subdirectories `claims/<uid>/`, created by the
+  service account, chowned to that uid, mode `0755`, so only that uid
+  writes inside; (b) claims sent through the broker, which writes them as
+  the service account; (c) keep `1777` and treat a foreign-owned
+  `claims/<uid>` as a blocked sweep the admin resolves. Current pick: (a),
+  since it needs no daemon and a squatted name cannot exist.
+- When a user's claim rename fails, does the sync fail or go on with the
+  system objects unclaimed? Current pick: that run drops the system layer
+  and realizes into the user's own store, so an unwritable claim never
+  leaves a root that the system GC can break.
 - Is the broker's plan protocol per object or per closure? Per object is
   simpler to re-derive. Per closure saves round trips.
 
