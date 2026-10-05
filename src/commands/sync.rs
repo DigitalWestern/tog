@@ -281,7 +281,9 @@ pub(crate) fn ensure_current_for(
         // refuses the build exactly as the scoped sync would have.
         check_whole_project(ctx.platform, &dir)?;
     }
-    Ok(dir)
+    // Found again, not assumed (see `ensure_current`): the first sync of a
+    // Cargo workspace member marks the workspace root.
+    project_root(cwd)
 }
 
 /// The half of `preflight_detected` no scope narrows, for a command that

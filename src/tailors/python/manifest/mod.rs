@@ -668,6 +668,15 @@ source = { registry = "https://pypi.org/simple" }
                 "dependencies = [{ version = \"1\" }]\n",
                 "uv.lock six.dependencies has an unreadable entry: { version = \"1\" }",
             ),
+            // A field of the wrong type is refused too, not read as absent.
+            (
+                "dependencies = [{ name = \"requests\", extra = \"socks\" }]\n",
+                "uv.lock six.dependencies has an unreadable entry: { extra = \"socks\", name = \"requests\" }",
+            ),
+            (
+                "dependencies = [{ name = \"requests\", marker = 1 }]\n",
+                "uv.lock six.dependencies has an unreadable entry: { marker = 1, name = \"requests\" }",
+            ),
             (
                 "optional-dependencies = { socks = \"pysocks\" }\n",
                 "uv.lock six.optional-dependencies.socks is not an array",
@@ -2006,6 +2015,10 @@ files = [{ file = "old.whl", hash = "sha256:dddddddddddddddddddddddddddddddddddd
             "https://pypi.org.internal.example/simple",
             "https://mirror.example/://pypi.org/simple",
             "https://evilpypi.org/simple",
+            // The right host over the wrong scheme or port is not PyPI.
+            "http://pypi.org/simple",
+            "https://pypi.org:8443/simple",
+            "file://pypi.org/simple",
             "not a url",
         ] {
             assert!(!uv::is_public_pypi_url(url), "{url}");
@@ -2187,6 +2200,28 @@ files = [{ file = "old.whl", hash = "sha256:dddddddddddddddddddddddddddddddddddd
         fs::remove_file(dir.0.join(".claude/skill")).unwrap();
         std::os::unix::fs::symlink("../skills/b", dir.0.join(".claude/skill")).unwrap();
         assert_ne!(first, hash());
+    }
+
+    #[test]
+    fn setup_hash_tracks_contents_of_a_symlinked_input_file() {
+        let dir = temp_project("setup-file-symlink");
+        let outside = temp_project("setup-file-target");
+        let target = outside.0.join("requirements-data.txt");
+        fs::write(&target, "six==1.16.0\n").unwrap();
+        fs::write(
+            dir.0.join("setup.py"),
+            "from setuptools import setup\nsetup()\n",
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(&target, dir.0.join("requirements-data.txt")).unwrap();
+        let hash = || setup_tree_hash(&ProjectRoot::open(&dir.0).unwrap()).unwrap();
+        let first = hash();
+        fs::write(&target, "six==1.17.0\n").unwrap();
+        assert_ne!(
+            first,
+            hash(),
+            "cached metadata must notice changed file inputs"
+        );
     }
 
     #[test]
