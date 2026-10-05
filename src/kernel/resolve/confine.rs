@@ -239,7 +239,10 @@ const FORCED: &[ForcedRow] = &[
             "--config.script-shell=@SH@",
             "--config.shell-emulator=false",
             "--config.git-shallow-hosts=",
-            "--ignore-scripts",
+            // `pnpm remove` rejects the `--ignore-scripts` flag PR 0
+            // measured on `install`; the `--config.` spelling is the one
+            // every verb's parser takes.
+            "--config.ignore-scripts=true",
             "--config.node-options=",
             "--config.pnpmfile=.pnpmfile.cjs",
             "--config.global-pnpmfile=",

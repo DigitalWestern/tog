@@ -153,6 +153,7 @@ fn attest(
         );
     }
     let ids: Vec<&str> = targets.iter().map(|tailor| tailor.id()).collect();
+    let host = crate::commands::shared::CommandHost { platform };
     check_then_publish(
         &ids,
         |id| {
@@ -173,7 +174,7 @@ fn attest(
                 DoorKind::Attest,
                 &mut attribution,
             )
-            .and_then(|mut door| tailor.attest_lock(&ctx, project, selected, &mut door));
+            .and_then(|mut door| tailor.attest_lock(&ctx, project, selected, &host, &mut door));
             attribution.discard();
             checked
         },

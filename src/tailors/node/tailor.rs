@@ -133,6 +133,28 @@ impl Tailor for Node {
         super::edit::edit_manifest(edit, door)
     }
 
+    fn resolution_outputs(&self, project: &ProjectRoot) -> io::Result<Vec<std::path::PathBuf>> {
+        super::resolve::resolution_outputs(project)
+    }
+
+    fn resolution_inputs(&self, project: &ProjectRoot) -> io::Result<Vec<std::path::PathBuf>> {
+        super::resolve::resolution_inputs(project)
+    }
+
+    /// npm's lock-only install with the lock unchanged, or pnpm's frozen
+    /// lock-only install, at the lock root, on the Node the selection
+    /// names.
+    fn attest_lock(
+        &self,
+        _ctx: &Context,
+        project: &ProjectRoot,
+        toolchain: &Selected,
+        host: &dyn crate::tailors::EditHost,
+        door: &mut ResolutionDoor<'_>,
+    ) -> io::Result<(crate::kernel::resolve::record::ResolutionRecord, Vec<u8>)> {
+        super::resolve::attest_project(door, project, host, toolchain)
+    }
+
     fn id(&self) -> &'static str {
         "node"
     }

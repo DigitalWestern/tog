@@ -39,6 +39,35 @@ fn run(project: &Path, store: &Path, args: &[&str], temp: &Path) -> Output {
         .expect("spawn tog")
 }
 
+/// `tog attest node` with a key the machine policy trusts: the record is
+/// written and the lock is left byte for byte as it was.
+fn attest_node(project: &Path, store: &Path, temp: &Path, lock: &str) {
+    let home = temp.join("home");
+    let key = home.join("signing.key");
+    let public = tog::kernel::signing::generate(&key).unwrap();
+    std::fs::create_dir_all(home.join(".tog")).unwrap();
+    std::fs::write(
+        home.join(".tog/policy.toml"),
+        format!("deny = []\n\n[signing]\ntrusted = [\"{public}\"]\n"),
+    )
+    .unwrap();
+    let before = std::fs::read(project.join(lock)).unwrap();
+    let attest = command(project, &home, store)
+        .env("TMPDIR", temp.join("tmp"))
+        .env("TOG_SANDBOX_TESTS", "required")
+        .env("TOG_SIGNING_KEY", &key)
+        .args(["attest", "node"])
+        .output()
+        .unwrap();
+    assert_ok(attest, "attest node");
+    assert!(project.join(".tog/resolution/node.json").is_file());
+    assert_eq!(
+        std::fs::read(project.join(lock)).unwrap(),
+        before,
+        "attest changed {lock}"
+    );
+}
+
 fn set_package_manager(project: &Path, value: &str) {
     let path = project.join("package.json");
     let mut package: serde_json::Value =
@@ -324,6 +353,10 @@ fn npm_add_update_remove_roundtrip() {
     );
     let package = std::fs::read_to_string(project.join("package.json")).unwrap();
     assert!(!package.contains("is-number"), "{package}");
+    // The lock an edit door wrote attests: npm's lock-only install leaves
+    // it unchanged, confined, and the record is signed.
+    assert_ok(run(project, &store, &[], &temp.0), "npm sync");
+    attest_node(project, &store, &temp.0, "package-lock.json");
 }
 
 #[test]
@@ -351,6 +384,9 @@ fn pnpm_add_update_remove_roundtrip() {
     let first_env_count = node_env_object_count(&store);
     assert!(first_env_count >= 1);
     assert_status_synced(project, &store, &temp);
+    // The pinned pnpm's frozen lock-only install attests the lock it
+    // wrote, through the same door.
+    attest_node(project, &store, &temp.0, "pnpm-lock.yaml");
 
     let x_root = temp.0.join("home/.tog/x");
     let x_root = std::fs::read_dir(&x_root)

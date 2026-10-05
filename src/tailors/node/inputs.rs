@@ -1,10 +1,11 @@
 //! From a Node project to its inputs: missing-lock generation through the
-//! store npm and the lockfile-to-`NpmPlan` importers.
+//! store npm (confined, see `super::resolve`) and the lockfile-to-`NpmPlan`
+//! importers.
 
 use crate::comforter::InputRecord;
 use crate::kernel::fsroot::{Entry, ProjectRoot};
 use crate::kernel::platform::Platform;
-use crate::kernel::resolve::{DelegateSpec, ResolutionDoor};
+use crate::kernel::resolve::ResolutionDoor;
 use crate::kernel::toolchain::Selected;
 use crate::kernel::ui;
 use crate::tailors::node;
@@ -43,32 +44,10 @@ pub fn ensure_npm_lock(
     }
     ui::note("no package-lock.json; resolving with the store npm...");
     // Store node's bundled npm, not host npm: a bare machine needs only
-    // tog. npm-cli's shebang is `env node`, so the store bin leads PATH.
-    // The npm that writes this lock is the one bundled in the Node the
-    // project's toolchain selection names.
-    let node = node::realize_runtime(door.store(), door.lease(), door.platform(), selected)?;
-    let path = format!(
-        "{}:{}",
-        node.join("bin").display(),
-        std::env::var("PATH").unwrap_or_default()
-    );
-    let mut spec = DelegateSpec::new(node.join("bin/npm"));
-    spec.arg("install").args(node::NPM_RESOLVE_ONLY);
-    node::quiet_npm(&mut spec);
-    if !ui::verbose() {
-        spec.arg("--silent");
-    }
-    spec.lock_root(dir).env("PATH", path);
-    spec.trace();
-    let report = door.run(spec).map_err(|e| {
-        io::Error::new(
-            e.kind(),
-            format!("run store npm ({}/bin/npm): {e}", node.display()),
-        )
-    })?;
-    if !report.status.success() {
-        return Err(io::Error::other("npm install --package-lock-only failed"));
-    }
+    // tog. The npm that writes this lock is the one bundled in the Node
+    // the project's toolchain selection names, confined through the door,
+    // which publishes the lock with the signed resolution record.
+    node::resolve::generate_lock(door, project, selected)?;
     if let Some(other) = bun_lock {
         // Said once the file exists, with its full path: an automatic sync
         // can run from a subdirectory of the project, where a relative
@@ -166,89 +145,6 @@ pub(crate) fn input_records(project: &ProjectRoot, names: &[&str]) -> io::Result
 
 #[cfg(test)]
 mod tests {
-    use crate::kernel::platform::Platform;
-    use crate::kernel::store;
-
-    /// The store npm resolves a missing lock and does nothing else: no
-    /// audit POST, no update-notifier fetch, no funding lookup (#212). A
-    /// stand-in Node object whose npm records its argv and environment
-    /// keeps the test offline.
-    #[test]
-    fn the_store_npm_only_resolves() {
-        use std::os::unix::fs::PermissionsExt as _;
-        let temp = crate::kernel::testutil::TempDir::named("npm-quiet");
-        let root = temp.0.join("store");
-        for sub in ["objects", "meta", "cache/sha256", "tmp"] {
-            std::fs::create_dir_all(root.join(sub)).unwrap();
-        }
-        let store = store::Store::for_test(root.canonicalize().unwrap());
-        crate::tailors::install_kinds();
-        let platform = Platform::host().unwrap();
-        let selected = crate::tailors::node::shipped_selection().unwrap();
-        let staged = store.stage().unwrap();
-        for file in [
-            "bin/node",
-            "include/node/node.h",
-            "lib/node_modules/npm/bin/npm-cli.js",
-            "lib/node_modules/npm/node_modules/node-gyp/bin/node-gyp.js",
-        ] {
-            std::fs::create_dir_all(staged.join(file).parent().unwrap()).unwrap();
-            std::fs::write(staged.join(file), "").unwrap();
-        }
-        let npm = staged.join("bin/npm");
-        std::fs::write(
-            &npm,
-            "#!/bin/sh\necho \"$@\" > npm-args.txt\nenv | grep -i '^npm_config_' > npm-env.txt\n\
-             echo '{\"lockfileVersion\":3,\"packages\":{}}' > package-lock.json\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&npm, std::fs::Permissions::from_mode(0o755)).unwrap();
-        store
-            .commit_with_deps(
-                &crate::tailors::node::runtime_identity(&selected, platform).unwrap(),
-                &staged,
-                &[],
-                &store::ObjectDeps::new(),
-            )
-            .unwrap();
-        let project_dir = temp.0.join("project");
-        std::fs::create_dir_all(&project_dir).unwrap();
-        std::fs::write(project_dir.join("package.json"), r#"{"name":"p"}"#).unwrap();
-        let project = crate::kernel::fsroot::ProjectRoot::open(&project_dir).unwrap();
-        let activity = store
-            .activity(crate::kernel::activity::ActivityMode::Shared)
-            .unwrap();
-        super::ensure_npm_lock(
-            &project,
-            &selected,
-            &mut crate::kernel::testutil::DoorScope::new().door(
-                &store,
-                &activity,
-                platform,
-                crate::kernel::resolve::DoorKind::MissingLock,
-            ),
-        )
-        .unwrap();
-        let args = std::fs::read_to_string(project_dir.join("npm-args.txt")).unwrap();
-        for flag in [
-            "--package-lock-only",
-            "--ignore-scripts",
-            "--no-audit",
-            "--no-fund",
-            "--no-update-notifier",
-        ] {
-            assert!(args.split_whitespace().any(|arg| arg == flag), "{args}");
-        }
-        let env = std::fs::read_to_string(project_dir.join("npm-env.txt")).unwrap();
-        for line in [
-            "NPM_CONFIG_AUDIT=false",
-            "NPM_CONFIG_FUND=false",
-            "NPM_CONFIG_UPDATE_NOTIFIER=false",
-        ] {
-            assert!(env.lines().any(|l| l == line), "{env}");
-        }
-    }
-
     /// A directory with no package.json is not a Node project: nothing to
     /// plan, and nothing to refuse.
     #[test]

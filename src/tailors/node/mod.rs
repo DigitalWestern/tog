@@ -18,6 +18,7 @@
 //! allowlist yet.
 
 pub(crate) mod corepack;
+pub(crate) mod door;
 pub mod edit;
 pub mod freshness;
 pub mod inputs;
@@ -25,6 +26,7 @@ pub mod lock_import;
 pub mod objects;
 pub mod registry;
 pub mod registry_tool;
+pub(crate) mod resolve;
 pub mod run_refusal;
 pub mod tailor;
 
@@ -333,30 +335,6 @@ pub(crate) const NPM_RESOLVE_ONLY: &[&str] = &[
     "--no-fund",
     "--no-update-notifier",
 ];
-
-/// The same three settings for anything npm starts, which reads the
-/// environment rather than npm's argv.
-pub(crate) fn quiet_npm(spec: &mut crate::kernel::resolve::DelegateSpec) {
-    const KEYS: [&str; 3] = [
-        "NPM_CONFIG_AUDIT",
-        "NPM_CONFIG_FUND",
-        "NPM_CONFIG_UPDATE_NOTIFIER",
-    ];
-    // npm rewrites lowercase false values to empty strings for its child
-    // processes, which then ignore them and restore the defaults. Uppercase
-    // values survive. Drop inherited aliases so they cannot shadow these.
-    for (name, _) in std::env::vars_os() {
-        if name
-            .to_str()
-            .is_some_and(|name| KEYS.iter().any(|key| name.eq_ignore_ascii_case(key)))
-        {
-            spec.env_remove(name);
-        }
-    }
-    for key in KEYS {
-        spec.env(key, "false");
-    }
-}
 
 /// Realize the Node this selection names (interpreter at <obj>/bin/node).
 ///

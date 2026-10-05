@@ -100,6 +100,7 @@ impl Tailor for Cargo {
         ctx: &Context,
         project: &ProjectRoot,
         toolchain: &Selected,
+        _host: &dyn crate::tailors::EditHost,
         door: &mut ResolutionDoor<'_>,
     ) -> io::Result<(crate::kernel::resolve::record::ResolutionRecord, Vec<u8>)> {
         let root = inputs::locate_cargo_root(project.path())?;

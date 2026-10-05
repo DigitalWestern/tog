@@ -1,15 +1,18 @@
 //! The Node tailor's `RegistryTool`: how `tog x` resolves one npm package
-//! with the store npm, realizes it as an ordinary node env object, and
-//! projects it as `node_modules` in the command's cache directory.
+//! with the store npm (confined through the `x` door, see `super::door`),
+//! realizes it as an ordinary node env object, and projects it as
+//! `node_modules` in the command's cache directory.
 
 use crate::comforter::status::canonical_symlink_target;
 use crate::kernel::activity::StoreActivity;
 use crate::kernel::platform::Platform;
-use crate::kernel::resolve::{DelegateSpec, ResolutionDoor};
+use crate::kernel::resolve::door::Publish;
+use crate::kernel::resolve::ResolutionDoor;
 use crate::kernel::store::Store;
 use crate::kernel::toolchain::Selected;
 use crate::kernel::ui;
 use crate::tailors::node;
+use crate::tailors::node::door::{self, NodeRun};
 use crate::tailors::node::tailor::encoded_workspace;
 use crate::tailors::{RegistryTool, ToolEnv};
 use serde_json::Value;
@@ -179,27 +182,31 @@ impl RegistryTool for NodeTool {
             version.unwrap_or("latest")
         ));
         let node_obj = node::realize_runtime(store, activity, platform, toolchain)?;
-        let mut spec = DelegateSpec::new(node_obj.join("bin/npm"));
-        spec.arg("install").args(node::NPM_RESOLVE_ONLY);
-        node::quiet_npm(&mut spec);
-        if !ui::verbose() {
-            spec.arg("--silent");
-        }
-        spec.lock_root(root).env(
-            "PATH",
-            format!(
-                "{}:{}",
-                node_obj.join("bin").display(),
-                std::env::var("PATH").unwrap_or_default()
-            ),
-        );
-        spec.trace();
-        let status = door.run(spec)?.status;
-        if !status.success() {
-            return Err(io::Error::other(format!(
-                "could not resolve '{package}' from npm (npm exit {status})"
-            )));
-        }
+        // The resolution runs confined through the `x` door, detached: the
+        // lock root is tog's own cache root, so the accepted lock is written
+        // back into it and the ledger is rooted under it.
+        let report = door::run_node_checked(
+            door,
+            NodeRun {
+                tool: door::NodeTool::Npm {
+                    node_obj: &node_obj,
+                },
+                lock_root: root,
+                cwd: None,
+                args: node::resolve::npm_resolve_args("install", &[]),
+                publish: Publish::Detached {
+                    outputs: vec![PathBuf::from("package-lock.json")],
+                },
+                capture: false,
+            },
+        )
+        .map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!("could not resolve '{package}' from npm: {error}"),
+            )
+        })?;
+        node::resolve::root_x_ledger(door, root, &report)?;
         let plan = node::plan_npm(platform, &fs::read_to_string(&lock)?)?;
         // node-gyp runs on the Python the caller decided: the project's
         // locked one when `x` runs inside a project that has Python, the

@@ -3,14 +3,19 @@
 //! A project with its own package-lock.json (or none yet) is edited by the
 //! store node's npm. A pnpm lock, its own or its workspace's, is edited by
 //! the exact pnpm the project's `packageManager` field pins, realized in
-//! the `tog x` cache (see `corepack`). yarn is not a pinned tool, so a yarn
+//! the `tog x` cache (see `corepack`). Both run confined through the edit
+//! door (`super::door`), which publishes the manifest and the lock with
+//! the signed resolution record. yarn is not a pinned tool, so a yarn
 //! project refuses with the command to run.
 
 use super::corepack::{self, CorepackAlgo, CorepackHash};
-use crate::kernel::resolve::{DelegateSpec, DoorKind, ResolutionDoor};
-use crate::kernel::ui;
+use super::door::{self, NodeRun, NodeTool, PnpmProgram};
+use crate::kernel::fsroot::ProjectRoot;
+use crate::kernel::resolve::door::Publish;
+use crate::kernel::resolve::{record, DoorKind, ResolutionDoor};
 use crate::tailors::edit::{
-    other, registry_latest, run_inherited, EditOutcome, EditVerb, ManifestEdit, PackageRegistry,
+    other, registry_latest, CachedTool, EditHost, EditOutcome, EditVerb, ManifestEdit,
+    PackageRegistry,
 };
 use std::fs;
 use std::io;
@@ -60,10 +65,6 @@ impl NodePackageManager {
     fn corepack_hash(&self) -> Option<&CorepackHash> {
         let Self::Pnpm { corepack_hash, .. } = self;
         corepack_hash.as_ref()
-    }
-
-    fn executable(&self) -> &'static str {
-        "pnpm"
     }
 }
 
@@ -254,13 +255,13 @@ fn pnpm_membership(root: &Path, project: &Path) -> io::Result<PnpmMembership> {
 /// cannot tell a member added since the last install from a project the
 /// workspace deliberately excludes, so each caller has to say what it does
 /// about that, and anything that would write a lockfile must refuse.
-enum NodeLock {
+pub(crate) enum NodeLock {
     Own { name: String, root: PathBuf },
     PnpmWorkspaceMember { root: PathBuf },
     UnlistedUnderPnpmWorkspace { workspace_root: PathBuf },
 }
 
-fn node_lock_for(project: &Path) -> io::Result<NodeLock> {
+pub(crate) fn node_lock_for(project: &Path) -> io::Result<NodeLock> {
     let own = |name: &str| NodeLock::Own {
         name: name.to_string(),
         root: project.to_path_buf(),
@@ -337,46 +338,19 @@ fn yarn_refusal(root: &Path, verb: EditVerb, texts: &[String], dev: bool) -> io:
     ))
 }
 
-fn node_delegate_args(
+/// pnpm's `verb`, lock-only, with the operands after `--`. The modules
+/// state, the store, the proxy, and the forced settings (`ignore-scripts`
+/// among them, as `--config.ignore-scripts=true`, the one spelling every
+/// verb's parser takes: `pnpm remove` rejects the `--ignore-scripts` flag)
+/// are the door's (`super::door`).
+fn pnpm_edit_args(
     verb: EditVerb,
     texts: &[String],
     dev: bool,
     workspace_root: bool,
-    scratch: &PnpmScratch,
 ) -> Vec<String> {
-    let mut args = vec![verb.command().to_string()];
-    args.push("--lockfile-only".into());
-    // Match the npm branch's defence in depth: `--lockfile-only` should mean
-    // nothing installs and no lifecycle script runs, but pnpm still runs
-    // `prepare` for git-URL dependencies while resolving. pnpm's `remove`
-    // parser rejects `--ignore-scripts` outright ("Unknown option:
-    // 'ignore-scripts'"), so the flag goes only on the verbs whose parser
-    // accepts it; `npm_config_ignore_scripts` in the delegate's environment
-    // (see `node`) is what covers all three.
-    if verb != EditVerb::Remove {
-        args.push("--ignore-scripts".into());
-    }
+    let mut args = vec![verb.command().to_string(), "--lockfile-only".into()];
     args.extend(["--reporter", "append-only"].map(str::to_string));
-    // Keep pnpm's modules state out of the user's project (see
-    // `PnpmScratch`). `--config.<name>=<value>` is the spelling every verb's
-    // parser accepts; `remove` and `update` reject `--modules-dir` as a flag.
-    args.push("--config.enable-modules-dir=false".into());
-    // `enable-modules-dir=false` only means "do not link into the modules
-    // directory" for the isolated linker. A project `.npmrc` carrying
-    // `node-linker=hoisted` makes the delegate a real installer again: it
-    // downloads packages and rewrites the user's `node_modules`, replacing
-    // symlinks with copied directories. `node-linker=pnp` fails with a raw
-    // pnpm stack trace. Force the linker so no project file can pick either.
-    args.push("--config.node-linker=isolated".into());
-    args.push(format!("--config.modules-dir={}", scratch.modules_dir));
-    args.push(format!(
-        "--config.virtual-store-dir={}",
-        scratch.virtual_store_dir
-    ));
-    // pnpm falls back to `~/.pnpm-store` whenever its default store would
-    // land on a different filesystem from the project: outside the project,
-    // outside the tog store, and never reclaimed by `gc`.
-    args.push(format!("--config.store-dir={}", scratch.store_dir));
     if workspace_root {
         args.push("-w".into());
     }
@@ -390,83 +364,18 @@ fn node_delegate_args(
     args
 }
 
-/// Where pnpm keeps its modules state during an edit: a per-run stage
-/// under `<store>/tmp`, never the user's project.
-///
-/// Even with `--lockfile-only`, pnpm's modules directory is live: at a
-/// workspace root `add -w --lockfile-only` performs a full install, every
-/// verb reads `node_modules/.modules.yaml` and refuses with
-/// `ERR_PNPM_UNEXPECTED_STORE` when the store recorded there is not the one
-/// it is given, and the workspace path deletes `<virtual-store-dir>/lock.yaml`
-/// when the current lockfile is empty. Three settings, all honoured by
-/// `add`, `remove`, and `update` of pnpm 9.12.3 (verified against the real
-/// binary; `tests/deps_e2e.rs::pnpm_edits_leave_an_installed_project_untouched`
-/// keeps proving it), move all of that out of the project:
-/// `enable-modules-dir=false` links nothing, `modules-dir` decides where
-/// `.modules.yaml` is looked for, and `virtual-store-dir` decides where the
-/// current lockfile lives. pnpm joins both paths onto a project directory
-/// (`path.join`, so an absolute value would land inside the project), hence
-/// the relative spellings. Nothing is created at either path; the stage
-/// exists so the paths resolve somewhere tog owns, and it is removed when
-/// the delegate returns (a leftover has the `stage-` name `gc::sweep_stages`
-/// reclaims).
-struct PnpmScratch {
-    /// `--config.modules-dir`, relative to the project pnpm runs in.
-    ///
-    /// pnpm joins this onto *every* importer's own directory, and one
-    /// relative path cannot escape the project from importers at differing
-    /// depths: computed for a workspace root, it lands back inside the
-    /// project for any deeper member. What keeps the project untouched is
-    /// therefore not this path but `enable-modules-dir=false` together with
-    /// `node-linker=isolated` — with both, pnpm creates no importer
-    /// `node_modules` at all, and this path only ever names a
-    /// `.modules.yaml` to read. Remove either flag and the path alone will
-    /// not save you.
-    modules_dir: String,
-    /// `--config.virtual-store-dir`, relative to the lock root, which is what
-    /// pnpm resolves it against.
-    virtual_store_dir: String,
-    /// `--config.store-dir`. Absolute: pnpm resolves the store directory
-    /// against the cwd rather than joining it onto an importer, so an
-    /// absolute path is both safe here and the only spelling that pins the
-    /// store no matter which directory the delegate runs in.
-    store_dir: String,
-}
-
-fn pnpm_scratch(stage: &Path, project: &Path, lock_root: &Path) -> io::Result<PnpmScratch> {
-    let stage = stage.canonicalize()?;
-    let project = project.canonicalize()?;
-    let lock_root = lock_root.canonicalize()?;
-    let modules = stage.join("modules");
-    Ok(PnpmScratch {
-        modules_dir: relative_path(&project, &modules)
-            .to_string_lossy()
-            .into_owned(),
-        virtual_store_dir: relative_path(&lock_root, &modules.join(".pnpm"))
-            .to_string_lossy()
-            .into_owned(),
-        store_dir: stage.join("pnpm-store").to_string_lossy().into_owned(),
-    })
-}
-
-/// `to` expressed relative to the directory `from`; both must be absolute and
-/// free of `..` (canonical), so the answer is a lexical prefix strip.
-fn relative_path(from: &Path, to: &Path) -> PathBuf {
-    let from: Vec<_> = from.components().collect();
-    let to: Vec<_> = to.components().collect();
-    let common = from
-        .iter()
-        .zip(to.iter())
-        .take_while(|(a, b)| a == b)
-        .count();
-    let mut out = PathBuf::new();
-    for _ in common..from.len() {
-        out.push("..");
-    }
-    for component in &to[common..] {
-        out.push(component);
-    }
-    out
+/// The refusal for a project under a pnpm workspace whose lock does not
+/// list it: tog cannot tell a member added since the last install from a
+/// deliberate exclusion, and never writes a lock inside a workspace.
+pub(crate) fn unlisted_member_refusal(project: &Path, workspace_root: &Path) -> io::Error {
+    other(format!(
+        "{} sits under the pnpm workspace {} but {} does not list it as an importer, so tog cannot tell whether it is a workspace member. If it is a member you added since the last install, run 'pnpm install' in {} and then run tog again. If it is deliberately outside the workspace, put a .tog directory in {} to make it its own root. Tog refuses rather than write a package-lock.json inside a pnpm workspace",
+        project.display(),
+        workspace_root.display(),
+        workspace_root.join("pnpm-lock.yaml").display(),
+        workspace_root.display(),
+        project.display()
+    ))
 }
 
 /// `Tailor::edit_root` for Node: the root whose lock an edit in `project`
@@ -490,14 +399,7 @@ pub(crate) fn edit_manifest(
         NodeLock::Own { name, root } => (name, root),
         NodeLock::PnpmWorkspaceMember { root } => ("pnpm-lock.yaml".to_string(), root),
         NodeLock::UnlistedUnderPnpmWorkspace { workspace_root } => {
-            return Err(other(format!(
-                "{} sits under the pnpm workspace {} but {} does not list it as an importer, so tog cannot tell whether it is a workspace member. If it is a member you added since the last install, run 'pnpm install' in {} and then run tog again. If it is deliberately outside the workspace, put a .tog directory in {} to make it its own root. Tog refuses rather than write a package-lock.json inside a pnpm workspace",
-                project.display(),
-                workspace_root.display(),
-                workspace_root.join("pnpm-lock.yaml").display(),
-                workspace_root.display(),
-                project.display()
-            )));
+            return Err(unlisted_member_refusal(project, &workspace_root));
         }
     };
     if lock_name == "package-lock.json" {
@@ -511,72 +413,81 @@ pub(crate) fn edit_manifest(
 }
 
 /// A project with its own package-lock.json (or no lock yet): the store
-/// node's npm edits it.
+/// node's npm edits it, confined through the edit door, which publishes
+/// the manifest and the lock with the signed resolution record.
 fn npm_edit(edit: &ManifestEdit<'_>, door: &mut ResolutionDoor<'_>) -> io::Result<EditOutcome> {
     let (project, verb, dev, texts) = (edit.project, edit.verb, edit.dev, &edit.texts());
+    let held = ProjectRoot::open(project)?;
+    crate::kernel::store::Store::check_registrable(held.path())?;
+    super::resolve::refuse_external_path_dependencies(&held)?;
     let node_obj = super::realize_runtime(
         door.store(),
         door.lease(),
         door.platform(),
         &edit.host.toolchain(project, "node")?,
     )?;
-    let mut spec = DelegateSpec::new(node_obj.join("bin/npm"));
-    if !ui::verbose() {
-        spec.arg("--silent");
+    let (npm_verb, extra): (&str, &[&str]) = match verb {
+        EditVerb::Add if dev => ("install", &["--save-dev"]),
+        EditVerb::Add => ("install", &[]),
+        EditVerb::Remove => ("uninstall", &[]),
+        EditVerb::Update => ("update", &[]),
+    };
+    let mut args = super::resolve::npm_resolve_args(npm_verb, extra);
+    if !texts.is_empty() {
+        args.push("--".into());
+        args.extend(texts.iter().cloned());
     }
-    super::quiet_npm(&mut spec);
-    match verb {
-        EditVerb::Add => {
-            spec.arg("install").args(super::NPM_RESOLVE_ONLY);
-            if dev {
-                spec.arg("--save-dev");
-            }
-            if !texts.is_empty() {
-                spec.arg("--").args(texts);
-            }
-        }
-        EditVerb::Remove => {
-            spec.arg("uninstall").args(super::NPM_RESOLVE_ONLY);
-            if !texts.is_empty() {
-                spec.arg("--").args(texts);
-            }
-        }
-        EditVerb::Update => {
-            spec.arg("update").args(super::NPM_RESOLVE_ONLY);
-            if !texts.is_empty() {
-                spec.arg("--").args(texts);
-            }
-        }
-    }
-    spec.lock_root(project).env(
-        "PATH",
-        format!(
-            "{}:{}",
-            node_obj.join("bin").display(),
-            std::env::var("PATH").unwrap_or_default()
-        ),
-    );
-    run_inherited(door, spec, "store npm")?;
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let spec = crate::tailors::record_spec(
+        &super::tailor::Node,
+        &held,
+        door::npm_tool(&node_obj)?,
+        &refs,
+    )?;
+    door::run_node_checked(
+        door,
+        NodeRun {
+            tool: NodeTool::Npm {
+                node_obj: &node_obj,
+            },
+            lock_root: held.path(),
+            cwd: None,
+            args,
+            publish: Publish::Project {
+                outputs: super::resolve::resolution_outputs(&held)?,
+                receipt: Some(record::producer(spec, Default::default())),
+            },
+            capture: false,
+        },
+    )?;
     Ok(EditOutcome {
         files: vec!["package.json".into(), "package-lock.json".into()],
         sync_root: project.to_path_buf(),
     })
 }
 
-/// A pnpm lock, the project's own or its workspace's: the exact pnpm the
-/// `packageManager` field pins edits it.
-fn pnpm_edit(
-    edit: &ManifestEdit<'_>,
+/// The pnpm a project's `packageManager` pins, realized in the `tog x`
+/// cache and found in the store: what a Node door runs. The cache root's
+/// lifecycle lock is held for as long as this lives.
+pub(crate) struct PinnedPnpm {
+    #[allow(dead_code)]
+    tool: CachedTool,
+    pub version: String,
+    pub program: PnpmProgram,
+}
+
+/// The pinned pnpm of the project whose lock root is `lock_root`
+/// (`lock_text` is its `pnpm-lock.yaml`, for the refusal's words). The
+/// pinned pnpm is a registry tool: it resolves through an `x` door on a
+/// Node scope nested in `door`'s, which publishes only when this call
+/// realized it.
+pub(crate) fn pinned_pnpm(
     door: &mut ResolutionDoor<'_>,
-    lock_name: &str,
-    lock_root: PathBuf,
+    host: &dyn EditHost,
+    lock_root: &Path,
     lock_text: &str,
-) -> io::Result<EditOutcome> {
-    let project = edit.project;
-    let manager = node_package_manager(&lock_root, lock_text)?;
-    // The pinned pnpm is a registry tool: it resolves through an `x` door
-    // on a Node scope nested in the edit's, which publishes only when this
-    // call realized it.
+) -> io::Result<PinnedPnpm> {
+    let manager = node_package_manager(lock_root, lock_text)?;
     let mut node_attribution = door.attribution().nested("node")?;
     let tool = {
         let mut x_door = ResolutionDoor::open(
@@ -587,9 +498,9 @@ fn pnpm_edit(
             &mut node_attribution,
         )?;
         corepack::realize_node_tool(
-            edit.host,
+            host,
             &mut x_door,
-            &lock_root,
+            lock_root,
             manager.name(),
             manager.version(),
             manager.corepack_hash(),
@@ -600,92 +511,94 @@ fn pnpm_edit(
     } else {
         node_attribution.discard();
     }
+    let program = door::pnpm_program(&tool.root, manager.version())?;
+    Ok(PinnedPnpm {
+        tool,
+        version: manager.version().to_string(),
+        program,
+    })
+}
+
+/// A pnpm lock, the project's own or its workspace's: the exact pnpm the
+/// `packageManager` field pins edits it, confined through the edit door
+/// at the workspace root (running in the member the edit was made in),
+/// which publishes the manifest and the lock with the signed resolution
+/// record.
+fn pnpm_edit(
+    edit: &ManifestEdit<'_>,
+    door: &mut ResolutionDoor<'_>,
+    lock_name: &str,
+    lock_root: PathBuf,
+    lock_text: &str,
+) -> io::Result<EditOutcome> {
+    let project = edit.project;
+    let workspace = ProjectRoot::open(&lock_root)?;
+    crate::kernel::store::Store::check_registrable(workspace.path())?;
+    super::resolve::refuse_external_path_dependencies(&workspace)?;
+    let pinned = pinned_pnpm(door, edit.host, workspace.path(), lock_text)?;
     let node_obj = super::realize_runtime(
         door.store(),
         door.lease(),
         door.platform(),
         &edit.host.toolchain(project, "node")?,
     )?;
-    let executable = tool
-        .root
-        .join("node_modules/.bin")
-        .join(manager.executable());
-    if !executable.is_file() {
-        return Err(other(format!(
-            "store {}@{} has no {} executable",
-            manager.name(),
-            manager.version(),
-            manager.name()
-        )));
-    }
-    // One per-run stage holds pnpm's isolated HOME/XDG root (so pnpm never
-    // reads or writes the user's pnpm config, store or registry metadata
-    // cache) and the scratch its modules state is pointed at (see
-    // `PnpmScratch`). It is removed when the delegate returns; a leftover
-    // from a killed run carries the `stage-` name `tog gc` sweeps.
-    let stage = door.store().stage_with_activity(door.lease())?;
-    let package_path = project.join("package.json");
-    let result = (|| -> io::Result<()> {
-        let scratch = pnpm_scratch(&stage, project, &lock_root)?;
-        let args = node_delegate_args(
-            edit.verb,
-            &edit.texts(),
-            edit.dev,
-            lock_name == "pnpm-lock.yaml"
-                && project == lock_root
-                && lock_root.join("pnpm-workspace.yaml").is_file(),
-            &scratch,
-        );
-        let pnpm_home_dir = stage.join("home");
-        let pnpm_config = pnpm_home_dir.join("xdg-config");
-        let pnpm_data = pnpm_home_dir.join("xdg-data");
-        let pnpm_cache = pnpm_home_dir.join("xdg-cache");
-        let pnpm_state = pnpm_home_dir.join("xdg-state");
-        fs::create_dir_all(&pnpm_home_dir)?;
-        let mut spec = DelegateSpec::new(&executable);
-        spec.args(&args).lock_root(project).env(
-            "PATH",
-            format!(
-                "{}:{}:{}",
-                node_obj.join("bin").display(),
-                tool.root.join("node_modules/.bin").display(),
-                std::env::var("PATH").unwrap_or_default()
-            ),
-        );
-        spec.env("HOME", &pnpm_home_dir)
-            .env("XDG_CONFIG_HOME", &pnpm_config)
-            .env("XDG_DATA_HOME", &pnpm_data)
-            .env("XDG_CACHE_HOME", &pnpm_cache)
-            .env("XDG_STATE_HOME", &pnpm_state);
-        // `npm_config_ignore_scripts` is set after the `npm_config_` strip
-        // (which `force_env` applies case-insensitively, the way npm and pnpm
-        // read `/^npm_config_/i`), so it is tog's value, not the user's.
-        // It is the only way to say "run no lifecycle script" to
-        // `pnpm remove`, whose parser rejects the `--ignore-scripts` flag;
-        // `add` and `update` carry the flag too, and `--lockfile-only`
-        // itself forces `ignoreScripts` inside pnpm's install options.
-        spec.force_env(
-            &["npm_config_", "PNPM_", "YARN_", "COREPACK_"],
-            &["NODE_OPTIONS"],
-            &[
-                ("CI".into(), "1".into()),
-                ("npm_config_ignore_scripts".into(), "true".into()),
-            ],
-        );
-        run_inherited(door, spec, &format!("store {}", manager.name()))?;
-        Ok(())
-    })();
-    let _ = crate::kernel::store::remove_tree(&stage);
-    result?;
-    let package_label = package_path
-        .strip_prefix(&lock_root)
-        .unwrap_or(&package_path)
-        .to_string_lossy()
-        .into_owned();
+    let cwd = member_dir(&workspace, project)?;
+    let args = pnpm_edit_args(
+        edit.verb,
+        &edit.texts(),
+        edit.dev,
+        lock_name == "pnpm-lock.yaml"
+            && cwd.is_none()
+            && workspace.is_input_file(Path::new("pnpm-workspace.yaml")),
+    );
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let spec = crate::tailors::record_spec(
+        &super::tailor::Node,
+        &workspace,
+        door::pnpm_tool(&pinned.version),
+        &refs,
+    )?;
+    let package_label = match &cwd {
+        Some(member) => member.join("package.json").to_string_lossy().into_owned(),
+        None => "package.json".to_string(),
+    };
+    door::run_node_checked(
+        door,
+        NodeRun {
+            tool: NodeTool::Pnpm {
+                node_obj: &node_obj,
+                program: &pinned.program,
+            },
+            lock_root: workspace.path(),
+            cwd,
+            args,
+            publish: Publish::Project {
+                outputs: super::resolve::resolution_outputs(&workspace)?,
+                receipt: Some(record::producer(spec, Default::default())),
+            },
+            capture: false,
+        },
+    )?;
     Ok(EditOutcome {
         files: vec![package_label, lock_name.to_string()],
         sync_root: lock_root,
     })
+}
+
+/// Where below the workspace root the edited project is: `None` at the
+/// root itself. The project was placed by the lock's importers
+/// (`pnpm_membership`), so it lies under the root.
+fn member_dir(workspace: &ProjectRoot, project: &Path) -> io::Result<Option<PathBuf>> {
+    let real = project.canonicalize()?;
+    match workspace.relative(&real) {
+        Some(relative) if relative.as_os_str().is_empty() => Ok(None),
+        Some(relative) => Ok(Some(relative.to_path_buf())),
+        None => Err(other(format!(
+            "{} is not below the pnpm workspace root {}",
+            real.display(),
+            workspace.path().display()
+        ))),
+    }
 }
 
 #[cfg(test)]
@@ -866,158 +779,32 @@ mod tests {
     }
 
     #[test]
-    fn node_delegate_argv_is_delimited_and_workspace_aware() {
-        let scratch = PnpmScratch {
-            modules_dir: "../../store/tmp/stage-1/modules".into(),
-            virtual_store_dir: "../store/tmp/stage-1/modules/.pnpm".into(),
-            store_dir: "/store/tmp/stage-1/pnpm-store".into(),
-        };
-        let args = node_delegate_args(
-            EditVerb::Add,
-            &["@scope/pkg@1.2.3".into()],
-            true,
-            true,
-            &scratch,
-        );
+    fn pnpm_edit_argv_is_delimited_and_workspace_aware() {
+        let args = pnpm_edit_args(EditVerb::Add, &["@scope/pkg@1.2.3".into()], true, true);
         assert_eq!(
             args,
             vec![
                 "add",
                 "--lockfile-only",
-                "--ignore-scripts",
                 "--reporter",
                 "append-only",
-                "--config.enable-modules-dir=false",
-                "--config.node-linker=isolated",
-                "--config.modules-dir=../../store/tmp/stage-1/modules",
-                "--config.virtual-store-dir=../store/tmp/stage-1/modules/.pnpm",
-                "--config.store-dir=/store/tmp/stage-1/pnpm-store",
                 "-w",
                 "-D",
                 "--",
                 "@scope/pkg@1.2.3"
             ]
         );
-        // Every verb comes from `EditVerb::command`, and every verb whose pnpm
-        // parser accepts `--ignore-scripts` carries it. `remove` is the one
-        // exception: pnpm rejects the flag there ("Unknown option:
-        // 'ignore-scripts'"), so `npm_config_ignore_scripts` in the delegate
-        // environment is what stops its lifecycle scripts.
+        // Every verb comes from `EditVerb::command`. The modules state, the
+        // store, the proxy and `ignore-scripts` are the door's settings, in
+        // the `--config.` spelling every verb's parser takes (`remove`
+        // rejects `--ignore-scripts` and `--modules-dir` as flags).
         for verb in [EditVerb::Add, EditVerb::Remove, EditVerb::Update] {
-            let args = node_delegate_args(verb, &[], false, false, &scratch);
+            let args = pnpm_edit_args(verb, &[], false, false);
             assert_eq!(args[0], verb.command());
-            // The modules-state redirection is on every verb: `remove` and
-            // `update` reject `--modules-dir` as a flag but take `--config.`.
-            assert!(args.contains(&"--config.enable-modules-dir=false".to_string()));
-            // Without a forced linker a project `.npmrc` (`node-linker=hoisted`)
-            // turns the delegate back into a real installer.
-            assert!(args.contains(&"--config.node-linker=isolated".to_string()));
-            assert!(args
-                .iter()
-                .any(|arg| arg.starts_with("--config.store-dir=")));
-            assert!(args
-                .iter()
-                .any(|arg| arg.starts_with("--config.modules-dir=")));
-            assert!(args
-                .iter()
-                .any(|arg| arg.starts_with("--config.virtual-store-dir=")));
-            assert_eq!(
-                args.contains(&"--ignore-scripts".to_string()),
-                verb != EditVerb::Remove,
-                "{verb:?} delegate argv: {args:?}"
-            );
+            assert_eq!(args[1], "--lockfile-only");
+            assert!(!args.contains(&"-w".to_string()));
+            assert!(!args.contains(&"--".to_string()));
         }
-    }
-
-    /// Lexically resolve `base/relative` (`..` pops), the way pnpm's
-    /// `path.join` does, to check where a relative setting lands.
-    fn lexical_join(base: &Path, relative: &str) -> PathBuf {
-        let mut out = base.to_path_buf();
-        for component in Path::new(relative).components() {
-            match component {
-                std::path::Component::ParentDir => {
-                    out.pop();
-                }
-                std::path::Component::Normal(name) => out.push(name),
-                _ => {}
-            }
-        }
-        out
-    }
-
-    /// pnpm joins `modules-dir` onto every importer's directory and
-    /// `virtual-store-dir` onto the lock root. From the project pnpm runs in
-    /// both land in tog's stage, and from any shallower importer the
-    /// modules dir still escapes the project tree. A root-computed one lands
-    /// back inside the project for a deeper importer; the linker flags, not
-    /// this path, are what keep that harmless.
-    #[test]
-    fn pnpm_scratch_paths_resolve_where_pnpm_joins_them() {
-        let temp = TempDir::named("pnpm-scratch");
-        let root = temp.0.clone();
-        let stage = root.join("store/tmp/stage-1");
-        let lock_root = root.join("proj");
-        let member = lock_root.join("packages/lib");
-        fs::create_dir_all(&stage).unwrap();
-        fs::create_dir_all(&member).unwrap();
-        let stage_c = stage.canonicalize().unwrap();
-        let lock_root_c = lock_root.canonicalize().unwrap();
-        let member_c = member.canonicalize().unwrap();
-
-        let scratch = pnpm_scratch(&stage, &member, &lock_root).unwrap();
-        assert!(
-            !scratch.modules_dir.starts_with('/'),
-            "{}",
-            scratch.modules_dir
-        );
-        assert!(
-            !scratch.virtual_store_dir.starts_with('/'),
-            "{}",
-            scratch.virtual_store_dir
-        );
-        assert_eq!(
-            lexical_join(&member_c, &scratch.modules_dir),
-            stage_c.join("modules")
-        );
-        assert_eq!(
-            lexical_join(&lock_root_c, &scratch.virtual_store_dir),
-            stage_c.join("modules/.pnpm")
-        );
-        // The root importer joins the same modules-dir onto its own path.
-        let from_root = lexical_join(&lock_root_c, &scratch.modules_dir);
-        assert!(
-            !from_root.starts_with(&lock_root_c),
-            "root importer's modules dir {} is inside the project",
-            from_root.display()
-        );
-
-        let scratch = pnpm_scratch(&stage, &lock_root, &lock_root).unwrap();
-        assert_eq!(
-            lexical_join(&lock_root_c, &scratch.modules_dir),
-            stage_c.join("modules")
-        );
-        // A root-computed modules-dir lands INSIDE the project for a deeper
-        // importer. This is a property of `path.join` and one relative path,
-        // not something to be fixed by computing it differently; it is
-        // asserted here so nobody reads the previous claim ("escapes from
-        // every importer") back into the code. Safety comes from the linker
-        // flags in `node_delegate_args`, and
-        // `deps_e2e::pnpm_edits_leave_an_installed_project_untouched` is what
-        // proves it end to end.
-        let from_member = lexical_join(&member_c, &scratch.modules_dir);
-        assert!(
-            from_member.starts_with(&lock_root_c),
-            "expected the documented in-project landing, got {}",
-            from_member.display()
-        );
-        assert_eq!(
-            relative_path(Path::new("/a/b/c"), Path::new("/a/x/y")),
-            PathBuf::from("../../x/y")
-        );
-        assert_eq!(
-            relative_path(Path::new("/a"), Path::new("/a/x")),
-            PathBuf::from("x")
-        );
     }
 
     fn selected(project: &Path) -> (String, PathBuf) {
