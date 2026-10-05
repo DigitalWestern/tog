@@ -216,7 +216,7 @@ impl GemInstall<'_> {
                 path: format!("{}:/usr/bin:/bin", ruby_obj.join("bin").display()),
                 host_view,
             };
-            crate::kernel::sandbox::run_build_spec_on_with_activity(platform, &spec, self.activity)
+            crate::kernel::sandbox::run_build_spec_on(platform, &spec, Some(self.activity))
         };
         // What the GEM_HOME held before a hermetic attempt, so a failed one
         // can be undone before the retry (see `gem_home`).

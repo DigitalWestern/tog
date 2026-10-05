@@ -888,7 +888,7 @@ fn run_sdist_build(
         write: vec![work],
         host_view: crate::kernel::sandbox::HostView::Full,
     };
-    crate::kernel::sandbox::run_build_spec_on_with_activity(
+    crate::kernel::sandbox::run_build_spec_on(
         platform,
         &crate::kernel::sandbox::BuildSpec {
             argv,
@@ -900,7 +900,7 @@ fn run_sdist_build(
             path,
             host_view: crate::kernel::sandbox::HostView::Full,
         },
-        activity,
+        Some(activity),
     )
     .map_err(|error| wrap_sandbox_build_error_with_tail(pkg, error, stderr_tail(&log)))
 }

@@ -1243,7 +1243,7 @@ pub fn realize_packages(
         ),
     )?;
     let config = verifier.join("nuget.config").canonicalize()?;
-    let result = crate::kernel::sandbox::run_build_spec_on_with_activity(
+    let result = crate::kernel::sandbox::run_build_spec_on(
         platform,
         &verify_spec(
             &sdk_obj,
@@ -1254,7 +1254,7 @@ pub fn realize_packages(
             &scratch,
             ensure_dotnet_tmp(platform)?,
         ),
-        activity,
+        Some(activity),
     );
     if let Err(e) = result {
         let _ = crate::kernel::store::remove_tree(&scratch);
@@ -1747,18 +1747,16 @@ pub fn build_sandboxed(
         output_scratch: &output_scratch,
     };
     let spec = phase.spec(false, restore, env.clone(), ensure_dotnet_tmp(platform)?);
-    crate::kernel::sandbox::run_build_spec_on_with_activity(platform, &spec, activity).map_err(
-        |e| {
-            io::Error::new(
-                e.kind(),
-                format!(
-                    "offline locked restore failed: {e}; network is denied — \
+    crate::kernel::sandbox::run_build_spec_on(platform, &spec, Some(activity)).map_err(|e| {
+        io::Error::new(
+            e.kind(),
+            format!(
+                "offline locked restore failed: {e}; network is denied — \
                      packages outside the lock, framework packs, or workloads \
                      are unsupported in v0"
-                ),
-            )
-        },
-    )?;
+            ),
+        )
+    })?;
     if !objdir.join("project.assets.json").is_file() {
         let _ = crate::kernel::store::remove_tree(&scratch);
         return Err(err("restore produced no project.assets.json"));
@@ -1778,9 +1776,7 @@ pub fn build_sandboxed(
         "--disable-build-servers".to_string(),
     ]);
     let spec = phase.spec(true, build, env, ensure_dotnet_tmp(platform)?);
-    if let Err(e) =
-        crate::kernel::sandbox::run_build_spec_on_with_activity(platform, &spec, activity)
-    {
+    if let Err(e) = crate::kernel::sandbox::run_build_spec_on(platform, &spec, Some(activity)) {
         let _ = crate::kernel::store::remove_tree(&scratch);
         return Err(io::Error::new(
             e.kind(),

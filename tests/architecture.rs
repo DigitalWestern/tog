@@ -1478,9 +1478,9 @@ const RAW_CHILD_SITES: &[(&str, &str, usize)] = &[
     ("src/kernel/archive.rs", "list_names", 1),
     ("src/kernel/archive.rs", "status_for", 1),
     ("src/kernel/sandbox.rs", "bwrap_preflight_with_activity", 2),
-    // Unmanaged sandbox entry points, for callers that consume no store.
-    ("src/kernel/sandbox.rs", "run_bwrap_with_stdout", 1),
-    ("src/kernel/sandbox.rs", "run_seatbelt_status", 1),
+    // The one unmanaged sandbox spawn: the `None` arm of every sandbox
+    // entry point, for callers that consume no store.
+    ("src/kernel/sandbox.rs", "spawn_unmanaged", 1),
     // Host probes, and the downloaded tog's `--version` before it is
     // installed.
     ("src/commands/selfupdate.rs", "smoke_test", 1),

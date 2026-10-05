@@ -144,6 +144,7 @@ fn version_output(platform: Platform, tree: &Path, binary: &str, flag: &str) -> 
         &scratch,
         &scratch,
         &[],
+        None,
     );
     let read = ran.and_then(|()| fs::read(&answer));
     let _ = fs::remove_dir_all(&scratch);

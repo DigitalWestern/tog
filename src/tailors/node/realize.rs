@@ -1450,14 +1450,14 @@ fn run_package_phases(
             .cloned()
             .chain([("npm_lifecycle_event".to_string(), phase.to_string())])
             .collect();
-        let result = sandbox.run_in_on_with_activity(
+        let result = sandbox.run_in_on(
             platform,
             &["/bin/sh", "-c", script],
             path_env,
             tmp,
             pkg_dir,
             &envs_phase,
-            activity,
+            Some(activity),
         );
         // A missing sandbox backend or an interrupt is never a script
         // failure: neither may become a permissive install-script-failed
