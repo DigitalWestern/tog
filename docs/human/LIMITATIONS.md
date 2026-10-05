@@ -274,7 +274,11 @@ Selection covers every patch of each maintained CPython minor that python-build-
   to import, naming it:
   - `platform_release` and `platform_version` are the running kernel's `uname -r` and
     `uname -v`, so a marker using them is evaluated only when the target is this host,
-    and refused for a cross target.
+    and refused for a cross target. A project whose `uv.lock` names either records the
+    kernel in its closure, so `tog status` reports a change and the next sync re-reads
+    the lock after a kernel update. A Linux release such as `6.8.0-45-generic` is not a
+    PEP 440 version, so ordering it (`platform_release >= '5.0'`) is refused by the next
+    rule. `==`, `!=` and `in` work.
   - An ordering operator (`<`, `>=`, `~=`, ...) on a value that is not a PEP 440 version
     (`sys_platform > 'darwin'`) is refused, where `packaging` compares the strings.
   - A backslash or control character in a quoted value is refused, where `packaging`

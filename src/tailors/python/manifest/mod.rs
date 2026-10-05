@@ -285,6 +285,26 @@ pub(crate) fn read_project_file(project: &ProjectRoot, path: &Path) -> io::Resul
     }
 }
 
+/// The host kernel a `uv.lock` marker was evaluated against, or `None`
+/// when the project's `uv.lock` names no kernel marker (`platform_release`,
+/// `platform_version`). Those two change with the running kernel and no
+/// project file changes with them, so the closure records this beside its
+/// inputs and `tog status` compares it. The check is on the lock's text,
+/// so a lock that only mentions a name elsewhere is recorded too: one
+/// re-sync after a kernel update, never a stale environment.
+pub(crate) fn kernel_marker_record(project: &ProjectRoot) -> io::Result<Option<serde_json::Value>> {
+    let Some(lock) = project.read_input(Path::new("uv.lock")).ok().flatten() else {
+        return Ok(None);
+    };
+    if !markers::names_kernel_marker(&String::from_utf8_lossy(&lock)) {
+        return Ok(None);
+    }
+    let (release, version) = markers::host_kernel()?;
+    Ok(Some(
+        serde_json::json!({"release": release, "version": version}),
+    ))
+}
+
 /// `path.is_file()`, resolved like `read_project_file`.
 pub(crate) fn is_project_file(project: &ProjectRoot, path: &Path) -> bool {
     match project.relative(path) {
