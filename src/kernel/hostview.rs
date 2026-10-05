@@ -1504,6 +1504,43 @@ mod tests {
         let mode = fs::metadata(skeleton.path()).unwrap().permissions().mode();
         assert_eq!(mode & 0o7777, 0o700);
     }
+
+    /// Set in the child `the_skeleton_root_is_private_under_umask_0777`
+    /// runs: only there does this test set the umask, which is process-wide
+    /// and would leak into every other test in this binary.
+    const UMASK_CHILD: &str = "TOG_TEST_HOSTVIEW_UMASK_CHILD";
+
+    /// The root is 0700 even under `umask 0777`, where the mode `create`
+    /// asks for alone would leave it 000 and every `RuntimeOnly` build
+    /// unable to traverse it (#337). The umask is set in a child run of
+    /// this test binary, which reports through its exit status.
+    #[test]
+    fn the_skeleton_root_is_private_under_umask_0777() {
+        use std::os::unix::fs::PermissionsExt as _;
+        const NAME: &str = "kernel::hostview::tests::the_skeleton_root_is_private_under_umask_0777";
+        if std::env::var_os(UMASK_CHILD).is_some() {
+            // SAFETY: umask has no preconditions; this process is the
+            // child run, which runs this one test and nothing else.
+            unsafe { libc::umask(0o777) };
+            let skeleton = ViewSkeleton::create().unwrap();
+            let mode = fs::metadata(skeleton.path()).unwrap().permissions().mode();
+            assert_eq!(mode & 0o7777, 0o700, "{}", skeleton.path().display());
+            return;
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", NAME, "--test-threads=1", "--nocapture"])
+            .env(UMASK_CHILD, "1")
+            .output()
+            .unwrap();
+        let report = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(output.status.success(), "{report}");
+        // The child ran the test rather than filtering it out.
+        assert!(report.contains("1 passed"), "{report}");
+    }
 }
 
 /// The skeleton becomes `/usr/include`, `/usr/lib64` and the rest inside the
