@@ -39,9 +39,13 @@
   - Know whether your change wakes the heavy suite. heavy.yml runs the
     47-minute e2e job on a pull request when it changes any file its
     `gate` job watches: `src/kernel/archive*`, `src/kernel/fetch*`,
-    anything under `src/kernel/provider/`, any `catalog.toml`,
-    `Cargo.lock`, `heavy.yml`, or `tests/acceptance.sh` (the regex in
-    `heavy.yml` is the authority). Once it is woken, every later push
+    `src/kernel/sandbox*`, anything under `src/kernel/provider/`, any
+    `catalog.toml`, `Cargo.lock`, `heavy.yml`, or `tests/acceptance.sh`.
+    It also runs for any file under `tests/` other than a top-level
+    `tests/*.rs`, `tests/size_baseline.txt` or `tests/install.sh`
+    (`tests/common/`, fixtures). A changed top-level `tests/<name>.rs`
+    only runs that file's ignored tests. The `gate` job in `heavy.yml`
+    is the authority. Once it is woken, every later push
     to that pull request runs it again. So do not touch those files in
     passing (a comment fix, a test-only helper): put that in a pull
     request that has to touch them anyway. When a pull request must

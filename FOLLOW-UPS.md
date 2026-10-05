@@ -53,9 +53,6 @@ After the proxy: the test-suite audit (#351) and then the quality review
 
 ## Open work, each its own pull request
 
-- **The action's fixture wakes the heavy suite (#426).** A change under
-  `tests/fixtures/action-demo/` runs the e2e job. Pick: move the fixture
-  out of `tests/`.
 - **Action leftovers (#427).** The first tag that carries `action.yml`, a
   store cache between runs, and a self-test of the signed path.
 - **Leftover `rustfmt.json` from an older tog (#416).** A lone record is
