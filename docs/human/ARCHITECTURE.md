@@ -230,7 +230,9 @@ can reclaim it between runs. A `.tog/closures/rustfmt.json` an older tog
 wrote is a retired name (`store::RETIRED_CLOSURES`): every closure reader
 but gc's live-set walk skips it, and a `tog fmt` without `--check` deletes it
 once another closure sits beside it (a root over an empty closures
-directory stops every sweep, and forgetting it needs the exclusive lease).
+directory stops every sweep, and forgetting it needs the exclusive lease),
+or once gc has forgotten the project's root. gc forgets a root whose only
+closures are retired records when it protects nothing they do not name.
 
 Every cargo run that resolves (`tog add`/`remove`/`update`, a missing
 `Cargo.lock`, `tog attest`, and the `Cargo.lock` of a Python sdist's Rust

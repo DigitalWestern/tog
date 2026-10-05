@@ -39,7 +39,8 @@ pub use roots::*;
 /// Closure file stems an older tog wrote that nothing reads any more.
 /// `tog fmt` used to leave `.tog/closures/rustfmt.json` at a Cargo
 /// workspace root; it now deletes one when it formats beside another
-/// closure, and until then every closure reader skips the name: the root
+/// closure or once gc has forgotten the project's root, and until then
+/// every closure reader skips the name: the root
 /// importer, `status`, `ls`, `audit`, `sbom`, and the sync summary. gc's
 /// live-set walk alone still reads it, so the objects it names stay
 /// protected while it exists.
