@@ -2375,7 +2375,7 @@ fn x_clean_removes_a_root_without_a_request_record_only_when_unfiltered() {
     }
 
     let out = tog(&project.0, &home.0, &["x", "--clean"]);
-    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
     let stdout = text(&out.stdout);
     assert!(!py_root.exists(), "{stdout}");
     assert!(!npm_root.exists(), "{stdout}");
@@ -2421,7 +2421,7 @@ fn x_clean_skips_a_root_whose_registry_entry_is_unusable() {
     std::fs::write(store.join("roots").join(&key), b"\xff not a record\n").unwrap();
 
     let out = tog(&home.0, &home.0, &["x", "--clean"]);
-    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
     let stdout = text(&out.stdout);
     assert!(root.is_dir(), "{stdout}");
     assert!(
@@ -2852,7 +2852,7 @@ fn busy_x_cleanup_retains_the_root_record() {
 
     let out = tog(&home.0, &home.0, &["x", "--clean"]);
     let stdout = text(&out.stdout);
-    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
     assert!(
         stdout.contains("in use by a running tool"),
         "a busy candidate was not narrated: {stdout}"
@@ -2967,10 +2967,15 @@ fn x_clean_skips_an_environment_whose_store_this_tog_does_not_read() {
         };
 
         // From another store: the refused one is the environment's, so the
-        // environment is skipped and the run is not a failure.
+        // environment is skipped and the run exits 1.
         let out = tog_at(&home.0, &home.0, &store_b, &["x", "--clean"]);
         let stdout = text(&out.stdout);
-        assert_eq!(out.status.code(), Some(0), "{case}: {}", text(&out.stderr));
+        assert_eq!(
+            out.status.code(),
+            Some(1),
+            "{case}: a skip exits 1: {}",
+            text(&out.stderr)
+        );
         assert!(
             stdout.contains("its originating store is not one this tog reads"),
             "{case}: {stdout}"
@@ -2991,7 +2996,7 @@ fn x_clean_skips_an_environment_whose_store_this_tog_does_not_read() {
         // From the refused store itself: the same, and there the bare
         // command is the right one.
         let out = tog(&home.0, &home.0, &["x", "--clean"]);
-        assert_eq!(out.status.code(), Some(0), "{case}: {}", text(&out.stderr));
+        assert_eq!(out.status.code(), Some(1), "{case}: {}", text(&out.stderr));
         assert!(
             text(&out.stdout).contains("; fix: tog gc --reset)"),
             "{case}: {}",
@@ -2999,7 +3004,21 @@ fn x_clean_skips_an_environment_whose_store_this_tog_does_not_read() {
         );
         untouched("from its own store, unfiltered", &out);
         let out = tog(&home.0, &home.0, &["x", "--clean", "ruff"]);
-        assert_eq!(out.status.code(), Some(0), "{case}: {}", text(&out.stderr));
+        // A skip exits 1; a filter that matched nothing exits 0. The
+        // request record is what makes `ruff` match.
+        let skipped = text(&out.stdout).contains("tog: skipped x environment");
+        assert_eq!(
+            skipped,
+            with_request_record,
+            "{case}: {}",
+            text(&out.stdout)
+        );
+        assert_eq!(
+            out.status.code(),
+            Some(i32::from(with_request_record)),
+            "{case}: {}",
+            text(&out.stderr)
+        );
         untouched("from its own store", &out);
         assert!(
             !text(&out.stdout).contains("removed x environment"),
@@ -3045,7 +3064,7 @@ fn the_fix_x_clean_prints_resets_the_refused_store_and_no_other() {
     std::fs::write(store_b.join("roots/note"), b"mine").unwrap();
 
     let out = tog_at(&home.0, &home.0, &store_b, &["x", "--clean"]);
-    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
     let stdout = text(&out.stdout);
     let fix = stdout
         .lines()
@@ -3258,7 +3277,12 @@ fn the_fix_for_a_store_whose_path_is_not_utf8_resets_that_store() {
     .unwrap();
 
     let out = tog_at(&home.0, &home.0, &store_b, &["x", "--clean"]);
-    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "the skip exits 1: {}",
+        text(&out.stderr)
+    );
     let stdout = text(&out.stdout);
     let fix = stdout
         .lines()

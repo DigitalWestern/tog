@@ -198,7 +198,6 @@ pub fn dispatch(command: cli::Command, sync: cli::SyncFlags) -> io::Result<i32> 
                 from,
                 tool,
             })
-            .map(|_| 0)
         }
         StoreRoots => return store::roots().map(|_| 0),
         StorePath => return store::path(),
