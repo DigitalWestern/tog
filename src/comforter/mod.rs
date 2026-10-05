@@ -1213,6 +1213,58 @@ mod tests {
         assert_eq!(record.objects, BTreeSet::from([id]));
     }
 
+    /// A historical closure, imported best-effort when a project's first
+    /// root record is written, may name a file inside one of this store's
+    /// objects (an interpreter's path). That reference protected the object
+    /// it points into, so the import keeps that object instead of dropping
+    /// the reference; a path inside an object that is gone, or under
+    /// another store, is still dropped (#355).
+    #[test]
+    fn a_legacy_path_inside_a_local_object_keeps_that_object() {
+        let (_store_dir, store) = test_store("legacy-inside");
+        let current = complete_object(&store, "legacy-current");
+        let interpreter = complete_object(&store, "legacy-interpreter");
+        // Live in this store, and named only by the foreign path below:
+        // a foreign reference wrongly kept would add it to the record.
+        let other = complete_object(&store, "legacy-other");
+        let gone = complete_object(&store, "legacy-gone");
+        let gone_path = store.object_path(&gone).join("bin/python");
+        crate::kernel::store::remove_tree(&store.object_path(&gone)).unwrap();
+        let project_dir = unique_project("legacy-inside");
+        let project = &project_dir.0;
+        envelope(
+            project,
+            "python",
+            serde_json::json!({
+                "interpreter": store.object_path(&interpreter).join("bin/python3").display().to_string(),
+                "gone": gone_path.display().to_string(),
+                "foreign": std::path::Path::new("/elsewhere/store/objects")
+                    .join(&other)
+                    .join("bin/python")
+                    .display()
+                    .to_string(),
+            }),
+        );
+        let root = ProjectRoot::open(project).unwrap();
+        let lock = fs::File::open(project).unwrap();
+        let activity = store
+            .activity(crate::kernel::activity::ActivityMode::Exclusive)
+            .unwrap();
+        let entry = store
+            .register_root_parts_with_project_lock(
+                &activity,
+                &root,
+                BTreeSet::from([current.clone()]),
+                BTreeSet::new(),
+                &lock,
+            )
+            .unwrap();
+        assert_eq!(
+            entry.record.unwrap().objects,
+            BTreeSet::from([current, interpreter])
+        );
+    }
+
     /// Publication writes the durable root record, then the visible closure.
     /// A closure write that fails therefore leaves the record behind (extra
     /// protection), never a closure without one. The closures directory is
