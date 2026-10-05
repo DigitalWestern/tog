@@ -164,8 +164,15 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   subdirectory of their library directory, which `ld` does not search, and reached through
   `LD_LIBRARY_PATH`. That variable outranks a program's own `DT_RUNPATH`: a program a gem
   bundles and runs during its build, relying on its RUNPATH for a library with the same
-  soname as a relocated host library, loads the host copy instead. An explicit `-I` or `-L`
-  into a subdirectory the view keeps (such as `/usr/lib64/python3.14`) is not curated. Native
+  soname as a relocated host library, loads the host copy instead. A library subdirectory
+  with headers, static or libtool archives, `pkgconfig` or `cmake` under it
+  (`/usr/lib64/perl5/CORE`, a Python package's CFFI headers, `/usr/lib64/libnl`) is curated
+  the same way, so an explicit `-I` or `-L` into it finds no development file (#331); the
+  compiler's own `gcc` and `clang` directories are kept whole. Kept files are symlinks into
+  one read-only bind of each whole curated host directory under `/.tog-host-files` (#334),
+  so every file the view hides is still readable there by that path: no default search
+  path, pkg-config directory or symlink in the view names it, but a build that names
+  `/.tog-host-files` on purpose reads the host's development files. Native
   gems also build with tog's pinned native library set mounted (zlib, openssl, libffi,
   libxml2, sqlite, ncurses and the rest of `nativelibs.rs`), and load it at run time through
   their rpath (#329); every Linux gems object with a native gem names that set, so those
@@ -197,8 +204,8 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   outside the curated directories and the compiler) can still make two hosts with the same
   fingerprint build different bytes.
   Pure-Ruby gems compile nothing and install against the whole host. Setting the view up
-  costs about two seconds per native gem on a Fedora 44 workstation, and more on a host with
-  a larger library directory.
+  costs about a quarter of a second per native gem on a Fedora 44 workstation (about 300
+  mounts), against about ten milliseconds for the whole host.
   Python sdist builds that compile Rust or mount the native-library set, and npm install
   scripts, follow the same rule (#328): they run against the C runtime alone first and fall
   back to the whole host with a `host-build-inputs` exception. A failed sdist attempt's

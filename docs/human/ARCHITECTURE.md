@@ -151,7 +151,11 @@ Rules the Linux port settled, which apply to any future platform:
   static archive and pkg-config file out of the compiler's and linker's
   default search paths and out of pkg-config. Other shared libraries the
   host's tools load move to a `.tog-host-runtime` subdirectory that `ld`
-  never searches, reached through `LD_LIBRARY_PATH`. Ruby gems with native
+  never searches, reached through `LD_LIBRARY_PATH`. Library subdirectories
+  holding development files are curated the same way. Each curated host
+  directory is bound once at `/.tog-host-files`, and the files the view
+  keeps are symlinks into it, so setting the view up costs a few hundred
+  mounts rather than one per library file. Ruby gems with native
   extensions, Python sdists that compile Rust or native code, and npm
   install scripts build under `RuntimeOnly` first, so an object committed
   under the `runtime-only/1` view does not depend on which `-dev` packages
