@@ -179,3 +179,4 @@ None open.
 - **Provider selection checks (#509).** Share recipe, runtime, and digest checks in the remaining CPython, Rust, and Rust-path providers.
 - **#524: tests: gaps found in the review of #459 to #496.** e2e children that keep the caller's environment, the tar call-site scan, a subkey signature case, three node tests under `TOG_STRICT=1`. One checklist.
 - **#525: review follow-ups from #474 to #492.** Small hardening items: one Elixir preflight, old project records, `STOPPED_BY`, links in an object's `bin/`, `meta/` listing and read cap, the silent digest skip. One checklist.
+- **#527: tests: gaps found in the review of #526.** Machine policy inode reuse, ecosystems and lock from one root, real uv and Bundler after a swap, detached publication after a rename, the other ancestor walkers under a search-only directory. One checklist.
