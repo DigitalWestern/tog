@@ -285,16 +285,14 @@ pub fn parse_file(path: &Path, text: &str) -> io::Result<Policy> {
     Ok(policy)
 }
 
-fn merge_file(
-    policy: &mut Policy,
-    sources: &mut Vec<PolicySource>,
-    path: &Path,
-    required: bool,
-    origin: SourceOrigin,
-) -> io::Result<bool> {
-    let text = match fs::read_to_string(path) {
-        Ok(text) => text,
-        Err(e) if e.kind() == io::ErrorKind::NotFound && !required => return Ok(false),
+/// A policy file opened once: the descriptor its bytes are read from and
+/// the identity of that same file. Deduplication then compares the file
+/// that was merged, never a later stat of a path that may name another one
+/// by then. `None` when an optional file does not exist.
+fn open_policy(path: &Path, required: bool) -> io::Result<Option<(fs::File, PathIdentity)>> {
+    let file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == io::ErrorKind::NotFound && !required => return Ok(None),
         Err(e) => {
             return Err(io::Error::new(
                 e.kind(),
@@ -302,12 +300,19 @@ fn merge_file(
             ))
         }
     };
-    merge_text(policy, sources, path, &text, origin)?;
-    Ok(true)
+    let identity = file_identity(&file, path)?;
+    Ok(Some((file, identity)))
 }
 
-/// `merge_file` for text already read (the project's own policy, read
-/// through the held project descriptor).
+/// The text of a policy file `open_policy` opened.
+fn read_policy(mut file: fs::File, path: &Path) -> io::Result<String> {
+    let mut text = String::new();
+    io::Read::read_to_string(&mut file, &mut text)
+        .map_err(|e| io::Error::new(e.kind(), format!("read {}: {e}", path.display())))?;
+    Ok(text)
+}
+
+/// Merge one policy file's text, already read through a descriptor.
 fn merge_text(
     policy: &mut Policy,
     sources: &mut Vec<PolicySource>,
@@ -340,20 +345,19 @@ type PathIdentity = (u64, u64);
 #[cfg(not(unix))]
 type PathIdentity = PathBuf;
 
-/// Identify an existing path by its filesystem identity. This catches hard
+/// Identify an open file by its filesystem identity. This catches hard
 /// links and bind mounts that do not share a pathname.
 #[cfg(unix)]
-fn path_identity(path: &Path) -> Option<PathIdentity> {
-    fs::metadata(path)
-        .ok()
-        .map(|metadata| (metadata.dev(), metadata.ino()))
+fn file_identity(file: &fs::File, _path: &Path) -> io::Result<PathIdentity> {
+    let metadata = file.metadata()?;
+    Ok((metadata.dev(), metadata.ino()))
 }
 
-/// Identify a path by its canonical spelling on platforms without Unix file
+/// Identify a file by its canonical spelling on platforms without Unix file
 /// identity fields.
 #[cfg(not(unix))]
-fn path_identity(path: &Path) -> Option<PathIdentity> {
-    Some(fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()))
+fn file_identity(_file: &fs::File, path: &Path) -> io::Result<PathIdentity> {
+    Ok(fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()))
 }
 
 /// Union `other` into `policy`. Union only tightens: the result denies
@@ -482,7 +486,7 @@ pub fn load_with_sources(
 /// descriptor the caller holds: its own `.tog/policy.toml` is the one of
 /// the directory being synced, whatever its path names by then, and its
 /// ancestors' are those of the directories that contain it. The machine
-/// policy is read by path.
+/// policy is found by path and read through the one descriptor opened.
 pub(crate) fn load_with_sources_from(
     project_dir: &Path,
     project: Option<&ProjectRoot>,
@@ -490,44 +494,44 @@ pub(crate) fn load_with_sources_from(
 ) -> io::Result<(Policy, Vec<PolicySource>)> {
     let mut policy = Policy::default();
     let mut sources = Vec::new();
-    let machine_path = if let Some(path) = std::env::var_os("TOG_POLICY") {
-        let path = PathBuf::from(path);
-        merge_file(
-            &mut policy,
-            &mut sources,
-            &path,
-            true,
-            SourceOrigin::Machine,
-        )?;
-        path_identity(&path)
-    } else if let Some(home) = std::env::var_os("HOME") {
-        let path = PathBuf::from(home).join(".tog/policy.toml");
-        let loaded = merge_file(
-            &mut policy,
-            &mut sources,
-            &path,
-            false,
-            SourceOrigin::Machine,
-        )?;
-        loaded.then(|| path_identity(&path)).flatten()
+    // The machine policy is opened once: the bytes merged and the identity
+    // deduplication compares come from the same file (#500).
+    let machine_file = if let Some(path) = std::env::var_os("TOG_POLICY") {
+        Some((PathBuf::from(path), true))
     } else {
-        None
+        std::env::var_os("HOME").map(|home| (PathBuf::from(home).join(".tog/policy.toml"), false))
     };
+    let mut machine_path = None;
+    if let Some((path, required)) = machine_file {
+        if let Some((file, identity)) = open_policy(&path, required)? {
+            let text = read_policy(file, &path)?;
+            merge_text(
+                &mut policy,
+                &mut sources,
+                &path,
+                &text,
+                SourceOrigin::Machine,
+            )?;
+            machine_path = Some(identity);
+        }
+    }
     // Every ancestor's project policy applies (union only tightens), so a
     // workspace-root policy governs builds started in a member directory
     // without tog having to know each ecosystem's rooting rule.
-    let is_machine = |identity: Option<PathIdentity>| {
-        machine_path.is_some() && identity.as_ref() == machine_path.as_ref()
-    };
+    let is_machine = |identity: &PathIdentity| machine_path.as_ref() == Some(identity);
     let Some(project) = project else {
         for dir in project_dir.ancestors() {
             let path = dir.join(".tog/policy.toml");
-            if !is_machine(path_identity(&path)) {
-                merge_file(
+            let Some((file, identity)) = open_policy(&path, false)? else {
+                continue;
+            };
+            if !is_machine(&identity) {
+                let text = read_policy(file, &path)?;
+                merge_text(
                     &mut policy,
                     &mut sources,
                     &path,
-                    false,
+                    &text,
                     SourceOrigin::Project,
                 )?;
             }
@@ -554,8 +558,7 @@ pub(crate) fn load_with_sources_from(
             dir.open_input_file(own)?
         };
         let Some(mut file) = file else { continue };
-        let meta = file.metadata()?;
-        if is_machine(Some((meta.dev(), meta.ino()))) {
+        if is_machine(&file_identity(&file, &path)?) {
             continue;
         }
         let mut bytes = Vec::new();
@@ -1932,6 +1935,64 @@ deny = ["git-dependency"]"#,
         assert_eq!(ours.len(), 1, "{sources:?}");
         assert_eq!(ours[0].origin, SourceOrigin::Machine);
         assert_eq!(ours[0].path.as_deref(), Some(machine.as_path()));
+    }
+
+    /// The bytes merged and the identity deduplication compares come from
+    /// the one file opened, even when the path names another file before
+    /// the read (#500).
+    #[cfg(unix)]
+    #[test]
+    fn a_machine_policy_is_read_and_identified_through_one_descriptor() {
+        let scratch = TempDir::named("policy-one-descriptor");
+        let path = scratch.0.join("policy.toml");
+        fs::write(&path, "deny = [\"git-dependency\"]\n").unwrap();
+        let original = fs::metadata(&path).unwrap();
+        let (file, identity) = open_policy(&path, true).unwrap().unwrap();
+        let aside = scratch.0.join("old.toml");
+        fs::rename(&path, &aside).unwrap();
+        fs::write(&path, "deny = [\"weak-integrity\"]\n").unwrap();
+        assert_eq!(identity, (original.dev(), original.ino()));
+        assert_eq!(
+            read_policy(file, &path).unwrap(),
+            "deny = [\"git-dependency\"]\n"
+        );
+        // A required policy that is missing still refuses, an optional one
+        // is simply absent.
+        let missing = scratch.0.join("missing.toml");
+        assert!(open_policy(&missing, true).is_err());
+        assert!(open_policy(&missing, false).unwrap().is_none());
+    }
+
+    /// A project hard link to a machine file that has since been replaced is
+    /// not the machine policy any more: it merges as the project's own, and
+    /// the machine policy is the new file.
+    #[cfg(unix)]
+    #[test]
+    fn a_hard_link_to_a_replaced_machine_policy_merges_as_the_project() {
+        let scratch = TempDir::named("policy-replaced-machine");
+        let root = scratch.0.clone();
+        let machine = root.join("machine.toml");
+        let project = root.join("project");
+        let project_policy = project.join(".tog/policy.toml");
+        fs::create_dir_all(project_policy.parent().unwrap()).unwrap();
+        fs::write(&machine, "deny = [\"git-dependency\"]\n").unwrap();
+        fs::hard_link(&machine, &project_policy).unwrap();
+        let replacement = root.join("machine.new");
+        fs::write(&replacement, "deny = [\"weak-integrity\"]\n").unwrap();
+        fs::rename(&replacement, &machine).unwrap();
+
+        let _env = test_env_lock();
+        let _policy = EnvVarGuard::set("TOG_POLICY", machine.as_os_str());
+        let _strict = EnvVarGuard::remove("TOG_STRICT");
+        let (merged, sources) = load_with_sources(&project, false).unwrap();
+
+        assert!(merged.deny.contains(GIT_DEPENDENCY));
+        assert!(merged.deny.contains(WEAK_INTEGRITY));
+        let ours = fixture_sources(&sources, &root);
+        assert_eq!(
+            ours.iter().map(|source| source.origin).collect::<Vec<_>>(),
+            vec![SourceOrigin::Machine, SourceOrigin::Project]
+        );
     }
 
     /// The fallback in `current` builds its policy with the same helper the
