@@ -787,6 +787,7 @@ fn node_closure_body(
     workspaces: &[String],
     reasons: &CloneReasons,
     inputs: &[crate::comforter::InputRecord],
+    basis: &crate::comforter::join::Digests,
 ) -> serde_json::Value {
     let cloned = reasons.cloned();
     let CloneReasons {
@@ -802,6 +803,7 @@ fn node_closure_body(
         .collect();
     serde_json::json!({
         "env_object": env_obj,
+        crate::comforter::join::BASIS_FIELD: crate::comforter::join::basis_value(basis),
         "native_libs": native_reference,
         "projection_schema": "node-forest/2",
         "projection_id": paths.proj_id,
@@ -966,6 +968,7 @@ pub fn project_node_env_recorded(
     }
 
     project.create_dir_all(Path::new(".tog"))?;
+    let basis = super::resolve::resolution_basis(project)?;
     let mut body = node_closure_body(
         &env_obj,
         &native_reference,
@@ -975,6 +978,7 @@ pub fn project_node_env_recorded(
         &workspaces,
         &reasons,
         inputs,
+        &basis,
     );
     record_unprojected(&mut body, &tracked, &workspaces);
     if let Some(record) = runtime_record {

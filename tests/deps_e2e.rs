@@ -302,8 +302,12 @@ fn python_uv_add_update_remove_roundtrip() {
 #[ignore]
 fn npm_add_update_remove_roundtrip() {
     let temp = scratch("npm");
-    let project = &temp.0;
-    let store = project.join("store");
+    // The project is its own directory beside home and the store: npm runs
+    // confined, and the door refuses a project that contains the signing
+    // key under home.
+    let project = &temp.0.join("project");
+    std::fs::create_dir_all(project).unwrap();
+    let store = temp.0.join("store");
     std::fs::write(
         project.join("package.json"),
         "{\"name\":\"deps-e2e\",\"version\":\"1.0.0\"}\n",
@@ -363,9 +367,9 @@ fn npm_add_update_remove_roundtrip() {
 #[ignore]
 fn pnpm_add_update_remove_roundtrip() {
     let temp = scratch("pnpm");
-    copy_tree(&fixture("proj-pnpm"), &temp.0);
-    let project = &temp.0;
-    let store = project.join("store");
+    let project = &temp.0.join("project");
+    copy_tree(&fixture("proj-pnpm"), project);
+    let store = temp.0.join("store");
     set_package_manager(project, "pnpm@9.12.3");
 
     assert_ok(
@@ -570,9 +574,9 @@ fn pnpm_add_update_remove_roundtrip() {
 #[ignore]
 fn mixed_cargo_pnpm_edit_keeps_cargo_exception_with_cargo() {
     let temp = scratch("mixed-cargo-pnpm");
-    let project = &temp.0;
-    let store = project.join("store");
-    copy_tree(&fixture("proj-pnpm"), &temp.0);
+    let project = &temp.0.join("project");
+    let store = temp.0.join("store");
+    copy_tree(&fixture("proj-pnpm"), project);
     std::fs::write(
         project.join("Cargo.toml"),
         "[package]\nname = \"mixed-cargo-pnpm\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
@@ -726,9 +730,9 @@ fn install_with_store_pnpm(temp: &TempDir, project: &Path, store: &Path) {
 #[ignore]
 fn pnpm_edits_leave_an_installed_project_untouched() {
     let temp = scratch("pnpm-installed");
-    copy_tree(&fixture("proj-pnpm"), &temp.0);
-    let project = &temp.0;
-    let store = project.join("store");
+    let project = &temp.0.join("project");
+    copy_tree(&fixture("proj-pnpm"), project);
+    let store = temp.0.join("store");
     set_package_manager(project, "pnpm@9.12.3");
 
     // A local dependency whose lifecycle scripts all leave a marker.
@@ -839,10 +843,10 @@ fn pnpm_edits_leave_an_installed_project_untouched() {
 #[ignore]
 fn pnpm_workspace_member_and_root_roundtrip() {
     let temp = scratch("pnpm-workspace");
-    copy_tree(&fixture("proj-pnpm-ws"), &temp.0);
-    let project = &temp.0;
+    let project = &temp.0.join("project");
+    copy_tree(&fixture("proj-pnpm-ws"), project);
     let member = project.join("packages/lib");
-    let store = project.join("store");
+    let store = temp.0.join("store");
     set_package_manager(project, "pnpm@9.12.3");
 
     assert_ok(
@@ -948,9 +952,9 @@ fn pnpm_workspace_member_and_root_roundtrip() {
 #[ignore]
 fn nested_independent_npm_project_does_not_use_ancestor_pnpm_lock() {
     let temp = scratch("pnpm-nested-npm");
-    copy_tree(&fixture("proj-pnpm-ws"), &temp.0);
-    let project = &temp.0;
-    let store = project.join("store");
+    let project = &temp.0.join("project");
+    copy_tree(&fixture("proj-pnpm-ws"), project);
+    let store = temp.0.join("store");
     set_package_manager(project, "pnpm@9.12.3");
     let ancestor_lock = std::fs::read_to_string(project.join("pnpm-lock.yaml")).unwrap();
     let nested = project.join("tools/nested-npm");

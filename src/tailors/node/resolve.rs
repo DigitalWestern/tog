@@ -226,6 +226,15 @@ fn expand_workspace_glob(root: &ProjectRoot, pattern: &str) -> io::Result<Vec<St
     Ok(found)
 }
 
+/// The closure's `resolution_basis`: every resolution file of the lock
+/// root that exists, by the digest of its bytes now, read through the
+/// held descriptor under the project lock the closure writer holds.
+pub(crate) fn resolution_basis(root: &ProjectRoot) -> io::Result<crate::comforter::join::Digests> {
+    let mut listed = resolution_outputs(root)?;
+    listed.extend(resolution_inputs(root)?);
+    record::file_digests(root, &listed)
+}
+
 /// Refuse a project whose manifests name a `file:` or `link:` dependency
 /// (or a bare path spec, which npm reads the same way) that resolves
 /// outside the lock root. The door snapshots the lock root alone, so a
