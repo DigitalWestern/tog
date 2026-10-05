@@ -781,7 +781,7 @@ fn run_passes_arguments_through_and_needs_a_project() {
     let stderr = text(&out.stderr);
     assert!(stderr.contains("no environment projected here"), "{stderr}");
     assert!(stderr.contains("no manifest to sync one from"), "{stderr}");
-    assert!(stderr.contains("PROJECT INPUTS"), "{stderr}");
+    assert!(stderr.contains("(see 'tog help inputs')"), "{stderr}");
     assert!(!stderr.contains("syncing first"), "{stderr}");
     // `--` reaches the same place with a program literally named `-h`.
     let out = tog(&project.0, &home.0, &["run", "--", "-h"]);
@@ -1117,6 +1117,14 @@ fn unknown_first_word_runs_a_package_json_script_or_errors() {
     let stderr = text(&out.stderr);
     assert!(stderr.contains("syncing first: "), "{stderr}");
     assert!(stderr.contains("no pinned CPython"), "{stderr}");
+    // A bare `tog` and `tog sync` from there sync the project above too:
+    // the pinned CPython stops them at the project's own selection.
+    for args in [&[][..], &["sync"]] {
+        let out = tog(&src, &home.0, args);
+        let stderr = text(&out.stderr);
+        assert_eq!(out.status.code(), Some(1), "{args:?}: {stderr}");
+        assert!(stderr.contains("no pinned CPython"), "{args:?}: {stderr}");
+    }
     // A built-in verb always wins over a same-named script. `build` syncs
     // only for the ecosystem it builds, so the stale node and python
     // environments here start no sync in front of its own refusal.

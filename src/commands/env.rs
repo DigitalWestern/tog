@@ -37,8 +37,8 @@ pub fn run(ctx: &Context, shell: Option<Shell>, frozen: bool) -> io::Result<i32>
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
             format!(
-                "no environment projected here, and no manifest to sync one from in {} (see \
-                 PROJECT INPUTS in 'tog --help')",
+                "no environment projected here, and no manifest to sync one from in {} (see 'tog \
+                 help inputs')",
                 dir.display()
             ),
         ));

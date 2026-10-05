@@ -177,6 +177,10 @@ pub trait Tailor: Sync {
     /// The one test `sync`, `plan`, `status`, `deps`, and `fmt` all use.
     fn detect(&self, project: &ProjectRoot) -> io::Result<bool>;
 
+    /// The files [`Tailor::detect`] looks for, in words, for the message
+    /// that says none were found. `tog help inputs` is the long form.
+    fn input_files(&self) -> &'static str;
+
     /// Before any store-touching work, for every detected ecosystem
     /// whatever the command is about: are the declarative toolchain inputs
     /// well-formed? Host-independent, so a malformed request refuses on

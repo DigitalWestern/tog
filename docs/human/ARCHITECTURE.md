@@ -983,9 +983,11 @@ and build inputs tailors share, so no tailor reaches into another):
     ui.rs           output conventions: quiet/verbose/color, error channel
 
 Comforter (`src/comforter/`): ecosystem-neutral closure records, projection
-symlinks, clone-tree and backup helpers (`mod.rs`) and `status.rs`, the
-projection-currency checks `tog status` is built from. It names no
-tailor; Python environment realization lives in `tailors/python/env.rs`.
+symlinks, clone-tree and backup helpers (`mod.rs`), `records.rs`, the
+committed closure records read as they are (envelope, body, exceptions,
+any platform) for `ls`, `status`, `audit` and `sbom`, and `status.rs`, the
+projection-currency checks `tog status` is built from. Freshness asks the
+tailors, so it stays in `commands/inspect.rs`. It names no tailor; Python environment realization lives in `tailors/python/env.rs`.
 
 Tailors (`src/tailors/<ecosystem>/`, leaves of the module graph). Every
 folder has `tailor.rs` (its `impl Tailor`, the one blueprint every

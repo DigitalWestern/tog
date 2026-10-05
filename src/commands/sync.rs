@@ -124,6 +124,20 @@ pub fn run_command(
     run_in_mode(platform, fresh, mode, false)
 }
 
+/// The directory `tog sync` run at `cwd` syncs. A directory with project
+/// inputs of its own is synced itself, so a project nested under a synced
+/// root (a docs site with its own `package.json`) can be given its own
+/// environment by syncing it there. Otherwise the project above, as `run`
+/// and the bare `tog` find it, so a sync from `src/` syncs the project,
+/// not `src/`.
+fn sync_dir(cwd: &Path) -> io::Result<PathBuf> {
+    if crate::commands::inspect::detected(cwd)?.is_empty() {
+        project_root(cwd)
+    } else {
+        Ok(cwd.to_path_buf())
+    }
+}
+
 /// The one path from a command line into a sync: preflight before the store
 /// is opened, prove the project directory is still the one preflight
 /// checked, then publish the lock and run the tailors.
@@ -137,7 +151,7 @@ pub(crate) fn run_in_mode(
     mode: Mode,
     stop_after_lock: bool,
 ) -> io::Result<()> {
-    let dir = context::project_dir();
+    let dir = sync_dir(&context::project_dir())?;
     // An interrupted resolution publication is undone before anything
     // reads the project. Its originals are in the store, so opening the
     // store early leaves no trace a refusal would have avoided.
@@ -199,15 +213,10 @@ fn recover_resolution(platform: Platform, dir: &Path) -> io::Result<Option<Conte
     Ok(Some(ctx))
 }
 
-/// Sync with a context the caller already opened (`add`/`remove`/`update`
-/// after their manifest edit).
-pub fn run(ctx: &Context, fresh: bool) -> io::Result<()> {
-    run_in(ctx, &project_root(&ctx.project_dir())?, fresh, false)
-}
-
-/// The same sync of one named directory: the projected root a command
-/// found by walking up, which is not always the process cwd.
-fn run_in(ctx: &Context, dir: &Path, fresh: bool, frozen: bool) -> io::Result<()> {
+/// A sync of one named directory, with a context the caller
+/// already opened: `add`/`remove`/`update` after their manifest edit, and
+/// the sync `run` and `build` start.
+pub(crate) fn run_in(ctx: &Context, dir: &Path, fresh: bool, frozen: bool) -> io::Result<()> {
     let mode = if frozen { Mode::Frozen } else { Mode::Writable };
     if resolve::transaction::has_pending_journal(dir) {
         resolve::transaction::recover_project(&ctx.store, &ctx.activity, dir)?;
@@ -1030,6 +1039,26 @@ mod tests {
         assert_eq!(project_root(&bare).unwrap(), bare);
     }
 
+    /// `tog sync` syncs the directory it is run in when that directory has
+    /// inputs of its own, a project nested under a synced root included,
+    /// and the project above from anywhere else.
+    #[test]
+    fn sync_syncs_a_nested_project_where_it_stands() {
+        let temp = TempDir::new();
+        let root = temp.0.join("repo");
+        let docs = root.join("docs");
+        std::fs::create_dir_all(root.join(".tog/closures")).unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(docs.join("pages")).unwrap();
+        std::fs::write(root.join("Cargo.toml"), "[package]\nname = \"x\"\n").unwrap();
+        std::fs::write(docs.join("package.json"), "{}").unwrap();
+        assert_eq!(sync_dir(&root.join("src")).unwrap(), root);
+        assert_eq!(sync_dir(&docs).unwrap(), docs);
+        // Below the nested project the marked root still answers, as it
+        // does for `run`, until the nested project is synced and marked.
+        assert_eq!(sync_dir(&docs.join("pages")).unwrap(), root);
+    }
+
     /// The build's sync realizes the built ecosystem only: with two
     /// ecosystems detected, scoping to one leaves the other out. The lock
     /// stays whole regardless, because `commit` publishes the full pending
@@ -1061,6 +1090,9 @@ mod tests {
     }
 
     impl Tailor for HostlessPython {
+        fn input_files(&self) -> &'static str {
+            "test input"
+        }
         fn id(&self) -> &'static str {
             "python"
         }
@@ -1270,7 +1302,7 @@ mod tests {
         let _store_env = StoreEnv::enter(&temp.0.join("store"));
         let ctx = Context::open_in(Platform::host().unwrap(), &project).unwrap();
 
-        let error = run(&ctx, false).unwrap_err();
+        let error = run_in(&ctx, &project, false, false).unwrap_err();
         assert!(
             error
                 .to_string()
@@ -1324,6 +1356,9 @@ mod tests {
     }
 
     impl Tailor for SwappedMidSync {
+        fn input_files(&self) -> &'static str {
+            "test input"
+        }
         fn id(&self) -> &'static str {
             "python"
         }

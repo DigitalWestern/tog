@@ -49,6 +49,10 @@ impl Tailor for Ruby {
         Ok(project.is_input_file(Path::new("Gemfile")))
     }
 
+    fn input_files(&self) -> &'static str {
+        "Gemfile"
+    }
+
     fn preflight(&self, platform: Platform, _project: &ProjectRoot) -> io::Result<()> {
         ruby::preflight_platform(platform)
     }

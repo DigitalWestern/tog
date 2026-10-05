@@ -884,15 +884,17 @@ works.
            takes the newest pinned patch, X.Y.Z must be an exact pinned
            build, and with neither the newest pinned build is taken once
            and then recorded in tog-toolchain.toml.
-  node     package-lock.json (v2/v3), pnpm-lock.yaml (v9, v6 importer
-           shape also accepted), yarn.lock (Yarn classic v1)
+  node     package.json with package-lock.json (v2/v3), pnpm-lock.yaml
+           (v9, v6 importer shape also accepted) or yarn.lock (Yarn
+           classic v1); a missing lock is written by the store npm
   cargo    Cargo.toml, Cargo.lock; a missing lock is written by the
            store Cargo
   go       go.mod, go.sum; the closure is computed by the store Go
   ruby     Gemfile, Gemfile.lock; a missing lock is resolved by store
            bundler
   elixir   mix.exs, mix.lock; a missing lock is resolved by store mix
-  dotnet   *.csproj with packages.lock.json (the lock is mandatory)
+  dotnet   *.csproj, *.sln or *.slnx with packages.lock.json (the lock
+           is mandatory)
 
 tog-toolchain.toml at the project root pins the runtime per ecosystem;
 'tog help setup' says how it is written and moved.

@@ -91,6 +91,10 @@ impl Tailor for Go {
         Ok(project.is_input_file(Path::new("go.mod")))
     }
 
+    fn input_files(&self) -> &'static str {
+        "go.mod"
+    }
+
     fn preflight(&self, platform: Platform, _project: &ProjectRoot) -> io::Result<()> {
         go::preflight_platform(platform)
     }

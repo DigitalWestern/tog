@@ -124,6 +124,10 @@ impl Tailor for Cargo {
         Ok(inputs::is_cargo_here(project))
     }
 
+    fn input_files(&self) -> &'static str {
+        "Cargo.toml, Cargo.lock"
+    }
+
     fn preflight(&self, platform: Platform, _project: &ProjectRoot) -> io::Result<()> {
         cargo::preflight_platform(platform)
     }
