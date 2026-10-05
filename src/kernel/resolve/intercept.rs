@@ -35,7 +35,8 @@ use super::mirror::{self, Exchange, Record};
 use super::proxy::{next_request, Context, Stream, Timed, Transport, Tunnel};
 use super::redact;
 use super::routes::{
-    check_route_path, Claim, Endpoint, Permitted, RegistryProtocol, RequestClass, Route, Upstream,
+    check_route_path_with, Claim, Endpoint, Permitted, RegistryProtocol, RequestClass, Route,
+    Upstream,
 };
 use crate::kernel::policy;
 use rustls::{ServerConnection, StreamOwned};
@@ -211,7 +212,17 @@ fn serve(
         );
         return refuse(out, shown, 421, &why, false);
     }
-    if let Err(why) = check_route_path(&request.target) {
+    // A route that serves this host may take an encoded slash in a
+    // segment (npm's scoped packuments); its own grammar is still applied
+    // by `Route::resolve` below. Every other host gets the strict grammar.
+    let encoded_slash = state.config.routes.iter().any(|route| {
+        route.protocol.encoded_slash()
+            && route
+                .endpoints
+                .iter()
+                .any(|endpoint| endpoint.origin() == target.origin)
+    });
+    if let Err(why) = check_route_path_with(&request.target, encoded_slash) {
         return refuse(out, shown, 403, &why, keep_alive);
     }
     let Ok(url) = Url::parse(&format!("{}{}", target.origin, request.target)) else {
@@ -1001,6 +1012,73 @@ mod tests {
                 assert_eq!(report.facts.refusals.len(), 1, "{:?}", report.facts);
             }
         }
+    }
+
+    /// A route whose protocol takes an encoded slash (npm's scoped
+    /// packuments): `/@s%2fn` inside the tunnel reaches the route and is
+    /// forwarded as spelled, while the strict grammar still refuses it on
+    /// a host no such route serves, and `..` behind the encoded slash
+    /// stays refused on the route host.
+    #[test]
+    fn a_route_may_take_an_encoded_slash_inside_the_tunnel() {
+        struct Encoded;
+        impl RegistryProtocol for Encoded {
+            fn route_id(&self) -> &'static str {
+                "fixture"
+            }
+            fn upstream(&self, endpoints: &[Endpoint], path: &str) -> io::Result<Upstream> {
+                crate::kernel::resolve::routes::testing::TEST_PROTOCOL.upstream(endpoints, path)
+            }
+            fn classify(&self, url: &Url) -> RequestClass {
+                crate::kernel::resolve::routes::testing::TEST_PROTOCOL.classify(url)
+            }
+            fn claims(&self, _url: &Url, _body: &[u8]) -> Vec<(Url, Claim)> {
+                Vec::new()
+            }
+            fn encoded_slash(&self) -> bool {
+                true
+            }
+        }
+        static ENCODED: Encoded = Encoded;
+        let harness = Harness::new("intercept-encoded-slash");
+        harness.upstream.set(
+            "/meta/@s%2fn.json",
+            Behavior::Reply(Reply::new(200, b"{}").header("Content-Type", "application/json")),
+        );
+        let mut config = harness.config(Policy::default(), Mode::Online);
+        config.intercept = Intercept::Tls;
+        config.routes = vec![Route::new(
+            &ENCODED,
+            vec![Endpoint::for_test("registry.test", harness.upstream.port())],
+        )
+        .unwrap()];
+        let (session, address) = harness.open(config);
+        let authority = format!("registry.test:{}", harness.upstream.port());
+        let roots = harness.proxy.authority().roots();
+        let mut tunnel =
+            open_tunnel(&address, &authority, "registry.test", roots.clone(), &[]).unwrap();
+        let scoped = tunnel_request(&mut tunnel, &get(&authority, "/meta/@s%2fn.json"), b"");
+        assert_eq!(scoped.status, 200, "{}", scoped.text());
+        let dotdot = tunnel_request(&mut tunnel, &get(&authority, "/meta/@s%2f../x.json"), b"");
+        assert_eq!(dotdot.status, 403, "{}", dotdot.text());
+        assert!(dotdot.text().contains(". or .."), "{}", dotdot.text());
+        drop(tunnel);
+        // The same path on an unrouted host meets the strict grammar.
+        let other = format!("other.test:{}", harness.upstream.port());
+        let mut tunnel = open_tunnel(&address, &other, "other.test", roots, &[]).unwrap();
+        let strict = tunnel_request(&mut tunnel, &get(&other, "/meta/@s%2fn.json"), b"");
+        assert_eq!(strict.status, 403, "{}", strict.text());
+        assert!(
+            strict.text().contains("percent-encoded"),
+            "{}",
+            strict.text()
+        );
+        drop(tunnel);
+        let report = session.finish();
+        assert_eq!(harness.upstream.hits("/meta/@s%2fn.json"), 1);
+        assert!(entries(&report).iter().any(|entry| entry.url
+            == harness.upstream_url("/meta/@s%2fn.json")
+            && entry.status == 200));
     }
 
     fn fetch(url: &str, method: &str) -> Option<Result<String, String>> {

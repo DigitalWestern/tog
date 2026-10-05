@@ -108,6 +108,10 @@ pub struct ConfinedSpec<'a> {
     pub scratch_outputs: Vec<PathGlob>,
     /// Paths under each snapshot root that are neither copied nor diffed.
     pub exclude: Vec<PathGlob>,
+    /// Where the tool runs, relative to the lock root: a workspace member
+    /// whose manifest the tool edits while the lock lives at the root.
+    /// `None` runs it in the lock root itself. Plain components only.
+    pub cwd: Option<PathBuf>,
     /// Project-side trees outside the lock root the tool reads.
     pub extra_roots: Vec<PathBuf>,
     /// Store objects the tool runs from, bound read-only.
@@ -146,6 +150,7 @@ impl<'a> ConfinedSpec<'a> {
             outputs: Vec::new(),
             scratch_outputs: Vec::new(),
             exclude: Vec::new(),
+            cwd: None,
             extra_roots: Vec::new(),
             store_reads: Vec::new(),
             cache_roots: Vec::new(),
@@ -159,6 +164,55 @@ impl<'a> ConfinedSpec<'a> {
             policy: None,
         }
     }
+
+    /// Where the run's accepted outputs go, from a tailor's own run type.
+    pub fn publish(&mut self, publish: Publish<'a>) {
+        match publish {
+            Publish::Project { outputs, receipt } => {
+                self.outputs = outputs;
+                self.target = Target::Project { receipt };
+            }
+            Publish::Detached { outputs } => {
+                self.outputs = outputs;
+                self.target = Target::Detached;
+            }
+        }
+    }
+}
+
+/// A [`Target`] with the outputs it publishes: what a tailor's run type
+/// carries from its call site to [`ConfinedSpec::publish`].
+pub enum Publish<'a> {
+    /// The lock root is a project: `outputs` go through the transaction,
+    /// with the receipt the producer makes.
+    Project {
+        outputs: Vec<PathBuf>,
+        receipt: Option<ReceiptProducer<'a>>,
+    },
+    /// The lock root is tog's own: accepted `outputs` are written back
+    /// into it, and the caller roots the ledger.
+    Detached { outputs: Vec<PathBuf> },
+}
+
+/// The proxy environment of an intercepting door, for a tool that reads
+/// it rather than taking flags (uv, curl-based tools, Node code other than
+/// npm): every spelling of the proxy variables set to the session's
+/// forward-proxy URL, `NO_PROXY` empty so no host bypasses it, and
+/// `SSL_CERT_FILE` naming the session CA as the tool sees it, which the
+/// OpenSSL-convention readers take as their whole root set. A tool whose
+/// flags beat its environment (npm, pnpm) gets these too, for any child
+/// that reads the environment instead.
+pub fn proxy_env(address: &ProxyAddress, ca_file: &Path) -> Vec<(OsString, OsString)> {
+    let url = address.proxy_url();
+    let mut env: Vec<(OsString, OsString)> =
+        ["HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy"]
+            .iter()
+            .map(|name| (OsString::from(name), OsString::from(&url)))
+            .collect();
+    env.push(("NO_PROXY".into(), OsString::new()));
+    env.push(("no_proxy".into(), OsString::new()));
+    env.push(("SSL_CERT_FILE".into(), ca_file.as_os_str().to_os_string()));
+    env
 }
 
 /// What a receipt producer is given.
@@ -370,6 +424,7 @@ fn run_tool(
         .map_err(|error| io::Error::other(format!("the relay address: {error}")))?;
     let address = session.listen_unix(&dir.socket, advertised)?;
     let invocation = invocation(spec, confined, &address, snapshot, forced_args)?;
+    let cwd = working_directory(confined, snapshot)?;
     let executable = relay_executable()?;
     let unconfined_denied = policy::denied(policy, policy::UNCONFINED_RESOLUTION);
     let outcome = confine::confined_run(
@@ -384,7 +439,7 @@ fn run_tool(
             ca_file: ca_file.as_deref(),
             executable: &executable,
             argv: &invocation.argv,
-            cwd: &snapshot.lock_root().real,
+            cwd: &cwd,
             env: &invocation.env,
             read_roots: &confined.store_reads,
             cache_roots: &confined.cache_roots,
@@ -404,6 +459,30 @@ fn run_tool(
         token,
         advertised: advertised.to_string(),
     })
+}
+
+/// The directory the tool runs in: the lock root, or the spec's `cwd`
+/// below it (plain components only, so it cannot name a place outside the
+/// snapshot or cross `..` into one).
+fn working_directory(confined: &ConfinedSpec<'_>, snapshot: &Snapshot) -> io::Result<PathBuf> {
+    let root = &snapshot.lock_root().real;
+    let Some(relative) = &confined.cwd else {
+        return Ok(root.clone());
+    };
+    let plain = relative
+        .components()
+        .all(|component| matches!(component, Component::Normal(_)));
+    if relative.as_os_str().is_empty() || !plain {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "the working directory {} for {} is not a plain path below the lock root",
+                relative.display(),
+                confined.name
+            ),
+        ));
+    }
+    Ok(root.join(relative))
 }
 
 /// The tool's argv and whole environment.
@@ -1089,6 +1168,52 @@ get() {
         expected.remove(Path::new("deps.lock"));
         assert_eq!(after, expected, "only the output and the receipt changed");
         assert!(outcome.recorded.is_empty(), "{:?}", outcome.recorded);
+    }
+
+    /// The spec's `cwd` runs the tool in a directory below the lock root
+    /// (a workspace member), still on the snapshot: the output it writes
+    /// at the root is published. A `cwd` that is not a plain path below
+    /// the root is refused before anything runs.
+    #[test]
+    fn the_tool_runs_in_the_spec_cwd_below_the_lock_root() {
+        let Some(relay) = relay("the_tool_runs_in_the_spec_cwd_below_the_lock_root") else {
+            return;
+        };
+        let fx = fixture("door-cwd");
+        fs::create_dir_all(fx.project.join("packages/member")).unwrap();
+        let outcome = run_door(
+            &fx,
+            Some(relay.clone()),
+            "pwd > ../../deps.lock\n",
+            Policy::default(),
+            |confined| confined.cwd = Some(PathBuf::from("packages/member")),
+        );
+        let report = outcome.result.unwrap();
+        assert!(
+            report.status.success(),
+            "{}",
+            String::from_utf8_lossy(&report.stderr)
+        );
+        assert_eq!(
+            fs::read_to_string(fx.project.join("deps.lock")).unwrap(),
+            format!("{}\n", fx.project.join("packages/member").display())
+        );
+        for bad in ["../elsewhere", "/tmp", ""] {
+            let before = tree(&fx.project);
+            let outcome = run_door(
+                &fx,
+                Some(relay.clone()),
+                "echo ran > deps.lock\n",
+                Policy::default(),
+                |confined| confined.cwd = Some(PathBuf::from(bad)),
+            );
+            let error = outcome.result.unwrap_err().to_string();
+            assert!(
+                error.contains("not a plain path below the lock root"),
+                "{bad}: {error}"
+            );
+            assert_eq!(tree(&fx.project), before, "{bad}: the project changed");
+        }
     }
 
     #[test]
