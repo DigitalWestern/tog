@@ -729,20 +729,27 @@ pub fn install_kinds() {
 
 /// The tailors whose inputs are present in `dir`, in registry order.
 pub fn detected(dir: &Path) -> io::Result<Vec<&'static dyn Tailor>> {
-    // A directory that is not there, or not a directory, has nothing to
-    // detect. One tog may not read is an error naming the path: an empty
-    // detection would report "no project here" for a project that exists.
     let project = match ProjectRoot::open(dir) {
         Ok(project) => project,
-        Err(error)
-            if error.kind() == io::ErrorKind::NotFound
-                || error.kind() == io::ErrorKind::InvalidData =>
-        {
-            return Ok(Vec::new())
-        }
+        Err(error) if nothing_to_detect(dir, &error) => return Ok(Vec::new()),
         Err(error) => return Err(error),
     };
     detected_in(&project)
+}
+
+/// Whether `error`, from opening `dir`, means there is no project there: the
+/// path is missing, or it names something that is not a directory. Any
+/// other failure is an error naming the path, since an empty detection
+/// would report "no project here" for a project that exists. That includes
+/// the refusal `ProjectRoot::open` gives when a directory on the path was
+/// swapped for a symlink while it walked: it shares `InvalidData` with the
+/// not-a-directory case, so the path itself is looked at to tell them apart.
+fn nothing_to_detect(dir: &Path, error: &io::Error) -> bool {
+    match error.kind() {
+        io::ErrorKind::NotFound => true,
+        io::ErrorKind::InvalidData => std::fs::metadata(dir).is_ok_and(|meta| !meta.is_dir()),
+        _ => false,
+    }
 }
 
 /// `detected` for a project the caller already holds: sync detects through
@@ -822,6 +829,24 @@ mod tests {
             std::fs::write(temp.0.join(lock), "").unwrap();
             require_lock(&project).unwrap_or_else(|error| panic!("{tailor}: {error}"));
         }
+    }
+
+    #[test]
+    fn a_file_has_nothing_to_detect_but_a_refused_directory_is_an_error() {
+        let temp = crate::kernel::testutil::TempDir::new();
+        let file = temp.0.join("go.mod");
+        std::fs::write(&file, "module example.com/m\n").unwrap();
+        assert!(detected(&file).unwrap().is_empty());
+        // The refusal a symlink swapped in mid-walk gives, for a path that
+        // is a directory when looked at: that is no "nothing here".
+        let refusal = io::Error::new(
+            io::ErrorKind::InvalidData,
+            "x is not a real directory; refusing to open project through it",
+        );
+        assert!(!nothing_to_detect(&temp.0, &refusal));
+        assert!(nothing_to_detect(&file, &refusal));
+        let missing = io::Error::from(io::ErrorKind::NotFound);
+        assert!(nothing_to_detect(&temp.0.join("absent"), &missing));
     }
 
     #[test]
