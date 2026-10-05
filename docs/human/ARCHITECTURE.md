@@ -1057,6 +1057,7 @@ when the two differ.
     ruby/native.rs         native gems: C-runtime-only first, host fallback identity
     ruby/gem_home.rs       what a failed gem build may leave before its retry
     elixir/mod.rs          Mix/Hex, AST-validated lockfile
+    elixir/check_locked.rs whether mix deps.get --check-locked must run again
     dotnet/mod.rs          NuGet packages.lock.json (tog-mandatory)
 
 ## Where the rest lives

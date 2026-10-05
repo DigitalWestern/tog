@@ -158,7 +158,7 @@ After the proxy: the test-suite audit (#351) and then the quality review
   - #188 npm: realize `file:` packages as tog-owned trees.
   - #191 provider object-kind rows still live in the tailors' `objects.rs`.
   - #216 python: `uv pip compile` fails for vllm and MetaGPT; classifier label.
-  - #287 store records: no gc for `records/`, orphaned `tmp/record-*` temporaries, Elixir check-locked hash blind spots.
+  - #476 fetch: state and audit that a cache hit is trusted by its digest's source, not its writer (from #287).
   - #289 interrupt: the bwrap preflight misreports Ctrl-C as "bwrap unavailable", and an interrupted sync exits 1 rather than 130.
   - #295 tests: four sandbox tests fail instead of skipping when bubblewrap is missing.
   - #297 python: two PEP 440 grammars; hoist `pep440.rs` into the kernel.

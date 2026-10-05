@@ -74,6 +74,8 @@ pub struct Report {
     pub backups: usize,
     /// `run-homes/<project key>` directories no surviving root names.
     pub run_homes: usize,
+    /// Store records about a project whose directory is gone.
+    pub project_records: usize,
     /// Records left without their object by an interrupted removal.
     pub records: usize,
     /// Resolution-proxy metadata cache entries unused for the retention
@@ -579,6 +581,142 @@ mod tests {
         assert!(!orphan.exists(), "{text}");
         assert!(young.is_dir(), "{text}");
         assert!(kept.is_dir(), "{text}");
+    }
+
+    #[test]
+    fn a_project_sweep_removes_records_about_projects_that_are_gone() {
+        let temp = TempStore::new("project-records");
+        let store = temp.store();
+        let gone = temp.root.join("gone");
+        let here = temp.root.join("here");
+        fs::create_dir_all(&gone).unwrap();
+        fs::create_dir_all(&here).unwrap();
+        let (gone, here) = (gone.canonicalize().unwrap(), here.canonicalize().unwrap());
+        store
+            .register_root_record(store::RootRecord {
+                key: store::Store::root_key(&here).unwrap(),
+                project_path: here.clone(),
+                objects: BTreeSet::new(),
+                projections: BTreeSet::new(),
+                updated: 1,
+            })
+            .unwrap();
+        let activity = store
+            .activity(crate::kernel::activity::ActivityMode::Shared)
+            .unwrap();
+        let value = serde_json::json!({"input_hash": "x"});
+        for project in [&gone, &here] {
+            store
+                .write_project_record(&activity, "demo-check", project, &value)
+                .unwrap();
+        }
+        // A fact about something immutable names no project and stays.
+        store
+            .write_record(&activity, "demo-digest", "gem@1.0.0", &value)
+            .unwrap();
+        drop(activity);
+        fs::remove_dir_all(&gone).unwrap();
+        let sweep = |project| {
+            let mut output = Vec::new();
+            let report = collect(
+                &store,
+                Options {
+                    dry_run: false,
+                    project,
+                    ..Options::default()
+                },
+                &mut output,
+            )
+            .unwrap();
+            (report, String::from_utf8(output).unwrap())
+        };
+        let (report, text) = sweep(false);
+        assert_eq!(report.project_records, 0, "{text}");
+        assert!(store
+            .read_project_record("demo-check", &gone)
+            .unwrap()
+            .is_some());
+        let (report, text) = sweep(true);
+        assert_eq!(report.project_records, 1, "{text}");
+        assert_eq!(
+            store.read_project_record("demo-check", &gone).unwrap(),
+            None
+        );
+        assert_eq!(
+            store.read_project_record("demo-check", &here).unwrap(),
+            Some(value.clone())
+        );
+        assert_eq!(
+            store.read_record("demo-digest", "gem@1.0.0").unwrap(),
+            Some(value)
+        );
+    }
+
+    /// A record or a record kind the sweep cannot read is left alone: records
+    /// are a cache, and before them `tog gc --project` never read records/.
+    #[test]
+    fn an_unreadable_record_does_not_fail_a_project_sweep() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = TempStore::new("unreadable-records");
+        let store = temp.store();
+        let gone = temp.root.join("gone");
+        fs::create_dir_all(&gone).unwrap();
+        let gone = gone.canonicalize().unwrap();
+        store
+            .register_root_record(store::RootRecord {
+                key: store::Store::root_key(&temp.root).unwrap(),
+                project_path: temp.root.canonicalize().unwrap(),
+                objects: BTreeSet::new(),
+                projections: BTreeSet::new(),
+                updated: 1,
+            })
+            .unwrap();
+        let activity = store
+            .activity(crate::kernel::activity::ActivityMode::Shared)
+            .unwrap();
+        let value = serde_json::json!({"input_hash": "x"});
+        for kind in ["demo-locked", "demo-sealed", "demo-check"] {
+            store
+                .write_project_record(&activity, kind, &gone, &value)
+                .unwrap();
+        }
+        drop(activity);
+        fs::remove_dir_all(&gone).unwrap();
+        let records = store.root.join(store::RECORDS);
+        let locked = fs::read_dir(records.join("demo-locked"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let mode = |path: &Path, mode| {
+            fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap()
+        };
+        mode(&locked, 0o000);
+        mode(&records.join("demo-sealed"), 0o000);
+        let mut output = Vec::new();
+        let report = collect(
+            &store,
+            Options {
+                dry_run: false,
+                project: true,
+                ..Options::default()
+            },
+            &mut output,
+        );
+        mode(&records.join("demo-sealed"), 0o700);
+        mode(&locked, 0o600);
+        let text = String::from_utf8(output).unwrap();
+        assert_eq!(report.unwrap().project_records, 1, "{text}");
+        assert!(locked.is_file(), "{text}");
+        assert!(store
+            .read_project_record("demo-sealed", &gone)
+            .unwrap()
+            .is_some());
+        assert_eq!(
+            store.read_project_record("demo-check", &gone).unwrap(),
+            None
+        );
     }
 
     #[test]

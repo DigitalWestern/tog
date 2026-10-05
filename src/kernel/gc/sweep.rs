@@ -69,6 +69,7 @@ pub(super) fn execute<W: Write>(
                 Counter::Forests => report.forests += 1,
                 Counter::Backups => report.backups += 1,
                 Counter::RunHomes => report.run_homes += 1,
+                Counter::ProjectRecords => report.project_records += 1,
                 Counter::Records => report.records += 1,
             }
             if let Some((meta_name, meta_stat)) = &removal.companion {

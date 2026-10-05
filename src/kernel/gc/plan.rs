@@ -40,6 +40,7 @@ pub(super) enum Counter {
     Forests,
     Backups,
     RunHomes,
+    ProjectRecords,
     Records,
 }
 
@@ -61,6 +62,7 @@ impl SweepPlan {
                 Counter::Forests => report.forests += 1,
                 Counter::Backups => report.backups += 1,
                 Counter::RunHomes => report.run_homes += 1,
+                Counter::ProjectRecords => report.project_records += 1,
                 Counter::Records => report.records += 1,
             }
         }
@@ -390,7 +392,8 @@ pub(super) fn plan(validated: &Validated, options: &Options) -> io::Result<Sweep
 }
 
 /// What a `--project` sweep adds: old forests and backups no surviving root
-/// claims, and run homes of projects no root names.
+/// claims, run homes of projects no root names, and store records about a
+/// project whose directory is gone.
 fn plan_projections(
     snapshot: &Snapshot,
     options: &Options,
@@ -482,6 +485,27 @@ fn plan_projections(
             ),
             bytes,
             counter: Counter::RunHomes,
+        });
+    }
+    // A project record is a cache of work tog did in that project (a
+    // passing `mix deps.get --check-locked`), so removing it loses nothing
+    // tog cannot redo: a project that comes back (a drive mounted again, a
+    // directory restored) pays one more registry check and is recorded anew.
+    for entry in &snapshot.orphan_records {
+        let bytes = file_size_of(&entry.stat);
+        removals.push(Removal {
+            parent: entry.parent,
+            name: entry.name.clone(),
+            stat: entry.stat,
+            companion: None,
+            label: format!("store record {}", entry.path.display()),
+            display: format!(
+                "store record {} about a project that is gone ({})",
+                entry.path.display(),
+                size(bytes)
+            ),
+            bytes,
+            counter: Counter::ProjectRecords,
         });
     }
     Ok(())

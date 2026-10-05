@@ -295,6 +295,7 @@ pub(super) enum Parent {
     ForestProject(usize),
     Backups,
     RunHomes,
+    RecordKind(usize),
     Meta,
 }
 
@@ -306,6 +307,7 @@ pub(super) struct Dirs {
     pub(super) forest_projects: Vec<HeldDir>,
     pub(super) backups: Option<HeldDir>,
     pub(super) run_homes: Option<HeldDir>,
+    pub(super) record_kinds: Vec<HeldDir>,
 }
 
 impl Dirs {
@@ -324,6 +326,7 @@ impl Dirs {
                 .run_homes
                 .as_ref()
                 .expect("a run home candidate implies a held run-homes descriptor"),
+            Parent::RecordKind(index) => &self.record_kinds[index],
         }
     }
 }
@@ -372,6 +375,8 @@ pub struct Snapshot {
     pub(super) backups: Vec<DirEntrySnapshot>,
     /// `run-homes/<project key>` directories.
     pub(super) run_homes: Vec<DirEntrySnapshot>,
+    /// Store records about a project whose directory is gone.
+    pub(super) orphan_records: Vec<DirEntrySnapshot>,
     /// Records whose object is gone. Under the exclusive lease nothing can
     /// be mid-publication (commit writes the object first), so each is the
     /// residue of a removal that stopped between the object and its record.
@@ -621,6 +626,8 @@ struct Projections {
     backups: Vec<DirEntrySnapshot>,
     run_homes_dir: Option<HeldDir>,
     run_homes: Vec<DirEntrySnapshot>,
+    record_kinds: Vec<HeldDir>,
+    orphan_records: Vec<DirEntrySnapshot>,
 }
 
 /// Enumerate the project projections, holding each project directory, the
@@ -658,7 +665,91 @@ fn read_projections(store: &Store) -> io::Result<Projections> {
     }
     (read.backups_dir, read.backups) = read_directories(store, "backups", Parent::Backups)?;
     (read.run_homes_dir, read.run_homes) = read_directories(store, "run-homes", Parent::RunHomes)?;
+    read_orphan_records(store, &mut read)?;
     Ok(read)
+}
+
+/// Every record under `records/<kind>/` that names a project (see
+/// `Store::write_project_record`) whose directory no longer exists. Each
+/// kind is held open and every record is opened relative to it, following
+/// no symlink; one that names no project is never a candidate. Records are a
+/// cache, so a kind or a record this cannot read is left alone rather than
+/// failing the sweep.
+fn read_orphan_records(store: &Store, read: &mut Projections) -> io::Result<()> {
+    let records = store.root.join(store::RECORDS);
+    validate_projection_namespace(&records, store::RECORDS)?;
+    if !records.is_dir() {
+        return Ok(());
+    }
+    let Ok(records_dir) = open_held(&records, store::RECORDS) else {
+        return Ok(());
+    };
+    let Ok(kinds) = store::read_dir_names_at(records_dir.file.as_raw_fd()) else {
+        return Ok(());
+    };
+    for kind in kinds {
+        let Ok(kind_stat) = store::stat_at(records_dir.file.as_raw_fd(), kind.as_bytes()) else {
+            continue;
+        };
+        if (kind_stat.st_mode & libc::S_IFMT) != libc::S_IFDIR {
+            continue;
+        }
+        let Ok(file) = store::open_directory_at(records_dir.file.as_raw_fd(), kind.as_bytes())
+        else {
+            continue;
+        };
+        let held = HeldDir {
+            label: "store record kind".to_string(),
+            file,
+        };
+        let Ok(names) = store::read_dir_names_at(held.file.as_raw_fd()) else {
+            continue;
+        };
+        let index = read.record_kinds.len();
+        let kind_path = records.join(&kind);
+        for name in names {
+            let Some(stat) = orphan_record_at(&held, &name) else {
+                continue;
+            };
+            read.orphan_records.push(DirEntrySnapshot {
+                path: kind_path.join(&name),
+                name,
+                parent: Parent::RecordKind(index),
+                stat,
+            });
+        }
+        read.record_kinds.push(held);
+    }
+    Ok(())
+}
+
+/// The stat of the record `name` in the held kind directory when it names a
+/// project whose directory is gone; `None` for any other record, or one
+/// that cannot be read.
+fn orphan_record_at(kind: &HeldDir, name: &std::ffi::OsStr) -> Option<libc::stat> {
+    use std::io::Read as _;
+    let stat = store::stat_at(kind.file.as_raw_fd(), name.as_bytes()).ok()?;
+    if (stat.st_mode & libc::S_IFMT) != libc::S_IFREG
+        || stat.st_size.max(0) as u64 > store::RECORD_CAP
+    {
+        return None;
+    }
+    let file = store::open_file_at(
+        kind.file.as_raw_fd(),
+        name.as_bytes(),
+        libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
+        0,
+    )
+    .ok()?;
+    let mut bytes = Vec::new();
+    file.take(store::RECORD_CAP + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    let project = store::record_project(&bytes)?;
+    match fs::symlink_metadata(&project) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Some(stat),
+        _ => None,
+    }
 }
 
 /// Every directory directly under the store's `namespace`, with that
@@ -736,6 +827,7 @@ pub(super) fn read(
         forests: projections.forests,
         backups: projections.backups,
         run_homes: projections.run_homes,
+        orphan_records: projections.orphan_records,
         stray_records,
         _stray_files: stray_files,
         dirs: Dirs {
@@ -746,6 +838,7 @@ pub(super) fn read(
             forest_projects: projections.forest_projects,
             backups: projections.backups_dir,
             run_homes: projections.run_homes_dir,
+            record_kinds: projections.record_kinds,
         },
     })
 }
