@@ -3516,7 +3516,11 @@ Node doors, each the flexible option that still fails closed:
   join's basis check exists for). `inputs::load_npm_plan_with_basis` now
   takes the basis from the lock bytes the plan read, with the other
   resolution files at that moment, as Cargo and Go do, and `tog x` passes
-  the basis of the lock its door just wrote (review round 1).
+  the basis of the lock its door just wrote (review round 1). `yarn.lock`
+  is no door's output and no record names it, so it is not part of the
+  basis or the record: a yarn project's basis is its manifests alone
+  (review round 2, which found the first form made every yarn sync fail
+  the basis check).
 - **`tog x` is a detached door.** The cache root is the lock root, the
   accepted `package-lock.json` is written back into it, and the ledger is
   rooted under the cache root (`ledger::root`), so GC keeps it with the

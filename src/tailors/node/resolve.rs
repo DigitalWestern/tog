@@ -234,8 +234,8 @@ fn expand_workspace_glob(root: &ProjectRoot, pattern: &str) -> io::Result<Vec<St
 }
 
 /// The closure's `resolution_basis`: every resolution file of the lock
-/// root that exists, by digest, with the lock `lock_name` taken from
-/// `lock_text`, the bytes the plan was built from. Computed at plan time,
+/// root that exists, by digest, with the lock `lock_name` (when it is one
+/// of [`LOCKS`]) taken from `lock_text`, the bytes the plan was built from. Computed at plan time,
 /// so a lock another writer swaps in while the sync realizes does not
 /// become the basis of a closure planned from the old one (the join's
 /// `check_basis` then refuses the closure instead).
@@ -247,10 +247,16 @@ pub(crate) fn resolution_basis(
     let mut listed = resolution_outputs(root)?;
     listed.extend(resolution_inputs(root)?);
     let mut basis = record::file_digests(root, &listed)?;
-    basis.insert(
-        lock_name.to_string(),
-        record::sha256_hex(lock_text.as_bytes()),
-    );
+    // Only a lock a door writes is part of the basis: `yarn.lock` is no
+    // door's output and no record names it, so the join compares the
+    // manifests alone for a yarn project (a basis entry the resolution
+    // files do not list would read as a change on every sync).
+    if LOCKS.contains(&lock_name) {
+        basis.insert(
+            lock_name.to_string(),
+            record::sha256_hex(lock_text.as_bytes()),
+        );
+    }
     Ok(basis)
 }
 

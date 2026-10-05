@@ -110,7 +110,8 @@ pub fn load_npm_plan_with_basis(
         let package = read_input(project, "package.json")?;
         let text = read_input(project, "yarn.lock")?;
         let plan = lock_import::plan_yarn(platform, &text, &package, project, node_version)?;
-        // yarn.lock is no door's output; the basis covers the manifests.
+        // yarn.lock is no door's output and no record names it; the basis
+        // covers the manifests (`resolve::resolution_basis` leaves it out).
         return planned("yarn.lock", &text, plan).map(Some);
     }
     Ok(None)
@@ -210,6 +211,37 @@ mod tests {
                 .unwrap_err()
                 .to_string();
         assert!(error.contains("package-lock.json changed"), "{error}");
+
+        // A yarn project: yarn.lock is no door's output, so it is not in the
+        // basis, and the join's check passes on the manifests alone.
+        let yarn_dir = temp.0.join("yarn");
+        std::fs::create_dir_all(&yarn_dir).unwrap();
+        let fixture =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/proj-yarn1");
+        for name in ["package.json", "yarn.lock"] {
+            std::fs::copy(fixture.join(name), yarn_dir.join(name)).unwrap();
+        }
+        let yarn = crate::kernel::fsroot::ProjectRoot::open(&yarn_dir).unwrap();
+        let planned = super::load_npm_plan_with_basis(
+            crate::kernel::platform::Platform::X86_64UnknownLinuxGnu,
+            &yarn,
+            &selected,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(planned.plan.lock_source, "yarn.lock");
+        assert!(
+            !planned.basis.contains_key("yarn.lock"),
+            "{:?}",
+            planned.basis
+        );
+        assert!(planned.basis.contains_key("package.json"));
+        let files = crate::kernel::resolve::record::ResolutionFiles {
+            outputs: crate::tailors::node::resolve::resolution_outputs(&yarn).unwrap(),
+            inputs: crate::tailors::node::resolve::resolution_inputs(&yarn).unwrap(),
+        };
+        crate::comforter::join::check_basis_for_test(&yarn, "node", &files, &planned.basis)
+            .unwrap();
     }
 
     /// A directory with no package.json is not a Node project: nothing to
