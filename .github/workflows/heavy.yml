@@ -12,8 +12,9 @@
 #     the sandbox, the toolchain providers and catalogs, Cargo.lock, or
 #     the heavy suite itself). Real toolchain archives carry shapes
 #     no fixture had: #316 was green in ci.yml and broke 15 targets here.
-#   - the PR has the `heavy` label. Adding it starts a run, and every
-#     later push to the PR runs again until the label comes off.
+#   - the PR has the `heavy` label. Adding it starts a run (unless the
+#     files above already started one for this commit), and every later
+#     push to the PR runs again until the label comes off.
 #     heavy-unlabel.yml takes it off after a green run.
 # A PR that needs neither but edits a test file holding `#[ignore]` tests
 # gets the `changed` job: the ignored tests of just those files, so an
@@ -79,18 +80,17 @@ jobs:
           # extraction gets the label (#325).
           watched='^(src/kernel/(archive|fetch|sandbox)[^/]*|src/kernel/(archive|fetch|sandbox)/.*|src/kernel/provider/.*|src/.*catalog\.toml|Cargo\.lock|\.github/workflows/heavy\.yml|tests/acceptance\.sh)$'
           tests=""
-          if [ "$ACTION" = labeled ]; then
-            # Some other label was added: nothing about the code changed.
-            if [ "$ADDED_LABEL" = heavy ]; then run=yes; else run=no; fi
-          elif [ "$HAS_LABEL" = true ]; then
-            run=yes
-          else
-            # A renamed file counts under its old name too. If the API
-            # call fails, run: a missed heavy run is the costlier mistake.
+          # Sets `run` (and `tests`) from the PR's files alone, the way a
+          # push decides. A renamed file counts under its old name too. If
+          # the API call fails, run: a missed heavy run is the costlier
+          # mistake.
+          by_paths() {
+            listed=yes
             if ! files=$(gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR/files" \
                 --jq '.[] | .filename, (.previous_filename // empty)'); then
               echo "::warning::could not list the PR's files; running the heavy suite"
               run=yes
+              listed=no
             elif grep -qE "$watched" <<< "$files"; then
               run=yes
             else
@@ -119,6 +119,25 @@ jobs:
                 tests=""
               fi
             fi
+          }
+          if [ "$ACTION" = labeled ]; then
+            if [ "$ADDED_LABEL" = heavy ]; then
+              # When the files already woke the suite, the push that
+              # brought this commit started it. Running again would
+              # cancel that run (the e2e job's concurrency group) and
+              # restart it on the same commit (#324). Later pushes run it
+              # through HAS_LABEL as usual.
+              by_paths
+              if [ "$listed" = yes ] && [ "$run" = yes ]; then run=no; else run=yes; fi
+              tests=""
+            else
+              # Some other label was added: nothing about the code changed.
+              run=no
+            fi
+          elif [ "$HAS_LABEL" = true ]; then
+            run=yes
+          else
+            by_paths
           fi
           echo "run=$run tests=$tests"
           echo "run=$run" >> "$GITHUB_OUTPUT"
