@@ -533,10 +533,8 @@ pub fn read_closure(project_dir: &Path, ecosystem: &str) -> io::Result<serde_jso
 }
 
 /// Is there a closure record for `ecosystem` in the held project?
-pub fn has_closure(project: &ProjectRoot, ecosystem: &str) -> bool {
-    project
-        .entry(&closure_relative(ecosystem))
-        .is_ok_and(|entry| entry != Entry::Absent)
+pub fn has_closure(project: &ProjectRoot, ecosystem: &str) -> io::Result<bool> {
+    Ok(project.entry(&closure_relative(ecosystem))? != Entry::Absent)
 }
 
 /// `read_closure` through a project the command holds: the record is tog
@@ -1181,6 +1179,27 @@ mod tests {
             error.contains("python\" belongs to another store"),
             "{error}"
         );
+        let traversal = store
+            .object_path(&mentioned)
+            .join("../../../foreign-store/objects")
+            .join(&id)
+            .join("bin/python");
+        envelope(
+            project,
+            "python",
+            serde_json::json!({
+                "env_object": store.object_path(&id), "traversal": traversal,
+            }),
+        );
+        let error = store
+            .root_record_from_project(project)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("contains parent-directory traversal"),
+            "{error}"
+        );
+        assert!(!error.contains("is inside object"), "{error}");
         envelope(
             project,
             "python",
@@ -1911,6 +1930,82 @@ mod closure_object_tests {
                 .starts_with(&format!("parse {}: ", path.display()))
                 && error.to_string().ends_with("; run `tog` first"),
             "{error}"
+        );
+    }
+
+    #[test]
+    fn optional_closure_read_distinguishes_absence_valid_and_damaged_records() {
+        let temp = TempDir::named("optional-closure-read");
+        let held = ProjectRoot::open(&temp.0).unwrap();
+        assert_eq!(read_closure_if_present(&held, "python").unwrap(), None);
+        assert_eq!(
+            read_closure_in(&held, "python").unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
+        write_envelope(&temp.0, &serde_json::json!({"schema": "closure/1", "ecosystem": "python", "platform": Platform::host().unwrap().triple(), "body": {"ok": true}}).to_string());
+        assert_eq!(
+            read_closure_if_present(&held, "python").unwrap(),
+            Some(serde_json::json!({"ok": true}))
+        );
+        let path = temp.0.join(".tog/closures/python.json");
+        for bytes in [
+            b"{not JSON".as_slice(),
+            b"\xff\xfe".as_slice(),
+            br#"{"schema":"closure/2","ecosystem":"python","body":{}}"#.as_slice(),
+            br#"{"schema":"closure/1","ecosystem":"node","body":{}}"#.as_slice(),
+        ] {
+            fs::write(&path, bytes).unwrap();
+            assert_eq!(
+                read_closure_if_present(&held, "python").unwrap_err().kind(),
+                io::ErrorKind::InvalidData
+            );
+        }
+    }
+
+    #[test]
+    fn optional_closure_read_refuses_symlinked_state() {
+        for parent in [".tog", ".tog/closures"] {
+            let temp = TempDir::named("optional-closure-symlink");
+            let project = temp.0.join("project");
+            let outside = temp.0.join("outside");
+            fs::create_dir_all(project.join(Path::new(parent).parent().unwrap())).unwrap();
+            write_envelope(
+                &outside,
+                r#"{"schema":"closure/1","ecosystem":"python","body":{"ok":true}}"#,
+            );
+            std::os::unix::fs::symlink(outside.join(parent), project.join(parent)).unwrap();
+            let held = ProjectRoot::open(&project).unwrap();
+            assert!(
+                read_closure_if_present(&held, "python").is_err(),
+                "{parent}"
+            );
+        }
+    }
+
+    #[test]
+    fn optional_closure_read_stays_with_a_renamed_and_replaced_project() {
+        let temp = TempDir::named("optional-closure-replaced");
+        let project = temp.0.join("project");
+        let moved = temp.0.join("moved");
+        write_envelope(
+            &project,
+            r#"{"schema":"closure/1","ecosystem":"python","body":{"ok":true}}"#,
+        );
+        let held = ProjectRoot::open(&project).unwrap();
+        fs::rename(&project, &moved).unwrap();
+        write_envelope(
+            &project,
+            r#"{"schema":"closure/1","ecosystem":"python","body":{"replacement":true}}"#,
+        );
+        assert_eq!(
+            read_closure_if_present(&held, "python").unwrap(),
+            Some(serde_json::json!({"ok": true}))
+        );
+        fs::remove_file(moved.join(".tog/closures/python.json")).unwrap();
+        assert_eq!(read_closure_if_present(&held, "python").unwrap(), None);
+        assert_eq!(
+            read_closure_if_present(&ProjectRoot::open(&project).unwrap(), "python").unwrap(),
+            Some(serde_json::json!({"replacement": true}))
         );
     }
 

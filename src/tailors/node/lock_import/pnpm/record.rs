@@ -5,62 +5,8 @@
 
 use super::*;
 
-/// The directories pnpm's own package search skips (`DEFAULT_IGNORE` in
-/// `@pnpm/fs.find-packages`), on top of a workspace's `!` globs.
-const PNPM_DEFAULT_IGNORE: [&str; 4] = [
-    "**/node_modules/**",
-    "**/bower_components/**",
-    "**/test/**",
-    "**/tests/**",
-];
-
-/// The workspace members `pnpm-workspace.yaml` names, the root left out:
-/// every directory holding a package.json that one of its `packages` globs
-/// matches and no `!` glob, nor pnpm's default ignores, excludes. pnpm
-/// applies the `!` globs as an ignore list, so their order does not matter.
-/// No workspace file, or one without `packages`, is a single project.
-pub(crate) fn pnpm_workspace_members(project: &ProjectRoot) -> io::Result<Vec<String>> {
-    const FILE: &str = "pnpm-workspace.yaml";
-    let Some(text) = project.read_input_string(Path::new(FILE))? else {
-        return Ok(Vec::new());
-    };
-    if yaml_lines(&text, 0)?.is_empty() {
-        return Ok(Vec::new());
-    }
-    let parsed = parse_yaml(&text).map_err(|error| err(format!("{FILE}: {error}")))?;
-    let Some(packages) = yaml_map(&parsed, FILE)?.get("packages") else {
-        return Ok(Vec::new());
-    };
-    let YamlValue::Seq(packages) = packages else {
-        return Err(err(format!("{FILE}: packages must be a list")));
-    };
-    let (mut include, mut exclude) = (Vec::new(), PNPM_DEFAULT_IGNORE.map(String::from).to_vec());
-    for package in packages {
-        let raw = yaml_str(Some(package))
-            .ok_or_else(|| err(format!("{FILE}: packages entries must be strings")))?;
-        let negated = raw.starts_with('!');
-        let pattern = raw.trim_start_matches('!').trim_start_matches("./");
-        if pattern.starts_with('/') || pattern.split('/').any(|part| part == "..") {
-            return Err(err(format!(
-                "{FILE}: packages pattern {raw:?} escapes the project"
-            )));
-        }
-        if negated { &mut exclude } else { &mut include }.push(pattern.to_string());
-    }
-    let mut candidates = Vec::new();
-    collect_workspace_manifests(project, Path::new("."), &mut candidates)?;
-    candidates.sort();
-    candidates.dedup();
-    let matches = |patterns: &[String], candidate: &str| {
-        patterns
-            .iter()
-            .any(|pattern| workspace_glob_matches(pattern, candidate))
-    };
-    Ok(candidates
-        .into_iter()
-        .filter(|candidate| matches(&include, candidate) && !matches(&exclude, candidate))
-        .collect())
-}
+mod workspace;
+pub(crate) use workspace::*;
 
 /// A dependency as an importer of `pnpm-lock.yaml` records it: the
 /// specifier its package.json wrote, verbatim, and the version pnpm resolved
@@ -120,28 +66,16 @@ fn name_and_range(text: &str) -> (&str, Option<&str>) {
     }
 }
 
-/// Split `parent[@range]>target` the way pnpm's selector pattern does: the
-/// `>` ends the parent right after its name, or after a non-empty range
-/// that holds no `>`. So `a@>=1 <3` is a target alone, and in a deeper
-/// chain (`a>b>name`) the target keeps its `>`, so it names no direct
-/// dependency.
+/// Split `parent[@range]>target` where pnpm's selector pattern does: at
+/// the first `>` that follows a character other than a space, `|` or `@`
+/// (`/[^ |@]>/`), so the `>` of a range (`a@>=1`, `a@^1 >b`) never splits
+/// it, and `a@>=1 <2>b` is parent `a@>=1 <2`, target `b`. In a deeper chain
+/// (`a>b>name`) the target keeps its `>`, so it names no direct dependency.
 fn split_parent(selector: &str) -> (Option<&str>, &str) {
-    let start = usize::from(selector.starts_with('@'));
-    let Some(end) = selector[start..]
-        .find(['@', '>'])
-        .map(|index| start + index)
-    else {
-        return (None, selector);
-    };
-    let separator = if selector[end..].starts_with('>') {
-        Some(end)
-    } else {
-        selector[end + 1..]
-            .find('>')
-            .filter(|&length| length > 0)
-            .map(|length| end + 1 + length)
-    };
-    match separator {
+    let bytes = selector.as_bytes();
+    match (1..bytes.len())
+        .find(|&at| bytes[at] == b'>' && !matches!(bytes[at - 1], b' ' | b'|' | b'@'))
+    {
         Some(at) => (Some(&selector[..at]), &selector[at + 1..]),
         None => (None, selector),
     }
@@ -233,4 +167,23 @@ pub(crate) fn pnpm_manifest_record(lock_yaml: &str) -> io::Result<PnpmManifestRe
         }
     }
     Ok(record)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_parent_ends_at_the_first_gt_after_a_name_or_range_character() {
+        for (selector, parent, target) in [
+            ("a@>=1 <2>b", Some("a@>=1 <2"), "b"),
+            ("a@^1 >b", None, "a@^1 >b"),
+            ("a@>=1 <3", None, "a@>=1 <3"),
+            ("a@1 || >2", None, "a@1 || >2"),
+            ("@s/a@2>@s/b@^1", Some("@s/a@2"), "@s/b@^1"),
+            ("x>app>a", Some("x"), "app>a"),
+        ] {
+            assert_eq!(split_parent(selector), (parent, target), "{selector}");
+        }
+    }
 }
