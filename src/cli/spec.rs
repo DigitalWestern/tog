@@ -470,7 +470,8 @@ discovered with the store Cargo tool and Cargo metadata is read with
 dependency resolution, or vendor object. --check returns rustfmt's status.
 The formatter is the one the committed tog-toolchain.toml pins, and the
 run writes no record: a .tog/closures/rustfmt.json an older tog left is
-deleted by a run without --check once the project has another closure.
+deleted by a run without --check once the project has another closure, or
+once gc has forgotten the project's root.
 A package.json script named fmt takes precedence and is run as
 'tog run fmt'. In a polyglot directory use --eco rust: an explicit --eco
 selects the ecosystem, so it formats Rust instead of running that script.
@@ -652,6 +653,9 @@ deletes inside project projections; --project collects old unused forests,
 backups, and run homes no registered project owns. A root record says for
 itself what its project needs, so it keeps protecting those objects even
 when the project directory is gone; give the protection up with --forget.
+The one root gc forgets by itself is one whose project holds only retired
+closure records (the rustfmt.json an older tog fmt wrote) and which
+protects nothing those records do not name; a dry run reports it.
 Cleanup is skipped while another Tog job is using this store. A record
 that cannot be read stops the sweep rather than being guessed at: the
 refusal lists every one, and --drop-object removes the ones that cannot be

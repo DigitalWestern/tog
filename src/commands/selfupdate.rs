@@ -194,7 +194,8 @@ fn no_release_found(url: &str, error: io::Error) -> io::Error {
 /// A release is compared by version only. A release does not name the
 /// commit it was built from, so a local build of the same crate version
 /// (from an older or a newer commit) reads as "same version", and the row
-/// says so rather than calling it current.
+/// says so rather than calling it current. A newer release is a warning
+/// only when it carries a build for this machine (see `newer_release`).
 pub fn doctor_check() -> Check {
     let running = cli::version_line();
     let current = match Version::running() {
@@ -207,30 +208,9 @@ pub fn doctor_check() -> Check {
             }
         }
     };
-    let platform = Platform::host().ok();
     match latest() {
-        // A newer release with no build for this machine is not something
-        // `update --self` can act on, so it is not a warning.
         Ok(release) if release.version > current => {
-            match platform.filter(|platform| release.build_for(*platform).is_none()) {
-                Some(platform) => Check {
-                    name: "version",
-                    level: Level::Ok,
-                    detail: format!(
-                        "{running}; {} is out, with no build for this machine ({})",
-                        release.tag,
-                        platform.triple()
-                    ),
-                },
-                None => Check {
-                    name: "version",
-                    level: Level::Warn,
-                    detail: format!(
-                        "{running}; {} is out (run 'tog update --self')",
-                        release.tag
-                    ),
-                },
-            }
+            newer_release(&running, &release, Platform::host())
         }
         Ok(release) if release.version == current => Check {
             name: "version",
@@ -253,6 +233,34 @@ pub fn doctor_check() -> Check {
             level: Level::Ok,
             detail: format!("{running}; newer release not checked ({error})"),
         },
+    }
+}
+
+/// The `version` row when `release` is newer. A release with no build for
+/// this machine, or a host tog has no build for at all, is not something
+/// `update --self` can act on, so it is `ok`, not a warning.
+fn newer_release(running: &str, release: &Release, host: io::Result<Platform>) -> Check {
+    let machine = match host {
+        Ok(platform) if release.build_for(platform).is_some() => {
+            return Check {
+                name: "version",
+                level: Level::Warn,
+                detail: format!(
+                    "{running}; {} is out (run 'tog update --self')",
+                    release.tag
+                ),
+            }
+        }
+        Ok(platform) => platform.triple().to_string(),
+        Err(_) => format!("{}/{}", std::env::consts::OS, std::env::consts::ARCH),
+    };
+    Check {
+        name: "version",
+        level: Level::Ok,
+        detail: format!(
+            "{running}; {} is out, with no build for this machine ({machine})",
+            release.tag
+        ),
     }
 }
 
@@ -593,6 +601,49 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("not JSON"));
+    }
+
+    /// Issue #403. A newer release is a warning only when `update --self`
+    /// could install it: the release has a build for this host, and tog
+    /// has a build for this host at all.
+    #[test]
+    fn a_newer_release_warns_only_when_this_machine_has_a_build() {
+        let platform = Platform::X86_64UnknownLinuxGnu;
+        let (asset, checksum) = asset_names(platform);
+        let mut release = Release {
+            tag: "v99.0.0".to_string(),
+            version: Version(99, 0, 0),
+            assets: vec![(asset, "https://example/a".to_string())],
+        };
+        // The archive without its checksum is no build.
+        let row = newer_release("tog 0.1.0", &release, Ok(platform));
+        assert_eq!(row.level, Level::Ok);
+        assert_eq!(
+            row.detail,
+            "tog 0.1.0; v99.0.0 is out, with no build for this machine (x86_64-unknown-linux-gnu)"
+        );
+        release
+            .assets
+            .push((checksum, "https://example/b".to_string()));
+        let row = newer_release("tog 0.1.0", &release, Ok(platform));
+        assert_eq!(row.level, Level::Warn);
+        assert!(
+            row.detail.contains("run 'tog update --self'"),
+            "{}",
+            row.detail
+        );
+        // An unsupported host has no build in any release.
+        let unsupported = io::Error::new(io::ErrorKind::Unsupported, "unsupported host");
+        let row = newer_release("tog 0.1.0", &release, Err(unsupported));
+        assert_eq!(row.level, Level::Ok);
+        assert_eq!(
+            row.detail,
+            format!(
+                "tog 0.1.0; v99.0.0 is out, with no build for this machine ({}/{})",
+                std::env::consts::OS,
+                std::env::consts::ARCH
+            )
+        );
     }
 
     #[test]

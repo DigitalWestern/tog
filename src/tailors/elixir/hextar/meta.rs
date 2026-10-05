@@ -23,6 +23,7 @@ enum Term {
 /// is refused with where it stopped.
 pub(super) fn top_level_entries(text: &str) -> Result<Vec<(Vec<u8>, Option<Vec<u8>>)>, String> {
     let mut reader = Reader {
+        text,
         bytes: text.as_bytes(),
         at: 0,
     };
@@ -52,7 +53,11 @@ pub(super) fn top_level_entries(text: &str) -> Result<Vec<(Vec<u8>, Option<Vec<u
     }
 }
 
+/// The text is kept as `&str` beside its bytes so a quoted character is
+/// decoded where the cursor stands, in constant time, instead of
+/// re-validating the rest of the file for each one.
 struct Reader<'a> {
+    text: &'a str,
     bytes: &'a [u8],
     at: usize,
 }
@@ -77,6 +82,19 @@ impl Reader<'_> {
         } else {
             false
         }
+    }
+
+    /// The character at the cursor, which moves past it. The cursor only
+    /// ever stops on a character boundary; were it not on one, the text is
+    /// refused rather than read from the middle of a character.
+    fn next_char(&mut self) -> Result<u32, String> {
+        let ch = self
+            .text
+            .get(self.at..)
+            .and_then(|rest| rest.chars().next())
+            .ok_or_else(|| self.error("not UTF-8"))?;
+        self.at += ch.len_utf8();
+        Ok(ch as u32)
     }
 
     fn eat_str(&mut self, text: &str) -> bool {
@@ -292,13 +310,7 @@ impl Reader<'_> {
                     self.at += 1;
                     out.push(self.escape()?);
                 }
-                Some(_) => {
-                    let rest = std::str::from_utf8(&self.bytes[self.at..])
-                        .map_err(|_| self.error("not UTF-8"))?;
-                    let ch = rest.chars().next().unwrap_or('\0');
-                    self.at += ch.len_utf8();
-                    out.push(ch as u32);
-                }
+                Some(_) => out.push(self.next_char()?),
             }
         }
     }
@@ -310,13 +322,7 @@ impl Reader<'_> {
                 self.at += 1;
                 self.escape()
             }
-            Some(_) => {
-                let rest = std::str::from_utf8(&self.bytes[self.at..])
-                    .map_err(|_| self.error("not UTF-8"))?;
-                let ch = rest.chars().next().unwrap_or('\0');
-                self.at += ch.len_utf8();
-                Ok(ch as u32)
-            }
+            Some(_) => self.next_char(),
             None => Err(self.error("the text ends after '$'")),
         }
     }
@@ -370,6 +376,9 @@ impl Reader<'_> {
                 let Some(letter) = self.peek() else {
                     return Err(self.error("the text ends inside an escape"));
                 };
+                if !letter.is_ascii() {
+                    return Err(self.error("a \\^ escape of a non-ASCII character"));
+                }
                 self.at += 1;
                 u32::from(letter) & 31
             }
@@ -517,13 +526,33 @@ mod tests {
             ("{<<\"app\">>,<<\"\\x{110000}\"/utf8>>}.\n", "non-character"),
             ("\n\n{<<\"app\">>,@}.\n", "unexpected character (line 3)"),
             ("{<<\"app\">>,\"open}.\n", "never ends"),
+            ("{<<\"app\">>,<<\"\\^é\">>}.\n", "\\^ escape of a non-ASCII"),
+            ("{<<\"app\">>,<<\"\\é\">>}.\n", "escape of a non-ASCII byte"),
         ] {
             let error = top_level_entries(text).unwrap_err();
             assert!(error.contains(why), "{text:?}: {error}");
         }
+        // `$é` reads the whole character, so the cursor lands after it.
+        assert_eq!(
+            top_level_entries("{<<\"app\">>,$é}.\n").unwrap(),
+            [(b"app".to_vec(), None)]
+        );
         let deep = format!("{}{}.", "[".repeat(100), "]".repeat(100));
         assert!(top_level_entries(&deep)
             .unwrap_err()
             .contains("nest too deeply"));
+    }
+
+    /// A quoted character is decoded where the cursor stands: a string of
+    /// several MiB reads in one pass. Re-validating the rest of the file
+    /// per character, as the reader once did, runs for many minutes here.
+    #[test]
+    fn a_multi_megabyte_string_reads_in_one_pass() {
+        let long = "aé".repeat(1 << 20);
+        let text = format!("{{<<\"app\">>,<<\"{long}\"/utf8>>}}.\n{{<<\"note\">>,\"{long}\"}}.\n");
+        let read = top_level_entries(&text).unwrap();
+        assert_eq!(read.len(), 2);
+        assert_eq!(read[0], (b"app".to_vec(), Some(long.into_bytes())));
+        assert_eq!(read[1], (b"note".to_vec(), None));
     }
 }

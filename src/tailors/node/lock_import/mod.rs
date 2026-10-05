@@ -10,8 +10,8 @@ use crate::kernel::fsroot::{Entry, ProjectRoot};
 use crate::kernel::platform::Platform;
 use crate::tailors::node::inputs::input_exists;
 use crate::tailors::node::{
-    refuse_json_url_credentials, url_credentials, url_credentials_refusal, NpmLink, NpmPackage,
-    NpmPatch, NpmPlan,
+    refuse_package_json_url_credentials, url_credentials, url_credentials_refusal, NpmLink,
+    NpmPackage, NpmPatch, NpmPlan,
 };
 use serde_json::Value as JsonValue;
 use sha2::{Digest as Sha2Digest, Sha256};
@@ -572,6 +572,7 @@ fn place_node_package(
             )));
         }
     } else {
+        refuse_endless_nesting(&path, node_key, node, occupied)?;
         occupied.insert(
             path.clone(),
             Occupied::Package {
@@ -582,6 +583,55 @@ fn place_node_package(
         );
     }
     Ok(path)
+}
+
+/// Nested package directories past which a placement is taken to be
+/// endless: far beyond any installable tree (each level adds at least
+/// `/node_modules/x` to a path PATH_MAX caps at 4096 bytes).
+const MAX_NESTING: usize = 100;
+
+/// Refuse placing `node_key` at `path` when the nesting would never end.
+/// Versions that need each other through one name (`a@1` needing `a@2`
+/// needing `a@1`) nest the same run of packages beneath itself, each copy
+/// below meeting the same conflicts the copy above did: the chain of
+/// packages down to `path` ends in one run twice in a row. A chain that
+/// only revisits a package (`x@1 > z@1 > x@2 > w@1 > x@1`, whose inner
+/// `z@1` is found above it) ends, so it is not refused.
+fn refuse_endless_nesting(
+    path: &str,
+    node_key: &str,
+    node: &Node,
+    occupied: &BTreeMap<String, Occupied>,
+) -> io::Result<()> {
+    let chain: Vec<(&str, Option<&str>)> = path
+        .match_indices("/node_modules/")
+        .map(|(at, _)| &path[..at])
+        .map(|ancestor| match occupied.get(ancestor) {
+            Some(Occupied::Package { node_key, .. }) => (ancestor, Some(node_key.as_str())),
+            _ => (ancestor, None),
+        })
+        .chain([(path, Some(node_key))])
+        .collect();
+    let keys: Vec<Option<&str>> = chain.iter().map(|(_, key)| *key).collect();
+    let n = keys.len();
+    let run = (1..=n / 2).find(|&k| keys[n - 2 * k..n - k] == keys[n - k..]);
+    if let Some(k) = run {
+        return Err(err(format!(
+            "{}@{}: would nest beneath its own copy at {}; its dependencies cycle through \
+             conflicting versions, which a node_modules tree cannot hold",
+            node.name,
+            node.version,
+            chain[n - 1 - k].0
+        )));
+    }
+    if n > MAX_NESTING {
+        return Err(err(format!(
+            "{}@{}: nested more than {MAX_NESTING} packages deep beneath {}; refusing an \
+             endless node_modules tree",
+            node.name, node.version, chain[0].0
+        )));
+    }
+    Ok(())
 }
 
 /// Placement for a workspace link. Same hoisting shape as a package, except
@@ -2808,6 +2858,53 @@ mod git_import_tests {
         let package = plan.packages.iter().find(|p| p.name == "plugin").unwrap();
         assert!(package.git.is_none());
         assert_eq!(package.integrity, SRI);
+    }
+
+    /// A parenthesis inside a tarball URL is part of the key, not a peer or
+    /// patch suffix after the version.
+    #[test]
+    fn a_pnpm_key_with_a_parenthesis_in_its_url_imports() {
+        let lock = format!(
+            "lockfileVersion: '9.0'\n\
+             importers:\n\
+             \x20\x20.:\n\
+             \x20\x20\x20\x20dependencies:\n\
+             \x20\x20\x20\x20\x20\x20foo:\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20specifier: https://r/a(1).tgz\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20version: https://r/a(1).tgz\n\
+             packages:\n\
+             \x20\x20foo@https://r/a(1).tgz:\n\
+             \x20\x20\x20\x20resolution: {{integrity: {SRI}, tarball: https://r/a(1).tgz}}\n\
+             \x20\x20\x20\x20version: 1.0.0\n\
+             snapshots:\n\
+             \x20\x20foo@https://r/a(1).tgz: {{}}\n"
+        );
+        let project = project();
+        let plan = super::plan_pnpm(
+            crate::kernel::platform::Platform::X86_64UnknownLinuxGnu,
+            &lock,
+            &held(&project.0),
+            node_version(),
+        )
+        .unwrap();
+        let package = plan.packages.iter().find(|p| p.name == "foo").unwrap();
+        assert_eq!(package.path, "node_modules/foo");
+        assert_eq!(package.integrity, SRI);
+        // The same holds for a `file:` path, and the suffix after one is read.
+        for (key, hash) in [
+            ("foo@file:../a(b)c", None),
+            ("foo@https://x/a(1).tgz", None),
+            (
+                "foo@file:../a(b)c(patch_hash=abc)(react@18.0.0)",
+                Some("abc"),
+            ),
+        ] {
+            assert_eq!(
+                super::pnpm::recorded_patch_hash(key).unwrap(),
+                hash,
+                "{key}"
+            );
+        }
     }
 
     #[test]

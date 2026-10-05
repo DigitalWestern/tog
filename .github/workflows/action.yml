@@ -29,8 +29,9 @@ jobs:
   demo:
     # 22.04 lets bwrap have a user namespace as it comes; 24.04 does not,
     # so that leg is the one that needs the action's AppArmor profile. The
-    # 22.04 leg also keeps the store in the cache: its first run saves it,
-    # the next one restores it. The signed leg runs the gate with trusted
+    # 22.04 leg also runs with the store cache on: its first run saves it,
+    # the next one restores it. The leg only shows the cache steps do not
+    # break a run: nothing here asserts the restore. The signed leg runs the gate with trusted
     # keys: a throwaway key, a policy that trusts it, and `audit: signed`.
     strategy:
       fail-fast: false
@@ -59,7 +60,8 @@ jobs:
           seed=$(tail -c 32 "$der" | od -An -v -tx1 | tr -d ' \n')
           public=$(openssl pkey -inform DER -in "$der" -pubout -outform DER | tail -c 32 | od -An -v -tx1 | tr -d ' \n')
           rm -f "$der"
-          echo "::add-mask::$seed"
+          # Not masked: GitHub drops a step output that holds a masked
+          # value, and this key is made for this job and thrown away.
           policy="$RUNNER_TEMP/tog-policy.toml"
           cp docs/human/policy-company.toml "$policy"
           printf '\n[signing]\ntrusted = ["ed25519:%s"]\n' "$public" >> "$policy"
