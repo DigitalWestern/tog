@@ -253,25 +253,26 @@ pub fn project_cargo_env(
 
     let cargo_bin = rust_obj.join("bin/cargo");
     let rustc_bin = rust_obj.join("bin/rustc");
-    let wrapper_text = format!(
-        "#!/bin/sh\n\
+    // Built as bytes: a path is bytes on Unix, and a lossy conversion would
+    // point the wrapper at a different path than the one it names.
+    let mut wrapper = b"#!/bin/sh\n\
          for a in \"$@\"; do case \"$a\" in --config|--config=*)\n\
            echo 'tog: --config is managed by tog' >&2; exit 2;; esac; done\n\
-         export CARGO_HOME=\"{}\"\n\
-         export RUSTC=\"{}\"\n\
-         export RUSTC_WRAPPER= RUSTC_WORKSPACE_WRAPPER=\n\
-         unset RUSTUP_HOME RUSTUP_TOOLCHAIN\n\
-         exec \"{}\" --frozen --config \"{}\" \"$@\"\n",
-        shell_double_quote(&cargo_home),
-        shell_double_quote(&rustc_bin),
-        shell_double_quote(&cargo_bin),
-        shell_double_quote(&config),
+         export CARGO_HOME=\""
+        .to_vec();
+    wrapper.extend(shell_double_quote(&cargo_home));
+    wrapper.extend(b"\"\nexport RUSTC=\"");
+    wrapper.extend(shell_double_quote(&rustc_bin));
+    wrapper.extend(
+        b"\"\nexport RUSTC_WRAPPER= RUSTC_WORKSPACE_WRAPPER=\n\
+          unset RUSTUP_HOME RUSTUP_TOOLCHAIN\n\
+          exec \"",
     );
-    project.write_file_mode(
-        Path::new(".tog/cargo-home/bin/cargo"),
-        wrapper_text.as_bytes(),
-        0o755,
-    )?;
+    wrapper.extend(shell_double_quote(&cargo_bin));
+    wrapper.extend(b"\" --frozen --config \"");
+    wrapper.extend(shell_double_quote(&config));
+    wrapper.extend(b"\" \"$@\"\n");
+    project.write_file_mode(Path::new(".tog/cargo-home/bin/cargo"), &wrapper, 0o755)?;
 
     let mut body = serde_json::json!({
         "rust_object": crate::comforter::object_ref(&rust_obj)?,
@@ -392,10 +393,13 @@ pub fn build_sandboxed(
     })
 }
 
+/// `relative` under the project, created if missing, as a canonical path.
+/// It is created from the held project descriptor, which refuses a symlink
+/// at any component: a `target` symlink to a path outside the project is
+/// refused before anything is created there, not after.
 fn project_child_dir(project_dir: &Path, relative: &str) -> io::Result<PathBuf> {
-    let path = project_dir.join(relative);
-    fs::create_dir_all(&path)?;
-    let path = path.canonicalize()?;
+    ProjectRoot::open(project_dir)?.create_dir_all(Path::new(relative))?;
+    let path = project_dir.join(relative).canonicalize()?;
     if !path.starts_with(project_dir) {
         return Err(err(format!(
             "Cargo path {} escapes project {}",
@@ -443,12 +447,20 @@ fn unique_dir(parent: &Path, prefix: &str) -> io::Result<PathBuf> {
     )))
 }
 
-fn shell_double_quote(path: &Path) -> String {
-    path.to_string_lossy()
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('$', "\\$")
-        .replace('`', "\\`")
+/// `path`'s bytes escaped for the inside of a POSIX shell double-quoted
+/// string: the four characters special there (`\\`, `"`, `$` and the
+/// backquote) get a backslash, and every other byte, newlines and non-UTF-8
+/// bytes included, stands for itself.
+fn shell_double_quote(path: &Path) -> Vec<u8> {
+    use std::os::unix::ffi::OsStrExt as _;
+    let mut quoted = Vec::new();
+    for &byte in path.as_os_str().as_bytes() {
+        if matches!(byte, b'\\' | b'"' | b'$' | b'`') {
+            quoted.push(b'\\');
+        }
+        quoted.push(byte);
+    }
+    quoted
 }
 
 #[cfg(test)]
@@ -1491,6 +1503,24 @@ checksum = "{hash_b}"
 
         let wrapper_path = home.join("bin/cargo");
         let wrapper = fs::read_to_string(&wrapper_path).unwrap();
+        // The whole script, so building it as bytes changed nothing in it.
+        assert_eq!(
+            wrapper,
+            format!(
+                "#!/bin/sh\n\
+                 for a in \"$@\"; do case \"$a\" in --config|--config=*)\n\
+                 echo 'tog: --config is managed by tog' >&2; exit 2;; esac; done\n\
+                 export CARGO_HOME=\"{home}\"\n\
+                 export RUSTC=\"{rustc}\"\n\
+                 export RUSTC_WRAPPER= RUSTC_WORKSPACE_WRAPPER=\n\
+                 unset RUSTUP_HOME RUSTUP_TOOLCHAIN\n\
+                 exec \"{cargo}\" --frozen --config \"{config}\" \"$@\"\n",
+                home = home.display(),
+                rustc = rust.join("bin/rustc").display(),
+                cargo = rust.join("bin/cargo").display(),
+                config = home.join("tog-config.toml").display(),
+            )
+        );
         assert!(wrapper.contains(&format!("export CARGO_HOME=\"{}\"", home.display())));
         assert!(wrapper.contains("unset RUSTUP_HOME RUSTUP_TOOLCHAIN"));
         assert!(wrapper.contains("--frozen --config"));
@@ -1529,6 +1559,74 @@ checksum = "{hash_b}"
             rust.join("bin/rustc").display()
         )));
         assert!(wrapper.contains("--config|--config=*"));
+    }
+
+    /// Every byte of a path survives the wrapper's quoting: `sh` reads the
+    /// quoted form back as the exact path, whatever characters the store or
+    /// project path holds (#348).
+    #[test]
+    fn shell_double_quote_round_trips_every_byte_through_sh() {
+        use std::os::unix::ffi::OsStrExt as _;
+        let paths: [&[u8]; 6] = [
+            b"/plain/path",
+            b"/with space/and \"quotes\" and 'single'",
+            b"/dollar $HOME and $(touch /tmp/never) and ${x}",
+            b"/back`tick`/and\\backslash\\",
+            b"/new\nline/and\ttab",
+            b"/not-utf8/\xff\xfe/caf\xc3\xa9",
+        ];
+        for path in paths {
+            let mut script = b"printf '%s' \"".to_vec();
+            script.extend(shell_double_quote(Path::new(std::ffi::OsStr::from_bytes(
+                path,
+            ))));
+            script.push(b'"');
+            let output = Command::new("/bin/sh")
+                .arg("-c")
+                .arg(std::ffi::OsStr::from_bytes(&script))
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{:?}",
+                String::from_utf8_lossy(path)
+            );
+            assert_eq!(output.stdout, path, "{:?}", String::from_utf8_lossy(path));
+        }
+    }
+
+    /// `target` is created from the held project descriptor: a symlink
+    /// there is refused, and nothing is created where it points (#348).
+    #[test]
+    fn project_child_dir_refuses_a_symlink_before_creating_anything() {
+        let temp = TempDir::named("cargo-child-dir");
+        let project = temp.0.join("project");
+        let outside = temp.0.join("outside");
+        fs::create_dir_all(&project).unwrap();
+        let project = project.canonicalize().unwrap();
+
+        // A plain directory is created and named canonically.
+        assert_eq!(
+            project_child_dir(&project, "target").unwrap(),
+            project.join("target")
+        );
+        fs::remove_dir(project.join("target")).unwrap();
+
+        // A symlink to a missing path outside: refused, nothing created.
+        std::os::unix::fs::symlink(outside.join("made"), project.join("target")).unwrap();
+        let error = project_child_dir(&project, "target").unwrap_err();
+        assert!(
+            error.to_string().contains("not a real directory"),
+            "{error}"
+        );
+        assert!(!outside.exists(), "a path outside the project was created");
+
+        // A symlink to an existing directory outside: refused too.
+        fs::create_dir_all(&outside).unwrap();
+        fs::remove_file(project.join("target")).unwrap();
+        std::os::unix::fs::symlink(&outside, project.join("target")).unwrap();
+        assert!(project_child_dir(&project, "target").is_err());
+        assert!(fs::read_dir(&outside).unwrap().next().is_none());
     }
 
     #[test]

@@ -1466,7 +1466,16 @@ mod tests {
         assert!(path.join("usr").is_dir(), "a locked skeleton was swept");
 
         drop(held);
-        sweep_stale_skeletons(base);
+        // Another test thread may be between `fork` and `exec` right now,
+        // and its child holds a copy of the lock's descriptor until the
+        // `exec` closes it: the lock is released a moment after the drop.
+        for _ in 0..200 {
+            sweep_stale_skeletons(base);
+            if !path.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
         assert!(!path.exists(), "an unlocked stale skeleton was kept");
     }
 
