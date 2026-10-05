@@ -54,30 +54,44 @@ pub fn run(args: &cli::GcArgs) -> io::Result<()> {
         )?;
         return Ok(());
     }
-    // Registering and forgetting the same root in one invocation is
-    // ambiguous; compare the keys before either side touches the registry.
+    // Resolve every key before changing the registry. This keeps a typo or
+    // unknown key from partially applying a multi-key forget request.
+    for (index, key) in args.forget.iter().enumerate() {
+        let key = store.lookup_root(key)?.key;
+        if options.forgotten[..index]
+            .iter()
+            .any(|previous| previous == &key)
+        {
+            return Err(io::Error::other(format!(
+                "refusing to forget root key {key} more than once in one invocation"
+            )));
+        }
+        // The sweep compares the record's on-disk name; on a
+        // case-insensitive filesystem the key may have been typed in
+        // another case (#163).
+        options.forgotten[index] = key;
+    }
+    // Compare resolved registry identities before either operation writes.
+    // Distinct spellings remain distinct on a case-sensitive filesystem.
     for project in &args.register {
         let key = store::Store::root_key(project)?;
-        if args.forget.iter().any(|forget| forget == &key) {
+        let key = match store.lookup_root(&key) {
+            Ok(entry) => entry.key,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => key,
+            Err(error) => return Err(error),
+        };
+        if options.forgotten.iter().any(|forget| forget == &key) {
             return Err(io::Error::other(format!(
                 "refusing to register and forget the same root key {key} in one invocation"
             )));
         }
-    }
-    // Resolve every key before changing the registry. This keeps a typo or
-    // unknown key from partially applying a multi-key forget request.
-    for (index, key) in args.forget.iter().enumerate() {
-        // The sweep compares the record's on-disk name; on a
-        // case-insensitive filesystem the key may have been typed in
-        // another case (#163).
-        options.forgotten[index] = store.lookup_root(key)?.key;
     }
     // `--dry-run` with `--register` was refused from argv.
     for project in &args.register {
         let entry = store.register_root_from_project_with_activity(&activity, project)?;
         writeln!(narrate, "tog: registered root {}", entry.path.display())?;
     }
-    for key in &args.forget {
+    for key in &options.forgotten {
         if options.dry_run {
             let entry = store.lookup_root(key)?;
             writeln!(

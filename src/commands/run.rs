@@ -307,6 +307,21 @@ mod tests {
                 "pnpm add",
             ),
             (vec!["bunx", "/x/bin/bun", "install"], "bun install"),
+            // A program named with its version is the same program.
+            (vec!["npx", "npm@10", "install"], "npm install"),
+            (vec!["npx", "pnpm@9", "install"], "pnpm install"),
+            (vec!["pnpm", "dlx", "pnpm@9", "install"], "pnpm install"),
+            (vec!["npx", "yarn@1", "add", "x"], "yarn add"),
+            // A shell line given as an option's value, or glued to `&&`.
+            (vec!["npm", "exec", "--call=npm ci"], "npm ci"),
+            (vec!["npx", "--call=npm ci"], "npm ci"),
+            (vec!["npx", "--call=yarn"], "yarn"),
+            (vec!["npm", "exec", "-c", "cd web&&npm ci"], "npm ci"),
+            (vec!["npx", "-c", "true;(pnpm i)"], "pnpm i"),
+            (vec!["npx", "-c", "CI=1 npm ci"], "npm ci"),
+            // A runner named by abbreviation is not lost to a later exact
+            // word (`x` is npm's own `exec` alias).
+            (vec!["npm", "exe", "--", "bun", "a", "x"], "bun a"),
             // A subcommand whose remaining words are the program's own again.
             (
                 vec!["yarn", "workspaces", "foreach", "-A", "install"],
@@ -384,6 +399,13 @@ mod tests {
             vec!["npm", "exec", "--", "tsc", "-p", "."],
             vec!["npx", "-c", "npm run build"],
             vec!["pnpm", "dlx", "create-vite", "app"],
+            // Only the word in the program's place is a program: the words
+            // after it are its own arguments.
+            vec!["npx", "create-turbo@latest", "-m", "yarn"],
+            vec!["npx", "--yes", "create-turbo", "-m", "yarn"],
+            vec!["npm", "exec", "--", "create-vite", "app", "--pm", "pnpm"],
+            vec!["npx", "--package=yarn", "yarn", "--version"],
+            vec!["npx", "-p", "yarn", "yarn", "--version"],
             vec!["yarn", "workspaces", "foreach", "-A", "run", "build"],
             vec!["yarn", "workspaces", "list"],
             vec!["yarn", "workspaces"],
