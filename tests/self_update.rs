@@ -431,6 +431,26 @@ fn doctor_reports_the_build_and_whether_a_release_is_newer() {
         .unwrap()
         .contains("tog update --self"));
 
+    // Issue #403. A newer release with no build for this machine is news,
+    // not a warning: `update --self` would refuse it.
+    let manifest = publish(
+        &home.0,
+        &Release {
+            no_assets: true,
+            ..Release::newer()
+        },
+    );
+    let out = run(&binary, &home.0, &manifest, &["doctor"]);
+    let stdout = text(&out.stdout);
+    assert_eq!(
+        stdout.lines().next().unwrap(),
+        format!(
+            "ok    version      {running}; v99.0.0 is out, with no build for this machine ({})",
+            triple()
+        ),
+        "{stdout}"
+    );
+
     let manifest = publish(
         &home.0,
         &Release {
