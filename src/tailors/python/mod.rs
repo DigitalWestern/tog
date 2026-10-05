@@ -14,6 +14,7 @@ pub mod pypi;
 pub mod pyselect;
 pub mod registry_tool;
 pub mod run_refusal;
+mod sdist_view;
 pub mod tailor;
 mod unpack;
 pub mod wheel;

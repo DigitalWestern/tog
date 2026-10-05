@@ -37,7 +37,9 @@ pub(super) fn cached_gems_object(
     identity: &Identity,
     fingerprint: impl FnOnce() -> io::Result<String>,
 ) -> io::Result<Option<String>> {
-    HOST_FALLBACK_RECORDS.cached_object(store, activity, identity, fingerprint)
+    Ok(HOST_FALLBACK_RECORDS
+        .cached_object(store, activity, identity, fingerprint)?
+        .map(|cached| cached.id))
 }
 
 /// Record which gems of `runtime_only` fell back against these host inputs

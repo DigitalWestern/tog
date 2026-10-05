@@ -99,6 +99,13 @@ fn sorted(names: &[String]) -> Vec<String> {
     names
 }
 
+/// An object `FallbackRecords::cached_object` found: its id, and when it
+/// is a host-fallback object, the host build inputs it was built against.
+pub(crate) struct CachedObject {
+    pub(crate) id: String,
+    pub(crate) host_inputs: Option<String>,
+}
+
 /// Where one kind of object records its fallbacks: the store record kind,
 /// which names a recorded fallback must have to be believed, and what a
 /// note about a failed write calls the builds.
@@ -158,10 +165,13 @@ impl FallbackRecords {
         activity: &StoreActivity,
         identity: &Identity,
         fingerprint: impl FnOnce() -> io::Result<String>,
-    ) -> io::Result<Option<String>> {
+    ) -> io::Result<Option<CachedObject>> {
         let id = identity.object_id();
         if store.has_with_activity(activity, &id)? {
-            return Ok(Some(id));
+            return Ok(Some(CachedObject {
+                id,
+                host_inputs: None,
+            }));
         }
         if identity.inputs.get("build_view").map(String::as_str) != Some(RUNTIME_ONLY_VIEW) {
             return Ok(None);
@@ -173,7 +183,10 @@ impl FallbackRecords {
         let fallback = fallback_identity(identity, &fell_back, &host_inputs).object_id();
         Ok(store
             .has_with_activity(activity, &fallback)?
-            .then_some(fallback))
+            .then_some(CachedObject {
+                id: fallback,
+                host_inputs: Some(host_inputs),
+            }))
     }
 
     /// Record which builds of `runtime_only` fell back against these host
@@ -273,4 +286,59 @@ where
         return Err(io::Error::other(HostChanged(subject.to_string())));
     }
     Ok(Some(after))
+}
+
+/// A `host-fallback/1` object names the builds that fell back, each one
+/// that `belongs` accepts as a build of the object, sorted and without repeats, and the SHA-256 fingerprint
+/// of the host build inputs they were built against; no other object
+/// names either.
+pub(crate) fn identity_contract(
+    identity: &Identity,
+    belongs: impl Fn(&str) -> bool,
+) -> Result<(), String> {
+    let view = identity.inputs.get("build_view").map(String::as_str);
+    let fallback = view == Some("host-fallback/1");
+    match identity.inputs.get("host_inputs") {
+        Some(host_inputs) if !fallback => {
+            return Err(format!(
+                "host_inputs {host_inputs:?} without build_view host-fallback/1"
+            ))
+        }
+        Some(host_inputs)
+            if host_inputs.len() != 64
+                || !host_inputs
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) =>
+        {
+            return Err(format!(
+                "host_inputs {host_inputs:?} is not a lowercase SHA-256 hex digest"
+            ))
+        }
+        None if fallback => {
+            return Err("build_view host-fallback/1 without host_inputs".to_string())
+        }
+        _ => {}
+    }
+    let names = identity.inputs.get("host_fallback");
+    match (view, names) {
+        (Some("host-fallback/1"), Some(names)) => {
+            let names: Vec<&str> = names.split(',').collect();
+            if names.windows(2).any(|pair| pair[0] >= pair[1]) {
+                return Err(format!("host_fallback {names:?} is not sorted and unique"));
+            }
+            for name in names {
+                if !belongs(name) {
+                    return Err(format!(
+                        "host_fallback names {name:?}, which is not a build of this object"
+                    ));
+                }
+            }
+            Ok(())
+        }
+        (Some("host-fallback/1"), None) => {
+            Err("build_view host-fallback/1 without host_fallback".to_string())
+        }
+        (_, Some(_)) => Err("host_fallback without build_view host-fallback/1".to_string()),
+        (_, None) => Ok(()),
+    }
 }
