@@ -164,6 +164,73 @@ pub(crate) fn open_file_at(
     Ok(unsafe { fs::File::from_raw_fd(fd) })
 }
 
+/// What is at an object metadata file's name.
+pub(crate) enum MetaFile {
+    /// A regular file, open for reading.
+    File(fs::File),
+    Missing,
+    /// A symlink, a FIFO, a socket, a directory: anything but a regular file.
+    NotRegular,
+}
+
+/// Open the metadata file `name` under the held directory `dirfd`. The open
+/// follows no symlink and does not block on a FIFO, and the descriptor's own
+/// type is checked after it: a stat first could be answered by a regular
+/// file that is swapped before the open. Every reader of `meta/<id>.json`
+/// opens it here, so none of them can be redirected or hung.
+pub(crate) fn open_meta_file_at(dirfd: RawFd, name: &[u8]) -> io::Result<MetaFile> {
+    let file = match open_file_at(
+        dirfd,
+        name,
+        libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
+        0,
+    ) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(MetaFile::Missing),
+        // A symlink (ELOOP) or a socket (ENXIO on Linux, EOPNOTSUPP on
+        // macOS) cannot be opened at all. EACCES is a regular file this user
+        // cannot read, or a directory: only the second is about the shape.
+        Err(error) => {
+            return match error.raw_os_error() {
+                Some(libc::ELOOP | libc::ENXIO | libc::EOPNOTSUPP) => Ok(MetaFile::NotRegular),
+                Some(libc::EACCES) if !is_regular_at(dirfd, name) => Ok(MetaFile::NotRegular),
+                _ => Err(error),
+            }
+        }
+    };
+    if !file.metadata()?.is_file() {
+        return Ok(MetaFile::NotRegular);
+    }
+    // O_NONBLOCK was only for the open; a regular-file read must not see
+    // EAGAIN from a filesystem that honours it (FUSE).
+    // SAFETY: fcntl on a descriptor this function owns.
+    if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_SETFL, 0) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(MetaFile::File(file))
+}
+
+/// Whether `name` under `dirfd` is a regular file, not following a symlink.
+/// Only for naming a failed open, so an entry that cannot be stated counts
+/// as regular and the open's own error stands.
+fn is_regular_at(dirfd: RawFd, name: &[u8]) -> bool {
+    let Ok(name) = CString::new(name) else {
+        return true;
+    };
+    let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+    // SAFETY: name is NUL-terminated and stat is a valid out-pointer.
+    let result = unsafe {
+        libc::fstatat(
+            dirfd,
+            name.as_ptr(),
+            stat.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    // SAFETY: fstatat filled the buffer when it returned 0.
+    result != 0 || unsafe { stat.assume_init() }.st_mode & libc::S_IFMT == libc::S_IFREG
+}
+
 /// Open the directory `name` under `dirfd`, following no symlink.
 pub(crate) fn open_directory_at(dirfd: RawFd, name: &[u8]) -> io::Result<fs::File> {
     open_file_at(

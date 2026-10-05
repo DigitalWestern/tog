@@ -81,6 +81,7 @@ impl MetaIndex {
                 "meta is not a real directory",
             ));
         }
+        let held = store::open_real_directory(&meta_dir, "object metadata directory")?;
         let mut entries = BTreeMap::new();
         let mut unusable = BTreeMap::new();
         for entry in fs::read_dir(&meta_dir)? {
@@ -89,7 +90,7 @@ impl MetaIndex {
             if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
                 continue;
             }
-            match read_record_at(&path) {
+            match read_record_in(&held, &path) {
                 Ok(record) => {
                     entries.insert(record.id.clone(), record);
                 }
@@ -119,45 +120,59 @@ impl MetaIndex {
 
 /// Parse and validate one metadata file. Shared by the index and by the
 /// sweep reader so a record can never be understood two different ways.
+/// The directory is opened as a real one and the file under it, so neither
+/// a symlinked `meta/` nor a symlinked record redirects the read.
 pub fn read_record_at(path: &Path) -> io::Result<Record> {
-    use std::os::unix::fs::OpenOptionsExt as _;
-    use std::os::unix::io::AsRawFd as _;
-    // Open first, then check what was opened: a stat before the open could
-    // be answered by a regular file that is swapped for a FIFO (the open
-    // would block) or a symlink (it would be followed) before the open.
-    let not_regular = || {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("object metadata {} is not a regular file", path.display()),
-        )
+    let (Some(parent), Some(_)) = (path.parent(), path.file_name()) else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("object metadata path {} names no file", path.display()),
+        ));
     };
-    let file = fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(path)
-        .map_err(|error| {
-            // A symlink (ELOOP), a socket (ENXIO on Linux, EOPNOTSUPP on
-            // macOS) or an unreadable directory (EACCES) fails to open. Name
-            // what is there when it is not a regular file. Any other error,
-            // and these on a regular file, keep their own kind.
-            let by_type = matches!(
-                error.raw_os_error(),
-                Some(libc::ELOOP | libc::ENXIO | libc::EOPNOTSUPP | libc::EACCES)
-            );
-            match fs::symlink_metadata(path) {
-                Ok(metadata) if by_type && !metadata.is_file() => not_regular(),
-                _ => error,
-            }
-        })?;
-    if !file.metadata()?.is_file() {
-        return Err(not_regular());
-    }
-    // O_NONBLOCK was only for the open; a regular-file read must not see
-    // EAGAIN from a filesystem that honours it (FUSE).
-    // SAFETY: fcntl on a descriptor this function owns.
-    if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_SETFL, 0) } != 0 {
-        return Err(io::Error::last_os_error());
-    }
+    let parent = if parent.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        parent
+    };
+    let dir = store::open_real_directory(parent, "object metadata directory")?;
+    read_record_in(&dir, path)
+}
+
+/// [`read_record_at`] for a record in `dir`, a held descriptor of the
+/// directory `path` is in.
+fn read_record_in(dir: &fs::File, path: &Path) -> io::Result<Record> {
+    use std::os::unix::ffi::OsStrExt as _;
+    use std::os::unix::io::AsRawFd as _;
+    let name = path.file_name().unwrap_or_default();
+    read_opened_record(
+        store::open_meta_file_at(dir.as_raw_fd(), name.as_bytes())?,
+        path,
+    )
+}
+
+/// The record of `id` in `store`, opened from the store's held `meta/`
+/// descriptor.
+pub fn read_store_record(store: &store::Store, id: &str) -> io::Result<Record> {
+    let path = store.root.join("meta").join(format!("{id}.json"));
+    read_opened_record(store.open_object_meta(id)?, &path)
+}
+
+fn read_opened_record(opened: store::MetaFile, path: &Path) -> io::Result<Record> {
+    let file = match opened {
+        store::MetaFile::File(file) => file,
+        store::MetaFile::NotRegular => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("object metadata {} is not a regular file", path.display()),
+            ))
+        }
+        store::MetaFile::Missing => {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("object metadata {} is missing", path.display()),
+            ))
+        }
+    };
     let id = path
         .file_stem()
         .and_then(|stem| stem.to_str())
