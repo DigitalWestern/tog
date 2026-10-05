@@ -1238,14 +1238,19 @@ mod tests {
     use sha2::{Digest, Sha256};
 
     /// Doctor's realized-toolchain row reads `Tailor::toolchain_kinds`; each
-    /// is a kind its own tailor registers, and every ecosystem has one.
+    /// is a kind its own tailor or a kernel provider registers (#191), and
+    /// every ecosystem has one.
     #[test]
     fn toolchain_kinds_are_registered_object_kinds() {
         for tailor in tailors::registry() {
             assert!(!tailor.toolchain_kinds().is_empty(), "{}", tailor.id());
             for kind in tailor.toolchain_kinds() {
                 assert!(
-                    tailor.object_kinds().iter().any(|row| row.kind == *kind),
+                    tailor
+                        .object_kinds()
+                        .iter()
+                        .chain(crate::kernel::provider::objects::KINDS)
+                        .any(|row| row.kind == *kind),
                     "{}: toolchain kind {kind} has no object-kind row",
                     tailor.id()
                 );
