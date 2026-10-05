@@ -684,7 +684,8 @@ fn parse_passthrough(args: &[String], name: &'static str) -> Result<Option<Comma
         {
             return Err(UsageError::new(
                 format!(
-                    "build: {word} does not build; tog build takes {}",
+                    "build: {word} does not build; tog build takes {}. To pass {word} to \
+                     the build tool as an argument, use `tog build -- {word}`",
                     BUILD_WORDS.join(", ")
                 ),
                 Some("build"),
@@ -1015,6 +1016,11 @@ fn gc_combination(gc: &GcArgs) -> Result<(), UsageError> {
     for (index, key) in gc.forget.iter().enumerate() {
         if gc.forget[..index].contains(key) {
             return refuse(&format!("--forget names root key {key} more than once"));
+        }
+    }
+    for (index, id) in gc.drop_objects.iter().enumerate() {
+        if gc.drop_objects[..index].contains(id) {
+            return refuse(&format!("--drop-object names object {id} more than once"));
         }
     }
     Ok(())
@@ -2495,6 +2501,10 @@ mod tests {
                 vec!["gc", "--forget", &key, &key],
                 &*format!("--forget names root key {key} more than once"),
             ),
+            (
+                vec!["gc", "--drop-object", &object, &object],
+                &*format!("--drop-object names object {object} more than once"),
+            ),
         ] {
             assert_eq!(message(&words), expected, "{words:?}");
         }
@@ -2521,7 +2531,8 @@ mod tests {
         ));
         assert_eq!(
             message(&["build", "python", "--release"]),
-            "build: python does not build; tog build takes cargo, go, elixir, dotnet"
+            "build: python does not build; tog build takes cargo, go, elixir, dotnet. To pass \
+             python to the build tool as an argument, use `tog build -- python`"
         );
         assert_eq!(
             command(&["build", "cargo", "--release"]),
