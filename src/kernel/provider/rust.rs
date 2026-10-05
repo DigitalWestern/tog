@@ -74,13 +74,7 @@ pub fn channel_manifest(platform: Platform, selected: &Selected) -> io::Result<A
                 })?
         }
     };
-    if row.recipe != CHANNEL_MANIFEST_RECIPE || row.digest.algo() != "sha256" {
-        return Err(err(format!(
-            "cargo: the channel manifest row ({} {}) is not one this tog reads; upgrade tog",
-            row.recipe,
-            row.digest.algo()
-        )));
-    }
+    row.check("cargo", CHANNEL_MANIFEST_RECIPE, "sha256")?;
     Ok(row)
 }
 
@@ -267,20 +261,10 @@ pub fn runtime_rows(platform: Platform, selected: &Selected) -> io::Result<Vec<A
     }
     let mut rows = Vec::new();
     for component in RUNTIME_COMPONENTS {
+        // Checked as `cargo`, the name users know this ecosystem by; the
+        // selection's own ecosystem is `rust`.
         let row = selected.artifact(platform, component)?;
-        if row.recipe != RUST_RECIPE {
-            return Err(err(format!(
-                "cargo: recipe {} in tog-toolchain.toml is not known to this tog; upgrade tog",
-                row.recipe
-            )));
-        }
-        if row.digest.algo() != "sha256" {
-            return Err(err(format!(
-                "cargo: {} artifact is a {} digest; this tog realizes Rust from sha256 artifacts",
-                row.component,
-                row.digest.algo()
-            )));
-        }
+        row.check("cargo", RUST_RECIPE, "sha256")?;
         rows.push(row);
     }
     Ok(rows)
