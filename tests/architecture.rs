@@ -1914,10 +1914,8 @@ fn tar_runs_only_in_kernel_archive() {
         {
             continue;
         }
-        for (token, owner) in production_tokens(&text) {
-            if matches!(&token, Token::Str(literal) if names_a_tar(literal)) {
-                sites.push(format!("{relative}:{owner}"));
-            }
+        for owner in tar_sites(&text) {
+            sites.push(format!("{relative}:{owner}"));
         }
     }
     // Positive control: the scan sees the owner's own invocation, so a
@@ -1942,13 +1940,58 @@ fn tar_runs_only_in_kernel_archive() {
 
 /// A string literal that names a tar binary: any absolute path ending in
 /// `tar`, `bsdtar`, `gtar` or `gnutar`, or one of the last three bare. A bare
-/// `"tar"` is not matched: it is also a file extension (`with_extension`),
-/// so matching it would flag ordinary path code. That spelling is the one
-/// gap left; host tools here are otherwise invoked by absolute path.
+/// `"tar"` is not matched here: it is also a file extension
+/// (`with_extension`). The scan catches it as a program instead, when it is
+/// the argument of `Command::new` (the `program` check in [`tar_sites`]).
 fn names_a_tar(literal: &str) -> bool {
     const TARS: [&str; 4] = ["tar", "bsdtar", "gtar", "gnutar"];
     let base = literal.rsplit('/').next().unwrap_or(literal);
     (literal.starts_with('/') && TARS.contains(&base)) || TARS[1..].contains(&literal)
+}
+
+/// The owners of every production site in `text` that names tar: a literal
+/// [`names_a_tar`] accepts, or a bare `"tar"` given to `Command::new` (any
+/// path to `Command`, such as `std::process::Command::new`, ends the same
+/// way). A bare `"tar"` anywhere else is a file extension and passes.
+fn tar_sites(text: &str) -> Vec<String> {
+    let tokens = production_tokens(text);
+    let program = |index: usize| {
+        let before: Vec<&Token> = tokens[..index]
+            .iter()
+            .rev()
+            .take(5)
+            .map(|(token, _)| token)
+            .collect();
+        matches!(
+            before.as_slice(),
+            [Token::Punct('('), Token::Ident(new), Token::Punct(':'), Token::Punct(':'), Token::Ident(command)]
+                if new == "new" && command == "Command"
+        )
+    };
+    tokens
+        .iter()
+        .enumerate()
+        .filter(|(index, (token, _))| match token {
+            Token::Str(literal) => names_a_tar(literal) || (literal == "tar" && program(*index)),
+            _ => false,
+        })
+        .map(|(_, (_, owner))| owner.clone())
+        .collect()
+}
+
+#[test]
+fn a_bare_tar_is_caught_as_a_program_and_not_as_an_extension() {
+    assert_eq!(
+        tar_sites(
+            "fn a() { Command::new(\"tar\").arg(\"-x\"); }\n\
+             fn b() { std::process::Command::new(\"tar\"); }\n\
+             fn c() { Command::new( \"tar\" ); }\n\
+             fn d() { path.with_extension(\"tar\"); }\n\
+             fn e() { Command::new(\"gzip\").arg(\"tar\"); }\n\
+             fn f() { Command::new(\"/usr/bin/tar\"); }"
+        ),
+        ["a", "b", "c", "f"]
+    );
 }
 
 #[test]
