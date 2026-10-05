@@ -530,27 +530,108 @@ fn subcommand(manager: &Manager, cmd: &[String]) -> Option<(&'static str, usize)
     abbreviated
 }
 
+/// The position of a runner named by abbreviation before `before`
+/// (`npm exe -- bun a x`). The scan above reads on past it to the exact `x`,
+/// but it may be the real subcommand, so what it would run is checked too.
+fn abbreviated_runner(manager: &Manager, cmd: &[String], before: usize) -> Option<usize> {
+    (1..before).find(|&index| {
+        matches!(resolve(manager, &cmd[index]), Some((verb, false)) if manager.runs.contains(&verb))
+    })
+}
+
+/// The options of a runner (`npx`, `npm exec`, `pnpm dlx`, `bunx`) that take
+/// no value, so the word after one is the program it runs. After any other
+/// option the next word may be that option's value (`npx -p npm npm i`).
+const RUNNER_FLAGS: &[&str] = &[
+    "-y",
+    "--yes",
+    "--no",
+    "-q",
+    "--quiet",
+    "-s",
+    "--silent",
+    "--bun",
+    "--no-install",
+    "--ignore-existing",
+    "--prefer-offline",
+    "--offline",
+    "--shell-auto-fallback",
+];
+
+/// The runner options whose value is a shell command line (`npm exec -c
+/// 'npm ci'`).
+const CALL_OPTIONS: &[&str] = &["-c", "--call"];
+
+/// The characters that end one shell command and start the next
+/// (`cd web&&npm ci`, `(npm ci)`).
+const SHELL_SEPARATORS: &[char] = &[';', '&', '|', '(', ')'];
+
+/// The program a word names: its last path segment without a version
+/// (`/x/bin/npm`, `npm@10`), a leading `@` kept for a scoped name.
+fn program_name(word: &str) -> &str {
+    let name = word.rsplit('/').next().unwrap_or(word);
+    match name.get(1..).and_then(|rest| rest.find('@')) {
+        Some(at) => &name[..at + 1],
+        None => name,
+    }
+}
+
 /// The install inside a command another one runs (`npm exec -- npm
-/// install`, `npx yarn add x`, `pnpm dlx npm ci`): the first word naming an
-/// npm-family program starts it, and a word holding spaces is a shell
-/// command line of its own (`npm exec -c 'npm install'`).
+/// install`, `npx yarn add x`, `pnpm dlx npm ci`). The program is the first
+/// word after the runner's own options, or the word after `--`; the words
+/// after it are its own (`npx create-turbo -m yarn` runs create-turbo). A
+/// bare word after an option may be that option's value, so it is checked
+/// and the scan reads on. A word holding spaces or shell separators is a
+/// shell command line of its own (`npm exec -c 'cd web&&npm ci'`), and so
+/// is the value of `--call=`.
 fn nested(words: &[String]) -> Option<String> {
+    let mut maybe_value = false;
     for (index, word) in words.iter().enumerate() {
-        if word.contains(char::is_whitespace) {
-            let line: Vec<String> = word.split_whitespace().map(str::to_string).collect();
-            if let Some(refusal) = nested(&line) {
-                return Some(refusal);
+        if word == "--" {
+            return refused_command(&words[index + 1..]);
+        }
+        if word.starts_with('-') {
+            if let Some((option, value)) = word.split_once('=') {
+                if CALL_OPTIONS.contains(&option) || is_shell_line(value) {
+                    if let Some(refusal) = shell_line(value) {
+                        return Some(refusal);
+                    }
+                }
             }
+            maybe_value = !word.contains('=') && !RUNNER_FLAGS.contains(&word.as_str());
             continue;
         }
-        let program = word.rsplit('/').next().unwrap_or(word);
-        if manager(program).is_some() || RUNNERS.contains(&program) {
-            if let Some(refusal) = refused_command(&words[index..]) {
+        if is_shell_line(word) {
+            if let Some(refusal) = shell_line(word) {
                 return Some(refusal);
             }
+            maybe_value = false;
+            continue;
         }
+        let refusal = refused_command(&words[index..]);
+        if refusal.is_some() || !maybe_value {
+            return refusal;
+        }
+        maybe_value = false;
     }
     None
+}
+
+fn is_shell_line(word: &str) -> bool {
+    word.contains(|c: char| c.is_whitespace() || SHELL_SEPARATORS.contains(&c))
+}
+
+/// The install among the commands of a shell line: each command's first
+/// word, past any `NAME=value` assignments, is its program.
+fn shell_line(line: &str) -> Option<String> {
+    line.split(SHELL_SEPARATORS).find_map(|command| {
+        let words: Vec<String> = command
+            .split_whitespace()
+            .skip_while(|word| !word.starts_with('-') && word.contains('='))
+            .map(str::to_string)
+            .collect();
+        refused_command(&words)
+    })
 }
 
 /// With no subcommand, yarn and bun install unless asked about themselves
@@ -581,12 +662,17 @@ fn bare_install(manager: &Manager, cmd: &[String]) -> bool {
 /// is refused with the verb that replaces it. Only the installing verbs
 /// are refused: reading the environment with `npm ls` is fine.
 pub fn refused_command(cmd: &[String]) -> Option<String> {
-    let program = cmd.first()?.rsplit('/').next()?;
+    let program = program_name(cmd.first()?);
     if RUNNERS.contains(&program) {
         return nested(&cmd[1..]);
     }
     let manager = manager(program)?;
-    let verb = match subcommand(manager, cmd) {
+    let found = subcommand(manager, cmd);
+    let runner = found.and_then(|(_, index)| abbreviated_runner(manager, cmd, index));
+    if let Some(refusal) = runner.and_then(|index| nested(&cmd[index + 1..])) {
+        return Some(refusal);
+    }
+    let verb = match found {
         Some((verb, _)) if manager.installs.contains(&verb) => verb,
         Some((verb, index)) if manager.runs.contains(&verb) => return nested(&cmd[index + 1..]),
         Some((verb, index)) if manager.reenters.contains(&verb) => {
