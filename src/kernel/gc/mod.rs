@@ -4,6 +4,9 @@
 //! current working directory. A project becomes a root when a tailor writes a
 //! closure. A root never stops protecting its project: an unavailable project
 //! stops the sweep until it returns or its record is explicitly forgotten.
+//! The one root a sweep forgets by itself is one whose project's closures
+//! are all retired records and which protects nothing those records do not
+//! name; a dry run reports it instead.
 
 use crate::kernel::activity::StoreActivity;
 use crate::kernel::store::{self, open_real_directory, RootEntry, Store};
@@ -139,9 +142,9 @@ pub fn collect_with_activity<W: Write>(
 }
 
 /// Forget each root whose project holds only retired closure records (the
-/// `rustfmt.json` an older `tog fmt` wrote and registered a root for).
-/// Nothing reads such a record any more, so the root protects nothing a
-/// project still uses; left alone it would keep its objects forever, or
+/// `rustfmt.json` an older `tog fmt` wrote and registered a root for) and
+/// that protects nothing those records do not name. Nothing reads such a
+/// record any more; left alone the root would keep its objects forever, or
 /// stop every sweep once the record is deleted. A dry run only reports, and
 /// leaves the root out of the plan the way `--dry-run --forget` does.
 fn forget_retired_roots<W: Write>(
@@ -161,6 +164,9 @@ fn forget_retired_roots<W: Write>(
         let Some(retired) = retired_only(project) else {
             continue;
         };
+        if !protects_only_retired(store, &root, project, &retired) {
+            continue;
+        }
         let what = format!(
             "root {} ({}): its only closures are retired records ({})",
             root.key,
@@ -200,6 +206,58 @@ fn retired_only(project: &Path) -> Option<Vec<String>> {
     }
     retired.sort();
     (!retired.is_empty()).then_some(retired)
+}
+
+/// Whether forgetting `root` gives up only what the project's `retired`
+/// records name, read with the sweep's own walk. A root/2 record is the
+/// sweep authority, and producers that write no closure file add to it (the
+/// resolution ledger and diagnostics the door roots, the resolution
+/// originals, backups), so every object and projection it lists must be
+/// named by a retired record. A pathname-only root protects what the closure
+/// files name, here only retired ones, and the forest a `node_modules` or
+/// `.venv` link points into. A run home under the project's key keeps either
+/// kind, and so does a retired record that cannot be read.
+fn protects_only_retired(
+    store: &Store,
+    root: &RootEntry,
+    project: &Path,
+    retired: &[String],
+) -> bool {
+    let mut ids = HashSet::new();
+    let mut paths = Vec::new();
+    for name in retired {
+        let path = project.join(".tog/closures").join(name);
+        let Some(value) = fs::read(&path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        else {
+            return false;
+        };
+        let body = value.get("body").unwrap_or(&value);
+        collect_object_ids(body, store, &mut ids);
+        collect_project_paths(body, store, &mut paths);
+    }
+    let run_home = store
+        .root
+        .join("run-homes")
+        .join(Store::canonical_project_key(project));
+    if !fs::symlink_metadata(run_home).is_err_and(|error| error.kind() == io::ErrorKind::NotFound) {
+        return false;
+    }
+    match &root.record {
+        Some(record) => {
+            record.objects.iter().all(|id| ids.contains(id))
+                && record
+                    .projections
+                    .iter()
+                    .all(|projection| paths.contains(&projection.path(store)))
+        }
+        None => {
+            let mut linked = Vec::new();
+            collect_linked_projections(project, store, &mut linked);
+            linked.iter().all(|path| paths.contains(path))
+        }
+    }
 }
 
 /// The resolution proxy's metadata cache is a cache: entries unused for the
@@ -718,6 +776,73 @@ mod tests {
         );
     }
 
+    /// A record or a record kind the sweep cannot read is left alone: records
+    /// are a cache, and before them `tog gc --project` never read records/.
+    #[test]
+    fn an_unreadable_record_does_not_fail_a_project_sweep() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = TempStore::new("unreadable-records");
+        let store = temp.store();
+        let gone = temp.root.join("gone");
+        fs::create_dir_all(&gone).unwrap();
+        let gone = gone.canonicalize().unwrap();
+        store
+            .register_root_record(store::RootRecord {
+                key: store::Store::root_key(&temp.root).unwrap(),
+                project_path: temp.root.canonicalize().unwrap(),
+                objects: BTreeSet::new(),
+                projections: BTreeSet::new(),
+                updated: 1,
+            })
+            .unwrap();
+        let activity = store
+            .activity(crate::kernel::activity::ActivityMode::Shared)
+            .unwrap();
+        let value = serde_json::json!({"input_hash": "x"});
+        for kind in ["demo-locked", "demo-sealed", "demo-check"] {
+            store
+                .write_project_record(&activity, kind, &gone, &value)
+                .unwrap();
+        }
+        drop(activity);
+        fs::remove_dir_all(&gone).unwrap();
+        let records = store.root.join(store::RECORDS);
+        let locked = fs::read_dir(records.join("demo-locked"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let mode = |path: &Path, mode| {
+            fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap()
+        };
+        mode(&locked, 0o000);
+        mode(&records.join("demo-sealed"), 0o000);
+        let mut output = Vec::new();
+        let report = collect(
+            &store,
+            Options {
+                dry_run: false,
+                project: true,
+                ..Options::default()
+            },
+            &mut output,
+        );
+        mode(&records.join("demo-sealed"), 0o700);
+        mode(&locked, 0o600);
+        let text = String::from_utf8(output).unwrap();
+        assert_eq!(report.unwrap().project_records, 1, "{text}");
+        assert!(locked.is_file(), "{text}");
+        assert!(store
+            .read_project_record("demo-sealed", &gone)
+            .unwrap()
+            .is_some());
+        assert_eq!(
+            store.read_project_record("demo-check", &gone).unwrap(),
+            None
+        );
+    }
+
     #[test]
     fn root2_keeps_objects_after_the_project_disappears() {
         let temp = TempStore::new("root2-moved-project");
@@ -753,6 +878,71 @@ mod tests {
         assert_eq!(report.objects, 1);
         assert!(store.object_path(&protected).exists());
         assert!(!store.object_path(&dead).exists());
+    }
+
+    /// A root/2 record whose project holds only the retired rustfmt record
+    /// is forgotten when that record names everything it protects (#416).
+    /// One that also protects an object no closure file names, such as a
+    /// resolution ledger the door rooted, is kept, and so is the object.
+    #[test]
+    fn a_retired_only_root_is_forgotten_only_when_it_protects_nothing_else() {
+        let temp = TempStore::new("retired-only");
+        let store = temp.store();
+        let rooted = |name: &str, objects: &[&str]| {
+            let project = temp.root.join(name);
+            let key = register_objects(&store, &project, objects);
+            let body = serde_json::json!({ "rustfmt_object": {
+                "id": objects[0],
+                "path": store.object_path(objects[0]).display().to_string(),
+            }});
+            fs::create_dir_all(project.join(".tog/closures")).unwrap();
+            fs::write(
+                project.join(".tog/closures/rustfmt.json"),
+                serde_json::to_vec(&serde_json::json!({
+                    "schema": "closure/1", "ecosystem": "cargo", "body": body,
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            key
+        };
+        let ids: Vec<String> = ["fmt-only", "fmt-ledger", "ledger"]
+            .iter()
+            .map(|name| commit(&store, name, None))
+            .collect();
+        for id in &ids {
+            age(&store.object_path(id));
+        }
+        let (fmt_only, fmt_ledger, ledger) = (&ids[0], &ids[1], &ids[2]);
+        let lone = rooted("lone", &[fmt_only]);
+        let with_ledger = rooted("with-ledger", &[fmt_ledger, ledger]);
+
+        let (_, text) = sweep(
+            &store,
+            Options {
+                dry_run: true,
+                ..Options::default()
+            },
+        );
+        assert!(
+            text.contains(&format!("would forget root {lone} (")),
+            "{text}"
+        );
+        assert!(!text.contains(&with_ledger), "{text}");
+
+        let (report, text) = sweep(
+            &store,
+            Options {
+                keep_days: 0,
+                ..Options::default()
+            },
+        );
+        assert_eq!(report.unwrap().objects, 1, "{text}");
+        assert!(!store.has_root_entry(&lone).unwrap(), "{text}");
+        assert!(!store.object_path(fmt_only).exists(), "{text}");
+        assert!(store.has_root_entry(&with_ledger).unwrap(), "{text}");
+        assert!(store.object_path(ledger).is_dir(), "{text}");
+        assert!(store.object_path(fmt_ledger).is_dir(), "{text}");
     }
 
     #[test]
@@ -1749,6 +1939,27 @@ mod tests {
         assert!(!record.exists(), "the stray record survived: {text}");
     }
 
+    #[test]
+    fn a_directory_replacing_a_parsed_orphan_record_is_never_swept() {
+        let temp = TempStore::new("orphan-directory-replacement");
+        let store = temp.store();
+        let gone = commit(&store, "gone", None);
+        store::remove_tree(&store.object_path(&gone)).unwrap();
+        let (index, unusable) =
+            crate::kernel::objmeta::MetaIndex::read_reporting_unusable(&store).unwrap();
+        assert!(unusable.is_empty());
+        let record = store.root.join("meta").join(format!("{gone}.json"));
+        fs::remove_file(&record).unwrap();
+        fs::create_dir(&record).unwrap();
+        fs::write(record.join("user-data"), "keep").unwrap();
+        let held = read::open_held(&store.root.join("meta"), "meta").unwrap();
+        assert!(read::read_stray_records(&index, &[], &held).is_err());
+        assert_eq!(
+            fs::read_to_string(record.join("user-data")).unwrap(),
+            "keep"
+        );
+    }
+
     /// A record whose object is gone while a rooted object still depends on
     /// it is a real loss, not residue: the sweep refuses and keeps it.
     #[test]
@@ -1815,6 +2026,61 @@ mod tests {
         for path in &fresh {
             assert!(path.exists(), "{} was removed: {text}", path.display());
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn restricted_resolution_trash_is_removed_without_mutating_a_dry_run() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = TempStore::new("restricted-resolution-trash");
+        let store = temp.store();
+        register_objects(&store, &temp.root.join("project"), &[]);
+        let stage = store.root.join("tmp/resolve-0-0-crashed");
+        let blocked = stage.join("blocked");
+        let search_only = stage.join("search-only");
+        fs::create_dir_all(&blocked).unwrap();
+        fs::create_dir_all(&search_only).unwrap();
+        fs::write(blocked.join("payload"), "trash").unwrap();
+        fs::write(search_only.join("payload"), "trash").unwrap();
+        let outside = temp.root.join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("keep"), "user data").unwrap();
+        std::os::unix::fs::symlink(&outside, blocked.join("escape")).unwrap();
+        let held_root = fs::File::open(&stage).unwrap();
+        let held_blocked = fs::File::open(&blocked).unwrap();
+        let held_search = fs::File::open(&search_only).unwrap();
+        age(&stage);
+        fs::set_permissions(&blocked, fs::Permissions::from_mode(0o0)).unwrap();
+        fs::set_permissions(&search_only, fs::Permissions::from_mode(0o100)).unwrap();
+        fs::set_permissions(&stage, fs::Permissions::from_mode(0o0)).unwrap();
+        let (dry, text) = sweep(
+            &store,
+            Options {
+                dry_run: true,
+                ..Options::default()
+            },
+        );
+        assert_eq!(dry.unwrap().stages, 1, "{text}");
+        assert!(text.contains("at least"), "{text}");
+        assert_eq!(
+            held_root.metadata().unwrap().permissions().mode() & 0o777,
+            0
+        );
+        assert_eq!(
+            held_blocked.metadata().unwrap().permissions().mode() & 0o777,
+            0
+        );
+        assert_eq!(
+            held_search.metadata().unwrap().permissions().mode() & 0o777,
+            0o100
+        );
+        let (real, text) = sweep(&store, Options::default());
+        assert_eq!(real.unwrap().stages, 1, "{text}");
+        assert!(!stage.exists(), "{text}");
+        assert_eq!(
+            fs::read_to_string(outside.join("keep")).unwrap(),
+            "user data"
+        );
     }
 
     /// A dry run writes nothing: no record, no root, no timestamp.
@@ -2650,6 +2916,35 @@ mod tests {
                     .contains("` (the next sync that needs it rebuilds it), or restore meta/"),
             "{message}"
         );
+    }
+
+    /// A recordless object that a readable record still depends on: drop
+    /// refuses the id alone, so the advice names the whole set, and running
+    /// it clears the stop.
+    #[test]
+    fn a_recordless_dependency_is_advised_as_a_drop_of_its_whole_set() {
+        let temp = TempStore::new("read-no-meta-dependency");
+        let store = temp.store();
+        register_objects(&store, &temp.root.join("project"), &[]);
+        let dependency = commit(&store, "dependency", None);
+        let dependent = commit(&store, "dependent", Some(&dependency));
+        fs::remove_file(store.root.join("meta").join(format!("{dependency}.json"))).unwrap();
+        let mut whole_set = [dependency.clone(), dependent.clone()];
+        whole_set.sort();
+        let (result, text) = sweep(&store, Options::default());
+        let message = result.expect_err(&text).to_string();
+        assert!(
+            message.contains(&format!(
+                "; drop it and the 1 object(s) that depend on it with `tog gc --drop-object \
+                 {} {}`",
+                whole_set[0], whole_set[1]
+            )),
+            "{message}"
+        );
+        let (count, text) = dropped(&store, &whole_set, false);
+        assert_eq!(count.unwrap(), 2, "{text}");
+        let (result, text) = sweep(&store, Options::default());
+        result.unwrap_or_else(|error| panic!("{error}: {text}"));
     }
 
     #[test]

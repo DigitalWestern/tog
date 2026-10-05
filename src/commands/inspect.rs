@@ -15,7 +15,7 @@ use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::platform::Platform;
 use crate::kernel::policy::Exception;
 use crate::kernel::sandbox;
-use crate::kernel::store::Store;
+use crate::kernel::store::{MetaFile, Store};
 use crate::kernel::toolchain::input;
 use crate::kernel::toolchain::lock::{self as toolchain_lock, ToolchainLock, LOCK_PATH};
 use crate::tailors;
@@ -760,14 +760,21 @@ fn free_bytes(path: &Path) -> io::Result<u64> {
 }
 
 /// Realized toolchains, from the store's metadata files only.
+/// The toolchains the store holds, by its object records. Each record is
+/// opened from held descriptors and only when it is a regular file: a FIFO
+/// or a symlink left under `meta/` is skipped, never opened by its path,
+/// where a FIFO would block the report for good.
 fn realized_toolchains(store: &Store) -> io::Result<Vec<String>> {
     let mut found = Vec::new();
     for entry in fs::read_dir(store.root.join("meta"))? {
-        let entry = entry?;
-        let Ok(text) = fs::read_to_string(entry.path()) else {
+        let name = entry?.file_name();
+        let Some(id) = name.to_str().and_then(|name| name.strip_suffix(".json")) else {
             continue;
         };
-        let Ok(value) = serde_json::from_str::<Value>(&text) else {
+        let Ok(MetaFile::File(file)) = store.open_object_meta(id) else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_reader::<_, Value>(io::BufReader::new(file)) else {
             continue;
         };
         let identity = &value["identity"];
@@ -1221,6 +1228,30 @@ mod tests {
 
     use crate::kernel::testutil::TempDir;
 
+    /// A FIFO or a symlink where an object record belongs is skipped: the
+    /// toolchain listing returns instead of blocking on the FIFO's open.
+    #[test]
+    fn realized_toolchains_skips_what_is_not_a_regular_record() {
+        let temp = TempDir::new();
+        let store = Store {
+            root: temp.0.join("store"),
+        };
+        let meta = store.root.join("meta");
+        fs::create_dir_all(&meta).unwrap();
+        let fifo = std::ffi::CString::new(meta.join("a.json").as_os_str().as_bytes()).unwrap();
+        // SAFETY: the NUL-terminated name lives through the call.
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+        let outside = temp.0.join("outside.json");
+        fs::write(
+            &outside,
+            r#"{"identity":{"kind":"python","name":"cpython","version":"9.9.9"}}"#,
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(&outside, meta.join("b.json")).unwrap();
+        fs::write(meta.join("c.json"), "not json").unwrap();
+        assert_eq!(realized_toolchains(&store).unwrap(), Vec::<String>::new());
+    }
+
     fn write_closure(dir: &Path, ecosystem: &str, platform: &str, body: Value) {
         let body = with_toolchain_lock(dir, ecosystem, body);
         let closures = dir.join(".tog/closures");
@@ -1249,14 +1280,27 @@ mod tests {
         let platform = Platform::host().unwrap();
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("requirements.txt"), "six\n").unwrap();
-        write_closure(&dir, "python", platform.triple(), json!({}));
+        let env = temp.0.join("env");
+        fs::create_dir_all(env.join("bin")).unwrap();
+        std::os::unix::fs::symlink(&env, dir.join(".venv")).unwrap();
+        write_closure(
+            &dir,
+            "python",
+            platform.triple(),
+            json!({
+                "env_object": env,
+                "inputs": [{"path": "requirements.txt", "sha256":
+                    crate::kernel::resolve::record::sha256_hex(b"six\n")}],
+                "exceptions": [],
+            }),
+        );
         let project = ProjectRoot::open(&dir).unwrap();
         fs::rename(&dir, temp.0.join("moved")).unwrap();
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("requirements.txt"), "six\n").unwrap();
         let held = status_in(platform, &project).unwrap();
         assert_eq!(held.len(), 1);
-        assert_ne!(held[0].state, State::NotSynced);
+        assert_eq!(held[0].state, State::Synced);
         assert_eq!(closures_in(&project).unwrap().len(), 1);
         assert_eq!(status(platform, &dir).unwrap()[0].state, State::NotSynced);
     }

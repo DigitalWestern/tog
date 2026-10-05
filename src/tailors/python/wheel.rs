@@ -500,7 +500,10 @@ fn parse_entry_points(text: &str) -> io::Result<Vec<(String, String, String)>> {
 /// character and continue with XID_Continue characters, and the spelling
 /// as written is not a keyword. So `a²` is refused although it normalizes
 /// to `a2`, and fullwidth `ｃｌａｓｓ` is accepted (checked against CPython
-/// 3.14). `__debug__` is refused in its NFKC form too, a safe superset.
+/// 3.14). The names the compiler checks after NFKC are refused in that
+/// form too: fullwidth `Ｎｏｎｅ` tokenizes as a name but cannot be
+/// imported, any more than `None` (or `True`, `False`, `__debug__`). The
+/// other keywords are not, since Python accepts fullwidth `ｃｌａｓｓ`.
 fn is_identifier(part: &str) -> bool {
     use icu_properties::props::{XidContinue, XidStart};
     use icu_properties::CodePointSetData;
@@ -512,7 +515,7 @@ fn is_identifier(part: &str) -> bool {
         .is_some_and(|first| first == '_' || start.contains(first))
         && chars.all(|c| rest.contains(c))
         && !PYTHON_KEYWORDS.contains(&part)
-        && nfkc(part) != "__debug__"
+        && !matches!(nfkc(part).as_str(), "None" | "True" | "False" | "__debug__")
 }
 
 fn nfkc(text: &str) -> String {
@@ -1175,6 +1178,12 @@ mod entry_guard_tests {
             "pkg.class:main",
             "pkg:Cli.class",
             "pkg:__debug__",
+            // Constants in their NFKC form, which the launcher's compiler
+            // refuses after the tokenizer has read them as names.
+            "pkg:\u{FF2E}\u{FF4F}\u{FF4E}\u{FF45}",
+            "pkg:C.\u{FF34}\u{FF52}\u{FF55}\u{FF45}",
+            "\u{FF2E}\u{FF4F}\u{FF4E}\u{FF45}:main",
+            "pkg.\u{FF26}\u{FF41}\u{FF4C}\u{FF53}\u{FF45}:main",
             // Non-identifier characters as Python's tokenizer reads them,
             // before NFKC (#369).
             "pkg:main\u{1F680}",
