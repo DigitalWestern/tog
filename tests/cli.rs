@@ -2967,7 +2967,7 @@ fn x_clean_skips_an_environment_whose_store_this_tog_does_not_read() {
         };
 
         // From another store: the refused one is the environment's, so the
-        // environment is skipped and the run is not a failure.
+        // environment is skipped and the run exits 1.
         let out = tog_at(&home.0, &home.0, &store_b, &["x", "--clean"]);
         let stdout = text(&out.stdout);
         assert_eq!(
@@ -3004,11 +3004,18 @@ fn x_clean_skips_an_environment_whose_store_this_tog_does_not_read() {
         );
         untouched("from its own store, unfiltered", &out);
         let out = tog(&home.0, &home.0, &["x", "--clean", "ruff"]);
-        // A skip exits 1; a filter that matched nothing exits 0.
+        // A skip exits 1; a filter that matched nothing exits 0. The
+        // request record is what makes `ruff` match.
         let skipped = text(&out.stdout).contains("tog: skipped x environment");
         assert_eq!(
+            skipped,
+            with_request_record,
+            "{case}: {}",
+            text(&out.stdout)
+        );
+        assert_eq!(
             out.status.code(),
-            Some(i32::from(skipped)),
+            Some(i32::from(with_request_record)),
             "{case}: {}",
             text(&out.stderr)
         );
