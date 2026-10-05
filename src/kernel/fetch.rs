@@ -160,7 +160,7 @@ pub(crate) fn read_cache_verified_digest(
 /// lease across a long phase can re-verify the bytes immediately before it
 /// uses them: the lease stops a sweep, not a same-user replacement.
 pub(crate) fn hash_file(path: &std::path::Path, algo: Algo) -> io::Result<String> {
-    hash_open(&mut fs::File::open(path)?, algo)
+    crate::kernel::digest::hash_reader(&mut fs::File::open(path)?, algo)
 }
 
 /// `path`'s digest and the file that was hashed, so a mismatch can be
@@ -168,7 +168,7 @@ pub(crate) fn hash_file(path: &std::path::Path, algo: Algo) -> io::Result<String
 fn hash_identified(path: &Path, algo: Algo) -> io::Result<(String, fs::Metadata)> {
     let mut f = fs::File::open(path)?;
     let seen = f.metadata()?;
-    Ok((hash_open(&mut f, algo)?, seen))
+    Ok((crate::kernel::digest::hash_reader(&mut f, algo)?, seen))
 }
 
 /// Remove the cache entry at `path` that failed verification, but only if
@@ -183,29 +183,6 @@ fn remove_poisoned(path: &Path, seen: &fs::Metadata) {
             let _ = fs::remove_file(path);
         }
     }
-}
-
-fn hash_open(f: &mut fs::File, algo: Algo) -> io::Result<String> {
-    let mut buf = [0u8; 65536];
-    let mut h256 = Sha256::new();
-    let mut h512 = Sha512::new();
-    let mut h1 = Sha1::new();
-    loop {
-        let n = f.read(&mut buf)?;
-        if n == 0 {
-            break;
-        }
-        match algo {
-            Algo::Sha1 => h1.update(&buf[..n]),
-            Algo::Sha256 => h256.update(&buf[..n]),
-            Algo::Sha512 => h512.update(&buf[..n]),
-        }
-    }
-    Ok(match algo {
-        Algo::Sha1 => hex::encode(h1.finalize()),
-        Algo::Sha256 => hex::encode(h256.finalize()),
-        Algo::Sha512 => hex::encode(h512.finalize()),
-    })
 }
 
 /// What a ureq failure means to someone waiting on a sync. ureq's own

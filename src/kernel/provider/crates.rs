@@ -636,7 +636,10 @@ fn inspect_dir(
             if relative != ".cargo-checksum.json" {
                 files.insert(
                     relative,
-                    crate::kernel::fetch::hash_file(&path, crate::kernel::digest::Algo::Sha256)?,
+                    crate::kernel::digest::hash_reader(
+                        &mut fs::File::open(&path)?,
+                        crate::kernel::digest::Algo::Sha256,
+                    )?,
                 );
             }
         } else {
