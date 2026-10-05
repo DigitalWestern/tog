@@ -214,7 +214,19 @@ impl Tailor for Python {
             {
                 State::ProjectionMissing(".venv".into())
             } else {
-                recorded_inputs_state(project, body)?
+                match recorded_inputs_state(project, body)? {
+                    // A kernel marker's answer is not in any project file.
+                    State::Synced
+                        if manifest::kernel_marker_record(project)?
+                            .is_some_and(|kernel| kernel != body["host_kernel"]) =>
+                    {
+                        State::Changed(vec![
+                            "host kernel (uv.lock reads platform_release or platform_version)"
+                                .into(),
+                        ])
+                    }
+                    state => state,
+                }
             },
         )
     }

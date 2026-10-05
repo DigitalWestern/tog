@@ -857,7 +857,7 @@ mod tests {
         let reason = check_identity_grammar(&native_libs_darwin).unwrap_err();
         assert!(reason.contains("native-libs platform contract"), "{reason}");
 
-        let sdist_rust = case_with_input(&linux, "sdist-build", Some("sdist-build/4"), "rust");
+        let sdist_rust = case_with_input(&linux, "sdist-build", Some("sdist-build/5"), "rust");
         assert_relation_breaks(
             &sdist_rust,
             &["rust", "vendor"],
@@ -1067,7 +1067,7 @@ mod tests {
     #[test]
     fn sdist_build_rust_vendor_dropped_is_detected() {
         let linux = live_identity_cases(Platform::X86_64UnknownLinuxGnu);
-        let rust = case_with_input(&linux, "sdist-build", Some("sdist-build/4"), "rust");
+        let rust = case_with_input(&linux, "sdist-build", Some("sdist-build/5"), "rust");
         let mut dropped = rust.clone();
         dropped.inputs.remove("rust");
         dropped.inputs.remove("vendor");
@@ -1534,11 +1534,15 @@ mod record_value_tests {
             "object metadata id \"not-an-id\" is malformed"
         );
 
-        // A socket cannot be opened at all. Linux only: macOS's temporary
-        // directory is too deep for a 104-byte socket path.
+        // A socket cannot be opened at all. Bind through the held directory's
+        // short Linux fd alias so a long TMPDIR cannot exceed sockaddr_un's
+        // pathname limit. The socket still lives at `meta` and is read there.
         #[cfg(target_os = "linux")]
         {
-            let listener = std::os::unix::net::UnixListener::bind(&meta).unwrap();
+            use std::os::fd::AsRawFd;
+            let directory = fs::File::open(&temp.0).unwrap();
+            let alias = format!("/proc/self/fd/{}/{id}.json", directory.as_raw_fd());
+            let listener = std::os::unix::net::UnixListener::bind(alias).unwrap();
             let error = read_record_at(&meta).map(drop).unwrap_err();
             assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{error}");
             assert_eq!(

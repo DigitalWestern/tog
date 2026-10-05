@@ -53,6 +53,10 @@ fn build_toolchain_fingerprint() -> String {
 // same one.
 const NATIVE_LINKER_CONFIG: &str = "native-libs-rpath/1";
 
+// Build scripts can read the flags and Cargo uses them in compilation
+// fingerprints. A Rust wheel must therefore name this build configuration.
+pub(super) const RUST_BUILD_CONFIG: &str = "rust-lint-cap-warn/1";
+
 fn sdist_build_env(platform: Platform) -> Vec<(String, String)> {
     if matches!(platform, Platform::X86_64UnknownLinuxGnu) {
         vec![
@@ -119,7 +123,15 @@ fn isolated_sdist_identity_from_ids(
     native_libs_id: Option<&str>,
 ) -> Identity {
     let mut inputs = BTreeMap::from([
-        ("schema".into(), "sdist-build/4".into()),
+        (
+            "schema".into(),
+            if rust_id.is_some() {
+                "sdist-build/5"
+            } else {
+                "sdist-build/4"
+            }
+            .into(),
+        ),
         ("sdist_sha256".into(), pkg.sha256.clone()),
         ("python".into(), python.to_string()),
         ("platform".into(), platform.triple().into()),
@@ -143,6 +155,7 @@ fn isolated_sdist_identity_from_ids(
     ]);
     if let Some(rust_id) = rust_id {
         inputs.insert("rust".into(), rust_id.into());
+        inputs.insert("rust_build_config".into(), RUST_BUILD_CONFIG.into());
     }
     if let Some(vendor_id) = vendor_id {
         inputs.insert("vendor".into(), vendor_id.into());
@@ -497,9 +510,8 @@ pub(crate) fn sdist_identity_input(
 /// never fail the build, as Cargo already caps them for every registry
 /// crate. Without this, a lint rustc later made deny-by-default (such as
 /// `invalid_reference_casting` in 1.73) stops a release that built on the
-/// Rust of its day (tokenizers 0.13.3). Lints change diagnostics, never
-/// codegen, so a build that succeeded before produces the same bytes and
-/// the build identity is unchanged. Both flag channels carry it, and
+/// Rust of its day (tokenizers 0.13.3). Build scripts can observe these
+/// flags, so the wheel identity records RUST_BUILD_CONFIG. Both channels carry it, and
 /// `nativelibs::compose_env` appends its own flags after these.
 fn rust_lint_cap() -> [(String, String); 2] {
     [
@@ -543,7 +555,11 @@ fn is_compiler_error(line: &str) -> bool {
         .filter(|(stamp, _)| stamp.starts_with(|ch: char| ch.is_ascii_digit()))
         .map_or(line, |(_, rest)| rest)
         .trim_start();
-    body.starts_with("error:") || body.starts_with("error[") || body.contains(": error:")
+    body.starts_with("error:")
+        || body.starts_with("error[")
+        || body.starts_with("fatal error:")
+        || body.contains(": error:")
+        || body.contains(": fatal error:")
 }
 
 fn cargo_lock_for(source: &Path, manifest: &Path) -> Option<PathBuf> {
@@ -1287,7 +1303,7 @@ pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
         .expect("Darwin Rust sdist identity plan");
         // Cargo.toml makes info.rust_build true, so plan_sdist_identity_input
         // takes the isolated-build path even though Darwin has no native-libs pin.
-        assert_eq!(planned.identity.inputs["schema"], "sdist-build/4");
+        assert_eq!(planned.identity.inputs["schema"], "sdist-build/5");
         cases.push(planned.identity);
     }
     cases
@@ -1434,6 +1450,15 @@ mod tests {
         assert!(!super::is_compiler_error(
             "2026-10-04T11:20:17,447 ERROR: Failed"
         ));
+
+        let mut c_log = vec![
+            "2026-10-04T11:20:17,332   source.c:12:3: fatal error: missing.h: No such file or directory".to_string(),
+            "2026-10-04T11:20:17,332   compilation terminated.".to_string(),
+        ];
+        c_log.extend((0..60).map(|n| format!("pip traceback line {n}")));
+        let excerpt = super::build_log_excerpt(&c_log.join("\n")).unwrap();
+        assert!(excerpt.contains("fatal error: missing.h"), "{excerpt}");
+        assert!(excerpt.ends_with("pip traceback line 59"), "{excerpt}");
     }
 
     /// The sdist's crate is a dependency: its lints are capped through both
@@ -1464,7 +1489,7 @@ mod tests {
     /// A project that locks Rust builds its sdists' Rust extensions on that
     /// selection: the `rust` input is the locked object's id, not the one the
     /// shipped pin would give. A lock naming the shipped release changes
-    /// nothing, so every existing `sdist-build/4` id is kept.
+    /// nothing within the current Rust build configuration.
     #[test]
     fn a_locked_rust_selection_is_the_rust_an_sdist_builds_with() {
         crate::tailors::install_kinds();
@@ -1503,7 +1528,7 @@ mod tests {
         )
         .unwrap();
         let unlocked = plan(None);
-        assert_eq!(unlocked.inputs["schema"], "sdist-build/4");
+        assert_eq!(unlocked.inputs["schema"], "sdist-build/5");
         assert_eq!(unlocked.inputs["rust"], rust_id(&shipped_rust));
         assert_eq!(plan(Some(&shipped_rust)).inputs, unlocked.inputs);
 
@@ -1569,7 +1594,7 @@ mod tests {
                 .insert("build_env".into(), "store-independent".into());
             assert_eq!(
                 fixed.object_id(),
-                "5582557b082e53e3a8d47b1ec286cc51867bd86c-locked-rust-1.0"
+                "d9f923625b654a848fa8a03efa2c8393628d4f65-locked-rust-1.0"
             );
         }
         let today = pinned(shipped_rust.version("rustc").unwrap());
@@ -1783,12 +1808,88 @@ mod tests {
         assert_eq!(identity.inputs["native_mode"], NATIVE_MODE_NONE);
     }
 
-    /// `sdist-build/4` golden, on both platforms, from fixed inputs. The
+    #[test]
+    fn rust_build_configuration_changes_wheel_and_parent_identity() {
+        crate::tailors::install_kinds();
+        let platform = Platform::host().unwrap();
+        let (_dir, store) = super::test_store("rust-config-identity");
+        let activity = store
+            .activity(crate::kernel::activity::ActivityMode::Shared)
+            .unwrap();
+        let selected = crate::tailors::python::shipped_selection("3.12.14").unwrap();
+        let pkg = super::local_rust_sdist_for_test(&store, "rust-config");
+        let planned = super::plan_sdist_identity_input(
+            &mut crate::kernel::testutil::DoorScope::new().door(
+                &store,
+                &activity,
+                platform,
+                crate::kernel::resolve::DoorKind::Planner,
+            ),
+            &pkg,
+            &selected,
+            None,
+            None,
+        )
+        .unwrap();
+        let mut legacy = planned.identity.clone();
+        legacy
+            .inputs
+            .insert("schema".into(), "sdist-build/4".into());
+        legacy.inputs.remove("rust_build_config");
+        assert_eq!(
+            crate::kernel::objmeta::check_identity_grammar(&legacy),
+            Ok(())
+        );
+        assert_ne!(legacy.object_id(), planned.identity.object_id());
+        let mut missing = planned.identity.clone();
+        missing.inputs.remove("rust_build_config");
+        assert!(crate::kernel::objmeta::check_identity_grammar(&missing).is_err());
+        let mut changed = planned.identity.clone();
+        changed
+            .inputs
+            .insert("rust_build_config".into(), "unknown/2".into());
+        assert!(crate::kernel::objmeta::check_identity_grammar(&changed).is_err());
+
+        let plan = crate::kernel::types::Plan {
+            ecosystem: "python".into(),
+            python_version: "3.12.14".into(),
+            packages: vec![pkg.clone()],
+        };
+        let cpython = crate::tailors::python::cpython_object_id(&selected, platform).unwrap();
+        let current = crate::tailors::python::env::environment_identity(
+            &mut crate::kernel::testutil::DoorScope::new().door(
+                &store,
+                &activity,
+                platform,
+                crate::kernel::resolve::DoorKind::Planner,
+            ),
+            &plan,
+            &cpython,
+            &selected,
+            None,
+        )
+        .unwrap();
+        let key = format!("pkg:{}", pkg.name);
+        assert_eq!(current.inputs[&key], planned.input);
+        let mut old_parent = current.clone();
+        old_parent
+            .inputs
+            .insert(key, format!("Sdist:{}:{}", pkg.sha256, legacy.object_id()));
+        let digest = crate::tailors::python::env::package_digest_of_inputs(&old_parent.inputs);
+        old_parent.inputs.insert("package_digest".into(), digest);
+        assert_eq!(
+            crate::kernel::objmeta::check_identity_grammar(&old_parent),
+            Ok(())
+        );
+        assert_ne!(current.object_id(), old_parent.object_id());
+    }
+
+    /// `sdist-build/5` Rust golden, on both platforms, from fixed inputs. The
     /// identity constructor is a pure function of its platform argument, so
     /// the Darwin value is computed here and the macOS gate only confirms
-    /// it. The `/3` spelling of the same build is a different object id, so
-    /// the bump reissues every isolated build; and the drift `/3` could not
-    /// see — losing both halves of a pair — is a contract error under `/4`.
+    /// it. The `/4` spelling of the same build is a different object id, so
+    /// the bump reissues Rust builds. Losing both halves of a toolchain or
+    /// native-library pair remains a contract error.
     #[test]
     fn isolated_identity_goldens_and_dropped_pairs() {
         crate::tailors::install_kinds();
@@ -1805,12 +1906,12 @@ mod tests {
             (
                 Platform::X86_64UnknownLinuxGnu,
                 Some("native-libs-object"),
-                "875ff008bc85acd29b9c84db443abf7661be73bd-example-1.0",
+                "c6652c7b7965481c70734e59b691df55ded0889a-example-1.0",
             ),
             (
                 Platform::Aarch64AppleDarwin,
                 None,
-                "cd380e0c765b7051f9521fae34ba072efe78641c-example-1.0",
+                "1f2066e2b956fbe8d1281680a8f8ea25062fc774-example-1.0",
             ),
         ] {
             let pin = crate::tailors::python::lookup(platform, "3.12.14").unwrap();
@@ -1823,7 +1924,7 @@ mod tests {
                 Some("vendor-object"),
                 native,
             );
-            assert_eq!(identity.inputs["schema"], "sdist-build/4");
+            assert_eq!(identity.inputs["schema"], "sdist-build/5");
             assert_eq!(identity.inputs["build_mode"], BUILD_MODE_RUST);
             assert_eq!(
                 identity.inputs["native_mode"],

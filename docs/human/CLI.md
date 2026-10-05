@@ -546,8 +546,9 @@ build in a project with no `tog-toolchain.toml` yet when another
 ecosystem's version request is one no catalog serves (a Python pin no
 release carries stops `tog build cargo`): creating the lock selects every
 ecosystem, the lock is never written with sections missing, and the error
-names the ecosystem to fix. Once the lock exists, only a stale section or a
-malformed request outside the built ecosystem blocks a build. The build
+names the ecosystem to fix. Once the lock exists, a missing, stale, or
+invalid lock section, or a malformed request outside the built ecosystem,
+still blocks a build. The build
 itself never writes one. CI that must not write a lock runs `tog --frozen`
 before it, and the check then finds nothing to do — or goes one step in a
 single command, `tog --frozen build`, whose implicit sync runs frozen.
@@ -967,7 +968,9 @@ concurrent sync cannot lose one. Sharp edges:
   home as it keeps its objects, even after the project directory is gone,
   until `--forget` gives it up. It also removes the store records tog keeps
   about one project (the last passing `mix deps.get --check-locked`) once
-  that project's directory is gone.
+  that project's directory is gone. Such a record is only a cache: a project
+  that comes back (a drive mounted again) pays one more registry check on
+  its next sync, and nothing else.
 - `--reset` empties the store and starts it again in the current format. It
   is the fix for a store this tog refuses to open: one written before the
   format marker existed, or one whose marker it does not know or cannot

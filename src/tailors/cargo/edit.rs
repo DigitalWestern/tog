@@ -42,10 +42,9 @@ pub(crate) fn edit_manifest(
     // The lock, the record, and the closure belong to the workspace root;
     // an edit in a member names the member's manifest from there. tog's
     // own walk finds it, before anything is realized.
-    let root = super::inputs::locate_cargo_root(project)?;
-    crate::kernel::store::Store::check_registrable(&root)?;
     let held = ProjectRoot::open(project)?;
-    let workspace = super::inputs::workspace_root(&held, &root)?;
+    let (root, workspace) = super::inputs::locate_held_cargo_root(&held)?;
+    crate::kernel::store::Store::check_registrable(&root)?;
     let member = member_manifest(&workspace, &held)?;
     crate::kernel::provider::cargo_door::refuse_unlisted_members(&workspace)?;
     let rust_obj = super::realize_runtime(door.store(), door.lease(), door.platform(), &selected)?;

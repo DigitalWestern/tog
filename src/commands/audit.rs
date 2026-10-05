@@ -271,11 +271,20 @@ pub fn read_policy_file(path: &Path) -> io::Result<Policy> {
 /// `--policy` file and the path it came from. The file can add denials or
 /// strictness and drop trusted keys, never the reverse. Returns the
 /// contributing policies alongside the merged one, in merge order.
+#[cfg(test)]
 pub fn effective_policy(
     dir: &Path,
     extra: Option<(&Path, &Policy)>,
 ) -> io::Result<(Policy, Vec<PolicySource>)> {
-    let (mut policy, mut sources) = policy::load_with_sources(dir, false)?;
+    effective_policy_from(dir, None, extra)
+}
+
+fn effective_policy_from(
+    dir: &Path,
+    project: Option<&ProjectRoot>,
+    extra: Option<(&Path, &Policy)>,
+) -> io::Result<(Policy, Vec<PolicySource>)> {
+    let (mut policy, mut sources) = policy::load_with_sources_from(dir, project, false)?;
     if let Some((path, extra)) = extra {
         policy::merge(&mut policy, extra, SourceOrigin::Flag);
         sources.push(PolicySource::from_file(SourceOrigin::Flag, path, extra));
@@ -474,18 +483,21 @@ fn check_name(closure: &ClosureFile) -> io::Result<()> {
 /// neither a joined record nor an `unrecorded-resolution` exception. A
 /// closure written since the join always has one of the two, so this one
 /// was written before it: "no evidence" must not pass as "attested".
-fn lacks_resolution_evidence(dir: &Path, closure: &ClosureFile) -> io::Result<bool> {
+fn lacks_resolution_evidence(project: &ProjectRoot, closure: &ClosureFile) -> io::Result<bool> {
     if closure.body.get("resolution").is_some() {
         return Ok(false);
     }
     let Some(tailor) = tailors::by_id(&closure.ecosystem) else {
         return Ok(false);
     };
-    let project = crate::kernel::fsroot::ProjectRoot::open(dir)?;
-    let Some(files) = tailors::resolution_files(tailor, &project)? else {
+    let Some(files) = tailors::resolution_files(tailor, project)? else {
         return Ok(false);
     };
-    if !files.outputs.iter().any(|output| dir.join(output).exists()) {
+    if !files
+        .outputs
+        .iter()
+        .any(|output| project.is_input_file(output))
+    {
         return Ok(false);
     }
     let recorded = inspect::recorded_exceptions(closure)?.unwrap_or_default();
@@ -500,6 +512,7 @@ fn lacks_resolution_evidence(dir: &Path, closure: &ClosureFile) -> io::Result<bo
 /// `present` is what `inspect::detected` found in `dir`. With no trusted
 /// set in `policy`, signatures are not checked and every fix line drops
 /// "under a trusted key".
+#[cfg(test)]
 pub fn evaluate(
     platform: Platform,
     dir: &Path,
@@ -508,10 +521,27 @@ pub fn evaluate(
     closures: &[ClosureFile],
     present: &[&str],
 ) -> io::Result<Vec<Verdict>> {
+    let project = inspect::open_project(dir)?;
+    evaluate_in(
+        platform,
+        project.as_ref(),
+        policy,
+        sources,
+        closures,
+        present,
+    )
+}
+
+fn evaluate_in(
+    platform: Platform,
+    project: Option<&ProjectRoot>,
+    policy: &Policy,
+    sources: &[PolicySource],
+    closures: &[ClosureFile],
+    present: &[&str],
+) -> io::Result<Vec<Verdict>> {
     let trusted = trusted_keys(policy);
     let key = under_key(trusted.is_some());
-    // Held once: every freshness read is of this one directory.
-    let project = inspect::open_project(dir)?;
     let mut verdicts = Vec::new();
     for closure in closures {
         let signature = judge_signature(closure, trusted, sources);
@@ -521,7 +551,7 @@ pub fn evaluate(
             verdicts.push(Verdict::not_evaluated(closure, signature));
             continue;
         }
-        let mut freshness = freshness(platform, project.as_ref(), closure, present, key)?;
+        let mut freshness = freshness(platform, project, closure, present, key)?;
         let mut denied = Vec::new();
         let mut unknown = Vec::new();
         let mut permitted = BTreeMap::new();
@@ -549,7 +579,12 @@ pub fn evaluate(
                 }
             }
         }
-        if !matches!(freshness, Freshness::Stale(_)) && lacks_resolution_evidence(dir, closure)? {
+        if !matches!(freshness, Freshness::Stale(_))
+            && project
+                .map(|project| lacks_resolution_evidence(project, closure))
+                .transpose()?
+                .unwrap_or(false)
+        {
             freshness = Freshness::Outdated(format!(
                 "no resolution record and no unrecorded-resolution exception (the closure predates \
                  the resolution join); run 'tog' once{key}, then commit"
@@ -595,22 +630,35 @@ pub fn missing_closures(closures: &[ClosureFile], present: &[&str]) -> Vec<Strin
 /// Audit the project in `dir` under an already-merged policy and its
 /// sources. `Err(NotFound)` when nothing is synced. Read-only: no store
 /// open, no lease, no process, no network.
+#[cfg(test)]
 pub fn audit_under(
     platform: Platform,
     dir: &Path,
     policy: Policy,
     sources: Vec<PolicySource>,
 ) -> io::Result<Report> {
+    let project = inspect::open_project(dir)?;
+    audit_under_in(platform, dir, project.as_ref(), policy, sources)
+}
+
+fn audit_under_in(
+    platform: Platform,
+    dir: &Path,
+    project: Option<&ProjectRoot>,
+    policy: Policy,
+    sources: Vec<PolicySource>,
+) -> io::Result<Report> {
     let signatures_checked = trusted_keys(&policy).is_some();
-    let closures = inspect::closures(dir)?;
+    let closures = project.map_or(Ok(Vec::new()), inspect::closures_in)?;
     if closures.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
             format!("nothing synced in {}; run 'tog' first", dir.display()),
         ));
     }
-    let present = inspect::detected(dir)?;
-    let verdicts = evaluate(platform, dir, &policy, &sources, &closures, &present)?;
+    let present = project.map_or(Ok(Vec::new()), tailors::detected_in)?;
+    let present: Vec<&str> = present.iter().map(|tailor| tailor.id()).collect();
+    let verdicts = evaluate_in(platform, project, &policy, &sources, &closures, &present)?;
     let missing = missing_closures(&closures, &present);
     Ok(Report {
         policy,
@@ -630,8 +678,9 @@ pub fn audit(
     dir: &Path,
     extra: Option<(&Path, &Policy)>,
 ) -> io::Result<Report> {
-    let (policy, sources) = effective_policy(dir, extra)?;
-    audit_under(platform, dir, policy, sources)
+    let project = inspect::open_project(dir)?;
+    let (policy, sources) = effective_policy_from(dir, project.as_ref(), extra)?;
+    audit_under_in(platform, dir, project.as_ref(), policy, sources)
 }
 
 /// A report line as the text report prints it: control characters (a
@@ -1011,8 +1060,12 @@ pub fn run(command: cli::Command) -> io::Result<i32> {
         },
         None => None,
     };
-    let (policy, sources) =
-        effective_policy(&dir, extra.as_ref().map(|(path, extra)| (*path, extra)))?;
+    let project = inspect::open_project(&dir)?;
+    let (policy, sources) = effective_policy_from(
+        &dir,
+        project.as_ref(),
+        extra.as_ref().map(|(path, extra)| (*path, extra)),
+    )?;
     if trusted_keys(&policy).is_none() {
         let why = if signed {
             Some("(--signed asked for the check)")
@@ -1026,7 +1079,7 @@ pub fn run(command: cli::Command) -> io::Result<i32> {
             return Ok(cli::EXIT_USAGE);
         }
     }
-    let report = audit_under(platform, &dir, policy, sources)?;
+    let report = audit_under_in(platform, &dir, project.as_ref(), policy, sources)?;
     let trusted = match trusted_keys(&report.policy) {
         Some(trusted) => format!("trusted=[{}]", key_list(trusted)),
         None => "signatures=not-checked".to_string(),
@@ -3128,15 +3181,29 @@ mod tests {
         let dir = &temp.0;
         let go = |body: Value| write_closure(dir, "go", "go", Some(host().triple()), body);
         // No lock file yet: nothing for a record to cover.
-        assert!(!lacks_resolution_evidence(dir, &go(json!({"exceptions": []}))).unwrap());
+        assert!(!lacks_resolution_evidence(
+            &ProjectRoot::open(dir).unwrap(),
+            &go(json!({"exceptions": []}))
+        )
+        .unwrap());
         fs::write(dir.join("go.mod"), "module example.com/m\n\ngo 1.22\n").unwrap();
         fs::write(dir.join("go.sum"), "").unwrap();
-        assert!(lacks_resolution_evidence(dir, &go(json!({"exceptions": []}))).unwrap());
-        assert!(lacks_resolution_evidence(dir, &go(json!({}))).unwrap());
+        assert!(lacks_resolution_evidence(
+            &ProjectRoot::open(dir).unwrap(),
+            &go(json!({"exceptions": []}))
+        )
+        .unwrap());
+        assert!(
+            lacks_resolution_evidence(&ProjectRoot::open(dir).unwrap(), &go(json!({}))).unwrap()
+        );
         let unrecorded = exception(policy::UNRECORDED_RESOLUTION, "go.sum");
-        assert!(!lacks_resolution_evidence(dir, &go(json!({"exceptions": [unrecorded]}))).unwrap());
         assert!(!lacks_resolution_evidence(
-            dir,
+            &ProjectRoot::open(dir).unwrap(),
+            &go(json!({"exceptions": [unrecorded]}))
+        )
+        .unwrap());
+        assert!(!lacks_resolution_evidence(
+            &ProjectRoot::open(dir).unwrap(),
             &go(json!({"exceptions": [], "resolution": resolution(dir, &[])}))
         )
         .unwrap());
@@ -3147,7 +3214,48 @@ mod tests {
             Some(host().triple()),
             json!({"exceptions": []}),
         );
-        assert!(!lacks_resolution_evidence(dir, &python).unwrap());
+        assert!(!lacks_resolution_evidence(&ProjectRoot::open(dir).unwrap(), &python).unwrap());
+    }
+
+    #[test]
+    fn audit_refuses_non_utf8_closure_names_beside_a_valid_record() {
+        use std::os::unix::ffi::OsStringExt;
+        let temp = python_project("audit-non-utf8-name");
+        write_closure(
+            &temp.0,
+            "python",
+            "python",
+            Some(host().triple()),
+            python_body(&temp.0),
+        );
+        let name = std::ffi::OsString::from_vec(b"bad-\xff.json".to_vec());
+        fs::write(temp.0.join(".tog/closures").join(name), "{}").unwrap();
+        assert!(audit_under(host(), &temp.0, permissive(), Vec::new()).is_err());
+    }
+
+    #[test]
+    fn resolution_evidence_uses_the_same_held_project_as_freshness() {
+        let temp = TempDir::named("audit-held-evidence");
+        let dir = temp.0.join("project");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("go.mod"), "module example.com/m\n\ngo 1.22\n").unwrap();
+        fs::write(dir.join("go.sum"), "").unwrap();
+        let closure = write_closure(
+            &dir,
+            "go",
+            "go",
+            Some(host().triple()),
+            json!({"exceptions": []}),
+        );
+        let project = ProjectRoot::open(&dir).unwrap();
+        fs::rename(&dir, temp.0.join("moved")).unwrap();
+        fs::create_dir_all(&dir).unwrap();
+        assert!(lacks_resolution_evidence(&project, &closure).unwrap());
+        assert!(!lacks_resolution_evidence(&ProjectRoot::open(&dir).unwrap(), &closure).unwrap());
+        let report =
+            audit_under_in(host(), &dir, Some(&project), permissive(), Vec::new()).unwrap();
+        assert_eq!(report.verdicts.len(), 1);
+        assert_eq!(report.verdicts[0].ecosystem, "go");
     }
 
     /// A Go record over `dir`'s go.mod and go.sum as they are now.
