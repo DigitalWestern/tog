@@ -146,6 +146,21 @@ impl Release {
             .find(|(asset, _)| asset == name)
             .map(|(_, url)| url.as_str())
     }
+
+    /// The archive and checksum URLs for `platform`, when this release
+    /// carries both.
+    fn build_for(&self, platform: Platform) -> Option<(&str, &str)> {
+        let (asset, checksum) = asset_names(platform);
+        Some((self.asset(&asset)?, self.asset(&checksum)?))
+    }
+}
+
+/// The archive `install.sh` and `update --self` take for `platform`, and
+/// the checksum file next to it.
+fn asset_names(platform: Platform) -> (String, String) {
+    let asset = format!("tog-{}.tar.gz", platform.triple());
+    let checksum = format!("{asset}.sha256");
+    (asset, checksum)
 }
 
 /// Read the latest release. The only network request `doctor` makes.
@@ -192,15 +207,31 @@ pub fn doctor_check() -> Check {
             }
         }
     };
+    let platform = Platform::host().ok();
     match latest() {
-        Ok(release) if release.version > current => Check {
-            name: "version",
-            level: Level::Warn,
-            detail: format!(
-                "{running}; {} is out (run 'tog update --self')",
-                release.tag
-            ),
-        },
+        // A newer release with no build for this machine is not something
+        // `update --self` can act on, so it is not a warning.
+        Ok(release) if release.version > current => {
+            match platform.filter(|platform| release.build_for(*platform).is_none()) {
+                Some(platform) => Check {
+                    name: "version",
+                    level: Level::Ok,
+                    detail: format!(
+                        "{running}; {} is out, with no build for this machine ({})",
+                        release.tag,
+                        platform.triple()
+                    ),
+                },
+                None => Check {
+                    name: "version",
+                    level: Level::Warn,
+                    detail: format!(
+                        "{running}; {} is out (run 'tog update --self')",
+                        release.tag
+                    ),
+                },
+            }
+        }
         Ok(release) if release.version == current => Check {
             name: "version",
             level: Level::Ok,
@@ -418,10 +449,8 @@ pub fn run(platform: Platform) -> io::Result<i32> {
         ));
         return Ok(0);
     }
-    let asset = format!("tog-{}.tar.gz", platform.triple());
-    let checksum = format!("{asset}.sha256");
-    let (Some(asset_url), Some(checksum_url)) = (release.asset(&asset), release.asset(&checksum))
-    else {
+    let (asset, checksum) = asset_names(platform);
+    let Some((asset_url, checksum_url)) = release.build_for(platform) else {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
             format!(
