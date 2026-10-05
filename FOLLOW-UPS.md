@@ -127,7 +127,6 @@ After the proxy: the test-suite audit (#351) and then the quality review
   - #248 sandbox and gitsrc: collapse the _with_activity twin of every entry point.
   - #413 x clean: delete before unregister, corrupt registry entries, pathname ownership reads (from the #408 review).
   - #261 perf: every sync parses every metadata record before starting.
-  - #252 commands: sbom, ls and store path create the store; sbom refuses closures from another platform.
   - #253 cli: usage mistakes exit 1 after opening the store instead of exit 2.
   - #254 commands: small fixes: deps changes cwd, stale help pointers, three manifest lists, inspect.rs belongs in comforter.
   - #256 design: the Tailor trait has 35+ methods, a dozen used by one ecosystem, and its docs have drifted.

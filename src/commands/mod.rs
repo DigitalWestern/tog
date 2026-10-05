@@ -180,10 +180,10 @@ pub fn dispatch(command: cli::Command, sync: cli::SyncFlags) -> io::Result<i32> 
     install_tailor_tables(&command);
     // Maintenance commands need no host-platform validation here: GC must
     // stay usable on a copied store from a host that cannot realize its
-    // objects, `attest` checks the host itself, and `audit`, `status` and
-    // `sbom` are read-only (no store open, no lease, no realization, no
-    // network), so they work with an unwritable store, leave no store where
-    // there was none, and never wait behind a GC sweep.
+    // objects, `attest` checks the host itself, and `audit`, `status`,
+    // `sbom`, `ls` and `store path` are read-only (no store open, no lease,
+    // no realization, no network, any closure's platform), so they work with
+    // an unwritable store, leave none where there was none, and never wait.
     match command {
         Status { json } => return status::run(Platform::host()?, json),
         Sbom { ref output } => return sbom::run(output.as_deref()).map(|_| 0),

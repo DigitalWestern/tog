@@ -115,6 +115,12 @@ impl Store {
         )
     }
 
+    /// Where the store is configured to be (`TOG_STORE`, or
+    /// `~/.tog/store`), as configured: nothing is created or resolved.
+    pub fn configured_path() -> PathBuf {
+        Self::configured_root().0
+    }
+
     /// The store `open` would use, without creating or changing anything:
     /// `None` when there is no store (or no `objects` namespace) there yet.
     /// The layout invariant is `open`'s: the canonical root, `objects` and
