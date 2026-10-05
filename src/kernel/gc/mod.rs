@@ -2586,6 +2586,35 @@ mod tests {
         );
     }
 
+    /// A recordless object that a readable record still depends on: drop
+    /// refuses the id alone, so the advice names the whole set, and running
+    /// it clears the stop.
+    #[test]
+    fn a_recordless_dependency_is_advised_as_a_drop_of_its_whole_set() {
+        let temp = TempStore::new("read-no-meta-dependency");
+        let store = temp.store();
+        register_objects(&store, &temp.root.join("project"), &[]);
+        let dependency = commit(&store, "dependency", None);
+        let dependent = commit(&store, "dependent", Some(&dependency));
+        fs::remove_file(store.root.join("meta").join(format!("{dependency}.json"))).unwrap();
+        let mut whole_set = [dependency.clone(), dependent.clone()];
+        whole_set.sort();
+        let (result, text) = sweep(&store, Options::default());
+        let message = result.expect_err(&text).to_string();
+        assert!(
+            message.contains(&format!(
+                "; drop it and the 1 object(s) that depend on it with `tog gc --drop-object \
+                 {} {}`",
+                whole_set[0], whole_set[1]
+            )),
+            "{message}"
+        );
+        let (count, text) = dropped(&store, &whole_set, false);
+        assert_eq!(count.unwrap(), 2, "{text}");
+        let (result, text) = sweep(&store, Options::default());
+        result.unwrap_or_else(|error| panic!("{error}: {text}"));
+    }
+
     #[test]
     fn read_refuses_a_cache_namespace_that_is_not_a_real_directory() {
         let message = read_refusal("read-cache-symlink", |store| {
