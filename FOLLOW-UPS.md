@@ -69,7 +69,6 @@ After the proxy: the test-suite audit (#351) and then the quality review
   per theme:
   - #430 signing key: other TOML parsers quote the failing line, and the no-store sandbox relay is unscrubbed.
   - #431 cargo confinement edges: a symlinked spelling of the root, grandchild-held pipes (left open by #57), an offline git-dependency test.
-  - #432 resolution ledger: `content_query_keys` never recorded, and `tog plan`'s sdist ledgers unrooted.
 - **Test-suite audit of 2026-09-27 (#351).** Nine reviewers, one per
   area, looked for tests that stay green when the code they name is
   broken. The fake passes were fixed in #351; what remains is grouped by

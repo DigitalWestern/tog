@@ -961,7 +961,7 @@ fn mirror_request(context: &Context, request: &Request, out: &mut dyn Write) -> 
     let keys = route.map_or(&[][..], |route| route.protocol.content_query_keys());
     // The token never enters the ledger, right or wrong.
     let shown = redact::url(&format!("/{REDACTED}/{rest}"), keys);
-    let record = Record::new("refused", &request.method, shown.clone());
+    let record = Record::new("refused", &request.method, shown.clone()).keeping(keys);
     if !state.token_matches(token) {
         let reason = format!("{shown} does not carry this session's token");
         mirror::refuse_unauthenticated(state, out, record, 403, &reason, &Headers::new())?;
@@ -1937,6 +1937,7 @@ mod tests {
                 hops: Vec::new(),
                 detail: None,
             },
+            &[],
         );
         assert!(state
             .check(policy::UNATTESTED_INDEX, "late", "late")

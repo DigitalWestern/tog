@@ -12,6 +12,7 @@ use crate::comforter::{
 use crate::kernel::activity::StoreActivity;
 use crate::kernel::fetch::download_verified_held;
 use crate::kernel::fsroot::ProjectRoot;
+use crate::kernel::resolve::ledger::LedgerObjects;
 use crate::kernel::resolve::ResolutionDoor;
 use crate::kernel::toolchain::Selected;
 use crate::kernel::types::{ArtifactKind, Identity, Plan};
@@ -507,7 +508,9 @@ fn python_closure_body(
 /// `project_env_with_selection` plus the input files recorded for status
 /// and, on a project path, the toolchain this environment was built with:
 /// the bundle it came from and the interpreter object it realized, which
-/// the closure records so a later run resolves the same bytes.
+/// the closure records so a later run resolves the same bytes. `ledgers`
+/// are the evidence planning kept (an sdist's generated `Cargo.lock`): the
+/// closure references them, so gc keeps them as long as it does.
 pub fn project_env_with_inputs(
     activity: &StoreActivity,
     project: &ProjectRoot,
@@ -517,6 +520,7 @@ pub fn project_env_with_inputs(
     inputs: &[InputRecord],
     toolchain: Option<(&Selected, &Path)>,
     helpers: &serde_json::Value,
+    ledgers: &[LedgerObjects],
     attribution: &mut crate::kernel::policy::Attribution,
 ) -> io::Result<()> {
     project_env_inner(
@@ -528,6 +532,7 @@ pub fn project_env_with_inputs(
         inputs,
         toolchain,
         helpers,
+        ledgers,
         attribution,
     )
 }
@@ -553,6 +558,7 @@ pub fn project_env_with_selection(
         &[],
         None,
         &serde_json::Value::Null,
+        &[],
         attribution,
     )
 }
@@ -568,6 +574,7 @@ pub(super) fn project_env_inner(
     // The helper decision (`tailors::helper_record`), stored beside the
     // toolchain record; `Null` writes none.
     helpers: &serde_json::Value,
+    ledgers: &[LedgerObjects],
     attribution: &mut crate::kernel::policy::Attribution,
 ) -> io::Result<()> {
     // `.venv` is moved aside, replaced and published through the held
@@ -603,6 +610,9 @@ pub(super) fn project_env_inner(
         })?;
         refs.object_id(&store, activity, native_id)?;
     }
+    for objects in ledgers {
+        refs.object_id(&store, activity, &objects.ledger)?;
+    }
     if let Some(backup) = backup.as_ref() {
         refs.backup(&store, activity, backup)?;
     }
@@ -617,7 +627,7 @@ pub(super) fn project_env_inner(
     // sync.
     replace_project_symlink(project, venv, &env_obj, ".venv")?;
 
-    let body = python_closure_body(
+    let mut body = python_closure_body(
         &env_obj,
         &native_reference,
         &backup,
@@ -626,6 +636,19 @@ pub(super) fn project_env_inner(
         inputs,
         runtime_record,
     );
+    // Each as `{id, path}`, the shape `gc --register` imports a reference
+    // from, so a root rebuilt from this closure keeps the ledgers too.
+    if !ledgers.is_empty() {
+        body["build_ledgers"] = ledgers
+            .iter()
+            .map(|objects| {
+                serde_json::json!({
+                    "id": objects.ledger,
+                    "path": store.object_path(&objects.ledger),
+                })
+            })
+            .collect();
+    }
     write_closure_with_project_lock(
         project,
         "python",
@@ -701,9 +724,9 @@ mod tests {
 
     /// The durable root/2 record `project_env_inner` publishes names exactly
     /// the environment object, the interpreter object, the native library
-    /// object the environment was built against, and the backup of the
-    /// user's real `.venv`: nothing inferred from the closure JSON, nothing
-    /// missing.
+    /// object the environment was built against, the ledger planning kept
+    /// (an sdist's generated Cargo.lock), and the backup of the user's real
+    /// `.venv`: nothing inferred from the closure JSON, nothing missing.
     #[test]
     fn closure_refs_name_every_object_this_producer_created() {
         use std::os::unix::fs::PermissionsExt;
@@ -751,6 +774,22 @@ mod tests {
         };
         let selected = selected_3_12();
         let runtime = store.object_path(&runtime_id);
+        let kept = {
+            use crate::kernel::resolve::ledger;
+            let mut portable = ledger::PortableLedger::new("cargo", "missing-lock").unwrap();
+            portable.insert(ledger::Entry {
+                class: "index".into(),
+                method: "GET".into(),
+                url: "https://index.crates.io/it/oa/itoa".into(),
+                status: 200,
+                sha256: Some("ab".repeat(32)),
+                claimed: None,
+                verified: false,
+                freshness: None,
+                redirected_to: None,
+            });
+            ledger::commit(&store, activity, &portable, &ledger::Diagnostics::default()).unwrap()
+        };
         project_env_inner(
             activity,
             &ProjectRoot::open(&project).unwrap(),
@@ -760,6 +799,7 @@ mod tests {
             &[],
             Some((&selected, runtime.as_path())),
             &serde_json::Value::Null,
+            std::slice::from_ref(&kept),
             &mut attribution,
         )
         .unwrap();
@@ -775,7 +815,7 @@ mod tests {
         let record = roots[0].record.as_ref().expect("root/2 record");
         assert_eq!(
             record.objects,
-            std::collections::BTreeSet::from([env_id, runtime_id, native_id])
+            std::collections::BTreeSet::from([env_id, runtime_id, native_id, kept.ledger])
         );
         assert_eq!(
             record.projections,

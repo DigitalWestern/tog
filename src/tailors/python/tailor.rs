@@ -133,8 +133,9 @@ impl Tailor for Python {
         // An sdist's generated Cargo.lock ran through a Detached door with
         // no project at hand; its ledger is evidence of this sync's
         // planning, rooted here so GC keeps it.
-        for objects in door.take_kept_ledgers() {
-            crate::kernel::resolve::ledger::root(store, activity, project, &objects)?;
+        let ledgers = door.take_kept_ledgers();
+        for objects in &ledgers {
+            crate::kernel::resolve::ledger::root(store, activity, project, objects)?;
         }
         // The `.venv` projection and the closure are published through the
         // held project descriptor.
@@ -147,6 +148,7 @@ impl Tailor for Python {
             &inputs,
             Some((selected, runtime.as_path())),
             &crate::tailors::helper_record(self, &helpers),
+            &ledgers,
             attribution,
         )?;
         ui::synced(".venv", &env);
