@@ -80,13 +80,87 @@ impl ScriptsFallback {
 /// check `hostfallback::hermetic_first` makes before it retries against the
 /// whole host, so a denying policy stops the retry before it runs.
 fn refuse_if_denied(kind: &str, subject: &str, detail: &str) -> io::Result<()> {
-    let policy = crate::kernel::policy::effective();
-    match crate::kernel::policy::denied(&policy, kind) {
+    refuse_with(&crate::kernel::policy::effective(), kind, subject, detail)
+}
+
+/// `refuse_if_denied` under `policy`.
+fn refuse_with(
+    policy: &crate::kernel::policy::Policy,
+    kind: &str,
+    subject: &str,
+    detail: &str,
+) -> io::Result<()> {
+    match crate::kernel::policy::denied(policy, kind) {
         true => Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
-            crate::kernel::policy::refusal(&policy, kind, subject, detail),
+            crate::kernel::policy::refusal(policy, kind, subject, detail),
         )),
         false => Ok(()),
+    }
+}
+
+/// How one package's scripts ended.
+#[derive(Debug)]
+enum ScriptsOutcome {
+    /// They ran; when they fell back, the host build inputs fingerprint
+    /// they were built against.
+    Built(Option<String>),
+    /// The sync stops here: the policy refused the fallback, the host
+    /// changed under the retry, the sandbox could not be set up, or tog was
+    /// asked to stop.
+    Stop(io::Error),
+    /// The scripts failed in every view they were allowed to run in: an
+    /// `install-script-failed` exception.
+    Failed(io::Error),
+}
+
+/// Run `build` in the view `identity` asks for: against the C runtime
+/// alone first when its `build_view` is runtime-only, retrying against the
+/// whole host when `refuse` allows `host-build-inputs`; against the whole
+/// host once otherwise. A refusal stops the sync, as it does for gems and
+/// sdists (`hostfallback::hermetic_first`): it is told apart from a script
+/// that fails with the same error kind by whether `refuse` refused.
+fn scripts_in_view(
+    identity: &Identity,
+    subject: &str,
+    refuse: impl FnOnce(&str, &str, &str) -> io::Result<()>,
+    discard: impl FnOnce() -> io::Result<()>,
+    fingerprint: impl FnMut() -> io::Result<String>,
+    mut build: impl FnMut(HostView) -> io::Result<()>,
+) -> ScriptsOutcome {
+    let refused = std::cell::Cell::new(false);
+    let result = if identity.inputs.get("build_view").map(String::as_str) == Some(RUNTIME_ONLY_VIEW)
+    {
+        hostfallback::hermetic_first(
+            subject,
+            HOST_BUILD_INPUTS_DETAIL,
+            Attempt {
+                record: |kind: &str, subject: &str, detail: &str| {
+                    let checked = refuse(kind, subject, detail);
+                    refused.set(checked.is_err());
+                    checked
+                },
+                discard,
+                fingerprint,
+                build,
+            },
+        )
+    } else {
+        build(HostView::Full).map(|()| None)
+    };
+    match result {
+        Ok(host_inputs) => ScriptsOutcome::Built(host_inputs),
+        Err(e)
+            if refused.get()
+                || hostfallback::is_host_changed(&e)
+                || matches!(
+                    e.kind(),
+                    io::ErrorKind::Unsupported | io::ErrorKind::Interrupted
+                ) =>
+        {
+            ScriptsOutcome::Stop(e)
+        }
+        Err(e) => ScriptsOutcome::Failed(e),
     }
 }
 
@@ -116,34 +190,26 @@ impl PackageScripts<'_> {
     /// Run the package's phases in the view `identity` asks for, and fold a
     /// fallback into `fallback`. A script failure in every view restores the
     /// package from its snapshot and is recorded as an exception; strict
-    /// policy turns the record into a hard error.
+    /// policy turns the record into a hard error. A policy that denies
+    /// `host-build-inputs` stops the sync before the retry runs.
     pub(super) fn run(
         &self,
         identity: &Identity,
         fallback: &mut ScriptsFallback,
     ) -> io::Result<()> {
         let p = self.package;
-        let build = |view: HostView| self.run_phases(view);
-        let result =
-            if identity.inputs.get("build_view").map(String::as_str) == Some(RUNTIME_ONLY_VIEW) {
-                hostfallback::hermetic_first(
-                    &p.path,
-                    HOST_BUILD_INPUTS_DETAIL,
-                    Attempt {
-                        // Checked here, recorded below: a retry that fails
-                        // too leaves the package as it was, built against
-                        // nothing, and its exception is install-script-failed.
-                        record: refuse_if_denied,
-                        discard: || self.restore_attempt(),
-                        fingerprint: crate::kernel::hostview::host_build_inputs,
-                        build,
-                    },
-                )
-            } else {
-                build(HostView::Full).map(|()| None)
-            };
-        let e = match result {
-            Ok(Some(host_inputs)) => {
+        let e = match scripts_in_view(
+            identity,
+            &p.path,
+            // Checked here, recorded below: a retry that fails too leaves
+            // the package as it was, built against nothing, and its
+            // exception is install-script-failed.
+            refuse_if_denied,
+            || self.restore_attempt(),
+            crate::kernel::hostview::host_build_inputs,
+            |view| self.run_phases(view),
+        ) {
+            ScriptsOutcome::Built(Some(host_inputs)) => {
                 crate::kernel::policy::record(
                     crate::kernel::policy::HOST_BUILD_INPUTS,
                     &p.path,
@@ -153,17 +219,9 @@ impl PackageScripts<'_> {
                 fallback.fell_back.push(p.path.clone());
                 return Ok(());
             }
-            Ok(None) => return Ok(()),
-            Err(e)
-                if hostfallback::is_host_changed(&e)
-                    || matches!(
-                        e.kind(),
-                        io::ErrorKind::Unsupported | io::ErrorKind::Interrupted
-                    ) =>
-            {
-                return Err(e)
-            }
-            Err(e) => e,
+            ScriptsOutcome::Built(None) => return Ok(()),
+            ScriptsOutcome::Stop(e) => return Err(e),
+            ScriptsOutcome::Failed(e) => e,
         };
         let hint = "If this package downloads files at install time, declare them as verified inputs in package.json — \
                     \"tog\": {\"artifacts\": [{\"url\", \"sha256\", \"path\"}]} — \
@@ -248,5 +306,130 @@ impl PackageScripts<'_> {
             )?;
         }
         remove_dangling_bin_links(self.staged, self.plan)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const HOST: &str = "1111111111111111111111111111111111111111111111111111111111111111";
+    const SUBJECT: &str = "node_modules/fixture-pkg";
+
+    fn identity(view: Option<&str>) -> Identity {
+        Identity {
+            kind: "node-env".into(),
+            name: "env".into(),
+            version: "1".into(),
+            inputs: view
+                .map(|view| ("build_view".to_string(), view.to_string()))
+                .into_iter()
+                .collect(),
+        }
+    }
+
+    fn deny_host_build_inputs() -> crate::kernel::policy::Policy {
+        crate::kernel::policy::Policy {
+            deny: [crate::kernel::policy::HOST_BUILD_INPUTS.to_string()]
+                .into_iter()
+                .collect(),
+            ..crate::kernel::policy::Policy::default()
+        }
+    }
+
+    /// `scripts_in_view` under `policy` with scripted attempt results,
+    /// returning the outcome and the views tried in order.
+    fn scripted(
+        identity: &Identity,
+        policy: &crate::kernel::policy::Policy,
+        mut results: Vec<io::Result<()>>,
+    ) -> (ScriptsOutcome, Vec<HostView>) {
+        results.reverse();
+        let mut views = Vec::new();
+        let outcome = scripts_in_view(
+            identity,
+            SUBJECT,
+            |kind, subject, detail| refuse_with(policy, kind, subject, detail),
+            || Ok(()),
+            || Ok(HOST.to_string()),
+            |view| {
+                views.push(view);
+                results.pop().expect("an attempt the test did not script")
+            },
+        );
+        (outcome, views)
+    }
+
+    fn failed(kind: io::ErrorKind, what: &str) -> io::Result<()> {
+        Err(io::Error::new(kind, format!("postinstall: {what}")))
+    }
+
+    /// A policy that denies `host-build-inputs` stops the sync before the
+    /// retry runs, as it does for gems and sdists: the package is not
+    /// rolled back into an `install-script-failed` exception.
+    #[test]
+    fn a_denied_fallback_stops_the_sync_without_running_against_the_host() {
+        let (outcome, views) = scripted(
+            &identity(Some(RUNTIME_ONLY_VIEW)),
+            &deny_host_build_inputs(),
+            vec![failed(io::ErrorKind::Other, "zlib.h not found")],
+        );
+        let ScriptsOutcome::Stop(error) = outcome else {
+            panic!("a denied fallback did not stop the sync: {outcome:?}");
+        };
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        let message = error.to_string();
+        assert!(message.contains("zlib.h not found"), "{message}");
+        assert!(
+            message.contains("policy denies host-build-inputs"),
+            "{message}"
+        );
+        assert_eq!(views, [HostView::RuntimeOnly]);
+    }
+
+    /// A script that fails in both views is an ordinary script failure,
+    /// even when its own error has the kind a refusal carries.
+    #[test]
+    fn a_script_failing_in_every_view_is_a_script_failure() {
+        let (outcome, views) = scripted(
+            &identity(Some(RUNTIME_ONLY_VIEW)),
+            &crate::kernel::policy::Policy::default(),
+            vec![
+                failed(io::ErrorKind::Other, "zlib.h not found"),
+                failed(io::ErrorKind::PermissionDenied, "EACCES"),
+            ],
+        );
+        assert!(
+            matches!(&outcome, ScriptsOutcome::Failed(error) if error.kind() == io::ErrorKind::PermissionDenied),
+            "{outcome:?}"
+        );
+        assert_eq!(views, [HostView::RuntimeOnly, HostView::Full]);
+    }
+
+    #[test]
+    fn an_allowed_fallback_builds_against_the_host() {
+        let (outcome, views) = scripted(
+            &identity(Some(RUNTIME_ONLY_VIEW)),
+            &crate::kernel::policy::Policy::default(),
+            vec![failed(io::ErrorKind::Other, "zlib.h not found"), Ok(())],
+        );
+        assert!(
+            matches!(&outcome, ScriptsOutcome::Built(Some(host)) if host == HOST),
+            "{outcome:?}"
+        );
+        assert_eq!(views, [HostView::RuntimeOnly, HostView::Full]);
+    }
+
+    /// Without a runtime-only view (macOS) the scripts run once against the
+    /// whole host, and a denying policy never comes into it.
+    #[test]
+    fn scripts_without_a_runtime_only_view_run_once_against_the_host() {
+        let (outcome, views) = scripted(
+            &identity(None),
+            &deny_host_build_inputs(),
+            vec![failed(io::ErrorKind::PermissionDenied, "EACCES")],
+        );
+        assert!(matches!(outcome, ScriptsOutcome::Failed(_)), "{outcome:?}");
+        assert_eq!(views, [HostView::Full]);
     }
 }
