@@ -637,49 +637,49 @@ fn read_projections(store: &Store) -> io::Result<Projections> {
 
 /// Every record under `records/<kind>/` that names a project (see
 /// `Store::write_project_record`) whose directory no longer exists. Each
-/// kind is held open; a record is read without following a symlink, and
-/// one that names no project is never a candidate.
+/// kind is held open and every record is opened relative to it, following
+/// no symlink; one that names no project is never a candidate. Records are a
+/// cache, so a kind or a record this cannot read is left alone rather than
+/// failing the sweep.
 fn read_orphan_records(store: &Store, read: &mut Projections) -> io::Result<()> {
-    use std::io::Read as _;
-    use std::os::unix::fs::OpenOptionsExt;
     let records = store.root.join(store::RECORDS);
     validate_projection_namespace(&records, store::RECORDS)?;
     if !records.is_dir() {
         return Ok(());
     }
-    for kind in fs::read_dir(&records)? {
-        let kind = kind?;
-        let kind_stat = fs::symlink_metadata(kind.path())?;
-        if kind_stat.file_type().is_symlink() || !kind_stat.is_dir() {
+    let Ok(records_dir) = open_held(&records, store::RECORDS) else {
+        return Ok(());
+    };
+    let Ok(kinds) = store::read_dir_names_at(records_dir.file.as_raw_fd()) else {
+        return Ok(());
+    };
+    for kind in kinds {
+        let Ok(kind_stat) = store::stat_at(records_dir.file.as_raw_fd(), kind.as_bytes()) else {
+            continue;
+        };
+        if (kind_stat.st_mode & libc::S_IFMT) != libc::S_IFDIR {
             continue;
         }
-        let held = open_held(&kind.path(), "store record kind")?;
+        let Ok(file) = store::open_directory_at(records_dir.file.as_raw_fd(), kind.as_bytes())
+        else {
+            continue;
+        };
+        let held = HeldDir {
+            label: "store record kind".to_string(),
+            file,
+        };
+        let Ok(names) = store::read_dir_names_at(held.file.as_raw_fd()) else {
+            continue;
+        };
         let index = read.record_kinds.len();
-        for entry in fs::read_dir(kind.path())? {
-            let entry = entry?;
-            let name = entry.file_name();
-            let stat = store::stat_at(held.file.as_raw_fd(), name.as_bytes())?;
-            if (stat.st_mode & libc::S_IFMT) != libc::S_IFREG
-                || stat.st_size.max(0) as u64 > store::RECORD_CAP
-            {
-                continue;
-            }
-            let mut bytes = Vec::new();
-            fs::OpenOptions::new()
-                .read(true)
-                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-                .open(entry.path())?
-                .read_to_end(&mut bytes)?;
-            let Some(project) = store::record_project(&bytes) else {
+        let kind_path = records.join(&kind);
+        for name in names {
+            let Some(stat) = orphan_record_at(&held, &name) else {
                 continue;
             };
-            match fs::symlink_metadata(&project) {
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                _ => continue,
-            }
             read.orphan_records.push(DirEntrySnapshot {
+                path: kind_path.join(&name),
                 name,
-                path: entry.path(),
                 parent: Parent::RecordKind(index),
                 stat,
             });
@@ -687,6 +687,35 @@ fn read_orphan_records(store: &Store, read: &mut Projections) -> io::Result<()> 
         read.record_kinds.push(held);
     }
     Ok(())
+}
+
+/// The stat of the record `name` in the held kind directory when it names a
+/// project whose directory is gone; `None` for any other record, or one
+/// that cannot be read.
+fn orphan_record_at(kind: &HeldDir, name: &std::ffi::OsStr) -> Option<libc::stat> {
+    use std::io::Read as _;
+    let stat = store::stat_at(kind.file.as_raw_fd(), name.as_bytes()).ok()?;
+    if (stat.st_mode & libc::S_IFMT) != libc::S_IFREG
+        || stat.st_size.max(0) as u64 > store::RECORD_CAP
+    {
+        return None;
+    }
+    let file = store::open_file_at(
+        kind.file.as_raw_fd(),
+        name.as_bytes(),
+        libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
+        0,
+    )
+    .ok()?;
+    let mut bytes = Vec::new();
+    file.take(store::RECORD_CAP + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    let project = store::record_project(&bytes)?;
+    match fs::symlink_metadata(&project) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Some(stat),
+        _ => None,
+    }
 }
 
 /// Every directory directly under the store's `namespace`, with that
