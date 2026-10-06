@@ -119,7 +119,6 @@ None open.
   resolution proxy's Mach allow-list (`tools/proxy_spike/macos_mach.sh`). Nothing Linux-side
   clears this.
 
-- **Tool-opened absolute inputs (#499).** Bundler and uv now name project inputs relative to the held directory. Cargo's `--manifest-path` (`src/kernel/provider/crates.rs`) and external absolute requirements files still reopen a path. Name the manifest relative to the held cwd, and give external files a held input or a snapshot.
 
 
 
