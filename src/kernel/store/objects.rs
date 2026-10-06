@@ -413,6 +413,9 @@ impl Store {
                 ),
             ));
         }
+        // Every `bin/` link stays inside the object or a declared object,
+        // checked while the object is still only staged.
+        super::bin_links::check_bin_links(self, &id, staged, &dest, &deps.objects)?;
         // Read-only BEFORE publication (contents; APFS can't rename a
         // read-only dir, so the root is locked right after the rename —
         // the only window is top-level entry creation, never mutation).

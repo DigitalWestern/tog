@@ -682,7 +682,9 @@ pub fn closure_object(
 /// every link is followed. `is_file` alone follows links anywhere, so an
 /// object carrying `bin/go -> /usr/bin/true` would pass and land on PATH.
 /// Links within the object (`bin/python3 -> python3.12`) still pass.
-/// Only the probe is checked: other entries beside it are not walked.
+/// Publication already refused any other `bin/` entry that leads out of
+/// the object to anything but an object it declares
+/// (`kernel::store::bin_links`); this covers the probe wherever it is.
 fn probe_is_inside(object: &Path, probe: &str) -> bool {
     let (Ok(root), Ok(target)) = (object.canonicalize(), object.join(probe).canonicalize()) else {
         return false;
@@ -1886,6 +1888,8 @@ mod closure_object_tests {
 
     /// The probe is followed through links, but only within the object: a
     /// link out of it, to a directory, or to nothing is not the content.
+    /// Publication refuses a `bin/` link out (`store::bin_links`), so the
+    /// links out live in `libexec/`: the probe may name any path.
     #[test]
     fn a_probe_link_must_stay_inside_the_object() {
         use std::os::unix::fs::symlink;
@@ -1897,8 +1901,9 @@ mod closure_object_tests {
             fs::write(staged.join("bin/tool-1.2"), "x").unwrap();
             symlink("tool-1.2", staged.join("bin/tool")).unwrap();
             symlink("../bin", staged.join("bin/up")).unwrap();
-            symlink(&outside, staged.join("bin/escape")).unwrap();
-            symlink("../../..", staged.join("bin/root")).unwrap();
+            fs::create_dir(staged.join("libexec")).unwrap();
+            symlink(&outside, staged.join("libexec/escape")).unwrap();
+            symlink("../../..", staged.join("libexec/root")).unwrap();
             symlink("nothing", staged.join("bin/dangling")).unwrap();
             symlink("bin", staged.join("dirlink")).unwrap();
         });
@@ -1915,8 +1920,8 @@ mod closure_object_tests {
         }
         let outside_name = outside.file_name().unwrap().to_str().unwrap();
         for probe in [
-            "bin/escape".to_owned(),
-            format!("bin/root/{outside_name}"),
+            "libexec/escape".to_owned(),
+            format!("libexec/root/{outside_name}"),
             "bin/dangling".to_owned(),
             "dirlink".to_owned(),
         ] {
