@@ -465,19 +465,25 @@ impl Sandbox<'_> {
         roots.push(cwd);
         roots.push(scratch);
 
-        let mut scanned = Vec::new();
+        // Each root scanned so far, and whether through a held descriptor.
+        // A root under one already scanned is skipped, except a held root
+        // under a parent scanned by path: the parent's walk covered what
+        // sits at the root's path now, not the tree the sandbox binds, which
+        // may have been renamed out from under it.
+        let mut scanned: Vec<(PathBuf, bool)> = Vec::new();
         for root in roots {
             let (alias, root) = match held.find(root) {
                 Some(found) => (Some(found.alias()), found.dest.clone()),
                 None => (None, fs::canonicalize(root)?),
             };
+            let is_held = alias.is_some();
             if scanned
                 .iter()
-                .any(|parent: &PathBuf| root.starts_with(parent))
+                .any(|(parent, parent_held)| root.starts_with(parent) && (*parent_held || !is_held))
             {
                 continue;
             }
-            scanned.retain(|parent| !parent.starts_with(&root));
+            scanned.retain(|(parent, _)| !parent.starts_with(&root));
             let found = match &alias {
                 Some(alias) => find_socket_without_following_symlinks(alias)?.map(|socket| {
                     match socket.strip_prefix(alias) {
@@ -493,7 +499,7 @@ impl Sandbox<'_> {
                     socket.display()
                 )));
             }
-            scanned.push(root);
+            scanned.push((root, is_held));
         }
         // The fixed `/etc` entries are bound too (#373). `/usr` is trusted
         // unscanned: walking it would cost more than the build.
@@ -511,7 +517,7 @@ impl Sandbox<'_> {
     ) -> io::Result<BwrapInvocation> {
         let (read_binds, write_binds) = held.place(&self.read, &self.write, tmp)?;
         let scratch = fs::canonicalize(tmp)?;
-        let cwd = held.place_one(cwd)?.1;
+        let cwd = held.dest(cwd)?;
         let read: Vec<PathBuf> = read_binds.iter().map(|(_, dest)| dest.clone()).collect();
         let write: Vec<PathBuf> = write_binds.iter().map(|(_, dest)| dest.clone()).collect();
 
@@ -1675,15 +1681,28 @@ mod tests {
         let path = project.join("f");
         // `test` is a child of the shell, so it holds exactly what the
         // command was given: the held descriptor would be at 3.
+        // An unexpanded glob (no `/proc/1/fd` to read) is reported too,
+        // so the pid 1 check cannot pass by looking at nothing.
         let script = "/usr/bin/cat f \"$1\"; \
             if /usr/bin/test -d /proc/self/fd/3; then echo ' leak 3'; fi; \
             for fd in /proc/1/fd/*; do \
+                if ! /usr/bin/test -e \"$fd\"; then echo \" unreadable $fd\"; fi; \
                 if /usr/bin/test -d \"$fd\"; then echo \" leak $fd\"; fi; \
             done";
         let cmd = ["/usr/bin/sh", "-c", script, "sh", path.to_str().unwrap()];
         // Renamed, nothing at the path.
         let seen = run_capture(&sandbox, &cmd, &scratch, &project, &[]).unwrap();
         assert_eq!(String::from_utf8_lossy(&seen), "heldheld");
+        // A symlink to another directory swapped in at the path: the held
+        // spelling is still resolved through the descriptor, never through
+        // what the path names now.
+        let linked = root.0.join("linked");
+        fs::create_dir(&linked).unwrap();
+        fs::write(linked.join("f"), "linked").unwrap();
+        std::os::unix::fs::symlink(&linked, &project).unwrap();
+        let seen = run_capture(&sandbox, &cmd, &scratch, &project, &[]).unwrap();
+        assert_eq!(String::from_utf8_lossy(&seen), "heldheld");
+        fs::remove_file(&project).unwrap();
         // Another directory swapped in at the path.
         fs::create_dir(&project).unwrap();
         fs::write(project.join("f"), "swapped").unwrap();
@@ -1693,6 +1712,72 @@ mod tests {
         // Once no root holds it, the path is bound as it stands.
         let seen = run_capture(&sandbox, &cmd, &scratch, &project, &[]).unwrap();
         assert_eq!(String::from_utf8_lossy(&seen), "swappedswapped");
+    }
+
+    /// A working directory an open root holds, inside the bound project
+    /// but not a declared root itself (`cargo fmt` from a workspace
+    /// member), has a place in the sandbox and no bind source: resolving
+    /// it must not panic, and asking it for a bind source is an error.
+    #[test]
+    fn a_held_working_directory_that_is_no_root_has_a_place_and_no_source() {
+        let root = temp_dir("held-cwd");
+        let scratch = root.0.join("scratch");
+        let project = root.0.join("project");
+        fs::create_dir(&scratch).unwrap();
+        fs::create_dir_all(project.join("member")).unwrap();
+        let project = project.canonicalize().unwrap();
+        let _held = crate::kernel::fsroot::ProjectRoot::open(&project).unwrap();
+        let member = project.join("member");
+        let sandbox = Sandbox {
+            read: vec![],
+            write: vec![&scratch],
+            host_view: HostView::Full,
+        };
+        let held = HeldRoots::resolve(&sandbox, &member).unwrap();
+        assert!(
+            held.find(&member).is_some(),
+            "the held cwd was not resolved"
+        );
+        assert_eq!(held.dest(&member).unwrap(), member);
+        assert!(held.passed().is_empty());
+        let error = held.place_one(&member).unwrap_err().to_string();
+        assert!(error.contains("not a declared sandbox root"), "{error}");
+    }
+
+    #[cfg(target_os = "linux")]
+    /// A held root is scanned through its descriptor even when a parent
+    /// declared before it was scanned by path: the parent's walk covered
+    /// what its path holds now, and the held tree, renamed out of it, is
+    /// not there any more. A socket in the held tree is still found.
+    #[test]
+    fn a_held_root_is_scanned_though_an_unheld_parent_was() {
+        let root = temp_dir("held-under-unheld");
+        let scratch = root.0.join("scratch");
+        let parent = root.0.join("parent");
+        let project = parent.join("project");
+        fs::create_dir(&scratch).unwrap();
+        fs::create_dir_all(&project).unwrap();
+        let parent = parent.canonicalize().unwrap();
+        let project = project.canonicalize().unwrap();
+        let _held = crate::kernel::fsroot::ProjectRoot::open(&project).unwrap();
+        // Out of the parent, with a socket inside.
+        let moved = root.0.join("moved");
+        fs::rename(&project, &moved).unwrap();
+        let _listener = crate::kernel::testutil::bind_socket(&moved.join("sock"));
+        let sandbox = Sandbox {
+            read: vec![&parent, &project],
+            write: vec![&scratch],
+            host_view: HostView::Full,
+        };
+        let held = HeldRoots::resolve(&sandbox, &scratch).unwrap();
+        let error = sandbox
+            .reject_host_sockets(&scratch, &scratch, &held)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains(&project.join("sock").display().to_string()),
+            "{error}"
+        );
     }
 
     #[test]

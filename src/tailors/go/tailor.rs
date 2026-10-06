@@ -200,7 +200,14 @@ impl Tailor for Go {
     ) -> io::Result<()> {
         let project = ProjectRoot::open(root)?;
         let (go_obj, modcache) = realize_and_project(ctx, &project, toolchain, attribution)?;
-        go::build_sandboxed(ctx.platform, &ctx.activity, root, &go_obj, &modcache, args)
+        go::build_sandboxed(
+            ctx.platform,
+            &ctx.activity,
+            &project,
+            &go_obj,
+            &modcache,
+            args,
+        )
     }
 
     /// `go run` on a lone file, outside any module: the standard library
