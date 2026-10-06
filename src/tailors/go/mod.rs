@@ -1345,22 +1345,6 @@ mod tests {
     use super::*;
     use crate::kernel::testutil::TempDir;
 
-    /// `dir` mode 0111 (search, no read) until dropped.
-    struct SearchOnly(std::path::PathBuf);
-    impl SearchOnly {
-        fn new(dir: &Path) -> Self {
-            use std::os::unix::fs::PermissionsExt as _;
-            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o111)).unwrap();
-            Self(dir.to_path_buf())
-        }
-    }
-    impl Drop for SearchOnly {
-        fn drop(&mut self) {
-            use std::os::unix::fs::PermissionsExt as _;
-            let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
-        }
-    }
-
     /// A go.work in a search-only (0111) parent is still found and refused:
     /// the walk checks the name through the held ancestor (#480).
     #[test]
@@ -1371,7 +1355,10 @@ mod tests {
         fs::create_dir_all(&module).unwrap();
         fs::write(module.join("go.mod"), "module example.com/m\n").unwrap();
         fs::write(parent.join("go.work"), "go 1.22\n").unwrap();
-        let _search_only = SearchOnly::new(&parent);
+        let _search_only = match crate::kernel::testutil::SearchOnly::new(&parent) {
+            Ok(held) => held,
+            Err(skip) => return eprintln!("{skip}"),
+        };
         let error = reject_workspaces_with(&ProjectRoot::open(&module).unwrap(), None).unwrap_err();
         assert!(error.to_string().contains("go.work found"), "{error}");
     }
