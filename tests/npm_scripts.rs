@@ -569,9 +569,25 @@ NAPI_MODULE(NODE_GYP_MODULE_NAME, init)
 
     // Strict policy never creates the toolchain lock, so the project commits
     // one first, exactly as a user runs `tog` once before CI goes strict.
+    // A strict sync also wants the lock to carry a signed resolution
+    // record (`tog attest node`, an npm lock check through the door), and
+    // this fixture lock names `fixture.invalid` tarballs no npm run can
+    // check, so the machine policy denies every kind strict denies but
+    // `unrecorded-resolution`: every other refusal below is strict's.
+    let denied: Vec<String> = policy::KINDS
+        .iter()
+        .filter(|kind| **kind != policy::UNRECORDED_RESOLUTION)
+        .map(|kind| format!("\"{kind}\""))
+        .collect();
+    std::fs::create_dir_all(temp.0.join(".tog")).unwrap();
+    std::fs::write(
+        temp.0.join(".tog/policy.toml"),
+        format!("deny = [{}]\n", denied.join(", ")),
+    )
+    .unwrap();
     commit_toolchain_lock(project, "node");
-    let synced = tog(project, &temp.0, &["sync", "--strict"]);
-    assert_success(&synced, "tog --strict");
+    let synced = tog(project, &temp.0, &["sync"]);
+    assert_success(&synced, "tog sync under the strict deny list");
 
     let closure = comforter::read_closure(project, "node").unwrap();
     let package_paths: Vec<&str> = closure["packages"]
@@ -629,8 +645,8 @@ console.log('linux-npm-roundtrip-ok');
             .count(),
         0
     );
-    let repeated = tog(project, &temp.0, &["sync", "--strict"]);
-    assert_success(&repeated, "offline warm sync --strict");
+    let repeated = tog(project, &temp.0, &["sync"]);
+    assert_success(&repeated, "offline warm sync under the strict deny list");
     let repeated_closure = comforter::read_closure(project, "node").unwrap();
     assert_eq!(
         repeated_closure["env_object"], closure["env_object"],
