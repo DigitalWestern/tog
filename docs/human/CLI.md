@@ -413,9 +413,12 @@ nearest projected root (the closest ancestor with `.tog/closures/`). A
 package.json script of the same name wins over an executable on PATH and
 runs with the npm lifecycle environment; the exit code passes through.
 The projected prefixes come first and the host PATH after them, but the
-runtime of an ecosystem the project has (`python`, `node`, `ruby`, `go`,
-`mix`, `dotnet`, `cargo`) named bare comes from the prefixes or not at all:
-`tog run node` in a Node project never runs the host's `node`.
+runtime of an ecosystem the project has, and the programs that ship in it
+(`python`, `python3`, `pip`, `pip3`; `node`, `npm`, `npx`; `ruby`, `gem`,
+`bundle`; `go`, `gofmt`; `mix`, `elixir`, `iex`, `erl`; `dotnet`; `cargo`,
+`rustc`), named bare comes from the prefixes or not at all: `tog run node`
+in a Node project never runs the host's `node`. A package.json script of
+the same name still wins.
 `tog <script>` is the short form for any first word that is not a
 built-in command, and a built-in always wins (`tog build` is the
 sandboxed build, never a script named build; `tog run build` reaches the
@@ -434,16 +437,25 @@ deps are loaded), `.go` (go run).
 A TypeScript file runs on the project's Node as it is from 23.6 and
 22.18, which strip types themselves, and with `--experimental-strip-types`
 from 22.6. An older Node is refused before the sync, naming the version:
-raise the version the project asks for, then `tog update --toolchain node`
-moves the lock.
+raise the version the project asks for (and run `tog update --toolchain node`
+if `tog-toolchain.toml` pins Node). The check applies to `tog <file>` only:
+`tog run node app.ts` hands the file to Node as it is.
 Uppercase extensions and paths with directories count. In a project
 without that ecosystem, or outside any project, the file runs on the
-ecosystem's runtime alone, the one `tog x` would use there: the version the
-project's toolchain lock or version file names, else the shipped one,
-realized into the store, never whatever `python` the host has. It gets no
-dependencies and no sync: `python3` runs a `.py`, `node` a `.js` or `.ts`
-(by the TypeScript rule above), `ruby` a `.rb`, `elixir` a `.exs`, and
-`go run` a `.go` with the standard library only (`GOPROXY=off`). A `.rs` or `.cs` file is refused with
+ecosystem's runtime alone, the one `tog x` would use there, realized into
+the store, never whatever `python` the host has. Which version: the
+project's toolchain lock when it has a section for the ecosystem; with no
+lock at all, the project's version file (`.ruby-version`, `.node-version`);
+a lock without that section, or no project, means the shipped release. It
+gets no dependencies and no sync, and the host's interpreter settings are
+removed as `tog run` removes them (RUBYOPT, GEM_HOME and Bundler variables
+for Ruby; ERL_LIBS, Mix and Hex variables for Elixir, with `HEX_OFFLINE=1`
+and a private home, so a `Mix.install` cannot fetch): `python3` runs a
+`.py`, `node` a `.js` or `.ts` (by the TypeScript rule above), `ruby` a
+`.rb` with no gems, `elixir` a `.exs`, and `go run` a `.go` with module
+mode off and scratch caches, so a go.mod above the file does not apply and
+only the standard library resolves (`GOPROXY=off`). A `.rs` or `.cs` file
+is refused with
 a pointer to `tog build`: Rust builds a crate, never a lone file, and a
 .NET file-based app would restore packages outside the lock. A file with any other extension is a usage error that names
 `tog run <program> <file>`. A package.json script with the same name as

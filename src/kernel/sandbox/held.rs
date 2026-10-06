@@ -103,11 +103,22 @@ impl HeldRoots {
         Ok((read, write))
     }
 
-    /// One path as (bind source, place in the sandbox).
+    /// One declared root as (bind source, place in the sandbox).
     pub(super) fn place_one(&self, path: &Path) -> io::Result<(PathBuf, PathBuf)> {
         match self.find(path) {
-            Some(found) => Ok((found.source(), found.dest.clone())),
+            Some(found) => Ok((found.source()?, found.dest.clone())),
             None => fs::canonicalize(path).map(|path| (path.clone(), path)),
+        }
+    }
+
+    /// Where the sandbox shows `path`, declared root or not: the working
+    /// directory is only entered, never bound by itself, so a held one
+    /// that is no declared root (a subdirectory of the bound project) has
+    /// a place here and no bind source.
+    pub(super) fn dest(&self, path: &Path) -> io::Result<PathBuf> {
+        match self.find(path) {
+            Some(found) => Ok(found.dest.clone()),
+            None => fs::canonicalize(path),
         }
     }
 
@@ -134,11 +145,15 @@ impl HeldRoots {
 
 impl HeldRoot {
     /// The bind source bubblewrap opens: its own copy of the descriptor.
-    fn source(&self) -> PathBuf {
-        PathBuf::from(format!(
-            "/proc/self/fd/{}",
-            self.target.expect("a bound root has a target")
-        ))
+    /// A working directory that is no declared root has none.
+    fn source(&self) -> io::Result<PathBuf> {
+        match self.target {
+            Some(target) => Ok(PathBuf::from(format!("/proc/self/fd/{target}"))),
+            None => Err(io::Error::other(format!(
+                "{} is the working directory, not a declared sandbox root",
+                self.requested.display()
+            ))),
+        }
     }
 
     /// This process's view of the held directory, for the socket scan.

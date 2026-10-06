@@ -91,26 +91,34 @@ pub struct Missing {
 }
 
 /// Every engine this build of tog can try, probed: what is usable and
-/// what is not.
-pub fn probe_tiers(activity: &StoreActivity) -> (Vec<TierOffer>, Vec<Missing>) {
+/// what is not. An interrupt during a probe is returned as the error it is.
+pub fn probe_tiers(activity: &StoreActivity) -> io::Result<(Vec<TierOffer>, Vec<Missing>)> {
     #[cfg(test)]
     if let Some(tiers) = TIERS_FOR_TEST.with(|tiers| tiers.borrow().clone()) {
-        return tiers;
+        return Ok(tiers);
     }
+    tiers_from(sandbox::bwrap_preflight_with_activity(Some(activity)).map(|_| ()))
+}
+
+/// The offers and gaps the bubblewrap preflight's result makes. An
+/// interrupt is no verdict: it stops the command (exit 130), so it is
+/// passed through rather than reported as a missing bubblewrap (#289).
+fn tiers_from(preflight: io::Result<()>) -> io::Result<(Vec<TierOffer>, Vec<Missing>)> {
     let mut offers = Vec::new();
     let mut missing = Vec::new();
-    match sandbox::bwrap_preflight_with_activity(Some(activity)) {
-        Ok(_) => offers.push(TierOffer {
+    match preflight {
+        Ok(()) => offers.push(TierOffer {
             engine: Engine::Bubblewrap,
             fenced: true,
         }),
+        Err(error) if crate::kernel::supervise::stop_signal(&error).is_some() => return Err(error),
         Err(error) => missing.push(Missing {
             capability: "bubblewrap",
             reason: error.to_string(),
             fix: "install bubblewrap and allow it unprivileged user namespaces".to_string(),
         }),
     }
-    (offers, missing)
+    Ok((offers, missing))
 }
 
 #[cfg(test)]
@@ -752,16 +760,24 @@ pub(crate) fn find_socket(root: &Path) -> io::Result<Option<PathBuf>> {
 fn scan_system_roots() -> io::Result<()> {
     static SCANNED: OnceLock<Result<(), String>> = OnceLock::new();
     SCANNED
-        .get_or_init(|| {
-            for root in system_roots() {
-                if let Some(socket) = find_socket(&root).map_err(|error| error.to_string())? {
-                    return Err(socket_error(&root, &socket).to_string());
-                }
-            }
-            Ok(())
-        })
+        .get_or_init(|| scan_bound_roots(&system_roots()).map_err(|error| error.to_string()))
         .clone()
         .map_err(|message| io::Error::new(io::ErrorKind::PermissionDenied, message))
+}
+
+/// Refuse a socket in any of `roots` as the sandbox binds them: from each
+/// one's real target, since bubblewrap follows a symlink at a bound path
+/// (an `/etc` entry may be one). A root with nothing there is not bound.
+fn scan_bound_roots(roots: &[PathBuf]) -> io::Result<()> {
+    for root in roots {
+        let Some(target) = sandbox::bind_target(root)? else {
+            continue;
+        };
+        if let Some(socket) = find_socket(&target)? {
+            return Err(socket_error(root, &socket));
+        }
+    }
+    Ok(())
 }
 
 /// `/usr`, each real top-level system directory the sandbox binds, and
@@ -901,7 +917,7 @@ pub fn confined_run(
     run: &ConfinedRun<'_>,
 ) -> io::Result<ConfinedOutcome> {
     store.require_activity(activity, "confined resolution")?;
-    let (offers, missing) = probe_tiers(activity);
+    let (offers, missing) = probe_tiers(activity)?;
     let tier = choose_tier(&offers, &missing, run.unconfined_denied, run.tool, run.why)?;
     let bwrap = sandbox::bwrap_preflight_with_activity(Some(activity))?;
     let mounts = Mounts::check(store, activity, run)?;
@@ -1417,6 +1433,36 @@ mod tests {
         assert!(refused.contains("unconfined-resolution"), "{refused}");
     }
 
+    /// An interrupt during the bubblewrap probe stops the command: it is
+    /// returned as the interrupt (main exits 130), with no "install
+    /// bubblewrap" advice (#289). Any other failure is a missing engine.
+    #[test]
+    fn an_interrupted_probe_is_no_missing_engine() {
+        use std::os::unix::process::ExitStatusExt;
+        let interrupt = io::Error::new(
+            io::ErrorKind::Interrupted,
+            crate::kernel::supervise::Interrupted {
+                signal: libc::SIGINT,
+                status: std::process::ExitStatus::from_raw(libc::SIGINT),
+            },
+        );
+        let error = tiers_from(Err(interrupt)).unwrap_err();
+        assert_eq!(
+            crate::kernel::supervise::stop_signal(&error),
+            Some(libc::SIGINT)
+        );
+        assert!(!error.to_string().contains("install bubblewrap"), "{error}");
+
+        let unavailable = io::Error::new(io::ErrorKind::Unsupported, "no bwrap");
+        let (offers, missing) = tiers_from(Err(unavailable)).unwrap();
+        assert!(offers.is_empty());
+        assert_eq!(missing.len(), 1);
+        assert_eq!(missing[0].reason, "no bwrap");
+        let (offers, missing) = tiers_from(Ok(())).unwrap();
+        assert_eq!(offers, vec![offer(true)]);
+        assert!(missing.is_empty());
+    }
+
     #[test]
     fn no_engine_names_the_tool_why_and_every_missing_capability() {
         let error =
@@ -1807,6 +1853,49 @@ mod tests {
             store.read_record(SOCKET_SCAN_RECORD, &clean_id).unwrap(),
             Some(serde_json::json!("clean"))
         );
+    }
+
+    /// A system root bound through a symlink is scanned at its target, so
+    /// an `/etc`-style entry that is a link to a socket, or to a directory
+    /// holding one, refuses the door by its bound name; a dangling link is
+    /// not bound and passes (#373).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_system_root_linked_to_a_socket_is_refused() {
+        let temp = TempDir::named("confine-etc");
+        let dir = temp.0.join("dir");
+        fs::create_dir(&dir).unwrap();
+        let to_socket = temp.0.join("localtime");
+        let to_dir = temp.0.join("ld.so.conf.d");
+        let dangling = temp.0.join("hosts");
+        std::os::unix::fs::symlink(temp.0.join("zone.sock"), &to_socket).unwrap();
+        std::os::unix::fs::symlink(&dir, &to_dir).unwrap();
+        std::os::unix::fs::symlink(temp.0.join("nowhere"), &dangling).unwrap();
+        let roots = [to_socket.clone(), to_dir.clone(), dangling];
+        // Control: the link to a socket dangles until the socket exists.
+        scan_bound_roots(&roots).unwrap();
+
+        let listener = crate::kernel::testutil::bind_socket(&temp.0.join("zone.sock"));
+        let error = scan_bound_roots(&roots).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert!(
+            error
+                .to_string()
+                .starts_with(&format!("{} holds a Unix socket at ", to_socket.display())),
+            "{error}"
+        );
+        drop(listener);
+        fs::remove_file(temp.0.join("zone.sock")).unwrap();
+
+        let listener = crate::kernel::testutil::bind_socket(&dir.join("agent.sock"));
+        let error = scan_bound_roots(&roots).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .starts_with(&format!("{} holds a Unix socket at ", to_dir.display())),
+            "{error}"
+        );
+        drop(listener);
     }
 
     /// The system-root scan runs to the end on this host: every directory

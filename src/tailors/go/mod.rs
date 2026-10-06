@@ -1200,12 +1200,47 @@ pub fn project_go_env(
     crate::comforter::write_closure(project, "go", body, &store, activity, refs, attribution)
 }
 
+/// The caches a go run writes, each a fresh directory under `scratch`, so
+/// nothing of the host's GOCACHE, GOPATH or temporary directory is read
+/// or written.
+fn scratch_caches(scratch: &Path) -> io::Result<Vec<(String, String)>> {
+    let mut env = Vec::new();
+    for (key, sub) in [
+        ("GOCACHE", "gocache"),
+        ("GOTMPDIR", "gotmp"),
+        ("GOPATH", "gopath"),
+    ] {
+        let dir = scratch.join(sub);
+        fs::create_dir_all(&dir)?;
+        env.push((key.to_string(), dir.display().to_string()));
+    }
+    Ok(env)
+}
+
+/// Env for a lone file (`tog t.go` with no Go project): [`go_env`] offline,
+/// every cache under `scratch`, and module mode off, so a go.mod above the
+/// file does not apply and nothing but the standard library resolves. The
+/// scratch module cache is empty and stays so with `GOPROXY=off`.
+pub fn lone_env(go_obj: &Path, scratch: &Path) -> io::Result<Vec<(String, String)>> {
+    let modcache = scratch.join("gomodcache");
+    fs::create_dir_all(&modcache)?;
+    let mut env = go_env(go_obj, &modcache, true);
+    env.extend(scratch_caches(scratch)?);
+    env.push(("GO111MODULE".to_string(), "off".to_string()));
+    Ok(env)
+}
+
 /// Sandboxed `go build`: network denied, project READ-ONLY — outputs are
 /// staged in scratch and moved into the project by tog afterwards.
+///
+/// The project is the directory `project` holds, named by the canonical
+/// path it was opened at, which the sandbox resolves through the held
+/// descriptor (#497). It is not canonicalized again: that would follow
+/// whatever sits at the path now, a symlink swapped in included.
 pub fn build_sandboxed(
     platform: Platform,
     activity: &StoreActivity,
-    project_dir: &Path,
+    project: &ProjectRoot,
     go_obj: &Path,
     modcache_obj: &Path,
     args: &[String],
@@ -1235,16 +1270,15 @@ pub fn build_sandboxed(
             )));
         }
     }
-    let project_dir = project_dir.canonicalize()?;
+    let project_dir = project.path().to_path_buf();
     let go_obj = go_obj.canonicalize()?;
     let modcache_obj = modcache_obj.canonicalize()?;
     let store = Store::open()?;
     store.require_activity(activity, "go build")?;
     let scratch = store.stage_with_activity(activity)?;
     let outdir = scratch.join("out");
-    for sub in ["out", "gocache", "gotmp", "gopath"] {
-        fs::create_dir_all(scratch.join(sub))?;
-    }
+    fs::create_dir_all(&outdir)?;
+    let caches = scratch_caches(&scratch)?;
     let mut argv = vec![
         go_obj.join("bin/go").display().to_string(),
         "build".to_string(),
@@ -1253,18 +1287,7 @@ pub fn build_sandboxed(
         format!("{}/", outdir.display()),
     ];
     let mut env = go_env(&go_obj, &modcache_obj, true);
-    env.push((
-        "GOCACHE".to_string(),
-        scratch.join("gocache").display().to_string(),
-    ));
-    env.push((
-        "GOTMPDIR".to_string(),
-        scratch.join("gotmp").display().to_string(),
-    ));
-    env.push((
-        "GOPATH".to_string(),
-        scratch.join("gopath").display().to_string(),
-    ));
+    env.extend(caches);
     let env: Vec<(String, String)> = env.into_iter().filter(|(_, v)| !v.is_empty()).collect();
     argv.extend(args.iter().cloned());
     // Default package is "." (go's own default) — never "./...": recursing
@@ -1345,22 +1368,6 @@ mod tests {
     use super::*;
     use crate::kernel::testutil::TempDir;
 
-    /// `dir` mode 0111 (search, no read) until dropped.
-    struct SearchOnly(std::path::PathBuf);
-    impl SearchOnly {
-        fn new(dir: &Path) -> Self {
-            use std::os::unix::fs::PermissionsExt as _;
-            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o111)).unwrap();
-            Self(dir.to_path_buf())
-        }
-    }
-    impl Drop for SearchOnly {
-        fn drop(&mut self) {
-            use std::os::unix::fs::PermissionsExt as _;
-            let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
-        }
-    }
-
     /// A go.work in a search-only (0111) parent is still found and refused:
     /// the walk checks the name through the held ancestor (#480).
     #[test]
@@ -1371,7 +1378,10 @@ mod tests {
         fs::create_dir_all(&module).unwrap();
         fs::write(module.join("go.mod"), "module example.com/m\n").unwrap();
         fs::write(parent.join("go.work"), "go 1.22\n").unwrap();
-        let _search_only = SearchOnly::new(&parent);
+        let _search_only = match crate::kernel::testutil::SearchOnly::new(&parent) {
+            Ok(held) => held,
+            Err(skip) => return eprintln!("{skip}"),
+        };
         let error = reject_workspaces_with(&ProjectRoot::open(&module).unwrap(), None).unwrap_err();
         assert!(error.to_string().contains("go.work found"), "{error}");
     }
@@ -2221,6 +2231,8 @@ mod tests {
     #[test]
     fn build_rejects_managed_flags() {
         let (_lease_store, activity) = crate::kernel::testutil::detached_lease();
+        let temp = TempDir::named("go-build-flags");
+        let project = ProjectRoot::open(&temp.0).unwrap();
         for bad in [
             "-mod=mod",
             "-toolexec",
@@ -2234,7 +2246,7 @@ mod tests {
             let e = build_sandboxed(
                 Platform::Aarch64AppleDarwin,
                 &activity,
-                Path::new("/nonexistent"),
+                &project,
                 Path::new("/nonexistent"),
                 Path::new("/nonexistent"),
                 &[bad.to_string()],

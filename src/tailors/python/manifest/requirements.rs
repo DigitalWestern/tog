@@ -17,12 +17,18 @@ pub(super) fn requirements_manifest(
     // The mode a file was first reached in. A file reached both as
     // requirements and as constraints lists its index options once.
     let mut first_mode = BTreeMap::new();
+    let mut external_includes = Vec::new();
     walk_includes(project, path, &mut |step| {
         match step {
             IncludeStep::File {
                 file,
                 constraints_only,
             } => {
+                if held_relative(project, file).is_none()
+                    && !external_includes.contains(&file.to_path_buf())
+                {
+                    external_includes.push(file.to_path_buf());
+                }
                 first_mode
                     .entry(file.to_path_buf())
                     .or_insert(constraints_only);
@@ -78,6 +84,7 @@ pub(super) fn requirements_manifest(
         provenance: input.into(),
         source,
         source_path: Some(path.to_path_buf()),
+        external_includes,
         locked_packages: None,
         uv_lock: None,
         has_index_options,
@@ -103,7 +110,7 @@ pub(super) fn requirements_directory_candidate(
         } else {
             dir.join(explicit)
         };
-        if is_project_file(project, &path) {
+        if is_project_file(project, &path)? {
             return Ok(Some(path));
         }
         return Err(unreadable(
@@ -113,13 +120,13 @@ pub(super) fn requirements_directory_candidate(
     }
     for hardware in ["cpu.txt", "cuda.txt", "rocm.txt", "xpu.txt"] {
         let path = requirements.join(hardware);
-        if is_project_file(project, &path) {
+        if is_project_file(project, &path)? {
             return Ok(Some(path));
         }
     }
     for name in ["common.txt", "base.txt", "requirements.in"] {
         let path = requirements.join(name);
-        if is_project_file(project, &path) {
+        if is_project_file(project, &path)? {
             return Ok(Some(path));
         }
     }
@@ -207,7 +214,7 @@ fn walk_from(
             unreadable(&path, "requirements include is missing its file argument")
         })?;
         let child = path.parent().unwrap_or(Path::new(".")).join(target.trim());
-        if !is_project_file(project, &child) {
+        if !is_project_file(project, &child)? {
             return Err(unreadable(&child, "included requirements file is missing"));
         }
         walk_from(
