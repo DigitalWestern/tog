@@ -1125,8 +1125,10 @@ pub(crate) fn extract_validated_with_activity_and_options(
 /// extracted here. The capturing pass still reads every header, and
 /// refuses every layout the in-process reader refuses for `list`. A hard
 /// link is followed only once it passes the link rules extraction applies.
-/// `member` is the exact stored name; `cap` bounds the member's declared
-/// size.
+/// A member written more than once is refused: tar extracts the last write
+/// (or, for a hard link, writes through the shared file), so no one entry's
+/// bytes are what an extracted tree holds. `member` is the exact stored
+/// name; `cap` bounds the member's declared size.
 pub fn read_member(
     archive: &Path,
     compression: Compression,
@@ -1134,6 +1136,19 @@ pub fn read_member(
     cap: u64,
 ) -> io::Result<Vec<u8>> {
     let (entries, wanted) = capture(archive, compression, member, cap)?;
+    let kept = validate::kept_name(member)?;
+    let mut writes = 0;
+    for entry in &entries {
+        if validate::kept_name(&entry.name)? == kept {
+            writes += 1;
+        }
+    }
+    if writes > 1 {
+        return Err(err(format!(
+            "archive {} writes member {member:?} more than once; refusing to read it",
+            archive.display()
+        )));
+    }
     if let Some(bytes) = wanted {
         return Ok(bytes);
     }
@@ -2861,6 +2876,60 @@ mod tests {
             let error = read(name, &members).expect_err(name);
             assert!(error.to_string().contains(reason), "{name}: {error}");
         }
+    }
+
+    /// A member written more than once is refused, whichever entry comes
+    /// first: tar extracts the last write, so the first entry's bytes are
+    /// not the extracted tree's. A second spelling of the same name
+    /// (`pkg/./a`) is the same member, as it is to tar (#556).
+    #[test]
+    fn read_member_refuses_a_member_written_more_than_once() {
+        let temp = temp_dir("read-member-twice");
+        for (name, members) in [
+            (
+                "regular-then-regular",
+                vec![
+                    ustar("pkg/a", b'0', "", b"first"),
+                    ustar("pkg/a", b'0', "", b"second"),
+                ],
+            ),
+            (
+                "regular-then-hardlink",
+                vec![
+                    ustar("pkg/x", b'0', "", b"other"),
+                    ustar("pkg/a", b'0', "", b"first"),
+                    ustar("pkg/a", b'1', "pkg/x", b""),
+                ],
+            ),
+            (
+                "second-spelling",
+                vec![
+                    ustar("pkg/a", b'0', "", b"first"),
+                    ustar("pkg/./a", b'0', "", b"second"),
+                ],
+            ),
+        ] {
+            let archive = temp.0.join(name);
+            write_tar(&archive, &members);
+            let error = read_member(&archive, Compression::None, "pkg/a", 1 << 20).expect_err(name);
+            assert!(
+                error.to_string().contains("more than once"),
+                "{name}: {error}"
+            );
+        }
+        // Control: one write reads.
+        let archive = temp.0.join("once");
+        write_tar(
+            &archive,
+            &[
+                ustar("pkg/a", b'0', "", b"only"),
+                ustar("pkg/b", b'0', "", b"other"),
+            ],
+        );
+        assert_eq!(
+            read_member(&archive, Compression::None, "pkg/a", 1 << 20).unwrap(),
+            b"only"
+        );
     }
 
     #[test]

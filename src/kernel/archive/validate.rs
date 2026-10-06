@@ -154,11 +154,13 @@ fn hard_links_contained(kept: &[(&Entry, Vec<&str>)], strip: usize) -> io::Resul
 }
 
 /// The stored name of the regular file the hard link `link` names, under
-/// the rules extraction applies with nothing stripped: every name and
-/// every hard link in `entries` is checked as [`validate_with_options`]
-/// checks them, so the target is an earlier regular file, not the link
-/// itself, and neither is written twice. A target spelled `pkg/./a` or
-/// `pkg/a/` finds the member stored as `pkg/a`, as tar would.
+/// extraction's hard-link rules with nothing stripped: every name in
+/// `entries` must be contained, and every hard link passes the checks
+/// [`validate_with_options`] applies to hard links, so the target is an
+/// earlier regular file, not the link itself, and neither is written
+/// twice. Symlinks and folded names are not checked: nothing is written to
+/// disk, so neither can change which bytes are read. A target spelled
+/// `pkg/./a` or `pkg/a/` finds the member stored as `pkg/a`, as tar would.
 pub(super) fn hard_link_target<'a>(entries: &'a [Entry], link: &Entry) -> io::Result<&'a str> {
     let mut kept: Vec<(&Entry, Vec<&str>)> = Vec::new();
     for entry in entries {
@@ -181,6 +183,18 @@ pub(super) fn hard_link_target<'a>(entries: &'a [Entry], link: &Entry) -> io::Re
         .find(|(entry, name)| entry.kind == EntryKind::File && *name == wanted)
         .map(|(entry, _)| entry.name.as_str())
         .ok_or_else(|| err(format!("archive hard link {:?}: no target", link.name)))
+}
+
+/// `name` as extraction compares it with nothing stripped: its contained
+/// components, `.` dropped, so `pkg/./a` and `pkg/a/` are both `pkg/a`.
+pub(super) fn kept_name(name: &str) -> io::Result<String> {
+    let components = contained_components(name)
+        .map_err(|reason| err(format!("archive entry {name:?}: {reason}")))?;
+    Ok(components
+        .into_iter()
+        .filter(|component| *component != ".")
+        .collect::<Vec<_>>()
+        .join("/"))
 }
 
 /// An approximation of the form under which APFS compares two names:
