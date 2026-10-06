@@ -467,11 +467,21 @@ impl Store {
         Ok(())
     }
 
-    /// Exclusive lock shared by fetches and GC. A cache lease keeps this
-    /// lock until its verified artifact has been extracted by the caller.
+    /// `gc.lock` held exclusive: GC and reset, which remove cache entries.
+    /// It waits for every [`Store::cache_lock`] holder to finish.
     pub(crate) fn gc_lock(&self) -> io::Result<fs::File> {
         let f = open_private_lock(&self.root.join("gc.lock"), "GC")?;
         f.lock()?;
+        Ok(f)
+    }
+
+    /// `gc.lock` held shared: a cache lease keeps it until its verified
+    /// artifact has been extracted by the caller. Shared, so leases in
+    /// separate tog processes download side by side, while GC's exclusive
+    /// [`Store::gc_lock`] still waits for all of them.
+    pub(crate) fn cache_lock(&self) -> io::Result<fs::File> {
+        let f = open_private_lock(&self.root.join("gc.lock"), "GC")?;
+        f.lock_shared()?;
         Ok(f)
     }
 

@@ -78,7 +78,6 @@ None open.
 - **Quality review of 2026-09-24 (#264).** A whole-codebase review after
   the 09-20 to 09-24 run. #264 holds the work order and the overall verdict.
   Each line is one issue and one PR, in order:
-  - #240 store: a CacheLease holds gc.lock exclusively, so separate tog processes download one at a time.
   - #247 dead code: the non-heavy part shipped; left are the unused items in heavy-watched files (`fetch.rs`, `archive.rs`, `sandbox.rs`, `provider/`) and the CI job that builds with `--cfg tog_dead_code -D dead_code`.
   - #245 kernel: consolidate duplicated primitives. Left after the first pass: the file hash copy in `provider/crates.rs` and `fetch.rs` (heavy gate), the pid temp names in `fetch.rs`, `validate_object_complete` and `exceptions()` reading records their own way.
   - #246 left: move the recipe checks in `kernel/provider` (cpython, rust, rust_path) onto `Selected::checked_artifact`. Deferred because those files wake the heavy suite.
