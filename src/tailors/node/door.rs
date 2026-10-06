@@ -690,6 +690,17 @@ mod tests {
         policy: Policy,
         run: NodeRun<'_>,
     ) -> (io::Result<DelegateReport>, Vec<Exception>) {
+        through_door_with(harness, kind, policy, run, |_| {})
+    }
+
+    /// [`through_door`] with `adjust` applied to the confined spec first.
+    fn through_door_with(
+        harness: &Harness,
+        kind: DoorKind,
+        policy: Policy,
+        run: NodeRun<'_>,
+        adjust: impl FnOnce(&mut ConfinedSpec<'_>),
+    ) -> (io::Result<DelegateReport>, Vec<Exception>) {
         let mut attribution = Attribution::open("node").unwrap();
         let mut door = ResolutionDoor::open(
             &harness.store,
@@ -709,6 +720,7 @@ mod tests {
         let mut confined = node_confined(&run, publish).unwrap();
         confined.proxy = Some(&harness.proxy);
         confined.policy = Some(policy);
+        adjust(&mut confined);
         let spec = node_spec(&run);
         let report = door.run_confined(spec, confined);
         drop(door);
@@ -1077,6 +1089,159 @@ mod tests {
             seen.sni.as_deref() == Some(registry::REGISTRY_HOST)
                 && seen.headers.get("proxy-authorization").is_none()
         }));
+    }
+
+    /// The child npm pacote starts for a git dependency (`npm install
+    /// --force` with its own flags, `GitFetcher`'s `npmInstallCmd` and
+    /// `npmCliConfig`) keeps audit, fund and the update notifier off under
+    /// the door: the environment the door gives npm, after npm's own
+    /// `set-envs` rewriting, configures that child so. The probe runs
+    /// inside the confined run, on the real store Node with the real npm's
+    /// `@npmcli/config`, `set-envs.js` and `pacote/lib/git.js` (the
+    /// `--require` injection the old `tests/npm_quiet_e2e.rs` used cannot:
+    /// `NODE_OPTIONS` is cleared and `--node-options=` forced), then hands
+    /// the same argv to the real npm, whose resolution goes to the
+    /// recorded registry alone.
+    #[test]
+    #[ignore = "realizes the store Node over the network"]
+    fn the_child_npm_for_a_git_dependency_keeps_audit_fund_and_notifier_off() {
+        let _serial = policy::attribution_test_lock();
+        let label = "the_child_npm_for_a_git_dependency_keeps_audit_fund_and_notifier_off";
+        let Some(harness) = node_harness(label, "npm") else {
+            return;
+        };
+        let node_obj = store_node(harness);
+        let platform = Platform::host().unwrap();
+        // A stand-in Node object whose `npm` is the probe on the real
+        // Node, beside the real object in the sandbox.
+        let staged = harness.store.stage().unwrap();
+        fs::create_dir_all(staged.join("bin")).unwrap();
+        fs::create_dir_all(staged.join("lib/node_modules/npm")).unwrap();
+        fs::write(
+            staged.join("lib/node_modules/npm/package.json"),
+            r#"{"name":"npm","version":"0.0.0-probe"}"#,
+        )
+        .unwrap();
+        let npm_path = node_obj.join("lib/node_modules/npm");
+        fs::write(
+            staged.join("probe.cjs"),
+            format!(
+                r#"
+const npmPath = {npm_path:?};
+const realNode = {real_node:?};
+const Config = require(npmPath + '/node_modules/@npmcli/config');
+const defs = require(npmPath + '/node_modules/@npmcli/config/lib/definitions');
+const GitFetcher = require(npmPath + '/node_modules/pacote/lib/git.js');
+async function configFor(args, env) {{
+  const c = new Config({{...defs, npmPath, argv: ['node', 'npm', ...args],
+                        env, cwd: process.cwd()}});
+  await c.load();
+  return c;
+}}
+async function main() {{
+  // The parent loads as npm does, project .npmrc included, and its
+  // load() runs set-envs over process.env, which the child inherits.
+  await configFor(process.argv.slice(2), process.env);
+  const git = new GitFetcher(
+    'github:example/pkg#0123456789012345678901234567890123456789',
+    {{cache: process.cwd(), npmBin: npmPath + '/bin/npm-cli.js'}});
+  const child = await configFor(
+    [...git.npmInstallCmd, ...git.npmCliConfig], {{...process.env}});
+  const cli = child.data.get('cli').data;
+  const report = ['audit', 'fund', 'update-notifier']
+    .map(key => key + '=' + String(child.get(key)) + ',cli:' + String(cli[key]))
+    .join(' ');
+  process.stderr.write('tog-probe child ' + report + String.fromCharCode(10));
+  const run = require('child_process').spawnSync(
+    realNode, [npmPath + '/bin/npm-cli.js', ...process.argv.slice(2)],
+    {{stdio: 'inherit', env: process.env}});
+  process.exit(run.status === null ? 1 : run.status);
+}}
+main().catch(error => {{ console.error(error); process.exit(1); }});
+"#,
+                real_node = node_obj.join("bin/node"),
+            ),
+        )
+        .unwrap();
+        let npm = staged.join("bin/npm");
+        fs::write(
+            &npm,
+            format!(
+                "#!/bin/sh\nexec {} \"$(dirname \"$0\")/../probe.cjs\" \"$@\"\n",
+                node_obj.join("bin/node").display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&npm, fs::Permissions::from_mode(0o755)).unwrap();
+        crate::tailors::install_kinds();
+        let identity = crate::kernel::types::Identity {
+            kind: "nodejs".into(),
+            name: "nodejs".into(),
+            version: "0.0.0-probe".into(),
+            inputs: std::collections::BTreeMap::from([
+                (
+                    "artifact_sha256".to_string(),
+                    record::sha256_hex(b"the child npm probe"),
+                ),
+                ("platform".to_string(), platform.triple().to_string()),
+            ]),
+        };
+        let (stand_in, _) = harness
+            .store
+            .commit_with_deps(
+                &identity,
+                &staged,
+                &[],
+                &crate::kernel::store::ObjectDeps::new(),
+            )
+            .unwrap();
+        assert!(stand_in.join("probe.cjs").is_file());
+        let temp = TempDir::named("npm-child-probe");
+        let project_dir = project(&temp.0.join("project"), "\"is-odd\": \"3.0.1\"");
+        fs::write(
+            project_dir.join(".npmrc"),
+            "audit=true\nfund=true\nupdate-notifier=true\n",
+        )
+        .unwrap();
+        let real = node_obj.clone();
+        let (report, recorded) = through_door_with(
+            harness,
+            DoorKind::MissingLock,
+            Policy::default(),
+            lock_only_run(&stand_in, &project_dir),
+            move |confined| confined.store_reads.push(real),
+        );
+        done();
+        let report = report.unwrap();
+        let text = stderr(&report);
+        assert!(report.status.success(), "{text}");
+        assert!(recorded.is_empty(), "{recorded:?}");
+        let probe = text
+            .lines()
+            .find(|line| line.starts_with("tog-probe child "))
+            .unwrap_or_else(|| panic!("no probe line in {text}"));
+        for key in ["audit", "fund", "update-notifier"] {
+            assert!(
+                probe.contains(&format!(" {key}=false,")),
+                "the child npm has {key} on: {probe}"
+            );
+        }
+        assert!(probe.contains("audit=false,cli:false"), "{probe}");
+        let lock = fs::read_to_string(project_dir.join("package-lock.json")).unwrap();
+        assert!(
+            lock.contains("https://registry.npmjs.org/is-odd/-/is-odd-3.0.1.tgz"),
+            "{lock}"
+        );
+        let entries = ledger_entries(harness, &report);
+        assert!(
+            !entries.is_empty()
+                && entries
+                    .iter()
+                    .all(|entry| entry.url.starts_with("https://registry.npmjs.org/")
+                        && !entry.url.contains("/-/npm/")
+                        && entry.url != "https://registry.npmjs.org/npm"),
+            "{entries:?}"
+        );
     }
 
     /// Contract 8: the lock npm writes through interception is
