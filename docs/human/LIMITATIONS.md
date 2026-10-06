@@ -166,9 +166,14 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   bundles and runs during its build, relying on its RUNPATH for a library with the same
   soname as a relocated host library, loads the host copy instead. A library subdirectory
   with headers, static or libtool archives, `pkgconfig` or `cmake` under it
-  (`/usr/lib64/perl5/CORE`, a Python package's CFFI headers, `/usr/lib64/libnl`) is curated
-  the same way, so an explicit `-I` or `-L` into it finds no development file (#331); the
-  compiler's own `gcc` and `clang` directories are kept whole. Kept files are symlinks into
+  (`/usr/lib64/perl5/CORE`, a Python package's CFFI headers, `/usr/lib64/libnl`), or that
+  tog cannot list, is curated the same way, so an explicit `-I` or `-L` into it finds no
+  header, archive, object, `lib*.so` symlink or linker script (#331); the compiler's own
+  `gcc` and `clang` directories are kept whole. Two gaps: a regular ELF `lib*.so` in a
+  curated subdirectory stays where it is (plugins and extension modules there are loaded by
+  that path), so `-L` into it can link it; and a subdirectory whose only development file
+  is a `lib*.so` symlink or linker script is bound whole, as plugin directories such as
+  `bfd-plugins`, `sasl2` and `xtables` are full of `lib*.so` symlinks programs load. Kept files are symlinks into
   one read-only bind of each whole curated host directory under `/.tog-host-files` (#334),
   so every file the view hides is still readable there by that path: no default search
   path, pkg-config directory or symlink in the view names it, but a build that names

@@ -8,7 +8,7 @@
 //! subdirectory is bound from the host onto its placeholder there, and
 //! every kept file is a symlink into `HOST_FILES`, where the whole host
 //! directory is bound once (#334): a file costs no mount, so the view's
-//! setup stays a few dozen mounts however many libraries the host has.
+//! setup stays a few hundred mounts however many libraries the host has.
 //! A dropped entry is absent from every path the build searches: no header
 //! search, `-l` lookup, pkg-config query or listing of a curated directory
 //! inside the sandbox can find it. A regular ELF shared library the linker
@@ -16,11 +16,12 @@
 //! instead.
 //!
 //! A library subdirectory is bound whole when nothing under it is a
-//! development file (`Curation::Subtree`); one that holds headers, static
-//! or libtool archives, `pkgconfig` or `cmake` (`/usr/lib64/perl5/CORE`,
-//! `/usr/lib64/python3.14/site-packages/cffi`, `/usr/lib64/libnl`) is
-//! curated in turn, so an explicit `-I` or `-L` into it finds no more than
-//! the default paths do (#331). The compiler's own directories (`gcc`,
+//! development file. One that holds headers, static or libtool archives,
+//! `pkgconfig` or `cmake` (`/usr/lib64/perl5/CORE`,
+//! `/usr/lib64/python3.14/site-packages/cffi`, `/usr/lib64/libnl`), or that
+//! tog cannot list, is curated in turn with the library rule
+//! (`Curation::Subtree`), so an explicit `-I` or `-L` into it finds no more
+//! than the default paths do (#331). The compiler's own directories (`gcc`,
 //! `clang`) are bound whole.
 
 use crate::kernel::sandbox::{host_layout_error, push_arg};
@@ -108,14 +109,13 @@ enum Curation {
     /// Keep only the names in `C_RUNTIME_HEADERS`.
     Headers,
     /// Keep runtime libraries and everything else, drop what only a link
-    /// step reads (`library_entry_kept`).
+    /// step reads (`library_entry_placement`).
     Libraries,
     /// Keep nothing.
     Empty,
-    /// A library subdirectory with development files under it: drop
-    /// headers, static and libtool archives, `pkgconfig` and `cmake`, keep
-    /// every other entry where it is (a plugin `.so` such as
-    /// `bfd-plugins/liblto_plugin.so` is loaded by that name).
+    /// A library subdirectory with development files under it: drop what
+    /// `Libraries` drops, keep plugins and extension modules where they are
+    /// (`library_entry_placement`). One tog cannot list is empty.
     Subtree,
 }
 
@@ -372,15 +372,39 @@ enum Placement {
     Curate,
 }
 
-/// Where a library directory entry goes in the `RuntimeOnly` view.
-/// Dropped: `pkgconfig` and `cmake` directories, static (`.a`), libtool
-/// (`.la`) and object (`.o`) files, and every `.so` symlink or linker
-/// script a link step would find by `-l` (what a `-dev` package adds).
-/// Regular ELF `*.so` files move out of the linker's reach
-/// (`Placement::Runtime`). The C runtime's own entries of each kind stay
-/// where they are, and every other entry, subdirectories included (`gcc`,
-/// `gconv`, `perl5`), is kept whole.
-fn library_entry_placement(name: &str, file_type: fs::FileType, host_entry: &Path) -> Placement {
+/// Where an entry of a library directory (`Curation::Libraries`) or of a
+/// library subdirectory curated in turn (`Curation::Subtree`) goes in the
+/// `RuntimeOnly` view. One rule for both, so a `-L` into a curated
+/// subdirectory finds no more than the default paths do.
+///
+/// Dropped: `pkgconfig` and `cmake` directories, headers, static (`.a`),
+/// libtool (`.la`) and object (`.o`) files, and every `lib*.so` symlink or
+/// linker script a link step would find by `-l` (what a `-dev` package
+/// adds). A subdirectory is bound whole unless something under it is a
+/// development file (`holds_dev_files`), and curated in turn otherwise;
+/// the compiler's own directories (`gcc`, `clang`) are always whole.
+///
+/// The two curations differ where a library directory and a subdirectory
+/// hold different things:
+/// - The C runtime's own entries stay where they are in a library
+///   directory. A subdirectory holds none of them, so the same names
+///   there (a `libc.a` of some other libc) are another package's
+///   development files and drop.
+/// - A regular ELF `*.so` in a library directory moves out of the
+///   linker's reach (`Placement::Runtime`). In a subdirectory it stays:
+///   Python and Perl extension modules and other plugins there are loaded
+///   by that path. A regular ELF `lib*.so` in a curated subdirectory thus
+///   stays linkable with an explicit `-L`.
+/// - A `.so` not named `lib*` stays in a subdirectory, whatever it is:
+///   `-l` cannot find it, and a plugin may be a symlink.
+fn library_entry_placement(
+    name: &str,
+    file_type: fs::FileType,
+    host_entry: &Path,
+    curation: Curation,
+) -> Placement {
+    let subtree = curation == Curation::Subtree;
+    let c_runtime = |list: &[&str], stem: &str| !subtree && list.contains(&stem);
     let keep_if = |kept: bool| {
         if kept {
             Placement::Keep
@@ -391,62 +415,78 @@ fn library_entry_placement(name: &str, file_type: fs::FileType, host_entry: &Pat
     if name == "pkgconfig" || name == "cmake" || name == RUNTIME_SUBDIR {
         return Placement::Drop;
     }
+    if file_type.is_dir() {
+        return if COMPILER_DIRS.contains(&name) || !holds_dev_files(host_entry) {
+            Placement::Keep
+        } else {
+            Placement::Curate
+        };
+    }
+    if is_header(name) {
+        return Placement::Drop;
+    }
     if let Some(stem) = name.strip_suffix(".so") {
-        if C_RUNTIME_SHARED.contains(&stem) || file_type.is_dir() {
+        if c_runtime(C_RUNTIME_SHARED, stem) || (subtree && !name.starts_with("lib")) {
             return Placement::Keep;
         }
         if file_type.is_file() && starts_with_elf_magic(host_entry) {
-            return Placement::Runtime;
+            return if subtree {
+                Placement::Keep
+            } else {
+                Placement::Runtime
+            };
         }
         return Placement::Drop;
     }
     if let Some(stem) = name.strip_suffix(".a") {
-        return keep_if(C_RUNTIME_ARCHIVES.contains(&stem) || stem.starts_with("libm-"));
+        return keep_if(
+            c_runtime(C_RUNTIME_ARCHIVES, stem) || (!subtree && stem.starts_with("libm-")),
+        );
     }
     if name.ends_with(".la") {
         return Placement::Drop;
     }
     if let Some(stem) = name.strip_suffix(".o") {
-        return keep_if(C_RUNTIME_OBJECTS.contains(&stem));
+        return keep_if(c_runtime(C_RUNTIME_OBJECTS, stem));
     }
     Placement::Keep
 }
 
-/// Whether a library subdirectory entry is a development file
-/// (`Curation::Subtree`).
-fn subtree_drops(name: &str, file_type: fs::FileType) -> bool {
+/// Whether `name` is a header file.
+fn is_header(name: &str) -> bool {
+    HEADER_SUFFIXES.iter().any(|suffix| name.ends_with(suffix))
+}
+
+/// Whether a library subdirectory entry marks the subdirectory as holding
+/// a `-devel` package's files: a header, a static or libtool archive, a
+/// `pkgconfig` or `cmake` directory. Narrower than what curation then
+/// drops: a `lib*.so` symlink alone marks nothing, as plugin directories
+/// are full of them (`bfd-plugins/liblto_plugin.so`, which `ld` loads by
+/// that name, `sasl2`, `xtables`, `libibverbs`), and dropping them would
+/// break the programs that load them. A subdirectory whose only
+/// development file is such a symlink or linker script is bound whole.
+fn marks_dev_dir(name: &str, file_type: fs::FileType) -> bool {
     if file_type.is_dir() {
         return name == "pkgconfig" || name == "cmake";
     }
-    HEADER_SUFFIXES.iter().any(|suffix| name.ends_with(suffix))
-        || name.ends_with(".a")
-        || name.ends_with(".la")
+    is_header(name) || name.ends_with(".a") || name.ends_with(".la")
 }
 
-/// Where a kept library subdirectory goes: bound whole when nothing under
-/// it is a development file, curated otherwise. A compiler's own directory
-/// is always whole.
-fn subtree_placement(name: &str, host: &Path) -> Placement {
-    if COMPILER_DIRS.contains(&name) || !holds_dev_files(host) {
-        Placement::Keep
-    } else {
-        Placement::Curate
-    }
-}
-
-/// Whether anything under the host directory `host` is a development file,
-/// stopping at the first. Symlinks are not followed. A directory tog cannot
-/// list is one the build cannot list either, so it counts as holding none.
+/// Whether anything under the host directory `host` marks it as holding
+/// development files (`marks_dev_dir`), stopping at the first. Symlinks
+/// are not followed. A directory tog cannot list may hold any of them, by
+/// a name the build can still open, so it counts as holding some: curated,
+/// it is an empty directory in the view (`classify_dir`).
 fn holds_dev_files(host: &Path) -> bool {
     let Ok(entries) = fs::read_dir(host) else {
-        return false;
+        return true;
     };
     entries.flatten().any(|entry| {
         let Ok(file_type) = entry.file_type() else {
             return false;
         };
         let name = entry.file_name();
-        subtree_drops(&name.to_string_lossy(), file_type)
+        marks_dev_dir(&name.to_string_lossy(), file_type)
             || (file_type.is_dir() && holds_dev_files(&entry.path()))
     })
 }
@@ -666,9 +706,11 @@ fn process_exists(pid: u32) -> bool {
 /// The mounts that turn the full system root `system_root_args` binds into
 /// `HostView::RuntimeOnly`, applied after it. Each directory in
 /// `CURATED_DIRS` the host has is replaced by its skeleton directory under
-/// `skeleton` (read-only), and every kept file and subdirectory is
-/// read-only bound from the host onto its placeholder there. Kept symlinks
-/// are recreated in the skeleton with the host's own targets. Nothing is
+/// `skeleton` (read-only), and the whole host directory is bound read-only
+/// under `HOST_FILES`. Every kept file is a symlink into that bind, every
+/// subdirectory kept whole is bound read-only from the host onto its
+/// placeholder, and kept symlinks are recreated in the skeleton with the
+/// host's own targets. Nothing is
 /// cached: the host directories are read again on every run. Also returns
 /// the `RUNTIME_SUBDIR` directories the view has, in mount order.
 ///
@@ -725,8 +767,9 @@ fn curated_roots(host_root: &Path) -> io::Result<Vec<(&'static Path, PathBuf, Cu
     Ok(roots)
 }
 
-/// Mirror the kept entries of one host directory into `mirror` and bind
-/// the kept files and directories. Entries are visited in name order so
+/// Mirror the kept entries of one host directory into `mirror`: files as
+/// symlinks under `HOST_FILES`, symlinks as themselves, subdirectories kept
+/// whole as binds, curated ones in turn. Entries are visited in name order so
 /// the command line is the same on every run of an unchanged host.
 fn curate_dir(
     host: &Path,
@@ -813,8 +856,18 @@ type Classified = (OsString, fs::FileType, bool, Placement);
 /// (`inside` in the sandbox), in name order. The one place the curation
 /// rules are applied, so the view and `host_build_inputs` cannot disagree.
 fn classify_dir(host: &Path, inside: &Path, curation: Curation) -> io::Result<Vec<Classified>> {
+    let listing = match fs::read_dir(host) {
+        // A subdirectory tog cannot list is curated because it may hold
+        // development files (`holds_dev_files`): it keeps nothing.
+        Err(error)
+            if curation == Curation::Subtree && error.kind() == io::ErrorKind::PermissionDenied =>
+        {
+            return Ok(Vec::new());
+        }
+        listing => listing.map_err(|error| host_layout_error(host, error))?,
+    };
     let mut names = Vec::new();
-    for entry in fs::read_dir(host).map_err(|error| host_layout_error(host, error))? {
+    for entry in listing {
         names.push(
             entry
                 .map_err(|error| host_layout_error(host, error))?
@@ -839,13 +892,9 @@ fn classify_dir(host: &Path, inside: &Path, curation: Curation) -> io::Result<Ve
                 Placement::Keep
             }
             Curation::Headers | Curation::Empty => Placement::Drop,
-            Curation::Libraries => match library_entry_placement(&text, file_type, &host_entry) {
-                Placement::Keep if file_type.is_dir() => subtree_placement(&text, &host_entry),
-                placement => placement,
-            },
-            Curation::Subtree if subtree_drops(&text, file_type) => Placement::Drop,
-            Curation::Subtree if file_type.is_dir() => subtree_placement(&text, &host_entry),
-            Curation::Subtree => Placement::Keep,
+            Curation::Libraries | Curation::Subtree => {
+                library_entry_placement(&text, file_type, &host_entry, curation)
+            }
         };
         entries.push((name, file_type, nested, placement));
     }
@@ -924,9 +973,16 @@ impl Fingerprint<'_> {
                 Placement::Keep if nested && file_type.is_dir() => {
                     self.dropped(&host_entry, &inside_entry, curation)?;
                 }
-                Placement::Curate => {
-                    self.dropped(&host_entry, &inside_entry, Curation::Subtree)?;
-                }
+                Placement::Curate => match fs::read_dir(&host_entry) {
+                    // Empty in the view, whatever the full host has in it:
+                    // recorded as unlistable, never as an empty directory.
+                    Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
+                        self.entry(&host_entry, &inside_entry)?;
+                        self.field(b"unlistable");
+                    }
+                    _ => self.dropped(&host_entry, &inside_entry, Curation::Subtree)?,
+                },
+                // What the view keeps, both views see.
                 Placement::Keep => {}
                 Placement::Runtime => {
                     self.entry(&host_entry, &inside_entry)?;
@@ -1440,6 +1496,198 @@ mod tests {
             after_target,
             "a replaced target did not count"
         );
+    }
+
+    /// A fake host whose library subdirectories carry the development
+    /// files of a `-devel` package beside its runtime: Fedora's
+    /// openmpi-devel (`pkgconfig/` beside a `libmpi.so` symlink, a linker
+    /// script, an object, another libc's archive, a plugin), Debian's
+    /// libperl-dev under the multiarch `/usr/lib/x86_64-linux-gnu`, and a
+    /// plugin directory of `lib*.so` symlinks with no development file.
+    fn subtree_fake_host(test_name: &str) -> TempDir {
+        let root = temp_dir(test_name);
+        for directory in [
+            "usr/lib64/openmpi/lib/pkgconfig",
+            "usr/lib64/openmpi/lib/openmpi",
+            "usr/lib64/bfd-plugins",
+            "usr/lib/x86_64-linux-gnu/perl/5.34/CORE",
+        ] {
+            fs::create_dir_all(root.0.join(directory)).unwrap();
+        }
+        let write = |path: &str, bytes: &[u8]| fs::write(root.0.join(path), bytes).unwrap();
+        let link = |target: &str, name: &str| {
+            std::os::unix::fs::symlink(target, root.0.join(name)).unwrap();
+        };
+        write("usr/lib64/openmpi/lib/pkgconfig/ompi.pc", b"Name: ompi\n");
+        write("usr/lib64/openmpi/lib/libmpi.so.40", b"\x7fELF\x02\x01\x01");
+        link("libmpi.so.40", "usr/lib64/openmpi/lib/libmpi.so");
+        write(
+            "usr/lib64/openmpi/lib/libmpi_script.so",
+            b"/* GNU ld script */\nINPUT ( libmpi.so.40 )\n",
+        );
+        write(
+            "usr/lib64/openmpi/lib/libopen-pal.so",
+            b"\x7fELF\x02\x01\x01",
+        );
+        write("usr/lib64/openmpi/lib/libc.a", b"!<arch>\n");
+        write("usr/lib64/openmpi/lib/crt1.o", b"\x7fELF\x02\x01\x01");
+        write(
+            "usr/lib64/openmpi/lib/openmpi/mca_btl_self.so",
+            b"\x7fELF\x02\x01\x01",
+        );
+        write(
+            "usr/lib64/bfd-plugins/liblto_plugin.so.0",
+            b"\x7fELF\x02\x01\x01",
+        );
+        link(
+            "liblto_plugin.so.0",
+            "usr/lib64/bfd-plugins/liblto_plugin.so",
+        );
+        write(
+            "usr/lib/x86_64-linux-gnu/perl/5.34/CORE/perl.h",
+            b"/* libperl-dev */\n",
+        );
+        link(
+            "../../../libperl.so.5.34",
+            "usr/lib/x86_64-linux-gnu/perl/5.34/CORE/libperl.so",
+        );
+        write(
+            "usr/lib/x86_64-linux-gnu/perl/5.34/CORE/config.sh",
+            b"# perl\n",
+        );
+        write(
+            "usr/lib/x86_64-linux-gnu/libperl.so.5.34",
+            b"\x7fELF\x02\x01\x01",
+        );
+        root
+    }
+
+    /// A curated subdirectory drops what a library directory drops: an
+    /// explicit `-L` into it links nothing the default paths would not
+    /// (#331). Plugins stay where they are loaded from, and a plugin
+    /// directory with no development file is bound whole.
+    #[test]
+    fn curated_subtrees_drop_what_library_directories_drop() {
+        let host = subtree_fake_host("subtree");
+        let skeleton = temp_dir("subtree-skeleton");
+        let (args, library_path) = runtime_only_args(&host.0, &skeleton.0).unwrap();
+        let binds = ro_binds(&args);
+        let mirrored = |inside: &str| {
+            fs::symlink_metadata(skeleton.0.join(inside.trim_start_matches('/'))).is_ok()
+        };
+        let linked = |inside: &str| {
+            fs::read_link(skeleton.0.join(inside.trim_start_matches('/'))).ok()
+                == Some(Path::new(HOST_FILES).join(inside.trim_start_matches('/')))
+        };
+        for dropped in [
+            "/usr/lib64/openmpi/lib/pkgconfig",
+            "/usr/lib64/openmpi/lib/libmpi.so",
+            "/usr/lib64/openmpi/lib/libmpi_script.so",
+            "/usr/lib64/openmpi/lib/libc.a",
+            "/usr/lib64/openmpi/lib/crt1.o",
+            "/usr/lib/x86_64-linux-gnu/perl/5.34/CORE/perl.h",
+            "/usr/lib/x86_64-linux-gnu/perl/5.34/CORE/libperl.so",
+        ] {
+            assert!(!mirrored(dropped), "{dropped} mirrored");
+            assert!(
+                !binds.iter().any(|(_, to)| to == Path::new(dropped)),
+                "{dropped} bound: {args:?}"
+            );
+        }
+        for kept in [
+            "/usr/lib64/openmpi/lib/libmpi.so.40",
+            "/usr/lib64/openmpi/lib/libopen-pal.so",
+            "/usr/lib/x86_64-linux-gnu/perl/5.34/CORE/config.sh",
+            "/usr/lib/x86_64-linux-gnu/libperl.so.5.34",
+        ] {
+            assert!(linked(kept), "{kept} not linked to the host");
+        }
+        // A plugin directory below a curated one is bound whole, and so is
+        // one of `lib*.so` symlinks: `ld` loads `liblto_plugin.so`.
+        for whole in ["/usr/lib64/openmpi/lib/openmpi", "/usr/lib64/bfd-plugins"] {
+            assert!(
+                binds.contains(&(
+                    host.0.join(whole.trim_start_matches('/')),
+                    PathBuf::from(whole)
+                )),
+                "{whole} not bound whole: {args:?}"
+            );
+        }
+        // Nothing in a subdirectory moves out of its loader's reach.
+        assert!(library_path.is_empty(), "{library_path:?}");
+    }
+
+    /// A development file appearing in a curated subdirectory, a dev
+    /// symlink included, changes the fingerprint; one appearing in a
+    /// subdirectory bound whole changes it by curating that subdirectory.
+    #[test]
+    fn host_build_inputs_track_curated_subtrees() {
+        let host = subtree_fake_host("subtree-fingerprint");
+        let fingerprint = || host_build_inputs_at(&host.0).unwrap();
+        let first = fingerprint();
+        let link = |target: &str, name: &str| {
+            std::os::unix::fs::symlink(target, host.0.join(name)).unwrap();
+        };
+        link("libmpi_cxx.so.40", "usr/lib64/openmpi/lib/libmpi_cxx.so");
+        let after_link = fingerprint();
+        assert_ne!(after_link, first, "a dev symlink did not count");
+        fs::write(
+            host.0
+                .join("usr/lib/x86_64-linux-gnu/perl/5.34/CORE/EXTERN.h"),
+            b"",
+        )
+        .unwrap();
+        let after_multiarch = fingerprint();
+        assert_ne!(
+            after_multiarch, after_link,
+            "a multiarch subtree header did not count"
+        );
+        fs::write(host.0.join("usr/lib64/bfd-plugins/plugin-api.h"), b"").unwrap();
+        assert_ne!(
+            fingerprint(),
+            after_multiarch,
+            "a header in a whole subdirectory did not count"
+        );
+    }
+
+    /// A library subdirectory tog cannot list may hold development files
+    /// by names the build can open, so it is curated: an empty directory
+    /// in the view, recorded in the fingerprint as unlistable.
+    #[test]
+    fn an_unlistable_library_subdirectory_is_empty() {
+        use std::os::unix::fs::PermissionsExt as _;
+        // SAFETY: geteuid has no preconditions.
+        if unsafe { libc::geteuid() } == 0 {
+            eprintln!("skip unlistable directory: running as root");
+            return;
+        }
+        let host = subtree_fake_host("subtree-unlistable");
+        let vendor = host.0.join("usr/lib64/vendor");
+        fs::create_dir(&vendor).unwrap();
+        fs::write(vendor.join("vendor.h"), b"").unwrap();
+        fs::write(vendor.join("libvendor.so.1"), b"\x7fELF\x02\x01\x01").unwrap();
+        let listable = host_build_inputs_at(&host.0).unwrap();
+        // Unlistable to its owner, who runs the test: a 0711 directory of
+        // root's is unlistable to everyone else the same way.
+        fs::set_permissions(&vendor, fs::Permissions::from_mode(0o311)).unwrap();
+        let skeleton = temp_dir("subtree-unlistable-skeleton");
+        let view = runtime_only_args(&host.0, &skeleton.0);
+        let unlistable = host_build_inputs_at(&host.0);
+        let again = host_build_inputs_at(&host.0);
+        fs::set_permissions(&vendor, fs::Permissions::from_mode(0o755)).unwrap();
+        let (args, _) = view.unwrap();
+        assert!(
+            !ro_binds(&args)
+                .iter()
+                .any(|(_, to)| to.starts_with("/usr/lib64/vendor")),
+            "{args:?}"
+        );
+        let mirror = skeleton.0.join("usr/lib64/vendor");
+        assert!(mirror.is_dir(), "no empty placeholder");
+        assert_eq!(fs::read_dir(&mirror).unwrap().count(), 0);
+        let unlistable = unlistable.unwrap();
+        assert_eq!(again.unwrap(), unlistable, "not deterministic");
+        assert_ne!(unlistable, listable, "unlistable passed for listable");
     }
 
     /// A dangling symlink is recorded as such; a symlink loop and a
