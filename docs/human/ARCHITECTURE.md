@@ -158,7 +158,7 @@ Rules the Linux port settled, which apply to any future platform:
   mounts rather than one per library file. Ruby gems with native
   extensions, Python sdists that compile Rust or native code, and npm
   install scripts build under `RuntimeOnly` first, so an object committed
-  under the `runtime-only/1` view does not depend on which `-dev` packages
+  under the `runtime-only/2` view does not depend on which `-dev` packages
   the building host has installed. The retry against the whole host, its
   `host-build-inputs` record and the `host-fallback/1` identity are shared
   (`kernel/hostfallback.rs`).

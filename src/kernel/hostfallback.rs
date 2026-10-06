@@ -20,7 +20,7 @@ use std::io;
 
 /// The `build_view` input of an identity whose native builds ran against
 /// the C runtime alone.
-pub(crate) const RUNTIME_ONLY_VIEW: &str = "runtime-only/1";
+pub(crate) const RUNTIME_ONLY_VIEW: &str = "runtime-only/2";
 /// The `build_view` input of an identity where at least one build fell
 /// back to the whole host.
 pub(crate) const HOST_FALLBACK_VIEW: &str = "host-fallback/1";

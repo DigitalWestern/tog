@@ -219,7 +219,8 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   Python or Node environment holding it, are committed under `host-fallback/1` identities
   that name what fell back (the sdist; `pkg:` entries for the environment). Every Linux
   Python environment with such an sdist and every Linux Node environment carries
-  `build_view = "runtime-only/1"`, so the first sync after this change rebuilds them once.
+  `build_view = "runtime-only/2"`, as does every Linux gems object (`/2` since the view
+  curated library subdirectories, #331), so each rebuilds once after either change.
   One gap: when a build-requirement sdist falls back, its build environment is committed
   under a host-fallback id, but the wheel built in that environment still names the
   environment's planned runtime-only id in its own identity (`build_env`), which is planned

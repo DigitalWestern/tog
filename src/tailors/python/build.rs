@@ -1678,8 +1678,8 @@ mod tests {
                 .insert("build_env".into(), "store-independent".into());
             assert_eq!(
                 fixed.object_id(),
-                // build_view runtime-only/1 since #328.
-                "dcb351ec9898fce1ea8e92ab68a5f8a0be66ff2b-locked-rust-1.0"
+                // build_view runtime-only/2 since #331.
+                "321a28af3fe8b27ac858314a1367413fe91c5c2a-locked-rust-1.0"
             );
         }
         let today = pinned(shipped_rust.version("rustc").unwrap());
@@ -1991,8 +1991,8 @@ mod tests {
             (
                 Platform::X86_64UnknownLinuxGnu,
                 Some("native-libs-object"),
-                // build_view runtime-only/1 since #328.
-                "0a06b68e31f76283e358b02e425cced4da34f6c3-example-1.0",
+                // build_view runtime-only/2 since #331.
+                "c897995821cc1696a67d8723e06bc4ec75f133e7-example-1.0",
             ),
             (
                 Platform::Aarch64AppleDarwin,
