@@ -429,7 +429,7 @@ impl Tailor for Node {
     }
 
     fn runtime_programs(&self) -> &'static [&'static str] {
-        &["node"]
+        &["node", "npm", "npx"]
     }
 
     fn run_env(

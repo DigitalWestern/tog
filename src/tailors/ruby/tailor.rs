@@ -156,7 +156,7 @@ impl Tailor for Ruby {
     }
 
     fn runtime_programs(&self) -> &'static [&'static str] {
-        &["ruby"]
+        &["ruby", "gem", "bundle"]
     }
 
     fn run_env(
