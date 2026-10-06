@@ -367,7 +367,7 @@ fn preflight(
     lock_root: &Path,
 ) -> io::Result<Vec<OsString>> {
     let unconfined_denied = policy::denied(policy, policy::UNCONFINED_RESOLUTION);
-    let (offers, missing) = confine::probe_tiers(activity);
+    let (offers, missing) = confine::probe_tiers(activity)?;
     confine::choose_tier(
         &offers,
         &missing,

@@ -1049,17 +1049,24 @@ pub(crate) fn bwrap_preflight_with_activity(
     activity: Option<&StoreActivity>,
 ) -> io::Result<&'static Path> {
     static PREFLIGHT: OnceLock<Result<PathBuf, String>> = OnceLock::new();
-    let verdict = match PREFLIGHT.get() {
-        Some(verdict) => verdict,
-        None => {
-            let verdict = run_preflight(activity)?;
-            PREFLIGHT.get_or_init(|| verdict)
-        }
-    };
-    match verdict {
+    match cached_verdict(&PREFLIGHT, || run_preflight(activity))? {
         Ok(path) => Ok(path.as_path()),
         Err(message) => Err(io::Error::new(io::ErrorKind::Unsupported, message.clone())),
     }
+}
+
+/// The verdict in `cache`, or the one `probe` reaches, cached. An error
+/// from `probe` (an interrupt) is returned and nothing is cached, so the
+/// next call probes again.
+fn cached_verdict(
+    cache: &OnceLock<Result<PathBuf, String>>,
+    probe: impl FnOnce() -> io::Result<Result<PathBuf, String>>,
+) -> io::Result<&Result<PathBuf, String>> {
+    if let Some(verdict) = cache.get() {
+        return Ok(verdict);
+    }
+    let verdict = probe()?;
+    Ok(cache.get_or_init(|| verdict))
 }
 
 /// An error from a probe child: a verdict (the sandbox is unavailable,
@@ -1591,6 +1598,40 @@ mod tests {
             "rc=7",
             "curl inside the sandbox must fail with 'could not connect'"
         );
+    }
+
+    /// An interrupted first probe leaves the cache empty, so the next call
+    /// probes again, and that verdict is the one kept (#289).
+    #[test]
+    fn an_interrupted_probe_caches_nothing() {
+        use std::os::unix::process::ExitStatusExt;
+        let cache = OnceLock::new();
+        let probes = std::cell::Cell::new(0);
+        let interrupted = cached_verdict(&cache, || {
+            probes.set(probes.get() + 1);
+            Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                crate::kernel::supervise::Interrupted {
+                    signal: libc::SIGINT,
+                    status: std::process::ExitStatus::from_raw(libc::SIGINT),
+                },
+            ))
+        })
+        .unwrap_err();
+        assert!(crate::kernel::supervise::interrupted(&interrupted).is_some());
+        assert!(cache.get().is_none());
+        let verdict = cached_verdict(&cache, || {
+            probes.set(probes.get() + 1);
+            Ok(Err("bubblewrap is not installed".to_string()))
+        })
+        .unwrap();
+        assert_eq!(verdict, &Err("bubblewrap is not installed".to_string()));
+        assert_eq!(probes.get(), 2);
+        let cached = cached_verdict(&cache, || -> io::Result<Result<PathBuf, String>> {
+            unreachable!("a cached verdict is not probed again")
+        })
+        .unwrap();
+        assert_eq!(cached, &Err("bubblewrap is not installed".to_string()));
     }
 
     #[test]

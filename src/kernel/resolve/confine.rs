@@ -91,26 +91,34 @@ pub struct Missing {
 }
 
 /// Every engine this build of tog can try, probed: what is usable and
-/// what is not.
-pub fn probe_tiers(activity: &StoreActivity) -> (Vec<TierOffer>, Vec<Missing>) {
+/// what is not. An interrupt during a probe is returned as the error it is.
+pub fn probe_tiers(activity: &StoreActivity) -> io::Result<(Vec<TierOffer>, Vec<Missing>)> {
     #[cfg(test)]
     if let Some(tiers) = TIERS_FOR_TEST.with(|tiers| tiers.borrow().clone()) {
-        return tiers;
+        return Ok(tiers);
     }
+    tiers_from(sandbox::bwrap_preflight_with_activity(Some(activity)).map(|_| ()))
+}
+
+/// The offers and gaps the bubblewrap preflight's result makes. An
+/// interrupt is no verdict: it stops the command (exit 130), so it is
+/// passed through rather than reported as a missing bubblewrap (#289).
+fn tiers_from(preflight: io::Result<()>) -> io::Result<(Vec<TierOffer>, Vec<Missing>)> {
     let mut offers = Vec::new();
     let mut missing = Vec::new();
-    match sandbox::bwrap_preflight_with_activity(Some(activity)) {
-        Ok(_) => offers.push(TierOffer {
+    match preflight {
+        Ok(()) => offers.push(TierOffer {
             engine: Engine::Bubblewrap,
             fenced: true,
         }),
+        Err(error) if crate::kernel::supervise::stop_signal(&error).is_some() => return Err(error),
         Err(error) => missing.push(Missing {
             capability: "bubblewrap",
             reason: error.to_string(),
             fix: "install bubblewrap and allow it unprivileged user namespaces".to_string(),
         }),
     }
-    (offers, missing)
+    Ok((offers, missing))
 }
 
 #[cfg(test)]
@@ -901,7 +909,7 @@ pub fn confined_run(
     run: &ConfinedRun<'_>,
 ) -> io::Result<ConfinedOutcome> {
     store.require_activity(activity, "confined resolution")?;
-    let (offers, missing) = probe_tiers(activity);
+    let (offers, missing) = probe_tiers(activity)?;
     let tier = choose_tier(&offers, &missing, run.unconfined_denied, run.tool, run.why)?;
     let bwrap = sandbox::bwrap_preflight_with_activity(Some(activity))?;
     let mounts = Mounts::check(store, activity, run)?;
@@ -1415,6 +1423,36 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(refused.contains("unconfined-resolution"), "{refused}");
+    }
+
+    /// An interrupt during the bubblewrap probe stops the command: it is
+    /// returned as the interrupt (main exits 130), with no "install
+    /// bubblewrap" advice (#289). Any other failure is a missing engine.
+    #[test]
+    fn an_interrupted_probe_is_no_missing_engine() {
+        use std::os::unix::process::ExitStatusExt;
+        let interrupt = io::Error::new(
+            io::ErrorKind::Interrupted,
+            crate::kernel::supervise::Interrupted {
+                signal: libc::SIGINT,
+                status: std::process::ExitStatus::from_raw(libc::SIGINT),
+            },
+        );
+        let error = tiers_from(Err(interrupt)).unwrap_err();
+        assert_eq!(
+            crate::kernel::supervise::stop_signal(&error),
+            Some(libc::SIGINT)
+        );
+        assert!(!error.to_string().contains("install bubblewrap"), "{error}");
+
+        let unavailable = io::Error::new(io::ErrorKind::Unsupported, "no bwrap");
+        let (offers, missing) = tiers_from(Err(unavailable)).unwrap();
+        assert!(offers.is_empty());
+        assert_eq!(missing.len(), 1);
+        assert_eq!(missing[0].reason, "no bwrap");
+        let (offers, missing) = tiers_from(Ok(())).unwrap();
+        assert_eq!(offers, vec![offer(true)]);
+        assert!(missing.is_empty());
     }
 
     #[test]
