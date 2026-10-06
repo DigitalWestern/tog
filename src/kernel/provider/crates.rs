@@ -479,7 +479,7 @@ fn realize_vendor_inner(
             )
         })?;
 
-        let (files, size) = inspect_crate(&crate_dir, krate)?;
+        let (files, _) = inspect_crate(&crate_dir, krate)?;
         let checksum = CargoChecksum {
             files,
             package: &krate.sha256,
