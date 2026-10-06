@@ -996,6 +996,63 @@ fn nested_independent_npm_project_does_not_use_ancestor_pnpm_lock() {
 /// link, not from the registry, the member gets no lock of its own, and
 /// the record is the root's. A sync run in the member before the root is
 /// synced is sent to the root rather than resolving the member alone.
+/// A pnpm workspace whose root has `pnpm-workspace.yaml` but no
+/// `pnpm-lock.yaml` yet: an edit in a member writes the first lock at the
+/// root, with the member as an importer, and nothing in the member but
+/// its manifest; a sync in the member is sent to the root.
+#[test]
+#[ignore]
+fn pnpm_workspace_member_edit_writes_the_first_root_lock() {
+    let temp = scratch("pnpm-first-lock");
+    let project = &temp.0.join("project");
+    copy_tree(&fixture("proj-pnpm-ws"), project);
+    std::fs::remove_file(project.join("pnpm-lock.yaml")).unwrap();
+    let member = project.join("packages/lib");
+    let store = temp.0.join("store");
+    set_package_manager(project, "pnpm@9.12.3");
+
+    let refused = run(&member, &store, &["sync"], &temp.0);
+    assert!(!refused.status.success());
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        stderr.contains("run this command in") && stderr.contains("pnpm-lock.yaml"),
+        "{stderr}"
+    );
+    assert!(
+        !project.join("pnpm-lock.yaml").exists() && !member.join("pnpm-lock.yaml").exists(),
+        "a refused member sync wrote a lock"
+    );
+
+    assert_ok(
+        run(
+            &member,
+            &store,
+            &["add", "--dev", "--no-sync", "is-even@1.0.0"],
+            &temp.0,
+        ),
+        "pnpm first-lock member add",
+    );
+    let member_package: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(member.join("package.json")).unwrap())
+            .unwrap();
+    assert_eq!(member_package["devDependencies"]["is-even"], "1.0.0");
+    let lock = std::fs::read_to_string(project.join("pnpm-lock.yaml")).unwrap();
+    assert!(
+        lock.contains("\n  packages/lib:") && lock.contains("is-even@1.0.0"),
+        "the root lock does not list the member and its new dependency:\n{lock}"
+    );
+    assert!(
+        !member.join("pnpm-lock.yaml").exists()
+            && !member.join(".tog").exists()
+            && project.join(".tog/resolution/node.json").is_file(),
+        "the lock and the record belong to the root"
+    );
+    assert!(
+        !project.join("node_modules").exists() && !member.join("node_modules").exists(),
+        "a lockfile-only workspace edit created node_modules"
+    );
+}
+
 #[test]
 #[ignore]
 fn npm_workspace_member_edit_writes_the_root_lock() {

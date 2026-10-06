@@ -473,7 +473,18 @@ pub(crate) fn edit_manifest(
     if lock_name == "package-lock.json" {
         return npm_edit(edit, door, lock_root);
     }
-    let lock_text = fs::read_to_string(lock_root.join(lock_name))?;
+    // A pnpm workspace root that has no lock yet gets its first one from
+    // this edit; the text only serves the refusals' words.
+    let lock_text = match fs::read_to_string(lock_root.join(lock_name)) {
+        Ok(text) => text,
+        Err(error)
+            if error.kind() == io::ErrorKind::NotFound
+                && matches!(selected, NodeLock::PnpmWorkspaceMember { .. }) =>
+        {
+            String::new()
+        }
+        Err(error) => return Err(error),
+    };
     if lock_name == "yarn.lock" {
         return Err(yarn_refusal(&lock_root, edit.verb, &edit.texts(), edit.dev));
     }
