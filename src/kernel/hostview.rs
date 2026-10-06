@@ -22,7 +22,7 @@
 //! tog cannot list, is curated in turn with the library rule
 //! (`Curation::Subtree`), so an explicit `-I` or `-L` into it finds no more
 //! than the default paths do (#331). The compiler's own directories (`gcc`,
-//! `clang`) are bound whole.
+//! `clang`, a versioned `llvm-<N>`) are bound whole.
 
 use crate::kernel::ldcache::MovedLibrary;
 use crate::kernel::sandbox::{host_layout_error, push_arg};
@@ -63,7 +63,23 @@ const LD_CACHE: &str = "ld.so.cache";
 
 /// The subdirectories of a library directory that are the compiler's own,
 /// bound whole: their headers and archives are what every compile reads.
+/// LLVM's versioned trees count too (`is_compiler_dir`).
 const COMPILER_DIRS: &[&str] = &["gcc", "clang"];
+
+/// Whether a library subdirectory is the compiler's own: `gcc`, `clang`,
+/// or a versioned LLVM tree, Debian and Ubuntu's `llvm-<N>` (clang's
+/// resource directory is `/usr/lib/llvm-14/lib/clang/14.0.0` on Ubuntu
+/// 22.04, its headers the ones every clang compile reads) and Fedora's
+/// `llvm<N>` compat packages (#559).
+fn is_compiler_dir(name: &str) -> bool {
+    COMPILER_DIRS.contains(&name)
+        || name
+            .strip_prefix("llvm")
+            .map(|rest| rest.strip_prefix('-').unwrap_or(rest))
+            .is_some_and(|version| {
+                !version.is_empty() && version.bytes().all(|b| b.is_ascii_digit())
+            })
+}
 
 /// The suffixes of a header file in a library subdirectory
 /// (`Curation::Subtree`).
@@ -393,7 +409,7 @@ enum Placement {
 /// linker script a link step would find by `-l` (what a `-dev` package
 /// adds). A subdirectory is bound whole unless something under it is a
 /// development file (`holds_dev_files`), and curated in turn otherwise;
-/// the compiler's own directories (`gcc`, `clang`) are always whole.
+/// the compiler's own directories (`gcc`, `clang`, `llvm-<N>`) are always whole.
 ///
 /// The two curations differ where a library directory and a subdirectory
 /// hold different things:
@@ -427,7 +443,7 @@ fn library_entry_placement(
         return Placement::Drop;
     }
     if file_type.is_dir() {
-        return if COMPILER_DIRS.contains(&name) || !holds_dev_files(host_entry) {
+        return if is_compiler_dir(name) || !holds_dev_files(host_entry) {
             Placement::Keep
         } else {
             Placement::Curate
@@ -1142,6 +1158,7 @@ mod tests {
             "usr/lib64/pkgconfig",
             "usr/lib64/cmake",
             "usr/lib64/gcc",
+            "usr/lib64/llvm-14/lib/clang/14.0.0/include",
             "usr/lib64/python3/site-packages",
             "usr/lib64/perl5/CORE",
             "usr/lib64/perl5/pkgconfig",
@@ -1168,6 +1185,10 @@ mod tests {
         write("usr/lib64/foo.o", b"\x7fELF\x02\x01\x01");
         write("usr/share/pkgconfig/zlib.pc", b"Name: zlib\n");
         write("usr/lib64/gcc/stddef.h", b"/* gcc */\n");
+        write(
+            "usr/lib64/llvm-14/lib/clang/14.0.0/include/stddef.h",
+            b"/* clang */\n",
+        );
         write("usr/lib64/python3/site-packages/mod.py", b"pass\n");
         write("usr/lib64/perl5/CORE/perl.h", b"/* perl-devel */\n");
         write("usr/lib64/perl5/CORE/libperl.so", b"\x7fELF\x02\x01\x01");
@@ -1200,6 +1221,23 @@ mod tests {
     /// Every rule, against a merged-/usr host: allowed entries are bound
     /// or recreated, everything a link step alone would read is absent,
     /// and a symlinked `/lib64` is left to its curated target.
+    #[test]
+    fn llvm_trees_are_the_compilers_own() {
+        for name in ["gcc", "clang", "llvm-14", "llvm-18", "llvm19", "llvm-20"] {
+            assert!(is_compiler_dir(name), "{name}");
+        }
+        for name in [
+            "llvm",
+            "llvm-",
+            "llvm-x",
+            "llvmpipe",
+            "perl5",
+            "gcc-plugins",
+        ] {
+            assert!(!is_compiler_dir(name), "{name}");
+        }
+    }
+
     #[test]
     fn runtime_only_view_keeps_the_c_runtime_and_drops_host_dev_files() {
         let host = curated_fake_host("runtime-only-merged", false);
@@ -1272,7 +1310,7 @@ mod tests {
         }
         // A subdirectory with no development files in it, and the
         // compiler's own, headers and all, are bound whole.
-        for kept in ["/usr/lib64/gcc", "/usr/lib64/python3"] {
+        for kept in ["/usr/lib64/gcc", "/usr/lib64/llvm-14", "/usr/lib64/python3"] {
             assert!(from_host(kept), "{kept} not bound from the host: {args:?}");
         }
         // One with development files is curated in turn: its plugin stays,

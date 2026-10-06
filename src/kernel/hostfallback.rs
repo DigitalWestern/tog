@@ -275,10 +275,15 @@ where
             format!("{attempts}, and it was not retried against the whole host: {refusal}"),
         )
     })?;
+    // The retry's error first: it is the one left to fix, and a caller
+    // that cuts the message short (an exception detail) keeps it.
     (attempt.build)(HostView::Full).map_err(|full| {
         io::Error::new(
             full.kind(),
-            format!("{attempts}, and so did the build against this machine's whole /usr ({full})"),
+            format!(
+                "the build against this machine's whole /usr failed ({full}), after \
+                 the build against the C runtime alone failed ({hermetic})"
+            ),
         )
     })?;
     let after = (attempt.fingerprint)()?;

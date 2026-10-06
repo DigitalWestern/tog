@@ -189,7 +189,8 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   (`/usr/lib64/perl5/CORE`, a Python package's CFFI headers, `/usr/lib64/libnl`), or that
   tog cannot list, is curated the same way, so an explicit `-I` or `-L` into it finds no
   header, archive, object, `lib*.so` symlink or linker script (#331); the compiler's own
-  `gcc` and `clang` directories are kept whole. Two gaps: a regular ELF `lib*.so` in a
+  `gcc` and `clang` directories, and a versioned LLVM tree (`llvm-<N>`, where Ubuntu
+  keeps clang's own headers), are kept whole. Two gaps: a regular ELF `lib*.so` in a
   curated subdirectory stays where it is (plugins and extension modules there are loaded by
   that path), so `-L` into it can link it; and a subdirectory whose only development file
   is a `lib*.so` symlink or linker script is bound whole, as plugin directories such as
@@ -197,7 +198,11 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   one read-only bind of each whole curated host directory under `/.tog-host-files` (#334),
   so every file the view hides is still readable there by that path: no default search
   path, pkg-config directory or symlink in the view names it, but a build that names
-  `/.tog-host-files` on purpose reads the host's development files. Native
+  `/.tog-host-files` on purpose reads the host's development files. A build that
+  resolves a kept file's real path reaches that copy too: `readlink -f
+  /usr/lib64/libssl.so.3` names it under `/.tog-host-files`, and a `-L` into that
+  directory finds `libssl.so`. For the same reason `find -type f` in a curated directory
+  does not list the libraries it kept, which are symlinks there (#559). Native
   gems also build with tog's pinned native library set mounted (zlib, openssl, libffi,
   libxml2, sqlite, ncurses and the rest of `nativelibs.rs`), and load it at run time through
   their rpath (#329); every Linux gems object with a native gem names that set, so those

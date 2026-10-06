@@ -605,10 +605,12 @@ mod tests {
             vec![failed("first"), failed("second")],
         );
         let message = result.unwrap_err().to_string();
-        assert!(message.contains("C runtime alone failed"), "{message}");
-        assert!(message.contains("first"), "{message}");
-        assert!(message.contains("whole /usr"), "{message}");
-        assert!(message.contains("second"), "{message}");
+        assert_eq!(
+            message,
+            "the build against this machine's whole /usr failed (sandboxed command \
+             failed: second), after the build against the C runtime alone failed \
+             (sandboxed command failed: first)"
+        );
         assert_eq!(views, [HostView::RuntimeOnly, HostView::Full]);
     }
 
