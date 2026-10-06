@@ -8,7 +8,13 @@
 //! archive under the same name, fails here. Where an upstream publishes no
 //! checksum listing (Homebrew portable-ruby and erlef's OTP builds, whose
 //! only published digest is GitHub's asset metadata), the archive is
-//! downloaded and hashed.
+//! downloaded and hashed. So is every row tog builds itself
+//! (DigitalWestern/tog-toolchains): the `.sha256` beside such an asset is
+//! published by the same party as the row, so checking against it would be
+//! circular, while hashing the asset at least proves the hosted bytes are
+//! the ones the row pins. The conda-forge packages the native library set
+//! pins (`nativelibs::LINUX_NATIVE_PACKAGES`) are downloaded from
+//! conda-forge and hashed too.
 
 use std::collections::BTreeMap;
 use std::io::Read;
@@ -97,9 +103,7 @@ impl Upstream {
             let source = format!("{dir}/{listing}");
             return (listed(self.text(&source), &name, &source), source);
         }
-        if url.contains("/astral-sh/uv/releases/download/")
-            || url.contains("/DigitalWestern/tog-toolchains/releases/download/")
-        {
+        if url.contains("/astral-sh/uv/releases/download/") {
             let source = format!("{url}.sha256");
             return (side_file("sha256", self.text(&source)), source);
         }
@@ -153,6 +157,7 @@ impl Upstream {
         }
         if url.contains("/Homebrew/homebrew-portable-ruby/releases/download/")
             || url.contains("/erlef/otp_builds/releases/download/")
+            || url.contains("/DigitalWestern/tog-toolchains/releases/download/")
         {
             return (self.downloaded(row), url.to_string());
         }
@@ -256,4 +261,23 @@ fn dotnet_rows_match_upstream() {
 #[ignore = "network: fetches static.rust-lang.org's .sha256 files"]
 fn cargo_rows_match_upstream() {
     verify("cargo");
+}
+
+#[test]
+#[ignore = "network: downloads every pinned conda-forge package (about 100 MB)"]
+fn native_library_pins_match_conda_forge() {
+    use tog::kernel::provider::nativelibs::LINUX_NATIVE_PACKAGES;
+    for package in LINUX_NATIVE_PACKAGES {
+        let url = package.url();
+        let hashed = hex::encode(Sha256::digest(get(&url)));
+        assert_eq!(
+            hashed, package.sha256,
+            "{}: the pinned sha256 is not what {url} serves",
+            package.filename
+        );
+    }
+    eprintln!(
+        "native libs: {} pins match conda-forge",
+        LINUX_NATIVE_PACKAGES.len()
+    );
 }

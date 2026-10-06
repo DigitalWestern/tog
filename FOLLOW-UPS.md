@@ -70,7 +70,6 @@ None open.
   area, looked for tests that stay green when the code they name is
   broken. The fake passes were fixed in #351; what remains is grouped by
   theme, one issue and one PR (or one per file block) each:
-  - #348 tests: security and integrity checks with no offline test.
   - #349 product and CI problems found by the audit.
   - #367 tests: the artifact size caps in kernel::fetch (8 GiB artifact, 256 MiB text) have no test (from the #363 review).
   - #373 sandbox: host-socket scan leftovers (from the #372 review).
