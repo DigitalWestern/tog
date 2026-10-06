@@ -760,16 +760,24 @@ pub(crate) fn find_socket(root: &Path) -> io::Result<Option<PathBuf>> {
 fn scan_system_roots() -> io::Result<()> {
     static SCANNED: OnceLock<Result<(), String>> = OnceLock::new();
     SCANNED
-        .get_or_init(|| {
-            for root in system_roots() {
-                if let Some(socket) = find_socket(&root).map_err(|error| error.to_string())? {
-                    return Err(socket_error(&root, &socket).to_string());
-                }
-            }
-            Ok(())
-        })
+        .get_or_init(|| scan_bound_roots(&system_roots()).map_err(|error| error.to_string()))
         .clone()
         .map_err(|message| io::Error::new(io::ErrorKind::PermissionDenied, message))
+}
+
+/// Refuse a socket in any of `roots` as the sandbox binds them: from each
+/// one's real target, since bubblewrap follows a symlink at a bound path
+/// (an `/etc` entry may be one). A root with nothing there is not bound.
+fn scan_bound_roots(roots: &[PathBuf]) -> io::Result<()> {
+    for root in roots {
+        let Some(target) = sandbox::bind_target(root)? else {
+            continue;
+        };
+        if let Some(socket) = find_socket(&target)? {
+            return Err(socket_error(root, &socket));
+        }
+    }
+    Ok(())
 }
 
 /// `/usr`, each real top-level system directory the sandbox binds, and
@@ -1845,6 +1853,49 @@ mod tests {
             store.read_record(SOCKET_SCAN_RECORD, &clean_id).unwrap(),
             Some(serde_json::json!("clean"))
         );
+    }
+
+    /// A system root bound through a symlink is scanned at its target, so
+    /// an `/etc`-style entry that is a link to a socket, or to a directory
+    /// holding one, refuses the door by its bound name; a dangling link is
+    /// not bound and passes (#373).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_system_root_linked_to_a_socket_is_refused() {
+        let temp = TempDir::named("confine-etc");
+        let dir = temp.0.join("dir");
+        fs::create_dir(&dir).unwrap();
+        let to_socket = temp.0.join("localtime");
+        let to_dir = temp.0.join("ld.so.conf.d");
+        let dangling = temp.0.join("hosts");
+        std::os::unix::fs::symlink(temp.0.join("zone.sock"), &to_socket).unwrap();
+        std::os::unix::fs::symlink(&dir, &to_dir).unwrap();
+        std::os::unix::fs::symlink(temp.0.join("nowhere"), &dangling).unwrap();
+        let roots = [to_socket.clone(), to_dir.clone(), dangling];
+        // Control: the link to a socket dangles until the socket exists.
+        scan_bound_roots(&roots).unwrap();
+
+        let listener = crate::kernel::testutil::bind_socket(&temp.0.join("zone.sock"));
+        let error = scan_bound_roots(&roots).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert!(
+            error
+                .to_string()
+                .starts_with(&format!("{} holds a Unix socket at ", to_socket.display())),
+            "{error}"
+        );
+        drop(listener);
+        fs::remove_file(temp.0.join("zone.sock")).unwrap();
+
+        let listener = crate::kernel::testutil::bind_socket(&dir.join("agent.sock"));
+        let error = scan_bound_roots(&roots).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .starts_with(&format!("{} holds a Unix socket at ", to_dir.display())),
+            "{error}"
+        );
+        drop(listener);
     }
 
     /// The system-root scan runs to the end on this host: every directory
