@@ -64,7 +64,6 @@ None open.
 
 - **Resolution proxy PR 5 review leftovers (#428).** One checklist issue
   per theme:
-  - #431 cargo confinement edges: a symlinked spelling of the root, grandchild-held pipes (left open by #57), an offline git-dependency test.
 - **Test-suite audit of 2026-09-27 (#351).** Nine reviewers, one per
   area, looked for tests that stay green when the code they name is
   broken. The fake passes were fixed in #351; what remains is grouped by

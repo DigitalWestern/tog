@@ -631,7 +631,10 @@ fn place_members(root: &Path, manifest: &toml::Table) -> io::Result<Placed> {
     for entry in &placed.raw_members {
         match member_pattern(root, entry) {
             Ok(Place::Inside(pattern)) => placed.inside.push(pattern),
-            Ok(Place::Outside(pattern)) => placed.outside.push(pattern),
+            Ok(Place::Outside(pattern)) => match through_root_spelling(root, &pattern) {
+                Some(inside) => placed.inside.push(inside),
+                None => placed.outside.push(pattern),
+            },
             Err(why) => refused.push(format!("{entry:?} ({why})")),
         }
     }
@@ -647,6 +650,28 @@ fn place_members(root: &Path, manifest: &toml::Table) -> io::Result<Placed> {
         ));
     }
     Ok(placed)
+}
+
+/// An absolute members entry outside `root` as written that reaches it
+/// through another spelling (a symlink to the root, or to a directory above
+/// it): the entry relative to the root, which is where cargo, comparing
+/// real paths, places it. Only the leading parts up to the one that
+/// resolves to the root are resolved, so the rest stays a pattern and a
+/// symlink below the root is still seen as one.
+fn through_root_spelling(root: &Path, pattern: &Path) -> Option<String> {
+    let real_root = std::fs::canonicalize(root).ok()?;
+    let mut prefix = PathBuf::new();
+    let mut parts = pattern.components();
+    while let Some(part) = parts.next() {
+        if is_wildcard(part.as_os_str()) {
+            return None;
+        }
+        prefix.push(part);
+        if std::fs::canonicalize(&prefix).is_ok_and(|real| real == real_root) {
+            return parts.as_path().to_str().map(str::to_string);
+        }
+    }
+    None
 }
 
 /// The directories of the external members (outside the root) that the

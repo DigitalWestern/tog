@@ -323,6 +323,46 @@ mod tests {
     /// placed lexically. One outside the root is not an output and refuses
     /// attest, like a path dependency there. A directory with no manifest
     /// is not listed.
+    /// An absolute member written through another spelling of the root (a
+    /// symlink to it, or to a directory above it) is the member inside the
+    /// root it names, as cargo places it: listed, an output, and no
+    /// external input. The rest of the entry stays a pattern.
+    #[test]
+    fn an_absolute_member_through_a_symlinked_root_spelling_is_inside() {
+        let temp = TempDir::named("cargo-root-spelling");
+        let root = temp.0.join("ws");
+        package(&root.join("app"), "app");
+        package(&root.join("crates/a"), "a");
+        std::os::unix::fs::symlink(&root, temp.0.join("alias")).unwrap();
+        std::os::unix::fs::symlink(&temp.0, temp.0.join("above")).unwrap();
+        fs::write(
+            root.join("Cargo.toml"),
+            format!(
+                "[workspace]\nmembers = [\"{}\", \"{}\"]\n",
+                temp.0.join("alias/app").display(),
+                temp.0.join("above/ws/crates/*").display()
+            ),
+        )
+        .unwrap();
+        let held = ProjectRoot::open(&root).unwrap();
+        assert_eq!(
+            cargo_door::member_dirs(&held).unwrap().listed,
+            ["app", "crates/a"].map(PathBuf::from).to_vec()
+        );
+        assert_eq!(
+            resolution_outputs(&held).unwrap(),
+            [
+                "Cargo.toml",
+                "Cargo.lock",
+                "app/Cargo.toml",
+                "crates/a/Cargo.toml"
+            ]
+            .map(PathBuf::from)
+            .to_vec()
+        );
+        refuse_external_inputs(&root).unwrap();
+    }
+
     #[test]
     fn outputs_name_every_member_manifest_inside_the_root() {
         let temp = TempDir::named("cargo-outputs");
@@ -594,17 +634,23 @@ mod tests {
     /// host reaches (`evil.test` too, for an unattested registry), and the
     /// store Rust realized in its store. `None` after a skip.
     fn crates_harness(label: &str) -> Option<(Harness, PathBuf)> {
+        let registry = stored_rows("cargo", label);
+        harness_serving(
+            label,
+            &registry.0.to_string_lossy(),
+            &[INDEX_HOST, DOWNLOAD_HOST, "evil.test"],
+        )
+    }
+
+    /// The recorded `registry` (a path under the fixture registries, or an
+    /// absolute one) answering for `hosts` behind a harness proxy, and the
+    /// store Rust realized in its store. `None` after a skip.
+    fn harness_serving(label: &str, registry: &str, hosts: &[&str]) -> Option<(Harness, PathBuf)> {
         let relay = relay(label)?;
         RELAY_FOR_TEST.with(|slot| *slot.borrow_mut() = Some(relay));
         let mut reach = Reach::public(|_, _| vec![TEST_ORIGIN_PUBLIC.parse().unwrap()]);
         reach.request_timeout = std::time::Duration::from_secs(10);
-        let registry = stored_rows("cargo", label);
-        let harness = Harness::serving(
-            label,
-            reach,
-            &[INDEX_HOST, DOWNLOAD_HOST, "evil.test"],
-            &registry.0.to_string_lossy(),
-        );
+        let harness = Harness::serving(label, reach, hosts, registry);
         let selected = crate::kernel::provider::rust::shipped_selection(
             crate::kernel::provider::rust::RUST_VERSION,
         )
@@ -761,6 +807,74 @@ mod tests {
             .seen()
             .iter()
             .all(|seen| seen.headers.get("proxy-authorization").is_none()));
+    }
+
+    /// A git dependency resolved confined and offline: cargo's git CLI
+    /// fetch (`net.git-fetch-with-cli`) goes through the git row to the
+    /// generated `cargo-git` fixture (`tools/git_fixture.py`), whose
+    /// protocol v2 `ls-refs` and `fetch` share one URL. The lock pins the
+    /// fixture's commit, both POSTs reached upstream with their bodies, and
+    /// the ledger records the exchange as `git`.
+    ///
+    /// Ignored: it realizes the store Rust toolchain, which is fetched over
+    /// the network. The resolution itself is offline.
+    #[test]
+    #[ignore = "realizes the store Rust toolchain over the network"]
+    fn cargo_git_dependency_resolves_through_the_proxy_offline() {
+        const LEAF: &str = "https://github.com/tog-fixtures/leaf";
+        const COMMIT: &str = "d7cb160e541496c4db48210eab4114354bc40543";
+        let _serial = policy::attribution_test_lock();
+        let label = "cargo_git_dependency_resolves_through_the_proxy_offline";
+        let Some((harness, rust_obj)) =
+            harness_serving(label, "cargo-git", &["github.com", "api.github.com"])
+        else {
+            return;
+        };
+        let temp = TempDir::named("cargo-git-project");
+        let project = library(
+            &temp.0.join("project"),
+            &format!("leaf = {{ git = \"{LEAF}\" }}\n"),
+        );
+        let (report, recorded) = through_door(
+            &harness,
+            &rust_obj,
+            &project,
+            DoorKind::MissingLock,
+            &["generate-lockfile"],
+        );
+        RELAY_FOR_TEST.with(|slot| *slot.borrow_mut() = None);
+        let report = report.unwrap();
+        assert!(report.status.success(), "{}", stderr(&report));
+        assert!(recorded.is_empty(), "{recorded:?}");
+        let lock = fs::read_to_string(project.join("Cargo.lock")).unwrap();
+        assert!(
+            lock.contains(&format!(
+                "name = \"leaf\"\nversion = \"0.1.0\"\nsource = \"git+{LEAF}#{COMMIT}\""
+            )),
+            "{lock}"
+        );
+        let bodies: Vec<String> = harness
+            .upstream
+            .seen()
+            .iter()
+            .filter(|seen| seen.target == "/tog-fixtures/leaf/git-upload-pack")
+            .map(|seen| String::from_utf8_lossy(&seen.body).into_owned())
+            .collect();
+        assert!(
+            bodies.iter().any(|body| body.contains("command=ls-refs"))
+                && bodies
+                    .iter()
+                    .any(|body| body.contains("command=fetch") && body.contains(COMMIT)),
+            "{bodies:?}"
+        );
+        let entries = ledger_entries(&harness, &report);
+        assert!(
+            entries.iter().any(|entry| entry.class == "git"
+                && entry.method == "POST"
+                && entry.url == format!("{LEAF}/git-upload-pack")
+                && entry.status == 200),
+            "{entries:?}"
+        );
     }
 
     /// Contract 8: the lock cargo writes through interception is
