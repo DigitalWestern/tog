@@ -720,14 +720,19 @@ fn valid_component(s: &str) -> bool {
         && !s.starts_with('.')
 }
 
+/// A gem's name, version, platform and full name, each one safe to place in
+/// a URL path or query and in a store path.
+fn valid_coordinates(name: &str, version: &str, platform: &str, full_name: &str) -> bool {
+    valid_component(name)
+        && valid_component(version)
+        && (platform == "ruby" || valid_component(platform))
+        && valid_component(full_name)
+}
+
 fn validate_plan(plan: &RubyPlan) -> io::Result<()> {
     let mut seen = std::collections::BTreeSet::new();
     for g in &plan.gems {
-        if !valid_component(&g.name)
-            || !valid_component(&g.version)
-            || !(g.platform == "ruby" || valid_component(&g.platform))
-            || !valid_component(&g.full_name)
-        {
+        if !valid_coordinates(&g.name, &g.version, &g.platform, &g.full_name) {
             return Err(err(format!("invalid gem coordinates in plan: {g:?}")));
         }
         if g.sha256.len() != 64 || !g.sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
@@ -880,6 +885,15 @@ pub fn plan_ruby(
 
     let mut gems = Vec::new();
     for g in parsed.gems {
+        // Checked before any of them is placed in a rubygems.org URL: a
+        // lock entry such as `x?platform=java` would otherwise choose the
+        // query the digest is asked with.
+        if !valid_coordinates(&g.name, &g.version, &g.platform, &g.full_name) {
+            return Err(err(format!(
+                "invalid gem coordinates in Gemfile.lock: {} {} {}",
+                g.name, g.version, g.platform
+            )));
+        }
         let mut digest_from_api = false;
         let recorded = match g.checksum {
             Some(_) => None,
@@ -897,11 +911,8 @@ pub fn plan_ruby(
                     "https://rubygems.org/api/v2/rubygems/{}/versions/{}.json?platform={}",
                     g.name, g.version, g.platform
                 );
-                let body = ureq::get(&url)
-                    .call()
-                    .map_err(|e| err(format!("{}: {url}: {e}", g.full_name)))?
-                    .into_string()
-                    .map_err(|e| err(format!("{}: read: {e}", g.full_name)))?;
+                let body = crate::kernel::fetch::fetch_text(&url)
+                    .map_err(|e| err(format!("{}: {e}", g.full_name)))?;
                 digest_from_api_reply(&g.full_name, &g.version, &g.platform, &body)?
             }
         };

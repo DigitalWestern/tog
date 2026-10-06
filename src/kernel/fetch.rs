@@ -378,6 +378,10 @@ fn artifact_name(url: &str) -> &str {
     }
 }
 
+/// What tog calls itself in a request, for the registries that ask callers
+/// to identify themselves (crates.io refuses an anonymous client).
+const USER_AGENT: &str = "tog (https://github.com/DigitalWestern/tog)";
+
 /// Open `url` for reading: a `file://` path (mirrors, tests) or an https
 /// request. `https_only` holds across redirects too, so nothing ever
 /// downgrades to http. The second value is the declared Content-Length,
@@ -394,7 +398,9 @@ fn open_url(
             .map_err(|e| io::Error::new(e.kind(), format!("open {path}: {e}")))?;
         return Ok((Box::new(file), None));
     }
-    let mut builder = ureq::AgentBuilder::new().https_only(true);
+    let mut builder = ureq::AgentBuilder::new()
+        .https_only(true)
+        .user_agent(USER_AGENT);
     if let Some(timeout) = timeout {
         builder = builder.timeout(timeout);
     }
@@ -422,14 +428,75 @@ pub fn fetch_text(url: &str) -> io::Result<String> {
 /// `fetch_text` with a deadline on the whole request. A `file://` URL reads
 /// the file and ignores the deadline.
 pub fn fetch_text_within(url: &str, timeout: Option<std::time::Duration>) -> io::Result<String> {
-    const MAX_TEXT: u64 = 8 << 20;
+    // Room for a registry's full package document (npm, PyPI), which ureq's
+    // own reader capped at 10 MiB before every request came through here.
+    const MAX_TEXT: u64 = 32 << 20;
     let (reader, _) = open_url(url, "fetch", timeout)?;
-    let mut text = String::new();
+    read_text_capped(reader, MAX_TEXT, url)
+}
+
+/// Read a whole text body of at most `max` bytes. A longer body is an error
+/// that says so, never a cut-off text that fails later as "not JSON".
+fn read_text_capped(reader: impl Read, max: u64, url: &str) -> io::Result<String> {
+    let mut body = Vec::new();
     reader
-        .take(MAX_TEXT)
-        .read_to_string(&mut text)
+        .take(max + 1)
+        .read_to_end(&mut body)
         .map_err(|e| io::Error::new(e.kind(), format!("read {url}: {e}")))?;
-    Ok(text)
+    if body.len() as u64 > max {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("read {url}: the response is larger than {max} bytes"),
+        ));
+    }
+    String::from_utf8(body).map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("read {url}: not UTF-8: {e}"),
+        )
+    })
+}
+
+/// Fetch a small text file that may not be there: `None` when the server
+/// answers 404 (a registry asked about a name it has never heard of), the
+/// text otherwise. Every other failure is an error, as from [`fetch_text`].
+pub(crate) fn fetch_text_or_missing(
+    url: &str,
+    timeout: Option<std::time::Duration>,
+) -> io::Result<Option<String>> {
+    match fetch_text_within(url, timeout) {
+        Ok(text) => Ok(Some(text)),
+        Err(error) if http_status(&error) == Some(404) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// Download `url` to `dest` with no hash to check it against, for a file a
+/// later step verifies some other way (a NuGet package, whose content hash
+/// the locked restore checks). Capped at `max` bytes: a longer stream
+/// refuses and removes `dest` rather than keep a truncated file.
+pub(crate) fn download_unpinned(url: &str, dest: &Path, max: u64) -> io::Result<()> {
+    let (reader, _) = open_url(url, "download", None)?;
+    let mut file = fs::File::create(dest)?;
+    let copied = io::copy(&mut reader.take(max + 1), &mut file);
+    drop(file);
+    let refusal = match copied {
+        Ok(copied) if copied <= max => return Ok(()),
+        Ok(_) => io::Error::other(format!("download {url}: longer than {max} bytes; refusing")),
+        Err(e) => io::Error::new(e.kind(), format!("read {url}: {e}")),
+    };
+    let _ = fs::remove_file(dest);
+    Err(refusal)
+}
+
+/// `url` parsed the way the fetcher parses it (ureq, through the `url`
+/// crate), so a check made on a URL and the download of it read one URL.
+/// `None` when the fetcher could not request it at all.
+pub(crate) fn request_url(url: &str) -> Option<url::Url> {
+    ureq::get(url)
+        .request_url()
+        .ok()
+        .map(|parsed| parsed.as_url().clone())
 }
 
 /// Download `url` to `dest`, verifying its sha256 as it streams, without
@@ -991,6 +1058,19 @@ mod tests {
     use super::*;
     use crate::kernel::testutil::TempDir;
     use std::time::{Duration, SystemTime};
+
+    /// A body at the cap is read whole; one byte more is refused by name,
+    /// even when the cut would land inside a multi-byte character.
+    #[test]
+    fn text_over_the_cap_is_refused_not_cut_off() {
+        let url = "https://example.invalid/doc";
+        assert_eq!(read_text_capped(&b"abcd"[..], 4, url).unwrap(), "abcd");
+        let long = read_text_capped(&b"abcde"[..], 4, url).unwrap_err();
+        assert_eq!(long.kind(), io::ErrorKind::InvalidData);
+        assert!(long.to_string().contains("larger than 4 bytes"), "{long}");
+        let split = read_text_capped("abcdé".as_bytes(), 4, url).unwrap_err();
+        assert!(split.to_string().contains("larger than 4 bytes"), "{split}");
+    }
 
     /// A status failure keeps its code behind the same sentence; anything
     /// else has no status to report.

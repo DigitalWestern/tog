@@ -645,11 +645,8 @@ pub fn select_file<'a>(
 
 fn fetch_candidates(name: &str, version: &str) -> io::Result<Vec<FileCandidate>> {
     let url = format!("https://pypi.org/pypi/{name}/{version}/json");
-    let body = ureq::get(&url)
-        .call()
-        .map_err(|e| err(format!("PyPI lookup failed for {name}=={version}: {e}")))?
-        .into_string()
-        .map_err(|e| err(format!("PyPI response for {name}: {e}")))?;
+    let body = crate::kernel::fetch::fetch_text(&url)
+        .map_err(|e| err(format!("PyPI lookup failed for {name}=={version}: {e}")))?;
     candidates_from_json(name, &body)
 }
 
