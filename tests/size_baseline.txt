@@ -7,7 +7,6 @@
 #   fn <lines> <path>::<name>[#<nth occurrence in the file>]
 file 1780 src/tailors/dotnet/mod.rs
 file 1711 src/tailors/elixir/mod.rs
-file 1522 src/tailors/node/realize.rs
 fn 171 src/comforter/toolchain.rs::resolve
 fn 163 src/commands/audit.rs::render
 fn 159 src/commands/mod.rs::dispatch
@@ -16,7 +15,7 @@ fn 151 src/kernel/gitsrc.rs::ensure_git_source
 fn 158 src/kernel/provider/crates.rs::realize_vendor_inner
 fn 209 src/kernel/toolchain/lock.rs::validate
 fn 202 src/tailors/node/lock_import/mod.rs::build_plan_recording
-fn 162 src/tailors/node/lock_import/pnpm.rs::pnpm_nodes
+fn 161 src/tailors/node/lock_import/pnpm.rs::pnpm_nodes
 fn 161 src/tailors/node/project.rs::project_node_env_recorded
 fn 159 src/tailors/python/edit.rs::edit_requirements
 fn 211 src/tailors/python/inputs.rs::read_plan

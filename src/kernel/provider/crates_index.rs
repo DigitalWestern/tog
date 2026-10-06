@@ -93,7 +93,7 @@ impl RegistryProtocol for CratesSparse {
                 let version = entry.get("vers")?.as_str()?;
                 let digest = Digest::sha256(entry.get("cksum")?.as_str()?).ok()?;
                 let download = download_url(name, version)?;
-                Some((download, Claim(digest)))
+                Some((download, Claim::one(digest)))
             })
             .collect()
     }
@@ -298,7 +298,10 @@ mod tests {
             std::fs::read(fixture.join("static.crates.io/crates/itoa/1.0.18/download.body"))
                 .unwrap();
         use sha2::{Digest as _, Sha256};
-        assert_eq!(claim.0.hex(), hex::encode(Sha256::digest(&crate_bytes)));
+        assert_eq!(
+            claim.digests()[0].hex(),
+            hex::encode(Sha256::digest(&crate_bytes))
+        );
         assert!(CRATES_SPARSE.expects_claim(&download));
         assert!(!CRATES_SPARSE.expects_claim(&index));
         let config = Url::parse("https://index.crates.io/config.json").unwrap();

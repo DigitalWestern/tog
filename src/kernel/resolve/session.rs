@@ -163,12 +163,13 @@ struct ClaimKey(u8, String, String);
 
 impl ClaimKey {
     fn new(claim: &Claim) -> Self {
-        let rank = match claim.0.algo() {
+        let rank = match claim.algo() {
             "sha512" => 3,
             "sha256" => 2,
             _ => 1,
         };
-        ClaimKey(rank, claim.0.algo().to_string(), claim.0.hex().to_string())
+        let hexes: Vec<&str> = claim.digests().iter().map(|digest| digest.hex()).collect();
+        ClaimKey(rank, claim.algo().to_string(), hexes.join(","))
     }
 }
 
@@ -533,13 +534,14 @@ impl State {
                 claim_key(url)
             ));
         }
-        let digest = match strongest.1.as_str() {
-            "sha512" => crate::kernel::fetch::Digest::sha512(&strongest.2),
-            "sha256" => crate::kernel::fetch::Digest::sha256(&strongest.2),
-            _ => crate::kernel::fetch::Digest::sha1(&strongest.2),
-        };
-        match digest {
-            Ok(digest) => Claimed::One(Claim(digest)),
+        let digests = strongest
+            .2
+            .split(',')
+            .map(|hex| crate::kernel::fetch::Digest::from_parts(&strongest.1, hex))
+            .collect::<io::Result<Vec<_>>>();
+        match digests.map(Claim::any) {
+            Ok(Some(claim)) => Claimed::One(claim),
+            Ok(None) => Claimed::Conflict(format!("an empty claim for {}", claim_key(url))),
             Err(error) => Claimed::Conflict(error.to_string()),
         }
     }

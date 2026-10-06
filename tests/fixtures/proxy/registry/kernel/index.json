@@ -48,7 +48,7 @@
     "url": "https://registry.test/meta/pkg.json",
     "status": 200,
     "file": "meta/pkg.json",
-    "sha256": "ad8d40dd6867f5f4cb2532f158a9a566217fbf39ae24d308625c24809fe8d66e",
+    "sha256": "8a5b79d387a6df23d0c2f28db6fe093d38a36a547b3166b13c7d1b115bd07761",
     "headers": {
       "Content-Type": "application/json",
       "ETag": "\"pkg-v1\"",

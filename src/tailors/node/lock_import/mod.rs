@@ -5,7 +5,6 @@
 //! scalars, and arbitrary YAML tags are unsupported. The graph is normalized
 //! to the npm tailor's literal node_modules paths before realization.
 
-use crate::kernel::fetch::Digest;
 use crate::kernel::fsroot::{Entry, ProjectRoot};
 use crate::kernel::platform::Platform;
 use crate::tailors::node::inputs::input_exists;
@@ -108,8 +107,8 @@ fn integrity_policy_with(
     integrity: &str,
     record: &mut impl FnMut(&str, &str, &str) -> io::Result<()>,
 ) -> io::Result<()> {
-    let digest = Digest::from_sri(integrity)?;
-    if digest.algo() == "sha1" {
+    let digests = crate::kernel::digest::sri_candidates(integrity)?;
+    if digests[0].algo() == "sha1" {
         record(
             crate::kernel::policy::WEAK_INTEGRITY,
             path,

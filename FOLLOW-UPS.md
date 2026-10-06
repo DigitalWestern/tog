@@ -124,7 +124,6 @@ None open.
 
 
 
-- **SRI alternatives (#508).** Preserve all strongest hash candidates through Node planning and verification. The consolidation preserves first-entry behavior on ties.
 - **Provider selection checks (#509).** Share recipe, runtime, and digest checks in the remaining CPython, Rust, and Rust-path providers.
 - **#524: tests: gaps found in the review of #459 to #496.** Left: the tar call-site scan (route every tar spawn through one helper, which touches heavy-watched files). One checklist.
 - **#525: review follow-ups from #474 to #492.** Left: links in an object's `bin/` that leave it (Python envs link into other store objects on purpose, so the publication check needs a design). One checklist.
