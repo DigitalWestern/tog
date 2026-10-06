@@ -165,6 +165,25 @@ pub(crate) fn missing_lock(project: &ProjectRoot, lock: &str) -> io::Error {
     )
 }
 
+/// One source-file extension an ecosystem claims for `tog <file>`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SourceFile {
+    /// Lowercase, without the dot: `py`, `mjs`.
+    pub extension: &'static str,
+    pub runner: FileRunner,
+}
+
+/// What `tog <file>` does with a file of one ecosystem.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileRunner {
+    /// The program, with its leading arguments, that runs the file inside
+    /// the project's environment: `python`, `go run`.
+    Command(&'static [&'static str]),
+    /// This ecosystem builds a project, never a lone file: why, and the
+    /// verb that does it.
+    Built(&'static str),
+}
+
 /// The verbs every ecosystem answers. Methods with a default body are the
 /// optional ones: not every ecosystem builds, contributes run-time
 /// environment, or has doctor checks.
@@ -198,6 +217,13 @@ pub trait Tailor: Sync {
     /// The files [`Tailor::detect`] looks for, in words, for the message
     /// that says none were found. `tog help inputs` is the long form.
     fn input_files(&self) -> &'static str;
+
+    /// `tog <file>`: the source-file extensions this ecosystem runs, and
+    /// how. The command layer picks the tailor by the file's extension and
+    /// runs the file inside the project's environment, as `tog run` would.
+    fn source_files(&self) -> &'static [SourceFile] {
+        &[]
+    }
 
     /// Before any store-touching work, for every detected ecosystem
     /// whatever the command is about: are the declarative toolchain inputs
@@ -1593,5 +1619,32 @@ mod tests {
         assert_eq!(version(&rows(None, Some(">=3.13"))), "3.14.7");
         assert_eq!(version(&rows(Some("3.13"), None)), "3.13.15");
         assert_eq!(version(&rows(Some("3.11.16"), Some(">=3.9"))), "3.11.16");
+    }
+
+    #[test]
+    fn source_file_extensions_are_lowercase_and_claimed_by_one_tailor() {
+        let mut seen = std::collections::BTreeSet::new();
+        for tailor in registry() {
+            for file in tailor.source_files() {
+                assert_eq!(
+                    file.extension,
+                    file.extension.to_ascii_lowercase(),
+                    "{}",
+                    tailor.id()
+                );
+                assert!(!file.extension.starts_with('.'), "{}", tailor.id());
+                assert!(
+                    seen.insert(file.extension),
+                    "{} claimed twice",
+                    file.extension
+                );
+                if let FileRunner::Command(program) = file.runner {
+                    assert!(!program.is_empty(), "{}", tailor.id());
+                }
+            }
+        }
+        for extension in ["py", "js", "ts", "rb", "exs", "go", "rs", "cs"] {
+            assert!(seen.contains(extension), "no tailor claims .{extension}");
+        }
     }
 }

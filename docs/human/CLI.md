@@ -12,6 +12,7 @@ USAGE:
   tog                        set up this project
   tog <command> [<args>...]  run a command ('tog help <command>' explains it)
   tog <script> [<args>...]   run a package.json script (like 'npm run')
+  tog <file> [<args>...]     run a source file in the environment (tog app.py)
 
 START HERE:
   tog                   set up the project from its lockfiles
@@ -416,6 +417,23 @@ there is no npm-style `--` separator: `tog test --watch` passes `--watch`,
 and `tog test -- --watch` passes a literal `--` as well. Completion offers
 the package.json script names as first words whenever a package.json is
 present, which is where most people find the shorthand.
+
+`tog <file>` is the other short form: a first word that names an existing
+source file runs it with its ecosystem's program inside the project's
+environment, so `tog app.py` is `tog run python app.py` and `tog main.go`
+is `tog run go run main.go`. The extension decides: `.py` (python),
+`.js`, `.mjs`, `.cjs`, `.ts`, `.mts`, `.cts` (node, which strips types
+itself from 23.6 on), `.rb` (ruby), `.exs` (elixir), `.go` (go run).
+Uppercase extensions and paths with directories count. The project has to
+have that ecosystem: `tog app.py` in an npm-only project, or outside any
+project, fails naming the missing project rather than running the file
+with whatever `python` the host has. A `.rs` or `.cs` file is refused with
+a pointer to `tog build`, since Rust and .NET build a project, never a
+lone file. A file with any other extension is a usage error that names
+`tog run <program> <file>`. A package.json script with the same name as
+the file wins, and so does a built-in command. Arguments after the file
+go to the program unchanged. Completion offers files with those
+extensions as first words.
 
 The environment is the one the project's inputs describe. Before the
 command runs, `run` makes the same check `status` prints, offline: when

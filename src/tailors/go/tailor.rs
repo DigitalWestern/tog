@@ -15,7 +15,9 @@ use crate::kernel::resolve::{DoorKind, ResolutionDoor};
 use crate::kernel::toolchain::{Catalog, Selected};
 use crate::kernel::ui;
 use crate::tailors::go::{self as go, inputs};
-use crate::tailors::{ClosureListing, DoctorCheck, PackageRow, SyncRequest, Tailor};
+use crate::tailors::{
+    ClosureListing, DoctorCheck, FileRunner, PackageRow, SourceFile, SyncRequest, Tailor,
+};
 use serde_json::Value;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -93,6 +95,13 @@ impl Tailor for Go {
 
     fn input_files(&self) -> &'static str {
         "go.mod"
+    }
+
+    fn source_files(&self) -> &'static [SourceFile] {
+        &[SourceFile {
+            extension: "go",
+            runner: FileRunner::Command(&["go", "run"]),
+        }]
     }
 
     fn preflight(&self, platform: Platform, _project: &ProjectRoot) -> io::Result<()> {

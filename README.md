@@ -168,6 +168,12 @@ build` for that one. Arguments go to the script unchanged, so there is no
 npm-style `--` separator to remember: `tog test --watch`, not
 `tog test -- --watch`.
 
+`tog <file>` is the same short form for a source file: `tog app.py` runs
+`python app.py` in the project's environment, `tog main.go` runs `go run
+main.go`. The extension picks the runtime (`.py`, `.js`, `.mjs`, `.cjs`,
+`.ts`, `.mts`, `.cts`, `.rb`, `.exs`, `.go`), the project has to have that
+ecosystem, and a `.rs` or `.cs` file points at `tog build` instead.
+
 `tog env` prints the environment as shell exports instead of running one
 command in it. For a whole directory rather than a whole shell, hand it to
 direnv: `echo 'eval "$(tog env)"' > .envrc && direnv allow`. Editors need

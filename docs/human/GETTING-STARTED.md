@@ -194,6 +194,10 @@ script unchanged, so there is no npm-style separator to remember: `tog test
 `tog build` is the sandboxed build; `tog run build` reaches a script called
 build.
 
+A source file works the same way: `tog app.py` runs it with the project's
+Python, `tog index.js` with its Node, by the extension. The file has to
+belong to an ecosystem this project has.
+
 ## 5. What is on disk now
 
 Three things, in three places.

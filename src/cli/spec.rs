@@ -175,8 +175,8 @@ Discovers every ecosystem present in the current directory, realizes each
 locked plan into the immutable store, and projects it into the project
 (.venv, node_modules, .tog/...), then prints the command list. Outside a
 project it prints the command list and exits 0. No other verb is needed
-to get here: 'tog run', 'tog env', 'tog build' and 'tog <script>' do the
-same first whenever the project is not set up or its inputs changed. With
+to get here: 'tog run', 'tog env', 'tog build', 'tog <script>' and
+'tog <file>' do the same first whenever the project is not set up or its inputs changed. With
 --frozen, --fresh or --strict the command list is not printed, so a CI
 log ends with the result. A found manifest with no dependencies sets up
 an interpreter-only environment. Adding a dependency is
@@ -345,8 +345,11 @@ projected root (the closest ancestor with .tog/closures/). When the
 project has a package.json and <command> names one of its scripts, the
 script runs (pre/name/post, npm environment, exit code passed through) and
 wins over a same-named executable on PATH; 'tog <script>' is the short
-form when the script name is not a tog command. Everything after
-<command> is passed through unchanged.
+form when the script name is not a tog command, and 'tog <file>' runs a
+source file with its ecosystem's program ('tog app.py' is 'tog run python
+app.py'; .py, .js, .mjs, .cjs, .ts, .mts, .cts, .rb, .exs and .go) inside
+the project that has that ecosystem. Everything after <command> is passed
+through unchanged.
 
 The environment is the one the project's inputs describe: when nothing is
 synced yet, or 'tog status' would say a manifest or lock changed, the
@@ -957,7 +960,8 @@ pub fn usage() -> String {
          USAGE:\n  \
          tog                        set up this project\n  \
          tog <command> [<args>...]  run a command ('tog help <command>' explains it)\n  \
-         tog <script> [<args>...]   run a package.json script (like 'npm run')\n\n"
+         tog <script> [<args>...]   run a package.json script (like 'npm run')\n  \
+         tog <file> [<args>...]     run a source file in the environment (tog app.py)\n\n"
     );
     text.push_str(START_HERE);
     let width = listed()
@@ -1180,6 +1184,7 @@ mod tests {
             assert!(text.contains(flag), "usage lacks {flag}");
         }
         assert!(text.contains("tog <script> [<args>...]"));
+        assert!(text.contains("tog <file> [<args>...]"));
         assert!(text.contains("Exit status: 0 success, 1 failure, 2 usage error"));
     }
 

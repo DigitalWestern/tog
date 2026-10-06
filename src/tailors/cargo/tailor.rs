@@ -15,7 +15,7 @@ use crate::kernel::resolve::ResolutionDoor;
 use crate::kernel::toolchain::{Catalog, Selected};
 use crate::kernel::ui;
 use crate::tailors::cargo::{self as cargo, inputs, rustfmt};
-use crate::tailors::{ClosureListing, PackageRow, SyncRequest, Tailor};
+use crate::tailors::{ClosureListing, FileRunner, PackageRow, SourceFile, SyncRequest, Tailor};
 use serde_json::Value;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -126,6 +126,16 @@ impl Tailor for Cargo {
 
     fn input_files(&self) -> &'static str {
         "Cargo.toml, Cargo.lock"
+    }
+
+    fn source_files(&self) -> &'static [SourceFile] {
+        &[SourceFile {
+            extension: "rs",
+            runner: FileRunner::Built(
+                "a Rust source file is built as part of its crate: 'tog build' builds the \
+                 crate in the sandbox, and 'tog run cargo run' builds and runs it",
+            ),
+        }]
     }
 
     fn preflight(&self, platform: Platform, _project: &ProjectRoot) -> io::Result<()> {

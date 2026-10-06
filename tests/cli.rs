@@ -5011,3 +5011,99 @@ fn unreadable_resolution_record_fails_the_sync() {
     assert!(!project.0.join(".tog/closures").exists());
     assert!(!project.0.join(".tog/resolution").exists());
 }
+
+#[test]
+fn unknown_first_word_that_names_a_source_file_runs_it_in_its_project() {
+    let home = TempDir::boundary("cli-file");
+    let project = TempDir::boundary("cli-file-project");
+    // The manifest pins a CPython no catalog has, so the sync `run` starts
+    // first refuses offline: proof that the file reached `run` (exit 1),
+    // not a usage error (2), without fetching anything.
+    std::fs::write(
+        project.0.join("pyproject.toml"),
+        "[project]\nname = \"fixture\"\nversion = \"0.1.0\"\nrequires-python = \"==0.0.1\"\n",
+    )
+    .unwrap();
+    std::fs::write(project.0.join("app.py"), "print('hi')\n").unwrap();
+    let out = tog(&project.0, &home.0, &["-v", "app.py", "--port", "3000"]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    let stderr = text(&out.stderr);
+    assert!(
+        stderr.contains("'app.py' is a python file: running it with 'python'"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("syncing first: "), "{stderr}");
+    assert!(stderr.contains("no pinned CPython"), "{stderr}");
+    // An uppercase extension and a path with a directory are the same file.
+    std::fs::create_dir_all(project.0.join("scripts")).unwrap();
+    std::fs::write(project.0.join("scripts/TOOL.PY"), "").unwrap();
+    let out = tog(&project.0, &home.0, &["-v", "scripts/TOOL.PY"]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    let stderr = text(&out.stderr);
+    assert!(
+        stderr.contains("'scripts/TOOL.PY' is a python file"),
+        "{stderr}"
+    );
+    // A directory named like a file is not a file: the usage error as before.
+    std::fs::create_dir_all(project.0.join("dir.py")).unwrap();
+    let out = tog(&project.0, &home.0, &["dir.py"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(
+        text(&out.stderr),
+        "tog: error: unknown command 'dir.py'\nRun 'tog --help' for usage.\n"
+    );
+    // A file of an ecosystem this project does not have is refused by
+    // name, never run with whatever `ruby` the host has, and no sync starts.
+    std::fs::write(project.0.join("tool.rb"), "").unwrap();
+    let out = tog(&project.0, &home.0, &["tool.rb"]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    let stderr = text(&out.stderr);
+    assert!(
+        stderr.contains("'tool.rb' is a ruby file, but there is no ruby project here"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("Gemfile"), "{stderr}");
+    assert!(!stderr.contains("syncing first"), "{stderr}");
+    // A file tog does not run by extension: exit 2, pointing at `tog run`.
+    std::fs::write(project.0.join("notes.txt"), "").unwrap();
+    let out = tog(&project.0, &home.0, &["notes.txt"]);
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = text(&out.stderr);
+    assert!(
+        stderr.contains("'notes.txt' is a file tog does not know how to run"),
+        "{stderr}"
+    );
+    assert!(stderr.contains(".py, "), "{stderr}");
+    assert!(stderr.contains("'tog run <program> notes.txt'"), "{stderr}");
+    // A Rust source file is built, never run alone.
+    std::fs::write(project.0.join("main.rs"), "").unwrap();
+    let out = tog(&project.0, &home.0, &["main.rs"]);
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = text(&out.stderr);
+    assert!(
+        stderr.contains("'main.rs': a Rust source file is built as part of its crate: 'tog build'"),
+        "{stderr}"
+    );
+    // A package.json script with the file's name wins over the file.
+    std::fs::write(
+        project.0.join("package.json"),
+        r#"{"name": "p", "scripts": {"app.py": "echo hi"}}"#,
+    )
+    .unwrap();
+    let out = tog(&project.0, &home.0, &["-v", "app.py"]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    let stderr = text(&out.stderr);
+    assert!(
+        stderr.contains("'app.py' is a package.json script: running it"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("is a python file"), "{stderr}");
+    // Outside any project the file is refused the same way as in the
+    // wrong one.
+    let empty = TempDir::boundary("cli-file-empty");
+    std::fs::write(empty.0.join("app.py"), "").unwrap();
+    let out = tog(&empty.0, &home.0, &["app.py"]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    let stderr = text(&out.stderr);
+    assert!(stderr.contains("no python project here"), "{stderr}");
+}
