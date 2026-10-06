@@ -1,6 +1,10 @@
-//! Where an object's `bin/` links lead (store layer): checked once, at
-//! publication, so every object a closure can put on PATH runs only
-//! programs inside itself or inside an object it declares (#525).
+//! Where an object's program links lead (store layer): checked once, at
+//! publication. A closure puts directories of an object on PATH: its
+//! `bin/`, a `bin/` or `.bin/` deeper in (`elixir/bin` and `otp/bin` of a
+//! BEAM, `node_modules/.bin` of a Node env and of each of its workspaces),
+//! or the object's root itself (the .NET SDK). Every entry of those runs
+//! only a program inside the object or inside an object it declares
+//! (#525). Objects published before the check existed were not swept.
 
 use super::Store;
 use std::collections::{BTreeSet, VecDeque};
@@ -9,29 +13,33 @@ use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
 
-/// The most links one `bin/` entry may pass through, as the kernel's own
-/// limit (`MAXSYMLINKS`) is 40.
+/// The most links one entry may pass through, as the kernel's own limit
+/// (`MAXSYMLINKS`) is 40.
 const MAX_HOPS: usize = 40;
 
 /// Where following a path from the object's root ends.
 #[derive(Debug, PartialEq, Eq)]
 enum Landing {
-    /// Inside the object, on something that exists.
-    Inside,
+    /// Inside the object, on something that exists, at this path relative
+    /// to the object's root (the root itself is the empty path).
+    Inside(PathBuf),
     /// Inside the object, on nothing: it runs nothing.
     Dangling,
     /// Outside the object, at this path (not yet resolved further).
     Outside(PathBuf),
 }
 
-/// Refuse publication when an entry of the staged object's top-level
-/// `bin/` (or `bin` itself) is a link that leads anywhere but inside the
-/// object or inside one of `deps`, the objects it declares. The comforter
-/// puts an object's `bin/` on PATH, so a link out of it, to the host or
+/// Refuse publication when an entry of a directory the object can put on
+/// PATH is a link that leads anywhere but inside the object or inside one
+/// of `deps`, the objects it declares. Those directories are the root's
+/// own entries, `bin`, and every `bin` or `.bin` directory at any depth,
+/// each as it will read once published. A link out of one, to the host or
 /// to an object the record does not name, would run a program the
 /// object's identity says nothing about. A Python env links `bin/python`
 /// into its interpreter object, a declared dependency, and passes. A link
-/// that dangles inside the object runs nothing and passes too.
+/// that dangles inside the object runs nothing and passes too. A link out
+/// from anywhere else (`libexec/`, `lib/`) is not a program on PATH and
+/// is not checked here.
 ///
 /// Links are followed as they will read once published at `dest`, not in
 /// the staging directory, since a relative target means what it means
@@ -44,35 +52,74 @@ pub(super) fn check_bin_links(
     dest: &Path,
     deps: &BTreeSet<String>,
 ) -> io::Result<()> {
-    let bin = OsString::from("bin");
-    match follow(staged, dest, std::slice::from_ref(&bin))? {
-        Landing::Dangling => return Ok(()),
-        Landing::Outside(path) => return admit(store, id, "bin", path, deps),
-        Landing::Inside => {}
+    // The root's own entries, then every `bin` or `.bin`. The walk is over
+    // real directories only (the same tree the read-only pass covers): a
+    // link to a directory is followed from where it sits, by `follow`,
+    // when it is one of the named ones.
+    check_entries(store, id, staged, dest, &[], deps)?;
+    let mut directories = vec![Vec::<OsString>::new()];
+    while let Some(directory) = directories.pop() {
+        let at = staged.join(directory.iter().collect::<PathBuf>());
+        for name in sorted_names(&at)? {
+            let mut parts = directory.clone();
+            parts.push(name.clone());
+            if name == "bin" || name == ".bin" {
+                check_entries(store, id, staged, dest, &parts, deps)?;
+            }
+            if fs::symlink_metadata(at.join(&name))?.is_dir() {
+                directories.push(parts);
+            }
+        }
     }
-    // `bin` itself stayed inside: list it where it really is.
-    let real_bin = staged.join(
-        fs::canonicalize(staged.join("bin"))?
-            .strip_prefix(fs::canonicalize(staged)?)
-            .map_err(|_| io::Error::other("bin/ resolved outside the staged object"))?,
-    );
-    let entries = match fs::read_dir(&real_bin) {
-        Ok(entries) => entries,
+    Ok(())
+}
+
+/// Every entry of the directory at `parts` (the root for none), followed
+/// as PATH lookup would read it; the directory itself may be a link.
+fn check_entries(
+    store: &Store,
+    id: &str,
+    staged: &Path,
+    dest: &Path,
+    parts: &[OsString],
+    deps: &BTreeSet<String>,
+) -> io::Result<()> {
+    let inside = match follow(staged, dest, parts)? {
+        Landing::Dangling => return Ok(()),
+        Landing::Outside(path) => return admit(store, id, &shown(parts), path, deps),
+        Landing::Inside(inside) => inside,
+    };
+    let names = match sorted_names(&staged.join(inside)) {
+        Ok(names) => names,
         // A file named `bin` has no entries to put on PATH.
         Err(error) if error.raw_os_error() == Some(libc::ENOTDIR) => return Ok(()),
         Err(error) => return Err(error),
     };
-    let mut names: Vec<OsString> = entries
-        .map(|entry| entry.map(|entry| entry.file_name()))
-        .collect::<io::Result<_>>()?;
-    names.sort();
     for name in names {
-        let shown = format!("bin/{}", name.to_string_lossy());
-        if let Landing::Outside(path) = follow(staged, dest, &[bin.clone(), name])? {
-            admit(store, id, &shown, path, deps)?;
+        let mut entry = parts.to_vec();
+        entry.push(name);
+        if let Landing::Outside(path) = follow(staged, dest, &entry)? {
+            admit(store, id, &shown(&entry), path, deps)?;
         }
     }
     Ok(())
+}
+
+fn sorted_names(directory: &Path) -> io::Result<Vec<OsString>> {
+    let mut names: Vec<OsString> = fs::read_dir(directory)?
+        .map(|entry| entry.map(|entry| entry.file_name()))
+        .collect::<io::Result<_>>()?;
+    names.sort();
+    Ok(names)
+}
+
+/// The entry as the refusal names it: its path from the object's root.
+fn shown(parts: &[OsString]) -> String {
+    parts
+        .iter()
+        .map(|part| part.to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 /// An entry that left the object is admitted when, resolved on disk, it
@@ -164,10 +211,9 @@ fn follow(staged: &Path, dest: &Path, parts: &[OsString]) -> io::Result<Landing>
             Err(_) => return Ok(Landing::Dangling),
         }
     }
-    Ok(if resolved.starts_with(dest) {
-        Landing::Inside
-    } else {
-        Landing::Outside(resolved)
+    Ok(match resolved.strip_prefix(dest) {
+        Ok(inside) => Landing::Inside(inside.to_path_buf()),
+        Err(_) => Landing::Outside(resolved),
     })
 }
 
@@ -255,6 +301,86 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("host-tool"), "{error}");
+    }
+
+    /// The directories a closure puts on PATH besides `bin/`: the root's
+    /// own entries (the .NET SDK), and a `bin` or `.bin` deeper in (a
+    /// BEAM's `elixir/bin` and `otp/bin`, a Node env's `node_modules/.bin`
+    /// and a workspace's). A link out from anywhere else is not a program
+    /// on PATH.
+    #[test]
+    fn every_directory_a_closure_puts_on_path_is_checked() {
+        let (_dir, store) = store("bin-links-deep");
+        let host = store.root.join("host-tool");
+        fs::write(&host, "x").unwrap();
+        let dest = store.object_path("self-1");
+        let staged = store.root.join("tmp").join("stage");
+        let fresh = || {
+            let _ = fs::remove_dir_all(&staged);
+            fs::create_dir_all(staged.join("lib")).unwrap();
+            fs::write(staged.join("lib/tool"), "x").unwrap();
+            fs::create_dir_all(staged.join("libexec")).unwrap();
+            symlink(&host, staged.join("libexec/helper")).unwrap();
+            fs::create_dir_all(staged.join("otp/bin")).unwrap();
+            symlink("../../lib/tool", staged.join("otp/bin/erl")).unwrap();
+            fs::create_dir_all(staged.join("node_modules/.bin")).unwrap();
+            symlink("../../lib/tool", staged.join("node_modules/.bin/tsc")).unwrap();
+        };
+        fresh();
+        check_bin_links(&store, "self-1", &staged, &dest, &BTreeSet::new())
+            .expect("links into the object and a libexec/ link out pass");
+        for escape in [
+            "dotnet",
+            "elixir/bin/elixir",
+            "otp/bin/escript",
+            "node_modules/.bin/eslint",
+            "workspaces/app/node_modules/.bin/vite",
+        ] {
+            fresh();
+            let at = staged.join(escape);
+            fs::create_dir_all(at.parent().unwrap()).unwrap();
+            symlink(&host, &at).unwrap();
+            let error =
+                check_bin_links(&store, "self-1", &staged, &dest, &BTreeSet::new()).unwrap_err();
+            let text = error.to_string();
+            assert!(
+                text.contains(&format!("object self-1: {escape} leads to")),
+                "{text}"
+            );
+            assert!(text.contains("host-tool"), "{text}");
+        }
+        // A `bin` reached through a link to a directory is listed where
+        // it points, deeper in too.
+        fresh();
+        fs::create_dir_all(staged.join("elixir/libexec")).unwrap();
+        symlink(&host, staged.join("elixir/libexec/iex")).unwrap();
+        symlink("libexec", staged.join("elixir/bin")).unwrap();
+        let error =
+            check_bin_links(&store, "self-1", &staged, &dest, &BTreeSet::new()).unwrap_err();
+        assert!(error.to_string().contains("elixir/bin/iex"), "{error}");
+    }
+
+    /// A `bin` that is a link naming its own place inside the object, by
+    /// the absolute path it will have or by a relative one through the
+    /// store, is read from the staged copy: nothing is at `dest` yet.
+    #[test]
+    fn a_bin_link_to_its_own_published_path_is_read_from_the_staged_copy() {
+        let (_dir, store) = store("bin-links-own-path");
+        let dest = store.object_path("self-1");
+        let staged = store.root.join("tmp").join("stage");
+        for target in [dest.join("usr/bin"), PathBuf::from("../self-1/usr/bin")] {
+            let _ = fs::remove_dir_all(&staged);
+            fs::create_dir_all(staged.join("usr/bin")).unwrap();
+            fs::write(staged.join("usr/bin/ok"), "x").unwrap();
+            symlink(&target, staged.join("bin")).unwrap();
+            check_bin_links(&store, "self-1", &staged, &dest, &BTreeSet::new())
+                .unwrap_or_else(|error| panic!("{}: {error}", target.display()));
+            symlink("/etc/passwd", staged.join("usr/bin/passwd")).unwrap();
+            let error =
+                check_bin_links(&store, "self-1", &staged, &dest, &BTreeSet::new()).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{error}");
+            assert!(error.to_string().contains("bin/passwd"), "{error}");
+        }
     }
 
     #[test]

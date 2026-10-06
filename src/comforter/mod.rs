@@ -682,9 +682,11 @@ pub fn closure_object(
 /// every link is followed. `is_file` alone follows links anywhere, so an
 /// object carrying `bin/go -> /usr/bin/true` would pass and land on PATH.
 /// Links within the object (`bin/python3 -> python3.12`) still pass.
-/// Publication already refused any other `bin/` entry that leads out of
-/// the object to anything but an object it declares
-/// (`kernel::store::bin_links`); this covers the probe wherever it is.
+/// Publication already refused a link out of the object, to anything but
+/// an object it declares, from every directory a closure puts on PATH
+/// (`kernel::store::bin_links`: the root's entries, `bin`, any `bin` or
+/// `.bin` below), for objects published since that check existed; this
+/// covers the probe wherever it is, in any object.
 fn probe_is_inside(object: &Path, probe: &str) -> bool {
     let (Ok(root), Ok(target)) = (object.canonicalize(), object.join(probe).canonicalize()) else {
         return false;
