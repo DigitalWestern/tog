@@ -314,6 +314,10 @@ pub fn read_record_value(id: &str, value: serde_json::Value) -> io::Result<Recor
             "object {id} has unknown evidence marker {evidence}"
         )));
     }
+    // Every reader of a record parses this field, the sweep and
+    // `--drop-object` included, so a record whose exceptions are malformed
+    // is unusable everywhere: a cache hit, a reference and the sweep all
+    // refuse it, and the sweep names it for `--drop-object`.
     let exceptions = match value.get("exceptions") {
         None => Vec::new(),
         Some(list) => serde_json::from_value(list.clone())
