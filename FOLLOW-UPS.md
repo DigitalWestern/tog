@@ -110,7 +110,6 @@ None open.
 - **Smaller open issues from the 2026-09-23/24 run.** One line each; the
   issue has the options and the pick.
   - #188 npm: realize `file:` packages as tog-owned trees.
-  - #191 provider object-kind rows still live in the tailors' `objects.rs`.
   - #216 python: `uv pip compile` fails for vllm and MetaGPT; classifier label.
   - #476 fetch: state and audit that a cache hit is trusted by its digest's source, not its writer (from #287).
   - #289 interrupt: the bwrap preflight misreports Ctrl-C as "bwrap unavailable" (`sandbox.rs`, heavy gate). The exit code is fixed.

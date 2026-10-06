@@ -7,27 +7,6 @@ use crate::kernel::types::Identity;
 
 pub static KINDS: &[ObjectKind] = &[
     ObjectKind {
-        kind: "cpython",
-        schema: None,
-        live_required: &["artifact_sha256", "platform"],
-        live_optional: &[],
-        live_contract: None,
-    },
-    ObjectKind {
-        kind: "uv",
-        schema: None,
-        live_required: &["artifact_sha256", "platform"],
-        live_optional: &[],
-        live_contract: None,
-    },
-    ObjectKind {
-        kind: "native-libs",
-        schema: None,
-        live_required: &["platform", "manifest_sha256", "store_root"],
-        live_optional: &[],
-        live_contract: Some(native_libs_contract),
-    },
-    ObjectKind {
         kind: "python-env",
         schema: Some("python-env/3"),
         live_required: &[
@@ -79,19 +58,6 @@ pub static KINDS: &[ObjectKind] = &[
         live_contract: Some(sdist_build_v5_contract),
     },
 ];
-
-fn native_libs_contract(identity: &Identity) -> Result<(), String> {
-    let platform = platform_of(identity)?.ok_or_else(|| {
-        "native-libs platform contract: the producer must record a platform input".to_string()
-    })?;
-    if platform != crate::kernel::platform::Platform::X86_64UnknownLinuxGnu {
-        return Err(format!(
-            "native-libs platform contract: no native-libs pin exists for {}",
-            platform.triple()
-        ));
-    }
-    Ok(())
-}
 
 /// `python-env/2` could not detect two identity drifts. A one-wheel plan
 /// that dropped its sole `pkg:` key was indistinguishable from the

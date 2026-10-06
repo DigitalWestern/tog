@@ -774,10 +774,11 @@ refuses, lists every such record, and names `tog gc --drop-object <id>` for
 each.
 
 Every (kind, schema) pair a producer commits has a row (`ObjectKind`, in the
-tailor's `objects.rs`). Its `live_required` and `live_optional` fields
+producer's `objects.rs`: the tailor's, or `src/kernel/provider/objects.rs`
+for the toolchains and build inputs the kernel providers make). Its `live_required` and `live_optional` fields
 describe the inputs the current producer writes, including dynamic prefixes
 for conditional package entries. Where identity shape has collection or platform semantics,
-the tailor owns a `live_contract` beside the producer's identity constructor
+the producer's layer owns a `live_contract` beside its rows
 in `objects.rs`; it receives the whole `Identity` and validates count fields,
 paired keys, and platform-conditional inputs. The live check validates
 required names and the live key whitelist before calling that contract.

@@ -332,8 +332,9 @@ pub struct ObjectKind {
 }
 
 /// The kernel's own kinds: sources realized by the kernel, not a tailor.
-/// The resolution proxy's ledger kinds live beside their producer
-/// (`resolve::ledger::KINDS`) and are chained in by `registered_kinds`.
+/// The resolution proxy's ledger kinds and the toolchain providers' kinds
+/// live beside their producers (`resolve::ledger::KINDS`,
+/// `provider::objects::KINDS`) and are chained in by `registered_kinds`.
 static KERNEL_KINDS: &[ObjectKind] = &[
     ObjectKind {
         kind: "git-source",
@@ -380,6 +381,7 @@ fn registered_kinds() -> impl Iterator<Item = &'static ObjectKind> {
     let rows = KERNEL_KINDS
         .iter()
         .chain(crate::kernel::resolve::ledger::KINDS)
+        .chain(crate::kernel::provider::objects::KINDS)
         .chain(installed_kinds().iter().copied());
     #[cfg(test)]
     {
