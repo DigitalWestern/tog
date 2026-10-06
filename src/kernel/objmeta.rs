@@ -97,12 +97,17 @@ impl MetaIndex {
                 Ok(record) => {
                     entries.insert(record.id.clone(), record);
                 }
-                // A record whose content is wrong is one an operator can
-                // drop, so it is reported. A read that failed for another
-                // reason (a permission, a vanished file, a `meta` that
-                // cannot be listed) is not about a record at all, and
-                // stops the read.
-                Err(error) if error.kind() == io::ErrorKind::InvalidData => {
+                // A record whose content is wrong, or that is over the
+                // size cap, is one an operator can drop, so it is reported.
+                // A read that failed for another reason (a permission, a
+                // vanished file, a `meta` that cannot be listed) is not
+                // about a record at all, and stops the read.
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::InvalidData | io::ErrorKind::FileTooLarge
+                    ) =>
+                {
                     let name = entry.file_name().to_string_lossy().into_owned();
                     unusable.insert(name, error.to_string());
                 }
