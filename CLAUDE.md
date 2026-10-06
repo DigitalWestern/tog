@@ -10,6 +10,25 @@
   the repo root, then `codex_wait` on the job id. Its findings, and
   what was fixed or declined, go in the pull request description.
 
+- The license is Apache-2.0, and every commit carries a `Signed-off-by`
+  line (`git commit -s`): the Developer Certificate of Origin in
+  CONTRIBUTING.md, checked on every pull request by the `dco` job in
+  ci.yml (`tools/dco.sh origin/main HEAD` runs the same check here).
+  There is no contributor license agreement.
+
+- What is open and what is not (owner decision, 2026-10-05). This
+  repository is the whole CLI, open source, and everything a developer
+  or a CI job runs on its own machine belongs here: every ecosystem, the
+  store, the sandbox, the policy gate, signing, the SBOM, the GitHub
+  Action. Not in this repository, and not to be started here: anything
+  that receives closures from many customers over a network (the
+  cross-repo dashboard), the hosted toolchain catalog and publisher-key
+  service, and a hosted package mirror. Those are the business and go in
+  a separate, closed repository when they are built. The CLI may grow the
+  client side of each (a command that posts a closure, a configurable
+  catalog source) as long as it works without the hosted service.
+  docs/human/PRODUCT.md is the long form.
+
 - After a pull request you worked on is merged, open a GitHub issue for
   every exception, problem, or needed fix you found along the way and did
   not ship in that PR: review findings, design questions raised in the

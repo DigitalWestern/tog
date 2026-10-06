@@ -29,6 +29,21 @@ permissions:
   contents: read
 
 jobs:
+  # Every commit a pull request adds is signed off by its author: the
+  # Developer Certificate of Origin (CONTRIBUTING.md). Seconds, no build.
+  dco:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+      - name: Every added commit carries its author's Signed-off-by
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: bash tools/dco.sh "$BASE" "$HEAD"
+
   test:
     runs-on: ubuntu-22.04
     steps:

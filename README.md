@@ -32,6 +32,8 @@ CLI never prints them; they are defined in
 |---|---|
 | [docs/human/GETTING-STARTED.md](docs/human/GETTING-STARTED.md) | install to first working project |
 | [STATUS.md](STATUS.md) | where the project is, what is next |
+| [docs/human/PRODUCT.md](docs/human/PRODUCT.md) | what tog is as a product: the deliverables, who each is for, what is open and what is not |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | the license and the sign-off rule |
 | [docs/human/ARCHITECTURE.md](docs/human/ARCHITECTURE.md) | how it works |
 | [docs/human/CLI.md](docs/human/CLI.md) | the command surface (spec) |
 | [docs/human/EDITORS.md](docs/human/EDITORS.md) | VS Code and PyCharm setup |
@@ -289,4 +291,6 @@ cache hit if that host has seen the lock.
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+Apache-2.0. See [LICENSE](LICENSE). Contributions are accepted under
+the Developer Certificate of Origin, one `Signed-off-by` line per commit;
+[CONTRIBUTING.md](CONTRIBUTING.md) has the rule and the one command.
