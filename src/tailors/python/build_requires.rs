@@ -220,8 +220,12 @@ fn parse_pyproject(
 ) -> io::Result<(Vec<String>, String, Option<String>)> {
     let text = std::str::from_utf8(bytes)
         .map_err(|e| invalid(format!("{source}: pyproject.toml is not UTF-8: {e}")))?;
-    let value: toml::Value = toml::from_str(text)
-        .map_err(|e| invalid(format!("{source}: malformed pyproject.toml: {e}")))?;
+    let value: toml::Value = toml::from_str(text).map_err(|e| {
+        invalid(format!(
+            "{source}: {}",
+            crate::kernel::tomlerr::describe("pyproject.toml", text, &e)
+        ))
+    })?;
     let Some(build_system) = value.get("build-system") else {
         return Ok((
             DEFAULT_REQUIRES.iter().map(|s| (*s).to_string()).collect(),

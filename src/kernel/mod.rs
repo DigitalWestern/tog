@@ -29,6 +29,7 @@ pub mod store;
 pub mod supervise;
 #[cfg(test)]
 pub(crate) mod testutil;
+pub mod tomlerr;
 pub mod toolchain;
 pub mod types;
 pub mod ui;

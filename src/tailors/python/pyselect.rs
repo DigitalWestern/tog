@@ -556,7 +556,7 @@ pub fn collect_project_inputs(project: &ProjectRoot) -> io::Result<PythonInputs>
         let value: toml::Value = toml::from_str(&text).map_err(|e| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("{}: {e}", pyproject_path.display()),
+                crate::kernel::tomlerr::describe(&pyproject_path.display().to_string(), &text, &e),
             )
         })?;
         if let Some(requires) = value

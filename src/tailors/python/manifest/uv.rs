@@ -96,8 +96,12 @@ pub(super) struct UvDependency {
 }
 
 pub fn parse_uv_lock(text: &str) -> io::Result<Vec<UvPackage>> {
-    let value: toml::Value = toml::from_str(text)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("uv.lock: {e}")))?;
+    let value: toml::Value = toml::from_str(text).map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            crate::kernel::tomlerr::describe("uv.lock", text, &e),
+        )
+    })?;
     let packages = value
         .get("package")
         .and_then(toml::Value::as_array)

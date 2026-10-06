@@ -84,7 +84,12 @@ fn malformed_file(name: &str, what: &str) -> io::Error {
 /// asks for nothing.
 fn pyproject_document(bytes: &[u8]) -> io::Result<toml::Value> {
     let text = std::str::from_utf8(bytes).map_err(|_| malformed("is not UTF-8"))?;
-    toml::from_str(text).map_err(|error| malformed(error.to_string().trim()))
+    toml::from_str(text).map_err(|error| {
+        malformed(&format!(
+            "is not valid TOML{}",
+            crate::kernel::tomlerr::position(text, &error)
+        ))
+    })
 }
 
 /// A JSON manifest (`package.json`, `global.json`) as a document, refused
@@ -331,7 +336,12 @@ pub fn rust_toolchain_table(bytes: &[u8], legacy: bool) -> io::Result<Option<Too
     let document = match toml::from_str::<toml::Value>(text) {
         Ok(document) => document,
         Err(_) if legacy => return Ok(None),
-        Err(error) => return Err(bad(error.to_string().trim().to_string())),
+        Err(error) => {
+            return Err(bad(format!(
+                "is not valid TOML{}",
+                crate::kernel::tomlerr::position(text, &error)
+            )))
+        }
     };
     match document.get("toolchain") {
         Some(toml::Value::Table(table)) => Ok(Some(table.clone())),

@@ -4881,8 +4881,9 @@ fn a_cargo_manifest_hard_linked_to_the_signing_key_never_echoes_it() {
 /// The other files a Cargo project's commands parse before anything is
 /// downloaded (the toolchain files and the project policy), each a hard
 /// link to the signing key: each command reaches the parser that fails on
-/// it (its error quotes the line, so the redaction marker shows), and no
-/// byte of the key reaches stdout or stderr. `attest` never reads
+/// it, which names the position only (the legacy `rust-toolchain` is read
+/// as a channel line, which the redaction marker replaces), and no byte of
+/// the key reaches stdout or stderr. `attest` never reads
 /// `rust-toolchain` (it runs frozen on `tog-toolchain.toml`), so that pair
 /// is refused for the missing lock instead.
 #[test]
@@ -4905,7 +4906,8 @@ fn project_files_hard_linked_to_the_signing_key_never_echo_it() {
         for (args, stderr) in CARGO_KEY_COMMANDS.iter().zip(runs) {
             let expected = match (file, args[0]) {
                 ("rust-toolchain", "attest") => "tog-toolchain.toml is missing",
-                _ => REDACTED,
+                ("rust-toolchain", _) => REDACTED,
+                _ => "is not valid TOML at line 1",
             };
             assert!(
                 stderr.contains(expected),

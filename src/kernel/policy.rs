@@ -283,7 +283,7 @@ pub fn parse_file(path: &Path, text: &str) -> io::Result<Policy> {
     let mut policy: Policy = toml::from_str(text).map_err(|e| {
         io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("parse {}: {e}", path.display()),
+            crate::kernel::tomlerr::describe(&path.display().to_string(), text, &e),
         )
     })?;
     // One spelling from here on: a file may name a kind either way, and
@@ -2364,7 +2364,7 @@ deny = ["git-dependency"]"#,
             let error = parse_file(path, text).unwrap_err();
             assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{what}");
             assert!(
-                error.to_string().starts_with("parse policy.toml"),
+                error.to_string().starts_with("policy.toml is not valid TOML"),
                 "{what}: {error}"
             );
         }
