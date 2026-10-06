@@ -480,12 +480,6 @@ fn realize_vendor_inner(
         })?;
 
         let (files, size) = inspect_crate(&crate_dir, krate)?;
-        if size > 1 << 30 {
-            return Err(err(format!(
-                "{}@{}: package expands past 1 GiB; refusing",
-                krate.name, krate.version
-            )));
-        }
         let checksum = CargoChecksum {
             files,
             package: &krate.sha256,
@@ -610,6 +604,9 @@ fn inspect_crate(
     Ok((files, size))
 }
 
+/// The most a crate's files may add up to once extracted.
+const MAX_CRATE_BYTES: u64 = 1 << 30;
+
 /// Each hard-linked inode met in the walk: its link count, how many of its
 /// names the walk found, and the first one.
 type Links = BTreeMap<(u64, u64), (u64, u64, String)>;
@@ -653,6 +650,14 @@ fn inspect_dir(
                     krate.name, krate.version
                 ))
             })?;
+            // Checked before the file is hashed, so a bomb is refused
+            // without reading it.
+            if *size > MAX_CRATE_BYTES {
+                return Err(err(format!(
+                    "{}@{}: package expands past 1 GiB; refusing",
+                    krate.name, krate.version
+                )));
+            }
             if relative != ".cargo-checksum.json" {
                 files.insert(
                     relative,
@@ -983,5 +988,58 @@ mod tests {
                 .contains("hard link to a file outside the crate at src/a.rs"),
             "{error}"
         );
+    }
+
+    /// A symlink and a special file in an extracted crate are refused by
+    /// path; an ordinary tree passes (#348).
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_or_special_file_in_a_crate_is_refused() {
+        let scratch = TempDir::named("cargo-hostile-entries");
+        let tree = scratch.0.join("tree");
+        fs::create_dir_all(tree.join("src")).unwrap();
+        fs::write(tree.join("src/lib.rs"), b"").unwrap();
+        let (files, size) = inspect_crate(&tree, &hard_link_crate()).unwrap();
+        assert_eq!(files.keys().collect::<Vec<_>>(), ["src/lib.rs"]);
+        assert_eq!(size, 0);
+
+        std::os::unix::fs::symlink("/etc/passwd", tree.join("src/passwd")).unwrap();
+        let error = inspect_crate(&tree, &hard_link_crate()).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("linked@1.0.0: hostile symlink at src/passwd"),
+            "{error}"
+        );
+        fs::remove_file(tree.join("src/passwd")).unwrap();
+
+        let _socket = std::os::unix::net::UnixListener::bind(tree.join("sock")).unwrap();
+        let error = inspect_crate(&tree, &hard_link_crate()).unwrap_err();
+        assert!(
+            error.to_string().contains("hostile special entry at sock"),
+            "{error}"
+        );
+    }
+
+    /// A crate whose files add up past 1 GiB is refused before the file
+    /// that crosses the cap is read (a sparse file, so no disk and no
+    /// 1 GiB hash); a small crate passes (#348).
+    #[test]
+    fn a_crate_past_one_gib_is_refused_before_it_is_hashed() {
+        let scratch = TempDir::named("cargo-size-cap");
+        let tree = scratch.0.join("tree");
+        fs::create_dir_all(&tree).unwrap();
+        let big = fs::File::create(tree.join("big")).unwrap();
+        big.set_len(MAX_CRATE_BYTES + 1).unwrap();
+        let small = fs::File::create(tree.join("small")).unwrap();
+        small.set_len(2).unwrap();
+        let error = inspect_crate(&tree, &hard_link_crate()).unwrap_err();
+        assert!(
+            error.to_string().contains("package expands past 1 GiB"),
+            "{error}"
+        );
+        fs::remove_file(tree.join("big")).unwrap();
+        let (_, size) = inspect_crate(&tree, &hard_link_crate()).unwrap();
+        assert_eq!(size, 2);
     }
 }
