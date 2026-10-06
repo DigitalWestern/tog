@@ -20,7 +20,7 @@ use crate::kernel::platform::{no_pin, Platform};
 use crate::kernel::store::Store;
 use crate::kernel::toolchain::document::Shipped;
 use crate::kernel::toolchain::input;
-use crate::kernel::toolchain::{ArtifactSpec, Catalog, Selected};
+use crate::kernel::toolchain::{ArtifactSpec, Catalog, Selected, Source};
 use crate::kernel::types::Identity;
 use crate::kernel::ui;
 use std::collections::BTreeMap;
@@ -59,8 +59,9 @@ pub const CHANNEL_MANIFEST_RECIPE: &str = "rust-channel-manifest/1";
 /// shipped release of the same version answers then, and the manifest is
 /// still held to every row of the lock before anything is read from it.
 pub fn channel_manifest(platform: Platform, selected: &Selected) -> io::Result<ArtifactSpec> {
-    let row = match selected.artifact(platform, CHANNEL_MANIFEST) {
-        Ok(row) => row,
+    let (row, source) = match selected.artifact(platform, CHANNEL_MANIFEST) {
+        Ok(row) if selected.source == Source::Lock => (row, "tog-toolchain.toml"),
+        Ok(row) => (row, "the Rust toolchain catalog"),
         Err(_) => {
             let version = selected.version("rustc")?;
             shipped_selection(version)
@@ -71,10 +72,11 @@ pub fn channel_manifest(platform: Platform, selected: &Selected) -> io::Result<A
                          provision the components, targets or profile rust-toolchain.toml asks \
                          for; upgrade tog"
                     ))
-                })?
+                })
+                .map(|row| (row, "this tog's shipped Rust catalog"))?
         }
     };
-    row.check("cargo", CHANNEL_MANIFEST_RECIPE, "sha256")?;
+    row.check_from("cargo", CHANNEL_MANIFEST_RECIPE, "sha256", source)?;
     Ok(row)
 }
 

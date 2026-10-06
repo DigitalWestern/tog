@@ -525,18 +525,32 @@ fn conflict(existing: &[u8], toolchain: &ProjectToolchain) -> io::Error {
 /// resolved them in. Called at the top of the one closure writer, so every
 /// project write is covered without each producer remembering to ask.
 ///
-/// The guards checked are the ones whose project contains `project`, the
-/// directory being written (a workspace member sits under its root).
+/// The guard checked is the nearest one whose project contains `project`,
+/// the directory being written: a workspace member with no guard of its
+/// own is checked against its root's, and a nested independent project
+/// syncing with its own guard only against that one, not its parent's.
 /// Everything is read through the descriptor the command held since
 /// preflight, so a project renamed away and replaced by another at the same
 /// path is refused here rather than rechecked in the replacement. Nothing
 /// to prove when no such guard is installed (a command outside sync).
 pub fn recheck_before_publication(project: &ProjectRoot) -> io::Result<()> {
     let guards = installed_guards();
-    for (_, state) in guards.iter() {
-        if project.path().starts_with(state.root.path()) {
-            recheck(state)?;
-        }
+    let containing = || {
+        guards
+            .iter()
+            .map(|(_, state)| state)
+            .filter(|state| project.path().starts_with(state.root.path()))
+    };
+    let Some(nearest) = containing()
+        .map(|state| state.root.path().components().count())
+        .max()
+    else {
+        return Ok(());
+    };
+    // Every guard at that depth: one project committed twice in a process
+    // keeps both snapshots in force.
+    for state in containing().filter(|state| state.root.path().components().count() == nearest) {
+        recheck(state)?;
     }
     Ok(())
 }
@@ -1214,7 +1228,8 @@ mod tests {
 
     /// #257: two projects committing in one process each keep their own
     /// snapshot. Dropping the second guard leaves the first in force, and
-    /// a write to one project is checked against its own guard only.
+    /// a write to one of two unrelated projects is checked against its own
+    /// guard only.
     #[test]
     fn two_projects_in_one_process_keep_their_own_guards() {
         let _serialized = serialized();
@@ -1237,6 +1252,54 @@ mod tests {
         );
         drop(first_guard);
         recheck_before_publication(&first).unwrap();
+    }
+
+    /// A write is checked against the nearest guard containing it: a
+    /// nested independent project against its own, a workspace member with
+    /// no guard of its own against its root's, and a directory outside
+    /// every guard's project against none.
+    #[test]
+    fn a_write_is_checked_against_the_nearest_guard_only() {
+        let _serialized = serialized();
+        let temp = TempDir::new();
+        let parent_dir = project(&temp);
+        let nested_dir = parent_dir.join("tools/nested");
+        std::fs::create_dir_all(&nested_dir).unwrap();
+        for name in ["pyproject.toml", ".python-version"] {
+            std::fs::copy(parent_dir.join(name), nested_dir.join(name)).unwrap();
+        }
+        let member_dir = parent_dir.join("packages/member");
+        std::fs::create_dir_all(&member_dir).unwrap();
+        let outside_dir = temp.0.join("elsewhere");
+        std::fs::create_dir_all(&outside_dir).unwrap();
+        let parent = ProjectRoot::open(&parent_dir).unwrap();
+        let nested = ProjectRoot::open(&nested_dir).unwrap();
+        let member = ProjectRoot::open(&member_dir).unwrap();
+        let outside = ProjectRoot::open(&outside_dir).unwrap();
+        let mut parent_toolchain = resolve_python(&parent, Mode::Writable).unwrap();
+        let _parent_guard = commit(&parent, &mut parent_toolchain, &Mode::Writable).unwrap();
+        let mut nested_toolchain = resolve_python(&nested, Mode::Writable).unwrap();
+        let _nested_guard = commit(&nested, &mut nested_toolchain, &Mode::Writable).unwrap();
+
+        // The parent's input moves: the parent and its member are refused,
+        // the nested project and a directory outside both are not.
+        std::fs::write(parent_dir.join(".python-version"), "3.13.15\n").unwrap();
+        for root in [&parent, &member] {
+            let error = recheck_before_publication(root).unwrap_err().to_string();
+            assert!(
+                error.contains("project toolchain inputs changed during sync"),
+                "{}: {error}",
+                root.path().display()
+            );
+        }
+        recheck_before_publication(&nested).unwrap();
+        recheck_before_publication(&outside).unwrap();
+
+        // The nested project's own input moving refuses it.
+        std::fs::write(parent_dir.join(".python-version"), "3.12.14\n").unwrap();
+        std::fs::write(nested_dir.join(".python-version"), "3.13.15\n").unwrap();
+        recheck_before_publication(&parent).unwrap();
+        assert!(recheck_before_publication(&nested).is_err());
     }
 
     /// #132: the guard holds the descriptor preflight resolved through. A

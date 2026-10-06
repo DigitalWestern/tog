@@ -819,6 +819,54 @@ mod tests {
         .unwrap();
     }
 
+    /// A script in a projected project runs as npm runs it: pre, main and
+    /// post steps, the lifecycle variables, and `INIT_CWD` where it started.
+    #[test]
+    fn projected_script_gives_each_step_npms_environment() {
+        let temp = TempDir::new();
+        let dir = temp.0.join("project");
+        let cwd = dir.join("packages/app");
+        fs::create_dir_all(&cwd).unwrap();
+        fs::create_dir_all(temp.0.join("forest/node_modules")).unwrap();
+        std::os::unix::fs::symlink(temp.0.join("forest/node_modules"), dir.join("node_modules"))
+            .unwrap();
+        write_closure(&dir, json!({}));
+        fs::write(
+            dir.join("package.json"),
+            r#"{"name": "app", "version": "1.2.3",
+                "scripts": {"pretest": "echo pre", "test": "vitest", "posttest": "echo post"}}"#,
+        )
+        .unwrap();
+        let cmd = ["test".to_string(), "--run".to_string()];
+        let run = Node.projected_script(&dir, &cwd, &cmd).unwrap().unwrap();
+        let labels: Vec<&str> = run.steps.iter().map(|(label, _)| label.as_str()).collect();
+        assert_eq!(labels, ["pretest", "test", "posttest"]);
+        assert!(run.steps[1].1.starts_with("vitest"), "{:?}", run.steps[1]);
+        assert!(run.steps[1].1.contains("--run"), "{:?}", run.steps[1]);
+        assert!(!run.steps[0].1.contains("--run"), "{:?}", run.steps[0]);
+        assert_eq!(run.scrubbed_prefix, "npm_");
+        assert_eq!(run.step_label_var, Some("npm_lifecycle_event"));
+        let env: std::collections::BTreeMap<String, std::ffi::OsString> =
+            run.env.into_iter().collect();
+        assert_eq!(env["npm_package_name"], "app");
+        assert_eq!(env["npm_package_version"], "1.2.3");
+        assert_eq!(
+            Path::new(&env["npm_package_json"]),
+            dir.join("package.json").canonicalize().unwrap()
+        );
+        assert_eq!(Path::new(&env["INIT_CWD"]), cwd);
+
+        // A name with no script, and a project tog has not projected, run
+        // nothing here.
+        let missing = ["lint".to_string()];
+        assert!(Node
+            .projected_script(&dir, &cwd, &missing)
+            .unwrap()
+            .is_none());
+        fs::remove_file(dir.join("node_modules")).unwrap();
+        assert!(Node.projected_script(&dir, &cwd, &cmd).unwrap().is_none());
+    }
+
     #[test]
     fn a_relative_projection_link_cannot_resolve_through_a_replaced_project() {
         let temp = TempDir::new();

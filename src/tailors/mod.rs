@@ -998,6 +998,22 @@ mod tests {
         assert!(nothing_to_detect(&file, &refusal));
         let missing = io::Error::from(io::ErrorKind::NotFound);
         assert!(nothing_to_detect(&temp.0.join("absent"), &missing));
+        assert!(detected(&temp.0.join("absent")).unwrap().is_empty());
+        // A project `ProjectRoot::open` really refuses: it exists, behind a
+        // parent tog may not search. That is an error naming the path, not
+        // an empty detection. (root searches anything, so it has no case.)
+        if unsafe { libc::geteuid() } != 0 {
+            use std::os::unix::fs::PermissionsExt;
+            let locked = temp.0.join("locked");
+            std::fs::create_dir_all(locked.join("project")).unwrap();
+            std::fs::write(locked.join("project/go.mod"), "module m\n").unwrap();
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+            let result = detected(&locked.join("project"));
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let error = result.map(|found| found.len()).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::PermissionDenied, "{error}");
+            assert!(error.to_string().contains("locked/project"), "{error}");
+        }
     }
 
     #[test]

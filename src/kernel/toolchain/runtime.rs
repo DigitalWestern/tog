@@ -66,9 +66,21 @@ impl ArtifactSpec {
     /// a digest of another algorithm than `algo`, the one the publisher
     /// signs with. `ecosystem` names the selection in the message.
     pub fn check(&self, ecosystem: &str, recipe: &str, algo: &str) -> io::Result<()> {
+        self.check_from(ecosystem, recipe, algo, "tog-toolchain.toml")
+    }
+
+    /// `check`, for a row read from `source` (where a refusal says the
+    /// row came from) rather than the project's `tog-toolchain.toml`.
+    pub fn check_from(
+        &self,
+        ecosystem: &str,
+        recipe: &str,
+        algo: &str,
+        source: &str,
+    ) -> io::Result<()> {
         if self.recipe != recipe {
             return Err(invalid(format!(
-                "{ecosystem}: recipe {} in tog-toolchain.toml is not known to this tog; upgrade tog",
+                "{ecosystem}: recipe {} in {source} is not known to this tog; upgrade tog",
                 self.recipe
             )));
         }
@@ -217,6 +229,39 @@ mod tests {
 
     const DARWIN: Platform = Platform::Aarch64AppleDarwin;
     const LINUX: Platform = Platform::X86_64UnknownLinuxGnu;
+
+    #[test]
+    fn a_refused_row_names_where_it_came_from() {
+        let row = ArtifactSpec {
+            component: "channel-manifest".into(),
+            version: "1.0.0".into(),
+            provider: "rust-lang".into(),
+            build: "official".into(),
+            recipe: "rust-channel-manifest/9".into(),
+            url: "https://static.rust-lang.org/dist/channel-rust-1.0.0.toml".into(),
+            digest: Digest::sha256(&"a".repeat(64)).unwrap(),
+        };
+        let error = row
+            .check_from(
+                "cargo",
+                "rust-channel-manifest/1",
+                "sha256",
+                "this tog's shipped Rust catalog",
+            )
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "cargo: recipe rust-channel-manifest/9 in this tog's shipped Rust catalog is not \
+             known to this tog; upgrade tog"
+        );
+        let error = row
+            .check("cargo", "rust-channel-manifest/1", "sha256")
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("in tog-toolchain.toml"),
+            "{error}"
+        );
+    }
 
     #[test]
     fn a_selection_answers_versions_artifacts_and_narration() {

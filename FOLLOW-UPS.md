@@ -125,6 +125,5 @@ None open.
 
 
 - **Provider selection checks (#509).** Share recipe, runtime, and digest checks in the remaining CPython, Rust, and Rust-path providers.
-- **#558: test and doc gaps from the review of #535 to #541.** A wrong file name in a Rust refusal, dead-code leftovers, a test that fakes its refusal, line counts, the toolchain guard's ancestor matching. One checklist.
 - **#559: host fallback and host view follow-ups from #549 to #551.** No e2e for a Ruby gem that really falls back, the npm exception detail, clang under `/usr/lib/llvm-<N>`, `realpath` to the uncurated copy, lone `lib*.so` symlinks. One checklist.
 - **#560: e2e layouts with HOME inside the project.** Python and Ruby tests that the PR 7 and PR 8 doors will refuse. One checklist.

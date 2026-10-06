@@ -381,3 +381,52 @@ pub fn realize_runtime(
         })
         .map(|(path, _)| path)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The shipped selection with every row's digest swapped for a sha512
+    /// one: CPython and uv are published as sha256, so each use refuses it.
+    #[test]
+    fn a_cpython_or_uv_row_that_is_not_sha256_is_refused() {
+        let platform = Platform::X86_64UnknownLinuxGnu;
+        let mut selected = shipped_newest().unwrap();
+        for row in &mut selected.bundle.artifacts {
+            row.digest = Digest::sha512(&"b".repeat(128)).unwrap();
+        }
+        for (component, recipe) in [("cpython", CPYTHON_RECIPE), ("uv", UV_RECIPE)] {
+            let error = row(&selected, platform, component, recipe).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{component}");
+            assert_eq!(
+                error.to_string(),
+                format!("python: {component} artifact digest must be sha256, got sha512")
+            );
+        }
+        for error in [
+            cpython_object_id(&selected, platform).unwrap_err(),
+            cpython_identity_input(&selected, platform).unwrap_err(),
+        ] {
+            assert!(error.to_string().contains("must be sha256"), "{error}");
+        }
+        // The identity's own guard, for a row that reached it unchecked.
+        let spec = selected
+            .bundle
+            .artifact(platform, "uv")
+            .map(|row| ArtifactSpec {
+                component: row.component.clone(),
+                version: "0.1.0".into(),
+                provider: row.provider.clone(),
+                build: row.build.clone(),
+                recipe: row.recipe.clone(),
+                url: row.url.clone(),
+                digest: row.digest.clone(),
+            })
+            .unwrap();
+        let error = artifact_sha256(&spec).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "uv 0.1.0: tog realizes this component from a sha256 digest, not sha512"
+        );
+    }
+}
