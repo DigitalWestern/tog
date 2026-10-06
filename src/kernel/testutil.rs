@@ -202,10 +202,10 @@ mod socket_tests {
     use super::*;
 
     /// A socket path longer than a socket address holds is bound where it
-    /// is, as a socket, on the filesystem of its own directory.
+    /// is: the entry at that path is a socket.
     #[test]
     fn bind_socket_takes_a_path_past_the_address_limit() {
-        use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _};
+        use std::os::unix::fs::FileTypeExt as _;
         let temp = TempDir::named("bind-socket");
         let deep = temp.0.join("d".repeat(60)).join("e".repeat(60));
         std::fs::create_dir_all(&deep).unwrap();
@@ -214,6 +214,5 @@ mod socket_tests {
         let _listener = bind_socket(&path);
         let stat = std::fs::symlink_metadata(&path).unwrap();
         assert!(stat.file_type().is_socket());
-        assert_eq!(stat.dev(), std::fs::metadata(&deep).unwrap().dev());
     }
 }

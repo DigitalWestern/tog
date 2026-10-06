@@ -1591,10 +1591,8 @@ mod tests {
         assert_eq!(read.output().unwrap().stdout, b"member held");
     }
 
-    /// A listening socket at `path`. A socket's path must fit in
-    /// `sun_path` (104 bytes on macOS, where the temp dir alone is about
-    /// 50), so a longer one is bound at a short name in /tmp and renamed
-    /// into place; a rename keeps the socket.
+    /// A listening socket at `path`, however long, through the shared
+    /// test helper (which says how a path past `sun_path` is bound).
     fn bind_socket(path: &Path) -> std::os::unix::net::UnixListener {
         crate::kernel::testutil::bind_socket(path)
     }
