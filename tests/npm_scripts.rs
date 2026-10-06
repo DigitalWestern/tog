@@ -303,8 +303,22 @@ fn network_access_during_install_script_fails() {
         let result =
             node::realize_node_env(&store, activity, platform, &plan_for(&tarball, &sri), &[]);
         let err = result.expect_err("install script reaching the network must fail");
+        // On Linux the script fails against the C runtime alone first, and
+        // strict policy refuses the retry against the whole host
+        // (`host-build-inputs`), which stops the sync there, as it does for
+        // gems and sdists. macOS runs the script once, so its failure is
+        // the refused `install-script-failed` exception.
+        let message = err.to_string();
+        let expected: &[&str] = if platform.is_macos() {
+            &["network-denied"]
+        } else {
+            &[
+                "sandboxed command failed",
+                "policy denies host-build-inputs",
+            ]
+        };
         assert!(
-            err.to_string().contains("network-denied"),
+            expected.iter().all(|part| message.contains(part)),
             "unexpected error shape: {err}"
         );
         return;
@@ -336,7 +350,7 @@ fn network_access_during_install_script_fails() {
         .unwrap();
     let stderr = String::from_utf8_lossy(&child.stderr);
     assert!(child.status.success(), "strict child failed: {stderr}");
-    // "network-denied" is in every strict script failure's message; the
+    // The strict child checked the error names the script's failure; the
     // probe's own words say the failure was the connect, refused by a
     // namespace with no route out (not a DNS error, not a timeout).
     assert!(!stderr.contains("TOG-PROBE connected"), "{stderr}");
