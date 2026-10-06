@@ -187,7 +187,7 @@ impl Tailor for Elixir {
     }
 
     fn runtime_programs(&self) -> &'static [&'static str] {
-        &["mix", "elixir"]
+        &["mix", "elixir", "iex", "erl"]
     }
 
     fn run_env(

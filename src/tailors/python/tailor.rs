@@ -169,7 +169,7 @@ impl Tailor for Python {
     }
 
     fn runtime_programs(&self) -> &'static [&'static str] {
-        &["python", "python3"]
+        &["python", "python3", "pip", "pip3"]
     }
 
     fn run_env(

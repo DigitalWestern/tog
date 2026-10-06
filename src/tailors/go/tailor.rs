@@ -195,7 +195,7 @@ impl Tailor for Go {
     }
 
     fn runtime_programs(&self) -> &'static [&'static str] {
-        &["go"]
+        &["go", "gofmt"]
     }
 
     fn run_env(
