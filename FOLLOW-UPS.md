@@ -84,7 +84,6 @@ None open.
 - **Quality review of 2026-09-24 (#264).** A whole-codebase review after
   the 09-20 to 09-24 run. #264 holds the work order and the overall verdict.
   Each line is one issue and one PR, in order:
-  - #245 kernel: consolidate duplicated primitives. Left: `validate_object_complete` and `exceptions()` now share objmeta's open and parse, but not its full record check (identity hash, schema), because about 25 tests write fake records it refuses. Give those tests real records, then call `read_store_record`.
   - #256 design: the Tailor trait has 35+ methods, a dozen used by one ecosystem. The drifted docs are fixed. Left: split the single-ecosystem methods into optional sub-traits behind accessors (`fn formatter() -> Option<&dyn Formatter>`), before the resolution proxy adds `edit_manifest` (#198).
   - #255 design: the kernel knows every ecosystem by name. `tog run` now reaches package scripts through `Tailor::project_script` and `projected_script`, and the architecture test refuses a command naming a tailor's module. Left: the toolchain-request parsing in `kernel/toolchain/resolve.rs` and `input.rs` still matches on ecosystem names; move it behind a `Tailor::toolchain_request` hook, then add a scan for ecosystem literals in `src/kernel`.
   - #257 design: move process-global state (policy, signing key, input guard, kinds) into Context. The input guard now keeps one snapshot per sync, so two projects in one process no longer clear each other's. Left: carry the policy frames, the signing key, the guard and the installed kinds in `Context`, designed with #57's per-operation sessions.
@@ -150,8 +149,6 @@ None open.
 
 - **Unreadable rollback cleanup (#503).** Replace the pathname cleanup helper with held-descriptor removal so mode-000 and search-only directories do not leave rollback or teardown data behind. See `src/kernel/store/fsops.rs::remove_tree`.
 
-- **Complete reference metadata (#506).** Use the shared semantic parser for referenced objects and replace legitimate minimal fixtures with complete records.
-- **Shared exception parsing (#507).** Add checked exceptions to object metadata records instead of reading that field separately.
 - **SRI alternatives (#508).** Preserve all strongest hash candidates through Node planning and verification. The consolidation preserves first-entry behavior on ties.
 - **Provider selection checks (#509).** Share recipe, runtime, and digest checks in the remaining CPython, Rust, and Rust-path providers.
 - **#524: tests: gaps found in the review of #459 to #496.** e2e children that keep the caller's environment, the tar call-site scan, a subkey signature case, three node tests under `TOG_STRICT=1`. One checklist.

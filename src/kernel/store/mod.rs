@@ -108,6 +108,22 @@ fn open_error(path: &Path, from_env: bool, error: io::Error) -> io::Error {
     )
 }
 
+/// The whole `object-meta/2` record a commit with no dependencies and no
+/// exceptions writes for `identity`: for fixtures that lay an object out by
+/// hand.
+#[cfg(test)]
+pub(crate) fn bare_record(identity: &crate::kernel::types::Identity) -> serde_json::Value {
+    serde_json::json!({
+        "schema": "object-meta/2",
+        "id": identity.object_id(),
+        "identity": identity,
+        "exceptions": [],
+        "dependencies": [],
+        "cache_digests": [],
+        "evidence": "explicit",
+    })
+}
+
 impl Store {
     /// Where `open` puts the store, and whether `TOG_STORE` chose it.
     fn configured_root() -> (PathBuf, bool) {
@@ -208,6 +224,46 @@ impl Store {
             fs::write(&marker, StoreFormat::current_line()).unwrap();
         }
         Store { root }
+    }
+
+    /// Leave a test object as a finished publication does, without the
+    /// publish machinery: `fill` writes its contents, then the root goes
+    /// read-only and a whole `object-meta/2` record names `identity`. For
+    /// fixtures that need an object a closure or root can reference, which
+    /// is checked with the same record parser a cache hit uses.
+    #[cfg(test)]
+    pub(crate) fn publish_bare_with(
+        &self,
+        identity: &crate::kernel::types::Identity,
+        fill: impl FnOnce(&Path),
+    ) -> String {
+        use std::os::unix::fs::PermissionsExt;
+        let id = identity.object_id();
+        let path = self.object_path(&id);
+        fs::create_dir_all(&path).unwrap();
+        fill(&path);
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o555)).unwrap();
+        fs::write(
+            self.root.join("meta").join(format!("{id}.json")),
+            serde_json::to_vec(&bare_record(identity)).unwrap(),
+        )
+        .unwrap();
+        id
+    }
+
+    /// [`Store::publish_bare_with`] for an empty object of a synthetic
+    /// `test` identity, whose id ends in `<name>-<version>`.
+    #[cfg(test)]
+    pub(crate) fn publish_bare_test(&self, name: &str, version: &str) -> String {
+        self.publish_bare_with(
+            &crate::kernel::types::Identity {
+                kind: "test".into(),
+                name: name.into(),
+                version: version.into(),
+                inputs: Default::default(),
+            },
+            |_| {},
+        )
     }
 
     /// `probe` for a root the caller names.
@@ -1692,28 +1748,8 @@ mod tests {
         assert_eq!(store.roots().unwrap().len(), 1);
     }
 
-    /// Leave `identity` as a finished publication does, without the publish
-    /// machinery: a read-only object root, then its metadata record.
     fn publish_bare(store: &Store, identity: &Identity) -> String {
-        use std::os::unix::fs::PermissionsExt;
-        let id = identity.object_id();
-        let path = store.object_path(&id);
-        fs::create_dir_all(&path).unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o555)).unwrap();
-        fs::write(
-            store.root.join("meta").join(format!("{id}.json")),
-            serde_json::to_vec(&serde_json::json!({
-                "schema": "object-meta/2",
-                "id": id,
-                "identity": identity,
-                "dependencies": [],
-                "cache_digests": [],
-                "evidence": "explicit",
-            }))
-            .unwrap(),
-        )
-        .unwrap();
-        id
+        store.publish_bare_with(identity, |_| {})
     }
 
     fn sweep_bare(store: &Store, id: &str) {

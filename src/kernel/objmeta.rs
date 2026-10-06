@@ -31,6 +31,9 @@ pub struct Record {
     pub dependencies: BTreeSet<String>,
     /// The cached artifacts this one was realized from.
     pub cache: BTreeSet<Digest>,
+    /// The policy exceptions recorded at commit. A record without the
+    /// field carries none: producers that allow nothing write no field.
+    pub exceptions: Vec<crate::kernel::policy::Exception>,
 }
 
 /// The `schema` input an identity dispatches on, if it wrote one. Every
@@ -159,13 +162,8 @@ pub fn read_store_record(store: &store::Store, id: &str) -> io::Result<Record> {
 }
 
 /// The parsed body of `id`'s record in `store`, opened and parsed the way
-/// [`read_store_record`] does, before the record's own fields are checked:
-/// for a reader that wants one field `Record` does not keep (the
-/// exceptions) or only that the record is there and names `id`.
-pub(crate) fn read_store_body(
-    store: &store::Store,
-    id: &str,
-) -> io::Result<(String, serde_json::Value)> {
+/// [`read_store_record`] does, before the record's own fields are checked.
+fn read_store_body(store: &store::Store, id: &str) -> io::Result<(String, serde_json::Value)> {
     let path = store.root.join("meta").join(format!("{id}.json"));
     read_opened_value(store.open_object_meta(id)?, &path)
 }
@@ -316,11 +314,21 @@ pub fn read_record_value(id: &str, value: serde_json::Value) -> io::Result<Recor
             "object {id} has unknown evidence marker {evidence}"
         )));
     }
+    // Every reader of a record parses this field, the sweep and
+    // `--drop-object` included, so a record whose exceptions are malformed
+    // is unusable everywhere: a cache hit, a reference and the sweep all
+    // refuse it, and the sweep names it for `--drop-object`.
+    let exceptions = match value.get("exceptions") {
+        None => Vec::new(),
+        Some(list) => serde_json::from_value(list.clone())
+            .map_err(|error| bad(format!("object {id} has malformed exceptions: {error}")))?,
+    };
     Ok(Record {
         id: id.to_string(),
         identity,
         dependencies,
         cache,
+        exceptions,
     })
 }
 

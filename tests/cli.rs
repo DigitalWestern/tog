@@ -2652,11 +2652,11 @@ fn cached_x_root_with_exception(home: &Path) -> PathBuf {
     // uncanonicalized path here compares unequal to `store.object_path`.
     fresh_store(&home.join("store"));
     std::fs::create_dir_all(
-        home.join("store/objects/0123456789abcdef0123456789abcdef01234567-test-env/bin"),
+        home.join("store/objects/31c924c96f4ad8da436dead232ac5041626c3fe0-test-env/bin"),
     )
     .unwrap();
     let store = home.join("store").canonicalize().unwrap();
-    let object = store.join("objects/0123456789abcdef0123456789abcdef01234567-test-env");
+    let object = store.join("objects/31c924c96f4ad8da436dead232ac5041626c3fe0-test-env");
     let executable = object.join("bin/ruff");
     std::fs::write(&executable, "#!/bin/sh\nexit 0\n").unwrap();
     std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -2668,8 +2668,19 @@ fn cached_x_root_with_exception(home: &Path) -> PathBuf {
         "detail": "cached test exception"
     });
     std::fs::write(
-        store.join("meta/0123456789abcdef0123456789abcdef01234567-test-env.json"),
-        serde_json::json!({"id": "0123456789abcdef0123456789abcdef01234567-test-env", "exceptions": [exception.clone()]}).to_string(),
+        store.join("meta/31c924c96f4ad8da436dead232ac5041626c3fe0-test-env.json"),
+        // A whole record: the `test` identity named `test` at version `env`
+        // hashes to the object's id.
+        serde_json::json!({
+            "schema": "object-meta/2",
+            "id": "31c924c96f4ad8da436dead232ac5041626c3fe0-test-env",
+            "identity": {"kind": "test", "name": "test", "version": "env", "inputs": {}},
+            "exceptions": [exception.clone()],
+            "dependencies": [],
+            "cache_digests": [],
+            "evidence": "explicit",
+        })
+        .to_string(),
     )
     .unwrap();
 
@@ -2741,7 +2752,7 @@ fn cached_x_rechecks_object_exceptions_under_project_policy() {
     assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
     assert!(
         text(&out.stderr).contains(
-            "cached object 0123456789abcdef0123456789abcdef01234567-test-env carries exception"
+            "cached object 31c924c96f4ad8da436dead232ac5041626c3fe0-test-env carries exception"
         ),
         "{}",
         text(&out.stderr)

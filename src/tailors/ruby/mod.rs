@@ -2037,20 +2037,8 @@ mod tests {
             .activity(crate::kernel::activity::ActivityMode::Shared)
             .unwrap();
         let activity = &lease;
-        let ruby_id = format!("{}-ruby-{RUBY_VERSION}", "1".repeat(40));
-        let gems_id = format!("{}-gems-1", "2".repeat(40));
-        for id in [&ruby_id, &gems_id] {
-            let object = store.object_path(id);
-            fs::create_dir_all(&object).unwrap();
-            let mut permissions = fs::metadata(&object).unwrap().permissions();
-            permissions.set_mode(permissions.mode() & !0o222);
-            fs::set_permissions(&object, permissions).unwrap();
-            fs::write(
-                store.root.join("meta").join(format!("{id}.json")),
-                serde_json::to_vec_pretty(&serde_json::json!({ "id": id })).unwrap(),
-            )
-            .unwrap();
-        }
+        let ruby_id = store.publish_bare_test("ruby", RUBY_VERSION);
+        let gems_id = store.publish_bare_test("gems", "1");
         let project = temp.0.join("project");
         fs::create_dir_all(&project).unwrap();
         project_ruby_env(

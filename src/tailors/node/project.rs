@@ -1226,7 +1226,13 @@ mod tests {
             let temp = TempDir::named(shape);
             let project = temp.0.join("project");
             let store_root = temp.0.join("home/store");
-            let env_id = format!("{}-npm-env-0", "1".repeat(40));
+            let env_identity = crate::kernel::types::Identity {
+                kind: "test".into(),
+                name: "npm-env".into(),
+                version: "0".into(),
+                inputs: Default::default(),
+            };
+            let env_id = env_identity.object_id();
             let env = store_root.join("objects").join(&env_id);
             let workspace = if shape == "suffix-member" {
                 "packages/member/node_modules"
@@ -1247,10 +1253,7 @@ mod tests {
             }
             fs::write(
                 store_root.join("meta").join(format!("{env_id}.json")),
-                serde_json::json!({"id": env_id,
-                    "identity": {"kind": "test", "name": env_id, "version": "0", "inputs": {}}
-                })
-                .to_string(),
+                crate::kernel::store::bare_record(&env_identity).to_string(),
             )
             .unwrap();
             fs::create_dir_all(

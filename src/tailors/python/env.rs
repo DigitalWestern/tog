@@ -813,7 +813,6 @@ mod tests {
     /// `.venv`: nothing inferred from the closure JSON, nothing missing.
     #[test]
     fn closure_refs_name_every_object_this_producer_created() {
-        use std::os::unix::fs::PermissionsExt;
         let _attribution_lock = crate::kernel::policy::attribution_test_lock();
         let mut attribution = crate::kernel::policy::Attribution::open("python").unwrap();
         let (_store_dir, store) = test_store("closure-refs");
@@ -824,29 +823,17 @@ mod tests {
         for sub in ["roots", "backups"] {
             fs::create_dir_all(store.root.join(sub)).unwrap();
         }
-        let env_id = format!("{}-env-0", "1".repeat(40));
-        let runtime_id = format!("{}-cpython-3.12.14", "2".repeat(40));
-        let native_id = format!("{}-native-libs-0", "3".repeat(40));
-        for (id, inputs) in [
-            (&env_id, serde_json::json!({ "native_libs": native_id })),
-            (&runtime_id, serde_json::json!({})),
-            (&native_id, serde_json::json!({})),
-        ] {
-            let object = store.object_path(id);
-            fs::create_dir_all(&object).unwrap();
-            let mut permissions = fs::metadata(&object).unwrap().permissions();
-            permissions.set_mode(permissions.mode() & !0o222);
-            fs::set_permissions(&object, permissions).unwrap();
-            fs::write(
-                store.root.join("meta").join(format!("{id}.json")),
-                serde_json::to_vec_pretty(&serde_json::json!({
-                    "id": id,
-                    "identity": {"kind": "test", "name": id, "version": "0", "inputs": inputs},
-                }))
-                .unwrap(),
-            )
-            .unwrap();
-        }
+        let runtime_id = store.publish_bare_test("cpython", "3.12.14");
+        let native_id = store.publish_bare_test("native-libs", "0");
+        let env_id = store.publish_bare_with(
+            &crate::kernel::types::Identity {
+                kind: "test".into(),
+                name: "env".into(),
+                version: "0".into(),
+                inputs: [("native_libs".to_string(), native_id.clone())].into(),
+            },
+            |_| {},
+        );
         // A real .venv the user made: it is moved into a store backup.
         let scratch = TempDir::named("python-closure-refs-project");
         let project = scratch.0.clone();

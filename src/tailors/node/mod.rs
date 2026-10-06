@@ -2402,7 +2402,6 @@ mod tests {
     /// from the closure JSON, nothing missing.
     #[test]
     fn closure_refs_name_every_object_this_producer_created() {
-        use std::os::unix::fs::PermissionsExt;
         let _attribution_lock = crate::kernel::policy::attribution_test_lock();
         let mut attribution = crate::kernel::policy::Attribution::open("node").unwrap();
         let scratch = TempDir::named("npm-closure-refs");
@@ -2425,37 +2424,20 @@ mod tests {
             .unwrap();
         let activity = &lease;
         let selected = shipped_selection().unwrap();
-        let env_id = format!("{}-npm-env-0", "1".repeat(40));
-        let runtime_id = format!("{}-node-0", "2".repeat(40));
-        let native_id = format!("{}-native-libs-0", "3".repeat(40));
-        fs::create_dir_all(store.object_path(&env_id).join("node_modules/c")).unwrap();
-        fs::write(
-            store
-                .object_path(&env_id)
-                .join("node_modules/c/package.json"),
-            "{}",
-        )
-        .unwrap();
-        for (id, inputs) in [
-            (&env_id, serde_json::json!({ "native_libs": native_id })),
-            (&runtime_id, serde_json::json!({})),
-            (&native_id, serde_json::json!({})),
-        ] {
-            let object = store.object_path(id);
-            fs::create_dir_all(&object).unwrap();
-            let mut permissions = fs::metadata(&object).unwrap().permissions();
-            permissions.set_mode(permissions.mode() & !0o222);
-            fs::set_permissions(&object, permissions).unwrap();
-            fs::write(
-                store.root.join("meta").join(format!("{id}.json")),
-                serde_json::to_vec_pretty(&serde_json::json!({
-                    "id": id,
-                    "identity": {"kind": "test", "name": id, "version": "0", "inputs": inputs},
-                }))
-                .unwrap(),
-            )
-            .unwrap();
-        }
+        let runtime_id = store.publish_bare_test("node", "0");
+        let native_id = store.publish_bare_test("native-libs", "0");
+        let env_id = store.publish_bare_with(
+            &crate::kernel::types::Identity {
+                kind: "test".into(),
+                name: "npm-env".into(),
+                version: "0".into(),
+                inputs: [("native_libs".to_string(), native_id.clone())].into(),
+            },
+            |env| {
+                fs::create_dir_all(env.join("node_modules/c")).unwrap();
+                fs::write(env.join("node_modules/c/package.json"), "{}").unwrap();
+            },
+        );
         // A real node_modules the user made: it is moved into a store backup.
         let project = root.join("project");
         fs::create_dir_all(project.join("node_modules/left-pad")).unwrap();
@@ -3097,36 +3079,33 @@ mod tests {
     }
 
     /// Store-relative spellings of the placeholder objects the projection
-    /// fixtures fill by hand under `<scratch>/home/store`.
-    const TEST_ENV: &str = "home/store/objects/4444444444444444444444444444444444444444-npm-env-0";
-    const TEST_RUNTIME: &str = "home/store/objects/5555555555555555555555555555555555555555-node-0";
+    /// fixtures fill by hand under `<scratch>/home/store`. Each id is the
+    /// one a `test` identity named by its label at version `0` hashes to,
+    /// which `seal_placeholder_objects` checks.
+    const TEST_ENV: &str = "home/store/objects/0d3958382b45b6aa50f52177625093688d362733-npm-env-0";
+    const TEST_RUNTIME: &str = "home/store/objects/fd682ad9acf7338f0b7f1ea1e46091100460447e-node-0";
 
     /// Make each hand-filled placeholder object complete, the way a commit
     /// leaves one: its metadata written and its directory read-only. Returns
     /// a lease on the store they sit in, so a projection can reference them.
     fn seal_placeholder_objects(objects: &[&Path]) -> crate::kernel::activity::StoreActivity {
-        use std::os::unix::fs::PermissionsExt as _;
         let store_root = objects[0].parent().unwrap().parent().unwrap();
         for sub in ["objects", "meta", "tmp", "roots", "forests", "backups"] {
             fs::create_dir_all(store_root.join(sub)).unwrap();
         }
+        let store = Store::for_test(store_root.canonicalize().unwrap());
         for object in objects {
-            fs::create_dir_all(object).unwrap();
             let id = object.file_name().unwrap().to_str().unwrap();
-            fs::write(
-                store_root.join("meta").join(format!("{id}.json")),
-                serde_json::to_vec_pretty(&serde_json::json!({
-                    "id": id,
-                    "identity": {"kind": "test", "name": id, "version": "0", "inputs": {}},
-                }))
-                .unwrap(),
-            )
-            .unwrap();
-            let mut permissions = fs::metadata(object).unwrap().permissions();
-            permissions.set_mode(permissions.mode() & !0o222);
-            fs::set_permissions(object, permissions).unwrap();
+            let name = id[41..].strip_suffix("-0").unwrap();
+            let identity = crate::kernel::types::Identity {
+                kind: "test".into(),
+                name: name.into(),
+                version: "0".into(),
+                inputs: Default::default(),
+            };
+            assert_eq!(store.publish_bare_with(&identity, |_| {}), id);
         }
-        Store::for_test(store_root.canonicalize().unwrap())
+        store
             .activity(crate::kernel::activity::ActivityMode::Shared)
             .unwrap()
     }

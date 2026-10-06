@@ -2003,20 +2003,8 @@ mod tests {
             .activity(crate::kernel::activity::ActivityMode::Shared)
             .unwrap();
         let activity = &lease;
-        let sdk_id = format!("{}-dotnet-sdk-{SDK_VERSION}", "1".repeat(40));
-        let packages_id = format!("{}-packages-0", "2".repeat(40));
-        for id in [&sdk_id, &packages_id] {
-            let object = store.object_path(id);
-            fs::create_dir_all(&object).unwrap();
-            let mut permissions = fs::metadata(&object).unwrap().permissions();
-            permissions.set_mode(permissions.mode() & !0o222);
-            fs::set_permissions(&object, permissions).unwrap();
-            fs::write(
-                store.root.join("meta").join(format!("{id}.json")),
-                serde_json::to_vec_pretty(&serde_json::json!({ "id": id })).unwrap(),
-            )
-            .unwrap();
-        }
+        let sdk_id = store.publish_bare_test("dotnet-sdk", SDK_VERSION);
+        let packages_id = store.publish_bare_test("packages", "0");
         let project = temp.join("project");
         fs::create_dir_all(&project).unwrap();
         let plan = DotnetPlan {

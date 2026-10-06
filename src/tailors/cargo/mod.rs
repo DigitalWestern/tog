@@ -1453,24 +1453,21 @@ checksum = "{hash_b}"
             .activity(crate::kernel::activity::ActivityMode::Shared)
             .unwrap();
         let activity = &lease;
-        let rust_id = format!("{}-rust-{RUST_VERSION}", "1".repeat(40));
-        let vendor_id = format!("{}-vendor-0", "2".repeat(40));
+        let rust_id = store.publish_bare_with(
+            &crate::kernel::types::Identity {
+                kind: "test".into(),
+                name: "rust".into(),
+                version: RUST_VERSION.into(),
+                inputs: Default::default(),
+            },
+            |rust| {
+                fs::create_dir_all(rust.join("bin")).unwrap();
+                fs::write(rust.join("bin/cargo"), "fake cargo").unwrap();
+            },
+        );
+        let vendor_id = store.publish_bare_test("vendor", "0");
         let rust = store.object_path(&rust_id);
         let vendor = store.object_path(&vendor_id);
-        fs::create_dir_all(rust.join("bin")).unwrap();
-        fs::write(rust.join("bin/cargo"), "fake cargo").unwrap();
-        for (id, object) in [(&rust_id, &rust), (&vendor_id, &vendor)] {
-            fs::create_dir_all(object).unwrap();
-            use std::os::unix::fs::PermissionsExt;
-            let mut permissions = fs::metadata(object).unwrap().permissions();
-            permissions.set_mode(permissions.mode() & !0o222);
-            fs::set_permissions(object, permissions).unwrap();
-            fs::write(
-                store.root.join("meta").join(format!("{id}.json")),
-                serde_json::to_vec_pretty(&serde_json::json!({ "id": id })).unwrap(),
-            )
-            .unwrap();
-        }
         let project = temp.0.join("project");
         fs::create_dir_all(&project).unwrap();
         let plan = CargoPlan {
@@ -1692,21 +1689,8 @@ checksum = "{hash_b}"
             .activity(crate::kernel::activity::ActivityMode::Shared)
             .unwrap();
         let activity = &lease;
-        let rust_id = format!("{}-rust-{RUST_VERSION}", "1".repeat(40));
-        let vendor_id = format!("{}-vendor-0", "2".repeat(40));
-        for id in [&rust_id, &vendor_id] {
-            let object = store.object_path(id);
-            fs::create_dir_all(&object).unwrap();
-            use std::os::unix::fs::PermissionsExt;
-            let mut permissions = fs::metadata(&object).unwrap().permissions();
-            permissions.set_mode(permissions.mode() & !0o222);
-            fs::set_permissions(&object, permissions).unwrap();
-            fs::write(
-                store.root.join("meta").join(format!("{id}.json")),
-                serde_json::to_vec_pretty(&serde_json::json!({ "id": id })).unwrap(),
-            )
-            .unwrap();
-        }
+        let rust_id = store.publish_bare_test("rust", RUST_VERSION);
+        let vendor_id = store.publish_bare_test("vendor", "0");
         let project = temp.0.join("project");
         fs::create_dir_all(&project).unwrap();
         let plan = CargoPlan {
