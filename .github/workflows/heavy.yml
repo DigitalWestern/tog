@@ -216,7 +216,8 @@ jobs:
       # node: npm_scripts [538] npm_lock_import [10] electron_provision [4]
       # run_scripts [10] git_deps [28] gc [55].
       SHARD_NODE: npm_scripts npm_lock_import electron_provision run_scripts git_deps gc
-      # rust: toolchain_lock [402] cargo_e2e [274] catalog_upstream [10].
+      # rust: toolchain_lock [402] cargo_e2e [274] catalog_upstream
+      # (downloads about 100 MB).
       SHARD_RUST: toolchain_lock cargo_e2e catalog_upstream
       # python, plus the ignored unit tests in src/ (--lib, [151]):
       # build_isolation [299] fmt_e2e [145] native_libs [18] python_select

@@ -2459,6 +2459,34 @@ deny = ["git-dependency"]"#,
         );
     }
 
+    /// A policy file whose value has the wrong type: serde's message quotes
+    /// the value, and a policy file can be a link to the signing key, so
+    /// the refusal names where and never what.
+    #[test]
+    fn a_wrongly_typed_policy_value_is_refused_without_its_text() {
+        let secret = "ed25519:c2VjcmV0LXNlZWQtYnl0ZXMtdGhhdC1tdXN0LW5vdC1sZWFr";
+        for text in [
+            format!("[signing]\ntrusted = \"{secret}\"\n"),
+            format!("strict = \"{secret}\"\n"),
+            format!("strict = false\ndeny = \"{secret}\"\n"),
+        ] {
+            let error = toml::from_str::<Policy>(&text).unwrap_err();
+            assert!(
+                error.message().contains("c2VjcmV0"),
+                "the premise: serde quotes the value: {}",
+                error.message()
+            );
+            let error = parse_file(Path::new("policy.toml"), &text)
+                .unwrap_err()
+                .to_string();
+            assert!(!error.contains("c2VjcmV0"), "{error}");
+            assert!(
+                error.starts_with("policy.toml is not valid TOML at line "),
+                "{error}"
+            );
+        }
+    }
+
     #[test]
     fn machine_scope_introduces_trust_and_lower_scopes_only_narrow() {
         let mut chain = Policy::default();

@@ -17,16 +17,26 @@ pub fn position(text: &str, error: &toml::de::Error) -> String {
         .unwrap_or_default()
 }
 
-/// "<name> is not valid TOML at line L, column C: <what>". `<what>` is the
-/// parser's message without the source excerpt its `Display` adds: the
-/// kind of mistake ("unknown field `x`", "expected `=`"), which names a
-/// key at most, never a value.
+/// "<name> is not valid TOML at line L, column C: <what>". `<what>` never
+/// holds a value from the file. For a syntax error it is the parser's
+/// message without the source excerpt its `Display` adds ("expected `=`",
+/// "duplicate key `x`"). For a document that parses but does not fit the
+/// type it is read into, serde's message can quote the value ("invalid
+/// type: string \"...\""), so only the messages that name a key are kept
+/// ("unknown field `x`", "missing field `x`") and any other becomes a
+/// fixed reason.
 pub fn describe(name: &str, text: &str, error: &toml::de::Error) -> String {
-    format!(
-        "{name} is not valid TOML{}: {}",
-        position(text, error),
-        error.message().trim()
-    )
+    let message = error.message().trim();
+    let syntax = toml::from_str::<toml::Table>(text).is_err();
+    let names_a_key = ["unknown field `", "missing field `", "duplicate field `"]
+        .iter()
+        .any(|prefix| message.starts_with(prefix));
+    let what = if syntax || names_a_key {
+        message
+    } else {
+        "a value has the wrong type or is not one this file accepts"
+    };
+    format!("{name} is not valid TOML{}: {what}", position(text, error))
 }
 
 #[cfg(test)]
@@ -64,5 +74,44 @@ mod tests {
             "{message}"
         );
         assert!(!message.contains("ed25519"), "{message}");
+    }
+
+    /// A document that parses but holds a value of the wrong type: serde's
+    /// own message quotes the value, and the description does not.
+    #[test]
+    fn a_wrongly_typed_value_is_described_without_its_text() {
+        #[derive(serde::Deserialize, Debug)]
+        #[serde(deny_unknown_fields)]
+        #[allow(dead_code)]
+        struct File {
+            count: u64,
+            kind: Option<Kind>,
+        }
+        #[derive(serde::Deserialize, Debug)]
+        #[serde(rename_all = "lowercase")]
+        enum Kind {
+            One,
+        }
+        for text in [
+            format!("count = \"{SECRET}\"\n"),
+            format!("count = 1\nkind = \"{SECRET}\"\n"),
+        ] {
+            let error = toml::from_str::<File>(&text).unwrap_err();
+            assert!(
+                error.message().contains("c2VjcmV0"),
+                "the premise: serde quotes the value: {}",
+                error.message()
+            );
+            let message = describe("x.toml", &text, &error);
+            assert!(!message.contains("c2VjcmV0"), "{message}");
+            assert!(
+                message.starts_with("x.toml is not valid TOML at line "),
+                "{message}"
+            );
+        }
+        let text = "count = 1\nmystery = 2\n";
+        let error = toml::from_str::<File>(text).unwrap_err();
+        let message = describe("x.toml", text, &error);
+        assert!(message.contains("unknown field `mystery`"), "{message}");
     }
 }
