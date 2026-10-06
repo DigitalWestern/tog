@@ -576,12 +576,7 @@ pub(crate) fn remove_tree_entry_if_same(
     if !same_inode(&actual, expected) {
         return Ok(false);
     }
-    let mut mode = actual.st_mode;
-    mode |= 0o700;
-    // SAFETY: child is owned by this function.
-    if unsafe { libc::fchmod(child.as_raw_fd(), mode) } != 0 {
-        return Err(io::Error::last_os_error());
-    }
+    restore_owner_bits(child.as_raw_fd(), actual.st_mode)?;
     remove_tree_at(child.as_raw_fd())?;
     unlink_if_same(parentfd, name, expected, libc::AT_REMOVEDIR)
 }
@@ -629,6 +624,22 @@ fn reopen_private_directory(
     Ok(Some(readable))
 }
 
+/// Add owner rwx to the directory held by `dirfd` so its entries can be
+/// listed and unlinked. A directory this user does not own (EPERM) is left
+/// as it is: listing it or unlinking from it then fails with the error that
+/// actually stops the removal, and a directory that is already writable is
+/// still removed.
+fn restore_owner_bits(dirfd: RawFd, mode: libc::mode_t) -> io::Result<()> {
+    // SAFETY: dirfd is borrowed by the caller.
+    if unsafe { libc::fchmod(dirfd, mode | 0o700) } != 0 {
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() != Some(libc::EPERM) {
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+
 /// Remove the contents of a possibly read-only directory through a borrowed
 /// descriptor. It never resolves a child pathname: symlinks are unlinked and
 /// directories are opened with O_NOFOLLOW before recursion. The caller owns
@@ -641,12 +652,7 @@ pub(crate) fn remove_tree_at(dirfd: RawFd) -> io::Result<()> {
             "descriptor is not a directory",
         ));
     }
-    let mut mode = stat.st_mode;
-    mode |= 0o700;
-    // SAFETY: dirfd is borrowed by the caller.
-    if unsafe { libc::fchmod(dirfd, mode) } != 0 {
-        return Err(io::Error::last_os_error());
-    }
+    restore_owner_bits(dirfd, stat.st_mode)?;
     for name in entry_names_at(dirfd)? {
         remove_tree_entry_at(dirfd, name.as_os_str().as_bytes())?;
     }
@@ -679,16 +685,61 @@ pub fn remove_tree(path: &Path) -> io::Result<()> {
     } else {
         parent
     };
-    let parent = fs::File::open(parent)?;
+    let parent = open_parent(parent)?;
     let expected = stat_at(parent.as_raw_fd(), name.as_bytes())?;
+    remove_tree_failpoint();
     if remove_tree_entry_if_same(parent.as_raw_fd(), name.as_bytes(), &expected)? {
-        Ok(())
-    } else {
-        Err(io::Error::new(
+        return Ok(());
+    }
+    // The entry was not removed by this call. If it is simply gone (a
+    // concurrent remover got there first), say NotFound, the error callers
+    // already tolerate for a tree that is not there. Only an entry that is
+    // now a different file is reported as replaced.
+    match stat_at(parent.as_raw_fd(), name.as_bytes()) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("{} was removed by someone else", path.display()),
+        )),
+        _ => Err(io::Error::new(
             io::ErrorKind::Interrupted,
             format!("{} was replaced while it was removed", path.display()),
-        ))
+        )),
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// A test's hook between `remove_tree`'s first stat and the removal, so
+    /// a concurrent remover or replacement can be interleaved there.
+    static REMOVE_TREE_FAILPOINT: std::cell::RefCell<Option<Box<dyn FnMut()>>> =
+        std::cell::RefCell::new(None);
+}
+
+#[cfg(test)]
+fn remove_tree_failpoint() {
+    REMOVE_TREE_FAILPOINT.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().as_mut() {
+            hook();
+        }
+    });
+}
+
+#[cfg(not(test))]
+fn remove_tree_failpoint() {}
+
+/// Hold the directory a tree is removed from. Every use of it is a `*at`
+/// call relative to it (fstatat, openat, unlinkat), never a listing, so on
+/// Linux it is opened O_PATH and a parent without read permission (a
+/// search-only `0o311` directory, say) still works.
+fn open_parent(parent: &Path) -> io::Result<fs::File> {
+    #[cfg(target_os = "linux")]
+    let flags = libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC;
+    #[cfg(not(target_os = "linux"))]
+    let flags = libc::O_DIRECTORY | libc::O_CLOEXEC;
+    fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(flags)
+        .open(parent)
 }
 
 /// Open an advisory lock without ever following a replacement or symlink at
@@ -892,6 +943,72 @@ mod remove_tree_tests {
         drop(temp);
         assert!(fs::symlink_metadata(&root).is_err());
         assert_outside_kept(&outside, &shared);
+    }
+
+    /// The parent is held O_PATH: removing a tree from a directory this
+    /// user may write and search but not list still works.
+    #[test]
+    fn a_tree_under_an_unlistable_parent_is_removed() {
+        let temp = TempDir::named("remove-tree-parent");
+        let parent = temp.0.join("parent");
+        let tree = parent.join("tree");
+        fs::create_dir_all(tree.join("nested")).unwrap();
+        fs::write(tree.join("nested/file"), "data").unwrap();
+        mode(&parent, 0o300);
+        if fs::read_dir(&parent).is_ok() {
+            mode(&parent, 0o700);
+            eprintln!("skipped: this user lists a 0300 directory (root or CAP_DAC_READ_SEARCH)");
+            return;
+        }
+        let removed = remove_tree(&tree);
+        mode(&parent, 0o700);
+        removed.unwrap();
+        assert!(fs::symlink_metadata(&tree).is_err());
+        assert!(parent.is_dir());
+    }
+
+    fn with_failpoint<T>(hook: impl FnMut() + 'static, run: impl FnOnce() -> T) -> T {
+        REMOVE_TREE_FAILPOINT.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+        let result = run();
+        REMOVE_TREE_FAILPOINT.with(|slot| *slot.borrow_mut() = None);
+        result
+    }
+
+    /// A tree another remover takes away after the first stat is reported
+    /// NotFound, the error callers such as the rustfmt scratch cleanup
+    /// already tolerate, not as replaced.
+    #[test]
+    fn a_tree_removed_concurrently_reports_not_found() {
+        let temp = TempDir::named("remove-tree-gone");
+        let tree = temp.0.join("tree");
+        fs::create_dir_all(tree.join("nested")).unwrap();
+        let other = tree.clone();
+        let error = with_failpoint(
+            move || fs::remove_dir_all(&other).unwrap(),
+            || remove_tree(&tree),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::NotFound, "{error}");
+    }
+
+    /// A tree replaced after the first stat is left alone and reported.
+    #[test]
+    fn a_tree_replaced_concurrently_is_kept_and_reported() {
+        let temp = TempDir::named("remove-tree-replaced");
+        let tree = temp.0.join("tree");
+        fs::create_dir(&tree).unwrap();
+        let other = tree.clone();
+        let error = with_failpoint(
+            move || {
+                fs::remove_dir(&other).unwrap();
+                fs::create_dir(&other).unwrap();
+                fs::write(other.join("new"), "kept").unwrap();
+            },
+            || remove_tree(&tree),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Interrupted, "{error}");
+        assert_eq!(fs::read_to_string(tree.join("new")).unwrap(), "kept");
     }
 
     /// A commit that finds its object already published (a cache hit)
