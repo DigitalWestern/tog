@@ -50,6 +50,24 @@ pub struct ClosureListing {
     pub packages: Vec<PackageRow>,
 }
 
+/// A project script `tog run` executes step by step, from
+/// [`Tailor::projected_script`]: a package.json script with its `pre` and
+/// `post` hooks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScriptRun {
+    /// (label, shell text) per step, in the order they run.
+    pub steps: Vec<(String, String)>,
+    /// Variables with this prefix, inherited or set by a projection, are
+    /// removed from every step before `env` is applied.
+    pub scrubbed_prefix: &'static str,
+    /// The variable that carries each step's label, when there is one.
+    pub step_label_var: Option<&'static str>,
+    /// Variables every step gets.
+    pub env: Vec<(String, std::ffi::OsString)>,
+    /// How an error names a step ("npm script").
+    pub noun: &'static str,
+}
+
 /// What a sync asks of one tailor: the flags that change how it works
 /// and the toolchain it must use. Under `--frozen` the caller skips
 /// `prepare`, so the tailor syncs from the committed lock.
@@ -296,6 +314,31 @@ pub trait Tailor: Sync {
     /// a .NET closure.
     fn refused_command(&self, _cmd: &[String]) -> Option<String> {
         None
+    }
+
+    /// The steps of the project script `name` at `root`, read straight from
+    /// the project's inputs before any sync: `None` when this ecosystem has
+    /// no such script there. `tog <script>` and `tog fmt` ask this to
+    /// decide whether a word is a script.
+    fn project_script(
+        &self,
+        _root: &Path,
+        _name: &str,
+        _args: &[String],
+    ) -> io::Result<Option<Vec<(String, String)>>> {
+        Ok(None)
+    }
+
+    /// `tog run`: the script `cmd` names in this ecosystem's projection
+    /// under `dir`, run from `cwd`. `None` when `cmd` is not one, and
+    /// `tog run` spawns it as a program instead.
+    fn projected_script(
+        &self,
+        _dir: &Path,
+        _cwd: &Path,
+        _cmd: &[String],
+    ) -> io::Result<Option<ScriptRun>> {
+        Ok(None)
     }
 
     /// `tog run`: why a package.json script may not run in `dir`, when this
