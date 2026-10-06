@@ -1200,8 +1200,6 @@ pub fn project_go_env(
     crate::comforter::write_closure(project, "go", body, &store, activity, refs, attribution)
 }
 
-/// Sandboxed `go build`: network denied, project READ-ONLY — outputs are
-/// staged in scratch and moved into the project by tog afterwards.
 /// The caches a go run writes, each a fresh directory under `scratch`, so
 /// nothing of the host's GOCACHE, GOPATH or temporary directory is read
 /// or written.
@@ -1232,6 +1230,8 @@ pub fn lone_env(go_obj: &Path, scratch: &Path) -> io::Result<Vec<(String, String
     Ok(env)
 }
 
+/// Sandboxed `go build`: network denied, project READ-ONLY — outputs are
+/// staged in scratch and moved into the project by tog afterwards.
 pub fn build_sandboxed(
     platform: Platform,
     activity: &StoreActivity,
