@@ -2853,6 +2853,50 @@ mod tests {
         collect_with_activity(&store, &activity, Options::default(), &mut out).unwrap();
     }
 
+    /// A record over the metadata size cap is reported unusable like one
+    /// whose content is wrong, so the sweep names `--drop-object` for it
+    /// instead of failing on the read, and the drop removes it.
+    #[test]
+    fn an_oversized_record_is_reported_droppable() {
+        let temp = TempStore::new("oversized-record");
+        let store = temp.store();
+        let id = commit(&store, "oversized", None);
+        let path = store.root.join("meta").join(format!("{id}.json"));
+        let file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        file.set_len(store::META_CAP + 1).unwrap();
+        drop(file);
+        register_objects(&store, &temp.root.join("project"), &[]);
+
+        let (index, unusable) =
+            crate::kernel::objmeta::MetaIndex::read_reporting_unusable(&store).unwrap();
+        assert!(index.get(&id).is_none(), "{unusable:?}");
+        let reason = unusable
+            .get(&format!("{id}.json"))
+            .unwrap_or_else(|| panic!("not reported unusable: {unusable:?}"));
+        assert!(reason.contains("byte cap"), "{reason}");
+
+        let activity = store.activity(ActivityMode::Exclusive).unwrap();
+        let mut out = Vec::new();
+        let error = collect_with_activity(&store, &activity, Options::default(), &mut out)
+            .unwrap_err()
+            .to_string();
+        drop(activity);
+        assert!(
+            error.contains(&format!("--drop-object {id}")),
+            "the recovery command is not named: {error}"
+        );
+        assert!(store.object_path(&id).is_dir(), "the sweep deleted it");
+
+        let (count, text) = dropped(&store, std::slice::from_ref(&id), false);
+        assert_eq!(count.unwrap(), 1, "{text}");
+        assert!(!store.object_path(&id).exists(), "{text}");
+        assert!(!path.exists(), "{text}");
+
+        let activity = store.activity(ActivityMode::Exclusive).unwrap();
+        let mut out = Vec::new();
+        collect_with_activity(&store, &activity, Options::default(), &mut out).unwrap();
+    }
+
     /// A record whose `exceptions` field does not parse fails the same
     /// record check as one whose identity does not hash to its name: the
     /// sweep reports it unusable and names `--drop-object`, which removes it.

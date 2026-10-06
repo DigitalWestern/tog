@@ -4,6 +4,34 @@
 use super::*;
 use crate::kernel::policy::Exception;
 
+/// The most bytes an object's metadata record may hold. A record is its
+/// identity, its exceptions and its dependency ids, so a legitimate one is
+/// kilobytes: 16 MiB is room for some 250,000 dependencies. The cap keeps
+/// a planted or runaway record from exhausting memory while it is parsed.
+/// It is separate from the 1 MiB cap on fact records (`RECORD_CAP`).
+pub const META_CAP: u64 = 16 << 20;
+
+/// An object record's JSON, read through at most `META_CAP + 1` bytes.
+///
+/// The outer error is a failed read, or a record over the cap (kind
+/// `FileTooLarge`): neither is evidence that a publication crashed, so a
+/// caller deciding completeness keeps the object. The inner error is a
+/// record that is not JSON, which a crash can leave.
+pub(crate) fn read_meta_json(
+    file: &fs::File,
+) -> io::Result<Result<serde_json::Value, serde_json::Error>> {
+    use std::io::Read as _;
+    let mut bytes = Vec::new();
+    file.take(META_CAP + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > META_CAP {
+        return Err(io::Error::new(
+            io::ErrorKind::FileTooLarge,
+            format!("object metadata is over the {META_CAP}-byte cap; it was left in place"),
+        ));
+    }
+    Ok(serde_json::from_slice(&bytes))
+}
+
 /// Explicit dependency evidence supplied when an object is published.  The
 /// sets are ordered so the on-disk metadata is deterministic and easy to
 /// compare during a cache hit.
@@ -114,13 +142,13 @@ impl Store {
                 return true;
             }
             match self.open_object_meta(id) {
-                Ok(MetaFile::File(file)) => {
-                    match serde_json::from_reader::<_, serde_json::Value>(io::BufReader::new(file))
-                    {
-                        Ok(value) => value.is_object(),
-                        Err(error) => error.is_io(),
-                    }
-                }
+                // An oversized record is refused by its readers, never
+                // taken for a crash and swept.
+                Ok(MetaFile::File(file)) => match read_meta_json(&file) {
+                    Ok(Ok(value)) => value.is_object(),
+                    Ok(Err(_)) => false,
+                    Err(_) => true,
+                },
                 Ok(MetaFile::Missing | MetaFile::NotRegular) => false,
                 Err(_) => true,
             }
@@ -178,7 +206,8 @@ impl Store {
                 )))
             }
         };
-        let value: serde_json::Value = serde_json::from_reader(io::BufReader::new(file))
+        let value = read_meta_json(&file)
+            .map_err(|error| io::Error::new(error.kind(), format!("store object {id}: {error}")))?
             .map_err(|error| invalid(format!("parse store object {id} metadata: {error}")))?;
         // The record must describe `id`: its identity hashes to it. A
         // sweep and a republish of the same id in between leave a record
@@ -348,6 +377,32 @@ impl Store {
             return self.cache_hit(&id, &dest, staged, exceptions, deps);
         }
         publication_failpoint("after-lookup")?;
+        // The record is built, and its size checked, before anything is
+        // published: one over the cap is refused while the object is still
+        // only staged, never left visible without a record.
+        let meta = serde_json::json!({
+            "schema": "object-meta/2",
+            "id": id,
+            "identity": identity,
+            "created": unix_secs(),
+            "exceptions": exceptions,
+            "dependencies": deps.objects.iter().collect::<Vec<_>>(),
+            "cache_digests": deps.cache.iter().map(|digest| {
+                serde_json::json!({"algo": digest.algo(), "hex": digest.hex()})
+            }).collect::<Vec<_>>(),
+            "evidence": "explicit",
+        });
+        let meta = serde_json::to_vec_pretty(&meta)?;
+        if meta.len() as u64 > META_CAP {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "object {id} metadata would be {} bytes, over the {META_CAP}-byte cap; \
+                     nothing was published",
+                    meta.len()
+                ),
+            ));
+        }
         // Read-only BEFORE publication (contents; APFS can't rename a
         // read-only dir, so the root is locked right after the rename —
         // the only window is top-level entry creation, never mutation).
@@ -399,18 +454,6 @@ impl Store {
             perms.set_mode(perms.mode() & !0o222);
             fs::set_permissions(&dest, perms)?;
         }
-        let meta = serde_json::json!({
-            "schema": "object-meta/2",
-            "id": id,
-            "identity": identity,
-            "created": unix_secs(),
-            "exceptions": exceptions,
-            "dependencies": deps.objects.iter().collect::<Vec<_>>(),
-            "cache_digests": deps.cache.iter().map(|digest| {
-                serde_json::json!({"algo": digest.algo(), "hex": digest.hex()})
-            }).collect::<Vec<_>>(),
-            "evidence": "explicit",
-        });
         // Meta is the completion marker: write via tmp + atomic rename so a
         // crash mid-write can never leave a partial file that has() would
         // accept as complete.
@@ -465,10 +508,9 @@ fn publish_completion(
     store: &Store,
     metadata: &fs::File,
     name: &str,
-    value: &serde_json::Value,
+    bytes: &[u8],
 ) -> io::Result<()> {
     let tmp = open_real_directory(&store.root.join("tmp"), "tmp")?;
-    let bytes = serde_json::to_vec_pretty(value)?;
     for _ in 0..16 {
         let candidate = format!("meta-{}-{}.json", std::process::id(), nanos());
         let mut file = match open_file_at(
@@ -483,7 +525,7 @@ fn publish_completion(
         };
         let expected = fd_stat(file.as_raw_fd())?;
         let result = (|| {
-            io::Write::write_all(&mut file, &bytes)?;
+            io::Write::write_all(&mut file, bytes)?;
             file.sync_all()?;
             if !same_inode(&stat_at(tmp.as_raw_fd(), candidate.as_bytes())?, &expected) {
                 return Err(io::Error::new(
@@ -819,6 +861,89 @@ mod meta_reader_tests {
         receiver
             .recv_timeout(std::time::Duration::from_secs(10))
             .expect("a metadata reader blocked")
+    }
+
+    /// `len` bytes of one JSON object: braces around spaces.
+    fn padded_record(len: u64) -> Vec<u8> {
+        let mut bytes = vec![b' '; len as usize];
+        bytes[0] = b'{';
+        bytes[len as usize - 1] = b'}';
+        bytes
+    }
+
+    #[test]
+    fn a_record_at_the_cap_is_read_and_one_byte_past_it_is_refused() {
+        let temp = TempDir::named("meta-cap-read");
+        let path = temp.0.join("record.json");
+        fs::write(&path, padded_record(META_CAP)).unwrap();
+        let value = read_meta_json(&fs::File::open(&path).unwrap()).unwrap();
+        assert!(value.unwrap().is_object());
+        fs::write(&path, padded_record(META_CAP + 1)).unwrap();
+        let error = read_meta_json(&fs::File::open(&path).unwrap()).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::FileTooLarge);
+    }
+
+    /// An oversized record is refused by every reader, and the completeness
+    /// probe keeps its object: it is not a crashed publication to sweep.
+    #[test]
+    fn an_oversized_record_is_refused_and_its_object_kept() {
+        let temp = TempDir::named("meta-cap-probe");
+        Store::open_at(&temp.0).unwrap();
+        let store = Store {
+            root: temp.0.canonicalize().unwrap(),
+        };
+        let id = published(&store);
+        let record = store.root.join("meta").join(format!("{id}.json"));
+        fs::remove_file(&record).unwrap();
+        fs::write(&record, padded_record(META_CAP + 1)).unwrap();
+        let [identity, complete, is_complete, exceptions, evidence] = readers(&store, &id);
+        assert_eq!(is_complete, Ok(()));
+        for answer in [identity, complete, exceptions, evidence] {
+            assert!(answer.unwrap_err().contains("byte cap"));
+        }
+        let activity = store.activity(ActivityMode::Shared).unwrap();
+        assert!(store.has_with_activity(&activity, &id).unwrap());
+        assert!(store.object_path(&id).is_dir());
+        assert_eq!(fs::metadata(&record).unwrap().len(), META_CAP + 1);
+    }
+
+    /// A record that would be over the cap is refused while its object is
+    /// only staged: nothing appears under `objects/` or `meta/`.
+    #[test]
+    fn an_oversized_record_is_never_published() {
+        let temp = TempDir::named("meta-cap-write");
+        Store::open_at(&temp.0).unwrap();
+        let store = Store {
+            root: temp.0.canonicalize().unwrap(),
+        };
+        crate::kernel::objmeta::register_test_kinds();
+        let identity = Identity {
+            kind: "test".into(),
+            name: "meta-cap-write".into(),
+            version: "1".into(),
+            inputs: Default::default(),
+        };
+        let activity = store.activity(ActivityMode::Shared).unwrap();
+        let staged = store.stage_with_activity(&activity).unwrap();
+        let exception = Exception {
+            kind: "test".into(),
+            subject: "subject".into(),
+            detail: "x".repeat(META_CAP as usize),
+        };
+        let error = store
+            .commit_with_activity_and_deps(
+                &activity,
+                &identity,
+                &staged,
+                &[exception],
+                &ObjectDeps::new(),
+            )
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("nothing was published"));
+        let id = identity.object_id();
+        assert!(!store.object_path(&id).exists());
+        assert!(!store.root.join("meta").join(format!("{id}.json")).exists());
     }
 
     #[test]

@@ -394,7 +394,7 @@ pub(super) fn read_stray_records(
                 "stray metadata is not a regular file",
             ));
         }
-        let value = serde_json::from_reader(std::io::BufReader::new(&file))
+        let value = store::read_meta_json(&file)?
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
         let record = crate::kernel::objmeta::read_record_value(id, value)?;
         let named = store::stat_at(meta_dir.file.as_raw_fd(), name.as_bytes())?;

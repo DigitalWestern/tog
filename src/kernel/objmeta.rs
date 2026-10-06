@@ -97,12 +97,17 @@ impl MetaIndex {
                 Ok(record) => {
                     entries.insert(record.id.clone(), record);
                 }
-                // A record whose content is wrong is one an operator can
-                // drop, so it is reported. A read that failed for another
-                // reason (a permission, a vanished file, a `meta` that
-                // cannot be listed) is not about a record at all, and
-                // stops the read.
-                Err(error) if error.kind() == io::ErrorKind::InvalidData => {
+                // A record whose content is wrong, or that is over the
+                // size cap, is one an operator can drop, so it is reported.
+                // A read that failed for another reason (a permission, a
+                // vanished file, a `meta` that cannot be listed) is not
+                // about a record at all, and stops the read.
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::InvalidData | io::ErrorKind::FileTooLarge
+                    ) =>
+                {
                     let name = entry.file_name().to_string_lossy().into_owned();
                     unusable.insert(name, error.to_string());
                 }
@@ -210,15 +215,13 @@ fn read_opened_value(
             format!("object metadata id {id:?} is malformed"),
         ));
     }
-    let value: serde_json::Value =
-        serde_json::from_reader(std::io::BufReader::new(file)).map_err(|error| {
-            // A failed read is a storage problem, not malformed metadata.
-            let kind = match error.io_error_kind() {
-                Some(kind) if error.is_io() => kind,
-                _ => io::ErrorKind::InvalidData,
-            };
+    // A failed read, or a record over the cap, is a storage problem, not
+    // malformed metadata.
+    let value = store::read_meta_json(&file)
+        .map_err(|error| io::Error::new(error.kind(), format!("{}: {error}", path.display())))?
+        .map_err(|error| {
             io::Error::new(
-                kind,
+                io::ErrorKind::InvalidData,
                 format!("parse object metadata {}: {error}", path.display()),
             )
         })?;
