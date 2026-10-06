@@ -59,7 +59,6 @@ None open.
 - **#465: heavy: audit shared state before allowing parallel ignored suites.** audit shared state before running ignored suites in parallel. Keep --test-threads=1 until local evidence supports removal.
 - **#466: ci: GitHub Actions job startup blocked by account billing or spending limit.** Actions jobs cannot start because of account billing or spending-limit restrictions. Pick: owner repairs account access, use documented local checks meanwhile.
 - **#495: explicit Python package sources.** Define per-package source and metadata-build trust rules for PyTorch-style indexes. Keep undeclared indexes refused until that design ships.
-- **#469: root removal identity.** Carry the decoded record's device/inode and held directory through deletion. Refuse replacements, including directory entries.
 - **Action leftovers (#427).** Left: the first tag that carries
   `action.yml`. At that tag, change `@main` in `action.yml`'s header and in
   CLI.md to it.
