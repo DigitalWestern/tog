@@ -2354,3 +2354,89 @@ mod tests {
         assert!(error.to_string().contains("not a directory"), "{error}");
     }
 }
+
+/// Removal deletes the registry entry its caller decoded, never one that
+/// took its key afterwards.
+#[cfg(test)]
+mod root_removal_identity_tests {
+    use super::*;
+    use crate::kernel::testutil::TempDir;
+
+    fn store_with_root(label: &str) -> (TempDir, Store, RootEntry) {
+        let temp = TempDir::named(label);
+        Store::open_at(&temp.0).unwrap();
+        let store = Store::for_test(temp.0.canonicalize().unwrap());
+        let project = temp.0.join("project");
+        fs::create_dir_all(&project).unwrap();
+        register_empty_root_for_test(&store, &project).unwrap();
+        let key = Store::root_key(&project).unwrap();
+        let entry = store.lookup_root(&key).unwrap();
+        (temp, store, entry)
+    }
+
+    #[test]
+    fn a_record_replaced_after_lookup_is_refused_and_left_intact() {
+        let (_temp, store, entry) = store_with_root("root-replaced");
+        // Another writer replaces the record at the same key.
+        let replacement = store.root.join("roots/replacement");
+        fs::write(&replacement, b"replacement").unwrap();
+        fs::rename(&replacement, &entry.registry_path).unwrap();
+
+        let error = store.remove_root_entry(&entry).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Interrupted, "{error}");
+        assert!(
+            error.to_string().contains("was replaced after it was read"),
+            "{error}"
+        );
+        assert_eq!(fs::read(&entry.registry_path).unwrap(), b"replacement");
+
+        // Looked up again, the replacement is the entry, and it goes.
+        let again = store.lookup_root(&entry.key).unwrap();
+        store.remove_root_entry(&again).unwrap();
+        assert!(!entry.registry_path.exists());
+    }
+
+    #[test]
+    fn a_directory_replaced_after_lookup_is_refused_and_left_intact() {
+        let (_temp, store, entry) = store_with_root("root-dir-replaced");
+        // The key held a directory when it was looked up.
+        fs::remove_file(&entry.registry_path).unwrap();
+        fs::create_dir(&entry.registry_path).unwrap();
+        fs::write(entry.registry_path.join("inside"), b"first").unwrap();
+        let looked_up = store.lookup_root(&entry.key).unwrap();
+        assert!(looked_up.unusable.is_some());
+        // Then another directory took the key.
+        let other = store.root.join("roots/other");
+        fs::create_dir(&other).unwrap();
+        fs::write(other.join("inside"), b"second").unwrap();
+        fs::rename(&entry.registry_path, store.root.join("roots/moved")).unwrap();
+        fs::rename(&other, &entry.registry_path).unwrap();
+
+        let error = store.remove_root_entry(&looked_up).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Interrupted, "{error}");
+        assert_eq!(
+            fs::read(entry.registry_path.join("inside")).unwrap(),
+            b"second"
+        );
+
+        // The directory the lookup saw is removed through descriptors, an
+        // unreadable subdirectory included.
+        fs::remove_dir_all(&entry.registry_path).unwrap();
+        fs::rename(store.root.join("roots/moved"), &entry.registry_path).unwrap();
+        let locked = entry.registry_path.join("locked");
+        fs::create_dir(&locked).unwrap();
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        store.remove_root_entry(&looked_up).unwrap();
+        assert!(!entry.registry_path.exists());
+    }
+
+    #[test]
+    fn an_entry_never_read_from_the_registry_is_not_removed() {
+        let (_temp, store, mut entry) = store_with_root("root-unread");
+        entry.identity = None;
+        let error = store.remove_root_entry(&entry).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "{error}");
+        assert!(entry.registry_path.exists());
+    }
+}
