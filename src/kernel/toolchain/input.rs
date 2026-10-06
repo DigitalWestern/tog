@@ -672,9 +672,20 @@ pub fn install_sources(rows: Installed) {
 pub(crate) fn sources(ecosystem: &str) -> io::Result<Sources> {
     #[cfg(test)]
     tests::install_shipped_sources();
-    INSTALLED_SOURCES
-        .get()
-        .and_then(|rows| rows.iter().find(|(name, _)| *name == ecosystem))
+    sources_in(INSTALLED_SOURCES.get(), ecosystem)
+}
+
+/// `ecosystem`'s entry in `installed`. A table nobody installed is a
+/// programming error with its own message, so it is never mistaken for a
+/// name no tailor claims.
+fn sources_in(installed: Option<&Installed>, ecosystem: &str) -> io::Result<Sources> {
+    let Some(rows) = installed else {
+        return Err(io::Error::other(
+            "toolchain sources not installed; the entry point must call tailors::install_kernel_tables first",
+        ));
+    };
+    rows.iter()
+        .find(|(name, _)| *name == ecosystem)
         .map(|(_, sources)| *sources)
         .ok_or_else(|| {
             io::Error::new(
@@ -1336,5 +1347,27 @@ mod tests {
         std::os::unix::fs::symlink(&victim, temp.0.join("proj/.python-version")).unwrap();
         let error = discover(&root, "python").unwrap_err();
         assert!(error.to_string().contains("is a symlink"), "{error}");
+    }
+
+    /// A table nobody installed and a name no tailor claims are two
+    /// different mistakes, and each is told apart by its message.
+    #[test]
+    fn an_uninstalled_table_is_told_apart_from_an_unknown_name() {
+        let uninstalled = sources_in(None, "python").err().unwrap();
+        assert_eq!(uninstalled.kind(), io::ErrorKind::Other);
+        assert!(
+            uninstalled
+                .to_string()
+                .contains("tailors::install_kernel_tables"),
+            "{uninstalled}"
+        );
+        install_shipped_sources();
+        let unknown = sources_in(INSTALLED_SOURCES.get(), "perl").err().unwrap();
+        assert_eq!(unknown.kind(), io::ErrorKind::InvalidInput);
+        assert!(
+            unknown.to_string().contains("unknown ecosystem 'perl'"),
+            "{unknown}"
+        );
+        assert!(sources_in(INSTALLED_SOURCES.get(), "python").is_ok());
     }
 }
