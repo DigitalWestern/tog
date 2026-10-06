@@ -935,13 +935,9 @@ mod record_check_tests {
                 .unwrap_err()
                 .to_string();
             assert!(error.contains(expected), "{label}: {error}");
+            // Closure and root references (`ClosureRefs::object_id`) are
+            // admitted through this same check.
             let error = store.exceptions(&id).unwrap_err().to_string();
-            assert!(error.contains(expected), "{label}: {error}");
-            let error = crate::comforter::ClosureRefs::new()
-                .object_id(&store, &activity, &id)
-                .map(drop)
-                .unwrap_err()
-                .to_string();
             assert!(error.contains(expected), "{label}: {error}");
 
             assert_eq!(fs::read(&record).unwrap(), bytes, "{label}: record changed");
