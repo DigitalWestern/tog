@@ -1551,7 +1551,7 @@ const RAW_CHILD_SITES: &[(&str, &str, usize)] = &[
     ("src/comforter/mod.rs", "clone_tree_for", 3),
     ("src/kernel/archive.rs", "list_names", 1),
     ("src/kernel/archive.rs", "status_for", 1),
-    ("src/kernel/sandbox.rs", "bwrap_preflight_with_activity", 2),
+    ("src/kernel/sandbox.rs", "run_preflight", 2),
     // The one unmanaged sandbox spawn: the `None` arm of every sandbox
     // entry point, for callers that consume no store.
     ("src/kernel/sandbox.rs", "spawn_unmanaged", 1),

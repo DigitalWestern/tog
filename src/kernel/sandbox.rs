@@ -990,95 +990,125 @@ fn bwrap_preflight() -> io::Result<&'static Path> {
     bwrap_preflight_with_activity(None)
 }
 
-// Reviewed site (tests/architecture.rs): `None` arm of `Option<&StoreActivity>`: no store is involved.
-#[allow(clippy::disallowed_methods)]
+/// The preflight's verdict, cached for the run: the bwrap path, or why the
+/// sandbox is unavailable. An interrupt during the probe is no verdict: it
+/// is returned as the error it is and nothing is cached (#289).
 pub(crate) fn bwrap_preflight_with_activity(
     activity: Option<&StoreActivity>,
 ) -> io::Result<&'static Path> {
     static PREFLIGHT: OnceLock<Result<PathBuf, String>> = OnceLock::new();
-    match PREFLIGHT.get_or_init(|| {
-        let Some(path) = find_bwrap() else {
-            return Err(bwrap_unavailable());
-        };
-        let mut version_command = bwrap_command(&path).map_err(|error| error.to_string())?;
-        version_command
-            .arg("--version")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null());
-        let version_ok = match activity {
-            Some(activity) => supervise_output_status(&mut version_command, activity),
-            None => version_command
-                .status()
-                .map(|status| status.success())
-                .unwrap_or(false),
-        };
-        if !version_ok {
-            return Err(bwrap_unavailable());
+    let verdict = match PREFLIGHT.get() {
+        Some(verdict) => verdict,
+        None => {
+            let verdict = run_preflight(activity)?;
+            PREFLIGHT.get_or_init(|| verdict)
         }
-        // The same system runtime the real sandbox mounts, so the probe
-        // cannot pass or fail on a layout builds never see.
-        let mut probe_args: Vec<OsString> = [
-            "--unshare-user",
-            "--unshare-net",
-            "--unshare-pid",
-            "--unshare-ipc",
-            "--unshare-uts",
-            "--hostname",
-            "tog",
-            "--unshare-cgroup-try",
-            "--die-with-parent",
-            "--new-session",
-            "--clearenv",
-        ]
-        .into_iter()
-        .map(OsString::from)
-        .collect();
-        probe_args.extend(system_root_args(Path::new("/")).map_err(|error| error.to_string())?);
-        probe_args.extend(
-            ["--dev", "/dev", "--proc", "/proc", PROBE_TARGET]
-                .into_iter()
-                .map(OsString::from),
-        );
-        let mut probe_command = bwrap_command(&path).map_err(|error| error.to_string())?;
-        probe_command
-            .args(probe_args)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::piped());
-        let probe_output = match activity {
-            Some(activity) => {
-                let output = crate::kernel::supervise::local_output(&mut probe_command, activity)
-                    .map_err(|error| error.to_string())?;
-                (output.status, output.stderr)
-            }
-            None => {
-                let output = probe_command.output().map_err(|error| error.to_string())?;
-                (output.status, output.stderr)
-            }
-        };
-        if probe_output.0.success() {
-            return Ok(path);
-        }
-        let stderr = String::from_utf8_lossy(&probe_output.1);
-        let message = if stderr.starts_with("bwrap:") {
-            explained_bwrap_stderr(&stderr)
-        } else {
-            bwrap_unavailable()
-        };
-        Err(with_userns_restriction_note(
-            message,
-            &stderr,
-            apparmor_restricts_userns(),
-        ))
-    }) {
+    };
+    match verdict {
         Ok(path) => Ok(path.as_path()),
         Err(message) => Err(io::Error::new(io::ErrorKind::Unsupported, message.clone())),
     }
 }
 
-fn supervise_output_status(command: &mut Command, activity: &StoreActivity) -> bool {
-    crate::kernel::supervise::local_output(command, activity)
-        .map(|output| output.status.success())
-        .unwrap_or(false)
+/// An error from a probe child: a verdict (the sandbox is unavailable,
+/// for this reason), or the interrupt that stopped tog, passed through.
+fn probe_failure(error: io::Error) -> io::Result<String> {
+    if crate::kernel::supervise::stop_signal(&error).is_some() {
+        return Err(error);
+    }
+    Ok(error.to_string())
+}
+
+// Reviewed site (tests/architecture.rs): `None` arm of `Option<&StoreActivity>`: no store is involved.
+#[allow(clippy::disallowed_methods)]
+fn run_preflight(activity: Option<&StoreActivity>) -> io::Result<Result<PathBuf, String>> {
+    let Some(path) = find_bwrap() else {
+        return Ok(Err(bwrap_unavailable()));
+    };
+    let mut version_command = match bwrap_command(&path) {
+        Ok(command) => command,
+        Err(error) => return Ok(Err(error.to_string())),
+    };
+    version_command
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let version_ok = match activity {
+        Some(activity) => supervise_output_status(&mut version_command, activity)?,
+        None => version_command
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false),
+    };
+    if !version_ok {
+        return Ok(Err(bwrap_unavailable()));
+    }
+    // The same system runtime the real sandbox mounts, so the probe
+    // cannot pass or fail on a layout builds never see.
+    let mut probe_args: Vec<OsString> = [
+        "--unshare-user",
+        "--unshare-net",
+        "--unshare-pid",
+        "--unshare-ipc",
+        "--unshare-uts",
+        "--hostname",
+        "tog",
+        "--unshare-cgroup-try",
+        "--die-with-parent",
+        "--new-session",
+        "--clearenv",
+    ]
+    .into_iter()
+    .map(OsString::from)
+    .collect();
+    match system_root_args(Path::new("/")) {
+        Ok(args) => probe_args.extend(args),
+        Err(error) => return Ok(Err(error.to_string())),
+    }
+    probe_args.extend(
+        ["--dev", "/dev", "--proc", "/proc", PROBE_TARGET]
+            .into_iter()
+            .map(OsString::from),
+    );
+    let mut probe_command = match bwrap_command(&path) {
+        Ok(command) => command,
+        Err(error) => return Ok(Err(error.to_string())),
+    };
+    probe_command
+        .args(probe_args)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped());
+    let output = match activity {
+        Some(activity) => crate::kernel::supervise::local_output(&mut probe_command, activity),
+        None => probe_command.output(),
+    };
+    let output = match output {
+        Ok(output) => output,
+        Err(error) => return probe_failure(error).map(Err),
+    };
+    if output.status.success() {
+        return Ok(Ok(path));
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let message = if stderr.starts_with("bwrap:") {
+        explained_bwrap_stderr(&stderr)
+    } else {
+        bwrap_unavailable()
+    };
+    Ok(Err(with_userns_restriction_note(
+        message,
+        &stderr,
+        apparmor_restricts_userns(),
+    )))
+}
+
+/// Whether the supervised child succeeded. A failure to run it is `false`,
+/// except an interrupt, which is returned.
+fn supervise_output_status(command: &mut Command, activity: &StoreActivity) -> io::Result<bool> {
+    match crate::kernel::supervise::local_output(command, activity) {
+        Ok(output) => Ok(output.status.success()),
+        Err(error) => probe_failure(error).map(|_| false),
+    }
 }
 
 fn find_bwrap() -> Option<PathBuf> {
@@ -1285,6 +1315,24 @@ pub(crate) fn push_setenv(args: &mut Vec<OsString>, key: &str, value: impl AsRef
 
 #[cfg(test)]
 mod tests {
+    /// An interrupt during the probe is returned as the interrupt, not
+    /// turned into a cached "bwrap unavailable" verdict (#289).
+    #[test]
+    fn an_interrupted_probe_is_no_verdict() {
+        use std::os::unix::process::ExitStatusExt;
+        let interrupt = io::Error::new(
+            io::ErrorKind::Interrupted,
+            crate::kernel::supervise::Interrupted {
+                signal: libc::SIGINT,
+                status: std::process::ExitStatus::from_raw(libc::SIGINT),
+            },
+        );
+        let error = probe_failure(interrupt).unwrap_err();
+        assert!(crate::kernel::supervise::interrupted(&error).is_some());
+        let other = io::Error::new(io::ErrorKind::NotFound, "no such file");
+        assert_eq!(probe_failure(other).unwrap(), "no such file");
+    }
+
     use super::*;
     use crate::kernel::testutil::TempDir;
     use std::collections::BTreeSet;
