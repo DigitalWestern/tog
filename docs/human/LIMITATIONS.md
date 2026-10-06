@@ -167,11 +167,6 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   reads or writes the store. `tog store path` and `tog doctor` still report on it, and
   `tog gc --reset` empties it (the download cache is kept), after which every project
   syncs again. Nothing carries old objects across a format change.
-- **`cargo test -- --ignored` still runs single-threaded** (`--test-threads=1` in README.md
-  and heavy.yml). The supervisor no longer needs it: any number of children can be supervised
-  at once in one process (#57). No parallel run of the end-to-end suites has yet checked
-  whether they share other state (`$HOME`, registries, scratch stores), so the flag stays
-  until one has.
 - **Unpinned host build inputs.** The Linux host C toolchain (gcc, binutils, glibc headers)
   and the macOS Xcode/clang/SDK are not in build identity — two hosts can produce different
   "identical" objects. The Linux OTP artifact needs glibc 2.43 and host `libcrypto.so.3`.
