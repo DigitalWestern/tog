@@ -194,6 +194,10 @@ impl Tailor for Go {
         go::build_sandboxed(ctx.platform, &ctx.activity, root, &go_obj, &modcache, args)
     }
 
+    fn runtime_programs(&self) -> &'static [&'static str] {
+        &["go"]
+    }
+
     fn run_env(
         &self,
         ctx: &Context,

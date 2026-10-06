@@ -412,6 +412,10 @@ and the next run realizes it again. A package.json script named `fmt` wins and r
 nearest projected root (the closest ancestor with `.tog/closures/`). A
 package.json script of the same name wins over an executable on PATH and
 runs with the npm lifecycle environment; the exit code passes through.
+The projected prefixes come first and the host PATH after them, but the
+runtime of an ecosystem the project has (`python`, `node`, `ruby`, `go`,
+`mix`, `dotnet`, `cargo`) named bare comes from the prefixes or not at all:
+`tog run node` in a Node project never runs the host's `node`.
 `tog <script>` is the short form for any first word that is not a
 built-in command, and a built-in always wins (`tog build` is the
 sandboxed build, never a script named build; `tog run build` reaches the

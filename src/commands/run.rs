@@ -10,6 +10,8 @@ use crate::kernel::context::Context;
 use crate::kernel::supervise;
 use crate::tailors::{self, ScriptRun};
 use std::io;
+use std::os::unix::fs::PermissionsExt;
+use std::path::Path;
 
 /// Why a resolved package.json script may not run in `dir`: the first
 /// projection there that forbids it (`Tailor::refused_package_script`).
@@ -53,6 +55,35 @@ pub(crate) fn refused_command(cmd: &[String]) -> Option<String> {
 
 /// The project script `cmd` names in a projection under `dir`: the first
 /// tailor's `Tailor::projected_script`.
+/// Why `program` cannot run: it is the runtime of an ecosystem the project
+/// at `dir` has (`node` in a Node project), named bare, and no `prefix`
+/// entry provides it, so the host's would run in its place.
+fn unprovided_runtime(dir: &Path, program: &str, prefix: &[String]) -> io::Result<Option<String>> {
+    if program.contains('/') {
+        return Ok(None);
+    }
+    let Some(tailor) = tailors::detected(dir)?
+        .into_iter()
+        .find(|tailor| tailor.runtime_programs().contains(&program))
+    else {
+        return Ok(None);
+    };
+    let provided = prefix.iter().any(|entry| {
+        Path::new(entry)
+            .join(program)
+            .metadata()
+            .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+    });
+    Ok((!provided).then(|| {
+        format!(
+            "'{program}' is the {} runtime, but the project's environment does not provide it, \
+             and tog does not run the host's in its place; run 'tog' to sync it, or 'tog doctor' \
+             if a sync leaves it missing",
+            tailor.id()
+        )
+    }))
+}
+
 fn projected_script(
     dir: &std::path::Path,
     cwd: &std::path::Path,
@@ -105,6 +136,9 @@ pub fn run(ctx: &Context, cmd: &[String], frozen: bool) -> io::Result<i32> {
                 dir.display()
             ),
         ));
+    }
+    if let Some(refusal) = unprovided_runtime(&dir, &cmd[0], &prefix)? {
+        return Err(io::Error::new(io::ErrorKind::NotFound, refusal));
     }
     let path = std::env::var("PATH").unwrap_or_default();
     prefix.push(path);
@@ -186,6 +220,41 @@ fn run_users_command(
 mod tests {
     use super::*;
     use crate::kernel::testutil::TempDir;
+
+    /// A runtime of an ecosystem the project has comes from the project's
+    /// prefixes or not at all: never the host's after them.
+    #[test]
+    fn a_projected_ecosystems_runtime_never_falls_through_to_the_host() {
+        let project = TempDir::new();
+        std::fs::write(project.0.join("package.json"), r#"{"name": "p"}"#).unwrap();
+        let bin = TempDir::new();
+        let prefix = vec![bin.0.to_string_lossy().into_owned()];
+        let why = unprovided_runtime(&project.0, "node", &prefix)
+            .unwrap()
+            .unwrap();
+        assert!(why.contains("'node' is the node runtime"), "{why}");
+        assert!(why.contains("does not run the host's"), "{why}");
+        // A file named like the runtime that cannot be executed is not it.
+        let node = bin.0.join("node");
+        std::fs::write(&node, "").unwrap();
+        assert!(unprovided_runtime(&project.0, "node", &prefix)
+            .unwrap()
+            .is_some());
+        std::fs::set_permissions(&node, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(
+            unprovided_runtime(&project.0, "node", &prefix).unwrap(),
+            None
+        );
+        // Another ecosystem's runtime, any other program, and an explicit
+        // path are the user's to name.
+        for program in ["python", "git", "/usr/bin/node", "./node"] {
+            assert_eq!(
+                unprovided_runtime(&project.0, program, &[]).unwrap(),
+                None,
+                "{program}"
+            );
+        }
+    }
 
     fn refusal(words: &[&str]) -> Option<String> {
         refused_command(&words.iter().map(|w| w.to_string()).collect::<Vec<_>>())

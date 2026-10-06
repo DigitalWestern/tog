@@ -399,6 +399,10 @@ impl Tailor for Node {
         }))
     }
 
+    fn runtime_programs(&self) -> &'static [&'static str] {
+        &["node"]
+    }
+
     fn run_env(
         &self,
         ctx: &Context,

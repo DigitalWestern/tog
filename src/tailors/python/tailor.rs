@@ -168,6 +168,10 @@ impl Tailor for Python {
         python::run_refusal::refused_command(cmd)
     }
 
+    fn runtime_programs(&self) -> &'static [&'static str] {
+        &["python", "python3"]
+    }
+
     fn run_env(
         &self,
         _ctx: &Context,

@@ -126,6 +126,10 @@ impl Tailor for Ruby {
         Ok(true)
     }
 
+    fn runtime_programs(&self) -> &'static [&'static str] {
+        &["ruby"]
+    }
+
     fn run_env(
         &self,
         ctx: &Context,
