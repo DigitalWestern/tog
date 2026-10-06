@@ -1200,6 +1200,36 @@ pub fn project_go_env(
     crate::comforter::write_closure(project, "go", body, &store, activity, refs, attribution)
 }
 
+/// The caches a go run writes, each a fresh directory under `scratch`, so
+/// nothing of the host's GOCACHE, GOPATH or temporary directory is read
+/// or written.
+fn scratch_caches(scratch: &Path) -> io::Result<Vec<(String, String)>> {
+    let mut env = Vec::new();
+    for (key, sub) in [
+        ("GOCACHE", "gocache"),
+        ("GOTMPDIR", "gotmp"),
+        ("GOPATH", "gopath"),
+    ] {
+        let dir = scratch.join(sub);
+        fs::create_dir_all(&dir)?;
+        env.push((key.to_string(), dir.display().to_string()));
+    }
+    Ok(env)
+}
+
+/// Env for a lone file (`tog t.go` with no Go project): [`go_env`] offline,
+/// every cache under `scratch`, and module mode off, so a go.mod above the
+/// file does not apply and nothing but the standard library resolves. The
+/// scratch module cache is empty and stays so with `GOPROXY=off`.
+pub fn lone_env(go_obj: &Path, scratch: &Path) -> io::Result<Vec<(String, String)>> {
+    let modcache = scratch.join("gomodcache");
+    fs::create_dir_all(&modcache)?;
+    let mut env = go_env(go_obj, &modcache, true);
+    env.extend(scratch_caches(scratch)?);
+    env.push(("GO111MODULE".to_string(), "off".to_string()));
+    Ok(env)
+}
+
 /// Sandboxed `go build`: network denied, project READ-ONLY — outputs are
 /// staged in scratch and moved into the project by tog afterwards.
 ///
@@ -1247,9 +1277,8 @@ pub fn build_sandboxed(
     store.require_activity(activity, "go build")?;
     let scratch = store.stage_with_activity(activity)?;
     let outdir = scratch.join("out");
-    for sub in ["out", "gocache", "gotmp", "gopath"] {
-        fs::create_dir_all(scratch.join(sub))?;
-    }
+    fs::create_dir_all(&outdir)?;
+    let caches = scratch_caches(&scratch)?;
     let mut argv = vec![
         go_obj.join("bin/go").display().to_string(),
         "build".to_string(),
@@ -1258,18 +1287,7 @@ pub fn build_sandboxed(
         format!("{}/", outdir.display()),
     ];
     let mut env = go_env(&go_obj, &modcache_obj, true);
-    env.push((
-        "GOCACHE".to_string(),
-        scratch.join("gocache").display().to_string(),
-    ));
-    env.push((
-        "GOTMPDIR".to_string(),
-        scratch.join("gotmp").display().to_string(),
-    ));
-    env.push((
-        "GOPATH".to_string(),
-        scratch.join("gopath").display().to_string(),
-    ));
+    env.extend(caches);
     let env: Vec<(String, String)> = env.into_iter().filter(|(_, v)| !v.is_empty()).collect();
     argv.extend(args.iter().cloned());
     // Default package is "." (go's own default) — never "./...": recursing
