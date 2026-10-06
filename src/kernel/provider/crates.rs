@@ -1013,7 +1013,7 @@ mod tests {
         );
         fs::remove_file(tree.join("src/passwd")).unwrap();
 
-        let _socket = std::os::unix::net::UnixListener::bind(tree.join("sock")).unwrap();
+        let _socket = crate::kernel::testutil::bind_socket(&tree.join("sock"));
         let error = inspect_crate(&tree, &hard_link_crate()).unwrap_err();
         assert!(
             error.to_string().contains("hostile special entry at sock"),
