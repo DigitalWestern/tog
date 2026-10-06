@@ -125,7 +125,6 @@ None open.
 
 
 - **Provider selection checks (#509).** Share recipe, runtime, and digest checks in the remaining CPython, Rust, and Rust-path providers.
-- **#556: archive link and `read_member` follow-ups from #542 and #543.** `read_member` follows links without `validate`'s rules, two refusals missing from the docs, missing tests, stale comments. One checklist.
 - **#557: what wakes the heavy suite (#546, #547).** Zip extraction and git-source packing are unwatched, the `kernel/` exemption is wider than the gate, two label gaps. A CI-cost decision. One checklist.
 - **#558: test and doc gaps from the review of #535 to #541.** A wrong file name in a Rust refusal, dead-code leftovers, a test that fakes its refusal, line counts, the toolchain guard's ancestor matching. One checklist.
 - **#559: host fallback and host view follow-ups from #549 to #551.** No e2e for a Ruby gem that really falls back, the npm exception detail, clang under `/usr/lib/llvm-<N>`, `realpath` to the uncurated copy, lone `lib*.so` symlinks. One checklist.

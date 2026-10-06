@@ -1122,9 +1122,11 @@ pub(crate) fn extract_validated_with_activity_and_options(
 /// the `tar -xO` use (a manifest read out of an sdist), entirely in
 /// process. No tar runs, so there is no `tar -t` cross-check either: that
 /// check makes the reader and an extracting tar agree, and nothing is
-/// extracted here. The capturing pass still reads every header and
-/// refuses every layout `list` refuses. `member` is the exact stored name;
-/// `cap` bounds the member's declared size.
+/// extracted here. The capturing pass still reads every header, and
+/// refuses every layout the in-process reader refuses for `list`. A hard
+/// link is followed only once it passes the link rules extraction applies.
+/// `member` is the exact stored name; `cap` bounds the member's declared
+/// size.
 pub fn read_member(
     archive: &Path,
     compression: Compression,
@@ -1135,14 +1137,17 @@ pub fn read_member(
     if let Some(bytes) = wanted {
         return Ok(bytes);
     }
-    // A hard link reads as the file it names: one more pass captures that
-    // member, which must itself be a regular file.
-    let target = entries
+    // A hard link reads as the file it names, under extraction's rules: an
+    // earlier regular file, not itself, neither written twice. One more
+    // pass captures that member by its stored name.
+    let link = entries
         .iter()
-        .find(|entry| entry.name == member && entry.kind == EntryKind::HardLink)
-        .and_then(|entry| entry.link.as_deref());
-    let wanted = match target {
-        Some(target) => capture(archive, compression, target, cap)?.1,
+        .find(|entry| entry.name == member && entry.kind == EntryKind::HardLink);
+    let wanted = match link {
+        Some(link) => {
+            let target = validate::hard_link_target(&entries, link)?;
+            capture(archive, compression, target, cap)?.1
+        }
         None => None,
     };
     wanted.ok_or_else(|| {
@@ -2801,6 +2806,61 @@ mod tests {
         // The target's own size cap still applies through the link.
         let error = read_member(&archive, Compression::None, "pkg/sub/b", 2).expect_err("cap");
         assert!(error.to_string().contains("read cap"), "{error}");
+    }
+
+    /// `read_member` follows a hard link only under extraction's rules: a
+    /// target that comes later, is written twice, or is the link itself is
+    /// refused, and a target spelled `pkg/./a` or `pkg/a/` is the member
+    /// stored as `pkg/a` (#556).
+    #[test]
+    fn read_member_follows_a_hard_link_only_as_extraction_would() {
+        let temp = temp_dir("read-member-links");
+        let read = |name: &str, members: &[Vec<u8>]| {
+            let archive = temp.0.join(name);
+            write_tar(&archive, members);
+            read_member(&archive, Compression::None, "pkg/b", 1 << 20)
+        };
+        for (name, target) in [("dot", "pkg/./a"), ("slash", "pkg/a/")] {
+            let bytes = read(
+                name,
+                &[
+                    ustar("pkg/a", b'0', "", b"shared"),
+                    ustar("pkg/b", b'1', target, b""),
+                ],
+            )
+            .unwrap_or_else(|error| panic!("{target}: {error}"));
+            assert_eq!(bytes, b"shared", "{target}");
+        }
+        for (name, members, reason) in [
+            (
+                "later",
+                vec![
+                    ustar("pkg/b", b'1', "pkg/a", b""),
+                    ustar("pkg/a", b'0', "", b"later"),
+                ],
+                "not an earlier regular file",
+            ),
+            (
+                "twice",
+                vec![
+                    ustar("pkg/a", b'0', "", b"first"),
+                    ustar("pkg/b", b'1', "pkg/a", b""),
+                    ustar("pkg/a", b'0', "", b"second"),
+                ],
+                "written more than once",
+            ),
+            (
+                "itself",
+                vec![
+                    ustar("pkg/a", b'0', "", b"x"),
+                    ustar("pkg/b", b'1', "pkg/b", b""),
+                ],
+                "names itself",
+            ),
+        ] {
+            let error = read(name, &members).expect_err(name);
+            assert!(error.to_string().contains(reason), "{name}: {error}");
+        }
     }
 
     #[test]
