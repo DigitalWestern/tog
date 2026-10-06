@@ -86,7 +86,6 @@ None open.
   - #243 sandbox: the macOS Seatbelt profile reads all of /opt, its timezone rule is dead, and CI never runs it.
 - **Found in the #316 review (2026-09-26).** One issue and one PR each:
   - #321 tests: kernel_smoke realizes against the developer's own store, so a local run can pass on cached objects.
-  - #319 archive: read_member runs a tar -t cross-check it does not need.
 - **Found in the #323 review (2026-09-26).** One issue and one PR each:
   - #324 ci: adding the heavy label during a path-triggered heavy run restarts it on the same commit.
   - #325 ci: tailor changes to extraction do not trigger the heavy suite on their own.

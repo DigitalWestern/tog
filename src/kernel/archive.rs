@@ -1119,46 +1119,18 @@ pub(crate) fn extract_validated_with_activity_and_options(
 }
 
 /// Read one regular-file member's bytes without writing anything to disk:
-/// the `tar -xO` use (a manifest read out of an sdist) without a second
-/// tar invocation whose flags the environment could shift. The archive is
-/// still listed and cross-checked first, so the bytes come from the same
-/// modelled stream an extraction would see. `member` is the exact stored
-/// name from `list`; `cap` bounds the member's declared size.
+/// the `tar -xO` use (a manifest read out of an sdist), entirely in
+/// process. No tar runs, so there is no `tar -t` cross-check either: that
+/// check makes the reader and an extracting tar agree, and nothing is
+/// extracted here. The capturing pass still reads every header and
+/// refuses every layout `list` refuses. `member` is the exact stored name;
+/// `cap` bounds the member's declared size.
 pub fn read_member(
     archive: &Path,
     compression: Compression,
     member: &str,
     cap: u64,
 ) -> io::Result<Vec<u8>> {
-    read_member_inner(archive, compression, member, cap, None)
-}
-
-/// Store-consuming single-member read. The caller's activity lease is
-/// borrowed for the whole read, so GC cannot observe the store as idle.
-pub(crate) fn read_member_with_activity(
-    activity: &StoreActivity,
-    archive: &Path,
-    compression: Compression,
-    member: &str,
-    cap: u64,
-) -> io::Result<Vec<u8>> {
-    read_member_inner(archive, compression, member, cap, Some(activity))
-}
-
-fn read_member_inner(
-    archive: &Path,
-    compression: Compression,
-    member: &str,
-    cap: u64,
-    activity: Option<&StoreActivity>,
-) -> io::Result<Vec<u8>> {
-    // The listing cross-checks the header reader against the tar that
-    // would perform an extraction; a disagreement refuses before any
-    // member bytes are trusted.
-    match activity {
-        Some(activity) => list_with_activity(activity, archive, compression)?,
-        None => list(archive, compression)?,
-    };
     let (entries, wanted) = capture(archive, compression, member, cap)?;
     if let Some(bytes) = wanted {
         return Ok(bytes);

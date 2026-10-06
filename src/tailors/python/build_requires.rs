@@ -194,12 +194,7 @@ fn root_relative(entry: &str, root: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-fn archive_file(
-    path: &Path,
-    kind: ArchiveKind,
-    member: &str,
-    activity: Option<&StoreActivity>,
-) -> io::Result<Vec<u8>> {
+fn archive_file(path: &Path, kind: ArchiveKind, member: &str) -> io::Result<Vec<u8>> {
     match kind {
         ArchiveKind::TarGz => {
             // One manifest read, not an extraction: the bytes come from the
@@ -207,21 +202,12 @@ fn archive_file(
             // 16 MiB covers any real manifest; anything larger is refused
             // rather than buffered.
             const MEMBER_CAP: u64 = 16 << 20;
-            let bytes = match activity {
-                Some(activity) => crate::kernel::archive::read_member_with_activity(
-                    activity,
-                    path,
-                    crate::kernel::archive::Compression::Gzip,
-                    member,
-                    MEMBER_CAP,
-                ),
-                None => crate::kernel::archive::read_member(
-                    path,
-                    crate::kernel::archive::Compression::Gzip,
-                    member,
-                    MEMBER_CAP,
-                ),
-            }
+            let bytes = crate::kernel::archive::read_member(
+                path,
+                crate::kernel::archive::Compression::Gzip,
+                member,
+                MEMBER_CAP,
+            )
             .map_err(|e| invalid(format!("read {member} from {}: {e}", path.display())))?;
             Ok(bytes)
         }
@@ -449,7 +435,7 @@ fn inspect_sdist_inner(path: &Path, activity: Option<&StoreActivity>) -> io::Res
         .find(|entry| entry.normalized == pyproject_member);
     let (requires, backend, explicit_manifest) = if let Some(entry) = pyproject_entry {
         parse_pyproject(
-            &archive_file(path, kind, &entry.original, activity)?,
+            &archive_file(path, kind, &entry.original)?,
             &pyproject_member,
         )?
     } else {
