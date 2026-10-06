@@ -22,6 +22,49 @@ fn run(cwd: &Path, home: &Path, store: &Path, args: &[&str]) -> Output {
         .unwrap()
 }
 
+/// A Node project below a directory tog may search but not list (mode
+/// 0111) syncs and runs: every ancestor walk steps through that directory
+/// by descriptor instead of listing it (#480, #527).
+#[test]
+#[ignore]
+fn npm_sync_and_run_under_a_search_only_parent() {
+    use std::os::unix::fs::PermissionsExt;
+    struct Restore<'a>(&'a Path);
+    impl Drop for Restore<'_> {
+        fn drop(&mut self) {
+            let _ = fs::set_permissions(self.0, fs::Permissions::from_mode(0o755));
+        }
+    }
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let temp = TempDir::new("npm-search-only");
+    let scratch = temp.path();
+    let store = warm_store(&temp);
+    let parent = scratch.join("search-only");
+    let project = parent.join("proj");
+    copy_tree(&root.join("tests/fixtures/proj-npm"), &project);
+    fs::set_permissions(&parent, fs::Permissions::from_mode(0o111)).unwrap();
+    // Before the scratch directory goes, so it can be removed.
+    let _restore = Restore(&parent);
+    assert!(fs::read_dir(&parent).is_err(), "the parent is not listable");
+
+    assert_ok(
+        run(&project, scratch, &store, &["sync"]),
+        "sync under a search-only parent",
+    );
+    let check = run(
+        &project,
+        scratch,
+        &store,
+        &[
+            "run",
+            "node",
+            "-e",
+            "if (!require('is-odd')(3)) process.exit(1)",
+        ],
+    );
+    assert_ok(check, "is-odd under a search-only parent");
+}
+
 #[test]
 #[ignore]
 fn pnpm_and_yarn_lockfiles_import_end_to_end() {
