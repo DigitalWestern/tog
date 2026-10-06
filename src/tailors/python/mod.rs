@@ -17,7 +17,6 @@ pub mod run_refusal;
 mod sdist_view;
 pub mod tailor;
 mod unpack;
-pub mod wheel;
 
 use crate::kernel::activity::StoreActivity;
 use crate::kernel::pep440::canonical_release_len;

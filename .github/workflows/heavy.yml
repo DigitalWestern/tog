@@ -10,7 +10,7 @@
 # `gate` job below:
 #   - the PR changes a file listed in `gate` (tar extraction, downloads,
 #     the sandbox, the toolchain providers and catalogs, each tailor's
-#     unpack.rs, self-update, Cargo.lock, or the heavy suite itself). Real toolchain archives carry shapes
+#     unpack.rs or unpack/, Go's zip hash, self-update, Cargo.lock, or the heavy suite itself). Real toolchain archives carry shapes
 #     no fixture had: #316 was green in ci.yml and broke 15 targets here.
 #   - the PR has the `heavy` label. Adding it starts a run (unless the
 #     files above already woke the suite and that run for this commit is
@@ -81,11 +81,12 @@ jobs:
           # the toolchain providers that extract real archives, the
           # catalogs that pin those archives, Cargo.lock (the decompression
           # crates), and the heavy suite itself. The tailors and `tog
-          # self-update` extract too: each tailor keeps its archive calls in
-          # its own unpack.rs, which tests/architecture.rs enforces, so
-          # those files and selfupdate.rs are watched, not every tailor
-          # file (#325).
-          watched='^(src/kernel/(archive|fetch|sandbox)[^/]*|src/kernel/(archive|fetch|sandbox)/.*|src/kernel/provider/.*|src/tailors/[^/]+/unpack\.rs|src/commands/selfupdate\.rs|src/.*catalog\.toml|Cargo\.lock|\.github/workflows/heavy\.yml|tests/acceptance\.sh)$'
+          # self-update` extract too: each tailor keeps its archive, zip and
+          # unzip calls in its own unpack.rs (or unpack/), which
+          # tests/architecture.rs enforces against this regex, so those
+          # files and selfupdate.rs are watched, not every tailor file
+          # (#325, #557). dirhash.rs hashes Go module zips.
+          watched='^(src/kernel/(archive|dirhash|fetch|sandbox)[^/]*|src/kernel/(archive|dirhash|fetch|sandbox)/.*|src/kernel/provider/.*|src/tailors/[^/]+/unpack(\.rs|/.*)|src/commands/selfupdate\.rs|src/.*catalog\.toml|Cargo\.lock|\.github/workflows/heavy\.yml|tests/acceptance\.sh)$'
           tests=""
           # Sets `run` (and `tests`) from the PR's files alone, the way a
           # push decides. A renamed file counts under its old name too. If

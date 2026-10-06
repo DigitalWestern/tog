@@ -8,6 +8,15 @@
 # that proved nothing. The weekly and by-hand runs have no PR and are left
 # alone.
 #
+# A run that proved nothing (acceptance failed, was cancelled or skipped)
+# may be one a `heavy` label deferred to: heavy.yml's gate does not start
+# a second run while one for the commit is queued or going (#324). When
+# that run fails, or was only another label's run with every job skipped,
+# the label would sit having started nothing (#557). So once no heavy run
+# for the commit is still going, the newest run whose gate deferred is
+# run again, and its gate now starts the suite. A run only defers while
+# another is going, so this ends.
+#
 # GitHub runs a `workflow_run` workflow from the default branch's copy, so
 # a change to this file takes effect once it is on main.
 name: heavy-unlabel
@@ -22,12 +31,11 @@ permissions:
 
 jobs:
   unlabel:
-    if: >-
-      github.event.workflow_run.event == 'pull_request' &&
-      github.event.workflow_run.conclusion == 'success'
+    if: github.event.workflow_run.event == 'pull_request'
     runs-on: ubuntu-22.04
     permissions:
-      actions: read
+      # actions: write runs a deferred heavy run again.
+      actions: write
       pull-requests: write
     steps:
       - env:
@@ -38,14 +46,11 @@ jobs:
           PR: ${{ github.event.workflow_run.pull_requests[0].number }}
           HEAD_OWNER: ${{ github.event.workflow_run.head_repository.owner.login }}
           HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          CONCLUSION: ${{ github.event.workflow_run.conclusion }}
         run: |
           set -euo pipefail
           acceptance=$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$RUN/jobs" \
             --jq '.jobs[] | select(.name == "acceptance") | .conclusion')
-          if [ "$acceptance" != success ]; then
-            echo "acceptance did not pass in run $RUN ('$acceptance'); the label stays"
-            exit 0
-          fi
           # GitHub leaves pull_requests empty in some cases; find the PR by
           # its branch then.
           if [ -z "$PR" ]; then
@@ -69,6 +74,34 @@ jobs:
           labels=$(gh api --paginate "repos/$GITHUB_REPOSITORY/issues/$PR/labels" --jq '.[].name')
           if ! grep -qx heavy <<< "$labels"; then
             echo "#$PR has no heavy label"
+            exit 0
+          fi
+          if [ "$CONCLUSION" != success ] || [ "$acceptance" != success ]; then
+            echo "run $RUN proved nothing ('$CONCLUSION', acceptance '$acceptance'); the label stays"
+            # Any heavy run for this commit still going finishes later and
+            # brings this workflow back; act only once none is.
+            if ! runs=$(gh api --paginate \
+                "repos/$GITHUB_REPOSITORY/actions/workflows/heavy.yml/runs?head_sha=$HEAD_SHA&event=pull_request&per_page=100" \
+                --jq '.workflow_runs[] | "\(.id) \(.status)"'); then
+              echo "the runs for $HEAD_SHA could not be listed; nothing run again"
+              exit 0
+            fi
+            if grep -v ' completed$' <<< "$runs" | grep -q .; then
+              echo "a heavy run for $HEAD_SHA is still going"
+              exit 0
+            fi
+            # Newest first, as the API lists them.
+            for id in $(cut -d' ' -f1 <<< "$runs"); do
+              gate=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$id/jobs" \
+                --jq '.jobs[] | select(.name == "gate") | .id' || true)
+              [ -n "$gate" ] || continue
+              log=$(gh api "repos/$GITHUB_REPOSITORY/actions/jobs/$gate/logs" || true)
+              if grep -q 'already queued or running; not starting another' <<< "$log"; then
+                gh api -X POST "repos/$GITHUB_REPOSITORY/actions/runs/$id/rerun" > /dev/null
+                echo "run $id deferred the heavy label to a run that proved nothing; ran it again"
+                exit 0
+              fi
+            done
             exit 0
           fi
           labeled=$(gh api --paginate "repos/$GITHUB_REPOSITORY/issues/$PR/events" \

@@ -11,7 +11,6 @@ use crate::tailors::python::pyselect;
 use std::fs::{self, File};
 use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
-use zip::ZipArchive;
 
 const DEFAULT_REQUIRES: &[&str] = &["setuptools>=40.8.0", "wheel"];
 const DEFAULT_BACKEND: &str = "setuptools.build_meta:__legacy__";
@@ -123,17 +122,11 @@ fn tar_entries(path: &Path, activity: Option<&StoreActivity>) -> io::Result<Vec<
 }
 
 fn zip_entries(path: &Path) -> io::Result<Vec<ArchiveEntry>> {
-    let file = File::open(path)?;
-    let mut archive = ZipArchive::new(file)
-        .map_err(|e| invalid(format!("read {} as zip: {e}", path.display())))?;
     let mut entries = Vec::new();
-    for index in 0..archive.len() {
-        let entry = archive
-            .by_index(index)
-            .map_err(|e| invalid(format!("read zip entry {index}: {e}")))?;
-        if let Some(normalized) = clean_entry(entry.name())? {
+    for original in super::unpack::zip_sdist_names(path)? {
+        if let Some(normalized) = clean_entry(&original)? {
             entries.push(ArchiveEntry {
-                original: entry.name().to_string(),
+                original,
                 normalized,
             });
         }
@@ -200,17 +193,7 @@ fn archive_file(path: &Path, kind: ArchiveKind, member: &str) -> io::Result<Vec<
                 .map_err(|e| invalid(format!("read {member} from {}: {e}", path.display())))?;
             Ok(bytes)
         }
-        ArchiveKind::Zip => {
-            let file = File::open(path)?;
-            let mut archive = ZipArchive::new(file)
-                .map_err(|e| invalid(format!("read {} as zip: {e}", path.display())))?;
-            let mut entry = archive
-                .by_name(member)
-                .map_err(|e| invalid(format!("read {member} from zip: {e}")))?;
-            let mut bytes = Vec::new();
-            entry.read_to_end(&mut bytes)?;
-            Ok(bytes)
-        }
+        ArchiveKind::Zip => super::unpack::read_zip_sdist_member(path, member),
     }
 }
 
@@ -535,39 +518,9 @@ fn extract_sdist_inner(
                 io::Error::new(e.kind(), format!("extract {}: {e}", path.display()))
             })?;
         }
-        ArchiveKind::Zip => {
-            let file = File::open(path)?;
-            let mut archive = ZipArchive::new(file)
-                .map_err(|e| invalid(format!("read {} as zip: {e}", path.display())))?;
-            for index in 0..archive.len() {
-                let mut entry = archive
-                    .by_index(index)
-                    .map_err(|e| invalid(format!("read zip entry {index}: {e}")))?;
-                if entry.is_symlink() {
-                    return Err(invalid(format!(
-                        "sdist archive contains a symlink entry: {}",
-                        entry.name()
-                    )));
-                }
-                let Some(name) = clean_entry(entry.name())? else {
-                    continue;
-                };
-                let Some(relative) = root_relative(&name, &info.archive_root) else {
-                    continue;
-                };
-                let output = destination.join(&relative);
-                if entry.is_dir() {
-                    fs::create_dir_all(&output)?;
-                    continue;
-                }
-                if let Some(parent) = output.parent() {
-                    fs::create_dir_all(parent)?;
-                }
-                let mut bytes = Vec::new();
-                entry.read_to_end(&mut bytes)?;
-                fs::write(output, bytes)?;
-            }
-        }
+        ArchiveKind::Zip => super::unpack::extract_zip_sdist(path, destination, |name| {
+            Ok(clean_entry(name)?.and_then(|name| root_relative(&name, &info.archive_root)))
+        })?,
     }
     let source = destination.canonicalize()?;
     validate_extracted_links(&source)?;

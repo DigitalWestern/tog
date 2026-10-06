@@ -2298,49 +2298,174 @@ fn the_http_client_scan_sees_every_spelling() {
     }
 }
 
-/// Whether `relative` may name `kernel::archive`: the kernel itself, a
-/// tailor's `unpack.rs`, and `tog self-update`. heavy.yml's `gate` watches
-/// exactly these, so a change to how anything extracts runs the heavy
-/// suite against real archives (#325).
-fn may_name_archive(relative: &str) -> bool {
-    if relative.starts_with("src/kernel/") || relative == "src/commands/selfupdate.rs" {
-        return true;
-    }
-    relative
-        .strip_prefix("src/tailors/")
-        .and_then(|rest| rest.strip_suffix("/unpack.rs"))
-        .is_some_and(|tailor| !tailor.is_empty() && !tailor.contains('/'))
+/// The `watched` regex of heavy.yml's `gate` job: the files whose change
+/// runs the heavy suite against real archives.
+fn gate_watched_regex() -> String {
+    let workflow = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join(".github/workflows/heavy.yml"),
+    )
+    .unwrap();
+    let line = workflow
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("watched='"))
+        .expect("heavy.yml's gate sets watched='<regex>'");
+    line.strip_suffix('\'')
+        .expect("watched='<regex>' on one line")
+        .to_string()
 }
 
-/// The production paths of `text` (the source of `relative`) into
-/// `kernel::archive`.
+/// Which of `paths` the gate's regex matches, evaluated by `grep -E` as
+/// the gate itself does.
+fn gate_watches(paths: &[String]) -> std::collections::BTreeSet<String> {
+    use std::io::Write;
+    let mut child = std::process::Command::new("grep")
+        .arg("-E")
+        .arg("-e")
+        .arg(gate_watched_regex())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("run grep");
+    let mut stdin = child.stdin.take().unwrap();
+    stdin.write_all(paths.join("\n").as_bytes()).unwrap();
+    stdin.write_all(b"\n").unwrap();
+    drop(stdin);
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.code().is_some_and(|code| code <= 1),
+        "grep failed"
+    );
+    String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
+/// Files that read or write archive bytes without waking the heavy suite,
+/// each with its reason.
+const ARCHIVE_GATE_EXEMPT: &[(&str, &str)] = &[(
+    "src/kernel/gitsrc.rs",
+    "hands a tree tog checked out at a pinned commit to \
+     archive::pack_ustar_with_activity, which the gate watches; the file \
+     changes often and its own end-to-end tests run when tests/git*.rs change",
+)];
+
+/// The production sites of `text` (the source of `relative`) that read or
+/// write archive bytes: a path into `kernel::archive` (through `crate::`,
+/// `super::`, an imported `kernel`, or a glob import of `crate::kernel`),
+/// the `zip` crate, or an `unzip` program.
 fn archive_sites(relative: &str, text: &str) -> Vec<String> {
     let module = module_path(Path::new(relative.trim_start_matches("src/")));
-    crate_paths(non_test(text), &module)
+    let tokens = production_tokens(text);
+    // The production code as text again, so `crate_paths` reads paths
+    // after a test module too (`non_test` stops at the first one).
+    let mut production = String::new();
+    let mut after_ident = false;
+    for (token, _) in &tokens {
+        match token {
+            Token::Ident(name) => {
+                if after_ident {
+                    production.push(' ');
+                }
+                production.push_str(name);
+            }
+            Token::Punct(c) => production.push(*c),
+            Token::Str(_) | Token::Lit => production.push_str(" 0 "),
+        }
+        after_ident = matches!(token, Token::Ident(_));
+    }
+    let mut sites: Vec<String> = crate_paths(&production, &module)
         .into_iter()
         .filter(|path| path.len() >= 2 && path[0] == "kernel" && path[1] == "archive")
         .map(|path| path.join("::"))
-        .collect()
+        .collect();
+    let path_at = |index: usize| {
+        is_punct(tokens.get(index + 1).map(|(token, _)| token), ':')
+            && is_punct(tokens.get(index + 2).map(|(token, _)| token), ':')
+    };
+    // A path's first segment: not itself after `::`.
+    let leading = |index: usize| index < 2 || !is_punct(Some(&tokens[index - 1].0), ':');
+    // `use crate::kernel::*;` makes a bare `archive::` the kernel's.
+    let glob_kernel = tokens.windows(7).any(|window| {
+        let shape: Vec<&Token> = window.iter().map(|(token, _)| token).collect();
+        is_ident(Some(shape[0]), "crate")
+            && is_ident(Some(shape[3]), "kernel")
+            && is_punct(Some(shape[6]), '*')
+            && [1, 2, 4, 5].iter().all(|&i| is_punct(Some(shape[i]), ':'))
+    });
+    let in_fn = |owner: &str| {
+        if owner.is_empty() {
+            String::new()
+        } else {
+            format!(" in fn {owner}")
+        }
+    };
+    for (index, (token, owner)) in tokens.iter().enumerate() {
+        match token {
+            Token::Ident(name) if name == "zip" && path_at(index) && leading(index) => {
+                sites.push(format!("zip::{}", in_fn(owner)));
+            }
+            Token::Ident(name)
+                if name == "kernel"
+                    && path_at(index)
+                    && leading(index)
+                    && is_ident(tokens.get(index + 3).map(|(token, _)| token), "archive") =>
+            {
+                sites.push(format!("kernel::archive{}", in_fn(owner)));
+            }
+            Token::Ident(name)
+                if glob_kernel && name == "archive" && path_at(index) && leading(index) =>
+            {
+                sites.push(format!(
+                    "archive:: (glob import of crate::kernel) in fn {owner}"
+                ));
+            }
+            Token::Str(literal) if literal == "unzip" || literal.ends_with("/unzip") => {
+                sites.push(format!("{literal:?}{}", in_fn(owner)));
+            }
+            _ => {}
+        }
+    }
+    sites
 }
 
 #[test]
 fn archive_calls_live_where_the_heavy_gate_looks() {
+    let sources: Vec<(String, String)> = all_sources()
+        .into_iter()
+        .filter(|(relative, _)| relative.starts_with("src/"))
+        .collect();
+    let watched = gate_watches(&sources.iter().map(|(r, _)| r.clone()).collect::<Vec<_>>());
     let mut violations = Vec::new();
-    for (relative, text) in all_sources() {
-        if !relative.starts_with("src/") || may_name_archive(&relative) {
+    for (relative, text) in &sources {
+        if watched.contains(relative)
+            || ARCHIVE_GATE_EXEMPT.iter().any(|(path, _)| path == relative)
+        {
             continue;
         }
-        for path in archive_sites(&relative, &text) {
-            violations.push(format!("{relative}: crate::{path}"));
+        for site in archive_sites(relative, text) {
+            violations.push(format!("{relative}: {site}"));
         }
     }
     assert!(
         violations.is_empty(),
-        "kernel::archive named outside src/kernel/, src/tailors/<tailor>/unpack.rs \
-         and src/commands/selfupdate.rs; move the call into the tailor's unpack.rs \
-         (heavy.yml watches those files):\n  {}",
+        "archive bytes read or written in a file heavy.yml's gate does not watch; \
+         move the call into the tailor's unpack.rs or unpack/ (or a watched kernel \
+         file), so a change to it runs the heavy suite against real archives:\n  {}",
         violations.join("\n  ")
     );
+    for (path, _) in ARCHIVE_GATE_EXEMPT {
+        let text = &sources
+            .iter()
+            .find(|(relative, _)| relative == path)
+            .unwrap_or_else(|| panic!("{path} is exempt but gone"))
+            .1;
+        assert!(
+            !archive_sites(path, text).is_empty() && !watched.contains(*path),
+            "{path} no longer needs its exemption"
+        );
+    }
 }
 
 #[test]
@@ -2350,6 +2475,13 @@ fn the_archive_scan_sees_every_spelling() {
         "use crate::kernel::archive::{self, Compression};",
         "use crate::kernel::{archive, store};",
         "use super::super::kernel::archive::Entry;",
+        "use crate::kernel;\nfn a() { kernel::archive::list(p, c); }",
+        "use crate::kernel::*;\nfn a() { archive::list(p, c); }",
+        "use zip::ZipArchive;",
+        "fn a() { let z = zip::ZipArchive::new(f); }",
+        "fn a() { Command::new(\"/usr/bin/unzip\"); }",
+        "fn a() { Command::new(\"unzip\"); }",
+        "#[cfg(test)]\nmod tests {}\nfn a() { crate::kernel::archive::list(p, c); }",
     ];
     for text in caught {
         assert!(
@@ -2359,8 +2491,10 @@ fn the_archive_scan_sees_every_spelling() {
     }
     let missed = [
         "fn a() { crate::kernel::fetch::download(u); }",
-        "// see archive::list",
-        "#[cfg(test)]\nmod tests { use crate::kernel::archive::list; }",
+        "// see archive::list and zip::ZipArchive",
+        "#[cfg(test)]\nmod tests { use crate::kernel::archive::list; use zip::ZipWriter; }",
+        "use crate::kernel;\nfn a() { archive::list(p, c); }",
+        "fn a() { let x = foo.zip(bar); }",
     ];
     for text in missed {
         assert!(
@@ -2368,9 +2502,31 @@ fn the_archive_scan_sees_every_spelling() {
             "{text}"
         );
     }
-    assert!(may_name_archive("src/tailors/go/unpack.rs"));
-    assert!(may_name_archive("src/kernel/provider/rust.rs"));
-    assert!(!may_name_archive("src/tailors/go/mod.rs"));
-    assert!(!may_name_archive("src/tailors/go/x/unpack.rs"));
-    assert!(!may_name_archive("src/commands/sync.rs"));
+}
+
+#[test]
+fn the_heavy_gate_watches_the_archive_homes() {
+    let paths: Vec<String> = [
+        "src/tailors/go/unpack.rs",
+        "src/tailors/python/unpack/mod.rs",
+        "src/tailors/python/unpack/wheel.rs",
+        "src/kernel/archive.rs",
+        "src/kernel/archive/validate.rs",
+        "src/kernel/dirhash.rs",
+        "src/kernel/provider/rust.rs",
+        "src/commands/selfupdate.rs",
+        "src/tailors/go/mod.rs",
+        "src/tailors/go/x/unpack.rs",
+        "src/commands/sync.rs",
+        "src/kernel/gitsrc.rs",
+    ]
+    .map(str::to_string)
+    .to_vec();
+    let watched = gate_watches(&paths);
+    for path in &paths[..8] {
+        assert!(watched.contains(path), "{path} is not watched");
+    }
+    for path in &paths[8..] {
+        assert!(!watched.contains(path), "{path} is watched");
+    }
 }
