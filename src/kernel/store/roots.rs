@@ -790,6 +790,7 @@ impl Store {
             if !is_regular_file(&stat) {
                 return Err(io::Error::other("the record is not a regular file"));
             }
+            tolerant_read_failpoint(key);
             let (bytes, read) = read_registry_file_at(roots_fd, key.as_bytes(), &path)?;
             if Some(read) != identity {
                 return Err(io::Error::other(
@@ -1063,6 +1064,26 @@ pub(super) fn parse_root_entry(
     })
 }
 
+#[cfg(test)]
+thread_local! {
+    /// A test's hook between the tolerant read's stat of a record and its
+    /// read, so a record can be swapped there deterministically.
+    static TOLERANT_READ_FAILPOINT: std::cell::RefCell<Option<Box<dyn FnMut(&str)>>> =
+        std::cell::RefCell::new(None);
+}
+
+#[cfg(test)]
+fn tolerant_read_failpoint(key: &str) {
+    TOLERANT_READ_FAILPOINT.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().as_mut() {
+            hook(key);
+        }
+    });
+}
+
+#[cfg(not(test))]
+fn tolerant_read_failpoint(_key: &str) {}
+
 /// The bytes of a registry file and the device and inode of the file they
 /// were read from.
 pub(super) fn read_registry_file_at(
@@ -1306,5 +1327,61 @@ mod tests {
             );
             assert_eq!(fs::read(&record).unwrap(), bytes);
         }
+    }
+
+    /// A record replaced between the tolerant read's stat and its read is
+    /// reported unusable, with the identity that was stat'd, even when the
+    /// replacement holds the same bytes: what was read is not the entry
+    /// that was checked.
+    #[test]
+    fn a_record_swapped_between_stat_and_read_is_unusable() {
+        use super::TOLERANT_READ_FAILPOINT;
+        use crate::kernel::store::Store;
+        use crate::kernel::testutil::TempDir;
+        use std::os::unix::fs::MetadataExt as _;
+        use std::{fs, path::PathBuf};
+
+        let temp = TempDir::named("swapped-root");
+        let store = Store::open_at(&temp.0.join("store")).unwrap();
+        let project = temp.0.join("project");
+        fs::create_dir_all(&project).unwrap();
+        crate::kernel::store::register_empty_root_for_test(&store, &project).unwrap();
+        let key = Store::root_key(&project).unwrap();
+        let record = temp.0.join("store/roots").join(&key);
+        let [entry] = store.roots().unwrap().try_into().unwrap();
+        assert!(entry.unusable.is_none(), "{entry:?}");
+        let stat = fs::metadata(&record).unwrap();
+        let original = (stat.dev(), stat.ino());
+
+        let swapped: PathBuf = record.clone();
+        TOLERANT_READ_FAILPOINT.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move |_key: &str| {
+                let bytes = fs::read(&swapped).unwrap();
+                let replacement = swapped.with_file_name("replacement");
+                fs::write(&replacement, bytes).unwrap();
+                fs::rename(&replacement, &swapped).unwrap();
+            }));
+        });
+        let entries = store.roots();
+        TOLERANT_READ_FAILPOINT.with(|hook| *hook.borrow_mut() = None);
+        let [entry] = entries.unwrap().try_into().unwrap();
+        assert_eq!(entry.key, key);
+        assert_eq!(
+            entry.unusable.as_deref(),
+            Some("the record was replaced while it was read"),
+            "{entry:?}"
+        );
+        assert!(entry.record.is_none(), "{entry:?}");
+        assert_eq!(entry.identity, Some(original));
+        let stat = fs::metadata(&record).unwrap();
+        assert_ne!(
+            (stat.dev(), stat.ino()),
+            original,
+            "the swap did not happen"
+        );
+
+        // Unhooked, the replacement reads as the usable record it is.
+        let [entry] = store.roots().unwrap().try_into().unwrap();
+        assert!(entry.unusable.is_none(), "{entry:?}");
     }
 }

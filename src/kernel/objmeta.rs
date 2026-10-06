@@ -100,12 +100,17 @@ impl MetaIndex {
                 Ok(record) => {
                     entries.insert(record.id.clone(), record);
                 }
-                // A record whose content is wrong is one an operator can
-                // drop, so it is reported. A read that failed for another
-                // reason (a permission, a vanished file, a `meta` that
-                // cannot be listed) is not about a record at all, and
-                // stops the read.
-                Err(error) if error.kind() == io::ErrorKind::InvalidData => {
+                // A record whose content is wrong, or that is over the
+                // size cap, is one an operator can drop, so it is reported.
+                // A read that failed for another reason (a permission, a
+                // vanished file, a `meta` that cannot be listed) is not
+                // about a record at all, and stops the read.
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::InvalidData | io::ErrorKind::FileTooLarge
+                    ) =>
+                {
                     unusable.insert(name.to_string_lossy().into_owned(), error.to_string());
                 }
                 Err(error) => return Err(error),
@@ -314,6 +319,10 @@ pub fn read_record_value(id: &str, value: serde_json::Value) -> io::Result<Recor
             "object {id} has unknown evidence marker {evidence}"
         )));
     }
+    // Every reader of a record parses this field, the sweep and
+    // `--drop-object` included, so a record whose exceptions are malformed
+    // is unusable everywhere: a cache hit, a reference and the sweep all
+    // refuse it, and the sweep names it for `--drop-object`.
     let exceptions = match value.get("exceptions") {
         None => Vec::new(),
         Some(list) => serde_json::from_value(list.clone())

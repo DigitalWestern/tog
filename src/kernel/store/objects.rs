@@ -1096,8 +1096,10 @@ mod record_check_tests {
                 .unwrap_err()
                 .to_string();
             assert!(error.contains(expected), "{label}: {error}");
-            // Closure and root references (`ClosureRefs::object_id`) are
-            // admitted through this same check.
+            // `Store::exceptions` reads the record through the same parser.
+            // (`ClosureRefs::object_id` admits closure and root references
+            // through `validate_object_complete` above; it lives in the
+            // comforter layer, so this kernel test does not call it.)
             let error = store.exceptions(&id).unwrap_err().to_string();
             assert!(error.contains(expected), "{label}: {error}");
 
