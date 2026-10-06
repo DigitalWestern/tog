@@ -2596,25 +2596,20 @@ exit 0
             .activity(crate::kernel::activity::ActivityMode::Shared)
             .unwrap();
         let activity = &lease;
-        let beam_id = format!(
-            "{}-beam-{OTP_VERSION}-elixir{ELIXIR_VERSION}",
-            "1".repeat(40)
+        let beam_id =
+            store.publish_bare_test("beam", &format!("{OTP_VERSION}-elixir{ELIXIR_VERSION}"));
+        let deps_id = store.publish_bare_with(
+            &crate::kernel::types::Identity {
+                kind: "test".into(),
+                name: "deps".into(),
+                version: "0".into(),
+                inputs: Default::default(),
+            },
+            |deps| {
+                fs::create_dir_all(deps.join("jason")).unwrap();
+                fs::write(deps.join("jason/mix.exs"), "").unwrap();
+            },
         );
-        let deps_id = format!("{}-deps-0", "2".repeat(40));
-        fs::create_dir_all(store.object_path(&deps_id).join("jason")).unwrap();
-        fs::write(store.object_path(&deps_id).join("jason/mix.exs"), "").unwrap();
-        for id in [&beam_id, &deps_id] {
-            let object = store.object_path(id);
-            fs::create_dir_all(&object).unwrap();
-            let mut permissions = fs::metadata(&object).unwrap().permissions();
-            permissions.set_mode(permissions.mode() & !0o222);
-            fs::set_permissions(&object, permissions).unwrap();
-            fs::write(
-                store.root.join("meta").join(format!("{id}.json")),
-                serde_json::to_vec_pretty(&serde_json::json!({ "id": id })).unwrap(),
-            )
-            .unwrap();
-        }
         let project = temp.0.join("project");
         fs::create_dir_all(&project).unwrap();
         let plan = ElixirPlan {

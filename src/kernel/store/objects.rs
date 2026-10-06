@@ -72,15 +72,12 @@ impl Store {
                 format!("object reference {id} is still writable"),
             ));
         }
-        let (_, value) = crate::kernel::objmeta::read_store_body(self, id).map_err(|error| {
+        // The whole record check, the one a cache hit and the sweep make:
+        // a record whose identity, schema or evidence this tog cannot read
+        // is not a complete object.
+        crate::kernel::objmeta::read_store_record(self, id).map_err(|error| {
             io::Error::new(error.kind(), format!("object reference {id}: {error}"))
         })?;
-        if value.get("id").and_then(serde_json::Value::as_str) != Some(id) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("object reference metadata {id} has a mismatched id"),
-            ));
-        }
         Ok(())
     }
 
@@ -457,20 +454,10 @@ impl Store {
         result
     }
 
-    /// The exceptions `id`'s record carries, from a record opened and parsed
-    /// by objmeta's reader.
+    /// The exceptions `id`'s record carries, from the record objmeta's
+    /// checked reader parsed whole.
     pub fn exceptions(&self, id: &str) -> io::Result<Vec<Exception>> {
-        let path = self.root.join("meta").join(format!("{id}.json"));
-        let (_, meta) = crate::kernel::objmeta::read_store_body(self, id)?;
-        match meta.get("exceptions") {
-            None => Ok(Vec::new()),
-            Some(value) => serde_json::from_value(value.clone()).map_err(|e| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("parse exceptions in {}: {e}", path.display()),
-                )
-            }),
-        }
+        Ok(crate::kernel::objmeta::read_store_record(self, id)?.exceptions)
     }
 }
 
@@ -790,7 +777,6 @@ mod object_id_guard_tests {
 mod meta_reader_tests {
     use super::*;
     use crate::kernel::testutil::TempDir;
-    use std::os::unix::fs::PermissionsExt;
 
     fn published(store: &Store) -> String {
         crate::kernel::objmeta::register_test_kinds();
@@ -800,23 +786,7 @@ mod meta_reader_tests {
             version: "1".into(),
             inputs: Default::default(),
         };
-        let id = identity.object_id();
-        fs::create_dir_all(store.object_path(&id)).unwrap();
-        fs::set_permissions(store.object_path(&id), fs::Permissions::from_mode(0o555)).unwrap();
-        fs::write(
-            store.root.join("meta").join(format!("{id}.json")),
-            serde_json::to_vec(&serde_json::json!({
-                "schema": "object-meta/2",
-                "id": id,
-                "identity": identity,
-                "dependencies": [],
-                "cache_digests": [],
-                "evidence": "explicit",
-            }))
-            .unwrap(),
-        )
-        .unwrap();
-        id
+        store.publish_bare_with(&identity, |_| {})
     }
 
     /// Each reader's answer, on a thread so a reader that blocks on a FIFO
@@ -890,5 +860,124 @@ mod meta_reader_tests {
         // A `meta/` that cannot be opened is no evidence of a crashed
         // publication, so the lookup does not clear the object over it.
         assert_eq!(is_complete, Ok(()));
+    }
+}
+
+/// Every reader that admits an object by its record (a closure or root
+/// reference, the exceptions a cache hit compares) runs objmeta's whole
+/// record check, not a lighter one of its own.
+#[cfg(test)]
+mod record_check_tests {
+    use super::*;
+    use crate::kernel::testutil::TempDir;
+
+    fn store_with_object(label: &str) -> (TempDir, Store, String) {
+        let temp = TempDir::named(label);
+        Store::open_at(&temp.0).unwrap();
+        let store = Store::for_test(temp.0.canonicalize().unwrap());
+        let id = store.publish_bare_test("record-check", "1");
+        (temp, store, id)
+    }
+
+    fn rewrite(store: &Store, id: &str, edit: impl FnOnce(&mut serde_json::Value)) {
+        let path = store.root.join("meta").join(format!("{id}.json"));
+        let mut record: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        edit(&mut record);
+        fs::write(&path, record.to_string()).unwrap();
+    }
+
+    #[test]
+    fn a_reference_to_a_record_the_parser_refuses_is_refused_without_mutation() {
+        type Edit = fn(&mut serde_json::Value);
+        let cases: [(&str, Edit, &str); 5] = [
+            (
+                "identity",
+                |record| record["identity"]["version"] = "2".into(),
+                "identity hashes to a different object id",
+            ),
+            (
+                "schema",
+                |record| record["schema"] = "object-meta/3".into(),
+                "unknown metadata schema object-meta/3",
+            ),
+            (
+                "evidence",
+                |record| {
+                    record.as_object_mut().unwrap().remove("evidence");
+                },
+                "has no evidence marker",
+            ),
+            (
+                "dependencies",
+                |record| record["dependencies"] = serde_json::json!(["not an id"]),
+                "malformed or duplicate dependency",
+            ),
+            (
+                "exceptions",
+                |record| record["exceptions"] = serde_json::json!([{"kind": 1}]),
+                "has malformed exceptions",
+            ),
+        ];
+        for (label, edit, expected) in cases {
+            let (_temp, store, id) = store_with_object(&format!("record-check-{label}"));
+            rewrite(&store, &id, edit);
+            let record = store.root.join("meta").join(format!("{id}.json"));
+            let bytes = fs::read(&record).unwrap();
+            let object_mtime = fs::metadata(store.object_path(&id))
+                .unwrap()
+                .modified()
+                .unwrap();
+            let activity = store.activity(ActivityMode::Shared).unwrap();
+
+            let error = store
+                .validate_object_complete(&activity, &id)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(expected), "{label}: {error}");
+            let error = store.exceptions(&id).unwrap_err().to_string();
+            assert!(error.contains(expected), "{label}: {error}");
+            let error = crate::comforter::ClosureRefs::new()
+                .object_id(&store, &activity, &id)
+                .map(drop)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(expected), "{label}: {error}");
+
+            assert_eq!(fs::read(&record).unwrap(), bytes, "{label}: record changed");
+            assert_eq!(
+                fs::metadata(store.object_path(&id))
+                    .unwrap()
+                    .modified()
+                    .unwrap(),
+                object_mtime,
+                "{label}: the read refreshed the object"
+            );
+            assert!(store.object_path(&id).is_dir(), "{label}: object removed");
+        }
+    }
+
+    #[test]
+    fn exceptions_come_from_the_checked_record() {
+        let (_temp, store, id) = store_with_object("record-check-exceptions");
+        assert_eq!(store.exceptions(&id).unwrap(), Vec::new());
+
+        // A producer that allowed nothing may write no field at all.
+        rewrite(&store, &id, |record| {
+            record.as_object_mut().unwrap().remove("exceptions");
+        });
+        assert_eq!(store.exceptions(&id).unwrap(), Vec::new());
+
+        let exception = Exception {
+            kind: "weak-integrity".into(),
+            subject: "left-pad".into(),
+            detail: "sha1 only".into(),
+        };
+        rewrite(&store, &id, |record| {
+            record["exceptions"] = serde_json::json!([exception]);
+        });
+        assert_eq!(store.exceptions(&id).unwrap(), vec![exception.clone()]);
+        let record = crate::kernel::objmeta::read_store_record(&store, &id).unwrap();
+        assert_eq!(record.exceptions, vec![exception]);
     }
 }

@@ -1540,29 +1540,11 @@ mod tests {
         let selected = selection();
         let go_id = {
             let row = runtime_row(Platform::host().unwrap(), &selected).unwrap();
-            runtime_identity(Platform::host().unwrap(), &row.version, row.digest.hex()).object_id()
+            let identity =
+                runtime_identity(Platform::host().unwrap(), &row.version, row.digest.hex());
+            store.publish_bare_with(&identity, |_| {})
         };
-        let modcache_id = "0000000000000000000000000000000000000000-modcache-0".to_string();
-        for id in [&go_id, &modcache_id] {
-            let object = store.object_path(id);
-            fs::create_dir_all(&object).unwrap();
-            use std::os::unix::fs::PermissionsExt;
-            let mut permissions = fs::metadata(&object).unwrap().permissions();
-            permissions.set_mode(permissions.mode() & !0o222);
-            fs::set_permissions(&object, permissions).unwrap();
-            fs::write(
-                store.root.join("meta").join(format!("{id}.json")),
-                serde_json::to_vec_pretty(&serde_json::json!({
-                    "id": id,
-                    "identity": {"kind": "go", "name": "go", "version": "0", "inputs": {}},
-                    "created": 0,
-                    "exceptions": [],
-                    "refs": []
-                }))
-                .unwrap(),
-            )
-            .unwrap();
-        }
+        let modcache_id = store.publish_bare_test("modcache", "0");
         let project = temp.0.join("project");
         fs::create_dir_all(&project).unwrap();
         let plan = GoPlan {
@@ -1619,29 +1601,11 @@ mod tests {
         let selected = selection();
         let go_id = {
             let row = runtime_row(Platform::host().unwrap(), &selected).unwrap();
-            runtime_identity(Platform::host().unwrap(), &row.version, row.digest.hex()).object_id()
+            let identity =
+                runtime_identity(Platform::host().unwrap(), &row.version, row.digest.hex());
+            store.publish_bare_with(&identity, |_| {})
         };
-        let modcache_id = "0000000000000000000000000000000000000000-modcache-0".to_string();
-        for id in [&go_id, &modcache_id] {
-            let object = store.object_path(id);
-            fs::create_dir_all(&object).unwrap();
-            use std::os::unix::fs::PermissionsExt;
-            let mut permissions = fs::metadata(&object).unwrap().permissions();
-            permissions.set_mode(permissions.mode() & !0o222);
-            fs::set_permissions(&object, permissions).unwrap();
-            fs::write(
-                store.root.join("meta").join(format!("{id}.json")),
-                serde_json::to_vec_pretty(&serde_json::json!({
-                    "id": id,
-                    "identity": {"kind": "go", "name": "go", "version": "0", "inputs": {}},
-                    "created": 0,
-                    "exceptions": [],
-                    "refs": []
-                }))
-                .unwrap(),
-            )
-            .unwrap();
-        }
+        let modcache_id = store.publish_bare_test("modcache", "0");
         let project = temp.0.join("project");
         fs::create_dir_all(&project).unwrap();
         let plan = GoPlan {
@@ -1703,29 +1667,11 @@ mod tests {
         let selected = selection();
         let go_id = {
             let row = runtime_row(Platform::host().unwrap(), &selected).unwrap();
-            runtime_identity(Platform::host().unwrap(), &row.version, row.digest.hex()).object_id()
+            let identity =
+                runtime_identity(Platform::host().unwrap(), &row.version, row.digest.hex());
+            store.publish_bare_with(&identity, |_| {})
         };
-        let modcache_id = "0000000000000000000000000000000000000000-modcache-0".to_string();
-        for id in [&go_id, &modcache_id] {
-            let object = store.object_path(id);
-            fs::create_dir_all(&object).unwrap();
-            use std::os::unix::fs::PermissionsExt;
-            let mut permissions = fs::metadata(&object).unwrap().permissions();
-            permissions.set_mode(permissions.mode() & !0o222);
-            fs::set_permissions(&object, permissions).unwrap();
-            fs::write(
-                store.root.join("meta").join(format!("{id}.json")),
-                serde_json::to_vec_pretty(&serde_json::json!({
-                    "id": id,
-                    "identity": {"kind": "go", "name": "go", "version": "0", "inputs": {}},
-                    "created": 0,
-                    "exceptions": [],
-                    "refs": []
-                }))
-                .unwrap(),
-            )
-            .unwrap();
-        }
+        let modcache_id = store.publish_bare_test("modcache", "0");
         let project = temp.0.join("project");
         fs::create_dir_all(&project).unwrap();
         let root = crate::kernel::fsroot::ProjectRoot::open(&project).unwrap();

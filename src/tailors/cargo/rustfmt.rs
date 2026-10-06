@@ -524,34 +524,35 @@ mod tests {
 
         let selected =
             crate::kernel::toolchain::shipped(&cargo::toolchain_catalog().unwrap()).unwrap();
-        let rust_id = cargo::runtime_object_id(platform, &selected).unwrap();
+        let rust_identity = crate::kernel::provider::rust::identity_of(
+            platform,
+            &crate::kernel::provider::rust::runtime_rows(platform, &selected).unwrap(),
+        );
+        let rust_id = rust_identity.object_id();
+        assert_eq!(
+            rust_id,
+            cargo::runtime_object_id(platform, &selected).unwrap()
+        );
         let row = rustfmt_row(platform, &selected).unwrap();
-        let rustfmt_id = identity_from(
+        let rustfmt_identity = identity_from(
             platform,
             &row.version,
             row.digest.hex(),
             &store.object_path(&rust_id),
         )
-        .unwrap()
-        .object_id();
+        .unwrap();
         // tog finds the workspace itself; `cargo-fmt` formats nothing and
         // succeeds.
-        for (id, script, body) in [
-            (&rust_id, "cargo", "#!/bin/sh\nexit 1\n"),
-            (&rustfmt_id, "cargo-fmt", "#!/bin/sh\nexit 0\n"),
+        for (identity, script, body) in [
+            (&rust_identity, "cargo", "#!/bin/sh\nexit 1\n"),
+            (&rustfmt_identity, "cargo-fmt", "#!/bin/sh\nexit 0\n"),
         ] {
-            let object = store.object_path(id);
-            fs::create_dir_all(object.join("bin")).unwrap();
-            let bin = object.join("bin").join(script);
-            fs::write(&bin, body).unwrap();
-            fs::set_permissions(&bin, fs::Permissions::from_mode(0o555)).unwrap();
-            fs::set_permissions(&object, fs::Permissions::from_mode(0o555)).unwrap();
-            fs::write(
-                store.root.join("meta").join(format!("{id}.json")),
-                serde_json::to_vec_pretty(&serde_json::json!({ "id": id, "exceptions": [] }))
-                    .unwrap(),
-            )
-            .unwrap();
+            store.publish_bare_with(identity, |object| {
+                fs::create_dir_all(object.join("bin")).unwrap();
+                let bin = object.join("bin").join(script);
+                fs::write(&bin, body).unwrap();
+                fs::set_permissions(&bin, fs::Permissions::from_mode(0o555)).unwrap();
+            });
         }
         let project = root.join("project");
         fs::create_dir_all(project.join(".tog/closures")).unwrap();

@@ -2878,7 +2878,20 @@ mod tests {
         let temp = TempStore::new("drop-dependents");
         let store = temp.store();
         let wedged = wedge(&store, "wedged");
-        let dependent = commit(&store, "dependent", Some(&wedged));
+        // A commit refuses a dependency whose record does not check out, so
+        // the dependent is laid out by hand: a store can still hold one
+        // whose dependency was damaged after it was published.
+        let identity = test_identity("dependent", Some(&wedged));
+        let dependent = store.publish_bare_with(&identity, |object| {
+            fs::write(object.join("payload"), "dependent").unwrap();
+        });
+        let mut record = crate::kernel::store::bare_record(&identity);
+        record["dependencies"] = serde_json::json!([wedged]);
+        fs::write(
+            store.root.join("meta").join(format!("{dependent}.json")),
+            record.to_string(),
+        )
+        .unwrap();
         let mut whole_set = [wedged.clone(), dependent.clone()];
         whole_set.sort();
 

@@ -1720,9 +1720,25 @@ mod tests {
     /// A published Python `x` root whose environment object carries
     /// `exceptions` in its metadata: (store, root, object).
     /// The cached projection's object, in the full object-id shape the
-    /// cache check demands.
-    const TEST_ENV: &str = "0123456789abcdef0123456789abcdef01234567-test-env";
-    const TEST_NODE_ENV: &str = "0123456789abcdef0123456789abcdef01234567-test-node-env";
+    /// cache check demands: the id the `test` identity named `test` at
+    /// version `env` (`node-env`) hashes to, which [`test_record`] checks.
+    const TEST_ENV: &str = "31c924c96f4ad8da436dead232ac5041626c3fe0-test-env";
+    const TEST_NODE_ENV: &str = "c7cb412f1fde50fb7e1c1b24ac0517882f272141-test-node-env";
+
+    /// The whole metadata record of the placeholder object `id`, carrying
+    /// `exceptions`.
+    fn test_record(id: &str, exceptions: &[serde_json::Value]) -> String {
+        let identity = crate::kernel::types::Identity {
+            kind: "test".into(),
+            name: "test".into(),
+            version: id[41..].strip_prefix("test-").unwrap().into(),
+            inputs: Default::default(),
+        };
+        assert_eq!(identity.object_id(), id);
+        let mut record = crate::kernel::store::bare_record(&identity);
+        record["exceptions"] = serde_json::Value::from(exceptions.to_vec());
+        record.to_string()
+    }
 
     fn ready_python_root(
         base: &Path,
@@ -1742,7 +1758,7 @@ mod tests {
         fs::set_permissions(&object, fs::Permissions::from_mode(0o555)).unwrap();
         fs::write(
             store.root.join(format!("meta/{TEST_ENV}.json")),
-            serde_json::json!({"id": TEST_ENV, "exceptions": exceptions}).to_string(),
+            test_record(TEST_ENV, exceptions),
         )
         .unwrap();
 
@@ -2028,7 +2044,7 @@ mod tests {
         fs::set_permissions(&object, fs::Permissions::from_mode(0o555)).unwrap();
         fs::write(
             store.root.join(format!("meta/{TEST_NODE_ENV}.json")),
-            serde_json::json!({"id": TEST_NODE_ENV, "exceptions": []}).to_string(),
+            test_record(TEST_NODE_ENV, &[]),
         )
         .unwrap();
 
