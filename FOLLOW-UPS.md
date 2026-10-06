@@ -62,8 +62,6 @@ None open.
   The design is DESIGNS.md §7 (2026-10-05). Next: an independent review
   round, then its four implementation PRs in order.
 
-- **Resolution proxy PR 5 review leftovers (#428).** One checklist issue
-  per theme:
 - **Test-suite audit of 2026-09-27 (#351).** Nine reviewers, one per
   area, looked for tests that stay green when the code they name is
   broken. The fake passes were fixed in #351; what remains is grouped by
