@@ -8,13 +8,13 @@
 #![allow(clippy::disallowed_methods)]
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::Output;
 
 use sha2::{Digest as _, Sha224, Sha256, Sha512};
 
 mod common;
 
-use common::{add_git_dependency, assert_ok, command, copy_tree, fixture, TempDir};
+use common::{add_git_dependency, assert_ok, child, command, copy_tree, fixture, TempDir};
 
 /// A scratch directory that is the project, with `home/` for tog's home and
 /// `tmp/` for the child's `TMPDIR`, so neither lands among the project's
@@ -689,7 +689,7 @@ fn install_with_store_pnpm(temp: &TempDir, project: &Path, store: &Path) {
         .expect("store node");
     let user_home = temp.0.join("user-home");
     std::fs::create_dir_all(&user_home).unwrap();
-    let install = Command::new(x_root.join("node_modules/.bin/pnpm"))
+    let install = child(x_root.join("node_modules/.bin/pnpm"), &user_home)
         .current_dir(project)
         .args(["install", "--ignore-scripts", "--reporter", "append-only"])
         .arg("--store-dir")
@@ -702,7 +702,6 @@ fn install_with_store_pnpm(temp: &TempDir, project: &Path, store: &Path) {
                 std::env::var("PATH").unwrap_or_default()
             ),
         )
-        .env("HOME", &user_home)
         .env("XDG_CONFIG_HOME", user_home.join("config"))
         .env("XDG_DATA_HOME", user_home.join("data"))
         .env("XDG_CACHE_HOME", user_home.join("cache"))
