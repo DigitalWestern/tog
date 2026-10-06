@@ -508,9 +508,39 @@ pub(crate) fn request_url(url: &str) -> Option<url::Url> {
 /// short read removes it), and the stream is capped so a hostile server
 /// cannot fill the disk before the hash check fails.
 pub fn download_file(url: &str, dest: &Path, sha256: &str) -> io::Result<()> {
-    const MAX_FILE: u64 = 256 << 20;
     let digest = Digest::sha256(sha256)?;
-    let (mut reader, declared) = open_url(url, "download", None)?;
+    let (reader, declared) = open_url(url, "download", None)?;
+    stream_to_file(url, dest, &digest, reader, declared, MAX_RELEASE_FILE)
+}
+
+/// The most `download_file` streams: tog's release binary is far smaller.
+const MAX_RELEASE_FILE: u64 = 256 << 20;
+
+/// The most one verified download streams into the cache. 8 GiB covers
+/// every real artifact class tog handles.
+const MAX_ARTIFACT: u64 = 8 << 30;
+
+/// A stream cap as a refusal names it: whole GiB or MiB when it is one.
+fn cap_text(max: u64) -> String {
+    if max >= 1 << 30 && max.is_multiple_of(1 << 30) {
+        format!("{} GiB", max >> 30)
+    } else if max >= 1 << 20 && max.is_multiple_of(1 << 20) {
+        format!("{} MiB", max >> 20)
+    } else {
+        format!("{max}-byte")
+    }
+}
+
+/// `download_file` past opening the URL, with the cap a parameter so a
+/// test can reach it.
+fn stream_to_file(
+    url: &str,
+    dest: &Path,
+    digest: &Digest,
+    mut reader: Box<dyn Read>,
+    declared: Option<u64>,
+    max: u64,
+) -> io::Result<()> {
     let mut progress = crate::kernel::ui::Progress::start(artifact_name(url), declared);
     let mut file = fs::File::create(dest)
         .map_err(|e| io::Error::new(e.kind(), format!("create {}: {e}", dest.display())))?;
@@ -525,10 +555,11 @@ pub fn download_file(url: &str, dest: &Path, sha256: &str) -> io::Result<()> {
         };
         total += n as u64;
         progress.advance(n as u64);
-        if total > MAX_FILE {
+        if total > max {
             break Err(io::Error::other(format!(
-                "{url}: exceeds the {} MiB cap for a tog release; refusing",
-                MAX_FILE >> 20
+                "{}: exceeds the {} cap for a tog release; refusing",
+                shown_url(url),
+                cap_text(max)
             )));
         }
         hasher.update(&buf[..n]);
@@ -926,7 +957,7 @@ pub(crate) fn cache_from_reader(
     digest: &Digest,
     open: impl FnOnce() -> io::Result<Box<dyn Read>>,
 ) -> io::Result<CacheLease> {
-    cache_or_download_narrated(store, activity, url, digest, false, || {
+    cache_or_download_narrated(store, activity, url, digest, false, MAX_ARTIFACT, || {
         open().map(|reader| (reader, None))
     })
 }
@@ -940,7 +971,7 @@ fn cache_or_download(
     digest: &Digest,
     open: impl FnOnce() -> io::Result<(Box<dyn Read>, Option<u64>)>,
 ) -> io::Result<CacheLease> {
-    cache_or_download_narrated(store, activity, url, digest, true, open)
+    cache_or_download_narrated(store, activity, url, digest, true, MAX_ARTIFACT, open)
 }
 
 fn cache_or_download_narrated(
@@ -949,6 +980,7 @@ fn cache_or_download_narrated(
     url: &str,
     digest: &Digest,
     narrate: bool,
+    max: u64,
     open: impl FnOnce() -> io::Result<(Box<dyn Read>, Option<u64>)>,
 ) -> io::Result<CacheLease> {
     store.require_activity(activity, "a verified download")?;
@@ -993,9 +1025,8 @@ fn cache_or_download_narrated(
     let mut progress =
         narrate.then(|| crate::kernel::ui::Progress::start(artifact_name(url), declared));
 
-    // Cap the stream so a hostile server can't fill the disk before the
-    // hash check fails. 8 GiB covers every real artifact class we handle.
-    const MAX_ARTIFACT: u64 = 8 << 30;
+    // Cap the stream (`max`, `MAX_ARTIFACT` outside tests) so a hostile
+    // server can't fill the disk before the hash check fails.
     let mut file = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -1016,10 +1047,11 @@ fn cache_or_download_narrated(
         if let Some(progress) = progress.as_mut() {
             progress.advance(n as u64);
         }
-        if total > MAX_ARTIFACT {
+        if total > max {
             break Err(io::Error::other(format!(
-                "{url}: exceeds the {} GiB artifact cap; refusing",
-                MAX_ARTIFACT >> 30
+                "{}: exceeds the {} artifact cap; refusing",
+                shown_url(url),
+                cap_text(max)
             )));
         }
         match digest.algo {
@@ -1887,6 +1919,76 @@ mod integrity_tests {
             "the bytes must not be cached under their own hash either"
         );
         assert!(leftover_downloads(&store).is_empty());
+    }
+
+    /// A stream past the artifact cap is refused by name, and leaves no
+    /// cache entry and no partial download; one at the cap is cached
+    /// (#367). The cap is 1 KiB here, `MAX_ARTIFACT` in production.
+    #[test]
+    fn a_download_past_the_artifact_cap_is_refused_and_leaves_nothing() {
+        let (_scratch, store) = scratch_store("fetch-cap");
+        let activity = &store.activity(ActivityMode::Shared).unwrap();
+        let fetch = |body: Vec<u8>| {
+            let digest = Digest::sha256(&sha256_hex(&body)).unwrap();
+            let outcome = cache_or_download_narrated(
+                &store,
+                activity,
+                "https://x/big?sig=secret",
+                &digest,
+                false,
+                1024,
+                || Ok((Box::new(io::Cursor::new(body)) as Box<dyn Read>, None)),
+            )
+            .map(drop);
+            (outcome, digest)
+        };
+        let (outcome, digest) = fetch(vec![7; 2048]);
+        let error = outcome.unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "https://x/big: exceeds the 1024-byte artifact cap; refusing"
+        );
+        assert!(!store.cache_path("sha256", digest.hex()).exists());
+        assert!(leftover_downloads(&store).is_empty());
+
+        let (outcome, digest) = fetch(vec![7; 1024]);
+        outcome.unwrap();
+        assert!(store.cache_path("sha256", digest.hex()).is_file());
+        assert!(leftover_downloads(&store).is_empty());
+    }
+
+    /// `download_file`'s cap refuses the same way and removes its
+    /// destination; at the cap the file is written (#367).
+    #[test]
+    fn a_release_download_past_its_cap_is_refused_and_removed() {
+        let scratch = TempDir::named("fetch-release-cap");
+        let dest = scratch.0.join("tog");
+        let fetch = |body: Vec<u8>| {
+            let digest = Digest::sha256(&sha256_hex(&body)).unwrap();
+            stream_to_file(
+                "https://x/tog",
+                &dest,
+                &digest,
+                Box::new(io::Cursor::new(body)),
+                None,
+                1024,
+            )
+        };
+        let error = fetch(vec![7; 2048]).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "https://x/tog: exceeds the 1024-byte cap for a tog release; refusing"
+        );
+        assert!(!dest.exists());
+        fetch(vec![7; 1024]).unwrap();
+        assert_eq!(fs::read(&dest).unwrap().len(), 1024);
+    }
+
+    #[test]
+    fn cap_text_names_whole_units() {
+        assert_eq!(cap_text(MAX_ARTIFACT), "8 GiB");
+        assert_eq!(cap_text(MAX_RELEASE_FILE), "256 MiB");
+        assert_eq!(cap_text(1024), "1024-byte");
     }
 
     #[test]
