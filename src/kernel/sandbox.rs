@@ -2997,10 +2997,10 @@ echo "PKG_CONFIG_LIBDIR=${PKG_CONFIG_LIBDIR-unset}"
             "/usr/lib/aarch64-linux-gnu",
         ]
         .iter()
-        .filter_map(|dir| fs::read_dir(dir).ok())
-        .flatten()
-        .flatten()
-        .filter_map(|entry| {
+        .filter(|dir| !fs::symlink_metadata(dir).is_ok_and(|meta| meta.is_symlink()))
+        .filter_map(|dir| Some((*dir, fs::read_dir(dir).ok()?)))
+        .flat_map(|(dir, entries)| entries.flatten().map(move |entry| (dir, entry)))
+        .filter_map(|(dir, entry)| {
             let name = entry.file_name().into_string().ok()?;
             let stem = name.strip_suffix(".so")?;
             let regular = entry.file_type().ok()?.is_file();
@@ -3008,10 +3008,10 @@ echo "PKG_CONFIG_LIBDIR=${PKG_CONFIG_LIBDIR-unset}"
                 && stem.starts_with("lib")
                 && !crate::kernel::hostview::C_RUNTIME_SHARED.contains(&stem)
                 && fs::read(entry.path()).is_ok_and(|bytes| bytes.starts_with(b"\x7fELF")))
-            .then_some(name)
+            .then_some((name, dir))
         })
         .min();
-        let Some(name) = moved else {
+        let Some((name, dir)) = moved else {
             eprintln!("skip: host has no regular ELF lib*.so for the view to move");
             return;
         };
@@ -3028,11 +3028,24 @@ echo "PKG_CONFIG_LIBDIR=${PKG_CONFIG_LIBDIR-unset}"
             "int tog_own_copy(void);\nint main(void) { return tog_own_copy() == 7 ? 0 : 1; }\n",
         )
         .unwrap();
+        fs::write(scratch.join("other.c"), "int main(void) { return 0; }\n").unwrap();
+        // The library moved: absent where the host has it, present in the
+        // runtime subdirectory. `main` loads its own copy over RUNPATH, and
+        // `other`, which NEEDs the same name with no RUNPATH, loads the
+        // moved one through the view's loader cache.
         let script = r#"
 cd "$1"
+test ! -e "$3/$2" || { echo "$3/$2 was not moved"; exit 1; }
+test -f "$3/$4/$2" || { echo "$3/$4/$2 is missing"; exit 1; }
 cc -shared -fPIC own.c -o "own/$2" -Wl,-soname,"$2" &&
 cc main.c -o main "own/$2" -Wl,--enable-new-dtags,-rpath,'$ORIGIN/own' &&
-./main
+./main || exit 1
+cc other.c -o other -Wl,--no-as-needed "own/$2" -Wl,--as-needed || exit 1
+traced=$(LD_TRACE_LOADED_OBJECTS=1 ./other) || { echo "$traced"; exit 1; }
+case "$traced" in
+  *"$2 => $3/$4/$2 "*) ./other ;;
+  *) echo "other did not load $3/$4/$2: $traced"; exit 1 ;;
+esac
 "#;
         let sandbox = Sandbox {
             read: vec![],
@@ -3048,6 +3061,8 @@ cc main.c -o main "own/$2" -Wl,--enable-new-dtags,-rpath,'$ORIGIN/own' &&
                 "sh",
                 scratch.to_str().unwrap(),
                 &name,
+                dir,
+                crate::kernel::hostview::RUNTIME_SUBDIR,
             ],
             &scratch,
             &scratch,
@@ -3055,7 +3070,8 @@ cc main.c -o main "own/$2" -Wl,--enable-new-dtags,-rpath,'$ORIGIN/own' &&
         );
         assert!(
             result.is_ok(),
-            "a program with its own {name} on its RUNPATH did not load it: {result:?}"
+            "{name} in {dir}: a program with its own copy on its RUNPATH did not load it, \
+             or one without did not load the moved copy through the cache: {result:?}"
         );
     }
 

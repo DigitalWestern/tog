@@ -68,31 +68,41 @@ struct Cache {
 }
 
 /// The host cache at `host_cache`, rewritten for `moved` (see the module
-/// documentation). A host without a cache gets one of the moved libraries
-/// alone.
+/// documentation). A host without a cache, or with one tog cannot read or
+/// parse, gets one of the moved libraries alone; the second is noted.
 pub(crate) fn for_view(host_cache: &Path, moved: &[MovedLibrary]) -> io::Result<Vec<u8>> {
-    let cache = match fs::read(host_cache) {
-        Ok(bytes) => parse(&bytes).map_err(|reason| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "the host's dynamic loader cache {} cannot be read: {reason}",
-                    host_cache.display()
-                ),
-            )
-        })?,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Cache {
-            flags: native_endian_flag(),
-            ..Cache::default()
-        },
-        Err(error) => {
-            return Err(io::Error::new(
-                error.kind(),
-                format!("read {}: {error}", host_cache.display()),
-            ))
-        }
-    };
+    let (cache, unusable) = read_host(host_cache)?;
+    if let Some(reason) = unusable {
+        crate::kernel::ui::note(&format!(
+            "the host's dynamic loader cache {} cannot be used ({reason}); the sandbox's \
+             cache names only the host libraries tog moved out of the linker's reach",
+            host_cache.display()
+        ));
+    }
     Ok(serialize(&relocate(cache, moved)))
+}
+
+/// The host cache at `host_cache`, and why it could not be used when it
+/// could not: then the cache is empty, as for a host without one. An
+/// unusable host cache costs host programs the libraries only it names,
+/// not the view's hermeticity. An interrupted read is returned.
+fn read_host(host_cache: &Path) -> io::Result<(Cache, Option<String>)> {
+    let empty = || Cache {
+        flags: native_endian_flag(),
+        ..Cache::default()
+    };
+    match fs::read(host_cache) {
+        Ok(bytes) => match parse(&bytes) {
+            Ok(cache) => Ok((cache, None)),
+            Err(reason) => Ok((empty(), Some(reason))),
+        },
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok((empty(), None)),
+        Err(error) if error.kind() == io::ErrorKind::Interrupted => Err(io::Error::new(
+            error.kind(),
+            format!("read {}: {error}", host_cache.display()),
+        )),
+        Err(error) => Ok((empty(), Some(error.to_string()))),
+    }
 }
 
 /// Point every entry naming a moved library at its new path, and add an
@@ -191,14 +201,15 @@ fn libcmp(left: &[u8], right: &[u8]) -> std::cmp::Ordering {
         } else if b.is_ascii_digit() {
             return Ordering::Less;
         } else if a != b {
-            // glibc compares `char`, signed on the hosts tog runs on.
-            return (a as i8).cmp(&(b as i8));
+            // glibc compares `char`, whose signedness is the platform's:
+            // signed on x86_64, unsigned on aarch64.
+            return (a as std::ffi::c_char).cmp(&(b as std::ffi::c_char));
         } else {
             i += 1;
             j += 1;
         }
     }
-    0i8.cmp(&(right.get(j).copied().unwrap_or(0) as i8))
+    (0 as std::ffi::c_char).cmp(&(right.get(j).copied().unwrap_or(0) as std::ffi::c_char))
 }
 
 /// Whether the ELF file at `path` has the class, byte order and machine of
@@ -426,6 +437,11 @@ mod tests {
         assert_eq!(libcmp(b"libfoo.so", b"libfoo.so.1"), Less);
         assert_eq!(libcmp(b"liba1", b"libab"), Greater);
         assert_eq!(libcmp(b"libb", b"liba"), Greater);
+        // A byte past ASCII compares as the platform's `char`.
+        #[cfg(target_arch = "x86_64")]
+        assert_eq!(libcmp(b"lib\xe9", b"liba"), Less);
+        #[cfg(target_arch = "aarch64")]
+        assert_eq!(libcmp(b"lib\xe9", b"liba"), Greater);
     }
 
     #[test]
@@ -523,10 +539,37 @@ mod tests {
             assert_eq!(keys(&cache), ["libown.so"]);
         }
         assert_eq!(cache.flags, native_endian_flag());
-        let unreadable = host.0.join("cache");
-        fs::write(&unreadable, b"not a cache").unwrap();
-        let error = for_view(&unreadable, &moved).unwrap_err();
-        assert!(error.to_string().contains("cannot be read"), "{error}");
+        assert_eq!(read_host(&host.0.join("absent")).unwrap().1, None);
+    }
+
+    /// A host cache tog cannot parse or read is no reason to give up the
+    /// view: the cache is built from the moved libraries alone, as for a
+    /// host without one, and the reason is kept for the note.
+    #[test]
+    fn an_unusable_host_cache_gives_a_cache_of_the_moved_libraries() {
+        let host = TempDir::new();
+        let own = host.0.join("libown.so");
+        fs::copy("/proc/self/exe", &own).unwrap();
+        let moved = [MovedLibrary {
+            host: own.clone(),
+            inside: Path::new("/r/libown.so").to_path_buf(),
+        }];
+        let unparseable = host.0.join("cache");
+        fs::write(&unparseable, b"not a cache").unwrap();
+        // A directory where the file should be cannot be read.
+        let unreadable = host.0.join("cache.d");
+        fs::create_dir(&unreadable).unwrap();
+        for path in [&unparseable, &unreadable] {
+            let (cache, reason) = read_host(path).unwrap();
+            assert!(cache.entries.is_empty());
+            assert!(reason.is_some(), "{}", path.display());
+            let cache = parse(&for_view(path, &moved).unwrap()).unwrap();
+            if NATIVE_FLAGS.is_some() {
+                assert_eq!(keys(&cache), ["libown.so"]);
+                assert_eq!(cache.entries[0].value, b"/r/libown.so");
+            }
+            assert_eq!(cache.flags, native_endian_flag());
+        }
     }
 
     /// This host's own cache parses, and survives a round trip unchanged in
