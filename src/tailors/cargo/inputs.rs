@@ -367,6 +367,41 @@ mod tests {
     use super::*;
     use crate::kernel::testutil::TempDir;
 
+    /// `dir` mode 0111 (search, no read) until dropped.
+    struct SearchOnly(std::path::PathBuf);
+    impl SearchOnly {
+        fn new(dir: &Path) -> Self {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o111)).unwrap();
+            Self(dir.to_path_buf())
+        }
+    }
+    impl Drop for SearchOnly {
+        fn drop(&mut self) {
+            use std::os::unix::fs::PermissionsExt as _;
+            let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+        }
+    }
+
+    /// The workspace walk reaches a root whose directory is search-only
+    /// (0111): its manifest is read by name through the held ancestor (#480).
+    #[test]
+    fn a_workspace_root_in_a_search_only_directory_is_found() {
+        let temp = TempDir::new();
+        let root = temp.0.join("workspace");
+        let member = root.join("member");
+        std::fs::create_dir_all(&member).unwrap();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"member\"]\n",
+        )
+        .unwrap();
+        std::fs::write(member.join("Cargo.toml"), "[package]\nname = \"member\"\n").unwrap();
+        let _search_only = SearchOnly::new(&root);
+        let (found, _held) = locate_held_cargo_root(&ProjectRoot::open(&member).unwrap()).unwrap();
+        assert_eq!(found, root.canonicalize().unwrap());
+    }
+
     #[test]
     fn cargo_participation_requires_local_manifest() {
         let temp = TempDir::new();

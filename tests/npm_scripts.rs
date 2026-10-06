@@ -1038,6 +1038,54 @@ fn terminate_during_install_script_stops_the_sync() {
     assert_signal_mid_script_stops_the_sync(libc::SIGTERM, false);
 }
 
+/// `root` and every process descended from it, one line each: pid, parent,
+/// state, the kernel function it waits in, and its command line. Read from
+/// `/proc` when a deadline passes, so the report says where tog was.
+fn process_listing(root: i32) -> String {
+    let mut table = Vec::new();
+    for entry in std::fs::read_dir("/proc").unwrap().flatten() {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|n| n.parse::<i32>().ok())
+        else {
+            continue;
+        };
+        let Ok(stat) = std::fs::read_to_string(entry.path().join("stat")) else {
+            continue;
+        };
+        // `pid (comm) state ppid ...`: comm may hold spaces, so split after it.
+        let Some((_, rest)) = stat.rsplit_once(") ") else {
+            continue;
+        };
+        let mut fields = rest.split_whitespace();
+        let state = fields.next().unwrap_or("?").to_string();
+        let ppid: i32 = fields.next().and_then(|f| f.parse().ok()).unwrap_or(0);
+        let wchan = std::fs::read_to_string(entry.path().join("wchan")).unwrap_or_default();
+        let cmdline = std::fs::read(entry.path().join("cmdline"))
+            .map(|bytes| String::from_utf8_lossy(&bytes).replace('\0', " "))
+            .unwrap_or_default();
+        table.push((pid, ppid, state, wchan, cmdline));
+    }
+    let mut wanted = vec![root];
+    let mut index = 0;
+    while index < wanted.len() {
+        let parent = wanted[index];
+        wanted.extend(table.iter().filter(|row| row.1 == parent).map(|row| row.0));
+        index += 1;
+    }
+    table
+        .iter()
+        .filter(|row| wanted.contains(&row.0))
+        .map(|(pid, ppid, state, wchan, cmdline)| {
+            format!(
+                "{pid} parent {ppid} {state} in {wchan}: {}\n",
+                cmdline.trim_end()
+            )
+        })
+        .collect()
+}
+
 /// Live `sleep <arg>` processes, by pid, read from `/proc/*/cmdline`. A
 /// zombie has an empty cmdline, so only a process still running counts.
 fn sleepers(arg: &str) -> Vec<i32> {
@@ -1139,11 +1187,19 @@ fn assert_signal_mid_script_stops_the_sync(signal: libc::c_int, whole_group: boo
             }
         }
     });
+    // Read as it comes, so a report made while tog still runs has it.
     let mut stderr = child.stderr.take().unwrap();
+    let stderr_so_far = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let stderr_sink = stderr_so_far.clone();
     let stderr_reader = std::thread::spawn(move || {
-        let mut text = String::new();
-        let _ = stderr.read_to_string(&mut text);
-        text
+        let mut chunk = [0u8; 4096];
+        while let Ok(read @ 1..) = stderr.read(&mut chunk) {
+            stderr_sink
+                .lock()
+                .unwrap()
+                .push_str(&String::from_utf8_lossy(&chunk[..read]));
+        }
+        stderr_sink.lock().unwrap().clone()
     });
 
     // It is the marker, never a sleep, that decides when to signal.
@@ -1190,7 +1246,10 @@ fn assert_signal_mid_script_stops_the_sync(signal: libc::c_int, whole_group: boo
         }
         assert!(
             Instant::now() < exit_deadline,
-            "tog kept running after the interrupt\nstdout:\n{stdout_text}"
+            "tog kept running after the interrupt\nstdout:\n{stdout_text}\nstderr so far:\n{}\n\
+             processes descended from tog:\n{}",
+            stderr_so_far.lock().unwrap(),
+            process_listing(pid)
         );
         std::thread::sleep(Duration::from_millis(20));
     };
