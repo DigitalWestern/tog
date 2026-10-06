@@ -20,7 +20,7 @@ pub struct EcosystemWords {
     pub toolchain: &'static str,
     /// `Tailor::builds`: whether `tog build <id>` names it.
     pub builds: bool,
-    /// `Tailor::fmt_ecosystem`: the word `tog fmt --eco` selects it by.
+    /// `Formatter::word`: the word `tog fmt --eco` selects it by.
     pub formats: Option<&'static str>,
 }
 
