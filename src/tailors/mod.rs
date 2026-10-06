@@ -173,6 +173,30 @@ pub struct SourceFile {
     pub runner: FileRunner,
 }
 
+/// How a realized runtime runs one source file (`Tailor::lone_file`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoneFile {
+    /// The program, a path inside the runtime, then its leading arguments;
+    /// the file and the user's arguments follow.
+    pub program: Vec<String>,
+    /// Directories put ahead of the host PATH.
+    pub path: Vec<PathBuf>,
+    /// Variables set for the program.
+    pub env: Vec<(&'static str, String)>,
+}
+
+impl LoneFile {
+    /// `program` from `runtime/bin`, with that directory on PATH.
+    fn in_bin(runtime: &Path, program: &str) -> LoneFile {
+        let bin = runtime.join("bin");
+        LoneFile {
+            program: vec![bin.join(program).to_string_lossy().into_owned()],
+            path: vec![bin],
+            env: Vec::new(),
+        }
+    }
+}
+
 /// What `tog <file>` does with a file of one ecosystem.
 #[derive(Debug, Clone, Copy)]
 pub enum FileRunner {
@@ -339,6 +363,20 @@ pub trait Tailor: Sync {
         _command: &mut Command,
     ) -> io::Result<Vec<String>> {
         Ok(Vec::new())
+    }
+
+    /// `tog <file>` where the project does not have this ecosystem, or
+    /// outside any project: realize the runtime `toolchain` names and say
+    /// how it runs one file with `extension`, a [`SourceFile`] extension
+    /// this tailor claims. `None`: a lone file of this ecosystem does not
+    /// run on its own.
+    fn lone_file(
+        &self,
+        _ctx: &Context,
+        _toolchain: &Selected,
+        _extension: &str,
+    ) -> io::Result<Option<LoneFile>> {
+        Ok(None)
     }
 
     /// `tog run`: the runtime programs `run_env`'s prefixes provide once

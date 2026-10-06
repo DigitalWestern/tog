@@ -9,6 +9,7 @@ pub(crate) mod completions;
 pub(crate) mod deps;
 pub(crate) mod doctor;
 pub(crate) mod env;
+pub(crate) mod file;
 pub(crate) mod fmt;
 pub(crate) mod gc;
 /// `pub` on purpose: the read-only closure/status views were public before
@@ -171,15 +172,17 @@ fn source_file(cwd: &Path, name: &str, args: &[String]) -> io::Result<Option<Res
     let id = tailor.id();
     let present = project_for(cwd)?.is_some_and(|location| location.detected.contains(&id));
     if !present {
-        return Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            format!(
-                "'{name}' is a {id} file, but there is no {id} project here to run it in: tog \
-                 runs a file inside the project's own environment, and looks for {} ('tog help \
-                 inputs')",
-                tailor.input_files()
-            ),
+        // No environment of this ecosystem to run in: the file runs on the
+        // runtime alone, the one `x` would use here (`file.rs`).
+        ui::trace(&format!(
+            "'{name}' is a {id} file and there is no {id} project here: running it on the \
+             {id} runtime alone"
         ));
+        return Ok(Some(Resolved::Command(cli::Command::File(cli::FileRun {
+            ecosystem: id.to_string(),
+            file: name.to_string(),
+            args: args.to_vec(),
+        }))));
     }
     let program = match runner {
         FileRunner::Command(program) => program,
@@ -345,9 +348,9 @@ pub fn dispatch(command: cli::Command, sync: cli::SyncFlags) -> io::Result<i32> 
         Plan { .. } => plan::run(&ctx, sync.frozen).map(|_| 0),
         Build { args } => build::run(&ctx, &args, sync.frozen).map(|_| 0),
         Run { command } => run::run(&ctx, &command, sync.frozen),
-        // Like `run`, `env` needs the store open: a closure's recorded
-        // runtime is a store object, and its bin directory is part of the
-        // PATH `env` prints.
+        File(request) => file::run(&ctx, &request),
+        // Like `run`, `env` needs the store open: a recorded runtime is a
+        // store object, whose bin directory is on the PATH `env` prints.
         Env { shell } => env::run(&ctx, shell, sync.frozen),
         Add {
             specs,

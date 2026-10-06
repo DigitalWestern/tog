@@ -18,7 +18,9 @@ use crate::kernel::toolchain::Request;
 use crate::kernel::toolchain::{Catalog, Selected};
 use crate::kernel::ui;
 use crate::tailors::elixir;
-use crate::tailors::{ClosureListing, FileRunner, PackageRow, SourceFile, SyncRequest, Tailor};
+use crate::tailors::{
+    ClosureListing, FileRunner, LoneFile, PackageRow, SourceFile, SyncRequest, Tailor,
+};
 use serde_json::Value;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -193,6 +195,25 @@ impl Tailor for Elixir {
             args,
             toolchain,
         )
+    }
+
+    /// A lone script runs with `elixir`, not `mix run`, which needs a
+    /// project: no deps, OTP on PATH beside it.
+    fn lone_file(
+        &self,
+        ctx: &Context,
+        toolchain: &Selected,
+        _extension: &str,
+    ) -> io::Result<Option<LoneFile>> {
+        let beam = elixir::realize_runtime(&ctx.store, &ctx.activity, ctx.platform, toolchain)?;
+        Ok(Some(LoneFile {
+            program: vec![beam
+                .join("elixir/bin/elixir")
+                .to_string_lossy()
+                .into_owned()],
+            path: vec![beam.join("elixir/bin"), beam.join("otp/bin")],
+            env: Vec::new(),
+        }))
     }
 
     fn runtime_programs(&self) -> &'static [&'static str] {

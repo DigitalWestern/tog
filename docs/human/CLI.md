@@ -436,10 +436,14 @@ A TypeScript file runs on the project's Node as it is from 23.6 and
 from 22.6. An older Node is refused before the sync, naming the version:
 raise the version the project asks for, then `tog update --toolchain node`
 moves the lock.
-Uppercase extensions and paths with directories count. The project has to
-have that ecosystem: `tog app.py` in an npm-only project, or outside any
-project, fails naming the missing project rather than running the file
-with whatever `python` the host has. A `.rs` or `.cs` file is refused with
+Uppercase extensions and paths with directories count. In a project
+without that ecosystem, or outside any project, the file runs on the
+ecosystem's runtime alone, the one `tog x` would use there: the version the
+project's toolchain lock or version file names, else the shipped one,
+realized into the store, never whatever `python` the host has. It gets no
+dependencies and no sync: `python3` runs a `.py`, `node` a `.js` or `.ts`
+(by the TypeScript rule above), `ruby` a `.rb`, `elixir` a `.exs`, and
+`go run` a `.go` with the standard library only (`GOPROXY=off`). A `.rs` or `.cs` file is refused with
 a pointer to `tog build`: Rust builds a crate, never a lone file, and a
 .NET file-based app would restore packages outside the lock. A file with any other extension is a usage error that names
 `tog run <program> <file>`. A package.json script with the same name as
