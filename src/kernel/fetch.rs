@@ -628,12 +628,9 @@ pub fn cache_insert(
         }
     }
     fs::create_dir_all(dest.parent().unwrap())?;
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static SEQ: AtomicU64 = AtomicU64::new(0);
     let tmp = store.root.join("tmp").join(format!(
-        "ins-{}-{}-{hex}",
-        std::process::id(),
-        SEQ.fetch_add(1, Ordering::Relaxed)
+        "ins-{}-{hex}",
+        crate::kernel::fsroot::random_suffix()?
     ));
     fs::copy(src, &tmp)?;
     {
@@ -961,16 +958,13 @@ fn cache_or_download_narrated(
     fs::create_dir_all(dest.parent().unwrap())
         .map_err(|e| io::Error::new(e.kind(), format!("cache dir: {e}")))?;
     // Unique per attempt: two concurrent downloads of the same artifact
-    // (even same-process threads) must never share a tmp file — the stream
-    // hash would verify while the file holds interleaved garbage. A
-    // process-wide sequence number breaks timestamp ties (SystemTime ticks
-    // in microseconds on macOS; concurrent threads collide on it).
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static SEQ: AtomicU64 = AtomicU64::new(0);
+    // (other processes, or threads of this one) must never share a tmp
+    // file, or the stream hash would verify while the file holds
+    // interleaved garbage. The random suffix is fsroot's, so no pid or
+    // clock tie can repeat it.
     let tmp = store.root.join("tmp").join(format!(
-        "dl-{}-{}-{}",
-        std::process::id(),
-        SEQ.fetch_add(1, Ordering::Relaxed),
+        "dl-{}-{}",
+        crate::kernel::fsroot::random_suffix()?,
         digest.hex()
     ));
 
@@ -984,7 +978,10 @@ fn cache_or_download_narrated(
     // Cap the stream so a hostile server can't fill the disk before the
     // hash check fails. 8 GiB covers every real artifact class we handle.
     const MAX_ARTIFACT: u64 = 8 << 30;
-    let mut file = fs::File::create(&tmp)
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp)
         .map_err(|e| io::Error::new(e.kind(), format!("create {}: {e}", tmp.display())))?;
     let mut h256 = Sha256::new();
     let mut h512 = Sha512::new();
