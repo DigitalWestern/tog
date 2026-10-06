@@ -198,10 +198,12 @@ fn status_with_stderr(
 ) -> io::Result<(std::process::ExitStatus, Vec<u8>)> {
     match activity {
         Some(activity) => crate::kernel::supervise::local_status_with_stderr(command, activity),
-        None => {
-            let output = wait_with_stderr_relay(spawn_unmanaged(command)?)?;
-            Ok((output.status, output.stderr))
-        }
+        None => status_with_scrubbed_relay(
+            command,
+            &mut io::stdout(),
+            &mut io::stderr(),
+            crate::kernel::resolve::confine::signing_key_secrets(),
+        ),
     }
 }
 
@@ -425,24 +427,32 @@ impl Sandbox<'_> {
         Ok((command, invocation))
     }
 
-    /// The unmanaged bwrap run with stdout sent to `stdout`, for the tests
-    /// that read what the command printed.
+    /// The unmanaged bwrap run with its stdout collected, for the tests
+    /// that read what the command printed. Its stderr is relayed to ours,
+    /// and `stderr` holds the classifier's prefix of it.
     #[cfg(test)]
-    fn run_bwrap_with_stdout(
+    fn run_bwrap_capture(
         &self,
         cmd: &[&str],
         env_path: &str,
         tmp: &Path,
         cwd: &Path,
         envs: &[(String, String)],
-        stdout: std::process::Stdio,
     ) -> io::Result<std::process::Output> {
         let (mut command, _invocation) = self.bwrap(cmd, env_path, tmp, cwd, envs, None)?;
-        command
-            .stdin(std::process::Stdio::null())
-            .stdout(stdout)
-            .stderr(std::process::Stdio::piped());
-        wait_with_stderr_relay(spawn_unmanaged(&mut command)?)
+        command.stdin(std::process::Stdio::null());
+        let mut stdout = Vec::new();
+        let (status, stderr) = status_with_scrubbed_relay(
+            &mut command,
+            &mut stdout,
+            &mut io::stderr(),
+            crate::kernel::resolve::confine::signing_key_secrets(),
+        )?;
+        Ok(std::process::Output {
+            status,
+            stdout,
+            stderr,
+        })
     }
 
     /// A Unix socket is reachable through a read-only bind as well as a
@@ -651,27 +661,28 @@ struct BwrapInvocation {
 /// setup errors are a single short line. The supervisor keeps the same.
 use crate::kernel::supervise::CLASSIFIER_PREFIX as STDERR_PREFIX_LIMIT;
 
-/// Copy a child's stderr to `sink` as it arrives, with the signing key
-/// scrubbed out by the same [`Scrubber`](crate::kernel::resolve::confine::Scrubber)
-/// the supervisor's relay uses (#430), retaining the first
-/// `STDERR_PREFIX_LIMIT` scrubbed bytes. Relay failures (e.g. our stderr
-/// closed) are ignored: they must not turn a successful build into a
-/// failure.
-fn relay_stderr(
-    mut stderr: impl io::Read,
+/// Copy a child's output stream to `sink` as it arrives, with the signing
+/// key scrubbed out by the same
+/// [`Scrubber`](crate::kernel::resolve::confine::Scrubber) the supervisor's
+/// relay uses (#430), retaining the first `limit` scrubbed bytes. Relay
+/// failures (e.g. our stderr closed) are ignored: they must not turn a
+/// successful build into a failure.
+fn relay_scrubbed(
+    mut stream: impl io::Read,
     sink: &mut impl io::Write,
     secrets: &[Vec<u8>],
+    limit: usize,
 ) -> Vec<u8> {
     let mut scrubber = crate::kernel::resolve::confine::Scrubber::new(secrets.to_vec());
     let mut prefix = Vec::new();
     let mut buffer = [0u8; 8192];
     let mut pass_on = |bytes: Vec<u8>| {
-        let keep = bytes.len().min(STDERR_PREFIX_LIMIT - prefix.len());
+        let keep = bytes.len().min(limit - prefix.len());
         prefix.extend_from_slice(&bytes[..keep]);
         let _ = sink.write_all(&bytes);
     };
     loop {
-        let read = match stderr.read(&mut buffer) {
+        let read = match stream.read(&mut buffer) {
             Ok(0) | Err(_) => break,
             Ok(read) => read,
         };
@@ -682,23 +693,32 @@ fn relay_stderr(
     prefix
 }
 
-fn wait_with_stderr_relay(mut child: std::process::Child) -> io::Result<std::process::Output> {
-    let stderr = child.stderr.take().expect("stderr is piped");
-    let relay = std::thread::spawn(move || {
-        relay_stderr(
-            stderr,
-            &mut io::stderr(),
-            crate::kernel::resolve::confine::signing_key_secrets(),
-        )
-    });
-    let output = child.wait_with_output()?;
-    let stderr = relay
-        .join()
-        .map_err(|_| io::Error::other("sandbox stderr relay thread panicked"))?;
-    Ok(std::process::Output {
-        status: output.status,
-        stdout: output.stdout,
-        stderr,
+/// Run `command` outside the supervisor, both its streams piped and
+/// relayed through [`relay_scrubbed`] with `secrets` taken out: stdout to
+/// `stdout`, stderr to `stderr`, the way the supervisor relays both
+/// (#430). Returns the status and the first `STDERR_PREFIX_LIMIT` scrubbed
+/// bytes of stderr, for the setup-failure classifier.
+fn status_with_scrubbed_relay(
+    command: &mut Command,
+    stdout: &mut (impl io::Write + Send),
+    stderr: &mut (impl io::Write + Send),
+    secrets: &[Vec<u8>],
+) -> io::Result<(std::process::ExitStatus, Vec<u8>)> {
+    command
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let mut child = spawn_unmanaged(command)?;
+    let out_pipe = child.stdout.take().expect("stdout is piped");
+    let err_pipe = child.stderr.take().expect("stderr is piped");
+    std::thread::scope(|scope| {
+        let out = scope.spawn(move || relay_scrubbed(out_pipe, stdout, secrets, 0));
+        let err =
+            scope.spawn(move || relay_scrubbed(err_pipe, stderr, secrets, STDERR_PREFIX_LIMIT));
+        let status = child.wait();
+        let panicked = |_| io::Error::other("sandbox output relay thread panicked");
+        out.join().map_err(panicked)?;
+        let prefix = err.join().map_err(panicked)?;
+        Ok((status?, prefix))
     })
 }
 
@@ -1363,14 +1383,19 @@ mod tests {
     /// even when the key arrives split across reads, and keeps the
     /// classifier's prefix scrubbed too (#430).
     #[test]
-    fn the_unmanaged_stderr_relay_scrubs_the_signing_key() {
+    fn the_unmanaged_relay_scrubs_the_signing_key() {
         let secret = b"k3y5eedQWERTYUIOPasdfghjklZXCVBNM12".to_vec();
         let stream = io::Read::chain(
             io::Cursor::new(b"bwrap: oops k3y5eedQWERTYU".to_vec()),
             io::Cursor::new(b"IOPasdfghjklZXCVBNM12 done\n".to_vec()),
         );
         let mut sink = Vec::new();
-        let prefix = relay_stderr(stream, &mut sink, std::slice::from_ref(&secret));
+        let prefix = relay_scrubbed(
+            stream,
+            &mut sink,
+            std::slice::from_ref(&secret),
+            STDERR_PREFIX_LIMIT,
+        );
         let relayed = String::from_utf8_lossy(&sink).into_owned();
         assert!(relayed.starts_with("bwrap: oops "), "{relayed}");
         assert!(relayed.ends_with(" done\n"), "{relayed}");
@@ -1378,8 +1403,37 @@ mod tests {
         assert_eq!(prefix, sink);
         // No secret: the bytes pass through unchanged.
         let mut sink = Vec::new();
-        relay_stderr(io::Cursor::new(b"plain\n".to_vec()), &mut sink, &[]);
+        relay_scrubbed(io::Cursor::new(b"plain\n".to_vec()), &mut sink, &[], 1);
         assert_eq!(sink, b"plain\n");
+    }
+
+    /// A child the no-store path runs has the key scrubbed from both of
+    /// its streams, and only stderr feeds the classifier's prefix (#430).
+    #[test]
+    fn the_unmanaged_path_scrubs_the_key_from_stdout_and_stderr() {
+        let secret = b"k3y5eedQWERTYUIOPasdfghjklZXCVBNM12".to_vec();
+        let mut command = Command::new("/bin/sh");
+        command.args([
+            "-c",
+            "printf 'out %s\\n' \"$1\"; printf 'err %s\\n' \"$1\" >&2; exit 4",
+            "sh",
+            std::str::from_utf8(&secret).unwrap(),
+        ]);
+        let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
+        let (status, prefix) = status_with_scrubbed_relay(
+            &mut command,
+            &mut stdout,
+            &mut stderr,
+            std::slice::from_ref(&secret),
+        )
+        .unwrap();
+        assert_eq!(status.code(), Some(4));
+        for (stream, label) in [(&stdout, "out "), (&stderr, "err ")] {
+            let text = String::from_utf8_lossy(stream);
+            assert!(text.starts_with(label), "{text}");
+            assert!(!text.contains("QWERTY"), "{text}");
+        }
+        assert_eq!(prefix, stderr);
     }
 
     use super::*;
@@ -1467,14 +1521,7 @@ mod tests {
         cwd: &Path,
         envs: &[(String, String)],
     ) -> io::Result<Vec<u8>> {
-        let output = sandbox.run_bwrap_with_stdout(
-            cmd,
-            "/usr/bin:/bin",
-            scratch,
-            cwd,
-            envs,
-            std::process::Stdio::piped(),
-        )?;
+        let output = sandbox.run_bwrap_capture(cmd, "/usr/bin:/bin", scratch, cwd, envs)?;
         if !output.status.success() {
             let failure = classify_sandbox_failure(&output.status, &output.stderr)
                 .expect("non-zero status has a sandbox failure classification");
@@ -2242,14 +2289,7 @@ mod tests {
         };
         let cmd = ["/usr/bin/sh", "-c", "echo build diagnostic >&2; exit 3"];
         let output = sandbox
-            .run_bwrap_with_stdout(
-                &cmd,
-                "/usr/bin:/bin",
-                &scratch,
-                &scratch,
-                &[],
-                std::process::Stdio::piped(),
-            )
+            .run_bwrap_capture(&cmd, "/usr/bin:/bin", &scratch, &scratch, &[])
             .unwrap();
         // The relay thread retained the build's own stderr (and forwarded it
         // to ours); a build printing to stderr is still a command failure.

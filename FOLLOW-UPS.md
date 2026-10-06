@@ -62,6 +62,9 @@ None open.
   The design is DESIGNS.md §7 (2026-10-05). Next: an independent review
   round, then its four implementation PRs in order.
 
+- **Resolution proxy PR 5 review leftovers (#428).** One checklist issue
+  per theme:
+  - #430 signing key: three TOML parse sites still print the parser's full `Display`, source line included: `reject_workspace_inheritance` in `src/kernel/provider/crates.rs` (a git crate's `Cargo.toml`), `Document::parse` in `src/kernel/toolchain/document.rs` (a catalog document) and `ChannelManifest::parse` in `src/kernel/provider/rust_channel.rs` (a Rust channel manifest). Move each to `kernel::tomlerr`.
 - **Test-suite audit of 2026-09-27 (#351).** Nine reviewers, one per
   area, looked for tests that stay green when the code they name is
   broken. The fake passes were fixed in #351; what remains is grouped by
