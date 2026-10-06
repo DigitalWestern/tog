@@ -189,8 +189,9 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   (`/usr/lib64/perl5/CORE`, a Python package's CFFI headers, `/usr/lib64/libnl`), or that
   tog cannot list, is curated the same way, so an explicit `-I` or `-L` into it finds no
   header, archive, object, `lib*.so` symlink or linker script (#331); the compiler's own
-  `gcc` and `clang` directories, and a versioned LLVM tree (`llvm-<N>`, where Ubuntu
-  keeps clang's own headers), are kept whole. Two gaps: a regular ELF `lib*.so` in a
+  `gcc` and `clang` directories are kept whole, as are a versioned LLVM tree's
+  (`llvm-<N>`) `bin` and `lib/clang`, where Ubuntu keeps clang's own headers; the rest
+  of that tree, LLVM's own headers and archives, is curated. Two gaps: a regular ELF `lib*.so` in a
   curated subdirectory stays where it is (plugins and extension modules there are loaded by
   that path), so `-L` into it can link it; and a subdirectory whose only development file
   is a `lib*.so` symlink or linker script is bound whole, as plugin directories such as
