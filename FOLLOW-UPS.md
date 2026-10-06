@@ -14,26 +14,27 @@ by position.
 
 ## Next up, in order
 
-The resolution proxy (#68), then the cleanup. Today Go and Cargo resolve
-confined through the proxy (PRs 1 to 5: #198, #199, #200, #202, #203).
-Every other ecosystem's `add`, `remove`, `update`, and missing-lock
-generation runs through the door's unsandboxed `Legacy` mode with network,
-the largest gap in what tog promises. Design: `docs/agent/DESIGNS.md` §6
-(#196), evidence in #209. One pull request each, in this order:
+The resolution proxy (#68), then the cleanup. Today Go, Cargo, and Node
+resolve confined through the proxy (PRs 1 to 6: #198, #199, #200, #202,
+#203, #204). Every other ecosystem's `add`, `remove`, `update`, and
+missing-lock generation runs through the door's unsandboxed `Legacy` mode
+with network, the largest gap in what tog promises. Design:
+`docs/agent/DESIGNS.md` §6 (#196), evidence in #209. One pull request
+each, in this order:
 
-1. **#204 (PR 6): Node.** npm and pnpm. npm already skips its audit,
-   fund and update-notifier requests (#212).
-2. **#205 (PR 7): Python.** uv. Every uv call already passes
+1. **#205 (PR 7): Python.** uv. Every uv call already passes
    `--python <store python>` (#210); the forced row's own `--python` then
-   replaces it.
-3. **#206 (PR 8): Ruby and Elixir.** Bundler and Hex mirrors. Edits
+   replaces it. PR 6 left it `ConfinedSpec::cwd` (a workspace member
+   below the lock root), `door::Publish`, and `door::proxy_env` (the
+   proxy variables and `SSL_CERT_FILE` of an intercepting session).
+2. **#206 (PR 8): Ruby and Elixir.** Bundler and Hex mirrors. Edits
    already resolve without installing (#211).
-4. **#207 (PR 9): .NET.** The `nuget.config` mirror.
-5. **#201 (PR 3b): the container backend and `tog-isolate`.** Moved after
+3. **#207 (PR 9): .NET.** The `nuget.config` mirror.
+4. **#201 (PR 3b): the container backend and `tog-isolate`.** Moved after
    the doors: Go shipped confined without it, so no door waits on it. It
    must land before #208, because removing `Legacy` leaves a host without
    the native sandbox with no way to resolve.
-6. **#208 (PR 10): remove `Legacy`.**
+5. **#208 (PR 10): remove `Legacy`.**
 
 The macOS door (Seatbelt rules, the Mach allow-list from one run of
 `tools/proxy_spike/macos_mach.sh` on a Mac, tree freeze) is not one of
@@ -154,3 +155,9 @@ None open.
 - **#524: tests: gaps found in the review of #459 to #496.** e2e children that keep the caller's environment, the tar call-site scan, a subkey signature case, three node tests under `TOG_STRICT=1`. One checklist.
 - **#525: review follow-ups from #474 to #492.** Small hardening items: one Elixir preflight, old project records, `STOPPED_BY`, links in an object's `bin/`, `meta/` listing and read cap, the silent digest skip. One checklist.
 - **#527: tests: gaps found in the review of #526.** Machine policy inode reuse, ecosystems and lock from one root, real uv and Bundler after a swap, detached publication after a rename, the other ancestor walkers under a search-only directory. One checklist.
+- **#555: fetch and cache hardening from the review of #532 to #545.** The poisoned-entry removal race, tests for `fetch_text_or_missing` and `download_unpinned`, `Interrupted` in `hash_reader`, the insert temporary and its mode. One checklist.
+- **#556: archive link and `read_member` follow-ups from #542 and #543.** `read_member` follows links without `validate`'s rules, two refusals missing from the docs, missing tests, stale comments. One checklist.
+- **#557: what wakes the heavy suite (#546, #547).** Zip extraction and git-source packing are unwatched, the `kernel/` exemption is wider than the gate, two label gaps. A CI-cost decision. One checklist.
+- **#558: test and doc gaps from the review of #535 to #541.** A wrong file name in a Rust refusal, dead-code leftovers, a test that fakes its refusal, line counts, the toolchain guard's ancestor matching. One checklist.
+- **#559: host fallback and host view follow-ups from #549 to #551.** No e2e for a Ruby gem that really falls back, the npm exception detail, clang under `/usr/lib/llvm-<N>`, `realpath` to the uncurated copy, lone `lib*.so` symlinks. One checklist.
+- **#560: e2e layouts with HOME inside the project.** Python and Ruby tests that the PR 7 and PR 8 doors will refuse. One checklist.

@@ -15,17 +15,13 @@ use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
 use crate::commands::shared::{
-    edit_tailors, project_dir, selected_toolchain, CachedTool, DepSpec, EditHost, ManifestEdit,
-    PackageRegistry, Tailor,
+    edit_tailors, project_dir, DepSpec, ManifestEdit, PackageRegistry, Tailor,
 };
 use crate::commands::sync;
-use crate::commands::x as xrun;
 use crate::kernel::context::Context;
-use crate::kernel::platform::Platform;
 use crate::kernel::policy;
 use crate::kernel::resolve::{DoorKind, ResolutionDoor};
 use crate::kernel::store::Store;
-use crate::kernel::toolchain::Selected;
 use crate::kernel::ui;
 
 /// Which edit: the tailors' own `EditVerb`.
@@ -404,7 +400,7 @@ pub fn edit(
     let activity = &ctx.activity;
     // Every delegated tool below runs under the command's own lease.
     store.require_activity(activity, "dependency edit")?;
-    let host = Host {
+    let host = crate::commands::shared::CommandHost {
         platform: ctx.platform,
     };
     let mut door =
@@ -449,29 +445,6 @@ pub fn edit(
         project: outcome_project,
         lines,
     })
-}
-
-/// What an edit borrows from this command: toolchain selection outside a
-/// sync, and the `tog x` cache a pinned package manager lives in.
-struct Host {
-    platform: Platform,
-}
-
-impl EditHost for Host {
-    fn toolchain(&self, dir: &Path, ecosystem: &str) -> io::Result<Selected> {
-        selected_toolchain(self.platform, dir, ecosystem)
-    }
-
-    fn cached_tool(
-        &self,
-        ecosystem: &str,
-        project: &Path,
-        package: &str,
-        version: &str,
-        door: &mut ResolutionDoor<'_>,
-    ) -> io::Result<CachedTool> {
-        xrun::realize_cached_tool(project, ecosystem, package, version, door)
-    }
 }
 
 fn reject_mixed_sync_roots(

@@ -155,6 +155,7 @@ impl Tailor for Go {
         ctx: &Context,
         project: &ProjectRoot,
         toolchain: &Selected,
+        _host: &dyn crate::tailors::EditHost,
         door: &mut ResolutionDoor<'_>,
     ) -> io::Result<(crate::kernel::resolve::record::ResolutionRecord, Vec<u8>)> {
         let go_obj = go::realize_runtime(&ctx.store, &ctx.activity, ctx.platform, toolchain)?;

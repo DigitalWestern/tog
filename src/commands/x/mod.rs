@@ -734,6 +734,9 @@ pub fn launch(
         )?;
         let mut door =
             ResolutionDoor::open(&store, activity, platform, DoorKind::X, &mut attribution)?;
+        // The closure the tool writes here describes a cache root, not a
+        // project: the resolution join leaves it alone.
+        crate::comforter::mark_cache_root(&root)?;
         tool.realize(&mut door, &root, package, version, &toolchain, &helpers)?;
         attribution.finish(true)?;
         write_x_request_for_store(
@@ -850,6 +853,9 @@ pub(crate) fn realize_cached_tool(
             realized: false,
         });
     }
+    // This process has the resolution-files lookup installed (an edit, a
+    // lock check); the cache root's closure is still not a project's.
+    crate::comforter::mark_cache_root(&root)?;
     tool.realize(door, &root, package, Some(version), &toolchain, &helpers)?;
     if !executable.is_file() {
         return Err(other(format!(
