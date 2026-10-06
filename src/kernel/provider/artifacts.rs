@@ -165,19 +165,24 @@ fn resolve_electron(
             text
         }
     };
-    let sha256 = sums
-        .lines()
+    let sha256 = listed_sha256(&sums, &zip_name).ok_or_else(|| {
+        io::Error::other(format!(
+            "electron {version}: {zip_name} is not listed in SHASUMS256.txt"
+        ))
+    })?;
+    Ok((sha256, sums, release_url, zip_name))
+}
+
+/// The sha256 a `SHASUMS256.txt` lists for exactly `file` (a `*` before
+/// the name marks binary mode), when it is 64 hex digits.
+fn listed_sha256(sums: &str, file: &str) -> Option<String> {
+    sums.lines()
         .find_map(|line| {
-            let (hash, file) = line.split_once(char::is_whitespace)?;
-            (file.trim_start_matches('*') == zip_name).then(|| hash.trim().to_ascii_lowercase())
+            let (hash, name) = line.split_once(char::is_whitespace)?;
+            (name.trim_start().trim_start_matches('*') == file)
+                .then(|| hash.trim().to_ascii_lowercase())
         })
         .filter(|hash| hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit()))
-        .ok_or_else(|| {
-            io::Error::other(format!(
-                "electron {version}: {zip_name} is not listed in SHASUMS256.txt"
-            ))
-        })?;
-    Ok((sha256, sums, release_url, zip_name))
 }
 
 /// The one decision behind every `provisioned:` identity input: does the
@@ -185,6 +190,13 @@ fn resolve_electron(
 /// normalized version it would resolve. The producer and the `node-env`
 /// identity contract both consult this, so the contract can require the
 /// `provisioned:` key exactly when the producer writes one.
+///
+/// The version comes from a lockfile, which is attacker-editable. It is
+/// interpolated into the release URL and into a filename, so anything but a
+/// plain version string is refused before either is built: otherwise
+/// `1/../../../someone/else/releases/download/v1` resolves to another
+/// repository's release (self-consistent zip AND checksum manifest), and a
+/// `/../` in the filename writes the fetched bytes outside the cache dir.
 pub fn provisioned_version<'a>(name: &str, version: &'a str) -> Option<&'a str> {
     if name != "electron" {
         return None;
@@ -219,21 +231,9 @@ pub fn provision(
     version: &str,
     scratch: &Path,
 ) -> io::Result<Option<Provisioning>> {
-    if name != "electron" {
+    let Some(version) = provisioned_version(name, version) else {
         return Ok(None);
-    }
-    let version = version.trim_start_matches('v');
-    // The version comes from a lockfile, which is attacker-editable. It is
-    // interpolated into the release URL and into a filename, so anything but a
-    // plain version string is refused before either is built: otherwise
-    // `1/../../../someone/else/releases/download/v1` resolves to another
-    // repository's release (self-consistent zip AND checksum manifest), and a
-    // `/../` in the filename writes the fetched bytes outside the cache dir.
-    if !version.starts_with(|c: char| c.is_ascii_digit())
-        || !crate::kernel::gitsrc::is_safe_component(version)
-    {
-        return Ok(None);
-    }
+    };
     let (sha256, sums, release_url, zip_name) = resolve_electron(store, platform, version)?;
     let zip = crate::kernel::fetch::download_verified_held(
         store,
@@ -286,6 +286,64 @@ mod tests {
             ),
             "4085417ef19dc0c699e7ae20aa4c47fda5a93b6d7926668b0c472c4233ed07e0"
         );
+    }
+
+    /// A lockfile version that would leave electron's release directory,
+    /// or name another file, provisions nothing (#348).
+    #[test]
+    fn an_electron_version_that_is_not_a_plain_version_is_not_provisioned() {
+        assert_eq!(provisioned_version("electron", "v39.0.0"), Some("39.0.0"));
+        assert_eq!(
+            provisioned_version("electron", "39.0.0-beta.1"),
+            Some("39.0.0-beta.1")
+        );
+        for hostile in [
+            "1/../../../someone/else/releases/download/v1",
+            "39.0.0/../x",
+            "..",
+            "",
+            "latest",
+            "39.0.0\\..",
+        ] {
+            assert_eq!(
+                provisioned_version("electron", hostile),
+                None,
+                "{hostile:?}"
+            );
+        }
+        assert_eq!(provisioned_version("not-electron", "39.0.0"), None);
+    }
+
+    /// The zip's sha256 is the line naming exactly that zip, and only a
+    /// full sha256 counts (#348).
+    #[test]
+    fn the_shasums_lookup_takes_only_the_exact_file_and_a_full_digest() {
+        let good = "a".repeat(64);
+        let other = "b".repeat(64);
+        let zip = "electron-v39.0.0-linux-x64.zip";
+        let sums = format!(
+            "{other} *electron-v39.0.0-linux-x64.zip.sig\n\
+             {other} *prefix-electron-v39.0.0-linux-x64.zip\n\
+             {good} *{zip}\n"
+        );
+        assert_eq!(listed_sha256(&sums, zip), Some(good.clone()));
+        assert_eq!(
+            listed_sha256(&format!("{} {zip}\n", good.to_uppercase()), zip),
+            Some(good.clone())
+        );
+        assert_eq!(
+            listed_sha256(&sums, "electron-v39.0.0-darwin-arm64.zip"),
+            None
+        );
+        assert_eq!(
+            listed_sha256(&format!("{} *{zip}\n", &good[..63]), zip),
+            None
+        );
+        assert_eq!(
+            listed_sha256(&format!("{}g *{zip}\n", &good[..63]), zip),
+            None
+        );
+        assert_eq!(listed_sha256("", zip), None);
     }
 
     #[test]

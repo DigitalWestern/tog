@@ -1495,6 +1495,105 @@ mod tests {
         TempDir::named(&format!("native-{label}"))
     }
 
+    /// A conda `_path` that leaves the package root, or is spelled so a
+    /// later join could, is refused; an ordinary relative path passes
+    /// (#348).
+    #[test]
+    fn safe_relative_refuses_paths_that_leave_the_package() {
+        for unsafe_path in [
+            "",
+            "../etc/passwd",
+            "lib/../../escape",
+            "/etc/passwd",
+            "./lib/libz.so",
+            "lib\\..\\escape",
+        ] {
+            let error = safe_relative(unsafe_path).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{unsafe_path:?}");
+            assert!(
+                error.to_string().contains("unsafe conda path"),
+                "{unsafe_path:?}: {error}"
+            );
+        }
+        assert_eq!(
+            safe_relative("lib/pkgconfig/zlib.pc").unwrap(),
+            Path::new("lib/pkgconfig/zlib.pc")
+        );
+    }
+
+    /// Two packages that ship the same file, or a file where the other
+    /// ships a directory, collide instead of one silently replacing the
+    /// other; disjoint trees merge (#348).
+    #[test]
+    fn merge_tree_refuses_a_path_two_packages_both_ship() {
+        let root = temp_dir("merge-tree");
+        let (first, second, merged) = (
+            root.0.join("first"),
+            root.0.join("second"),
+            root.0.join("merged"),
+        );
+        for dir in [&first, &second, &merged] {
+            fs::create_dir_all(dir.join("lib")).unwrap();
+        }
+        fs::write(first.join("lib/libz.so.1"), "z").unwrap();
+        fs::write(second.join("lib/libssl.so.3"), "ssl").unwrap();
+        merge_tree(&first, &merged).unwrap();
+        merge_tree(&second, &merged).unwrap();
+        assert_eq!(fs::read(merged.join("lib/libz.so.1")).unwrap(), b"z");
+        assert_eq!(fs::read(merged.join("lib/libssl.so.3")).unwrap(), b"ssl");
+
+        let same = root.0.join("same");
+        fs::create_dir_all(same.join("lib")).unwrap();
+        fs::write(same.join("lib/libz.so.1"), "other z").unwrap();
+        let error = merge_tree(&same, &merged).unwrap_err();
+        assert!(error.to_string().contains("path collision"), "{error}");
+        assert_eq!(fs::read(merged.join("lib/libz.so.1")).unwrap(), b"z");
+
+        let file_over_dir = root.0.join("file-over-dir");
+        fs::create_dir_all(&file_over_dir).unwrap();
+        fs::write(file_over_dir.join("lib"), "not a dir").unwrap();
+        let error = merge_tree(&file_over_dir, &merged).unwrap_err();
+        assert!(error.to_string().contains("path collision"), "{error}");
+
+        let dir_over_file = root.0.join("dir-over-file");
+        fs::create_dir_all(dir_over_file.join("lib/libz.so.1")).unwrap();
+        let error = merge_tree(&dir_over_file, &merged).unwrap_err();
+        assert!(error.to_string().contains("path collision"), "{error}");
+    }
+
+    /// A placeholder left in any file after relocation refuses the set,
+    /// naming the file; the generic conda-build placeholders refuse too,
+    /// and a clean tree passes (#348).
+    #[test]
+    fn a_placeholder_that_survived_relocation_is_refused() {
+        let root = temp_dir("placeholder-scan");
+        fs::create_dir_all(root.0.join("lib/pkgconfig")).unwrap();
+        fs::write(root.0.join("lib/pkgconfig/zlib.pc"), "prefix=/store/obj\n").unwrap();
+        let placeholders = ["/opt/anaconda1anaconda2anaconda3".to_string()];
+        scan_for_placeholders(&root.0, &placeholders).unwrap();
+
+        fs::write(
+            root.0.join("lib/pkgconfig/ssl.pc"),
+            "prefix=/opt/anaconda1anaconda2anaconda3\n",
+        )
+        .unwrap();
+        let error = scan_for_placeholders(&root.0, &placeholders).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("survived relocation"), "{error}");
+        assert!(
+            error.to_string().contains("lib/pkgconfig/ssl.pc"),
+            "{error}"
+        );
+        fs::remove_file(root.0.join("lib/pkgconfig/ssl.pc")).unwrap();
+
+        fs::write(
+            root.0.join("lib/libfoo.so"),
+            b"\x7fELF /home/build/_h_env_placehold_placehold/lib",
+        )
+        .unwrap();
+        assert!(scan_for_placeholders(&root.0, &placeholders).is_err());
+    }
+
     /// No package is pinned twice, and the object id names the store it
     /// lives in: the libraries' prefix is rewritten to the store path, so
     /// two stores never share one object.
