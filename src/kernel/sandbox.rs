@@ -417,7 +417,7 @@ impl Sandbox<'_> {
         envs: &[(String, String)],
         activity: Option<&StoreActivity>,
     ) -> io::Result<(Command, BwrapInvocation)> {
-        self.reject_host_sockets(cwd, tmp)?;
+        self.reject_host_sockets(cwd, tmp, &HOST_ETC_ENTRIES)?;
         let bwrap = bwrap_preflight_with_activity(activity)?;
         let invocation = self.bwrap_args(cmd, env_path, tmp, cwd, envs)?;
         let mut command = bwrap_command(bwrap)?;
@@ -447,8 +447,9 @@ impl Sandbox<'_> {
 
     /// A Unix socket is reachable through a read-only bind as well as a
     /// writable one (`connect` needs no write access to the mount), so every
-    /// declared root is scanned, not only the writable ones.
-    fn reject_host_sockets(&self, cwd: &Path, scratch: &Path) -> io::Result<()> {
+    /// declared root is scanned, not only the writable ones, and so is each
+    /// of the fixed host `binds` (`HOST_ETC_ENTRIES` in production).
+    fn reject_host_sockets(&self, cwd: &Path, scratch: &Path, binds: &[&str]) -> io::Result<()> {
         let mut roots = Vec::with_capacity(self.read.len() + self.write.len() + 2);
         roots.extend(self.read.iter().copied());
         roots.extend(self.write.iter().copied());
@@ -473,9 +474,10 @@ impl Sandbox<'_> {
             }
             scanned.push(root);
         }
-        // The fixed `/etc` entries are bound too (#373). `/usr` is trusted
-        // unscanned: walking it would cost more than the build.
-        reject_sockets_in_binds(HOST_ETC_ENTRIES.iter().map(Path::new))
+        // The fixed `/etc` entries are bound too (#373). This sandbox trusts
+        // `/usr` unscanned, since walking it on every build would cost more
+        // than the build; the resolution sandbox scans it once per process.
+        reject_sockets_in_binds(binds.iter().map(Path::new))
     }
 
     fn bwrap_args(
@@ -905,15 +907,30 @@ pub(crate) fn bwrap_command(path: &Path) -> io::Result<Command> {
     Ok(command)
 }
 
+/// What a bind of the host path `bind` mounts: bubblewrap follows a
+/// symlink at the bound path, so its real target, where a socket scan has
+/// to start. `None` when nothing is there (absent, or a dangling link),
+/// which the sandboxes bind nothing for. Any other failure names the bind.
+/// The resolution sandbox resolves its `/etc` entries through this too.
+pub(crate) fn bind_target(bind: &Path) -> io::Result<Option<PathBuf>> {
+    match fs::canonicalize(bind) {
+        Ok(target) => Ok(Some(target)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(io::Error::new(
+            error.kind(),
+            format!("cannot resolve sandbox path {}: {error}", bind.display()),
+        )),
+    }
+}
+
 /// Refuse a Unix socket in any of the host paths the sandbox binds as they
-/// are, where each exists: bubblewrap follows a symlink at the bound path,
-/// so the scan starts at its target.
+/// are, where each exists, scanning from each one's [`bind_target`].
 fn reject_sockets_in_binds<'a>(binds: impl Iterator<Item = &'a Path>) -> io::Result<()> {
     for bind in binds {
-        if !bind.exists() {
+        let Some(target) = bind_target(bind)? else {
             continue;
-        }
-        if let Some(socket) = find_socket_without_following_symlinks(&fs::canonicalize(bind)?)? {
+        };
+        if let Some(socket) = find_socket_without_following_symlinks(&target)? {
             return Err(io::Error::other(format!(
                 "host Unix socket exposed by sandbox path {}: {}",
                 bind.display(),
@@ -3284,30 +3301,44 @@ mod containment_tests {
             write: vec![&scratch],
             host_view: HostView::Full,
         };
-        sandbox.reject_host_sockets(&scratch, &scratch).unwrap();
+        sandbox
+            .reject_host_sockets(&scratch, &scratch, &HOST_ETC_ENTRIES)
+            .unwrap();
         drop(listener);
     }
 
     /// A socket in one of the fixed host binds, or behind a symlink the
     /// bind follows, is refused by name; binds without one, and a missing
-    /// one, pass (#373).
+    /// one, pass (#373). A bind that cannot be resolved is refused by name.
     #[cfg(target_os = "linux")]
     #[test]
     fn a_socket_in_a_fixed_host_bind_is_refused() {
         let root = temp_dir("etc-binds");
+        let scratch = root.0.join("s");
         let conf_d = root.0.join("ld.so.conf.d");
         let localtime = root.0.join("localtime");
         let zone = root.0.join("zone");
+        fs::create_dir(&scratch).unwrap();
         fs::create_dir(&conf_d).unwrap();
         fs::write(conf_d.join("a.conf"), "/opt/lib\n").unwrap();
         fs::write(&zone, "TZif").unwrap();
         std::os::unix::fs::symlink(&zone, &localtime).unwrap();
         let missing = root.0.join("missing");
-        let binds = [conf_d.as_path(), localtime.as_path(), missing.as_path()];
-        reject_sockets_in_binds(binds.iter().copied()).unwrap();
+        let sandbox = Sandbox {
+            read: vec![],
+            write: vec![&scratch],
+            host_view: HostView::Full,
+        };
+        let binds = [
+            conf_d.to_str().unwrap(),
+            localtime.to_str().unwrap(),
+            missing.to_str().unwrap(),
+        ];
+        let scan = |binds: &[&str]| sandbox.reject_host_sockets(&scratch, &scratch, binds);
+        scan(&binds).unwrap();
 
         let listener = crate::kernel::testutil::bind_socket(&conf_d.join("s.sock"));
-        let error = reject_sockets_in_binds(binds.iter().copied()).unwrap_err();
+        let error = scan(&binds).unwrap_err();
         assert!(
             error.to_string().starts_with(&format!(
                 "host Unix socket exposed by sandbox path {}: ",
@@ -3322,9 +3353,20 @@ mod containment_tests {
         let listener = crate::kernel::testutil::bind_socket(&target);
         fs::remove_file(&localtime).unwrap();
         std::os::unix::fs::symlink(&target, &localtime).unwrap();
-        let error = reject_sockets_in_binds(binds.iter().copied()).unwrap_err();
+        let error = scan(&binds).unwrap_err();
         assert!(error.to_string().contains("target.sock"), "{error}");
         drop(listener);
+
+        let looped = root.0.join("looped");
+        std::os::unix::fs::symlink(&looped, &looped).unwrap();
+        let error = scan(&[looped.to_str().unwrap()]).unwrap_err();
+        assert!(
+            error.to_string().starts_with(&format!(
+                "cannot resolve sandbox path {}: ",
+                looped.display()
+            )),
+            "{error}"
+        );
     }
 
     /// A read root the scan cannot list is refused, naming the directory,
@@ -3349,7 +3391,7 @@ mod containment_tests {
             write: vec![&scratch],
             host_view: HostView::Full,
         };
-        let result = sandbox.reject_host_sockets(&scratch, &scratch);
+        let result = sandbox.reject_host_sockets(&scratch, &scratch, &[]);
         fs::set_permissions(&closed, fs::Permissions::from_mode(0o755)).unwrap();
         let error = result.unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::PermissionDenied, "{error}");
