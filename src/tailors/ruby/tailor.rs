@@ -15,7 +15,7 @@ use crate::kernel::sandbox;
 use crate::kernel::toolchain::{Catalog, Selected};
 use crate::kernel::ui;
 use crate::tailors::ruby;
-use crate::tailors::{ClosureListing, PackageRow, SyncRequest, Tailor};
+use crate::tailors::{ClosureListing, FileRunner, PackageRow, SourceFile, SyncRequest, Tailor};
 use serde_json::Value;
 use std::io;
 use std::path::Path;
@@ -51,6 +51,13 @@ impl Tailor for Ruby {
 
     fn input_files(&self) -> &'static str {
         "Gemfile"
+    }
+
+    fn source_files(&self) -> &'static [SourceFile] {
+        &[SourceFile {
+            extension: "rb",
+            runner: FileRunner::Command(&["ruby"]),
+        }]
     }
 
     fn preflight(&self, platform: Platform, _project: &ProjectRoot) -> io::Result<()> {

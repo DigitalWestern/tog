@@ -13,7 +13,9 @@ use crate::kernel::resolve::{DoorKind, ResolutionDoor};
 use crate::kernel::toolchain::{Catalog, Selected};
 use crate::kernel::ui;
 use crate::tailors::python::{self as python, inputs, manifest, pyselect};
-use crate::tailors::{ClosureListing, PackageRow, RegistryTool, SyncRequest, Tailor};
+use crate::tailors::{
+    ClosureListing, FileRunner, PackageRow, RegistryTool, SourceFile, SyncRequest, Tailor,
+};
 use serde_json::Value;
 use std::io;
 use std::path::Path;
@@ -49,6 +51,13 @@ impl Tailor for Python {
 
     fn input_files(&self) -> &'static str {
         "requirements.lock.txt, requirements.txt, pyproject.toml ([project], [tool.poetry], [dependency-groups]), setup.cfg, setup.py, requirements/{common.txt,base.txt,requirements.in,cpu.txt,cuda.txt,rocm.txt,xpu.txt}"
+    }
+
+    fn source_files(&self) -> &'static [SourceFile] {
+        &[SourceFile {
+            extension: "py",
+            runner: FileRunner::Command(&["python"]),
+        }]
     }
 
     /// An sdist with a Rust extension compiles with a Rust. With no locked

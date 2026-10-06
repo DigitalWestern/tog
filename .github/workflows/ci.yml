@@ -29,6 +29,21 @@ permissions:
   contents: read
 
 jobs:
+  # Every commit a pull request adds is signed off by its author: the
+  # Developer Certificate of Origin (CONTRIBUTING.md). Seconds, no build.
+  dco:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+      # The checkout is the pull request's merge ref, so HEAD^1 is the
+      # base it was merged onto and HEAD^2 the pull request's head: the
+      # exact range, however far main has moved since the event.
+      - name: Every added commit carries its author's Signed-off-by
+        run: bash tools/dco.sh HEAD^1 HEAD^2
+
   test:
     runs-on: ubuntu-22.04
     steps:

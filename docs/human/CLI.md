@@ -12,6 +12,7 @@ USAGE:
   tog                        set up this project
   tog <command> [<args>...]  run a command ('tog help <command>' explains it)
   tog <script> [<args>...]   run a package.json script (like 'npm run')
+  tog <file> [<args>...]     run a source file in the environment (tog app.py)
 
 START HERE:
   tog                   set up the project from its lockfiles
@@ -376,8 +377,8 @@ argument. A release is compared by version only, because a release does not
 name the commit it was built from: a local build of the same crate version
 is "at the latest release's version" and stays. The asset names and the
 checksum rule are `install.sh`'s, so the two read a release the same way. Releases are built for Linux x86_64
-only for now (macOS waits on #66), and while the repository is private the anonymous request gets a 404, which
-tog reports as no published release. `TOG_RELEASE_MANIFEST` names another
+only for now (macOS waits on #66); a 404 from the anonymous request is
+reported as no published release. `TOG_RELEASE_MANIFEST` names another
 manifest URL (the tests use `file://`); nothing checks in the background.
 
 **update --toolchain** `[<ecosystem>]` is the other update, and the two never
@@ -416,6 +417,24 @@ there is no npm-style `--` separator: `tog test --watch` passes `--watch`,
 and `tog test -- --watch` passes a literal `--` as well. Completion offers
 the package.json script names as first words whenever a package.json is
 present, which is where most people find the shorthand.
+
+`tog <file>` is the other short form: a first word that names an existing
+source file runs it with its ecosystem's program inside the project's
+environment, so `tog app.py` is `tog run python app.py` and `tog main.go`
+is `tog run go run main.go`. The extension decides: `.py` (python),
+`.js`, `.mjs`, `.cjs`, `.ts`, `.mts`, `.cts` (node, which strips types
+itself from 23.6 on), `.rb` (ruby), `.exs` (mix run, so the project's
+deps are loaded), `.go` (go run).
+Uppercase extensions and paths with directories count. The project has to
+have that ecosystem: `tog app.py` in an npm-only project, or outside any
+project, fails naming the missing project rather than running the file
+with whatever `python` the host has. A `.rs` or `.cs` file is refused with
+a pointer to `tog build`: Rust builds a crate, never a lone file, and a
+.NET file-based app would restore packages outside the lock. A file with any other extension is a usage error that names
+`tog run <program> <file>`. A package.json script with the same name as
+the file wins, and so does a built-in command. Arguments after the file
+go to the program unchanged. Completion offers files with those
+extensions as first words.
 
 The environment is the one the project's inputs describe. Before the
 command runs, `run` makes the same check `status` prints, offline: when
@@ -856,7 +875,7 @@ a later step can `tog run` the tests under the same policy. Its inputs:
 | input | default | what it does |
 |---|---|---|
 | `version` | `latest` | release to install, as a tag (`v0.1.0`) |
-| `token` | the job's token | reads the release; while this repository is private, a job in another repository has to pass a token that can read it |
+| `token` | the job's token | reads the release; the job's own token is enough for a public tog, so pass another only to read a private fork of it |
 | `working-directory` | `.` | the project to set up |
 | `policy` | *(empty)* | empty: the company deny list (`docs/human/policy-company.toml`); `none`: sets none (a policy already on the runner or in the project still applies); otherwise the path of a policy file in the workspace |
 | `frozen` | `true` | `false` runs a plain `tog`, which may write the locks |
@@ -884,19 +903,9 @@ request, so a run on `main` never restores it. Do not turn the cache on in
 a `pull_request_target` workflow: there a fork's code runs with the base
 branch's cache.
 
-**While this repository is private.** A workflow in another repository
-needs two things before `uses: DigitalWestern/tog@main` works:
-
-1. In this repository's Settings, Actions, General, under "Access", choose
-   "Accessible from repositories owned by the user 'DigitalWestern'". Only
-   repositories that account owns can use the action until this repository
-   is public.
-2. A token that can read this repository's releases, as a secret (a
-   fine-grained token with "Contents: read" on `DigitalWestern/tog`),
-   passed as `token: ${{ secrets.TOG_RELEASES_TOKEN }}`. The job's own
-   token reads only the repository the job runs in.
-
-Neither is needed once the repository is public.
+**From another repository.** `uses: DigitalWestern/tog@main` works from
+any repository: the action and its releases are public, and the job's own
+token reads them.
 
 The same job written out by hand, for a runner the action does not cover
 or a step that has to differ. Its install step uses the one-line installer,

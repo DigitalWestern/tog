@@ -32,6 +32,8 @@ CLI never prints them; they are defined in
 |---|---|
 | [docs/human/GETTING-STARTED.md](docs/human/GETTING-STARTED.md) | install to first working project |
 | [STATUS.md](STATUS.md) | where the project is, what is next |
+| [docs/human/PRODUCT.md](docs/human/PRODUCT.md) | what tog is as a product: the deliverables, who each is for, what is open and what is not |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | the license and the sign-off rule |
 | [docs/human/ARCHITECTURE.md](docs/human/ARCHITECTURE.md) | how it works |
 | [docs/human/CLI.md](docs/human/CLI.md) | the command surface (spec) |
 | [docs/human/EDITORS.md](docs/human/EDITORS.md) | VS Code and PyCharm setup |
@@ -69,34 +71,12 @@ is on, `tog doctor` names it.
 
 ## Install
 
-Releases start at `v0.1.0`, built for Linux x86_64 only (macOS arm64
-waits on #66). The repository is private, so the installer below cannot
-download a release yet: install from source. You need a Rust
-toolchain from [rustup](https://rustup.rs); `cargo install` puts the binary
-in `~/.cargo/bin`, which rustup already added to PATH:
-
-```sh
-git clone https://github.com/DigitalWestern/tog
-cd tog
-cargo install --path . --locked
-tog completions zsh > ~/.zfunc/_tog   # bash | zsh | fish; optional
-```
-
-`cargo install --git https://github.com/DigitalWestern/tog --locked` does
-the same without keeping a checkout. The repository is private for now, so
-both need your GitHub access. Do not `cargo install tog` from crates.io:
-that name belongs to an unrelated crate. To update a source install, pull
-and run `cargo install --path . --locked` again.
-
-### The one-line installer, once the repository is public
-
 Releases are built by
 [.github/workflows/release.yml](.github/workflows/release.yml) on a `v*`
-tag. Once the repository can be read without logging in (it is private
-now), this is one line on Linux x86_64. It downloads the release binary for
-your machine, checks its sha256, puts it in `~/.local/bin`, adds that
-directory to PATH if it is not already there, and installs bash, zsh, and
-fish completions:
+tag, for Linux x86_64 only (macOS arm64 waits on #66). On Linux x86_64
+this is one line. It downloads the release binary for your machine, checks
+its sha256, puts it in `~/.local/bin`, adds that directory to PATH if it is
+not already there, and installs bash, zsh, and fish completions:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/DigitalWestern/tog/main/install.sh | sh
@@ -134,10 +114,26 @@ doctor` says when a newer release exists (one request; "not checked" when
 offline, or while no release can be read; an `ok` row naming this machine
 when that release has no build for it), and `tog --version` prints the
 commit and its date, so a stale binary can be told from a current one.
-Nothing checks in the background. While the repository is private, `tog
-update --self` reports that it cannot read the latest release: it asks
-GitHub without logging in, and GitHub answers 404. Releases are built for
-Linux x86_64 only for now.
+Nothing checks in the background. Both ask GitHub without logging in.
+Releases are built for Linux x86_64 only for now.
+
+### From source
+
+On any other machine, or to run the current `main`: you need a Rust
+toolchain from [rustup](https://rustup.rs); `cargo install` puts the binary
+in `~/.cargo/bin`, which rustup already added to PATH:
+
+```sh
+git clone https://github.com/DigitalWestern/tog
+cd tog
+cargo install --path . --locked
+tog completions zsh > ~/.zfunc/_tog   # bash | zsh | fish; optional
+```
+
+`cargo install --git https://github.com/DigitalWestern/tog --locked` does
+the same without keeping a checkout. Do not `cargo install tog` from
+crates.io: that name belongs to an unrelated crate. To update a source
+install, pull and run `cargo install --path . --locked` again.
 
 ## Use
 
@@ -165,6 +161,12 @@ build` is the sandboxed build and never a script called build. Use `tog run
 build` for that one. Arguments go to the script unchanged, so there is no
 npm-style `--` separator to remember: `tog test --watch`, not
 `tog test -- --watch`.
+
+`tog <file>` is the same short form for a source file: `tog app.py` runs
+`python app.py` in the project's environment, `tog main.go` runs `go run
+main.go`. The extension picks the runtime (`.py`, `.js`, `.mjs`, `.cjs`,
+`.ts`, `.mts`, `.cts`, `.rb`, `.exs`, `.go`), the project has to have that
+ecosystem, and a `.rs` or `.cs` file points at `tog build` instead.
 
 `tog env` prints the environment as shell exports instead of running one
 command in it. For a whole directory rather than a whole shell, hand it to
@@ -289,4 +291,6 @@ cache hit if that host has seen the lock.
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+Apache-2.0. See [LICENSE](LICENSE). Contributions are accepted under
+the Developer Certificate of Origin, one `Signed-off-by` line per commit;
+[CONTRIBUTING.md](CONTRIBUTING.md) has the rule and the one command.

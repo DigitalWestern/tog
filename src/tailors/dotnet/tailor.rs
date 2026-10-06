@@ -15,7 +15,7 @@ use crate::kernel::sandbox;
 use crate::kernel::toolchain::{Catalog, Selected};
 use crate::kernel::ui;
 use crate::tailors::dotnet;
-use crate::tailors::{ClosureListing, PackageRow, SyncRequest, Tailor};
+use crate::tailors::{ClosureListing, FileRunner, PackageRow, SourceFile, SyncRequest, Tailor};
 use serde_json::Value;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -83,6 +83,17 @@ impl Tailor for Dotnet {
 
     fn input_files(&self) -> &'static str {
         "*.csproj, *.sln, *.slnx, packages.lock.json"
+    }
+
+    fn source_files(&self) -> &'static [SourceFile] {
+        &[SourceFile {
+            extension: "cs",
+            runner: FileRunner::Built(
+                "a C# source file is built as part of its project, and a file-based app's \
+                 '#:package' lines would restore packages outside the lock: 'tog build' builds \
+                 the project in the sandbox",
+            ),
+        }]
     }
 
     fn preflight(&self, platform: Platform, _project: &ProjectRoot) -> io::Result<()> {

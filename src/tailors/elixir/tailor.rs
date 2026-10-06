@@ -16,7 +16,7 @@ use crate::kernel::sandbox;
 use crate::kernel::toolchain::{Catalog, Selected};
 use crate::kernel::ui;
 use crate::tailors::elixir;
-use crate::tailors::{ClosureListing, PackageRow, SyncRequest, Tailor};
+use crate::tailors::{ClosureListing, FileRunner, PackageRow, SourceFile, SyncRequest, Tailor};
 use serde_json::Value;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -87,6 +87,17 @@ impl Tailor for Elixir {
 
     fn input_files(&self) -> &'static str {
         "mix.exs"
+    }
+
+    fn source_files(&self) -> &'static [SourceFile] {
+        // .exs is a script; .ex is a compiled module of a Mix project and
+        // has no meaning on its own. `mix run` rather than `elixir`: a bare
+        // `elixir` loads none of the project's deps, and the projection
+        // only reaches the script through Mix.
+        &[SourceFile {
+            extension: "exs",
+            runner: FileRunner::Command(&["mix", "run"]),
+        }]
     }
 
     fn preflight(&self, platform: Platform, _project: &ProjectRoot) -> io::Result<()> {

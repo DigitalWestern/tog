@@ -17,24 +17,7 @@ are defined in the six-row table at the top of [the README](../../README.md).
 
 ## 1. Install
 
-The repository is private, so the released binary cannot be downloaded
-yet: build tog from source. With a Rust toolchain
-from [rustup](https://rustup.rs):
-
-```sh
-git clone https://github.com/DigitalWestern/tog
-cd tog
-cargo install --path . --locked
-```
-
-`cargo install` puts `tog` in `~/.cargo/bin`, which rustup already put on
-PATH, so a new terminal has it. The repository is private for now, so the
-clone needs your GitHub access. `tog completions zsh` (or `bash`, `fish`)
-prints shell completions if you want them; the
-[README](../../README.md#install) has the details.
-
-Once the repository can be read without logging in, a one-line installer
-replaces all of that on Linux x86_64:
+On Linux x86_64 the installer is one line:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/DigitalWestern/tog/main/install.sh | sh
@@ -54,7 +37,10 @@ source "$HOME/.tog/env"
 New terminals have `tog` without it. To undo the whole thing later, run the
 same script with `--uninstall`: it removes the binary, the env file, the
 completions and the PATH blocks it added, and leaves the store, which is
-downloaded data rather than part of the program.
+downloaded data rather than part of the program. On another platform, or
+to run the current `main`, build from source with a Rust toolchain:
+`cargo install --git https://github.com/DigitalWestern/tog --locked`; the
+[README](../../README.md#from-source) has the details.
 
 On Linux you also want bubblewrap and a C toolchain, because the build
 sandbox and native builds need them; the
@@ -80,7 +66,8 @@ Nine rows, exit 0 when none says `fail`. The first row is the build you
 are running and whether a newer release exists (`warn`, with `tog update
 --self` as the fix; `ok` with `no build for this machine` when that release
 has nothing `update --self` could install here; `not checked` when offline
-or, as here, while GitHub answers 404 because the repository is private). This is the command to run
+or, as in this transcript, recorded while the repository was still private
+and GitHub answered 404). This is the command to run
 before you file a bug and the output to paste into it. The `store` row
 answers "where does all this go": one directory per machine, shared by every
 project on it, created the first time something needs it.
@@ -193,6 +180,10 @@ script unchanged, so there is no npm-style separator to remember: `tog test
 --watch`, not `tog test -- --watch`. A built-in always wins, which means
 `tog build` is the sandboxed build; `tog run build` reaches a script called
 build.
+
+A source file works the same way: `tog app.py` runs it with the project's
+Python, `tog index.js` with its Node, by the extension. The file has to
+belong to an ecosystem this project has.
 
 ## 5. What is on disk now
 

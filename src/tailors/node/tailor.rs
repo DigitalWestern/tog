@@ -15,7 +15,10 @@ use crate::kernel::resolve::ResolutionDoor;
 use crate::kernel::toolchain::{Catalog, Selected};
 use crate::kernel::ui;
 use crate::tailors::node::{self as node, inputs};
-use crate::tailors::{ClosureListing, PackageRow, RegistryTool, ScriptRun, SyncRequest, Tailor};
+use crate::tailors::{
+    ClosureListing, FileRunner, PackageRow, RegistryTool, ScriptRun, SourceFile, SyncRequest,
+    Tailor,
+};
 use serde_json::{json, Value};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -167,6 +170,39 @@ impl Tailor for Node {
 
     fn input_files(&self) -> &'static str {
         "package.json, package-lock.json, pnpm-lock.yaml, yarn.lock"
+    }
+
+    fn source_files(&self) -> &'static [SourceFile] {
+        // Node runs TypeScript itself from 23.6 (22.18 on the 22 line) by
+        // stripping the types; an older locked Node says so in its own
+        // words when handed a .ts file.
+        const NODE: FileRunner = FileRunner::Command(&["node"]);
+        &[
+            SourceFile {
+                extension: "js",
+                runner: NODE,
+            },
+            SourceFile {
+                extension: "mjs",
+                runner: NODE,
+            },
+            SourceFile {
+                extension: "cjs",
+                runner: NODE,
+            },
+            SourceFile {
+                extension: "ts",
+                runner: NODE,
+            },
+            SourceFile {
+                extension: "mts",
+                runner: NODE,
+            },
+            SourceFile {
+                extension: "cts",
+                runner: NODE,
+            },
+        ]
     }
 
     /// `tog x` resolves from the public registry and projects into its own

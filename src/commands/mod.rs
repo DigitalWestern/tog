@@ -34,7 +34,9 @@ use crate::cli;
 use crate::commands::shared::{package_script, project_dir, project_for, project_root};
 use crate::kernel::platform::Platform;
 use crate::kernel::ui;
+use crate::tailors::{self, FileRunner};
 use std::io;
+use std::path::Path;
 
 /// What argv asked for, once the grammar has had its say.
 pub enum Pending {
@@ -96,12 +98,16 @@ pub fn resolve(pending: Pending) -> io::Result<Resolved> {
             args,
             message,
         } => {
-            let root = project_root(&project_dir())?;
+            let cwd = project_dir();
+            let root = project_root(&cwd)?;
             if package_script(&root, &name, &[])?.is_some() {
                 ui::trace(&format!("'{name}' is a package.json script: running it"));
                 let mut command = vec![name];
                 command.extend(args);
                 return Ok(Resolved::Command(cli::Command::Run { command }));
+            }
+            if let Some(resolved) = source_file(&cwd, &name, &args)? {
+                return Ok(resolved);
             }
             let message = if root.join("package.json").is_file() {
                 format!("{message} (no package.json script named '{name}' here)")
@@ -111,6 +117,79 @@ pub fn resolve(pending: Pending) -> io::Result<Resolved> {
             Ok(Resolved::Usage(cli::render_usage_error(&message, None)))
         }
     }
+}
+
+/// `tog <file>`: a first word that names a source file runs it with its
+/// ecosystem's program inside the project's environment, so `tog app.py`
+/// is `tog run python app.py`. The extension picks the tailor
+/// ([`Tailor::source_files`]), and the project has to have that ecosystem:
+/// an npm-only project does not run `app.py` with whatever `python` the
+/// host has. A package.json script of the same name was already taken by
+/// the caller, so an explicit script wins over a file. `None`: the word is
+/// not an existing file.
+fn source_file(cwd: &Path, name: &str, args: &[String]) -> io::Result<Option<Resolved>> {
+    let path = Path::new(name);
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let extension = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_default();
+    let claimed = tailors::registry().iter().find_map(|tailor| {
+        tailor
+            .source_files()
+            .iter()
+            .find(|file| file.extension == extension)
+            .map(|file| (*tailor, file.runner))
+    });
+    let Some((tailor, runner)) = claimed else {
+        let known: Vec<String> = tailors::registry()
+            .iter()
+            .flat_map(|tailor| tailor.source_files())
+            .filter(|file| matches!(file.runner, FileRunner::Command(_)))
+            .map(|file| format!(".{}", file.extension))
+            .collect();
+        let message = format!(
+            "'{name}' is a file tog does not know how to run; it runs {} by extension, and \
+             'tog run <program> {name}' runs any file with a program from the environment",
+            known.join(", ")
+        );
+        return Ok(Some(Resolved::Usage(cli::render_usage_error(
+            &message, None,
+        ))));
+    };
+    let program = match runner {
+        FileRunner::Command(program) => program,
+        FileRunner::Built(why) => {
+            let message = format!("'{name}': {why}");
+            return Ok(Some(Resolved::Usage(cli::render_usage_error(
+                &message, None,
+            ))));
+        }
+    };
+    let id = tailor.id();
+    let present = project_for(cwd)?.is_some_and(|location| location.detected.contains(&id));
+    if !present {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!(
+                "'{name}' is a {id} file, but there is no {id} project here to run it in: tog \
+                 runs a file inside the project's own environment, and looks for {} ('tog help \
+                 inputs')",
+                tailor.input_files()
+            ),
+        ));
+    }
+    let mut command: Vec<String> = program.iter().map(|word| word.to_string()).collect();
+    command.push(name.to_string());
+    command.extend(args.iter().cloned());
+    ui::trace(&format!(
+        "'{name}' is a {id} file: running '{}'",
+        command.join(" ")
+    ));
+    Ok(Some(Resolved::Command(cli::Command::Run { command })))
 }
 
 /// Run the hidden resolution relay and return its exit status: the tool's,
