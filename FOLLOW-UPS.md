@@ -147,7 +147,6 @@ None open.
 
 - **Unreadable rollback cleanup (#503).** Replace the pathname cleanup helper with held-descriptor removal so mode-000 and search-only directories do not leave rollback or teardown data behind. See `src/kernel/store/fsops.rs::remove_tree`.
 
-- **Shared file hashing (#504).** Unify crate and fetch hashing through one descriptor/reader helper in the digest layer.
 - **Random fetch temporaries (#505).** Share random suffixes for download/install temporaries while preserving exclusive creation and GC prefixes.
 - **Complete reference metadata (#506).** Use the shared semantic parser for referenced objects and replace legitimate minimal fixtures with complete records.
 - **Shared exception parsing (#507).** Add checked exceptions to object metadata records instead of reading that field separately.
