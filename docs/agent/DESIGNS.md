@@ -3480,7 +3480,12 @@ Node doors, each the flexible option that still fails closed:
   lock is the output (a `yarn.lock` there is yarn's refusal). As first
   built the member was its own lock root, so the confined npm saw the
   member alone, wrote it a lock of its own and fetched sibling members
-  from the registry (review). A sync run in a member that has no lock of
+  from the registry (review). The pnpm side had the same hole for a
+  first lock: membership is read from `pnpm-lock.yaml`'s `importers`,
+  so a root with `pnpm-workspace.yaml` and no lock yet was walked past.
+  Until pnpm writes a lock, that file's `packages` list (the one tog
+  reads, a settings-only file naming nobody) places the member at the
+  root. A sync run in a member that has no lock of
   its own (npm or pnpm) is refused in preflight naming the root, before
   the toolchain lock or a journal is written into the member: a sync
   holds the member as its project, so a lock generated at the root could

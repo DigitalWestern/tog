@@ -319,11 +319,34 @@ pub(crate) fn node_lock_for(project: &Path) -> io::Result<NodeLock> {
                 root: ancestor.to_path_buf(),
             });
         }
+        // The same for a pnpm workspace that has no lock yet: until pnpm
+        // writes one, `pnpm-workspace.yaml`'s `packages` is the only list
+        // of members there is, and pnpm itself resolves the member from
+        // the root it names.
+        if lock_name.is_none() && pnpm_workspace_yaml_names(ancestor, relative)? {
+            return Ok(NodeLock::PnpmWorkspaceMember {
+                root: ancestor.to_path_buf(),
+            });
+        }
         if lock_name.is_some() || ancestor.join(".tog").is_dir() {
             break;
         }
     }
     Ok(own("package-lock.json"))
+}
+
+/// Does `root`'s `pnpm-workspace.yaml` (present, with a `packages` list tog
+/// can read) name the directory `relative` as a member? A settings-only
+/// file names nobody.
+fn pnpm_workspace_yaml_names(root: &Path, relative: &Path) -> io::Result<bool> {
+    if !root.join("pnpm-workspace.yaml").is_file() {
+        return Ok(false);
+    }
+    let held = ProjectRoot::open(root)?;
+    let Some(members) = super::lock_import::pnpm_workspace_members(&held)? else {
+        return Ok(false);
+    };
+    Ok(members.iter().any(|member| Path::new(member) == relative))
 }
 
 /// The refusal for a command run in a workspace member whose lock, and
@@ -1040,6 +1063,51 @@ mod tests {
     /// lock or `.tog` directory, a `!` exclusion, a directory without a
     /// manifest, and a root whose `workspaces` does not name the project
     /// each leave the project its own root, as before.
+    #[test]
+    fn a_pnpm_workspace_member_under_a_root_without_a_lock_takes_the_root() {
+        let scratch = TempDir::named("pnpm-first-lock");
+        let root = scratch.0.clone();
+        for dir in ["packages/lib", "packages/private", "examples/demo"] {
+            fs::create_dir_all(root.join(dir)).unwrap();
+            fs::write(root.join(dir).join("package.json"), "{}").unwrap();
+        }
+        fs::write(root.join("package.json"), "{}").unwrap();
+        fs::write(
+            root.join("pnpm-workspace.yaml"),
+            "packages:\n  - packages/*\n  - '!packages/private'\n",
+        )
+        .unwrap();
+        let lib = root.join("packages/lib");
+        assert_eq!(
+            selected(&lib),
+            ("pnpm-lock.yaml".to_string(), root.clone()),
+            "a member named by pnpm-workspace.yaml gets its first lock at the root"
+        );
+        for alone in [root.join("packages/private"), root.join("examples/demo")] {
+            assert_eq!(
+                selected(&alone),
+                ("package-lock.json".to_string(), alone.clone()),
+                "a directory the packages list does not name resolves alone"
+            );
+        }
+        fs::write(
+            root.join("pnpm-workspace.yaml"),
+            "onlyBuiltDependencies:\n  - esbuild\n",
+        )
+        .unwrap();
+        assert_eq!(
+            selected(&lib),
+            ("package-lock.json".to_string(), lib.clone()),
+            "a settings-only pnpm-workspace.yaml names no member"
+        );
+        fs::write(root.join("pnpm-workspace.yaml"), "packages: &a\n  - x\n").unwrap();
+        assert_eq!(
+            selected(&lib),
+            ("package-lock.json".to_string(), lib.clone()),
+            "a packages list tog cannot read names no member here; the root sync refuses it"
+        );
+    }
+
     #[test]
     fn an_npm_workspace_member_takes_the_root_as_its_lock_root() {
         let scratch = TempDir::named("npm-workspace-member");

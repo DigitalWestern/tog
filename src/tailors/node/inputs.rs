@@ -330,6 +330,26 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("does not list it as an importer"), "{error}");
+
+        let first = temp.0.join("pnpm-first");
+        let first_lib = first.join("packages/lib");
+        std::fs::create_dir_all(&first_lib).unwrap();
+        std::fs::write(first.join("package.json"), "{}").unwrap();
+        std::fs::write(first_lib.join("package.json"), "{}").unwrap();
+        std::fs::write(
+            first.join("pnpm-workspace.yaml"),
+            "packages:\n  - packages/*\n",
+        )
+        .unwrap();
+        let member = crate::kernel::fsroot::ProjectRoot::open(&first_lib).unwrap();
+        let error = super::refuse_member_lock_generation(&member)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("pnpm-lock.yaml")
+                && error.contains(&first.canonicalize().unwrap().display().to_string()),
+            "a pnpm member whose root has no lock yet is sent to the root: {error}"
+        );
     }
 
     /// A directory with no package.json is not a Node project: nothing to
