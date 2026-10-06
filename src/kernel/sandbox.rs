@@ -36,6 +36,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
 
+mod held;
+pub(crate) use held::pass_fds;
+use held::HeldRoots;
+
 /// How much of the host's system directories a sandboxed build can see.
 /// The host C toolchain is an unpinned build input either way (see
 /// docs/human/LIMITATIONS.md); this decides what else of the host rides
@@ -417,11 +421,15 @@ impl Sandbox<'_> {
         envs: &[(String, String)],
         activity: Option<&StoreActivity>,
     ) -> io::Result<(Command, BwrapInvocation)> {
-        self.reject_host_sockets(cwd, tmp)?;
+        let held = HeldRoots::resolve(self, cwd)?;
+        self.reject_host_sockets(cwd, tmp, &held)?;
         let bwrap = bwrap_preflight_with_activity(activity)?;
-        let invocation = self.bwrap_args(cmd, env_path, tmp, cwd, envs)?;
+        let mut invocation = self.bwrap_args(cmd, env_path, tmp, cwd, envs, &held)?;
         let mut command = bwrap_command(bwrap)?;
         command.args(&invocation.args);
+        pass_fds(&mut command, held.passed());
+        // The descriptors are duplicated only when the child is spawned.
+        invocation._held = held;
         Ok((command, invocation))
     }
 
@@ -448,7 +456,9 @@ impl Sandbox<'_> {
     /// A Unix socket is reachable through a read-only bind as well as a
     /// writable one (`connect` needs no write access to the mount), so every
     /// declared root is scanned, not only the writable ones.
-    fn reject_host_sockets(&self, cwd: &Path, scratch: &Path) -> io::Result<()> {
+    /// A root an open project root holds is scanned through its held
+    /// descriptor, the directory the sandbox binds (`held`).
+    fn reject_host_sockets(&self, cwd: &Path, scratch: &Path, held: &HeldRoots) -> io::Result<()> {
         let mut roots = Vec::with_capacity(self.read.len() + self.write.len() + 2);
         roots.extend(self.read.iter().copied());
         roots.extend(self.write.iter().copied());
@@ -457,7 +467,10 @@ impl Sandbox<'_> {
 
         let mut scanned = Vec::new();
         for root in roots {
-            let root = fs::canonicalize(root)?;
+            let (alias, root) = match held.find(root) {
+                Some(found) => (Some(found.alias()), found.dest.clone()),
+                None => (None, fs::canonicalize(root)?),
+            };
             if scanned
                 .iter()
                 .any(|parent: &PathBuf| root.starts_with(parent))
@@ -465,7 +478,16 @@ impl Sandbox<'_> {
                 continue;
             }
             scanned.retain(|parent| !parent.starts_with(&root));
-            if let Some(socket) = find_socket_without_following_symlinks(&root)? {
+            let found = match &alias {
+                Some(alias) => find_socket_without_following_symlinks(alias)?.map(|socket| {
+                    match socket.strip_prefix(alias) {
+                        Ok(below) => root.join(below),
+                        Err(_) => socket,
+                    }
+                }),
+                None => find_socket_without_following_symlinks(&root)?,
+            };
+            if let Some(socket) = found {
                 return Err(io::Error::other(format!(
                     "host Unix socket exposed by sandbox path: {}",
                     socket.display()
@@ -485,22 +507,13 @@ impl Sandbox<'_> {
         tmp: &Path,
         cwd: &Path,
         envs: &[(String, String)],
+        held: &HeldRoots,
     ) -> io::Result<BwrapInvocation> {
-        let read: Vec<PathBuf> = self
-            .read
-            .iter()
-            .map(fs::canonicalize)
-            .collect::<io::Result<_>>()?;
-        let mut write: Vec<PathBuf> = self
-            .write
-            .iter()
-            .map(fs::canonicalize)
-            .collect::<io::Result<_>>()?;
+        let (read_binds, write_binds) = held.place(&self.read, &self.write, tmp)?;
         let scratch = fs::canonicalize(tmp)?;
-        let cwd = fs::canonicalize(cwd)?;
-        if !write.iter().any(|path| path == &scratch) {
-            write.push(scratch.clone());
-        }
+        let cwd = held.place_one(cwd)?.1;
+        let read: Vec<PathBuf> = read_binds.iter().map(|(_, dest)| dest.clone()).collect();
+        let write: Vec<PathBuf> = write_binds.iter().map(|(_, dest)| dest.clone()).collect();
 
         let mut args = vec![
             OsString::from("--unshare-user"),
@@ -559,11 +572,12 @@ impl Sandbox<'_> {
             push_arg(&mut args, "--tmpfs");
             push_arg(&mut args, cwd.as_os_str());
         }
-        for path in &read {
-            push_bind_path(&mut args, "--ro-bind", path);
-        }
-        for path in &write {
-            push_bind_path(&mut args, "--bind", path);
+        for (flag, binds) in [("--ro-bind", &read_binds), ("--bind", &write_binds)] {
+            for (source, dest) in binds {
+                push_arg(&mut args, flag);
+                args.push(source.clone().into_os_string());
+                args.push(dest.clone().into_os_string());
+            }
         }
 
         push_setenv(&mut args, "PATH", env_path);
@@ -590,6 +604,16 @@ impl Sandbox<'_> {
         push_arg(&mut args, "--unsetenv");
         push_arg(&mut args, "PWD");
 
+        // The held descriptors bubblewrap bound from reach the command too
+        // (its pid 1 closes only its own copies), and a host directory's
+        // descriptor leads out of the sandbox through `..`. The system
+        // shell closes them before anything of the build runs.
+        if let Some(close) = held.close_script() {
+            push_arg(&mut args, "/bin/sh");
+            push_arg(&mut args, "-c");
+            push_arg(&mut args, close);
+            push_arg(&mut args, "sh");
+        }
         // bwrap 0.12 adds PWD while processing --chdir. Keep the environment
         // identical to Seatbelt's env_clear projection in the exec transition.
         push_arg(&mut args, "/usr/bin/env");
@@ -611,6 +635,7 @@ impl Sandbox<'_> {
         Ok(BwrapInvocation {
             args,
             _skeleton: skeleton,
+            _held: HeldRoots::default(),
         })
     }
 }
@@ -645,6 +670,8 @@ const BWRAP_MAX_ARGS: usize = 9000;
 struct BwrapInvocation {
     args: Vec<OsString>,
     _skeleton: Option<crate::kernel::hostview::ViewSkeleton>,
+    /// The held roots the command passes to bubblewrap, open until it runs.
+    _held: HeldRoots,
 }
 
 /// Longest stderr prefix retained for sandbox setup classification; bwrap's own
@@ -1619,6 +1646,55 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
+    /// A project an open root holds is bound from its held descriptor
+    /// (#497): renamed away with another directory put at its path, the
+    /// sandbox still sees, and starts in, the tree tog opened. Renamed with
+    /// nothing put back, it still runs there. Neither the command nor the
+    /// sandbox's pid 1 keeps the held descriptor, which would lead out of
+    /// the sandbox through `..`.
+    #[test]
+    fn linux_a_held_project_is_bound_from_its_descriptor() {
+        if !linux_ready("linux_a_held_project_is_bound_from_its_descriptor") {
+            return;
+        }
+        let root = temp_dir("held-project");
+        let scratch = root.0.join("scratch");
+        let project = root.0.join("project");
+        fs::create_dir(&scratch).unwrap();
+        fs::create_dir(&project).unwrap();
+        let project = project.canonicalize().unwrap();
+        fs::write(project.join("f"), "held").unwrap();
+        let held = crate::kernel::fsroot::ProjectRoot::open(&project).unwrap();
+        let moved = root.0.join("moved");
+        fs::rename(&project, &moved).unwrap();
+        let sandbox = Sandbox {
+            read: vec![&project],
+            write: vec![&scratch],
+            host_view: HostView::Full,
+        };
+        let path = project.join("f");
+        // `test` is a child of the shell, so it holds exactly what the
+        // command was given: the held descriptor would be at 3.
+        let script = "/usr/bin/cat f \"$1\"; \
+            if /usr/bin/test -d /proc/self/fd/3; then echo ' leak 3'; fi; \
+            for fd in /proc/1/fd/*; do \
+                if /usr/bin/test -d \"$fd\"; then echo \" leak $fd\"; fi; \
+            done";
+        let cmd = ["/usr/bin/sh", "-c", script, "sh", path.to_str().unwrap()];
+        // Renamed, nothing at the path.
+        let seen = run_capture(&sandbox, &cmd, &scratch, &project, &[]).unwrap();
+        assert_eq!(String::from_utf8_lossy(&seen), "heldheld");
+        // Another directory swapped in at the path.
+        fs::create_dir(&project).unwrap();
+        fs::write(project.join("f"), "swapped").unwrap();
+        let seen = run_capture(&sandbox, &cmd, &scratch, &project, &[]).unwrap();
+        assert_eq!(String::from_utf8_lossy(&seen), "heldheld");
+        drop(held);
+        // Once no root holds it, the path is bound as it stands.
+        let seen = run_capture(&sandbox, &cmd, &scratch, &project, &[]).unwrap();
+        assert_eq!(String::from_utf8_lossy(&seen), "swappedswapped");
+    }
+
     #[test]
     fn linux_inherited_directory_and_socket_fds_are_closed() {
         if !linux_ready("linux_inherited_directory_and_socket_fds_are_closed") {
@@ -2507,7 +2583,14 @@ mod tests {
                 host_view,
             };
             let invocation = sandbox
-                .bwrap_args(&["/usr/bin/true"], "/usr/bin:/bin", &scratch, &scratch, &[])
+                .bwrap_args(
+                    &["/usr/bin/true"],
+                    "/usr/bin:/bin",
+                    &scratch,
+                    &scratch,
+                    &[],
+                    &HeldRoots::default(),
+                )
                 .unwrap();
             let args: Vec<String> = invocation
                 .args
@@ -2583,6 +2666,7 @@ mod tests {
                 &scratch,
                 &scratch,
                 &[("PKG_CONFIG_LIBDIR".to_string(), "/mine".to_string())],
+                &HeldRoots::default(),
             )
             .unwrap();
         let own: Vec<String> = own
@@ -3007,6 +3091,7 @@ cc main.c -o main "own/$2" -Wl,--enable-new-dtags,-rpath,'$ORIGIN/own' &&
                 &scratch,
                 &scratch,
                 &[("CHECK".to_string(), "ok".to_string())],
+                &HeldRoots::default(),
             )
             .unwrap()
             .args;
@@ -3323,7 +3408,9 @@ mod containment_tests {
             write: vec![&scratch],
             host_view: HostView::Full,
         };
-        sandbox.reject_host_sockets(&scratch, &scratch).unwrap();
+        sandbox
+            .reject_host_sockets(&scratch, &scratch, &HeldRoots::default())
+            .unwrap();
         drop(listener);
     }
 
@@ -3388,7 +3475,7 @@ mod containment_tests {
             write: vec![&scratch],
             host_view: HostView::Full,
         };
-        let result = sandbox.reject_host_sockets(&scratch, &scratch);
+        let result = sandbox.reject_host_sockets(&scratch, &scratch, &HeldRoots::default());
         fs::set_permissions(&closed, fs::Permissions::from_mode(0o755)).unwrap();
         let error = result.unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::PermissionDenied, "{error}");
@@ -3517,7 +3604,14 @@ mod containment_tests {
     }
 
     fn argv(sandbox: &Sandbox<'_>, cmd: &[&str], scratch: &Path) -> io::Result<Vec<String>> {
-        let invocation = sandbox.bwrap_args(cmd, "/usr/bin:/bin", scratch, scratch, &[])?;
+        let invocation = sandbox.bwrap_args(
+            cmd,
+            "/usr/bin:/bin",
+            scratch,
+            scratch,
+            &[],
+            &HeldRoots::default(),
+        )?;
         Ok(invocation
             .args
             .iter()

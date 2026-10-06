@@ -142,6 +142,10 @@ Rules the Linux port settled, which apply to any future platform:
   same deny-by-default rules (no network, declared reads and writes,
   scrubbed environment, `SOURCE_DATE_EPOCH`). A path that would need a
   sandbox the platform lacks fails loudly; it never runs unsandboxed.
+  On Linux a declared root an open `ProjectRoot` holds is bound from the
+  held descriptor (bubblewrap binds `/proc/self/fd/<n>`), and the system
+  shell closes those descriptors before the build runs, since a host
+  directory's descriptor leads out through `..` (#497).
 - **The host C toolchain is an unpinned build input** on both platforms
   (Xcode clang on macOS, `/usr` gcc on Linux). Pinning it is a backlog item.
   A build spec also names its host view: `Full` binds the host's whole `/usr`,

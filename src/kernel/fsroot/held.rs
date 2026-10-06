@@ -98,7 +98,7 @@ fn held_dir_for(path: &Path) -> io::Result<Option<(fs::File, PathBuf)>> {
 /// Any other spelling is canonicalized, which resolves what it names now,
 /// and matched once more. A renamed project still matches by the canonical
 /// path it was opened at, which is the spelling its callers hold.
-pub(super) fn held_root_for(path: &Path) -> io::Result<Option<(fs::File, PathBuf)>> {
+pub(crate) fn held_root_for(path: &Path) -> io::Result<Option<(fs::File, PathBuf)>> {
     let plain = path.is_absolute()
         && path.components().all(|part| {
             matches!(
