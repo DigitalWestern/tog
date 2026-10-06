@@ -5119,6 +5119,27 @@ fn unknown_first_word_that_names_a_source_file_runs_it_in_its_project() {
         "{stderr}"
     );
     assert!(!stderr.contains("is a python file"), "{stderr}");
+    // Outside any project the file takes the lone-file road too, on the
+    // shipped runtime: with the network cut, realizing it refuses, and
+    // nothing ran on the host's `python`.
+    let empty = TempDir::boundary("cli-file-empty");
+    std::fs::write(empty.0.join("app.py"), "print('host python ran')\n").unwrap();
+    let out = tog_offline(&empty.0, &home.0, &["-v", "app.py"]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    let stderr = text(&out.stderr);
+    assert!(
+        stderr.contains(
+            "'app.py' is a python file and there is no python project here: running it on the \
+             python runtime alone"
+        ),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("syncing first"), "{stderr}");
+    assert!(
+        !stderr.contains("no python project here (tog looks for"),
+        "{stderr}"
+    );
+    assert_eq!(text(&out.stdout), "", "{stderr}");
 }
 
 /// A TypeScript file on a Node too old to strip types is refused before

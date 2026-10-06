@@ -53,8 +53,6 @@ pub(crate) fn refused_command(cmd: &[String]) -> Option<String> {
         .find_map(|tailor| tailor.refused_command(cmd))
 }
 
-/// The project script `cmd` names in a projection under `dir`: the first
-/// tailor's `Tailor::projected_script`.
 /// Why `program` cannot run: it is the runtime of an ecosystem the project
 /// at `dir` has (`node` in a Node project), named bare, and no `prefix`
 /// entry provides it, so the host's would run in its place.
@@ -77,13 +75,14 @@ fn unprovided_runtime(dir: &Path, program: &str, prefix: &[String]) -> io::Resul
     Ok((!provided).then(|| {
         format!(
             "'{program}' is the {} runtime, but the project's environment does not provide it, \
-             and tog does not run the host's in its place; run 'tog' to sync it, or 'tog doctor' \
-             if a sync leaves it missing",
+             and tog does not run the host's in its place; 'tog doctor' says what is missing",
             tailor.id()
         )
     }))
 }
 
+/// The project script `cmd` names in a projection under `dir`: the first
+/// tailor's `Tailor::projected_script`.
 fn projected_script(
     dir: &std::path::Path,
     cwd: &std::path::Path,
@@ -137,8 +136,12 @@ pub fn run(ctx: &Context, cmd: &[String], frozen: bool) -> io::Result<i32> {
             ),
         ));
     }
-    if let Some(refusal) = unprovided_runtime(&dir, &cmd[0], &prefix)? {
-        return Err(io::Error::new(io::ErrorKind::NotFound, refusal));
+    // A package.json script named like a runtime (`go`, `python`) is a
+    // script: its steps run, not a program of that name.
+    if script.is_none() {
+        if let Some(refusal) = unprovided_runtime(&dir, &cmd[0], &prefix)? {
+            return Err(io::Error::new(io::ErrorKind::NotFound, refusal));
+        }
     }
     let path = std::env::var("PATH").unwrap_or_default();
     prefix.push(path);
@@ -234,6 +237,8 @@ mod tests {
             .unwrap();
         assert!(why.contains("'node' is the node runtime"), "{why}");
         assert!(why.contains("does not run the host's"), "{why}");
+        assert!(why.contains("tog doctor"), "{why}");
+        assert!(!why.contains("run 'tog' to sync"), "{why}");
         // A file named like the runtime that cannot be executed is not it.
         let node = bin.0.join("node");
         std::fs::write(&node, "").unwrap();
@@ -245,6 +250,30 @@ mod tests {
             unprovided_runtime(&project.0, "node", &prefix).unwrap(),
             None
         );
+        // The programs that ship in the runtime count as the runtime.
+        for program in ["npm", "npx"] {
+            assert!(
+                unprovided_runtime(&project.0, program, &prefix)
+                    .unwrap()
+                    .is_some(),
+                "{program}"
+            );
+        }
+        for (manifest, program) in [
+            ("requirements.txt", "pip"),
+            ("Gemfile", "bundle"),
+            ("go.mod", "gofmt"),
+            ("mix.exs", "iex"),
+        ] {
+            let other = TempDir::new();
+            std::fs::write(other.0.join(manifest), "").unwrap();
+            assert!(
+                unprovided_runtime(&other.0, program, &[])
+                    .unwrap()
+                    .is_some(),
+                "{program}"
+            );
+        }
         // Another ecosystem's runtime, any other program, and an explicit
         // path are the user's to name.
         for program in ["python", "git", "/usr/bin/node", "./node"] {

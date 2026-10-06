@@ -4,8 +4,11 @@ as git smart HTTP (protocol v2) at https://github.com/tog-fixtures/leaf.
 
 The repository is built here with a fixed author and date, so its commit id
 never changes, and each answer comes from this machine's `git upload-pack`,
-not from GitHub: the fixture needs no network and no account, and running
-this again writes the same bytes. Protocol v2 sends `ls-refs` and `fetch` to
+not from GitHub: the fixture needs no network and no account. The commit id
+and the `ls-refs` answer are the same on every run; the `fetch` answer is a
+pack whose bytes depend on the git build that wrote it (its compression and
+delta choices), so regenerating with another git rewrites that file and its
+sha256 in the index. Protocol v2 sends `ls-refs` and `fetch` to
 the same URL, so the two POST rows carry `request_has`, the command the
 fixture upstream matches in the request body to pick one.
 

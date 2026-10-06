@@ -1190,17 +1190,24 @@ fn assert_signal_mid_script_stops_the_sync(signal: libc::c_int, whole_group: boo
     });
     // Read as it comes, so a report made while tog still runs has it.
     let mut stderr = child.stderr.take().unwrap();
-    let stderr_so_far = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    // Raw bytes, decoded once at the end: a chunk may end inside a UTF-8
+    // character, and EINTR is a retry, not the end of the stream.
+    let stderr_so_far = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
     let stderr_sink = stderr_so_far.clone();
     let stderr_reader = std::thread::spawn(move || {
         let mut chunk = [0u8; 4096];
-        while let Ok(read @ 1..) = stderr.read(&mut chunk) {
-            stderr_sink
-                .lock()
-                .unwrap()
-                .push_str(&String::from_utf8_lossy(&chunk[..read]));
+        loop {
+            match stderr.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(read) => stderr_sink
+                    .lock()
+                    .unwrap()
+                    .extend_from_slice(&chunk[..read]),
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => break,
+            }
         }
-        stderr_sink.lock().unwrap().clone()
+        String::from_utf8_lossy(&stderr_sink.lock().unwrap()).into_owned()
     });
 
     // It is the marker, never a sleep, that decides when to signal.
@@ -1249,7 +1256,7 @@ fn assert_signal_mid_script_stops_the_sync(signal: libc::c_int, whole_group: boo
             Instant::now() < exit_deadline,
             "tog kept running after the interrupt\nstdout:\n{stdout_text}\nstderr so far:\n{}\n\
              processes descended from tog:\n{}",
-            stderr_so_far.lock().unwrap(),
+            String::from_utf8_lossy(&stderr_so_far.lock().unwrap()),
             process_listing(pid)
         );
         std::thread::sleep(Duration::from_millis(20));

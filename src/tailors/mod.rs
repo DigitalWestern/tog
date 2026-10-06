@@ -174,6 +174,9 @@ pub struct SourceFile {
 }
 
 /// How a realized runtime runs one source file (`Tailor::lone_file`).
+/// The environment is scrubbed the way `tog run` scrubs it for the same
+/// runtime (`kernel::sandbox::force_env`): the host's interpreter
+/// configuration never changes what the file runs with.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoneFile {
     /// The program, a path inside the runtime, then its leading arguments;
@@ -181,9 +184,17 @@ pub struct LoneFile {
     pub program: Vec<String>,
     /// Directories put ahead of the host PATH.
     pub path: Vec<PathBuf>,
-    /// Variables set for the program.
-    pub env: Vec<(&'static str, String)>,
+    /// Inherited variables removed by prefix, then by exact name, before
+    /// `env` is set.
+    pub remove_prefixes: Vec<&'static str>,
+    pub remove: Vec<&'static str>,
+    /// Variables set for the program, last, so they win.
+    pub env: Vec<(String, String)>,
 }
+
+/// An environment scrub as the tailors' `run_env` functions state it:
+/// prefixes and names to remove, then the variables to set.
+pub type EnvScrub = (Vec<&'static str>, Vec<&'static str>, Vec<(String, String)>);
 
 impl LoneFile {
     /// `program` from `runtime/bin`, with that directory on PATH.
@@ -192,8 +203,16 @@ impl LoneFile {
         LoneFile {
             program: vec![bin.join(program).to_string_lossy().into_owned()],
             path: vec![bin],
+            remove_prefixes: Vec::new(),
+            remove: Vec::new(),
             env: Vec::new(),
         }
+    }
+
+    /// With `scrub` as the file's environment.
+    fn scrubbed(mut self, scrub: EnvScrub) -> LoneFile {
+        (self.remove_prefixes, self.remove, self.env) = scrub;
+        self
     }
 }
 

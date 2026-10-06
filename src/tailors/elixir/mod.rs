@@ -987,20 +987,11 @@ pub fn prepare_run_home(scratch_home: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// Env for `tog run` (MIX_ENV passes through from the user's shell —
-/// it's on the remove-prefix list, so re-set it when present).
-pub fn run_env(
-    beam_obj: &Path,
-    deps_path: &Path,
-    build_root: &Path,
-    scratch_home: &Path,
-) -> io::Result<(Vec<&'static str>, Vec<&'static str>, Vec<(String, String)>)> {
+/// [`forced_env`] with the child's home moved under `scratch_home`
+/// ([`prepare_run_home`]): the host's HOME and XDG config would let
+/// `.erlang`, `.iex.exs` and rebar3 global plugins back in.
+fn homed_env(beam_obj: &Path, deps_path: &Path, scratch_home: &Path) -> Vec<(String, String)> {
     let mut set = forced_env(beam_obj, deps_path, scratch_home);
-    set.push((
-        "MIX_BUILD_ROOT".to_string(),
-        build_root.display().to_string(),
-    ));
-    // Host HOME/XDG config would let rebar3 global plugins back in.
     set.push(("HOME".to_string(), scratch_home.display().to_string()));
     set.push((
         "XDG_CONFIG_HOME".to_string(),
@@ -1009,6 +1000,34 @@ pub fn run_env(
     set.push((
         "XDG_CACHE_HOME".to_string(),
         scratch_home.join("xdg-cache").display().to_string(),
+    ));
+    set
+}
+
+/// Env for a lone script (`tog t.exs` with no Elixir project): the scrub
+/// of [`run_env`] with no deps and no build root. `HEX_OFFLINE=1` and the
+/// scratch Mix and Hex homes mean a `Mix.install` in the script cannot
+/// fetch, and finds nothing the host installed.
+pub fn lone_env(beam_obj: &Path, scratch_home: &Path) -> crate::tailors::EnvScrub {
+    (
+        ENV_REMOVE_PREFIXES.to_vec(),
+        ENV_REMOVE.to_vec(),
+        homed_env(beam_obj, &scratch_home.join("deps"), scratch_home),
+    )
+}
+
+/// Env for `tog run` (MIX_ENV passes through from the user's shell —
+/// it's on the remove-prefix list, so re-set it when present).
+pub fn run_env(
+    beam_obj: &Path,
+    deps_path: &Path,
+    build_root: &Path,
+    scratch_home: &Path,
+) -> io::Result<crate::tailors::EnvScrub> {
+    let mut set = homed_env(beam_obj, deps_path, scratch_home);
+    set.push((
+        "MIX_BUILD_ROOT".to_string(),
+        build_root.display().to_string(),
     ));
     if let Ok(env) = std::env::var("MIX_ENV") {
         // Strict: nonempty, bounded, loud on garbage — never silently dev.
@@ -1523,7 +1542,12 @@ fn closure_body(
 /// Build root, qualified by the toolchain fingerprint: stale BEAM/native
 /// artifacts across OTP/Elixir upgrades are a real hazard.
 pub fn build_root_at(project_dir: &Path, fingerprint: &str) -> PathBuf {
-    project_dir.join(format!("_build/tog-{fingerprint}"))
+    project_dir.join(build_root_relative(fingerprint))
+}
+
+/// The build root of one BEAM fingerprint, relative to the project.
+fn build_root_relative(fingerprint: &str) -> PathBuf {
+    PathBuf::from(format!("_build/tog-{fingerprint}"))
 }
 
 /// The build root of the selected toolchain.
@@ -1538,12 +1562,32 @@ pub fn build_root(
     ))
 }
 
+/// The build root of the selected toolchain, created from the held project
+/// descriptor (which refuses a symlink at any component, so a `_build`
+/// symlink out of the project is refused before anything is created where
+/// it points) and spelled under the project's held path.
+fn held_build_root(
+    platform: Platform,
+    project: &ProjectRoot,
+    selected: &Selected,
+) -> io::Result<PathBuf> {
+    let relative = build_root_relative(&beam_fingerprint_for(&beam_spec(platform, selected)?));
+    project.create_dir_all(&relative)?;
+    Ok(project.path().join(relative))
+}
+
 /// Sandboxed `mix compile`: network denied, writes only the qualified
 /// build root, the deps projection (native builds write in-tree), scratch.
+///
+/// The project is the directory `project` holds, named by the canonical
+/// path it was opened at, which the sandbox resolves through the held
+/// descriptor (#497). Neither it nor the build root under it is
+/// canonicalized again: that would follow whatever sits at the path now, a
+/// symlink swapped in included.
 pub fn build_sandboxed(
     platform: Platform,
     activity: &StoreActivity,
-    project_dir: &Path,
+    project: &ProjectRoot,
     beam_obj: &Path,
     deps_projection: &Path,
     args: &[String],
@@ -1555,15 +1599,13 @@ pub fn build_sandboxed(
             return Err(err(format!("{arg}: this flag is managed by tog")));
         }
     }
-    let project_dir = project_dir.canonicalize()?;
+    let project_dir = project.path().to_path_buf();
     let beam_obj = beam_obj.canonicalize()?;
     let deps_projection = deps_projection.canonicalize()?;
     let store = Store::open()?;
     store.require_activity(activity, "mix build")?;
     let scratch = store.stage_with_activity(activity)?;
-    let build = build_root(platform, &project_dir, selected)?;
-    fs::create_dir_all(&build)?;
-    let build = build.canonicalize()?;
+    let build = held_build_root(platform, project, selected)?;
     let mut argv = vec![
         beam_obj.join("elixir/bin/mix").display().to_string(),
         "compile".to_string(),
@@ -2443,6 +2485,37 @@ exit 0
         assert_eq!(
             build_root(DARWIN, Path::new("/p"), &shipped_selection().unwrap()).unwrap(),
             root
+        );
+    }
+
+    /// The build root is created from the held project descriptor and
+    /// named under the path the root was opened at, never resolved again
+    /// (#497): with the project renamed away and a symlink to another
+    /// directory put at its path, `_build` lands in the held tree and the
+    /// symlink's target gets nothing.
+    #[test]
+    fn held_build_root_ignores_a_symlink_swapped_in_at_the_project() {
+        let temp = TempDir::named("elixir-build-root-swap");
+        let project = temp.0.join("project");
+        let moved = temp.0.join("moved");
+        let other = temp.0.join("other");
+        fs::create_dir_all(&project).unwrap();
+        fs::create_dir_all(&other).unwrap();
+        let project = project.canonicalize().unwrap();
+        let held = ProjectRoot::open(&project).unwrap();
+        fs::rename(&project, &moved).unwrap();
+        std::os::unix::fs::symlink(&other, &project).unwrap();
+
+        let selected = shipped_selection().unwrap();
+        let build = held_build_root(DARWIN, &held, &selected).unwrap();
+        assert_eq!(build, build_root(DARWIN, &project, &selected).unwrap());
+        assert!(
+            moved.join("_build").is_dir(),
+            "not created in the held tree"
+        );
+        assert!(
+            fs::read_dir(&other).unwrap().next().is_none(),
+            "created where the swapped-in symlink points"
         );
     }
 

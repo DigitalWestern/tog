@@ -471,17 +471,20 @@ fn read_text_capped(reader: impl Read, max: u64, url: &str) -> io::Result<String
     reader
         .take(max + 1)
         .read_to_end(&mut body)
-        .map_err(|e| io::Error::new(e.kind(), format!("read {url}: {e}")))?;
+        .map_err(|e| io::Error::new(e.kind(), format!("read {}: {e}", shown_url(url))))?;
     if body.len() as u64 > max {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("read {url}: the response is larger than {max} bytes"),
+            format!(
+                "read {}: the response is larger than {max} bytes",
+                shown_url(url)
+            ),
         ));
     }
     String::from_utf8(body).map_err(|e| {
         io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("read {url}: not UTF-8: {e}"),
+            format!("read {}: not UTF-8: {e}", shown_url(url)),
         )
     })
 }
@@ -516,8 +519,11 @@ pub(crate) fn download_unpinned(url: &str, dest: &Path, max: u64) -> io::Result<
     drop(file);
     let refusal = match copied {
         Ok(copied) if copied <= max => return Ok(()),
-        Ok(_) => io::Error::other(format!("download {url}: longer than {max} bytes; refusing")),
-        Err(e) => io::Error::new(e.kind(), format!("read {url}: {e}")),
+        Ok(_) => io::Error::other(format!(
+            "download {}: longer than {max} bytes; refusing",
+            shown_url(url)
+        )),
+        Err(e) => io::Error::new(e.kind(), format!("read {}: {e}", shown_url(url))),
     };
     let _ = fs::remove_file(dest);
     Err(refusal)
@@ -582,7 +588,12 @@ fn stream_to_file(
         let n = match reader.read(&mut buf) {
             Ok(0) => break Ok(()),
             Ok(n) => n,
-            Err(e) => break Err(io::Error::new(e.kind(), format!("read {url}: {e}"))),
+            Err(e) => {
+                break Err(io::Error::new(
+                    e.kind(),
+                    format!("read {}: {e}", shown_url(url)),
+                ))
+            }
         };
         total += n as u64;
         progress.advance(n as u64);
@@ -607,7 +618,8 @@ fn stream_to_file(
             Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
-                    "hash mismatch for {url}\n  expected sha256 {}\n  got      {got}",
+                    "hash mismatch for {}\n  expected sha256 {}\n  got      {got}",
+                    shown_url(url),
                     digest.hex()
                 ),
             ))
@@ -742,9 +754,13 @@ pub fn download_verified_digest(
 /// its digest comes from: a toolchain row (tog's catalog or the project's
 /// toolchain lock), a table compiled into tog, the publisher's listing read
 /// over TLS, or the project's own pin (its committed lock or a declared
-/// artifact). Every caller is listed under its source in
-/// `tests/architecture.rs` (`DIGEST_SOURCES`), and a new one fails there
-/// until it is.
+/// artifact), or the registry's claim for an artifact read through the
+/// resolution proxy (`resolve::mirror`). The same rule covers the
+/// cache-only reads (`cache_verified_held`, `cache_verified_digest_held`,
+/// `read_cache_verified_digest`) and the proxy's `cache_from_reader`. Every
+/// caller is listed under its source in `tests/architecture.rs`
+/// (`DIGEST_SOURCES`), and a new one fails there until it is; the count is
+/// per function, so a call replaced within a listed function is not seen.
 pub(crate) fn download_verified_digest_held(
     store: &Store,
     activity: &StoreActivity,
@@ -816,15 +832,20 @@ fn download_toolchain_artifact_under(
 /// CDN URL a redirect leads to carries its signature in the query string,
 /// and a mirror URL may carry credentials before its host; neither belongs
 /// in a message a user pastes into an issue (#348).
+///
+/// The credentials go first, on the raw string: a password may hold a `?`
+/// or `#`, so cutting the query first would keep the part before it.
 pub(crate) fn shown_url(url: &str) -> std::borrow::Cow<'_, str> {
-    let url = url.split(['?', '#']).next().unwrap_or(url);
+    fn without_query(url: &str) -> &str {
+        url.split(['?', '#']).next().unwrap_or(url)
+    }
     let Some((scheme, rest)) = url.split_once("://") else {
-        return url.into();
+        return without_query(url).into();
     };
     let authority_end = rest.find('/').unwrap_or(rest.len());
     match rest[..authority_end].rfind('@') {
-        Some(at) => format!("{scheme}://{}", &rest[at + 1..]).into(),
-        None => url.into(),
+        Some(at) => format!("{scheme}://{}", without_query(&rest[at + 1..])).into(),
+        None => without_query(url).into(),
     }
 }
 
@@ -989,6 +1010,7 @@ fn remove_dot_segments(path: &str) -> String {
 /// without parsing the message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HashMismatch {
+    /// The URL as requested. The message names it through [`shown_url`].
     pub url: String,
     pub expected: Digest,
     /// The other digests the bytes were allowed to match, all of the
@@ -1003,7 +1025,7 @@ impl std::fmt::Display for HashMismatch {
         write!(
             f,
             "hash mismatch for {}\n  expected {} {}",
-            self.url,
+            shown_url(&self.url),
             self.expected.algo(),
             self.expected.hex()
         )?;
@@ -1682,11 +1704,61 @@ mod tests {
                 "https://user:pass@mirror.example/x?y",
                 "https://mirror.example/x",
             ),
+            ("https://user:p?ss@host.example/x", "https://host.example/x"),
+            (
+                "https://user:p#ss@host.example/x?sig=s",
+                "https://host.example/x",
+            ),
+            ("https://u:a@b@host.example/x", "https://host.example/x"),
+            ("https://user:p?ss@host.example", "https://host.example"),
             ("https://mirror.example/a@b", "https://mirror.example/a@b"),
             ("https://mirror.example", "https://mirror.example"),
             ("not a url?q", "not a url"),
         ] {
             assert_eq!(shown_url(url), shown, "{url}");
+        }
+    }
+
+    /// A transport failure tog has no sentence for (a malformed reply)
+    /// falls back to ureq's kind and detail, still without the URL ureq's
+    /// own text leads with (#348).
+    #[test]
+    fn an_unexplained_transport_failure_names_no_url() {
+        use std::io::Write as _;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0u8; 1024];
+            let _ = io::Read::read(&mut stream, &mut request);
+            let _ = stream.write_all(b"not an http reply\r\n\r\n");
+        });
+        let url =
+            format!("http://user:secret@127.0.0.1:{port}/signed/path?X-Amz-Signature=s1gn4ture");
+        let error = ureq::AgentBuilder::new()
+            .build()
+            .get(&url)
+            .call()
+            .unwrap_err();
+        server.join().unwrap();
+        let ureq::Error::Transport(transport) = &error else {
+            panic!("not a transport failure: {error}");
+        };
+        assert!(
+            transport.to_string().contains("/signed/path"),
+            "{transport}"
+        );
+        assert!(transport_cause_with(transport.kind(), "").is_none());
+        let cause = network_cause(&error);
+        assert!(cause.starts_with(&transport.kind().to_string()), "{cause}");
+        for leak in [
+            "127.0.0.1",
+            "/signed/path",
+            "secret",
+            "X-Amz-Signature",
+            "s1gn4ture",
+        ] {
+            assert!(!cause.contains(leak), "{leak}: {cause}");
         }
     }
 
@@ -2233,6 +2305,63 @@ mod integrity_tests {
         outcome.unwrap();
         assert!(store.cache_path("sha256", digest.hex()).is_file());
         assert!(leftover_downloads(&store).is_empty());
+    }
+
+    /// The production wrappers pass `MAX_ARTIFACT`, not the release cap
+    /// beside it: a stream one byte past `MAX_RELEASE_FILE` goes through
+    /// `cache_or_download` to the hash check rather than a cap refusal.
+    #[test]
+    fn a_verified_download_is_capped_at_the_artifact_cap_not_the_release_cap() {
+        let (_scratch, store) = scratch_store("fetch-cap-pin");
+        let activity = &store.activity(ActivityMode::Shared).unwrap();
+        let digest = Digest::sha256(&sha256_hex(b"hello")).unwrap();
+        let error = cache_or_download(&store, activity, "https://x/big", &digest, || {
+            let body = io::repeat(0).take(MAX_RELEASE_FILE + 1);
+            Ok((Box::new(body) as Box<dyn Read>, None))
+        })
+        .map(drop)
+        .unwrap_err();
+        assert!(HashMismatch::of(&error).is_some(), "{error}");
+        assert!(leftover_downloads(&store).is_empty());
+    }
+
+    /// A hash mismatch names the URL without the credentials before its
+    /// host or the signature in its query string (#348), from the cache
+    /// and from `download_file` alike.
+    #[test]
+    fn a_hash_mismatch_does_not_print_credentials_or_a_signature() {
+        let url = "https://user:token@x/hello?sig=secret";
+        let digest = Digest::sha256(&sha256_hex(b"hello")).unwrap();
+        let (_scratch, store) = scratch_store("fetch-mismatch-shown");
+        let activity = &store.activity(ActivityMode::Shared).unwrap();
+        let cached = cache_or_download(&store, activity, url, &digest, || {
+            Ok((Box::new(&b"hellp"[..]) as Box<dyn Read>, None))
+        })
+        .map(drop)
+        .unwrap_err();
+        let dest = store.root.join("release");
+        let release =
+            stream_to_file(url, &dest, &digest, Box::new(&b"hellp"[..]), None, 1024).unwrap_err();
+        let dropped = stream_to_file(
+            url,
+            &dest,
+            &digest,
+            Box::new(DroppedStream {
+                head: b"hel",
+                served: 0,
+            }),
+            None,
+            1024,
+        )
+        .unwrap_err();
+        let text = read_text_capped(&b"abcde"[..], 4, url).unwrap_err();
+        for error in [cached, release, dropped, text] {
+            let shown = error.to_string();
+            assert!(shown.contains("https://x/hello"), "{shown}");
+            for secret in ["user", "token", "sig=", "secret"] {
+                assert!(!shown.contains(secret), "{secret} in {shown}");
+            }
+        }
     }
 
     /// `download_file`'s cap refuses the same way and removes its

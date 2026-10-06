@@ -77,16 +77,16 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   cargo, go, mix, bundle, dotnet, git) start in the held directory: the child enters it
   through the descriptor (`fchdir`), not the path. A sandboxed child (the `setup.py` probe,
   a sandboxed build in the project) has the held directory bound in through its descriptor
-  and starts there, and a confined resolution snapshots the held directory. A path handed
-  to a tool as an argument (`--manifest-path`, `-r <requirements>`) or an environment
-  variable (`BUNDLE_GEMFILE`) is still one the tool opens itself. So a same-user process
-  that renames the directory away, puts another project at its path, and puts the original
-  back while such a tool runs can make it read or write the replacement.
-  Loud when the tool's output is read back (a lock it wrote is missing from the held
-  directory); silent otherwise. Files above the project (a Cargo workspace root, a parent
-  `go.work`, .NET `Directory.*` files, a parent `.tog/policy.toml`) are read from the
-  directories that contain the held one (`..` from its descriptor), not from the path's
-  parents. Policy loading verifies each held ancestor still has its original name and
+  and starts there, and a confined resolution snapshots the held directory. The inputs a
+  tool is handed (a member manifest, a requirements file, `BUNDLE_GEMFILE`) are named
+  relative to the directory it entered, or read from a held snapshot when they lie outside
+  the project, so the tool opens them in the held directory too. The one absolute input
+  left is `tog run`'s `BUNDLE_GEMFILE`: the user's command may start in a subdirectory and
+  still needs the root Gemfile, so it is named by its full path, and Bundler in that
+  command resolves the path when it reads it. Files above the project (a Cargo workspace
+  root, a parent `go.work`, .NET `Directory.*` files, a parent `.tog/policy.toml`) are read
+  from the directories that contain the held one (`..` from its descriptor), not from the
+  path's parents. Policy loading verifies each held ancestor still has its original name and
   refuses a changed chain, so a temporary move cannot lift a parent policy.
   The machine policy is read by path. `status`, `doctor` and the environment `run`
   and `env` build open the project once and read it through that descriptor. `audit` uses the same held project for policy, closures,
@@ -260,7 +260,8 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   as stopping malicious code from running.
 - **Sandboxes are cooperative hermeticity, not hostile-code containment.** On Linux, tog scans
   every declared root, the cwd, the scratch and the fixed `/etc` entries it binds for Unix
-  sockets before invoking bubblewrap, but not `/usr`, which is trusted, and a socket created
+  sockets before invoking bubblewrap. The build sandbox trusts `/usr` unscanned; the
+  resolution sandbox scans `/usr` and the other system roots once per process. A socket created
   after the scan is not caught (the fmt host-socket scan is Linux-only too); build daemons can
   outlive a run. **Store objects are trusted from permissions + metadata, and all
   toolchain pins are TOFU** (pin-time hashes, not signed manifests): same-user content
