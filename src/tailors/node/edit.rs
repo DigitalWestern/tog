@@ -247,18 +247,37 @@ fn pnpm_membership(root: &Path, project: &Path) -> io::Result<PnpmMembership> {
 }
 
 /// Select the lockfile to edit. A lockfile in the project itself wins in the
-/// same order as sync. Only a pnpm workspace root may be inherited, and only
-/// when that root's `pnpm-lock.yaml` lists the project among its importers.
-/// Any other ancestor lock is a boundary.
+/// same order as sync. A workspace root may be inherited: a pnpm root when
+/// its `pnpm-lock.yaml` lists the project among its importers, an npm root
+/// when its `package.json` names the project in `workspaces` (npm's own
+/// rule, so a confined npm run in the member finds the same root it would
+/// find unconfined; the root's lock, when it has one, is then the lock to
+/// edit, `yarn.lock` included). Any other ancestor lock is a boundary.
 ///
-/// The third variant is not an advisory flag a caller may drop: tog
+/// The last variant is not an advisory flag a caller may drop: tog
 /// cannot tell a member added since the last install from a project the
 /// workspace deliberately excludes, so each caller has to say what it does
 /// about that, and anything that would write a lockfile must refuse.
 pub(crate) enum NodeLock {
     Own { name: String, root: PathBuf },
     PnpmWorkspaceMember { root: PathBuf },
+    NpmWorkspaceMember { root: PathBuf },
     UnlistedUnderPnpmWorkspace { workspace_root: PathBuf },
+}
+
+impl NodeLock {
+    /// The root whose lock a workspace member's edit writes, with the
+    /// lock's name there; `None` for a project that is its own root or
+    /// one the pnpm workspace does not list.
+    pub(crate) fn workspace(&self) -> Option<(&Path, &'static str)> {
+        match self {
+            NodeLock::PnpmWorkspaceMember { root } => Some((root, "pnpm-lock.yaml")),
+            NodeLock::NpmWorkspaceMember { root } => {
+                Some((root, node_lock_at(root).unwrap_or("package-lock.json")))
+            }
+            NodeLock::Own { .. } | NodeLock::UnlistedUnderPnpmWorkspace { .. } => None,
+        }
+    }
 }
 
 pub(crate) fn node_lock_for(project: &Path) -> io::Result<NodeLock> {
@@ -273,10 +292,8 @@ pub(crate) fn node_lock_for(project: &Path) -> io::Result<NodeLock> {
         return Ok(own("package-lock.json"));
     }
     for ancestor in project.ancestors().skip(1) {
-        if let Some(lock_name) = node_lock_at(ancestor) {
-            if lock_name != "pnpm-lock.yaml" {
-                break;
-            }
+        let lock_name = node_lock_at(ancestor);
+        if lock_name == Some("pnpm-lock.yaml") {
             match pnpm_membership(ancestor, project)? {
                 PnpmMembership::Listed => {
                     return Ok(NodeLock::PnpmWorkspaceMember {
@@ -291,11 +308,35 @@ pub(crate) fn node_lock_for(project: &Path) -> io::Result<NodeLock> {
                 PnpmMembership::NotAWorkspace => break,
             }
         }
-        if ancestor.join(".tog").is_dir() {
+        // npm needs no lock at the root to take it as the workspace root,
+        // so neither does tog: a root that has none yet gets its first
+        // lock from the member's edit, at the root.
+        let relative = project
+            .strip_prefix(ancestor)
+            .expect("an ancestor is a prefix of the project");
+        if super::resolve::npm_workspace_names(ancestor, relative) {
+            return Ok(NodeLock::NpmWorkspaceMember {
+                root: ancestor.to_path_buf(),
+            });
+        }
+        if lock_name.is_some() || ancestor.join(".tog").is_dir() {
             break;
         }
     }
     Ok(own("package-lock.json"))
+}
+
+/// The refusal for a command run in a workspace member whose lock, and
+/// with it tog's record and projection, live at the root: the member
+/// cannot be resolved or synced alone.
+pub(crate) fn member_lock_elsewhere(project: &Path, root: &Path, lock_name: &str) -> io::Error {
+    other(format!(
+        "{} is a member of the workspace at {}; its {lock_name} and resolution record live \
+         there, so run this command in {}",
+        project.display(),
+        root.display(),
+        root.display()
+    ))
 }
 
 fn is_yarn_berry(root: &Path) -> bool {
@@ -384,7 +425,7 @@ pub(crate) fn unlisted_member_refusal(project: &Path, workspace_root: &Path) -> 
 pub(crate) fn edit_root(project: &Path) -> io::Result<PathBuf> {
     Ok(match node_lock_for(project)? {
         NodeLock::Own { root, .. } => root,
-        NodeLock::PnpmWorkspaceMember { root } => root,
+        NodeLock::PnpmWorkspaceMember { root } | NodeLock::NpmWorkspaceMember { root } => root,
         NodeLock::UnlistedUnderPnpmWorkspace { .. } => project.to_path_buf(),
     })
 }
@@ -395,29 +436,40 @@ pub(crate) fn edit_manifest(
     door: &mut ResolutionDoor<'_>,
 ) -> io::Result<EditOutcome> {
     let project = edit.project;
-    let (lock_name, lock_root) = match node_lock_for(project)? {
-        NodeLock::Own { name, root } => (name, root),
-        NodeLock::PnpmWorkspaceMember { root } => ("pnpm-lock.yaml".to_string(), root),
+    let selected = node_lock_for(project)?;
+    let (lock_name, lock_root) = match &selected {
+        NodeLock::Own { name, root } => (name.as_str(), root.clone()),
         NodeLock::UnlistedUnderPnpmWorkspace { workspace_root } => {
-            return Err(unlisted_member_refusal(project, &workspace_root));
+            return Err(unlisted_member_refusal(project, workspace_root));
+        }
+        member => {
+            let (root, name) = member.workspace().expect("a workspace member");
+            (name, root.to_path_buf())
         }
     };
     if lock_name == "package-lock.json" {
-        return npm_edit(edit, door);
+        return npm_edit(edit, door, lock_root);
     }
-    let lock_text = fs::read_to_string(lock_root.join(&lock_name))?;
+    let lock_text = fs::read_to_string(lock_root.join(lock_name))?;
     if lock_name == "yarn.lock" {
         return Err(yarn_refusal(&lock_root, edit.verb, &edit.texts(), edit.dev));
     }
-    pnpm_edit(edit, door, &lock_name, lock_root, &lock_text)
+    pnpm_edit(edit, door, lock_name, lock_root, &lock_text)
 }
 
-/// A project with its own package-lock.json (or no lock yet): the store
-/// node's npm edits it, confined through the edit door, which publishes
-/// the manifest and the lock with the signed resolution record.
-fn npm_edit(edit: &ManifestEdit<'_>, door: &mut ResolutionDoor<'_>) -> io::Result<EditOutcome> {
+/// A project with its own package-lock.json (or no lock yet), or a member
+/// of an npm workspace whose root `lock_root` has one or none: the store
+/// node's npm edits it, confined through the edit door at the lock root
+/// (running in the member, where npm's own workspace detection finds the
+/// root and applies the edit to that member), which publishes the
+/// manifests and the lock with the signed resolution record.
+fn npm_edit(
+    edit: &ManifestEdit<'_>,
+    door: &mut ResolutionDoor<'_>,
+    lock_root: PathBuf,
+) -> io::Result<EditOutcome> {
     let (project, verb, dev, texts) = (edit.project, edit.verb, edit.dev, &edit.texts());
-    let held = ProjectRoot::open(project)?;
+    let held = ProjectRoot::open(&lock_root)?;
     crate::kernel::store::Store::check_registrable(held.path())?;
     super::resolve::refuse_external_path_dependencies(&held)?;
     let outputs = super::resolve::resolution_outputs(&held)?;
@@ -427,6 +479,7 @@ fn npm_edit(edit: &ManifestEdit<'_>, door: &mut ResolutionDoor<'_>) -> io::Resul
         door.platform(),
         &edit.host.toolchain(project, "node")?,
     )?;
+    let cwd = member_dir(&held, project, "npm")?;
     let (npm_verb, extra): (&str, &[&str]) = match verb {
         EditVerb::Add if dev => ("install", &["--save-dev"]),
         EditVerb::Add => ("install", &[]),
@@ -445,6 +498,7 @@ fn npm_edit(edit: &ManifestEdit<'_>, door: &mut ResolutionDoor<'_>) -> io::Resul
         door::npm_tool(&node_obj)?,
         &refs,
     )?;
+    let package_label = package_label(&cwd);
     door::run_node_checked(
         door,
         NodeRun {
@@ -452,7 +506,7 @@ fn npm_edit(edit: &ManifestEdit<'_>, door: &mut ResolutionDoor<'_>) -> io::Resul
                 node_obj: &node_obj,
             },
             lock_root: held.path(),
-            cwd: None,
+            cwd,
             args,
             publish: Publish::Project {
                 outputs,
@@ -462,9 +516,18 @@ fn npm_edit(edit: &ManifestEdit<'_>, door: &mut ResolutionDoor<'_>) -> io::Resul
         },
     )?;
     Ok(EditOutcome {
-        files: vec!["package.json".into(), "package-lock.json".into()],
-        sync_root: project.to_path_buf(),
+        files: vec![package_label, "package-lock.json".into()],
+        sync_root: lock_root,
     })
+}
+
+/// The manifest an edit names in its report: the member's, below the
+/// lock root, or the root's own.
+fn package_label(cwd: &Option<PathBuf>) -> String {
+    match cwd {
+        Some(member) => member.join("package.json").to_string_lossy().into_owned(),
+        None => "package.json".to_string(),
+    }
 }
 
 /// The pnpm a project's `packageManager` pins, realized in the `tog x`
@@ -544,7 +607,7 @@ fn pnpm_edit(
         door.platform(),
         &edit.host.toolchain(project, "node")?,
     )?;
-    let cwd = member_dir(&workspace, project)?;
+    let cwd = member_dir(&workspace, project, "pnpm")?;
     let args = pnpm_edit_args(
         edit.verb,
         &edit.texts(),
@@ -560,10 +623,7 @@ fn pnpm_edit(
         door::pnpm_tool(&pinned.version),
         &refs,
     )?;
-    let package_label = match &cwd {
-        Some(member) => member.join("package.json").to_string_lossy().into_owned(),
-        None => "package.json".to_string(),
-    };
+    let package_label = package_label(&cwd);
     door::run_node_checked(
         door,
         NodeRun {
@@ -589,14 +649,15 @@ fn pnpm_edit(
 
 /// Where below the workspace root the edited project is: `None` at the
 /// root itself. The project was placed by the lock's importers
-/// (`pnpm_membership`), so it lies under the root.
-fn member_dir(workspace: &ProjectRoot, project: &Path) -> io::Result<Option<PathBuf>> {
+/// (`pnpm_membership`) or the root's `workspaces`
+/// (`resolve::npm_workspace_names`), so it lies under the root.
+fn member_dir(workspace: &ProjectRoot, project: &Path, tool: &str) -> io::Result<Option<PathBuf>> {
     let real = project.canonicalize()?;
     match workspace.relative(&real) {
         Some(relative) if relative.as_os_str().is_empty() => Ok(None),
         Some(relative) => Ok(Some(relative.to_path_buf())),
         None => Err(other(format!(
-            "{} is not below the pnpm workspace root {}",
+            "{} is not below the {tool} workspace root {}",
             real.display(),
             workspace.path().display()
         ))),
@@ -813,6 +874,7 @@ mod tests {
         match node_lock_for(project).unwrap() {
             NodeLock::Own { name, root } => (name, root),
             NodeLock::PnpmWorkspaceMember { root } => ("pnpm-lock.yaml".to_string(), root),
+            NodeLock::NpmWorkspaceMember { root } => ("npm workspace".to_string(), root),
             NodeLock::UnlistedUnderPnpmWorkspace { workspace_root } => panic!(
                 "expected a lock selection, got a refusal under the pnpm workspace {}",
                 workspace_root.display()
@@ -967,6 +1029,111 @@ mod tests {
         assert_eq!(
             selected(&boundary),
             ("package-lock.json".to_string(), boundary)
+        );
+    }
+
+    /// An npm workspace member edits the root's lock, by npm's own rule:
+    /// the root `package.json` names the member in `workspaces` (a glob
+    /// or a literal path, less a `!` pattern), and the member has a
+    /// manifest. The root needs no lock yet; a root with `yarn.lock` is
+    /// still the root (its edit then refuses as yarn's). A member's own
+    /// lock or `.tog` directory, a `!` exclusion, a directory without a
+    /// manifest, and a root whose `workspaces` does not name the project
+    /// each leave the project its own root, as before.
+    #[test]
+    fn an_npm_workspace_member_takes_the_root_as_its_lock_root() {
+        let scratch = TempDir::named("npm-workspace-member");
+        let root = scratch.0.clone();
+        let app = root.join("packages/app");
+        let util = root.join("packages/util");
+        let skipped = root.join("packages/skipped");
+        let no_manifest = root.join("packages/empty");
+        let deep = root.join("apps/nested/deep");
+        let tool = root.join("tools/cli");
+        for dir in [&app, &util, &skipped, &no_manifest, &deep, &tool] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        for dir in [&app, &util, &skipped, &deep, &tool] {
+            fs::write(dir.join("package.json"), "{}\n").unwrap();
+        }
+        fs::write(
+            root.join("package.json"),
+            r#"{"workspaces":["packages/*","!packages/skipped","apps/**","./tools/cli/"]}"#,
+        )
+        .unwrap();
+
+        let member = |project: &Path| match node_lock_for(project).unwrap() {
+            NodeLock::NpmWorkspaceMember { root } => Some(root),
+            NodeLock::Own { .. } => None,
+            _ => panic!("a pnpm selection for {}", project.display()),
+        };
+        // No lock at the root yet: it is the root all the same, and the
+        // root's lock name defaults to npm's.
+        assert_eq!(member(&app), Some(root.clone()));
+        assert_eq!(
+            node_lock_for(&app).unwrap().workspace().unwrap().1,
+            "package-lock.json"
+        );
+        assert_eq!(member(&util), Some(root.clone()));
+        assert_eq!(member(&deep), Some(root.clone()));
+        assert_eq!(member(&tool), Some(root.clone()));
+        assert_eq!(edit_root(&app).unwrap(), root);
+        assert_eq!(member(&skipped), None, "a `!` pattern excludes");
+        assert_eq!(member(&no_manifest), None, "no manifest, no member");
+        assert_eq!(member(&root.join("packages")), None);
+
+        fs::write(root.join("package-lock.json"), "{}\n").unwrap();
+        assert_eq!(member(&app), Some(root.clone()));
+        assert_eq!(
+            node_lock_for(&app).unwrap().workspace().unwrap().1,
+            "package-lock.json"
+        );
+        assert_eq!(member(&skipped), None);
+        assert_eq!(
+            selected(&skipped),
+            ("package-lock.json".to_string(), skipped.clone()),
+            "an excluded project under a root lock is its own root, as before"
+        );
+
+        // The member's own lock, and its own `.tog`, win.
+        fs::write(app.join("package-lock.json"), "{}\n").unwrap();
+        assert_eq!(
+            selected(&app),
+            ("package-lock.json".to_string(), app.clone())
+        );
+        fs::remove_file(app.join("package-lock.json")).unwrap();
+        fs::create_dir_all(app.join(".tog")).unwrap();
+        assert_eq!(
+            selected(&app),
+            ("package-lock.json".to_string(), app.clone())
+        );
+        fs::remove_dir_all(app.join(".tog")).unwrap();
+        assert_eq!(member(&app), Some(root.clone()));
+
+        // A yarn root is still the root; the edit is then yarn's refusal.
+        fs::remove_file(root.join("package-lock.json")).unwrap();
+        fs::write(root.join("yarn.lock"), "# yarn lockfile v1\n").unwrap();
+        assert_eq!(member(&app), Some(root.clone()));
+        assert_eq!(
+            node_lock_for(&app).unwrap().workspace().unwrap().1,
+            "yarn.lock"
+        );
+        fs::remove_file(root.join("yarn.lock")).unwrap();
+
+        // A root manifest that names other members, or is not JSON, is
+        // not this project's root; with a lock there it is a boundary.
+        fs::write(root.join("package.json"), r#"{"workspaces":["apps/*"]}"#).unwrap();
+        assert_eq!(member(&app), None);
+        fs::write(root.join("package.json"), "not json").unwrap();
+        assert_eq!(member(&app), None);
+        fs::write(root.join("package.json"), r#"{"workspaces":"packages/*"}"#).unwrap();
+        assert_eq!(member(&app), None);
+
+        // The refusal a sync or attest in a member gets names the root.
+        let error = member_lock_elsewhere(&app, &root, "package-lock.json").to_string();
+        assert!(
+            error.contains(&root.display().to_string()) && error.contains("package-lock.json"),
+            "{error}"
         );
     }
 

@@ -988,6 +988,111 @@ fn nested_independent_npm_project_does_not_use_ancestor_pnpm_lock() {
     );
 }
 
+/// An npm workspace: the root `package.json` lists `packages/*`, and
+/// `packages/app` depends on its sibling `@acme/util`. `tog add` and
+/// `remove` in the member edit the member's manifest and the root's lock
+/// (the first one, and then the existing one) through the confined npm,
+/// which sees the whole workspace: the sibling resolves as a workspace
+/// link, not from the registry, the member gets no lock of its own, and
+/// the record is the root's. A sync run in the member before the root is
+/// synced is sent to the root rather than resolving the member alone.
+#[test]
+#[ignore]
+fn npm_workspace_member_edit_writes_the_root_lock() {
+    let temp = scratch("npm-workspace");
+    let root = &temp.0.join("project");
+    let app = root.join("packages/app");
+    let util = root.join("packages/util");
+    std::fs::create_dir_all(&app).unwrap();
+    std::fs::create_dir_all(&util).unwrap();
+    let store = temp.0.join("store");
+    std::fs::write(
+        root.join("package.json"),
+        "{\"name\":\"ws\",\"version\":\"1.0.0\",\"workspaces\":[\"packages/*\"]}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        util.join("package.json"),
+        "{\"name\":\"@acme/util\",\"version\":\"1.0.0\"}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        app.join("package.json"),
+        "{\"name\":\"app\",\"version\":\"1.0.0\",\"dependencies\":{\"@acme/util\":\"1.0.0\"}}\n",
+    )
+    .unwrap();
+    // A sync in the member of a never-synced workspace names the root
+    // rather than resolving the member alone.
+    let member_sync = run(&app, &store, &[], &temp.0);
+    assert!(!member_sync.status.success(), "a member synced alone");
+    let words = String::from_utf8_lossy(&member_sync.stderr);
+    assert!(
+        words.contains("run this command in") && words.contains(&root.display().to_string()),
+        "{words}"
+    );
+    assert!(
+        !app.join("package-lock.json").exists() && !root.join("package-lock.json").exists(),
+        "a member sync wrote a lock"
+    );
+
+    // The root has no lock yet: the member's edit writes the first one, at
+    // the root.
+    assert_ok(
+        run(&app, &store, &["add", "--no-sync", "is-odd@3.0.1"], &temp.0),
+        "npm workspace member add",
+    );
+    let app_package: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(app.join("package.json")).unwrap()).unwrap();
+    assert_eq!(app_package["dependencies"]["is-odd"], "^3.0.1");
+    let root_package: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(root.join("package.json")).unwrap()).unwrap();
+    assert!(root_package.get("dependencies").is_none());
+    assert!(
+        !app.join("package-lock.json").exists() && !util.join("package-lock.json").exists(),
+        "a member got a lock of its own"
+    );
+    let read_root_lock = || -> serde_json::Value {
+        serde_json::from_str(&std::fs::read_to_string(root.join("package-lock.json")).unwrap())
+            .unwrap()
+    };
+    let root_lock = read_root_lock();
+    assert_eq!(
+        root_lock["packages"]["node_modules/is-odd"]["version"],
+        "3.0.1"
+    );
+    assert_eq!(
+        root_lock["packages"]["node_modules/@acme/util"]["link"],
+        true
+    );
+    assert_eq!(
+        root_lock["packages"]["node_modules/@acme/util"]["resolved"],
+        "packages/util"
+    );
+    assert!(
+        root.join(".tog/resolution/node.json").is_file() && !app.join(".tog").exists(),
+        "the record is the root's"
+    );
+
+    // With the root lock in place, a member edit still goes to the root.
+    assert_ok(
+        run(&app, &store, &["remove", "--no-sync", "is-odd"], &temp.0),
+        "npm workspace member remove",
+    );
+    assert!(!std::fs::read_to_string(app.join("package.json"))
+        .unwrap()
+        .contains("is-odd"));
+    let root_lock = read_root_lock();
+    assert!(root_lock["packages"].get("node_modules/is-odd").is_none());
+    assert_eq!(
+        root_lock["packages"]["node_modules/@acme/util"]["link"],
+        true
+    );
+    assert!(!app.join("package-lock.json").exists());
+
+    assert_ok(run(root, &store, &[], &temp.0), "workspace sync");
+    assert_status_synced(root, &store, &temp);
+}
+
 #[test]
 #[ignore]
 fn cargo_add_update_remove_roundtrip() {

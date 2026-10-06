@@ -65,6 +65,34 @@ pub fn ensure_npm_lock(
     Ok(())
 }
 
+/// A project with no lock of its own that sits in a workspace is not
+/// resolved alone: npm would see the member only (the door snapshots the
+/// project it is given) and write a lock that resolves sibling members
+/// from the registry, and a sync holds the member as its project, so the
+/// root's lock could not feed it either. The lock, the record, and the
+/// projection are the root's: the refusal names it. A project under a
+/// pnpm workspace that its lock does not list is refused as an edit is.
+/// Asked in `Tailor::preflight`, before the sync writes anything into the
+/// member (its toolchain lock, its journal), since a `.tog` directory in
+/// the project is what makes it its own root.
+pub(crate) fn refuse_member_lock_generation(project: &ProjectRoot) -> io::Result<()> {
+    use node::edit::NodeLock;
+    match node::edit::node_lock_for(project.path())? {
+        NodeLock::Own { .. } => Ok(()),
+        NodeLock::UnlistedUnderPnpmWorkspace { workspace_root } => Err(
+            node::edit::unlisted_member_refusal(project.path(), &workspace_root),
+        ),
+        member => {
+            let (root, lock_name) = member.workspace().expect("a workspace member");
+            Err(node::edit::member_lock_elsewhere(
+                project.path(),
+                root,
+                lock_name,
+            ))
+        }
+    }
+}
+
 /// The plan from whichever lock the project has, read through the held
 /// descriptor (a lock npm just generated is read back the same way).
 pub fn load_npm_plan(
@@ -122,14 +150,19 @@ pub fn load_npm_plan_with_basis(
 /// `prepare`. A directory with no package.json is not a Node project and
 /// plans nothing.
 pub fn require_lock(project: &ProjectRoot) -> io::Result<()> {
-    let locked = ["package-lock.json", "pnpm-lock.yaml", "yarn.lock"]
-        .iter()
-        .any(|lock| input_exists(project, lock));
-    if input_exists(project, "package.json") && !locked {
+    if needs_lock(project) {
         Err(crate::tailors::missing_lock(project, "package-lock.json"))
     } else {
         Ok(())
     }
+}
+
+/// A `package.json` with none of the locks tog imports.
+pub(crate) fn needs_lock(project: &ProjectRoot) -> bool {
+    let locked = ["package-lock.json", "pnpm-lock.yaml", "yarn.lock"]
+        .iter()
+        .any(|lock| input_exists(project, lock));
+    input_exists(project, "package.json") && !locked
 }
 
 /// `Path::exists` for a project input, resolved from the held descriptor.
@@ -242,6 +275,61 @@ mod tests {
         };
         crate::comforter::join::check_basis_for_test(&yarn, "node", &files, &planned.basis)
             .unwrap();
+    }
+
+    /// A sync run in a workspace member that has no lock of its own does
+    /// not generate one there: the root's lock is the one the member
+    /// belongs to (an npm root by its `workspaces`, a pnpm root by its
+    /// lock's importers), and a project under a pnpm workspace that the
+    /// lock does not list is refused as an edit is. A project that is
+    /// its own root generates.
+    #[test]
+    fn a_workspace_member_without_a_lock_is_sent_to_the_root() {
+        let temp = crate::kernel::testutil::TempDir::named("node-member-lock-gen");
+        let root = temp.0.join("ws");
+        let app = root.join("packages/app");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::write(
+            root.join("package.json"),
+            r#"{"workspaces":["packages/*"]}"#,
+        )
+        .unwrap();
+        std::fs::write(app.join("package.json"), r#"{"name":"app"}"#).unwrap();
+        let project = crate::kernel::fsroot::ProjectRoot::open(&app).unwrap();
+        let error = super::refuse_member_lock_generation(&project)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains(&root.canonicalize().unwrap().display().to_string())
+                && error.contains("package-lock.json"),
+            "{error}"
+        );
+        let held_root = crate::kernel::fsroot::ProjectRoot::open(&root).unwrap();
+        super::refuse_member_lock_generation(&held_root).unwrap();
+
+        let pnpm = temp.0.join("pnpm");
+        let lib = pnpm.join("packages/lib");
+        let stranger = pnpm.join("packages/stranger");
+        std::fs::create_dir_all(&lib).unwrap();
+        std::fs::create_dir_all(&stranger).unwrap();
+        std::fs::write(
+            pnpm.join("pnpm-lock.yaml"),
+            "lockfileVersion: '9.0'\n\nimporters:\n\n  .: {}\n\n  packages/lib: {}\n",
+        )
+        .unwrap();
+        for dir in [&lib, &stranger] {
+            std::fs::write(dir.join("package.json"), "{}").unwrap();
+        }
+        let member = crate::kernel::fsroot::ProjectRoot::open(&lib).unwrap();
+        let error = super::refuse_member_lock_generation(&member)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("pnpm-lock.yaml"), "{error}");
+        let unlisted = crate::kernel::fsroot::ProjectRoot::open(&stranger).unwrap();
+        let error = super::refuse_member_lock_generation(&unlisted)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("does not list it as an importer"), "{error}");
     }
 
     /// A directory with no package.json is not a Node project: nothing to

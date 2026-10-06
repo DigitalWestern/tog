@@ -142,6 +142,12 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   the last `pnpm install` is not in the lock and cannot be distinguished from a deliberate
   exclusion**, so edits refuse loudly with two remedies: `pnpm install` at the root, or a
   `.tog` directory in it.
+- **An npm workspace member is edited at the root.** `tog add` in a member whose root
+  `package.json` names it in `workspaces` runs npm in the member with the root as the lock
+  root, so the root's `package-lock.json` (created there if it has none) and resolution record
+  are what change. A member with a lock or a `.tog` directory of its own is its own root. A
+  sync run in a member (npm or pnpm) that has no lock of its own refuses, naming the root:
+  run `tog` there.
 - **Yarn classic edits remain a refusal** (no lockfile-only edit mode); run the Yarn command
   tog names. Yarn Berry is not imported (cache-zip checksums are not tarball integrity
   values).

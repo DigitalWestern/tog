@@ -190,6 +190,11 @@ impl Tailor for Node {
 
     fn preflight(&self, platform: Platform, project: &ProjectRoot) -> io::Result<()> {
         node::preflight(platform)?;
+        // A workspace member with no lock of its own is sent to the root
+        // here, before the sync writes anything into it.
+        if inputs::needs_lock(project) {
+            inputs::refuse_member_lock_generation(project)?;
+        }
         // A workspace whose members tog cannot name refuses here, before
         // anything is realized: the closure writer would refuse it later.
         super::resolve::check_members_readable(project)

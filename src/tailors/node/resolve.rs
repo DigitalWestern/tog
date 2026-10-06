@@ -151,6 +151,70 @@ pub(crate) fn check_members_readable(root: &ProjectRoot) -> io::Result<()> {
 /// form's `packages` list. A `!` pattern narrows npm's set; it is left out
 /// so the record covers what it would exclude too.
 fn npm_workspace_patterns(package: &serde_json::Value) -> io::Result<Vec<String>> {
+    Ok(npm_workspace_entries(package)?
+        .into_iter()
+        .filter(|entry| !entry.starts_with('!'))
+        .collect())
+}
+
+/// Whether npm, run in `root_dir.join(member)`, would take `root_dir` as
+/// its workspace root: `root_dir/package.json` names `member` in
+/// `workspaces` (a literal path or a glob, less any `!` pattern that
+/// matches it), and the member has a `package.json`. This is npm's own
+/// rule (`@npmcli/config`'s `loadLocalPrefix`, through
+/// `@npmcli/map-workspaces`), so a root `package.json` that is missing,
+/// unreadable, or has no list is simply not a root, as it is for npm.
+pub(crate) fn npm_workspace_names(root_dir: &Path, member: &Path) -> bool {
+    let Ok(text) = std::fs::read_to_string(root_dir.join("package.json")) else {
+        return false;
+    };
+    let Ok(package) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return false;
+    };
+    let Ok(entries) = npm_workspace_entries(&package) else {
+        return false;
+    };
+    if entries.is_empty() || !root_dir.join(member).join("package.json").is_file() {
+        return false;
+    }
+    let relative = member.to_string_lossy().replace('\\', "/");
+    let relative = relative.trim_end_matches('/');
+    let options = glob::MatchOptions {
+        case_sensitive: true,
+        require_literal_separator: true,
+        require_literal_leading_dot: false,
+    };
+    let matches = |pattern: &str| {
+        let trimmed = pattern.trim_start_matches("./").trim_end_matches('/');
+        if trimmed == relative {
+            return true;
+        }
+        trimmed.contains(['*', '?', '['])
+            && glob::Pattern::new(trimmed)
+                .map(|compiled| compiled.matches_with(relative, options))
+                .unwrap_or(false)
+    };
+    let mut named = false;
+    for entry in &entries {
+        match entry.strip_prefix('!') {
+            Some(excluded) => {
+                if matches(excluded) {
+                    named = false;
+                }
+            }
+            None => {
+                if matches(entry) {
+                    named = true;
+                }
+            }
+        }
+    }
+    named
+}
+
+/// Every `workspaces` entry of a `package.json` as written, `!` patterns
+/// included: a list, or the object form's `packages` list.
+fn npm_workspace_entries(package: &serde_json::Value) -> io::Result<Vec<String>> {
     let list = match package.get("workspaces") {
         None => return Ok(Vec::new()),
         Some(serde_json::Value::Array(list)) => list,
@@ -174,7 +238,6 @@ fn npm_workspace_patterns(package: &serde_json::Value) -> io::Result<Vec<String>
     Ok(list
         .iter()
         .filter_map(|entry| entry.as_str())
-        .filter(|entry| !entry.starts_with('!'))
         .map(str::to_string)
         .collect())
 }
@@ -439,20 +502,19 @@ pub(crate) fn attest_project(
     let err = |text: String| io::Error::other(text);
     let lock_name = match super::edit::node_lock_for(project.path())? {
         NodeLock::Own { name, .. } => name,
-        NodeLock::PnpmWorkspaceMember { root } => {
-            return Err(err(format!(
-                "{} is a member of the pnpm workspace at {}; its pnpm-lock.yaml and resolution \
-                 record live there, so run `tog attest node` in {}",
-                project.path().display(),
-                root.display(),
-                root.display()
-            )))
-        }
         NodeLock::UnlistedUnderPnpmWorkspace { workspace_root } => {
             return Err(super::edit::unlisted_member_refusal(
                 project.path(),
                 &workspace_root,
             ))
+        }
+        member => {
+            let (root, lock_name) = member.workspace().expect("a workspace member");
+            return Err(super::edit::member_lock_elsewhere(
+                project.path(),
+                root,
+                lock_name,
+            ));
         }
     };
     if !project.is_input_file(Path::new(&lock_name)) {

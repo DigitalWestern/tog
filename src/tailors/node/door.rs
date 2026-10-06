@@ -761,42 +761,9 @@ mod tests {
         else {
             return;
         };
+        plant_stand_in_npm(harness);
         let platform = Platform::host().unwrap();
         let selected = crate::tailors::node::shipped_selection().unwrap();
-        let staged = harness.store.stage().unwrap();
-        for file in [
-            "bin/node",
-            "include/node/node.h",
-            "lib/node_modules/npm/bin/npm-cli.js",
-            "lib/node_modules/npm/node_modules/node-gyp/bin/node-gyp.js",
-        ] {
-            fs::create_dir_all(staged.join(file).parent().unwrap()).unwrap();
-            fs::write(staged.join(file), "").unwrap();
-        }
-        fs::write(
-            staged.join("lib/node_modules/npm/package.json"),
-            r#"{"name":"npm","version":"0.0.0-stand-in"}"#,
-        )
-        .unwrap();
-        let npm = staged.join("bin/npm");
-        fs::write(
-            &npm,
-            "#!/bin/sh\n{ printf '%s\\n' \"$@\"; echo '---env---'; env | sort; echo \"---cwd---\"; pwd; } \
-             | sed -e 's/tog:[0-9a-f]*@/tog:TOKEN@/g' -e 's/127\\.0\\.0\\.1:8119/PROXY/g' \
-             > package-lock.json\n",
-        )
-        .unwrap();
-        fs::set_permissions(&npm, fs::Permissions::from_mode(0o755)).unwrap();
-        crate::tailors::install_kinds();
-        harness
-            .store
-            .commit_with_deps(
-                &crate::tailors::node::runtime_identity(&selected, platform).unwrap(),
-                &staged,
-                &[],
-                &crate::kernel::store::ObjectDeps::new(),
-            )
-            .unwrap();
         let temp = TempDir::named("npm-stand-in");
         let project_dir = project(&temp.0.join("project"), "");
         fs::write(
@@ -890,6 +857,157 @@ mod tests {
             "{receipt}"
         );
         assert!(receipt.contains("\".npmrc\""), "{receipt}");
+        assert!(harness.upstream.seen().is_empty());
+    }
+
+    /// A stand-in Node object whose `npm` does what npm's own workspace
+    /// detection does: walk up from its working directory to the nearest
+    /// `package.json` that has `workspaces`, and write the lock there, with
+    /// its argv, environment, and working directory. Committed under the
+    /// runtime identity, so `realize_runtime` returns it.
+    fn plant_stand_in_npm(harness: &Harness) {
+        let platform = Platform::host().unwrap();
+        let selected = crate::tailors::node::shipped_selection().unwrap();
+        let staged = harness.store.stage().unwrap();
+        for file in [
+            "bin/node",
+            "include/node/node.h",
+            "lib/node_modules/npm/bin/npm-cli.js",
+            "lib/node_modules/npm/node_modules/node-gyp/bin/node-gyp.js",
+        ] {
+            fs::create_dir_all(staged.join(file).parent().unwrap()).unwrap();
+            fs::write(staged.join(file), "").unwrap();
+        }
+        fs::write(
+            staged.join("lib/node_modules/npm/package.json"),
+            r#"{"name":"npm","version":"0.0.0-stand-in"}"#,
+        )
+        .unwrap();
+        let npm = staged.join("bin/npm");
+        fs::write(
+            &npm,
+            "#!/bin/sh\nroot=$PWD\n\
+             while [ \"$root\" != / ]; do\n  \
+               if [ -f \"$root/package.json\" ] && grep -q '\"workspaces\"' \"$root/package.json\"; then break; fi\n  \
+               root=$(dirname \"$root\")\n\
+             done\n\
+             [ \"$root\" = / ] && root=$PWD\n\
+             { printf '%s\\n' \"$@\"; echo '---env---'; env | sort; echo \"---cwd---\"; pwd; } \
+             | sed -e 's/tog:[0-9a-f]*@/tog:TOKEN@/g' -e 's/127\\.0\\.0\\.1:8119/PROXY/g' \
+             > \"$root/package-lock.json\"\n",
+        )
+        .unwrap();
+        fs::set_permissions(&npm, fs::Permissions::from_mode(0o755)).unwrap();
+        crate::tailors::install_kinds();
+        harness
+            .store
+            .commit_with_deps(
+                &crate::tailors::node::runtime_identity(&selected, platform).unwrap(),
+                &staged,
+                &[],
+                &crate::kernel::store::ObjectDeps::new(),
+            )
+            .unwrap();
+    }
+
+    /// `tog add` in an npm workspace member runs npm in the member with the
+    /// workspace root as the lock root: the root is in the snapshot (the
+    /// stand-in finds it by npm's own walk, and would otherwise write a
+    /// member lock the door refuses as undeclared), npm's working directory
+    /// is the member, the lock and the record are published at the root
+    /// and the record covers the member's manifest, the member gets no
+    /// lock of its own, and the sync root is the root. The member's and
+    /// the root's `.npmrc` are both the record's inputs.
+    #[test]
+    fn an_npm_workspace_member_edit_runs_in_the_member_at_the_root() {
+        let _serial = policy::attribution_test_lock();
+        let Some(harness) = node_harness(
+            "an_npm_workspace_member_edit_runs_in_the_member_at_the_root",
+            "npm",
+        ) else {
+            return;
+        };
+        plant_stand_in_npm(harness);
+        let temp = TempDir::named("npm-ws-stand-in");
+        let root = temp.0.join("ws");
+        fs::create_dir_all(root.join("packages/util")).unwrap();
+        let app = project(&root.join("packages/app"), "\"@acme/util\": \"*\"");
+        let root = root.canonicalize().unwrap();
+        fs::write(
+            root.join("package.json"),
+            r#"{"name":"ws","workspaces":["packages/*"]}"#,
+        )
+        .unwrap();
+        fs::write(
+            root.join("packages/util/package.json"),
+            r#"{"name":"@acme/util","version":"1.0.0"}"#,
+        )
+        .unwrap();
+        fs::write(root.join("package-lock.json"), "{\"name\":\"ws\"}\n").unwrap();
+        fs::write(root.join(".npmrc"), "fund=true\n").unwrap();
+        fs::write(app.join(".npmrc"), "audit=true\n").unwrap();
+        let host = TestHost {
+            harness,
+            cache: temp.0.join("cache"),
+        };
+        let specs = [crate::tailors::edit::DepSpec {
+            name: "is-odd".into(),
+            text: "is-odd@3.0.1".into(),
+        }];
+        let edit = crate::tailors::edit::ManifestEdit {
+            verb: crate::tailors::edit::EditVerb::Add,
+            project: &app,
+            specs: &specs,
+            dev: false,
+            host: &host,
+        };
+        let mut attribution = Attribution::open("node").unwrap();
+        let mut door = ResolutionDoor::open(
+            &harness.store,
+            &harness.activity,
+            Platform::host().unwrap(),
+            DoorKind::Edit,
+            &mut attribution,
+        )
+        .unwrap();
+        let outcome = crate::tailors::node::edit::edit_manifest(&edit, &mut door).unwrap();
+        drop(door);
+        let recorded = attribution.recorded();
+        attribution.discard();
+        done();
+        assert!(recorded.is_empty(), "{recorded:?}");
+        assert_eq!(outcome.sync_root, root);
+        assert_eq!(
+            outcome.files,
+            vec!["packages/app/package.json", "package-lock.json"]
+        );
+        assert!(
+            !app.join("package-lock.json").exists(),
+            "the member got a lock of its own"
+        );
+        let lock = fs::read_to_string(root.join("package-lock.json")).unwrap();
+        let (args, rest) = lock.split_once("---env---\n").unwrap();
+        let (_, cwd) = rest.split_once("---cwd---\n").unwrap();
+        assert_eq!(cwd.trim(), app.display().to_string());
+        let args: Vec<&str> = args.lines().collect();
+        for flag in ["install", "--package-lock-only", "--", "is-odd@3.0.1"] {
+            assert!(args.contains(&flag), "{flag} missing from {args:?}");
+        }
+        let receipt = fs::read_to_string(root.join(".tog/resolution/node.json")).unwrap();
+        for name in [
+            "\"package-lock.json\"",
+            "\"package.json\"",
+            "\"packages/app/package.json\"",
+            "\"packages/util/package.json\"",
+            "\".npmrc\"",
+            "\"packages/app/.npmrc\"",
+        ] {
+            assert!(receipt.contains(name), "{name} missing from {receipt}");
+        }
+        assert!(
+            !app.join(".tog").exists(),
+            "the record was written in the member"
+        );
         assert!(harness.upstream.seen().is_empty());
     }
 

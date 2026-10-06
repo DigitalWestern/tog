@@ -3471,8 +3471,20 @@ Node doors, each the flexible option that still fails closed:
   member.** `ConfinedSpec::cwd` (kernel, plain components below the lock
   root, for uv's workspace members too) puts pnpm in the directory the
   edit was made in, as before, while the snapshot, the transaction, and
-  the record are the root's. An npm edit runs in the project, which is
-  its own lock root.
+  the record are the root's. An npm workspace member is placed the same
+  way, by npm's own rule (`@npmcli/config`'s `loadLocalPrefix`: the
+  nearest ancestor whose `package.json` names the member in
+  `workspaces`, a `!` pattern honoured, the member holding a manifest):
+  the root is the lock root whether or not it has a lock yet, the edit
+  runs in the member so npm applies it to that workspace, and the root's
+  lock is the output (a `yarn.lock` there is yarn's refusal). As first
+  built the member was its own lock root, so the confined npm saw the
+  member alone, wrote it a lock of its own and fetched sibling members
+  from the registry (review). A sync run in a member that has no lock of
+  its own (npm or pnpm) is refused in preflight naming the root, before
+  the toolchain lock or a journal is written into the member: a sync
+  holds the member as its project, so a lock generated at the root could
+  not feed it, and one generated in the member would resolve it alone.
 - **Resolution outputs are the union of every member source.** The lock
   root's `package.json`, `package-lock.json`, `npm-shrinkwrap.json`, and
   `pnpm-lock.yaml`, plus the `package.json` of every workspace member
