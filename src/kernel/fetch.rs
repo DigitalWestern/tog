@@ -445,17 +445,20 @@ fn read_text_capped(reader: impl Read, max: u64, url: &str) -> io::Result<String
     reader
         .take(max + 1)
         .read_to_end(&mut body)
-        .map_err(|e| io::Error::new(e.kind(), format!("read {url}: {e}")))?;
+        .map_err(|e| io::Error::new(e.kind(), format!("read {}: {e}", shown_url(url))))?;
     if body.len() as u64 > max {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("read {url}: the response is larger than {max} bytes"),
+            format!(
+                "read {}: the response is larger than {max} bytes",
+                shown_url(url)
+            ),
         ));
     }
     String::from_utf8(body).map_err(|e| {
         io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("read {url}: not UTF-8: {e}"),
+            format!("read {}: not UTF-8: {e}", shown_url(url)),
         )
     })
 }
@@ -485,8 +488,11 @@ pub(crate) fn download_unpinned(url: &str, dest: &Path, max: u64) -> io::Result<
     drop(file);
     let refusal = match copied {
         Ok(copied) if copied <= max => return Ok(()),
-        Ok(_) => io::Error::other(format!("download {url}: longer than {max} bytes; refusing")),
-        Err(e) => io::Error::new(e.kind(), format!("read {url}: {e}")),
+        Ok(_) => io::Error::other(format!(
+            "download {}: longer than {max} bytes; refusing",
+            shown_url(url)
+        )),
+        Err(e) => io::Error::new(e.kind(), format!("read {}: {e}", shown_url(url))),
     };
     let _ = fs::remove_file(dest);
     Err(refusal)
@@ -551,7 +557,12 @@ fn stream_to_file(
         let n = match reader.read(&mut buf) {
             Ok(0) => break Ok(()),
             Ok(n) => n,
-            Err(e) => break Err(io::Error::new(e.kind(), format!("read {url}: {e}"))),
+            Err(e) => {
+                break Err(io::Error::new(
+                    e.kind(),
+                    format!("read {}: {e}", shown_url(url)),
+                ))
+            }
         };
         total += n as u64;
         progress.advance(n as u64);
@@ -576,7 +587,8 @@ fn stream_to_file(
             Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
-                    "hash mismatch for {url}\n  expected sha256 {}\n  got      {got}",
+                    "hash mismatch for {}\n  expected sha256 {}\n  got      {got}",
+                    shown_url(url),
                     digest.hex()
                 ),
             ))
@@ -917,6 +929,7 @@ fn remove_dot_segments(path: &str) -> String {
 /// without parsing the message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HashMismatch {
+    /// The URL as requested. The message names it through [`shown_url`].
     pub url: String,
     pub expected: Digest,
     /// The hex digest of the bytes received, under the expected algorithm.
@@ -928,7 +941,7 @@ impl std::fmt::Display for HashMismatch {
         write!(
             f,
             "hash mismatch for {}\n  expected {} {}\n  got      {}",
-            self.url,
+            shown_url(&self.url),
             self.expected.algo(),
             self.expected.hex(),
             self.got
@@ -1955,6 +1968,63 @@ mod integrity_tests {
         outcome.unwrap();
         assert!(store.cache_path("sha256", digest.hex()).is_file());
         assert!(leftover_downloads(&store).is_empty());
+    }
+
+    /// The production wrappers pass `MAX_ARTIFACT`, not the release cap
+    /// beside it: a stream one byte past `MAX_RELEASE_FILE` goes through
+    /// `cache_or_download` to the hash check rather than a cap refusal.
+    #[test]
+    fn a_verified_download_is_capped_at_the_artifact_cap_not_the_release_cap() {
+        let (_scratch, store) = scratch_store("fetch-cap-pin");
+        let activity = &store.activity(ActivityMode::Shared).unwrap();
+        let digest = Digest::sha256(&sha256_hex(b"hello")).unwrap();
+        let error = cache_or_download(&store, activity, "https://x/big", &digest, || {
+            let body = io::repeat(0).take(MAX_RELEASE_FILE + 1);
+            Ok((Box::new(body) as Box<dyn Read>, None))
+        })
+        .map(drop)
+        .unwrap_err();
+        assert!(HashMismatch::of(&error).is_some(), "{error}");
+        assert!(leftover_downloads(&store).is_empty());
+    }
+
+    /// A hash mismatch names the URL without the credentials before its
+    /// host or the signature in its query string (#348), from the cache
+    /// and from `download_file` alike.
+    #[test]
+    fn a_hash_mismatch_does_not_print_credentials_or_a_signature() {
+        let url = "https://user:token@x/hello?sig=secret";
+        let digest = Digest::sha256(&sha256_hex(b"hello")).unwrap();
+        let (_scratch, store) = scratch_store("fetch-mismatch-shown");
+        let activity = &store.activity(ActivityMode::Shared).unwrap();
+        let cached = cache_or_download(&store, activity, url, &digest, || {
+            Ok((Box::new(&b"hellp"[..]) as Box<dyn Read>, None))
+        })
+        .map(drop)
+        .unwrap_err();
+        let dest = store.root.join("release");
+        let release =
+            stream_to_file(url, &dest, &digest, Box::new(&b"hellp"[..]), None, 1024).unwrap_err();
+        let dropped = stream_to_file(
+            url,
+            &dest,
+            &digest,
+            Box::new(DroppedStream {
+                head: b"hel",
+                served: 0,
+            }),
+            None,
+            1024,
+        )
+        .unwrap_err();
+        let text = read_text_capped(&b"abcde"[..], 4, url).unwrap_err();
+        for error in [cached, release, dropped, text] {
+            let shown = error.to_string();
+            assert!(shown.contains("https://x/hello"), "{shown}");
+            for secret in ["user", "token", "sig=", "secret"] {
+                assert!(!shown.contains(secret), "{secret} in {shown}");
+            }
+        }
     }
 
     /// `download_file`'s cap refuses the same way and removes its
