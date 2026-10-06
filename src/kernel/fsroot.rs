@@ -1591,24 +1591,10 @@ mod tests {
         assert_eq!(read.output().unwrap().stdout, b"member held");
     }
 
-    /// A listening socket at `path`. A socket's path must fit in
-    /// `sun_path` (104 bytes on macOS, where the temp dir alone is about
-    /// 50), so a longer one is bound at a short name in /tmp and renamed
-    /// into place; a rename keeps the socket.
+    /// A listening socket at `path`, however long, through the shared
+    /// test helper (which says how a path past `sun_path` is bound).
     fn bind_socket(path: &Path) -> std::os::unix::net::UnixListener {
-        if path.as_os_str().len() < 100 {
-            return std::os::unix::net::UnixListener::bind(path).unwrap();
-        }
-        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let short = PathBuf::from(format!(
-            "/tmp/tog-sock-{}-{}",
-            std::process::id(),
-            SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        ));
-        let _ = fs::remove_file(&short);
-        let listener = std::os::unix::net::UnixListener::bind(&short).unwrap();
-        fs::rename(&short, path).unwrap();
-        listener
+        crate::kernel::testutil::bind_socket(path)
     }
 
     fn entries(dir: &Path) -> Vec<String> {
