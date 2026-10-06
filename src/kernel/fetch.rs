@@ -1610,8 +1610,17 @@ mod integrity_tests {
             "GC took gc.lock while a lease was held"
         );
         drop(lease);
-        gc.try_lock()
-            .expect("GC must get gc.lock once every lease is gone");
+        // A child another test forks in this process holds a copy of every
+        // open descriptor until it execs, and with it the flock, so the
+        // released lock can stay held for a moment. Retry briefly.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while let Err(error) = gc.try_lock() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "GC must get gc.lock once every lease is gone: {error:?}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
     }
 
     /// A poisoned entry another process replaced with good bytes after it

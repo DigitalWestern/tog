@@ -218,7 +218,8 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   (`src/kernel/archive.rs`, #236). It reads every entry from the
   archive's own headers (ustar names and the POSIX prefix field, PAX `path`/`linkpath`/`size`,
   GNU long names), cross-checks that listing against `tar -t`, refuses the whole archive on an
-  absolute name, `..`, a hard link, a special file, an escaping symlink, a name that is not
+  absolute name, `..`, a special file, an escaping symlink, a hard link to anything but an
+  earlier regular file that survives `--strip-components` (#317), a name that is not
   UTF-8 or carries a control, bidirectional-override or zero-width character, two names that
   APFS would fold into one (by case or by Unicode normalization; for a per-platform build such
   as a toolchain or conda package, only on macOS, since Linux CPython and ncurses ship

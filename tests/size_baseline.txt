@@ -11,7 +11,7 @@ file 1604 src/tailors/node/realize.rs
 fn 171 src/comforter/toolchain.rs::resolve
 fn 163 src/commands/audit.rs::render
 fn 159 src/commands/mod.rs::dispatch
-fn 166 src/kernel/archive.rs::read_entries
+fn 160 src/kernel/archive.rs::read_entries
 fn 151 src/kernel/gitsrc.rs::ensure_git_source
 fn 164 src/kernel/provider/crates.rs::realize_vendor_inner
 fn 209 src/kernel/toolchain/lock.rs::validate

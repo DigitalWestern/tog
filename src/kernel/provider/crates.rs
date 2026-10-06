@@ -591,9 +591,28 @@ fn inspect_crate(
 ) -> io::Result<(BTreeMap<String, String>, u64)> {
     let mut files = BTreeMap::new();
     let mut size = 0u64;
-    inspect_dir(crate_dir, crate_dir, krate, &mut files, &mut size)?;
+    let mut links = Links::new();
+    inspect_dir(
+        crate_dir, crate_dir, krate, &mut files, &mut size, &mut links,
+    )?;
+    // A hard link the archive carried names an earlier member of the same
+    // archive (`archive::validate_with_options`), so every name of its file
+    // is in this tree. A file with a name the walk did not find is shared
+    // with something outside it.
+    for (count, found, relative) in links.values() {
+        if found != count {
+            return Err(err(format!(
+                "{}@{}: hard link to a file outside the crate at {relative}",
+                krate.name, krate.version
+            )));
+        }
+    }
     Ok((files, size))
 }
+
+/// Each hard-linked inode met in the walk: its link count, how many of its
+/// names the walk found, and the first one.
+type Links = BTreeMap<(u64, u64), (u64, u64, String)>;
 
 fn inspect_dir(
     root: &Path,
@@ -601,6 +620,7 @@ fn inspect_dir(
     krate: &CargoCrate,
     files: &mut BTreeMap<String, String>,
     size: &mut u64,
+    links: &mut Links,
 ) -> io::Result<()> {
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
@@ -615,16 +635,16 @@ fn inspect_dir(
             )));
         }
         if file_type.is_dir() {
-            inspect_dir(root, &path, krate, files, size)?;
+            inspect_dir(root, &path, krate, files, size, links)?;
         } else if file_type.is_file() {
             #[cfg(unix)]
             {
                 use std::os::unix::fs::MetadataExt;
                 if metadata.nlink() > 1 {
-                    return Err(err(format!(
-                        "{}@{}: hostile hardlink at {relative}",
-                        krate.name, krate.version
-                    )));
+                    let slot = links
+                        .entry((metadata.dev(), metadata.ino()))
+                        .or_insert_with(|| (metadata.nlink(), 0, relative.clone()));
+                    slot.1 += 1;
                 }
             }
             *size = size.checked_add(metadata.len()).ok_or_else(|| {
@@ -924,5 +944,41 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("inherits workspace"), "{error}");
+    }
+
+    fn hard_link_crate() -> CargoCrate {
+        CargoCrate {
+            name: "linked".into(),
+            version: "1.0.0".into(),
+            sha256: "a".repeat(64),
+            url: "https://crates.io/api/v1/crates/linked/1.0.0/download".into(),
+            git: None,
+        }
+    }
+
+    /// A hard link between two files of the crate is accepted (#317) and
+    /// both names are checksummed; one to a file outside it is refused.
+    #[cfg(unix)]
+    #[test]
+    fn a_hard_link_inside_the_crate_is_accepted_and_one_outside_is_refused() {
+        let scratch = TempDir::named("cargo-hard-link");
+        let inside = scratch.0.join("inside");
+        fs::create_dir_all(inside.join("src")).unwrap();
+        fs::write(inside.join("src/a.rs"), b"a").unwrap();
+        fs::hard_link(inside.join("src/a.rs"), inside.join("b.rs")).unwrap();
+        let (files, _) = inspect_crate(&inside, &hard_link_crate()).unwrap();
+        assert_eq!(files["src/a.rs"], files["b.rs"]);
+
+        let outside = scratch.0.join("outside");
+        fs::create_dir(&outside).unwrap();
+        fs::hard_link(inside.join("src/a.rs"), outside.join("c.rs")).unwrap();
+        fs::remove_file(inside.join("b.rs")).unwrap();
+        let error = inspect_crate(&inside, &hard_link_crate()).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("hard link to a file outside the crate at src/a.rs"),
+            "{error}"
+        );
     }
 }
