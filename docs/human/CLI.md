@@ -425,9 +425,13 @@ present, which is where most people find the shorthand.
 source file runs it with its ecosystem's program inside the project's
 environment, so `tog app.py` is `tog run python app.py` and `tog main.go`
 is `tog run go run main.go`. The extension decides: `.py` (python),
-`.js`, `.mjs`, `.cjs`, `.ts`, `.mts`, `.cts` (node, which strips types
-itself from 23.6 on), `.rb` (ruby), `.exs` (mix run, so the project's
+`.js`, `.mjs`, `.cjs`, `.ts`, `.mts`, `.cts` (node), `.rb` (ruby), `.exs` (mix run, so the project's
 deps are loaded), `.go` (go run).
+A TypeScript file runs on the project's Node as it is from 23.6 and
+22.18, which strip types themselves, and with `--experimental-strip-types`
+from 22.6. An older Node is refused before the sync, naming the version:
+raise the version the project asks for, then `tog update --toolchain node`
+moves the lock.
 Uppercase extensions and paths with directories count. The project has to
 have that ecosystem: `tog app.py` in an npm-only project, or outside any
 project, fails naming the missing project rather than running the file

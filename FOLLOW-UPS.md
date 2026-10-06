@@ -51,7 +51,6 @@ None open.
 
 - **Found in the `tog <file>` work (2026-10-05).** One issue and one PR each:
   - #561 run: `tog <file>` outside a project, or in a project without that ecosystem, on the locked or shipped toolchain. Pick: realize the runtime as `x` does.
-  - #562 node: say when the locked Node is too old to run a `.ts` file. Pick: refuse naming `tog update --toolchain node`, with `--experimental-strip-types` for 22.6 to 22.17.
   - #564 run: a mixed project where one tailor adds no PATH entry can resolve the program on the host. Pick: confirm, then every `run_env` puts its runtime first and a runtime name never falls through.
   - #565 ci: the `dco` job is skipped by `paths-ignore`, so a pointer-only pull request (allowed since 2026-10-06) merges with no sign-off check. Pick: its own workflow file, when there are outside contributors.
 - **#463: tests: sandbox socket fixtures fail before assertions under a long TMPDIR.** sandbox socket fixtures exceed SUN_LEN with a long TMPDIR. The shared helper is `kernel::testutil::bind_socket` (#462); left is calling it from `sandbox.rs`, batched with required sandbox work.

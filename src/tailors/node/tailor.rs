@@ -173,10 +173,10 @@ impl Tailor for Node {
     }
 
     fn source_files(&self) -> &'static [SourceFile] {
-        // Node runs TypeScript itself from 23.6 (22.18 on the 22 line) by
-        // stripping the types; an older locked Node says so in its own
-        // words when handed a .ts file.
+        // Node runs TypeScript itself by stripping the types, so which
+        // command runs a .ts file depends on the project's Node.
         const NODE: FileRunner = FileRunner::Command(&["node"]);
+        const TYPESCRIPT: FileRunner = FileRunner::ByVersion(typescript_runner);
         &[
             SourceFile {
                 extension: "js",
@@ -192,15 +192,15 @@ impl Tailor for Node {
             },
             SourceFile {
                 extension: "ts",
-                runner: NODE,
+                runner: TYPESCRIPT,
             },
             SourceFile {
                 extension: "mts",
-                runner: NODE,
+                runner: TYPESCRIPT,
             },
             SourceFile {
                 extension: "cts",
-                runner: NODE,
+                runner: TYPESCRIPT,
             },
         ]
     }
@@ -665,12 +665,54 @@ fn node_projection_state(project: &ProjectRoot, body: &Value) -> State {
     State::Synced
 }
 
+/// The command that runs a TypeScript file on Node `version`. Node strips
+/// types on its own from 23.6 and 22.18, behind `--experimental-strip-types`
+/// from 22.6 (23.0 to 23.5 included), and not at all before.
+fn typescript_runner(version: &str) -> Result<&'static [&'static str], String> {
+    let mut parts = version.split('.').map(|part| part.parse::<u64>().ok());
+    let major = parts.next().flatten();
+    let minor = parts.next().flatten().unwrap_or(0);
+    match major {
+        Some(major) if major >= 24 => Ok(&["node"]),
+        Some(23) if minor >= 6 => Ok(&["node"]),
+        Some(22) if minor >= 18 => Ok(&["node"]),
+        Some(23) => Ok(&["node", "--experimental-strip-types"]),
+        Some(22) if minor >= 6 => Ok(&["node", "--experimental-strip-types"]),
+        _ => Err(format!(
+            "the project's Node is {version}, which cannot run TypeScript (Node strips types \
+             from 22.6 on); raise the Node version the project asks for, then 'tog update \
+             --toolchain node' moves the lock in tog-toolchain.toml"
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::kernel::store::Store;
     use crate::kernel::testutil::TempDir;
     use std::fs;
+
+    /// TypeScript runs as-is where Node strips types itself, behind the
+    /// flag where it needs one, and is refused before 22.6.
+    #[test]
+    fn typescript_runs_on_every_node_that_can_strip_types() {
+        for version in ["22.18.0", "22.20.1", "23.6.0", "24.0.0", "26.10.0"] {
+            assert_eq!(typescript_runner(version).unwrap(), ["node"], "{version}");
+        }
+        for version in ["22.6.0", "22.17.1", "23.0.0", "23.5.0"] {
+            assert_eq!(
+                typescript_runner(version).unwrap(),
+                ["node", "--experimental-strip-types"],
+                "{version}"
+            );
+        }
+        for version in ["22.5.1", "21.7.3", "20.19.0", "garbage"] {
+            let why = typescript_runner(version).unwrap_err();
+            assert!(why.contains(&format!("Node is {version}")), "{why}");
+            assert!(why.contains("tog update --toolchain node"), "{why}");
+        }
+    }
 
     struct StoreEnv(Option<std::ffi::OsString>);
 
