@@ -246,8 +246,7 @@ pub fn ensure_rustfmt(
         path: format!("{}:/usr/bin:/bin", staged.join("bin").display()),
         host_view: crate::kernel::sandbox::HostView::Full,
     };
-    let probe_result =
-        crate::kernel::sandbox::run_build_spec_on_with_activity(platform, &probe, activity);
+    let probe_result = crate::kernel::sandbox::run_build_spec_on(platform, &probe, Some(activity));
     let _ = crate::kernel::store::remove_tree(&scratch);
     if let Err(error) = probe_result {
         let _ = crate::kernel::store::remove_tree(&staged);
@@ -359,8 +358,7 @@ pub fn run_sandboxed(
         ),
         host_view: crate::kernel::sandbox::HostView::Full,
     };
-    let result =
-        crate::kernel::sandbox::run_build_spec_status_on_with_activity(platform, &spec, activity);
+    let result = crate::kernel::sandbox::run_build_spec_status_on(platform, &spec, Some(activity));
     let _ = crate::kernel::store::remove_tree(&scratch);
     result
 }

@@ -5,7 +5,7 @@
 #
 #   file <non-test lines> <path>
 #   fn <lines> <path>::<name>[#<nth occurrence in the file>]
-file 1814 src/tailors/dotnet/mod.rs
+file 1810 src/tailors/dotnet/mod.rs
 file 1740 src/tailors/elixir/mod.rs
 file 1604 src/tailors/node/realize.rs
 fn 171 src/comforter/toolchain.rs::resolve

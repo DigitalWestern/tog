@@ -1637,7 +1637,7 @@ pub fn build_sandboxed(
         path: beam_path(&beam_obj),
         host_view: crate::kernel::sandbox::HostView::Full,
     };
-    let result = crate::kernel::sandbox::run_build_spec_on_with_activity(platform, &spec, activity)
+    let result = crate::kernel::sandbox::run_build_spec_on(platform, &spec, Some(activity))
         .map_err(|e| {
             io::Error::new(
                 e.kind(),
