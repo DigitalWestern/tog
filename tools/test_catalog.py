@@ -922,7 +922,23 @@ class Node(Base):
         self.publish("24.9.0")
         body = self.net.bodies["https://nodejs.org/dist/v24.9.0/SHASUMS256.txt"]
         # The trailing `!` makes gpg sign with exactly this subkey.
-        self.net.bodies["https://nodejs.org/dist/v24.9.0/SHASUMS256.txt.sig"] = self.sign(body, subkey + "!")
+        sig = self.sign(body, subkey + "!")
+        self.net.bodies["https://nodejs.org/dist/v24.9.0/SHASUMS256.txt.sig"] = sig
+        # gpgv itself says who signed: VALIDSIG names the subkey as the
+        # signer and the pinned primary as the primary key, so the accept
+        # below is a subkey signature chaining to its primary.
+        paths = {}
+        for name, data in (("keyring", self.net.bodies[self.KEYRING]), ("body", body), ("sig", sig)):
+            paths[name] = os.path.join(self.scratch.name, f"subkey-{name}")
+            with open(paths[name], "wb") as f:
+                f.write(data)
+        status = subprocess.run(["gpgv", "--status-fd", "1", "--keyring", paths["keyring"],
+                                 paths["sig"], paths["body"]], check=True, capture_output=True,
+                                text=True).stdout
+        valid = [line.split() for line in status.splitlines() if line.startswith("[GNUPG:] VALIDSIG ")]
+        self.assertEqual(len(valid), 1, status)
+        self.assertEqual(valid[0][2], subkey, status)
+        self.assertEqual(valid[0][-1], primary, status)
         out, _ = self.generate([])
         self.assertEqual(out, {"node-24.9.0": self.expected("24.9.0")})
         # The pin names the primary key only: the subkey alone is refused.

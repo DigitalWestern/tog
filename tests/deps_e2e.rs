@@ -8,7 +8,7 @@
 #![allow(clippy::disallowed_methods)]
 
 use std::path::{Path, PathBuf};
-use std::process::Output;
+use std::process::{Command, Output};
 
 use sha2::{Digest as _, Sha224, Sha256, Sha512};
 
@@ -664,6 +664,21 @@ fn tree_snapshot(dir: &Path) -> Vec<(String, String)> {
     out
 }
 
+/// Drop every `npm_config_*` variable (npm and pnpm read them in any case,
+/// `NPM_CONFIG_REGISTRY` as well as `npm_config_registry`) from `command`'s
+/// environment, so a developer's npm settings cannot reach the child.
+fn without_npm_config(mut command: Command) -> Command {
+    for (name, _) in std::env::vars_os() {
+        let npm = name
+            .to_str()
+            .is_some_and(|name| name.to_ascii_lowercase().starts_with("npm_config_"));
+        if npm {
+            command.env_remove(&name);
+        }
+    }
+    command
+}
+
 /// Run the store pnpm's real `install` in `project` from a home of its own,
 /// the way the user would after a `tog` edit realized the tool:
 /// `node_modules/.modules.yaml` then names a store tog is never given,
@@ -689,7 +704,8 @@ fn install_with_store_pnpm(temp: &TempDir, project: &Path, store: &Path) {
         .expect("store node");
     let user_home = temp.0.join("user-home");
     std::fs::create_dir_all(&user_home).unwrap();
-    let install = child(x_root.join("node_modules/.bin/pnpm"), &user_home)
+    let pnpm = x_root.join("node_modules/.bin/pnpm");
+    let install = without_npm_config(child(pnpm, &user_home))
         .current_dir(project)
         .args(["install", "--ignore-scripts", "--reporter", "append-only"])
         .arg("--store-dir")
