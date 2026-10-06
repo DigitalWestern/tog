@@ -714,10 +714,9 @@ fn the_signing_key_never_reaches_the_output_through_cargo_files() {
         std::fs::hard_link(&key, project.join(file)).unwrap();
         let (ok, stderr) = run(&project, &["add", "--no-sync", "cargo:itoa"]);
         assert!(!ok, "{file}: add succeeded");
-        // The key is not TOML, so in front of a toolchain file only the
-        // TOML parser stands: it refuses with a position, never the line
-        // (#569). What proves no key leaks is `run`'s own check that no
-        // piece of the key is in the output.
+        // `run` has already checked that no piece of the key is in the
+        // output. The refusal is the key guard's, or the TOML parser's,
+        // whose message names a position and never the line (#569).
         assert!(
             stderr.contains("is the signing key")
                 || stderr.contains("[signing key redacted]")
