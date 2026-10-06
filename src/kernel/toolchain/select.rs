@@ -108,8 +108,6 @@ impl fmt::Display for Version {
 pub enum Op {
     Ge,
     Lt,
-    Eq,
-    Ne,
     /// `~= X.Y.Z` is `>= X.Y.Z` and `== X.Y.*`.
     Compatible,
 }
@@ -135,8 +133,6 @@ impl Specifier {
         match self.op {
             Op::Ge => candidate >= &self.version,
             Op::Lt => candidate < &self.version,
-            Op::Eq => candidate == &self.version,
-            Op::Ne => candidate != &self.version,
             Op::Compatible => {
                 let mut prefix = self.version.clone();
                 prefix.0.pop();
@@ -203,8 +199,6 @@ impl fmt::Display for VersionRequest {
                         let op = match s.op {
                             Op::Ge => ">=",
                             Op::Lt => "<",
-                            Op::Eq => "==",
-                            Op::Ne => "!=",
                             Op::Compatible => "~=",
                         };
                         format!("{op}{}", s.version)
@@ -434,15 +428,11 @@ mod tests {
         let spec = |op, text| Specifier::new(op, v(text)).unwrap();
         assert!(spec(Op::Ge, "3.11").matches(&v("3.11.0")));
         assert!(!spec(Op::Lt, "3.11").matches(&v("3.11.0")));
-        assert!(spec(Op::Eq, "3.11.2").matches(&v("3.11.2")));
-        assert!(spec(Op::Ne, "3.11.2").matches(&v("3.11.3")));
         assert!(spec(Op::Compatible, "3.11.2").matches(&v("3.11.9")));
         assert!(!spec(Op::Compatible, "3.11.2").matches(&v("3.12.0")));
         assert!(spec(Op::Compatible, "3.11").matches(&v("3.14.0")));
         assert!(!spec(Op::Compatible, "3.11").matches(&v("4.0.0")));
         assert!(Specifier::new(Op::Compatible, v("3")).is_err());
-        assert!(spec(Op::Eq, "3.12").matches(&v("3.12.0")));
-        assert!(!spec(Op::Eq, "3.12").matches(&v("3.12.1")));
         let range = VersionRequest::Specifiers(vec![spec(Op::Ge, "3.11"), spec(Op::Lt, "3.13")]);
         assert!(range.matches(&v("3.12.14")));
         assert!(!range.matches(&v("3.13.0")));
@@ -518,11 +508,11 @@ mod tests {
             ]),
         );
         assert_eq!(catalog.select(&range).unwrap().release, "py312");
-        let excluded = Request::newest().with(
+        let below = Request::newest().with(
             "cpython",
-            VersionRequest::Specifiers(vec![Specifier::new(Op::Ne, v("3.14.7")).unwrap()]),
+            VersionRequest::Specifiers(vec![Specifier::new(Op::Lt, v("3.14.7")).unwrap()]),
         );
-        assert_eq!(catalog.select(&excluded).unwrap().release, "py313");
+        assert_eq!(catalog.select(&below).unwrap().release, "py313");
         // Exact requests match the primary version only: no prefix matching.
         assert!(catalog
             .select(&Request::exact("cpython", "3.12").unwrap())

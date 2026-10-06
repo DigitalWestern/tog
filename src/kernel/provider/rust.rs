@@ -29,8 +29,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 pub use super::rust_extras::{
-    project_extras, project_extras_in, realize_toolchain, toolchain_file_extras_within,
-    toolchain_object_id, Extras,
+    project_extras_in, realize_toolchain, toolchain_file_extras_within, toolchain_object_id, Extras,
 };
 
 /// The shipped Rust catalog: every stable release from 1.70.0 on, with its
@@ -42,6 +41,7 @@ static CATALOG: Shipped = Shipped::new(include_str!("rust.catalog.toml"));
 
 /// The release the checked-in channel manifest fixture trims and the
 /// identity goldens pin. Any shipped release realizes the same way.
+#[cfg(test)]
 pub const RUST_VERSION: &str = "1.96.1";
 
 /// The catalog component that pins a release's official channel manifest,
@@ -449,7 +449,8 @@ pub(super) fn validate_rust_layout(staged: &Path, platform: Platform) -> io::Res
 /// Every entry point that is handed a [`Selected`] takes the version from it
 /// instead (`toolchain.version("rustc")`), so the lock decides the toolchain.
 /// What the file asks for beyond the channel is read from the lock's rows
-/// ([`project_extras`]) or, for an sdist, [`toolchain_file_extras_within`].
+/// ([`project_extras_in`]) or, for an sdist, [`toolchain_file_extras_within`].
+#[cfg(test)]
 pub fn resolve_toolchain(platform: Platform, project_dir: &Path) -> io::Result<&'static str> {
     resolve_toolchain_with(
         platform,
@@ -464,11 +465,12 @@ pub fn resolve_toolchain(platform: Platform, project_dir: &Path) -> io::Result<&
 /// parent directories (`$HOME`, a repository the store sits in) and must
 /// not reach a build whose identity names only the sdist. With none, the
 /// catalog's default, whatever lies above the store.
+#[cfg(test)]
 pub fn resolve_toolchain_within(platform: Platform, root: &Path) -> io::Result<&'static str> {
     resolve_toolchain_within_or(platform, root, None)
 }
 
-/// [`resolve_toolchain_within`] with the default a project locked: an
+/// `resolve_toolchain_within` with the default a project locked: an
 /// sdist whose own file names a channel gets that channel, and one with no
 /// file, no channel, or `stable` gets `default` (the Rust the Python
 /// section of `tog-toolchain.toml` pins for sdists) rather than whatever

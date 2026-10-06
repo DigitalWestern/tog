@@ -85,14 +85,6 @@ impl AsRef<OsStr> for CacheLease {
 /// Fetch a cache entry by sha256, RE-VERIFYING its content (never trust a
 /// cache hit: read-only bits stop accidents, not same-user replacement).
 /// A poisoned entry is deleted and the call fails.
-pub fn cache_verified(
-    store: &Store,
-    activity: &StoreActivity,
-    sha256: &str,
-) -> io::Result<PathBuf> {
-    cache_verified_held(store, activity, sha256).map(CacheLease::into_path)
-}
-
 pub(crate) fn cache_verified_held(
     store: &Store,
     activity: &StoreActivity,
@@ -581,18 +573,6 @@ pub fn download_file(url: &str, dest: &Path, sha256: &str) -> io::Result<()> {
     outcome
 }
 
-/// Sha256-hex convenience for callers outside the store. Internal extraction
-/// paths use `download_verified_held` so their lease lasts through
-/// consumption.
-pub fn download_verified(
-    store: &Store,
-    activity: &StoreActivity,
-    url: &str,
-    sha256: &str,
-) -> io::Result<PathBuf> {
-    download_verified_held(store, activity, url, sha256).map(CacheLease::into_path)
-}
-
 pub(crate) fn download_verified_held(
     store: &Store,
     activity: &StoreActivity,
@@ -605,7 +585,7 @@ pub(crate) fn download_verified_held(
 /// Insert a local file into the verified artifact cache by its computed
 /// sha256 (for artifacts obtained through delegated tools and then verified
 /// by tog — e.g. Go module zips h1-checked by dirhash). Returns
-/// (sha256 hex, cache path). Publication mirrors download_verified.
+/// (sha256 hex, cache path). Publication mirrors download_verified_held.
 pub fn cache_insert(
     store: &Store,
     activity: &StoreActivity,
@@ -616,7 +596,7 @@ pub fn cache_insert(
     let _gc_lock = acquire_cache_lock(store)?;
     let dest = store.cache_path("sha256", &hex);
     if dest.is_file() {
-        // Re-verify on hit, like download_verified: a same-user replacement
+        // Re-verify on hit, like a download: a same-user replacement
         // must never ride an old address (poisoned -> drop and re-insert).
         match hash_identified(&dest, Algo::Sha256) {
             Ok((h, _)) if h == hex => {
