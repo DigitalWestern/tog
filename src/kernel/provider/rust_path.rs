@@ -696,13 +696,15 @@ fn cache_path(store: &Store, tree: &Path) -> PathBuf {
     )
 }
 
-/// The cache of the active store, when there is one: what `select` reads
-/// and writes. The store is only located, never created.
-fn store_cache(tree: &Path) -> Option<PathBuf> {
-    Store::existing()
+/// The cache of the active store, when there is one, with the shared lease
+/// that keeps it from being swept while `select` reads and writes it. The
+/// store is only located, never created, and a busy one is skipped: the
+/// cache is a shortcut, and without it the files are read.
+fn store_cache(tree: &Path) -> Option<(PathBuf, StoreActivity)> {
+    Store::existing_shared()
         .ok()
         .flatten()
-        .map(|store| cache_path(&store, tree))
+        .map(|(store, activity)| (cache_path(&store, tree), activity))
 }
 
 fn load_cache(path: &Path) -> BTreeMap<String, CachedFile> {
@@ -788,7 +790,7 @@ fn select_with(
     platform: Platform,
     project: &Path,
     rows: &[InputRow],
-    cache: fn(&Path) -> Option<PathBuf>,
+    cache: fn(&Path) -> Option<(PathBuf, StoreActivity)>,
 ) -> io::Result<Option<Bundle>> {
     let Some(value) = rows
         .iter()
@@ -802,7 +804,8 @@ fn select_with(
     let probe = probe(&tree, platform)?;
     // The lock's digest is read from the files themselves, never from the
     // cache; the cache is refreshed on the way, for the realization next.
-    let digest = tree_digest_refreshed(&tree, cache(&tree).as_deref())?;
+    let cache = cache(&tree);
+    let digest = tree_digest_refreshed(&tree, cache.as_ref().map(|(path, _)| path.as_path()))?;
     let url = tree
         .to_str()
         .map(|path| format!("{PATH_URL_SCHEME}{path}"))
@@ -1101,7 +1104,7 @@ mod tests {
         ));
     }
 
-    fn no_cache(_: &Path) -> Option<PathBuf> {
+    fn no_cache(_: &Path) -> Option<(PathBuf, StoreActivity)> {
         None
     }
 
