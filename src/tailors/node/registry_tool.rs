@@ -184,7 +184,11 @@ impl RegistryTool for NodeTool {
         let node_obj = node::realize_runtime(store, activity, platform, toolchain)?;
         // The resolution runs confined through the `x` door, detached: the
         // lock root is tog's own cache root, so the accepted lock is written
-        // back into it and the ledger is rooted under it.
+        // back into it and the ledger is rooted under it. npm's output is
+        // captured: the command's stdout is the tool's, and npm's own
+        // summary ("up to date in 3ms") is not what a caller piping
+        // `tog x <tool>` asked for; on a failure npm's words come back in
+        // the error.
         let report = door::run_node_checked(
             door,
             NodeRun {
@@ -197,7 +201,7 @@ impl RegistryTool for NodeTool {
                 publish: Publish::Detached {
                     outputs: vec![PathBuf::from("package-lock.json")],
                 },
-                capture: false,
+                capture: true,
             },
         )
         .map_err(|error| {
