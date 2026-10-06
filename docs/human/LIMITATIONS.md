@@ -142,6 +142,10 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   the last `pnpm install` is not in the lock and cannot be distinguished from a deliberate
   exclusion**, so edits refuse loudly with two remedies: `pnpm install` at the root, or a
   `.tog` directory in it.
+- **pnpm patches are resolution inputs only when `package.json` names them.** The patch
+  files `pnpm.patchedDependencies` lists are in the resolution basis and the record, so a
+  patch edited after signing reads as a change. The same setting in `pnpm-workspace.yaml`
+  (pnpm 10) is not read: tog reads that file's `packages` alone.
 - **An npm workspace member is edited at the root.** `tog add` in a member whose root
   `package.json` names it in `workspaces` runs npm in the member with the root as the lock
   root, so the root's `package-lock.json` (created there if it has none) and resolution record

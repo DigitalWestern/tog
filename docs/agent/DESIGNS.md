@@ -3497,8 +3497,11 @@ Node doors, each the flexible option that still fails closed:
   `pnpm-workspace.yaml`), is an error rather than a gap, raised in
   `Tailor::preflight` and before any door realizes a tool, not when the
   closure is written (review round 1). Inputs are
-  `.npmrc`, `pnpm-workspace.yaml`, `.pnpmfile.cjs`, and each member's
-  `.npmrc`. `node_modules` at every depth is excluded from the snapshot
+  `.npmrc`, `pnpm-workspace.yaml`, `.pnpmfile.cjs`, each member's
+  `.npmrc`, and the patch files the root manifest's
+  `pnpm.patchedDependencies` names (review: a patch edited after signing
+  is a change the basis must see; the pnpm 10 spelling in
+  `pnpm-workspace.yaml` is not read). `node_modules` at every depth is excluded from the snapshot
   (npm's lock-only install ignores it, pnpm's modules state is in the
   scratch).
 - **A `file:` or `link:` dependency outside the lock root is refused by

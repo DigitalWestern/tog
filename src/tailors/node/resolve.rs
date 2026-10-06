@@ -43,14 +43,61 @@ pub(crate) fn resolution_outputs(root: &ProjectRoot) -> io::Result<Vec<PathBuf>>
 /// `Tailor::resolution_inputs` for Node: the configuration npm and pnpm
 /// read at the lock root (`.npmrc`, which can name a scoped registry or a
 /// program; `pnpm-workspace.yaml`, which names the members and, since
-/// pnpm 10, settings; `.pnpmfile.cjs`, project code pnpm runs), and each
-/// member's own `.npmrc`.
+/// pnpm 10, settings; `.pnpmfile.cjs`, project code pnpm runs), each
+/// member's own `.npmrc`, and the patch files the root manifest's
+/// `pnpm.patchedDependencies` names (pnpm hashes each into the lock, so a
+/// patch edited after signing is a change the basis must see).
 pub(crate) fn resolution_inputs(root: &ProjectRoot) -> io::Result<Vec<PathBuf>> {
     let mut inputs: Vec<PathBuf> = INPUTS.iter().map(PathBuf::from).collect();
     for member in workspace_members(root)? {
         inputs.push(member.join(".npmrc"));
     }
+    inputs.extend(patched_dependency_files(root)?);
     Ok(inputs)
+}
+
+/// The patch files `pnpm.patchedDependencies` in the root `package.json`
+/// names, relative to the root, in the manifest's order. A path that is
+/// not plain and inside the project is an error, as a member's would be: a
+/// record names files inside the project only, and the confined pnpm
+/// could not read it anyway. (pnpm 10 also takes the setting in
+/// `pnpm-workspace.yaml`; tog reads that file's `packages` alone.)
+fn patched_dependency_files(root: &ProjectRoot) -> io::Result<Vec<PathBuf>> {
+    let Some(text) = root.read_input_string(Path::new("package.json"))? else {
+        return Ok(Vec::new());
+    };
+    let Ok(package) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return Ok(Vec::new());
+    };
+    let mut files = Vec::new();
+    let patches = package
+        .get("pnpm")
+        .and_then(|pnpm| pnpm.get("patchedDependencies"))
+        .and_then(|value| value.as_object());
+    for (name, file) in patches.into_iter().flatten() {
+        let Some(file) = file.as_str() else {
+            continue;
+        };
+        let path = PathBuf::from(file.trim_start_matches("./"));
+        let plain = !path.as_os_str().is_empty()
+            && path
+                .components()
+                .all(|component| matches!(component, Component::Normal(_)));
+        if !plain {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "package.json names the patch for {name} as {file:?}, which is not a plain \
+                     path inside the project; a resolution record names files inside the \
+                     project only"
+                ),
+            ));
+        }
+        if !files.contains(&path) {
+            files.push(path);
+        }
+    }
+    Ok(files)
 }
 
 /// The workspace members of the project at `root`, relative to it, from
@@ -736,6 +783,46 @@ mod tests {
         );
         assert!(inputs.contains(&"packages/a/.npmrc".to_string()));
         assert!(inputs.contains(&"tools/cli/.npmrc".to_string()));
+        assert!(!inputs.iter().any(|input| input.ends_with(".patch")));
+
+        // The patch files `pnpm.patchedDependencies` names are inputs (the
+        // outputs are unchanged), whether or not they exist yet; one named
+        // outside the project is refused.
+        write(
+            &root,
+            "package.json",
+            r#"{"workspaces":["packages/*"],"pnpm":{"patchedDependencies":{"lodash@4.17.21":"./patches/lodash@4.17.21.patch","left-pad":"patches/left-pad.patch"}}}"#,
+        );
+        write(&root, "patches/lodash@4.17.21.patch", "--- a\n+++ b\n");
+        let inputs = resolution_inputs(&held).unwrap();
+        assert!(
+            inputs.contains(&PathBuf::from("patches/lodash@4.17.21.patch")),
+            "{inputs:?}"
+        );
+        assert!(
+            inputs.contains(&PathBuf::from("patches/left-pad.patch")),
+            "{inputs:?}"
+        );
+        assert!(!resolution_outputs(&held)
+            .unwrap()
+            .iter()
+            .any(|output| output.starts_with("patches")));
+        let basis = resolution_basis(&held, "pnpm-lock.yaml", "lockfileVersion: '9.0'\n").unwrap();
+        assert!(
+            basis.contains_key("patches/lodash@4.17.21.patch"),
+            "{basis:?}"
+        );
+        assert!(!basis.contains_key("patches/left-pad.patch"), "{basis:?}");
+        write(
+            &root,
+            "package.json",
+            r#"{"pnpm":{"patchedDependencies":{"lodash":"../elsewhere/lodash.patch"}}}"#,
+        );
+        let error = resolution_inputs(&held).unwrap_err().to_string();
+        assert!(
+            error.contains("../elsewhere/lodash.patch") && error.contains("not a plain path"),
+            "{error}"
+        );
 
         // A member named outside the project cannot be in a record.
         write(&root, "package.json", r#"{"workspaces":["../elsewhere"]}"#);
