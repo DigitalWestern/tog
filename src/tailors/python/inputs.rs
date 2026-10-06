@@ -88,6 +88,24 @@ pub fn python_input_records(
     comforter::input_records(project, &candidates)
 }
 
+/// The text uv resolves, and whether uv may be handed the manifest's own
+/// file instead (it names the same requirements). A file outside the
+/// project never is: uv would read it again by path, and by then the path
+/// may name another file (#501). uv compiles the flattened text tog read
+/// instead, written under `.tog` by `read_plan`.
+fn resolver_input(project: &ProjectRoot, manifest: &manifest::Manifest) -> (String, bool) {
+    let external = manifest
+        .source_path
+        .as_deref()
+        .is_some_and(|path| project.relative(path).is_none());
+    if external {
+        return (manifest.flattened_text(), false);
+    }
+    let text = manifest.resolver_text();
+    let as_is = text == manifest.requirements_text();
+    (text, as_is)
+}
+
 /// Plan from project inputs, returning the interpreter selection that was
 /// used. The manifest layer may only learn the constraint after a sandboxed
 /// `setup.py egg_info`, so the selection is made here and handed back to the
@@ -165,7 +183,7 @@ pub fn read_plan(
     ui::note(&format!("python inputs: {}", manifest.provenance));
     let input = manifest.input.clone();
     let source = manifest.requirements_text();
-    let resolver_source = manifest.resolver_text();
+    let (resolver_source, as_is) = resolver_input(project, &manifest);
     if !input.starts_with("requirements") {
         record_skippable_specs(&source)?;
     }
@@ -199,33 +217,32 @@ pub fn read_plan(
         ));
     }
 
-    let generated_input = if (input.starts_with("requirements") || is_fully_pinned(&source))
-        && resolver_source == source
-    {
-        None
-    } else {
-        // The compile input is named to uv by pathname, but tog writes it
-        // through the held project descriptor so a symlinked `.tog` is
-        // refused rather than followed.
-        let path = dir.join(MANIFEST_REQUIREMENTS);
-        let mut text = if manifest.has_constraints() {
-            project.write_file(
-                Path::new(MANIFEST_CONSTRAINTS),
-                manifest.constraints_text().as_bytes(),
-            )?;
-            format!(
-                "{}-c {MANIFEST_CONSTRAINTS_NAME}\n",
-                manifest.normalized_requirements_text(),
-            )
+    let generated_input =
+        if as_is && (input.starts_with("requirements") || is_fully_pinned(&source)) {
+            None
         } else {
-            resolver_source.clone()
+            // The compile input is named to uv by pathname, but tog writes it
+            // through the held project descriptor so a symlinked `.tog` is
+            // refused rather than followed.
+            let path = dir.join(MANIFEST_REQUIREMENTS);
+            let mut text = if manifest.has_constraints() {
+                project.write_file(
+                    Path::new(MANIFEST_CONSTRAINTS),
+                    manifest.constraints_text().as_bytes(),
+                )?;
+                format!(
+                    "{}-c {MANIFEST_CONSTRAINTS_NAME}\n",
+                    manifest.normalized_requirements_text(),
+                )
+            } else {
+                resolver_source.clone()
+            };
+            if text.is_empty() {
+                text.push('\n');
+            }
+            project.write_file(Path::new(MANIFEST_REQUIREMENTS), text.as_bytes())?;
+            Some(path)
         };
-        if text.is_empty() {
-            text.push('\n');
-        }
-        project.write_file(Path::new(MANIFEST_REQUIREMENTS), text.as_bytes())?;
-        Some(path)
-    };
     let compile_path = if generated_input.is_some() {
         generated_input.as_deref()
     } else {
@@ -421,7 +438,8 @@ pub fn locked_requirements(
     // uv starts inside the held project directory, so an input in the
     // project is named relative to it: a directory swapped in at the
     // project's path is never the one read (#499). An external
-    // requirements file keeps its own path.
+    // requirements file never reaches here: `read_plan` hands uv the
+    // flattened text under `.tog` instead (#501).
     let compile_input = compile_path
         .map(|path| path.strip_prefix(dir).unwrap_or(path))
         .and_then(Path::to_str)
@@ -746,6 +764,92 @@ mod tests {
             "six==1.17.0\n"
         );
         assert!(!project_dir.join("uv-args.txt").exists());
+    }
+
+    /// A project whose `tog.toml` names a requirements file outside it.
+    fn external_requirements_project(temp: &Path) -> (PathBuf, PathBuf) {
+        let project_dir = temp.join("proj");
+        std::fs::create_dir_all(project_dir.join("requirements")).unwrap();
+        let external = temp.join("shared/requirements.txt");
+        std::fs::create_dir_all(external.parent().unwrap()).unwrap();
+        std::fs::write(&external, "six==1.17.0\n").unwrap();
+        std::fs::write(
+            project_dir.join("tog.toml"),
+            format!("[python]\nrequirements = \"{}\"\n", external.display()),
+        )
+        .unwrap();
+        (project_dir, external)
+    }
+
+    /// An external requirements file replaced between planning and the
+    /// input record: the record is of the bytes the plan was made from,
+    /// and the same command's status check agrees, while the next command
+    /// sees the change (#501).
+    #[test]
+    fn an_external_requirements_file_is_read_once_per_command() {
+        use sha2::{Digest, Sha256};
+        let temp = crate::kernel::testutil::TempDir::new();
+        let (project_dir, external) = external_requirements_project(&temp.0);
+        let project = ProjectRoot::open(&project_dir).unwrap();
+        let manifest = manifest::discover(
+            Platform::host().unwrap(),
+            &project,
+            pyselect::DEFAULT_VERSION,
+        )
+        .unwrap();
+        assert_eq!(manifest.source, "six==1.17.0\n");
+        std::fs::write(&external, "decoy==1.0\n").unwrap();
+        let records = python_input_records(&project, &manifest).unwrap();
+        let record = records
+            .iter()
+            .find(|record| Path::new(&record.path) == external)
+            .expect("the external file is recorded");
+        assert_eq!(record.sha256, hex::encode(Sha256::digest(b"six==1.17.0\n")));
+        let body = serde_json::json!({ "inputs": records });
+        assert_eq!(
+            comforter::status::recorded_inputs_state(&project, &body).unwrap(),
+            comforter::status::State::Synced
+        );
+        assert!(matches!(
+            comforter::status::recorded_inputs_state(
+                &ProjectRoot::open(&project_dir).unwrap(),
+                &body
+            )
+            .unwrap(),
+            comforter::status::State::Changed(_)
+        ));
+    }
+
+    /// uv is never handed the external path, which it would reopen: it
+    /// compiles the text tog read, written under `.tog` (#501).
+    #[test]
+    fn uv_compiles_the_external_requirements_tog_read() {
+        let temp = crate::kernel::testutil::TempDir::new();
+        let (project_dir, external) = external_requirements_project(&temp.0);
+        let store = store_with_stub_uv(&temp.0.join("store"));
+        let project = ProjectRoot::open(&project_dir).unwrap();
+        // The first read happens here; the replacement after it is not seen.
+        assert!(project.read_external(&external).unwrap().is_some());
+        std::fs::write(&external, "decoy==1.0\n").unwrap();
+        let _ = read_plan(
+            &project,
+            &selected(),
+            &mut crate::kernel::testutil::DoorScope::new().door(
+                &store,
+                &test_activity(&store),
+                Platform::host().unwrap(),
+                crate::kernel::resolve::DoorKind::Planner,
+            ),
+        );
+        let args = std::fs::read_to_string(project_dir.join("uv-args.txt")).unwrap();
+        assert!(
+            args.starts_with(&format!("pip compile {MANIFEST_REQUIREMENTS} ")),
+            "{args}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(project_dir.join("uv-input.txt")).unwrap(),
+            "six==1.17.0\n"
+        );
     }
 
     /// A `setup.py egg_info` probe that cannot run must not abort planning:

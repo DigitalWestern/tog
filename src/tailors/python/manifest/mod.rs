@@ -77,22 +77,25 @@ impl Manifest {
     /// private index named by a child file can never be followed by uv.
     pub fn resolver_text(&self) -> String {
         if self.input.starts_with("requirements") && self.has_index_options {
-            return if self.requirements.is_empty() && self.constraints.is_empty() {
-                String::new()
-            } else {
-                join_requirements(&self.requirements, &self.constraints)
-            };
+            return self.flattened_text();
         }
         if self.input.starts_with("requirements")
             && (self.has_skippable_specs || !self.constraints.is_empty())
         {
-            return if self.requirements.is_empty() && self.constraints.is_empty() {
-                String::new()
-            } else {
-                join_requirements(&self.requirements, &self.constraints)
-            };
+            return self.flattened_text();
         }
         self.requirements_text()
+    }
+
+    /// The requirements and constraints of every file in the include
+    /// closure as one text, with options and includes removed: what uv
+    /// compiles when it must not reopen the source by path.
+    pub fn flattened_text(&self) -> String {
+        if self.requirements.is_empty() && self.constraints.is_empty() {
+            String::new()
+        } else {
+            join_requirements(&self.requirements, &self.constraints)
+        }
     }
 
     /// The normalized install requirements without constraint-only entries.
@@ -280,7 +283,19 @@ pub(crate) fn read_project_file(project: &ProjectRoot, path: &Path) -> io::Resul
         Some(relative) if !relative.as_os_str().is_empty() => project
             .read_input(relative)?
             .ok_or_else(|| io::Error::from_raw_os_error(libc::ENOENT)),
-        _ => fs::read(path),
+        _ => project
+            .read_external(path)?
+            .ok_or_else(|| io::Error::from_raw_os_error(libc::ENOENT)),
+    }
+}
+
+/// `path.canonicalize()`, resolved like `read_project_file`: a path
+/// outside the project is resolved once per command, so the include walk
+/// reads the file the manifest read.
+pub(crate) fn canonical_project_path(project: &ProjectRoot, path: &Path) -> io::Result<PathBuf> {
+    match project.relative(path) {
+        Some(relative) if !relative.as_os_str().is_empty() => path.canonicalize(),
+        _ => project.external_canonical(path),
     }
 }
 
@@ -308,7 +323,9 @@ pub(crate) fn kernel_marker_record(project: &ProjectRoot) -> io::Result<Option<s
 pub(crate) fn is_project_file(project: &ProjectRoot, path: &Path) -> bool {
     match project.relative(path) {
         Some(relative) if !relative.as_os_str().is_empty() => project.is_input_file(relative),
-        _ => path.is_file(),
+        _ => project
+            .read_external(path)
+            .is_ok_and(|bytes| bytes.is_some()),
     }
 }
 

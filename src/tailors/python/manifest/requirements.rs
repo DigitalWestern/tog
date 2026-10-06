@@ -170,7 +170,7 @@ fn walk_from(
     seen: &mut BTreeSet<(PathBuf, bool)>,
     visit: &mut dyn FnMut(IncludeStep<'_>) -> io::Result<()>,
 ) -> io::Result<()> {
-    let path = path.canonicalize().map_err(|e| unreadable(path, e))?;
+    let path = canonical_project_path(project, path).map_err(|e| unreadable(path, e))?;
     let key = (path.clone(), constraints_only);
     if stack.contains(&key) {
         return Err(unreadable(
@@ -229,7 +229,7 @@ fn walk_from(
 /// than only the bytes of the top-level file. Each file is read through the
 /// held project descriptor.
 pub fn requirements_tree_hash(project: &ProjectRoot, path: &Path) -> io::Result<String> {
-    let top = path.canonicalize().map_err(|e| unreadable(path, e))?;
+    let top = canonical_project_path(project, path).map_err(|e| unreadable(path, e))?;
     let root = top.parent().unwrap_or(Path::new("."));
     let mut files = BTreeSet::new();
     walk_includes(project, &top, &mut |step| {

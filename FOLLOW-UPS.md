@@ -134,7 +134,6 @@ None open.
 - **Tool-opened absolute inputs (#499).** Bundler and uv now name project inputs relative to the held directory. Cargo's `--manifest-path` (`src/kernel/provider/crates.rs`) and external absolute requirements files still reopen a path. Name the manifest relative to the held cwd, and give external files a held input or a snapshot.
 
 
-- **External requirements consistency (#501).** Select external absolute Python requirements once across command stages, using held input descriptors or immutable snapshots. Preserve existing supported external requirements. See `src/comforter/status.rs` and `src/tailors/python/inputs.rs`.
 
 
 
