@@ -651,30 +651,46 @@ struct BwrapInvocation {
 /// setup errors are a single short line. The supervisor keeps the same.
 use crate::kernel::supervise::CLASSIFIER_PREFIX as STDERR_PREFIX_LIMIT;
 
-/// Copy a child's stderr to ours as it arrives, retaining the first
-/// `STDERR_PREFIX_LIMIT` bytes. Relay failures (e.g. our stderr closed) are
-/// ignored: they must not turn a successful build into a failure.
-fn relay_stderr(mut stderr: std::process::ChildStderr) -> Vec<u8> {
-    use std::io::{Read as _, Write as _};
+/// Copy a child's stderr to `sink` as it arrives, with the signing key
+/// scrubbed out by the same [`Scrubber`](crate::kernel::resolve::confine::Scrubber)
+/// the supervisor's relay uses (#430), retaining the first
+/// `STDERR_PREFIX_LIMIT` scrubbed bytes. Relay failures (e.g. our stderr
+/// closed) are ignored: they must not turn a successful build into a
+/// failure.
+fn relay_stderr(
+    mut stderr: impl io::Read,
+    sink: &mut impl io::Write,
+    secrets: &[Vec<u8>],
+) -> Vec<u8> {
+    let mut scrubber = crate::kernel::resolve::confine::Scrubber::new(secrets.to_vec());
     let mut prefix = Vec::new();
     let mut buffer = [0u8; 8192];
-    let mut sink = io::stderr();
+    let mut pass_on = |bytes: Vec<u8>| {
+        let keep = bytes.len().min(STDERR_PREFIX_LIMIT - prefix.len());
+        prefix.extend_from_slice(&bytes[..keep]);
+        let _ = sink.write_all(&bytes);
+    };
     loop {
         let read = match stderr.read(&mut buffer) {
             Ok(0) | Err(_) => break,
             Ok(read) => read,
         };
-        let keep = read.min(STDERR_PREFIX_LIMIT - prefix.len());
-        prefix.extend_from_slice(&buffer[..keep]);
-        let _ = sink.write_all(&buffer[..read]);
+        pass_on(scrubber.push(&buffer[..read]));
     }
+    pass_on(scrubber.finish());
     let _ = sink.flush();
     prefix
 }
 
 fn wait_with_stderr_relay(mut child: std::process::Child) -> io::Result<std::process::Output> {
     let stderr = child.stderr.take().expect("stderr is piped");
-    let relay = std::thread::spawn(move || relay_stderr(stderr));
+    let relay = std::thread::spawn(move || {
+        relay_stderr(
+            stderr,
+            &mut io::stderr(),
+            crate::kernel::resolve::confine::signing_key_secrets(),
+        )
+    });
     let output = child.wait_with_output()?;
     let stderr = relay
         .join()
@@ -1341,6 +1357,29 @@ mod tests {
         assert!(crate::kernel::supervise::interrupted(&error).is_some());
         let other = io::Error::new(io::ErrorKind::NotFound, "no such file");
         assert_eq!(probe_failure(other).unwrap(), "no such file");
+    }
+
+    /// The no-store relay scrubs the signing key as the supervisor's does,
+    /// even when the key arrives split across reads, and keeps the
+    /// classifier's prefix scrubbed too (#430).
+    #[test]
+    fn the_unmanaged_stderr_relay_scrubs_the_signing_key() {
+        let secret = b"k3y5eedQWERTYUIOPasdfghjklZXCVBNM12".to_vec();
+        let stream = io::Read::chain(
+            io::Cursor::new(b"bwrap: oops k3y5eedQWERTYU".to_vec()),
+            io::Cursor::new(b"IOPasdfghjklZXCVBNM12 done\n".to_vec()),
+        );
+        let mut sink = Vec::new();
+        let prefix = relay_stderr(stream, &mut sink, std::slice::from_ref(&secret));
+        let relayed = String::from_utf8_lossy(&sink).into_owned();
+        assert!(relayed.starts_with("bwrap: oops "), "{relayed}");
+        assert!(relayed.ends_with(" done\n"), "{relayed}");
+        assert!(!relayed.contains("QWERTY"), "{relayed}");
+        assert_eq!(prefix, sink);
+        // No secret: the bytes pass through unchanged.
+        let mut sink = Vec::new();
+        relay_stderr(io::Cursor::new(b"plain\n".to_vec()), &mut sink, &[]);
+        assert_eq!(sink, b"plain\n");
     }
 
     use super::*;

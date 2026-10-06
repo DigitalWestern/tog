@@ -1031,8 +1031,8 @@ const STDERR_HANDLES: &[(&str, &str, &str)] = &[
     ),
     (
         "src/kernel/sandbox.rs",
-        "let mut sink = io::stderr();",
-        "verbatim relay of a sandboxed build's stderr",
+        "&mut io::stderr(),",
+        "scrubbed relay of a sandboxed build's stderr",
     ),
     (
         "src/commands/deps.rs",
