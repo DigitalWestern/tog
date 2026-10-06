@@ -473,7 +473,9 @@ impl Sandbox<'_> {
             }
             scanned.push(root);
         }
-        Ok(())
+        // The fixed `/etc` entries are bound too (#373). `/usr` is trusted
+        // unscanned: walking it would cost more than the build.
+        reject_sockets_in_binds(HOST_ETC_ENTRIES.iter().map(Path::new))
     }
 
     fn bwrap_args(
@@ -901,6 +903,25 @@ pub(crate) fn bwrap_command(path: &Path) -> io::Result<Command> {
         }
     }
     Ok(command)
+}
+
+/// Refuse a Unix socket in any of the host paths the sandbox binds as they
+/// are, where each exists: bubblewrap follows a symlink at the bound path,
+/// so the scan starts at its target.
+fn reject_sockets_in_binds<'a>(binds: impl Iterator<Item = &'a Path>) -> io::Result<()> {
+    for bind in binds {
+        if !bind.exists() {
+            continue;
+        }
+        if let Some(socket) = find_socket_without_following_symlinks(&fs::canonicalize(bind)?)? {
+            return Err(io::Error::other(format!(
+                "host Unix socket exposed by sandbox path {}: {}",
+                bind.display(),
+                socket.display()
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn find_socket_without_following_symlinks(path: &Path) -> io::Result<Option<PathBuf>> {
@@ -3264,6 +3285,45 @@ mod containment_tests {
             host_view: HostView::Full,
         };
         sandbox.reject_host_sockets(&scratch, &scratch).unwrap();
+        drop(listener);
+    }
+
+    /// A socket in one of the fixed host binds, or behind a symlink the
+    /// bind follows, is refused by name; binds without one, and a missing
+    /// one, pass (#373).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_socket_in_a_fixed_host_bind_is_refused() {
+        let root = temp_dir("etc-binds");
+        let conf_d = root.0.join("ld.so.conf.d");
+        let localtime = root.0.join("localtime");
+        let zone = root.0.join("zone");
+        fs::create_dir(&conf_d).unwrap();
+        fs::write(conf_d.join("a.conf"), "/opt/lib\n").unwrap();
+        fs::write(&zone, "TZif").unwrap();
+        std::os::unix::fs::symlink(&zone, &localtime).unwrap();
+        let missing = root.0.join("missing");
+        let binds = [conf_d.as_path(), localtime.as_path(), missing.as_path()];
+        reject_sockets_in_binds(binds.iter().copied()).unwrap();
+
+        let listener = crate::kernel::testutil::bind_socket(&conf_d.join("s.sock"));
+        let error = reject_sockets_in_binds(binds.iter().copied()).unwrap_err();
+        assert!(
+            error.to_string().starts_with(&format!(
+                "host Unix socket exposed by sandbox path {}: ",
+                conf_d.display()
+            )),
+            "{error}"
+        );
+        drop(listener);
+        fs::remove_file(conf_d.join("s.sock")).unwrap();
+
+        let target = root.0.join("target.sock");
+        let listener = crate::kernel::testutil::bind_socket(&target);
+        fs::remove_file(&localtime).unwrap();
+        std::os::unix::fs::symlink(&target, &localtime).unwrap();
+        let error = reject_sockets_in_binds(binds.iter().copied()).unwrap_err();
+        assert!(error.to_string().contains("target.sock"), "{error}");
         drop(listener);
     }
 

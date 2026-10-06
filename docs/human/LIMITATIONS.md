@@ -259,8 +259,8 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   build output and run it at `tog run` time with full network. Do not describe tog
   as stopping malicious code from running.
 - **Sandboxes are cooperative hermeticity, not hostile-code containment.** On Linux, tog scans
-  every declared root, the cwd and the scratch for Unix sockets before invoking bubblewrap, but
-  not the system directories bubblewrap binds (`/usr`, `/etc` entries), and a socket created
+  every declared root, the cwd, the scratch and the fixed `/etc` entries it binds for Unix
+  sockets before invoking bubblewrap, but not `/usr`, which is trusted, and a socket created
   after the scan is not caught (the fmt host-socket scan is Linux-only too); build daemons can
   outlive a run. **Store objects are trusted from permissions + metadata, and all
   toolchain pins are TOFU** (pin-time hashes, not signed manifests): same-user content
