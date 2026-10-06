@@ -256,6 +256,21 @@ fi
 echo "== 11. polyglot project: python + node from one sync, one kernel"
 cp -R "$FIXTURES/proj-poly" "$WORK/p"
 (cd "$WORK/p" && "$TOG" sync)
+# The fixture ships its package-lock.json, so no sync resolved it and the
+# first sync records unrecorded-resolution, which the company policy
+# audited in 13 denies. attest gives the lock a signed resolution record
+# (npm's own lock check in the verification door, the lock left byte for
+# byte; it needs the toolchain lock the first sync wrote), as a repository
+# that adopts tog would, and the next sync carries no exception.
+LOCK_BEFORE=$(cksum < "$WORK/p/package-lock.json")
+if (cd "$WORK/p" && "$TOG" attest node); then
+  [ "$(cksum < "$WORK/p/package-lock.json")" = "$LOCK_BEFORE" ] && [ -f "$WORK/p/.tog/resolution/node.json" ] \
+    && ok "attest node signed a record for the fixture lock and left the lock as it was" \
+    || bad "attest node changed the lock or wrote no record"
+else
+  bad "attest node failed"
+fi
+(cd "$WORK/p" && "$TOG" sync)
 PY=$(cd "$WORK/p" && "$TOG" run python -c 'import six; print(six.__version__)')
 JS=$(cd "$WORK/p" && "$TOG" run node index.js)
 [ "$PY" = "1.17.0" ] && [ "$JS" = "is-odd(3): true" ] && ok "both ecosystems projected (py six=$PY, $JS)" || bad "py=$PY js=$JS"
