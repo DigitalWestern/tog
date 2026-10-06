@@ -16,7 +16,13 @@ pub static KINDS: &[ObjectKind] = &[
             "package_digest",
             "native",
         ],
-        live_optional: &["native_libs", "pkg:"],
+        live_optional: &[
+            "native_libs",
+            "build_view",
+            "host_fallback",
+            "host_inputs",
+            "pkg:",
+        ],
         live_contract: Some(python_env_v3_contract),
     },
     ObjectKind {
@@ -38,7 +44,15 @@ pub static KINDS: &[ObjectKind] = &[
             "build_mode",
             "native_mode",
         ],
-        live_optional: &["rust", "vendor", "native_libs", "native_linker"],
+        live_optional: &[
+            "rust",
+            "vendor",
+            "native_libs",
+            "native_linker",
+            "build_view",
+            "host_fallback",
+            "host_inputs",
+        ],
         live_contract: Some(sdist_build_v4_contract),
     },
     ObjectKind {
@@ -54,7 +68,15 @@ pub static KINDS: &[ObjectKind] = &[
             "native_mode",
             "rust_build_config",
         ],
-        live_optional: &["rust", "vendor", "native_libs", "native_linker"],
+        live_optional: &[
+            "rust",
+            "vendor",
+            "native_libs",
+            "native_linker",
+            "build_view",
+            "host_fallback",
+            "host_inputs",
+        ],
         live_contract: Some(sdist_build_v5_contract),
     },
 ];
@@ -120,6 +142,10 @@ fn python_env_v3_contract(identity: &Identity) -> Result<(), String> {
     // The `/2` relations run first: when one of them can name the exact
     // pairing that broke, that is a better diagnostic than "the digest moved".
     python_env_contract(identity)?;
+    // A host-fallback environment names the sdists whose wheels fell back.
+    crate::kernel::hostfallback::identity_contract(identity, |name| {
+        identity.inputs.contains_key(&format!("pkg:{name}"))
+    })?;
     let inputs = &identity.inputs;
     let declared = inputs
         .get("package_digest")
@@ -185,6 +211,8 @@ fn sdist_build_v3_contract(identity: &Identity) -> Result<(), String> {
 /// whole pair never collapses into the valid shape that never had one.
 fn sdist_build_v4_contract(identity: &Identity) -> Result<(), String> {
     sdist_build_v3_contract(identity)?;
+    // A host-fallback wheel names its own package as what fell back.
+    crate::kernel::hostfallback::identity_contract(identity, |name| name == identity.name)?;
     let inputs = &identity.inputs;
     for (field, key, present, absent) in [
         (

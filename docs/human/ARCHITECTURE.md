@@ -152,9 +152,12 @@ Rules the Linux port settled, which apply to any future platform:
   default search paths and out of pkg-config. Other shared libraries the
   host's tools load move to a `.tog-host-runtime` subdirectory that `ld`
   never searches, reached through `LD_LIBRARY_PATH`. Ruby gems with native
-  extensions install under `RuntimeOnly`, so a gem object committed under
-  the `runtime-only/1` view does not depend on which `-dev` packages the
-  building host has installed.
+  extensions, Python sdists that compile Rust or native code, and npm
+  install scripts build under `RuntimeOnly` first, so an object committed
+  under the `runtime-only/1` view does not depend on which `-dev` packages
+  the building host has installed. The retry against the whole host, its
+  `host-build-inputs` record and the `host-fallback/1` identity are shared
+  (`kernel/hostfallback.rs`).
 - **Darwin identity goldens stay byte-identical.** A platform change that
   alters a macOS object id is a bug.
 - **Archive extensions must agree.** GNU tar always prefers the PAX record
@@ -976,6 +979,8 @@ and build inputs tailors share, so no tailor reaches into another):
     sandbox.rs      hermetic build sandbox (Seatbelt / bubblewrap)
     hostview.rs     HostView::RuntimeOnly on Linux: the host's runtime files
                     plus the C runtime's development files, nothing else
+    hostfallback.rs C-runtime-first builds: the retry against the whole host,
+                    host-fallback identities and their store records
     provider/       shared toolchain providers, the pinned things more than one
                     tailor realizes: cpython.rs (CPython + uv from
                     cpython.catalog.toml, realization; node-gyp's
@@ -1040,6 +1045,7 @@ when the two differ.
                            requirements.rs, setup.rs, markers.rs
     python/env.rs          venv-shaped env object realization and projection
     python/build.rs        sandboxed sdist-to-wheel builds
+    python/sdist_view.rs   which host view an sdist build runs in, host fallback
     python/build_requires.rs  PEP 517 build requirements
     python/registry_tool.rs  `tog x` from PyPI: uv resolve, env realize, .venv
     python/run_refusal.rs  `tog run` refusals: pip install into a projected .venv
@@ -1047,6 +1053,7 @@ when the two differ.
     node/plan.rs           package-lock.json planning
     node/freshness.rs      lock-vs-package.json checks for npm and pnpm locks
     node/realize.rs        env realization and sandboxed install scripts
+    node/script_view.rs    install scripts: C-runtime-only first, host fallback
     node/project.rs        node_modules projection and workspace links
     node/inputs.rs         missing-lock generation, lockfile importers
     node/registry_tool.rs  `tog x` from npm: npm resolve, env realize, node_modules

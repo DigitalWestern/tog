@@ -12,6 +12,7 @@ use crate::comforter::{
 use crate::kernel::activity::StoreActivity;
 use crate::kernel::fetch::download_verified_held;
 use crate::kernel::fsroot::ProjectRoot;
+use crate::kernel::hostfallback::{self, FallbackRecords, RUNTIME_ONLY_VIEW};
 use crate::kernel::resolve::ledger::LedgerObjects;
 use crate::kernel::resolve::ResolutionDoor;
 use crate::kernel::toolchain::Selected;
@@ -215,6 +216,8 @@ fn environment_identity_inner(
     );
     inputs.insert("cpython".to_string(), cpython_id.to_string());
     let mut native_libs_id = None;
+    // Whether a wheel in it builds against the C runtime alone first.
+    let mut runtime_only = false;
     // The per-package entry. This is the expensive half — an sdist is
     // planned here — so it is computed once and kept beside the plan.
     let mut values = BTreeMap::new();
@@ -243,6 +246,11 @@ fn environment_identity_inner(
                 )?;
                 if native_libs_id.is_none() {
                     native_libs_id = sdist.native_libs_id;
+                }
+                if sdist.identity.inputs.get("build_view").map(String::as_str)
+                    == Some(RUNTIME_ONLY_VIEW)
+                {
+                    runtime_only = true;
                 }
                 sdist.input
             }
@@ -285,6 +293,12 @@ fn environment_identity_inner(
     if let Some(native_libs_id) = native_libs_id {
         inputs.insert("native_libs".into(), native_libs_id);
     }
+    // An sdist wheel that falls back to the whole host is keyed by the host
+    // state it was built against, and so is the environment holding it:
+    // the view lets `ENV_FALLBACK_RECORDS` find that environment (#328).
+    if runtime_only {
+        inputs.insert("build_view".into(), RUNTIME_ONLY_VIEW.into());
+    }
     Ok(Identity {
         kind: "python-env".into(),
         name: "env".into(),
@@ -292,6 +306,14 @@ fn environment_identity_inner(
         inputs,
     })
 }
+
+/// Where a runtime-only environment identity, built on a host in a given
+/// state, records the sdists whose wheels fell back to the whole host.
+const ENV_FALLBACK_RECORDS: FallbackRecords = FallbackRecords {
+    kind: "python-env-host-fallback",
+    names: |identity, name| identity.inputs.contains_key(&format!("pkg:{name}")),
+    what: "Python environments",
+};
 
 /// Compute an environment object id without realizing its files. Build
 /// planning uses this so an isolated sdist can commit its isolated-build identity
@@ -331,10 +353,12 @@ pub(crate) fn realize_env_at_depth(
         .to_string_lossy()
         .into_owned();
     let identity = environment_identity(door, plan, &cpython_id, selected, rust)?;
-    let id = identity.object_id();
-    if store.has_with_activity(activity, &id)? {
-        crate::kernel::policy::check_cached_with_activity(store, activity, &id)?;
-        return Ok(store.object_path(&id));
+    let lookup_inputs = crate::kernel::hostview::host_build_inputs;
+    if let Some(cached) =
+        ENV_FALLBACK_RECORDS.cached_object(store, activity, &identity, lookup_inputs)?
+    {
+        crate::kernel::policy::check_cached_with_activity(store, activity, &cached.id)?;
+        return Ok(store.object_path(&cached.id));
     }
 
     // Canonical package order + duplicate rejection: identity uses the same
@@ -342,40 +366,13 @@ pub(crate) fn realize_env_at_depth(
     let packages = canonical_packages(plan)?;
 
     // Fetch everything first (all-or-nothing before assembly starts).
-    let mut artifacts: Vec<(&crate::kernel::types::LockedPackage, PathBuf)> = Vec::new();
+    let Artifacts {
+        mut artifacts,
+        fell_back,
+        host_inputs,
+    } = realize_artifacts(door, &packages, selected, rust, plan, sdist_depth)?;
     // Keep verified cache leases alive until every wheel has been extracted.
     let mut _cache_leases = Vec::new();
-    for &p in &packages {
-        let wheel_file = match p.kind {
-            ArtifactKind::Wheel => {
-                let lease = download_verified_held(store, activity, &p.url, &p.sha256)?;
-                let path = lease.to_path_buf();
-                drop(lease);
-                path
-            }
-            // sdist -> wheel via sandboxed derivation (network denied).
-            ArtifactKind::Sdist => {
-                let owned;
-                let source = if p.git.is_some() {
-                    owned = crate::tailors::python::build::git_sdist_package(
-                        store, activity, platform, p,
-                    )?;
-                    &owned
-                } else {
-                    p
-                };
-                crate::tailors::python::build::build_sdist_wheel_at_depth(
-                    door,
-                    source,
-                    selected,
-                    rust,
-                    Some(plan),
-                    sdist_depth + 1,
-                )?
-            }
-        };
-        artifacts.push((p, wheel_file));
-    }
     // Sdist realization may recursively fetch toolchains. Re-verify all
     // wheel inputs only after that work, then hold their leases through wheel
     // extraction and publication.
@@ -414,8 +411,16 @@ pub(crate) fn realize_env_at_depth(
         ),
     )?;
 
+    // An environment holding a fallen-back wheel is committed under its own
+    // identity, keyed by the host state that wheel was built against.
+    let commit_identity = match &host_inputs {
+        None => identity.clone(),
+        Some(host_inputs) => hostfallback::fallback_identity(&identity, &fell_back, host_inputs),
+    };
     // The env's python path — as it will exist after commit — for shebangs.
-    let final_python = store.object_path(&id).join("bin/python");
+    let final_python = store
+        .object_path(&commit_identity.object_id())
+        .join("bin/python");
     let mut installed = BTreeMap::new();
     for (_p, wheel_file) in &artifacts {
         wheel::install_wheel(
@@ -453,14 +458,88 @@ pub(crate) fn realize_env_at_depth(
             }
         }
     }
-    let (object, applied) =
-        store.commit_with_activity_and_deps(activity, &identity, &staged, &candidate, &deps)?;
+    let (object, applied) = store.commit_with_activity_and_deps(
+        activity,
+        &commit_identity,
+        &staged,
+        &candidate,
+        &deps,
+    )?;
+    if let Some(host_inputs) = &host_inputs {
+        ENV_FALLBACK_RECORDS.record(store, activity, &identity, host_inputs, &fell_back);
+    }
     for exception in applied {
         if !candidate.contains(&exception) {
             crate::kernel::policy::record(&exception.kind, &exception.subject, &exception.detail)?;
         }
     }
     Ok(object)
+}
+
+/// Every package of an environment as a wheel file, in `packages` order:
+/// a wheel from the verified cache, an sdist built into a wheel (network
+/// denied). The sdists whose wheels fell back to the whole host are listed
+/// with the one host state they were all built against
+/// (`same_host_state`).
+struct Artifacts<'p> {
+    artifacts: Vec<(&'p crate::kernel::types::LockedPackage, PathBuf)>,
+    fell_back: Vec<String>,
+    host_inputs: Option<String>,
+}
+
+fn realize_artifacts<'p>(
+    door: &mut ResolutionDoor<'_>,
+    packages: &[&'p crate::kernel::types::LockedPackage],
+    selected: &Selected,
+    rust: Option<&Selected>,
+    plan: &Plan,
+    sdist_depth: usize,
+) -> io::Result<Artifacts<'p>> {
+    let (store, activity, platform) = (door.store(), door.lease(), door.platform());
+    let mut artifacts: Vec<(&crate::kernel::types::LockedPackage, PathBuf)> = Vec::new();
+    let mut fell_back = Vec::new();
+    let mut host_inputs = None;
+    for &p in packages {
+        let wheel_file = match p.kind {
+            ArtifactKind::Wheel => {
+                let lease = download_verified_held(store, activity, &p.url, &p.sha256)?;
+                let path = lease.to_path_buf();
+                drop(lease);
+                path
+            }
+            // sdist -> wheel via sandboxed derivation (network denied).
+            ArtifactKind::Sdist => {
+                let owned;
+                let source = if p.git.is_some() {
+                    owned = crate::tailors::python::build::git_sdist_package(
+                        store, activity, platform, p,
+                    )?;
+                    &owned
+                } else {
+                    p
+                };
+                let wheel = crate::tailors::python::build::build_sdist_wheel_at_depth(
+                    door,
+                    source,
+                    selected,
+                    rust,
+                    Some(plan),
+                    sdist_depth + 1,
+                )?;
+                if let Some(built_against) = wheel.host_inputs {
+                    hostfallback::same_host_state(&mut host_inputs, &p.name, built_against)?;
+                    fell_back.push(p.name.clone());
+                }
+                wheel.path
+            }
+        };
+        artifacts.push((p, wheel_file));
+    }
+    Ok(Artifacts {
+        artifacts,
+        fell_back,
+        host_inputs,
+    })
 }
 
 /// The closure record `tog status`, `tog ls` and `tog gc` read. The

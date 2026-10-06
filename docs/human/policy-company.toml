@@ -126,7 +126,8 @@ deny = [
 #                                    none; every crate in it is still
 #                                    hash-verified. Commit the lock to make
 #                                    this disappear.
-#   host-build-inputs                a native extension (a Ruby gem's) did
+#   host-build-inputs                a native build (a Ruby gem's, a Python
+#                                    sdist's, an npm install script) did
 #                                    not build against the host's C runtime
 #                                    alone, so it was rebuilt against the
 #                                    machine's whole /usr: the object depends

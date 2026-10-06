@@ -303,8 +303,22 @@ fn network_access_during_install_script_fails() {
         let result =
             node::realize_node_env(&store, activity, platform, &plan_for(&tarball, &sri), &[]);
         let err = result.expect_err("install script reaching the network must fail");
+        // On Linux the script fails against the C runtime alone first, and
+        // strict policy refuses the retry against the whole host
+        // (`host-build-inputs`), which stops the sync there, as it does for
+        // gems and sdists. macOS runs the script once, so its failure is
+        // the refused `install-script-failed` exception.
+        let message = err.to_string();
+        let expected: &[&str] = if platform.is_macos() {
+            &["network-denied"]
+        } else {
+            &[
+                "sandboxed command failed",
+                "policy denies host-build-inputs",
+            ]
+        };
         assert!(
-            err.to_string().contains("network-denied"),
+            expected.iter().all(|part| message.contains(part)),
             "unexpected error shape: {err}"
         );
         return;
@@ -336,7 +350,7 @@ fn network_access_during_install_script_fails() {
         .unwrap();
     let stderr = String::from_utf8_lossy(&child.stderr);
     assert!(child.status.success(), "strict child failed: {stderr}");
-    // "network-denied" is in every strict script failure's message; the
+    // The strict child checked the error names the script's failure; the
     // probe's own words say the failure was the connect, refused by a
     // namespace with no route out (not a DNS error, not a timeout).
     assert!(!stderr.contains("TOG-PROBE connected"), "{stderr}");
@@ -425,6 +439,128 @@ fn permissive_install_script_is_cached_but_rejected_strict() {
     );
 }
 
+/// The identity inputs of the store object at `object`.
+fn object_inputs(dir: &Path, object: &Path) -> serde_json::Map<String, serde_json::Value> {
+    let id = object.file_name().unwrap().to_str().unwrap();
+    let meta: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(dir.join("store/meta").join(format!("{id}.json"))).unwrap(),
+    )
+    .unwrap();
+    meta["identity"]["inputs"].as_object().unwrap().clone()
+}
+
+/// An install script that compiles against a host development header falls
+/// back to the whole host: the C-runtime-only view hides `zlib.h`, so the
+/// first attempt fails, the retry builds, and the env is committed under
+/// its own `host-fallback/1` identity with a `host-build-inputs` exception
+/// naming the package. The next realization on the unchanged host finds
+/// that object through the store record instead of running the script
+/// again (issue #328).
+#[test]
+#[cfg(target_os = "linux")]
+fn install_script_needing_host_headers_falls_back_once() {
+    let platform = Platform::host().expect("host platform");
+    let test = "install_script_needing_host_headers_falls_back_once";
+    if !sandbox_or_skip(test, platform) {
+        return;
+    }
+    if !Path::new("/usr/include/zlib.h").is_file() {
+        let required =
+            matches!(std::env::var_os("TOG_SANDBOX_TESTS"), Some(value) if !value.is_empty());
+        assert!(
+            !required,
+            "required test {test} needs /usr/include/zlib.h (the zlib development package)"
+        );
+        eprintln!("skip {test}: this host has no /usr/include/zlib.h");
+        return;
+    }
+    let _policy_guard = policy_guard();
+    let _attribution = policy::Attribution::open("node").expect("test attribution");
+    let temp = TempDir::new("npm-host-fallback");
+    let dir = temp.path();
+    let (tarball, sri) = make_pkg_tarball(
+        dir,
+        "printf '#include <zlib.h>\\nint main(void) { return zlibVersion()[0] == 0; }\\n' > z.c \
+         && cc z.c -lz -o z && ./z && printf host > built.txt",
+    );
+    // One stub Node for both realizations: `realize_offline` makes a new
+    // one per call, which would key a different environment.
+    let store = store_at(dir);
+    let activity = &store
+        .activity(tog::kernel::activity::ActivityMode::Shared)
+        .unwrap();
+    let selected = stub_node_selection(dir, &store, activity, platform);
+    seed_gyp_python(&store, platform);
+    let mut plan = plan_for(&tarball, &sri);
+    plan.node_version = selected.version("node").unwrap().to_string();
+    let realize = || {
+        node::realize_node_env_for(
+            &store,
+            activity,
+            platform,
+            &plan,
+            &[],
+            &selected,
+            &node::shipped_gyp_python().unwrap(),
+        )
+        .expect("realize")
+    };
+    let env = realize();
+    assert_eq!(
+        std::fs::read_to_string(env.join("node_modules/fixture-pkg/built.txt")).unwrap(),
+        "host"
+    );
+    let inputs = object_inputs(dir, &env);
+    assert_eq!(
+        inputs["build_view"].as_str(),
+        Some("host-fallback/1"),
+        "{inputs:?}"
+    );
+    assert_eq!(
+        inputs["host_fallback"].as_str(),
+        Some("node_modules/fixture-pkg"),
+        "{inputs:?}"
+    );
+    assert!(
+        inputs["host_inputs"]
+            .as_str()
+            .is_some_and(|hex| hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_hexdigit())),
+        "{inputs:?}"
+    );
+    let store = store_at(dir);
+    let exceptions = store
+        .exceptions(env.file_name().unwrap().to_str().unwrap())
+        .unwrap();
+    assert!(
+        exceptions
+            .iter()
+            .any(|exception| exception.kind == policy::HOST_BUILD_INPUTS
+                && exception.subject == "node_modules/fixture-pkg"),
+        "no host-build-inputs exception: {exceptions:?}"
+    );
+    assert_eq!(
+        std::fs::read_dir(dir.join("store/records/node-env-host-fallback"))
+            .unwrap()
+            .count(),
+        1,
+        "the fallback was not recorded"
+    );
+    // The record leads the next realization to the same object, never a
+    // rebuild: with the tarball gone from disk and from the store's
+    // artifact cache (the archive classification is persisted, so the
+    // lookup itself reads neither), a rebuild could not even start.
+    let cached = store.cache_path(
+        "sha512",
+        &format!("{:x}", Sha512::digest(std::fs::read(&tarball).unwrap())),
+    );
+    assert!(cached.exists(), "the tarball is not in the artifact cache");
+    tog::kernel::store::remove_tree(&cached)
+        .or_else(|_| std::fs::remove_file(&cached))
+        .unwrap();
+    std::fs::remove_file(&tarball).unwrap();
+    assert_eq!(realize(), env);
+}
+
 #[test]
 fn benign_install_script_runs_and_output_is_captured() {
     let platform = Platform::host().expect("host platform");
@@ -442,6 +578,16 @@ fn benign_install_script_runs_and_output_is_captured() {
     let env = realize_offline(dir, platform, plan_for(&tarball, &sri));
     let built = env.join("node_modules/fixture-pkg/built.txt");
     assert_eq!(std::fs::read_to_string(built).unwrap(), "ok");
+    // A script that needs nothing from the host stays runtime-only on Linux.
+    if !platform.is_macos() {
+        let inputs = object_inputs(dir, &env);
+        assert_eq!(
+            inputs["build_view"].as_str(),
+            Some("runtime-only/1"),
+            "{inputs:?}"
+        );
+        assert!(!inputs.contains_key("host_fallback"), "{inputs:?}");
+    }
 }
 
 #[test]
