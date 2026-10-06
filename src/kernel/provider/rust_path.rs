@@ -1191,6 +1191,9 @@ mod tests {
     /// and verification never refuses a tree on a cached sum alone.
     #[test]
     fn unchanged_files_are_hashed_from_the_cache() {
+        if !crate::kernel::sandbox::linux_ready("unchanged_files_are_hashed_from_the_cache") {
+            return;
+        }
         let dir = temp("cache");
         let tree = dir.0.join("tree");
         fake_toolchain(&tree, host(), "1.96.1");
@@ -1250,6 +1253,9 @@ mod tests {
     /// file imports the tree.
     #[test]
     fn realize_recovers_from_a_stale_cached_sum() {
+        if !crate::kernel::sandbox::linux_ready("realize_recovers_from_a_stale_cached_sum") {
+            return;
+        }
         let _attribution_lock = crate::kernel::policy::attribution_test_lock();
         let _attribution = crate::kernel::policy::Attribution::open("cargo").unwrap();
         let dir = temp("realize-cache");
@@ -1358,6 +1364,9 @@ mod tests {
 
     #[test]
     fn a_path_row_selects_the_probed_and_hashed_tree() {
+        if !crate::kernel::sandbox::linux_ready("a_path_row_selects_the_probed_and_hashed_tree") {
+            return;
+        }
         let dir = temp("select");
         let tree = dir.0.join("custom-rust");
         fake_toolchain(&tree, host(), "1.97.0-nightly");
