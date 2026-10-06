@@ -94,7 +94,6 @@ None open.
   - #333 ruby: host-fallback fingerprint is stat-based, not content-based (accepted).
 - **Smaller open issues from the 2026-09-23/24 run.** One line each; the
   issue has the options and the pick.
-  - #188 npm: realize `file:` packages as tog-owned trees.
   - #476 fetch: state and audit that a cache hit is trusted by its digest's source, not its writer (from #287).
   - #289 interrupt: the bwrap preflight misreports Ctrl-C as "bwrap unavailable" (`sandbox.rs`, heavy gate). The exit code is fixed.
   - #295 tests: four sandbox tests fail instead of skipping when bubblewrap is missing.

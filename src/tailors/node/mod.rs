@@ -22,6 +22,7 @@ pub(crate) mod door;
 pub mod edit;
 pub mod freshness;
 pub mod inputs;
+pub(crate) mod local_package;
 pub mod lock_import;
 pub mod objects;
 pub mod registry;

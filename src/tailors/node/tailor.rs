@@ -322,6 +322,9 @@ impl Tailor for Node {
             Some(python) => python.clone(),
             None => node::shipped_gyp_python()?,
         };
+        // A `file:` directory package is packed from the project into the
+        // cache, where the environment extracts it like a registry tarball.
+        node::local_package::stage(store, activity, project, &plan.packages)?;
         let env = node::realize_node_env_for(
             store,
             activity,
@@ -491,7 +494,14 @@ impl Tailor for Node {
         let projection = node_projection_state(project, body);
         Ok(
             if matches!(&projection, State::Synced | State::Unchecked(_)) {
+                let packages = body["packages"].as_array().map_or(&[][..], Vec::as_slice);
+                let local = node::local_package::changed(project, packages);
                 match recorded_inputs_state(project, body)? {
+                    State::Synced if !local.is_empty() => State::Changed(local),
+                    State::Changed(mut changed) => {
+                        changed.extend(local);
+                        State::Changed(changed)
+                    }
                     State::Synced if matches!(projection, State::Unchecked(_)) => projection,
                     State::Synced => State::Synced,
                     other => other,

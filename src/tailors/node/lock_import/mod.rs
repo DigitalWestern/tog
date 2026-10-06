@@ -365,7 +365,7 @@ fn conflict(
     );
     if requirer.local || holder.is_some_and(|(holder, _)| holder.local) {
         message.push_str(
-            ". file: packages whose dependencies conflict with their workspace member's are not supported yet",
+            ". A linked package resolves its dependencies from its source directory, where each name has one version, so they cannot differ from its workspace member's",
         );
     }
     err(message)
@@ -970,7 +970,7 @@ fn build_plan_recording(
                 if let Some(children) = graph.local_link_deps.get(target) {
                     for child in children {
                         let requirer = Requirer {
-                            who: format!("the file: package {target}"),
+                            who: format!("the linked package {target}"),
                             context: context.clone(),
                             local: true,
                             registry: false,
@@ -1065,6 +1065,68 @@ fn check_destinations(
             .map(|package| package.path.as_str())
             .chain(links.keys().map(String::as_str)),
     )
+}
+
+/// The node for a `file:` snapshot naming a directory that is not one of
+/// the lock's importers: a package of its own, which pnpm installs as a
+/// copy with its own `node_modules` (#188). Its content is the directory,
+/// packed (`local_package`); its integrity is that tarball's digest. A
+/// `file:` naming an importer stays a link to it, as does every `link:`,
+/// and a `file:` tarball is not a directory and is left as it was.
+fn file_directory_node(
+    snapshot_key: &str,
+    importers: &BTreeSet<String>,
+    project: &ProjectRoot,
+) -> io::Result<Option<Node>> {
+    let Some((name, version)) = normalize_pnpm_identity(snapshot_key) else {
+        return Ok(None);
+    };
+    let Some(raw) = version.strip_prefix("file:") else {
+        return Ok(None);
+    };
+    let Ok(target) = workspace_target(project, ".", raw) else {
+        return Ok(None);
+    };
+    if target == "." || importers.contains(&target) {
+        return Ok(None);
+    }
+    if project.input_entry(Path::new(&target))? != crate::kernel::fsroot::Entry::Directory {
+        return Ok(None);
+    }
+    use crate::tailors::node::local_package;
+    Ok(Some(Node {
+        key: snapshot_key.to_string(),
+        name,
+        version: local_package::version(project, &target)?,
+        url: local_package::url_for(&target),
+        integrity: local_package::integrity(project, &target)?,
+        optional: false,
+        os: Vec::new(),
+        cpu: Vec::new(),
+        libc: Vec::new(),
+        external: None,
+        patch: None,
+        deps: Vec::new(),
+    }))
+}
+
+/// Add the node of every `file:` directory snapshot that has none
+/// ([`file_directory_node`]) to `nodes`.
+fn add_file_directory_nodes<'a>(
+    snapshot_keys: impl Iterator<Item = &'a String>,
+    nodes: &mut BTreeMap<String, Node>,
+    importers: &BTreeSet<String>,
+    project: &ProjectRoot,
+) -> io::Result<()> {
+    for snapshot_key in snapshot_keys {
+        if nodes.contains_key(snapshot_key) {
+            continue;
+        }
+        if let Some(node) = file_directory_node(snapshot_key, importers, project)? {
+            nodes.insert(snapshot_key.clone(), node);
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
