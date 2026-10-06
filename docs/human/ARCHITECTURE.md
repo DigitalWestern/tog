@@ -359,8 +359,16 @@ store-commit rename; this bit once). On Linux each gem whose gemspec
 declares native extensions installs against the host C runtime alone
 (`HostView::RuntimeOnly`, recorded in the gem object's identity as
 `build_view`; pure-Ruby gems compile nothing and install against the full
-view); a gem whose native extension needs another host
-library is rebuilt against the whole host after recording
+view). Those builds also get tog's pinned native library set
+(`kernel/provider/nativelibs.rs`, the one Python sdists and npm addons
+use) through pkg-config, gcc's `CPATH`/`LIBRARY_PATH` and mkmf's
+`--with-cppflags`/`--with-ldflags`, which carry its rpath into the
+extension (`ruby/native_libs.rs`, #329). The gems identity says whether
+it did (`native`, and the set's id as `native_libs`); whether a gem is
+native is read from its gemspec once and kept as a store record keyed by
+its sha256, so a warm sync names the set without downloading anything. A
+gem whose native extension needs a library outside the set
+is rebuilt against the whole host after recording
 `host-build-inputs`, which the object carries so a cache hit replays it.
 Before that retry the failed attempt's own gem and extension directories
 are removed from the shared GEM_HOME, and any other change it made refuses
@@ -1073,6 +1081,7 @@ when the two differ.
     go/inputs.rs           toolchain selection from go.mod, the GoPlan
     ruby/mod.rs            Bundler-delegated planning, tog-verified gems
     ruby/native.rs         native gems: C-runtime-only first, host fallback identity
+    ruby/native_libs.rs    native gems build with tog's pinned native library set
     ruby/gem_home.rs       what a failed gem build may leave before its retry
     elixir/mod.rs          Mix/Hex, AST-validated lockfile
     elixir/check_locked.rs whether mix deps.get --check-locked must run again

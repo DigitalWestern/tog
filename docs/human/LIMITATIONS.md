@@ -165,7 +165,12 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   `LD_LIBRARY_PATH`. That variable outranks a program's own `DT_RUNPATH`: a program a gem
   bundles and runs during its build, relying on its RUNPATH for a library with the same
   soname as a relocated host library, loads the host copy instead. An explicit `-I` or `-L`
-  into a subdirectory the view keeps (such as `/usr/lib64/python3.14`) is not curated. A gem
+  into a subdirectory the view keeps (such as `/usr/lib64/python3.14`) is not curated. Native
+  gems also build with tog's pinned native library set mounted (zlib, openssl, libffi,
+  libxml2, sqlite, ncurses and the rest of `nativelibs.rs`), and load it at run time through
+  their rpath (#329); every Linux gems object with a native gem names that set, so those
+  objects rebuild once after the change. An extconf that ignores pkg-config, `CPATH`,
+  `LIBRARY_PATH` and mkmf's flags does not see the set. A gem
   that needs another host library fails that build, is rebuilt against the whole host, and
   records `host-build-inputs`, which a policy can deny. The build that failed may only have
   left its own gem and extension directories behind; anything else it changed in the gem

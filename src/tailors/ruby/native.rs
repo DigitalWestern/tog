@@ -64,6 +64,9 @@ pub(super) struct GemInstall<'a> {
     pub(super) helper: &'a Path,
     pub(super) scratch: &'a Path,
     pub(super) staged: &'a Path,
+    /// tog's native library set, which native gems build with
+    /// (`native_libs`).
+    pub(super) native_libs: Option<&'a Path>,
 }
 
 impl GemInstall<'_> {
@@ -82,26 +85,46 @@ impl GemInstall<'_> {
         let (platform, ruby_obj, scratch, staged) =
             (self.platform, self.ruby_obj, self.scratch, self.staged);
         let mut homes = AttemptHomes::new(scratch, &gem.full_name);
+        // Only a native gem compiles anything, so only its build gets the
+        // native library set.
+        let native_libs = self.native_libs.filter(|_| native);
         let install = |host_view: HostView| {
             let home = homes.next()?;
+            let mut argv = vec![
+                ruby_obj.join("bin/ruby").display().to_string(),
+                self.helper.display().to_string(),
+                "install".to_string(),
+                named.display().to_string(),
+                staged.display().to_string(),
+            ];
+            let mut env = vec![
+                ("GEM_HOME".to_string(), staged.display().to_string()),
+                ("GEM_PATH".to_string(), staged.display().to_string()),
+                ("BUNDLE_IGNORE_CONFIG".to_string(), "1".to_string()),
+            ];
+            let mut read = vec![ruby_obj.to_path_buf(), scratch.to_path_buf()];
+            if let Some(set) = native_libs {
+                argv.push(set.display().to_string());
+                env.extend(super::native_libs::build_env(set, host_view));
+                read.push(set.to_path_buf());
+            }
             let spec = BuildSpec {
-                argv: vec![
-                    ruby_obj.join("bin/ruby").display().to_string(),
-                    self.helper.display().to_string(),
-                    "install".to_string(),
-                    named.display().to_string(),
-                    staged.display().to_string(),
-                ],
+                argv,
                 cwd: home.clone(),
-                env: vec![
-                    ("GEM_HOME".to_string(), staged.display().to_string()),
-                    ("GEM_PATH".to_string(), staged.display().to_string()),
-                    ("BUNDLE_IGNORE_CONFIG".to_string(), "1".to_string()),
-                ],
-                read: vec![ruby_obj.to_path_buf(), scratch.to_path_buf()],
+                env,
+                read,
                 write: vec![staged.to_path_buf()],
                 scratch: home,
-                path: format!("{}:/usr/bin:/bin", ruby_obj.join("bin").display()),
+                // The set's own tools (`xml2-config`, `curl-config`) follow
+                // the store Ruby.
+                path: match native_libs {
+                    Some(set) => format!(
+                        "{}:{}:/usr/bin:/bin",
+                        ruby_obj.join("bin").display(),
+                        set.join("bin").display()
+                    ),
+                    None => format!("{}:/usr/bin:/bin", ruby_obj.join("bin").display()),
+                },
                 host_view,
             };
             crate::kernel::sandbox::run_build_spec_on(platform, &spec, Some(self.activity))
@@ -371,7 +394,8 @@ mod tests {
         second.version = "1.18.10".into();
         second.full_name = "nokogiri-1.18.10".into();
         plan.gems.push(second);
-        let runtime_only = ruby_gems_identity(&pin_spec(Platform::X86_64UnknownLinuxGnu), &plan);
+        let runtime_only =
+            ruby_gems_identity(&pin_spec(Platform::X86_64UnknownLinuxGnu), &plan, None);
         let host = "a".repeat(64);
         let one = ruby_gems_fallback_identity(&runtime_only, &["nokogiri-1.18.10".into()], &host);
         let both = ruby_gems_fallback_identity(
@@ -438,6 +462,7 @@ mod tests {
         let runtime_only = ruby_gems_identity(
             &pin_spec(Platform::X86_64UnknownLinuxGnu),
             &linux_test_plan(),
+            None,
         );
         let (host, upgraded) = ("a".repeat(64), "b".repeat(64));
         let fallback = ruby_gems_fallback_identity(&runtime_only, &["rake-13.2.1".into()], &host);
