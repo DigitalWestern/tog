@@ -210,8 +210,12 @@ def check_github_digest(report, what, recorded, digest, vouched_by):
     """Compare `digest` with GitHub's own digest of the asset. GitHub
     records none for assets uploaded before it began to, and then the run
     says which source alone vouches for the row instead of passing over
-    the missing check in silence."""
-    if recorded is None:
+    the missing check in silence. `vouched_by` None: upstream publishes no
+    checksum of its own, so the row rests on its TLS download alone."""
+    if recorded is None and vouched_by is None:
+        report.note(f"{what}: GitHub records no digest and upstream publishes none, "
+                    "so the row is trusted on its TLS download alone")
+    elif recorded is None:
         report.note(f"{what}: GitHub records no digest, so {vouched_by} is its only check")
     else:
         expect_equal(f"{what} GitHub digest", recorded, digest)
@@ -777,7 +781,7 @@ def ruby_release(report, tag, release_json, key=None, revision=None):
             return None, platform
         url = f"https://github.com/{PORTABLE}/releases/download/{tag}/{name}"
         digest = "sha256:" + download_digest(url, "sha256")
-        check_github_digest(report, f"ruby {name}", digests[name], digest, "its HTTPS download")
+        check_github_digest(report, f"ruby {name}", digests[name], digest, None)
         check_bottle_layout(archive_path(url), tag)
         if platform == LINUX:
             run_linux_bottle(archive_path(url), tag, version)

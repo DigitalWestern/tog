@@ -5,6 +5,7 @@
 use std::fs;
 use std::io::{self, Write};
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
@@ -793,11 +794,17 @@ fn free_bytes(path: &Path) -> io::Result<u64> {
 /// where a FIFO would block the report for good.
 fn realized_toolchains(store: &Store) -> io::Result<Vec<String>> {
     let mut found = Vec::new();
-    for name in store.object_meta_names()? {
+    // Listed and read through one held `meta/`, so a `meta/` renamed or
+    // replaced meanwhile cannot mix one directory's names with another's
+    // records.
+    let Some(meta) = store.open_object_meta_dir()? else {
+        return Ok(found);
+    };
+    for name in crate::kernel::store::read_dir_names_at(meta.as_raw_fd())? {
         let Some(id) = name.to_str().and_then(|name| name.strip_suffix(".json")) else {
             continue;
         };
-        let Ok(MetaFile::File(file)) = store.open_object_meta(id) else {
+        let Ok(MetaFile::File(file)) = crate::kernel::store::open_object_meta_at(&meta, id) else {
             continue;
         };
         let Ok(Ok(value)) = crate::kernel::store::read_meta_json(&file) else {
@@ -1281,6 +1288,35 @@ mod tests {
         std::os::unix::fs::symlink(&outside, meta.join("b.json")).unwrap();
         fs::write(meta.join("c.json"), "not json").unwrap();
         assert_eq!(realized_toolchains(&store).unwrap(), Vec::<String>::new());
+    }
+
+    /// Names and records come from one held `meta/`: a `meta/` swapped
+    /// for a decoy after it is opened shows neither the decoy's toolchain
+    /// nor loses the held directory's.
+    #[test]
+    fn realized_toolchains_reads_the_held_meta_directory() {
+        let temp = TempDir::new();
+        let store = Store {
+            root: temp.0.join("store"),
+        };
+        let meta = store.root.join("meta");
+        fs::create_dir_all(&meta).unwrap();
+        let record = |version: &str| {
+            format!(r#"{{"identity":{{"kind":"cpython","name":"cpython","version":"{version}"}}}}"#)
+        };
+        fs::write(meta.join("held.json"), record("3.12.0")).unwrap();
+        let (from, to) = (meta.clone(), store.root.join("meta-moved"));
+        crate::kernel::store::HELD_META_FAILPOINT.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move || {
+                fs::rename(&from, &to).unwrap();
+                fs::create_dir(&from).unwrap();
+                fs::write(from.join("held.json"), record("9.9.9")).unwrap();
+                fs::write(from.join("decoy.json"), record("9.9.8")).unwrap();
+            }))
+        });
+        let found = realized_toolchains(&store);
+        crate::kernel::store::HELD_META_FAILPOINT.with(|slot| *slot.borrow_mut() = None);
+        assert_eq!(found.unwrap(), vec!["cpython 3.12.0".to_string()]);
     }
 
     fn write_closure(dir: &Path, ecosystem: &str, platform: &str, body: Value) {

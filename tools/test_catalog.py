@@ -141,6 +141,16 @@ def asset(name, body):
     return {"name": name, "digest": f"sha256:{sha256(body)}"}
 
 
+def without_github_digest(net, repo, name):
+    """`repo`'s release listing with `name` recorded with no digest, the
+    way GitHub lists an asset uploaded before it kept digests."""
+    url = f"https://api.github.com/repos/{repo}/releases?per_page=100&page=1"
+    releases = json.loads(net.bodies[url])
+    for release in releases:
+        release["assets"] = [dict(a, digest=None) if a["name"] == name else a for a in release["assets"]]
+    net.json(url, releases)
+
+
 def run_quietly(eco, check):
     """`catalog.run` on the catalog under `catalog.REPO`: (ok, what it printed)."""
     args = type("Args", (), {"check": check, "set_default": None})()
@@ -316,6 +326,23 @@ class Elixir(Base):
         with self.assertRaisesRegex(catalog.Failure, "no longer lists"):
             self.generate(existing)
 
+    def test_an_asset_github_records_no_digest_for_is_named_in_the_notes(self):
+        lname = f"OTP-{self.OTP}-{LINUX}-fedora44.tar.gz"
+        cases = [
+            (catalog.TOG_TOOLCHAINS, lname,
+             f"tog-toolchains {lname}: GitHub records no digest, so its .sha256 is its only check"),
+            (catalog.ELIXIR, "elixir-otp-29.zip",
+             f"elixir {self.ELIXIR} elixir-otp-29.zip: GitHub records no digest, "
+             "so its .sha256sum is its only check"),
+        ]
+        for repo, name, _ in cases:
+            without_github_digest(self.net, repo, name)
+        out, report = self.generate([])
+        self.assertEqual(list(out), [f"beam-otp{self.OTP}-elixir{self.ELIXIR}"])
+        for _, name, note in cases:
+            with self.subTest(name=name):
+                self.assertIn(note, report.notes)
+
     def test_a_shipped_row_whose_bytes_changed_is_an_error(self):
         existing = self.shipped()
         zip_url = f"https://github.com/{catalog.ELIXIR}/releases/download/v{self.ELIXIR}/elixir-otp-29.zip"
@@ -409,6 +436,16 @@ class Ruby(Base):
         self.assertIn('default = "ruby-3.4.6"', written)
         self.assertLess(written.index('key = "ruby-3.4.6"'), written.index('key = "ruby-3.4.6_1"'))
         self.assertIn("revision = 2\n", written)
+
+
+    def test_a_bottle_github_records_no_digest_for_is_trusted_on_its_download_alone(self):
+        self.publish("3.4.6")
+        name = f"portable-ruby-3.4.6.{catalog.BOTTLE_TAGS[LINUX]}.bottle.tar.gz"
+        without_github_digest(self.net, catalog.PORTABLE, name)
+        out, report = self.generate([])
+        self.assertEqual(list(out), ["ruby-3.4.6"])
+        self.assertIn(f"ruby {name}: GitHub records no digest and upstream publishes none, "
+                      "so the row is trusted on its TLS download alone", report.notes)
 
 
 class Rust(Base):
@@ -1216,6 +1253,15 @@ class Python(Base):
         release["assets"] = [dict(a, **change) if a["name"] == name else a
                              for a in release["assets"] if change or a["name"] != name]
         self.net.json(self.UV_RELEASE, release)
+
+    def test_a_cpython_asset_github_records_no_digest_for_is_named_in_the_notes(self):
+        existing = self.shipped()
+        name = catalog.pbs_asset("3.12.1", "20260801", LINUX)
+        self.github_digest("20260801", name, None)
+        out, report = self.generate(existing)
+        self.assertEqual(list(out), ["cpython-3.12.1"])
+        self.assertIn(f"python {name}: GitHub records no digest, so its SHA256SUMS is its only check",
+                      report.notes)
 
     def test_a_uv_github_digest_that_disagrees_is_an_error(self):
         existing = self.shipped()

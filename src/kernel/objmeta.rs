@@ -85,6 +85,7 @@ impl MetaIndex {
             ));
         }
         let held = store::open_real_directory(&meta_dir, "object metadata directory")?;
+        store::held_meta_failpoint();
         let mut entries = BTreeMap::new();
         let mut unusable = BTreeMap::new();
         // Listed from the same held descriptor the records are read
@@ -1670,5 +1671,35 @@ mod record_value_tests {
             check_identity_grammar(&junk),
             Err("identity has an unparseable platform input \"junk\"".to_string())
         );
+    }
+
+    /// The index lists and reads one held `meta/`: one renamed away after
+    /// the descriptor is opened, with a decoy put in its place, still
+    /// yields its own records, and the decoy's unusable record is never
+    /// seen.
+    #[test]
+    fn the_index_lists_the_held_meta_directory_not_a_decoy() {
+        tests::register_test_kinds();
+        let temp = TempDir::named("om-held");
+        let store = store::Store::open_at(&temp.0.join("store")).unwrap();
+        let id = store.publish_bare_test("held", "1");
+        let meta = store.root.join("meta");
+        let moved = store.root.join("meta-moved");
+        let (from, to) = (meta.clone(), moved.clone());
+        store::HELD_META_FAILPOINT.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move || {
+                fs::rename(&from, &to).unwrap();
+                fs::create_dir(&from).unwrap();
+                fs::write(from.join("decoy.json"), "not a record").unwrap();
+            }))
+        });
+        let read = MetaIndex::read_reporting_unusable(&store);
+        store::HELD_META_FAILPOINT.with(|slot| *slot.borrow_mut() = None);
+        let (index, unusable) = read.unwrap();
+        assert!(moved.join(format!("{id}.json")).is_file());
+        assert!(meta.join("decoy.json").is_file());
+        assert!(unusable.is_empty(), "{unusable:?}");
+        assert!(index.get(&id).is_some());
+        assert_eq!(index.iter().count(), 1);
     }
 }
