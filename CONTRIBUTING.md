@@ -19,7 +19,9 @@ That line is your statement of the
 wrote the change, or have the right to submit it under the project's
 license. The `dco` job in `.github/workflows/ci.yml` checks every commit
 a pull request adds, with `tools/dco.sh`; a commit without the line fails
-the check. A `Co-Authored-By` trailer needs no sign-off of its own.
+the check, and so does one authored or signed off by an agent's address
+(`noreply@anthropic.com`): the sign-off is a person's. A `Co-Authored-By`
+trailer needs no sign-off of its own.
 
 ## Before you push
 

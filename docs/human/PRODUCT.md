@@ -110,7 +110,7 @@ The things that accrue trust to whoever runs them are the real moat:
 |---|---|---|
 | Scan a lockfile for known vulnerabilities | Snyk, Dependabot, Socket | They read the lockfile from outside and guess. tog did the install, so it records from inside |
 | Write an SBOM | Syft, Trivy, GitHub's export | Same guess from the lockfile. tog's SBOM comes from the closure it built |
-| Gate what gets downloaded | JFrog Artifactory, Sonatype Nexus | A company-run mirror in the network path, with a six-figure price. tog gates inside the install step and writes a signed receipt per build, which a mirror cannot. tog cannot yet go *through* a company's mirror: it forces public PyPI and the public Go proxy today (DESIGNS.md §4) |
+| Gate what gets downloaded | JFrog Artifactory, Sonatype Nexus | A company-run mirror in the network path, with a six-figure price. tog gates inside the install step and writes a signed receipt per build, which a mirror cannot. tog cannot yet go *through* a company's mirror: every ecosystem resolves from its public registry only, pinned in the resolver's permitted-host list and, for Python and Go, forced on the tool's command line (DESIGNS.md §4) |
 | Manage toolchains across languages | mise, Nix | Same job, no receipt and no gate |
 | One fast package manager | uv, pnpm, Bun | Same shared-cache idea, one ecosystem each, no receipt |
 
@@ -122,10 +122,10 @@ under a few hundred people, are the first market.
 
 Honest gaps, in the order a security reviewer meets them:
 
-1. Dependency resolution for Python, npm, Ruby, Elixir and .NET still runs
+1. Dependency resolution for Python, Ruby, Elixir and .NET still runs
    the ecosystem's own tool unsandboxed with network (`add`, `remove`,
-   `update`, missing-lock generation). Go and Cargo resolve through tog's
-   proxy. The receipt covers the install, not yet the step that chose what
+   `update`, missing-lock generation). Go, Cargo and Node resolve through
+   tog's proxy. The receipt covers the install, not yet the step that chose what
    to install. This is the current work track (#68, FOLLOW-UPS.md).
 2. Linux x86_64 only in releases. macOS has been run by hand; there is no
    Windows.

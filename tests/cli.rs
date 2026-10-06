@@ -5029,7 +5029,7 @@ fn unknown_first_word_that_names_a_source_file_runs_it_in_its_project() {
     assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
     let stderr = text(&out.stderr);
     assert!(
-        stderr.contains("'app.py' is a python file: running it with 'python'"),
+        stderr.contains("'app.py' is a python file: running 'python app.py --port 3000'"),
         "{stderr}"
     );
     assert!(stderr.contains("syncing first: "), "{stderr}");

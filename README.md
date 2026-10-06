@@ -90,24 +90,6 @@ one was already there. Options: `--dir=<path>`, `--version=<tag>`,
 `--no-modify-path`, `--no-completions`; the header of
 [install.sh](install.sh) lists every file it touches.
 
-### From source
-
-On any other machine, or to run the current `main`: you need a Rust
-toolchain from [rustup](https://rustup.rs); `cargo install` puts the binary
-in `~/.cargo/bin`, which rustup already added to PATH:
-
-```sh
-git clone https://github.com/DigitalWestern/tog
-cd tog
-cargo install --path . --locked
-tog completions zsh > ~/.zfunc/_tog   # bash | zsh | fish; optional
-```
-
-`cargo install --git https://github.com/DigitalWestern/tog --locked` does
-the same without keeping a checkout. Do not `cargo install tog` from
-crates.io: that name belongs to an unrelated crate. To update a source
-install, pull and run `cargo install --path . --locked` again.
-
 To undo it, run the same script with `--uninstall`:
 
 ```sh
@@ -134,6 +116,24 @@ when that release has no build for it), and `tog --version` prints the
 commit and its date, so a stale binary can be told from a current one.
 Nothing checks in the background. Both ask GitHub without logging in.
 Releases are built for Linux x86_64 only for now.
+
+### From source
+
+On any other machine, or to run the current `main`: you need a Rust
+toolchain from [rustup](https://rustup.rs); `cargo install` puts the binary
+in `~/.cargo/bin`, which rustup already added to PATH:
+
+```sh
+git clone https://github.com/DigitalWestern/tog
+cd tog
+cargo install --path . --locked
+tog completions zsh > ~/.zfunc/_tog   # bash | zsh | fish; optional
+```
+
+`cargo install --git https://github.com/DigitalWestern/tog --locked` does
+the same without keeping a checkout. Do not `cargo install tog` from
+crates.io: that name belongs to an unrelated crate. To update a source
+install, pull and run `cargo install --path . --locked` again.
 
 ## Use
 

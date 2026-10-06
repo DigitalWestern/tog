@@ -91,10 +91,12 @@ impl Tailor for Elixir {
 
     fn source_files(&self) -> &'static [SourceFile] {
         // .exs is a script; .ex is a compiled module of a Mix project and
-        // has no meaning on its own.
+        // has no meaning on its own. `mix run` rather than `elixir`: a bare
+        // `elixir` loads none of the project's deps, and the projection
+        // only reaches the script through Mix.
         &[SourceFile {
             extension: "exs",
-            runner: FileRunner::Command(&["elixir"]),
+            runner: FileRunner::Command(&["mix", "run"]),
         }]
     }
 

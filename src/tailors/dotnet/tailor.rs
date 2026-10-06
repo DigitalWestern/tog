@@ -89,8 +89,9 @@ impl Tailor for Dotnet {
         &[SourceFile {
             extension: "cs",
             runner: FileRunner::Built(
-                "a C# source file is built as part of its project: 'tog build' builds the \
-                 project in the sandbox",
+                "a C# source file is built as part of its project, and a file-based app's \
+                 '#:package' lines would restore packages outside the lock: 'tog build' builds \
+                 the project in the sandbox",
             ),
         }]
     }

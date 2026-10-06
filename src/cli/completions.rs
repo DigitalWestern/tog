@@ -48,8 +48,9 @@ fn bash_completions(source_extensions: &[&str]) -> String {
     ));
     out.push_str(&format!(
         "        else\n            COMPREPLY=( $(compgen -W \"{} $(_tog_scripts)\" -- \"$cur\") )\n            \
-         COMPREPLY+=( $(compgen -d -- \"$cur\") )\n            for ext in {}; do\n                \
-         COMPREPLY+=( $(compgen -f -X \"!*.$ext\" -- \"$cur\") )\n            done\n        fi\n        return\n    fi\n    case \"$cmd\" in\n",
+         compopt -o filenames 2>/dev/null\n            \
+         mapfile -t -O \"${{#COMPREPLY[@]}}\" COMPREPLY < <(compgen -d -- \"$cur\"; for ext in {}; do \
+         compgen -f -X \"!*.$ext\" -- \"$cur\"; done)\n        fi\n        return\n    fi\n    case \"$cmd\" in\n",
         all_command_words().join(" "),
         source_extensions.join(" ")
     ));

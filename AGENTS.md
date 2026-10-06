@@ -14,7 +14,10 @@
   line (`git commit -s`): the Developer Certificate of Origin in
   CONTRIBUTING.md, checked on every pull request by the `dco` job in
   ci.yml (`tools/dco.sh origin/main HEAD` runs the same check here).
-  There is no contributor license agreement.
+  The author and the sign-off are the owner's git identity, never an
+  agent's address: a commit authored or signed off by
+  noreply@anthropic.com fails the check. There is no contributor license
+  agreement.
 
 - What is open and what is not (owner decision, 2026-10-05). This
   repository is the whole CLI, open source, and everything a developer

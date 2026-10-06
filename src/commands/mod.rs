@@ -148,6 +148,7 @@ fn source_file(cwd: &Path, name: &str, args: &[String]) -> io::Result<Option<Res
         let known: Vec<String> = tailors::registry()
             .iter()
             .flat_map(|tailor| tailor.source_files())
+            .filter(|file| matches!(file.runner, FileRunner::Command(_)))
             .map(|file| format!(".{}", file.extension))
             .collect();
         let message = format!(
@@ -181,13 +182,13 @@ fn source_file(cwd: &Path, name: &str, args: &[String]) -> io::Result<Option<Res
             ),
         ));
     }
-    ui::trace(&format!(
-        "'{name}' is a {id} file: running it with '{}'",
-        program.join(" ")
-    ));
     let mut command: Vec<String> = program.iter().map(|word| word.to_string()).collect();
     command.push(name.to_string());
     command.extend(args.iter().cloned());
+    ui::trace(&format!(
+        "'{name}' is a {id} file: running '{}'",
+        command.join(" ")
+    ));
     Ok(Some(Resolved::Command(cli::Command::Run { command })))
 }
 
