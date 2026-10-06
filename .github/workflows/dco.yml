@@ -1,0 +1,31 @@
+# Every pull request: each commit it adds is signed off by its author, the
+# Developer Certificate of Origin (CONTRIBUTING.md). Seconds, no build.
+# Its own file so that no paths-ignore skips it: ci.yml ignores a pull
+# request that touches only FOLLOW-UPS.md or STATUS.md, and a job there
+# could never be a required check, since such a pull request would wait for
+# it forever.
+name: dco
+
+on:
+  pull_request:
+
+# A new push cancels that pull request's older run.
+concurrency:
+  group: dco-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  dco:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+      # The checkout is the pull request's merge ref, so HEAD^1 is the
+      # base it was merged onto and HEAD^2 the pull request's head: the
+      # exact range, however far main has moved since the event.
+      - name: Every added commit carries its author's Signed-off-by
+        run: bash tools/dco.sh HEAD^1 HEAD^2

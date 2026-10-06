@@ -13,7 +13,7 @@
 - The license is Apache-2.0, and every commit carries a `Signed-off-by`
   line (`git commit -s`): the Developer Certificate of Origin in
   CONTRIBUTING.md, checked on every pull request by the `dco` job in
-  ci.yml (`tools/dco.sh origin/main HEAD` runs the same check here).
+  dco.yml (`tools/dco.sh origin/main HEAD` runs the same check here).
   The author and the sign-off are the owner's git identity, never an
   agent's address: a commit authored or signed off by
   noreply@anthropic.com fails the check. There is no contributor license
@@ -84,8 +84,7 @@
   FOLLOW-UPS.md pointer or a one-line doc change is allowed now that
   minutes are free, but batching it into the next real pull request is
   still better. A pull request touching only FOLLOW-UPS.md or STATUS.md
-  skips ci.yml entirely, the `dco` job included, so the sign-off on
-  those commits is up to the author (#565). Run
+  skips ci.yml entirely, but dco.yml still checks its sign-off. Run
   `gh pr list --state open` first, so you do not duplicate a pull
   request another agent already opened.
 

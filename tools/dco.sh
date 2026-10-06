@@ -4,7 +4,7 @@
 # The sign-off is a person's: a commit whose author or sign-off is an
 # agent's address (noreply@anthropic.com) fails. Merge commits are
 # skipped, and a Co-Authored-By trailer needs no sign-off of its own. The
-# `dco` job in .github/workflows/ci.yml runs this on a pull request's merge
+# `dco` job in .github/workflows/dco.yml runs this on a pull request's merge
 # ref as `tools/dco.sh HEAD^1 HEAD^2`; locally: tools/dco.sh origin/main HEAD
 set -euo pipefail
 base=${1:?usage: tools/dco.sh <base> <head>}
