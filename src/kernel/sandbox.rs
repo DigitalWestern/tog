@@ -3273,7 +3273,6 @@ mod containment_tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn a_host_socket_under_a_read_root_is_refused_before_bwrap() {
-        // Short names: a socket path is capped at 108 bytes.
         let root = temp_dir("rs");
         let scratch = root.0.join("s");
         let readable = root.0.join("r");
