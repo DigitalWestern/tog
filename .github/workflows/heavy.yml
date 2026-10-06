@@ -128,13 +128,15 @@ jobs:
               fi
             fi
           }
-          # Says whether another run of this workflow for the head commit
-          # is queued or running. If the API call fails, says no: the
+          # Says whether another pull_request run of this workflow for the
+          # head commit is queued or running. A weekly or by-hand run is
+          # not one: heavy-unlabel.yml acts only on pull_request runs, so
+          # a label deferred to one of those would never be run again. If the API call fails, says no: the
           # caller then runs, and a missed heavy run is the costlier mistake.
           other_run_active() {
             local ids
             if ! ids=$(gh api --paginate \
-                "repos/$GITHUB_REPOSITORY/actions/workflows/heavy.yml/runs?head_sha=$HEAD_SHA&per_page=100" \
+                "repos/$GITHUB_REPOSITORY/actions/workflows/heavy.yml/runs?head_sha=$HEAD_SHA&event=pull_request&per_page=100" \
                 --jq ".workflow_runs[] | select(.id != $GITHUB_RUN_ID) | select(.status != \"completed\") | .id"); then
               echo "::warning::could not list this commit's heavy runs; running the heavy suite"
               return 1
